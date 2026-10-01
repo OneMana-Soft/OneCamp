@@ -1,0 +1,5 @@
+This repository is the public export of OneCamp's releases, made by
+scripts/publish-public.sh. Its tests read this file to know that the env files
+describing OneMana's own deployments (vars/.env.beta, vars/.env.local) were
+withheld on purpose. vars/.env.prod, the template every install starts from, is
+here.

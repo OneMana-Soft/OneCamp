@@ -159,6 +159,9 @@ func TestOllamaImageTagIsConsistentEverywhere(t *testing.T) {
 	}
 
 	for _, path := range ollamaEnvFiles {
+		if withheldHere(path) {
+			continue
+		}
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatalf("cannot read %s: %v. If an env file moved, update ollamaEnvFiles — the tag it "+

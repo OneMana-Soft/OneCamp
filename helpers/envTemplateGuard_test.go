@@ -55,6 +55,9 @@ var kekVariables = []string{"AI_CONFIG_KEK", "IMPORT_TOKEN_KEK", "TOTP_KEK"}
 // meaningfulEnvLines returns the lines that are neither blank nor comments, with their 1-based numbers.
 func meaningfulEnvLines(t *testing.T, path string) map[int]string {
 	t.Helper()
+	if withheldHere(path) {
+		t.Skipf("%s is withheld from the public export", path)
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("cannot read %s: %v. If the templates moved, update envTemplates — this check is "+
@@ -262,10 +265,15 @@ func envCredentialFiles(t *testing.T) []string {
 	}
 	sort.Strings(unique)
 
-	if len(unique) < minEnvCredentialFiles {
+	floor := minEnvCredentialFiles
+	if inPublicExport() {
+		// The export withholds .env.beta and .env.local and adds .sample.env.
+		floor -= len(withheldFromPublicExport) - 1
+	}
+	if len(unique) < floor {
 		t.Fatalf("found %d env-shaped file(s), expected at least %d. Either they moved or these "+
 			"patterns no longer match them, and a check that scans nothing passes for the wrong reason",
-			len(unique), minEnvCredentialFiles)
+			len(unique), floor)
 	}
 	return unique
 }
