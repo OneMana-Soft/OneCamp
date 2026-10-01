@@ -1,0 +1,22 @@
+-- Password reset tokens are stored hashed from here on.
+--
+-- WHY. The token is a BEARER CREDENTIAL: whoever holds it can set the password on
+-- that account without knowing the old one. Stored in plaintext, this table was a
+-- list of working skeleton keys for every reset in flight — readable from a leaked
+-- backup, a SQL injection, or any account with SELECT on a replica, and replayable
+-- until each one expired. Hashed, that same read yields nothing usable.
+--
+-- The application now stores and looks up sha256(token); see HashResetToken.
+--
+-- WHY DELETE RATHER THAN CONVERT. The obvious migration is
+--   UPDATE password_reset_tokens SET token = encode(sha256(token::bytea), 'hex')
+-- and it cannot be made safe. generateSecureToken(32) emits 64 hex characters and
+-- so does SHA-256, so nothing in a row distinguishes "already hashed" from "not
+-- yet" — a migration re-run, or a partially applied one, would hash some rows
+-- twice and silently invalidate them with no way to tell which.
+--
+-- Deleting is unambiguous and idempotent, and the cost is small and bounded: these
+-- live one hour, so the worst case is somebody mid-reset clicking "forgot password"
+-- a second time. Used rows are kept — they are the record that a reset happened,
+-- and their token is spent either way.
+DELETE FROM password_reset_tokens WHERE used = false;

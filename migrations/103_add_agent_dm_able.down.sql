@@ -1,0 +1,1 @@
+ALTER TABLE ai_agents DROP COLUMN IF EXISTS "dm_able";

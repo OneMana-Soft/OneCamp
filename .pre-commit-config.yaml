@@ -1,0 +1,8 @@
+repos:
+  - repo: https://github.com/akashc777/pre-commit-golang
+    rev: v0.0.1
+    hooks:
+      - id: go-build
+      - id: go-fmt
+      - id: go-vet
+      - id: golangci-lint

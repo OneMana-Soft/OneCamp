@@ -1,0 +1,11 @@
+-- Migration 127: let the data-source engine be governed by the application, not
+-- a database CHECK, so adding a new engine (mysql, snowflake, redshift, …) is a
+-- pure code change (register a connector + dialect) with no schema migration.
+--
+-- The app layer (business/DataSource.ValidEngine) remains the single source of
+-- truth for which engines are actually implemented, so this does not weaken
+-- validation — it just stops the DB from needing a migration per engine.
+--
+-- Idempotent: the inline column CHECK created in migration 126 is auto-named
+-- data_sources_engine_check by Postgres.
+ALTER TABLE data_sources DROP CONSTRAINT IF EXISTS data_sources_engine_check;

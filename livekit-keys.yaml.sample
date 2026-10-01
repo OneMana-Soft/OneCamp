@@ -1,0 +1,33 @@
+# LiveKit API keys for the SHARED, multi-tenant LiveKit — one key per customer.
+#
+# Copy to livekit-keys.yaml, which is gitignored, and chmod it 600:
+#
+#   cp livekit-keys.yaml.sample livekit-keys.yaml
+#   chmod 600 livekit-keys.yaml
+#
+# livekit-server REFUSES to start if the file is readable by others — it exits with
+# "key file others permissions must be set to 0". That is deliberate on LiveKit's
+# part and worth leaving alone: the file holds every tenant's signing secret.
+#
+# WHY ONE KEY PER TENANT. A LiveKit token is signed with the API secret and names
+# the room it grants access to. With a single shared secret, any tenant that has it
+# can mint a token for ANY room on this server, including another tenant's, and can
+# ask for roomAdmin while doing so. The shared-host provisioner wrote the same
+# key and secret into every customer's .env, so that was the state. That model,
+# and the script, are gone: every customer now has their own server and their own
+# LiveKit, and `make secrets` generates their signing key on their machine.
+#
+# Each customer's own .env carries only its own pair:
+#   LIVEKIT_API_KEY_NAME=oc-<cid>
+#   LIVEKIT_API_PASS=<that customer's secret>
+#   LIVEKIT_API_KEY="oc-<cid>: <that customer's secret>"
+#
+# Append the new line here by hand and restart LiveKit.
+# Removing a customer's line revokes their ability to create tokens, which is the
+# other half of why this is a file and not a constant.
+#
+# Format is "<name>: <secret>", one per line. Secrets should be at least 32
+# characters: openssl rand -base64 32
+
+# oc-acme: replace-with-openssl-rand-base64-32
+# oc-globex: replace-with-openssl-rand-base64-32

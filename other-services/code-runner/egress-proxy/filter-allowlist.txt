@@ -1,0 +1,16 @@
+# Egress allowlist for the coding runner (tinyproxy FilterDefaultDeny On).
+# One extended-regex per line; a CONNECT host matching ANY line is allowed, all
+# else is denied. Anchor with ^...$ so a substring can't widen the allowlist.
+#
+# Default set = GitHub's clone/push/API hosts. For a self-hosted git host or a
+# package registry your builds genuinely need, add an anchored entry here and
+# re-run the containment smoke check. Keep this list as tight as possible — it
+# is the ONLY internet the runner (and the untrusted code it executes) can reach.
+
+# NOTE: for an HTTPS CONNECT, tinyproxy tests the destination WITH its port
+# (e.g. "github.com:443"), so each entry allows an optional :port. Keep the
+# start/end anchors so a look-alike host (evil-github.com.attacker.net) can't
+# match.
+^github\.com(:[0-9]+)?$
+^api\.github\.com(:[0-9]+)?$
+^codeload\.github\.com(:[0-9]+)?$

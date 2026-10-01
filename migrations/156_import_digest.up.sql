@@ -1,0 +1,18 @@
+-- What an import actually brought in, in prose.
+--
+-- The import is the most sophisticated thing a new customer runs and it ends by
+-- telling them a number. "12,400 messages imported" is a receipt, not an answer:
+-- it says the machine worked and nothing about whether the years of conversation
+-- now sitting in the workspace are worth opening. The single best demonstration
+-- of what this product does to their own data was being thrown away at the exact
+-- moment they were most willing to look at it.
+--
+-- Stored on the job rather than posted as a message, because the job row is what
+-- the import panel already reads and what survives a page reload. A message would
+-- also need a channel, and the channel it belongs in is the one they have not
+-- chosen yet.
+--
+-- Nullable and never backfilled. An import that ran before this, or on the AI-free
+-- edition, or with AI switched off, genuinely has no digest, and an empty string
+-- would be indistinguishable from one the model returned empty.
+ALTER TABLE import_jobs ADD COLUMN IF NOT EXISTS digest TEXT;

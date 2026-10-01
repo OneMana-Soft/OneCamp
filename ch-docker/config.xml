@@ -1,0 +1,221 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <logger>
+        <level>debug</level>
+        <console>true</console>
+        <log remove="remove" />
+        <errorlog remove="remove" />
+    </logger>
+
+    <listen_host>0.0.0.0</listen_host>
+    <http_port>8123</http_port>
+    <tcp_port>9000</tcp_port>
+    <interserver_http_host>ch-server</interserver_http_host>
+    <interserver_http_port>9009</interserver_http_port>
+
+    <max_connections>4096</max_connections>
+    <keep_alive_timeout>64</keep_alive_timeout>
+    <max_concurrent_queries>100</max_concurrent_queries>
+    <uncompressed_cache_size>8589934592</uncompressed_cache_size>
+    <mark_cache_size>5368709120</mark_cache_size>
+
+    <path>/var/lib/clickhouse/</path>
+    <tmp_path>/var/lib/clickhouse/tmp/</tmp_path>
+    <user_files_path>/var/lib/clickhouse/user_files/</user_files_path>
+
+    <user_directories>
+        <users_xml>
+            <path>users.xml</path>
+        </users_xml>
+    </user_directories>
+    <!-- <users_config>users.xml</users_config> -->
+    <default_profile>default</default_profile>
+    <default_database>default</default_database>
+    <timezone>UTC</timezone>
+    <mlock_executable>false</mlock_executable>
+
+    <!-- Prometheus exporter -->
+    <prometheus>
+        <endpoint>/metrics</endpoint>
+        <port>9363</port>
+        <metrics>true</metrics>
+        <events>true</events>
+        <asynchronous_metrics>true</asynchronous_metrics>
+        <errors>true</errors>
+    </prometheus>
+
+    <!-- Query log. Used only for queries with setting log_queries = 1. -->
+    <query_log>
+        <database>system</database>
+        <table>query_log</table>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </query_log>
+
+    <!-- Metric log contains rows with current values of ProfileEvents, CurrentMetrics collected
+    with "collect_interval_milliseconds" interval. -->
+    <metric_log>
+        <database>system</database>
+        <table>metric_log</table>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <!-- Every 10 s, not every second: a row per second of the server's own
+             counters is more than anyone reads, and each row is merged forever. -->
+        <collect_interval_milliseconds>10000</collect_interval_milliseconds>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </metric_log>
+
+    <!--
+        Asynchronous metric log contains values of metrics from
+        system.asynchronous_metrics.
+    -->
+    <asynchronous_metric_log>
+        <database>system</database>
+        <table>asynchronous_metric_log</table>
+        <!--
+            Asynchronous metrics are updated once a minute, so there is
+            no need to flush more often.
+        -->
+        <flush_interval_milliseconds>7000</flush_interval_milliseconds>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </asynchronous_metric_log>
+
+    <!--
+        OpenTelemetry log contains OpenTelemetry trace spans.
+    -->
+    <opentelemetry_span_log>
+        <!--
+            The default table creation code is insufficient, this <engine> spec
+            is a workaround. There is no 'event_time' for this log, but two times,
+            start and finish. It is sorted by finish time, to avoid inserting
+            data too far away in the past (probably we can sometimes insert a span
+            that is seconds earlier than the last span in the table, due to a race
+            between several spans inserted in parallel). This gives the spans a
+            global order that we can use to e.g. retry insertion into some external
+            system.
+        -->
+        <!-- With an engine given, its TTL goes inside it; a separate <ttl> stops
+             the server from starting. -->
+        <engine>
+            engine MergeTree
+            partition by toYYYYMM(finish_date)
+            order by (finish_date, finish_time_us, trace_id)
+            ttl finish_date + INTERVAL 7 DAY DELETE
+        </engine>
+        <database>system</database>
+        <table>opentelemetry_span_log</table>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+    </opentelemetry_span_log>
+
+
+    <!-- Crash log. Stores stack traces for fatal errors.
+         This table is normally empty. -->
+    <crash_log>
+        <database>system</database>
+        <table>crash_log</table>
+
+        <partition_by />
+        <flush_interval_milliseconds>1000</flush_interval_milliseconds>
+    </crash_log>
+
+    <!-- Profiling on Processors level. -->
+    <processors_profile_log>
+        <database>system</database>
+        <table>processors_profile_log</table>
+
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </processors_profile_log>
+
+    <!-- Uncomment if use part log.
+         Part log contains information about all actions with parts in MergeTree tables (creation, deletion,
+    merges, downloads).-->
+    <part_log>
+        <database>system</database>
+        <table>part_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </part_log>
+
+    <!-- Trace log. Stores stack traces collected by query profilers.
+         See query_profiler_real_time_period_ns and query_profiler_cpu_time_period_ns settings. -->
+    <trace_log>
+        <database>system</database>
+        <table>trace_log</table>
+
+        <!-- By day, so the TTL drops whole days. By month, expired rows are
+             rewritten out of a month-sized part, which is the merge that ran for
+             hours. Profiling is off (users.xml); this keeps crash traces. -->
+        <partition_by>event_date</partition_by>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <ttl>event_date + INTERVAL 1 DAY DELETE</ttl>
+    </trace_log>
+
+    <!-- Query thread log. Has information about all threads participated in query execution.
+         Used only for queries with setting log_query_threads = 1. -->
+    <query_thread_log>
+        <database>system</database>
+        <table>query_thread_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </query_thread_log>
+
+    <!-- Query views log. Has information about all dependent views associated with a query.
+         Used only for queries with setting log_query_views = 1. -->
+    <query_views_log>
+        <database>system</database>
+        <table>query_views_log</table>
+        <partition_by>toYYYYMM(event_date)</partition_by>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <ttl>event_date + INTERVAL 7 DAY DELETE</ttl>
+    </query_views_log>
+
+    <remote_servers>
+        <hdx_cluster>
+            <shard>
+                <replica>
+                    <host>ch-server</host>
+                    <port>9000</port>
+                </replica>
+            </shard>
+        </hdx_cluster>
+    </remote_servers>
+
+    <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+    </distributed_ddl>
+
+    <format_schema_path>/var/lib/clickhouse/format_schemas/</format_schema_path>
+
+    <!-- Every telemetry table has a retention limit, checked at each start.
+         The collector creates metrics tables with a TTL today, but tables made
+         by an older collector have none, and its migrations only CREATE IF NOT
+         EXISTS, so they grew for ever. Each script runs only while its table
+         exists without a TTL; a failure is logged and does not stop the server.
+         The 30 days match otel_logs and otel_traces (init-db.sh). -->
+    <startup_scripts>
+        <throw_on_error>false</throw_on_error>
+        <scripts>
+            <query>ALTER TABLE default.otel_metrics_gauge MODIFY TTL toDateTime(TimeUnix) + INTERVAL 30 DAY</query>
+            <condition>SELECT toUInt8(count() = 1) FROM system.tables WHERE database = 'default' AND name = 'otel_metrics_gauge' AND position(create_table_query, ' TTL ') = 0</condition>
+        </scripts>
+        <scripts>
+            <query>ALTER TABLE default.otel_metrics_sum MODIFY TTL toDateTime(TimeUnix) + INTERVAL 30 DAY</query>
+            <condition>SELECT toUInt8(count() = 1) FROM system.tables WHERE database = 'default' AND name = 'otel_metrics_sum' AND position(create_table_query, ' TTL ') = 0</condition>
+        </scripts>
+        <scripts>
+            <query>ALTER TABLE default.otel_metrics_histogram MODIFY TTL toDateTime(TimeUnix) + INTERVAL 30 DAY</query>
+            <condition>SELECT toUInt8(count() = 1) FROM system.tables WHERE database = 'default' AND name = 'otel_metrics_histogram' AND position(create_table_query, ' TTL ') = 0</condition>
+        </scripts>
+        <scripts>
+            <query>ALTER TABLE default.otel_metrics_exponential_histogram MODIFY TTL toDateTime(TimeUnix) + INTERVAL 30 DAY</query>
+            <condition>SELECT toUInt8(count() = 1) FROM system.tables WHERE database = 'default' AND name = 'otel_metrics_exponential_histogram' AND position(create_table_query, ' TTL ') = 0</condition>
+        </scripts>
+        <scripts>
+            <query>ALTER TABLE default.otel_metrics_summary MODIFY TTL toDateTime(TimeUnix) + INTERVAL 30 DAY</query>
+            <condition>SELECT toUInt8(count() = 1) FROM system.tables WHERE database = 'default' AND name = 'otel_metrics_summary' AND position(create_table_query, ' TTL ') = 0</condition>
+        </scripts>
+    </startup_scripts>
+</clickhouse>

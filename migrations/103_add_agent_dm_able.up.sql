@@ -1,0 +1,12 @@
+-- Migration 103: per-agent DM-able toggle.
+--
+-- Lets an admin make an individual Agent Builder agent addressable as a 1:1 DM
+-- target (Req 10.1): when on, the agent's bot principal can be started as a DM
+-- and a message sent to it routes to THAT agent's runner (replying as the
+-- agent's own badged identity), distinct from the shared "OneCamp AI" coworker.
+-- Off by default so enabling discoverability is an explicit, reversible admin
+-- choice (toggling it off removes the affordance with no data migration).
+--
+-- Additive + non-null with a safe default: existing agents stay non-DM-able and
+-- keep working unchanged.
+ALTER TABLE ai_agents ADD COLUMN IF NOT EXISTS "dm_able" boolean NOT NULL DEFAULT false;

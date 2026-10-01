@@ -1,0 +1,883 @@
+services:
+  postgres:
+    # A real readiness signal, not "the container exists".
+    #
+    # Nothing in this file had a healthcheck, so `docker ps --filter health=...`
+    # returned nothing and every check that asked whether the stack was healthy —
+    # `make verify`, and the wait `make restore` does before it — was answering
+    # from the absence of information. Ported from the compose the demo host has
+    # run for months rather than invented here.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    image: postgres:12-alpine
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_USER: ${DB_USER}
+    # NOT PUBLISHED. This service used to carry a Traefik TCP router on a dedicated
+    # entrypoint, which put it on the public internet behind nothing but its own
+    # password. Nothing in the product reached it that way -- the application uses the
+    # internal hostname. Reach it over an SSH tunnel for administration.
+    # The router's tls=true was also spelt `traefic`, so it was never a Traefik directive:
+    # this was routed to the internet over PLAINTEXT TCP, and the line meant to prevent
+    # that had been misspelt since it was written.
+    networks:
+      - onecamp-shared-net
+    depends_on:
+      - traefik
+
+  zero:
+    image: dgraph/dgraph:v25.3.3
+    volumes:
+      - ./data/dgraph:/dgraph
+    restart: unless-stopped
+    command: dgraph zero --my=zero:5080
+    networks:
+      - onecamp-shared-net
+  alpha:
+    image: dgraph/dgraph:v25.3.3
+    volumes:
+      - ./data/dgraph:/dgraph
+    restart: unless-stopped
+    command: dgraph alpha --my=alpha:7080 --zero=zero:5080 --security whitelist=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+    networks:
+      - onecamp-shared-net
+      - traefik-public
+    depends_on:
+      - traefik
+
+  emqx:
+    restart: unless-stopped
+    image: emqx/emqx:6.0.0
+    environment:
+      EMQX_DASHBOARD__DEFAULT_USERNAME: ${EMQX_DASHBOARD_DEFAULT_USERNAME}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_DEFAULT_PASSWORD}
+      EMQX_AUTHENTICATION__1__ENABLE: true
+      EMQX_AUTHENTICATION__1__SECRET: ${JWT_SECRET}
+      EMQX_AUTHENTICATION__1__ALGORITHM: hmac-based
+      EMQX_AUTHENTICATION__1__MECHANISM: jwt
+      EMQX_AUTHENTICATION__1__USE_JWKS: false
+      EMQX_AUTHENTICATION__1__VERIFY_CLAIMS: '{username: "$${username}"}'
+      # Provisioned ACL (see emqx/acl.conf). Anything outside the
+      # allow list is denied. New topic prefixes added in helpers.go
+      # MUST be added to acl.conf or end users will get
+      # "Subscribe error: Not authorized" from the broker.
+      EMQX_AUTHORIZATION__SOURCES__1__TYPE: file
+      EMQX_AUTHORIZATION__SOURCES__1__ENABLE: true
+      EMQX_AUTHORIZATION__SOURCES__1__PATH: /opt/emqx/etc/acl.conf
+      EMQX_AUTHORIZATION__NO_MATCH: deny
+      EMQX_LOG__CONSOLE_HANDLER__ENABLE: true
+      EMQX_LOG__CONSOLE_HANDLER__LEVEL: debug
+    volumes:
+      - ./emqx/acl.conf:/opt/emqx/etc/acl.conf:ro
+      - ./data/emqx_data/data:/opt/emqx/data
+      - ./data/emqx_data/log:/opt/emqx/log
+      - ./data/emqx_data/mnesia:/opt/emqx/mnesia # Volume mount for persisting data to the hard disk
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.services.emqx-ws.loadbalancer.server.port=8083
+      - traefik.http.routers.emqx-ws-https.rule=Host(`${EMQX_WS_DOMAIN}`)
+      - traefik.http.routers.emqx-ws-https.entrypoints=wss
+      - traefik.http.routers.emqx-ws-https.tls=true
+      - traefik.http.routers.emqx-ws-https.service=emqx-ws
+      - traefik.http.routers.emqx-ws-https.tls.certresolver=le
+    # CONSOLE NOT PUBLISHED. This service used to carry a Traefik router on its
+    # management port, so the console was reachable over HTTPS from anywhere with
+    # only its own login in front of it. Reach it through an SSH tunnel instead:
+    #   ssh -L <local>:<service>:<port> <host>
+    # and delete any DNS record that still points at it.
+    networks:
+      - onecamp-shared-net
+      - traefik-public
+    depends_on:
+      - traefik
+
+  minio:
+    restart: unless-stopped
+    image: minio/minio:RELEASE.2025-01-18T00-31-37Z
+    volumes:
+      - ./data/minio:/data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD}
+      MINIO_SERVER_URL: https://${MINO_DOMAIN}
+      # No MINIO_BROWSER_REDIRECT_URL: it pinned the console to a public hostname that is
+      # no longer routed, so the console would redirect a tunnelled session to a dead host.
+      # Unset, MinIO uses the request's own host, which is what a tunnel needs.
+      CONSOLE_SECURE_TLS_REDIRECT: off
+    command: server --console-address ":8080" /data
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.services.minio.loadbalancer.server.port=9000
+      - traefik.http.routers.minio-http.service=minio
+      - traefik.http.routers.minio-http.entrypoints=http
+      - traefik.http.routers.minio-http.rule=Host(`${MINO_DOMAIN}`)
+      - traefik.http.routers.minio-http.middlewares=https-redirect
+      - traefik.http.routers.minio-https.rule=Host(`${MINO_DOMAIN}`)
+      - traefik.http.routers.minio-https.entrypoints=https
+      - traefik.http.routers.minio-https.tls=true
+      - traefik.http.routers.minio-https.service=minio
+      - traefik.http.routers.minio-https.tls.certresolver=le
+    # CONSOLE NOT PUBLISHED. This service used to carry a Traefik router on its
+    # management port, so the console was reachable over HTTPS from anywhere with
+    # only its own login in front of it. Reach it through an SSH tunnel instead:
+    #   ssh -L <local>:<service>:<port> <host>
+    # and delete any DNS record that still points at it.
+    networks:
+      - onecamp-shared-net
+      - traefik-public
+    depends_on:
+      - traefik
+
+  opensearch-node1: # This is also the hostname of the container within the Docker network (i.e. https://opensearch-node1/)
+    image: opensearchproject/opensearch:${OPENSEARCH_VERSION:-3.6.0}
+    container_name: opensearch-node1
+    # The ninth service missing a policy, and the one 0f3d94b did not find: the guard's service pattern
+    # did not match a key with a trailing comment, so this line hid the whole block from it. Without
+    # this, a reboot leaves the search node down while everything that queries it comes back — the JVM
+    # also exits deliberately on OOM, so it does not take a reboot to lose it.
+    restart: unless-stopped
+    environment:
+      - cluster.name=opensearch-cluster # Name the cluster
+      - node.name=opensearch-node1 # Name the node that will run in this container
+      - discovery.seed_hosts=opensearch-node1 # Nodes to look for when discovering the cluster
+      - cluster.initial_cluster_manager_nodes=opensearch-node1 # Nodes eligibile to serve as cluster manager
+      - bootstrap.memory_lock=true # Disable JVM heap memory swapping
+      # Sized by `make tune` from the machine's RAM (a quarter, 512m to 4g); 512m when unset.
+      - "OPENSEARCH_JAVA_OPTS=-Xms${OPENSEARCH_HEAP:-512m} -Xmx${OPENSEARCH_HEAP:-512m}"
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OS_PASSWORD} # Sets the demo admin user password when using demo configuration (for OpenSearch 2.12 and later)
+      # Lets `make backup` snapshot search beside the database dumps, so a restore brings back
+      # the search and AI indices that match them instead of stale or empty ones.
+      - path.repo=/usr/share/opensearch/snapshots
+    ulimits:
+      memlock:
+        soft: -1 # Set memlock to unlimited (no soft or hard limit)
+        hard: -1
+      nofile:
+        soft: 65536 # Maximum number of open files for the opensearch user - set to at least 65536
+        hard: 65536
+    volumes:
+      - ./data/opensearch/opensearch-data1:/usr/share/opensearch/data # Creates volume called opensearch-data1 and mounts it to the container
+      # Where `make backup` snapshots the search indices (other-services/opensearch/snapshot.sh).
+      - ./data/opensearch/snapshots:/usr/share/opensearch/snapshots
+    networks:
+      - onecamp-shared-net
+    depends_on:
+      - traefik
+
+
+  opensearch-dashboards:
+    restart: unless-stopped
+    image: opensearchproject/opensearch-dashboards:${OPENSEARCH_VERSION:-3.6.0} # Make sure the version of opensearch-dashboards matches the version of opensearch installed on other nodes
+    container_name: opensearch-dashboards
+    # CONSOLE NOT PUBLISHED. This service used to carry a Traefik router on its
+    # management port, so the console was reachable over HTTPS from anywhere with
+    # only its own login in front of it. Reach it through an SSH tunnel instead:
+    #   ssh -L <local>:<service>:<port> <host>
+    # and delete any DNS record that still points at it.
+
+    expose:
+      - "5601" # Expose port 5601 for web access to OpenSearch Dashboards
+    environment:
+      OPENSEARCH_HOSTS: '["https://opensearch-node1:9200","https://opensearch-node2:9200"]' # Define the OpenSearch nodes that OpenSearch Dashboards will query
+    networks:
+      - onecamp-shared-net
+    depends_on:
+      - traefik
+
+  redis:
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    image: redis:8.6.2
+    restart: always
+    volumes:
+      - ./data/redis_data/dаta:/root/redis
+      - ./data/redis_data/redis.conf:/usr/local/etc/redis/redis.conf
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_PORT=6379
+      - REDIS_DATABASES=16
+    # NOT PUBLISHED. This service used to carry a Traefik TCP router on a dedicated
+    # entrypoint, which put it on the public internet behind nothing but its own
+    # password. Nothing in the product reached it that way -- the application uses the
+    # internal hostname. Reach it over an SSH tunnel for administration.
+    # The router's tls=true was also spelt `traefic`, so it was never a Traefik directive:
+    # this was routed to the internet over PLAINTEXT TCP, and the line meant to prevent
+    # that had been misspelt since it was written.
+    networks:
+      - onecamp-shared-net
+    depends_on:
+      - traefik
+
+  go-service:
+    # /health is a plain 200 from the router (router.go), verified answering both
+    # in-container and through the proxy before this was added: a healthcheck
+    # pointed at a path that does not exist would mark every install permanently
+    # unhealthy, which is worse than having none.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    image: go_service_onecamp_onemana:1.0
+    restart: always
+    # The container's configuration, passed in rather than built in.
+    #
+    # There was no env_file here at all. It worked only because the image was built
+    # with `COPY . .` in the install directory, which baked .env into the image —
+    # so every deployment's database password and encryption keys lived inside a
+    # distributable artefact. The image no longer contains it, so the configuration
+    # has to arrive the way compose intends.
+    env_file:
+      - .env
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.services.go-service.loadbalancer.server.port=3000
+      - traefik.http.routers.go-service-http.service=go-service
+      - traefik.http.routers.go-service-http.entrypoints=http
+      - traefik.http.routers.go-service-http.rule=Host(`${BACKEND_DOMAIN}`)
+      - traefik.http.routers.go-service-http.middlewares=https-redirect
+      - traefik.http.routers.go-service-https.rule=Host(`${BACKEND_DOMAIN}`)
+      - traefik.http.routers.go-service-https.entrypoints=https
+      - traefik.http.routers.go-service-https.tls=true
+      - traefik.http.routers.go-service-https.service=go-service
+      - traefik.http.routers.go-service-https.tls.certresolver=le
+    networks:
+      - onecamp-shared-net
+      - traefik-public
+      # Egress-less hop to the optional code-execution sandbox. Harmless when
+      # the "code-execution" profile is not activated (the network exists but
+      # the code-runner container simply isn't started).
+      - code-runner-net
+    # WAIT FOR THE DATASTORES. This was `- traefik` and nothing else, so the
+    # application started the moment the proxy existed and raced Postgres, Dgraph,
+    # Redis, MinIO and the MQTT broker on every single start. It connects to all of
+    # them at boot and exits if the broker is missing, so `restart: always` turned
+    # that race into a crash-loop: the demo host restarted nine times after one
+    # restore before it settled.
+    #
+    # The loop was self-healing, which is exactly why it survived — the stack came
+    # up eventually and nobody looked. What it cost was every check that asks
+    # whether the install is working: `make verify` reported FAIL on a restore that
+    # had worked, for seventeen nights, and a warning that is wrong every night is
+    # one nobody reads on the night it is right.
+    #
+    # healthy where there is a healthcheck to wait for, started where there is not:
+    # ordering the start is worth having even without a readiness signal, and
+    # inventing healthchecks for services whose readiness we have not verified
+    # would replace a noisy loop with a stack that refuses to start.
+    depends_on:
+      traefik:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      alpha:
+        condition: service_started
+      minio:
+        condition: service_started
+      emqx:
+        condition: service_started
+
+  # ---------------------------------------------------------------------------
+  # go-worker — the background half of the server as its own replicas (opt-in).
+  #
+  # The same image as go-service, started with SERVICE_ROLE=worker: it runs
+  # every loop (the agent task queue, the scheduler, the workflow engine, the
+  # sync and email workers, the sweeps) and serves nothing but /health. It is
+  # not on traefik-public and carries no router labels, because a worker that
+  # can be reached from outside is an API server by another name.
+  #
+  # WHEN TO USE IT. A single go-service does everything, and for most installs
+  # that is right. Add workers when the AI teammates need more capacity than one
+  # process gives them, or when a long agent run on the same process as the API
+  # is the reason the app feels slow. Scale by count:
+  #
+  #   docker compose --profile workers up -d --scale go-worker=3
+  #
+  # Every worker claims from the same queue with a database lease, so adding one
+  # never runs a job twice. The per-process ceiling stays AI_AGENT_TASK_CONCURRENCY;
+  # three workers is three times that.
+  #
+  # KEEP go-service AS "all" OR SET IT TO "api". With the profile on and
+  # go-service left at its default, the API process also runs the loops and the
+  # workers add capacity on top; that is fine. Set SERVICE_ROLE=api in .env to take
+  # the loops off the API process entirely, and then the workers are the ONLY
+  # thing draining the queue: the "agent-queue" system check in Admin goes red
+  # within two minutes if none of them is up.
+  #
+  # Config an admin saves reaches every worker within thirty seconds; nothing
+  # needs a restart for that. See helpers.ServiceRole in the backend for the
+  # full account of what makes the split safe.
+  # ---------------------------------------------------------------------------
+  go-worker:
+    profiles: ["workers"]
+    image: go_service_onecamp_onemana:1.0
+    restart: always
+    env_file:
+      - .env
+    # Overrides the same variable from .env: this container is a worker whatever
+    # the operator set go-service to.
+    environment:
+      SERVICE_ROLE: worker
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - onecamp-shared-net
+      - code-runner-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      alpha:
+        condition: service_started
+      minio:
+        condition: service_started
+      emqx:
+        condition: service_started
+
+  # ---------------------------------------------------------------------------
+  # ClamAV — anti-virus scanning for user uploads (chat/import attachments,
+  # avatars, email logo). The go-service streams every upload to clamd over the
+  # INSTREAM TCP protocol (port 3310) before the object-store write commits.
+  #
+  # Enablement: the backend only scans when CLAMAV_HOST is set (CLAMAV_HOST=clamav
+  # in the go-service env). With it unset, uploads skip scanning (fail-open).
+  #
+  # Boot coupling: go-service deliberately does NOT depend_on clamav — clamd
+  # needs ~1-2 min to load its signature DB and the scanner dials lazily
+  # per-request (fail-open on connect errors), so coupling boot would needlessly
+  # delay the backend.
+  #
+  # Resources: clamd holds the full signature DB in RAM (~1.5-2 GB); freshclam
+  # (bundled) keeps definitions current. The volume persists definitions so a
+  # restart doesn't re-download the full DB.
+  # ---------------------------------------------------------------------------
+  clamav:
+    image: clamav/clamav:1.4
+    container_name: clamav
+    restart: unless-stopped
+    volumes:
+      - ./data/clamav:/var/lib/clamav
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - onecamp-shared-net
+
+  # ---------------------------------------------------------------------------
+  # code-runner — OPTIONAL, hardened sandbox for the agent code-execution
+  # capability. Present in this single self-host compose for completeness, but
+  # OPT-IN and OFF by default: it only starts when you activate its Compose
+  # profile, so a stock install has no untrusted-code execution surface.
+  #
+  # Start it (alongside the always-on services):
+  #   docker compose --profile code-execution up -d
+  # Then point ai_settings.sandbox_runner_url at http://code-runner:9099/run,
+  # set the shared token (CODE_RUNNER_TOKEN, must match
+  # ai_settings.sandbox_runner_token), and enable the sandbox in admin settings.
+  #
+  # ISOLATION: it sits ONLY on the egress-less `code-runner-net` (internal:true,
+  # no route to the internet), publishes NO ports, drops all caps, runs
+  # read-only with tmpfs work dirs, and is resource-capped. For untrusted code,
+  # also run it under gVisor (uncomment `runtime: runsc`) once the host has it.
+  # ---------------------------------------------------------------------------
+  code-runner:
+    profiles: ["code-execution"]
+    build:
+      context: ./other-services/code-runner
+    image: onecamp/code-runner:latest
+    # runtime: runsc            # <- enable gVisor if installed (recommended)
+    restart: unless-stopped
+    environment:
+      # NOT a required-variable marker (${VAR:?}), deliberately. Compose evaluates
+      # interpolation for the WHOLE file regardless of which profiles are active, so a
+      # `:?` here refused to start ANY service for every operator who never enables this
+      # optional sandbox. The check belongs in the service, and is already there:
+      # other-services/code-runner/main.go refuses to start on an empty token and names
+      # this variable when it does.
+      CODE_RUNNER_TOKEN: "${CODE_RUNNER_TOKEN:-}"
+      CODE_RUNNER_ADDR: ":9099"
+      CODE_RUNNER_MAX_CONCURRENCY: "4"
+      CODE_RUNNER_WORKDIR: "/work"
+    # No published ports: reachable only on the internal network below.
+    networks:
+      - code-runner-net
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: "1.0"
+    tmpfs:
+      - /work:rw,noexec,nosuid,nodev,size=128m,uid=10001,gid=10001,mode=0700
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+
+  # ---------------------------------------------------------------------------
+  # Ollama — OPTIONAL local model engine, for deployments that want inference to
+  # run on this server instead of at a hosted provider.
+  #
+  # OFF BY DEFAULT. It is the heaviest optional thing in this file: models are
+  # multi-gigabyte downloads and inference wants RAM and CPU that Postgres,
+  # Dgraph and OpenSearch also want. Start it deliberately with `make ollama_up`,
+  # which activates the "local-ai" profile below.
+  #
+  # WHEN TO ENABLE IT. Deployments that need prompts and document content to stay
+  # on their own hardware, with nothing sent to a third party. Deployments using a
+  # hosted provider key (OpenAI, Anthropic, or any OpenAI-compatible endpoint)
+  # should leave it off — the engine would sit idle holding memory for nothing.
+  #
+  # AFTER ENABLING: set AI_PROVIDER=ollama in .env and run
+  # `make build_restart_service`, or just point the admin AI panel at it. The
+  # panel writes to the database, which overrides these environment values at
+  # runtime.
+  #
+  # Models live in ./data/ollama, so they survive a container recreate and
+  # `make ollama_update` never re-downloads what is already on disk.
+  # ---------------------------------------------------------------------------
+
+  # ---------------------------------------------------------------------------
+  # Whisper — OPTIONAL self-hosted speech-to-text (profile: transcription)
+  #
+  # WHY THIS IS HERE. Backend transcription previously meant Deepgram, Google,
+  # or an OpenAI-compatible endpoint you ran yourself. So on a product whose
+  # whole promise is that the workspace lives on your machine, the audio of
+  # every meeting left it, and an air-gapped install could not transcribe at
+  # all. This is the option where it does not.
+  #
+  # OPT-IN, because it costs real memory and downloads a model on first use.
+  # Nothing starts it unless the operator asks: `make stt_up`.
+  #
+  # SIZING (the `base` default): ~145 MB on disk, ~700 MB RAM. large-v3-turbo is
+  # ~1.6 GB and ~6 GB RAM and wants a GPU to be pleasant. Start at base.
+  #
+  # NO PUBLISHED PORTS and no container_name: it is reachable only from this
+  # network, as `whisper`, and leaving compose to namespace the container means
+  # two OneCamp stacks on one host do not collide.
+  #
+  # No healthcheck is declared because the check that matters is made from the
+  # service that will actually use this one: the admin Transcription page's Test
+  # button probes /v1/models over this network. A second, weaker check here
+  # would only add a way to disagree with it.
+  # ---------------------------------------------------------------------------
+  whisper:
+    profiles: ["transcription"]
+    # PINNED BY DIGEST, not a tag. Upstream publishes exactly one tag (latest),
+    # so there is no version to name: the same exception tinyproxy is pinned
+    # under. This manifest-list digest covers amd64 and arm64, so an ARM host
+    # still resolves its own image. Captured 2026-08-31 from the `latest` tag
+    # published 2026-08-27; bump it deliberately, which is the point.
+    image: hwdsl2/whisper-server@sha256:8f76c4f99069b533b54866388f6a6cb1cb47cfde14762dc7af0b22dd58721df2
+    restart: unless-stopped
+    environment:
+      # tiny | base | small | medium | large-v3-turbo | large-v3
+      - WHISPER_MODEL=${WHISPER_MODEL:-base}
+      # cpu | cuda | auto. Left on cpu so the default works on any VPS.
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
+      - WHISPER_PORT=9000
+      # The server requires a bearer token on every request, including
+      # /v1/models, whether or not one is configured: unset means nothing
+      # can reach it rather than everything can. Reusing the stack's
+      # existing internal secret keeps this to zero new setup for the
+      # operator, and it is the same trust boundary: both sides are our
+      # own containers on a network with no published ports.
+      - WHISPER_API_KEY=${INTERNAL_SECRET}
+      # Set to any value once the model is cached to forbid all downloads,
+      # which is what an air-gapped install wants.
+      - WHISPER_LOCAL_ONLY=${WHISPER_LOCAL_ONLY:-}
+    volumes:
+      - ./data/whisper:/var/lib/whisper
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - onecamp-shared-net
+
+  ollama:
+    profiles: ["local-ai"]
+    # PINNED, like every other image here. An engine upgrade changes model
+    # behaviour and occasionally the on-disk format, so it should be a version
+    # somebody chose and can put back — not whatever :latest resolved to on the
+    # morning a container happened to be recreated.
+    image: ollama/ollama:${OLLAMA_IMAGE_TAG:-0.21.2}
+    restart: unless-stopped
+    volumes:
+      - ./data/ollama:/root/.ollama
+    environment:
+      # Plain defaults, NOT required-variable markers (${VAR:?}). Compose
+      # interpolates the whole file regardless of which profiles are active, so a
+      # `:?` here would refuse to start the entire stack for every operator who
+      # never enables local models. Same reasoning as code-runner above.
+      OLLAMA_NUM_PARALLEL: "${OLLAMA_NUM_PARALLEL:-1}"
+      OLLAMA_KEEP_ALIVE: "${OLLAMA_KEEP_ALIVE:-10m}"
+      OLLAMA_MAX_LOADED_MODELS: "${OLLAMA_MAX_LOADED_MODELS:-1}"
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    # No published ports. Reachable only from go-service over the internal
+    # network, so an open inference endpoint is never exposed to the internet.
+    networks:
+      - onecamp-shared-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ollama-init pulls the chat and embedding models once the engine reports
+  # healthy, then exits.
+  #
+  # SEPARATE FROM THE ENGINE so a slow first pull — which can be several
+  # gigabytes — never makes the engine itself look unhealthy and get restarted
+  # underneath the download. `restart: "no"` so it does not re-run on every host
+  # reboot; by then the models are already on disk and `ollama pull` would be a
+  # no-op round trip at every boot.
+  ollama-init:
+    profiles: ["local-ai"]
+    image: ollama/ollama:${OLLAMA_IMAGE_TAG:-0.21.2}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      OLLAMA_HOST: "http://ollama:11434"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        for MODEL in "${OLLAMA_MODEL:-llama3.2:3b}" "${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}"; do
+          echo "[ollama-init] pulling $$MODEL ..."
+          ollama pull "$$MODEL"
+          echo "[ollama-init] $$MODEL ready"
+        done
+        echo "[ollama-init] all models ready"
+    networks:
+      - onecamp-shared-net
+
+  # ---------------------------------------------------------------------------
+  # web — the web app your team opens, served from this server.
+  #
+  # WHY IT IS HERE. The web app used to be a second deployment somewhere else
+  # (Vercel, Netlify, another server) with its own DNS record, so a correct
+  # install still ended at a URL nothing answered until the buyer set up a
+  # second host. With the "web" profile on, which `make install` does for a
+  # self-hosted server, this server serves it too: one install, one place.
+  #
+  # BUILT HERE, FOR THIS DOMAIN. The browser's service addresses are compiled
+  # in (NEXT_PUBLIC_*), so the image is built on this server from the public
+  # frontend's branch for this edition (WEB_BRANCH, from version.txt), with
+  # FE_DOMAIN as the domain. `make update` rebuilds it with everything else.
+  #
+  # Plain defaults, not ${VAR:?}: compose interpolates every service whether
+  # or not its profile is on, and a required marker would stop the whole stack
+  # on installs that host the web app elsewhere.
+  web:
+    profiles: ["web"]
+    build:
+      context: https://github.com/OneMana-Soft/OneCamp-fe.git#${WEB_BRANCH:-main}
+      args:
+        ONECAMP_DOMAIN: ${FE_DOMAIN:-}
+    image: onecamp_web:local
+    restart: always
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.services.web.loadbalancer.server.port=3000
+      - traefik.http.routers.web-http.service=web
+      - traefik.http.routers.web-http.entrypoints=http
+      - traefik.http.routers.web-http.rule=Host(`${FE_HOST_DOMAIN:-}`)
+      - traefik.http.routers.web-http.middlewares=https-redirect
+      - traefik.http.routers.web-https.rule=Host(`${FE_HOST_DOMAIN:-}`)
+      - traefik.http.routers.web-https.entrypoints=https
+      - traefik.http.routers.web-https.tls=true
+      - traefik.http.routers.web-https.service=web
+      - traefik.http.routers.web-https.tls.certresolver=le
+    networks:
+      - traefik-public
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # LiveKit — calls and meetings.
+  #
+  # WHY IT IS HERE NOW. The frontend has shipped /app/meet pages for some time and
+  # the env template has always defined LIVEKIT_DOMAIN and TURN_DOMAIN, but no
+  # service answered on them: the variables were referenced nowhere in this file.
+  # A customer following the DNS guide created records for a host that refused every
+  # connection, and the product presented a call button that could not work. Absent
+  # would have been better than that; present is better than both.
+  #
+  # NOT AN AI FEATURE, so it ships in BOTH editions. The v1/v2 split is about models
+  # and agents; a meeting is neither.
+  #
+  # TURN IS BUILT IN. LiveKit serves TURN itself on 443, which is why there is no
+  # coturn container here — and why onecamp-turn must be a DNS-only record. Media
+  # travels over UDP and a proxy cannot pass it; proxying that hostname does not
+  # fail loudly, calls simply never connect for anyone behind a restrictive network.
+  # ---------------------------------------------------------------------------
+  livekit:
+    image: livekit/livekit-server:v1.11.0
+    command: --config /livekit.yaml
+    restart: unless-stopped
+    environment:
+      # The name:secret pair, assembled in .env as LIVEKIT_API_KEY — the same
+      # variable final-compose.yml uses, so the two stacks agree.
+      LIVEKIT_KEYS: ${LIVEKIT_API_KEY}
+      LIVEKIT_REDIS_ADDRESS: redis:6379
+      LIVEKIT_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      LIVEKIT_TURN_URL: "turns:${TURN_DOMAIN}:443?transport=tcp"
+      LIVEKIT_TURN_SECRET: ${TURN_SECRET}
+    volumes:
+      # Written by `make configure-livekit` from livekit.yaml.sample. The sample is
+      # shipped rather than a filled-in file because the real one carries this
+      # deployment's signing key.
+      - ./livekit.yaml:/livekit.yaml
+    ports:
+      # Published directly, not through Traefik: TURN and the media path are not
+      # HTTP, and a reverse proxy has nothing useful to do with them.
+      - "3478:3478/tcp"
+      - "3478:3478/udp"
+      - "7881:7881/tcp"
+      - "50000-50100:50000-50100/udp"
+    depends_on:
+      redis:
+        condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.services.livekit.loadbalancer.server.port=7880
+      - traefik.http.routers.livekit-https.rule=Host(`${LIVEKIT_DOMAIN}`)
+      - traefik.http.routers.livekit-https.entrypoints=https
+      - traefik.http.routers.livekit-https.tls=true
+      - traefik.http.routers.livekit-https.service=livekit
+      - traefik.http.routers.livekit-https.tls.certresolver=le
+    networks:
+      - onecamp-shared-net
+      - traefik-public
+
+  # ---------------------------------------------------------------------------
+  # Egress — recording and streaming for calls.
+  #
+  # Pairs with LiveKit: it joins a room as a headless client and writes the
+  # recording out, so without it the record button in a meeting has nothing behind
+  # it — the same shape of gap the meet pages themselves had until LiveKit shipped
+  # here.
+  #
+  # NO PUBLISHED PORTS AND NO ROUTER, deliberately. Nothing outside the deployment
+  # talks to it: the frontend asks the backend to start a recording, the backend
+  # asks LiveKit, and LiveKit asks this. Publishing it would expose a service whose
+  # whole job is to join private rooms.
+  #
+  # Its configuration is a YAML document inside an environment variable, which is
+  # how LiveKit's egress expects it. The redis it names is the same one the rest of
+  # the stack uses — egress coordinates with LiveKit through it rather than by any
+  # direct connection between them.
+  # ---------------------------------------------------------------------------
+  egress:
+    image: livekit/egress:v1.12.0
+    restart: unless-stopped
+    environment:
+      EGRESS_CONFIG_BODY: |
+        api_key: ${LIVEKIT_API_KEY_NAME}
+        api_secret: ${LIVEKIT_API_PASS}
+        ws_url: ws://livekit:7880
+        redis:
+          address: redis:6379
+          password: ${REDIS_PASSWORD}
+        insecure: true
+    depends_on:
+      redis:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - onecamp-shared-net
+
+  # ---------------------------------------------------------------------------
+  # Collaboration service — live editing of documents and boards.
+  #
+  # Same story as LiveKit: the frontend has always dialled collab_WS_DOMAIN and
+  # nothing served it, so every document showed "Reconnecting to collaboration
+  # server…" indefinitely while the rest of the product worked. The client was
+  # reconnecting correctly to something that did not exist.
+  #
+  # `restart: unless-stopped` matters more here than anywhere else in this file:
+  # without it one unhandled rejection is a permanent outage of a feature that fails
+  # quietly, and nobody notices until a customer says their document will not sync.
+  # ---------------------------------------------------------------------------
+  collaboration-service:
+    build:
+      context: ./other-services/collaboration-service
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - PORT=1234
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - GO_BACKEND_URL=http://go-service:3000
+      - INTERNAL_SECRET=${INTERNAL_SECRET}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+    depends_on:
+      redis:
+        condition: service_healthy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=traefik-public
+      - traefik.http.services.collab-ws.loadbalancer.server.port=1234
+      - traefik.http.routers.collab-ws-https.rule=Host(`${collab_WS_DOMAIN}`)
+      - traefik.http.routers.collab-ws-https.entrypoints=https
+      - traefik.http.routers.collab-ws-https.tls=true
+      - traefik.http.routers.collab-ws-https.service=collab-ws
+      - traefik.http.routers.collab-ws-https.tls.certresolver=le
+    networks:
+      - onecamp-shared-net
+      - traefik-public
+
+  traefik:
+    image: "traefik:v3.0"
+    restart: unless-stopped
+    labels:
+      # Enable Traefik for this service, to make it available in the public network
+      - traefik.enable=true
+      # Use the traefik-public network (declared below)
+      - traefik.docker.network=traefik-public
+      # admin-auth middleware with HTTP Basic auth
+      # Using the environment variables USERNAME and HASHED_PASSWORD
+      - traefik.http.middlewares.admin-auth.basicauth.users=admin:${TRAEFIK_HASHED_PASSWORD:?No HASHED_PASSWORD set}
+      # Uses the environment variable TRAEFIK_DOMAIN
+      - traefik.http.routers.traefik-public-http.rule=Host(`${TRAEFIK_DOMAIN:?No TRAEFIK_DOMAIN set}`)
+      - traefik.http.routers.traefik-public-http.entrypoints=http
+      # Use the special Traefik service api@internal with the web UI/Dashboard
+      - traefik.http.routers.traefik-public-http.service=api@internal
+      # Enable HTTP Basic auth, using the middleware created above
+      - traefik.http.routers.traefik-public-http.middlewares=admin-auth
+      # Define the port inside of the Docker service to use
+      - traefik.http.services.traefik-public.loadbalancer.server.port=8080
+      # https-redirect middleware to redirect HTTP to HTTPS
+      # It can be re-used by other stacks in other Docker Compose files
+      - traefik.http.middlewares.https-redirect.redirectscheme.scheme=https
+      - traefik.http.middlewares.https-redirect.redirectscheme.permanent=true
+      # traefik-http to use the middleware to redirect to https
+      - traefik.http.routers.traefik-public-http.middlewares=https-redirect
+      # traefik-https the actual router using HTTPS
+      # Uses the environment variable DOMAIN
+      - traefik.http.routers.traefik-public-https.rule=Host(`${TRAEFIK_DOMAIN}`)
+      - traefik.http.routers.traefik-public-https.entrypoints=https
+      - traefik.http.routers.traefik-public-https.tls=true
+      # Use the special Traefik service api@internal with the web UI/Dashboard
+      - traefik.http.routers.traefik-public-https.service=api@internal
+      # Use the "le" (Let's Encrypt) resolver created below
+      - traefik.http.routers.traefik-public-https.tls.certresolver=le
+      # Enable HTTP Basic auth, using the middleware created above
+      - traefik.http.routers.traefik-public-https.middlewares=admin-auth
+    command:
+      # Enable Docker in Traefik, so that it reads labels from Docker services
+      - --providers.docker=true
+      # Do not expose all Docker services, only the ones explicitly exposed
+      - --providers.docker.exposedbydefault=false
+      # Create an entrypoint http listening on port 80
+      - --entrypoints.http.address=:80
+      # NO postgres OR redis ENTRYPOINT. There used to be one of each, on :5432 and
+      # :6379, with TCP routers pointing at the database and the cache. That published
+      # both to the internet behind only their own passwords. An entrypoint with no
+      # router behind it is still an open port, so the listener goes too.
+      # Create an entrypoint https listening on port 443
+      - --entrypoints.https.address=:443
+      # Create an entry point ws listening on port 8083
+      - --entrypoints.ws.address=:8083
+      # Create an entry point wss listening on port 8084
+      - --entrypoints.wss.address=:8084
+      # Create the certificate resolver le for Let's Encrypt, uses the environment variable EMAIL
+      - --certificatesresolvers.le.acme.email=${TRAEFIK_EMAIL:?No EMAIL set}
+      # Store the Let's Encrypt certificates in the mounted volume
+      - --certificatesresolvers.le.acme.storage=/certificates/acme.json
+      # Use the TLS Challenge for Let's Encrypt
+      - --certificatesresolvers.le.acme.tlschallenge=true
+      # Enable the access log, with HTTP requests
+      - --accesslog
+      # Enable the Traefik log, for configurations and errors
+      - --log
+      # Enable the Dashboard and API
+      - --api
+      # Max idle connections per host
+      - --serversTransport.maxIdleConnsPerHost=-1
+    ports:
+      - 80:80
+      # NO 5432 OR 6379. The proxy published the database and the cache on the
+      # public interface. e023656 removed their Traefik routers and the entrypoints
+      # behind them, and this was still open — a published port is the socket, and it
+      # answers with or without a router. Found by running the customer install: the
+      # stack would not start locally because "Bind for 0.0.0.0:6379 failed", which is
+      # the only reason anybody looked here.
+      #
+      # The lesson went one level deeper each time: the router was not the exposure,
+      # the entrypoint was not the whole exposure either, and the port mapping is what
+      # actually opens it. TestNoPublishedPortExposesADatastore now covers this level.
+      - 443:443
+      - 8083:8083
+      - 8084:8084
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - cert-data:/certificates
+    networks:
+      - traefik-public
+
+volumes:
+  cert-data:
+
+networks:
+  traefik-public:
+    name: traefik-public
+    external: false
+  onecamp-shared-net:
+    driver: bridge
+  # Egress-less network for the optional code-execution sandbox: containers on
+  # it can reach each other (server -> code-runner) but have NO route to the
+  # internet, so executed code cannot make outbound connections.
+  code-runner-net:
+    name: code-runner
+    internal: true
+    external: false

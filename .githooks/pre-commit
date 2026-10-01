@@ -1,0 +1,59 @@
+#!/bin/sh
+# OneCamp pre-commit hook — auto-format Go files and block unformatted commits.
+# Install: git config core.hooksPath .githooks
+
+set -e
+
+# --- Secrets -----------------------------------------------------------------
+# Scan what is being committed for credentials. Seven live secrets reached this
+# history before this check existed (found 1 Oct 2026); anything committed is
+# permanent, so the only cheap moment to stop one is now. CI cannot be relied on
+# for this: it runs after the commit exists, and on this account it does not run.
+# Values are redacted in the output. A deliberate fixture can carry an inline
+# `gitleaks:allow` comment.
+if command -v gitleaks >/dev/null 2>&1; then
+    SECRETS_SCAN="gitleaks git --staged --redact --no-banner -v ."
+elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    SECRETS_SCAN="docker run --rm --user $(id -u):$(id -g) -e HOME=/tmp -v $(pwd):/repo -w /repo zricethezav/gitleaks:latest git --staged --redact --no-banner -v /repo"
+else
+    SECRETS_SCAN=""
+    echo "[pre-commit] WARNING: no gitleaks and no Docker; staged files were NOT scanned for secrets."
+fi
+if [ -n "$SECRETS_SCAN" ]; then
+    if ! $SECRETS_SCAN >/tmp/onecamp-gitleaks.$$ 2>&1; then
+        cat /tmp/onecamp-gitleaks.$$
+        rm -f /tmp/onecamp-gitleaks.$$
+        echo "[pre-commit] ERROR: the staged changes contain what looks like a secret (value redacted above)."
+        echo "[pre-commit] Move it to the environment, or mark a deliberate test fixture with 'gitleaks:allow'."
+        exit 1
+    fi
+    rm -f /tmp/onecamp-gitleaks.$$
+    echo "[pre-commit] secrets scan OK."
+fi
+
+# Only run if Go files are staged
+STAGED_GO=$(git diff --cached --name-only --diff-filter=ACM | grep '\.go$' || true)
+
+if [ -z "$STAGED_GO" ]; then
+    exit 0
+fi
+
+echo "[pre-commit] Running gofmt on staged Go files..."
+
+# Format all staged Go files
+echo "$STAGED_GO" | while read -r file; do
+    if [ -f "$file" ]; then
+        gofmt -w "$file"
+        git add "$file"
+    fi
+done
+
+# Verify nothing is left unformatted
+UNFORMATTED=$(gofmt -l $(echo "$STAGED_GO" | tr '\n' ' '))
+if [ -n "$UNFORMATTED" ]; then
+    echo "[pre-commit] ERROR: gofmt could not format these files:"
+    echo "$UNFORMATTED"
+    exit 1
+fi
+
+echo "[pre-commit] gofmt OK."

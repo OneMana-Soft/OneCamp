@@ -1,0 +1,59 @@
+# Controller sites that put an error STRING in a response body's DETAIL slot, as
+#
+#     helpers.Envolope{"msg": "...", "err": err.Error()}
+#     helpers.Envolope{"error": err.Error()}
+#
+# RedactErrorsInResponse blanks the error INTERFACE at the WriteJSON chokepoint, and it does so by
+# VALUE TYPE, not by key name — so "error" is the same bypass as "err". A string is not an error, so
+# these reach the client untouched. For a *pq.Error that string is the driver's message, which still
+# names the constraint, the table and the column.
+#
+# These sites are the pure-loss case: the client does not even display them. The global error
+# handler (onecamp-fe lib/axiosInstance.ts) falls back through `data?.msg`, so nothing renders err
+# or error. The detail is leaked to the browser and shown to nobody.
+#
+# NOT LISTED: `"msg": err.Error()`. Deliberate. msg IS rendered, so a string there can be a real
+# message, and putting a sentinel's message in msg is the fix this file is asking for — ratcheting
+# it by shape would fail CI on the correct change. That gap is named in the test comment and belongs
+# to review.
+#
+# This is a BACKLOG, not an allowance. TestErrorStringsInResponsesDoNotGrow fails if any count
+# rises or a new file appears, so the pattern cannot spread while the migration is pending. It also
+# fails if a count DROPS without this file being updated, so progress is recorded rather than
+# quietly reversible.
+#
+# THE MIGRATION, for whoever picks a file off this list. Do not simply swap .Error() for the error
+# value — that hands the reader "redacted: see server logs" where an actionable sentence belongs,
+# and several of these are actionable on purpose. Decide, per site, which it is:
+#
+#   the server authored this FOR the reader   -> a sentinel error, recognised with errors.Is, and
+#                                               the message put in msg. Two worked examples:
+#                                               business/AI.ErrProviderKeyUnreadable and
+#                                               AIMCP.ErrAuthSecretUnreadable. Prefer a matching
+#                                               4xx while you are there; both of those returned
+#                                               5xx for a condition the caller had to fix.
+#   it came from a dependency                 -> leave it in err as the error value and let the
+#                                               chokepoint blank it. The detail is already in the
+#                                               server log, which is where the message points.
+#
+# Worth knowing before you start on Archive, GitHub, Import, SlackImport or Webhook: several of
+# those respond with "error" as the ONLY key. Those endpoints currently show the user the generic
+# "An unexpected error occurred" toast no matter what went wrong, because nothing reads that key.
+# Migrating them to msg is a UX fix as much as a redaction one.
+#
+# Format: relative path, then the count. One per line.
+
+controllers/AI/aiConfigController.go 4
+controllers/AI/aiController.go 13
+controllers/AI/aiDocController.go 3
+controllers/AI/memoryController.go 1
+controllers/Archive/archiveController.go 12
+controllers/Board/boardController.go 9
+controllers/Channel/channelController.go 1
+controllers/Doc/docController.go 6
+controllers/EntityLink/entityLinkController.go 4
+controllers/GitHub/githubController.go 17
+controllers/Import/importController.go 17
+controllers/SlackImport/slackImportController.go 8
+controllers/Task/taskController.go 6
+controllers/Webhook/webhookController.go 8
