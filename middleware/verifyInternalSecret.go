@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
 )
@@ -18,6 +19,16 @@ func VerifyInternalServiceRequest(next http.Handler) http.Handler {
 		if internalSecret == "" {
 			// If internal secret is not configured, deny all internal requests for security
 			helpers.MessageLogs.ErrorLog.Println("middleware/VerifyInternalServiceRequest INTERNAL_SECRET env var is not set")
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+
+		// A secret anyone can read is not a secret. The collaboration service once fell back to a
+		// literal in its public source, and an install left on it would open every document and board
+		// to anyone who read that file. A known default or a short value is refused outright, with a
+		// log line that says what to do, rather than accepted quietly.
+		if WeakInternalSecret(internalSecret) {
+			helpers.MessageLogs.ErrorLog.Println("middleware/VerifyInternalServiceRequest INTERNAL_SECRET is a public default or too short; set a random value of at least 32 characters (make secrets) and restart")
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
@@ -42,4 +53,23 @@ func VerifyInternalServiceRequest(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// knownDefaultSecrets are values that have appeared in OneCamp's own source or
+// samples. Compared case-insensitively.
+var knownDefaultSecrets = []string{"super-secret-key", "changeme", "change-me", "secret", "internal-secret"}
+
+// WeakInternalSecret reports whether a configured INTERNAL_SECRET is a known
+// default or shorter than 16 characters. Exported for its test.
+func WeakInternalSecret(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) < 16 {
+		return true
+	}
+	for _, d := range knownDefaultSecrets {
+		if strings.EqualFold(s, d) {
+			return true
+		}
+	}
+	return strings.HasPrefix(s, "__") && strings.HasSuffix(s, "__")
 }

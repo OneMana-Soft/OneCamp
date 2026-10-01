@@ -156,6 +156,16 @@ import { generateHTML, generateJSON } from '@tiptap/html'
 import { COLLAB_EXTENSIONS } from './extensions.js'
 import { createAppendHandler } from './appendToDoc.js'
 
+// The secret this service presents to the API. There is no fallback: a default
+// written here would be public, and an install left on it would let anyone who
+// read this file into every document. Unset means the call is refused upstream,
+// which is the visible failure we want.
+function internalSecret() {
+    const s = (process.env.INTERNAL_SECRET || '').trim()
+    if (!s) console.error('INTERNAL_SECRET is not set; the API will refuse document and board loads until it is')
+    return s
+}
+
 // Helper to extract text from Tiptap JSON
 const getText = (node) => {
     let text = ''
@@ -313,7 +323,7 @@ const server = new Server({
             const fetchUrl = `${GO_BACKEND_URL}/boardColab/getBoard/${id}`;
             try {
                 const response = await api.get(fetchUrl, {
-                    headers: { 'X-Internal-Secret': process.env.INTERNAL_SECRET || 'super-secret-key' }
+                    headers: { 'X-Internal-Secret': internalSecret() }
                 })
 
                 const boardState = response.data?.data?.board_state
@@ -338,7 +348,7 @@ const server = new Server({
 
         try {
             const response = await api.get(fetchUrl, {
-                headers: { 'X-Internal-Secret': process.env.INTERNAL_SECRET || 'super-secret-key' }
+                headers: { 'X-Internal-Secret': internalSecret() }
             })
 
             const docBody = response.data?.data?.doc_body
@@ -435,7 +445,7 @@ const server = new Server({
                     contributors,
                 }, {
                     headers: {
-                        'X-Internal-Secret': process.env.INTERNAL_SECRET || 'super-secret-key'
+                        'X-Internal-Secret': internalSecret()
                     }
                 })
                 console.log(`[Collab] Saved board ${id} successfully: ${response.status}`);
@@ -487,7 +497,7 @@ const server = new Server({
                 contributors,
             }, {
                 headers: {
-                    'X-Internal-Secret': process.env.INTERNAL_SECRET || 'super-secret-key'
+                    'X-Internal-Secret': internalSecret()
                 }
             })
             console.log(`[Collab] Saved ${id} successfully: ${response.status}`);
