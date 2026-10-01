@@ -1,0 +1,3 @@
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS "status" varchar NOT NULL DEFAULT 'pending';
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS "token" varchar UNIQUE;
+ALTER TABLE invitations ADD COLUMN IF NOT EXISTS "token_expires_at" TIMESTAMP WITH TIME ZONE;

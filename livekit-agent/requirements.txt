@@ -1,0 +1,32 @@
+livekit
+livekit-api
+python-dotenv
+aiohttp
+livekit-plugins-deepgram
+livekit-plugins-google
+livekit-plugins-openai
+# Voice activity detection, used to segment audio for STT models that cannot
+# stream (Whisper and every self-hosted server built on it). See
+# _ensure_streaming in agent.py.
+livekit-plugins-silero
+
+# OpenTelemetry must be installed as ONE coordinated release: the core
+# packages (api/sdk/exporter) use 1.x versioning and the
+# instrumentation/semantic-convention packages use the paired 0.xxb
+# versioning. Pinning only opentelemetry-sdk while leaving the others unpinned
+# makes pip backtrack across dozens of exporter versions and fail with
+# ResolutionImpossible (each exporter-otlp-proto-http X.Y depends on sdk~=X.Y).
+#
+# Pin the FULL set to 1.39.0 / 0.60b0. livekit-agents requires
+# opentelemetry-sdk ~=1.39.0, and 1.39.0 is where LogData was removed in favour
+# of ReadableLogRecord (which modern livekit-agents uses). The previous
+# 1.42.1 pin was OUTSIDE the agents' ~=1.39.0 range AND past the LogData
+# removal, which crashed the agent on import with
+# "cannot import name 'LogData' from 'opentelemetry.sdk._logs'". Keep this set
+# aligned with livekit-agents' opentelemetry requirement when upgrading.
+opentelemetry-api==1.39.0
+opentelemetry-sdk==1.39.0
+opentelemetry-exporter-otlp-proto-http==1.39.0
+opentelemetry-instrumentation-logging==0.60b0
+opentelemetry-instrumentation-aiohttp-server==0.60b0
+opentelemetry-instrumentation-aiohttp-client==0.60b0

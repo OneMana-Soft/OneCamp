@@ -1,0 +1,75 @@
+one_camp_api
+/server
+/data
+
+# Compiled code-runner sidecar. `go build ./...` inside that module drops an
+# ~8 MB binary next to the sources, and its Dockerfile builds it from source in
+# a build stage, so nothing needs it committed.
+/other-services/code-runner/code-runner
+.kiro
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.env
+node
+firebase-cred.json
+architecture-diagrams
+
+# dependencies
+node_modules/
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+.idea
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# python (livekit-agent) build artifacts
+__pycache__/
+*.pyc
+
+# The shared LiveKit key file: one signing secret per tenant. The .sample is
+# committed; this is not.
+livekit-keys.yaml
+
+# Built by `go build ./cmd/journey` when run without -o. Anchored: a bare
+# "journey" also matches the cmd/journey directory and drops it from the repo.
+/journey

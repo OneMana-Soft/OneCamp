@@ -1,0 +1,16 @@
+-- Migration 102: per-agent bot principal.
+--
+-- Promotes each Agent Builder agent into its OWN workspace principal (a real
+-- users row + Dgraph node, flagged is_bot + is_external like the shared
+-- automation bot) so an agent can author messages AS ITSELF — its own name and
+-- avatar, its own uuid — instead of sharing the single "OneCamp AI" identity
+-- with a per-message display-name override. This is the keystone for treating
+-- each agent as a distinct, badged AI teammate (and, later, an addressable
+-- channel member in the mention typeahead).
+--
+-- The principal is provisioned lazily and idempotently from a deterministic
+-- sentinel email keyed on the agent id (agent-bot-<agentId>@bot.onecamp.local),
+-- so resolution never DEPENDS on this column; bot_user_id is a denormalized
+-- convenience (and a hook for membership/cleanup). Nullable + additive: existing
+-- agents keep working and get their principal on next run/edit.
+ALTER TABLE ai_agents ADD COLUMN IF NOT EXISTS "bot_user_id" uuid REFERENCES users(id);

@@ -1,0 +1,3 @@
+-- Expand github_task_activities activity_type CHECK constraint to cover all new event types
+ALTER TABLE github_task_activities DROP CONSTRAINT IF EXISTS github_task_activities_activity_type_check;
+ALTER TABLE github_task_activities ADD CONSTRAINT github_task_activities_activity_type_check CHECK (activity_type IN ('comment','reaction','pr_opened','pr_closed','pr_merged','pr_drafted','pr_ready_for_review','issue_opened','issue_closed','issue_reopened','branch_created','commit_pushed','commit_linked','status_synced','assignee_synced','label_synced','pr_review_approved','pr_review_changes_requested','pr_review_commented','check_run'));

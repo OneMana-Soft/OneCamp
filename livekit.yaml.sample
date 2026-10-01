@@ -1,0 +1,62 @@
+# LiveKit configuration — SAMPLE, for a self-hosted OneCamp deployment.
+#
+# This is the file customers receive. The real livekit.yaml in this repository is
+# OneMana's own, and it used to be what shipped — which sent every buyer:
+#
+#   * the live LiveKit API secret, in plaintext, on a `keys:` line. That secret
+#     signs every call token, so holding it means minting a token for any room on
+#     any LiveKit that trusts the key.
+#   * rtc.node_ip pointing at OneMana's server, so a customer's WebRTC clients
+#     were told to send media to somebody else's machine and their calls could
+#     not connect.
+#   * turn.domain pointing at OneMana's TURN host, with the same result.
+#   * a webhook URL for a DIFFERENT customer's backend, so room events from this
+#     deployment would have been posted to a third party.
+#
+# Copy this to livekit.yaml and replace the three __CHANGE_ME__ values. `make
+# configure-livekit` does it for you from the values already in .env.
+
+port: 7880
+
+logging:
+  json: false
+  level: info
+
+# NO `keys:` BLOCK. The API secret comes from the LIVEKIT_KEYS environment
+# variable, set from LIVEKIT_API_KEY in .env, so it is never written to a file that
+# could be copied or committed. Format: "<name>: <secret>".
+#
+# livekit-server refuses to start when neither is present, so a missing key is a
+# container that does not come up rather than calls that silently fail.
+
+rtc:
+  # The PUBLIC IP of YOUR server. WebRTC clients are told to send media here, so a
+  # wrong value means calls that connect and then carry no audio or video.
+  node_ip: __CHANGE_ME_YOUR_SERVER_PUBLIC_IP__
+  # UDP range for media. Must match the ports published in compose.yml.
+  port_range_start: 50000
+  port_range_end: 50100
+  tcp_port: 7881
+  use_external_ip: true
+
+turn:
+  enabled: true
+  # YOUR TURN hostname, the one you pointed at this server as onecamp-turn.<domain>.
+  domain: __CHANGE_ME_YOUR_TURN_DOMAIN__
+  tls_port: 5349
+  udp_port: 3478
+  external_tls: true
+
+redis:
+  address: redis:6379
+
+webhook:
+  # Must match the key NAME in LIVEKIT_KEYS (the part before the colon).
+  api_key: onecamp
+  urls:
+    # YOUR backend only. Every URL listed here receives room and participant
+    # events for every room on this server, so a foreign URL is a data leak and
+    # not merely a stray line.
+    - https://__CHANGE_ME_YOUR_BACKEND_DOMAIN__/livekit/webhook
+    # The transcription agent, on the internal network.
+    - http://agent:8080/webhook

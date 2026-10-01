@@ -1,0 +1,18 @@
+-- A share link that outlives the thing it was shared for.
+--
+-- Every guest link expired: fourteen days by default, ninety at the outside.
+-- That is the right default and the wrong ceiling. The links people actually
+-- send outward are durable artifacts, a handbook, a proposal, a roadmap someone
+-- keeps open in a tab, and a link that dies quietly three months later is worse
+-- than no link at all: the recipient sees a dead page and the sender never finds
+-- out. It also meant every share in the product was a scheduled support ticket.
+--
+-- NULL now means "until somebody revokes it". Not a far-future sentinel date,
+-- which would read as a real expiry in the admin's grant list and would be wrong
+-- again on whatever date it named.
+--
+-- The safety properties are unchanged. The token is still only stored as a hash,
+-- the grant is still revocable and still listed for an admin, and the whole
+-- surface is still behind a workspace guest-access policy that defaults to off.
+-- Expiry stays the default; this only makes permanence expressible.
+ALTER TABLE guest_grants ALTER COLUMN expires_at DROP NOT NULL;

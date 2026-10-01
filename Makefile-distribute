@@ -1,0 +1,1961 @@
+# Optional: the deployment env file. `-include` (not `include`) so the help
+# target works before the operator has run `cp ./.sample.env ./.env`. Every
+# target that needs a value still validates that the key is set and fails with
+# a clear message rather than a missing-file error.
+-include .env
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OneCamp — the Makefile a customer receives (shipped as `Makefile`).
+#
+# WHY MOST OF THIS IS NEW. The published install guide told customers to run
+# update-admin-email, update-server-ip, replace-domain, create-traefik-password,
+# update-traefik-email, update-allowed-domains and create-swap. NONE of those
+# existed — not here, not in the development Makefile, nowhere in the
+# repository. So a paying customer following the official instructions hit
+# "No rule to make target" on the third line, having already been charged. They
+# are implemented here because the documentation was the specification; the
+# alternative was deleting seven steps from the guide and leaving the customer
+# to hand-edit .env, which is what the guide was trying to avoid.
+#
+# Every target is idempotent and prints what it changed. A setup step that
+# silently does nothing the second time you run it is indistinguishable from one
+# that failed.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Activating the optional local model engine has to be STICKY, not a flag on one
+# command. Compose only manages the services in the profiles it is told about, so
+# if `make ollama_up` passed --profile once, the very next `make build_restart_all`
+# or `make down` would run without it and leave the engine running, unmanaged and
+# invisible to every other target. Recording the choice in .env means every
+# compose invocation below agrees about what this deployment consists of.
+LOCAL_AI_PROFILE := $(if $(filter 1 true yes on,$(AI_LOCAL_MODELS)),--profile local-ai,)
+
+# Serving the web app from this server is sticky the same way (SERVE_WEB in
+# .env, set by `make install` for a self-hosted server, or `make web_up`).
+WEB_PROFILE := $(if $(filter 1 true yes on,$(SERVE_WEB)),--profile web,)
+
+# SELF is this makefile, for the targets that call each other.
+#
+# Plain $(MAKE) re-reads whatever make picks by default, which is this file only
+# when it has been installed as "Makefile". Run it as `make -f Makefile-distribute`
+# and every sub-make fails with "No rule to make target", which is how backup and
+# restore both broke the first time either was run outside a customer install.
+SELF := $(firstword $(MAKEFILE_LIST))
+
+# STACK_FILE is resolved at run time rather than hardcoded.
+#
+# This was pinned to sample-compose.yml. When that file is not present — a
+# source checkout rather than a release tarball, or a rename during packaging —
+# docker compose still runs happily, matches no services, and every target
+# reports "service postgres is not running" instead of failing. That is not a
+# theoretical hazard: `make backup` took that path and wrote a 7-line archive
+# containing none of the data, and reported success while doing it.
+#
+# Order is deliberate. sample-compose.yml stays FIRST so a working install keeps
+# using exactly the file it uses today; the fallbacks only matter where the
+# current code would otherwise have silently done nothing.
+# The development stack (final-compose.yml, project onecamp-beta) is NOT listed.
+# It differs by project name as well as filename, so it needs the full COMPOSE=
+# override that demo-reset.sh already passes; listing the file alone would look
+# like it worked and still match no running services.
+# The trailing literal is the fallback when NONE of them exist, so the name is
+# never empty. An empty -f argument makes docker compose match no services and
+# every target then reports "service postgres is not running"; a name that is
+# simply absent fails with "no such file", which is the honest error.
+STACK_FILE := $(firstword $(wildcard sample-compose.yml compose.yml distribute-compose.yml) sample-compose.yml)
+
+COMPOSE = docker compose --env-file .env --project-name onecamp $(LOCAL_AI_PROFILE) $(WEB_PROFILE) -f $(STACK_FILE)
+IMAGE   = go_service_onecamp_onemana:1.0
+
+.PHONY: coding-up coding-smoke coding-down help setup update-admin-email update-server-ip replace-domain \
+        create-traefik-password update-traefik-email update-allowed-domains \
+        create-swap configure-livekit create_postgres_db migrate_up migrate_status \
+        build_restart_all build_restart_service console-tunnel doctor verify \
+        set-flat-domains secrets install \
+        reset-link reset-password clear-2fa change-email update \
+        ollama_up ollama_down ollama_update
+
+help:
+	@echo "Install everything in one command:"
+	@echo "  make install EMAIL=you@example.com DOMAIN=example.com PASSWORD=<traefik-pw>"
+	@echo "  make install EMAIL=you@example.com SLUG=acme ZONE=onemana.dev PASSWORD=<traefik-pw>"
+	@echo ""
+	@echo "Or step by step:"
+	@echo "  make coding-up              start the opt-in coding agent runner (then: make coding-smoke)"
+	@echo "  make secrets                generate every credential the install can choose itself"
+	@echo "  make setup EMAIL=you@example.com DOMAIN=example.com PASSWORD=<traefik-admin-pw>"
+	@echo "     runs every configuration step below in the right order"
+	@echo ""
+	@echo "Individual steps:"
+	@echo "  make update-admin-email EMAIL=you@example.com"
+	@echo "  make restart-api                                 (after editing .env)"
+	@echo "  make update-server-ip"
+	@echo "  make replace-domain DOMAIN=example.com          (your own domain)"
+	@echo "  make set-flat-domains SLUG=acme ZONE=onemana.dev (a managed subdomain)"
+	@echo "  make create-traefik-password PASSWORD=<pw>"
+	@echo "  make update-traefik-email EMAIL=you@example.com"
+	@echo "  make update-allowed-domains DOMAINS=example.com"
+	@echo "  make create-swap"
+	@echo "  make configure-livekit    writes livekit.yaml from your .env"
+	@echo ""
+	@echo "Then bring it up:"
+	@echo "  make build_restart_all      build the image and start everything"
+	@echo "  make create_postgres_db     create the database (first install only)"
+	@echo "  make migrate_up             apply the schema"
+	@echo ""
+	@echo "Operations:"
+	@echo "  make doctor                 check .env for unset placeholders"
+	@echo "  make migrate_status         what the database believes is applied"
+	@echo "  make console-tunnel         reach the admin consoles safely"
+	@echo "  make verify                 check a finished install is actually working"
+	@echo "  make journey                prove the product works: creates a task, reads it back"
+	@echo "  make update                 apply a version you just downloaded"
+	@echo "  make update REBUILD=1       rebuild the version already running"
+	@echo ""
+	@echo "Locked out of the workspace? Nobody can resend a password (we never"
+	@echo "stored it), but you can issue a new one from the server:"
+	@echo "  make reset-link EMAIL=admin@example.com"
+	@echo "     print a one-time reset link to send them — they choose the password"
+	@echo "  make reset-password EMAIL=admin@example.com [PASSWORD=<pw>]"
+	@echo "     set a password directly, for when the reset page cannot be reached"
+	@echo "  make clear-2fa EMAIL=admin@example.com"
+	@echo "     last resort when the authenticator AND the recovery codes are gone"
+	@echo "  make change-email OLD=old@example.com NEW=new@example.com"
+	@echo "     when the mailbox itself is gone, so no link could ever reach them"
+	@echo ""
+	@echo "Web app (a self-hosted install serves it from this server by default):"
+	@echo "  make web_up                 serve the web app from this server"
+	@echo "  make web_down               host the web app elsewhere instead"
+	@echo ""
+	@echo "Local AI models (optional — hosted-provider deployments skip this):"
+	@echo "  make ollama_up              start the local model engine and pull models"
+	@echo "  make ollama_update          move to the OLLAMA_IMAGE_TAG pinned in .env"
+	@echo "  make ollama_down            stop it and stop managing it"
+
+# Which frontend branch matches THIS install.
+#
+# The frontend repository has one branch per edition and its DEFAULT is main, the
+# AI-free one. Printing a bare clone told a v2 operator to deploy a frontend with
+# no AI surface against a backend that has all of it: no agents, no AI admin tab,
+# no governance drill. Nothing failed. The features simply were not there, which
+# reads from the outside as "the AI edition does not work".
+#
+# Read from version.txt, which the archive writes with the release that produced
+# it, so this cannot disagree with what is actually installed. Anything
+# unreadable falls back to main, because showing the AI-free branch to a v2
+# install is a missing feature while the reverse is a workspace full of controls
+# that cannot work.
+FE_BRANCH := $(shell if grep -qs '^v2' version.txt; then echo ai; else echo main; fi)
+
+# WHAT IS ON DISK vs WHAT IS RUNNING, which nothing recorded.
+#
+# version.txt is written by the archive, so unzipping a new release changes it
+# immediately — before a single container has been rebuilt. That makes it the
+# STAGED version, and there was nothing anywhere saying which release the running
+# containers were actually built from.
+#
+# The cost was a silent no-op with a success message. A customer who read
+# "UPGRADING: make update" in a release note, and ran exactly that without first
+# re-running the installer, got a backup, a migration pass with nothing to apply,
+# a rebuild of the identical source, and the word "Updated." while still on the
+# old release. Nothing failed and nothing changed.
+#
+# APPLIED_FILE is written by `update` only after every step has succeeded, so it
+# means "this release is running", never "this release was unpacked". It is a
+# root dotfile, which the archive does not contain, so unzip -o cannot clobber it.
+#
+# MISSING MEANS UNKNOWN, AND UNKNOWN PROCEEDS. Every install that predates this
+# file has no record, and refusing to update those would be a worse failure than
+# the one being fixed. The cloud updater takes the opposite reading of NULL for a
+# different reason: it acts on someone else's machine unattended, where a wrong
+# guess is not recoverable by the person watching.
+APPLIED_FILE := .applied_version
+STAGED_VERSION := $(shell cat version.txt 2>/dev/null | tr -d '\r\n')
+APPLIED_VERSION := $(shell cat $(APPLIED_FILE) 2>/dev/null | tr -d '\r\n')
+
+# setup runs the configuration steps in dependency order, so a customer has one
+# command to remember instead of seven to sequence correctly.
+#
+# EXPLICIT $(MAKE) CALLS, NOT PREREQUISITES, and the arguments are validated FIRST.
+# As prerequisites this failed halfway: `make setup DOMAIN=...` reached
+# update-allowed-domains, which requires DOMAINS rather than DOMAIN, and stopped —
+# after eleven keys had already been written. A configuration step that half-applies
+# and then errors is worse than one that refuses, because the operator now has to
+# work out which half happened. Found by running it rather than by reading it.
+#
+# Validating up front means the only way to get a partial .env is a step failing on
+# its own merits, not on an argument the caller could not have known to pass.
+# install is the whole thing, in one command.
+#
+# WHY THIS EXISTS. The documented install was six commands with a manual step in
+# the middle: edit fifteen credentials into a 500-line file by hand, and get every
+# one of them right, before anything would start. That step is the reason installs
+# fail, and none of those values needed a person to choose them. With `make
+# secrets` filling them, the remaining commands are a fixed sequence with no
+# decisions in it — which is a script, not instructions.
+#
+# TWO ADDRESS MODES, matching how the workspace is reached:
+#   DOMAIN=example.com          a domain you own; hostnames become onecamp-<svc>.<domain>
+#   SLUG=acme ZONE=onemana.dev  a managed subdomain; hostnames are flat, acme-<svc>.<zone>
+#
+# IT ENDS IN `verify`, deliberately. A install target that finishes when the last
+# command exits tells you the commands ran, not that the workspace works. This one
+# only succeeds when the running system answers.
+install:
+	@if [ -z "$(EMAIL)" ] || [ -z "$(PASSWORD)" ]; then \
+		echo "make install needs an admin email and a Traefik password:"; \
+		echo ""; \
+		echo "  Your own domain:"; \
+		echo "    make install EMAIL=you@example.com DOMAIN=example.com PASSWORD=<pw>"; \
+		echo ""; \
+		echo "  A managed subdomain:"; \
+		echo "    make install EMAIL=you@example.com SLUG=acme ZONE=onemana.dev PASSWORD=<pw>"; \
+		exit 1; \
+	fi
+	@if [ -z "$(DOMAIN)" ] && [ -z "$(SLUG)" ]; then \
+		echo "Set either DOMAIN=<your domain> or SLUG=<name> ZONE=<zone>."; exit 1; \
+	fi
+	@if [ -n "$(SLUG)" ] && [ -z "$(ZONE)" ]; then \
+		echo "SLUG needs ZONE, e.g. SLUG=acme ZONE=onemana.dev"; exit 1; \
+	fi
+	@if [ ! -f .env ]; then cp ./.sample.env ./.env && echo "  created .env from the template"; fi
+	@if [ ! -f compose.yml ]; then cp ./sample-compose.yml ./compose.yml && echo "  created compose.yml"; fi
+	@$(MAKE) -f $(SELF) --no-print-directory secrets
+	@$(MAKE) -f $(SELF) --no-print-directory update-admin-email EMAIL=$(EMAIL)
+	@$(MAKE) -f $(SELF) --no-print-directory update-server-ip
+	@if [ -n "$(SLUG)" ]; then \
+		$(MAKE) -f $(SELF) --no-print-directory set-flat-domains SLUG=$(SLUG) ZONE=$(ZONE); \
+		$(MAKE) -f $(SELF) --no-print-directory update-allowed-domains DOMAINS=$(SLUG).$(ZONE); \
+	else \
+		$(MAKE) -f $(SELF) --no-print-directory web-choice WEB=$(WEB); \
+		$(MAKE) -f $(SELF) --no-print-directory replace-domain DOMAIN=$(DOMAIN); \
+		$(MAKE) -f $(SELF) --no-print-directory update-allowed-domains DOMAINS=$(DOMAIN); \
+	fi
+	@$(MAKE) -f $(SELF) --no-print-directory create-traefik-password PASSWORD='$(PASSWORD)'
+	@$(MAKE) -f $(SELF) --no-print-directory update-traefik-email EMAIL=$(EMAIL)
+	@$(MAKE) -f $(SELF) --no-print-directory configure-livekit
+	@$(MAKE) -f $(SELF) --no-print-directory create-swap
+	@$(MAKE) -f $(SELF) --no-print-directory tune
+	@$(MAKE) -f $(SELF) --no-print-directory doctor
+	@$(MAKE) -f $(SELF) --no-print-directory build_restart_all
+	@$(MAKE) -f $(SELF) --no-print-directory create_postgres_db || echo "  database already exists, continuing"
+	@$(MAKE) -f $(SELF) --no-print-directory migrate_up
+	@$(MAKE) -f $(SELF) --no-print-directory verify
+	@echo ""
+	@echo "  The server is ready. It runs the API and the datastores."
+	# THE NEXT STEP USED TO BE MISSING ENTIRELY. This said "Done" and pointed at
+	# /admin-setup on a host that nothing had deployed yet, so a correct install
+	# ended at a dead URL. On the managed path the frontend is deployed for the
+	# customer, so only the self-host path needs telling.
+	@if [ -z "$(SLUG)" ] && grep -qE '^SERVE_WEB=(1|true|yes|on)$$' .env 2>/dev/null; then \
+		echo "  It also serves the web app, at https://onecamp.$(DOMAIN)"; \
+	elif [ -z "$(SLUG)" ]; then \
+		echo ""; \
+		echo "  Step 2 of 2: deploy the web app. It is a separate deployment from the"; \
+		echo "  open-source frontend, hosted wherever you prefer, pointed at this server:"; \
+		echo ""; \
+		echo "      git clone -b $(FE_BRANCH) https://github.com/OneMana-Soft/OneCamp-fe"; \
+		echo "      cd OneCamp-fe && pnpm install && pnpm configure --domain $(DOMAIN)"; \
+		echo ""; \
+		echo "  The branch matters: the frontend repository has one per edition and its"; \
+		echo "  default is the AI-free one, so a clone without -b gives a v2 install a"; \
+		echo "  workspace with no AI in it."; \
+		echo ""; \
+		echo "  Then point onecamp.$(DOMAIN) at that deployment."; \
+	fi
+	@echo ""
+	@echo "  Then create the first admin account at:"
+	@if [ -n "$(SLUG)" ]; then echo "    https://$(SLUG).$(ZONE)/admin-setup"; \
+	else echo "    https://onecamp.$(DOMAIN)/admin-setup"; fi
+	@echo ""
+	@echo "  Everything else, sign-in providers, email and AI, is configured in the admin panel."
+
+# ─── Serving the web app from this server ─────────────────────────────────────
+#
+# The web app was always a second deployment (Vercel, Netlify, another server)
+# with its own DNS record, so a correct install ended at an address nothing
+# answered until the buyer set up a second host. A self-hosted install now
+# serves it from here (the "web" compose profile), built from the public
+# frontend for this edition and this domain.
+
+# web-choice records whether this server serves the web app. On by default for
+# a self-hosted install; WEB=0 keeps the old two-deployment layout.
+web-choice:
+	@if [ "$(WEB)" = "0" ]; then \
+		$(call set_env_sh,SERVE_WEB,0); echo "  the web app will be hosted elsewhere (WEB=0)"; \
+	else \
+		$(call set_env_sh,SERVE_WEB,1); $(call set_env_sh,WEB_BRANCH,$(FE_BRANCH)); \
+		echo "  this server will serve the web app too ($(FE_BRANCH) edition)"; \
+	fi
+
+# web_up turns it on for an existing install: builds the web app for this
+# domain and starts it. Point onecamp.<your domain> at this server afterwards.
+web_up:
+	@if ! grep -qE '^FE_DOMAIN=[a-z0-9.-]+\.[a-z]+$$' .env; then \
+		echo "ERROR: no domain in .env yet. Run make install (or make replace-domain) first."; exit 1; \
+	fi
+	@$(call set_env_sh,SERVE_WEB,1); $(call set_env_sh,WEB_BRANCH,$(FE_BRANCH))
+	@echo "▶ building the web app for $$(grep -m1 '^FE_DOMAIN=' .env | cut -d= -f2) ($(FE_BRANCH) edition). This takes a few minutes."
+	@docker compose --env-file .env --project-name onecamp $(LOCAL_AI_PROFILE) --profile web -f $(STACK_FILE) build --pull web
+	@docker compose --env-file .env --project-name onecamp $(LOCAL_AI_PROFILE) --profile web -f $(STACK_FILE) up -d web
+	@echo ""
+	@echo "  The web app is running here. Point this record at THIS server (an A record),"
+	@echo "  replacing wherever it pointed before:"
+	@echo "    $$(grep -m1 '^FE_HOST_DOMAIN=' .env | cut -d= -f2)"
+
+# web_down goes back to hosting the web app elsewhere.
+web_down:
+	@docker compose --env-file .env --project-name onecamp --profile web -f $(STACK_FILE) rm -sf web
+	@$(call set_env_sh,SERVE_WEB,0)
+	@echo "  stopped; this server no longer serves the web app"
+
+setup:
+	@if [ -z "$(EMAIL)" ] || [ -z "$(DOMAIN)" ] || [ -z "$(PASSWORD)" ]; then \
+		echo "make setup needs all three:"; \
+		echo "  make setup EMAIL=you@example.com DOMAIN=example.com PASSWORD=<traefik-admin-pw>"; \
+		echo ""; \
+		echo "EMAIL     the workspace admin, and the address Let's Encrypt notices go to"; \
+		echo "DOMAIN    your domain; service hostnames are derived as onecamp-<service>.<domain>"; \
+		echo "PASSWORD  for the Traefik dashboard's basic auth"; \
+		exit 1; \
+	fi
+	@$(MAKE) -f $(SELF) --no-print-directory update-admin-email EMAIL=$(EMAIL)
+	@$(MAKE) -f $(SELF) --no-print-directory update-server-ip
+	@$(MAKE) -f $(SELF) --no-print-directory replace-domain DOMAIN=$(DOMAIN)
+	@$(MAKE) -f $(SELF) --no-print-directory create-traefik-password PASSWORD='$(PASSWORD)'
+	@$(MAKE) -f $(SELF) --no-print-directory update-traefik-email EMAIL=$(EMAIL)
+	@$(MAKE) -f $(SELF) --no-print-directory update-allowed-domains DOMAINS=$(DOMAIN)
+	@$(MAKE) -f $(SELF) --no-print-directory configure-livekit
+	@$(MAKE) -f $(SELF) --no-print-directory create-swap
+	@echo ""
+	@echo "Configuration written to .env. Next: make doctor, then make build_restart_all"
+
+# configure-livekit writes livekit.yaml from the sample, filling in the three values
+# that are specific to YOUR server.
+#
+# The sample exists because the repository's own livekit.yaml used to ship verbatim,
+# which sent every customer OneMana's LiveKit API secret in plaintext, an rtc.node_ip
+# pointing at OneMana's server, a TURN domain pointing at OneMana's host, and a
+# webhook URL for a different customer's backend. The first is a credential leak; the
+# next two mean calls that connect and carry no media; the last would have posted
+# your room events to a third party.
+#
+# No secret is written here. LiveKit reads the signing key from LIVEKIT_KEYS in .env,
+# and refuses to start without it, so a missing key stops the server rather than
+# producing calls nobody can join.
+#
+# ONE shell for the whole recipe, deliberately. Make runs each recipe LINE in its own
+# shell, so the early `exit 0` guards below were exiting only their own line and the
+# generation still ran — the target overwrote an existing livekit.yaml on every call.
+# Caught by running it twice.
+configure-livekit:
+	@if [ ! -f livekit.yaml.sample ]; then \
+		echo "  no livekit.yaml.sample in this archive, skipping"; \
+	elif [ -f livekit.yaml ]; then \
+		echo "  livekit.yaml already exists, leaving it alone"; \
+	else \
+	ip=$$(grep -E '^SERVER_IP=' .env | cut -d= -f2-); \
+	turn=$$(grep -E '^TURN_DOMAIN=' .env | cut -d= -f2-); \
+	be=$$(grep -E '^BACKEND_DOMAIN=' .env | cut -d= -f2-); \
+	if [ -z "$$ip" ] || [ -z "$$turn" ] || [ -z "$$be" ]; then \
+		echo "  ERROR: SERVER_IP, TURN_DOMAIN and BACKEND_DOMAIN must be set first."; \
+		echo "         Run: make update-server-ip && make replace-domain DOMAIN=<your-domain>"; \
+		exit 1; \
+	fi; \
+	sed -e "s|__CHANGE_ME_YOUR_SERVER_PUBLIC_IP__|$$ip|" \
+	    -e "s|__CHANGE_ME_YOUR_TURN_DOMAIN__|$$turn|" \
+	    -e "s|__CHANGE_ME_YOUR_BACKEND_DOMAIN__|$$be|" \
+	    livekit.yaml.sample > livekit.yaml; \
+	echo "  wrote livekit.yaml  (node_ip=$$ip  turn=$$turn  webhook=$$be)"; \
+	fi
+
+# ─── Configuration steps ──────────────────────────────────────────────────────
+#
+# set_env is the one place that edits .env. Doing it in a single function rather
+# than seven inline seds is what makes the steps consistent: each one appends the
+# key if it is absent and replaces it if it is present, so re-running is safe and
+# a key can never end up declared twice — which in a .env means the LAST one wins
+# and the operator's earlier edit silently does nothing.
+define set_env
+	@if [ ! -f .env ]; then echo "ERROR: .env not found. Run: cp ./.sample.env ./.env"; exit 1; fi
+	@if grep -qE '^$(1)=' .env; then \
+		tmp=$$(mktemp) && sed 's|^$(1)=.*|$(1)=$(2)|' .env > "$$tmp" && mv "$$tmp" .env; \
+	else \
+		printf '%s=%s\n' '$(1)' '$(2)' >> .env; \
+	fi
+	@echo "  set $(1)"
+endef
+
+# bcrypt_hash — hash the password in $$PW into $$hash, or fail with a clear message.
+#
+# htpasswd comes from apache2-utils, which is one more thing to install on a fresh
+# server before anything works. Docker is already a hard requirement, so fall back
+# to it rather than sending the operator to apt: httpd:alpine carries the same
+# binary. Only if BOTH are missing is this a real dead end.
+#
+# The password travels in the ENVIRONMENT, never as an argument. An argument is
+# visible in `ps` to every user on the box for as long as the process runs, and the
+# docker fallback would additionally write it into the daemon's record of how the
+# container was created.
+#
+# -C 10 pins the cost to bcrypt.DefaultCost in the Go code. htpasswd's own default
+# for -B is 5, which would make a hash written here measurably cheaper to attack
+# than one the application wrote for the very same password.
+define bcrypt_hash
+	export PW; \
+	if command -v htpasswd >/dev/null 2>&1; then \
+	  hash=$$(htpasswd -nbBC 10 x "$$PW" | cut -d: -f2 | tr -d '\r\n'); \
+	elif command -v docker >/dev/null 2>&1; then \
+	  hash=$$(docker run --rm -e PW httpd:alpine sh -c 'htpasswd -nbBC 10 x "$$PW"' 2>/dev/null | cut -d: -f2 | tr -d '\r\n'); \
+	else \
+	  echo "ERROR: neither htpasswd nor docker is available."; \
+	  echo "  Install one: sudo apt -y install apache2-utils"; \
+	  exit 1; \
+	fi; \
+	if [ -z "$$hash" ]; then echo "ERROR: failed to hash the password"; exit 1; fi
+endef
+
+# ALLOWED_USERS is the key that actually gates sign-up (business/Settings reads it;
+# empty means invite-only). ADMIN_EMAIL_ID is the key the template has always
+# carried, so it is set too rather than left holding whatever shipped in the file.
+#
+# An earlier version of this target wrote ADMIN_EMAIL, which appears in no Go file
+# and no compose file — a key nothing reads, set with conviction.
+#
+# AT COLUMN ZERO, not indented into the recipe. A tab-indented comment is a recipe
+# line: make echoes it, so six lines of rationale were printed to the operator every
+# time the target ran, and again inside change-email when it calls through to here.
+# ADMIN_EMAIL_ID IS READ NOW. The API refuses a first-admin claim from any other
+# address, which closes the window between `make install` finishing and the
+# operator getting to the setup page. The env file is read when the container is
+# created, so once the API is up a change here needs `make restart-api` to take.
+update-admin-email:
+ifndef EMAIL
+	$(error EMAIL is required, e.g. make update-admin-email EMAIL=you@example.com)
+endif
+	$(call set_env,ALLOWED_USERS,$(EMAIL))
+	$(call set_env,ADMIN_EMAIL_ID,$(EMAIL))
+	@if docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'go-service'; then \
+	  echo "  The API is running with the previous address. Apply this one with:"; \
+	  echo "      make restart-api"; \
+	fi
+
+# Recreates the API container and nothing else, which is what it takes for a
+# changed .env to be read. Not a rebuild: the image is unchanged, and it is back
+# in a few seconds.
+restart-api:
+	$(COMPOSE) up -d --force-recreate --no-deps go-service
+
+# The public IP is detected rather than asked for, because an operator typing
+# their own server's IP is a step that can be wrong in a way nothing catches.
+update-server-ip:
+	@ip=$$(curl -fsS --max-time 10 https://api.ipify.org || curl -fsS --max-time 10 https://ifconfig.me); \
+	if [ -z "$$ip" ]; then echo "ERROR: could not detect the public IP. Set SERVER_IP in .env by hand."; exit 1; fi; \
+	if grep -qE '^SERVER_IP=' .env; then \
+		tmp=$$(mktemp) && sed "s|^SERVER_IP=.*|SERVER_IP=$$ip|" .env > "$$tmp" && mv "$$tmp" .env; \
+	else \
+		printf 'SERVER_IP=%s\n' "$$ip" >> .env; \
+	fi; \
+	echo "  set SERVER_IP=$$ip"
+
+# replace-domain rewrites every *_DOMAIN value onto the customer's domain,
+# keeping the onecamp-<service> prefixes the compose file's router rules expect.
+#
+# It deliberately does NOT create hostnames for the admin consoles. Those are no
+# longer routed through Traefik — see the CONSOLE NOT PUBLISHED notes in
+# compose.yml — so a DNS record for them would point at something that does not
+# answer, and creating one is how they ended up on the public internet before.
+replace-domain:
+ifndef DOMAIN
+	$(error DOMAIN is required, e.g. make replace-domain DOMAIN=example.com)
+endif
+	$(call set_env,BACKEND_DOMAIN,onecamp-backend.$(DOMAIN))
+	$(call set_env,FE_DOMAIN,$(DOMAIN))
+	$(call set_env,FE_HOST_DOMAIN,onecamp.$(DOMAIN))
+	$(call set_env,EMQX_WS_DOMAIN,onecamp-emqx.$(DOMAIN))
+	$(call set_env,MINO_DOMAIN,onecamp-minio.$(DOMAIN))
+	$(call set_env,collab_WS_DOMAIN,onecamp-collab.$(DOMAIN))
+	$(call set_env,LIVEKIT_DOMAIN,onecamp-livekit.$(DOMAIN))
+	$(call set_env,TURN_DOMAIN,onecamp-turn.$(DOMAIN))
+	$(call set_env,TRAEFIK_DOMAIN,traefik.$(DOMAIN))
+	# MINIO_HOST, MQTT_DOMAIN and MQTT_WS_URL were never set by this target, so the
+	# documented install left three placeholders behind and `make doctor` failed at
+	# the end of a run in which the operator had done everything the guide asked.
+	# MQTT_WS_URL in particular has no fallback in code — an empty value breaks
+	# real-time messaging — and the template says it must match EMQX_WS_DOMAIN,
+	# which is a thing to derive rather than to ask someone to keep in step.
+	$(call set_env,MINIO_HOST,onecamp-minio.$(DOMAIN))
+	$(call set_env,MQTT_DOMAIN,onecamp-emqx.$(DOMAIN))
+	$(call set_env,MQTT_WS_URL,wss://onecamp-emqx.$(DOMAIN)/mqtt)
+	# onecamp.$(DOMAIN) WAS LISTED UNDER "pointing at this server" AND IS NOT.
+	# Nothing here answers it: grep the compose file and there is no Traefik router
+	# for FE_HOST_DOMAIN, because the web app is a separate deployment. A customer
+	# who followed this pointed the one address their team actually opens at a
+	# server that would never serve it, and the published DNS guide said the
+	# opposite, so the two sources of truth disagreed about the most important
+	# record. Split into two lists so neither can be read as the other.
+	@echo ""
+	@echo "  DNS, part 1. A records pointing at THIS server:"
+	@echo "    onecamp-backend.$(DOMAIN)   the API"
+	@echo "    onecamp-emqx.$(DOMAIN)      realtime messaging"
+	@echo "    onecamp-minio.$(DOMAIN)     file storage"
+	@echo "    onecamp-collab.$(DOMAIN)    live editing in documents"
+	@echo "    onecamp-livekit.$(DOMAIN)   video calls"
+	@echo "    onecamp-turn.$(DOMAIN)      DNS ONLY, never proxied. It carries UDP media."
+	@echo ""
+ifneq ($(WEB_PROFILE),)
+	@echo "    onecamp.$(DOMAIN)           the web app your team opens (served here too)"
+else
+	@echo "  DNS, part 2. This one points at your WEB APP, not at this server:"
+	@echo "    onecamp.$(DOMAIN)           the address your team opens"
+	@echo "    Nothing on this server answers it. See step 2 below."
+endif
+	@echo ""
+	@echo "  Do NOT create records for the admin consoles; they are not routed."
+
+# Traefik's dashboard is behind HTTP basic auth, so it needs a bcrypt hash rather
+# than the password. htpasswd comes from apache2-utils, which the installer adds.
+#
+# EVERY `$` IN THE HASH IS DOUBLED, and that is not cosmetic. A bcrypt hash looks
+# like $2y$05$<salt><digest>, and Docker Compose treats `$` in a .env value as the
+# start of a variable reference. Left alone, compose warns
+#
+#     The "05" variable is not set. Defaulting to a blank string.
+#
+# and hands Traefik a hash with the segments after each `$` deleted, so the
+# dashboard password silently never matches. Found by running `docker compose
+# config` against a .env this target had written, not by reading it — the file
+# looks correct, and only compose's interpretation of it is wrong.
+# set-flat-domains is replace-domain's counterpart for a MANAGED subdomain.
+#
+# WHY A SECOND TARGET RATHER THAN A FLAG. The two schemes are different shapes,
+# not different values. replace-domain PREFIXES a domain you own —
+# onecamp-backend.example.com — which is right when the whole domain is yours.
+# Under a shared zone that shape puts every hostname TWO labels deep
+# (onecamp-backend.acme.onemana.dev), and a wildcard certificate covers exactly
+# one. Two levels therefore needs a separate certificate per service per tenant,
+# which is both the expensive answer and the one that meets Let's Encrypt's cap of
+# 50 certificates per registered domain per week at about seven customers.
+#
+# So a managed tenant gets FLAT names — acme.onemana.dev, acme-api.onemana.dev —
+# all one label deep, all covered by a single *.onemana.dev certificate, no matter
+# how many tenants exist.
+#
+# FE_DOMAIN IS THE ZONE, NOT THE WORKSPACE HOST, and that is deliberate. It is
+# what the sender address is built from (noreply@$$FE_DOMAIN), so pointing it at
+# the zone reuses the sending domain that is already verified with the email
+# provider. Setting it to acme.onemana.dev would require verifying a new sending
+# domain for every tenant, and mail would silently fail until someone did.
+# FE_HOST_DOMAIN is the host people actually open, and that is the tenant's own.
+set-flat-domains:
+ifndef SLUG
+	$(error SLUG is required, e.g. make set-flat-domains SLUG=acme ZONE=onemana.dev)
+endif
+ifndef ZONE
+	$(error ZONE is required, e.g. make set-flat-domains SLUG=acme ZONE=onemana.dev)
+endif
+	$(call set_env,FE_HOST_DOMAIN,$(SLUG).$(ZONE))
+	$(call set_env,FE_DOMAIN,$(ZONE))
+	$(call set_env,BACKEND_DOMAIN,$(SLUG)-api.$(ZONE))
+	$(call set_env,EMQX_WS_DOMAIN,$(SLUG)-emqx.$(ZONE))
+	$(call set_env,MINO_DOMAIN,$(SLUG)-minio.$(ZONE))
+	$(call set_env,collab_WS_DOMAIN,$(SLUG)-collab.$(ZONE))
+	$(call set_env,LIVEKIT_DOMAIN,$(SLUG)-livekit.$(ZONE))
+	$(call set_env,TURN_DOMAIN,$(SLUG)-turn.$(ZONE))
+	$(call set_env,MQTT_WS_URL,wss://$(SLUG)-emqx.$(ZONE)/mqtt)
+	$(call set_env,MINIO_HOST,$(SLUG)-minio.$(ZONE))
+	$(call set_env,MQTT_DOMAIN,$(SLUG)-emqx.$(ZONE))
+	# Set although the dashboard is not published: the compose file marks it a
+	# REQUIRED variable, so an unset value refuses to start the whole stack. No DNS
+	# record is created for it, which is what actually keeps it unreachable.
+	$(call set_env,TRAEFIK_DOMAIN,$(SLUG)-traefik.$(ZONE))
+	@echo ""
+	@echo "  Workspace address: https://$(SLUG).$(ZONE)"
+	@echo ""
+	# $(SLUG).$(ZONE) IS A CNAME AT THE FRONTEND, NOT AN A RECORD HERE. The
+	# provisioner already knows this: EnsureTenantRecords writes a CNAME to the
+	# frontend target for the workspace host and A records for the rest, and its
+	# comment calls out writing an A record for the frontend as a past fault. This
+	# printed list said otherwise, which only matters when somebody creates a record
+	# by hand, which is exactly when a wrong instruction does damage.
+	@echo "  A records for this server:"
+	@echo "    $(SLUG)-api.$(ZONE)       $(SLUG)-emqx.$(ZONE)     $(SLUG)-minio.$(ZONE)"
+	@echo "    $(SLUG)-collab.$(ZONE)    $(SLUG)-livekit.$(ZONE)"
+	@echo "    $(SLUG)-turn.$(ZONE)      (DNS only, never proxied. It carries UDP media.)"
+	@echo ""
+	@echo "  CNAME at the frontend deployment, not this server:"
+	@echo "    $(SLUG).$(ZONE)           the address the team opens"
+	@echo ""
+	@echo "  Admin consoles are not routed and must NOT get records."
+
+# PASSWORD reaches the shell through the ENVIRONMENT, not spliced into the recipe
+# text. Written as PW='$(PASSWORD)', a password containing a single quote closes
+# the quote early and the rest of it is read as shell — at best a syntax error, at
+# worst a command. Nobody picks a password with that in mind, which is exactly why
+# it has to be handled here rather than documented as a thing to avoid.
+create-traefik-password: export PWIN = $(PASSWORD)
+create-traefik-password:
+ifndef PASSWORD
+	$(error PASSWORD is required, e.g. make create-traefik-password PASSWORD=<strong-password>)
+endif
+	@PW="$$PWIN"; \
+	$(bcrypt_hash); \
+	esc=$$(printf '%s' "$$hash" | sed 's/\$$/$$$$/g'); \
+	tmp=$$(mktemp); \
+	if grep -qE '^TRAEFIK_HASHED_PASSWORD=' .env; then \
+		awk -v h="$$esc" 'BEGIN{FS=OFS="="} /^TRAEFIK_HASHED_PASSWORD=/{print "TRAEFIK_HASHED_PASSWORD=" h; next} {print}' .env > "$$tmp" && mv "$$tmp" .env; \
+	else \
+		printf 'TRAEFIK_HASHED_PASSWORD=%s\n' "$$esc" >> .env; \
+	fi; \
+	echo "  set TRAEFIK_HASHED_PASSWORD (bcrypt hash of the password you gave)"
+
+update-traefik-email:
+ifndef EMAIL
+	$(error EMAIL is required, e.g. make update-traefik-email EMAIL=you@example.com)
+endif
+	$(call set_env,TRAEFIK_EMAIL,$(EMAIL))
+
+update-allowed-domains:
+ifndef DOMAINS
+	$(error DOMAINS is required, e.g. make update-allowed-domains DOMAINS=example.com)
+endif
+	$(call set_env,ALLOWED_DOMAINS,$(DOMAINS))
+
+# OpenSearch and the JVM services need more memory headroom than a small VPS has.
+# Idempotent: an existing swapfile is left alone rather than recreated, because
+# recreating one in use is how a server falls over mid-install.
+#
+# NON-FATAL, and it runs last in `make setup`. Swap is headroom, not a requirement:
+# the stack starts without it. It needs sudo, and a sudo that prompts or is refused
+# used to abort the whole of `make setup` — leaving the configuration half-written
+# over something optional. It now warns and returns success, naming the command to
+# run by hand.
+create-swap:
+	@if [ -f /swapfile ]; then \
+		echo "  /swapfile already exists, leaving it alone"; \
+	elif ! sudo -n true 2>/dev/null; then \
+		echo "  SKIPPED: creating swap needs sudo without a password prompt."; \
+		echo "  Run this yourself when convenient — OpenSearch and the JVM services want the headroom:"; \
+		echo "    sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile \\"; \
+		echo "      && sudo mkswap /swapfile && sudo swapon /swapfile"; \
+		echo "    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab"; \
+	else \
+		sudo fallocate -l 4G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile; \
+		grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null; \
+		echo "  created and enabled a 4G swapfile"; \
+	fi
+
+# ─── Secrets ────────────────────────────────────────────────────────────
+#
+# secrets fills in every credential the deployment can generate for itself.
+#
+# WHY THIS EXISTS. The install guide used to say "replace each __CHANGE_ME_*__
+# with a value of your own" and leave the customer editing fifteen entries in a
+# 500-line file with openssl. That is the single worst step in the whole install:
+# it is long, it is easy to half-finish, and the failure it produces is a database
+# refusing a connection rather than anything that mentions the file they were
+# editing. None of those values needs a human to choose it.
+#
+# IDEMPOTENT BY CONSTRUCTION: it only ever replaces a placeholder, never a value.
+# Re-running it after an install cannot rotate a key underneath a running system,
+# which matters enormously for the KEKs — changing one of those makes every secret
+# sealed with it permanently unreadable.
+#
+# WHAT IT DELIBERATELY LEAVES ALONE:
+#   __CHANGE_ME_RUN_make_*__   set by the configuration targets above.
+#   __CHANGE_ME_YOUR_OWN_*__   OAuth credentials only the customer can obtain.
+#   __CHANGE_ME_BCRYPT_*__     set by create-traefik-password.
+#
+# RESEND_API_KEY IS EMPTIED, NOT GENERATED, and the distinction matters. It
+# ships with the same __SET_FROM_SECRET_STORE__ marker as the KEKs, but it is a
+# credential issued by someone else — a random 64 characters is not a Resend key,
+# it is a string that looks like one. IsEmailEnabled() only checks that the
+# variable is non-empty, so filling it would make the deployment believe email
+# works and fail every invitation at the provider instead of at the switch.
+# Empty is the honest state: email is off until a real key is entered, which is
+# a thing the admin panel does.
+#
+# THE OAUTH CLIENT IDS ARE CLEARED ALONGSIDE THEIR SECRETS, and only while the
+# secret is still a placeholder — meaning the customer has not set their own. The
+# template ships OUR client ids, which are public by design and safe to commit,
+# but they are ours: a customer keeping them would send their users to an OAuth
+# app they do not control, with a redirect URI that was never registered for
+# their domain. That fails at the provider, after the user has clicked, which
+# reads as a broken product rather than an unconfigured one. Clearing both halves
+# turns it off cleanly until real credentials are entered in the admin panel.
+# doctor still fails on anything left, so a placeholder cannot reach production
+# just because this target does not know how to fill it.
+secrets:
+	@if [ ! -f .env ]; then echo "ERROR: .env not found. Run: cp ./.sample.env ./.env"; exit 1; fi
+	@gen() { openssl rand -base64 64 | tr -dc 'A-Za-z0-9' | head -c "$$1"; }; \
+	changed=0; \
+	for tok in __CHANGE_ME_STRONG_DB_PASSWORD__ __CHANGE_ME_STRONG_REDIS_PASSWORD__ \
+	           __CHANGE_ME_STRONG_MINIO_PASSWORD__ __CHANGE_ME_STRONG_DGRAPH_PASSWORD__ \
+	           __CHANGE_ME_STRONG_EMQX_PASSWORD__ __CHANGE_ME_STRONG_OPENSEARCH_PASSWORD__ \
+	           __CHANGE_ME_RANDOM_64_CHARS__ __CHANGE_ME_RANDOM_40_CHARS__ \
+	           __CHANGE_ME_SEE_LIVEKIT_API_KEY_NAME_AND_PASS__; do \
+	  if grep -q "$$tok" .env; then \
+	    val=$$(gen 40); \
+	    tmp=$$(mktemp) && sed "s|$$tok|$$val|g" .env > "$$tmp" && mv "$$tmp" .env; \
+	    echo "  generated $$tok"; changed=$$((changed+1)); \
+	  fi; \
+	done; \
+	for var in INTERNAL_SECRET LIVEKIT_API_PASS TURN_SECRET ADMIN_PASSWORD \
+	          IMPORT_TOKEN_KEK AI_CONFIG_KEK TOTP_KEK; do \
+	  if grep -qE "^$$var=__[A-Za-z0-9_-]+__$$" .env; then \
+	    val=$$(gen 64); \
+	    tmp=$$(mktemp) && awk -v k="$$var" -v v="$$val" -F= 'BEGIN{OFS="="} $$1==k{print k, v; next} {print}' .env > "$$tmp" && mv "$$tmp" .env; \
+	    echo "  generated $$var"; changed=$$((changed+1)); \
+	  fi; \
+	done; \
+	for var in RESEND_API_KEY; do \
+	  if grep -qE "^$$var=__[A-Za-z0-9_-]+__$$" .env; then \
+	    tmp=$$(mktemp) && awk -v k="$$var" -F= 'BEGIN{OFS="="} $$1==k{print k, ""; next} {print}' .env > "$$tmp" && mv "$$tmp" .env; \
+	    echo "  cleared $$var (add a real key in the admin panel to enable email)"; changed=$$((changed+1)); \
+	  fi; \
+	done; \
+	for pair in GOOGLE_CLIENT_ID:GOOGLE_CLIENT_SECRET GITHUB_CLIENT_ID:GITHUB_CLIENT_SECRET; do \
+	  id=$${pair%%:*}; sec=$${pair##*:}; \
+	  if grep -qE "^$$sec=__[A-Za-z0-9_-]+__$$" .env; then \
+	    tmp=$$(mktemp) && awk -v a="$$id" -v b="$$sec" -F= 'BEGIN{OFS="="} $$1==a||$$1==b{print $$1, ""; next} {print}' .env > "$$tmp" && mv "$$tmp" .env; \
+	    echo "  cleared $$id and $$sec (set your own in the admin panel to offer this sign-in)"; changed=$$((changed+1)); \
+	  fi; \
+	done; \
+	if [ $$changed -eq 0 ]; then echo "  nothing to generate — no generatable placeholders left"; \
+	else echo "  filled $$changed value(s)"; fi
+
+# ─── Preflight ────────────────────────────────────────────────────────────────
+#
+# doctor exists because .sample.env ships every credential as a __CHANGE_ME_*__
+# placeholder. Deploying with one left in place fails in different ways per
+# service — Postgres refuses the connection, the KEKs refuse to boot at all —
+# and none of those messages says "you did not finish editing .env".
+doctor:
+	@missing=$$(grep -nE '__[A-Za-z0-9_-]+__' .env | cut -d: -f1,2 | sed 's/:/ /' || true); \
+	if [ -n "$$missing" ]; then \
+		echo "These values in .env are still placeholders and MUST be set:"; \
+		grep -nE '__[A-Za-z0-9_-]+__' .env | awk -F: '{split($$2,kv,"="); printf "  line %-5s %s\n", $$1, kv[1]}'; \
+		echo ""; \
+		echo "Generate strong values, e.g.:  openssl rand -base64 32"; \
+		exit 1; \
+	fi; \
+	echo "No placeholders left in .env."
+
+# journey answers the question verify cannot: does the PRODUCT work?
+#
+# WHY IT IS NOT PART OF verify. Everything verify does is read-only -- containers,
+# migrations, disk, endpoints -- and that is what makes it safe to run on a live
+# workspace at any time. It is also why it cannot tell you whether somebody can
+# create a task and then find it again, which is the only question your users
+# actually have. Every silent failure this product has shipped passed every check
+# verify makes: the services were up, the migrations were applied, the endpoint
+# answered, and a feature had been dead since the day it launched.
+#
+# So this one WRITES. It creates one task through the public API, reads it back,
+# moves it to done and searches for it. That is why it is a separate command you
+# run deliberately, and why it needs you to name the project it may write in:
+# nobody should type `make verify` and find test rows in real work afterwards.
+#
+# Needs an API token from admin > API tokens with tasks:read, tasks:write,
+# projects:read and search:read. Without a project the writing steps report as
+# skipped rather than passing, so a run can never claim more than it proved.
+#
+#   ONECAMP_JOURNEY_TOKEN=oc_... ONECAMP_JOURNEY_PROJECT=<uuid> make journey
+journey:
+	@if [ -z "$$ONECAMP_JOURNEY_TOKEN" ]; then \
+		echo "ONECAMP_JOURNEY_TOKEN is not set."; \
+		echo "Create one in the workspace: admin > API tokens, with tasks:read,"; \
+		echo "tasks:write, projects:read and search:read. Then:"; \
+		echo ""; \
+		echo "  ONECAMP_JOURNEY_TOKEN=oc_... ONECAMP_JOURNEY_PROJECT=<uuid> make journey"; \
+		exit 1; \
+	fi; \
+	$(COMPOSE) exec \
+		-e ONECAMP_BASE_URL="$${ONECAMP_BASE_URL:-http://localhost:3000}" \
+		-e ONECAMP_JOURNEY_TOKEN="$$ONECAMP_JOURNEY_TOKEN" \
+		-e ONECAMP_JOURNEY_PROJECT="$$ONECAMP_JOURNEY_PROJECT" \
+		go-service ./app journey
+
+# verify answers "is this install actually working", after everything is up.
+#
+# WHY IT EXISTS SEPARATELY FROM doctor. doctor is a PREFLIGHT — it reads .env and
+# says whether the configuration is finished. verify is a POSTFLIGHT: it asks the
+# running system whether it came up, which is a different question with different
+# answers. An install can pass doctor and still be broken because a container
+# crash-looped, a migration never ran, or DNS points somewhere else.
+#
+# IT ACCUMULATES FAILURES INSTEAD OF STOPPING AT THE FIRST, so one run tells an
+# operator everything that is wrong. Stopping at the first fault turns diagnosis
+# into a sequence of rebuild-and-retry cycles.
+#
+# IT EXITS NON-ZERO when anything fails, so it can gate an automated deploy. That
+# is the property that matters most: a provisioning system can run this and only
+# tell a customer their workspace is ready once it has actually proven so.
+verify:
+	@fail=0; warn=0; \
+	$(db_fn); \
+	echo "Checking this install…"; echo ""; \
+	\
+	echo "  release"; \
+	: "THE FIRST THING ANYONE ASKS ABOUT A BROKEN INSTALL IS WHICH VERSION IT IS,"; \
+	: "and there was no answer on the box: version.txt says what was UNPACKED, which"; \
+	: "is the new release from the moment a zip lands and before anything is built."; \
+	if [ -n "$(APPLIED_VERSION)" ] && [ "$(STAGED_VERSION)" != "$(APPLIED_VERSION)" ]; then \
+		echo "    TODO  running $(APPLIED_VERSION), but $(STAGED_VERSION) is unpacked here and not applied"; \
+		echo "          Apply it with: make update"; \
+		warn=$$((warn+1)); \
+	elif [ -n "$(APPLIED_VERSION)" ]; then \
+		echo "    ok    running $(APPLIED_VERSION)"; \
+	elif [ -n "$(STAGED_VERSION)" ]; then \
+		echo "    ok    $(STAGED_VERSION) unpacked here (this install predates the applied-version marker)"; \
+	else \
+		echo "    ok    version unknown (no version.txt in this directory)"; \
+	fi; \
+	\
+	echo "  configuration"; \
+	if grep -qE '__[A-Za-z0-9_-]+__' .env 2>/dev/null; then \
+		echo "    FAIL  .env still has placeholders — run: make doctor"; fail=1; \
+	else echo "    ok    no placeholders in .env"; fi; \
+	\
+	echo "  containers"; \
+	: "ollama-init is excluded below: it is a one-shot model puller that EXITS on"; \
+	: "success, so not-running is what a healthy install looks like for it."; \
+	expected=$$($(COMPOSE) config --services 2>/dev/null | grep -v '^ollama-init$$'); \
+	if [ -z "$$expected" ]; then \
+		echo "    FAIL  could not read the stack definition (check .env and sample-compose.yml)"; fail=1; \
+	else \
+		running=$$($(COMPOSE) ps --format '{{.Service}} {{.State}}' 2>/dev/null | awk '$$2 == "running" {print $$1}'); \
+		missing=""; \
+		for svc in $$expected; do \
+			echo "$$running" | grep -qx "$$svc" || missing="$$missing $$svc"; \
+		done; \
+		if [ -n "$$missing" ]; then \
+			echo "    FAIL  not running:$$missing"; fail=1; \
+		else echo "    ok    all $$(echo $$expected | wc -w) services running"; fi; \
+	fi; \
+	unhealthy=$$(docker ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null | grep '^onecamp' || true); \
+	if [ -n "$$unhealthy" ]; then \
+		echo "    FAIL  unhealthy: $$(echo $$unhealthy | tr '\n' ' ')"; fail=1; \
+	else echo "    ok    no container reports unhealthy"; fi; \
+	\
+	: "Storage is checked because there is no backup behind it. A mirrored pair"; \
+	: "that has silently lost a disk looks exactly like a healthy one from inside"; \
+	: "the application, and the next failure takes everything. A full disk is the"; \
+	: "other way this ends: postgres stops accepting writes and the workspace"; \
+	: "appears to hang rather than to break."; \
+	: "Output is captured and the verdict read from it, rather than from the exit"; \
+	: "code, because a failing sub-make prints its own *** Error line into the"; \
+	: "middle of a report a person is trying to read."; \
+	echo "  storage"; \
+	out=$$($(MAKE) -f $(SELF) --no-print-directory storage-report 2>/dev/null); \
+	printf '%s\n' "$$out"; \
+	case "$$out" in *FAIL*) fail=1;; esac; \
+	\
+	out=$$($(MAKE) -f $(SELF) --no-print-directory backup-status 2>/dev/null); \
+	if [ -n "$$out" ]; then \
+		echo "  backups"; printf '%s\n' "$$out"; \
+		case "$$out" in *FAIL*) fail=1;; esac; \
+	fi; \
+	\
+	echo "  database"; \
+	applied=$$(echo "SELECT count(*) FROM _sqlx_migrations WHERE success;" | q 2>/dev/null); \
+	if [ -z "$$applied" ] || [ "$$applied" = "0" ]; then \
+		echo "    FAIL  no migrations applied — run: make migrate_up"; fail=1; \
+	else echo "    ok    $$applied migrations applied"; fi; \
+	failed=$$(echo "SELECT count(*) FROM _sqlx_migrations WHERE NOT success;" | q 2>/dev/null); \
+	if [ -n "$$failed" ] && [ "$$failed" != "0" ]; then \
+		echo "    FAIL  $$failed migration(s) recorded as failed"; fail=1; \
+	fi; \
+	\
+	echo "  backing services (from the backend's own startup log)"; \
+	logs=$$($(COMPOSE) logs go-service 2>/dev/null | tail -400); \
+	for svc in postgres minio Dgraph redis mqtt openSearch; do \
+		if echo "$$logs" | grep -qi "Successfully connected.*$$svc"; then \
+			echo "    ok    $$svc"; \
+		else \
+			echo "    FAIL  backend never reported connecting to $$svc"; fail=1; \
+		fi; \
+	done; \
+	\
+	echo "  public endpoints"; \
+	if [ -n "$(BACKEND_DOMAIN)" ]; then \
+		code=$$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$(BACKEND_DOMAIN)/" 2>/dev/null); \
+		if [ "$$code" = "000" ]; then \
+			echo "    FAIL  https://$(BACKEND_DOMAIN)/ unreachable (DNS, firewall, or certificate)"; fail=1; \
+		else echo "    ok    https://$(BACKEND_DOMAIN)/ answered $$code"; fi; \
+	else echo "    FAIL  BACKEND_DOMAIN is not set"; fail=1; fi; \
+	if [ -n "$(WEB_PROFILE)" ] && [ -n "$(FE_HOST_DOMAIN)" ]; then \
+		code=$$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$(FE_HOST_DOMAIN)/" 2>/dev/null); \
+		case "$$code" in \
+			2*|3*) echo "    ok    https://$(FE_HOST_DOMAIN)/ (the web app) answered $$code";; \
+			000) echo "    FAIL  https://$(FE_HOST_DOMAIN)/ unreachable: point it at this server (an A record)"; fail=1;; \
+			*) echo "    FAIL  https://$(FE_HOST_DOMAIN)/ answered $$code: check make logs for the web service"; fail=1;; \
+		esac; \
+	fi; \
+	\
+	: "EMAIL IS THE ONE THING A FRESH INSTALL IS MISSING ON PURPOSE. make secrets"; \
+	: "clears RESEND_API_KEY so that nothing ever sends from a customer's domain"; \
+	: "without them choosing to, which means a new workspace cannot send anything"; \
+	: "at all until a key is added. That matters more than it sounds: password"; \
+	: "reset answers 'check your email' whether or not it could send — it always"; \
+	: "does, so nobody can use it to discover which addresses have accounts — so"; \
+	: "the failure is completely silent from the outside. An admin who forgets"; \
+	: "their password before this is set has no way back in over HTTP."; \
+	: "A TODO, NOT A FAIL. verify runs at the end of make install, before the"; \
+	: "customer has had any chance to add a key; failing here would make a correct"; \
+	: "install report itself broken and teach people to ignore the output."; \
+	echo "  email"; \
+	mail=$$(echo "SELECT value FROM system_configs WHERE key = 'resend_api_key' AND value <> '';" | q 2>/dev/null); \
+	if [ -z "$$mail" ]; then \
+		mail=$$(grep -E '^RESEND_API_KEY=' .env 2>/dev/null | cut -d= -f2- | tr -d '\r'); \
+	fi; \
+	if [ -n "$$mail" ]; then echo "    ok    a sending key is configured"; \
+	else \
+		echo "    TODO  email is OFF, so nothing this workspace sends will arrive:"; \
+		echo "          password resets, invitations and notifications all fail silently."; \
+		echo "          Add a sending key in your workspace: Admin -> Settings -> Email."; \
+		echo "          Until then, recover a locked-out admin with: make reset-link EMAIL=…"; \
+		warn=$$((warn+1)); \
+	fi; \
+	\
+	echo "  AI"; \
+	if $(COMPOSE) exec -T ollama ollama list >/dev/null 2>&1; then \
+		echo "    ok    local model engine responding"; \
+	elif [ -n "$(LOCAL_AI_PROFILE)" ]; then \
+		echo "    FAIL  local models are enabled but the engine is not responding"; fail=1; \
+	elif [ "$(AI_PROVIDER)" = "ollama" ]; then \
+		echo "    FAIL  AI_PROVIDER=ollama but no local model engine is responding."; \
+		echo "          Run 'make ollama_up', or set a hosted provider in .env or the admin AI panel."; fail=1; \
+	else \
+		echo "    ok    AI_PROVIDER=$(AI_PROVIDER) — configure the key in the admin AI panel"; \
+	fi; \
+	\
+	echo ""; \
+	if [ $$fail -ne 0 ]; then echo "NOT READY — fix the FAIL lines above, then run make verify again."; exit 1; fi; \
+	if [ $$warn -ne 0 ]; then \
+		echo "READY — up and answering, but $$warn thing(s) still need doing (TODO above)."; \
+	else \
+		echo "READY — this install is up and answering."; \
+	fi
+
+# ─── Database ─────────────────────────────────────────────────────────────────
+
+# ─── Backups ──────────────────────────────────────────────────────────────────
+
+# WHAT THIS IS, AND WHAT IT IS NOT.
+#
+# It is an UNDO BUFFER. It lives on the same machine — the same RAID array — as the
+# data it copies, so it survives exactly one kind of loss: somebody deleting or
+# corrupting something while the filesystem is fine. That is also the most common
+# kind, which is why it is worth having.
+#
+# It does NOT survive the array failing, the machine being lost, the datacentre
+# burning, or ransomware. Anything that takes the disk takes the backup with it.
+# Calling it a backup without saying that would be worse than not having one,
+# because it invites relying on it for a job it cannot do.
+#
+# Postgres and Dgraph are dumped by default: they hold the accounts, the structure
+# and the documents, they are small next to the disk, and they are what people
+# accidentally delete. Uploaded FILES are not, unless BACKUP_FILES=1 — copying them
+# roughly doubles the space the workspace uses, and a lost file is a rarer complaint
+# than a lost page.
+
+# OPT-IN. Nothing runs a backup until someone asks for one, with `make backup` or
+# `make enable-backups`, and verify stays quiet until then. The targets are here so
+# turning them on later is one command rather than a project.
+BACKUP_DIR    ?= ./data/backups
+BACKUP_KEEP   ?= 7
+# Refuse to start a backup that would fill the disk. A backup that causes the outage
+# it exists to prevent is worse than no backup, and a full disk stops postgres
+# accepting writes.
+BACKUP_MIN_FREE_PCT ?= 15
+
+backup:
+	@set -e; \
+	stamp=$$(date -u +%Y%m%dT%H%M%SZ); \
+	dest="$(BACKUP_DIR)/$$stamp"; \
+	: "A lock, because two overlapping runs would dump the same database twice and"; \
+	: "race each other deleting old ones."; \
+	: "mkdir FIRST, unconditionally. This used to try the lock and fall back to"; \
+	: "creating the directory — which cannot work: a failed exec redirection is"; \
+	: "fatal in POSIX sh, so the shell dies before reaching the ||. Every backup"; \
+	: "on a machine that had never backed up before failed on this line."; \
+	mkdir -p "$(BACKUP_DIR)"; \
+	exec 9>"$(BACKUP_DIR)/.lock"; \
+	if command -v flock >/dev/null 2>&1 && ! flock -n 9; then \
+		echo "  another backup is already running"; exit 0; \
+	fi; \
+	free=$$(df -P "$(BACKUP_DIR)" 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$$5); print 100-$$5}'); \
+	if [ -n "$$free" ] && [ "$$free" -lt "$(BACKUP_MIN_FREE_PCT)" ]; then \
+		echo "  FAIL  only $$free% disk free — refusing to back up and fill it"; \
+		echo "        free some space, or lower BACKUP_MIN_FREE_PCT if you are sure"; \
+		exit 1; \
+	fi; \
+	mkdir -p "$$dest.partial"; \
+	echo "  backing up to $$dest"; \
+	\
+	echo "    postgres"; \
+	$(COMPOSE) exec -T postgres pg_dumpall -U "$(DB_USER)" \
+		| gzip -c > "$$dest.partial/postgres.sql.gz"; \
+	: "gzip -t proves the file is complete. A truncated dump restores silently up to"; \
+	: "the point it stops, which is the worst possible failure for a backup."; \
+	gzip -t "$$dest.partial/postgres.sql.gz"; \
+	if [ ! -s "$$dest.partial/postgres.sql.gz" ]; then echo "    FAIL  empty postgres dump"; exit 1; fi; \
+	\
+	echo "    dgraph"; \
+	if $(COMPOSE) exec -T alpha curl -sf -X POST localhost:8080/admin \
+		-H 'Content-Type: application/json' \
+		-d '{"query":"mutation { export(input: {format: \"rdf\"}) { response { message } } }"}' \
+		| grep -q '"message"'; then \
+		sleep 3; \
+		if [ -d ./data/dgraph/export ]; then \
+			: "TARRED FROM INSIDE THE CONTAINER. Dgraph runs as root, so the export"; \
+			: "it just wrote is owned by root, and tar running as the host user"; \
+			: "cannot read it: 'Cannot open: Permission denied', and with set -e"; \
+			: "the whole backup dies. Streaming it out of the container reads the"; \
+			: "files as the user that created them and needs no sudo on the host."; \
+			$(COMPOSE) exec -T alpha tar -czf - -C /dgraph export > "$$dest.partial/dgraph.tar.gz"; \
+			gzip -t "$$dest.partial/dgraph.tar.gz"; \
+			: "Removed in the container for the same reason it was read there."; \
+			$(COMPOSE) exec -T alpha rm -rf /dgraph/export; \
+		fi; \
+	else \
+		echo "    warn  dgraph export could not be triggered"; \
+	fi; \
+	\
+	: "Search, beside the dumps it matches. Never fails the backup: a node from"; \
+	: "before path.repo gets a warning and the backup is what it always was."; \
+	COMPOSE="$(COMPOSE)" sh other-services/opensearch/snapshot.sh save "$$dest.partial" \
+		|| echo "    warn  search was not backed up"; \
+	\
+	if [ "$(BACKUP_FILES)" = "1" ]; then \
+		echo "    files (minio)"; \
+		: "Hardlinked against the previous run, so unchanged files cost no extra"; \
+		: "space. Without this, every run copies every upload again."; \
+		prev=$$(ls -1d $(BACKUP_DIR)/*/minio 2>/dev/null | tail -1 || true); \
+		if [ -n "$$prev" ]; then \
+			rsync -a --delete --link-dest="$$(cd $$prev && pwd)" ./data/minio/ "$$dest.partial/minio/"; \
+		else \
+			rsync -a ./data/minio/ "$$dest.partial/minio/"; \
+		fi; \
+	fi; \
+	\
+	printf '%s\n' "$$stamp" > "$$dest.partial/COMPLETE"; \
+	: "Renamed only once everything succeeded, so a half-written backup is never"; \
+	: "mistaken for a usable one — by the rotation below, or by a person restoring."; \
+	mv "$$dest.partial" "$$dest"; \
+	echo "    ok    $$(du -sh $$dest | cut -f1) written"; \
+	$(MAKE) -f $(SELF) --no-print-directory backup-rotate
+
+# backup-rotate keeps the newest BACKUP_KEEP complete backups.
+#
+# ONLY COMPLETE ONES ARE COUNTED, and the newest is never deleted whatever the
+# setting says. A rotation that can leave you with nothing is not a rotation.
+backup-rotate:
+	@complete=$$(ls -1d $(BACKUP_DIR)/*/ 2>/dev/null | while read -r d; do \
+		[ -f "$$d/COMPLETE" ] && echo "$$d"; done | sort); \
+	total=$$(echo "$$complete" | grep -c . || true); \
+	keep=$(BACKUP_KEEP); [ "$$keep" -lt 1 ] && keep=1; \
+	if [ "$$total" -gt "$$keep" ]; then \
+		echo "$$complete" | head -n $$(( total - keep )) | while read -r d; do \
+			echo "    removing old backup $$(basename $$d)"; rm -rf "$$d"; \
+		done; \
+	fi; \
+	: "Half-written runs from a crash or a full disk, which are not backups."; \
+	rm -rf $(BACKUP_DIR)/*.partial 2>/dev/null || true
+
+# backup-status reports whether there IS a usable backup and how old it is.
+#
+# The question that matters is not "did the job run" but "is there something to
+# restore from, and from when". A job that has been failing silently for a month
+# looks identical to one that never ran.
+backup-status:
+	@latest=$$(ls -1d $(BACKUP_DIR)/*/ 2>/dev/null | while read -r d; do \
+		[ -f "$$d/COMPLETE" ] && echo "$$d"; done | sort | tail -1); \
+	: "Silent when backups were never switched on. Reporting on a feature nobody"; \
+	: "enabled trains people to ignore the line, and the same line is the one that"; \
+	: "has to be noticed on the day a backup job quietly stops."; \
+	if [ -z "$$latest" ] && [ ! -d "$(BACKUP_DIR)" ]; then \
+		exit 0; \
+	fi; \
+	if [ -z "$$latest" ]; then \
+		echo "    warn  backups are set up but none has completed — run: make backup"; \
+	else \
+		age=$$(( ( $$(date -u +%s) - $$(date -u -r "$$latest/COMPLETE" +%s) ) / 3600 )); \
+		if [ "$$age" -gt 48 ]; then \
+			echo "    FAIL  newest backup is $$age hours old ($$(basename $$latest))"; \
+			exit 1; \
+		else \
+			echo "    ok    newest backup $$age hours old, $$(ls -1d $(BACKUP_DIR)/*/ 2>/dev/null | wc -l) kept"; \
+		fi; \
+	fi
+
+# backup-list shows what could be restored.
+backup-list:
+	@ls -1d $(BACKUP_DIR)/*/ 2>/dev/null | while read -r d; do \
+		if [ -f "$$d/COMPLETE" ]; then \
+			printf '  %-24s %s\n' "$$(basename $$d)" "$$(du -sh $$d | cut -f1)"; \
+		else \
+			printf '  %-24s %s\n' "$$(basename $$d)" "INCOMPLETE - not restorable"; \
+		fi; \
+	done; \
+	[ -d "$(BACKUP_DIR)" ] || echo "  no backups yet"
+
+# restore puts a backup back, replacing everything currently in the workspace.
+#
+# A BACKUP NOBODY CAN RESTORE IS NOT A BACKUP. `make backup` has existed for a
+# while and there was no way to use what it produced, which means the backups were
+# a feeling rather than a plan. This is the other half.
+#
+# DGRAPH MERGES UNLESS YOU DROP FIRST. `dgraph live` is an upsert loader: point it
+# at an export and everything written since that export is still there afterwards,
+# so a "restore" quietly produces a mixture of the backup and the accident you were
+# restoring away from. Nothing warns you. drop_all goes first for that reason.
+#
+# The stack is stopped for the duration. Restoring underneath a running workspace
+# means the application writes into a database being replaced beneath it, and the
+# result is neither the backup nor what you had.
+#
+# Refuses unless CONFIRM matches, because this deletes the current workspace.
+# WARNING: `make -n restore` IS NOT A DRY RUN. GNU make treats any recipe line
+# containing $(MAKE) as recursive and RUNS it even under -n, so it can print the
+# sub-make's commands. Step 5/5 of this recipe is a single line that contains
+# $(MAKE) ... verify, so -n executes that whole line: the drop, the replay, the
+# migrate and the restart. Confirmed the hard way against the demo host.
+#
+# CONFIRM=restore is the real guard and it works. Preview by reading the recipe,
+# never by adding -n and passing CONFIRM.
+restore:
+	@if [ -z "$(FROM)" ]; then 		echo "Usage: make restore FROM=<backup-dir-or-'latest'> CONFIRM=restore"; 		echo ""; 		$(MAKE) -f $(firstword $(MAKEFILE_LIST)) --no-print-directory backup-list; 		exit 1; 	fi
+	@if [ "$(CONFIRM)" != "restore" ]; then 		echo "This REPLACES the current workspace with the backup, and what is here now is gone."; 		echo "Re-run with:  make restore FROM=$(FROM) CONFIRM=restore"; 		exit 1; 	fi
+	@set -e; 	src="$(FROM)"; 	if [ "$$src" = "latest" ]; then 		src=$$(ls -1d $(BACKUP_DIR)/*/ 2>/dev/null | while read -r d; do 			[ -f "$$d/COMPLETE" ] && echo "$$d"; done | tail -1); 	fi; 	[ -n "$$src" ] || { echo "  FAIL  no complete backup found"; exit 1; }; 	src=$${src%/}; 	: "COMPLETE is written last by backup, so its absence means the backup died"; 	: "part way and restoring it would hand you a truncated database."; 	[ -f "$$src/COMPLETE" ] || { echo "  FAIL  $$src has no COMPLETE marker, so it is not restorable"; exit 1; }; 	[ -s "$$src/postgres.sql.gz" ] || { echo "  FAIL  $$src has no postgres dump"; exit 1; }; 	gzip -t "$$src/postgres.sql.gz" || { echo "  FAIL  $$src postgres dump is corrupt"; exit 1; }; 	echo "Restoring from $$src"; 		: "A backup of the current state before destroying it. The most common reason"; 	: "to restore is that something went wrong, and the second most common is that"; 	: "the restore was the thing that went wrong."; 	echo "▶ 1/5  backing up the current state first"; 	$(MAKE) -f $(SELF) --no-print-directory backup || echo "    warn  could not back up first, continuing"; 		echo "▶ 2/5  stopping the application"; 	$(COMPOSE) stop go-service collaboration-service 2>/dev/null || true; 		echo "▶ 3/5  postgres"; 	: "THE DATABASE IS DROPPED FIRST, and this is the whole correctness of this"; 	: "step. pg_dumpall emits CREATE DATABASE and CREATE TABLE, never DROP: replay"; 	: "it over a database that already exists and every statement fails as already"; 	: "exists, psql exits 0 having changed almost nothing, and the restore reports"; 	: "success while the data you were restoring away from is still sitting there."; 	: "Found by restoring over a row added after the backup and watching it live."; 	$(COMPOSE) exec -T postgres psql -U "$(DB_USER)" -d postgres -q -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$(DB_NAME)' AND pid <> pg_backend_pid();" > /dev/null 2>&1 || true; 	$(COMPOSE) exec -T postgres psql -U "$(DB_USER)" -d postgres -q -c 'DROP DATABASE IF EXISTS "$(DB_NAME)";' > /dev/null; 	gzip -dc "$$src/postgres.sql.gz" \
+		| $(COMPOSE) exec -T postgres psql -U "$(DB_USER)" -d postgres -v ON_ERROR_STOP=0 -q > /dev/null; 	$(COMPOSE) exec -T postgres psql -U "$(DB_USER)" -d "$(DB_NAME)" -qtAc 'SELECT 1' > /dev/null || { echo "    FAIL  the database did not come back; the dump may not match this server"; exit 1; }; 	echo "    ok    database restored"; 		echo "▶ 4/5  dgraph"; 	if [ -f "$$src/dgraph.tar.gz" ]; then 		$(COMPOSE) exec -T alpha curl -sf -X POST localhost:8080/alter \
+			-H 'Content-Type: application/json' -d '{"drop_all": true}' > /dev/null \
+			&& echo "    ok    dropped existing graph" \
+			|| { echo "    FAIL  could not drop the graph; refusing to merge a backup into live data"; exit 1; }; 		rm -rf ./data/dgraph/restore && mkdir -p ./data/dgraph/restore; 		tar -xzf "$$src/dgraph.tar.gz" -C ./data/dgraph/restore; 		f=$$(find ./data/dgraph/restore -name '*.rdf.gz' -o -name '*.rdf' | head -1); 		sch=$$(find ./data/dgraph/restore -name '*.schema.gz' -o -name '*.schema' | head -1); 		if [ -n "$$f" ]; then 			rel=$$(echo "$$f" | sed 's|^\./data/dgraph|/dgraph|'); 			relsch=$$(echo "$$sch" | sed 's|^\./data/dgraph|/dgraph|'); 			$(COMPOSE) exec -T alpha dgraph live -f "$$rel" $${relsch:+-s "$$relsch"} \
+				-a localhost:9080 -z zero:5080 > /dev/null \
+				&& echo "    ok    graph reloaded" \
+				|| echo "    warn  graph reload reported a problem — check make verify"; 		else 			echo "    warn  no rdf file inside dgraph.tar.gz"; 		fi; 		rm -rf ./data/dgraph/restore; 	else 		echo "    skip  no dgraph in this backup"; 	fi; 		if [ -d "$$src/minio" ]; then 		echo "    files (minio)"; 		rsync -a --delete "$$src/minio/" ./data/minio/; 	fi; 	: "Search as it was when the backup was taken, so results and AI answers"; 	: "match the restored data. A failure leaves search as it was; results for"; 	: "content that no longer exists are filtered out as they are met."; 	COMPOSE="$(COMPOSE)" sh other-services/opensearch/snapshot.sh restore "$$src" 		|| echo "    warn  search was not restored; it will catch up as content is written"; 		echo "▶ 5/5  schema, restart, check"; 	: "NEVER let a failure here leave the application stopped. Step 2/5 stopped it,"; 	: "and an operator whose restore failed is left with a workspace that is down"; 	: "with nothing saying so — which is exactly how the demo host stayed dead for"; 	: "four days. A running server that complains about its schema tells you what"; 	: "is wrong; a stopped one tells you nothing."; 	$(MAKE) -f $(SELF) --no-print-directory migrate_up || echo "    FAIL  migrations did not run; starting anyway so the failure is visible in the logs"; 	$(COMPOSE) up -d > /dev/null; 	$(COMPOSE) restart > /dev/null; 	: "WAIT FOR READY, do not sleep and hope. This was sleep 8, and eight seconds is"; 	: "not how long a stack takes to come back: the application connects to Postgres,"; 	: "Dgraph, Redis, MinIO, MQTT and OpenSearch before it reports running. So verify"; 	: "ran against a stack that was still starting and printed NOT READY on a restore"; 	: "that had worked — the demo host logged exactly that every night for seventeen"; 	: "nights, and a customer meets it at the one moment they are least able to tell a"; 	: "real failure from a false one. Same service list verify uses, so the two cannot"; 	: "disagree about what ready means."; 	waited=0; good=0; missing=""; 	expected=$$($(COMPOSE) config --services 2>/dev/null | grep -v '^ollama-init$$'); 	while [ $$waited -lt 120 ]; do 		running=$$($(COMPOSE) ps --format '{{.Service}} {{.State}}' 2>/dev/null | awk '$$2 == "running" {print $$1}'); 		missing=""; 		for svc in $$expected; do echo "$$running" | grep -qx "$$svc" || missing="$$missing $$svc"; done; 		: "RUNNING IS NOT READY. A container that crash-loops is running for a"; 		: "moment between each crash, so waiting on state alone let verify judge a"; 		: "stack mid-restart and call a real crash-loop a false alarm — which is"; 		: "what happened the first time this wait was written. Anything Docker"; 		: "reports unhealthy counts as not ready, the same signal verify uses."; 		sick=$$(docker ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null | grep '^onecamp' || true); 		: "TWICE, a few seconds apart. A single snapshot passes for a service that is"; 		: "running at the instant it is asked and restarts a moment later, and then"; 		: "verify catches it mid-restart and reports NOT READY on a restore that"; 		: "worked. Requiring the condition to hold on two consecutive checks costs"; 		: "three seconds and removes the flap."; 		if [ -z "$$missing" ] && [ -z "$$sick" ]; then 			good=$$((good + 1)); 			[ $$good -ge 2 ] && break; 		else good=0; fi; 		sleep 3; waited=$$((waited + 3)); 	done; 	[ -n "$$missing" ] && echo "    warn  still starting after $$waited""s:$$missing" || true; 	[ -n "$$sick" ] && echo "    warn  still unhealthy after $$waited""s: $$sick" || true; 	$(MAKE) -f $(SELF) --no-print-directory verify || true; 	echo ""; 	echo "  Restored from $$src."
+
+# ─── Coding agent (opt-in) ────────────────────────────────────────────────────
+# The AI teammate can open pull requests, but the runner that does it is NOT
+# started by default and there was no target for it, so turning it on meant
+# copying a docker compose invocation out of a file header. That is the same
+# shape of gap that left `make rebuild_go` undiscoverable until a deploy shipped
+# the previous binary.
+#
+# It is opt-in for a real reason rather than caution. The analysis sandbox has NO
+# network; this runner must reach your git host, so instead it has no DIRECT
+# internet and its traffic is forced through a default-deny proxy that permits
+# only the hosts in other-services/code-runner/egress-proxy/filter-allowlist.txt.
+# Weaker isolation is a decision an operator should make knowingly.
+#
+# Order matters: bring it up, PROVE the containment, then enable the feature in
+# Admin -> AI -> Code PRs. coding-smoke restarts the proxy first because
+# tinyproxy only re-reads its allowlist on restart, so an edited allowlist that
+# was never reloaded would otherwise be tested in its old form.
+coding-up:
+	@if [ ! -f code-runner-coding-compose.yml ]; then \
+		echo "ERROR: code-runner-coding-compose.yml is not here, so there is nothing to start."; \
+		exit 1; \
+	fi
+	@if ! grep -q "^CODE_RUNNER_TOKEN=." .env 2>/dev/null; then \
+		echo "ERROR: CODE_RUNNER_TOKEN is not set in .env."; \
+		echo "  It is the shared secret between this runner and the server, and compose"; \
+		echo "  fails with an interpolation error rather than a useful one without it."; \
+		echo "  Generate one:  openssl rand -hex 32"; \
+		echo "  Then set the SAME value in Admin -> AI -> Code PRs."; \
+		exit 1; \
+	fi
+	$(COMPOSE) -f code-runner-coding-compose.yml --profile coding up -d --build
+	@echo "▶ started. Prove containment before enabling the feature:  make coding-smoke"
+
+coding-smoke:
+	$(COMPOSE) -f code-runner-coding-compose.yml --profile coding restart egress-proxy
+	@./scripts/code-runner-coding-smoke.sh
+
+coding-down:
+	$(COMPOSE) -f code-runner-coding-compose.yml --profile coding down
+
+# enable-backups installs a nightly run.
+#
+# Backups nobody schedules are backups nobody has. Idempotent, so running it twice
+# does not give you two.
+enable-backups:
+	@line="30 3 * * * cd $$(pwd) && make backup >> $$(pwd)/data/backups/backup.log 2>&1"; \
+	mkdir -p ./data/backups; \
+	( crontab -l 2>/dev/null | grep -v 'make backup' ; echo "$$line" ) | crontab -; \
+	echo "  nightly backup scheduled at 03:30"; \
+	echo "  check it with: make backup-status"
+
+# ─── Moving to another machine ────────────────────────────────────────────────
+#
+# A workspace moves to a larger (or smaller) machine by backing up here,
+# restoring there, and pointing the address at the new one. OneCamp Cloud
+# drives these over SSH; anyone self-hosting can run the same three by hand.
+#
+#   old machine:  make app-stop && make backup BACKUP_FILES=1
+#   copy data/backups/<stamp>/ and .env to the new machine, the .env as .env.incoming
+#   new machine:  make install ...  then  make move-in FROM=<stamp>
+#   point the address at the new machine; the old one can then be wiped.
+#
+# app-stop pauses only the parts that write (the API, workers, shared editing),
+# so the final backup is the final state. The databases keep running so the
+# backup can read them. app-start undoes it, for a move that is called off.
+app-stop:
+	@$(COMPOSE) stop go-service collaboration-service 2>/dev/null || true
+	@$(COMPOSE) stop go-worker 2>/dev/null || true
+	@echo "  app stopped: nothing is written until make app-start"
+
+app-start:
+	@$(COMPOSE) start go-service collaboration-service 2>/dev/null || $(COMPOSE) up -d go-service collaboration-service
+	@if $(COMPOSE) ps -a --format '{{.Service}}' 2>/dev/null | grep -qx go-worker; then $(COMPOSE) start go-worker; fi
+	@echo "  app started"
+
+# move-in adopts another machine's workspace: its .env (the keys that decrypt
+# what is in the database must be the ones it was written with), then this
+# machine's own address and sizing on top, then the restore.
+#
+# The .env this machine was installed with is kept as .env.before-move, so a
+# move that is abandoned here can be put back with one copy.
+move-in:
+	@if [ -z "$(FROM)" ]; then echo "Usage: make move-in FROM=<backup stamp>"; exit 1; fi
+	@if [ ! -f "$(BACKUP_DIR)/$(FROM)/COMPLETE" ]; then echo "    FAIL  $(BACKUP_DIR)/$(FROM) is not a complete backup"; exit 1; fi
+	@if [ ! -s .env.incoming ]; then echo "    FAIL  .env.incoming is missing; copy the old machine's .env here first"; exit 1; fi
+	@cp .env .env.before-move
+	@cp .env.incoming .env
+	@$(MAKE) -f $(SELF) --no-print-directory update-server-ip
+	@$(MAKE) -f $(SELF) --no-print-directory tune
+	@$(MAKE) -f $(SELF) --no-print-directory configure-livekit
+	@$(MAKE) -f $(SELF) --no-print-directory restore FROM=$(BACKUP_DIR)/$(FROM) CONFIRM=restore
+	@rm -f .env.incoming
+	@echo "    ok    moved in from $(FROM)"
+
+# ─── Machine tuning ───────────────────────────────────────────────────────────
+#
+# Two settings that depend on the machine rather than the workspace, set from
+# the machine itself so that a small box is not run with a large box's numbers.
+#
+#   OPENSEARCH_HEAP  a quarter of RAM, between 512m and 4g. Search is the first
+#                    thing to want memory on a workspace with history, and 512m
+#                    was the same on an 8 GB machine as on a 64 GB one.
+#   EGRESS_PRESET    720p30 on four cores or fewer, 1080p30 above. Recording a
+#                    call at 1080p is the heaviest single thing a box does, and
+#                    on a small one it starved everything else while it ran.
+#
+# Idempotent; run by install and by update. A value already in .env that was
+# set by hand (marked TUNE_MANUAL=1) is left alone.
+tune:
+	@if [ ! -f .env ]; then echo "ERROR: .env not found. Run: cp ./.sample.env ./.env"; exit 1; fi
+	@if grep -qE '^TUNE_MANUAL=1' .env; then echo "  tune: TUNE_MANUAL=1, leaving OPENSEARCH_HEAP and EGRESS_PRESET as they are"; exit 0; fi; \
+	ram_mb=$$(awk '/MemTotal/ {print int($$2/1024)}' /proc/meminfo 2>/dev/null || echo 8192); \
+	heap=$$(( ram_mb / 4 )); \
+	[ "$$heap" -lt 512 ] && heap=512; [ "$$heap" -gt 4096 ] && heap=4096; \
+	cores=$$(nproc 2>/dev/null || echo 4); \
+	preset=1080p30; [ "$$cores" -le 4 ] && preset=720p30; \
+	$(call set_env_sh,OPENSEARCH_HEAP,$${heap}m); \
+	$(call set_env_sh,EGRESS_PRESET,$$preset); \
+	echo "  tune: $${ram_mb} MB RAM, $${cores} cores -> OPENSEARCH_HEAP=$${heap}m EGRESS_PRESET=$$preset"
+
+# set_env_sh is set_env for use inside a shell recipe line (no leading @).
+define set_env_sh
+if grep -qE '^$(1)=' .env; then tmp=$$(mktemp) && sed "s|^$(1)=.*|$(1)=$(2)|" .env > "$$tmp" && mv "$$tmp" .env; else printf '%s=%s\n' '$(1)' "$(2)" >> .env; fi
+endef
+
+# ─── Extra storage ────────────────────────────────────────────────────────────
+#
+# Files and recordings are what fill a machine. These move them to an
+# S3-compatible bucket and back, without the workspace noticing: the API and
+# the call recorder read the same five variables, so switching them is the
+# whole change. Used by OneCamp Cloud when a customer buys extra storage, and
+# by anyone self-hosting who would rather keep files in object storage.
+#
+# ORDER, AND WHY IT IS MIRRORED TWICE. Copy everything while the workspace
+# still writes locally, switch, then copy again: the second pass picks up what
+# was uploaded during the first. Nothing is deleted from the machine by
+# attach; detach copies back and refuses if it would not fit.
+#
+#   STORAGE_ENDPOINT=s3.gra.io.cloud.ovh.net STORAGE_BUCKET=... \
+#   STORAGE_ACCESS=... STORAGE_SECRET=... make storage-attach
+#
+# Credentials come from the environment, not the command line, so they do not
+# sit in the shell history or the process list.
+storage-attach:
+	@if [ ! -f .env ]; then echo "ERROR: .env not found."; exit 1; fi
+	@if [ -z "$$STORAGE_ENDPOINT" ] || [ -z "$$STORAGE_BUCKET" ] || [ -z "$$STORAGE_ACCESS" ] || [ -z "$$STORAGE_SECRET" ]; then \
+		echo "ERROR: set STORAGE_ENDPOINT, STORAGE_BUCKET, STORAGE_ACCESS and STORAGE_SECRET in the environment"; exit 1; fi
+	@set -e; \
+	. ./.env; \
+	local_bucket="$$USER_UPLOAD_BUCKET_NAME"; \
+	if grep -qE '^STORAGE_ATTACHED_BUCKET=' .env; then \
+		: "Already attached: the local bucket is the saved one, not the current."; \
+		local_bucket=$$(grep -E '^LOCAL_USER_UPLOAD_BUCKET_NAME=' .env | cut -d= -f2-); \
+		echo "  storage: already attached to $$(grep -E '^STORAGE_ATTACHED_BUCKET=' .env | cut -d= -f2-); copying anything new and keeping it so"; \
+	fi; \
+	mc_run() { $(COMPOSE) exec -T \
+		-e MC_HOST_local="http://$$MINIO_USER:$$MINIO_PASSWORD@minio:9000" \
+		-e MC_HOST_remote="https://$$STORAGE_ACCESS:$$STORAGE_SECRET@$$STORAGE_ENDPOINT" \
+		minio mc "$$@"; }; \
+	echo "  storage: checking $$STORAGE_BUCKET at $$STORAGE_ENDPOINT"; \
+	mc_run ls "remote/$$STORAGE_BUCKET" >/dev/null; \
+	echo "  storage: copying files to the bucket (first pass)"; \
+	mc_run mirror --overwrite --quiet "local/$$local_bucket" "remote/$$STORAGE_BUCKET"; \
+	if ! grep -qE '^STORAGE_ATTACHED_BUCKET=' .env; then \
+		: "Saved once, so detach can put things back exactly as they were."; \
+		$(call set_env_sh,LOCAL_MINIO_HOST,$$MINIO_HOST); \
+		$(call set_env_sh,LOCAL_MINIO_SSL,$$MINIO_SSL); \
+		$(call set_env_sh,LOCAL_MINIO_ACCESS_KEY_ID,$$MINIO_ACCESS_KEY_ID); \
+		$(call set_env_sh,LOCAL_MINIO_SECRET_ACCESS_KEY,$$MINIO_SECRET_ACCESS_KEY); \
+		$(call set_env_sh,LOCAL_USER_UPLOAD_BUCKET_NAME,$$USER_UPLOAD_BUCKET_NAME); \
+	fi; \
+	$(call set_env_sh,MINIO_HOST,$$STORAGE_ENDPOINT); \
+	$(call set_env_sh,MINIO_SSL,true); \
+	$(call set_env_sh,MINIO_ACCESS_KEY_ID,$$STORAGE_ACCESS); \
+	$(call set_env_sh,MINIO_SECRET_ACCESS_KEY,$$STORAGE_SECRET); \
+	$(call set_env_sh,USER_UPLOAD_BUCKET_NAME,$$STORAGE_BUCKET); \
+	$(call set_env_sh,STORAGE_ATTACHED_BUCKET,$$STORAGE_BUCKET); \
+	echo "  storage: switching the workspace to the bucket"; \
+	$(COMPOSE) up -d --force-recreate --no-deps go-service >/dev/null; \
+	if $(COMPOSE) ps --status running go-worker 2>/dev/null | grep -q go-worker; then $(COMPOSE) up -d --force-recreate --no-deps go-worker >/dev/null; fi; \
+	echo "  storage: copying files uploaded during the first pass"; \
+	mc_run mirror --overwrite --quiet "local/$$local_bucket" "remote/$$STORAGE_BUCKET"; \
+	n=$$(mc_run ls --recursive "remote/$$STORAGE_BUCKET" 2>/dev/null | wc -l); \
+	echo "    ok    attached: files live in $$STORAGE_BUCKET ($$n objects)"
+
+# storage-detach copies the files back to this machine and restores the
+# original settings. Refused, with the numbers, when they would not fit with
+# 15% of the disk to spare: a detach that fills the disk is the outage the
+# add-on existed to prevent.
+storage-detach:
+	@if [ ! -f .env ]; then echo "ERROR: .env not found."; exit 1; fi
+	@if ! grep -qE '^STORAGE_ATTACHED_BUCKET=' .env; then echo "  storage: files already live on this machine; nothing to detach"; exit 0; fi
+	@set -e; \
+	. ./.env; \
+	remote_bucket="$$STORAGE_ATTACHED_BUCKET"; \
+	mc_run() { $(COMPOSE) exec -T \
+		-e MC_HOST_local="http://$$MINIO_USER:$$MINIO_PASSWORD@minio:9000" \
+		-e MC_HOST_remote="https://$$MINIO_ACCESS_KEY_ID:$$MINIO_SECRET_ACCESS_KEY@$$MINIO_HOST" \
+		minio mc "$$@"; }; \
+	need_kb=$$(mc_run du --json "remote/$$remote_bucket" 2>/dev/null | sed -n 's/.*"size":\([0-9]*\).*/\1/p' | tail -1); \
+	need_kb=$$(( $${need_kb:-0} / 1024 )); \
+	free_kb=$$(df -Pk . | awk 'NR==2 {print $$4}'); total_kb=$$(df -Pk . | awk 'NR==2 {print $$2}'); \
+	spare_kb=$$(( total_kb * 15 / 100 )); \
+	if [ $$(( free_kb - need_kb )) -lt $$spare_kb ]; then \
+		echo "    FAIL  does not fit: the files need $$(( need_kb / 1024 )) MB and the machine has $$(( free_kb / 1024 )) MB free, with $$(( spare_kb / 1024 )) MB kept spare"; \
+		echo "          free at least $$(( (spare_kb + need_kb - free_kb) / 1024 )) MB (Admin, then Archive, Remove for good) and run this again"; \
+		exit 2; \
+	fi; \
+	echo "  storage: copying files back to this machine (first pass)"; \
+	mc_run mirror --overwrite --quiet "remote/$$remote_bucket" "local/$$LOCAL_USER_UPLOAD_BUCKET_NAME"; \
+	$(call set_env_sh,MINIO_HOST,$$LOCAL_MINIO_HOST); \
+	$(call set_env_sh,MINIO_SSL,$$LOCAL_MINIO_SSL); \
+	$(call set_env_sh,MINIO_ACCESS_KEY_ID,$$LOCAL_MINIO_ACCESS_KEY_ID); \
+	$(call set_env_sh,MINIO_SECRET_ACCESS_KEY,$$LOCAL_MINIO_SECRET_ACCESS_KEY); \
+	$(call set_env_sh,USER_UPLOAD_BUCKET_NAME,$$LOCAL_USER_UPLOAD_BUCKET_NAME); \
+	tmp=$$(mktemp) && grep -vE '^(STORAGE_ATTACHED_BUCKET|LOCAL_MINIO_HOST|LOCAL_MINIO_SSL|LOCAL_MINIO_ACCESS_KEY_ID|LOCAL_MINIO_SECRET_ACCESS_KEY|LOCAL_USER_UPLOAD_BUCKET_NAME)=' .env > "$$tmp" && mv "$$tmp" .env; \
+	echo "  storage: switching the workspace back to this machine"; \
+	$(COMPOSE) up -d --force-recreate --no-deps go-service >/dev/null; \
+	if $(COMPOSE) ps --status running go-worker 2>/dev/null | grep -q go-worker; then $(COMPOSE) up -d --force-recreate --no-deps go-worker >/dev/null; fi; \
+	echo "  storage: copying files uploaded during the first pass"; \
+	mc_run mirror --overwrite --quiet "remote/$$remote_bucket" "local/$$LOCAL_USER_UPLOAD_BUCKET_NAME"; \
+	echo "    ok    detached: files live on this machine again"
+
+# storage-status says where the files live, in one line.
+storage-status:
+	@if [ -f .env ] && grep -qE '^STORAGE_ATTACHED_BUCKET=' .env; then \
+		echo "    files live in $$(grep -E '^STORAGE_ATTACHED_BUCKET=' .env | cut -d= -f2-) at $$(grep -E '^MINIO_HOST=' .env | cut -d= -f2-)"; \
+	else \
+		echo "    files live on this machine"; \
+	fi
+
+# ─── Storage health ───────────────────────────────────────────────────────────
+
+# storage-report checks the things that lose data when nothing is backing them up.
+#
+# RAID IS NOT A BACKUP, and this is the check that makes it worth what it does
+# cover. A mirror protects against one disk dying — but only while both disks are
+# present. An array that lost a disk last month is running with no redundancy at
+# all, and nothing above the block layer will say so: the filesystem is fine, the
+# containers are fine, the workspace is fine, right up until the second disk goes.
+#
+# Exits non-zero on a real problem so `make verify` fails, and prints what to do.
+storage-report:
+	@fail=0; \
+	if [ -r /proc/mdstat ] && grep -q '^md' /proc/mdstat 2>/dev/null; then \
+		: "Rebuilding is checked FIRST because a rebuilding array also matches the"; \
+		: "degraded pattern — it IS degraded, but a disk has already been replaced"; \
+		: "and it is recovering on its own. Reporting that as a failure would tell"; \
+		: "an operator to act when the only thing left to do is wait."; \
+		if grep -qE 'recovery|resync' /proc/mdstat; then \
+			echo "    warn  RAID is rebuilding — no redundancy until it finishes"; \
+			grep -E 'recovery|resync' /proc/mdstat | sed 's/^/          /'; \
+		elif grep -qE '\[[U_]*_[U_]*\]' /proc/mdstat; then \
+			echo "    FAIL  RAID is DEGRADED — a disk has failed and there is no redundancy left"; \
+			sed -n '/^md/,/^$$/p' /proc/mdstat | sed 's/^/          /'; \
+			echo "          Replace the failed disk with your provider before anything else."; \
+			echo "          There is no backup behind this: the next disk failure loses everything."; \
+			fail=1; \
+		else \
+			echo "    ok    RAID arrays healthy ($$(grep -c '^md' /proc/mdstat) active)"; \
+		fi; \
+	else \
+		echo "    warn  no RAID array found — this machine has no disk redundancy"; \
+	fi; \
+	use=$$(df -P . 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$$5); print $$5}'); \
+	if [ -n "$$use" ]; then \
+		if [ "$$use" -ge 95 ]; then \
+			echo "    FAIL  disk $$use% full — postgres stops accepting writes near this point"; fail=1; \
+		elif [ "$$use" -ge 85 ]; then \
+			echo "    warn  disk $$use% full"; \
+		else \
+			echo "    ok    disk $$use% used"; \
+		fi; \
+	fi; \
+	exit $$fail
+
+# health answers "is this machine's data safe" in one command: the redundancy it
+# depends on, and whether there is anything to restore from.
+health:
+	@echo "  storage"; $(MAKE) -f $(SELF) --no-print-directory storage-report 2>/dev/null || true; \
+	out=$$($(MAKE) -f $(SELF) --no-print-directory backup-status 2>/dev/null); \
+	[ -n "$$out" ] && { echo "  backups"; printf '%s\n' "$$out"; } || true
+
+create_postgres_db:
+	$(COMPOSE) exec postgres createdb --username=${DB_USER} --owner=${DB_USER} ${DB_NAME}
+
+# migrate_up runs sqlx INSIDE the compose network, against `postgres:5432`.
+#
+# It used to connect from the host to ${POSTGRES_DOMAIN}:${DB_PORT}, which only
+# worked because Postgres was published to the internet through a Traefik TCP
+# router. That router is gone — a database reachable from anywhere, behind one
+# password, is not something to ship — so connecting from the host would now
+# fail. This reaches it over the internal network instead, which is where it was
+# always supposed to be reached.
+#
+# Two things stop being necessary as a result: installing Rust, cargo and
+# sqlx-cli on the host, and the `echo "127.0.0.1 onecamp-postgres..." >> /etc/hosts`
+# line the old guide needed to make the public hostname resolve locally.
+# THE NETWORK IS DISCOVERED, NOT NAMED. This used to hard-code
+# `onecamp_onecamp-shared-net`, which is what compose creates for the default
+# project name and is wrong for every deployment that uses another one. It is
+# also the one line in this recipe a COMPOSE override cannot reach, because it is
+# a raw `docker run` rather than a compose command: demo-reset.sh passes
+# COMPOSE=... and every other step honours it, so postgres and dgraph restored
+# correctly and only this failed.
+#
+# It failed nightly on the demo host for four days, and because step 5/5 of
+# restore runs under `set -e`, that failure aborted the recipe BEFORE the restart
+# that undoes step 2/5. The API stayed stopped and Traefik answered 404 for
+# everything, which reads as "route missing" rather than "service down".
+#
+# Asking the running postgres container which network it is on works under any
+# project name and honours any override, because it reads the live stack instead
+# of predicting it.
+migrate_up:
+	@net=$$($(COMPOSE) ps -q postgres 2>/dev/null | head -1 \
+		| xargs -r docker inspect -f '{{range $$$$k, $$$$v := .NetworkSettings.Networks}}{{$$$$k}} {{end}}' 2>/dev/null \
+		| tr ' ' '\n' | grep -- '-shared-net' | head -1); \
+	if [ -z "$$net" ]; then \
+		echo "    FAIL  cannot find the network postgres is on. Is the stack up? (make up)"; \
+		exit 1; \
+	fi; \
+	docker run --rm -v "$$(pwd)":/app -w /app \
+		--network "$$net" \
+		rust:alpine sh -c "cargo install sqlx-cli --no-default-features --features postgres --quiet && \
+		sqlx migrate run --database-url postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}?sslmode=disable"
+
+# migrate_status reports what the DATABASE believes, so a schema mismatch is
+# diagnosable without reading application logs or guessing.
+#
+# The one query that does NOT go through db_fn's q(): this output is a table for a
+# person to read, and q() is -qtA — unaligned, tuples only, no header — which is
+# right for a value a script consumes and wrong for a column of dates.
+migrate_status:
+	$(COMPOSE) exec -T postgres psql -U ${DB_USER} -d ${DB_NAME} \
+		-c "SELECT version, success, installed_on FROM _sqlx_migrations ORDER BY version DESC LIMIT 12;"
+
+# ─── Run ──────────────────────────────────────────────────────────────────────
+
+build_restart_all:
+	@if [ ! -d "data" ]; then mkdir -p "data" && echo "Directory created: data"; else echo "Directory already exists: data"; fi
+	sudo chmod 777 -R ./data
+	docker build --pull -t $(IMAGE) .
+	@: "The web app is rebuilt with the server, so an update moves both."
+	$(if $(WEB_PROFILE),$(COMPOSE) build --pull web,)
+	$(COMPOSE) down
+	$(COMPOSE) up -d
+
+build_restart_service: migrate_up
+	@if [ ! -d "data" ]; then mkdir -p "data" && echo "Directory created: data"; else echo "Directory already exists: data"; fi
+	docker build --pull -t $(IMAGE) .
+	$(COMPOSE) up -d --force-recreate --no-deps go-service
+
+# ─── Operations ───────────────────────────────────────────────────────────────
+
+# The admin consoles are deliberately not published. This prints the one command
+# that reaches them, because "not published" without a route to them is just a
+# feature an operator cannot use.
+console-tunnel:
+	@echo "Run this from your own machine, then open the localhost URLs:"
+	@echo ""
+	@echo "  ssh -N \\"
+	@echo "    -L 18083:emqx:18083 \\"
+	@echo "    -L 8080:minio:8080 \\"
+	@echo "    -L 5601:opensearch-dashboards:5601 \\"
+	@echo "    $$(whoami)@$$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || echo '<server-ip>')"
+	@echo ""
+	@echo "  EMQX dashboard        http://localhost:18083"
+	@echo "  MinIO console         http://localhost:8080"
+	@echo "  OpenSearch Dashboards http://localhost:5601"
+
+
+# ─── Updating an existing install ─────────────────────────────────────────────
+
+# update applies a version you have already downloaded.
+#
+# WHY IT EXISTS. Re-running the installer fetched a new build and unpacked it over
+# the old tree — and then stopped. Nothing rebuilt the image, nothing applied the
+# new migrations, nothing restarted anything. An operator who ran the installer and
+# went to bed had the new code on disk and the old code running, with no indication
+# that the two had diverged. It is the worst shape a partial upgrade can take,
+# because everything reports healthy.
+#
+# THE ORDER IS DELIBERATE, and it is the standard expand sequence:
+#
+#   1. back up      because a migration is the only step here that cannot be undone
+#                   by putting the old image back.
+#   2. migrate      while the OLD code is still running. Migrations here are
+#                   additive — ADD COLUMN IF NOT EXISTS, CREATE TABLE IF NOT EXISTS
+#                   — so old code tolerates the new schema, and this way the schema
+#                   is never behind the code that needs it.
+#   3. rebuild      and restart onto the new image.
+#   4. verify       because "the commands ran" is not the same as "it works", and
+#                   this is exactly the moment that difference matters.
+#
+# Any step failing stops the rest. A half-applied update that keeps going is how a
+# migration lands against an image that was never built.
+update:
+	@if [ ! -f .env ]; then \
+		echo "ERROR: no .env here, so nothing is installed in this directory."; \
+		echo "  For a first install: make install EMAIL=… DOMAIN=… PASSWORD=…"; \
+		exit 1; \
+	fi
+	@: "NOTHING NEW STAGED IS NOT A FAILURE, AND IT IS NOT AN UPDATE EITHER."
+	@: "Say so and stop, rather than spending five minutes rebuilding the same"
+	@: "source to arrive at the same version with the word Updated on the end."
+	@: ""
+	@: "THE WORK IS A SEPARATE TARGET because `exit 0` in a recipe line ends that"
+	@: "LINE's shell and make carries on to the next one. Written inline, the"
+	@: "early return printed its message and then backed up and rebuilt anyway,"
+	@: "which is the same silent no-op one layer down."
+	@if [ -n "$(STAGED_VERSION)" ] && [ "$(STAGED_VERSION)" = "$(APPLIED_VERSION)" ] && [ -z "$(REBUILD)" ]; then \
+		echo "Already running $(APPLIED_VERSION), and no newer release is unpacked here."; \
+		echo ""; \
+		echo "  To check for a newer one, re-run the install command from your licence"; \
+		echo "  email. It asks us what is current on your edition, compares it against"; \
+		echo "  this install, and unpacks it for you; then this target applies it."; \
+		echo ""; \
+		echo "  To rebuild this same version anyway (after editing .env, say):"; \
+		echo "      make update REBUILD=1"; \
+	else \
+		$(MAKE) -f $(SELF) --no-print-directory update_apply; \
+	fi
+
+# update_apply is `update` once it has decided there is something to do. Not meant
+# to be run directly, and harmless if it is.
+update_apply:
+	@: "Announced FIRST, before any precondition. What is being applied is the"
+	@: "context for every message below it, including the ones that fail."
+	@if [ -n "$(APPLIED_VERSION)" ] && [ "$(STAGED_VERSION)" != "$(APPLIED_VERSION)" ]; then \
+		echo "Applying $(APPLIED_VERSION) -> $(STAGED_VERSION)"; \
+	elif [ -n "$(STAGED_VERSION)" ]; then \
+		echo "Applying $(STAGED_VERSION)"; \
+	fi
+	@if ! $(COMPOSE) ps --status running postgres 2>/dev/null | grep -q postgres; then \
+		echo "ERROR: postgres is not running, so it cannot be backed up or migrated."; \
+		echo "  Start the stack first:  make build_restart_all"; \
+		exit 1; \
+	fi
+	@echo "▶ 1/4  backing up before anything changes"
+	@$(MAKE) -f $(SELF) --no-print-directory backup
+	@echo "▶ 2/4  applying migrations, while the current version is still running"
+	@$(MAKE) -f $(SELF) --no-print-directory migrate_up
+	@$(MAKE) -f $(SELF) --no-print-directory tune
+	@echo "▶ 3/4  rebuilding and restarting"
+	@$(MAKE) -f $(SELF) --no-print-directory build_restart_all
+	@echo "▶ 4/4  checking the result"
+	@$(MAKE) -f $(SELF) --no-print-directory verify
+	@: "WRITTEN LAST, AND ONLY HERE. Every step above stops the target on failure,"
+	@: "so reaching this line is the only proof that this release is the one now"
+	@: "running. Writing it earlier would record an upgrade that did not finish."
+	@if [ -n "$(STAGED_VERSION)" ]; then printf '%s\n' "$(STAGED_VERSION)" > $(APPLIED_FILE); fi
+	@echo ""
+	@if [ -n "$(APPLIED_VERSION)" ] && [ "$(STAGED_VERSION)" != "$(APPLIED_VERSION)" ]; then \
+		echo "  Updated to $(STAGED_VERSION). The backup taken in step 1 is under"; \
+	else \
+		echo "  Rebuilt $(STAGED_VERSION). The backup taken in step 1 is under"; \
+	fi
+	@echo "  $(BACKUP_DIR) — keep it until you are satisfied, then remove it or"
+	@echo "  leave it to rotation."
+
+# ─── Account recovery ─────────────────────────────────────────────────────────
+#
+# WHY THIS EXISTS. The workspace admin's password is set once — at /admin-setup,
+# or during managed provisioning — and is never stored anywhere afterwards: not
+# in the database, not in a log, not in a mail we could go and look up. That is
+# the right design for a credential, and it has a consequence worth stating
+# plainly: "resend the password" is not something anyone can do. It does not
+# exist any more to be resent. The only honest recovery is a new one.
+#
+# The self-service route is closed on a fresh install too. `make secrets`
+# deliberately clears RESEND_API_KEY, so /auth/forgot-password mints its token and
+# then has nothing to send it with — it answers "check your email" (it always
+# does, so that nobody can use it to discover which addresses have accounts) and
+# no mail ever arrives. A workspace whose only admin forgets their password before
+# a mail key is configured has no way back in over HTTP at all.
+#
+# These targets are that way back in, and they need nothing but shell access on
+# the box. reset-link is the one to reach for; reset-password is break-glass.
+
+# db_fn — declare q(), the one way this Makefile talks to Postgres.
+#
+# Every target that reads the workspace database goes through it, so the connection
+# details, ON_ERROR_STOP and the unaligned tuples-only output are stated once rather
+# than copied into each. It was three copies before verify needed a fourth.
+#
+# SQL ARRIVES ON STDIN, never through psql -c, because -c performs no variable
+# interpolation: :'name' reaches the server verbatim and it answers with a syntax
+# error. Piping it in is what makes :'name' expand — and expansion is the whole
+# point, since it is psql, not this Makefile, that quotes a value typed on the
+# command line into a string literal that cannot end the quote early.
+define db_fn
+	q() { $(COMPOSE) exec -T postgres psql -U $(DB_USER) -d $(DB_NAME) \
+	        -v ON_ERROR_STOP=1 -qtA "$$@"; }
+endef
+
+# find_user — resolve EMAIL to $$uid, or fail with the real accounts.
+#
+# Matching is case-insensitive because the address is being typed from memory by
+# someone already having a bad day, and Login lowercases before it compares too.
+# On a miss it PRINTS THE ACCOUNTS rather than only saying no: the usual cause is
+# that the admin is at a different address than whoever is running this believes,
+# and "no account for that" leaves them guessing at the one thing the box knows.
+define find_user
+	if ! $(COMPOSE) ps --status running postgres 2>/dev/null | grep -q postgres; then \
+	  echo "ERROR: the postgres container is not running — start the stack first:"; \
+	  echo "    make build_restart_all"; \
+	  exit 1; \
+	fi; \
+	$(db_fn); \
+	uid=$$(echo "SELECT id FROM users WHERE lower(email_id) = lower(:'em') AND deleted_at IS NULL;" | q -v em="$$em") \
+	  || { echo "ERROR: could not query the database — is the stack healthy? Try: make doctor"; exit 1; }; \
+	if [ -z "$$uid" ]; then \
+	  echo "ERROR: no active account for '$$em' on this workspace."; \
+	  echo ""; \
+	  echo "  Accounts that do exist:"; \
+	  echo "SELECT email_id FROM users WHERE deleted_at IS NULL ORDER BY created_at LIMIT 25;" | q | sed 's/^/    /'; \
+	  exit 1; \
+	fi
+endef
+
+# refuse_sso — stop before issuing a password to an account the IdP owns.
+#
+# SEPARATE FROM find_user because it is a rule about resetting a password, not about
+# finding a person: change-email has to reach the same account and this rule does not
+# apply to it. Folding the two together made every future caller inherit a refusal it
+# might not want, which is how a lookup helper quietly becomes policy.
+#
+# REFUSED HERE RATHER THAN AT THE FAR END. ResetPassword rejects these accounts on
+# purpose, so issuing a link for one produces a link that fails only once the customer
+# clicks it, which is the worst possible moment to find out. The column is probed
+# before it is read, for the same reason as the 2FA one: it arrived in migration 58.
+define refuse_sso
+	hassso=$$(echo "SELECT count(*) FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'is_sso_managed';" | q); \
+	if [ "$$hassso" = "1" ]; then \
+	  sso=$$(echo "SELECT is_sso_managed FROM users WHERE id = :'uid';" | q -v uid="$$uid"); \
+	  if [ "$$sso" = "t" ]; then \
+	    echo "ERROR: '$$em' signs in through your identity provider, not with a password."; \
+	    echo "  ResetPassword refuses these accounts outright, so a link or a new"; \
+	    echo "  password here would be rejected at the moment they tried to use it."; \
+	    echo "  Recover this account at the IdP (Okta, Google Workspace, Entra, ...)."; \
+	    exit 1; \
+	  fi; \
+	fi
+endef
+
+# warn_2fa — say so when a password is not the only thing standing in the way.
+#
+# Without this the operator resets the password, reports success, and the customer
+# still cannot get in, because the account has TOTP confirmed and the phone is what
+# they actually lost. Finding that out AFTER telling a customer they are sorted is
+# the failure this exists to prevent.
+#
+# The columns are probed rather than assumed: two-factor arrived in migration 141,
+# this Makefile also ships to installs older than that, and selecting a column that
+# is not there would abort the entire recovery with a SQL error.
+define warn_2fa
+	has2fa=$$(echo "SELECT count(*) FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'totp_confirmed_at';" | q); \
+	if [ "$$has2fa" = "1" ]; then \
+	  on=$$(echo "SELECT totp_confirmed_at IS NOT NULL FROM users WHERE id = '$$uid';" | q); \
+	  if [ "$$on" = "t" ]; then \
+	    left=$$(echo "SELECT count(*) FROM user_recovery_codes WHERE user_id = '$$uid' AND used_at IS NULL;" | q); \
+	    echo "  NOTE: this account has two-factor authentication turned on."; \
+	    echo "  A new password alone will NOT sign them in — they still need a code."; \
+	    echo "  Unused recovery codes: $$left"; \
+	    if [ "$$left" = "0" ]; then \
+	      echo "  With no codes left and no authenticator, clear the second factor:"; \
+	      echo "      make clear-2fa EMAIL=$$em"; \
+	    else \
+	      echo "  Tell them to use one of their recovery codes at the 2FA prompt."; \
+	    fi; \
+	    echo ""; \
+	  fi; \
+	fi
+endef
+
+# reset-link mints the same one-time token /auth/forgot-password would have sent,
+# and prints it instead of mailing it.
+#
+# PREFER THIS OVER SETTING A PASSWORD, for a reason that matters most in the
+# managed case: whoever runs it never learns the customer's password. They carry a
+# link that expires, is single-use, and lets the customer choose the secret
+# themselves. A password read out over a support channel is a password that lives
+# in that channel's history for as long as the channel does.
+#
+# The token is 32 random bytes hex-encoded — byte for byte what generateSecureToken
+# produces — so /auth/reset-password validates it exactly as it would its own.
+#
+# ONLY ITS HASH IS STORED, which is what the application does since migration 143:
+# the token is a bearer credential, so a plaintext column is a list of working
+# skeleton keys for every reset in flight. The hashing is done by Postgres rather
+# than here, so this depends on nothing being installed on the box and uses the very
+# same function the Go code does. The link printed below is the only copy of the
+# plaintext that will ever exist — once this scrolls away it is unrecoverable, and
+# the answer is to issue another one.
+#
+# HOURS defaults to 24 rather than the 1 hour the mail path uses. That hour assumes
+# a mail arriving in seconds; this link travels by whatever route a human arranges,
+# and an expiry that runs out mid-handover just means doing the whole thing again.
+reset-link: export EM = $(EMAIL)
+reset-link: export HRS = $(or $(HOURS),24)
+reset-link:
+ifndef EMAIL
+	$(error EMAIL is required, e.g. make reset-link EMAIL=admin@example.com)
+endif
+	@em="$$EM"; hours="$$HRS"; \
+	$(find_user); \
+	$(refuse_sso); \
+	tok=$$(openssl rand -hex 32); \
+	if [ -z "$$tok" ]; then echo "ERROR: could not generate a token (is openssl installed?)"; exit 1; fi; \
+	echo "INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES (:'uid', encode(sha256(:'tok'::bytea), 'hex'), NOW() + (:'hours' || ' hours')::interval);" \
+	  | q -v uid="$$uid" -v tok="$$tok" -v hours="$$hours" >/dev/null \
+	  || { echo "ERROR: could not create the reset token"; exit 1; }; \
+	fe=$$(grep -E '^FRONTEND_DOMAIN=' .env 2>/dev/null | cut -d= -f2- | tr -d '\r'); \
+	if [ -z "$$fe" ]; then fe=$$(grep -E '^FE_HOST_DOMAIN=' .env 2>/dev/null | cut -d= -f2- | tr -d '\r'); fi; \
+	if [ -z "$$fe" ]; then fe="localhost:3001"; fi; \
+	case "$$fe" in \
+	  http://*|https://*) base="$$fe" ;; \
+	  localhost*|127.0.0.1*) base="http://$$fe" ;; \
+	  *) base="https://$$fe" ;; \
+	esac; \
+	base=$$(printf '%s' "$$base" | sed 's:/*$$::'); \
+	echo "  Password reset link for $$em — valid $$hours hour(s), usable once:"; \
+	echo ""; \
+	echo "    $$base/reset-password?token=$$tok"; \
+	echo ""; \
+	$(warn_2fa)
+
+# reset-password sets a password directly, for when the link cannot be used.
+#
+# The link path needs the frontend reachable and rendering. This one needs nothing
+# but the database, which makes it the right tool when the workspace is half-broken
+# and the admin account is how you would go about fixing it. It is the weaker
+# option the rest of the time: it puts a plaintext password into whatever channel
+# carries it to the customer.
+#
+# Every outstanding reset token for the account is burned at the same time. A
+# password change that leaves a live token behind means an old "forgot password"
+# mail still works afterwards — possibly the one sitting in a mailbox somebody else
+# can read, which is a fair guess at why the password is being reset at all.
+reset-password: export EM = $(EMAIL)
+reset-password: export PWIN = $(PASSWORD)
+reset-password:
+ifndef EMAIL
+	$(error EMAIL is required, e.g. make reset-password EMAIL=admin@example.com)
+endif
+	@em="$$EM"; \
+	PW="$$PWIN"; gen=0; \
+	if [ -z "$$PW" ]; then \
+	  PW=$$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 20); gen=1; \
+	fi; \
+	: "The password is checked BEFORE the database is touched. It is a local"; \
+	: "question, so answering it first means a bad argument fails in the same way"; \
+	: "whether or not the stack is up — and does not need a running Postgres to"; \
+	: "be exercised."; \
+	bytes=$$(printf '%s' "$$PW" | wc -c); \
+	if [ "$$bytes" -lt 8 ]; then echo "ERROR: password must be at least 8 characters"; exit 1; fi; \
+	if [ "$$bytes" -gt 72 ]; then \
+	  echo "ERROR: password must not exceed 72 bytes (this one is $$bytes)."; \
+	  echo "  bcrypt hashes only the first 72, and the application refuses anything"; \
+	  echo "  longer at signup — so a longer one here would be a credential the"; \
+	  echo "  workspace would never have accepted, with a tail that means nothing."; \
+	  exit 1; \
+	fi; \
+	$(find_user); \
+	$(refuse_sso); \
+	$(bcrypt_hash); \
+	echo "UPDATE users SET password_hash = :'h', updated_at = NOW() WHERE id = :'uid';" \
+	  | q -v h="$$hash" -v uid="$$uid" >/dev/null \
+	  || { echo "ERROR: could not write the new password"; exit 1; }; \
+	echo "UPDATE password_reset_tokens SET used = true WHERE user_id = :'uid' AND used = false;" \
+	  | q -v uid="$$uid" >/dev/null; \
+	echo "  Password reset for $$em"; \
+	if [ $$gen -eq 1 ]; then \
+	  echo ""; \
+	  echo "    new password: $$PW"; \
+	  echo ""; \
+	  echo "  Give it to them over a channel you trust, and tell them to change it."; \
+	fi; \
+	echo ""; \
+	$(warn_2fa)
+
+# change-email moves an account to a new address.
+#
+# WHY A WORKSPACE NEEDS THIS. The address is the login, so a customer who loses
+# access to the mailbox they signed up with loses the account itself — not just the
+# password, which reset-link can replace, but every route back to it: the reset link
+# is delivered there, and so is everything else we would send. Nothing above can fix
+# that, because everything above assumes the mailbox works.
+#
+# It is a SEPARATE operation from a password reset and never a step inside one. An
+# address change is how an account is taken over, so it has to be a thing somebody
+# decided to do, with the old address named out loud.
+#
+# WHAT IT DOES NOT TOUCH: anything historical. Invoices and orders carry the address
+# that paid at the time they were issued, and rewriting those to match a later
+# change would falsify a tax record to tidy up a support case.
+change-email: export OLD_EM = $(OLD)
+change-email: export NEW_EM = $(NEW)
+change-email:
+ifndef OLD
+	$(error OLD is required, e.g. make change-email OLD=old@example.com NEW=new@example.com)
+endif
+ifndef NEW
+	$(error NEW is required, e.g. make change-email OLD=old@example.com NEW=new@example.com)
+endif
+	@em="$$OLD_EM"; new="$$NEW_EM"; \
+	$(find_user); \
+	case "$$new" in \
+	  *@*.*) ;; \
+	  *) echo "ERROR: '$$new' does not look like an email address"; exit 1 ;; \
+	esac; \
+	taken=$$(echo "SELECT count(*) FROM users WHERE lower(email_id) = lower(:'new');" | q -v new="$$new"); \
+	if [ "$$taken" != "0" ]; then \
+	  echo "ERROR: '$$new' is already an account on this workspace."; \
+	  echo "  Two accounts cannot share an address, and merging them is not something"; \
+	  echo "  this can decide for you. Remove or rename the other one first."; \
+	  exit 1; \
+	fi; \
+	echo "UPDATE users SET email_id = :'new', updated_at = NOW() WHERE id = :'uid';" \
+	  | q -v new="$$new" -v uid="$$uid" >/dev/null \
+	  || { echo "ERROR: could not change the address"; exit 1; }; \
+	echo "  $$em is now $$new"; \
+	echo ""; \
+	echo "  Their password is unchanged. If they cannot sign in either, follow with:"; \
+	echo "      make reset-link EMAIL=$$new"; \
+	echo ""; \
+	allow=$$(grep -E '^ALLOWED_USERS=' .env 2>/dev/null | cut -d= -f2- | tr -d '\r'); \
+	case ",$$(printf '%s' "$$allow" | tr 'A-Z' 'a-z')," in \
+	  *,$$(printf '%s' "$$em" | tr 'A-Z' 'a-z'),*) \
+	    echo "  The sign-up allow-list still names the old address. Updating it so a"; \
+	    echo "  future sign-in with the new one is not turned away:"; \
+	    $(MAKE) -f $(SELF) --no-print-directory update-admin-email EMAIL="$$new" ;; \
+	  *) ;; \
+	esac; \
+	dbal=$$(echo "SELECT count(*) FROM onemana_config WHERE key = 'allowed_users' AND value <> '';" | q 2>/dev/null || echo 0); \
+	if [ "$$dbal" = "1" ]; then \
+	  echo "  NOTE: this workspace also has an allow-list saved in its admin panel,"; \
+	  echo "  which takes priority over .env. Check it names the new address."; \
+	fi
+
+# clear-2fa is the last resort, for when the second factor itself is what was lost.
+#
+# It is deliberately a SEPARATE target and never a side effect of a password reset.
+# "I lost my phone, please turn off my second factor" is the oldest pretext in
+# support, and a reset that quietly stripped 2FA would turn every password recovery
+# into a full account takeover for anyone who could talk their way into one.
+# Switching it off has to be something a human decided to do.
+clear-2fa: export EM = $(EMAIL)
+clear-2fa:
+ifndef EMAIL
+	$(error EMAIL is required, e.g. make clear-2fa EMAIL=admin@example.com)
+endif
+	@em="$$EM"; \
+	$(find_user); \
+	has2fa=$$(echo "SELECT count(*) FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'totp_confirmed_at';" | q); \
+	if [ "$$has2fa" != "1" ]; then echo "  This install predates two-factor authentication — nothing to clear."; exit 0; fi; \
+	echo "UPDATE users SET totp_secret_enc = NULL, totp_confirmed_at = NULL, totp_last_step = 0 WHERE id = :'uid';" \
+	  | q -v uid="$$uid" >/dev/null \
+	  || { echo "ERROR: could not clear the second factor"; exit 1; }; \
+	echo "DELETE FROM user_recovery_codes WHERE user_id = :'uid';" | q -v uid="$$uid" >/dev/null; \
+	echo "  Two-factor authentication cleared for $$em"; \
+	echo "  They sign in with their password alone now. Have them enrol again."
+
+# ─── Local AI models (optional) ───────────────────────────────────────────────
+#
+# The Ollama engine ships in the compose file behind the "local-ai" profile and
+# is NOT started by default. Two reasons it is opt-in rather than always-on:
+# models are multi-gigabyte downloads, and inference wants the RAM and CPU that
+# Postgres, Dgraph and OpenSearch also want. Deployments that use a hosted
+# provider key never want it running.
+#
+# ollama_up records the choice in .env (see LOCAL_AI_PROFILE at the top), so
+# every later target — build_restart_all, down, ollama_update — keeps managing
+# the engine instead of silently abandoning it.
+ollama_up:
+	@if ! grep -q "^  ollama:" sample-compose.yml 2>/dev/null; then \
+		echo "This edition of OneCamp does not include the local model engine."; \
+		echo "  The AI-free edition (v1) ships no models and no agents by design."; \
+		echo "  To use AI, install the v2 edition: re-run the installer and choose v2."; \
+		exit 1; \
+	fi
+	$(call set_env,AI_LOCAL_MODELS,1)
+	@echo "  starting the local model engine and pulling models — the first pull is several GB"
+	@docker compose --env-file .env --project-name onecamp --profile local-ai \
+		-f sample-compose.yml up -d ollama ollama-init
+	@echo ""
+	@echo "  Models download in the background. Watch them arrive with:"
+	@echo "    docker compose --project-name onecamp logs -f ollama-init"
+	@echo ""
+	@echo "  Then point OneCamp at it, either way round:"
+	@echo "    - set AI_PROVIDER=ollama in .env and run: make build_restart_service"
+	@echo "    - or choose Ollama in the admin AI panel (this overrides .env)"
+
+# ollama_update moves the engine to the version pinned in OLLAMA_IMAGE_TAG and
+# recreates only that container. Models live in ./data/ollama and are untouched,
+# so this never re-downloads what is already on disk.
+#
+# Refuses rather than silently doing nothing when local models were never
+# enabled: "make ollama_update" printing success while no engine exists is how
+# an operator concludes their AI is up to date when there is no AI at all.
+ollama_update:
+	@if [ -z "$(LOCAL_AI_PROFILE)" ]; then \
+		echo "Local models are not enabled on this deployment, so there is no engine to update."; \
+		echo "  To use models on this server:   make ollama_up"; \
+		echo "  To use a hosted provider:       set AI_PROVIDER + key in .env, or use the admin AI panel"; \
+		exit 1; \
+	fi
+	$(COMPOSE) pull ollama
+	$(COMPOSE) up -d --force-recreate --no-deps ollama
+	@echo "  engine now running $(OLLAMA_IMAGE_TAG)"
+
+# ollama_down stops the engine AND stops managing it, so the stack definition
+# and what is actually running stay in agreement. Models are left on disk, so
+# turning it back on later is fast and loses nothing.
+ollama_down:
+	@docker compose --env-file .env --project-name onecamp --profile local-ai \
+		-f sample-compose.yml rm -sf ollama ollama-init || true
+	$(call set_env,AI_LOCAL_MODELS,0)
+	@echo "  local model engine stopped. Models remain in ./data/ollama."
+	@echo "  If AI_PROVIDER is still ollama, set a hosted provider in .env or the admin AI panel,"
+	@echo "  otherwise AI requests now have nowhere to go."

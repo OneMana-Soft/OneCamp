@@ -1,0 +1,253 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, without-ai, beta]
+  pull_request:
+    branches: [main, master, without-ai, beta]
+
+# Cancel superseded runs on the same ref so PR pushes don't queue.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25"
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: gofmt check
+        run: |
+          # gofmt -l prints filenames that need formatting; non-empty
+          # output means the codebase is not properly formatted.
+          #
+          # This walks the filesystem rather than Go package patterns, so it
+          # already covers the nested other-services/code-runner module (its
+          # own go.mod is invisible to ./... from the repo root). Keep it that
+          # way: gofmt is module-agnostic.
+          OUT="$(gofmt -l $(find . -name '*.go' -not -path './data/*' -not -path './.next/*' 2>/dev/null))"
+          if [ -n "$OUT" ]; then
+            echo "These files need gofmt:"
+            echo "$OUT"
+            echo ""
+            echo "Run 'make fmt' locally and commit the result."
+            echo "Or enable the pre-commit hook: make install_githooks"
+            exit 1
+          fi
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      # Build everything except the data and migration sub-trees so a
+      # bad merge is caught on every PR. This is the minimum bar before
+      # you click "merge".
+      - name: go build
+        run: |
+          # cmd/server FIRST, and not because of ordering: it is the binary that
+          # actually ships, and it was missing from this list. A startup wiring
+          # change that referenced a package it never imported compiled fine
+          # here, passed, merged to two branches, and was caught by the Docker
+          # build on the deploy host. Every package below can be green while the
+          # program does not link.
+          go build -o /dev/null ./cmd/server/
+          go build ./business/... \
+                   ./controllers/... \
+                   ./domain/... \
+                   ./models/... \
+                   ./helpers/... \
+                   ./router/... \
+                   ./adapter/... \
+                   ./initializers/... \
+                   ./services/...
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # The unit-test set is "everything that doesn't require Postgres,
+      # Redis, OpenSearch, MinIO, Dgraph, or MQTT". Tests that DO require
+      # those live behind the `integration` build tag and run in the
+      # integration job below, so these whole-tree patterns stay hermetic.
+      #
+      # These are deliberately TREE patterns, not a hand-maintained package
+      # list. A previous hand-list silently excluded security-relevant suites
+      # (MCP write-governance / fail-closed classification in business/AIMCP,
+      # business/AIAgent, business/DataSource, business/CodePR, controllers/*,
+      # domain/*, and most of models/postgres/*) and went stale every time a
+      # package was added. Do not narrow this back down to named packages:
+      # a new package under any of these trees must be gating merges the day
+      # it lands.
+      #
+      # -count=1 so the test cache can't mask a flake; -race because most of
+      # this code is concurrent; -p=4 to keep peak memory bounded on hosted
+      # runners.
+      - name: go test (unit)
+        run: |
+          go test -count=1 -race -timeout=20m -p=4 \
+            ./business/... \
+            ./models/... \
+            ./domain/... \
+            ./controllers/... \
+            ./services/... \
+            ./helpers/... \
+            ./middleware/... \
+            ./router/... \
+            ./adapter/... \
+            ./initializers/...
+        env:
+          IMPORT_TOKEN_KEK: "ci-test-kek-with-enough-entropy-1234567890"
+          AI_CONFIG_KEK: "ci-test-ai-kek-with-enough-entropy-1234567890"
+
+  code-runner:
+    name: Code-runner sidecar
+    runs-on: ubuntu-latest
+    # other-services/code-runner is a SEPARATE Go module, so the root-level
+    # ./... patterns in the lint/build/test jobs never see it. It executes
+    # untrusted repository code inside the sandbox, which makes its
+    # containment tests (enforce_test.go, coding_test.go) security-gating —
+    # they must not be able to break silently.
+    #
+    # gofmt for this tree is covered by the Lint job (its check walks the
+    # filesystem, not Go package patterns), so it is intentionally not
+    # repeated here.
+    defaults:
+      run:
+        working-directory: other-services/code-runner
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          # This module has zero external dependencies (stdlib only, so no
+          # go.sum exists). Leaving the cache off avoids setup-go resolving
+          # the root module's go.sum for a module it doesn't belong to.
+          cache: false
+
+      - name: go build
+        run: go build ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      # Default (untagged) tests only. The heavier suites opt in via the
+      # `coderun_integration` / `sandbox_integration` build tags because they
+      # need git, a Go toolchain, and real process isolation — see
+      # `make code_runner_coding_test` and scripts/code-runner-coding-smoke.sh.
+      - name: go test
+        run: go test -count=1 -race -timeout=10m ./...
+
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    # Integration tests rely on testcontainers-go. They run on push to
+    # main and on PRs touching backend code. Skip on docs-only changes.
+    if: github.event_name == 'push' || contains(github.event.pull_request.changed_files, 'business/') || contains(github.event.pull_request.changed_files, 'domain/') || contains(github.event.pull_request.changed_files, 'models/')
+    services:
+      docker:
+        image: docker:24-dind
+        options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: go test (integration)
+        # The package opts in via the //go:build integration build tag
+        # so the unit job above doesn't accidentally pull in the
+        # heavyweight harness.
+        run: go test -count=1 -timeout=20m -tags=integration ./tests/integration/...
+        env:
+          IMPORT_TOKEN_KEK: "ci-integration-kek-1234567890abcdef"
+
+  # The check that would have caught two broken releases.
+  #
+  # Both compiled, both passed every unit test, and neither would start: the image
+  # stopped carrying a .env file and two separate godotenv.Load() calls killed the
+  # process when it was missing. Nothing in this pipeline looked at whether the
+  # thing it built actually runs.
+  #
+  # It asserts the failure REASON, not just the exit code. A container with no
+  # database is expected to die; what must not happen is dying at configuration
+  # while claiming the environment was fine.
+  boots:
+    name: Image boots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image the customer receives
+        run: docker build -t onecamp-ci:boot .
+
+      - name: It must not ship secrets
+        run: |
+          contents=$(docker run --rm --entrypoint sh onecamp-ci:boot -c 'ls -A /app')
+          echo "image /app contains: $contents"
+          for forbidden in .env firebase-cred.json; do
+            if printf '%s\n' "$contents" | grep -qx "$forbidden"; then
+              echo "FAIL: $forbidden is inside the image"
+              exit 1
+            fi
+          done
+
+      - name: It must start from the environment alone, with no .env file
+        run: |
+          set +e
+          out=$(timeout 40 docker run --rm -e DB_NAME=ci -e DB_HOST=nowhere onecamp-ci:boot 2>&1)
+          set -e
+          echo "$out"
+          if printf '%s' "$out" | grep -q "no configuration in the environment either"; then
+            echo "FAIL: refused to start despite configuration being present in the environment"
+            exit 1
+          fi
+          # Reaching the database is proof it got past every configuration gate.
+          if ! printf '%s' "$out" | grep -qi "connect"; then
+            echo "FAIL: never reached the database, so it died during configuration"
+            exit 1
+          fi
+          echo "OK: started from the environment and stopped only for want of a database"
+
+      - name: And it must still refuse when nothing is configured at all
+        run: |
+          set +e
+          out=$(timeout 40 docker run --rm onecamp-ci:boot 2>&1)
+          set -e
+          echo "$out"
+          printf '%s' "$out" | grep -q "no configuration in the environment either" || {
+            echo "FAIL: an unconfigured container did not say so"
+            exit 1
+          }
+          echo "OK: says plainly what is missing"

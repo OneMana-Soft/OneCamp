@@ -1,0 +1,31 @@
+# What must never enter a build context.
+#
+# THIS FILE PREVIOUSLY CONTAINED ONE LINE: "data". Everything else in the working
+# directory was copied into the image by `COPY . .`, and two of those things are
+# credentials.
+#
+# .env is the deployment's own secrets — database password, the KEKs that decrypt
+# everything at rest, third-party API keys. It is gitignored, so it never reached
+# the repository, but `docker build .` runs in the DEPLOYMENT directory where the
+# real one lives, and it was being baked into the image. Anyone able to pull or
+# inspect that image had the workspace's keys.
+#
+# firebase-cred.json is a service-account private key.
+#
+# Neither is needed to compile anything.
+.env
+.env.*
+*.env
+firebase-cred.json
+*-cred.json
+*.pem
+*.key
+
+# Not needed by the build, and large.
+.git
+.github
+data
+node_modules
+*.tar.gz
+*.dump
+*.log

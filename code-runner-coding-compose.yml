@@ -1,0 +1,107 @@
+# code-runner-coding-compose.yml — the CODE-PR coding runner profile (opt-in).
+#
+# The python data-analysis sandbox (code-runner, final-compose.yml, profile
+# code-execution) is
+# egress-LESS. The CODE-PR runner is different: it must reach the GIT HOST to
+# clone/push. So it is NOT on an egress-less network — instead it has no DIRECT
+# internet and its git traffic is forced through an ALLOWLISTING PROXY that
+# permits only the git host. The model is reached via the main server's internal
+# LLM proxy (no internet needed). This is the "git-host-egress-only" model.
+#
+# Activate alongside the main stack (which defines code-runner-net + go-service):
+#   docker compose -f final-compose.yml -f code-runner-coding-compose.yml \
+#     --profile coding up -d
+# Then in Admin → AI → Code PRs set the runner URL to
+# http://code-runner-coding:9099 and the shared token, and enable the feature.
+#
+# BEFORE ENABLING, prove containment:  make code-runner-coding-smoke
+#
+# Hardening: non-root, cap_drop ALL, no-new-privileges, read-only rootfs with a
+# size-capped tmpfs work dir, pids/mem/cpu caps, and gVisor (runsc) recommended
+# for untrusted code. Uncomment `runtime: runsc` once the host has it.
+
+services:
+  # ── The allowlisting egress proxy ──────────────────────────────────────────
+  # Default-deny; only the git host(s) in egress-proxy/filter-allowlist.txt are
+  # reachable. Sits on the internal net (with the runner) AND an egress net (the
+  # only component here with internet). The runner routes git via HTTPS_PROXY.
+  egress-proxy:
+    profiles: ["coding"]
+    # Pinned by DIGEST because upstream publishes exactly one tag, `latest`, so there is no
+    # version to name. This container is the code-PR sandbox's only route to the internet and
+    # it enforces the host allowlist, so an unnoticed change here changes a security boundary.
+    # A digest that upstream later prunes fails the pull loudly, which is the better failure.
+    #
+    # WORTH REPLACING: this is a single-tag image in a personal namespace, last built in 2021,
+    # sitting on a security boundary. A first-party build would be the right dependency here.
+    image: vimagick/tinyproxy@sha256:72b441b95ee1e641af948f68f09492f9f795ead72b73954414e339168c98ad8c
+    restart: unless-stopped
+    volumes:
+      - ./other-services/code-runner/egress-proxy/tinyproxy.conf:/etc/tinyproxy/tinyproxy.conf:ro
+      - ./other-services/code-runner/egress-proxy/filter-allowlist.txt:/etc/tinyproxy/filter-allowlist.txt:ro
+    networks:
+      - code-runner-net # internal: reachable by the coding runner
+      - coding-egress   # the ONLY internet route in this profile
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── The coding runner ───────────────────────────────────────────────────────
+  code-runner-coding:
+    profiles: ["coding"]
+    build:
+      context: ./other-services/code-runner
+      dockerfile: Dockerfile.coding
+    image: onecamp/code-runner-coding:latest
+    # runtime: runsc            # <- enable gVisor if installed (recommended)
+    restart: unless-stopped
+    environment:
+      CODE_RUNNER_TOKEN: "${CODE_RUNNER_TOKEN:?set a strong shared token}"
+      CODE_RUNNER_ADDR: ":9099"
+      CODE_RUNNER_MAX_CONCURRENCY: "2"
+      CODE_RUNNER_WORKDIR: "/work"
+      # No DIRECT internet: git egress is forced through the allowlist proxy.
+      HTTP_PROXY: "http://egress-proxy:8888"
+      HTTPS_PROXY: "http://egress-proxy:8888"
+      http_proxy: "http://egress-proxy:8888"
+      https_proxy: "http://egress-proxy:8888"
+      # The main server (LLM proxy) is on the internal net — reach it DIRECTLY,
+      # never via the egress proxy (which would deny it).
+      NO_PROXY: "go-service,localhost,127.0.0.1"
+      no_proxy: "go-service,localhost,127.0.0.1"
+    networks:
+      - code-runner-net # internal only: reaches go-service (LLM proxy) + the proxy
+    # No published ports: reachable only on the internal network.
+    read_only: true
+    user: "10001:10001"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    mem_limit: 4g
+    cpus: "2.0"
+    tmpfs:
+      # The whole working set (checkout + build scratch + toolchain caches)
+      # lives here and is wiped per run. noexec is NOT set: the runner must
+      # execute the repo's own build/test toolchain.
+      - /work:rw,nosuid,nodev,size=8g,uid=10001,gid=10001,mode=0700
+      - /tmp:rw,nosuid,nodev,size=256m
+
+networks:
+  # Reuse the main stack's internal (egress-less) network so the coding runner
+  # can reach go-service's LLM proxy. Declared here so the overlay is valid
+  # standalone; the main compose file marks it internal:true.
+  code-runner-net:
+    internal: true
+  # The proxy's dedicated internet route. Only egress-proxy attaches to it.
+  coding-egress:
+    driver: bridge

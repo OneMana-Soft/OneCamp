@@ -1,0 +1,58 @@
+# Dockerfile.coding — the CODE-PR coding profile image for the code-runner
+# sidecar. Unlike the python data-analysis image (Dockerfile), this ships the
+# toolchains a coding run needs (git + Go + Node) so it can clone, edit, and run
+# the target repo's own build/tests. It is the SAME runner binary; only the
+# /code-run handler is exercised in this profile.
+#
+# Deploy it with the hardening in code-runner-coding-compose.yml: non-root,
+# cap_drop=ALL, no-new-privileges, read-only rootfs + tmpfs /work, pids/mem/cpu
+# caps, gVisor (runsc) recommended, and — critically — NO direct internet: git
+# egress is forced through an allowlisting proxy (only the git host is
+# reachable), and the model is reached via the main server's internal LLM proxy.
+#
+# SUPPLY CHAIN: toolchains are pinned to exact versions; upgrading is a
+# deliberate image bump. No package manager runs at request time.
+
+# ---- build the runner binary ----
+FROM golang:1.23-alpine AS build
+WORKDIR /src
+COPY go.mod ./
+COPY *.go ./
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/code-runner .
+
+# ---- coding runtime: git + go + node, non-root ----
+# Debian slim gives a stable, well-known toolchain base. Versions are pinned via
+# the base tag + explicit apt pins where practical; treat an upgrade as a
+# reviewed image bump.
+FROM golang:1.23-bookworm AS runtime
+
+# git for clone/commit/push; node for JS/TS repos' build/test. Go is already in
+# the base image. ca-certificates for TLS to the git host (via the proxy).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git=1:2.39.* \
+        ca-certificates \
+        nodejs \
+        npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# A fixed non-root user for every run.
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin coder
+
+COPY --from=build /out/code-runner /usr/local/bin/code-runner
+
+# tmpfs work dir is mounted here by compose; create the mount point.
+RUN mkdir -p /work && chown coder:coder /work
+
+# Toolchain caches live under the writable work dir (wiped per run), never the
+# read-only rootfs. HOME is set per-run by the handler too.
+ENV CODE_RUNNER_WORKDIR=/work \
+    CODE_RUNNER_ADDR=:9099 \
+    GOFLAGS=-mod=mod \
+    GOCACHE=/work/.gocache \
+    GOMODCACHE=/work/.gomodcache \
+    NPM_CONFIG_CACHE=/work/.npm
+
+USER coder
+EXPOSE 9099
+ENTRYPOINT ["/usr/local/bin/code-runner"]

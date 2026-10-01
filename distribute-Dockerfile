@@ -1,0 +1,25 @@
+# A SUPPORTED BASE, WHICH IS ALL THIS IMAGE NEEDS TO BE.
+#
+# Nothing is compiled here. `app` is already built when the archive is made, so
+# this image only has to run it, and the Go version has no effect on the binary
+# the customer executes. That is worth stating because it is the opposite of what
+# the tag suggests.
+#
+# It moved off 1.24 because Go supports the two most recent major releases, so a
+# 1.24 base stops receiving updates entirely, including the Alpine packages
+# underneath it. 1.25 matches the go directive in go.mod and is supported.
+#
+# The better fix is a plain alpine base: a runtime image has no business carrying
+# a compiler and a module cache. That is a larger change than a security patch
+# should carry, so it is noted rather than done.
+FROM golang:1.25-alpine
+
+RUN apk add --no-cache curl
+
+WORKDIR /app
+
+COPY . .
+
+EXPOSE 3000
+
+CMD [ "./app" ]
