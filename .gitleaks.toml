@@ -2,15 +2,8 @@
 # deliberate fakes below are allowed: test fixtures (placeholder keys such as
 # "-----BEGIN PRIVATE KEY-----\nQUJD") and CI's throwaway encryption keys.
 [extend]
-useDefault = true
-
-[allowlist]
-description = "fixtures and CI throwaway values"
-paths = [
-  '''_test\.go$''',
-  '''\.test\.js$''',
-  '''(^|/)tests/integration/''',
-  '''(^|/)\.github/workflows/ci\.yml$''',
-  # curl -u "admin:${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-}": a variable, not a password.
-  '''(^|/)other-services/opensearch/snapshot\.sh$''',
+# The environment template's placeholders, which make install replaces with
+# generated values (e.g. AI_CONFIG_KEK=__SET_FROM_SECRET_STORE__).
+regexes = [
+  '''^__[A-Z0-9_]+__$''',
 ]
