@@ -8,6 +8,7 @@ every action they take is signed and recorded.
 - Live demo, no signup: https://onemana.dev
 - Documentation: https://onemana.dev/docs
 - Web app (MIT): https://github.com/OneMana-Soft/OneCamp-fe
+- Desktop app for Windows, macOS and Linux (MIT): https://github.com/OneMana-Soft/OneCamp-desktop/releases/latest
 
 ## Which OneCamp is for you
 
@@ -43,19 +44,22 @@ the [commercial licence](COMMERCIAL-LICENSE.md) removes them.
 ## Run it from source
 
 Requirements: a Linux server with Docker, 8 GB of RAM, 40 GB of disk and a
-domain you control.
+domain you control, plus Go 1.25 to build.
 
 ```
 git clone https://github.com/OneMana-Soft/OneCamp.git
 cd OneCamp
-docker build -t onecamp-backend .
+scripts/package-from-source.sh ./onecamp-install
+cd onecamp-install
+make install EMAIL=you@example.com DOMAIN=example.com PASSWORD=<traefik-admin-password>
 ```
 
-The full stack (Postgres, Dgraph, Redis, MinIO, OpenSearch, EMQX, LiveKit and
-the rest) is described in `Makefile-distribute` and the
-[installation guide](https://onemana.dev/docs/installation). The quickest way to
-a working install is the official release: a [free licence](https://onemana.dev/free)
-gives you the one-command installer for up to 25 people.
+`package-from-source.sh` builds the server and lays it out exactly like the
+official release, so the [installation guide](https://onemana.dev/docs/installation)
+applies from its second step. `make install` generates every credential, starts
+the whole stack (Postgres, Dgraph, Redis, MinIO, OpenSearch, EMQX, LiveKit and
+the web app) and prints the DNS records to create. A build from source has no
+seat limit.
 
 Branches:
 - `main`: the edition with AI teammates (releases `v2.x`).
