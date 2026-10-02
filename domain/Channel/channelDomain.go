@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strconv"
@@ -63,7 +64,9 @@ func GetChannelByName(ctx context.Context, channelName string) (channelInfo *mod
         LIMIT 1
     `
 	channelInfo, err = models.GetChannelByName(query, channelName)
-	if err != nil {
+	// Callers ask in order to learn whether the channel exists (the governance
+	// drill, the demo seed, reminders), so not found is an answer, not an error.
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		helpers.LogErrorWithContext(ctx,
 			"domain/GetChannelByName Failed to get channel by name err: %+v",
 			err)

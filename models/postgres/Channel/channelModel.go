@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -77,9 +78,11 @@ func GetChannelByName(query string, channelName string) (channelInfo *Channel, e
 	)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetChannelByName Failed to get channel err: %+v",
-			err)
+		if !errors.Is(err, sql.ErrNoRows) {
+			helpers.LogErrorWithContext(ctx,
+				"models/GetChannelByName Failed to get channel err: %+v",
+				err)
+		}
 		return
 	}
 

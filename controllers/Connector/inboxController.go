@@ -37,6 +37,13 @@ func InboxFail(w http.ResponseWriter, r *http.Request, err error, what string) {
 		return
 	}
 	if errors.Is(err, connectorBusiness.ErrNotConnected) {
+		// The demo's shared visitor can never connect (see NoPersonalAccountsInDemo),
+		// so its page explains that instead of offering a button that is refused.
+		if info, ok := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo); ok &&
+			helpers.IsDemoVisitor(info.UserPostgresInfo.EmailID) {
+			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"code": "demo", "msg": helpers.DemoPersonalAccountMsg})
+			return
+		}
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"code": "not_connected", "msg": "Connect Gmail to see your inbox here."})
 		return
 	}
@@ -53,7 +60,7 @@ func InboxFail(w http.ResponseWriter, r *http.Request, err error, what string) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That conversation is no longer in your Gmail."})
 	default:
 		helpers.LogErrorWithContext(r.Context(), "controllers/inbox %s: %v", what, err)
-		helpers.WriteJSON(w, http.StatusBadGateway, helpers.Envolope{"msg": "Gmail did not answer. Try again in a moment."})
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Gmail did not answer. Try again in a moment."})
 	}
 }
 

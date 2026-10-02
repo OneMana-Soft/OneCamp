@@ -14,7 +14,7 @@ func CheckForUpdates(w http.ResponseWriter, r *http.Request) {
 	status, err := updatesBusiness.Check(r.Context())
 	if err != nil {
 		helpers.LogErrorWithContext(r.Context(), "controllers/CheckForUpdates err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadGateway, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{
 			"msg":    "Couldn't reach backend.onemana.dev to check. Make sure this server can reach it, then try again.",
 			"status": "failed",
 		})

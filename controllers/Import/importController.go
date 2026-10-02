@@ -227,7 +227,7 @@ func HandleCreateJob(w http.ResponseWriter, r *http.Request) {
 			helpers.LogWarnWithContext(ctx,
 				"Import.HandleCreateJob validate failed provider=%s job=%s err=%+v",
 				provName, jobId, err)
-			helpers.WriteJSON(w, http.StatusBadGateway, helpers.Envolope{
+			helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{
 				"error":  err.Error(),
 				"code":   "validate_failed",
 				"job_id": jobId,
@@ -929,7 +929,7 @@ func HandleDiscover(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Surface auth-flavoured errors as 401 so the FE prompts to reconnect.
 		helpers.LogWarnWithContext(ctx, "Import discover failed provider=%s err=%+v", provName, err)
-		helpers.WriteJSON(w, http.StatusBadGateway, helpers.Envolope{"error": err.Error()})
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"error": err.Error()})
 		return
 	}
 

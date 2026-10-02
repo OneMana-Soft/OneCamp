@@ -30,6 +30,11 @@ const (
 	ProblemNotFound
 )
 
+// ErrCredentialUnreadable is a saved connection the server cannot decrypt: it
+// was stored under another APP_SECRET_KEK (a changed key, or data restored from
+// another install). No retry can fix it; connecting again overwrites it.
+var ErrCredentialUnreadable = errors.New("the saved connection cannot be read")
+
 // InputError is a request the person can fix by changing what they sent.
 type InputError string
 
@@ -50,6 +55,9 @@ const (
 func ClassifyAPIError(err error) APIProblem {
 	if err == nil {
 		return ProblemNone
+	}
+	if errors.Is(err, ErrCredentialUnreadable) {
+		return ProblemExpired
 	}
 	var gerr *googleapi.Error
 	if errors.As(err, &gerr) {

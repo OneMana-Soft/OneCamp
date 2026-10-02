@@ -98,12 +98,6 @@ func HandleCallback(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
 
-	// A consent screen opened before the demo refused connections must not
-	// land a token on the shared visitor either.
-	if helpers.DemoMode() {
-		http.Redirect(w, r, connectorReturnURL("")+"?connector=error", http.StatusFound)
-		return
-	}
 	res, err := connectorBusiness.HandleCallback(ctx, state, code)
 	dest := connectorReturnURL(res.ReturnPage)
 	if err != nil {

@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"testing"
 
 	connectorBusiness "github.com/akashc777/OneCamp/business/Connector"
+	"github.com/akashc777/OneCamp/helpers"
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"google.golang.org/api/googleapi"
 )
 
@@ -30,7 +33,8 @@ func TestInboxFailTellsThePageWhatToDo(t *testing.T) {
 		{"deleted thread", &googleapi.Error{Code: 404}, http.StatusNotFound, ""},
 		{"quota", &googleapi.Error{Code: 429}, http.StatusTooManyRequests, ""},
 		{"api off", &googleapi.Error{Code: 403, Errors: []googleapi.ErrorItem{{Reason: "accessNotConfigured"}}}, http.StatusServiceUnavailable, ""},
-		{"outage", errors.New("connection reset"), http.StatusBadGateway, ""},
+		{"outage", errors.New("connection reset"), http.StatusServiceUnavailable, ""},
+		{"unreadable saved token", fmt.Errorf("decrypt access token: %w", connectorBusiness.ErrCredentialUnreadable), http.StatusConflict, "reconnect"},
 	}
 	for _, c := range cases {
 		w := httptest.NewRecorder()
@@ -45,6 +49,23 @@ func TestInboxFailTellsThePageWhatToDo(t *testing.T) {
 		}
 		if msg, _ := body["msg"].(string); msg == "" {
 			t.Errorf("%s: no message for the person", c.name)
+		}
+	}
+}
+
+func TestOnlyTheDemoVisitorIsToldTheDemoCannotConnect(t *testing.T) {
+	t.Setenv("DEMO_MODE", "true")
+	t.Setenv("DEMO_USER_EMAIL", "visitor@demo.example")
+	for email, want := range map[string]string{"visitor@demo.example": "demo", "owner@company.example": "not_connected"} {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		info := userModels.UserInfo{UserPostgresInfo: userModels.User{EmailID: email}}
+		r = r.WithContext(context.WithValue(r.Context(), helpers.UserInfoContextKey, info))
+		w := httptest.NewRecorder()
+		InboxFail(w, r, connectorBusiness.ErrNotConnected, "test")
+		var body map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &body)
+		if got, _ := body["code"].(string); got != want {
+			t.Errorf("%s: code %q, want %q", email, got, want)
 		}
 	}
 }

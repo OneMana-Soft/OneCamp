@@ -50,7 +50,6 @@ func UpdateUserEmojiStatus(ctx context.Context, dgraphStatus *dgraphStruct.Dgrap
 }
 
 func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.DgraphUser, query string, deleteJson string) (userUid string, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
 	pb, err := json.Marshal(dgraphUser)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -63,13 +62,11 @@ func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.Dgra
 		SetJson:    pb,
 		DeleteJson: []byte(deleteJson),
 	}
-	req := &api.Request{
+	// An upsert, so a conflicting concurrent write is retried (DoCommitNow).
+	res, err := dgraphInit.DoCommitNow(ctx, &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
-	}
-
-	res, err := txn.Do(ctx, req)
+	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/CreateOrUpdateDgraphUser failed to create or update dgraph user err: %+v",
@@ -79,22 +76,6 @@ func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.Dgra
 
 	// will get uid only when new node is created
 	userUid = res.Uids["uid(user)"]
-	//helpers.MessageLogs.InfoLog.Printf(
-	//	"dgraphModel/CreateOrUpdateDgraphUser UIDS: %+v",
-	//	res.Uids)
-	//if _, ok := res.Uids["uid(user)"]; ok {
-	//	helpers.MessageLogs.InfoLog.Printf(
-	//		"dgraphModel/CreateOrUpdateDgraphUser UID: %+v",
-	//		res.Uids["uid(user)"])
-	//}
-	defer func() {
-		err = txn.Discard(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/CreateOrUpdateDgraphUser failed to discard dgraph txn err: %+v",
-				err)
-		}
-	}()
 	return
 }
 

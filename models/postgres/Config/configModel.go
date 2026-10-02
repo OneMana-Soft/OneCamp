@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -33,9 +34,12 @@ func GetConfigByKey(key string) (config *SystemConfig, err error) {
 		&updatedAt,
 	)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetConfigByKey Failed to get config by key err: %+v",
-			err)
+		// An unset key is how a setting says "use the default".
+		if !errors.Is(err, sql.ErrNoRows) {
+			helpers.LogErrorWithContext(ctx,
+				"models/GetConfigByKey Failed to get config by key err: %+v",
+				err)
+		}
 		return
 	}
 
