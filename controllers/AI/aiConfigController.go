@@ -111,7 +111,7 @@ func ListProviderModels(w http.ResponseWriter, r *http.Request) {
 		}
 		// Everything else is a genuine upstream or server failure and keeps ERROR.
 		helpers.LogErrorWithContext(ctx, "controllers/ListProviderModels failed: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadGateway, helpers.Envolope{"msg": "failed to list models", "err": err.Error()})
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "failed to list models", "err": err.Error()})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": map[string]any{"models": models}})

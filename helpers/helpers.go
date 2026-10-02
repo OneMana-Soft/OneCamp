@@ -351,6 +351,7 @@ func WriteJSON(w http.ResponseWriter, status int, data interface{}, headers ...h
 	// constraint, table, column, and Postgres' own source location. Doing it here closes the class
 	// for every handler at once, including ones not yet written.
 	data = RedactErrorsInResponse(data)
+	status = edgeSafeStatus(status)
 
 	out, err := json.MarshalIndent(data, "", "\t")
 	if err != nil {
@@ -981,3 +982,18 @@ func IsSoftDeleted(deletedAt *time.Time) bool {
 // — every reader in this codebase writes !IsSoftDeleted. A second name for one rule is the thing
 // that let IsUniqueViolationOnUsername and its hand-written twin disagree, so the wrapper was
 // removed rather than left waiting for an adopter.
+
+// edgeSafeStatus keeps an answer from being replaced on its way to the browser.
+//
+// Cloudflare (in front of the demo, and of many installs) swaps an origin's 502
+// or 504 for its own error page. That page carries no CORS headers, so the
+// browser cannot read it and the person sees only "Network Error": the
+// message the handler wrote never arrives. A 503 is passed through as written.
+// The application never means "a gateway failed" by these codes anyway; it
+// means "something we depend on did not answer", which is what 503 says.
+func edgeSafeStatus(status int) int {
+	if status == http.StatusBadGateway || status == http.StatusGatewayTimeout {
+		return http.StatusServiceUnavailable
+	}
+	return status
+}

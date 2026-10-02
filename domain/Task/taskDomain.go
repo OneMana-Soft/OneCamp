@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -487,6 +488,13 @@ func GetDgraphBasicTaskInfoWithAttachmentsByUUID(ctx context.Context, teamUUID s
 
 	variables := make(map[string]string)
 	variables["$id"] = teamUUID
+	// A background read has no reader and passes "". Dgraph refuses an empty
+	// uid() and fails the whole query ("ID can't be empty"), which is how every
+	// agent work event silently lost its project. The membership counts it feeds
+	// are not consulted for a system read, so any uid that is not a person works.
+	if strings.TrimSpace(userDgraphUID) == "" {
+		userDgraphUID = "0x1"
+	}
 	variables["$userUid"] = userDgraphUID
 	query := `query TaskInfo($id: string, $userUid: string){
 				taskInfo(func: eq(task_uuid, $id)) {

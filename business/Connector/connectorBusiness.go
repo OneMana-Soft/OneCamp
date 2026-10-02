@@ -156,13 +156,13 @@ func loadUserToken(ctx context.Context, userUUID uuid.UUID, provider string) (*s
 	}
 	access, err := helpers.DecryptSecret(*rec.AccessToken)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt access token: %w", err)
+		return nil, fmt.Errorf("decrypt access token: %w (%w)", ErrCredentialUnreadable, err)
 	}
 	out := &storedToken{AccessToken: access, ExpiresAt: rec.ExpiresAt}
 	if rec.RefreshToken != nil && *rec.RefreshToken != "" {
 		refresh, derr := helpers.DecryptSecret(*rec.RefreshToken)
 		if derr != nil {
-			return nil, fmt.Errorf("decrypt refresh token: %w", derr)
+			return nil, fmt.Errorf("decrypt refresh token: %w (%w)", ErrCredentialUnreadable, derr)
 		}
 		out.RefreshToken = refresh
 	}

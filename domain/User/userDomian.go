@@ -1596,7 +1596,6 @@ func GetUserRecordingsList(ctx context.Context, userDgraphUID string, startDate 
 							user_name
 							user_full_name
 							is_bot
-							user_full_name
 						}
 					}
 				}

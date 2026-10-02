@@ -40,7 +40,7 @@ func SummarizeInboxThread(w http.ResponseWriter, r *http.Request) {
 	summary, err := svc.SummarizeFor(r.Context(), ai.PurposeSummaries, text, inboxSummaryPrompt)
 	if err != nil {
 		helpers.LogErrorWithContext(r.Context(), "controllers/inbox summary: %v", err)
-		helpers.WriteJSON(w, http.StatusBadGateway, helpers.Envolope{"msg": "The summary did not come back. Try again."})
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The summary did not come back. Try again."})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]string{"summary": strings.TrimSpace(summary)}})

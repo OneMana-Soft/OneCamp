@@ -13,7 +13,10 @@ func CreateChannelNotificationType(ctx context.Context, userId string, channelId
 		INSERT INTO users_channel_notification 
 		(user_id, channel_id, notification_type, updated_at)
 		VALUES ($1, $2, $3, $4)
+		ON CONFLICT DO NOTHING
 	`
+	// The default for someone joining a channel. Someone rejoining already has a
+	// row, and it holds the choice they made, which a default must not replace.
 
 	err = models.CreateChannelNotificationType(query, userId, channelId, notificationType, updatedTime)
 	if err != nil {
