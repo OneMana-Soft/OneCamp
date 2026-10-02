@@ -58,8 +58,17 @@ func RedirectURI() string {
 	return oauth.BackendProtocol(host) + host + "/connector/oauth/callback"
 }
 
+// ReturnPages are where a person may land after connecting, by name. A name,
+// never a URL, travels in the state, so the callback cannot be turned into an
+// open redirect. Anything else lands on the connectors settings page.
+var ReturnPages = map[string]string{
+	"inbox": "/app/inbox",
+}
+
 // BuildAuthURL returns the provider authorize URL for a user to connect.
-func BuildAuthURL(ctx context.Context, userUUID uuid.UUID, providerID string) (string, error) {
+// returnPage names where the person lands afterwards (see ReturnPages); an
+// unknown or empty name means the connectors settings page.
+func BuildAuthURL(ctx context.Context, userUUID uuid.UUID, providerID, returnPage string) (string, error) {
 	p, ok := providerRegistry[providerID]
 	if !ok {
 		return "", fmt.Errorf("unknown connector: %s", providerID)
@@ -69,10 +78,13 @@ func BuildAuthURL(ctx context.Context, userUUID uuid.UUID, providerID string) (s
 		return "", err
 	}
 
-	// One-shot state nonce bound to user+provider.
+	// One-shot state nonce bound to user+provider (and the page to return to).
+	if _, ok := ReturnPages[returnPage]; !ok {
+		returnPage = ""
+	}
 	state := randHex(16)
 	_ = redisStore.SetString(ctx, registry.ConnectorOAuthState, []string{state},
-		userUUID.String()+":"+providerID)
+		userUUID.String()+":"+providerID+":"+returnPage)
 
 	u, err := url.Parse(p.AuthURL)
 	if err != nil {
@@ -96,37 +108,61 @@ func BuildAuthURL(ctx context.Context, userUUID uuid.UUID, providerID string) (s
 	return u.String(), nil
 }
 
-// HandleCallback exchanges the code and persists the token for the user the
-// state nonce is bound to. Returns (userUUID, providerID) for the redirect.
-func HandleCallback(ctx context.Context, state, code string) (uuid.UUID, string, error) {
-	if state == "" || code == "" {
-		return uuid.Nil, "", fmt.Errorf("missing state or code")
-	}
-	bound, found, _ := redisStore.GetDelString(ctx, registry.ConnectorOAuthState, []string{state})
-	if !found || bound == "" {
-		return uuid.Nil, "", fmt.Errorf("invalid or expired state")
-	}
-	parts := strings.SplitN(bound, ":", 2)
-	if len(parts) != 2 {
-		return uuid.Nil, "", fmt.Errorf("malformed state binding")
+// CallbackResult is who connected what, and where they asked to land.
+type CallbackResult struct {
+	UserUUID   uuid.UUID
+	ProviderID string
+	// ReturnPage is a key of ReturnPages, or "" for the settings page.
+	ReturnPage string
+}
+
+// parseStateBinding reads "<user>:<provider>[:<return page>]". The two-part
+// form is what states issued before return pages existed carry.
+func parseStateBinding(bound string) (CallbackResult, error) {
+	parts := strings.SplitN(bound, ":", 3)
+	if len(parts) < 2 {
+		return CallbackResult{}, fmt.Errorf("malformed state binding")
 	}
 	userUUID, err := uuid.Parse(parts[0])
 	if err != nil {
-		return uuid.Nil, "", fmt.Errorf("invalid user in state")
+		return CallbackResult{}, fmt.Errorf("invalid user in state")
 	}
-	providerID := parts[1]
+	res := CallbackResult{UserUUID: userUUID, ProviderID: parts[1]}
+	if len(parts) == 3 {
+		if _, ok := ReturnPages[parts[2]]; ok {
+			res.ReturnPage = parts[2]
+		}
+	}
+	return res, nil
+}
+
+// HandleCallback exchanges the code and persists the token for the user the
+// state nonce is bound to. The result carries what the redirect needs.
+func HandleCallback(ctx context.Context, state, code string) (CallbackResult, error) {
+	if state == "" || code == "" {
+		return CallbackResult{}, fmt.Errorf("missing state or code")
+	}
+	bound, found, _ := redisStore.GetDelString(ctx, registry.ConnectorOAuthState, []string{state})
+	if !found || bound == "" {
+		return CallbackResult{}, fmt.Errorf("invalid or expired state")
+	}
+	res, err := parseStateBinding(bound)
+	if err != nil {
+		return CallbackResult{}, err
+	}
+	userUUID, providerID := res.UserUUID, res.ProviderID
 	p, ok := providerRegistry[providerID]
 	if !ok {
-		return userUUID, providerID, fmt.Errorf("unknown connector: %s", providerID)
+		return res, fmt.Errorf("unknown connector: %s", providerID)
 	}
 	clientID, clientSecret, err := clientCreds(p)
 	if err != nil {
-		return userUUID, providerID, err
+		return res, err
 	}
 
 	tok, err := exchangeCode(ctx, p.TokenURL, clientID, clientSecret, code)
 	if err != nil {
-		return userUUID, providerID, fmt.Errorf("token exchange failed: %w", err)
+		return res, fmt.Errorf("token exchange failed: %w", err)
 	}
 
 	st := storedToken{AccessToken: tok.AccessToken, RefreshToken: tok.RefreshToken}
@@ -135,12 +171,12 @@ func HandleCallback(ctx context.Context, state, code string) (uuid.UUID, string,
 		st.ExpiresAt = &t
 	}
 	if err := saveUserToken(ctx, userUUID, providerID, st); err != nil {
-		return userUUID, providerID, fmt.Errorf("persist token: %w", err)
+		return res, fmt.Errorf("persist token: %w", err)
 	}
 	// Bust the briefing "Your day" cache so the newly-connected account shows
 	// up immediately rather than after the TTL.
 	invalidateBriefingDayCache(ctx, userUUID)
-	return userUUID, providerID, nil
+	return res, nil
 }
 
 // validAccessToken returns a non-expired access token for the user+provider,

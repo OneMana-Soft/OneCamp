@@ -27,15 +27,30 @@ func InboxUser(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 	return info.UserPostgresInfo.Id, true
 }
 
-// Not connected is its own code, so the page offers the connect button
-// instead of an error.
 // InboxFail answers a failed mailbox call; exported for the AI summary handler.
+// Not connected and reconnect are codes of their own, so the page offers the
+// connect button instead of an error.
 func InboxFail(w http.ResponseWriter, r *http.Request, err error, what string) {
-	switch {
-	case errors.Is(err, connectorBusiness.ErrNotConnected):
+	var input connectorBusiness.InputError
+	if errors.As(err, &input) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": input.Error()})
+		return
+	}
+	if errors.Is(err, connectorBusiness.ErrNotConnected) {
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"code": "not_connected", "msg": "Connect Gmail to see your inbox here."})
-	case errors.Is(err, connectorBusiness.ErrBadHeader):
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		return
+	}
+	switch connectorBusiness.ClassifyAPIError(err) {
+	case connectorBusiness.ProblemExpired, connectorBusiness.ProblemPermissions:
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"code": "reconnect",
+			"msg": "Your Gmail connection has expired or lost access. Reconnect it to see your inbox here."})
+	case connectorBusiness.ProblemAPIDisabled:
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{
+			"msg": "The Gmail API is not enabled in this workspace's Google Cloud project. An admin needs to enable it."})
+	case connectorBusiness.ProblemRateLimited:
+		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": "Gmail is busy. Try again in a minute."})
+	case connectorBusiness.ProblemNotFound:
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That conversation is no longer in your Gmail."})
 	default:
 		helpers.LogErrorWithContext(r.Context(), "controllers/inbox %s: %v", what, err)
 		helpers.WriteJSON(w, http.StatusBadGateway, helpers.Envolope{"msg": "Gmail did not answer. Try again in a moment."})
@@ -90,10 +105,6 @@ func ReplyInboxThread(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := connectorBusiness.GmailReply(r.Context(), uid, chi.URLParam(r, "id"), in.Body)
 	if err != nil {
-		if strings.Contains(err.Error(), "write a reply") || strings.Contains(err.Error(), "who to reply") {
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
-			return
-		}
 		InboxFail(w, r, err, "reply")
 		return
 	}

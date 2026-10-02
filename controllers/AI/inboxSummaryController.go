@@ -36,10 +36,7 @@ func SummarizeInboxThread(w http.ResponseWriter, r *http.Request) {
 		connectorController.InboxFail(w, r, err, "summary")
 		return
 	}
-	text := connectorBusiness.ThreadText(d)
-	if len(text) > 60000 {
-		text = text[:60000]
-	}
+	text := helpers.TruncateRunes(connectorBusiness.ThreadText(d), 60000)
 	summary, err := svc.SummarizeFor(r.Context(), ai.PurposeSummaries, text, inboxSummaryPrompt)
 	if err != nil {
 		helpers.LogErrorWithContext(r.Context(), "controllers/inbox summary: %v", err)

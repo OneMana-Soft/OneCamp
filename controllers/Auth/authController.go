@@ -1165,7 +1165,7 @@ func GetEnabledProviders(w http.ResponseWriter, r *http.Request) {
 		"oidc":   envTrue("OIDC_ENABLED"),
 		"saml":   envTrue("SAML_ENABLED"),
 		"ldap":   envTrue("LDAP_ENABLED"),
-		"demo":   envTrue("DEMO_MODE"),
+		"demo":   helpers.DemoMode(),
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{

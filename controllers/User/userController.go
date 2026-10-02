@@ -4115,7 +4115,7 @@ func DemoLogin(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// 1. Guard: only enabled when DEMO_MODE=true
-	if strings.ToLower(strings.TrimSpace(os.Getenv("DEMO_MODE"))) != "true" {
+	if !helpers.DemoMode() {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{
 			"msg": "Not found",
 		})

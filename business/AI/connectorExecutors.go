@@ -11,7 +11,6 @@ import (
 	connectorBusiness "github.com/akashc777/OneCamp/business/Connector"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/google/uuid"
-	"google.golang.org/api/googleapi"
 )
 
 // connectorExecutors.go — AI tool executors for per-user connectors (Gmail,
@@ -42,50 +41,21 @@ func notConnectedMsg(human string) string {
 	return fmt.Sprintf("🔌 Your %s account isn't connected yet. Open Settings → Connectors to connect it, then try again.", human)
 }
 
-// friendlyAPIError interprets a raw Google/GitHub API error into a short,
-// actionable message the AI can show the user instead of dumping JSON. It
-// prefers the typed googleapi.Error (robust) and falls back to string matching
-// for other providers/transports.
+// friendlyAPIError turns a refused Google/GitHub call into a short, actionable
+// message the AI can show the user instead of dumping JSON. The sorting is the
+// connector package's, shared with the inbox.
 func friendlyAPIError(provider string, err error) string {
-	// Typed Google API error — classify by HTTP status + reason, which is far
-	// more robust than substring matching on the message body.
-	var gerr *googleapi.Error
-	if errors.As(err, &gerr) {
-		switch gerr.Code {
-		case 403:
-			for _, e := range gerr.Errors {
-				if e.Reason == "accessNotConfigured" || strings.Contains(e.Message, "has not been used in project") {
-					return fmt.Sprintf("⚠️ The %s API isn't enabled in your workspace's Google Cloud project yet. Ask your admin to enable it in the Google Cloud Console, then try again.", provider)
-				}
-			}
-			if strings.Contains(gerr.Message, "has not been used in project") || strings.Contains(gerr.Message, "SERVICE_DISABLED") {
-				return fmt.Sprintf("⚠️ The %s API isn't enabled in your workspace's Google Cloud project yet. Ask your admin to enable it in the Google Cloud Console, then try again.", provider)
-			}
-			return fmt.Sprintf("⚠️ Your %s connection doesn't have the required permissions. Try reconnecting it under Settings → Connectors with the requested access.", provider)
-		case 401:
-			return fmt.Sprintf("⚠️ Your %s connection has expired. Please reconnect it under Settings → Connectors.", provider)
-		case 429:
-			return fmt.Sprintf("⚠️ %s is rate-limiting requests right now. Please wait a moment and try again.", provider)
-		case 404:
-			return fmt.Sprintf("⚠️ Couldn't find that on %s. It may have been moved or the connection lacks access to it.", provider)
-		}
-	}
-
-	msg := err.Error()
-	// String fallbacks for non-typed errors (GitHub, OAuth refresh, transport).
-	switch {
-	case strings.Contains(msg, "SERVICE_DISABLED") || strings.Contains(msg, "has not been used in project"):
+	switch connectorBusiness.ClassifyAPIError(err) {
+	case connectorBusiness.ProblemAPIDisabled:
 		return fmt.Sprintf("⚠️ The %s API isn't enabled in your workspace's Google Cloud project yet. Ask your admin to enable it in the Google Cloud Console, then try again.", provider)
-	case strings.Contains(msg, "invalid_grant") || strings.Contains(msg, "expired or revoked"):
+	case connectorBusiness.ProblemExpired:
 		return fmt.Sprintf("⚠️ Your %s connection has expired. Please reconnect it under Settings → Connectors.", provider)
-	case strings.Contains(msg, "401") || strings.Contains(msg, "Unauthorized"):
-		return fmt.Sprintf("⚠️ Your %s connection has expired. Please reconnect it under Settings → Connectors.", provider)
-	case strings.Contains(msg, "403") || strings.Contains(msg, "Forbidden") || strings.Contains(msg, "insufficient"):
-		return fmt.Sprintf("⚠️ Your %s connection doesn't have the required permissions. Try reconnecting it under Settings → Connectors.", provider)
-	case strings.Contains(msg, "429") || strings.Contains(msg, "rate limit"):
+	case connectorBusiness.ProblemPermissions:
+		return fmt.Sprintf("⚠️ Your %s connection doesn't have the required permissions. Try reconnecting it under Settings → Connectors with the requested access.", provider)
+	case connectorBusiness.ProblemRateLimited:
 		return fmt.Sprintf("⚠️ %s is rate-limiting requests right now. Please wait a moment and try again.", provider)
-	case strings.Contains(msg, "404") || strings.Contains(msg, "Not Found"):
-		return fmt.Sprintf("⚠️ Couldn't find that on %s. It may be private or the connection lacks access.", provider)
+	case connectorBusiness.ProblemNotFound:
+		return fmt.Sprintf("⚠️ Couldn't find that on %s. It may have been moved, or the connection lacks access to it.", provider)
 	default:
 		return fmt.Sprintf("⚠️ Your %s request couldn't be completed right now. Please try again in a moment, or reconnect under Settings → Connectors.", provider)
 	}
