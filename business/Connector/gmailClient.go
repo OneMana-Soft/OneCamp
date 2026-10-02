@@ -2,10 +2,8 @@ package business
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"strings"
-	"time"
 
 	"golang.org/x/oauth2"
 	"google.golang.org/api/gmail/v1"
@@ -44,12 +42,9 @@ type EmailSummary struct {
 // GmailSearch runs a Gmail query (Gmail search syntax) and returns up to
 // `limit` compact summaries. Read-only.
 func GmailSearch(ctx context.Context, userUUID uuid.UUID, query string, limit int64) ([]EmailSummary, error) {
-	svc, err := gmailService(ctx, userUUID)
+	svc, err := requireGmail(ctx, userUUID)
 	if err != nil {
 		return nil, err
-	}
-	if svc == nil {
-		return nil, ErrNotConnected
 	}
 	if limit <= 0 || limit > 25 {
 		limit = 10
@@ -69,16 +64,8 @@ func GmailSearch(ctx context.Context, userUUID uuid.UUID, query string, limit in
 		}
 		es := EmailSummary{ID: m.Id, Snippet: msg.Snippet}
 		if msg.Payload != nil {
-			for _, h := range msg.Payload.Headers {
-				switch h.Name {
-				case "From":
-					es.From = h.Value
-				case "Subject":
-					es.Subject = h.Value
-				case "Date":
-					es.Date = h.Value
-				}
-			}
+			hs := msg.Payload.Headers
+			es.From, es.Subject, es.Date = header(hs, "From"), header(hs, "Subject"), header(hs, "Date")
 		}
 		out = append(out, es)
 	}
@@ -88,31 +75,19 @@ func GmailSearch(ctx context.Context, userUUID uuid.UUID, query string, limit in
 // GmailSend sends an email on the user's behalf. WRITE — only ever invoked
 // after explicit user confirmation through the AI ProposedAction gate.
 func GmailSend(ctx context.Context, userUUID uuid.UUID, to, subject, body string) (string, error) {
-	svc, err := gmailService(ctx, userUUID)
+	if strings.TrimSpace(to) == "" {
+		return "", ErrNoRecipients
+	}
+	// The values come from an AI's proposal; rawEmail refuses a line break in
+	// any of them.
+	raw, err := rawEmail([]mailHeader{{"To", to}, {"Subject", subject}}, body)
 	if err != nil {
 		return "", err
 	}
-	if svc == nil {
-		return "", ErrNotConnected
+	svc, err := requireGmail(ctx, userUUID)
+	if err != nil {
+		return "", err
 	}
-	if strings.TrimSpace(to) == "" {
-		return "", fmt.Errorf("recipient is required")
-	}
-	// A line break in a header value would let it add headers of its own
-	// (another recipient, say). The values come from an AI's proposal.
-	if hasLineBreak(to) || hasLineBreak(subject) {
-		return "", ErrBadHeader
-	}
-
-	var sb strings.Builder
-	sb.WriteString("To: " + to + "\r\n")
-	sb.WriteString("Subject: " + subject + "\r\n")
-	sb.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")
-	sb.WriteString("Date: " + time.Now().Format(time.RFC1123Z) + "\r\n")
-	sb.WriteString("\r\n")
-	sb.WriteString(body)
-
-	raw := base64.URLEncoding.EncodeToString([]byte(sb.String()))
 	sent, err := svc.Users.Messages.Send("me", &gmail.Message{Raw: raw}).Context(ctx).Do()
 	if err != nil {
 		return "", fmt.Errorf("gmail send: %w", err)

@@ -17,10 +17,10 @@ import (
 	"fmt"
 	"html"
 	"net/mail"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/microcosm-cc/bluemonday"
@@ -34,10 +34,6 @@ const (
 	// be megabytes of markup; the person can still open it in Gmail.
 	maxBodyBytes = 300 << 10
 )
-
-// ErrBadHeader is a recipient or subject carrying a line break, which would
-// let it add headers of its own to the message.
-var ErrBadHeader = fmt.Errorf("an address or subject cannot contain a line break")
 
 // InboxThread is one conversation in the list.
 type InboxThread struct {
@@ -93,12 +89,9 @@ func header(hs []*gmail.MessagePartHeader, name string) string {
 // GmailInbox lists the person's conversations. query is Gmail search syntax;
 // empty means the inbox.
 func GmailInbox(ctx context.Context, userUUID uuid.UUID, query, pageToken string) (*InboxPage, error) {
-	svc, err := gmailService(ctx, userUUID)
+	svc, err := requireGmail(ctx, userUUID)
 	if err != nil {
 		return nil, err
-	}
-	if svc == nil {
-		return nil, ErrNotConnected
 	}
 	q := strings.TrimSpace(query)
 	if q == "" {
@@ -115,6 +108,7 @@ func GmailInbox(ctx context.Context, userUUID uuid.UUID, query, pageToken string
 
 	out := make([]InboxThread, len(list.Threads))
 	ok := make([]bool, len(list.Threads))
+	errs := make([]error, len(list.Threads))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, inboxFetchWidth)
 	for i, t := range list.Threads {
@@ -125,7 +119,11 @@ func GmailInbox(ctx context.Context, userUUID uuid.UUID, query, pageToken string
 			defer func() { <-sem }()
 			th, gerr := svc.Users.Threads.Get("me", id).Format("metadata").
 				MetadataHeaders("From", "Subject", "Date").Context(ctx).Do()
-			if gerr != nil || len(th.Messages) == 0 {
+			if gerr != nil {
+				errs[i] = gerr
+				return
+			}
+			if len(th.Messages) == 0 {
 				return
 			}
 			first, last := th.Messages[0], th.Messages[len(th.Messages)-1]
@@ -150,10 +148,18 @@ func GmailInbox(ctx context.Context, userUUID uuid.UUID, query, pageToken string
 	wg.Wait()
 
 	page := &InboxPage{Threads: make([]InboxThread, 0, len(out)), NextPageToken: list.NextPageToken}
+	var firstErr error
 	for i := range out {
 		if ok[i] {
 			page.Threads = append(page.Threads, out[i])
+		} else if firstErr == nil && errs[i] != nil {
+			firstErr = errs[i]
 		}
+	}
+	// One conversation that will not load is skipped. A page where none did is
+	// a failure (a revoked token, say), not an empty inbox.
+	if len(page.Threads) == 0 && firstErr != nil {
+		return nil, fmt.Errorf("gmail thread: %w", firstErr)
 	}
 	return page, nil
 }
@@ -161,20 +167,28 @@ func GmailInbox(ctx context.Context, userUUID uuid.UUID, query, pageToken string
 // GmailThread returns one conversation with sanitised bodies.
 func GmailThread(ctx context.Context, userUUID uuid.UUID, threadID string) (*InboxThreadDetail, error) {
 	if !reThreadID.MatchString(threadID) {
-		return nil, fmt.Errorf("not a conversation id")
+		return nil, ErrBadThreadID
 	}
-	svc, err := gmailService(ctx, userUUID)
+	svc, err := requireGmail(ctx, userUUID)
 	if err != nil {
 		return nil, err
 	}
-	if svc == nil {
-		return nil, ErrNotConnected
-	}
+	// The address names the account the link opens in. Without it, Gmail opens
+	// the first account signed in to the browser, which is often the wrong one.
+	account := make(chan string, 1)
+	go func() {
+		p, perr := svc.Users.GetProfile("me").Context(ctx).Do()
+		if perr != nil {
+			account <- ""
+			return
+		}
+		account <- p.EmailAddress
+	}()
 	th, err := svc.Users.Threads.Get("me", threadID).Format("full").Context(ctx).Do()
 	if err != nil {
 		return nil, fmt.Errorf("gmail thread: %w", err)
 	}
-	d := &InboxThreadDetail{ID: threadID, GmailURL: "https://mail.google.com/mail/u/0/#all/" + threadID}
+	d := &InboxThreadDetail{ID: threadID, GmailURL: GmailThreadURL(<-account, threadID)}
 	for _, m := range th.Messages {
 		if m.Payload == nil {
 			continue
@@ -192,6 +206,14 @@ func GmailThread(ctx context.Context, userUUID uuid.UUID, threadID string) (*Inb
 		d.Messages = append(d.Messages, im)
 	}
 	return d, nil
+}
+
+// GmailThreadURL opens a conversation in Gmail, in the given account when known.
+func GmailThreadURL(account, threadID string) string {
+	if account == "" {
+		return "https://mail.google.com/mail/u/0/#all/" + threadID
+	}
+	return "https://mail.google.com/mail/?authuser=" + url.QueryEscape(account) + "#all/" + threadID
 }
 
 // emailPolicy is the HTML an email body may keep: text formatting, lists,
@@ -240,18 +262,12 @@ func messageBody(p *gmail.MessagePart) (string, bool) {
 		}
 	}
 	walk(p)
-	truncated := false
-	cut := func(s string) string {
-		if len(s) > maxBodyBytes {
-			truncated = true
-			return s[:maxBodyBytes]
-		}
-		return s
-	}
 	if htmlPart != "" {
-		return SanitizeEmailHTML(cut(htmlPart)), truncated
+		body, truncated := cutBytes(htmlPart, maxBodyBytes)
+		return SanitizeEmailHTML(body), truncated
 	}
-	return PlainToHTML(cut(textPart)), truncated
+	body, truncated := cutBytes(textPart, maxBodyBytes)
+	return PlainToHTML(body), truncated
 }
 
 func decodePart(data string) string {
@@ -296,23 +312,18 @@ func htmlToText(s string) string {
 	return strings.TrimSpace(html.UnescapeString(reTags.ReplaceAllString(s, "")))
 }
 
-func hasLineBreak(s string) bool { return strings.ContainsAny(s, "\r\n") }
-
 // GmailReply sends body as a reply in the conversation, to the last person who
 // wrote to the user (or, if the user wrote last, to whoever they wrote to).
 func GmailReply(ctx context.Context, userUUID uuid.UUID, threadID, body string) (string, error) {
 	if !reThreadID.MatchString(threadID) {
-		return "", fmt.Errorf("not a conversation id")
+		return "", ErrBadThreadID
 	}
 	if strings.TrimSpace(body) == "" {
-		return "", fmt.Errorf("write a reply first")
+		return "", ErrEmptyReply
 	}
-	svc, err := gmailService(ctx, userUUID)
+	svc, err := requireGmail(ctx, userUUID)
 	if err != nil {
 		return "", err
-	}
-	if svc == nil {
-		return "", ErrNotConnected
 	}
 	profile, err := svc.Users.GetProfile("me").Context(ctx).Do()
 	if err != nil {
@@ -320,40 +331,32 @@ func GmailReply(ctx context.Context, userUUID uuid.UUID, threadID, body string) 
 	}
 	th, err := svc.Users.Threads.Get("me", threadID).Format("metadata").
 		MetadataHeaders("From", "To", "Reply-To", "Subject", "Message-ID", "References").Context(ctx).Do()
-	if err != nil || len(th.Messages) == 0 {
-		return "", fmt.Errorf("gmail thread: %v", err)
+	if err != nil {
+		return "", fmt.Errorf("gmail thread: %w", err)
 	}
-	last := th.Messages[len(th.Messages)-1]
-	hs := last.Payload.Headers
+	if len(th.Messages) == 0 || th.Messages[len(th.Messages)-1].Payload == nil {
+		return "", ErrNoRecipient
+	}
+	hs := th.Messages[len(th.Messages)-1].Payload.Headers
 	to := replyRecipient(profile.EmailAddress, header(hs, "From"), header(hs, "Reply-To"), header(hs, "To"))
+	if strings.TrimSpace(to) == "" {
+		return "", ErrNoRecipient
+	}
 	subject := header(hs, "Subject")
 	if !strings.HasPrefix(strings.ToLower(subject), "re:") {
 		subject = "Re: " + subject
 	}
 	msgID := header(hs, "Message-ID")
-	refs := strings.TrimSpace(header(hs, "References") + " " + msgID)
-	for _, v := range []string{to, subject, msgID, refs} {
-		if hasLineBreak(v) {
-			return "", ErrBadHeader
-		}
-	}
-	if to == "" {
-		return "", fmt.Errorf("could not tell who to reply to")
-	}
-	var sb strings.Builder
-	sb.WriteString("To: " + to + "\r\n")
-	sb.WriteString("Subject: " + subject + "\r\n")
+	headers := []mailHeader{{"To", to}, {"Subject", subject}}
 	if msgID != "" {
-		sb.WriteString("In-Reply-To: " + msgID + "\r\n")
-		sb.WriteString("References: " + refs + "\r\n")
+		refs := strings.TrimSpace(header(hs, "References") + " " + msgID)
+		headers = append(headers, mailHeader{"In-Reply-To", msgID}, mailHeader{"References", refs})
 	}
-	sb.WriteString("Content-Type: text/plain; charset=\"UTF-8\"\r\n")
-	sb.WriteString("Date: " + time.Now().Format(time.RFC1123Z) + "\r\n\r\n")
-	sb.WriteString(body)
-	sent, err := svc.Users.Messages.Send("me", &gmail.Message{
-		Raw:      base64.URLEncoding.EncodeToString([]byte(sb.String())),
-		ThreadId: threadID,
-	}).Context(ctx).Do()
+	raw, err := rawEmail(headers, body)
+	if err != nil {
+		return "", err
+	}
+	sent, err := svc.Users.Messages.Send("me", &gmail.Message{Raw: raw, ThreadId: threadID}).Context(ctx).Do()
 	if err != nil {
 		return "", fmt.Errorf("gmail send: %w", err)
 	}

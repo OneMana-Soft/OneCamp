@@ -1499,8 +1499,8 @@ func Routes() http.Handler {
 	})
 
 	integrationRouter.Group(func(r chi.Router) {
-		r.Get("/google-calendar/auth-url", integrationController.GetGoogleCalendarAuthUrl)
-		r.Post("/google-calendar/callback", integrationController.GoogleCalendarCallback) // Using POST instead of GET if body contains code
+		r.With(customMiddleware.NoPersonalAccountsInDemo).Get("/google-calendar/auth-url", integrationController.GetGoogleCalendarAuthUrl)
+		r.With(customMiddleware.NoPersonalAccountsInDemo).Post("/google-calendar/callback", integrationController.GoogleCalendarCallback) // Using POST instead of GET if body contains code
 		r.Get("/google-calendar/status", integrationController.GetGoogleCalendarStatus)
 		r.Post("/google-calendar/unlink", integrationController.UnlinkGoogleCalendar)
 		r.Post("/google-calendar/sync-task", integrationController.UpdateGoogleCalendarSyncTask)
@@ -1512,7 +1512,7 @@ func Routes() http.Handler {
 	// can only manage their own connectors.
 	connectorRouter.Group(func(r chi.Router) {
 		r.Get("/", connectorController.ListConnectors)
-		r.Get("/{provider}/connect", connectorController.StartConnect)
+		r.With(customMiddleware.NoPersonalAccountsInDemo).Get("/{provider}/connect", connectorController.StartConnect)
 		r.Post("/{provider}/disconnect", connectorController.Disconnect)
 		// The inbox: the person's own Gmail inside OneCamp.
 		r.Get("/gmail/inbox", connectorController.GetInbox)

@@ -6,6 +6,7 @@ package controllers
 
 import (
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -61,7 +62,8 @@ func StartConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	provider := chi.URLParam(r, "provider")
-	url, err := connectorBusiness.BuildAuthURL(ctx, userInfo.UserPostgresInfo.Id, provider)
+	// ?return=inbox brings the person back to the page they connected from.
+	url, err := connectorBusiness.BuildAuthURL(ctx, userInfo.UserPostgresInfo.Id, provider, r.URL.Query().Get("return"))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/Connector/StartConnect err: %+v", err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
@@ -89,35 +91,46 @@ func Disconnect(w http.ResponseWriter, r *http.Request) {
 // HandleCallback handles GET /connector/oauth/callback. The state nonce is the
 // credential (it binds the flow to the initiating user), so this is mounted
 // unauthenticated like the calendar/GitHub callbacks. It redirects back to the
-// FE connectors settings page with a status query param.
+// page the person connected from (the connectors settings page unless they
+// named another) with a status query param.
 func HandleCallback(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
 
-	dest := connectorSettingsURL()
-	_, providerID, err := connectorBusiness.HandleCallback(ctx, state, code)
+	// A consent screen opened before the demo refused connections must not
+	// land a token on the shared visitor either.
+	if helpers.DemoMode() {
+		http.Redirect(w, r, connectorReturnURL("")+"?connector=error", http.StatusFound)
+		return
+	}
+	res, err := connectorBusiness.HandleCallback(ctx, state, code)
+	dest := connectorReturnURL(res.ReturnPage)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/Connector/HandleCallback err: %+v", err)
 		http.Redirect(w, r, dest+"?connector=error", http.StatusFound)
 		return
 	}
-	http.Redirect(w, r, dest+"?connector=success&provider="+providerID, http.StatusFound)
+	http.Redirect(w, r, dest+"?connector=success&provider="+url.QueryEscape(res.ProviderID), http.StatusFound)
 }
 
-// connectorSettingsURL builds the FE settings destination for the post-OAuth
-// redirect.
-func connectorSettingsURL() string {
+// connectorReturnURL builds the FE destination for the post-OAuth redirect:
+// a page from connectorBusiness.ReturnPages, or the connectors settings page.
+func connectorReturnURL(returnPage string) string {
+	path, ok := connectorBusiness.ReturnPages[returnPage]
+	if !ok {
+		path = "/app/settings/connectors"
+	}
 	feHost := os.Getenv("FE_HOST_DOMAIN")
 	if feHost == "" {
 		feHost = os.Getenv("FRONTEND_DOMAIN")
 	}
 	if feHost == "" {
-		return "http://localhost:3001/app/settings/connectors"
+		return "http://localhost:3001" + path
 	}
 	proto := "https://"
 	if strings.Contains(feHost, "localhost") || strings.Contains(feHost, "127.0.0.1") {
 		proto = "http://"
 	}
-	return proto + feHost + "/app/settings/connectors"
+	return proto + feHost + path
 }

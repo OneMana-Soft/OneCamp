@@ -1,7 +1,8 @@
 # Security
 
-Please report security problems privately to **support@onemana.dev**, with
-"Security" in the subject. Do not open a public issue.
+Please report security problems privately, never in a public issue:
+[open a private report](https://github.com/OneMana-Soft/OneCamp/security/advisories/new)
+on GitHub, or email **support@onemana.dev** with "Security" in the subject.
 
 Include what you found, how to reproduce it, and the version affected. You will
 get a reply within 3 working days. Once a fix is released, we credit you in the

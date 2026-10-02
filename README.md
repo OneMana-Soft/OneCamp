@@ -5,6 +5,17 @@ yourself, with AI teammates you can govern. Agents act as the person who sponsor
 them and never more, ask before they change things until you say otherwise, and
 every action they take is signed and recorded.
 
+**[Try the live demo](https://onemana.dev)**: no signup, a real workspace with
+channels, docs, tasks and an AI teammate already in it.
+
+![The OneCamp AI assistant summarising what the team discussed today, with its sources](.github/assets/ai.jpg)
+
+| Chat | Tasks and boards |
+|---|---|
+| ![A channel in OneCamp](.github/assets/channel.jpg) | ![A project board in OneCamp](.github/assets/board.jpg) |
+| **Docs, edited together live** | **Every agent action on the record** |
+| ![A collaborative doc in OneCamp](.github/assets/doc.jpg) | ![An agent's refused action, with the hash-chained record that proves it](.github/assets/drill.jpg) |
+
 - Live demo, no signup: https://onemana.dev
 - Documentation: https://onemana.dev/docs
 - Web app (MIT): https://github.com/OneMana-Soft/OneCamp-fe
