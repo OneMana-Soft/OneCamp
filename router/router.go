@@ -11,6 +11,7 @@ import (
 
 	importBusiness "github.com/akashc777/OneCamp/business/Import"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
+	"github.com/akashc777/OneCamp/helpers"
 
 	apiTokenBusiness "github.com/akashc777/OneCamp/business/ApiToken"
 	boardBusiness "github.com/akashc777/OneCamp/business/Board"
@@ -63,6 +64,7 @@ import (
 	v1Controller "github.com/akashc777/OneCamp/controllers/V1"
 	webhookController "github.com/akashc777/OneCamp/controllers/Webhook"
 	workflowController "github.com/akashc777/OneCamp/controllers/Workflow"
+
 	// Imported for init()-time provider registration; no symbols used.
 	_ "github.com/akashc777/OneCamp/business/Import/providers"
 	customMiddleware "github.com/akashc777/OneCamp/middleware"
@@ -288,8 +290,10 @@ func Routes() http.Handler {
 		// SCIM provisioning credentials. Managed HERE — admin, session-authenticated — and never on the
 		// /scim/v2 surface itself: a credential able to mint its own replacement would make revoking a
 		// leaked one pointless.
+		// Listing and revoking stay open on every plan, so a token can always be
+		// seen and revoked; minting one is the company control.
 		r.Get("/scim/tokens", scimController.ListScimTokensHandler)
-		r.Post("/scim/tokens", scimController.CreateScimTokenHandler)
+		r.With(customMiddleware.RequirePlan(helpers.FeatureSCIM)).Post("/scim/tokens", scimController.CreateScimTokenHandler)
 		r.Post("/scim/tokens/{id}/revoke", scimController.RevokeScimTokenHandler)
 		r.Get("/getAllAdminUsers", userController.GetAllAdminUsers)
 		r.Get("/getSelfAdminProfile", userController.GetSelfAdminProfile)
@@ -356,11 +360,11 @@ func Routes() http.Handler {
 		// Set one step aside, or put it back. Same endpoint both ways: it is one
 		// edit in two directions, and two routes is how the two drift.
 		r.Post("/onboarding/skip", settingsController.SkipOnboardingStep)
-		r.Get("/audit-log/export", settingsController.ExportAuditLog)
+		r.With(customMiddleware.RequirePlan(helpers.FeatureAuditExport)).Get("/audit-log/export", settingsController.ExportAuditLog)
 		// The evidence pack: the log, the chain recomputation, what each agent was
 		// told, and a manifest fingerprinting every section, as one document. Same
 		// admin gate as the export it sits beside.
-		r.Get("/audit-log/evidence-pack", settingsController.ExportEvidencePack)
+		r.With(customMiddleware.RequirePlan(helpers.FeatureAuditExport)).Get("/audit-log/evidence-pack", settingsController.ExportEvidencePack)
 		// What each completed month's pack said, at the time it said it. See
 		// business/AdminAudit/evidenceReceipt.go for why a pack generated later
 		// is a weaker document than one generated then.
@@ -856,6 +860,7 @@ func Routes() http.Handler {
 	// send would simply make every request fail.
 	scimRouter := chi.NewRouter()
 	scimRouter.Use(customMiddleware.BodyLimit(1 << 20))
+	scimRouter.Use(scimController.RequireSCIMPlan)
 	scimRouter.Use(customMiddleware.VerifyScimToken)
 	// Discovery. Okta and Azure AD both read this while testing a new connection, and a 404 surfaces to
 	// the operator as an unexplained setup failure.

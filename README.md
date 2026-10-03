@@ -23,8 +23,10 @@ channels, docs, tasks and an AI teammate already in it.
 
 ## Which OneCamp is for you
 
-Every option has every feature, AI agents included. They differ in who installs
-and updates it, how many people it covers, and the licence terms.
+Every option has chat, docs, tasks, calls and AI agents with their governance.
+They differ in who installs and updates it, how many people it covers, the
+licence terms, and whether company controls (single sign-on, LDAP, SCIM and
+audit-log export) come with it.
 
 | | Open source | Free licence | Lifetime licence | OneCamp Cloud |
 |---|---|---|---|---|
@@ -34,11 +36,12 @@ and updates it, how many people it covers, and the licence terms.
 | **Install** | Build it yourself (Docker) | One command | One command | Nothing to install |
 | **Updates** | Pull and rebuild | One command | One command, free within your major version | Automatic |
 | **Licence** | AGPL-3.0 | AGPL-3.0 | Commercial: no AGPL obligations | Commercial |
+| **Company controls** | Included | Not included | Included | Included |
 | **Help** | Community, on GitHub Discussions | Community | Email support | Email support |
 
 **In one line each:**
 - **Open source:** this code, free for any number of people, under AGPL-3.0.
-- **Free licence:** the same product as a ready-made release with a one-command installer, for teams of up to 25 people. [Get a key](https://onemana.dev/free).
+- **Free licence:** the product as a ready-made release with a one-command installer, for teams of up to 25 people, without the company controls. [Get a key](https://onemana.dev/free).
 - **Lifetime licence:** the ready-made release for any number of people, under a commercial licence, so your company has no AGPL obligations. Pay once. [Prices](https://onemana.dev/buy).
 - **OneCamp Cloud:** we run it on a server of your own for you, with backups and updates. [Plans](https://onemana.dev/buy).
 

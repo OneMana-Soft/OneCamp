@@ -57,6 +57,19 @@ func writeSCIM(w http.ResponseWriter, r *http.Request, status int, body any) {
 // `detail` is always a sentence this codebase authored. Never err.Error(): a *pq.Error's message names
 // the constraint, the table and the column, and here it would be sent to a third-party service that logs
 // it into an administration console outside this deployment.
+// RequireSCIMPlan refuses the whole /scim/v2 surface on a plan without SCIM
+// (helpers/planFeatures.go), in SCIM's own error format so the directory shows
+// the reason to whoever set the connection up.
+func RequireSCIMPlan(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !helpers.PlanAllows(helpers.FeatureSCIM) {
+			writeSCIMError(w, r, http.StatusForbidden, "", helpers.PlanRequiredMessage(helpers.FeatureSCIM))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func writeSCIMError(w http.ResponseWriter, r *http.Request, status int, scimType string, detail string) {
 	writeSCIM(w, r, status, scimBusiness.ScimError{
 		Schemas:  []string{scimBusiness.SchemaError},

@@ -38,6 +38,9 @@ import (
 //  4. JIT-provision if first time, marking the user as SSO-managed.
 //  5. Issue auth cookies via the canonical helper from authController.go.
 func LDAPLogin(w http.ResponseWriter, r *http.Request) {
+	if planLocked(w, r, helpers.FeatureLDAP, false) {
+		return
+	}
 	ctx := r.Context()
 
 	cfg := authService.ResolveLDAPConfig(ctx)
@@ -161,6 +164,9 @@ func LDAPLogin(w http.ResponseWriter, r *http.Request) {
 // middleware, which manages request tracking (the InResponseTo nonce) so the
 // callback can validate replies properly.
 func SAMLLogin(w http.ResponseWriter, r *http.Request) {
+	if planLocked(w, r, helpers.FeatureSSO, true) {
+		return
+	}
 	if !authService.ResolveSAMLConfig(r.Context()).Enabled || samlService.SAMLMiddleware == nil {
 		http.Error(w, "SAML is disabled", http.StatusForbidden)
 		return
@@ -175,6 +181,9 @@ func SAMLLogin(w http.ResponseWriter, r *http.Request) {
 
 // SAMLMetadata exposes the SP metadata for IdP configuration.
 func SAMLMetadata(w http.ResponseWriter, r *http.Request) {
+	if planLocked(w, r, helpers.FeatureSSO, false) {
+		return
+	}
 	if !authService.ResolveSAMLConfig(r.Context()).Enabled || samlService.SAMLMiddleware == nil {
 		http.Error(w, "SAML is disabled", http.StatusForbidden)
 		return
@@ -201,6 +210,9 @@ func SAMLMetadata(w http.ResponseWriter, r *http.Request) {
 // We additionally refuse assertions whose Subject isn't an email-format
 // NameID and whose AttributeStatements don't yield a valid email.
 func SAMLCallback(w http.ResponseWriter, r *http.Request) {
+	if planLocked(w, r, helpers.FeatureSSO, true) {
+		return
+	}
 	ctx := r.Context()
 
 	if !authService.ResolveSAMLConfig(ctx).Enabled || samlService.SAMLMiddleware == nil {
@@ -359,6 +371,9 @@ func isEmailNameIDFormat(format string) bool {
 // also closes the open-redirect hole the previous code had (where the IdP-
 // echoed redirect URL was trusted blindly).
 func GenericOIDCLogin(w http.ResponseWriter, r *http.Request) {
+	if planLocked(w, r, helpers.FeatureSSO, true) {
+		return
+	}
 	ctx := r.Context()
 
 	cfg := authService.ResolveOIDCConfig(ctx)
@@ -395,6 +410,9 @@ func GenericOIDCLogin(w http.ResponseWriter, r *http.Request) {
 
 // GenericOIDCCallback handles GET /oauth_callback/oidc.
 func GenericOIDCCallback(w http.ResponseWriter, r *http.Request) {
+	if planLocked(w, r, helpers.FeatureSSO, true) {
+		return
+	}
 	ctx := r.Context()
 
 	cfg := authService.ResolveOIDCConfig(ctx)
@@ -635,6 +653,21 @@ func lookupOrProvision(ctx context.Context, email, username, method string) (*us
 
 // ssoErrorRedirect builds a frontend URL with the standardized error/message
 // query params. Allowed error codes are documented in the FE login page.
+// planLocked refuses a sign-in method the plan leaves out (helpers/planFeatures.go).
+// A browser flow lands back on the sign-in page with the reason, the same way a
+// full seat plan does; an API caller gets the JSON 403.
+func planLocked(w http.ResponseWriter, r *http.Request, f helpers.PlanFeature, browser bool) bool {
+	if helpers.PlanAllows(f) {
+		return false
+	}
+	if browser {
+		http.Redirect(w, r, ssoErrorRedirect("plan_required", helpers.PlanRequiredMessage(f)), http.StatusFound)
+	} else {
+		helpers.WritePlanRequired(w, f)
+	}
+	return true
+}
+
 func ssoErrorRedirect(errCode, errMsg string) string {
 	feBase := authService.FrontendBaseURL()
 	if feBase == "" {

@@ -76,7 +76,7 @@ IMAGE   = go_service_onecamp_onemana:1.0
         build_restart_all build_restart_service console-tunnel doctor verify \
         set-flat-domains secrets install \
         reset-link reset-password clear-2fa change-email update \
-        ollama_up ollama_down ollama_update
+        ollama_up ollama_down ollama_update use_local_ai
 
 help:
 	@echo "Install everything in one command:"
@@ -132,6 +132,7 @@ help:
 	@echo ""
 	@echo "Local AI models (optional — hosted-provider deployments skip this):"
 	@echo "  make ollama_up              start the local model engine and pull models"
+	@echo "  make use_local_ai           ollama_up, and make it the AI provider (no key needed)"
 	@echo "  make ollama_update          move to the OLLAMA_IMAGE_TAG pinned in .env"
 	@echo "  make ollama_down            stop it and stop managing it"
 
@@ -2049,6 +2050,16 @@ ollama_up:
 	@echo "  Then point OneCamp at it, either way round:"
 	@echo "    - set AI_PROVIDER=ollama in .env and run: make build_restart_service"
 	@echo "    - or choose Ollama in the admin AI panel (this overrides .env)"
+
+# use_local_ai is ollama_up plus the step it leaves to the operator: making the
+# local engine the provider. AI then works with no key, which is what OneCamp
+# Cloud does on every workspace it installs. A provider chosen in the admin AI
+# panel still wins, so adding a hosted key later needs nothing from here.
+# Recreates only the API container: .env is read when it starts, so no rebuild.
+use_local_ai: ollama_up
+	$(call set_env,AI_PROVIDER,ollama)
+	@$(COMPOSE) up -d --force-recreate --no-deps go-service
+	@echo "  AI now runs on this server. Models finish downloading in the background."
 
 # ollama_update moves the engine to the version pinned in OLLAMA_IMAGE_TAG and
 # recreates only that container. Models live in ./data/ollama and are untouched,
