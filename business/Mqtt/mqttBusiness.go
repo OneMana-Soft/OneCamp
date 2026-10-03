@@ -880,3 +880,23 @@ func PublishTableRow(tableId string, data interface{}) {
 		}
 	}()
 }
+
+// PublishPollUpdate tells a channel's clients that one of its polls changed.
+func PublishPollUpdate(channelId, pollId string) {
+	ctx := context.Background()
+	marshalled, err := json.Marshal(mqttStruct.Message{
+		Type: mqttStruct.MESSAGE_POLL_UPDATE,
+		Data: &mqttStruct.MqttPollUpdate{Type: mqttStruct.TYPE_UPDATE, PollUUID: pollId, ChannelUUID: channelId},
+	})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/PublishPollUpdate marshal err: %+v", err)
+		return
+	}
+	res := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelMessage(channelId), 1, false, marshalled)
+	go func() {
+		_ = res.Wait()
+		if res.Error() != nil {
+			helpers.LogErrorWithContext(ctx, "business/PublishPollUpdate publish err: %+v", res.Error())
+		}
+	}()
+}

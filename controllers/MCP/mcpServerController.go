@@ -70,6 +70,9 @@ type mcpTool struct {
 	Description string                   `json:"description"`
 	InputSchema interface{}              `json:"inputSchema"`
 	Annotations *mcpBusiness.Annotations `json:"annotations,omitempty"`
+	// Meta carries `ui.resourceUri` for a tool with an MCP Apps view (see
+	// business/MCPServer/apps.go). Hosts without MCP Apps ignore it.
+	Meta map[string]interface{} `json:"_meta,omitempty"`
 }
 
 // HandleRPC is the single MCP endpoint. It dispatches by JSON-RPC method.
@@ -100,7 +103,7 @@ func HandleRPC(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(req.Params, &params)
 		writeRPCResult(w, req.ID, map[string]interface{}{
 			"protocolVersion": mcpBusiness.NegotiateProtocolVersion(params.ProtocolVersion),
-			"capabilities":    map[string]interface{}{"tools": map[string]interface{}{}},
+			"capabilities":    map[string]interface{}{"tools": map[string]interface{}{}, "resources": map[string]interface{}{}},
 			"serverInfo":      map[string]interface{}{"name": serverName, "version": serverVersion},
 		})
 	case "ping":
@@ -109,6 +112,10 @@ func HandleRPC(w http.ResponseWriter, r *http.Request) {
 		writeRPCResult(w, req.ID, map[string]interface{}{"tools": listToolsForScopes(r)})
 	case "tools/call":
 		handleToolCall(w, r, req)
+	case "resources/list":
+		writeRPCResult(w, req.ID, map[string]interface{}{"resources": listAppResources()})
+	case "resources/read":
+		readAppResource(w, req)
 	default:
 		writeRPCError(w, req.ID, -32601, "method not found: "+req.Method)
 	}
@@ -176,6 +183,9 @@ func listToolsForScopes(r *http.Request) []mcpTool {
 		if spec, ok := mcpBusiness.Lookup(t.Name); ok {
 			annotations := mcpBusiness.AnnotationsFor(spec)
 			entry.Annotations = &annotations
+		}
+		if uri := mcpBusiness.ViewForTool(t.Name); uri != "" {
+			entry.Meta = map[string]interface{}{"ui": map[string]interface{}{"resourceUri": uri}}
 		}
 		out = append(out, entry)
 	}
@@ -280,14 +290,47 @@ func handleToolCall(w http.ResponseWriter, r *http.Request, req jsonRPCRequest) 
 	ctx := mcpBusiness.SpendContext(r.Context(), decision.Actor)
 
 	action := ai.ProposedAction{ToolName: params.Name, Params: stringifyArgs(params.Arguments)}
-	msg, _, err := executor(ctx, action, userUUID)
+	msg, meta, err := executor(ctx, action, userUUID)
 	if err != nil {
 		// Tool errors are returned as a successful JSON-RPC response with
 		// isError=true, per the MCP spec, so the client can surface them.
 		writeRPCResult(w, req.ID, toolResult(err.Error(), true))
 		return
 	}
-	writeRPCResult(w, req.ID, toolResult(msg, false))
+	res := toolResult(msg, false)
+	if data := mcpBusiness.StructuredData(meta, ai.MetaStructuredJSON); data != nil {
+		res["structuredContent"] = map[string]interface{}{"text": msg, "data": data}
+	}
+	writeRPCResult(w, req.ID, res)
+}
+
+// listAppResources lists the MCP Apps views. They hold no data (a view renders
+// only the tool result its host hands it), so listing them needs no scope.
+func listAppResources() []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(mcpBusiness.AppViews))
+	for _, v := range mcpBusiness.AppViews {
+		out = append(out, map[string]interface{}{
+			"uri": v.URI, "name": v.Name, "description": v.Description, "mimeType": mcpBusiness.AppMimeType,
+		})
+	}
+	return out
+}
+
+// readAppResource answers resources/read for a ui:// view.
+func readAppResource(w http.ResponseWriter, req jsonRPCRequest) {
+	var params struct {
+		URI string `json:"uri"`
+	}
+	_ = json.Unmarshal(req.Params, &params)
+	v, ok := mcpBusiness.ViewByURI(params.URI)
+	if !ok {
+		writeRPCError(w, req.ID, -32002, "resource not found: "+params.URI)
+		return
+	}
+	writeRPCResult(w, req.ID, map[string]interface{}{"contents": []map[string]interface{}{{
+		"uri": v.URI, "mimeType": mcpBusiness.AppMimeType, "text": v.HTML,
+		"_meta": map[string]interface{}{"ui": map[string]interface{}{"prefersBorder": true}},
+	}}})
 }
 
 // mcpAuditSummary is the one-line description an audit reader sees. Written for a

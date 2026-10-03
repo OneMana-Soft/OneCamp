@@ -34,6 +34,7 @@ import (
 
 	mcpBusiness "github.com/akashc777/OneCamp/business/MCPServer"
 	"github.com/akashc777/OneCamp/helpers"
+	ai "github.com/akashc777/OneCamp/services/AI"
 )
 
 // JSON-RPC codes for the governed outcomes.
@@ -247,6 +248,15 @@ func governedToolResult(out any) map[string]interface{} {
 	if m, ok := out.(map[string]any); ok {
 		if s, ok := m["text"].(string); ok {
 			text = s
+		}
+	}
+	// A view (MCP Apps) reads the decoded rows as structuredContent.data; the
+	// existing text and meta stay where clients already find them.
+	if m, ok := out.(map[string]any); ok {
+		if meta, ok := m["meta"].(map[string]string); ok {
+			if data := mcpBusiness.StructuredData(meta, ai.MetaStructuredJSON); data != nil {
+				m["data"] = data
+			}
 		}
 	}
 	return map[string]interface{}{

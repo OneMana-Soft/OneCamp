@@ -63,6 +63,8 @@ const (
 	// has come due, so an open app can say so and move it to the top of Later.
 	// MUST stay last (append-only rule above).
 	MESSAGE_SAVED_ITEM_DUE
+	// A poll's votes or state changed; clients refetch that poll.
+	MESSAGE_POLL_UPDATE
 )
 
 const (
@@ -407,4 +409,12 @@ type MqttAgentWork struct {
 	Open bool `json:"open"`
 	// UpdatedAt is when the job last moved (RFC3339), for ordering.
 	UpdatedAt string `json:"updated_at,omitempty"`
+}
+
+// MqttPollUpdate says a poll in a channel changed. It carries only the id: a
+// client refetches the poll, which answers with that reader's own choices.
+type MqttPollUpdate struct {
+	Type        int8   `json:"type"`
+	PollUUID    string `json:"poll_uuid"`
+	ChannelUUID string `json:"channel_uuid"`
 }

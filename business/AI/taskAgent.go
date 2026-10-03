@@ -11,6 +11,7 @@ package business
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	ai "github.com/akashc777/OneCamp/services/AI"
+	authService "github.com/akashc777/OneCamp/services/Auth"
 	"github.com/google/uuid"
 )
 
@@ -137,6 +139,7 @@ func executeListTasks(ctx context.Context, action ai.ProposedAction, userUUID st
 		return "You have no tasks matching that.", nil, nil
 	}
 
+	meta := taskListMeta("Your tasks", dgraphUser.Tasks, int(dgraphUser.TaskCount))
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Your tasks (%d shown):\n", len(dgraphUser.Tasks)))
 	for _, t := range dgraphUser.Tasks {
@@ -147,7 +150,69 @@ func executeListTasks(ctx context.Context, action ai.ProposedAction, userUUID st
 		b.WriteString(fmt.Sprintf("\n(Showing %d of %d. Narrow it down with a status or a search term.)", len(dgraphUser.Tasks), dgraphUser.TaskCount))
 	}
 
-	return strings.TrimSpace(b.String()), nil, nil
+	return strings.TrimSpace(b.String()), meta, nil
+}
+
+// TaskRow is one task as a screen shows it: the structured twin of formatTaskLine.
+type TaskRow struct {
+	UUID     string `json:"uuid"`
+	Name     string `json:"name"`
+	Status   string `json:"status"`
+	Priority string `json:"priority,omitempty"`
+	Due      string `json:"due,omitempty"`
+	Overdue  bool   `json:"overdue,omitempty"`
+	Project  string `json:"project,omitempty"`
+	Assignee string `json:"assignee,omitempty"`
+	URL      string `json:"url"`
+}
+
+// TaskList is a list of tasks with what the view needs to title and link it.
+type TaskList struct {
+	Title string    `json:"title"`
+	Total int       `json:"total"`
+	Tasks []TaskRow `json:"tasks"`
+}
+
+// taskListMeta builds the MetaStructuredJSON for a task list. Never fails a
+// tool call: a marshal error drops only the structured copy.
+func taskListMeta(title string, tasks []*dgraphStruct.DgraphTask, total int) map[string]string {
+	b, err := json.Marshal(taskList(title, tasks, total, authService.FrontendBaseURL(), time.Now()))
+	if err != nil {
+		return nil
+	}
+	return map[string]string{ai.MetaStructuredJSON: string(b)}
+}
+
+// taskList is taskListMeta's data, pure for its test.
+func taskList(title string, tasks []*dgraphStruct.DgraphTask, total int, base string, now time.Time) TaskList {
+	out := TaskList{Title: title, Total: total, Tasks: make([]TaskRow, 0, len(tasks))}
+	for _, t := range tasks {
+		if t == nil {
+			continue
+		}
+		row := TaskRow{UUID: t.Uuid, Name: strings.TrimSpace(t.Name), Status: t.Status, Priority: t.Priority, URL: base + "/app/task/" + t.Uuid}
+		if row.Name == "" {
+			row.Name = "(untitled task)"
+		}
+		if t.CustomStatusName != nil && *t.CustomStatusName != "" {
+			row.Status = *t.CustomStatusName
+		}
+		if t.DueDate != nil && t.DueDate.Year() > 1970 {
+			row.Due = t.DueDate.UTC().Format(time.RFC3339)
+			row.Overdue = t.DueDate.Before(now) && t.Status != dgraphStruct.TASK_STATUS_DONE && t.Status != dgraphStruct.TASK_STATUS_CANCELED
+		}
+		if t.Project != nil {
+			row.Project = strings.TrimSpace(t.Project.Name)
+		}
+		if t.Assignee != nil {
+			row.Assignee = strings.TrimSpace(t.Assignee.UserName)
+		}
+		out.Tasks = append(out.Tasks, row)
+	}
+	if out.Total < len(out.Tasks) {
+		out.Total = len(out.Tasks)
+	}
+	return out
 }
 
 // executeListProjectTasks lists the tasks in a project the user can see. It
@@ -215,5 +280,5 @@ func executeListProjectTasks(ctx context.Context, action ai.ProposedAction, user
 		b.WriteString(fmt.Sprintf("\n(Showing %d of %d. Narrow it down with a status or a search term.)", len(taskProject.Tasks), taskProject.TaskCount))
 	}
 
-	return strings.TrimSpace(b.String()), nil, nil
+	return strings.TrimSpace(b.String()), taskListMeta("Tasks in "+projectName, taskProject.Tasks, int(taskProject.TaskCount)), nil
 }

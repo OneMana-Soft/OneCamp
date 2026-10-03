@@ -115,6 +115,25 @@ var ToolRegistry = []ToolDef{
 		},
 	},
 	{
+		Name:        "create_poll",
+		Description: "Post a poll in a channel: a question everyone can answer in one click, with live results. Use when a decision needs the team's quick vote (pick a date, choose an option, gauge interest). Posts as the user, so they must be able to post in the channel.",
+		Parameters: []ToolParam{
+			{Name: "channel_uuid", Type: "string", Required: true, Description: "UUID of the channel to post the poll in"},
+			{Name: "question", Type: "string", Required: true, Description: "The question, under 300 characters"},
+			{Name: "options", Type: "string", Required: true, Description: "2 to 10 options separated by | (for example: Tuesday | Wednesday | Thursday)"},
+			{Name: "multiple", Type: "boolean", Required: false, Description: "true lets people choose more than one option"},
+			{Name: "open_hours", Type: "string", Required: false, Description: "Close voting after this many hours (max 720); omit to leave it open"},
+		},
+	},
+	{
+		Name:        "read_poll",
+		Description: "Read a poll's question, options and current vote counts. Use to report results or check whether a poll is still open. Read-only.",
+		ReadOnly:    true,
+		Parameters: []ToolParam{
+			{Name: "poll_uuid", Type: "string", Required: true, Description: "UUID of the poll (the data-id of its block in the message)"},
+		},
+	},
+	{
 		Name:        "list_tasks",
 		Description: "List the current user's own assigned tasks. Use when the user asks about their tasks/todos/work, what is open or overdue, or to find a specific task (by name) before updating it. Read-only.",
 		ReadOnly:    true,
@@ -1339,6 +1358,12 @@ var Executors = map[string]ToolExecutor{}
 // code_pr) whose honest acknowledgement ("On it — I'll post the result here")
 // must not be overwritten by a model-fabricated "Done."
 const MetaAgentFinal = "agent_final"
+
+// MetaStructuredJSON is a tool-executor metadata key carrying the result as JSON,
+// for callers that render it rather than read it: an MCP host shows it in an
+// interactive view (MCP Apps), and the public API returns it under data. The
+// text result stays the model's version; this one is for a screen.
+const MetaStructuredJSON = "structured_json"
 
 // ActionSignature returns a deterministic identity for an action — its tool
 // name plus its params in sorted order. Used to dedupe repeated tool calls
