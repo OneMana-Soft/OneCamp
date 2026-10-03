@@ -1162,10 +1162,12 @@ func GetEnabledProviders(w http.ResponseWriter, r *http.Request) {
 		// (DB-first, ENV-fallback — see initializers/oauth/credentials.go).
 		"google": oauthStatus.GoogleConfigured,
 		"github": oauthStatus.GithubConfigured,
-		"oidc":   envTrue("OIDC_ENABLED"),
-		"saml":   envTrue("SAML_ENABLED"),
-		"ldap":   envTrue("LDAP_ENABLED"),
-		"demo":   helpers.DemoMode(),
+		// Company controls the plan leaves out are reported off, so the sign-in
+		// page never offers a button that would only refuse.
+		"oidc": envTrue("OIDC_ENABLED") && helpers.PlanAllows(helpers.FeatureSSO),
+		"saml": envTrue("SAML_ENABLED") && helpers.PlanAllows(helpers.FeatureSSO),
+		"ldap": envTrue("LDAP_ENABLED") && helpers.PlanAllows(helpers.FeatureLDAP),
+		"demo": helpers.DemoMode(),
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
