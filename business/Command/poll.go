@@ -2,11 +2,13 @@ package business
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	commandAdapter "github.com/akashc777/OneCamp/adapter/Command"
+	pollBusiness "github.com/akashc777/OneCamp/business/Poll"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 )
@@ -28,6 +30,26 @@ func handlePoll(ctx context.Context, cc CommandContext) (*commandAdapter.Command
 	}
 	question := args[0]
 	options := args[1:]
+
+	// IN A CHANNEL THE POLL IS DURABLE. This card kept its votes in Redis for
+	// fifteen minutes (CommandInteraction's TTL), after which every vote was lost
+	// and the card answered "This poll has expired". A channel poll is now a
+	// stored poll (business/Poll): votes persist, results update for everyone
+	// live, and an agent can read them. Its message is posted by Create, so the
+	// command itself only confirms. DMs keep the card below.
+	if cc.ChannelID != nil {
+		user := cc.User
+		if _, err := pollBusiness.Create(ctx, &user, pollBusiness.NewPoll{
+			ChannelUUID: cc.ChannelID.String(), Question: question, Options: options,
+		}); err != nil {
+			var input pollBusiness.InputError
+			if errors.As(err, &input) || errors.Is(err, pollBusiness.ErrNoAccess) {
+				return errorResponse("%s", err.Error()), nil
+			}
+			return errorResponse("Couldn't post the poll. Please try again."), nil
+		}
+		return ephemeral("Poll posted."), nil
+	}
 	if len(options) > 10 {
 		options = options[:10]
 	}

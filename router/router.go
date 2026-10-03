@@ -41,6 +41,7 @@ import (
 	livekitController "github.com/akashc777/OneCamp/controllers/LiveKit"
 	marketplaceController "github.com/akashc777/OneCamp/controllers/Marketplace"
 	notificationController "github.com/akashc777/OneCamp/controllers/Notification"
+	pollController "github.com/akashc777/OneCamp/controllers/Poll"
 	postController "github.com/akashc777/OneCamp/controllers/Post"
 	projectController "github.com/akashc777/OneCamp/controllers/Project"
 	publicController "github.com/akashc777/OneCamp/controllers/Public"
@@ -127,6 +128,7 @@ func Routes() http.Handler {
 	eventRouter := chi.NewRouter()
 	integrationRouter := chi.NewRouter()
 	connectorRouter := chi.NewRouter()
+	pollRouter := chi.NewRouter()
 
 	projectRouter := chi.NewRouter()
 	livekitRouter := chi.NewRouter()
@@ -767,6 +769,7 @@ func Routes() http.Handler {
 		r.Mount("/event", eventRouter)
 		r.Mount("/integration", integrationRouter)
 		r.Mount("/connectors", connectorRouter)
+		r.Mount("/poll", pollRouter)
 		r.Mount("/ai", aiRouter)
 		r.Mount("/command", commandRouter)
 		r.Mount("/link", linkRouter)
@@ -1510,6 +1513,12 @@ func Routes() http.Handler {
 	// Per-user connectors (Gmail, Google Calendar, GitHub) the AI can read/act
 	// through. Authed: every handler resolves the user from context so a user
 	// can only manage their own connectors.
+	// Polls in channels: made with /poll or by an agent, voted on in the message.
+	pollRouter.Post("/", pollController.CreatePoll)
+	pollRouter.Get("/{id}", pollController.GetPoll)
+	pollRouter.Post("/{id}/vote", pollController.VotePoll)
+	pollRouter.Post("/{id}/close", pollController.ClosePoll)
+
 	connectorRouter.Group(func(r chi.Router) {
 		r.Get("/", connectorController.ListConnectors)
 		r.With(customMiddleware.NoPersonalAccountsInDemo).Get("/{provider}/connect", connectorController.StartConnect)

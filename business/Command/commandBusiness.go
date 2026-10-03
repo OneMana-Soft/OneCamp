@@ -115,7 +115,11 @@ func splitArgs(text string) []string {
 	inQuote := false
 	for _, r := range text {
 		switch {
-		case r == '"':
+		// Curly quotes count too: the composer turns typed "straight" quotes into
+		// “curly” ones, so /poll “Lunch?” “Pizza” “Sushi” used to arrive as single
+		// words and post a poll whose question was “Lunch? and whose options were
+		// every word after it.
+		case r == '"' || r == '\u201C' || r == '\u201D' || r == '\u201E':
 			inQuote = !inQuote
 		case r == ' ' && !inQuote:
 			if cur.Len() > 0 {
