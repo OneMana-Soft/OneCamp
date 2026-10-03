@@ -373,6 +373,12 @@ services:
   # restart doesn't re-download the full DB.
   # ---------------------------------------------------------------------------
   clamav:
+    # Started only when CLAMAV_HOST is set (the Makefile turns that into
+    # --profile antivirus). clamd holds its signatures in about 1.5-2 GB of RAM,
+    # which is what a 4 GB server cannot spare; `make tune` leaves it off below
+    # 7 GB, and uploads are then accepted unscanned, as they always were when
+    # CLAMAV_HOST was empty.
+    profiles: ["antivirus"]
     image: clamav/clamav:1.4
     container_name: clamav
     restart: unless-stopped
