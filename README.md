@@ -54,23 +54,25 @@ the [commercial licence](COMMERCIAL-LICENSE.md) removes them.
 
 ## Run it from source
 
-Requirements: a Linux server with Docker, 8 GB of RAM, 40 GB of disk and a
-domain you control, plus Go 1.25 to build.
+Requirements: a Linux server with Docker, 4 GB of RAM (8 GB to also scan uploads
+for viruses) and 40 GB of disk, plus Go 1.25 to build. A domain is optional.
 
 ```
 git clone https://github.com/OneMana-Soft/OneCamp.git
 cd OneCamp
 scripts/package-from-source.sh ./onecamp-install
 cd onecamp-install
-make install EMAIL=you@example.com DOMAIN=example.com PASSWORD=<traefik-admin-password>
+make install EMAIL=you@example.com
 ```
 
 `package-from-source.sh` builds the server and lays it out exactly like the
-official release, so the [installation guide](https://onemana.dev/docs/installation)
-applies from its second step. `make install` generates every credential, starts
-the whole stack (Postgres, Dgraph, Redis, MinIO, OpenSearch, EMQX, LiveKit and
-the web app) and prints the DNS records to create. A build from source has no
-seat limit.
+official release. `make install` generates every credential, starts the whole
+stack (Postgres, Dgraph, Redis, MinIO, OpenSearch, EMQX, LiveKit and the web app)
+and checks the result. With no `DOMAIN`, the workspace answers at once on a free
+address, `onecamp.<your-ip>.sslip.io`, with no DNS records to create. Add
+`DOMAIN=example.com` to use your own, or move to it later with
+`make replace-domain DOMAIN=example.com && make build_restart_all`. A build from
+source has no seat limit. Full guide: https://onemana.dev/docs/installation
 
 Branches:
 - `main`: the edition with AI teammates (releases `v2.x`).

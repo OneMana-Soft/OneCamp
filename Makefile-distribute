@@ -33,6 +33,9 @@ LOCAL_AI_PROFILE := $(if $(filter 1 true yes on,$(AI_LOCAL_MODELS)),--profile lo
 # Serving the web app from this server is sticky the same way (SERVE_WEB in
 # .env, set by `make install` for a self-hosted server, or `make web_up`).
 WEB_PROFILE := $(if $(filter 1 true yes on,$(SERVE_WEB)),--profile web,)
+# Virus scanning runs exactly when the API is told where to scan, so the two can
+# never disagree: an install whose .env names CLAMAV_HOST keeps its scanner.
+ANTIVIRUS_PROFILE := $(if $(strip $(CLAMAV_HOST)),--profile antivirus,)
 
 # SELF is this makefile, for the targets that call each other.
 #
@@ -64,10 +67,10 @@ SELF := $(firstword $(MAKEFILE_LIST))
 # simply absent fails with "no such file", which is the honest error.
 STACK_FILE := $(firstword $(wildcard sample-compose.yml compose.yml distribute-compose.yml) sample-compose.yml)
 
-COMPOSE = docker compose --env-file .env --project-name onecamp $(LOCAL_AI_PROFILE) $(WEB_PROFILE) -f $(STACK_FILE)
+COMPOSE = docker compose --env-file .env --project-name onecamp $(LOCAL_AI_PROFILE) $(WEB_PROFILE) $(ANTIVIRUS_PROFILE) -f $(STACK_FILE)
 IMAGE   = go_service_onecamp_onemana:1.0
 
-.PHONY: coding-up coding-smoke coding-down help setup update-admin-email update-server-ip replace-domain \
+.PHONY: install_run auto-domain-https coding-up coding-smoke coding-down help setup update-admin-email update-server-ip replace-domain \
         create-traefik-password update-traefik-email update-allowed-domains \
         create-swap configure-livekit create_postgres_db migrate_up migrate_status \
         build_restart_all build_restart_service console-tunnel doctor verify \
@@ -201,23 +204,63 @@ APPLIED_VERSION := $(shell cat $(APPLIED_FILE) 2>/dev/null | tr -d '\r\n')
 # IT ENDS IN `verify`, deliberately. A install target that finishes when the last
 # command exits tells you the commands ran, not that the workspace works. This one
 # only succeeds when the running system answers.
+# ─── Install ───────────────────────────────────────────────────────────────────
+#
+# NO DOMAIN NEEDED TO START. The only required value is EMAIL:
+#
+#     make install EMAIL=you@example.com
+#
+# With no DOMAIN, the workspace answers at onecamp.<ip-with-dashes>.sslip.io,
+# a public wildcard DNS service that resolves any such name to the IP inside it,
+# so every service host points at this server without one DNS record, and Let's
+# Encrypt still issues real certificates. Seven DNS records and a domain were the
+# step at which people trying OneCamp stopped. Move to your own domain any time:
+#
+#     make replace-domain DOMAIN=example.com && make build_restart_all
+#
+# PASSWORD (the Traefik dashboard's) is generated and printed when not given.
+#
+# THE DECISION IS ITS OWN TARGET. Choosing the domain and password re-runs the
+# install with them filled in; written inline, an `exit 0` after the re-run would
+# end only that recipe line, and make would carry on with the rest of the install
+# a second time with nothing set.
 install:
-	@if [ -z "$(EMAIL)" ] || [ -z "$(PASSWORD)" ]; then \
-		echo "make install needs an admin email and a Traefik password:"; \
+	@if [ -z "$(EMAIL)" ]; then \
+		echo "make install needs the email of the first admin:"; \
+		echo ""; \
+		echo "  Start now, no domain needed (you get an address on sslip.io):"; \
+		echo "    make install EMAIL=you@example.com"; \
 		echo ""; \
 		echo "  Your own domain:"; \
-		echo "    make install EMAIL=you@example.com DOMAIN=example.com PASSWORD=<pw>"; \
+		echo "    make install EMAIL=you@example.com DOMAIN=example.com"; \
 		echo ""; \
 		echo "  A managed subdomain:"; \
-		echo "    make install EMAIL=you@example.com SLUG=acme ZONE=onemana.dev PASSWORD=<pw>"; \
+		echo "    make install EMAIL=you@example.com SLUG=acme ZONE=onemana.dev"; \
 		exit 1; \
-	fi
-	@if [ -z "$(DOMAIN)" ] && [ -z "$(SLUG)" ]; then \
-		echo "Set either DOMAIN=<your domain> or SLUG=<name> ZONE=<zone>."; exit 1; \
 	fi
 	@if [ -n "$(SLUG)" ] && [ -z "$(ZONE)" ]; then \
 		echo "SLUG needs ZONE, e.g. SLUG=acme ZONE=onemana.dev"; exit 1; \
 	fi
+	@domain='$(DOMAIN)'; auto='$(AUTO_DOMAIN)'; pw='$(PASSWORD)'; gen=''; \
+	if [ -z "$$domain" ] && [ -z "$(SLUG)" ]; then \
+		ip=$$(curl -4 -fsS --max-time 10 https://api.ipify.org || curl -4 -fsS --max-time 10 https://ifconfig.me); \
+		if ! printf '%s' "$$ip" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$$'; then \
+			echo "Could not detect this server's public IPv4 address, so there is no"; \
+			echo "free address to give it. Install with your own domain instead:"; \
+			echo "    make install EMAIL=$(EMAIL) DOMAIN=example.com"; \
+			exit 1; \
+		fi; \
+		domain=$$(printf '%s' "$$ip" | tr . -).sslip.io; auto=1; \
+		echo "  No DOMAIN given: this workspace will answer at https://onecamp.$$domain"; \
+	fi; \
+	if [ -z "$$pw" ]; then \
+		pw=$$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-20); gen=1; \
+	fi; \
+	$(MAKE) -f $(SELF) --no-print-directory install_run DOMAIN="$$domain" AUTO_DOMAIN="$$auto" PASSWORD="$$pw" PASSWORD_GENERATED="$$gen"
+
+# install_run is `install` with the domain and password decided. Not meant to be
+# run directly.
+install_run:
 	@if [ ! -f .env ]; then cp ./.sample.env ./.env && echo "  created .env from the template"; fi
 	@if [ ! -f compose.yml ]; then cp ./sample-compose.yml ./compose.yml && echo "  created compose.yml"; fi
 	@$(MAKE) -f $(SELF) --no-print-directory secrets
@@ -240,6 +283,7 @@ install:
 	@$(MAKE) -f $(SELF) --no-print-directory build_restart_all
 	@$(MAKE) -f $(SELF) --no-print-directory create_postgres_db || echo "  database already exists, continuing"
 	@$(MAKE) -f $(SELF) --no-print-directory migrate_up
+	@if [ -n "$(AUTO_DOMAIN)" ]; then $(MAKE) -f $(SELF) --no-print-directory auto-domain-https; fi
 	@$(MAKE) -f $(SELF) --no-print-directory verify
 	@echo ""
 	@echo "  The server is ready. It runs the API and the datastores."
@@ -266,9 +310,18 @@ install:
 	@echo ""
 	@echo "  Then create the first admin account at:"
 	@if [ -n "$(SLUG)" ]; then echo "    https://$(SLUG).$(ZONE)/admin-setup"; \
-	else echo "    https://onecamp.$(DOMAIN)/admin-setup"; fi
+	else echo "    https://$$(grep -E '^FE_HOST_DOMAIN=' .env | cut -d= -f2-)/admin-setup"; fi
 	@echo ""
 	@echo "  Everything else, sign-in providers, email and AI, is configured in the admin panel."
+	@if [ -n "$(PASSWORD_GENERATED)" ]; then \
+		echo ""; \
+		echo "  Traefik dashboard password (shown once, keep it): $(PASSWORD)"; \
+	fi
+	@if [ -n "$(AUTO_DOMAIN)" ]; then \
+		echo ""; \
+		echo "  This address is for getting started. When you have a domain, move to it with:"; \
+		echo "    make replace-domain DOMAIN=example.com && make build_restart_all"; \
+	fi
 
 # ─── Serving the web app from this server ─────────────────────────────────────
 #
@@ -351,8 +404,6 @@ setup:
 configure-livekit:
 	@if [ ! -f livekit.yaml.sample ]; then \
 		echo "  no livekit.yaml.sample in this archive, skipping"; \
-	elif [ -f livekit.yaml ]; then \
-		echo "  livekit.yaml already exists, leaving it alone"; \
 	else \
 	ip=$$(grep -E '^SERVER_IP=' .env | cut -d= -f2-); \
 	turn=$$(grep -E '^TURN_DOMAIN=' .env | cut -d= -f2-); \
@@ -362,11 +413,25 @@ configure-livekit:
 		echo "         Run: make update-server-ip && make replace-domain DOMAIN=<your-domain>"; \
 		exit 1; \
 	fi; \
-	sed -e "s|__CHANGE_ME_YOUR_SERVER_PUBLIC_IP__|$$ip|" \
-	    -e "s|__CHANGE_ME_YOUR_TURN_DOMAIN__|$$turn|" \
-	    -e "s|__CHANGE_ME_YOUR_BACKEND_DOMAIN__|$$be|" \
-	    livekit.yaml.sample > livekit.yaml; \
-	echo "  wrote livekit.yaml  (node_ip=$$ip  turn=$$turn  webhook=$$be)"; \
+	if [ -f livekit.yaml ]; then \
+		: "AN EXISTING FILE IS RE-POINTED, NOT LEFT ALONE. It used to be skipped"; \
+		: "whole, so moving to a new domain (make replace-domain) left calls on the"; \
+		: "old TURN host and the webhook on the old API, and calls connected with"; \
+		: "no media. Only the three derived values change; keys and any other edit"; \
+		: "the operator made stay as they are."; \
+		tmp=$$(mktemp) && sed -E \
+			-e "s|^(  node_ip: ).*|\1$$ip|" \
+			-e "s|^(  domain: ).*|\1$$turn|" \
+			-e "s|https://[^/ ]+/livekit/webhook|https://$$be/livekit/webhook|" \
+			livekit.yaml > "$$tmp" && cat "$$tmp" > livekit.yaml && rm -f "$$tmp"; \
+		echo "  updated livekit.yaml  (node_ip=$$ip  turn=$$turn  webhook=$$be)"; \
+	else \
+		sed -e "s|__CHANGE_ME_YOUR_SERVER_PUBLIC_IP__|$$ip|" \
+		    -e "s|__CHANGE_ME_YOUR_TURN_DOMAIN__|$$turn|" \
+		    -e "s|__CHANGE_ME_YOUR_BACKEND_DOMAIN__|$$be|" \
+		    livekit.yaml.sample > livekit.yaml; \
+		echo "  wrote livekit.yaml  (node_ip=$$ip  turn=$$turn  webhook=$$be)"; \
+	fi; \
 	fi
 
 # ─── Configuration steps ──────────────────────────────────────────────────────
@@ -487,6 +552,7 @@ endif
 	$(call set_env,MINIO_HOST,onecamp-minio.$(DOMAIN))
 	$(call set_env,MQTT_DOMAIN,onecamp-emqx.$(DOMAIN))
 	$(call set_env,MQTT_WS_URL,wss://onecamp-emqx.$(DOMAIN)/mqtt)
+	@if [ -f livekit.yaml ]; then $(MAKE) -f $(SELF) --no-print-directory configure-livekit; fi
 	# onecamp.$(DOMAIN) WAS LISTED UNDER "pointing at this server" AND IS NOT.
 	# Nothing here answers it: grep the compose file and there is no Traefik router
 	# for FE_HOST_DOMAIN, because the web app is a separate deployment. A customer
@@ -494,6 +560,12 @@ endif
 	# server that would never serve it, and the published DNS guide said the
 	# opposite, so the two sources of truth disagreed about the most important
 	# record. Split into two lists so neither can be read as the other.
+ifneq ($(AUTO_DOMAIN),)
+	@echo ""
+	@echo "  No DNS records needed: every name under $(DOMAIN) already resolves to"
+	@echo "  this server. If a firewall sits in front of it, open 80, 443, 3478 and"
+	@echo "  7881 (TCP) and 3478 and 50000-50100 (UDP); calls need the last four."
+else
 	@echo ""
 	@echo "  DNS, part 1. A records pointing at THIS server:"
 	@echo "    onecamp-backend.$(DOMAIN)   the API"
@@ -512,6 +584,7 @@ else
 endif
 	@echo ""
 	@echo "  Do NOT create records for the admin consoles; they are not routed."
+endif
 
 # Traefik's dashboard is behind HTTP basic auth, so it needs a bcrypt hash rather
 # than the password. htpasswd comes from apache2-utils, which the installer adds.
@@ -791,6 +864,46 @@ journey:
 # IT EXITS NON-ZERO when anything fails, so it can gate an automated deploy. That
 # is the property that matters most: a provisioning system can run this and only
 # tell a customer their workspace is ready once it has actually proven so.
+# auto-domain-https waits for a real certificate on a no-domain install, and
+# moves to nip.io when sslip.io cannot get one.
+#
+# Let's Encrypt counts certificates per registered domain. sslip.io is not on
+# the Public Suffix List, so every sslip.io user in the world shares one weekly
+# quota; it is raised far above the default, and was still used up in February
+# 2026 (github.com/cunnie/sslip.io/issues/108). nip.io resolves the same names
+# and has a quota of its own, so a refusal costs a rebuild, not the install.
+# Never fails the install: verify reports what is still wrong.
+auto-domain-https:
+	@be=$$(grep -E '^BACKEND_DOMAIN=' .env | cut -d= -f2-); dom=$$(grep -E '^FE_DOMAIN=' .env | cut -d= -f2-); \
+	echo "  waiting for the HTTPS certificate for $$dom (up to 3 minutes)…"; \
+	waited=0; \
+	while [ $$waited -lt 180 ]; do \
+		if curl -fs --max-time 8 -o /dev/null "https://$$be/health"; then \
+			echo "    ok    https://$$be has a valid certificate"; exit 0; \
+		fi; \
+		sleep 6; waited=$$((waited+6)); \
+	done; \
+	if $(COMPOSE) logs --tail 400 traefik 2>/dev/null | grep -qiE 'too many certificates|rateLimited'; then \
+		case "$$dom" in \
+			*.sslip.io) alt="$${dom%.sslip.io}.nip.io" ;; \
+			*) alt="" ;; \
+		esac; \
+		if [ -n "$$alt" ]; then \
+			echo "  Let's Encrypt has used up this week's certificates for sslip.io."; \
+			echo "  Moving to $$alt, which resolves the same way, and rebuilding."; \
+			$(MAKE) -f $(SELF) --no-print-directory replace-domain DOMAIN="$$alt" AUTO_DOMAIN=1 && \
+			$(MAKE) -f $(SELF) --no-print-directory build_restart_all && \
+			$(MAKE) -f $(SELF) --no-print-directory auto-domain-https; \
+			exit $$?; \
+		fi; \
+		echo "    FAIL  Let's Encrypt is refusing certificates for $$dom this week."; \
+		echo "          Use your own domain: make replace-domain DOMAIN=example.com && make build_restart_all"; \
+		exit 0; \
+	fi; \
+	echo "    warn  no valid certificate for https://$$be yet. Ports 80 and 443 must be"; \
+	echo "          reachable from the internet for Let's Encrypt to issue one; see:"; \
+	echo "          $(COMPOSE) logs traefik | grep -i acme"
+
 verify:
 	@fail=0; warn=0; \
 	$(db_fn); \
@@ -1253,9 +1366,15 @@ tune:
 	[ "$$heap" -lt 512 ] && heap=512; [ "$$heap" -gt 4096 ] && heap=4096; \
 	cores=$$(nproc 2>/dev/null || echo 4); \
 	preset=1080p30; [ "$$cores" -le 4 ] && preset=720p30; \
+	av=clamav; [ "$$ram_mb" -lt 7000 ] && av=; \
 	$(call set_env_sh,OPENSEARCH_HEAP,$${heap}m); \
 	$(call set_env_sh,EGRESS_PRESET,$$preset); \
-	echo "  tune: $${ram_mb} MB RAM, $${cores} cores -> OPENSEARCH_HEAP=$${heap}m EGRESS_PRESET=$$preset"
+	$(call set_env_sh,CLAMAV_HOST,$$av); \
+	echo "  tune: $${ram_mb} MB RAM, $${cores} cores -> OPENSEARCH_HEAP=$${heap}m EGRESS_PRESET=$$preset virus-scan=$${av:-off}"; \
+	if [ -z "$$av" ]; then \
+		echo "        Virus scanning of uploads is off: it needs about 2 GB of RAM of its own."; \
+		echo "        On a server with 8 GB or more, re-run make tune to turn it on."; \
+	fi
 
 # set_env_sh is set_env for use inside a shell recipe line (no leading @).
 define set_env_sh

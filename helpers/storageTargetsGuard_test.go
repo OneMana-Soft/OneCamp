@@ -53,9 +53,10 @@ func TestStorageTargetsKeepTheirShape(t *testing.T) {
 
 	// tune runs at install and at update, so an existing machine is sized
 	// on its next update rather than never.
-	install := section(mk, "install:")
+	// install only decides the domain and password; install_run does the work.
+	install := section(mk, "install_run:")
 	update := section(mk, "update_apply:")
-	for name, body := range map[string]string{"install": install, "update_apply": update} {
+	for name, body := range map[string]string{"install_run": install, "update_apply": update} {
 		if !strings.Contains(body, "--no-print-directory tune") {
 			t.Errorf("%s does not run tune", name)
 		}

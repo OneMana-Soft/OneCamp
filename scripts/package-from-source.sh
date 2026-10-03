@@ -46,4 +46,5 @@ echo "${VERSION:-source}" > "$OUT/version.txt"
 
 echo "ready: $OUT"
 echo "next, on your server in that directory:"
-echo "  make install EMAIL=you@example.com DOMAIN=example.com PASSWORD=<traefik-admin-password>"
+echo "  make install EMAIL=you@example.com            # free address, no DNS needed"
+echo "  make install EMAIL=you@example.com DOMAIN=example.com   # your own domain"
