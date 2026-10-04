@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
@@ -56,23 +57,90 @@ func GetMyNotificationPreferences(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"status": "success",
 		"data": map[string]any{
-			"email_supported":         emailService.IsEmailEnabled(),
-			"email_enabled":           pref.EmailEnabled,
-			"email_mentions":          pref.EmailMentions,
-			"email_dms":               pref.EmailDMs,
-			"email_task_assigned":     pref.EmailTaskAssigned,
-			"email_task_status":       pref.EmailTaskStatus,
-			"email_comments":          pref.EmailComments,
-			"email_calls":             pref.EmailCalls,
-			"email_channel_invites":   pref.EmailChannelInvites,
-			"email_only_when_offline": pref.EmailOnlyWhenOffline,
-			"email_digest_frequency":  pref.EmailDigestFrequency,
-			"quiet_hours_enabled":     pref.QuietHoursEnabled,
-			"quiet_hours_start":       pref.QuietHoursStart,
-			"quiet_hours_end":         pref.QuietHoursEnd,
-			"quiet_hours_tz":          pref.QuietHoursTZ,
+			"email_supported":            emailService.IsEmailEnabled(),
+			"email_enabled":              pref.EmailEnabled,
+			"email_mentions":             pref.EmailMentions,
+			"email_dms":                  pref.EmailDMs,
+			"email_task_assigned":        pref.EmailTaskAssigned,
+			"email_task_status":          pref.EmailTaskStatus,
+			"email_comments":             pref.EmailComments,
+			"email_calls":                pref.EmailCalls,
+			"email_channel_invites":      pref.EmailChannelInvites,
+			"email_only_when_offline":    pref.EmailOnlyWhenOffline,
+			"email_digest_frequency":     pref.EmailDigestFrequency,
+			"quiet_hours_enabled":        pref.QuietHoursEnabled,
+			"quiet_hours_start":          pref.QuietHoursStart,
+			"quiet_hours_end":            pref.QuietHoursEnd,
+			"quiet_hours_tz":             pref.QuietHoursTZ,
+			"notifications_paused_until": pausedUntil(pref.NotificationsPausedUntil),
 		},
 	})
+}
+
+// pausedUntil is a pause still in force, or nil: an expired pause is not news.
+func pausedUntil(t *time.Time) *time.Time {
+	if t == nil || !t.After(time.Now()) {
+		return nil
+	}
+	return t
+}
+
+type pauseInput struct {
+	// Until pauses to a moment; Minutes pauses for a while; neither resumes.
+	Until   *time.Time `json:"until,omitempty"`
+	Minutes int        `json:"minutes,omitempty"`
+}
+
+// PauseMyNotifications pauses (or resumes) every notification to the person's
+// devices: Slack's "pause notifications". Quiet hours keep working beside it.
+// POST /user/notificationPause {until?|minutes?}
+func PauseMyNotifications(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	if !ok {
+		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not signed in"})
+		return
+	}
+	// Preferences are keyed by the Postgres user id, as everywhere else here.
+	userID := userInfo.UserPostgresInfo.Id
+	var in pauseInput
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that request."})
+		return
+	}
+	until, err := pauseEnd(in, time.Now())
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		return
+	}
+	pref, err := prefDomain.SetPause(ctx, userID, until)
+	var pe *prefDomain.PauseError
+	if errors.As(err, &pe) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": pe.Error()})
+		return
+	}
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Couldn't change your notifications. Try again."})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"notifications_paused_until": pausedUntil(pref.NotificationsPausedUntil)}})
+}
+
+// pauseEnd turns a request into the moment the pause ends (nil = resume).
+func pauseEnd(in pauseInput, now time.Time) (*time.Time, error) {
+	var until time.Time
+	switch {
+	case in.Until != nil:
+		until = *in.Until
+	case in.Minutes > 0:
+		until = now.Add(time.Duration(in.Minutes) * time.Minute)
+	default:
+		return nil, nil
+	}
+	if err := prefDomain.CheckPauseEnd(until, now); err != nil {
+		return nil, err
+	}
+	return &until, nil
 }
 
 // UpdateMyNotificationPreferences applies a partial update.
@@ -123,7 +191,8 @@ func UpdateMyNotificationPreferences(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.QuietHoursTZ != nil && *input.QuietHoursTZ != "" {
-		if _, err := time.LoadLocation(*input.QuietHoursTZ); err != nil {
+		known, err := prefModels.KnownTimeZone(*input.QuietHoursTZ)
+		if _, lerr := time.LoadLocation(*input.QuietHoursTZ); err != nil || lerr != nil || !known {
 			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 				"msg":    "invalid quiet_hours_tz (must be IANA TZ)",
 				"status": "failed",

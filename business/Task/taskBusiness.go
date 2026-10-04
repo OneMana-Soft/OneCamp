@@ -1333,6 +1333,11 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 		"updated_by_uuid": userInfo.Uuid,
 	})
 
+	// A repeating task makes its next occurrence when it is done.
+	if next.Category == dgraphStruct.TASK_STATUS_DONE && prev.Category != dgraphStruct.TASK_STATUS_DONE {
+		repeatIfRecurring(ctx, taskUUID, userInfo)
+	}
+
 	return
 }
 

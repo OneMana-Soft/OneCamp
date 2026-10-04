@@ -3,6 +3,7 @@ package helpers
 import (
 	"errors"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/lib/pq"
 )
 
@@ -40,6 +41,13 @@ func IsUniqueViolation(err error) bool { return pgErrorCodeIs(err, pgUniqueViola
 func pgErrorCodeIs(err error, code string) bool {
 	if err == nil {
 		return false
+	}
+	// The server talks to Postgres through pgx; lib/pq errors still come from
+	// the tools that use it. Checking only pq's type made every duplicate look
+	// like a server error ("something went wrong" for a taken channel name).
+	var pgxErr *pgconn.PgError
+	if errors.As(err, &pgxErr) {
+		return pgxErr.Code == code
 	}
 	var pqErr *pq.Error
 	if errors.As(err, &pqErr) {

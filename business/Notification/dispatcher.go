@@ -55,6 +55,7 @@ const (
 	EventChannelCall      EventType = "channel.call"
 	EventChatCall         EventType = "chat.call"
 	EventMemoryDigest     EventType = "memory.digest"
+	EventCalendarBooking  EventType = "calendar.booking"
 )
 
 // Recipient describes a single user the dispatcher should consider. Only the
@@ -225,7 +226,7 @@ func dispatchPrepared(ctx context.Context, evt Event, user *userModels.User, pre
 	// Quiet hours. Defer to the next post-quiet-hours moment by setting
 	// next_retry_at at insert time so the worker can never pick the row
 	// up before the window closes.
-	deliverAt, deferred := quietHoursDelay(time.Now(), pref)
+	deliverAt, deferred := deliveryTime(time.Now(), pref)
 
 	tmplData := emailService.TemplateData{
 		RecipientName:  user.EmailID,
@@ -333,6 +334,17 @@ func isUserOnline(ctx context.Context, userUUID string) bool {
 	return *dgraphUser.DevicesConnected > 0
 }
 
+// deliveryTime is when an email may go out: after a pause, then past quiet
+// hours as they stand at that moment. Returns (whenToDeliver, deferred).
+func deliveryTime(now time.Time, p *prefModels.UserNotificationPreference) (time.Time, bool) {
+	from := now
+	if p.NotificationsPausedUntil != nil && p.NotificationsPausedUntil.After(now) {
+		from = *p.NotificationsPausedUntil
+	}
+	at, _ := quietHoursDelay(from, p)
+	return at, at.After(now)
+}
+
 // quietHoursDelay decides whether we should defer the email past the user's
 // quiet-hours window. Returns (whenToDeliver, deferred).
 func quietHoursDelay(now time.Time, p *prefModels.UserNotificationPreference) (time.Time, bool) {
@@ -357,6 +369,10 @@ func quietHoursDelay(now time.Time, p *prefModels.UserNotificationPreference) (t
 	endToday := time.Date(local.Year(), local.Month(), local.Day(), endH, endM, 0, 0, loc)
 
 	// Two cases: same-day window (08:00 → 17:00) and overnight window (22:00 → 07:00).
+	// A window that starts where it ends is empty, as the push gate reads it.
+	if endToday.Equal(startToday) {
+		return now, false
+	}
 	if endToday.After(startToday) {
 		// Same-day. If now is inside, deliver at end.
 		if (local.Equal(startToday) || local.After(startToday)) && local.Before(endToday) {

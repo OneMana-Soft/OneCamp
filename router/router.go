@@ -242,6 +242,12 @@ func Routes() http.Handler {
 	// single-room LiveKit token). Rate-limited per IP; every "not available"
 	// reason (disabled / invalid / expired / revoked) returns a uniform 404 so
 	// there is no oracle. The 32-byte link token makes brute force infeasible.
+	// Booking pages: anyone may look at free slots and book one. Booking and
+	// cancelling are limited per address; looking is cached per page.
+	router.Get("/public/book/{slug}", eventController.GetPublicBookingPage)
+	router.With(customMiddleware.IPRateLimit("booking", 10, "Too many bookings from here. Try again later.")).With(customMiddleware.BodyLimit(8<<10)).Post("/public/book/{slug}", eventController.BookPublicSlot)
+	router.With(customMiddleware.LoginRateLimit("booking-cancel")).Get("/public/booking/{token}", eventController.GetPublicBooking)
+	router.With(customMiddleware.LoginRateLimit("booking-cancel")).Post("/public/booking/{token}/cancel", eventController.CancelPublicBooking)
 	router.With(customMiddleware.LoginRateLimit("guest")).Get("/guest/meet/{token}", guestController.GetGuestMeeting)
 	router.With(customMiddleware.LoginRateLimit("guest")).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/meet/{token}/join", guestController.JoinGuestMeeting)
 	// Phase 2: exchange a doc/board share-link token for a short-lived,
@@ -1104,6 +1110,7 @@ func Routes() http.Handler {
 		// Email notification preferences (per-user toggles, quiet hours, digest).
 		r.Get("/notificationPreferences", notificationController.GetMyNotificationPreferences)
 		r.Post("/notificationPreferences", notificationController.UpdateMyNotificationPreferences)
+		r.Post("/notificationPause", notificationController.PauseMyNotifications)
 		r.Post("/addFavChannel/{channel_id}", userController.AddChannelToUserFav)
 		r.Post("/removeFavChannel/{channel_id}", userController.RemoveChannelToUserFav)
 		r.Post("/searchUserAndChannelList", userController.FwdUserAndChannelList)
@@ -1218,6 +1225,11 @@ func Routes() http.Handler {
 		r.Post("/updateTaskStartDate", taskController.UpdateTaskStartDate)
 		r.Post("/updateTaskDueDate", taskController.UpdateTaskDueDate)
 		r.Post("/updateTaskStatus", taskController.UpdateTaskStatus)
+		r.Get("/recurrence/{task_uuid}", taskController.GetTaskRecurrence)
+		r.Post("/recurrence", taskController.SetTaskRecurrence)
+		r.Get("/views", taskController.GetTaskViews)
+		r.Post("/views", taskController.SaveTaskView)
+		r.Post("/views/delete", taskController.DeleteTaskView)
 		r.Post("/moveTask", taskController.MoveTask)
 		r.Post("/updateTaskPriority", taskController.UpdateTaskPriority)
 		r.Post("/updateTaskLabel", taskController.UpdateTaskLabel)
@@ -1381,6 +1393,10 @@ func Routes() http.Handler {
 		r.Post("/updateEvent/{eventId}", eventController.UpdateEventController)
 		r.Delete("/deleteEvent/{eventId}", eventController.DeleteEventController)
 		r.Post("/leaveEvent/{eventId}", eventController.LeaveEventController)
+		r.Post("/findTime", eventController.FindTime)
+		r.Get("/bookingPages", eventController.GetMyBookingPages)
+		r.Post("/bookingPages", eventController.SaveMyBookingPage)
+		r.Post("/bookingPages/delete", eventController.DeleteMyBookingPage)
 	})
 
 	integrationRouter.Group(func(r chi.Router) {

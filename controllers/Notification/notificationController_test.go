@@ -101,3 +101,24 @@ func TestValidHHMM(t *testing.T) {
 		}
 	}
 }
+
+func TestPauseEnd(t *testing.T) {
+	now := time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)
+	later := now.Add(2 * time.Hour)
+	past := now.Add(-time.Hour)
+	if got, err := pauseEnd(pauseInput{}, now); got != nil || err != nil {
+		t.Fatalf("empty input resumes: %v %v", got, err)
+	}
+	if got, err := pauseEnd(pauseInput{Minutes: 30}, now); err != nil || !got.Equal(now.Add(30*time.Minute)) {
+		t.Fatalf("minutes: %v %v", got, err)
+	}
+	if got, err := pauseEnd(pauseInput{Until: &later, Minutes: 5}, now); err != nil || !got.Equal(later) {
+		t.Fatalf("until wins: %v %v", got, err)
+	}
+	if _, err := pauseEnd(pauseInput{Until: &past}, now); err == nil {
+		t.Fatal("past accepted")
+	}
+	if _, err := pauseEnd(pauseInput{Minutes: 8 * 24 * 60}, now); err == nil {
+		t.Fatal("eight days accepted")
+	}
+}

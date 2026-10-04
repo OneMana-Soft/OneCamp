@@ -175,15 +175,9 @@ func Schedule(ctx context.Context, user *userModels.UserInfo, kind string, body 
 	if err != nil {
 		return nil, err
 	}
-	pending, err := jobDomain.ListByUser(ctx, owner, []string{jobModel.StatusPending}, MaxPerPerson+1)
+	n, err := jobDomain.CountByUser(ctx, owner, jobModel.JobTypeScheduledMessage, []string{jobModel.StatusPending})
 	if err != nil {
 		return nil, err
-	}
-	n := 0
-	for _, j := range pending {
-		if j.JobType == jobModel.JobTypeScheduledMessage {
-			n++
-		}
 	}
 	if n >= MaxPerPerson {
 		return nil, ErrTooMany
@@ -211,16 +205,13 @@ func List(ctx context.Context, user *userModels.UserInfo, target string) ([]*Vie
 	if err != nil {
 		return nil, err
 	}
-	jobs, err := jobDomain.ListByUser(ctx, owner, []string{jobModel.StatusPending, jobModel.StatusRunning, jobModel.StatusFailed}, 200)
+	jobs, err := jobDomain.ListByUser(ctx, owner, jobModel.JobTypeScheduledMessage, []string{jobModel.StatusPending, jobModel.StatusRunning, jobModel.StatusFailed}, MaxPerPerson+100)
 	if err != nil {
 		return nil, err
 	}
 	out := []*View{}
 	weekAgo := time.Now().Add(-7 * 24 * time.Hour)
 	for _, j := range jobs {
-		if j.JobType != jobModel.JobTypeScheduledMessage {
-			continue
-		}
 		if j.Status == jobModel.StatusFailed && j.UpdatedAt.Before(weekAgo) {
 			continue
 		}

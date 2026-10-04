@@ -66,7 +66,7 @@ func GetFCMTokenByUserId(ctx context.Context, userId string) (tokens []string, e
 	query := `
 		SELECT fcm_token 
 		FROM users_fcm_token 
-		WHERE user_id = $1
+		WHERE user_id = $1 AND` + notPaused("users_fcm_token.user_id") + `
 	`
 
 	tokens, err = models.GetFCMTokenByUserId(query, userId)
@@ -87,7 +87,7 @@ func GetFCMTokenByListOfUserId(ctx context.Context, userIds []string) (tokens []
 	query := `
 		SELECT fcm_token
 		FROM users_fcm_token
-		WHERE user_id IN (` + helpers.Placeholders(len(userIds)) + `)`
+		WHERE user_id IN (` + helpers.Placeholders(len(userIds)) + `) AND` + notPaused("users_fcm_token.user_id")
 
 	tokens, err = models.GetFCMTokenByListOfUserId(query, userIds)
 
@@ -109,6 +109,7 @@ func GetFCMTokensForNewChannelActivityExcludingUserId(ctx context.Context, userI
 			  ON fcm.user_id = ucn.user_id
 			WHERE ucn.channel_id = $1
 			  AND ucn.user_id != $2
+			  AND` + notPaused("fcm.user_id") + `
 			  AND (
 				  (ucn.notification_type = 'all' AND ucn.user_id = ANY($3)) OR
 				  (ucn.notification_type = 'mention' AND ucn.user_id = ANY($4))
@@ -139,6 +140,7 @@ func GetFCMTokensForNewProjectActivityExcludingUserId(ctx context.Context, userI
 		WHERE 
 			upn.project_id = $1
 			AND upn.user_id != $2
+			AND` + notPaused("uft.user_id") + `
 			AND (
 					(upn.notification_type = 'all' AND upn.user_id = ANY($3)) OR
 					(upn.notification_type = 'mention' AND upn.user_id = ANY($4))
@@ -169,6 +171,7 @@ func GetFCMTokensForNewChatActivityExcludingUserId(ctx context.Context, userId s
 		WHERE 
 			ucn.grp_id = $1
 			AND ucn.user_id != $2
+			AND` + notPaused("uft.user_id") + `
 			AND (
 					(ucn.notification_type = 'all') OR
 					(ucn.notification_type = 'mention' AND ucn.user_id = ANY($3))

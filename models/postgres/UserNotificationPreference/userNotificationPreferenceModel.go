@@ -33,16 +33,19 @@ type UserNotificationPreference struct {
 	QuietHoursStart      *string   `json:"quiet_hours_start,omitempty"`
 	QuietHoursEnd        *string   `json:"quiet_hours_end,omitempty"`
 	QuietHoursTZ         *string   `json:"quiet_hours_tz,omitempty"`
-	UnsubscribeToken     string    `json:"-"` // never expose to the client
-	CreatedAt            time.Time `json:"created_at"`
-	UpdatedAt            time.Time `json:"updated_at"`
+	// NotificationsPausedUntil is a pause the person set (Slack's "pause
+	// notifications"); nil or past means not paused. See domain/UserFCMToken.
+	NotificationsPausedUntil *time.Time `json:"notifications_paused_until,omitempty"`
+	UnsubscribeToken         string     `json:"-"` // never expose to the client
+	CreatedAt                time.Time  `json:"created_at"`
+	UpdatedAt                time.Time  `json:"updated_at"`
 }
 
 const allColumns = `id, user_id, email_enabled, email_mentions, email_dms, email_task_assigned,
 		email_task_status, email_comments, email_calls, email_channel_invites,
 		email_only_when_offline, email_digest_frequency, quiet_hours_enabled,
 		quiet_hours_start, quiet_hours_end, quiet_hours_tz, unsubscribe_token,
-		created_at, updated_at`
+		created_at, updated_at, notifications_paused_until`
 
 func scanRow(row *sql.Row) (*UserNotificationPreference, error) {
 	var p UserNotificationPreference
@@ -51,7 +54,7 @@ func scanRow(row *sql.Row) (*UserNotificationPreference, error) {
 		&p.EmailTaskAssigned, &p.EmailTaskStatus, &p.EmailComments, &p.EmailCalls,
 		&p.EmailChannelInvites, &p.EmailOnlyWhenOffline, &p.EmailDigestFrequency,
 		&p.QuietHoursEnabled, &p.QuietHoursStart, &p.QuietHoursEnd, &p.QuietHoursTZ,
-		&p.UnsubscribeToken, &p.CreatedAt, &p.UpdatedAt,
+		&p.UnsubscribeToken, &p.CreatedAt, &p.UpdatedAt, &p.NotificationsPausedUntil,
 	)
 	if err != nil {
 		return nil, err
@@ -267,7 +270,7 @@ func GetByUserIDs(userIDs []uuid.UUID) (map[uuid.UUID]*UserNotificationPreferenc
 			&p.EmailTaskAssigned, &p.EmailTaskStatus, &p.EmailComments, &p.EmailCalls,
 			&p.EmailChannelInvites, &p.EmailOnlyWhenOffline, &p.EmailDigestFrequency,
 			&p.QuietHoursEnabled, &p.QuietHoursStart, &p.QuietHoursEnd, &p.QuietHoursTZ,
-			&p.UnsubscribeToken, &p.CreatedAt, &p.UpdatedAt,
+			&p.UnsubscribeToken, &p.CreatedAt, &p.UpdatedAt, &p.NotificationsPausedUntil, &p.NotificationsPausedUntil,
 		)
 		if err != nil {
 			return nil, err
@@ -275,4 +278,29 @@ func GetByUserIDs(userIDs []uuid.UUID) (map[uuid.UUID]*UserNotificationPreferenc
 		out[p.UserID] = &p
 	}
 	return out, rows.Err()
+}
+
+// SetPausedUntil pauses a person's notifications until a time, or resumes them
+// (nil). The row must exist (domain LoadOrCreate makes it).
+func SetPausedUntil(userID uuid.UUID, until *time.Time) error {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx,
+		`UPDATE users_notification_preferences SET notifications_paused_until = $2, updated_at = NOW() WHERE user_id = $1`, userID, until)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/UserNotificationPreference/SetPausedUntil err: %+v", err)
+	}
+	return err
+}
+
+// KnownTimeZone says whether Postgres can read the zone name. Go's zone list
+// and Postgres's can differ, and the push gate converts times in SQL, where a
+// name Postgres can't read would fail every lookup that touches the row.
+func KnownTimeZone(name string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	var ok bool
+	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM pg_timezone_names WHERE name = $1)`, name).Scan(&ok)
+	return ok, err
 }
