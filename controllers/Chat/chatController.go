@@ -12,13 +12,12 @@ import (
 	business "github.com/akashc777/OneCamp/business/Chat"
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
 	lastSeenChatBusiness "github.com/akashc777/OneCamp/business/LastSeenChat"
-	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
 	reactionBusiness "github.com/akashc777/OneCamp/business/Reaction"
+	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	userChatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
-	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -44,71 +43,14 @@ func CreateChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	toUUID, err := uuid.Parse(chatInfo.ToUuid)
+	// Every rule for messaging lives in business/Send, shared with scheduled
+	// messages, so a message sent now and one sent later obey the same checks.
+	dm, err := sendBusiness.PrepareDirectMessage(ctx, &userInfo, &chatInfo)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateChat Failed to parse toUUID err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse toUUID in req",
-			"err": err,
-		})
+		writeSendError(w, err)
 		return
 	}
-
-	sendToDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, chatInfo.ToUuid)
-
-	if err != nil || (sendToDgraphInfo.DeletedAt != nil && !sendToDgraphInfo.DeletedAt.IsZero()) {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateChat Failed to get user dgraphInfo of sendUUID err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to info of  toUUID in req",
-			"err": err,
-		})
-		return
-	}
-
-	// The recipient rule, now held in one place so the AI executor and the MCP
-	// authorizer enforce the identical thing. It keeps the deliberate bot exception:
-	// external (read-only ghost) users can't be DMed, but the shared automation bot is
-	// is_external by class and is intentionally messageable, because a DM to it is
-	// answered by the AI coworker.
-	if e := principalBusiness.CanReceiveDirectMessage(sendToDgraphInfo); !e.Allowed {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Cannot start a direct message with this user",
-			"err": e.Reason,
-		})
-		return
-	}
-
-	mentions, err := helpers.GetMentions(chatInfo.TextHtml)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateChat Failed to get post mentions err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get post mentions",
-			"err": err,
-		})
-		return
-	}
-
-	mentionsDgraphUsersList, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, mentions)
-
-	if len(mentionsDgraphUsersList) != len(mentions) {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Got unregistered users in mentions",
-			"err": err,
-		})
-		return
-	}
-
-	createdChatInfo, err := business.CreateChat(ctx, &chatInfo, &userInfo, sendToDgraphInfo, toUUID, mentionsDgraphUsersList)
+	createdChatInfo, err := dm.Commit(ctx)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/CreateChat Failed to create chat err: %+v",
@@ -353,87 +295,12 @@ func CreateGroupChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var perticipantsDgraphUsersList []*dgraphStruct.DgraphUser
-
-	if len(chatInfo.Participants) > 0 {
-
-		perticipantsDgraphUsersList, err = userBusiness.GetDgraphUserInfoByUUIDs(ctx, chatInfo.Participants)
-
-		if len(perticipantsDgraphUsersList) != len(chatInfo.Participants) || err != nil {
-
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "Got unregistered users in participants",
-				"err": err,
-			})
-			return
-		}
-
-		for _, p := range perticipantsDgraphUsersList {
-			if p.IsExternal {
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-					"msg": "Cannot add external users to group chats",
-				})
-				return
-			}
-		}
-
-	} else if len(chatInfo.GrpUuid) > 0 {
-
-		dgraphDm, err := business.GetDgraphDmBasicInfoFromDgraph(ctx, userInfo.UserDgraphInfo.Uid, chatInfo.GrpUuid)
-
-		if err != nil {
-
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "Faild to get group participants",
-				"err": err,
-			})
-			return
-
-		}
-
-		if dgraphDm.ParticipantIsMember == 0 {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-				"msg": "Not Authorised",
-			})
-
-			return
-		}
-
-		perticipantsDgraphUsersList = dgraphDm.Participants
-	}
-
-	if len(perticipantsDgraphUsersList) < 3 {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Minimum 3 participants required for a group",
-		})
-		return
-	}
-
-	mentions, err := helpers.GetMentions(chatInfo.TextHtml)
+	group, err := sendBusiness.PrepareGroupMessage(ctx, &userInfo, &chatInfo)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateGroupChat Failed to get post mentions err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get post mentions",
-			"err": err,
-		})
+		writeSendError(w, err)
 		return
 	}
-
-	mentionsDgraphUsersList, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, mentions)
-
-	if len(mentionsDgraphUsersList) != len(mentions) {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Got unregistered users in mentions",
-			"err": err,
-		})
-		return
-	}
-
-	createdChatInfo, err := business.CreateChatForGroup(ctx, &chatInfo, &userInfo, mentionsDgraphUsersList, perticipantsDgraphUsersList)
+	createdChatInfo, err := group.Commit(ctx)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/CreateGroupChat Failed to create chat err: %+v",
@@ -1005,7 +872,9 @@ func GetOldChats(w http.ResponseWriter, r *http.Request) {
 
 	epochTime, err := strconv.ParseInt(epochTimeString, 10, 64)
 	if err != nil {
-		panic(err)
+		// A malformed time in the URL is the caller's mistake: say so, don't panic.
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "time_stamp must be a whole number of seconds"})
+		return
 	}
 
 	secondUserUUID, err := uuid.Parse(secondUserUUIDString)
@@ -1195,7 +1064,9 @@ func GetNewGroupChats(w http.ResponseWriter, r *http.Request) {
 
 	epochTime, err := strconv.ParseInt(epochTimeString, 10, 64)
 	if err != nil {
-		panic(err)
+		// A malformed time in the URL is the caller's mistake: say so, don't panic.
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "time_stamp must be a whole number of seconds"})
+		return
 	}
 
 	dgraphDm, err := business.GetDgraphDmBasicInfoFromDgraph(ctx, userInfo.UserDgraphInfo.Uid, grpIdString)
@@ -1250,7 +1121,9 @@ func GetNewChats(w http.ResponseWriter, r *http.Request) {
 
 	epochTime, err := strconv.ParseInt(epochTimeString, 10, 64)
 	if err != nil {
-		panic(err)
+		// A malformed time in the URL is the caller's mistake: say so, don't panic.
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "time_stamp must be a whole number of seconds"})
+		return
 	}
 
 	secondUserUUID, err := uuid.Parse(secondUserUUIDString)
@@ -2808,4 +2681,18 @@ func GetGrpChatRecordingTranscript(w http.ResponseWriter, r *http.Request) {
 		"pageCount": pageCount,
 	})
 
+}
+
+// writeSendError answers a refused send with the status and message the rule
+// gives, and anything else as a bad request.
+func writeSendError(w http.ResponseWriter, err error) {
+	if rj, ok := sendBusiness.AsRejection(err); ok {
+		env := helpers.Envolope{"msg": rj.Msg}
+		if rj.Err != nil {
+			env["err"] = rj.Err
+		}
+		helpers.WriteJSON(w, rj.Status, env)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to send", "err": err})
 }

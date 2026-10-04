@@ -272,3 +272,78 @@ func ExecJobs(ctx context.Context, query string, args []any) ([]*ScheduledJob, e
 	}
 	return jobs, rows.Err()
 }
+
+// GetUserJob returns one of a user's jobs of a type, or nil when it is not
+// theirs (or does not exist), so a caller can never reach another's job.
+func GetUserJob(ctx context.Context, id, userUUID uuid.UUID, jobType string) (*ScheduledJob, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	q := `SELECT ` + SelectColumns + ` FROM scheduled_jobs WHERE id = $1 AND user_uuid = $2 AND job_type = $3 AND deleted_at IS NULL`
+	j, err := scanFullJob(postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, id, userUUID, jobType))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return j, err
+}
+
+// UpdatePendingJob changes a pending job's time and payload. It reports false
+// when the job is no longer pending (it already fired, or was cancelled), so a
+// late edit never rewrites a message that has been sent.
+func UpdatePendingJob(ctx context.Context, id, userUUID uuid.UUID, runAt time.Time, payloadJSON string) (bool, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	const q = `UPDATE scheduled_jobs SET run_at = $3, payload = $4, attempts = 0, last_error = NULL, updated_at = NOW()
+		WHERE id = $1 AND user_uuid = $2 AND status = 'pending' AND deleted_at IS NULL`
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, userUUID, runAt, payloadJSON)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/UpdatePendingJob err: %+v", err)
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+// CancelPendingJob cancels a user's pending job, or dismisses one that failed;
+// false when it has been sent (or is sending) or is already gone.
+func CancelPendingJob(ctx context.Context, id, userUUID uuid.UUID) (bool, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	const q = `UPDATE scheduled_jobs SET status = 'cancelled', updated_at = NOW()
+		WHERE id = $1 AND user_uuid = $2 AND status IN ('pending', 'failed') AND deleted_at IS NULL`
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, userUUID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/CancelPendingJob err: %+v", err)
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+// ClaimUserJob takes a user's pending job out of the queue for running now,
+// the same claim the worker makes, so "send now" and the worker can never both
+// send it. Returns nil when it is no longer pending.
+func ClaimUserJob(ctx context.Context, id, userUUID uuid.UUID, workerID string) (*ScheduledJob, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	q := `UPDATE scheduled_jobs SET status = 'running', locked_at = NOW(), locked_by = $3, attempts = attempts + 1, updated_at = NOW()
+		WHERE id = $1 AND user_uuid = $2 AND status = 'pending' AND deleted_at IS NULL
+		RETURNING ` + SelectColumns
+	j, err := scanFullJob(postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, id, userUUID, workerID))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return j, err
+}
+
+// MarkFailed marks a job failed outright with a reason, regardless of its
+// retry budget: for a refusal that would only refuse again.
+func MarkFailed(ctx context.Context, id uuid.UUID, reason string) error {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	const q = `UPDATE scheduled_jobs SET status = 'failed', last_error = $2, locked_at = NULL, locked_by = NULL, updated_at = NOW() WHERE id = $1`
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, reason)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/MarkFailed err: %+v", err)
+	}
+	return err
+}
