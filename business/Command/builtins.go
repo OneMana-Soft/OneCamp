@@ -2,10 +2,12 @@ package business
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	commandAdapter "github.com/akashc777/OneCamp/adapter/Command"
+	prefDomain "github.com/akashc777/OneCamp/domain/UserNotificationPreference"
 )
 
 // init registers every built-in command handler. The catalog rows for these
@@ -122,6 +124,9 @@ func handleDnd(ctx context.Context, cc CommandContext) (*commandAdapter.CommandR
 
 	// Explicit off.
 	if low == "off" || low == "0" || low == "clear" || low == "end" {
+		if _, err := prefDomain.SetPause(ctx, cc.User.UserPostgresInfo.Id, nil); err != nil {
+			return errorResponse("Couldn't resume your notifications. Try again."), nil
+		}
 		return clientAction("set_dnd", map[string]string{}), nil
 	}
 
@@ -135,6 +140,16 @@ func handleDnd(ctx context.Context, cc CommandContext) (*commandAdapter.CommandR
 	when, err := ParseWhen("in "+dur, cc.Timezone)
 	if err != nil {
 		return errorResponse("Couldn't read that duration. Try `/dnd 30 minutes`, or `/dnd off`."), nil
+	}
+	// The server holds the pause, so phones and other tabs go quiet too; the
+	// client action updates this tab at once.
+	until := when.At
+	if _, err := prefDomain.SetPause(ctx, cc.User.UserPostgresInfo.Id, &until); err != nil {
+		var pe *prefDomain.PauseError
+		if errors.As(err, &pe) {
+			return errorResponse("%s", pe.Error()), nil
+		}
+		return errorResponse("Couldn't pause your notifications. Try again."), nil
 	}
 	return clientAction("set_dnd", map[string]string{
 		"until":   when.At.UTC().Format("2006-01-02T15:04:05Z07:00"),

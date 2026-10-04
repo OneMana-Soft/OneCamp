@@ -128,3 +128,35 @@ func TestRecipientsFromStrings(t *testing.T) {
 		t.Fatalf("expected %s, got %s", good, got[0].UserUUID.String())
 	}
 }
+
+// TestDeliveryTime: a pause holds email until it ends, and quiet hours are
+// then read at that moment, not at the time the email was raised.
+func TestDeliveryTime(t *testing.T) {
+	now := time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)
+	at := func(h, m int) time.Time { return time.Date(2026, 10, 5, h, m, 0, 0, time.UTC) }
+	ptr := func(v time.Time) *time.Time { return &v }
+	str := func(s string) *string { return &s }
+	cases := []struct {
+		name     string
+		pref     prefModels.UserNotificationPreference
+		want     time.Time
+		deferred bool
+	}{
+		{"nothing set", prefModels.UserNotificationPreference{}, now, false},
+		{"pause ended", prefModels.UserNotificationPreference{NotificationsPausedUntil: ptr(at(9, 0))}, now, false},
+		{"paused", prefModels.UserNotificationPreference{NotificationsPausedUntil: ptr(at(11, 30))}, at(11, 30), true},
+		{"pause ends inside quiet hours", prefModels.UserNotificationPreference{
+			NotificationsPausedUntil: ptr(at(12, 30)),
+			QuietHoursEnabled:        true, QuietHoursStart: str("12:00"), QuietHoursEnd: str("13:00"),
+		}, at(13, 0), true},
+		{"empty quiet window", prefModels.UserNotificationPreference{
+			QuietHoursEnabled: true, QuietHoursStart: str("09:00"), QuietHoursEnd: str("09:00"),
+		}, now, false},
+	}
+	for _, c := range cases {
+		got, deferred := deliveryTime(now, &c.pref)
+		if !got.Equal(c.want) || deferred != c.deferred {
+			t.Errorf("%s: got %v %v, want %v %v", c.name, got, deferred, c.want, c.deferred)
+		}
+	}
+}

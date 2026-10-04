@@ -1,6 +1,7 @@
 package business
 
 import (
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -12,7 +13,8 @@ import (
 //	FREQ=DAILY
 //	FREQ=WEEKLY;BYDAY=MO,WE,FR
 //	FREQ=WEEKLY            (same weekday as the previous run)
-//	FREQ=MONTHLY           (same day-of-month)
+//	FREQ=MONTHLY           (same day-of-month, or the month's last day)
+//	FREQ=YEARLY            (same date; Feb 29 falls back to Feb 28)
 //	FREQ=HOURLY
 //	INTERVAL=2             (every N periods; defaults to 1)
 //
@@ -59,14 +61,33 @@ func NextRun(rule string, from time.Time, prev time.Time) (time.Time, error) {
 		return nextWeekly(parts["BYDAY"], base, from, interval), nil
 
 	case "MONTHLY":
-		next := base
-		for !next.After(from) {
-			next = next.AddDate(0, interval, 0)
-		}
-		return next, nil
+		return nextByMonths(base, from, interval), nil
+
+	case "YEARLY":
+		return nextByMonths(base, from, 12*interval), nil
 
 	default:
 		return time.Time{}, nil
+	}
+}
+
+// nextByMonths steps whole months from base, keeping base's day of the month
+// where the month has it and using the month's last day where it doesn't:
+// the 31st repeats on Feb 28 (or 29), Apr 30, then May 31 again. Counting from
+// base, not from the last step, is what keeps a short month from dragging
+// every later one down to the 28th.
+func nextByMonths(base, from time.Time, months int) time.Time {
+	for k := 1; ; k++ {
+		y, m := base.Year(), base.Month()+time.Month(k*months)
+		last := time.Date(y, m+1, 0, 0, 0, 0, 0, base.Location()).Day()
+		day := base.Day()
+		if day > last {
+			day = last
+		}
+		next := time.Date(y, m, day, base.Hour(), base.Minute(), base.Second(), 0, base.Location())
+		if next.After(from) {
+			return next
+		}
 	}
 }
 
@@ -86,19 +107,31 @@ func nextWeekly(byday string, base, from time.Time, interval int) time.Time {
 		return next
 	}
 
-	// Search up to 8 weeks ahead for the next matching weekday after `from`.
+	// Search ahead for the next matching weekday after `from`, in a week that
+	// is a whole number of intervals from base's (every other week, ...).
 	start := time.Date(from.Year(), from.Month(), from.Day(),
 		tod.Hour(), tod.Minute(), tod.Second(), 0, tod.Location())
-	for offset := 0; offset < 7*8; offset++ {
+	baseWeek := mondayOf(base)
+	for offset := 0; offset < 7*8*interval; offset++ {
 		cand := start.AddDate(0, 0, offset)
 		if !cand.After(from) {
 			continue
 		}
-		if _, ok := days[cand.Weekday()]; ok {
+		if _, ok := days[cand.Weekday()]; !ok {
+			continue
+		}
+		weeks := int(math.Round(mondayOf(cand).Sub(baseWeek).Hours() / (24 * 7)))
+		if weeks%interval == 0 {
 			return cand
 		}
 	}
 	return time.Time{}
+}
+
+// mondayOf is midnight on the Monday of t's week, in t's zone.
+func mondayOf(t time.Time) time.Time {
+	d := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	return d.AddDate(0, 0, -((int(d.Weekday()) + 6) % 7))
 }
 
 // parseRule splits "KEY=VAL;KEY2=VAL2" into a map (upper-cased keys).
@@ -241,4 +274,61 @@ func DueForInterval(intervalMinutes int, lastRun *time.Time, now time.Time) bool
 		return true
 	}
 	return !now.Before(lastRun.Add(time.Duration(intervalMinutes) * time.Minute))
+}
+
+// NormaliseCalendarRule checks a calendar rule a person picked (DAILY, WEEKLY,
+// MONTHLY or YEARLY, INTERVAL 1-365, and BYDAY on WEEKLY only) and writes it
+// in one order, so equal rules compare equal. Pure.
+func NormaliseCalendarRule(rule string) (string, bool) {
+	parts := parseRule(rule)
+	freq := strings.ToUpper(parts["FREQ"])
+	switch freq {
+	case "DAILY", "WEEKLY", "MONTHLY", "YEARLY":
+	default:
+		return "", false
+	}
+	for k := range parts {
+		if k != "FREQ" && k != "INTERVAL" && k != "BYDAY" {
+			return "", false
+		}
+	}
+	out := "FREQ=" + freq
+	if v, ok := parts["INTERVAL"]; ok {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 365 {
+			return "", false
+		}
+		if n > 1 {
+			out += ";INTERVAL=" + strconv.Itoa(n)
+		}
+	}
+	if v, ok := parts["BYDAY"]; ok {
+		if freq != "WEEKLY" {
+			return "", false
+		}
+		days := parseByDay(v)
+		if len(days) == 0 || len(days) != len(strings.Split(v, ",")) {
+			return "", false
+		}
+		var names []string
+		for _, code := range []string{"MO", "TU", "WE", "TH", "FR", "SA", "SU"} {
+			if _, ok := days[bydayMap[code]]; ok {
+				names = append(names, code)
+			}
+		}
+		out += ";BYDAY=" + strings.Join(names, ",")
+	}
+	return out, true
+}
+
+// WithoutByDay drops BYDAY: "every 2 weeks after completion" counts weeks, not
+// weekdays. Pure.
+func WithoutByDay(rule string) string {
+	var keep []string
+	for _, seg := range strings.Split(rule, ";") {
+		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(seg)), "BYDAY=") {
+			keep = append(keep, seg)
+		}
+	}
+	return strings.Join(keep, ";")
 }

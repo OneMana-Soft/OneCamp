@@ -174,7 +174,7 @@ func remindList(ctx context.Context, cc CommandContext) (*commandAdapter.Command
 	if err != nil {
 		return errorResponse("Couldn't look up your reminders."), nil
 	}
-	jobs, err := jobDomain.ListByUser(ctx, ownerUUID, []string{jobModel.StatusPending}, 25)
+	jobs, err := jobDomain.ListByUser(ctx, ownerUUID, jobModel.JobTypeReminder, []string{jobModel.StatusPending}, 25)
 	if err != nil {
 		return errorResponse("Couldn't load your reminders."), nil
 	}
@@ -185,9 +185,6 @@ func remindList(ctx context.Context, cc CommandContext) (*commandAdapter.Command
 	var sb strings.Builder
 	sb.WriteString("*Your upcoming reminders*\n")
 	for _, j := range jobs {
-		if j.JobType != jobModel.JobTypeReminder {
-			continue
-		}
 		var p reminderPayload
 		_ = json.Unmarshal([]byte(j.Payload), &p)
 		when := j.RunAt.In(loadLocation(cc.Timezone)).Format("Mon, Jan 2 at 3:04 PM")

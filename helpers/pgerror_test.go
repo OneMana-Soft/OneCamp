@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/lib/pq"
 )
 
@@ -89,5 +90,17 @@ func TestDriverErrorMustNeverBeSerialisedToAClient(t *testing.T) {
 			t.Errorf("expected the marshalled driver error to expose %q — if this no longer "+
 				"holds, the warning in pgerror.go should be revisited", leaked)
 		}
+	}
+}
+
+// The server's driver is pgx: a duplicate it reports must be seen as one, or a
+// taken channel or booking-page name answers "something went wrong".
+func TestUniqueViolationFromPgx(t *testing.T) {
+	dup := fmt.Errorf("save: %w", &pgconn.PgError{Code: "23505"})
+	if !IsUniqueViolation(dup) {
+		t.Fatal("pgx unique violation not recognised")
+	}
+	if IsUniqueViolation(&pgconn.PgError{Code: "23503"}) {
+		t.Fatal("foreign-key violation taken for a duplicate")
 	}
 }

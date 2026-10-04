@@ -10,23 +10,35 @@ package domain
 
 import (
 	"context"
+	"fmt"
 
 	model "github.com/akashc777/OneCamp/models/postgres/ScheduledJob"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
 
-// ListByUser returns a user's jobs (optionally filtered by status) for the
-// "/remind list" surface and management screens, soonest run_at first.
-func ListByUser(ctx context.Context, userUUID uuid.UUID, statuses []string, limit int) ([]*model.ScheduledJob, error) {
+// ListByUser returns a user's jobs of one type ("" for every type), optionally
+// filtered by status, soonest run_at first. The type is filtered here, in SQL:
+// filtering after a LIMIT let one kind of job crowd out another (scheduled
+// messages hid reminders from "/remind list").
+func ListByUser(ctx context.Context, userUUID uuid.UUID, jobType string, statuses []string, limit int) ([]*model.ScheduledJob, error) {
 	query := `SELECT ` + model.SelectColumns + ` FROM scheduled_jobs WHERE user_uuid = $1 AND deleted_at IS NULL`
 	args := []any{userUUID}
-	if len(statuses) > 0 {
-		query += ` AND status = ANY($2) ORDER BY run_at ASC LIMIT $3`
-		args = append(args, pq.Array(statuses), limit)
-	} else {
-		query += ` ORDER BY run_at ASC LIMIT $2`
-		args = append(args, limit)
+	if jobType != "" {
+		args = append(args, jobType)
+		query += fmt.Sprintf(` AND job_type = $%d`, len(args))
 	}
+	if len(statuses) > 0 {
+		args = append(args, pq.Array(statuses))
+		query += fmt.Sprintf(` AND status = ANY($%d)`, len(args))
+	}
+	args = append(args, limit)
+	query += fmt.Sprintf(` ORDER BY run_at ASC LIMIT $%d`, len(args))
 	return model.ExecJobs(ctx, query, args)
+}
+
+// CountByUser counts a user's jobs of one type in the given statuses, for caps.
+func CountByUser(ctx context.Context, userUUID uuid.UUID, jobType string, statuses []string) (int, error) {
+	return model.CountJobs(ctx, `SELECT count(*) FROM scheduled_jobs WHERE user_uuid = $1 AND job_type = $2 AND status = ANY($3) AND deleted_at IS NULL`,
+		[]any{userUUID, jobType, pq.Array(statuses)})
 }

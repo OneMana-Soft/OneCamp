@@ -380,3 +380,15 @@ func MarkFailed(ctx context.Context, id uuid.UUID, reason string) error {
 	}
 	return err
 }
+
+// CountJobs runs a pre-built count query (see domain/ScheduledJob).
+func CountJobs(ctx context.Context, query string, args []any) (int, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	var n int
+	if err := postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, query, args...).Scan(&n); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/CountJobs err: %+v", err)
+		return 0, err
+	}
+	return n, nil
+}

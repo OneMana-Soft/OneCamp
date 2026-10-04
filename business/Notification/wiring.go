@@ -103,6 +103,35 @@ func DispatchMemoryDigest(recipientUUID, subject, body string) {
 	}()
 }
 
+// DispatchCalendarBooking tells a booking page's owner that someone booked
+// (or cancelled) time with them. Email is the channel: a booking lands while
+// the owner is away from OneCamp more often than not.
+func DispatchCalendarBooking(ownerUUID, guestName, pageTitle, when, bookingID string, cancelled bool) {
+	if ownerUUID == "" {
+		return
+	}
+	go func() {
+		defer recoverDispatch("DispatchCalendarBooking")
+		subject, title, kind := guestName+" booked "+pageTitle, "New booking", "booked"
+		if cancelled {
+			subject, title, kind = guestName+" cancelled "+pageTitle, "Booking cancelled", "cancelled"
+		}
+		Dispatch(context.Background(), Event{
+			Type:            EventCalendarBooking,
+			ActorName:       guestName,
+			SubjectLine:     subject,
+			Title:           title,
+			Subtitle:        pageTitle,
+			Body:            when,
+			CTAURL:          frontendBaseURL() + "/app/calendar",
+			CTAText:         "Open your calendar",
+			DedupKeyParts:   []string{"calendar.booking", bookingID, kind},
+			Recipients:      recipientsFromStrings([]string{ownerUUID}),
+			SkipOnlineCheck: true,
+		})
+	}()
+}
+
 // DispatchMemoryDigestTest sends a one-off TEST digest to a single recipient,
 // bypassing the per-(recipient, day) dedup so an admin can re-send and verify
 // delivery. It still honors the recipient's email settings + suppression

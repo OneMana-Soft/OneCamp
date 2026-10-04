@@ -25,6 +25,13 @@ const loginRateMaxAttempts = 20
 //
 // `kind` separates buckets across surfaces (email, ldap, forgot, etc).
 func LoginRateLimit(kind string) func(http.Handler) http.Handler {
+	return IPRateLimit(kind, loginRateMaxAttempts, "Too many login attempts. Please try again later.")
+}
+
+// IPRateLimit rate-limits mutating requests per (kind, client IP) in the
+// registry.LoginRate 15-minute window, answering 429 with msg once max is
+// reached. Fails OPEN when Redis is unavailable.
+func IPRateLimit(kind string, max int, msg string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Don't gate preflights or non-mutating probes
@@ -49,7 +56,7 @@ func LoginRateLimit(kind string) func(http.Handler) http.Handler {
 			rctx, cancel := contextWithRedisTimeout(ctx)
 			defer cancel()
 
-			res := redisStore.AllowFixedWindow(rctx, registry.LoginRate, []string{kind, ip}, loginRateMaxAttempts)
+			res := redisStore.AllowFixedWindow(rctx, registry.LoginRate, []string{kind, ip}, max)
 			if !res.Allowed {
 				retryAfter := res.RetryAfterSeconds()
 				if retryAfter <= 0 {
@@ -57,7 +64,7 @@ func LoginRateLimit(kind string) func(http.Handler) http.Handler {
 				}
 				w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 				helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{
-					"msg":    "Too many login attempts. Please try again later.",
+					"msg":    msg,
 					"status": "rate_limited",
 				})
 				return
