@@ -1665,10 +1665,12 @@ func GetChannelsAndUsers(ctx context.Context, userDgraphUID string, userDgraphUU
 
 	for _, u := range usersList {
 		fwdInfo := adapterUser.UserAndChannelFwdMessage{
-			Type:           "user",
-			UserUuid:       u.Uuid,
-			UserName:       u.UserName,
-			UserProfileKey: *u.ProfileKey,
+			Type:     "user",
+			UserUuid: u.Uuid,
+			UserName: u.UserName,
+			// Not every person has a photo (invited or seeded people often
+			// don't); dereferencing it unguarded crashed the forward search.
+			UserProfileKey: profileKeyOrEmpty(u.ProfileKey),
 			UserDgraphUid:  u.Uid,
 		}
 
@@ -1972,4 +1974,12 @@ func UnlinkExternalUser(ctx context.Context, userUUID uuid.UUID) (bool, error) {
 		return false, errors.New("user not found or not an external user")
 	}
 	return true, nil
+}
+
+// profileKeyOrEmpty is a person's photo key, or "" when they have none.
+func profileKeyOrEmpty(k *string) string {
+	if k == nil {
+		return ""
+	}
+	return *k
 }

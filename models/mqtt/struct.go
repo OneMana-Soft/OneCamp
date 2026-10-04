@@ -65,6 +65,9 @@ const (
 	MESSAGE_SAVED_ITEM_DUE
 	// A poll's votes or state changed; clients refetch that poll.
 	MESSAGE_POLL_UPDATE
+	// A member's scheduled message was sent, failed, or changed; an open app
+	// refreshes its scheduled list (and the conversation, when it sent).
+	MESSAGE_SCHEDULED_MESSAGE
 )
 
 const (

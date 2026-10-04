@@ -103,8 +103,10 @@ func TestEverySendPathAsksTheOneRecipientRule(t *testing.T) {
 		file string
 		why  string
 	}{
-		{"../../controllers/Chat/chatController.go",
-			"a person using the app could DM an identity that cannot read it"},
+		// The app's send path (and scheduled messages) since the rules moved out
+		// of the controller; the next test checks the controller still uses it.
+		{"../../business/Send/send.go",
+			"a person using the app (now, or in a scheduled message) could DM an identity that cannot read it"},
 		{"../../business/AI/aiExecutors.go",
 			"the in-app AI (and the MCP surface, which reuses this executor) could DM an " +
 				"identity the app refuses"},
@@ -120,6 +122,22 @@ func TestEverySendPathAsksTheOneRecipientRule(t *testing.T) {
 		if !strings.Contains(string(raw), "CanReceiveDirectMessage(") {
 			t.Errorf("%s does not call CanReceiveDirectMessage: %s", target.file, target.why)
 		}
+	}
+}
+
+// The HTTP handler must reach the recipient rule through business/Send, not
+// around it: a direct call to the create function would skip every check.
+func TestTheAppDMHandlerSendsThroughTheSharedRules(t *testing.T) {
+	raw, err := os.ReadFile("../../controllers/Chat/chatController.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(raw)
+	if !strings.Contains(src, "sendBusiness.PrepareDirectMessage(") {
+		t.Error("controllers/Chat no longer prepares DMs through business/Send, so the recipient rule may be skipped")
+	}
+	if strings.Contains(src, "business.CreateChat(") {
+		t.Error("controllers/Chat calls CreateChat directly, around the recipient rule in business/Send")
 	}
 }
 

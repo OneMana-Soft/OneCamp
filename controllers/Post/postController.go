@@ -10,9 +10,9 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/Post"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
-	lastseenBusiness "github.com/akashc777/OneCamp/business/LastSeenChannel"
 	business "github.com/akashc777/OneCamp/business/Post"
 	reactionBusiness "github.com/akashc777/OneCamp/business/Reaction"
+	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -39,88 +39,14 @@ func CreatePost(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	postInfo.ChannelUUID, err = uuid.Parse(postInfo.ChannelUuid)
-
+	// Every rule for posting lives in business/Send, shared with scheduled
+	// messages, so a post sent now and one sent later obey the same checks.
+	post, err := sendBusiness.PrepareChannelPost(ctx, &userInfo, &postInfo)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreatePost Failed to get channel UUID err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get channel UUID",
-			"err": err,
-		})
+		writeSendError(w, err)
 		return
 	}
-
-	channelUUID, err := uuid.Parse(postInfo.ChannelUuid)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreatePost Failed to parse channelUUID err: %+v",
-			err)
-		return
-	}
-
-	dgraphChannelInfo, err := channelBusiness.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
-	if err != nil || !dgraphChannelInfo.DeletedAt.IsZero() {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreatePost Failed to get dgraph channel info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph channel info",
-			"err": err,
-		})
-		return
-	}
-
-	if dgraphChannelInfo.IsMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
-		return
-	}
-
-	// Announcement-channel governance: in an admins_only channel, only channel
-	// moderators/admins may post. Everyone can still read. The automation bot
-	// posts via a separate internal path, so workflow/webhook announcements are
-	// unaffected.
-	if dgraphChannelInfo.PostPolicy == "admins_only" && dgraphChannelInfo.IsAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Only channel admins can post in this announcement channel",
-		})
-		return
-	}
-
-	// get mentions
-	mentions, err := helpers.GetMentions(postInfo.HTMLText)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreatePost Failed to get post mentions err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get post mentions",
-			"err": err,
-		})
-		return
-	}
-	// validate mentions (will be sent via FE)
-
-	mentionsDgraphUsersList, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, mentions)
-
-	if len(mentionsDgraphUsersList) != len(mentions) {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Got unregistered users in mentions",
-			"err": err,
-		})
-		return
-	}
-
-	cratedPostInfo, err := business.CreatePost(ctx, &postInfo, &userInfo, mentionsDgraphUsersList, dgraphChannelInfo)
-
+	cratedPostInfo, err := post.Commit(ctx)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/CreatePost Failed to create post err: %+v",
@@ -130,15 +56,6 @@ func CreatePost(w http.ResponseWriter, r *http.Request) {
 			"msg": " Failed to get Failed to create post",
 			"err": err,
 		})
-		return
-	}
-
-	// update last seen
-	err = lastseenBusiness.CreateOrUpdateLastSeenChannel(ctx, userInfo.UserPostgresInfo.Id, channelUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreatePost Failed to create entry in last seen channel err: %+v",
-			err)
 		return
 	}
 
@@ -850,7 +767,9 @@ func GetOldPosts(w http.ResponseWriter, r *http.Request) {
 
 	epochTime, err := strconv.ParseInt(epochTimeString, 10, 64)
 	if err != nil {
-		panic(err)
+		// A malformed time in the URL is the caller's mistake: say so, don't panic.
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "time_stamp must be a whole number of seconds"})
+		return
 	}
 
 	channelUUID, err := uuid.Parse(channelUUIDString)
@@ -1239,4 +1158,18 @@ func DeletePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "deleted post successfully!"})
+}
+
+// writeSendError answers a refused send with the status and message the rule
+// gives, and anything else as a bad request.
+func writeSendError(w http.ResponseWriter, err error) {
+	if rj, ok := sendBusiness.AsRejection(err); ok {
+		env := helpers.Envolope{"msg": rj.Msg}
+		if rj.Err != nil {
+			env["err"] = rj.Err
+		}
+		helpers.WriteJSON(w, rj.Status, env)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to send", "err": err})
 }

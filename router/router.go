@@ -47,6 +47,7 @@ import (
 	publicController "github.com/akashc777/OneCamp/controllers/Public"
 	recordingController "github.com/akashc777/OneCamp/controllers/Recording"
 	savedItemController "github.com/akashc777/OneCamp/controllers/SavedItem"
+	scheduledMessageController "github.com/akashc777/OneCamp/controllers/ScheduledMessage"
 	scimController "github.com/akashc777/OneCamp/controllers/Scim"
 	settingsController "github.com/akashc777/OneCamp/controllers/Settings"
 	slackBridgeController "github.com/akashc777/OneCamp/controllers/SlackBridge"
@@ -781,6 +782,14 @@ func Routes() http.Handler {
 		r.Mount("/api-tokens", apiTokenRouter)
 		r.Mount("/marketplace", marketplaceRouter)
 		// Save for later: private to the member; see business/SavedItem.
+		// Send later: channels, DMs and groups; see business/ScheduledMessage.
+		r.Route("/message", func(r chi.Router) {
+			r.Post("/schedule", scheduledMessageController.Schedule)
+			r.Get("/scheduled", scheduledMessageController.List)
+			r.Post("/scheduled/update", scheduledMessageController.Update)
+			r.Post("/scheduled/cancel", scheduledMessageController.Cancel)
+			r.Post("/scheduled/sendNow", scheduledMessageController.SendNow)
+		})
 		r.Route("/later", func(r chi.Router) {
 			r.Get("/", savedItemController.List)
 			r.Post("/save", savedItemController.Save)

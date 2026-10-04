@@ -16,6 +16,7 @@ package business
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"time"
@@ -156,6 +157,18 @@ func drainDueJobs(ctx context.Context) {
 }
 
 // runJob executes a single claimed job and records its outcome.
+// Terminal is what a handler returns for a failure retrying cannot fix (a
+// rule refused it, and would refuse again): the job is marked failed with the
+// reason at once instead of being retried and then marked done.
+type Terminal struct{ Reason string }
+
+func (t *Terminal) Error() string { return t.Reason }
+
+// RunClaimed runs a job the caller has already claimed (for example "send
+// now"), with the same handler dispatch, timeout, retry and completion as the
+// worker, so there is one way a job runs.
+func RunClaimed(ctx context.Context, job *jobModel.ScheduledJob) { runJob(ctx, job) }
+
 func runJob(ctx context.Context, job *jobModel.ScheduledJob) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -178,6 +191,11 @@ func runJob(ctx context.Context, job *jobModel.ScheduledJob) {
 	defer cancel()
 
 	if err := handler(jobCtx, job); err != nil {
+		var term *Terminal
+		if errors.As(err, &term) {
+			_ = jobModel.MarkFailed(ctx, job.Id, term.Reason)
+			return
+		}
 		helpers.LogErrorWithContext(ctx, "Scheduler/runJob handler err (job %s): %+v", job.Id, err)
 		_ = jobModel.MarkFailedOrRetry(ctx, job.Id, err.Error(), time.Now().Add(backoff(job.Attempts)))
 		return
