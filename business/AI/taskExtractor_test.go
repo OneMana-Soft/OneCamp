@@ -173,3 +173,17 @@ func TestExtractionCalendar(t *testing.T) {
 		t.Fatalf("calendar runs past seven days: %q", got)
 	}
 }
+
+// Ask AI's tools set due dates, so its prompt carries the calendar; a plain
+// answer does not need one.
+func TestAskAIPromptCarriesTheCalendarWithTools(t *testing.T) {
+	got := askAIDatePrompt(time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC))
+	for _, want := range []string{"Today is Saturday 2026-10-03", "Fri 2026-10-09", "Fri 2026-10-16"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("date prompt lacks %q: %s", want, got)
+		}
+	}
+	if strings.Contains(AskAISystemPrompt(false), "The coming days:") {
+		t.Error("a prompt without tools needs no calendar")
+	}
+}

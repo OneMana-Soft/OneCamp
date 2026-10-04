@@ -84,6 +84,7 @@ func AskAISystemPrompt(withTools bool) string {
 		prompt += ai.BuildToolPrompt()
 		prompt += ChartCapabilityPrompt()
 		prompt += htmlArtifactCapabilityPrompt()
+		prompt += askAIDatePrompt(time.Now().UTC())
 	}
 	return prompt
 }
@@ -98,8 +99,18 @@ func AskAISystemPromptForQuery(withTools bool, question string) string {
 		prompt += ai.BuildToolPromptFiltered(question)
 		prompt += ChartCapabilityPrompt()
 		prompt += htmlArtifactCapabilityPrompt()
+		prompt += askAIDatePrompt(time.Now().UTC())
 	}
 	return prompt
+}
+
+// askAIDatePrompt anchors the assistant's tools (a task's due date, an event's
+// day) to today and the coming fortnight. Without it the assistant had no date
+// at all, and a small local model asked for "next Friday" picks a weekday by
+// guessing. Only added with tools: a plain answer needs no calendar. Pure.
+func askAIDatePrompt(now time.Time) string {
+	return "\n\nToday is " + now.Format("Monday 2006-01-02") + " (UTC). " + UpcomingDays(now, 14) +
+		" When a request names a day, look its date up in that list rather than counting."
 }
 
 // AskAIConversationalPrompt returns the system prompt for casual, non-contextual chat.

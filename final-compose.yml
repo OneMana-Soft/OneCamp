@@ -777,7 +777,7 @@ services:
         echo " OneCamp AI — Model Initialization"
         echo "============================================"
 
-        for MODEL in "${OLLAMA_MODEL:-llama3.2:3b}" "${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}"; do
+        for MODEL in "${OLLAMA_MODEL:-qwen3:4b-instruct}" "${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}"; do
           echo "[ollama-init] Pulling $$MODEL (skips if already present)..."
           ollama pull "$$MODEL"
           echo "[ollama-init] ✅ $$MODEL ready"

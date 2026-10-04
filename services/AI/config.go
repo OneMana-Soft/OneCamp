@@ -177,7 +177,10 @@ func LoadAIConfig() *AIConfig {
 	provider := ProviderType(getEnvStr("AI_PROVIDER", "ollama"))
 
 	ollamaHost := getEnvStr("OLLAMA_HOST", "http://localhost:11434")
-	ollamaModel := getEnvStr("OLLAMA_MODEL", "llama3.2:3b")
+	// qwen3:4b-instruct, not llama3.2:3b: on a 4-core CPU it passed 12 of 15
+	// agent jobs against 6 (tasks from requests, answering without a tool,
+	// summaries, first steps, JSON) at 5.5 s a reply (benchmark, 3 Oct 2026).
+	ollamaModel := getEnvStr("OLLAMA_MODEL", "qwen3:4b-instruct")
 	ollamaEmbed := getEnvStr("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
 	openaiKey := getEnvStr("OPENAI_API_KEY", "")
 	openaiModel := getEnvStr("OPENAI_MODEL", "gpt-4o-mini")

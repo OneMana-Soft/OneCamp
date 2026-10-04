@@ -15,7 +15,11 @@ package business
 // request, which forwards the browser's tz); labeling it UTC lets the model
 // reason about offsets when a user names one.
 
-import "time"
+import (
+	"time"
+
+	aiBusiness "github.com/akashc777/OneCamp/business/AI"
+)
 
 // buildTemporalContext renders the "current date/time" system-prompt snippet
 // from now. Pure and DB-free so it is unit-testable and deterministic. now is
@@ -28,5 +32,6 @@ func buildTemporalContext(now time.Time) string {
 	return "\n\nThe current date and time is " + stamp + ". This is the authoritative \"now\": " +
 		"resolve every relative time the user uses (\"today\", \"yesterday\", \"this week\", \"recently\", " +
 		"\"last month\", etc.) against it, and NEVER rely on your training data for the current date. " +
-		"Times are in UTC unless the user names a timezone; if they do, convert from UTC accordingly."
+		"Times are in UTC unless the user names a timezone; if they do, convert from UTC accordingly. " +
+		aiBusiness.UpcomingDays(u, 14) + " Look dates up in that list rather than counting."
 }

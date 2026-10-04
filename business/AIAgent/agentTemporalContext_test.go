@@ -33,3 +33,14 @@ func TestBuildTemporalContext_NormalisesToUTC(t *testing.T) {
 		t.Errorf("expected UTC-normalised time 13:45, got:\n%s", got)
 	}
 }
+
+// Small models count days wrong; with the coming fortnight written out they look
+// "next Friday" up instead (agent benchmark, 3 Oct 2026).
+func TestBuildTemporalContext_ListsTheComingFortnight(t *testing.T) {
+	got := buildTemporalContext(time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)) // a Saturday
+	for _, want := range []string{"Fri 2026-10-09", "Fri 2026-10-16", "Look dates up"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("temporal context lacks %q:\n%s", want, got)
+		}
+	}
+}

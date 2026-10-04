@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -85,7 +86,7 @@ func (o *OllamaProvider) redact(ctx context.Context, msgs []ChatMessage) ([]Chat
 // admin-configured reasoning setting applies. For every other model we omit the
 // field entirely (nil) so the request is always accepted.
 func (o *OllamaProvider) resolveThink(want *bool) *bool {
-	if !modelSupportsThinking(o.model) {
+	if !o.canThink() {
 		return nil
 	}
 	if want != nil {
@@ -444,4 +445,66 @@ func (o *OllamaProvider) Dimensions() int {
 	}
 	// nomic-embed-text produces 768-dimensional vectors
 	return 768
+}
+
+// thinkingCaps caches what each Ollama host says a model can do, keyed by
+// host+model, so the engine is asked once per model per process.
+var thinkingCaps sync.Map // map[string]bool
+
+// canThink reports whether the configured model has a reasoning trace, asking
+// the engine (POST /api/show, "capabilities") rather than guessing from the
+// name. Names mislead both ways: qwen3:4b-instruct matches the "qwen3" hint
+// but reports only [completion tools], and newer Ollama rejects `think` for it
+// with a 400. Falls back to the name hints when the engine cannot be asked
+// (old Ollama without capabilities, or unreachable), and that fallback is not
+// cached so a later call can still learn the truth.
+func (o *OllamaProvider) canThink() bool {
+	key := o.host + "|" + o.model
+	if v, ok := thinkingCaps.Load(key); ok {
+		return v.(bool)
+	}
+	caps, ok := o.modelCapabilities()
+	if !ok {
+		return modelSupportsThinking(o.model)
+	}
+	has := false
+	for _, c := range caps {
+		if c == "thinking" {
+			has = true
+			break
+		}
+	}
+	thinkingCaps.Store(key, has)
+	return has
+}
+
+// modelCapabilities asks the engine what the model can do. ok is false when it
+// did not say (request failed, or an engine too old to report capabilities).
+func (o *OllamaProvider) modelCapabilities() ([]string, bool) {
+	if o.host == "" || o.model == "" || o.client == nil {
+		return nil, false
+	}
+	body, _ := json.Marshal(map[string]string{"model": o.model})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.host+"/api/show", bytes.NewReader(body))
+	if err != nil {
+		return nil, false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := o.client.Do(req)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var out struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil || len(out.Capabilities) == 0 {
+		return nil, false
+	}
+	return out.Capabilities, true
 }

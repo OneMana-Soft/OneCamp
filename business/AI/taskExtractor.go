@@ -286,12 +286,23 @@ func decodeTaskItems(out string) (items []rawProposedTask, ok bool) {
 // "by Friday" to a Wednesday and "before Thursday" to the day before; with the
 // days written out it looks the date up instead of counting. Pure.
 func extractionCalendar(now time.Time) string {
+	return "Today is " + now.Format("Monday 2006-01-02") + " (UTC). " + UpcomingDays(now, 7) +
+		" A deadline \"by\" or \"before\" a weekday is that day in the coming week."
+}
+
+// UpcomingDays writes out the next n days with their weekdays, so a model looks
+// a date up instead of counting. Every small model benchmarked for OneCamp
+// Cloud (llama3.2:3b, qwen3:4b-instruct, 3 Oct 2026) turned "next Friday",
+// asked on a Friday, into a Wednesday when given only today's date.
+//
+// n is the caller's: task extraction lists 7 so "by Friday" can only mean the
+// coming one; an agent lists 14 so "next Friday" is there too. Pure.
+func UpcomingDays(now time.Time, n int) string {
 	var b strings.Builder
-	b.WriteString("Today is " + now.Format("Monday 2006-01-02") + " (UTC). The next seven days:")
-	for i := 1; i <= 7; i++ {
+	b.WriteString("The coming days:")
+	for i := 1; i <= n; i++ {
 		b.WriteString(" " + now.AddDate(0, 0, i).Format("Mon 2006-01-02") + ";")
 	}
-	b.WriteString(" A deadline \"by\" or \"before\" a weekday is that day in the coming week.")
 	return b.String()
 }
 
