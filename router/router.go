@@ -783,6 +783,12 @@ func Routes() http.Handler {
 	v1Router.Use(customMiddleware.VerifyApiToken)
 	v1Router.Use(customMiddleware.ApiTokenRateLimit)
 	v1Router.Get("/me", v1Controller.Me)
+	// What is waiting for the token's owner, for desktop bars (the OneMana kit
+	// for Omarchy). /unread is in both editions; /attention is the AI edition's.
+	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeAttentionRead)).
+		Get("/unread", v1Controller.Unread)
+	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeAttentionRead)).
+		Get("/attention", v1Controller.Attention)
 	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeTablesRead)).
 		Get("/tables", v1Controller.ListTables)
 	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeTablesRead)).

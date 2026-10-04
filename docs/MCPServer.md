@@ -137,6 +137,7 @@ down; they never widen it. A token with `docs:read` held by someone who cannot o
 | `tables:read` / `tables:write` | read and query tables; create and update rows |
 | `calendar:write` | create reminders and events |
 | `data_sources:read` | read and query connected external data sources |
+| `attention:read` | read what is waiting for you: unread counts (`GET /v1/unread`) and, in the AI edition, approvals and overdue tasks (`GET /v1/attention`); nothing else |
 | `search:read` | search across the workspace, memory, and connected apps |
 
 Grant the narrowest set that does the job. A read-only agent should hold only `:read`

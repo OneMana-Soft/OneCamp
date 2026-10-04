@@ -42,6 +42,10 @@ const (
 	// external, connected database is a materially broader grant than reading
 	// native tables, so a token must opt into it explicitly.
 	ScopeDataSourcesRead = "data_sources:read"
+	// ScopeAttentionRead reads what is waiting for the token's owner (unread
+	// counts, approvals, overdue tasks) and nothing else: what a desktop bar
+	// needs, without the reach of messages:read (GET /v1/unread, /v1/attention).
+	ScopeAttentionRead = "attention:read"
 )
 
 // AllScopes is the catalog of grantable scopes (validation + UI).
@@ -54,6 +58,7 @@ var AllScopes = []string{
 	ScopeTablesRead, ScopeTablesWrite,
 	ScopeSearchRead,
 	ScopeDataSourcesRead,
+	ScopeAttentionRead,
 }
 
 // ToolScope maps each public AI tool (exposed over the MCP server endpoint and
