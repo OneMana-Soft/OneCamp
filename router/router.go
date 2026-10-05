@@ -62,6 +62,7 @@ import (
 	taskController "github.com/akashc777/OneCamp/controllers/Task"
 	taskStatusController "github.com/akashc777/OneCamp/controllers/TaskStatus"
 	teamController "github.com/akashc777/OneCamp/controllers/Team"
+	timeEntryController "github.com/akashc777/OneCamp/controllers/TimeEntry"
 	transcriptionController "github.com/akashc777/OneCamp/controllers/Transcription"
 	userController "github.com/akashc777/OneCamp/controllers/User"
 	v1Controller "github.com/akashc777/OneCamp/controllers/V1"
@@ -173,6 +174,9 @@ func Routes() http.Handler {
 	// six-digit secret can be guessed, and pooling its budget with password attempts would let one
 	// exhaust the other's allowance.
 	router.With(customMiddleware.LoginRateLimit("totp")).Post("/auth/login/totp", authController.TOTPLogin)
+	// Passkey sign-in: a challenge, then the browser's answer.
+	router.With(customMiddleware.LoginRateLimit("passkey")).Post("/auth/passkey/begin", authController.PasskeyLoginBegin)
+	router.With(customMiddleware.LoginRateLimit("passkey")).Post("/auth/passkey/finish", authController.PasskeyLoginFinish)
 	router.With(customMiddleware.LoginRateLimit("ldap")).Post("/auth/ldap-login", authController.LDAPLogin)
 	router.Get("/saml/login", authController.SAMLLogin)
 	router.Get("/saml/metadata", authController.SAMLMetadata)
@@ -271,6 +275,11 @@ func Routes() http.Handler {
 	router.With(customMiddleware.LoginRateLimit("guest-channel-read")).Get("/guest/channel/{token}", guestController.GuestChannel)
 	router.With(customMiddleware.LoginRateLimit("guest-channel-read")).Get("/guest/channel/{token}/thread/{post_id}", guestController.GuestChannelThread)
 	router.With(customMiddleware.LoginRateLimit("guest-channel")).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/channel/{token}", guestController.GuestChannelPost)
+	// Project guests: a client follows one project's tasks and, with the
+	// comment capability, comments on them.
+	router.With(customMiddleware.LoginRateLimit("guest-project-read")).Get("/guest/project/{token}", guestController.GuestProject)
+	router.With(customMiddleware.LoginRateLimit("guest-project-read")).Get("/guest/project/{token}/task/{task_id}", guestController.GuestProjectTask)
+	router.With(customMiddleware.LoginRateLimit("guest-project")).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/project/{token}/task/{task_id}/comment", guestController.GuestProjectComment)
 	// Public guest doc comments: read the guest feedback thread, and (when the
 	// grant carries the comment capability) post a comment. Rate-limited and
 	// body-capped; the business layer enforces the capability and strips HTML.
@@ -297,6 +306,11 @@ func Routes() http.Handler {
 		r.Post("/auth/2fa/setup", authController.BeginTwoFactorSetup)
 		r.Post("/auth/2fa/confirm", authController.ConfirmTwoFactorSetup)
 		r.Post("/auth/2fa/disable", authController.DisableTwoFactor)
+		r.Get("/auth/passkeys", authController.ListPasskeys)
+		r.Post("/auth/passkeys/begin", authController.BeginPasskeyRegistration)
+		r.Post("/auth/passkeys/finish", authController.FinishPasskeyRegistration)
+		r.Post("/auth/passkeys/{id}/rename", authController.RenamePasskey)
+		r.Post("/auth/passkeys/{id}/delete", authController.DeletePasskey)
 	})
 
 	// admin routes
@@ -718,6 +732,8 @@ func Routes() http.Handler {
 		// Mint a scoped, read-only external share link for a doc/board the
 		// member can edit (Phase 2).
 		r.Post("/guest/links", guestController.CreateResourceGuestLink)
+		r.Get("/guest/links", guestController.ListResourceGuestLinks)
+		r.Post("/guest/links/{id}/revoke", guestController.RevokeResourceGuestLink)
 
 	})
 
@@ -1177,6 +1193,7 @@ func Routes() http.Handler {
 		r.Get("/{project_uuid}/forms", formController.ListForms)
 		r.Post("/{project_uuid}/forms", formController.SaveForm)
 		r.Post("/{project_uuid}/forms/{form_id}/delete", formController.DeleteForm)
+		r.Get("/{project_uuid}/time", timeEntryController.ProjectTime)
 		r.Get("/{project_uuid}/cycles", cycleController.ListCycles)
 		r.Post("/{project_uuid}/cycles", cycleController.CreateCycle)
 		r.Post("/{project_uuid}/cycles/{cycle_id}/rename", cycleController.RenameCycle)
@@ -1248,6 +1265,14 @@ func Routes() http.Handler {
 		r.Post("/updateTaskStatus", taskController.UpdateTaskStatus)
 		r.Get("/recurrence/{task_uuid}", taskController.GetTaskRecurrence)
 		r.Get("/cycle/{task_uuid}", cycleController.GetTaskCycle)
+		// Time on tasks: a timer, time added by hand, and the person's own edits.
+		r.Get("/time/running", timeEntryController.RunningTimer)
+		r.Post("/time/stop", timeEntryController.StopTimer)
+		r.Get("/time/{task_uuid}", timeEntryController.GetTaskTime)
+		r.Post("/time/{task_uuid}", timeEntryController.AddTime)
+		r.Post("/time/{task_uuid}/start", timeEntryController.StartTimer)
+		r.Post("/time/entry/{entry_id}/update", timeEntryController.UpdateTime)
+		r.Post("/time/entry/{entry_id}/delete", timeEntryController.DeleteTime)
 		r.Post("/cycle", cycleController.SetTaskCycle)
 		r.Post("/recurrence", taskController.SetTaskRecurrence)
 		r.Get("/views", taskController.GetTaskViews)

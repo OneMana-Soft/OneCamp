@@ -99,7 +99,7 @@ func CreateResourceGrant(ctx context.Context, creatorUUID uuid.UUID, resourceTyp
 		return nil, ErrGuestDisabled
 	}
 	switch resourceType {
-	case guestModel.ResourceDoc, guestModel.ResourceBoard, guestModel.ResourceTable, guestModel.ResourceChannel:
+	case guestModel.ResourceDoc, guestModel.ResourceBoard, guestModel.ResourceTable, guestModel.ResourceChannel, guestModel.ResourceProject:
 		// ok
 	default:
 		return nil, errors.New("unsupported resource type for guest access")
@@ -108,9 +108,10 @@ func CreateResourceGrant(ctx context.Context, creatorUUID uuid.UUID, resourceTyp
 	if resourceID == "" {
 		return nil, errors.New("missing resource id")
 	}
-	// Normalize capability: comment is doc-only; everything else is view.
+	// Normalize capability: comment is for docs and projects, post for
+	// channels; everything else is view.
 	cap := guestModel.CapabilityView
-	if capability == guestModel.CapabilityComment && resourceType == guestModel.ResourceDoc {
+	if capability == guestModel.CapabilityComment && (resourceType == guestModel.ResourceDoc || resourceType == guestModel.ResourceProject) {
 		cap = guestModel.CapabilityComment
 	}
 	if capability == guestModel.CapabilityPost && resourceType == guestModel.ResourceChannel {

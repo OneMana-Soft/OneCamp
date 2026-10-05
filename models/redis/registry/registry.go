@@ -848,6 +848,16 @@ var CommandOAuthState = withArity(Spec{
 	Description: "One-shot OAuth install state nonce → app id. GETDEL on consume.",
 }, 1) // (state)
 
+// PasskeyCeremony is one passkey sign-in or registration in progress: the
+// challenge the server issued, read back once when the browser answers.
+var PasskeyCeremony = withArity(Spec{
+	Namespace:   "auth:passkey",
+	TTL:         5 * time.Minute,
+	Datatype:    DatatypeString,
+	Category:    CategoryAuth,
+	Description: "One-shot WebAuthn ceremony (challenge session JSON). GETDEL on finish.",
+}, 1) // (ceremony id)
+
 // ConnectorOAuthState is the one-shot OAuth state nonce for per-USER connector
 // authorization (Gmail, GitHub, Calendar). The stored value binds the nonce to
 // the initiating user + provider so the callback can only ever write that

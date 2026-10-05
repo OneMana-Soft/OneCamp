@@ -10,6 +10,7 @@ import (
 	domain "github.com/akashc777/OneCamp/domain/Activity"
 	lastSeenChannelDomain "github.com/akashc777/OneCamp/domain/LastSeenChannel"
 	lastSeenChatDomain "github.com/akashc777/OneCamp/domain/LastSeenChat"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Activity"
@@ -146,6 +147,10 @@ func GetUnifiedActivity(ctx context.Context, userUUID uuid.UUID, userDgraphId st
 		allActivities = append(allActivities, item)
 	}
 
+	for i := range allActivities {
+		allActivities[i].ActorKind = ActorKind(actorOf(&allActivities[i]))
+	}
+
 	// Sort by Time Descending
 	sort.Slice(allActivities, func(i, j int) bool {
 		return allActivities[i].Time > allActivities[j].Time
@@ -199,4 +204,52 @@ func PublishActivityToUser(recipientUserUUID string, activityItem *dgraphModels.
 	}
 
 	go mqttBusiness.PublishActivity(mqttActivity, recipientUserUUID)
+}
+
+// Who an activity item's actor is, for the people / agents / apps filter.
+const (
+	ActorPerson = "person"
+	ActorAgent  = "agent"
+	ActorApp    = "app"
+)
+
+// actorOf is the principal who did what an activity item reports.
+func actorOf(item *dgraphModels.UnifiedActivityItem) *dgraphStruct.DgraphUser {
+	switch {
+	case item.Mention != nil && item.Mention.Post != nil:
+		return item.Mention.Post.PostBy
+	case item.Mention != nil && item.Mention.Comment != nil:
+		return item.Mention.Comment.CommentBy
+	case item.Mention != nil && item.Mention.Chat != nil:
+		return item.Mention.Chat.From
+	case item.Comment != nil:
+		return item.Comment.CommentBy
+	case item.Reaction != nil:
+		return item.Reaction.AddedBy
+	}
+	return nil
+}
+
+// ActorKind sorts an actor into people, agents and apps, and drops the email
+// that classifying it needed, which the reader has no use for. The assistant
+// and configured agents are agents; the Slack bridge and channel guests carry
+// people's own words, so they count as people; automations and any bot this
+// build doesn't know are apps.
+func ActorKind(u *dgraphStruct.DgraphUser) string {
+	if u == nil {
+		return ActorPerson
+	}
+	email := u.EmailID
+	u.EmailID = ""
+	if !u.IsBot {
+		return ActorPerson
+	}
+	switch userDomain.ClassifyBot(email) {
+	case userDomain.BotKindAssistant, userDomain.BotKindAgent:
+		return ActorAgent
+	case userDomain.BotKindBridge, userDomain.BotKindGuest:
+		return ActorPerson
+	default:
+		return ActorApp
+	}
 }

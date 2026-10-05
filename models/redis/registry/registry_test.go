@@ -120,6 +120,7 @@ func all() []Spec {
 		CommandInteraction,
 		CommandOAuthState,
 		ConnectorOAuthState,
+		PasskeyCeremony,
 		ConnectorBriefingDay,
 		CollabStateSize,
 	}

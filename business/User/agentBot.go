@@ -155,10 +155,11 @@ var (
 	channelGuestBot   *BotIdentity
 )
 
-// EnsureChannelGuestBot resolves (provisioning on first use) the principal
-// that authors messages from channel guests. Like the Slack bridge's, it is
-// its own principal, so a guest's message never reads as the AI or a member.
-func EnsureChannelGuestBot(ctx context.Context) (*BotIdentity, error) {
+// EnsureGuestBot resolves (provisioning on first use) the principal that
+// writes for guests: channel messages and task comments from people outside
+// the workspace. Like the Slack bridge's, it is its own principal, so a guest's
+// words never read as the AI's or a member's.
+func EnsureGuestBot(ctx context.Context) (*BotIdentity, error) {
 	channelGuestBotMu.Lock()
 	defer channelGuestBotMu.Unlock()
 	if channelGuestBot != nil && channelGuestBot.DgraphUID != "" {
