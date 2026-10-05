@@ -43,7 +43,7 @@ func CreateChannel(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if len(channelInfo.ChannelName) == 0 || !helpers.IsValidStringWithoutSpecialCharacter(channelInfo.ChannelName) {
+	if len(channelInfo.ChannelName) == 0 || !helpers.IsValidName(channelInfo.ChannelName) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg":    "Invalid channelInfo",
 			"status": "failed",
@@ -109,7 +109,7 @@ func GetIfChannelNameIsAvailable(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	if !helpers.IsValidStringWithoutSpecialCharacter(chName[0]) {
+	if !helpers.IsValidName(chName[0]) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "channel name should not contain special character",
 		})

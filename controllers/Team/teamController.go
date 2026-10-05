@@ -37,7 +37,7 @@ func CreateTeam(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if !userInfo.UserPostgresInfo.IsAdmin || !helpers.IsValidStringWithoutSpecialCharacter(createTeamInfo.Name) {
+	if !userInfo.UserPostgresInfo.IsAdmin || !helpers.IsValidName(createTeamInfo.Name) {
 
 		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
 			"msg": "Not Authorised",
@@ -108,7 +108,7 @@ func CheckIfTeamNameExist(w http.ResponseWriter, r *http.Request) {
 
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
-	if !userInfo.UserPostgresInfo.IsAdmin || len(teamName) == 0 || !helpers.IsValidStringWithoutSpecialCharacter(teamName[0]) {
+	if !userInfo.UserPostgresInfo.IsAdmin || len(teamName) == 0 || !helpers.IsValidName(teamName[0]) {
 
 		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
 			"msg": "Not Authorised",
