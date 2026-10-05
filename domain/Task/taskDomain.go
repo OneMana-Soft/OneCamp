@@ -1437,7 +1437,7 @@ func GetDgraphTaskForGuest(ctx context.Context, taskUUID string) (*dgraphStruct.
 						comment_uuid
 						comment_text
 						comment_created_at
-						comment_by { user_name user_full_name }
+						comment_by { user_name user_full_name is_bot }
 					}
 				}
 			}`

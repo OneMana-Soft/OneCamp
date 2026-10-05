@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -68,5 +69,28 @@ func TestDateOfHidesUnsetDates(t *testing.T) {
 	}
 	if dateOf(&real) == nil {
 		t.Error("a real date was hidden")
+	}
+}
+
+func TestReviewText(t *testing.T) {
+	if text, _, err := ReviewText("approved", ""); err != nil || text != "Approved." {
+		t.Errorf("approve: %q %v", text, err)
+	}
+	if text, note, err := ReviewText("changes", "  Make the logo bigger "); err != nil || text != "Changes requested: Make the logo bigger" || note != "Make the logo bigger" {
+		t.Errorf("changes: %q %q %v", text, note, err)
+	}
+	var in *ErrGuestInput
+	for _, c := range [][2]string{{"changes", ""}, {"maybe", "x"}, {"approved", strings.Repeat("x", 2001)}} {
+		if _, _, err := ReviewText(c[0], c[1]); !errors.As(err, &in) {
+			t.Errorf("%q: want an input error, got %v", c, err)
+		}
+	}
+}
+
+// A view-only link can't give a verdict.
+func TestReviewNeedsTheCommentLink(t *testing.T) {
+	view := &guestModel.GuestGrant{ResourceType: guestModel.ResourceProject, ResourceID: uuid.NewString(), Capability: guestModel.CapabilityView}
+	if _, err := ReviewAsGuest(context.Background(), view, uuid.NewString(), "Priya", "approved", ""); !errors.Is(err, ErrForbidden) {
+		t.Errorf("a view link reviewed: %v", err)
 	}
 }

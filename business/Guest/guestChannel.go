@@ -70,6 +70,40 @@ func authorName(u *dgraphStruct.DgraphUser) string {
 	return "Someone"
 }
 
+// splitLabel takes the "[Priya (Acme) (guest)]" line a bridged or guest
+// message starts with (botpost.LabelledHTML) and makes it the author, so a
+// guest reads "Priya (Acme) (guest)" said this, not "Guests" said "[...]".
+// Messages without one are unchanged. Pure.
+func splitLabel(author, text string) (string, string) {
+	if !strings.HasPrefix(text, "[") {
+		return author, text
+	}
+	first, rest, _ := strings.Cut(text, "\n")
+	if end := strings.Index(first, "]"); end > 1 {
+		label := strings.TrimSpace(first[1:end])
+		after := strings.TrimSpace(first[end+1:])
+		if after != "" {
+			rest = strings.TrimSpace(after + "\n" + rest)
+		}
+		return label, strings.TrimSpace(rest)
+	}
+	return author, text
+}
+
+// guestMessage is one stored message as a guest sees it: plain text, and a
+// bridged or guest author named from the message's label.
+func guestMessage(id string, by *dgraphStruct.DgraphUser, stored string, at *time.Time) GuestMessage {
+	author, text := authorName(by), PlainText(stored)
+	if by != nil && by.IsBot {
+		author, text = splitLabel(author, text)
+	}
+	m := GuestMessage{ID: id, Author: author, Text: text}
+	if at != nil {
+		m.CreatedAt = *at
+	}
+	return m
+}
+
 // PlainText is a stored message as plain text for a guest: tags gone,
 // entities decoded, whitespace tidy. Pure.
 func PlainText(stored string) string {
@@ -119,10 +153,7 @@ func GetGuestChannel(ctx context.Context, grant *guestModel.GuestGrant, before t
 		posts, view.HasMore = posts[:postDomain.POST_COUNT], true
 	}
 	for _, p := range posts {
-		m := GuestMessage{ID: p.Uuid, Author: authorName(p.PostBy), Text: PlainText(p.Text)}
-		if p.CreatedAt != nil {
-			m.CreatedAt = *p.CreatedAt
-		}
+		m := guestMessage(p.Uuid, p.PostBy, p.Text, p.CreatedAt)
 		if p.CommentCount != nil {
 			m.ReplyCount = *p.CommentCount
 		}
@@ -152,16 +183,9 @@ func GetGuestThread(ctx context.Context, grant *guestModel.GuestGrant, postID st
 	if err != nil || p == nil || p.Channel == nil || p.Channel.Uuid != channelID.String() || helpers.IsSoftDeleted(p.DeletedAt) {
 		return nil, ErrNotFound
 	}
-	t := &GuestThread{Message: GuestMessage{ID: p.Uuid, Author: authorName(p.PostBy), Text: PlainText(p.Text)}, Replies: []GuestMessage{}}
-	if p.CreatedAt != nil {
-		t.Message.CreatedAt = *p.CreatedAt
-	}
+	t := &GuestThread{Message: guestMessage(p.Uuid, p.PostBy, p.Text, p.CreatedAt), Replies: []GuestMessage{}}
 	for _, c := range p.Comments {
-		r := GuestMessage{ID: c.Uuid, Author: authorName(c.CommentBy), Text: PlainText(c.Text)}
-		if c.CreatedAt != nil {
-			r.CreatedAt = *c.CreatedAt
-		}
-		t.Replies = append(t.Replies, r)
+		t.Replies = append(t.Replies, guestMessage(c.Uuid, c.CommentBy, c.Text, c.CreatedAt))
 	}
 	t.Message.ReplyCount = uint64(len(t.Replies))
 	return t, nil

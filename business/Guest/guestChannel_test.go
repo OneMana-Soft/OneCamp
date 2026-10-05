@@ -28,3 +28,17 @@ func TestPlainText(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestSplitLabel(t *testing.T) {
+	cases := []struct{ in, author, text string }{
+		{"[Priya (Acme) (guest)]\nChanges requested: brighter", "Priya (Acme) (guest)", "Changes requested: brighter"},
+		{"[Sam (Slack)] shipped it", "Sam (Slack)", "shipped it"},
+		{"no label here", "Guests", "no label here"},
+		{"[]", "Guests", "[]"},
+	}
+	for _, c := range cases {
+		if a, txt := splitLabel("Guests", c.in); a != c.author || txt != c.text {
+			t.Errorf("%q: got %q / %q", c.in, a, txt)
+		}
+	}
+}
