@@ -26,6 +26,7 @@ package business
 import (
 	"context"
 	"fmt"
+	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	"sort"
 	"strings"
 	"sync"
@@ -361,6 +362,19 @@ func definitions() []stepDef {
 			done: hasImported,
 		},
 		{
+			// Tasks, boards, forms, client links and time all live in a
+			// project, and a new workspace has none. After import, which may have
+			// brought projects across already. The link opens the dialog,
+			// which also offers to create the team a project needs.
+			Step: Step{
+				ID:     "project",
+				Title:  "Start your first project",
+				Detail: "Projects hold tasks, boards, intake forms and the time spent on them, and can be shared with a client.",
+				Href:   "/app/home?open=createProject",
+			},
+			done: hasAnyProject,
+		},
+		{
 			Step: Step{
 				ID:     "people",
 				Title:  "Invite your team",
@@ -399,6 +413,13 @@ func hasAnyChannel(ctx context.Context, user userModels.UserInfo) bool {
 	channels, _, err := channelBusiness.GetUserActiveChannelListWithLatestPost(
 		ctx, user.UserDgraphInfo.Uid, user.UserPostgresInfo.Id, 0, 1)
 	return err == nil && len(channels) > 0
+}
+
+// hasAnyProject asks whether this admin runs a project. Only the projects they
+// admin, which is what a new workspace's first admin's projects are.
+func hasAnyProject(ctx context.Context, user userModels.UserInfo) bool {
+	projects, err := projectBusiness.GetDgraphProjectListByAdminDgraphUID(ctx, user.UserDgraphInfo.Uid)
+	return err == nil && len(projects) > 0
 }
 
 // hasImported reports whether any import has ever been started here.

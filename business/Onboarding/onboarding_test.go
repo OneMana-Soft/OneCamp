@@ -156,7 +156,7 @@ func TestStepOrderMatchesWhatSomebodyWouldActuallyDo(t *testing.T) {
 	// workspace, so the people who arrive land in one that already has it.
 	// The password comes first: it is about the account everything else is
 	// done from, and it is the credential that has sat in an inbox.
-	want := []string{"password", "channel", "import", "people", "email"}
+	want := []string{"password", "channel", "import", "project", "people", "email"}
 	if len(ids) != len(want) {
 		t.Fatalf("expected %v, got %v", want, ids)
 	}

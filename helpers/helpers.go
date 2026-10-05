@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/akashc777/OneCamp/services"
 	"go.opentelemetry.io/otel/trace"
@@ -959,13 +960,18 @@ func Placeholders(n int) string {
 	return b.String()
 }
 
-func IsValidStringWithoutSpecialCharacter(value string) bool {
-	// Define a regex pattern for valid characters (alphanumeric and spaces)
-	pattern := `^[a-zA-Z0-9\s]*$` // Matches only strings with valid characters
-	// Compile the regex
-	re := regexp.MustCompile(pattern)
-	// Check if the entire string matches the regex
-	return re.MatchString(value)
+// workspaceNamePattern is what a channel or team may be called: letters in any
+// script, digits, spaces, hyphens and underscores. The web app's dialogs use
+// the same rule (lib/validation/names.ts), so a name accepted there is never
+// refused here.
+var workspaceNamePattern = regexp.MustCompile(`^[\p{L}\p{M}\p{N} _-]+$`)
+
+// IsValidName reports whether name is a valid channel or team name: 2 to 40
+// characters after trimming, of the kinds workspaceNamePattern allows.
+func IsValidName(name string) bool {
+	name = strings.TrimSpace(name)
+	n := utf8.RuneCountInString(name)
+	return n >= 2 && n <= 40 && workspaceNamePattern.MatchString(name)
 }
 
 func StringSliceToJSONString(slice []string) string {
