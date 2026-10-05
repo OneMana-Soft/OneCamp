@@ -186,11 +186,14 @@ func CreateOrUpdateDgraphProject(ctx context.Context, dgraphProject *dgraphStruc
 	return
 }
 
+// GetDgraphProjectListByAdminDgraphUID is the live projects a person admins:
+// the ones work can be put in. Archived projects are left out, so pickers
+// (new task, board to tasks, agents, workflows) never offer them.
 func GetDgraphProjectListByAdminDgraphUID(ctx context.Context, userDgraphUID string) (dgraphProject []*dgraphStruct.DgraphProject, err error) {
 	variables := make(map[string]string)
 	variables["$user_id"] = userDgraphUID
 	query := `query ProjectInfo($user_id: string){
-				projectInfo(func: has(project_uuid)) @filter((uid_in(project_admins, $user_id))) {
+				projectInfo(func: has(project_uuid)) @filter(uid_in(project_admins, $user_id) AND NOT gt(project_deleted_at, "1970-01-01T00:00:00Z")) {
 					uid
 					project_uuid
 					project_name

@@ -36,14 +36,15 @@ type BuiltIn struct {
 	Label string `json:"label"`
 }
 
-// BuiltIns in board order.
+// BuiltIns in board order, named in sentence case as the app writes them
+// (types/task.ts taskStatusOptions).
 var BuiltIns = []BuiltIn{
 	{dgraphStruct.TASK_STATUS_BACKLOG, "Backlog"},
-	{dgraphStruct.TASK_STATUS_TODO, "Todo"},
-	{dgraphStruct.TASK_STATUS_INPROGRESS, "In Progress"},
-	{dgraphStruct.TASK_STATUS_INREVIEW, "In Review"},
+	{dgraphStruct.TASK_STATUS_TODO, "To do"},
+	{dgraphStruct.TASK_STATUS_INPROGRESS, "In progress"},
+	{dgraphStruct.TASK_STATUS_INREVIEW, "In review"},
 	{dgraphStruct.TASK_STATUS_DONE, "Done"},
-	{dgraphStruct.TASK_STATUS_CANCELED, "Canceled"},
+	{dgraphStruct.TASK_STATUS_CANCELED, "Cancelled"},
 }
 
 // Colors a custom status may take; the app maps each to its own tokens.

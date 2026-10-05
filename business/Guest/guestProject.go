@@ -19,6 +19,7 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/Task"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	taskStatus "github.com/akashc777/OneCamp/business/TaskStatus"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
@@ -69,15 +70,17 @@ type GuestTaskView struct {
 	CanComment  bool           `json:"can_comment"`
 }
 
-// guestStatuses is the order a client reads a project in. Cancelled work is
-// left out.
-var guestStatuses = []struct{ status, label string }{
-	{dgraphStruct.TASK_STATUS_BACKLOG, "Backlog"},
-	{dgraphStruct.TASK_STATUS_TODO, "To do"},
-	{dgraphStruct.TASK_STATUS_INPROGRESS, "In progress"},
-	{dgraphStruct.TASK_STATUS_INREVIEW, "In review"},
-	{dgraphStruct.TASK_STATUS_DONE, "Done"},
-}
+// guestStatuses is the order a client reads a project in: the built-in
+// statuses, named as everywhere else, with cancelled work left out.
+var guestStatuses = func() []struct{ status, label string } {
+	out := []struct{ status, label string }{}
+	for _, b := range taskStatus.BuiltIns {
+		if b.Key != dgraphStruct.TASK_STATUS_CANCELED {
+			out = append(out, struct{ status, label string }{b.Key, b.Label})
+		}
+	}
+	return out
+}()
 
 // StatusLabel is a status as a guest reads it: the team's own name for it when
 // they gave one, else the built-in name. Pure.

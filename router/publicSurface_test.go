@@ -281,3 +281,23 @@ func TestAuthMiddlewareNamesStillExist(t *testing.T) {
 		}
 	}
 }
+
+// A route that changes something is never a GET. GETs skip the CSRF check and
+// can't carry a body, and the app posts to these: /doc/deleteDoc was a GET,
+// so every delete from the app answered 405.
+func TestNoStateChangingGetRoutes(t *testing.T) {
+	getChanges := regexp.MustCompile(`\.Get\("[^"]*",\s*\w+\.(Delete|Remove|Update|Create|Add|Set|Archive|Revoke|Leave|Join|Save|Mark|Send|Approve|Deny|Stop|Start)\w*\)`)
+	// Handlers that must be GETs, and why.
+	allowed := map[string]string{
+		"connectorController.StartConnect": "begins an OAuth redirect: the browser navigates to it",
+	}
+	for i, line := range routerSource(t) {
+		exempt := false
+		for h := range allowed {
+			exempt = exempt || strings.Contains(line, h+")")
+		}
+		if getChanges.MatchString(line) && !exempt {
+			t.Errorf("router.go:%d registers a state-changing handler as GET: %s", i+1, strings.TrimSpace(line))
+		}
+	}
+}
