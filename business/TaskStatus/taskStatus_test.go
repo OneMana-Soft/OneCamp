@@ -68,7 +68,7 @@ func TestOfAndDisplay(t *testing.T) {
 	}
 	empty := ""
 	r = Of(&dgraphStruct.DgraphTask{Status: "inProgress", CustomStatus: &empty})
-	if r.CustomID != "" || r.Display() != "In Progress" {
+	if r.CustomID != "" || r.Display() != "In progress" {
 		t.Fatalf("built-in: %+v %q", r, r.Display())
 	}
 }

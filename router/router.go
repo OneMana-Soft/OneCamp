@@ -1390,7 +1390,9 @@ func Routes() http.Handler {
 		r.Get("/getPublicDoc", docController.GetPublicDocList)
 		r.Get("/getCommentList/{doc_uuid}", docController.GetAllCommentList)
 		r.Post("/createDoc", docController.CreateDoc)
-		r.Get("/deleteDoc", docController.DeleteDoc)
+		// POST: it reads a JSON body, and the app has always posted to it. As a
+		// GET route every delete from the app answered 405.
+		r.Post("/deleteDoc", docController.DeleteDoc)
 		r.Get("/getDocInfo/{doc_uuid}", docController.GetDocInfo)
 		r.Post("/createComment", docController.CreateDocComment)
 		r.Post("/updateComment", docController.UpdateDocComment)
