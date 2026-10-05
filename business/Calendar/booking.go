@@ -167,7 +167,8 @@ func loadPage(ctx context.Context, slug string) (*livePage, error) {
 		return nil, ErrNoPage
 	}
 	du, err := userDomain.GetDgraphUserInfoByUUID(ctx, p.UserId.String())
-	if err != nil || du == nil {
+	// Someone who has left the workspace takes no more bookings.
+	if err != nil || du == nil || helpers.IsSoftDeleted(du.DeletedAt) {
 		return nil, ErrNoPage
 	}
 	name := du.UserFullName

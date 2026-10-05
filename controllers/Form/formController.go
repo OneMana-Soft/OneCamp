@@ -94,7 +94,7 @@ func DeleteForm(w http.ResponseWriter, r *http.Request) {
 // GetPublicForm is a form's questions, for anyone with the link.
 // GET /public/form/{token}
 func GetPublicForm(w http.ResponseWriter, r *http.Request) {
-	f, err := formBusiness.GetPublic(chi.URLParam(r, "token"))
+	f, err := formBusiness.GetPublic(r.Context(), chi.URLParam(r, "token"))
 	if err != nil {
 		write(w, r, "GetPublicForm", err)
 		return

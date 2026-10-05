@@ -311,40 +311,61 @@ type Public struct {
 // same, so a closed form reveals nothing.
 var ErrNoForm = errors.New("no such form")
 
-func load(token string) (*formModel.Form, []Field, error) {
+// live is a form people may fill in, with its owner and project as stored.
+type live struct {
+	form    *formModel.Form
+	fields  []Field
+	owner   *dgraphStruct.DgraphUser
+	project *dgraphStruct.DgraphProject
+}
+
+// load finds an active form whose project is still there. A form of an
+// archived project, or one whose owner has gone, answers as no form at all:
+// nobody should be filing tasks into a project nobody sees.
+func load(ctx context.Context, token string) (*live, error) {
 	if len(token) != 24 {
-		return nil, nil, ErrNoForm
+		return nil, ErrNoForm
 	}
 	f, err := formModel.ByToken(token)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if f == nil || !f.Active {
-		return nil, nil, ErrNoForm
+		return nil, ErrNoForm
 	}
 	var fields []Field
 	if json.Unmarshal(f.Fields, &fields) != nil {
-		return nil, nil, ErrNoForm
+		return nil, ErrNoForm
 	}
-	return f, fields, nil
+	sys := helpers.WithSystemRead(ctx)
+	owner, err := userBusiness.GetDgraphUserInfoByUUID(sys, f.CreatedBy.String())
+	if err != nil || owner == nil || helpers.IsSoftDeleted(owner.DeletedAt) {
+		return nil, ErrNoForm
+	}
+	project, err := projectDomain.GetBasicDgraphProjectInfo(sys, f.ProjectUUID.String(), owner.Uid)
+	if err != nil || project == nil || project.Uid == "" || project.Team == nil || helpers.IsSoftDeleted(project.DeletedAt) {
+		return nil, ErrNoForm
+	}
+	return &live{form: f, fields: fields, owner: owner, project: project}, nil
 }
 
 // GetPublic is a form for a visitor.
-func GetPublic(token string) (*Public, error) {
-	f, fields, err := load(token)
+func GetPublic(ctx context.Context, token string) (*Public, error) {
+	l, err := load(ctx, token)
 	if err != nil {
 		return nil, err
 	}
-	return &Public{Title: f.Title, Description: f.Description, Fields: fields}, nil
+	return &Public{Title: l.form.Title, Description: l.form.Description, Fields: l.fields}, nil
 }
 
 // Submit turns a visitor's answers into a task in the form's project.
 func Submit(ctx context.Context, token string, raw map[string]any, now time.Time) error {
-	f, fields, err := load(token)
+	l, err := load(ctx, token)
 	if err != nil {
 		return err
 	}
-	answers, err := CheckAnswers(fields, raw)
+	f := l.form
+	answers, err := CheckAnswers(l.fields, raw)
 	if err != nil {
 		return err
 	}
@@ -353,23 +374,15 @@ func Submit(ctx context.Context, token string, raw map[string]any, now time.Time
 	} else if n >= maxPerFormPerHour {
 		return &FormError{"This form is taking a lot of answers right now. Try again in a while."}
 	}
-
 	sys := helpers.WithSystemRead(ctx)
-	owner, err := userBusiness.GetDgraphUserInfoByUUID(sys, f.CreatedBy.String())
-	if err != nil || owner == nil {
-		return fmt.Errorf("form owner: %w", err)
-	}
-	project, err := projectDomain.GetBasicDgraphProjectInfo(sys, f.ProjectUUID.String(), owner.Uid)
-	if err != nil || project == nil || project.Team == nil {
-		return fmt.Errorf("form project: %w", err)
-	}
+	owner, project := l.owner, l.project
 	var assignee *dgraphStruct.DgraphUser
 	if f.AssigneeUUID != nil {
 		if a, err := userBusiness.GetDgraphUserInfoByUUID(sys, f.AssigneeUUID.String()); err == nil && a != nil {
 			assignee = a
 		}
 	}
-	name, desc := TaskFrom(f.Title, fields, f.TitleField, answers)
+	name, desc := TaskFrom(f.Title, l.fields, f.TitleField, answers)
 	actor := &model.UserInfo{UserPostgresInfo: model.User{Id: f.CreatedBy}, UserDgraphInfo: *owner}
 	taskID, err := taskBusiness.CreateTask(ctx, f.ProjectUUID, actor, project, assignee, adapter.CreateOrUpdateTaskInput{
 		TaskName:        name,
