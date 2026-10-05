@@ -11,6 +11,7 @@ import (
 
 	adapter "github.com/akashc777/OneCamp/adapter/Project"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
+	cycleBusiness "github.com/akashc777/OneCamp/business/Cycle"
 	business "github.com/akashc777/OneCamp/business/Project"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
@@ -1223,6 +1224,14 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 			}
 			if param.Id == "task_assignee_name" {
 				filterValue = fmt.Sprintf(`uid_in(task_assignee, [%s])`, strings.Join(strValues, ", "))
+			}
+			// Cycles live in Postgres; see business/Cycle.
+			if param.Id == "task_cycle" {
+				clause, cErr := cycleBusiness.FilterClause(projectUUIDString, strValues)
+				if cErr != nil {
+					helpers.LogErrorWithContext(ctx, "controllers/Project cycle filter err: %+v", cErr)
+				}
+				filterValue = clause
 
 			}
 
@@ -1415,6 +1424,14 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 			}
 			if param.Id == "task_assignee_name" {
 				filterValue = fmt.Sprintf(`uid_in(task_assignee, [%s])`, strings.Join(strValues, ", "))
+			}
+			// Cycles live in Postgres; see business/Cycle.
+			if param.Id == "task_cycle" {
+				clause, cErr := cycleBusiness.FilterClause(projectUUIDString, strValues)
+				if cErr != nil {
+					helpers.LogErrorWithContext(ctx, "controllers/Project cycle filter err: %+v", cErr)
+				}
+				filterValue = clause
 
 			}
 

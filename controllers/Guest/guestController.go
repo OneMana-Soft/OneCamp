@@ -23,6 +23,7 @@ import (
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	boardBusiness "github.com/akashc777/OneCamp/business/Board"
+	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	tableBusiness "github.com/akashc777/OneCamp/business/DataTable"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
@@ -32,6 +33,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
+	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -273,6 +275,23 @@ func CreateResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 		}
 		if !bundle.CanManage {
 			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You need manage access to share this table."})
+			return
+		}
+	case "channel":
+		// Inviting someone from outside into a channel is the channel admins'
+		// call (or a workspace admin's), as adding a member is.
+		cid, perr := uuid.Parse(body.ResourceID)
+		if perr != nil {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid channel id"})
+			return
+		}
+		ch, cerr := channelBusiness.GetBasicDgraphChannelInfoByUUID(ctx, cid, userInfo.UserDgraphInfo.Uid)
+		if cerr != nil || ch == nil || ch.Uuid == "" {
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Channel not found"})
+			return
+		}
+		if ch.IsAdmin == 0 && !userInfo.UserPostgresInfo.IsAdmin {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the channel's admins can invite guests."})
 			return
 		}
 	default:
@@ -580,4 +599,83 @@ func CreateGuestDocComment(w http.ResponseWriter, r *http.Request) {
 		Body:      comment.Body,
 		CreatedAt: comment.CreatedAt,
 	}})
+}
+
+// ─── Channel guests (capability = view | post) ─────────────────────────
+
+func channelGrant(w http.ResponseWriter, r *http.Request) (*guestModel.GuestGrant, bool) {
+	grant, err := guestBusiness.ValidateResourceGrant(r.Context(), chi.URLParam(r, "token"), "channel")
+	if err != nil {
+		notAvailable(w)
+		return nil, false
+	}
+	return grant, true
+}
+
+// GuestChannel GET /guest/channel/{token}?before=RFC3339 — public. A page of
+// the shared channel's messages, newest first, as plain text.
+func GuestChannel(w http.ResponseWriter, r *http.Request) {
+	grant, ok := channelGrant(w, r)
+	if !ok {
+		return
+	}
+	before, _ := time.Parse(time.RFC3339Nano, r.URL.Query().Get("before"))
+	view, err := guestBusiness.GetGuestChannel(r.Context(), grant, before)
+	if err != nil {
+		notAvailable(w)
+		return
+	}
+	if before.IsZero() {
+		auditBusiness.Record(r, "guest.resource.access", auditBusiness.CategorySecurity,
+			"A guest opened a shared channel",
+			map[string]interface{}{"resource_type": "channel", "resource_id": grant.ResourceID, "grant_id": grant.Id.String()})
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": view})
+}
+
+// GuestChannelThread GET /guest/channel/{token}/thread/{post_id} — public.
+func GuestChannelThread(w http.ResponseWriter, r *http.Request) {
+	grant, ok := channelGrant(w, r)
+	if !ok {
+		return
+	}
+	t, err := guestBusiness.GetGuestThread(r.Context(), grant, chi.URLParam(r, "post_id"))
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message isn't here any more."})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": t})
+}
+
+// GuestChannelPost POST /guest/channel/{token} {display_name, text, reply_to}
+// — public. Posts as the guest, or replies in a thread.
+func GuestChannelPost(w http.ResponseWriter, r *http.Request) {
+	grant, ok := channelGrant(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		DisplayName string `json:"display_name"`
+		Text        string `json:"text"`
+		ReplyTo     string `json:"reply_to"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid request body"})
+		return
+	}
+	err := guestBusiness.PostAsGuest(r.Context(), grant, body.DisplayName, body.Text, body.ReplyTo)
+	var in *guestBusiness.ErrGuestInput
+	switch {
+	case err == nil:
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Sent"})
+	case errors.As(err, &in):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": in.Msg})
+	case errors.Is(err, guestBusiness.ErrForbidden):
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "This link is read only."})
+	case errors.Is(err, guestBusiness.ErrNotFound):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message isn't here any more."})
+	default:
+		helpers.LogErrorWithContext(r.Context(), "controllers/Guest/GuestChannelPost err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't send that. Try again."})
+	}
 }

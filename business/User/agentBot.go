@@ -150,6 +150,32 @@ func EnsureSlackBridgeBot(ctx context.Context) (*BotIdentity, error) {
 	return id, nil
 }
 
+var (
+	channelGuestBotMu sync.Mutex
+	channelGuestBot   *BotIdentity
+)
+
+// EnsureChannelGuestBot resolves (provisioning on first use) the principal
+// that authors messages from channel guests. Like the Slack bridge's, it is
+// its own principal, so a guest's message never reads as the AI or a member.
+func EnsureChannelGuestBot(ctx context.Context) (*BotIdentity, error) {
+	channelGuestBotMu.Lock()
+	defer channelGuestBotMu.Unlock()
+	if channelGuestBot != nil && channelGuestBot.DgraphUID != "" {
+		return channelGuestBot, nil
+	}
+	userID, err := domain.EnsureBotUser(ctx, domain.ChannelGuestBotEmail, domain.ChannelGuestBotUsername, "Guests")
+	if err != nil {
+		return nil, err
+	}
+	id := ensureBotPrincipal(ctx, userID, domain.ChannelGuestBotEmail, "Guests", "")
+	if id.DgraphUID == "" {
+		return nil, fmt.Errorf("channel guest principal has no graph node")
+	}
+	channelGuestBot = id
+	return id, nil
+}
+
 // InvalidateAgentBot drops an agent's cached principal (call after delete) so a
 // stale identity is not served. Resolution will re-provision on next use.
 func InvalidateAgentBot(agentID uuid.UUID) {

@@ -1394,3 +1394,22 @@ func syncTaskStatusToOpenSearch(uuids []string, category string) {
 		UpdateTaskInOpenSearch(&openSearchStruct.OpenSearchTask{Uuid: id, TaskStatus: category, TaskUpdatedAt: now})
 	}
 }
+
+// GetDgraphTaskStatuses is the status of each live task listed, for counting
+// a cycle's progress. Archived tasks are left out.
+func GetDgraphTaskStatuses(ctx context.Context, taskUUIDs []string) (tasks []*dgraphStruct.DgraphTask, err error) {
+	if len(taskUUIDs) == 0 {
+		return nil, nil
+	}
+	ids, err := json.Marshal(taskUUIDs)
+	if err != nil {
+		return nil, err
+	}
+	query := fmt.Sprintf(`{
+				tasks(func: eq(task_uuid, %s)) @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")) {
+					task_uuid
+					task_status
+				}
+			}`, ids)
+	return dgraphModels.QueryDgraphTasks(ctx, query, nil)
+}

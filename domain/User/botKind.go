@@ -21,6 +21,12 @@ const (
 	SlackBridgeBotUsername = "slack-bridge"
 	// SlackBridgeBotEmail keys that principal's row.
 	SlackBridgeBotEmail = SlackBridgeBotUsername + BotEmailDomain
+	// ChannelGuestBotUsername is the principal that carries messages from
+	// people outside the workspace invited to a channel by a guest link, each
+	// badged with the guest's name. Guests themselves never become users.
+	ChannelGuestBotUsername = "channel-guest"
+	// ChannelGuestBotEmail keys that principal's row.
+	ChannelGuestBotEmail = ChannelGuestBotUsername + BotEmailDomain
 )
 
 // BotKind names what a bot principal actually IS.
@@ -50,6 +56,9 @@ const (
 	// BotKindBridge relays people from another chat app (the Slack bridge).
 	// It has no AI and runs nothing: each message is someone in Slack.
 	BotKindBridge BotKind = "bridge"
+	// BotKindGuest relays people outside the workspace invited to a channel.
+	// It has no AI: each message is a guest's, named in the message.
+	BotKindGuest BotKind = "guest"
 	// BotKindUnknown is a bot this build does not recognise. Returned rather
 	// than guessing, so a caller shows neutral copy instead of the assistant's.
 	BotKindUnknown BotKind = "bot"
@@ -74,6 +83,8 @@ func ClassifyBot(email string) BotKind {
 		return BotKindAutomation
 	case email == SlackBridgeBotEmail:
 		return BotKindBridge
+	case email == ChannelGuestBotEmail:
+		return BotKindGuest
 	case strings.HasPrefix(email, AgentBotPrefix):
 		return BotKindAgent
 	default:

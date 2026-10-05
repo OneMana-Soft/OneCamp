@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	prefDomain "github.com/akashc777/OneCamp/domain/UserNotificationPreference"
 	"github.com/akashc777/OneCamp/helpers"
@@ -26,6 +27,8 @@ import (
 	prefModels "github.com/akashc777/OneCamp/models/postgres/UserNotificationPreference"
 	authService "github.com/akashc777/OneCamp/services/Auth"
 	emailService "github.com/akashc777/OneCamp/services/Email"
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 // GetMyNotificationPreferences returns the current user's preferences,
@@ -585,4 +588,55 @@ func validHHMM(s string) bool {
 		m = m*10 + int(c-'0')
 	}
 	return h < 24 && m < 60
+}
+
+// TeammateNotificationStatus says whether a teammate's notifications are held
+// (paused, or quiet hours) and until when, so a DM can say so.
+// GET /user/notificationStatus/{user_uuid}
+func TeammateNotificationStatus(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "user_uuid"))
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a person."})
+		return
+	}
+	status, err := notificationBusiness.HeldStatusOf(id, time.Now())
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't check. Try again."})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": status})
+}
+
+// NotifyAnyway sends one urgent ping through a teammate's pause or quiet
+// hours, once a day, in a DM. POST /user/notifyAnyway {user_uuid}
+func NotifyAnyway(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	if !ok {
+		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not signed in"})
+		return
+	}
+	var in struct {
+		UserUUID string `json:"user_uuid"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that request."})
+		return
+	}
+	to, err := uuid.Parse(in.UserUUID)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a person."})
+		return
+	}
+	err = notificationBusiness.NotifyAnyway(ctx, &userInfo, to, time.Now())
+	var ue *notificationBusiness.UrgentError
+	switch {
+	case err == nil:
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Notified"})
+	case errors.As(err, &ue):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ue.Msg})
+	default:
+		helpers.LogErrorWithContext(ctx, "controllers/NotifyAnyway err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't notify them. Try again."})
+	}
 }

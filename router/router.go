@@ -29,10 +29,12 @@ import (
 	commandController "github.com/akashc777/OneCamp/controllers/Command"
 	configController "github.com/akashc777/OneCamp/controllers/Config"
 	connectorController "github.com/akashc777/OneCamp/controllers/Connector"
+	cycleController "github.com/akashc777/OneCamp/controllers/Cycle"
 	dataSourceController "github.com/akashc777/OneCamp/controllers/DataSource"
 	dataTableController "github.com/akashc777/OneCamp/controllers/DataTable"
 	docController "github.com/akashc777/OneCamp/controllers/Doc"
 	entityLinkController "github.com/akashc777/OneCamp/controllers/EntityLink"
+	formController "github.com/akashc777/OneCamp/controllers/Form"
 	githubController "github.com/akashc777/OneCamp/controllers/GitHub"
 	globalSearchController "github.com/akashc777/OneCamp/controllers/GlobalSearch"
 	guestController "github.com/akashc777/OneCamp/controllers/Guest"
@@ -241,6 +243,10 @@ func Routes() http.Handler {
 	// there is no oracle. The 32-byte link token makes brute force infeasible.
 	// Booking pages: anyone may look at free slots and book one. Booking and
 	// cancelling are limited per address; looking is cached per page.
+	// Intake forms: anyone with the link fills one in; each answer set
+	// becomes a task. Sending is limited per address.
+	router.Get("/public/form/{token}", formController.GetPublicForm)
+	router.With(customMiddleware.IPRateLimit("form", 20, "Too many forms sent from here. Try again later.")).With(customMiddleware.BodyLimit(64<<10)).Post("/public/form/{token}", formController.SubmitPublicForm)
 	router.Get("/public/book/{slug}", eventController.GetPublicBookingPage)
 	router.With(customMiddleware.IPRateLimit("booking", 10, "Too many bookings from here. Try again later.")).With(customMiddleware.BodyLimit(8<<10)).Post("/public/book/{slug}", eventController.BookPublicSlot)
 	router.With(customMiddleware.LoginRateLimit("booking-cancel")).Get("/public/booking/{token}", eventController.GetPublicBooking)
@@ -257,6 +263,11 @@ func Routes() http.Handler {
 	router.Get("/guest/board-attachment/{token}/{obj_uuid}", guestController.GuestBoardAttachment)
 	// Public read-only table bundle for a guest, authorized by the grant.
 	router.With(customMiddleware.LoginRateLimit("guest")).Get("/guest/table/{token}", guestController.GuestTable)
+	// Channel guests: a person outside the workspace reads (and, with the post
+	// capability, writes in) one channel. Same grant machinery as every link.
+	router.With(customMiddleware.LoginRateLimit("guest-channel-read")).Get("/guest/channel/{token}", guestController.GuestChannel)
+	router.With(customMiddleware.LoginRateLimit("guest-channel-read")).Get("/guest/channel/{token}/thread/{post_id}", guestController.GuestChannelThread)
+	router.With(customMiddleware.LoginRateLimit("guest-channel")).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/channel/{token}", guestController.GuestChannelPost)
 	// Public guest doc comments: read the guest feedback thread, and (when the
 	// grant carries the comment capability) post a comment. Rate-limited and
 	// body-capped; the business layer enforces the capability and strips HTML.
@@ -1246,6 +1257,8 @@ func Routes() http.Handler {
 		r.Get("/notificationPreferences", notificationController.GetMyNotificationPreferences)
 		r.Post("/notificationPreferences", notificationController.UpdateMyNotificationPreferences)
 		r.Post("/notificationPause", notificationController.PauseMyNotifications)
+		r.Get("/notificationStatus/{user_uuid}", notificationController.TeammateNotificationStatus)
+		r.Post("/notifyAnyway", notificationController.NotifyAnyway)
 		r.Post("/addFavChannel/{channel_id}", userController.AddChannelToUserFav)
 		r.Post("/removeFavChannel/{channel_id}", userController.RemoveChannelToUserFav)
 		r.Post("/searchUserAndChannelList", userController.FwdUserAndChannelList)
@@ -1296,6 +1309,14 @@ func Routes() http.Handler {
 		r.Post("/deleteProject", projectController.ArchiveProject)
 		r.Post("/unDeleteProject", projectController.UnArchiveProject)
 		// A project's task statuses: members read, admins change.
+		r.Get("/{project_uuid}/forms", formController.ListForms)
+		r.Post("/{project_uuid}/forms", formController.SaveForm)
+		r.Post("/{project_uuid}/forms/{form_id}/delete", formController.DeleteForm)
+		r.Get("/{project_uuid}/cycles", cycleController.ListCycles)
+		r.Post("/{project_uuid}/cycles", cycleController.CreateCycle)
+		r.Post("/{project_uuid}/cycles/{cycle_id}/rename", cycleController.RenameCycle)
+		r.Post("/{project_uuid}/cycles/{cycle_id}/complete", cycleController.CompleteCycle)
+		r.Post("/{project_uuid}/cycles/{cycle_id}/delete", cycleController.DeleteCycle)
 		r.Get("/{project_uuid}/statuses", taskStatusController.List)
 		r.Post("/{project_uuid}/statuses", taskStatusController.Create)
 		r.Post("/{project_uuid}/statuses/reorder", taskStatusController.Reorder)
@@ -1361,6 +1382,8 @@ func Routes() http.Handler {
 		r.Post("/updateTaskDueDate", taskController.UpdateTaskDueDate)
 		r.Post("/updateTaskStatus", taskController.UpdateTaskStatus)
 		r.Get("/recurrence/{task_uuid}", taskController.GetTaskRecurrence)
+		r.Get("/cycle/{task_uuid}", cycleController.GetTaskCycle)
+		r.Post("/cycle", cycleController.SetTaskCycle)
 		r.Post("/recurrence", taskController.SetTaskRecurrence)
 		r.Get("/views", taskController.GetTaskViews)
 		r.Post("/views", taskController.SaveTaskView)
