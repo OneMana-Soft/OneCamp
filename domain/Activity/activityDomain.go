@@ -401,6 +401,8 @@ func GetUnifiedActivity(ctx context.Context, userDgraphId string, beforeTime tim
 						user_uuid
 						user_profile_object_key
 						user_full_name
+						is_bot
+						user_email_id
 					}
 					chat_dm @filter(uid_in(dm_participants, $user_id)){
 						dm_grouping_id
@@ -429,6 +431,8 @@ func GetUnifiedActivity(ctx context.Context, userDgraphId string, beforeTime tim
 						user_name
 						user_profile_object_key
 						user_full_name
+						is_bot
+						user_email_id
 					}
 					post_channel @filter(uid_in(ch_members, $user_id)) {
 						ch_name
@@ -475,6 +479,8 @@ func GetUnifiedActivity(ctx context.Context, userDgraphId string, beforeTime tim
 						user_uuid
 						user_profile_object_key
 						user_full_name
+						is_bot
+						user_email_id
 					}
 					comment_created_at
 				}
@@ -488,6 +494,8 @@ func GetUnifiedActivity(ctx context.Context, userDgraphId string, beforeTime tim
 					user_uuid
 					user_profile_object_key
 					user_full_name
+					is_bot
+					user_email_id
 				}
 				comment_created_at
 				comment_post @filter(not gt(post_deleted_at, "1970-01-01T00:00:00Z")) @cascade(post_channel) {
@@ -547,6 +555,8 @@ func GetUnifiedActivity(ctx context.Context, userDgraphId string, beforeTime tim
 					user_name
 					user_profile_object_key
 					user_full_name
+					is_bot
+					user_email_id
 				}
 				post: ~post_reactions @filter(not gt(post_deleted_at, "1970-01-01T00:00:00Z")) @cascade(post_channel) {
 					post_uuid

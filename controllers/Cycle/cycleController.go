@@ -8,7 +8,6 @@ import (
 	"time"
 
 	cycleBusiness "github.com/akashc777/OneCamp/business/Cycle"
-	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -158,15 +157,8 @@ func DeleteCycle(w http.ResponseWriter, r *http.Request) {
 
 // GetTaskCycle is the cycle a task is in (null when none). GET /task/cycle/{task_uuid}
 func GetTaskCycle(w http.ResponseWriter, r *http.Request) {
-	userInfo := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-	taskID, err := uuid.Parse(chi.URLParam(r, "task_uuid"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a task."})
-		return
-	}
-	task, err := taskBusiness.GetDgraphBasicTaskInfo(r.Context(), taskID.String(), userInfo.UserDgraphInfo.Uid)
-	if err != nil || task == nil || !taskBusiness.CanViewTask(task, userInfo.UserDgraphInfo.Uid) {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Task not found"})
+	taskID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"))
+	if !ok {
 		return
 	}
 	c, err := cycleModel.CycleOf(taskID)
@@ -180,7 +172,6 @@ func GetTaskCycle(w http.ResponseWriter, r *http.Request) {
 // SetTaskCycle puts a task in one of its project's cycles, or takes it out
 // (cycle_id ""). POST /task/cycle {task_uuid, cycle_id}
 func SetTaskCycle(w http.ResponseWriter, r *http.Request) {
-	userInfo := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	var in struct {
 		TaskUUID string `json:"task_uuid"`
 		CycleID  string `json:"cycle_id"`
@@ -189,17 +180,11 @@ func SetTaskCycle(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that request."})
 		return
 	}
-	taskID, err := uuid.Parse(in.TaskUUID)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a task."})
+	taskID, task, ok := projectaccess.RequireTask(w, r, in.TaskUUID)
+	if !ok {
 		return
 	}
-	task, err := taskBusiness.GetDgraphBasicTaskInfo(r.Context(), taskID.String(), userInfo.UserDgraphInfo.Uid)
-	if err != nil || task == nil || task.Project == nil {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Task not found"})
-		return
-	}
-	if task.Project.IsProjectAdmin == 0 {
+	if task.Project == nil || task.Project.IsProjectAdmin == 0 {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the project's admins can change its cycles."})
 		return
 	}

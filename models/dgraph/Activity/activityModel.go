@@ -336,6 +336,9 @@ type UnifiedActivityItem struct {
 	Mention      *dgraphStruct.DgraphMentions `json:"mention,omitempty"`
 	Comment      *dgraphStruct.DgraphComment  `json:"comment,omitempty"`
 	Reaction     *ReactionsActivity           `json:"reaction,omitempty"`
+	// ActorKind is who did it: "person", "agent" or "app", so a reader can
+	// see what people did apart from what agents and automations did.
+	ActorKind string `json:"actor_kind"`
 }
 
 type UnifiedActivityPagination struct {

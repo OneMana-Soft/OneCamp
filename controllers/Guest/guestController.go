@@ -13,6 +13,7 @@
 package controllers
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"html"
@@ -28,6 +29,7 @@ import (
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	fileBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -232,70 +234,7 @@ func CreateResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the caller may share this resource: must have edit access or own
-	// it. Reuses the same dgraph access projection the collab authorize uses.
-	switch body.ResourceType {
-	case "doc":
-		d, err := docBusiness.GetDgraphDocByUUIDOnlyEditingInfo(ctx, body.ResourceID, userInfo.UserDgraphInfo.Uid)
-		if err != nil || d == nil {
-			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Document not found"})
-			return
-		}
-		isOwner := d.CreatedBy != nil && d.CreatedBy.Uuid == userInfo.UserDgraphInfo.Uuid
-		if d.HasEditAccess == 0 && !isOwner {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You need edit access to share this document."})
-			return
-		}
-	case "board":
-		b, err := boardBusiness.GetBasicBoardByUUID(ctx, body.ResourceID, userInfo.UserDgraphInfo.Uid)
-		if err != nil || b == nil {
-			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Board not found"})
-			return
-		}
-		isOwner := b.CreatedBy != nil && b.CreatedBy.Uuid == userInfo.UserDgraphInfo.Uuid
-		if b.HasEditAccess == 0 && !isOwner {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You need edit access to share this board."})
-			return
-		}
-	case "table":
-		tid, perr := uuid.Parse(body.ResourceID)
-		if perr != nil {
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid table id"})
-			return
-		}
-		// The caller must be able to MANAGE the table to share it externally.
-		// GetBundle enforces view access; CanManage gates the privileged share.
-		bundle, berr := tableBusiness.GetBundle(ctx, tid, tableBusiness.Actor{
-			UserID:  userInfo.UserPostgresInfo.Id,
-			IsAdmin: userInfo.UserPostgresInfo.IsAdmin,
-		})
-		if berr != nil {
-			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Table not found"})
-			return
-		}
-		if !bundle.CanManage {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You need manage access to share this table."})
-			return
-		}
-	case "channel":
-		// Inviting someone from outside into a channel is the channel admins'
-		// call (or a workspace admin's), as adding a member is.
-		cid, perr := uuid.Parse(body.ResourceID)
-		if perr != nil {
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid channel id"})
-			return
-		}
-		ch, cerr := channelBusiness.GetBasicDgraphChannelInfoByUUID(ctx, cid, userInfo.UserDgraphInfo.Uid)
-		if cerr != nil || ch == nil || ch.Uuid == "" {
-			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Channel not found"})
-			return
-		}
-		if ch.IsAdmin == 0 && !userInfo.UserPostgresInfo.IsAdmin {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the channel's admins can invite guests."})
-			return
-		}
-	default:
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Unsupported resource type"})
+	if !mayShare(w, r, userInfo, body.ResourceType, body.ResourceID) {
 		return
 	}
 
@@ -603,13 +542,19 @@ func CreateGuestDocComment(w http.ResponseWriter, r *http.Request) {
 
 // ─── Channel guests (capability = view | post) ─────────────────────────
 
-func channelGrant(w http.ResponseWriter, r *http.Request) (*guestModel.GuestGrant, bool) {
-	grant, err := guestBusiness.ValidateResourceGrant(r.Context(), chi.URLParam(r, "token"), "channel")
+// grantFor is the active grant behind the {token} in the URL for a kind of
+// resource, or a uniform "not available" written for the caller.
+func grantFor(w http.ResponseWriter, r *http.Request, resourceType string) (*guestModel.GuestGrant, bool) {
+	grant, err := guestBusiness.ValidateResourceGrant(r.Context(), chi.URLParam(r, "token"), resourceType)
 	if err != nil {
 		notAvailable(w)
 		return nil, false
 	}
 	return grant, true
+}
+
+func channelGrant(w http.ResponseWriter, r *http.Request) (*guestModel.GuestGrant, bool) {
+	return grantFor(w, r, guestModel.ResourceChannel)
 }
 
 // GuestChannel GET /guest/channel/{token}?before=RFC3339 — public. A page of
@@ -678,4 +623,218 @@ func GuestChannelPost(w http.ResponseWriter, r *http.Request) {
 		helpers.LogErrorWithContext(r.Context(), "controllers/Guest/GuestChannelPost err: %+v", err)
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't send that. Try again."})
 	}
+}
+
+// GuestProject GET /guest/project/{token} — public. The shared project's tasks
+// by status.
+func GuestProject(w http.ResponseWriter, r *http.Request) {
+	grant, ok := grantFor(w, r, guestModel.ResourceProject)
+	if !ok {
+		return
+	}
+	view, err := guestBusiness.GetGuestProject(r.Context(), grant)
+	if err != nil {
+		notAvailable(w)
+		return
+	}
+	if r.URL.Query().Get("refresh") == "" {
+		auditBusiness.Record(r, "guest.resource.access", auditBusiness.CategorySecurity,
+			"A guest opened a shared project",
+			map[string]interface{}{"resource_type": "project", "resource_id": grant.ResourceID, "grant_id": grant.Id.String()})
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": view})
+}
+
+// GuestProjectTask GET /guest/project/{token}/task/{task_id} — public.
+func GuestProjectTask(w http.ResponseWriter, r *http.Request) {
+	grant, ok := grantFor(w, r, guestModel.ResourceProject)
+	if !ok {
+		return
+	}
+	t, err := guestBusiness.GetGuestTask(r.Context(), grant, chi.URLParam(r, "task_id"))
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task isn't here any more."})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": t})
+}
+
+// GuestProjectComment POST /guest/project/{token}/task/{task_id}/comment
+// {display_name, text} — public.
+func GuestProjectComment(w http.ResponseWriter, r *http.Request) {
+	grant, ok := grantFor(w, r, guestModel.ResourceProject)
+	if !ok {
+		return
+	}
+	var body struct {
+		DisplayName string `json:"display_name"`
+		Text        string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid request body"})
+		return
+	}
+	err := guestBusiness.CommentAsGuest(r.Context(), grant, chi.URLParam(r, "task_id"), body.DisplayName, body.Text)
+	var in *guestBusiness.ErrGuestInput
+	switch {
+	case err == nil:
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Sent"})
+	case errors.As(err, &in):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": in.Msg})
+	case errors.Is(err, guestBusiness.ErrForbidden):
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "This link is read only."})
+	case errors.Is(err, guestBusiness.ErrNotFound):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task isn't here any more."})
+	default:
+		helpers.LogErrorWithContext(r.Context(), "controllers/Guest/GuestProjectComment err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't send that. Try again."})
+	}
+}
+
+// mayShare says whether the caller may share a resource with people outside
+// the workspace (and so see and turn off its links), writing the refusal when
+// not. It reuses each resource's own access checks, the same ones the collab
+// authorize endpoints use.
+func mayShare(w http.ResponseWriter, r *http.Request, userInfo userModels.UserInfo, resourceType, resourceID string) bool {
+	ctx := r.Context()
+	// Verify the caller may share this resource: must have edit access or own
+	// it. Reuses the same dgraph access projection the collab authorize uses.
+	switch resourceType {
+	case "doc":
+		d, err := docBusiness.GetDgraphDocByUUIDOnlyEditingInfo(ctx, resourceID, userInfo.UserDgraphInfo.Uid)
+		if err != nil || d == nil {
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Document not found"})
+			return false
+		}
+		isOwner := d.CreatedBy != nil && d.CreatedBy.Uuid == userInfo.UserDgraphInfo.Uuid
+		if d.HasEditAccess == 0 && !isOwner {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You need edit access to share this document."})
+			return false
+		}
+	case "board":
+		b, err := boardBusiness.GetBasicBoardByUUID(ctx, resourceID, userInfo.UserDgraphInfo.Uid)
+		if err != nil || b == nil {
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Board not found"})
+			return false
+		}
+		isOwner := b.CreatedBy != nil && b.CreatedBy.Uuid == userInfo.UserDgraphInfo.Uuid
+		if b.HasEditAccess == 0 && !isOwner {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You need edit access to share this board."})
+			return false
+		}
+	case "table":
+		tid, perr := uuid.Parse(resourceID)
+		if perr != nil {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid table id"})
+			return false
+		}
+		// The caller must be able to MANAGE the table to share it externally.
+		// GetBundle enforces view access; CanManage gates the privileged share.
+		bundle, berr := tableBusiness.GetBundle(ctx, tid, tableBusiness.Actor{
+			UserID:  userInfo.UserPostgresInfo.Id,
+			IsAdmin: userInfo.UserPostgresInfo.IsAdmin,
+		})
+		if berr != nil {
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Table not found"})
+			return false
+		}
+		if !bundle.CanManage {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You need manage access to share this table."})
+			return false
+		}
+	case "channel":
+		// Inviting someone from outside into a channel is the channel admins'
+		// call (or a workspace admin's), as adding a member is.
+		cid, perr := uuid.Parse(resourceID)
+		if perr != nil {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid channel id"})
+			return false
+		}
+		ch, cerr := channelBusiness.GetBasicDgraphChannelInfoByUUID(ctx, cid, userInfo.UserDgraphInfo.Uid)
+		if cerr != nil || ch == nil || ch.Uuid == "" {
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Channel not found"})
+			return false
+		}
+		if ch.IsAdmin == 0 && !userInfo.UserPostgresInfo.IsAdmin {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the channel's admins can invite guests."})
+			return false
+		}
+	case "project":
+		// Showing a project to a client is the project admins' call (or a
+		// workspace admin's), as adding a member is.
+		if _, perr := uuid.Parse(resourceID); perr != nil {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid project id"})
+			return false
+		}
+		p, perr := projectBusiness.GetBasicDgraphProjectInfo(ctx, resourceID, userInfo.UserDgraphInfo.Uid)
+		if perr != nil || p == nil || p.Uuid == "" || helpers.IsSoftDeleted(p.DeletedAt) ||
+			(p.IsProjectMember == 0 && p.IsProjectAdmin == 0 && !userInfo.UserPostgresInfo.IsAdmin) {
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Project not found"})
+			return false
+		}
+		if p.IsProjectAdmin == 0 && !userInfo.UserPostgresInfo.IsAdmin {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the project's admins can share it with a client."})
+			return false
+		}
+	default:
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Unsupported resource type"})
+		return false
+	}
+	return true
+}
+
+// GuestLinkView is one live link to a resource, for the people who may share it.
+type GuestLinkView struct {
+	ID         uuid.UUID  `json:"id"`
+	Capability string     `json:"capability"`
+	ExpiresAt  *time.Time `json:"expires_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+	Mine       bool       `json:"mine"`
+}
+
+// ListResourceGuestLinks GET /guest/links?resource_type=&resource_id= — the
+// live links to one resource, for anyone who may share it.
+func ListResourceGuestLinks(w http.ResponseWriter, r *http.Request) {
+	userInfo := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	q := r.URL.Query()
+	if !mayShare(w, r, userInfo, q.Get("resource_type"), q.Get("resource_id")) {
+		return
+	}
+	grants, err := guestModel.ListActiveForResource(r.Context(), q.Get("resource_type"), q.Get("resource_id"))
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't load the links. Try again."})
+		return
+	}
+	out := make([]GuestLinkView, 0, len(grants))
+	for _, g := range grants {
+		out = append(out, GuestLinkView{ID: g.Id, Capability: g.Capability, ExpiresAt: g.ExpiresAt, CreatedAt: g.CreatedAt, Mine: g.CreatedBy == userInfo.UserPostgresInfo.Id})
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": out})
+}
+
+// RevokeResourceGuestLink POST /guest/links/{id}/revoke — turns a link off,
+// for anyone who may share what it opens (a workspace admin can also do it
+// from admin settings).
+func RevokeResourceGuestLink(w http.ResponseWriter, r *http.Request) {
+	userInfo := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a link."})
+		return
+	}
+	g, err := guestModel.GetByID(r.Context(), id)
+	if err != nil || g == nil || g.ResourceType == guestModel.ResourceMeeting {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That link isn't here any more."})
+		return
+	}
+	if !mayShare(w, r, userInfo, g.ResourceType, g.ResourceID) {
+		return
+	}
+	if err := guestModel.Revoke(r.Context(), id); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't turn the link off. Try again."})
+		return
+	}
+	auditBusiness.Record(r, "guest.link.revoke", auditBusiness.CategorySecurity, "Turned off an external share link",
+		map[string]interface{}{"resource_type": g.ResourceType, "resource_id": g.ResourceID, "grant_id": id.String()})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Turned off"})
 }

@@ -50,6 +50,8 @@ const (
 	AuthMethodSAML   = "saml"
 	AuthMethodLDAP   = "ldap"
 	AuthMethodDemo   = "demo"
+	// AuthMethodPasskey is a sign-in with a passkey (WebAuthn).
+	AuthMethodPasskey = "passkey"
 	// AuthMethodSCIM records an account created by directory provisioning.
 	//
 	// It is a PROVISIONING method, not a login method, and that is why it is absent from IsSSOMethod

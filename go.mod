@@ -9,7 +9,7 @@ require (
 	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/go-chi/chi/v5 v5.1.0
 	github.com/go-chi/cors v1.2.1
-	github.com/golang-jwt/jwt/v5 v5.2.2
+	github.com/golang-jwt/jwt/v5 v5.2.3
 	github.com/google/uuid v1.6.0
 	github.com/joho/godotenv v1.5.1
 	github.com/lib/pq v1.10.9
@@ -37,6 +37,20 @@ require (
 )
 
 require github.com/pion/transport/v4 v4.0.1 // indirect
+
+require (
+	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
+	github.com/go-webauthn/x v0.1.23 // indirect
+	github.com/google/go-tpm v0.9.5 // indirect
+	github.com/mitchellh/mapstructure v1.5.0 // indirect
+	github.com/x448/float16 v0.8.4 // indirect
+)
+
+require (
+	github.com/go-webauthn/webauthn v0.13.4
+	github.com/pion/transport/v4 v4.0.1 // indirect
+	github.com/yuin/goldmark v1.8.6 // indirect
+)
 
 require (
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.10-20250912141014-52f32327d4b0.1 // indirect

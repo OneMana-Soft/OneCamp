@@ -8,6 +8,7 @@ import (
 	"net/http"
 
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
+	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -36,4 +37,21 @@ func Require(w http.ResponseWriter, r *http.Request, needAdmin bool, deniedMsg s
 		return uuid.Nil, nil, false
 	}
 	return id, p, true
+}
+
+// RequireTask reads a task id and checks the caller may see the task. A task
+// they can't see answers as one that doesn't exist.
+func RequireTask(w http.ResponseWriter, r *http.Request, raw string) (uuid.UUID, *dgraphStruct.DgraphTask, bool) {
+	userInfo := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	id, err := uuid.Parse(raw)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a task."})
+		return uuid.Nil, nil, false
+	}
+	task, err := taskBusiness.GetDgraphBasicTaskInfo(r.Context(), id.String(), userInfo.UserDgraphInfo.Uid)
+	if err != nil || task == nil || task.Uuid == "" || !taskBusiness.CanViewTask(task, userInfo.UserDgraphInfo.Uid) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Task not found"})
+		return uuid.Nil, nil, false
+	}
+	return id, task, true
 }

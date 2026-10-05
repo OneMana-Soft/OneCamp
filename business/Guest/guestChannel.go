@@ -99,7 +99,7 @@ func GetGuestChannel(ctx context.Context, grant *guestModel.GuestGrant, before t
 	if err != nil {
 		return nil, err
 	}
-	bot, err := userBusiness.EnsureChannelGuestBot(ctx)
+	bot, err := userBusiness.EnsureGuestBot(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func GetGuestThread(ctx context.Context, grant *guestModel.GuestGrant, postID st
 	if err != nil {
 		return nil, err
 	}
-	bot, err := userBusiness.EnsureChannelGuestBot(ctx)
+	bot, err := userBusiness.EnsureGuestBot(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -199,7 +199,7 @@ func PostAsGuest(ctx context.Context, grant *guestModel.GuestGrant, name, text, 
 	if err != nil {
 		return err
 	}
-	bot, err := userBusiness.EnsureChannelGuestBot(ctx)
+	bot, err := userBusiness.EnsureGuestBot(ctx)
 	if err != nil {
 		return err
 	}

@@ -46,6 +46,8 @@ var publicRoutes = map[string]string{
 	// for a purpose claim so a session token cannot be presented in its place, and it is rate limited
 	// under its own key because it is the one place a six-digit secret can be guessed.
 	"/auth/login/totp":                 "completes a 2FA challenge issued by /auth/login; no session exists yet",
+	"/auth/passkey/begin":              "a passkey sign-in starts before anyone is signed in",
+	"/auth/passkey/finish":             "a passkey sign-in is how someone becomes signed in",
 	"/auth/signup":                     "invited-user registration",
 	"/auth/ldap-login":                 "directory credentials exchange",
 	"/auth/forgot-password":            "sends a reset mail; uniform response, no account oracle",
@@ -78,18 +80,21 @@ var publicRoutes = map[string]string{
 
 	// Guest share links. The token is the credential; every one is rate-limited
 	// and returns a uniform not-available response so there is no oracle.
-	"/public/form/{token}":                       "intake form: anyone with the link fills it in; rate-limited",
-	"/public/book/{slug}":                        "booking page: outsiders see free slots and book; rate-limited",
-	"/public/booking/{token}":                    "a guest's booking, by its cancel-link token",
-	"/public/booking/{token}/cancel":             "a guest cancels through their cancel-link token",
-	"/guest/channel/{token}":                     "share-link token",
-	"/guest/channel/{token}/thread/{post_id}":    "share-link token",
-	"/guest/meet/{token}":                        "share-link token",
-	"/guest/meet/{token}/join":                   "share-link token",
-	"/guest/collab/{token}":                      "share-link token",
-	"/guest/table/{token}":                       "share-link token",
-	"/guest/doc-comments/{token}":                "share-link token",
-	"/guest/board-attachment/{token}/{obj_uuid}": "share-link grant scopes the attachment",
+	"/public/form/{token}":                          "intake form: anyone with the link fills it in; rate-limited",
+	"/public/book/{slug}":                           "booking page: outsiders see free slots and book; rate-limited",
+	"/public/booking/{token}":                       "a guest's booking, by its cancel-link token",
+	"/public/booking/{token}/cancel":                "a guest cancels through their cancel-link token",
+	"/guest/channel/{token}":                        "share-link token",
+	"/guest/channel/{token}/thread/{post_id}":       "share-link token",
+	"/guest/project/{token}":                        "share-link token",
+	"/guest/project/{token}/task/{task_id}":         "share-link token",
+	"/guest/project/{token}/task/{task_id}/comment": "share-link token",
+	"/guest/meet/{token}":                           "share-link token",
+	"/guest/meet/{token}/join":                      "share-link token",
+	"/guest/collab/{token}":                         "share-link token",
+	"/guest/table/{token}":                          "share-link token",
+	"/guest/doc-comments/{token}":                   "share-link token",
+	"/guest/board-attachment/{token}/{obj_uuid}":    "share-link grant scopes the attachment",
 
 	// Email-driven, must work from a mail client with no session.
 	"/public/notifications/unsubscribe": "unsubscribe token; required by bulk-mail norms",

@@ -1413,3 +1413,37 @@ func GetDgraphTaskStatuses(ctx context.Context, taskUUIDs []string) (tasks []*dg
 			}`, ids)
 	return dgraphModels.QueryDgraphTasks(ctx, query, nil)
 }
+
+// GetDgraphTaskForGuest is what a project's guest may see of one task: its
+// card, its description and its comments with their authors' names. Nothing
+// about the viewer is asked, because a guest is not a user; the caller has
+// already checked the task belongs to the guest's project.
+func GetDgraphTaskForGuest(ctx context.Context, taskUUID string) (*dgraphStruct.DgraphTask, error) {
+	query := `query TaskInfo($id: string){
+				taskInfo(func: eq(task_uuid, $id)) {
+					task_uuid
+					task_name
+					task_status
+					task_custom_status_name
+					task_priority
+					task_description
+					task_due_date
+					task_start_date
+					task_created_at
+					task_deleted_at
+					task_assignee { user_name user_full_name }
+					task_project { project_uuid }
+					task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")) (orderasc: comment_created_at) {
+						comment_uuid
+						comment_text
+						comment_created_at
+						comment_by { user_name user_full_name }
+					}
+				}
+			}`
+	t, err := dgraphModels.GetDgraphTaskInfoByUUID(ctx, query, map[string]string{"$id": taskUUID})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetDgraphTaskForGuest err: %+v", err)
+	}
+	return t, err
+}

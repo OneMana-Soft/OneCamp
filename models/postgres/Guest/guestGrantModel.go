@@ -26,6 +26,8 @@ const (
 	ResourceBoard   = "board"
 	ResourceTable   = "table"
 	ResourceChannel = "channel"
+	// ResourceProject is a client's view of one project's tasks.
+	ResourceProject = "project"
 
 	CapabilityJoin    = "join"
 	CapabilityView    = "view"
@@ -174,6 +176,29 @@ func ListActive(ctx context.Context) ([]*GuestGrant, error) {
 		g, scanErr := scanGrant(rows)
 		if scanErr != nil {
 			return nil, scanErr
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// ListActiveForResource is the live grants to one resource, newest first.
+func ListActiveForResource(ctx context.Context, resourceType, resourceID string) ([]*GuestGrant, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	const q = `SELECT ` + grantColumns + ` FROM guest_grants
+		WHERE resource_type = $1 AND resource_id = $2 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())
+		ORDER BY created_at DESC LIMIT 100`
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q, resourceType, resourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*GuestGrant{}
+	for rows.Next() {
+		g, err := scanGrant(rows)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, g)
 	}
