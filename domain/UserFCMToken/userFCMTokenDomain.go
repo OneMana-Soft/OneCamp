@@ -204,3 +204,14 @@ func DeleteFromListOfFCMToken(ctx context.Context, tokens []string) (err error) 
 	}
 	return
 }
+
+// GetFCMTokenByUserIdIgnoringPause is a person's devices even while they have
+// paused notifications or are in quiet hours. Only the urgent "notify anyway"
+// ping uses it, and that is limited to one a day per sender.
+func GetFCMTokenByUserIdIgnoringPause(ctx context.Context, userId string) (tokens []string, err error) {
+	tokens, err = models.GetFCMTokenByUserId(`SELECT fcm_token FROM users_fcm_token WHERE user_id = $1`, userId)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetFCMTokenByUserIdIgnoringPause err: %+v", err)
+	}
+	return
+}

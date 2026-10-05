@@ -89,9 +89,12 @@ var publicRoutes = map[string]string{
 
 	// Guest share links. The token is the credential; every one is rate-limited
 	// and returns a uniform not-available response so there is no oracle.
+	"/public/form/{token}":                       "intake form: anyone with the link fills it in; rate-limited",
 	"/public/book/{slug}":                        "booking page: outsiders see free slots and book; rate-limited",
 	"/public/booking/{token}":                    "a guest's booking, by its cancel-link token",
 	"/public/booking/{token}/cancel":             "a guest cancels through their cancel-link token",
+	"/guest/channel/{token}":                     "share-link token",
+	"/guest/channel/{token}/thread/{post_id}":    "share-link token",
 	"/guest/meet/{token}":                        "share-link token",
 	"/guest/meet/{token}/join":                   "share-link token",
 	"/guest/collab/{token}":                      "share-link token",

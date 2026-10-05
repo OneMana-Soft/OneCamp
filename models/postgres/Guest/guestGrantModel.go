@@ -25,10 +25,13 @@ const (
 	ResourceDoc     = "doc"
 	ResourceBoard   = "board"
 	ResourceTable   = "table"
+	ResourceChannel = "channel"
 
 	CapabilityJoin    = "join"
 	CapabilityView    = "view"
 	CapabilityComment = "comment"
+	// CapabilityPost lets a channel guest write as well as read.
+	CapabilityPost = "post"
 )
 
 // GuestGrant mirrors a row of guest_grants. The raw token is never stored.

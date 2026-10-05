@@ -99,7 +99,7 @@ func CreateResourceGrant(ctx context.Context, creatorUUID uuid.UUID, resourceTyp
 		return nil, ErrGuestDisabled
 	}
 	switch resourceType {
-	case guestModel.ResourceDoc, guestModel.ResourceBoard, guestModel.ResourceTable:
+	case guestModel.ResourceDoc, guestModel.ResourceBoard, guestModel.ResourceTable, guestModel.ResourceChannel:
 		// ok
 	default:
 		return nil, errors.New("unsupported resource type for guest access")
@@ -112,6 +112,9 @@ func CreateResourceGrant(ctx context.Context, creatorUUID uuid.UUID, resourceTyp
 	cap := guestModel.CapabilityView
 	if capability == guestModel.CapabilityComment && resourceType == guestModel.ResourceDoc {
 		cap = guestModel.CapabilityComment
+	}
+	if capability == guestModel.CapabilityPost && resourceType == guestModel.ResourceChannel {
+		cap = guestModel.CapabilityPost
 	}
 	// The ceiling still applies to every link that HAS an expiry. Permanence is
 	// only reachable by asking for it explicitly.
