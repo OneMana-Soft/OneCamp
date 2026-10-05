@@ -47,7 +47,13 @@ const allColumns = `id, user_id, email_enabled, email_mentions, email_dms, email
 		quiet_hours_start, quiet_hours_end, quiet_hours_tz, unsubscribe_token,
 		created_at, updated_at, notifications_paused_until`
 
-func scanRow(row *sql.Row) (*UserNotificationPreference, error) {
+// rowScanner is a *sql.Row or *sql.Rows.
+type rowScanner interface{ Scan(dest ...any) error }
+
+// scanRow reads one row of allColumns. Every reader uses it: a second,
+// hand-copied scanner once fell out of step with the column list (21 targets
+// for 20 columns), and every batched email lookup failed.
+func scanRow(row rowScanner) (*UserNotificationPreference, error) {
 	var p UserNotificationPreference
 	err := row.Scan(
 		&p.ID, &p.UserID, &p.EmailEnabled, &p.EmailMentions, &p.EmailDMs,
@@ -264,18 +270,11 @@ func GetByUserIDs(userIDs []uuid.UUID) (map[uuid.UUID]*UserNotificationPreferenc
 
 	out := make(map[uuid.UUID]*UserNotificationPreference, len(userIDs))
 	for rows.Next() {
-		var p UserNotificationPreference
-		err := rows.Scan(
-			&p.ID, &p.UserID, &p.EmailEnabled, &p.EmailMentions, &p.EmailDMs,
-			&p.EmailTaskAssigned, &p.EmailTaskStatus, &p.EmailComments, &p.EmailCalls,
-			&p.EmailChannelInvites, &p.EmailOnlyWhenOffline, &p.EmailDigestFrequency,
-			&p.QuietHoursEnabled, &p.QuietHoursStart, &p.QuietHoursEnd, &p.QuietHoursTZ,
-			&p.UnsubscribeToken, &p.CreatedAt, &p.UpdatedAt, &p.NotificationsPausedUntil, &p.NotificationsPausedUntil,
-		)
+		p, err := scanRow(rows)
 		if err != nil {
 			return nil, err
 		}
-		out[p.UserID] = &p
+		out[p.UserID] = p
 	}
 	return out, rows.Err()
 }
