@@ -100,6 +100,7 @@ var publicRoutes = map[string]string{
 	"/guest/project/{token}":                        "share-link token",
 	"/guest/project/{token}/task/{task_id}":         "share-link token",
 	"/guest/project/{token}/task/{task_id}/comment": "share-link token",
+	"/guest/project/{token}/task/{task_id}/review":  "share-link token",
 	"/guest/meet/{token}":                           "share-link token",
 	"/guest/meet/{token}/join":                      "share-link token",
 	"/guest/collab/{token}":                         "share-link token",

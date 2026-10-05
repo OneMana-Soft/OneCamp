@@ -280,6 +280,7 @@ func Routes() http.Handler {
 	router.With(customMiddleware.LoginRateLimit("guest-project-read")).Get("/guest/project/{token}", guestController.GuestProject)
 	router.With(customMiddleware.LoginRateLimit("guest-project-read")).Get("/guest/project/{token}/task/{task_id}", guestController.GuestProjectTask)
 	router.With(customMiddleware.LoginRateLimit("guest-project")).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/project/{token}/task/{task_id}/comment", guestController.GuestProjectComment)
+	router.With(customMiddleware.LoginRateLimit("guest-project")).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/project/{token}/task/{task_id}/review", guestController.GuestProjectReview)
 	// Public guest doc comments: read the guest feedback thread, and (when the
 	// grant carries the comment capability) post a comment. Rate-limited and
 	// body-capped; the business layer enforces the capability and strips HTML.
@@ -1265,6 +1266,7 @@ func Routes() http.Handler {
 		r.Post("/updateTaskStatus", taskController.UpdateTaskStatus)
 		r.Get("/recurrence/{task_uuid}", taskController.GetTaskRecurrence)
 		r.Get("/cycle/{task_uuid}", cycleController.GetTaskCycle)
+		r.Get("/clientReview/{task_uuid}", guestController.TaskClientReview)
 		// Time on tasks: a timer, time added by hand, and the person's own edits.
 		r.Get("/time/running", timeEntryController.RunningTimer)
 		r.Post("/time/stop", timeEntryController.StopTimer)

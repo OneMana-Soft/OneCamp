@@ -14,6 +14,7 @@ import (
 	"context"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Task"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
@@ -22,6 +23,7 @@ import (
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	reviewModel "github.com/akashc777/OneCamp/models/postgres/ClientReview"
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -37,6 +39,8 @@ type GuestTaskCard struct {
 	DueDate      *time.Time `json:"due_date,omitempty"`
 	Assignee     string     `json:"assignee,omitempty"`
 	CommentCount uint32     `json:"comment_count"`
+	// Review is the client's newest verdict, if they gave one.
+	Review *ReviewView `json:"review,omitempty"`
 }
 
 // GuestColumn is one status and its tasks, in board order.
@@ -162,13 +166,23 @@ func GetGuestProject(ctx context.Context, grant *guestModel.GuestGrant) (*GuestP
 		Columns:     make([]GuestColumn, 0, len(guestStatuses)),
 		GeneratedAt: time.Now().UTC(),
 	}
+	reviews, err := reviewModel.LatestForProject(projectID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Guest/GetGuestProject reviews err: %+v", err)
+	}
 	for _, s := range guestStatuses {
 		col := GuestColumn{Status: s.status, Label: s.label, Tasks: []GuestTaskCard{}}
 		for _, t := range byStatus[s.status] {
 			if t == nil || t.Uuid == "" {
 				continue
 			}
-			col.Tasks = append(col.Tasks, cardOf(t))
+			card := cardOf(t)
+			if id, err := uuid.Parse(t.Uuid); err == nil {
+				if r, ok := reviews[id]; ok {
+					card.Review = reviewView(&r)
+				}
+			}
+			col.Tasks = append(col.Tasks, card)
 		}
 		view.TotalTasks += len(col.Tasks)
 		if s.status == dgraphStruct.TASK_STATUS_DONE {
@@ -211,13 +225,14 @@ func GetGuestTask(ctx context.Context, grant *guestModel.GuestGrant, taskID stri
 		v.Description = PlainText(*t.Description)
 	}
 	v.CommentCount = uint32(len(t.Comments))
+	if id, err := uuid.Parse(t.Uuid); err == nil {
+		if r, err := reviewModel.Latest(id); err == nil {
+			v.Review = reviewView(r)
+		}
+	}
 	if canComment {
 		for _, c := range t.Comments {
-			m := GuestMessage{ID: c.Uuid, Author: authorName(c.CommentBy), Text: PlainText(c.Text)}
-			if c.CreatedAt != nil {
-				m.CreatedAt = *c.CreatedAt
-			}
-			v.Comments = append(v.Comments, m)
+			v.Comments = append(v.Comments, guestMessage(c.Uuid, c.CommentBy, c.Text, c.CreatedAt))
 		}
 	}
 	return v, nil
@@ -241,8 +256,14 @@ func CommentAsGuest(ctx context.Context, grant *guestModel.GuestGrant, taskID, n
 	if _, err := guestTask(ctx, projectID, taskID); err != nil {
 		return err
 	}
-	sys := helpers.WithSystemRead(ctx)
-	task, err := taskBusiness.GetDgraphBasicTaskInfo(sys, taskID, bot.DgraphUID)
+	return postGuestComment(ctx, bot, taskID, body)
+}
+
+// postGuestComment posts already-escaped HTML on a task as the guests'
+// principal. The caller has checked the grant and that the task is the
+// grant's project's.
+func postGuestComment(ctx context.Context, bot *userBusiness.BotIdentity, taskID, body string) error {
+	task, err := taskBusiness.GetDgraphBasicTaskInfo(helpers.WithSystemRead(ctx), taskID, bot.DgraphUID)
 	if err != nil || task == nil || task.Project == nil {
 		return ErrNotFound
 	}
@@ -261,4 +282,81 @@ func CommentAsGuest(ctx context.Context, grant *guestModel.GuestGrant, taskID, n
 		SkipGitHubSync: true,
 	}, nil)
 	return err
+}
+
+// ReviewView is a client's verdict on a task, as anyone sees it.
+type ReviewView struct {
+	Decision  string    `json:"decision"`
+	Name      string    `json:"name"`
+	Note      string    `json:"note,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func reviewView(r *reviewModel.Review) *ReviewView {
+	if r == nil {
+		return nil
+	}
+	return &ReviewView{Decision: r.Decision, Name: r.Name, Note: r.Note, CreatedAt: r.CreatedAt}
+}
+
+const maxReviewNote = 2000
+
+// ReviewText is the comment a verdict posts, and checks it. Pure.
+func ReviewText(decision, note string) (string, string, error) {
+	note = strings.TrimSpace(note)
+	if utf8.RuneCountInString(note) > maxReviewNote {
+		return "", "", &ErrGuestInput{"Keep the note under 2,000 characters."}
+	}
+	switch decision {
+	case reviewModel.Approved:
+		if note == "" {
+			return "Approved.", note, nil
+		}
+		return "Approved. " + note, note, nil
+	case reviewModel.Changes:
+		if note == "" {
+			return "", "", &ErrGuestInput{"Say what should change."}
+		}
+		return "Changes requested: " + note, note, nil
+	}
+	return "", "", &ErrGuestInput{"Choose approve or request changes."}
+}
+
+// ReviewAsGuest records a client's verdict on a task and posts it as their
+// comment, so the people on the task are told.
+func ReviewAsGuest(ctx context.Context, grant *guestModel.GuestGrant, taskID, name, decision, note string) (*ReviewView, error) {
+	if grant == nil || grant.Capability != guestModel.CapabilityComment {
+		return nil, ErrForbidden
+	}
+	text, note, err := ReviewText(decision, note)
+	if err != nil {
+		return nil, err
+	}
+	body, err := GuestMessageHTML(name, text)
+	if err != nil {
+		return nil, err
+	}
+	projectID, bot, err := liveProject(ctx, grant)
+	if err != nil {
+		return nil, err
+	}
+	task, err := guestTask(ctx, projectID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	taskUUID, _ := uuid.Parse(task.Uuid)
+	r, err := reviewModel.Add(taskUUID, projectID, grant.Id, decision, SanitizeGuestName(name), note)
+	if err != nil {
+		return nil, err
+	}
+	if err := postGuestComment(ctx, bot, task.Uuid, body); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Guest/ReviewAsGuest comment err: %+v", err)
+	}
+	return reviewView(r), nil
+}
+
+// LatestReview is a task's newest client verdict, for the team's task panel.
+func LatestReview(taskID uuid.UUID) (*ReviewView, error) {
+	r, err := reviewModel.Latest(taskID)
+	return reviewView(r), err
 }

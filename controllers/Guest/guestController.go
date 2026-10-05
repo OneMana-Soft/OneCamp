@@ -32,6 +32,7 @@ import (
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	fileBusiness "github.com/akashc777/OneCamp/business/User"
+	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
@@ -609,18 +610,26 @@ func GuestChannelPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := guestBusiness.PostAsGuest(r.Context(), grant, body.DisplayName, body.Text, body.ReplyTo)
+	if err != nil {
+		guestWriteFailed(w, r, "GuestChannelPost", err, "That message isn't here any more.")
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Sent"})
+}
+
+// guestWriteFailed answers a guest's failed write: their own mistake in their
+// words, a read-only link, something gone, or a retry for anything else.
+func guestWriteFailed(w http.ResponseWriter, r *http.Request, where string, err error, goneMsg string) {
 	var in *guestBusiness.ErrGuestInput
 	switch {
-	case err == nil:
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Sent"})
 	case errors.As(err, &in):
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": in.Msg})
 	case errors.Is(err, guestBusiness.ErrForbidden):
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "This link is read only."})
 	case errors.Is(err, guestBusiness.ErrNotFound):
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message isn't here any more."})
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": goneMsg})
 	default:
-		helpers.LogErrorWithContext(r.Context(), "controllers/Guest/GuestChannelPost err: %+v", err)
+		helpers.LogErrorWithContext(r.Context(), "controllers/Guest/%s err: %+v", where, err)
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't send that. Try again."})
 	}
 }
@@ -674,21 +683,52 @@ func GuestProjectComment(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid request body"})
 		return
 	}
-	err := guestBusiness.CommentAsGuest(r.Context(), grant, chi.URLParam(r, "task_id"), body.DisplayName, body.Text)
-	var in *guestBusiness.ErrGuestInput
-	switch {
-	case err == nil:
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Sent"})
-	case errors.As(err, &in):
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": in.Msg})
-	case errors.Is(err, guestBusiness.ErrForbidden):
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "This link is read only."})
-	case errors.Is(err, guestBusiness.ErrNotFound):
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task isn't here any more."})
-	default:
-		helpers.LogErrorWithContext(r.Context(), "controllers/Guest/GuestProjectComment err: %+v", err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't send that. Try again."})
+	if err := guestBusiness.CommentAsGuest(r.Context(), grant, chi.URLParam(r, "task_id"), body.DisplayName, body.Text); err != nil {
+		guestWriteFailed(w, r, "GuestProjectComment", err, "That task isn't here any more.")
+		return
 	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Sent"})
+}
+
+// GuestProjectReview POST /guest/project/{token}/task/{task_id}/review
+// {display_name, decision: approved|changes, note} — public. The client's
+// verdict on a task.
+func GuestProjectReview(w http.ResponseWriter, r *http.Request) {
+	grant, ok := grantFor(w, r, guestModel.ResourceProject)
+	if !ok {
+		return
+	}
+	var body struct {
+		DisplayName string `json:"display_name"`
+		Decision    string `json:"decision"`
+		Note        string `json:"note"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid request body"})
+		return
+	}
+	review, err := guestBusiness.ReviewAsGuest(r.Context(), grant, chi.URLParam(r, "task_id"), body.DisplayName, body.Decision, body.Note)
+	if err != nil {
+		guestWriteFailed(w, r, "GuestProjectReview", err, "That task isn't here any more.")
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": review})
+}
+
+// TaskClientReview GET /task/clientReview/{task_uuid} — the client's newest
+// verdict on a task, for anyone who can see the task. Null when there's none.
+func TaskClientReview(w http.ResponseWriter, r *http.Request) {
+	taskID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"))
+	if !ok {
+		return
+	}
+	review, err := guestBusiness.LatestReview(taskID)
+	if err != nil {
+		helpers.LogErrorWithContext(r.Context(), "controllers/Guest/TaskClientReview err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't load the client's verdict."})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": review})
 }
 
 // mayShare says whether the caller may share a resource with people outside
