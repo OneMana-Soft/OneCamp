@@ -406,7 +406,9 @@ func CreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	createTaskInfoInput.Status = dgraphStruct.TASK_STATUS_TODO
+	// The status is the caller's: "Add task" at the foot of a board column
+	// makes the task in that column. business.CreateTask resolves it (a
+	// built-in key, or one of the project's own) and starts an empty one in Todo.
 
 	var assigneeDgraphInfo *dgraphStruct.DgraphUser
 
@@ -471,6 +473,12 @@ func CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	taskUUID, err := business.CreateTask(ctx, projectUUID, &userInfo, dgraphProjectInfo, assigneeDgraphInfo, createTaskInfoInput, mentionUsers)
 
+	if errors.Is(err, taskStatusBusiness.ErrUnknownStatus) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+			"msg": "That is not a status in this project. Use one of: " + taskStatusBusiness.Describe(ctx, projectUUID.String()),
+		})
+		return
+	}
 	if err != nil {
 
 		helpers.LogErrorWithContext(ctx,

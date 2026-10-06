@@ -276,6 +276,7 @@ func createSchema() (err error) {
 		task_created_by: uid .
 		task_created_at: dateTime .
 		task_updated_at: dateTime .
+		task_status_since: dateTime .
 		task_deleted_at: dateTime .
 		task_rank: float .
 
@@ -573,6 +574,7 @@ func createSchema() (err error) {
 			task_priority
 			task_created_at
 			task_updated_at
+			task_status_since
 			task_deleted_at
 			task_rank
 			linked_docs: [Doc]

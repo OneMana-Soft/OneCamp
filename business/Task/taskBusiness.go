@@ -520,6 +520,7 @@ func AddAttachmentToTask(ctx context.Context, taskUUID uuid.UUID, dgraphTaskInfo
 
 func CreateTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.UserInfo, projectDgraphInfo *dgraphStruct.DgraphProject, assigneeDgraphInfo *dgraphStruct.DgraphUser, taskInfo adapter.CreateOrUpdateTaskInput, mentionsUsers []*dgraphStruct.DgraphUser) (taskUUIDRes uuid.UUID, err error) {
 
+	taskInfo.Label = helpers.NormaliseTags(taskInfo.Label)
 	// A built-in status or one of the project's own; none given is Todo.
 	status, err := taskStatusBusiness.Resolve(ctx, projectUUID.String(), taskInfo.Status)
 	if err != nil {
@@ -573,6 +574,7 @@ func CreateTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.User
 		Attachments: taskInfo.Attachments,
 		Description: &taskInfo.TaskDescription,
 		Status:      status.Category,
+		StatusSince: &currentTime,
 		Priority:    taskInfo.Priority,
 		Label:       &taskInfo.Label,
 		CreatedBy: &dgraphStruct.DgraphUser{
@@ -1239,9 +1241,10 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 		return r.Category
 	}
 	dgraphTask := &dgraphStruct.DgraphTask{
-		Uid:    "uid(task)",
-		Uuid:   taskUUID.String(),
-		Status: next.Category,
+		Uid:         "uid(task)",
+		Uuid:        taskUUID.String(),
+		Status:      next.Category,
+		StatusSince: &currentTime,
 		Activity: []*dgraphStruct.DgraphTaskActivity{{
 			Uuid: activityUUID.String(),
 			Type: dgraphStruct.ACTIVITY_TYPE_STATUS,
@@ -1376,6 +1379,9 @@ func UpdateTaskPriorityByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskP
 }
 
 func UpdateTaskLabelByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskLabel string, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) (err error) {
+	// The label holds the task's tags; every writer (the app, GitHub, the API,
+	// agents) stores them the same way.
+	taskLabel = helpers.NormaliseTags(taskLabel)
 
 	currentTime := time.Now()
 	activityUUID := uuid.New()

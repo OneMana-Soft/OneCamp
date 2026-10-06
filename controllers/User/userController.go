@@ -724,7 +724,8 @@ func GetUsersListWhoDontBelongToTheTeam(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if dgraphTeam.IsAdmin == 0 {
+	// Whoever may add people to the team (its admins, a workspace admin) may see who could be added.
+	if dgraphTeam.IsAdmin == 0 && !userInfo.UserPostgresInfo.IsAdmin {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 			"err": err,

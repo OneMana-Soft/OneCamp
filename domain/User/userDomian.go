@@ -845,6 +845,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 						}
 						task_created_at
 						task_rank
+						task_status_since
 					}
 					user_tasks_in_progress: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "inProgress") %s) (orderdesc: task_created_at) {
 						task_uuid
@@ -878,6 +879,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 						}
 						task_created_at
 						task_rank
+						task_status_since
 					}
 					user_tasks_backlog: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "backlog") %s) (orderdesc: task_created_at) {
 						task_uuid
@@ -911,6 +913,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 						}
 						task_created_at
 						task_rank
+						task_status_since
 					}
 					user_tasks_in_review: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "inReview") %s) (orderdesc: task_created_at) {
 						task_uuid
@@ -944,6 +947,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 						}
 						task_created_at
 						task_rank
+						task_status_since
 					}
 					user_tasks_canceled: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "canceled") %s) (orderdesc: task_created_at%s) {
 						task_uuid
@@ -977,6 +981,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 						}
 						task_created_at
 						task_rank
+						task_status_since
 					}
 					user_tasks_canceled_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "canceled") %s))
 
@@ -1012,6 +1017,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 						}
 						task_created_at
 						task_rank
+						task_status_since
 					}
 					user_tasks_done_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "done") %s))
 				}

@@ -45,3 +45,23 @@ func TestPermissionChecksAnswer403Not401(t *testing.T) {
 		t.Fatalf("found only %d 401s; the scan is looking in the wrong place", checked)
 	}
 }
+
+// The auth middleware stores the signed-in person as a UserInfo value. A
+// handler that reads it as *UserInfo never finds it, and answers 401 to
+// everyone: creating webhooks, archive runs and deleting recordings all did,
+// until October 2026. Use userModel.FromContext, which takes either.
+func TestHandlersReadTheSignedInPersonAsStored(t *testing.T) {
+	err := filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return err
+		}
+		src, _ := os.ReadFile(path)
+		if regexp.MustCompile(`UserInfoContextKey\)\.\(\*`).Match(src) {
+			t.Errorf("%s reads the signed-in person as a pointer, which never matches; use userModel.FromContext", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}

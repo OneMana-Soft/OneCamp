@@ -536,9 +536,13 @@ func syncIssueLabelToGitHub(owner, repo string, number int, oldLabel, newLabel, 
 	client := githubHTTPClient
 	baseURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d", owner, repo, number)
 
-	// Step 1: Remove old label if it differs from new label and is not empty
-	if oldLabel != "" && oldLabel != newLabel {
-		delURL := fmt.Sprintf("%s/labels/%s", baseURL, url.PathEscape(oldLabel))
+	// A task's label holds its tags, comma-separated: each one removed comes
+	// off the issue, and the ones added go on.
+	added, removed := helpers.TagChanges(oldLabel, newLabel)
+
+	// Step 1: remove each tag the task no longer has.
+	for _, gone := range removed {
+		delURL := fmt.Sprintf("%s/labels/%s", baseURL, url.PathEscape(gone))
 		req, _ := http.NewRequest(http.MethodDelete, delURL, nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Accept", "application/vnd.github+json")
@@ -559,11 +563,11 @@ func syncIssueLabelToGitHub(owner, repo string, number int, oldLabel, newLabel, 
 		resp.Body.Close()
 	}
 
-	// Step 2: Add new label if not empty
-	if newLabel == "" {
+	// Step 2: add the tags it gained.
+	if len(added) == 0 {
 		return nil
 	}
-	bodyBytes, _ := json.Marshal(map[string]interface{}{"labels": []string{newLabel}})
+	bodyBytes, _ := json.Marshal(map[string]interface{}{"labels": added})
 	req, _ := http.NewRequest(http.MethodPost, baseURL+"/labels", bytes.NewReader(bodyBytes))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github+json")

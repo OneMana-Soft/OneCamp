@@ -53,7 +53,8 @@ const projectTaskFields = `
 							team_uuid
 						}
 						task_created_at
-						task_rank`
+						task_rank
+						task_status_since`
 
 func CreateProject(ctx context.Context, projectUUID uuid.UUID, projectName string, teamUUID uuid.UUID, createdByUUID uuid.UUID, createdTime time.Time) (err error) {
 

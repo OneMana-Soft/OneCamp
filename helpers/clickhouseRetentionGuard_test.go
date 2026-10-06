@@ -110,3 +110,23 @@ func TestEveryTelemetryTableGetsARetentionLimit(t *testing.T) {
 		}
 	}
 }
+
+// metric_log's parts must stay compact: with over a thousand columns, a wide part makes every
+// merge open them all at once, and on the demo that merge failed its memory limit in a loop.
+func TestMetricLogMergesStayCompact(t *testing.T) {
+	var cfg struct {
+		Items []chLog `xml:",any"`
+	}
+	if err := xml.Unmarshal([]byte(readFile(t, chConfig)), &cfg); err != nil {
+		t.Fatalf("parse %s: %v", chConfig, err)
+	}
+	for _, it := range cfg.Items {
+		if it.XMLName.Local == "metric_log" {
+			if !regexp.MustCompile(`min_bytes_for_wide_part\s*=\s*[1-9]\d{8,}`).MatchString(it.Engine) {
+				t.Errorf("metric_log's engine does not keep parts compact (min_bytes_for_wide_part of at least 100 MB): its merges run out of memory")
+			}
+			return
+		}
+	}
+	t.Fatalf("no <metric_log> in %s", chConfig)
+}

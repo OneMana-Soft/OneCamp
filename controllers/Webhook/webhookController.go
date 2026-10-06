@@ -22,7 +22,7 @@ import (
 func HandleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(*userModel.UserInfo)
+	userInfo, ok := userModel.FromContext(ctx)
 	if !ok || userInfo == nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -264,7 +264,7 @@ func HandleGetWebhookLogs(w http.ResponseWriter, r *http.Request) {
 func HandleGetGlobalWebhookLogs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(*userModel.UserInfo)
+	userInfo, ok := userModel.FromContext(ctx)
 	if !ok || userInfo == nil {
 		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"error": "Admin access required"})
 		return
