@@ -3,6 +3,7 @@ package notification
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
@@ -206,6 +207,20 @@ func deliverItem(parentCtx context.Context, item *emailQueueModels.QueueItem) {
 		},
 	})
 
+	if errors.Is(err, emailService.ErrUndeliverable) {
+		// Nothing was sent, and nothing ever could be: suppressed, not failed.
+		_ = emailQueueModels.MarkSuppressed(item.ID, "suppressed: "+err.Error())
+		_ = emailLogModels.Insert(emailLogModels.LogRow{
+			UserID:    &item.UserID,
+			ToEmail:   item.ToEmail,
+			EventType: item.EventType,
+			Subject:   item.Subject,
+			Status:    emailLogModels.StatusSuppressed,
+			QueueID:   &item.ID,
+			Attempts:  item.Attempts,
+		})
+		return
+	}
 	if err != nil {
 		errMsg := strings.TrimSpace(err.Error())
 		if len(errMsg) > 1000 {

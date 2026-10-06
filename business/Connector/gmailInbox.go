@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/google/uuid"
 	"github.com/microcosm-cc/bluemonday"
 	"google.golang.org/api/gmail/v1"
@@ -235,12 +236,6 @@ func SanitizeEmailHTML(raw string) string {
 	return emailPolicy.Sanitize(reRemoteImg.ReplaceAllString(raw, ""))
 }
 
-// PlainToHTML shows a plain-text body as escaped paragraphs.
-func PlainToHTML(text string) string {
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	return "<p>" + strings.ReplaceAll(html.EscapeString(text), "\n", "<br/>") + "</p>"
-}
-
 // messageBody prefers the HTML part (sanitised), then plain text.
 func messageBody(p *gmail.MessagePart) (string, bool) {
 	var htmlPart, textPart string
@@ -267,7 +262,7 @@ func messageBody(p *gmail.MessagePart) (string, bool) {
 		return SanitizeEmailHTML(body), truncated
 	}
 	body, truncated := cutBytes(textPart, maxBodyBytes)
-	return PlainToHTML(body), truncated
+	return helpers.PlainTextToHTML(body), truncated
 }
 
 func decodePart(data string) string {

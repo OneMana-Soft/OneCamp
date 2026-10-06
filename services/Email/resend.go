@@ -216,6 +216,9 @@ func SendEmailWithOptions(ctx context.Context, opt SendOptions) (SendResult, err
 	if _, err := mail.ParseAddress(opt.To); err != nil {
 		return SendResult{}, fmt.Errorf("invalid recipient email %q: %w", opt.To, err)
 	}
+	if !Deliverable(ctx, opt.To) {
+		return SendResult{}, ErrUndeliverable
+	}
 
 	// Counted after validation, so a malformed request spends none of the day.
 	if err := sentToday.take(time.Now(), dailyCapFromEnv()); err != nil {

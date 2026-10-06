@@ -418,7 +418,7 @@ func (p *Provider) IterCommentsOfTask(ctx context.Context, j *importModels.Job, 
 			case out <- importProvider.SourceComment{
 				SourceID:       c.ID,
 				TaskSourceID:   taskSourceID,
-				Body:           commentTextToHTML(c.Comment),
+				Body:           helpers.PlainTextToHTML(c.Comment),
 				AuthorSourceID: c.UserID,
 				Created:        c.Created,
 			}:
@@ -775,10 +775,10 @@ func (p *Provider) loadToken(ctx context.Context, j *importModels.Job) (string, 
 // ─── Mapping helpers ──────────────────────────────────────────────
 
 func (p *Provider) taskToSourceTask(t clickupTask) importProvider.SourceTask {
-	desc := commentTextToHTML(t.TextContent)
+	desc := helpers.PlainTextToHTML(t.TextContent)
 	if desc == "" {
 		// Fall back to description if text_content is absent (older API).
-		desc = commentTextToHTML(t.Description)
+		desc = helpers.PlainTextToHTML(t.Description)
 	}
 
 	status := t.StatusName
@@ -822,7 +822,7 @@ func (p *Provider) taskToSourceTask(t clickupTask) importProvider.SourceTask {
 		SourceID:        t.ID,
 		ParentTaskID:    t.ParentID,
 		ProjectSourceID: t.ListID,
-		Name:            truncate(t.Name, 256),
+		Name:            helpers.TruncateRunes(t.Name, 256),
 		Description:     desc,
 		Status:          status,
 		Priority:        priority,
@@ -846,38 +846,6 @@ func (p *Provider) taskToSourceTask(t clickupTask) importProvider.SourceTask {
 			"space_id":    t.SpaceID,
 		},
 	}
-}
-
-// commentTextToHTML converts ClickUp's comment text (plain text plus
-// inline @mentions and code blocks) into a minimal HTML subset. The
-// orchestrator's bluemonday sanitiser strips anything we don't allow.
-func commentTextToHTML(s string) string {
-	if s == "" {
-		return ""
-	}
-	out := htmlEscape(s)
-	out = strings.ReplaceAll(out, "\r\n", "\n")
-	paragraphs := strings.Split(out, "\n\n")
-	for i, p := range paragraphs {
-		paragraphs[i] = "<p>" + strings.ReplaceAll(p, "\n", "<br/>") + "</p>"
-	}
-	return strings.Join(paragraphs, "")
-}
-
-func htmlEscape(s string) string {
-	return strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-		`"`, "&quot;",
-	).Replace(s)
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }
 
 // parseClickUpMillis turns ClickUp's millisecond-since-epoch string

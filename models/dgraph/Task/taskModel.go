@@ -12,7 +12,6 @@ import (
 )
 
 func CreateOrUpdateDgraphTask(ctx context.Context, dgraphTask *dgraphStruct.DgraphTask, query string, delStringJSON string) (taskUid string, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
 	pb, err := json.Marshal(dgraphTask)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -34,13 +33,10 @@ func CreateOrUpdateDgraphTask(ctx context.Context, dgraphTask *dgraphStruct.Dgra
 	}
 	mutations = append(mutations, muSet)
 
-	req := &api.Request{
-		Query:     query,
-		Mutations: mutations,
-		CommitNow: true,
-	}
-
-	res, err := txn.Do(ctx, req)
+	// Run again in a fresh transaction if Dgraph aborts it for a concurrent
+	// write to the same task (a card dropped into another row and column
+	// saves its status and its assignee at once).
+	res, err := dgraphInit.DoCommitNow(ctx, &api.Request{Query: query, Mutations: mutations})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/CreateOrUpdateDgraphTask failed to create or update dgraph task err: %+v",
@@ -50,15 +46,6 @@ func CreateOrUpdateDgraphTask(ctx context.Context, dgraphTask *dgraphStruct.Dgra
 
 	// will get uid only when new node is created
 	taskUid = res.Uids["uid(task)"]
-
-	defer func() {
-		err = txn.Discard(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/CreateOrUpdateDgraphTask failed to discard dgraph txn err: %+v",
-				err)
-		}
-	}()
 	return
 }
 
@@ -100,18 +87,11 @@ func GetDgraphTaskInfoByUUID(ctx context.Context, query string, variables map[st
 
 // BulkSoftDeleteDgraphTasks sets task_deleted_at on multiple tasks in a single Dgraph mutation.
 func BulkSoftDeleteDgraphTasks(ctx context.Context, tasks []*dgraphStruct.DgraphTask, query string) error {
-	txn := dgraphInit.DgraphClient.NewTxn()
 	pb, err := json.Marshal(tasks)
 	if err != nil {
 		return err
 	}
-	mu := &api.Mutation{SetJson: pb}
-	req := &api.Request{
-		Query:     query,
-		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
-	}
-	_, err = txn.Do(ctx, req)
+	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{Query: query, Mutations: []*api.Mutation{{SetJson: pb}}})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/BulkSoftDeleteDgraphTasks failed: %v", err)
 		return err
@@ -173,9 +153,7 @@ func UpdateExistingTasksReturning(ctx context.Context, set *dgraphStruct.DgraphT
 		mutations = append(mutations, &api.Mutation{DeleteJson: []byte(delJSON), Cond: cond})
 	}
 	mutations = append(mutations, &api.Mutation{SetJson: pb, Cond: cond})
-	txn := dgraphInit.DgraphClient.NewTxn()
-	defer txn.Discard(ctx)
-	resp, err := txn.Do(ctx, &api.Request{Query: query, Mutations: mutations, CommitNow: true})
+	resp, err := dgraphInit.DoCommitNow(ctx, &api.Request{Query: query, Mutations: mutations})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/UpdateExistingTasks err: %+v", err)
 		return nil, err
