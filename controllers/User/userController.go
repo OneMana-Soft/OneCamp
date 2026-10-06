@@ -297,64 +297,12 @@ func GetDgraphUserTaskList(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	getallString := queryParams["getAll"]
-	pageSizeStr := queryParams["pageSize"]
-	pageIndexStr := queryParams["pageIndex"]
 	taskSearchStr := queryParams["taskSearchString"]
 
-	if len(getallString) == 0 && (len(pageSizeStr) == 0 || len(pageIndexStr) == 0) {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
-			"msg": "Noi Authorised",
-		})
+	getAll, pageSize, pageIndex, err := helpers.ListPaging(queryParams)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
 		return
-	}
-
-	getAll := false
-
-	if len(getallString) != 0 {
-		getAll = true
-	}
-
-	pageSize := 0
-
-	var err error
-	if len(pageSizeStr) != 0 {
-		pageSize, err = strconv.Atoi(pageSizeStr[0])
-		if err != nil {
-			if err != nil {
-
-				helpers.LogErrorWithContext(ctx,
-					"controllers/GetDgraphUserTaskList Failed to parse pageSize query param to int err: %+v",
-					err)
-
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-					"msg": "Failed to parse filters query param",
-					"err": err,
-				})
-				return
-
-			}
-		}
-	}
-
-	pageIndex := 0
-	if len(pageIndexStr) != 0 {
-		pageIndex, err = strconv.Atoi(pageIndexStr[0])
-		if err != nil {
-			if err != nil {
-
-				helpers.LogErrorWithContext(ctx,
-					"controllers/GetDgraphUserTaskList Failed to parse pageIndex query param to int err: %+v",
-					err)
-
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-					"msg": "Failed to parse filters query param",
-					"err": err,
-				})
-				return
-
-			}
-		}
 	}
 
 	var filterStrings []string
@@ -781,7 +729,7 @@ func GetUsersListWhoDontBelongToTheTeam(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if dgraphTeam.IsAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 			"err": err,
 		})
@@ -1738,7 +1686,7 @@ func GetPublicFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if attachmentPostgresInfo.SrcKey != postgressStruct.ATTACHMENT_SRC_PUBLIC {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 			"err": err,
 		})
@@ -1825,7 +1773,7 @@ func GetGroupChatFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if attachmentPostgresInfo.SrcKey != postgressStruct.ATTACHMENT_SRC_GRP_CHAT || attachmentPostgresInfo.SrcValue != grpIDString {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 			"err": err,
 		})
@@ -1898,7 +1846,7 @@ func GetDocFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if attachmentPostgresInfo.SrcKey != postgressStruct.ATTACHMENT_SRC_DOC || attachmentPostgresInfo.SrcValue != doclUUIDString {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 			"err": err,
 		})
@@ -1992,7 +1940,7 @@ func GetDocAttachment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if attachmentPostgresInfo.SrcKey != postgressStruct.ATTACHMENT_SRC_DOC || attachmentPostgresInfo.SrcValue != doclUUIDString {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 			"err": err,
 		})
@@ -2063,7 +2011,7 @@ func GetBoardAttachment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if attachmentPostgresInfo.SrcKey != postgressStruct.ATTACHMENT_SRC_BOARD || attachmentPostgresInfo.SrcValue != boardUUIDString {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not Authorised"})
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
 	}
 
@@ -2150,7 +2098,7 @@ func GetChatFile(w http.ResponseWriter, r *http.Request) {
 	grpString := helpers.GetGroupingId(chatUUIDString, userInfo.UserDgraphInfo.Uuid)
 
 	if attachmentPostgresInfo.SrcKey != postgressStruct.ATTACHMENT_SRC_CHAT || attachmentPostgresInfo.SrcValue != grpString {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 			"err": err,
 		})
@@ -2558,7 +2506,7 @@ func GetChannelFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if attachmentPostgresInfo.SrcKey != postgressStruct.ATTACHMENT_SRC_CHANNEL || attachmentPostgresInfo.SrcValue != channelUUIDString {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 			"err": err,
 		})
@@ -2857,7 +2805,7 @@ func GetProjectFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if attachmentPostgresInfo.SrcKey != postgressStruct.ATTACHMENT_SRC_PROJECT || attachmentPostgresInfo.SrcValue != projectUUIDString {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 			"err": err,
 		})

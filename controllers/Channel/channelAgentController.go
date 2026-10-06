@@ -64,7 +64,7 @@ func ListChannelMentionAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canViewChannel(ctx, channelUUID, userInfo.UserDgraphInfo.Uid) {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not Authorised"})
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
 	}
 
@@ -94,7 +94,7 @@ func ListChannelAITeammates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canManageChannelMembership(ctx, channelUUID, userInfo.UserDgraphInfo.Uid) {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not Authorised"})
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
 	}
 
@@ -138,7 +138,7 @@ func SetChannelAITeammate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canManageChannelMembership(ctx, channelUUID, userInfo.UserDgraphInfo.Uid) {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not Authorised"})
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
 	}
 
@@ -170,7 +170,7 @@ func GetChannelAIBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canManageChannelMembership(ctx, channelUUID, userInfo.UserDgraphInfo.Uid) {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not Authorised"})
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
 	}
 
@@ -217,7 +217,7 @@ func SetChannelAIBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !canManageChannelMembership(ctx, channelUUID, userInfo.UserDgraphInfo.Uid) {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not Authorised"})
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
 	}
 	if req.MaxDailyTokens < 0 {

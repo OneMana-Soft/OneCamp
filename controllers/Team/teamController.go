@@ -37,13 +37,13 @@ func CreateTeam(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if !userInfo.UserPostgresInfo.IsAdmin || !helpers.IsValidName(createTeamInfo.Name) {
-
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+	if !userInfo.UserPostgresInfo.IsAdmin {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only workspace admins can create teams."})
 		return
-
+	}
+	if !helpers.IsValidName(createTeamInfo.Name) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": helpers.NameRuleMessage})
+		return
 	}
 
 	exists, err := business.CheckIfTeamExistByTeamName(ctx, createTeamInfo.Name)
@@ -108,13 +108,13 @@ func CheckIfTeamNameExist(w http.ResponseWriter, r *http.Request) {
 
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
-	if !userInfo.UserPostgresInfo.IsAdmin || len(teamName) == 0 || !helpers.IsValidName(teamName[0]) {
-
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+	if !userInfo.UserPostgresInfo.IsAdmin {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only workspace admins can create teams."})
 		return
-
+	}
+	if len(teamName) == 0 || !helpers.IsValidName(teamName[0]) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": helpers.NameRuleMessage})
+		return
 	}
 
 	exists, err := business.CheckIfTeamExistByTeamName(ctx, teamName[0])
@@ -157,9 +157,7 @@ func UpdateTeamName(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(inputTeamInfo.Uuid) == 0 || len(inputTeamInfo.Name) == 0 {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Say which team, and its new name."})
 		return
 	}
 
@@ -194,7 +192,7 @@ func UpdateTeamName(w http.ResponseWriter, r *http.Request) {
 
 	if dgraphTeamInfo.IsAdmin == 0 {
 
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
 		return
@@ -278,7 +276,7 @@ func AddMemberToTeam(w http.ResponseWriter, r *http.Request) {
 
 	if dgraphTeamInfo.IsAdmin == 0 && !userInfo.UserPostgresInfo.IsAdmin {
 
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
 		return
@@ -298,9 +296,7 @@ func AddMemberToTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if memberInfo == nil {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That person isn't in OneCamp."})
 		return
 	}
 
@@ -375,7 +371,7 @@ func AddAdminMemberToTeam(w http.ResponseWriter, r *http.Request) {
 
 	if (dgraphTeamInfo.IsAdmin == 0 && !userInfo.UserPostgresInfo.IsAdmin) || len(dgraphTeamInfo.Members) == 0 {
 
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
 		return
@@ -432,9 +428,7 @@ func RemoveMemberFromTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if removeMemberInfo.UserUuid == userInfo.UserDgraphInfo.Uuid {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "You can't change your own place in the team here."})
 		return
 	}
 
@@ -465,7 +459,7 @@ func RemoveMemberFromTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if (dgraphTeamInfo.IsAdmin == 0 && !userInfo.UserPostgresInfo.IsAdmin) || len(dgraphTeamInfo.Members) == 0 {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
 		return
@@ -535,9 +529,7 @@ func RemoveAdminMemberFromTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if removeMemberInfo.UserUuid == userInfo.UserDgraphInfo.Uuid {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "You can't change your own place in the team here."})
 		return
 	}
 
@@ -554,7 +546,7 @@ func RemoveAdminMemberFromTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if dgraphTeamInfo.IsAdmin == 0 && !userInfo.UserPostgresInfo.IsAdmin {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
 		return
@@ -778,7 +770,7 @@ func ArchiveTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !userInfo.UserPostgresInfo.IsAdmin {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
 		return
@@ -891,7 +883,7 @@ func UnArchiveTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !userInfo.UserPostgresInfo.IsAdmin {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
 		return

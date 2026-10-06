@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -1109,63 +1108,12 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	getallString := queryParams["getAll"]
-	pageSizeStr := queryParams["pageSize"]
-	pageIndexStr := queryParams["pageIndex"]
 	taskSearchStr := queryParams["taskSearchString"]
 
-	if len(getallString) == 0 && (len(pageSizeStr) == 0 || len(pageIndexStr) == 0) {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Noi Authorised",
-		})
+	getAll, pageSize, pageIndex, err := helpers.ListPaging(queryParams)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
 		return
-	}
-
-	getAll := false
-
-	if len(getallString) != 0 {
-		getAll = true
-	}
-
-	pageSize := 0
-
-	if len(pageSizeStr) != 0 {
-		pageSize, err = strconv.Atoi(pageSizeStr[0])
-		if err != nil {
-			if err != nil {
-
-				helpers.LogErrorWithContext(ctx,
-					"controllers/GetProjectTaskList Failed to parse pageSize query param to int err: %+v",
-					err)
-
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-					"msg": "Failed to parse filters query param",
-					"err": err,
-				})
-				return
-
-			}
-		}
-	}
-
-	pageIndex := 0
-	if len(pageIndexStr) != 0 {
-		pageIndex, err = strconv.Atoi(pageIndexStr[0])
-		if err != nil {
-			if err != nil {
-
-				helpers.LogErrorWithContext(ctx,
-					"controllers/GetProjectTaskList Failed to parse pageIndex query param to int err: %+v",
-					err)
-
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-					"msg": "Failed to parse filters query param",
-					"err": err,
-				})
-				return
-
-			}
-		}
 	}
 
 	var filterStrings []string

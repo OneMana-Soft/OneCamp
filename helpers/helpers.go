@@ -908,6 +908,9 @@ func Placeholders(n int) string {
 // refused here.
 var workspaceNamePattern = regexp.MustCompile(`^[\p{L}\p{M}\p{N} _-]+$`)
 
+// NameRuleMessage says what IsValidName accepts, for a refusal people can act on.
+const NameRuleMessage = "Use 2 to 40 letters, numbers, spaces, hyphens or underscores."
+
 // IsValidName reports whether name is a valid channel or team name: 2 to 40
 // characters after trimming, of the kinds workspaceNamePattern allows.
 func IsValidName(name string) bool {

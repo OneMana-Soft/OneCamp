@@ -72,7 +72,7 @@ func GetChannelWeeklyReport(w http.ResponseWriter, r *http.Request) {
 	}
 	canView, canManage := channelAccess(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
 	if !canView {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not Authorised"})
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
 	}
 
@@ -97,7 +97,7 @@ func SetChannelWeeklyReport(w http.ResponseWriter, r *http.Request) {
 	}
 	_, canManage := channelAccess(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
 	if !canManage {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Only channel moderators can change this"})
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only channel moderators can change this"})
 		return
 	}
 
