@@ -237,14 +237,18 @@ func GetDgraphProjectTaskListForKanban(ctx context.Context, projectUUID string, 
 				project_tasks_in_review: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "inReview") %s) (orderdesc: task_created_at) {
 					%s
 				}
-				project_tasks_canceled: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "canceled") %s) (orderdesc: task_created_at) {
+				project_tasks_canceled: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "canceled") %s) (orderdesc: task_created_at, first: %d) {
 					%s
 				}
-				project_tasks_done: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "done") %s) (orderdesc: task_created_at) {
+				project_tasks_canceled_count: count(project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "canceled") %s))
+				project_tasks_done: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "done") %s) (orderdesc: task_created_at, first: %d) {
 					%s
 				}
+				project_tasks_done_count: count(project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "done") %s))
 			}
-		}`, filterQuery, projectTaskFields, filterQuery, projectTaskFields, filterQuery, projectTaskFields, filterQuery, projectTaskFields, filterQuery, projectTaskFields, filterQuery, projectTaskFields)
+		}`, filterQuery, projectTaskFields, filterQuery, projectTaskFields, filterQuery, projectTaskFields, filterQuery, projectTaskFields,
+		filterQuery, dgraphStruct.BoardClosedLimit, projectTaskFields, filterQuery,
+		filterQuery, dgraphStruct.BoardClosedLimit, projectTaskFields, filterQuery)
 
 	dgraphProject, err = dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, variables)
 
