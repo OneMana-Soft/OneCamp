@@ -1139,7 +1139,7 @@ func DeletePost(w http.ResponseWriter, r *http.Request) {
 
 	if dgraphChannel.IsAdmin == 0 && !(userInfo.UserDgraphInfo.Uuid == dgraphPost.PostBy.Uuid) {
 
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
 		return

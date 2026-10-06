@@ -365,7 +365,7 @@ func GetChatText(w http.ResponseWriter, r *http.Request) {
 
 	if (chatDgraphInfo.From != nil && chatDgraphInfo.From.DeletedAt != nil && !chatDgraphInfo.From.DeletedAt.IsZero()) ||
 		(chatDgraphInfo.To != nil && chatDgraphInfo.To.DeletedAt != nil && !chatDgraphInfo.To.DeletedAt.IsZero()) {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not authorized to view this message",
 		})
 		return

@@ -265,8 +265,12 @@ func HandleGetGlobalWebhookLogs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(*userModel.UserInfo)
-	if !ok || userInfo == nil || !userInfo.UserPostgresInfo.IsAdmin {
+	if !ok || userInfo == nil {
 		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"error": "Admin access required"})
+		return
+	}
+	if !userInfo.UserPostgresInfo.IsAdmin {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"error": "Admin access required"})
 		return
 	}
 
