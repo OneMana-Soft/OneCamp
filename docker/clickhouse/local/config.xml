@@ -57,7 +57,23 @@
         <database>system</database>
         <table>metric_log</table>
         <flush_interval_milliseconds>7500</flush_interval_milliseconds>
-        <collect_interval_milliseconds>1000</collect_interval_milliseconds>
+        <!-- Every 10 s, not every second: a row per second of the server's own
+             counters is more than anyone reads, and each row is merged forever. -->
+        <collect_interval_milliseconds>10000</collect_interval_milliseconds>
+        <!-- metric_log has over a thousand columns and tiny rows, so its parts turn
+             "wide" (a file per column) at 10 MB, long before merges switch to the
+             vertical algorithm. A horizontal merge of wide parts opens every column
+             at once and ran past the 3.6 GiB limit, retrying all day. Compact parts
+             up to 512 MB avoid it (Altinity KB, "High memory usage during merge in
+             system.metric_log"). The TTL lives in the engine: ClickHouse refuses a
+             separate <ttl> next to an <engine>. -->
+        <engine>
+            ENGINE = MergeTree
+            PARTITION BY event_date
+            ORDER BY event_time
+            TTL event_date + INTERVAL 7 DAY DELETE
+            SETTINGS min_bytes_for_wide_part = 536870912
+        </engine>
     </metric_log>
 
     <!--

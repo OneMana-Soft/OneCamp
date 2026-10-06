@@ -15,7 +15,7 @@ import (
 func HandleDeleteChannelRecording(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(*userModel.UserInfo)
+	userInfo, ok := userModel.FromContext(ctx)
 	if !ok || userInfo == nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -30,6 +30,12 @@ func HandleDeleteChannelRecording(w http.ResponseWriter, r *http.Request) {
 	dgraphRecording, err := recordingDomain.GetDgraphChannelRecordingInfoByEgressId(ctx, egressId, userInfo.UserDgraphInfo.Uid)
 	if err != nil || dgraphRecording == nil || dgraphRecording.Channel == nil {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "Recording not found"})
+		return
+	}
+	// The channel's moderators may delete its recordings, and so may a
+	// workspace admin; everyone else, members included, may only watch them.
+	if dgraphRecording.Channel.IsAdmin == 0 && !userInfo.UserPostgresInfo.IsAdmin {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the channel's moderators can delete its recordings."})
 		return
 	}
 
@@ -48,7 +54,7 @@ func HandleDeleteChannelRecording(w http.ResponseWriter, r *http.Request) {
 func HandleDeleteChatRecording(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(*userModel.UserInfo)
+	userInfo, ok := userModel.FromContext(ctx)
 	if !ok || userInfo == nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -63,6 +69,11 @@ func HandleDeleteChatRecording(w http.ResponseWriter, r *http.Request) {
 	dgraphRecording, err := recordingDomain.GetDgraphDmRecordingInfoByEgressId(ctx, egressId, userInfo.UserDgraphInfo.Uid)
 	if err != nil || dgraphRecording == nil || dgraphRecording.Dm == nil {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "Recording not found"})
+		return
+	}
+	// Anyone in the conversation may delete its recordings; nobody else.
+	if dgraphRecording.Dm.ParticipantIsMember == 0 {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only people in this conversation can delete its recordings."})
 		return
 	}
 

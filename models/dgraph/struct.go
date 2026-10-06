@@ -395,9 +395,11 @@ type DgraphTask struct {
 	CreatedBy             *DgraphUser           `json:"task_created_by,omitempty"`
 	CreatedAt             *time.Time            `json:"task_created_at,omitempty"`
 	UpdatedAt             *time.Time            `json:"task_updated_at,omitempty"`
-	DeletedAt             *time.Time            `json:"task_deleted_at,omitempty"`
-	LinkedDocs            []*DgraphDoc          `json:"linked_docs,omitempty"`
-	LinkedBoards          []*DgraphBoard        `json:"linked_boards,omitempty"`
+	// When the task entered its current status: "time in status" on a board.
+	StatusSince  *time.Time     `json:"task_status_since,omitempty"`
+	DeletedAt    *time.Time     `json:"task_deleted_at,omitempty"`
+	LinkedDocs   []*DgraphDoc   `json:"linked_docs,omitempty"`
+	LinkedBoards []*DgraphBoard `json:"linked_boards,omitempty"`
 	// Rank orders the task within its kanban column; see business/TaskRank.
 	Rank *float64 `json:"task_rank,omitempty"`
 	// The project's own status the task is in, if any, and its name at the

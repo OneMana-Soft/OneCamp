@@ -1195,6 +1195,7 @@ func Routes() http.Handler {
 		r.Post("/{project_uuid}/forms", formController.SaveForm)
 		r.Post("/{project_uuid}/forms/{form_id}/delete", formController.DeleteForm)
 		r.Get("/{project_uuid}/time", timeEntryController.ProjectTime)
+		r.Get("/{project_uuid}/tags", taskController.ProjectTags)
 		r.Get("/{project_uuid}/cycles", cycleController.ListCycles)
 		r.Post("/{project_uuid}/cycles", cycleController.CreateCycle)
 		r.Post("/{project_uuid}/cycles/{cycle_id}/rename", cycleController.RenameCycle)

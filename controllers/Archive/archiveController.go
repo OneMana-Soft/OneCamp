@@ -82,7 +82,7 @@ func HandleUpdatePolicy(w http.ResponseWriter, r *http.Request) {
 func HandleRunArchiveJob(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(*userModel.UserInfo)
+	userInfo, ok := userModel.FromContext(ctx)
 	if !ok || userInfo == nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -145,7 +145,7 @@ func HandleGetStats(w http.ResponseWriter, r *http.Request) {
 func HandleRestore(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(*userModel.UserInfo)
+	userInfo, ok := userModel.FromContext(ctx)
 	if !ok || userInfo == nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -193,7 +193,7 @@ func HandleRestore(w http.ResponseWriter, r *http.Request) {
 func HandleUndoArchiveJob(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(*userModel.UserInfo)
+	userInfo, ok := userModel.FromContext(ctx)
 	if !ok || userInfo == nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		return

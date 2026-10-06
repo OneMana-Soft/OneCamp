@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"time"
 
+	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 
 	"os/signal"
@@ -194,6 +196,8 @@ func (app *Application) Serve(ctx context.Context) error {
 func startBackgroundLoops(ctx context.Context) {
 	// Start Background Auto-Archiver
 	archiveBusiness.StartAutoArchiver(ctx)
+	// Once: when each older task entered its status, for "time in status".
+	taskBusiness.StartStatusSinceBackfill(ctx)
 	githubBusiness.StartGitHubSyncWorker(business.SyncSignal, ctx)
 	githubBusiness.StartGitHubImportWorker(ctx)
 

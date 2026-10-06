@@ -1182,6 +1182,17 @@ func GetDgraphProjectColumnRanks(ctx context.Context, projectUUID string, status
 
 // SetDgraphTaskRanks writes each task's rank in one transaction.
 func SetDgraphTaskRanks(ctx context.Context, tasks []*dgraphStruct.DgraphTask) error {
+	return writeDgraphTasks(ctx, tasks, func(from, to *dgraphStruct.DgraphTask) { to.Rank = from.Rank })
+}
+
+// SetDgraphTaskStatusSince writes when each task entered its status, in one transaction.
+func SetDgraphTaskStatusSince(ctx context.Context, tasks []*dgraphStruct.DgraphTask) error {
+	return writeDgraphTasks(ctx, tasks, func(from, to *dgraphStruct.DgraphTask) { to.StatusSince = from.StatusSince })
+}
+
+// writeDgraphTasks writes, for each task (found by its uuid), the fields fill
+// copies over, all in one transaction.
+func writeDgraphTasks(ctx context.Context, tasks []*dgraphStruct.DgraphTask, fill func(from, to *dgraphStruct.DgraphTask)) error {
 	if len(tasks) == 0 {
 		return nil
 	}
@@ -1192,10 +1203,27 @@ func SetDgraphTaskRanks(ctx context.Context, tasks []*dgraphStruct.DgraphTask) e
 			return fmt.Errorf("task %q: %w", t.Uuid, err)
 		}
 		query += fmt.Sprintf("  tr%d as var(func: eq(task_uuid, %q))\n", i, t.Uuid)
-		writes[i] = &dgraphStruct.DgraphTask{Uid: fmt.Sprintf("uid(tr%d)", i), Rank: t.Rank}
+		writes[i] = &dgraphStruct.DgraphTask{Uid: fmt.Sprintf("uid(tr%d)", i)}
+		fill(t, writes[i])
 	}
 	query += "}"
 	return dgraphModels.BulkSoftDeleteDgraphTasks(ctx, writes, query)
+}
+
+// GetDgraphTasksWithoutStatusSince returns up to n tasks that do not yet say
+// when they entered their status, with what is needed to work it out.
+func GetDgraphTasksWithoutStatusSince(ctx context.Context, n int) ([]*dgraphStruct.DgraphTask, error) {
+	query := fmt.Sprintf(`{
+				tasks(func: has(task_uuid), first: %d) @filter(NOT has(task_status_since)) {
+					task_uuid
+					task_created_at
+					task_activities {
+						activity_type
+						activity_time
+					}
+				}
+			}`, n)
+	return dgraphModels.QueryDgraphTasks(ctx, query, nil)
 }
 
 // clearJSON is a Dgraph delete for the named predicates of the nodes in var v.
@@ -1323,4 +1351,20 @@ func GetDgraphTaskForGuest(ctx context.Context, taskUUID string) (*dgraphStruct.
 		helpers.LogErrorWithContext(ctx, "domain/GetDgraphTaskForGuest err: %+v", err)
 	}
 	return t, err
+}
+
+// GetDgraphProjectTaskLabels returns the labels (tag lists) of a project's
+// live tasks that have one. task_uuid is asked for because QueryDgraphTasks
+// keeps only rows that carry one.
+func GetDgraphProjectTaskLabels(ctx context.Context, projectUUID string) ([]*dgraphStruct.DgraphTask, error) {
+	query := `query Labels($project: string){
+				var(func: eq(project_uuid, $project)) {
+					t as project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND has(task_label))
+				}
+				tasks(func: uid(t)) {
+					task_uuid
+					task_label
+				}
+			}`
+	return dgraphModels.QueryDgraphTasks(ctx, query, map[string]string{"$project": projectUUID})
 }

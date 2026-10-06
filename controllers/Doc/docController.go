@@ -106,7 +106,7 @@ func DeleteReactionOnCommentDoc(w http.ResponseWriter, r *http.Request) {
 
 	if dgraphReaction.AddedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Unauthorized",
+			"msg": "You can only remove your own reaction.",
 		})
 		return
 	}

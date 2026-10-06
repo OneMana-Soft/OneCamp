@@ -901,13 +901,14 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 		if err != nil || dgraphTaskInfo == nil {
 			break
 		}
-		// Only update if the new label actually differs from the current task label
-		if dgraphTaskInfo.Label == nil || *dgraphTaskInfo.Label != event.Label.Name {
-			if err := taskBusiness.UpdateTaskLabelByTaskUUID(ctx, taskUUID, event.Label.Name, dgraphTaskInfo, userDgraphInfo); err != nil {
+		// A label added on GitHub is one more tag on the task.
+		current := labelOf(dgraphTaskInfo)
+		if next := helpers.WithTag(current, event.Label.Name); next != current {
+			if err := taskBusiness.UpdateTaskLabelByTaskUUID(ctx, taskUUID, next, dgraphTaskInfo, userDgraphInfo); err != nil {
 				helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Failed to update label: %v", err)
 			} else {
 				publishGitHubSyncMqtt(taskUUIDStr4, link.ProjectId.String(), "label_synced", map[string]interface{}{
-					"label": event.Label.Name,
+					"label": next,
 				})
 			}
 		}
@@ -933,13 +934,14 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 		if err != nil || dgraphTaskInfo == nil {
 			break
 		}
-		// Only clear the task label if the removed GitHub label matches the current task label
-		if dgraphTaskInfo.Label != nil && *dgraphTaskInfo.Label == event.Label.Name {
-			if err := taskBusiness.UpdateTaskLabelByTaskUUID(ctx, taskUUID, "", dgraphTaskInfo, userDgraphInfo); err != nil {
+		// A label removed on GitHub takes that tag off the task, and only that one.
+		current := labelOf(dgraphTaskInfo)
+		if next := helpers.WithoutTag(current, event.Label.Name); next != current {
+			if err := taskBusiness.UpdateTaskLabelByTaskUUID(ctx, taskUUID, next, dgraphTaskInfo, userDgraphInfo); err != nil {
 				helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Failed to remove label: %v", err)
 			} else {
 				publishGitHubSyncMqtt(taskUUIDStr5, link.ProjectId.String(), "label_synced", map[string]interface{}{
-					"label": "",
+					"label": next,
 				})
 			}
 		}
@@ -1264,12 +1266,13 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 		if taskUUIDStr != "" && event.Label != nil && event.Label.Name != "" {
 			dgraphTaskInfo, _ := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskUUIDStr, "0x1")
 			if dgraphTaskInfo != nil {
-				if dgraphTaskInfo.Label == nil || *dgraphTaskInfo.Label != event.Label.Name {
+				current := labelOf(dgraphTaskInfo)
+				if next := helpers.WithTag(current, event.Label.Name); next != current {
 					userDgraphInfo, _ := userBusiness.GetDgraphUserInfoByUUID(ctx, link.CreatedBy.String())
 					if userDgraphInfo != nil {
-						_ = taskBusiness.UpdateTaskLabelByTaskUUID(ctx, taskUUID, event.Label.Name, dgraphTaskInfo, userDgraphInfo)
+						_ = taskBusiness.UpdateTaskLabelByTaskUUID(ctx, taskUUID, next, dgraphTaskInfo, userDgraphInfo)
 						publishGitHubSyncMqtt(taskUUIDStr, link.ProjectId.String(), "label_synced", map[string]interface{}{
-							"label": event.Label.Name,
+							"label": next,
 						})
 					}
 				}
@@ -1278,13 +1281,16 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 	case "unlabeled":
 		if taskUUIDStr != "" && event.Label != nil && event.Label.Name != "" {
 			dgraphTaskInfo, _ := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskUUIDStr, "0x1")
-			if dgraphTaskInfo != nil && dgraphTaskInfo.Label != nil && *dgraphTaskInfo.Label == event.Label.Name {
-				userDgraphInfo, _ := userBusiness.GetDgraphUserInfoByUUID(ctx, link.CreatedBy.String())
-				if userDgraphInfo != nil {
-					_ = taskBusiness.UpdateTaskLabelByTaskUUID(ctx, taskUUID, "", dgraphTaskInfo, userDgraphInfo)
-					publishGitHubSyncMqtt(taskUUIDStr, link.ProjectId.String(), "label_synced", map[string]interface{}{
-						"label": "",
-					})
+			if dgraphTaskInfo != nil {
+				current := labelOf(dgraphTaskInfo)
+				if next := helpers.WithoutTag(current, event.Label.Name); next != current {
+					userDgraphInfo, _ := userBusiness.GetDgraphUserInfoByUUID(ctx, link.CreatedBy.String())
+					if userDgraphInfo != nil {
+						_ = taskBusiness.UpdateTaskLabelByTaskUUID(ctx, taskUUID, next, dgraphTaskInfo, userDgraphInfo)
+						publishGitHubSyncMqtt(taskUUIDStr, link.ProjectId.String(), "label_synced", map[string]interface{}{
+							"label": next,
+						})
+					}
 				}
 			}
 		}
@@ -2638,4 +2644,12 @@ func getGitHubDefaultBranch(owner, repo, token string) (string, error) {
 		return "main", nil
 	}
 	return result.DefaultBranch, nil
+}
+
+// labelOf is a task's label (its tags), "" when it has none.
+func labelOf(t *dgraphStruct.DgraphTask) string {
+	if t == nil || t.Label == nil {
+		return ""
+	}
+	return *t.Label
 }

@@ -63,7 +63,7 @@ func GetDgraphChannelRecordingInfoByEgressId(ctx context.Context, egressId strin
 					recording_channel {
 						ch_uuid
 						ch_is_member: count(ch_members @filter(uid($userUid)))
-						
+						ch_is_admin: count(ch_moderators @filter(uid($userUid)))
 					}
 				}
 			}`

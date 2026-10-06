@@ -723,3 +723,17 @@ func DisplayNamesByUUIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]st
 	}
 	return out, rows.Err()
 }
+
+// FromContext is the signed-in person a request carries. The auth middleware
+// stores a UserInfo value; reading it as a *UserInfo never matches, and seven
+// handlers did, so they answered 401 ("sign in again") to everyone until
+// October 2026. Either form is accepted here.
+func FromContext(ctx context.Context) (*UserInfo, bool) {
+	switch u := ctx.Value(helpers.UserInfoContextKey).(type) {
+	case UserInfo:
+		return &u, true
+	case *UserInfo:
+		return u, u != nil
+	}
+	return nil, false
+}
