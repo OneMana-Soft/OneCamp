@@ -158,6 +158,8 @@ type DgraphUser struct {
 	TasksInReview       []*DgraphTask    `json:"user_tasks_in_review,omitempty"`   // not used in DB only used in query
 	TasksCanceled       []*DgraphTask    `json:"user_tasks_canceled,omitempty"`    // not used in DB only used in query
 	TasksDone           []*DgraphTask    `json:"user_tasks_done,omitempty"`        // not used in DB only used in query
+	TasksDoneCount      int              `json:"user_tasks_done_count,omitempty"`
+	TasksCanceledCount  int              `json:"user_tasks_canceled_count,omitempty"`
 
 	Events      []*DgraphEvent   `json:"user_events,omitempty"`
 	IsModerator bool             `json:"user_moderator,omitempty"` // not used in dgraph or postgres (Only used in returning channelInfo)
@@ -427,6 +429,12 @@ type DgraphMemoryItem struct {
 	UpdatedAt  *time.Time     `json:"mem_updated_at,omitempty"`
 }
 
+// BoardClosedLimit is how many of a board's done (and cancelled) tasks come
+// back, newest first. Those columns only grow, and a project with years of
+// finished work sent all of it to every board load; the *_count fields carry
+// the real totals.
+const BoardClosedLimit = 200
+
 type DgraphEvent struct {
 	Uid                   string        `json:"uid,omitempty"`
 	Uuid                  string        `json:"event_uuid,omitempty"`
@@ -453,33 +461,36 @@ type DgraphEvent struct {
 // const TASK_STATUS_DONE = "done"
 
 type DgraphProject struct {
-	Uid              string              `json:"uid,omitempty"`
-	Uuid             string              `json:"project_uuid,omitempty"`
-	DType            []string            `json:"dgraph.type,omitempty"`
-	Name             string              `json:"project_name,omitempty"`
-	Status           string              `json:"project_status,omitempty"`
-	Tasks            []*DgraphTask       `json:"project_tasks,omitempty"`
-	TasksTodo        []*DgraphTask       `json:"project_tasks_todo,omitempty"`        // not used in DB only used in query
-	TasksInProgresss []*DgraphTask       `json:"project_tasks_in_progress,omitempty"` // not used in DB only used in query
-	TasksBacklog     []*DgraphTask       `json:"project_tasks_backlog,omitempty"`     // not used in DB only used in query
-	TasksInReview    []*DgraphTask       `json:"project_tasks_in_review,omitempty"`   // not used in DB only used in query
-	TasksCanceled    []*DgraphTask       `json:"project_tasks_canceled,omitempty"`    // not used in DB only used in query
-	TasksDone        []*DgraphTask       `json:"project_tasks_done,omitempty"`        // not used in DB only used in query
-	Attachments      []*DgraphAttachment `json:"project_attachments,omitempty"`
-	Team             *DgraphTeam         `json:"project_team,omitempty"`
-	TaskCount        uint64              `json:"project_task_count,omitempty"`
-	IsProjectAdmin   uint8               `json:"project_is_admin,omitempty"`  // not used in DB only used in query
-	IsProjectMember  uint8               `json:"project_is_member,omitempty"` // not used in DB only used in query
-	Members          []*DgraphUser       `json:"project_members,omitempty"`
-	MemberCount      uint32              `json:"project_member_count,omitempty"`
-	NotificationType string              `json:"notification_type,omitempty"`
-	Admins           []*DgraphUser       `json:"project_admins,omitempty"`
-	CreatedBy        *DgraphUser         `json:"project_created_by,omitempty"`
-	CreatedAt        *time.Time          `json:"project_created_at,omitempty"`
-	UpdatedAt        *time.Time          `json:"project_updated_at,omitempty"`
-	DeletedAt        *time.Time          `json:"project_deleted_at,omitempty"`
-	LinkedDocs       []*DgraphDoc        `json:"linked_docs,omitempty"`
-	LinkedBoards     []*DgraphBoard      `json:"linked_boards,omitempty"`
+	Uid              string        `json:"uid,omitempty"`
+	Uuid             string        `json:"project_uuid,omitempty"`
+	DType            []string      `json:"dgraph.type,omitempty"`
+	Name             string        `json:"project_name,omitempty"`
+	Status           string        `json:"project_status,omitempty"`
+	Tasks            []*DgraphTask `json:"project_tasks,omitempty"`
+	TasksTodo        []*DgraphTask `json:"project_tasks_todo,omitempty"`        // not used in DB only used in query
+	TasksInProgresss []*DgraphTask `json:"project_tasks_in_progress,omitempty"` // not used in DB only used in query
+	TasksBacklog     []*DgraphTask `json:"project_tasks_backlog,omitempty"`     // not used in DB only used in query
+	TasksInReview    []*DgraphTask `json:"project_tasks_in_review,omitempty"`   // not used in DB only used in query
+	TasksCanceled    []*DgraphTask `json:"project_tasks_canceled,omitempty"`    // not used in DB only used in query
+	TasksDone        []*DgraphTask `json:"project_tasks_done,omitempty"`        // not used in DB only used in query
+	// The real totals of the two closed columns, which a board loads only the newest of.
+	TasksDoneCount     int                 `json:"project_tasks_done_count,omitempty"`
+	TasksCanceledCount int                 `json:"project_tasks_canceled_count,omitempty"`
+	Attachments        []*DgraphAttachment `json:"project_attachments,omitempty"`
+	Team               *DgraphTeam         `json:"project_team,omitempty"`
+	TaskCount          uint64              `json:"project_task_count,omitempty"`
+	IsProjectAdmin     uint8               `json:"project_is_admin,omitempty"`  // not used in DB only used in query
+	IsProjectMember    uint8               `json:"project_is_member,omitempty"` // not used in DB only used in query
+	Members            []*DgraphUser       `json:"project_members,omitempty"`
+	MemberCount        uint32              `json:"project_member_count,omitempty"`
+	NotificationType   string              `json:"notification_type,omitempty"`
+	Admins             []*DgraphUser       `json:"project_admins,omitempty"`
+	CreatedBy          *DgraphUser         `json:"project_created_by,omitempty"`
+	CreatedAt          *time.Time          `json:"project_created_at,omitempty"`
+	UpdatedAt          *time.Time          `json:"project_updated_at,omitempty"`
+	DeletedAt          *time.Time          `json:"project_deleted_at,omitempty"`
+	LinkedDocs         []*DgraphDoc        `json:"linked_docs,omitempty"`
+	LinkedBoards       []*DgraphBoard      `json:"linked_boards,omitempty"`
 }
 
 type DgraphTeam struct {
