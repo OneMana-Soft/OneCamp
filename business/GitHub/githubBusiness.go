@@ -486,150 +486,6 @@ func GetGitHubLinkById(ctx context.Context, linkId uuid.UUID) (*githubLinkModel.
 	return githubLinkModel.GetGitHubLinkById(query, linkId)
 }
 
-// ExecRaw executes a raw SQL query with args.
-func ExecRaw(ctx context.Context, query string, args ...interface{}) error {
-	ctx2, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx2, query, args...)
-	return err
-}
-
-// ImportIssuesAsTasks imports open GitHub issues from a linked repo as OneCamp tasks.
-//
-// Deprecated: this synchronous variant is kept for backwards
-// compatibility with any internal callers. New flows should call
-// EnqueueImportIssues which routes through the background worker
-// and returns immediately. This function delegates the actual work
-// to the same per-page batch helpers so behaviour is identical.
-func ImportIssuesAsTasks(ctx context.Context, linkId uuid.UUID, userId uuid.UUID) (int, error) {
-	getQuery := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1 AND deleted_at IS NULL`
-	link, err := githubLinkModel.GetGitHubLinkById(getQuery, linkId)
-	if err != nil || link == nil {
-		return 0, fmt.Errorf("link not found")
-	}
-
-	client, err := GitHubHTTPClient(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("GitHub not connected")
-	}
-
-	userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, userId.String())
-	if err != nil {
-		return 0, fmt.Errorf("failed to get user dgraph info: %v", err)
-	}
-	userInfo := &userModels.UserInfo{
-		UserPostgresInfo: userModels.User{Id: userId},
-		UserDgraphInfo:   *userDgraphInfo,
-	}
-	dgraphProjectInfo, err := projectBusiness.GetBasicDgraphProjectInfo(ctx, link.ProjectId.String(), userDgraphInfo.Uid)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get project dgraph info: %v", err)
-	}
-
-	imported := 0
-	page := 1
-	for page <= importPagesMax {
-		issues, hasMore, err := fetchIssuesPage(ctx, client, link, page)
-		if err != nil {
-			return imported, err
-		}
-		if len(issues) == 0 {
-			break
-		}
-		urls := make([]string, 0, len(issues))
-		for _, issue := range issues {
-			if issue.PullRequest == nil {
-				urls = append(urls, issue.HTMLURL)
-			}
-		}
-		existing, _ := taskDomain.FindTasksByGitHubIssueURLs(ctx, urls)
-		for i := range issues {
-			issue := issues[i]
-			if issue.PullRequest != nil {
-				continue
-			}
-			if _, ok := existing[issue.HTMLURL]; ok {
-				continue
-			}
-			if err := createTaskFromIssue(ctx, link, userInfo, dgraphProjectInfo, &issue); err != nil {
-				helpers.LogErrorWithContext(ctx, "business/ImportIssuesAsTasks Failed to create task for issue #%d err: %+v", issue.Number, err)
-				continue
-			}
-			imported++
-		}
-		if !hasMore {
-			break
-		}
-		page++
-	}
-
-	return imported, nil
-}
-
-// ImportPRsAsTasks imports open GitHub PRs from a linked repo as OneCamp tasks.
-//
-// Deprecated: see the doc-comment on ImportIssuesAsTasks. New flows
-// should call EnqueueImportPRs.
-func ImportPRsAsTasks(ctx context.Context, linkId uuid.UUID, userId uuid.UUID) (int, error) {
-	getQuery := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1 AND deleted_at IS NULL`
-	link, err := githubLinkModel.GetGitHubLinkById(getQuery, linkId)
-	if err != nil || link == nil {
-		return 0, fmt.Errorf("link not found")
-	}
-
-	client, err := GitHubHTTPClient(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("GitHub not connected")
-	}
-
-	userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, userId.String())
-	if err != nil {
-		return 0, fmt.Errorf("failed to get user dgraph info: %v", err)
-	}
-	userInfo := &userModels.UserInfo{
-		UserPostgresInfo: userModels.User{Id: userId},
-		UserDgraphInfo:   *userDgraphInfo,
-	}
-	dgraphProjectInfo, err := projectBusiness.GetBasicDgraphProjectInfo(ctx, link.ProjectId.String(), userDgraphInfo.Uid)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get project dgraph info: %v", err)
-	}
-
-	imported := 0
-	page := 1
-	for page <= importPagesMax {
-		prs, hasMore, err := fetchPRsPage(ctx, client, link, page)
-		if err != nil {
-			return imported, err
-		}
-		if len(prs) == 0 {
-			break
-		}
-		urls := make([]string, 0, len(prs))
-		for _, pr := range prs {
-			urls = append(urls, pr.HTMLURL)
-		}
-		existing, _ := taskDomain.FindTasksByGitHubPRURLs(ctx, urls)
-		for i := range prs {
-			pr := prs[i]
-			if _, ok := existing[pr.HTMLURL]; ok {
-				continue
-			}
-			if err := createTaskFromPR(ctx, link, userInfo, dgraphProjectInfo, &pr); err != nil {
-				helpers.LogErrorWithContext(ctx, "business/ImportPRsAsTasks Failed to create task for PR #%d err: %+v", pr.Number, err)
-				continue
-			}
-			imported++
-		}
-		if !hasMore {
-			break
-		}
-		page++
-	}
-
-	return imported, nil
-}
-
 // HandleGitHubWebhookEvent processes an incoming GitHub webhook event.
 func HandleGitHubWebhookEvent(ctx context.Context, eventType string, body []byte) error {
 	// Everything below applies a change that came FROM GitHub, through the same
@@ -2783,4 +2639,148 @@ func getGitHubDefaultBranch(owner, repo, token string) (string, error) {
 		return "main", nil
 	}
 	return result.DefaultBranch, nil
+}
+
+// ExecRaw executes a raw SQL query with args.
+func ExecRaw(ctx context.Context, query string, args ...interface{}) error {
+	ctx2, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx2, query, args...)
+	return err
+}
+
+// ImportIssuesAsTasks imports open GitHub issues from a linked repo as OneCamp tasks.
+//
+// Deprecated: this synchronous variant is kept for backwards
+// compatibility with any internal callers. New flows should call
+// EnqueueImportIssues which routes through the background worker
+// and returns immediately. This function delegates the actual work
+// to the same per-page batch helpers so behaviour is identical.
+func ImportIssuesAsTasks(ctx context.Context, linkId uuid.UUID, userId uuid.UUID) (int, error) {
+	getQuery := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1 AND deleted_at IS NULL`
+	link, err := githubLinkModel.GetGitHubLinkById(getQuery, linkId)
+	if err != nil || link == nil {
+		return 0, fmt.Errorf("link not found")
+	}
+
+	client, err := GitHubHTTPClient(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("GitHub not connected")
+	}
+
+	userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, userId.String())
+	if err != nil {
+		return 0, fmt.Errorf("failed to get user dgraph info: %v", err)
+	}
+	userInfo := &userModels.UserInfo{
+		UserPostgresInfo: userModels.User{Id: userId},
+		UserDgraphInfo:   *userDgraphInfo,
+	}
+	dgraphProjectInfo, err := projectBusiness.GetBasicDgraphProjectInfo(ctx, link.ProjectId.String(), userDgraphInfo.Uid)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get project dgraph info: %v", err)
+	}
+
+	imported := 0
+	page := 1
+	for page <= importPagesMax {
+		issues, hasMore, err := fetchIssuesPage(ctx, client, link, page)
+		if err != nil {
+			return imported, err
+		}
+		if len(issues) == 0 {
+			break
+		}
+		urls := make([]string, 0, len(issues))
+		for _, issue := range issues {
+			if issue.PullRequest == nil {
+				urls = append(urls, issue.HTMLURL)
+			}
+		}
+		existing, _ := taskDomain.FindTasksByGitHubIssueURLs(ctx, urls)
+		for i := range issues {
+			issue := issues[i]
+			if issue.PullRequest != nil {
+				continue
+			}
+			if _, ok := existing[issue.HTMLURL]; ok {
+				continue
+			}
+			if err := createTaskFromIssue(ctx, link, userInfo, dgraphProjectInfo, &issue); err != nil {
+				helpers.LogErrorWithContext(ctx, "business/ImportIssuesAsTasks Failed to create task for issue #%d err: %+v", issue.Number, err)
+				continue
+			}
+			imported++
+		}
+		if !hasMore {
+			break
+		}
+		page++
+	}
+
+	return imported, nil
+}
+
+// ImportPRsAsTasks imports open GitHub PRs from a linked repo as OneCamp tasks.
+//
+// Deprecated: see the doc-comment on ImportIssuesAsTasks. New flows
+// should call EnqueueImportPRs.
+func ImportPRsAsTasks(ctx context.Context, linkId uuid.UUID, userId uuid.UUID) (int, error) {
+	getQuery := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1 AND deleted_at IS NULL`
+	link, err := githubLinkModel.GetGitHubLinkById(getQuery, linkId)
+	if err != nil || link == nil {
+		return 0, fmt.Errorf("link not found")
+	}
+
+	client, err := GitHubHTTPClient(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("GitHub not connected")
+	}
+
+	userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, userId.String())
+	if err != nil {
+		return 0, fmt.Errorf("failed to get user dgraph info: %v", err)
+	}
+	userInfo := &userModels.UserInfo{
+		UserPostgresInfo: userModels.User{Id: userId},
+		UserDgraphInfo:   *userDgraphInfo,
+	}
+	dgraphProjectInfo, err := projectBusiness.GetBasicDgraphProjectInfo(ctx, link.ProjectId.String(), userDgraphInfo.Uid)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get project dgraph info: %v", err)
+	}
+
+	imported := 0
+	page := 1
+	for page <= importPagesMax {
+		prs, hasMore, err := fetchPRsPage(ctx, client, link, page)
+		if err != nil {
+			return imported, err
+		}
+		if len(prs) == 0 {
+			break
+		}
+		urls := make([]string, 0, len(prs))
+		for _, pr := range prs {
+			urls = append(urls, pr.HTMLURL)
+		}
+		existing, _ := taskDomain.FindTasksByGitHubPRURLs(ctx, urls)
+		for i := range prs {
+			pr := prs[i]
+			if _, ok := existing[pr.HTMLURL]; ok {
+				continue
+			}
+			if err := createTaskFromPR(ctx, link, userInfo, dgraphProjectInfo, &pr); err != nil {
+				helpers.LogErrorWithContext(ctx, "business/ImportPRsAsTasks Failed to create task for PR #%d err: %+v", pr.Number, err)
+				continue
+			}
+			imported++
+		}
+		if !hasMore {
+			break
+		}
+		page++
+	}
+
+	return imported, nil
 }

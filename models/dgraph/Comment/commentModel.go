@@ -407,42 +407,6 @@ func CreateOrUpdateCommentInChat(ctx context.Context, query string, dgraphChat *
 	return
 }
 
-func GetDgraphProjectMembersByUUID(ctx context.Context, query string, variables map[string]string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
-	resp, err := txn.QueryWithVars(ctx, query, variables)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphProjectMembersByUUID failed to get project err: %+v",
-			err)
-		return
-	}
-
-	type Projects struct {
-		ProjectInfo []dgraphStruct.DgraphProject `json:"projectInfo"`
-	}
-
-	var projectsInfo Projects
-	err = json.Unmarshal(resp.Json, &projectsInfo)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphProjectMembersByUUID failed to unmarshal response json err: %+v",
-			err)
-		return
-	}
-
-	if len(projectsInfo.ProjectInfo) == 0 {
-		err = errors.New("failed to get dgraph project")
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphProjectMembersByUUID failed to get dgraph project variables: %+v", variables)
-
-		return
-	}
-	dgraphProject = &projectsInfo.ProjectInfo[0]
-
-	return
-}
-
 // CreateBoardComment persists a Comment node associated with a board (via
 // comment_board) plus an inline Mention node. The top-level mutated object is
 // the comment itself (boards have no board_comments edge). The upsert query
@@ -477,5 +441,41 @@ func CreateBoardComment(ctx context.Context, query string, dgraphComment *dgraph
 			helpers.LogErrorWithContext(ctx, "models/CreateBoardComment failed to discard txn err: %+v", derr)
 		}
 	}()
+	return
+}
+
+func GetDgraphProjectMembersByUUID(ctx context.Context, query string, variables map[string]string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
+	txn := dgraphInit.DgraphClient.NewTxn()
+
+	resp, err := txn.QueryWithVars(ctx, query, variables)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/GetDgraphProjectMembersByUUID failed to get project err: %+v",
+			err)
+		return
+	}
+
+	type Projects struct {
+		ProjectInfo []dgraphStruct.DgraphProject `json:"projectInfo"`
+	}
+
+	var projectsInfo Projects
+	err = json.Unmarshal(resp.Json, &projectsInfo)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/GetDgraphProjectMembersByUUID failed to unmarshal response json err: %+v",
+			err)
+		return
+	}
+
+	if len(projectsInfo.ProjectInfo) == 0 {
+		err = errors.New("failed to get dgraph project")
+		helpers.LogErrorWithContext(ctx,
+			"models/GetDgraphProjectMembersByUUID failed to get dgraph project variables: %+v", variables)
+
+		return
+	}
+	dgraphProject = &projectsInfo.ProjectInfo[0]
+
 	return
 }

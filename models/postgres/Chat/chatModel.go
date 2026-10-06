@@ -43,46 +43,6 @@ func CreateChat(query string, id uuid.UUID, createdBy uuid.UUID, grpId string) (
 	return
 }
 
-func GetChatByUUID(query string, chatUUID uuid.UUID) (chatInfo *Chat, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var chatData Chat
-	var createdAt sql.NullTime
-	var updatedAt sql.NullTime
-	var deletedAt sql.NullTime
-
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, chatUUID)
-	err = row.Scan(
-		&chatData.Id,
-		&chatData.CreatedBy,
-		&createdAt,
-		&updatedAt,
-		&deletedAt,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetChatByUUID Failed to get chat err: %+v",
-			err)
-		return
-	}
-
-	if createdAt.Valid {
-		chatData.CreatedAt = createdAt.Time
-	}
-
-	if updatedAt.Valid {
-		chatData.UpdatedAt = updatedAt.Time
-	}
-
-	if deletedAt.Valid {
-		chatData.DeletedAt = deletedAt.Time
-	}
-
-	return &chatData, nil
-}
-
 func UpdateChatByUUID(query string, chatUUID uuid.UUID) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -96,26 +56,6 @@ func UpdateChatByUUID(query string, chatUUID uuid.UUID) (err error) {
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/UpdateChatByUUID Failed to update chat err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
-func BulkUpdateGrpIdInChatAndAtachment(query string, oldGrpId string, newGrpId string) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		newGrpId,
-		oldGrpId,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/BulkUpdateGrpIdInChatAndAtachment Failed to update chat and attachments err: %+v",
 			err)
 		return
 	}
@@ -177,6 +117,66 @@ func GetLatestChatMessageCountByUserID(query string, userID uuid.UUID) (chatMess
 	// from a genuinely short list.
 	if err = rows.Err(); err != nil {
 		helpers.LogErrorWithContext(ctx, "chatModel.go rows iteration failed err: %+v", err)
+		return
+	}
+
+	return
+}
+
+func GetChatByUUID(query string, chatUUID uuid.UUID) (chatInfo *Chat, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	var chatData Chat
+	var createdAt sql.NullTime
+	var updatedAt sql.NullTime
+	var deletedAt sql.NullTime
+
+	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, chatUUID)
+	err = row.Scan(
+		&chatData.Id,
+		&chatData.CreatedBy,
+		&createdAt,
+		&updatedAt,
+		&deletedAt,
+	)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/GetChatByUUID Failed to get chat err: %+v",
+			err)
+		return
+	}
+
+	if createdAt.Valid {
+		chatData.CreatedAt = createdAt.Time
+	}
+
+	if updatedAt.Valid {
+		chatData.UpdatedAt = updatedAt.Time
+	}
+
+	if deletedAt.Valid {
+		chatData.DeletedAt = deletedAt.Time
+	}
+
+	return &chatData, nil
+}
+
+func BulkUpdateGrpIdInChatAndAtachment(query string, oldGrpId string, newGrpId string) (err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	_, err = postgresInit.DBConn.SqlDB.ExecContext(
+		ctx,
+		query,
+		newGrpId,
+		oldGrpId,
+	)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/BulkUpdateGrpIdInChatAndAtachment Failed to update chat and attachments err: %+v",
+			err)
 		return
 	}
 

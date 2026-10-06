@@ -63,26 +63,6 @@ func CheckIfTeamExistByTeamName(ctx context.Context, teamName string) (exist boo
 	return
 }
 
-func GetTeamByUUID(ctx context.Context, TeamUUID uuid.UUID) (teamInfo *models.Team, err error) {
-
-	query := `
-        SELECT id, team_name, created_by, created_at, updated_at, deleted_at
-        FROM teams
-        WHERE id = $1
-    `
-
-	teamInfo, err = models.GetTeamByUUID(query, TeamUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetTeamByUUID Failed to team by uuid err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func UpdateTeamNameByTeamUUID(ctx context.Context, newTeamName string, teamUUID uuid.UUID, currentTime time.Time) (err error) {
 	query := `
         UPDATE teams
@@ -508,41 +488,6 @@ func GetDgraphTeamMemberListByTeamUUID(ctx context.Context, teamUUID string, use
 
 }
 
-func GetDgraphUnDeletedProjectListByTeamUUID(ctx context.Context, teamUUID string) (dgraphTeam *dgraphStruct.DgraphTeam, err error) {
-	variables := make(map[string]string)
-	variables["$id"] = teamUUID
-	query := `query TeamInfo($id: string){
-				teamInfo(func: eq(team_uuid, $id)) {
-					uid
-					team_uuid
-					team_name
-					team_projects @filter(not gt(project_deleted_at, "1970-01-01T00:00:00Z")){
-						project_uuid
-						project_name
-						project_status
-						project_deleted_at
-						project_created_by {
-							user_uuid
-							user_name
-						}
-					}
-
-				}
-			}`
-
-	dgraphTeam, err = dgraphModels.GetDgraphTeamInfoByUUID(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphUnDeletedProjectListByTeamUUID Failed to get team's project list from dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
-}
-
 func GetDgraphTeamListByUserDgraphUID(ctx context.Context, userDgraphUID string) (dgraphTeamList []*dgraphStruct.DgraphTeam, err error) {
 	variables := make(map[string]string)
 	variables["$user_id"] = userDgraphUID
@@ -913,5 +858,60 @@ func HardDeleteTeam(ctx context.Context, teamUUID uuid.UUID) (err error) {
 			"domain/HardDeleteTeam Failed to delete team row err: %+v", err)
 		return
 	}
+	return
+}
+
+func GetTeamByUUID(ctx context.Context, TeamUUID uuid.UUID) (teamInfo *models.Team, err error) {
+
+	query := `
+        SELECT id, team_name, created_by, created_at, updated_at, deleted_at
+        FROM teams
+        WHERE id = $1
+    `
+
+	teamInfo, err = models.GetTeamByUUID(query, TeamUUID)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetTeamByUUID Failed to team by uuid err: %+v",
+			err)
+		return
+	}
+
+	return
+}
+
+func GetDgraphUnDeletedProjectListByTeamUUID(ctx context.Context, teamUUID string) (dgraphTeam *dgraphStruct.DgraphTeam, err error) {
+	variables := make(map[string]string)
+	variables["$id"] = teamUUID
+	query := `query TeamInfo($id: string){
+				teamInfo(func: eq(team_uuid, $id)) {
+					uid
+					team_uuid
+					team_name
+					team_projects @filter(not gt(project_deleted_at, "1970-01-01T00:00:00Z")){
+						project_uuid
+						project_name
+						project_status
+						project_deleted_at
+						project_created_by {
+							user_uuid
+							user_name
+						}
+					}
+
+				}
+			}`
+
+	dgraphTeam, err = dgraphModels.GetDgraphTeamInfoByUUID(ctx, query, variables)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetDgraphUnDeletedProjectListByTeamUUID Failed to get team's project list from dgraph err: %+v",
+			err,
+		)
+		return
+	}
+
 	return
 }

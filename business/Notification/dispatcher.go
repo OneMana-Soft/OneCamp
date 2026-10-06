@@ -22,7 +22,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -446,19 +445,8 @@ func frontendBaseURL() string {
 	return authService.FrontendBaseURL()
 }
 
-// backendBaseURL resolves the BACKEND_DOMAIN env var into a fully-qualified
-// origin. Used only for emails (List-Unsubscribe + email-logo URL); never
-// for in-app navigation.
+// backendBaseURL is this server's public origin. Used only for emails
+// (List-Unsubscribe + email-logo URL); never for in-app navigation.
 func backendBaseURL() string {
-	backend := strings.TrimRight(os.Getenv("BACKEND_DOMAIN"), "/")
-	if backend == "" {
-		return "http://localhost:3000"
-	}
-	if strings.HasPrefix(backend, "http://") || strings.HasPrefix(backend, "https://") {
-		return backend
-	}
-	if strings.Contains(backend, "localhost") || strings.Contains(backend, "127.0.0.1") {
-		return "http://" + backend
-	}
-	return "https://" + backend
+	return authService.BackendBaseURL()
 }

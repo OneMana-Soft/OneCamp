@@ -307,6 +307,33 @@ var AISession = withArity(Spec{
 	Description: "JSON-encoded AI conversation session. Refreshed on each turn.",
 }, 1) // (sessionID)
 
+// AIStreamStop records that the person a streamed answer belongs to asked for
+// it to stop. Written by the stop endpoint, read by the handler that owns the
+// stream when its client goes away, so a deliberate stop can be told apart from
+// a tab that closed. The value is the requester's user uuid, so only the owner's
+// request counts. Short TTL: a stop that nobody consumed within minutes was for
+// a stream that already ended.
+var AIStreamStop = withArity(Spec{
+	Namespace:   "ai:stream:stop",
+	TTL:         5 * time.Minute,
+	Datatype:    DatatypeString,
+	Category:    CategoryAI,
+	Description: "Owner uuid; present while a deliberate stop of this session's answer is pending.",
+}, 1) // (sessionID)
+
+// AIStreamLive marks a session whose answer is still being written on the
+// server after the client that asked has gone. A client that comes back reads
+// it to know there is something to wait for. TTL is the stream timeout's order,
+// refreshed while generation runs; a key that outlives its stream only makes a
+// client poll a little longer.
+var AIStreamLive = withArity(Spec{
+	Namespace:   "ai:stream:live",
+	TTL:         10 * time.Minute,
+	Datatype:    DatatypeString,
+	Category:    CategoryAI,
+	Description: "Set while an answer for this session is being generated; cleared when it is saved.",
+}, 1) // (sessionID)
+
 // AIRate limits AI requests per minute per user.
 var AIRate = withArity(Spec{
 	Namespace:   "ai:rate",

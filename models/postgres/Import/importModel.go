@@ -359,45 +359,6 @@ func UpdateProgress(ctx context.Context, jobId uuid.UUID, patch json.RawMessage)
 	return err
 }
 
-// SetContentHash stores the SHA-256 hash of the staged ZIP for dedup.
-func SetContentHash(ctx context.Context, jobId uuid.UUID, hash string) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx,
-		`UPDATE import_jobs SET content_hash = $2, updated_at = NOW() WHERE id = $1`,
-		jobId, hash)
-	return err
-}
-
-// FindCompletedJobByHash returns a previously-completed/running job with
-// the same (provider, workspace, content_hash). Used to short-circuit a
-// duplicate upload before doing any work.
-func FindCompletedJobByHash(ctx context.Context, provider, workspace, contentHash string) (*Job, error) {
-	if contentHash == "" {
-		return nil, nil
-	}
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx, `
-		SELECT `+JobSelectColumns+`
-		FROM import_jobs
-		WHERE provider = $1
-		  AND source_workspace_name = $2
-		  AND content_hash = $3
-		  AND status IN ('running','paused','completed','validating','planned')
-		ORDER BY created_at DESC
-		LIMIT 1`, provider, workspace, contentHash)
-	j, err := scanJob(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return j, nil
-}
-
 // ListJobsForRawCleanup returns terminal jobs older than cutoff that
 // still have a raw_object_key set. Bounded at 200 rows per call.
 func ListJobsForRawCleanup(ctx context.Context, cutoff time.Time) ([]*Job, error) {
@@ -804,30 +765,6 @@ func ExecSourceIdMap(ctx context.Context, query string, args []interface{}, hint
 	return out, rows.Err()
 }
 
-// IdMappingsByType returns every (sourceId, onecampUUID) for an entity.
-// Used by rollback. Includes both physically-created and re-mapped entries.
-func IdMappingsByType(ctx context.Context, importId uuid.UUID, entityType string) ([]IdMapEntry, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, `
-		SELECT source_id, onecamp_uuid FROM import_id_map
-		WHERE import_id = $1 AND entity_type = $2
-		ORDER BY source_id`, importId, entityType)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := make([]IdMapEntry, 0, 64)
-	for rows.Next() {
-		var e IdMapEntry
-		if err := rows.Scan(&e.SourceId, &e.OnecampUUID); err != nil {
-			return nil, err
-		}
-		out = append(out, e)
-	}
-	return out, rows.Err()
-}
-
 // IdMappingsByTypeOwned returns mapping rows where this import was the
 // physical creator. Used by rollback so we never soft-delete entities
 // that a different import owns.
@@ -1211,4 +1148,67 @@ func RetryFailedChunks(ctx context.Context, importId uuid.UUID) (int64, error) {
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
+}
+
+// SetContentHash stores the SHA-256 hash of the staged ZIP for dedup.
+func SetContentHash(ctx context.Context, jobId uuid.UUID, hash string) error {
+	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx,
+		`UPDATE import_jobs SET content_hash = $2, updated_at = NOW() WHERE id = $1`,
+		jobId, hash)
+	return err
+}
+
+// FindCompletedJobByHash returns a previously-completed/running job with
+// the same (provider, workspace, content_hash). Used to short-circuit a
+// duplicate upload before doing any work.
+func FindCompletedJobByHash(ctx context.Context, provider, workspace, contentHash string) (*Job, error) {
+	if contentHash == "" {
+		return nil, nil
+	}
+	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	row := postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx, `
+		SELECT `+JobSelectColumns+`
+		FROM import_jobs
+		WHERE provider = $1
+		  AND source_workspace_name = $2
+		  AND content_hash = $3
+		  AND status IN ('running','paused','completed','validating','planned')
+		ORDER BY created_at DESC
+		LIMIT 1`, provider, workspace, contentHash)
+	j, err := scanJob(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return j, nil
+}
+
+// IdMappingsByType returns every (sourceId, onecampUUID) for an entity.
+// Used by rollback. Includes both physically-created and re-mapped entries.
+func IdMappingsByType(ctx context.Context, importId uuid.UUID, entityType string) ([]IdMapEntry, error) {
+	dbCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, `
+		SELECT source_id, onecamp_uuid FROM import_id_map
+		WHERE import_id = $1 AND entity_type = $2
+		ORDER BY source_id`, importId, entityType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]IdMapEntry, 0, 64)
+	for rows.Next() {
+		var e IdMapEntry
+		if err := rows.Scan(&e.SourceId, &e.OnecampUUID); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }

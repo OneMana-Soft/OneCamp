@@ -11,40 +11,6 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
-func CreateUserInOpenSearch(ctx context.Context, openSearchUser *openSearchStruct.OpenSearchUser) (err error) {
-
-	jsonData, err := json.Marshal(openSearchUser)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateUserInOpenSearch Error mashiling strut to json err: %+v",
-			err)
-		return
-	}
-
-	document := openSearchStruct.IndexReader(jsonData)
-
-	docId := openSearchUser.Uuid
-
-	_, err = opensearchInit.OpenSearchClient.Document.Create(
-		context.Background(),
-		opensearchapi.DocumentCreateReq{
-			Index:      "users",
-			DocumentID: docId,
-			Body:       document,
-		},
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateUserInOpenSearch failed to create user document err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func UpdateUserInOpenSearch(ctx context.Context, openSearchUser *openSearchStruct.OpenSearchUser) (err error) {
 
 	doc := openSearchStruct.BulkUpdate{
@@ -245,4 +211,38 @@ func PropagateUserInfoChangeInOpenSearch(ctx context.Context, userUUID string, n
 		}
 	}
 	return nil
+}
+
+func CreateUserInOpenSearch(ctx context.Context, openSearchUser *openSearchStruct.OpenSearchUser) (err error) {
+
+	jsonData, err := json.Marshal(openSearchUser)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/CreateUserInOpenSearch Error mashiling strut to json err: %+v",
+			err)
+		return
+	}
+
+	document := openSearchStruct.IndexReader(jsonData)
+
+	docId := openSearchUser.Uuid
+
+	_, err = opensearchInit.OpenSearchClient.Document.Create(
+		context.Background(),
+		opensearchapi.DocumentCreateReq{
+			Index:      "users",
+			DocumentID: docId,
+			Body:       document,
+		},
+	)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/CreateUserInOpenSearch failed to create user document err: %+v",
+			err)
+		return
+	}
+
+	return
 }

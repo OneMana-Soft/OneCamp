@@ -88,17 +88,6 @@ func Upsert(email, reason, details string) error {
 	return nil
 }
 
-// Delete removes a suppression. Admin-only; the unsubscribe path uses the
-// preferences table instead.
-func Delete(email string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	email = strings.TrimSpace(strings.ToLower(email))
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx,
-		`DELETE FROM notification_email_suppressions WHERE email = $1`, email)
-	return err
-}
-
 // IsSuppressedBatch is the batched twin of IsSuppressed. Given a list
 // of emails it returns the subset that are suppressed, mapping each
 // hit to its reason. Used by the notification dispatcher to avoid N
@@ -144,4 +133,15 @@ func IsSuppressedBatch(emails []string) (map[string]string, error) {
 		out[email] = reason
 	}
 	return out, rows.Err()
+}
+
+// Delete removes a suppression. Admin-only; the unsubscribe path uses the
+// preferences table instead.
+func Delete(email string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	email = strings.TrimSpace(strings.ToLower(email))
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx,
+		`DELETE FROM notification_email_suppressions WHERE email = $1`, email)
+	return err
 }

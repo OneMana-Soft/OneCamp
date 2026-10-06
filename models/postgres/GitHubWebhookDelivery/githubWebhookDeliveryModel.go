@@ -123,38 +123,6 @@ func MarkDeliveryFailed(ctx context.Context, deliveryID, errMsg string) error {
 // should use ClaimDelivery / MarkDeliveryCompleted / MarkDeliveryFailed.
 // ─────────────────────────────────────────────────────────────────────
 
-// InsertGitHubWebhookDelivery records a webhook delivery for deduplication.
-// Returns true if inserted (new delivery), false if already exists.
-//
-// Deprecated: use ClaimDelivery + MarkDeliveryCompleted instead. This
-// shim continues the legacy "insert as completed on receipt" behaviour
-// for callers that haven't migrated yet.
-func InsertGitHubWebhookDelivery(query string, deliveryID string, eventType string) (bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, deliveryID, eventType)
-	if err != nil {
-		if isDuplicateError(err) {
-			return false, nil
-		}
-		helpers.LogErrorWithContext(ctx, "models/InsertGitHubWebhookDelivery Failed err: %+v", err)
-		return false, err
-	}
-	return true, nil
-}
-
-// isDuplicateError checks if the error is a unique violation.
-func isDuplicateError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if pqErr, ok := err.(*pq.Error); ok {
-		return pqErr.Code == "23505"
-	}
-	return false
-}
-
 // HealthSummary captures the health-check shape returned to the admin
 // UI: counts of recent statuses + the last successful processing time.
 // Aggregating in SQL means a single round-trip regardless of fleet size.
@@ -196,4 +164,36 @@ func GetHealthSummary(ctx context.Context) (*HealthSummary, error) {
 		return nil, err
 	}
 	return &s, nil
+}
+
+// InsertGitHubWebhookDelivery records a webhook delivery for deduplication.
+// Returns true if inserted (new delivery), false if already exists.
+//
+// Deprecated: use ClaimDelivery + MarkDeliveryCompleted instead. This
+// shim continues the legacy "insert as completed on receipt" behaviour
+// for callers that haven't migrated yet.
+func InsertGitHubWebhookDelivery(query string, deliveryID string, eventType string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, deliveryID, eventType)
+	if err != nil {
+		if isDuplicateError(err) {
+			return false, nil
+		}
+		helpers.LogErrorWithContext(ctx, "models/InsertGitHubWebhookDelivery Failed err: %+v", err)
+		return false, err
+	}
+	return true, nil
+}
+
+// isDuplicateError checks if the error is a unique violation.
+func isDuplicateError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if pqErr, ok := err.(*pq.Error); ok {
+		return pqErr.Code == "23505"
+	}
+	return false
 }

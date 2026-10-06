@@ -225,19 +225,6 @@ func IsSymlinkEntry(f *zip.File) bool {
 	return f.FileInfo().Mode()&0o20000000 != 0 // os.ModeSymlink
 }
 
-// IsRegularEntry returns true for plain file entries (not symlinks,
-// not directories). Callers iterating zr.File should skip non-regular
-// entries with this helper.
-func IsRegularEntry(f *zip.File) bool {
-	if f == nil {
-		return false
-	}
-	if f.FileInfo().IsDir() {
-		return false
-	}
-	return !IsSymlinkEntry(f)
-}
-
 // LimitReader wraps an entry's decompression stream with a hard byte
 // cap. If the inner stream produces more than `cap` bytes (i.e. the
 // header lied about UncompressedSize64), Read returns
@@ -287,4 +274,17 @@ func (c *cappedReader) Read(p []byte) (int, error) {
 
 func (c *cappedReader) Close() error {
 	return c.inner.Close()
+}
+
+// IsRegularEntry returns true for plain file entries (not symlinks,
+// not directories). Callers iterating zr.File should skip non-regular
+// entries with this helper.
+func IsRegularEntry(f *zip.File) bool {
+	if f == nil {
+		return false
+	}
+	if f.FileInfo().IsDir() {
+		return false
+	}
+	return !IsSymlinkEntry(f)
 }

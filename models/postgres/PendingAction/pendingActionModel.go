@@ -65,7 +65,11 @@ type PendingAction struct {
 	// performs an irreversible/high-risk mutation. The business layer sets it
 	// from the live tool registry so the FE can flag the approval card; it is
 	// always recomputable from tool_name (so audit history loses nothing).
-	Destructive    bool       `json:"destructive"`
+	Destructive bool `json:"destructive"`
+	// Fresh is true only on the call that inserted the row. A retry with the
+	// same idempotency key gets the existing row back with Fresh false, so a
+	// side effect meant once per proposal (a push to the person) happens once.
+	Fresh          bool       `json:"-"`
 	Status         string     `json:"status"`
 	IdempotencyKey *string    `json:"idempotency_key,omitempty"`
 	Result         *string    `json:"result,omitempty"`
@@ -192,6 +196,7 @@ func CreatePendingAction(ctx context.Context, requestedBy uuid.UUID, surfaceType
 		helpers.LogErrorWithContext(ctx, "models/PendingAction/CreatePendingAction err: %+v", err)
 		return nil, err
 	}
+	p.Fresh = true
 	return p, nil
 }
 

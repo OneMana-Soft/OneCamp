@@ -457,16 +457,6 @@ func renderDMHTML(ctx context.Context, dc *dmContext, m *SlackMessage) string {
 	return body
 }
 
-// lookupDgraphUser resolves a OneCamp UUID to the cached DgraphUser.
-// Caller may need the full *dgraphStruct.DgraphUser for chat business
-// calls; use importingDgraphUser2 directly for that path.
-func (dc *dmContext) lookupDgraphUser(ctx context.Context, ocUUID string) *dgraphStruct.DgraphUser {
-	if u, ok := dc.userCache[ocUUID]; ok {
-		return &u.UserDgraphInfo
-	}
-	return importingDgraphUser2(ctx, ocUUID)
-}
-
 // mpimParticipantsDgraph builds the []*DgraphUser slice CreateChatForGroup
 // expects. Each member's full Dgraph user is fetched once.
 func mpimParticipantsDgraph(ctx context.Context, dc *dmContext) ([]*dgraphStruct.DgraphUser, error) {
@@ -653,4 +643,14 @@ func backdateChat(ctx context.Context, chatUUID uuid.UUID, t time.Time) error {
 	_, err := importModels.Exec(dbCtx, `
 		UPDATE chats SET created_at = $2, updated_at = $2 WHERE id = $1`, chatUUID, t)
 	return err
+}
+
+// lookupDgraphUser resolves a OneCamp UUID to the cached DgraphUser.
+// Caller may need the full *dgraphStruct.DgraphUser for chat business
+// calls; use importingDgraphUser2 directly for that path.
+func (dc *dmContext) lookupDgraphUser(ctx context.Context, ocUUID string) *dgraphStruct.DgraphUser {
+	if u, ok := dc.userCache[ocUUID]; ok {
+		return &u.UserDgraphInfo
+	}
+	return importingDgraphUser2(ctx, ocUUID)
 }

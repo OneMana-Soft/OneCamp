@@ -427,76 +427,6 @@ func GetChannelInfoByUUIDWithMemberAdminFlag(w http.ResponseWriter, r *http.Requ
 
 }
 
-func GetChannelInfoByUUID(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	channelUUIDString := chi.URLParam(r, "channel_uuid")
-	channelUUID, err := uuid.Parse(channelUUIDString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChannelInfoByUUID Failed to parse channelUUID string to uuid err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse channelUUID string to uuid",
-			"err": err,
-		})
-		return
-	}
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	channelInfo, err := business.GetDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChannelInfoByUUID Failed to channels info form dgraph err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to channels info",
-			"err": err,
-		})
-		return
-
-	}
-
-	if channelInfo.IsMember == 0 && *channelInfo.IsPrivate {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChannelInfoByUUID Unauthorised user trying to access channelInfo")
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorized",
-		})
-		return
-	}
-
-	if channelInfo.IsMember == 1 {
-		var notificationType string
-		notificationType, err = userChannelNotificationBusiness.GetNotificationTypeByUserIdAndChannelId(userInfo.UserDgraphInfo.Uuid, channelUUID.String())
-
-		if err != nil {
-
-			helpers.LogErrorWithContext(ctx,
-				"controllers/GetChannelInfoByUUID Failed to get users notificationType err: %+v",
-				err)
-
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "Failed to get users notificationType",
-				"err": err,
-			})
-			return
-		}
-		channelInfo.NotificationType = notificationType
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-		"msg":          "got channel's info successfully",
-		"channel_info": channelInfo,
-	})
-
-}
-
 func GetChannelBasicInfoByUUID(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	channelUUIDString := chi.URLParam(r, "channel_uuid")
@@ -1798,4 +1728,74 @@ func sanitizeSearchOrFail(ctx interface{}, w http.ResponseWriter, raw string) (s
 		"msg": "search text is too long or invalid",
 	})
 	return "", err
+}
+
+func GetChannelInfoByUUID(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	channelUUIDString := chi.URLParam(r, "channel_uuid")
+	channelUUID, err := uuid.Parse(channelUUIDString)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"controllers/GetChannelInfoByUUID Failed to parse channelUUID string to uuid err: %+v",
+			err)
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+			"msg": "Failed to parse channelUUID string to uuid",
+			"err": err,
+		})
+		return
+	}
+
+	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+
+	channelInfo, err := business.GetDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
+
+	if err != nil {
+
+		helpers.LogErrorWithContext(ctx,
+			"controllers/GetChannelInfoByUUID Failed to channels info form dgraph err: %+v",
+			err)
+
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+			"msg": "Failed to channels info",
+			"err": err,
+		})
+		return
+
+	}
+
+	if channelInfo.IsMember == 0 && *channelInfo.IsPrivate {
+		helpers.LogErrorWithContext(ctx,
+			"controllers/GetChannelInfoByUUID Unauthorised user trying to access channelInfo")
+
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
+			"msg": "Not authorized",
+		})
+		return
+	}
+
+	if channelInfo.IsMember == 1 {
+		var notificationType string
+		notificationType, err = userChannelNotificationBusiness.GetNotificationTypeByUserIdAndChannelId(userInfo.UserDgraphInfo.Uuid, channelUUID.String())
+
+		if err != nil {
+
+			helpers.LogErrorWithContext(ctx,
+				"controllers/GetChannelInfoByUUID Failed to get users notificationType err: %+v",
+				err)
+
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+				"msg": "Failed to get users notificationType",
+				"err": err,
+			})
+			return
+		}
+		channelInfo.NotificationType = notificationType
+	}
+
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
+		"msg":          "got channel's info successfully",
+		"channel_info": channelInfo,
+	})
+
 }

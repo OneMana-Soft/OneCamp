@@ -36,45 +36,6 @@ type Auth struct {
 	DeviceExpiresAt  time.Time
 }
 
-// Set writes the three auth cookies to w with the appropriate
-// security flags. Idempotent and safe to call from any handler that
-// produces a session.
-func Set(w http.ResponseWriter, a Auth) {
-	secure, sameSite := SecureAndSameSite()
-	domain := FrontendDomain()
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "Authorization",
-		Value:    a.AuthToken,
-		Expires:  a.AuthExpiresAt,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Domain:   domain,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     "RefreshToken",
-		Value:    a.RefreshToken,
-		Expires:  a.RefreshExpiresAt,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Domain:   domain,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     "DeviceId",
-		Value:    a.DeviceID,
-		Expires:  a.DeviceExpiresAt,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Domain:   domain,
-	})
-}
-
 // FrontendDomain returns the cookie Domain attribute. Mirrors the
 // existing getFrontendCookieDomain in controllers/User but lives here
 // so other packages can reuse it.
@@ -124,4 +85,43 @@ func SecureAndSameSite() (bool, http.SameSite) {
 		return false, http.SameSiteLaxMode
 	}
 	return true, http.SameSiteNoneMode
+}
+
+// Set writes the three auth cookies to w with the appropriate
+// security flags. Idempotent and safe to call from any handler that
+// produces a session.
+func Set(w http.ResponseWriter, a Auth) {
+	secure, sameSite := SecureAndSameSite()
+	domain := FrontendDomain()
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "Authorization",
+		Value:    a.AuthToken,
+		Expires:  a.AuthExpiresAt,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: sameSite,
+		Domain:   domain,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "RefreshToken",
+		Value:    a.RefreshToken,
+		Expires:  a.RefreshExpiresAt,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: sameSite,
+		Domain:   domain,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "DeviceId",
+		Value:    a.DeviceID,
+		Expires:  a.DeviceExpiresAt,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   secure,
+		SameSite: sameSite,
+		Domain:   domain,
+	})
 }

@@ -82,6 +82,68 @@ func CreateAttachmentForChannelsAndChats(query string, args ...interface{}) (err
 //	return
 //}
 
+func UpdateAttachmentDeletedTimeByUUID(query string, deleteTime *time.Time, attachmentUUID uuid.UUID) (err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	_, err = postgresInit.DBConn.SqlDB.ExecContext(
+		ctx,
+		query,
+		deleteTime,
+		attachmentUUID,
+	)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/UpdateAttachmentDeletedTimeByUUID Failed to update attachment's delete time err: %+v",
+			err)
+		return
+	}
+
+	return
+}
+
+func GetAttachmentByObjUUID(query string, objUUID string, srcKey string) (returnAttachment *Attachment, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, objUUID, srcKey)
+	defer func() {
+		cancel()
+	}()
+
+	var createdAt sql.NullTime
+	var deletedAt sql.NullTime
+
+	var attachment Attachment
+
+	err = row.Scan(
+		&attachment.Uuid,
+		&attachment.ObjKey,
+		&attachment.SrcKey,
+		&attachment.SrcValue,
+		&attachment.CreatedBy,
+		&createdAt,
+		&deletedAt,
+	)
+
+	if createdAt.Valid {
+		attachment.CreatedAt = createdAt.Time
+	}
+
+	if deletedAt.Valid {
+		attachment.DeletedAt = deletedAt.Time
+	}
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/GetAttachmentByObjUUID Failed to get attachment from postgres err: %+v",
+			err)
+		return
+	}
+
+	returnAttachment = &attachment
+
+	return
+}
+
 func GetAttachmentByUUID(query string, uuid uuid.UUID) (attachment *Attachment, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -141,26 +203,6 @@ func UpdateAttachmentNameByAttachmentUUID(query string, TeamName string, current
 	return
 }
 
-func UpdateAttachmentDeletedTimeByUUID(query string, deleteTime *time.Time, attachmentUUID uuid.UUID) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		deleteTime,
-		attachmentUUID,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/UpdateAttachmentDeletedTimeByUUID Failed to update attachment's delete time err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func UpdateAttachmentDeletedTimeToNullByUUID(query string, updateTime *time.Time, attachmentUUID uuid.UUID) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -177,48 +219,6 @@ func UpdateAttachmentDeletedTimeToNullByUUID(query string, updateTime *time.Time
 			err)
 		return
 	}
-
-	return
-}
-
-func GetAttachmentByObjUUID(query string, objUUID string, srcKey string) (returnAttachment *Attachment, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, objUUID, srcKey)
-	defer func() {
-		cancel()
-	}()
-
-	var createdAt sql.NullTime
-	var deletedAt sql.NullTime
-
-	var attachment Attachment
-
-	err = row.Scan(
-		&attachment.Uuid,
-		&attachment.ObjKey,
-		&attachment.SrcKey,
-		&attachment.SrcValue,
-		&attachment.CreatedBy,
-		&createdAt,
-		&deletedAt,
-	)
-
-	if createdAt.Valid {
-		attachment.CreatedAt = createdAt.Time
-	}
-
-	if deletedAt.Valid {
-		attachment.DeletedAt = deletedAt.Time
-	}
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetAttachmentByObjUUID Failed to get attachment from postgres err: %+v",
-			err)
-		return
-	}
-
-	returnAttachment = &attachment
 
 	return
 }

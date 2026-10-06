@@ -262,59 +262,6 @@ func GetSyncedTaskGCalIds(ctx context.Context, userUID uuid.UUID) ([]string, err
 	return ids, nil
 }
 
-// GetEntityIdsOlderThan returns UUIDs of entities created before cutoff.
-func GetEntityIdsOlderThan(query string, cutoff time.Time) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query, cutoff)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err == nil {
-			ids = append(ids, id)
-		}
-	}
-	// Iteration can stop on a mid-query failure (dropped connection, server-side
-	// error) rather than on end-of-rows. Without it this returns a PARTIAL result
-	// with a nil error, and the caller cannot tell truncated data from a short list.
-	if err := rows.Err(); err != nil {
-		helpers.LogErrorWithContext(ctx, "models/Task rows iteration failed err: %+v", err)
-		return nil, err
-	}
-	return ids, nil
-}
-
-// BulkArchiveEntity soft-deletes entities created before cutoff.
-func BulkArchiveEntity(query string, cutoff time.Time) (int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	result, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, cutoff)
-	if err != nil {
-		return 0, err
-	}
-	rows, _ := result.RowsAffected()
-	return rows, nil
-}
-
-// LinkPRToTaskByBranch sets PR fields on a task matching branch + project.
-func LinkPRToTaskByBranch(query string, prNumber int, prURL string, branch string, projectId uuid.UUID) (taskUUID string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, prNumber, prURL, branch, projectId).Scan(&taskUUID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", err
-	}
-	return taskUUID, nil
-}
-
 // SetGitHubPRFieldsOnTask sets PR fields on a specific task by UUID.
 func SetGitHubPRFieldsOnTask(query string, taskUUID uuid.UUID, prNumber int, prURL string, branch string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
@@ -351,18 +298,6 @@ func FindTaskUUIDByGitHubIssueURL(query string, issueURL string) (taskUUID strin
 	defer cancel()
 
 	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, issueURL).Scan(&taskUUID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", err
-	}
-	return taskUUID, nil
-}
-
-// FindTaskUUIDByGitHubPRURL finds a task UUID by its GitHub PR URL.
-func FindTaskUUIDByGitHubPRURL(query string, prURL string) (taskUUID string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, prURL).Scan(&taskUUID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", err
 	}
@@ -444,18 +379,6 @@ func GetTaskGitHubURLs(query string, taskUUID uuid.UUID) (issueURL, prURL *strin
 		return nil, nil, err
 	}
 	return issueURL, prURL, nil
-}
-
-// GetTaskLastSyncedAtByTaskID returns the github_last_synced_at for a task by its UUID.
-func GetTaskLastSyncedAtByTaskID(query string, taskUUID uuid.UUID) (lastSyncedAt *time.Time, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, taskUUID).Scan(&lastSyncedAt)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
-	}
-	return lastSyncedAt, nil
 }
 
 // SetGitHubLastSyncedAt updates the github_last_synced_at timestamp for a task.
@@ -759,4 +682,81 @@ func GetGitHubMetaForTasks(taskUUIDs []uuid.UUID) (map[uuid.UUID]*GitHubMeta, er
 		return nil, err
 	}
 	return result, nil
+}
+
+// GetEntityIdsOlderThan returns UUIDs of entities created before cutoff.
+func GetEntityIdsOlderThan(query string, cutoff time.Time) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	// Iteration can stop on a mid-query failure (dropped connection, server-side
+	// error) rather than on end-of-rows. Without it this returns a PARTIAL result
+	// with a nil error, and the caller cannot tell truncated data from a short list.
+	if err := rows.Err(); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/Task rows iteration failed err: %+v", err)
+		return nil, err
+	}
+	return ids, nil
+}
+
+// BulkArchiveEntity soft-deletes entities created before cutoff.
+func BulkArchiveEntity(query string, cutoff time.Time) (int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	result, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	rows, _ := result.RowsAffected()
+	return rows, nil
+}
+
+// LinkPRToTaskByBranch sets PR fields on a task matching branch + project.
+func LinkPRToTaskByBranch(query string, prNumber int, prURL string, branch string, projectId uuid.UUID) (taskUUID string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, prNumber, prURL, branch, projectId).Scan(&taskUUID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	return taskUUID, nil
+}
+
+// FindTaskUUIDByGitHubPRURL finds a task UUID by its GitHub PR URL.
+func FindTaskUUIDByGitHubPRURL(query string, prURL string) (taskUUID string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, prURL).Scan(&taskUUID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	return taskUUID, nil
+}
+
+// GetTaskLastSyncedAtByTaskID returns the github_last_synced_at for a task by its UUID.
+func GetTaskLastSyncedAtByTaskID(query string, taskUUID uuid.UUID) (lastSyncedAt *time.Time, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, taskUUID).Scan(&lastSyncedAt)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	return lastSyncedAt, nil
 }

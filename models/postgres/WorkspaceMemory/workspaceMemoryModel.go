@@ -507,42 +507,6 @@ func (s ScopeRef) scopeWhere(start int) (string, any) {
 	return "", nil
 }
 
-// DeleteByScope soft-deletes (permanent, user-delete semantics) every live
-// memory item belonging to a scope (channel/project/group). Returns the
-// removed ids so the caller can drop projections. Used when an entire scope
-// is deleted by a user. Unlike DeleteBySource this matches the scope COLUMN,
-// so it removes worker-extracted (scope-keyed) facts too.
-func DeleteByScope(ctx context.Context, scope ScopeRef) ([]uuid.UUID, error) {
-	pred, arg := scope.scopeWhere(1)
-	if pred == "" {
-		return nil, nil
-	}
-	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	q := `
-		UPDATE workspace_memory_items
-		SET deleted_at = NOW(), updated_at = NOW()
-		WHERE ` + pred + ` AND deleted_at IS NULL
-		RETURNING id`
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(cctx, q, arg)
-	if err != nil {
-		helpers.LogErrorWithContext(cctx, "models/workspaceMemory DeleteByScope failed: %+v", err)
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if serr := rows.Scan(&id); serr != nil {
-			return ids, serr
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
-}
-
 // ArchiveByScope reversibly soft-deletes (reason='archive') every live
 // memory item belonging to a scope — the scope-level twin of
 // ArchiveBySource, revived by RestoreByScope. Returns removed ids.
@@ -1038,4 +1002,40 @@ func inClause(n *int, vals []string) (string, []any) {
 		*n++
 	}
 	return strings.Join(ph, ","), out
+}
+
+// DeleteByScope soft-deletes (permanent, user-delete semantics) every live
+// memory item belonging to a scope (channel/project/group). Returns the
+// removed ids so the caller can drop projections. Used when an entire scope
+// is deleted by a user. Unlike DeleteBySource this matches the scope COLUMN,
+// so it removes worker-extracted (scope-keyed) facts too.
+func DeleteByScope(ctx context.Context, scope ScopeRef) ([]uuid.UUID, error) {
+	pred, arg := scope.scopeWhere(1)
+	if pred == "" {
+		return nil, nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	q := `
+		UPDATE workspace_memory_items
+		SET deleted_at = NOW(), updated_at = NOW()
+		WHERE ` + pred + ` AND deleted_at IS NULL
+		RETURNING id`
+
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(cctx, q, arg)
+	if err != nil {
+		helpers.LogErrorWithContext(cctx, "models/workspaceMemory DeleteByScope failed: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if serr := rows.Scan(&id); serr != nil {
+			return ids, serr
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

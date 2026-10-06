@@ -152,7 +152,7 @@ func GetGuestProject(ctx context.Context, grant *guestModel.GuestGrant) (*GuestP
 	if err != nil {
 		return nil, err
 	}
-	p, err := projectBusiness.GetDgraphProjectTaskListForKanban(helpers.WithSystemRead(ctx), projectID.String(), bot.DgraphUID, "")
+	p, err := projectBusiness.GetDgraphProjectTaskListForKanban(helpers.WithSystemRead(ctx), projectID.String(), bot.DgraphUID, "", dgraphStruct.BoardClosedLimit)
 	if err != nil || p == nil {
 		return nil, ErrNotFound
 	}

@@ -59,9 +59,15 @@ func EnsureAutomationBot(ctx context.Context) (*BotIdentity, error) {
 	//    keyed on user_uuid via the upsert query, so this is idempotent too.
 	zeroUnixTime := time.Time{}
 	dgraphUser := &dgraphStruct.DgraphUser{
-		Uuid:         userID.String(),
-		EmailID:      domain.SystemBotEmail,
-		UserName:     domain.SystemBotUsername(),
+		Uuid:    userID.String(),
+		EmailID: domain.SystemBotEmail,
+		// The display name in BOTH fields, as agent bots do (agentBot.go): the
+		// Dgraph user_name is what DM lists, task cards, reactions and the search
+		// index show, and the handle "onecamp-ai" there made the bot appear as a
+		// login rather than a name. The unique handle stays on the Postgres
+		// users.username column, so addressing is unaffected. Re-upserted on every
+		// boot, so existing installs pick this up on their next restart.
+		UserName:     domain.SystemBotDisplayName(),
 		UserFullName: domain.SystemBotDisplayName(),
 		Status:       dgraphStruct.USER_OPT_STATUS_OFFLINE,
 		DeletedAt:    &zeroUnixTime,

@@ -113,27 +113,6 @@ func GetDgraphDmRecordingInfoByEgressId(ctx context.Context, egressId string, us
 
 }
 
-// RestoreDgraphRecording clears recording_deleted_at (un-soft-deletes).
-func RestoreDgraphRecording(ctx context.Context, egressId string) error {
-	zeroTime := time.Time{}
-	dgraphRec := &dgraphStruct.DgraphRecording{
-		DType:     []string{"Recording"},
-		EgressId:  egressId,
-		DeletedAt: &zeroTime,
-	}
-
-	query := fmt.Sprintf(`query {
-		recording as var(func: eq(recording_egress_id, "%+v"))
-	}`, egressId)
-
-	_, err := dgraphModels.CreateOrUpdateDgraphRecording(ctx, dgraphRec, query, "")
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/RestoreDgraphRecording failed for %s: %+v", egressId, err)
-		return err
-	}
-	return nil
-}
-
 // GetRecordingEgressIdsOlderThan returns egress IDs of completed recordings older than cutoff.
 func GetRecordingEgressIdsOlderThan(ctx context.Context, cutoff time.Time) ([]string, error) {
 	cutoffStr := cutoff.Format(time.RFC3339)
@@ -238,4 +217,25 @@ func GetRecentlyArchivedRecordings(ctx context.Context, cutoffRFC3339 string, fi
 		return nil, 0, err
 	}
 	return list.Recordings, int64(list.Count), nil
+}
+
+// RestoreDgraphRecording clears recording_deleted_at (un-soft-deletes).
+func RestoreDgraphRecording(ctx context.Context, egressId string) error {
+	zeroTime := time.Time{}
+	dgraphRec := &dgraphStruct.DgraphRecording{
+		DType:     []string{"Recording"},
+		EgressId:  egressId,
+		DeletedAt: &zeroTime,
+	}
+
+	query := fmt.Sprintf(`query {
+		recording as var(func: eq(recording_egress_id, "%+v"))
+	}`, egressId)
+
+	_, err := dgraphModels.CreateOrUpdateDgraphRecording(ctx, dgraphRec, query, "")
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/RestoreDgraphRecording failed for %s: %+v", egressId, err)
+		return err
+	}
+	return nil
 }

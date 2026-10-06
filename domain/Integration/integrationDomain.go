@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/models/postgres/Integration"
+	models "github.com/akashc777/OneCamp/models/postgres/Integration"
 	"github.com/google/uuid"
 )
 
@@ -42,21 +42,6 @@ func GetIntegration(ctx context.Context, entityType string, entityId uuid.UUID, 
 		return nil, err
 	}
 	return integration, nil
-}
-
-func UpdateSyncToken(ctx context.Context, entityType string, entityId uuid.UUID, provider, syncToken string) error {
-	currentTime := time.Now()
-	query := `
-		UPDATE integrations
-		SET sync_token = $1, updated_at = $2
-		WHERE entity_type = $3 AND entity_id = $4 AND provider = $5
-	`
-	err := models.UpdateSyncToken(query, entityType, entityId, provider, syncToken, currentTime)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/UpdateSyncToken Failed to update sync token err: %+v", err)
-		return err
-	}
-	return nil
 }
 
 func DeleteIntegration(ctx context.Context, entityType string, entityId uuid.UUID, provider string) error {
@@ -109,4 +94,19 @@ func UpdateIntegrationToken(ctx context.Context, entityType string, entityId uui
 		WHERE entity_type = $5 AND entity_id = $6 AND provider = $7
 	`
 	return models.UpdateIntegrationToken(query, accessToken, refreshToken, expiresAt, currentTime, entityType, entityId, provider)
+}
+
+func UpdateSyncToken(ctx context.Context, entityType string, entityId uuid.UUID, provider, syncToken string) error {
+	currentTime := time.Now()
+	query := `
+		UPDATE integrations
+		SET sync_token = $1, updated_at = $2
+		WHERE entity_type = $3 AND entity_id = $4 AND provider = $5
+	`
+	err := models.UpdateSyncToken(query, entityType, entityId, provider, syncToken, currentTime)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/UpdateSyncToken Failed to update sync token err: %+v", err)
+		return err
+	}
+	return nil
 }

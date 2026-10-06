@@ -169,3 +169,14 @@ ValidRecurrence
 VerifyRepoAccess
 VerifyRepoAccessWithToken
 ThreadText
+
+# Shared with the AI edition, called there only by AI features (synced from
+# main by scripts/aistrip on 6 Oct 2026). Kept so the shared files stay
+# identical to main's; deleting them here would re-create the drift.
+DispatchMemoryDigestTestNow
+SearchPeople
+LogDebugWithContext
+RevokeAny
+RotateSecret
+DisplayNamesByUUIDs
+MCPResourceMetadataURL

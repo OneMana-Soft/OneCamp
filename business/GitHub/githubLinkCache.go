@@ -166,12 +166,6 @@ func invalidateLinkByLink(link *githubLinkModel.GitHubLink) {
 	invalidateLinkByRepo(link.RepoOwner, link.RepoName)
 }
 
-// GitHubLinkCacheStats returns hit/miss counts and current size for
-// observability.
-func GitHubLinkCacheStats() (hits, misses uint64, size int) {
-	return atomic.LoadUint64(&githubLinkCacheHits), atomic.LoadUint64(&githubLinkCacheMisses), githubLinkCache.Len()
-}
-
 // lookupGitHubLinkByRepo is the (link, error) shim used by callers
 // that don't care about pre-parsed automation rules. Keeps the call-
 // site change to a single drop-in replacement of githubLinkModel.GetGitHubLinkByRepo.
@@ -201,4 +195,10 @@ func UpdateBranchFormatAndInvalidate(ctx context.Context, linkId uuid.UUID, bran
 	}
 	invalidateLinkByLink(link)
 	return nil
+}
+
+// GitHubLinkCacheStats returns hit/miss counts and current size for
+// observability.
+func GitHubLinkCacheStats() (hits, misses uint64, size int) {
+	return atomic.LoadUint64(&githubLinkCacheHits), atomic.LoadUint64(&githubLinkCacheMisses), githubLinkCache.Len()
 }

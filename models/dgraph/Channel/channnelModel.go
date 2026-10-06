@@ -54,41 +54,6 @@ func CreateOrUpdateDgraphChannel(ctx context.Context, dgraphChannel *dgraphStruc
 	return
 }
 
-func GetDgraphChannelInfoByName(ctx context.Context, query string, variables map[string]string) (dgraphChannel *dgraphStruct.DgraphChannel, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
-	resp, err := txn.QueryWithVars(ctx, query, variables)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphChannelInfoByName failed to get user err: %+v",
-			err)
-		return
-	}
-
-	type Channels struct {
-		ChannelInfo []dgraphStruct.DgraphChannel `json:"channelInfo"`
-	}
-
-	var channelInfo Channels
-	err = json.Unmarshal(resp.Json, &channelInfo)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphChannelInfoByName failed to unmarshal response json err: %+v",
-			err)
-		return
-	}
-
-	if len(channelInfo.ChannelInfo) == 0 {
-		err = fmt.Errorf("channel not found in dgraph")
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphChannelInfoByName failed to get channel info")
-		return
-	}
-	dgraphChannel = &channelInfo.ChannelInfo[0]
-
-	return
-}
-
 func GetDgraphChannelsInfoByUserUUID(ctx context.Context, query string, variables map[string]string) (dgraphChannel []*dgraphStruct.DgraphChannel, err error) {
 	txn := dgraphInit.DgraphClient.NewTxn()
 
@@ -233,4 +198,39 @@ func DeleteChannelEdge(ctx context.Context, delStringJSON string) (err error) {
 	}()
 
 	return nil
+}
+
+func GetDgraphChannelInfoByName(ctx context.Context, query string, variables map[string]string) (dgraphChannel *dgraphStruct.DgraphChannel, err error) {
+	txn := dgraphInit.DgraphClient.NewTxn()
+
+	resp, err := txn.QueryWithVars(ctx, query, variables)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/GetDgraphChannelInfoByName failed to get user err: %+v",
+			err)
+		return
+	}
+
+	type Channels struct {
+		ChannelInfo []dgraphStruct.DgraphChannel `json:"channelInfo"`
+	}
+
+	var channelInfo Channels
+	err = json.Unmarshal(resp.Json, &channelInfo)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/GetDgraphChannelInfoByName failed to unmarshal response json err: %+v",
+			err)
+		return
+	}
+
+	if len(channelInfo.ChannelInfo) == 0 {
+		err = fmt.Errorf("channel not found in dgraph")
+		helpers.LogErrorWithContext(ctx,
+			"models/GetDgraphChannelInfoByName failed to get channel info")
+		return
+	}
+	dgraphChannel = &channelInfo.ChannelInfo[0]
+
+	return
 }

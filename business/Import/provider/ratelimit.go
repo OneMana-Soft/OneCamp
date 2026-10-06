@@ -25,15 +25,6 @@ type Limiter interface {
 	Wait(ctx context.Context) error
 }
 
-// staticLimiter is a no-op limiter for providers / paths that don't
-// need rate-limiting (e.g., reading a local ZIP).
-type staticLimiter struct{}
-
-func (staticLimiter) Wait(ctx context.Context) error { return nil }
-
-// NoopLimiter returns a limiter that never blocks.
-func NoopLimiter() Limiter { return staticLimiter{} }
-
 // SleepLimiter is a simple "at-most-once-per-d" limiter used when
 // x/time/rate isn't available. Concurrent callers serialise.
 type SleepLimiter struct {
@@ -78,3 +69,12 @@ func (l *SleepLimiter) Wait(ctx context.Context) error {
 		return ctx.Err()
 	}
 }
+
+// staticLimiter is a no-op limiter for providers / paths that don't
+// need rate-limiting (e.g., reading a local ZIP).
+type staticLimiter struct{}
+
+func (staticLimiter) Wait(ctx context.Context) error { return nil }
+
+// NoopLimiter returns a limiter that never blocks.
+func NoopLimiter() Limiter { return staticLimiter{} }

@@ -75,26 +75,6 @@ func GetChannelByName(ctx context.Context, channelName string) (channelInfo *mod
 	return
 }
 
-func GetChannelByHandle(ctx context.Context, channelHandle *string) (channelInfo *models.Channel, err error) {
-
-	query := `
-        SELECT id, ch_name, created_by, created_at, updated_at, deleted_at
-        FROM channels
-        WHERE ch_handle = $1
-    `
-
-	channelInfo, err = models.GetChannelByHandle(&query, channelHandle)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetChannelByName Failed to channel by ch_handle err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func GetChannelInfoByUUID(ctx context.Context, channelUUID uuid.UUID) (channelInfo *models.Channel, err error) {
 
 	query := `
@@ -748,6 +728,7 @@ func GetArchivedChannelListWithLatestPostWithUserIdAndSearchText(ctx context.Con
 					  post_created_at
 					  post_by {
 						user_name
+						user_full_name
 					  }
 					post_attachments {
 						attachment_file_name
@@ -803,6 +784,7 @@ func GetAllActiveChannelListWithLatestPost(ctx context.Context, userDgraphId str
 					  post_created_at
 					  post_by {
 						user_name
+						user_full_name
 					  }
 					post_attachments {
 						attachment_file_name
@@ -857,6 +839,7 @@ func GetActiveChannelListWithLatestPostWithUserIdAndSearchText(ctx context.Conte
 					  post_created_at
 					  post_by {
 						user_name
+						user_full_name
 					  }
 					post_attachments {
 						attachment_file_name
@@ -912,6 +895,7 @@ func GetChannelListWithLatestPostWithUserIdAndSearchText(ctx context.Context, us
 					  post_created_at
 					  post_by {
 						user_name
+						user_full_name
 					  }
 					post_attachments {
 						attachment_file_name
@@ -967,6 +951,7 @@ func GetUserArchivedChannelListWithLatestPost(ctx context.Context, userDgraphId 
 					  post_created_at
 					  post_by {
 						user_name
+						user_full_name
 					  }
 						post_attachments {
 							attachment_file_name
@@ -1021,6 +1006,7 @@ func GetUserActiveChannelListWithLatestPost(ctx context.Context, userDgraphId st
 					  post_created_at
 					  post_by {
 						user_name
+						user_full_name
 					  }
 						post_attachments {
 							attachment_file_name
@@ -1207,5 +1193,25 @@ func RestoreChannelRow(ctx context.Context, channelUUID uuid.UUID, channelName s
 		return
 	}
 	_ = redisStore.DeletePattern(ctx, registry.ChannelBasicInfo.Pattern(channelUUID.String()))
+	return
+}
+
+func GetChannelByHandle(ctx context.Context, channelHandle *string) (channelInfo *models.Channel, err error) {
+
+	query := `
+        SELECT id, ch_name, created_by, created_at, updated_at, deleted_at
+        FROM channels
+        WHERE ch_handle = $1
+    `
+
+	channelInfo, err = models.GetChannelByHandle(&query, channelHandle)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetChannelByName Failed to channel by ch_handle err: %+v",
+			err)
+		return
+	}
+
 	return
 }

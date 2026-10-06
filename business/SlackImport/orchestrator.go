@@ -52,7 +52,7 @@ var errReaperOnly = errors.New("transient; let the reaper retry")
 //  6. files     — separate pool downloading + uploading attachments
 //  7. reactions — final pass with the complete id_map
 //  8. finalize  — mark complete, emit MQTT. The staged ZIP is kept on
-//     MinIO until SLACK_IMPORT_RAW_RETENTION_DAYS so the
+//     MinIO until IMPORT_RAW_RETENTION_DAYS so the
 //     operator can rollback + retry without re-upload;
 //     the cleanup loop deletes it after retention.
 //
@@ -502,28 +502,6 @@ func CancelImport(ctx context.Context, jobId uuid.UUID) error {
 	return nil
 }
 
-// StartReaperLoop runs every 60s and resets stuck claims. Mirrors the
-// GitHub-sync reaper. Wire from main.go.
-func StartReaperLoop() {
-	go func() {
-		t := time.NewTicker(60 * time.Second)
-		defer t.Stop()
-		for range t.C {
-			ctx := context.Background()
-			n, err := importModels.ReapStuckChunks(ctx, 5*time.Minute)
-			if err != nil {
-				helpers.LogWarnWithContext(ctx,
-					"SlackImport reaper failed: %+v", err)
-				continue
-			}
-			if n > 0 {
-				helpers.LogInfoWithContext(ctx,
-					"SlackImport reaper reset %d stuck chunk(s)", n)
-			}
-		}
-	}()
-}
-
 // --- Helpers --------------------------------------------------------------
 
 // openStagedZip is replaced by openMinioZip in minio_reader.go. The new
@@ -640,4 +618,26 @@ func isTrue(b *bool) bool {
 		return true
 	}
 	return *b
+}
+
+// StartReaperLoop runs every 60s and resets stuck claims. Mirrors the
+// GitHub-sync reaper. Wire from main.go.
+func StartReaperLoop() {
+	go func() {
+		t := time.NewTicker(60 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			ctx := context.Background()
+			n, err := importModels.ReapStuckChunks(ctx, 5*time.Minute)
+			if err != nil {
+				helpers.LogWarnWithContext(ctx,
+					"SlackImport reaper failed: %+v", err)
+				continue
+			}
+			if n > 0 {
+				helpers.LogInfoWithContext(ctx,
+					"SlackImport reaper reset %d stuck chunk(s)", n)
+			}
+		}
+	}()
 }

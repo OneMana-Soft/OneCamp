@@ -12,39 +12,6 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
-func CreateChatInOpenSearch(ctx context.Context, openSearchChat *openSearchStruct.OpenSearchChat) (err error) {
-
-	jsonData, err := json.Marshal(openSearchChat)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateChatInOpenSearch Error mashiling strut to json err: %+v",
-			err)
-		return
-	}
-
-	document := openSearchStruct.IndexReader(jsonData)
-
-	docId := openSearchChat.Uuid
-
-	_, err = opensearchInit.OpenSearchClient.Document.Create(
-		context.Background(),
-		opensearchapi.DocumentCreateReq{
-			Index:      "chats",
-			DocumentID: docId,
-			Body:       document,
-		},
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateChatInOpenSearch failed to create chat document err: %+v",
-			err)
-		return
-	}
-	return
-}
-
 func UpdateChatInOpenSearch(ctx context.Context, openSearchChat *openSearchStruct.OpenSearchChat) (err error) {
 
 	doc := openSearchStruct.BulkUpdate{
@@ -129,4 +96,37 @@ func MigrateChatGroupIDInOpensearch(ctx context.Context, oldGrpID, newGrpID stri
 	}
 
 	return nil
+}
+
+func CreateChatInOpenSearch(ctx context.Context, openSearchChat *openSearchStruct.OpenSearchChat) (err error) {
+
+	jsonData, err := json.Marshal(openSearchChat)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/CreateChatInOpenSearch Error mashiling strut to json err: %+v",
+			err)
+		return
+	}
+
+	document := openSearchStruct.IndexReader(jsonData)
+
+	docId := openSearchChat.Uuid
+
+	_, err = opensearchInit.OpenSearchClient.Document.Create(
+		context.Background(),
+		opensearchapi.DocumentCreateReq{
+			Index:      "chats",
+			DocumentID: docId,
+			Body:       document,
+		},
+	)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/CreateChatInOpenSearch failed to create chat document err: %+v",
+			err)
+		return
+	}
+	return
 }

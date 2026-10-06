@@ -242,12 +242,6 @@ func BuildDisposition(filename string) string {
 	return buildAttachmentDisposition(filename)
 }
 
-// BuildInlineDisposition returns `inline; filename="..."`. Use only
-// for content types in inlineSafeTypes after extension cross-check.
-func BuildInlineDisposition(filename string) string {
-	return buildInlineDisposition(filename)
-}
-
 // SanitiseFileName produces a cross-platform-safe filename. Keeps
 // printable Unicode (so "résumé.pdf" survives), strips path separators
 // and control characters, and trims to maxLen runes (NOT bytes — this
@@ -449,4 +443,10 @@ func capOrDefault(v, def int) int {
 		return def
 	}
 	return v
+}
+
+// BuildInlineDisposition returns `inline; filename="..."`. Use only
+// for content types in inlineSafeTypes after extension cross-check.
+func BuildInlineDisposition(filename string) string {
+	return buildInlineDisposition(filename)
 }

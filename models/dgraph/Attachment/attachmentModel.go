@@ -52,42 +52,6 @@ func CreateOrUpdateDgraphAttachment(ctx context.Context, dgraphAttachment *dgrap
 	return
 }
 
-func GetDgraphAttachmentInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphAttachment *dgraphStruct.DgraphAttachment, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
-	resp, err := txn.QueryWithVars(ctx, query, variables)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphAttachmentInfoByUUID failed to get attachment err: %+v",
-			err)
-		return
-	}
-
-	type Attachments struct {
-		AttachmentInfo []dgraphStruct.DgraphAttachment `json:"attachmentInfo"`
-	}
-
-	var attachmentsInfo Attachments
-	err = json.Unmarshal(resp.Json, &attachmentsInfo)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphAttachmentInfoByUUID failed to unmarshal response json err: %+v",
-			err)
-		return
-	}
-
-	if len(attachmentsInfo.AttachmentInfo) == 0 {
-		err = errors.New("failed to get dgraph attachment")
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphAttachmentInfoByUUID failed to get dgraph attachment")
-
-		return
-	}
-	dgraphAttachment = &attachmentsInfo.AttachmentInfo[0]
-
-	return
-}
-
 func BulkAddAttachmentsToDgraph(ctx context.Context, dgraphAttachments []*dgraphStruct.DgraphAttachment) (dgraphAttachmentUUID []string, err error) {
 
 	// Convert data to JSON
@@ -134,6 +98,63 @@ func BulkAddAttachmentsToDgraph(ctx context.Context, dgraphAttachments []*dgraph
 	return
 }
 
+// BulkSoftDeleteDgraphAttachments sets attachment_deleted_at on multiple attachments in a single Dgraph mutation.
+func BulkSoftDeleteDgraphAttachments(ctx context.Context, attachments []*dgraphStruct.DgraphAttachment, query string) error {
+	txn := dgraphInit.DgraphClient.NewTxn()
+	pb, err := json.Marshal(attachments)
+	if err != nil {
+		return err
+	}
+	mu := &api.Mutation{SetJson: pb}
+	req := &api.Request{
+		Query:     query,
+		Mutations: []*api.Mutation{mu},
+		CommitNow: true,
+	}
+	_, err = txn.Do(ctx, req)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/BulkSoftDeleteDgraphAttachments failed: %v", err)
+		return err
+	}
+	return nil
+}
+
+func GetDgraphAttachmentInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphAttachment *dgraphStruct.DgraphAttachment, err error) {
+	txn := dgraphInit.DgraphClient.NewTxn()
+
+	resp, err := txn.QueryWithVars(ctx, query, variables)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/GetDgraphAttachmentInfoByUUID failed to get attachment err: %+v",
+			err)
+		return
+	}
+
+	type Attachments struct {
+		AttachmentInfo []dgraphStruct.DgraphAttachment `json:"attachmentInfo"`
+	}
+
+	var attachmentsInfo Attachments
+	err = json.Unmarshal(resp.Json, &attachmentsInfo)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/GetDgraphAttachmentInfoByUUID failed to unmarshal response json err: %+v",
+			err)
+		return
+	}
+
+	if len(attachmentsInfo.AttachmentInfo) == 0 {
+		err = errors.New("failed to get dgraph attachment")
+		helpers.LogErrorWithContext(ctx,
+			"models/GetDgraphAttachmentInfoByUUID failed to get dgraph attachment")
+
+		return
+	}
+	dgraphAttachment = &attachmentsInfo.AttachmentInfo[0]
+
+	return
+}
+
 func GetDgraphAttachmentList(ctx context.Context, query string, variables map[string]string) (dgraphAttachments []*dgraphStruct.DgraphAttachment, err error) {
 	txn := dgraphInit.DgraphClient.NewTxn()
 
@@ -159,25 +180,4 @@ func GetDgraphAttachmentList(ctx context.Context, query string, variables map[st
 	}
 	dgraphAttachments = attachmentsInfo.AttachmentInfo
 	return
-}
-
-// BulkSoftDeleteDgraphAttachments sets attachment_deleted_at on multiple attachments in a single Dgraph mutation.
-func BulkSoftDeleteDgraphAttachments(ctx context.Context, attachments []*dgraphStruct.DgraphAttachment, query string) error {
-	txn := dgraphInit.DgraphClient.NewTxn()
-	pb, err := json.Marshal(attachments)
-	if err != nil {
-		return err
-	}
-	mu := &api.Mutation{SetJson: pb}
-	req := &api.Request{
-		Query:     query,
-		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
-	}
-	_, err = txn.Do(ctx, req)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/BulkSoftDeleteDgraphAttachments failed: %v", err)
-		return err
-	}
-	return nil
 }

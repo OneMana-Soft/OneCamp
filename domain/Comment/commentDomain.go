@@ -69,23 +69,6 @@ func UpdateCommentByUUID(ctx context.Context, commentUUID uuid.UUID, currentTime
 	return
 }
 
-func GetCommentByUUID(ctx context.Context, commentUUID uuid.UUID) (commentInfo *models.Comment, err error) {
-	query := `
-		SELECT id, created_by, created_at, updated_at, deleted_at
-        FROM comments
-        WHERE id = $1
-	`
-	commentInfo, err = models.GetCommentByUUID(query, commentUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetCommentByUUID Failed to get comment err: %+v",
-			err)
-		return
-	}
-	return
-}
-
 func SoftDeletePostByUUIUD(ctx context.Context, commentUUID uuid.UUID, current time.Time) (err error) {
 	query := `
 		UPDATE comments
@@ -522,36 +505,6 @@ func GetDgraphCommentInfoByUUID(ctx context.Context, commentUUID string) (dgraph
 	return
 }
 
-func GetDgraphProjectMemberInfoForComment(ctx context.Context, projectUUID string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
-	variables := make(map[string]string)
-	variables["$id"] = projectUUID
-	query := `query ProjectInfo($id: string, $userUid: string){
-				projectInfo(func: eq(project_uuid, $id)) {
-					project_uuid
-					project_name
-					project_members (orderasc: user_name){
-						uid
-						user_uuid
-						user_name
-						user_email
-						user_profile_object_key
-					}
-				}
-			}`
-
-	dgraphProject, err = dgraphModels.GetDgraphProjectMembersByUUID(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphProjectMemberInfoForComment Failed to get project info from dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
-}
-
 func UpdateDgraphCommentInAPost(ctx context.Context, dgraphComment *dgraphStruct.DgraphComment) (err error) {
 
 	query := fmt.Sprintf(`query {
@@ -898,4 +851,51 @@ func DeleteCommentWithAttachmentsInOpenSearch(openSearchComment *openSearchStruc
 		return
 	}
 
+}
+
+func GetCommentByUUID(ctx context.Context, commentUUID uuid.UUID) (commentInfo *models.Comment, err error) {
+	query := `
+		SELECT id, created_by, created_at, updated_at, deleted_at
+        FROM comments
+        WHERE id = $1
+	`
+	commentInfo, err = models.GetCommentByUUID(query, commentUUID)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetCommentByUUID Failed to get comment err: %+v",
+			err)
+		return
+	}
+	return
+}
+
+func GetDgraphProjectMemberInfoForComment(ctx context.Context, projectUUID string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
+	variables := make(map[string]string)
+	variables["$id"] = projectUUID
+	query := `query ProjectInfo($id: string, $userUid: string){
+				projectInfo(func: eq(project_uuid, $id)) {
+					project_uuid
+					project_name
+					project_members (orderasc: user_name){
+						uid
+						user_uuid
+						user_name
+						user_email
+						user_profile_object_key
+					}
+				}
+			}`
+
+	dgraphProject, err = dgraphModels.GetDgraphProjectMembersByUUID(ctx, query, variables)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetDgraphProjectMemberInfoForComment Failed to get project info from dgraph err: %+v",
+			err,
+		)
+		return
+	}
+
+	return
 }

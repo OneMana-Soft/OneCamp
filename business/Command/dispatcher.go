@@ -78,14 +78,6 @@ func GetCatalog(ctx context.Context, user userModels.UserInfo) (*commandAdapter.
 	return resp, nil
 }
 
-// InvalidateCatalog drops a user's cached catalog. The admin install/toggle
-// path can't enumerate every user cheaply, so callers may also rely on the
-// short 5-minute TTL for eventual consistency; this is the targeted bust.
-func InvalidateCatalog(ctx context.Context, userUUID string) {
-	version := catalogVersion(ctx)
-	_ = redisStore.Delete(ctx, registry.CommandCatalog, []string{userUUID + ":" + version})
-}
-
 // catalogVersion returns the current workspace-wide catalog version token. It
 // is embedded in every user's catalog cache key so a single bump (on admin
 // app install/toggle/remove) invalidates all cached catalogs at once without
@@ -445,4 +437,12 @@ func signV1(secret string, body []byte, timestamp string) string {
 	mac.Write([]byte("v1:" + timestamp + ":"))
 	mac.Write(body)
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// InvalidateCatalog drops a user's cached catalog. The admin install/toggle
+// path can't enumerate every user cheaply, so callers may also rely on the
+// short 5-minute TTL for eventual consistency; this is the targeted bust.
+func InvalidateCatalog(ctx context.Context, userUUID string) {
+	version := catalogVersion(ctx)
+	_ = redisStore.Delete(ctx, registry.CommandCatalog, []string{userUUID + ":" + version})
 }

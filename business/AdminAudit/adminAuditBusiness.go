@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"fmt"
+
 	"github.com/akashc777/OneCamp/helpers"
 	auditModel "github.com/akashc777/OneCamp/models/postgres/AdminAudit"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -68,11 +69,6 @@ func Record(r *http.Request, action, category, summary string, metadata map[stri
 		defer func() { _ = recover() }()
 		_ = auditModel.Insert(context.Background(), entry)
 	}()
-}
-
-// List proxies the model list for the admin audit viewer.
-func List(ctx context.Context, category string, limit, offset int) ([]*auditModel.AuditEntry, error) {
-	return auditModel.List(ctx, category, limit, offset)
 }
 
 // ListWhere is List with an initiator filter.
@@ -282,4 +278,9 @@ func RecordForPrincipal(
 		}
 	}
 	return auditModel.Insert(ctx, entry)
+}
+
+// List proxies the model list for the admin audit viewer.
+func List(ctx context.Context, category string, limit, offset int) ([]*auditModel.AuditEntry, error) {
+	return auditModel.List(ctx, category, limit, offset)
 }

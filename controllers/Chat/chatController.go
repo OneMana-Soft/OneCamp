@@ -500,7 +500,7 @@ func UpdateChatInGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if chatDgraphInfo.From.Uuid != userInfo.UserDgraphInfo.Uuid {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Failed to get chat info req",
 			"err": err,
 		})
@@ -594,7 +594,7 @@ func UpdateChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if chatDgraphInfo.From.Uuid != userInfo.UserDgraphInfo.Uuid || (chatDgraphInfo != nil && chatDgraphInfo.To.DeletedAt != nil && !chatDgraphInfo.To.DeletedAt.IsZero()) {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Failed to get chat info req",
 			"err": err,
 		})
@@ -690,7 +690,7 @@ func DeleteChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if chatDgraphInfo.From.Uuid != userInfo.UserDgraphInfo.Uuid || !chatDgraphInfo.DeletedAt.IsZero() {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Failed to get chat info req",
 			"err": err,
 		})

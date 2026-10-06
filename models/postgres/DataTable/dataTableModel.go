@@ -537,18 +537,6 @@ func ListRowsFiltered(ctx context.Context, tableId uuid.UUID, likeSubstrings []s
 	return out, rows.Err()
 }
 
-// CountRows returns the number of non-deleted rows in a table.
-func CountRows(ctx context.Context, tableId uuid.UUID) (int, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	const q = `SELECT COUNT(*) FROM data_table_rows WHERE table_id=$1 AND deleted_at IS NULL`
-	var n int
-	if err := postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, tableId).Scan(&n); err != nil {
-		return 0, err
-	}
-	return n, nil
-}
-
 // ───────────────────────── views ─────────────────────────
 
 func scanView(s scanner) (*View, error) {
@@ -626,22 +614,6 @@ func DeleteView(ctx context.Context, tableId, viewId uuid.UUID) error {
 	return nil
 }
 
-// GetViewByID returns a single non-deleted view, or (nil, nil) if absent.
-func GetViewByID(ctx context.Context, tableId, viewId uuid.UUID) (*View, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	q := `SELECT ` + viewColumns + ` FROM data_table_views WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL`
-	v, err := scanView(postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, viewId, tableId))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/GetViewByID err: %+v", err)
-		return nil, err
-	}
-	return v, nil
-}
-
 // ListViews returns a table's saved views in position order.
 func ListViews(ctx context.Context, tableId uuid.UUID) ([]*View, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
@@ -663,4 +635,32 @@ func ListViews(ctx context.Context, tableId uuid.UUID) ([]*View, error) {
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+
+// CountRows returns the number of non-deleted rows in a table.
+func CountRows(ctx context.Context, tableId uuid.UUID) (int, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	const q = `SELECT COUNT(*) FROM data_table_rows WHERE table_id=$1 AND deleted_at IS NULL`
+	var n int
+	if err := postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, tableId).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// GetViewByID returns a single non-deleted view, or (nil, nil) if absent.
+func GetViewByID(ctx context.Context, tableId, viewId uuid.UUID) (*View, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	q := `SELECT ` + viewColumns + ` FROM data_table_views WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL`
+	v, err := scanView(postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, viewId, tableId))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/GetViewByID err: %+v", err)
+		return nil, err
+	}
+	return v, nil
 }

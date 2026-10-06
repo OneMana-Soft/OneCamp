@@ -90,6 +90,18 @@ func ArchiveAttachmentByAttachmentUUID(ctx context.Context, attachmentUUID uuid.
 
 }
 
+func GetAttachmentByObjUUID(ctx context.Context, objUUID string, srcKey string) (attachment *models.Attachment, err error) {
+	attachment, err = domain.GetAttachmentByObjUUID(ctx, objUUID, srcKey)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/GetAttachmentByObjUUID Failed to get attachment from postgres err: %+v", err)
+
+		return
+	}
+
+	return
+}
+
 func UnArchiveAttachmentByAttachmentUUID(ctx context.Context, attachmentUUID uuid.UUID) (err error) {
 
 	currentTime := time.Now()
@@ -142,18 +154,6 @@ func GetAttachmentsByObjUUIDs(ctx context.Context, objUUIDs []string) (attachmen
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/GetAttachmentsByObjUUIDs Failed to get attachments list from postgres err: %+v", err)
-
-		return
-	}
-
-	return
-}
-
-func GetAttachmentByObjUUID(ctx context.Context, objUUID string, srcKey string) (attachment *models.Attachment, err error) {
-	attachment, err = domain.GetAttachmentByObjUUID(ctx, objUUID, srcKey)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetAttachmentByObjUUID Failed to get attachment from postgres err: %+v", err)
 
 		return
 	}

@@ -377,18 +377,6 @@ func GetUserByEmailId(ctx context.Context, emailId *string) (userInfo *userModel
 	return
 }
 
-func GetDraphUserInfoWithProjectInfo(ctx context.Context, userUUID string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
-
-	dgraphUser, err = domain.GetDraphUserInfoWithProjectInfo(ctx, userUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetDraphUserInfoWithProjectInfo failed to get user info from dgraph err: %+v", err)
-		return
-	}
-
-	return
-}
-
 func ResetToken(ctx context.Context, userId string, deviceId string, authTokenExpiryUnix int64, refreshTokenExpiryUnix int64) (AuthTokenString string, RefreshTokenString string, err error) {
 	AuthTokenString, err = GenerateAuthTokenString(ctx, userId, authTokenExpiryUnix)
 	if err != nil {
@@ -827,35 +815,6 @@ func processGithubUserInfo(ctx context.Context, code string) (*authModels.User, 
 	return user, nil
 }
 
-func UpdateUNameByEmailID(ctx context.Context, emailID string, uName string, currentTime time.Time) (err error) {
-	err = domain.UpdateUNameByEmailID(ctx, emailID, uName, currentTime)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/UpdateUNameByEmailID Failed to update user name err: %+v",
-			err,
-		)
-		err = errors.New("failed to update user name")
-		return
-	}
-
-	return
-}
-
-func GetAdminUserByUserUUIUD(ctx context.Context, userUUID uuid.UUID) (userInfo *userModels.User, err error) {
-	userInfo, err = domain.GetAdminUserByUserUUID(ctx, userUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetAdminUserByUserUUIUD Failed to get admin userInfo  err: %+v",
-			err,
-		)
-		err = errors.New("failed to get admin userInfo")
-		return
-	}
-
-	return
-}
-
 func GetAllAdminUsers(ctx context.Context, pageIndex int, pageSize int) (usersInfo []*userModels.User, hasMore bool, err error) {
 	usersInfo, actualLen, err := domain.GetAllAdminUsers(ctx, pageIndex, pageSize)
 	if err != nil {
@@ -909,24 +868,6 @@ func GetAllInvitations(ctx context.Context) (invitations []*userModels.Invitatio
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/GetAllInvitations Failed to get invitations err: %+v", err)
 		err = errors.New("failed to get invitations")
-		return
-	}
-	return
-}
-
-func AddInvitation(ctx context.Context, email string, invitedBy uuid.UUID) (err error) {
-	exists, err := domain.CheckIfInvitationExists(ctx, email)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return errors.New("invitation already exists")
-	}
-
-	err = domain.AddInvitation(ctx, email, invitedBy)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/AddInvitation Failed to add invitation err: %+v", err)
-		err = errors.New("failed to add invitation")
 		return
 	}
 	return
@@ -1214,44 +1155,6 @@ func GetUsersPosts(ctx context.Context, userUUID string, userDgraphUID string, p
 	return
 }
 
-func UpdateUserName(ctx context.Context, userUUID string, newName string) (err error) {
-
-	currentTime := time.Now()
-	dgraphUser := &dgraphStruct.DgraphUser{
-		Uid:      "uid(user)",
-		Uuid:     userUUID,
-		UserName: newName,
-	}
-
-	_, err = domain.CreateOrUpdateDgraphUser(ctx, dgraphUser)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/UpdateUserName failed to update user name in dgraph err: %+v", err)
-		return
-	}
-
-	openSearchUser := &openSearchStruct.OpenSearchUser{
-		Uuid:          userUUID,
-		UserName:      newName,
-		UserFullName:  newName,
-		UserUpdatedAt: currentTime.Unix(),
-	}
-
-	go domain.UpdateUserInOpenSearch(openSearchUser)
-
-	// Fetch current user info to propagate changes across all indices
-	userInfo, errFetch := domain.GetActiveDgraphUserInfoByUUID(ctx, userUUID)
-	if errFetch == nil {
-		profilePic := ""
-		if userInfo.ProfileKey != nil {
-			profilePic = *userInfo.ProfileKey
-		}
-		go domain.PropagateUserInfoInOpenSearch(userUUID, userInfo.UserFullName, profilePic)
-	}
-
-	return
-}
-
 func UsersListNotExistInGivenChannel(ctx context.Context, channelUUID string) (dgraphUsers []*dgraphStruct.DgraphUser, err error) {
 
 	dgraphUsers, err = domain.DgraphUsersListNotExistInGivenChannel(ctx, channelUUID)
@@ -1484,8 +1387,8 @@ func GetDgraphUserProjectList(ctx context.Context, userUUID string) (dgraphUser 
 
 }
 
-func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDgraphUID string, filterQuery string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
-	dgraphUser, err = domain.GetDgraphUserTaskListForKanban(ctx, userUUID, userDgraphUID, filterQuery)
+func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDgraphUID string, filterQuery string, closedLimit int) (dgraphUser *dgraphStruct.DgraphUser, err error) {
+	dgraphUser, err = domain.GetDgraphUserTaskListForKanban(ctx, userUUID, userDgraphUID, filterQuery, closedLimit)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/GetDgraphUserTaskListForKanban Failed to get user's task list in dgraph err: %+v",
@@ -1607,19 +1510,6 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID uuid.UUI
 
 }
 
-func GetUserListWithSearchText(ctx context.Context, userUUID string, searchText string) (dgraphUsers []*dgraphStruct.DgraphUser, err error) {
-
-	dgraphUsers, err = domain.GetUserListWithSearchText(ctx, userUUID, searchText)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetUserListWithSearchText Failed to get users list err: %+v",
-			err)
-
-		return
-	}
-	return
-}
-
 func GetChannelsAndUsers(ctx context.Context, userDgraphUID string, userDgraphUUID string, searchText string) (fwdList []*adapterUser.UserAndChannelFwdMessage, err error) {
 
 	channelList, err := channelDomain.GetChannelListWithSearchText(ctx, userDgraphUID, searchText)
@@ -1717,30 +1607,6 @@ func GetDgraphUserInfoByUUIDs(ctx context.Context, userUUID []string) (dgraphUse
 		return
 	}
 
-	return
-}
-
-func GetDgraphUserInfoByUUIDForMQTTConfig(ctx context.Context, userUUID string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
-	dgraphUser, err = domain.GetDgraphUserInfoByUUIDForMQTTConfig(ctx, userUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetDgraphUserInfoByUUIDForMQTTConfig Failed to get dgraph user infos by uuid err: %+v",
-			err,
-		)
-		return
-	}
-	return
-}
-
-func IncrementDeviceConnectedDgraphUser(ctx context.Context, userUUID string) (err error) {
-	err = domain.IncrementDeviceConnectedDgraphUser(ctx, userUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/IncrementDeviceConnectedDgraphUser Failed to increment device connected by user err: %+v",
-			err,
-		)
-		return
-	}
 	return
 }
 
@@ -1982,4 +1848,138 @@ func profileKeyOrEmpty(k *string) string {
 		return ""
 	}
 	return *k
+}
+
+func GetDraphUserInfoWithProjectInfo(ctx context.Context, userUUID string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
+
+	dgraphUser, err = domain.GetDraphUserInfoWithProjectInfo(ctx, userUUID)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/GetDraphUserInfoWithProjectInfo failed to get user info from dgraph err: %+v", err)
+		return
+	}
+
+	return
+}
+
+func UpdateUNameByEmailID(ctx context.Context, emailID string, uName string, currentTime time.Time) (err error) {
+	err = domain.UpdateUNameByEmailID(ctx, emailID, uName, currentTime)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/UpdateUNameByEmailID Failed to update user name err: %+v",
+			err,
+		)
+		err = errors.New("failed to update user name")
+		return
+	}
+
+	return
+}
+
+func GetAdminUserByUserUUIUD(ctx context.Context, userUUID uuid.UUID) (userInfo *userModels.User, err error) {
+	userInfo, err = domain.GetAdminUserByUserUUID(ctx, userUUID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/GetAdminUserByUserUUIUD Failed to get admin userInfo  err: %+v",
+			err,
+		)
+		err = errors.New("failed to get admin userInfo")
+		return
+	}
+
+	return
+}
+
+func AddInvitation(ctx context.Context, email string, invitedBy uuid.UUID) (err error) {
+	exists, err := domain.CheckIfInvitationExists(ctx, email)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return errors.New("invitation already exists")
+	}
+
+	err = domain.AddInvitation(ctx, email, invitedBy)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/AddInvitation Failed to add invitation err: %+v", err)
+		err = errors.New("failed to add invitation")
+		return
+	}
+	return
+}
+
+func UpdateUserName(ctx context.Context, userUUID string, newName string) (err error) {
+
+	currentTime := time.Now()
+	dgraphUser := &dgraphStruct.DgraphUser{
+		Uid:      "uid(user)",
+		Uuid:     userUUID,
+		UserName: newName,
+	}
+
+	_, err = domain.CreateOrUpdateDgraphUser(ctx, dgraphUser)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/UpdateUserName failed to update user name in dgraph err: %+v", err)
+		return
+	}
+
+	openSearchUser := &openSearchStruct.OpenSearchUser{
+		Uuid:          userUUID,
+		UserName:      newName,
+		UserFullName:  newName,
+		UserUpdatedAt: currentTime.Unix(),
+	}
+
+	go domain.UpdateUserInOpenSearch(openSearchUser)
+
+	// Fetch current user info to propagate changes across all indices
+	userInfo, errFetch := domain.GetActiveDgraphUserInfoByUUID(ctx, userUUID)
+	if errFetch == nil {
+		profilePic := ""
+		if userInfo.ProfileKey != nil {
+			profilePic = *userInfo.ProfileKey
+		}
+		go domain.PropagateUserInfoInOpenSearch(userUUID, userInfo.UserFullName, profilePic)
+	}
+
+	return
+}
+
+func GetUserListWithSearchText(ctx context.Context, userUUID string, searchText string) (dgraphUsers []*dgraphStruct.DgraphUser, err error) {
+
+	dgraphUsers, err = domain.GetUserListWithSearchText(ctx, userUUID, searchText)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/GetUserListWithSearchText Failed to get users list err: %+v",
+			err)
+
+		return
+	}
+	return
+}
+
+func GetDgraphUserInfoByUUIDForMQTTConfig(ctx context.Context, userUUID string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
+	dgraphUser, err = domain.GetDgraphUserInfoByUUIDForMQTTConfig(ctx, userUUID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/GetDgraphUserInfoByUUIDForMQTTConfig Failed to get dgraph user infos by uuid err: %+v",
+			err,
+		)
+		return
+	}
+	return
+}
+
+func IncrementDeviceConnectedDgraphUser(ctx context.Context, userUUID string) (err error) {
+	err = domain.IncrementDeviceConnectedDgraphUser(ctx, userUUID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/IncrementDeviceConnectedDgraphUser Failed to increment device connected by user err: %+v",
+			err,
+		)
+		return
+	}
+	return
 }

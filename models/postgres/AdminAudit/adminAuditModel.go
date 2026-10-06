@@ -302,11 +302,6 @@ func (f ListFilter) whereClause() (string, []interface{}) {
 	return " WHERE " + strings.Join(clauses, " AND "), args
 }
 
-// List returns entries newest first, narrowed by the filter.
-func List(ctx context.Context, category string, limit, offset int) ([]*AuditEntry, error) {
-	return ListFiltered(ctx, ListFilter{Category: category}, limit, offset)
-}
-
 // ListFiltered is List with the full filter.
 func ListFiltered(ctx context.Context, f ListFilter, limit, offset int) ([]*AuditEntry, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
@@ -664,4 +659,9 @@ func RedactOlderThan(ctx context.Context, cutoff time.Time) (int64, error) {
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
+}
+
+// List returns entries newest first, narrowed by the filter.
+func List(ctx context.Context, category string, limit, offset int) ([]*AuditEntry, error) {
+	return ListFiltered(ctx, ListFilter{Category: category}, limit, offset)
 }

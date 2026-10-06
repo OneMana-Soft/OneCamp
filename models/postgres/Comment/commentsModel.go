@@ -38,6 +38,45 @@ func CreateComment(query string, id uuid.UUID, createdBy uuid.UUID, currentTime 
 	return
 }
 
+func UpdateCommentByUUID(query string, commentUUID uuid.UUID, currentTime time.Time) (err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	_, err = postgresInit.DBConn.SqlDB.ExecContext(
+		ctx,
+		query,
+		currentTime,
+		commentUUID,
+	)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/UpdateCommentByUUID Failed to update post err: %+v",
+			err)
+		return
+	}
+
+	return
+}
+
+func HardDeleteCommentByUUID(query string, commentUUID uuid.UUID) (err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	_, err = postgresInit.DBConn.SqlDB.ExecContext(
+		ctx,
+		query,
+		commentUUID,
+	)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/HardDeleteCommentByUUID Failed to hard delete post err: %+v",
+			err)
+		return
+	}
+
+	return
+}
+
 func GetCommentByUUID(query string, postUUID uuid.UUID) (postInfo *Comment, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -76,43 +115,4 @@ func GetCommentByUUID(query string, postUUID uuid.UUID) (postInfo *Comment, err 
 	}
 
 	return &commentData, nil
-}
-
-func UpdateCommentByUUID(query string, commentUUID uuid.UUID, currentTime time.Time) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		currentTime,
-		commentUUID,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/UpdateCommentByUUID Failed to update post err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
-func HardDeleteCommentByUUID(query string, commentUUID uuid.UUID) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		commentUUID,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/HardDeleteCommentByUUID Failed to hard delete post err: %+v",
-			err)
-		return
-	}
-
-	return
 }

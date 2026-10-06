@@ -92,17 +92,6 @@ func UpdateAttachmentInOpenSearch(openSearchAttachment *openSearchStruct.OpenSea
 	return
 }
 
-func CreateAttachmentInOpenSearch(ctx context.Context, openSearchAttachment *openSearchStruct.OpenSearchAttachment) {
-	err := OpenSearchModels.CreateAttachmentInOpenSearch(ctx, openSearchAttachment)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/UpdateAttachmentInOpenSearch Failed to update attachment in open search err: %+v",
-			err)
-		return
-	}
-	return
-}
-
 //func CheckIfProjectExistByProjectNameAndTeamID(projectName string, teamUUID uuid.UUID) (exist bool, err error) {
 //	query := `
 //        SELECT EXISTS (
@@ -122,26 +111,6 @@ func CreateAttachmentInOpenSearch(ctx context.Context, openSearchAttachment *ope
 //
 //	return
 //}
-
-func GetAttachmentByUUID(ctx context.Context, attachmentUUID uuid.UUID) (attachmentInfo *models.Attachment, err error) {
-
-	query := `
-        SELECT id, project_id, obj_key, src_key, src_value, created_by, created_at, deleted_at
-        FROM attachments
-        WHERE id = $1
-    `
-
-	attachmentInfo, err = models.GetAttachmentByUUID(query, attachmentUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetAttachmentByUUID Failed to get attachment by uuid err: %+v",
-			err)
-		return
-	}
-
-	return
-}
 
 //func UpdateAttachmentByAttachmentUUID(attachmentUUID uuid.UUID, currentTime time.Time) (err error) {
 //	query := `
@@ -177,21 +146,6 @@ func UpdateAttachmentDeletedTimeByUUID(ctx context.Context, attachmentUUID uuid.
 	return
 }
 
-func UpdateAttachmentDeletedTimeToNullByUUID(ctx context.Context, attachmentUUID uuid.UUID, updatedTime *time.Time) (err error) {
-	query := `
-        UPDATE attachments
-        SET updated_at = $1, deleted_at = null
-		WHERE id = $2`
-	err = models.UpdateAttachmentDeletedTimeToNullByUUID(query, updatedTime, attachmentUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/UpdateAttachmentDeletedTimeToNullByUUID Failed to attachment delete time to null err: %+v",
-			err)
-		return
-	}
-	return
-}
-
 func GetAttachmentByObjUUID(ctx context.Context, objUUID string, srcKey string) (attachment *models.Attachment, err error) {
 	query := `
 		SELECT id, obj_key, src_key, src_value, created_by, created_at, deleted_at
@@ -209,25 +163,6 @@ func GetAttachmentByObjUUID(ctx context.Context, objUUID string, srcKey string) 
 	return
 }
 
-func GetAttachmentsByObjUUIDs(ctx context.Context, objUUIDS []string) (attachments []*models.Attachment, err error) {
-	query := `
-		SELECT id, obj_key, created_by, created_at, deleted_at
-		FROM attachments
-		WHERE id = ANY($1)
-		AND deleted_at IS NULL
-		ORDER BY array_position($1, id::text)
-	`
-	attachments, err = models.GetAttachmentsByObjUUIDs(query, objUUIDS)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetAttachmentsByObjUUIDs Failed to attachments list for postgres err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func CreateOrUpdateDgraphAttachment(ctx context.Context, dgraphAttachment *dgraphStruct.DgraphAttachment) (attachmentUid string, err error) {
 	dgraphAttachment.DType = []string{"Attachment"}
 	query := fmt.Sprintf(`query {
@@ -242,41 +177,6 @@ func CreateOrUpdateDgraphAttachment(ctx context.Context, dgraphAttachment *dgrap
 			err)
 		return
 	}
-	return
-}
-
-func GetDgraphAttachmentInfoByUUID(ctx context.Context, attachmentUUID string, userDgraph string) (dgraphAttachment *dgraphStruct.DgraphAttachment, err error) {
-
-	variables := make(map[string]string)
-	variables["$id"] = attachmentUUID
-	variables["$userUid"] = userDgraph
-	query := `query AttachmentInfo($id: string){
-				attachmentInfo(func: eq(attachment_uuid, $id)) {
-					uid
-					attachment_uuid
-					attachment_obj_key
-					attachment_file_name
-					attachment_project {
-						project_is_member: count(project_members @filter(uid($userUid)))
-						project_is_admin: count(project_admins @filter(uid($userUid)))
-					}
-					attachment_task {
-						uid
-					}
-					
-				}
-			}`
-
-	dgraphAttachment, err = dgraphModels.GetDgraphAttachmentInfoByUUID(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphAttachmentInfoByUUID Failed to get attachment in dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
 	return
 }
 
@@ -395,4 +295,104 @@ func UpsertAttachmentInOpenSearchSafe(att *openSearchStruct.OpenSearchAttachment
 			"domain/UpsertAttachmentInOpenSearchSafe bulk create failed att=%s err=%+v",
 			att.Uuid, err)
 	}
+}
+
+func CreateAttachmentInOpenSearch(ctx context.Context, openSearchAttachment *openSearchStruct.OpenSearchAttachment) {
+	err := OpenSearchModels.CreateAttachmentInOpenSearch(ctx, openSearchAttachment)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/UpdateAttachmentInOpenSearch Failed to update attachment in open search err: %+v",
+			err)
+		return
+	}
+	return
+}
+
+func GetAttachmentByUUID(ctx context.Context, attachmentUUID uuid.UUID) (attachmentInfo *models.Attachment, err error) {
+
+	query := `
+        SELECT id, project_id, obj_key, src_key, src_value, created_by, created_at, deleted_at
+        FROM attachments
+        WHERE id = $1
+    `
+
+	attachmentInfo, err = models.GetAttachmentByUUID(query, attachmentUUID)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetAttachmentByUUID Failed to get attachment by uuid err: %+v",
+			err)
+		return
+	}
+
+	return
+}
+
+func UpdateAttachmentDeletedTimeToNullByUUID(ctx context.Context, attachmentUUID uuid.UUID, updatedTime *time.Time) (err error) {
+	query := `
+        UPDATE attachments
+        SET updated_at = $1, deleted_at = null
+		WHERE id = $2`
+	err = models.UpdateAttachmentDeletedTimeToNullByUUID(query, updatedTime, attachmentUUID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/UpdateAttachmentDeletedTimeToNullByUUID Failed to attachment delete time to null err: %+v",
+			err)
+		return
+	}
+	return
+}
+
+func GetAttachmentsByObjUUIDs(ctx context.Context, objUUIDS []string) (attachments []*models.Attachment, err error) {
+	query := `
+		SELECT id, obj_key, created_by, created_at, deleted_at
+		FROM attachments
+		WHERE id = ANY($1)
+		AND deleted_at IS NULL
+		ORDER BY array_position($1, id::text)
+	`
+	attachments, err = models.GetAttachmentsByObjUUIDs(query, objUUIDS)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetAttachmentsByObjUUIDs Failed to attachments list for postgres err: %+v",
+			err)
+		return
+	}
+
+	return
+}
+
+func GetDgraphAttachmentInfoByUUID(ctx context.Context, attachmentUUID string, userDgraph string) (dgraphAttachment *dgraphStruct.DgraphAttachment, err error) {
+
+	variables := make(map[string]string)
+	variables["$id"] = attachmentUUID
+	variables["$userUid"] = userDgraph
+	query := `query AttachmentInfo($id: string){
+				attachmentInfo(func: eq(attachment_uuid, $id)) {
+					uid
+					attachment_uuid
+					attachment_obj_key
+					attachment_file_name
+					attachment_project {
+						project_is_member: count(project_members @filter(uid($userUid)))
+						project_is_admin: count(project_admins @filter(uid($userUid)))
+					}
+					attachment_task {
+						uid
+					}
+					
+				}
+			}`
+
+	dgraphAttachment, err = dgraphModels.GetDgraphAttachmentInfoByUUID(ctx, query, variables)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetDgraphAttachmentInfoByUUID Failed to get attachment in dgraph err: %+v",
+			err,
+		)
+		return
+	}
+
+	return
 }

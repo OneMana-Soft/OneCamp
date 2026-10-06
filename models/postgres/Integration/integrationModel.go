@@ -131,27 +131,6 @@ func GetIntegration(query string, entityType string, entityId uuid.UUID, provide
 	return &integration, nil
 }
 
-func UpdateSyncToken(query string, entityType string, entityId uuid.UUID, provider string, syncToken string, updatedAt time.Time) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		syncToken,
-		updatedAt,
-		entityType,
-		entityId,
-		provider,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/UpdateSyncToken Failed to update sync token err: %+v", err)
-		return err
-	}
-	return nil
-}
-
 func DeleteIntegration(query string, entityType string, entityId uuid.UUID, provider string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -239,4 +218,25 @@ func GetIntegrationMetadataByEntityID(query string, entityId uuid.UUID) (*string
 		return nil, err
 	}
 	return metadataStr, nil
+}
+
+func UpdateSyncToken(query string, entityType string, entityId uuid.UUID, provider string, syncToken string, updatedAt time.Time) error {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(
+		ctx,
+		query,
+		syncToken,
+		updatedAt,
+		entityType,
+		entityId,
+		provider,
+	)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/UpdateSyncToken Failed to update sync token err: %+v", err)
+		return err
+	}
+	return nil
 }

@@ -56,26 +56,6 @@ func CreateUser(ctx context.Context, emailID string, userUUID uuid.UUID) (err er
 //     CONSTRAINT unique_id_and_obj_key UNIQUE ("id", "obj_key")
 // );
 
-func GetUserByUname(ctx context.Context, uname *string) (userInfo *models.User, err error) {
-	query := `
-        SELECT id, user_name, email_id, created_at, updated_at, deleted_at
-        FROM users
-        WHERE user_name = $1
-        AND is_external = false
-    `
-
-	userInfo, err = models.GetUserByUname(query, uname)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetUserByUname Failed to get user err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func CheckIfUserExistByUsername(ctx context.Context, uname *string) (exist bool, err error) {
 	query := `
         SELECT EXISTS (
@@ -178,35 +158,6 @@ func GetUserListWithSearchText(ctx context.Context, userUUID string, searchText 
 	return
 }
 
-func GetDraphUserInfoWithProjectInfo(ctx context.Context, userUUID string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
-	variables := make(map[string]string)
-	variables["$id"] = userUUID
-	query := `query UserInfo($id: string){
-				userInfo(func: eq(user_uuid, $id)) {
-					uid
-					user_projects @filter(not gt(project_deleted_at, "1970-01-01T00:00:00Z")) {
-						uid
-						project_uuid
-						project_name
-						project_is_member: 1
-					}
-				}
-			}`
-
-	dgraphUser, err = dgraphModels.GetDgraphUserInfoByUUID(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDraphUserInfoWithProjectInfo Failed to get user from dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
-
-}
-
 func GetActiveUserWithAdminFlagByUserUUID(ctx context.Context, userUUID uuid.UUID) (user *models.User, err error) {
 	found, _ := redisStore.GetJSON(ctx, registry.UserProfile, []string{userUUID.String()}, &user)
 	if found {
@@ -282,25 +233,6 @@ func GetUserByUUID(ctx context.Context, uuid uuid.UUID) (userInfo *models.User, 
 	return
 }
 
-func UpdateUNameByEmailID(ctx context.Context, emailID string, uName string, currentTime time.Time) (err error) {
-	query := `
-        UPDATE users
-        SET user_name = $1 , updated_at = $2
-		WHERE email_id = $3
-    `
-
-	err = models.UpdateUNameByEmailID(query, uName, currentTime, emailID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/UpdateUNameByEmailID Failed to update user name err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func UpdateDeletedTimeToNullByUUID(ctx context.Context, updateTime *time.Time, userUUID uuid.UUID) (err error) {
 	if err = ensureSeatForReactivation(ctx, userUUID); err != nil {
 		return err
@@ -335,36 +267,6 @@ func UpdateDeletedTimeByUUID(ctx context.Context, deleteTime *time.Time, updateT
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/UpdateDeletedTimeByUUID Failed to update user's delete time name err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
-func GetAdminUserByUserUUID(ctx context.Context, userUUID uuid.UUID) (userInfo *models.User, err error) {
-	query := `
-        SELECT 
-		u.id AS user_id,
-		u.email_id,
-		u.created_at,
-		u.updated_at,
-		u.deleted_at
-		FROM 
-			users u
-		JOIN 
-			admin_users a 
-		ON 
-			u.email_id = a.email_id
-		WHERE 
-			u.id = $1
-    `
-
-	userInfo, err = models.GetAdminUserByUserUUID(query, userUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetUserByUserUUID Failed to get user err: %+v",
 			err)
 		return
 	}
@@ -522,22 +424,6 @@ func GetAllInvitations(ctx context.Context) (invitations []*models.Invitation, e
 	return
 }
 
-func AddInvitation(ctx context.Context, email string, invitedBy uuid.UUID) (err error) {
-	query := `
-		INSERT INTO invitations (email, invited_by)
-		VALUES ($1, $2)
-	`
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(ctx, query, email, invitedBy)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/AddInvitation Failed to add invitation err: %+v", err)
-		return
-	}
-	return
-}
-
 func DeleteInvitationByEmail(ctx context.Context, email string) (err error) {
 	query := `
 		DELETE FROM invitations
@@ -681,43 +567,6 @@ func GetUsersListWhoDontBelongToTheProjectButBelongToTheTeam(ctx context.Context
 		)
 		return
 	}
-	return
-}
-
-func IncrementDeviceConnectedDgraphUser(ctx context.Context, userUUID string) (err error) {
-
-	query := fmt.Sprintf(`query {
-				userInfo(func: eq(user_uuid, %q)) {
-					user as uid
-					udc as user_device_connected
-				}
-			}`, userUUID)
-
-	mutation, err := json.Marshal(map[string]interface{}{
-		"uid": "val(user)",
-		"user_device_connected": map[string]interface{}{
-			"@value": "val(udc) + 1",
-		},
-	})
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/IncrementDeviceConnectedDgraphUser Failed to marshal json err: %+v",
-			err,
-		)
-		return
-	}
-
-	err = dgraphModels.ExecDgraphQuery(ctx, query, mutation)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/IncrementDeviceConnectedDgraphUser Failed to user increment user device connected in dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
 	return
 }
 
@@ -875,6 +724,8 @@ func GetActiveDgraphUserInfoByUUID(ctx context.Context, userUUID string) (dgraph
 					dm_participants {
 						user_uuid
 						user_name
+						user_full_name
+						is_bot
 						user_profile_object_key
 					}
 				}
@@ -946,7 +797,7 @@ func GetAllUserEmojiStatusList(ctx context.Context, userUUID string) (dgraphUser
 	return
 }
 
-func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDgraphUID string, filterQuery string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
+func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDgraphUID string, filterQuery string, closedLimit int) (dgraphUser *dgraphStruct.DgraphUser, err error) {
 
 	if len(filterQuery) > 0 {
 		filterQuery = "AND " + filterQuery
@@ -1094,7 +945,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 						task_created_at
 						task_rank
 					}
-					user_tasks_canceled: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "canceled") %s) (orderdesc: task_created_at, first: %d) {
+					user_tasks_canceled: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "canceled") %s) (orderdesc: task_created_at%s) {
 						task_uuid
 						id: task_uuid
 						task_name
@@ -1129,7 +980,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 					}
 					user_tasks_canceled_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "canceled") %s))
 
-					user_tasks_done: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "done") %s) (orderdesc: task_created_at, first: %d) {
+					user_tasks_done: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "done") %s) (orderdesc: task_created_at%s) {
 						task_uuid
 						id:task_uuid
 						task_name
@@ -1164,7 +1015,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 					}
 					user_tasks_done_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "done") %s))
 				}
-			}`, filterQuery, filterQuery, filterQuery, filterQuery, filterQuery, dgraphStruct.BoardClosedLimit, filterQuery, filterQuery, dgraphStruct.BoardClosedLimit, filterQuery)
+			}`, filterQuery, filterQuery, filterQuery, filterQuery, filterQuery, dgraphStruct.ClosedFirst(closedLimit), filterQuery, filterQuery, dgraphStruct.ClosedFirst(closedLimit), filterQuery)
 	dgraphUser, err = dgraphModels.GetDgraphUserInfoByUUID(ctx, query, variables)
 
 	if err != nil {
@@ -1294,6 +1145,8 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID string) 
 						dm_participants {
 							user_uuid
 							user_name
+							user_full_name
+							is_bot
 							user_profile_object_key
 							user_device_connected
 							user_status
@@ -1745,6 +1598,7 @@ func GetUserRecordingsList(ctx context.Context, userDgraphUID string, startDate 
 							user_uuid
 							user_name
 							user_full_name
+							is_bot
 						}
 					}
 				}
@@ -1837,10 +1691,6 @@ func PasswordGenerated(ctx context.Context, userID uuid.UUID) (bool, error) {
 	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx,
 		`SELECT password_generated FROM users WHERE id = $1`, userID).Scan(&generated)
 	return generated, err
-}
-
-func CreateUserWithPassword(ctx context.Context, emailID string, username string, passwordHash *string, userUUID uuid.UUID) (err error) {
-	return CreateUserWithMethod(ctx, emailID, username, passwordHash, userUUID, "", false)
 }
 
 // CreateUserWithMethod inserts a user record with full provenance.
@@ -2341,4 +2191,220 @@ func HardDeleteUser(ctx context.Context, userUUID uuid.UUID) (err error) {
 		return
 	}
 	return
+}
+
+// SearchPeople finds workspace members by name, full name, job title or
+// department, for the AI people-lookup tool.
+//
+// SEPARATE FROM GetUserListWithSearchText, which searches user_name alone and is
+// wired into the mention typeahead and the share pickers. Widening that query
+// would change what those surfaces return, and a picker that suddenly matches on
+// department is a surprise nobody asked for. This one is additive.
+//
+// BOTS ARE EXCLUDED. Every Agent Builder agent has a real users row so it can
+// author as itself, so without this filter "who works on billing" answers with
+// the agents. Confirmed against a live workspace: two of them show up.
+//
+// The empty-field case is deliberate rather than unhandled. job title and
+// department are unset on every user in the workspaces I can see, so those two
+// clauses match nothing today; they cost one filter each and start working the
+// day somebody fills the fields in.
+//
+// The needle is escaped by the same helper the other search uses, because this
+// one is called with text a model produced.
+func SearchPeople(ctx context.Context, needle string, limit int) (dgraphUsers []*dgraphStruct.DgraphUser, err error) {
+	safe := escapeForDgraphRegex(needle)
+	if safe == "" {
+		return nil, nil
+	}
+	if limit <= 0 || limit > peopleSearchMaxResults {
+		limit = peopleSearchMaxResults
+	}
+
+	// THE BLOCK MUST BE CALLED userInfo. GetDgraphUsersList unmarshals into a
+	// struct with one field tagged `json:"userInfo"`, so any other name parses
+	// cleanly into an empty slice: no error, no rows, a tool that always answers
+	// "nobody found". Named it "people" first and caught it by reading the model.
+	query := fmt.Sprintf(`{
+			userInfo(func: has(user_uuid), first: %d) @filter(
+				(regexp(user_name, /.*%s.*/i)
+				 OR regexp(user_full_name, /.*%s.*/i)
+				 OR regexp(user_job_title, /.*%s.*/i)
+				 OR regexp(<user.department>, /.*%s.*/i))
+				AND NOT eq(is_external, true)
+				AND NOT eq(is_bot, true)) {
+				user_uuid
+				user_name
+				user_full_name
+				user_job_title
+				user.department
+				user_email_id
+			}
+			}`, limit, safe, safe, safe, safe)
+
+	dgraphUsers, err = dgraphModels.GetDgraphUsersList(ctx, query, map[string]string{})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/SearchPeople failed err: %+v", err)
+		return nil, err
+	}
+	return dgraphUsers, nil
+}
+
+// peopleSearchMaxResults bounds what a single lookup returns. A directory is not
+// something an agent should be able to page through one tool call at a time.
+const peopleSearchMaxResults = 15
+
+func GetUserByUname(ctx context.Context, uname *string) (userInfo *models.User, err error) {
+	query := `
+        SELECT id, user_name, email_id, created_at, updated_at, deleted_at
+        FROM users
+        WHERE user_name = $1
+        AND is_external = false
+    `
+
+	userInfo, err = models.GetUserByUname(query, uname)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetUserByUname Failed to get user err: %+v",
+			err)
+		return
+	}
+
+	return
+}
+
+func GetDraphUserInfoWithProjectInfo(ctx context.Context, userUUID string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
+	variables := make(map[string]string)
+	variables["$id"] = userUUID
+	query := `query UserInfo($id: string){
+				userInfo(func: eq(user_uuid, $id)) {
+					uid
+					user_projects @filter(not gt(project_deleted_at, "1970-01-01T00:00:00Z")) {
+						uid
+						project_uuid
+						project_name
+						project_is_member: 1
+					}
+				}
+			}`
+
+	dgraphUser, err = dgraphModels.GetDgraphUserInfoByUUID(ctx, query, variables)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetDraphUserInfoWithProjectInfo Failed to get user from dgraph err: %+v",
+			err,
+		)
+		return
+	}
+
+	return
+
+}
+
+func UpdateUNameByEmailID(ctx context.Context, emailID string, uName string, currentTime time.Time) (err error) {
+	query := `
+        UPDATE users
+        SET user_name = $1 , updated_at = $2
+		WHERE email_id = $3
+    `
+
+	err = models.UpdateUNameByEmailID(query, uName, currentTime, emailID)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/UpdateUNameByEmailID Failed to update user name err: %+v",
+			err)
+		return
+	}
+
+	return
+}
+
+func GetAdminUserByUserUUID(ctx context.Context, userUUID uuid.UUID) (userInfo *models.User, err error) {
+	query := `
+        SELECT 
+		u.id AS user_id,
+		u.email_id,
+		u.created_at,
+		u.updated_at,
+		u.deleted_at
+		FROM 
+			users u
+		JOIN 
+			admin_users a 
+		ON 
+			u.email_id = a.email_id
+		WHERE 
+			u.id = $1
+    `
+
+	userInfo, err = models.GetAdminUserByUserUUID(query, userUUID)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetUserByUserUUID Failed to get user err: %+v",
+			err)
+		return
+	}
+
+	return
+}
+
+func AddInvitation(ctx context.Context, email string, invitedBy uuid.UUID) (err error) {
+	query := `
+		INSERT INTO invitations (email, invited_by)
+		VALUES ($1, $2)
+	`
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	_, err = postgresInit.DBConn.SqlDB.ExecContext(ctx, query, email, invitedBy)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/AddInvitation Failed to add invitation err: %+v", err)
+		return
+	}
+	return
+}
+
+func IncrementDeviceConnectedDgraphUser(ctx context.Context, userUUID string) (err error) {
+
+	query := fmt.Sprintf(`query {
+				userInfo(func: eq(user_uuid, %q)) {
+					user as uid
+					udc as user_device_connected
+				}
+			}`, userUUID)
+
+	mutation, err := json.Marshal(map[string]interface{}{
+		"uid": "val(user)",
+		"user_device_connected": map[string]interface{}{
+			"@value": "val(udc) + 1",
+		},
+	})
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/IncrementDeviceConnectedDgraphUser Failed to marshal json err: %+v",
+			err,
+		)
+		return
+	}
+
+	err = dgraphModels.ExecDgraphQuery(ctx, query, mutation)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/IncrementDeviceConnectedDgraphUser Failed to user increment user device connected in dgraph err: %+v",
+			err,
+		)
+		return
+	}
+
+	return
+}
+
+func CreateUserWithPassword(ctx context.Context, emailID string, username string, passwordHash *string, userUUID uuid.UUID) (err error) {
+	return CreateUserWithMethod(ctx, emailID, username, passwordHash, userUUID, "", false)
 }

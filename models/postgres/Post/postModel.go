@@ -44,21 +44,6 @@ func CreatePost(query string, id uuid.UUID, channelUUID uuid.UUID, createdBy uui
 	return
 }
 
-func BulkInsertPost(query string, values ...interface{}) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(ctx, query, values...)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/BulkInsertPost Failed to execute bulk insert err: %+v",
-			err)
-		return err
-	}
-
-	return nil
-}
-
 func GetPostByUUID(query string, postUUID uuid.UUID) (postInfo *Post, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -178,6 +163,21 @@ func HardDeletePstByUUID(query string, postUUID uuid.UUID) (err error) {
 	}
 
 	return
+}
+
+func BulkInsertPost(query string, values ...interface{}) (err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	_, err = postgresInit.DBConn.SqlDB.ExecContext(ctx, query, values...)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/BulkInsertPost Failed to execute bulk insert err: %+v",
+			err)
+		return err
+	}
+
+	return nil
 }
 
 // GetEntityIdsOlderThan returns UUIDs of entities created before cutoff that are not soft-deleted.

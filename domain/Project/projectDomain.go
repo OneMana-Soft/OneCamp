@@ -92,26 +92,6 @@ func CheckIfProjectExistByProjectNameAndTeamID(ctx context.Context, projectName 
 	return
 }
 
-func GetProjectByUUID(ctx context.Context, TeamUUID uuid.UUID) (projectInfo *models.Project, err error) {
-
-	query := `
-        SELECT id, project_name, created_by, team_id, created_at, updated_at, deleted_at
-        FROM projects
-        WHERE id = $1
-    `
-
-	projectInfo, err = models.GetProjectByUUID(query, TeamUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetProjectByUUID Failed to get project by uuid err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func UpdateProjectNameByProjectUUID(ctx context.Context, newProjectName string, projectUUID uuid.UUID, currentTime time.Time) (err error) {
 	query := `
         UPDATE projects
@@ -225,7 +205,7 @@ func GetDgraphProjectListByAdminDgraphUID(ctx context.Context, userDgraphUID str
 	return
 }
 
-func GetDgraphProjectTaskListForKanban(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
+func GetDgraphProjectTaskListForKanban(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, closedLimit int) (dgraphProject *dgraphStruct.DgraphProject, err error) {
 	if len(filterQuery) > 0 {
 		filterQuery = "AND " + filterQuery
 	}
@@ -257,18 +237,18 @@ func GetDgraphProjectTaskListForKanban(ctx context.Context, projectUUID string, 
 				project_tasks_in_review: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "inReview") %s) (orderdesc: task_created_at) {
 					%s
 				}
-				project_tasks_canceled: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "canceled") %s) (orderdesc: task_created_at, first: %d) {
+				project_tasks_canceled: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "canceled") %s) (orderdesc: task_created_at%s) {
 					%s
 				}
 				project_tasks_canceled_count: count(project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "canceled") %s))
-				project_tasks_done: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "done") %s) (orderdesc: task_created_at, first: %d) {
+				project_tasks_done: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "done") %s) (orderdesc: task_created_at%s) {
 					%s
 				}
 				project_tasks_done_count: count(project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "done") %s))
 			}
 		}`, filterQuery, projectTaskFields, filterQuery, projectTaskFields, filterQuery, projectTaskFields, filterQuery, projectTaskFields,
-		filterQuery, dgraphStruct.BoardClosedLimit, projectTaskFields, filterQuery,
-		filterQuery, dgraphStruct.BoardClosedLimit, projectTaskFields, filterQuery)
+		filterQuery, dgraphStruct.ClosedFirst(closedLimit), projectTaskFields, filterQuery,
+		filterQuery, dgraphStruct.ClosedFirst(closedLimit), projectTaskFields, filterQuery)
 
 	dgraphProject, err = dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, variables)
 
@@ -640,71 +620,6 @@ func GetBasicDgraphProjectInfo(ctx context.Context, projectUUID string, userDgra
 	return
 }
 
-func GetDgraphProjectInfoByUUID(ctx context.Context, projectUUID string, userDgraphUID string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
-
-	variables := make(map[string]string)
-	variables["$id"] = projectUUID
-	variables["$userUid"] = userDgraphUID
-	query := `query ProjectInfo($id: string, $userUid: string){
-				projectInfo(func: eq(project_uuid, $id)) {
-					uid
-					project_uuid
-					project_name
-					project_status
-					project_is_member: count(project_members @filter(uid($userUid)))
-					project_is_admin: count(project_admins @filter(uid($userUid)))
-					project_team {
-						uid
-					}
-					project_admins {
-						user_uuid
-					}
-					project_tasks (orderasc: task_due_date) {
-						task_uuid
-						task_name
-						task_status
-						task_description
-						task_assignee {
-							user_uuid
-							user_name
-							user_profile_object_key
-						}
-						task_sub_tasks {
-							sub_task_uuid
-							sub_task_name
-							sub_task_assignee {
-								user_uuid
-								user_name
-								user_profile_object_key
-							}
-							sub_task_due_date
-						}
-						task_comments {
-							comment_uuid
-							comment_html_text
-							comment_attachments {
-								attachment_uuid
-								attachment_obj_key
-								attachment_file_name
-							}
-						}
-					}
-				}
-			}`
-
-	dgraphProject, err = dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphProjectInfoByUUID Failed to get project in dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
-}
-
 func RemoveAdminMemberFromProject(ctx context.Context, projectDgraphUID string, userDgraphUID string) (err error) {
 	delStringJSON := fmt.Sprintf(`
 		
@@ -982,41 +897,6 @@ func CreateProjectkAttachmentsInOpensearch(currentTime *time.Time, projectUUID s
 
 }
 
-func CreateProjectWithAttachmentsInOpensearch(ctx context.Context, openSearchProject *openSearchStruct.OpenSearchProject, dgraphAttachments []*dgraphStruct.DgraphAttachment, userInfo *dgraphStruct.DgraphUser) {
-
-	var openSearchAttachments []*openSearchStruct.OpenSearchAttachment
-
-	for _, attachment := range dgraphAttachments {
-		openSearchAttachments = append(openSearchAttachments, &openSearchStruct.OpenSearchAttachment{
-			Uuid:                  attachment.Uuid,
-			AttachmentFileName:    attachment.FileName,
-			AttachmentByUserUuid:  userInfo.Uuid,
-			AttachmentObjKey:      attachment.ObjectKey,
-			AttachmentProjectUuid: openSearchProject.Uuid,
-			AttachmentCreatedAt:   openSearchProject.ProjectCreatedAt,
-		})
-	}
-
-	bulkOperationString, err := getProjectWithAttachmentBulkOperationStringForOpenSearch(ctx, openSearchProject, openSearchAttachments)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/CreateProjectWithAttachmentsInOpensearch Error getting bulk string for project's attachments err: %+v",
-			err)
-		return
-	}
-
-	err = OpenSearchBulkModels.BulkCreateInOpenSearch(bulkOperationString)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/CreateProjectWithAttachmentsInOpensearch Error getting bulk string for project's attachments err: %+v",
-			err)
-		return
-	}
-
-	return
-
-}
-
 func getProjectWithAttachmentBulkOperationStringForOpenSearch(ctx context.Context, openSearchProject *openSearchStruct.OpenSearchProject, openSearchAttachments []*openSearchStruct.OpenSearchAttachment) (bulkActionString string, err error) {
 
 	if openSearchProject != nil {
@@ -1071,4 +951,124 @@ func HardDeleteProject(ctx context.Context, projectUUID uuid.UUID) (err error) {
 		return
 	}
 	return
+}
+
+func GetProjectByUUID(ctx context.Context, TeamUUID uuid.UUID) (projectInfo *models.Project, err error) {
+
+	query := `
+        SELECT id, project_name, created_by, team_id, created_at, updated_at, deleted_at
+        FROM projects
+        WHERE id = $1
+    `
+
+	projectInfo, err = models.GetProjectByUUID(query, TeamUUID)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetProjectByUUID Failed to get project by uuid err: %+v",
+			err)
+		return
+	}
+
+	return
+}
+
+func GetDgraphProjectInfoByUUID(ctx context.Context, projectUUID string, userDgraphUID string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
+
+	variables := make(map[string]string)
+	variables["$id"] = projectUUID
+	variables["$userUid"] = userDgraphUID
+	query := `query ProjectInfo($id: string, $userUid: string){
+				projectInfo(func: eq(project_uuid, $id)) {
+					uid
+					project_uuid
+					project_name
+					project_status
+					project_is_member: count(project_members @filter(uid($userUid)))
+					project_is_admin: count(project_admins @filter(uid($userUid)))
+					project_team {
+						uid
+					}
+					project_admins {
+						user_uuid
+					}
+					project_tasks (orderasc: task_due_date) {
+						task_uuid
+						task_name
+						task_status
+						task_description
+						task_assignee {
+							user_uuid
+							user_name
+							user_profile_object_key
+						}
+						task_sub_tasks {
+							sub_task_uuid
+							sub_task_name
+							sub_task_assignee {
+								user_uuid
+								user_name
+								user_profile_object_key
+							}
+							sub_task_due_date
+						}
+						task_comments {
+							comment_uuid
+							comment_html_text
+							comment_attachments {
+								attachment_uuid
+								attachment_obj_key
+								attachment_file_name
+							}
+						}
+					}
+				}
+			}`
+
+	dgraphProject, err = dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, variables)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetDgraphProjectInfoByUUID Failed to get project in dgraph err: %+v",
+			err,
+		)
+		return
+	}
+
+	return
+}
+
+func CreateProjectWithAttachmentsInOpensearch(ctx context.Context, openSearchProject *openSearchStruct.OpenSearchProject, dgraphAttachments []*dgraphStruct.DgraphAttachment, userInfo *dgraphStruct.DgraphUser) {
+
+	var openSearchAttachments []*openSearchStruct.OpenSearchAttachment
+
+	for _, attachment := range dgraphAttachments {
+		openSearchAttachments = append(openSearchAttachments, &openSearchStruct.OpenSearchAttachment{
+			Uuid:                  attachment.Uuid,
+			AttachmentFileName:    attachment.FileName,
+			AttachmentByUserUuid:  userInfo.Uuid,
+			AttachmentObjKey:      attachment.ObjectKey,
+			AttachmentProjectUuid: openSearchProject.Uuid,
+			AttachmentCreatedAt:   openSearchProject.ProjectCreatedAt,
+		})
+	}
+
+	bulkOperationString, err := getProjectWithAttachmentBulkOperationStringForOpenSearch(ctx, openSearchProject, openSearchAttachments)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/CreateProjectWithAttachmentsInOpensearch Error getting bulk string for project's attachments err: %+v",
+			err)
+		return
+	}
+
+	err = OpenSearchBulkModels.BulkCreateInOpenSearch(bulkOperationString)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/CreateProjectWithAttachmentsInOpensearch Error getting bulk string for project's attachments err: %+v",
+			err)
+		return
+	}
+
+	return
+
 }

@@ -53,11 +53,6 @@ func NewTTLCache[V any](defaultTTL time.Duration) *TTLCache[V] {
 	}
 }
 
-// Forever is a sentinel for "cache without time-based expiry". Use as
-// the defaultTTL argument to NewTTLCache when entries are only ever
-// invalidated explicitly.
-func Forever() time.Duration { return 0 }
-
 // Get returns the cached value and true when an unexpired entry exists.
 // Expired entries are deleted opportunistically on access so a slow-
 // burn miss does not accumulate dead memory.
@@ -123,6 +118,18 @@ func (c *TTLCache[V]) Delete(key string) {
 	c.mu.Unlock()
 }
 
+// sweepLocked removes expired entries. Must be called with the write
+// lock held. Bounded by map size; runs O(n) once per sweepThreshold
+// inserts so amortised cost per Set is O(1).
+func (c *TTLCache[V]) sweepLocked() {
+	now := time.Now()
+	for k, v := range c.items {
+		if !v.expiresAt.IsZero() && now.After(v.expiresAt) {
+			delete(c.items, k)
+		}
+	}
+}
+
 // Purge drops every entry. Used on disconnect / re-connect flows
 // where the entire cache scope is invalidated at once.
 func (c *TTLCache[V]) Purge() {
@@ -145,14 +152,7 @@ func (c *TTLCache[V]) Len() int {
 	return len(c.items)
 }
 
-// sweepLocked removes expired entries. Must be called with the write
-// lock held. Bounded by map size; runs O(n) once per sweepThreshold
-// inserts so amortised cost per Set is O(1).
-func (c *TTLCache[V]) sweepLocked() {
-	now := time.Now()
-	for k, v := range c.items {
-		if !v.expiresAt.IsZero() && now.After(v.expiresAt) {
-			delete(c.items, k)
-		}
-	}
-}
+// Forever is a sentinel for "cache without time-based expiry". Use as
+// the defaultTTL argument to NewTTLCache when entries are only ever
+// invalidated explicitly.
+func Forever() time.Duration { return 0 }

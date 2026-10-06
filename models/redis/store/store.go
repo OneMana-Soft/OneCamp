@@ -42,12 +42,6 @@ func IsAvailable() bool {
 	return redisInit.RedisClient != nil
 }
 
-// Client returns the underlying client when callers need raw access
-// (Lua scripting, custom pipelines). Most code should not need this.
-func Client() *redis.Client {
-	return redisInit.RedisClient
-}
-
 // =============================================================================
 // JSON cache primitives — caches a value blob with the registry's TTL.
 // =============================================================================
@@ -416,21 +410,6 @@ func AllowSlidingWindow(ctx context.Context, spec registry.Spec, args []string, 
 // Convenience: TTL inspection
 // =============================================================================
 
-// TTL returns the remaining TTL for a registered key, or 0 if the key
-// does not exist or has no expiry. Useful for tests and the admin
-// debug endpoint.
-func TTL(ctx context.Context, spec registry.Spec, args []string) (time.Duration, error) {
-	if !IsAvailable() {
-		return 0, ErrNotConnected
-	}
-	key := spec.Build(args...)
-	d, err := redisInit.RedisClient.TTL(ctx, key).Result()
-	if err != nil {
-		return 0, err
-	}
-	return d, nil
-}
-
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -446,14 +425,6 @@ func (r RateLimitResult) RetryAfterSeconds() int {
 		secs = 1
 	}
 	return secs
-}
-
-// String for log messages.
-func (r RateLimitResult) String() string {
-	if r.Allowed {
-		return fmt.Sprintf("allowed count=%d/%d", r.Count, r.Limit)
-	}
-	return fmt.Sprintf("blocked count=%d/%d retry=%s", r.Count, r.Limit, r.RetryAfter)
 }
 
 // UpdateJSONAtomic performs a read-modify-write on a JSON value under optimistic
@@ -578,4 +549,33 @@ func ZRevRangeWithScores(ctx context.Context, spec registry.Spec, args []string,
 		out = append(out, ScoredMember{Member: member, Score: z.Score})
 	}
 	return out
+}
+
+// Client returns the underlying client when callers need raw access
+// (Lua scripting, custom pipelines). Most code should not need this.
+func Client() *redis.Client {
+	return redisInit.RedisClient
+}
+
+// TTL returns the remaining TTL for a registered key, or 0 if the key
+// does not exist or has no expiry. Useful for tests and the admin
+// debug endpoint.
+func TTL(ctx context.Context, spec registry.Spec, args []string) (time.Duration, error) {
+	if !IsAvailable() {
+		return 0, ErrNotConnected
+	}
+	key := spec.Build(args...)
+	d, err := redisInit.RedisClient.TTL(ctx, key).Result()
+	if err != nil {
+		return 0, err
+	}
+	return d, nil
+}
+
+// String for log messages.
+func (r RateLimitResult) String() string {
+	if r.Allowed {
+		return fmt.Sprintf("allowed count=%d/%d", r.Count, r.Limit)
+	}
+	return fmt.Sprintf("blocked count=%d/%d retry=%s", r.Count, r.Limit, r.RetryAfter)
 }

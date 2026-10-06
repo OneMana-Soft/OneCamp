@@ -99,47 +99,6 @@ func GetChannelByName(query string, channelName string) (channelInfo *Channel, e
 	return &channelData, nil
 }
 
-func GetChannelByHandle(query *string, channelHandle *string) (channelInfo *Channel, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var channelData Channel
-	var createdAt sql.NullTime
-	var updatedAt sql.NullTime
-	var deletedAt sql.NullTime
-
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, *query, *channelHandle)
-	err = row.Scan(
-		&channelData.Id,
-		&channelData.Name,
-		&channelData.CreatedBy,
-		&createdAt,
-		&updatedAt,
-		&deletedAt,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetChannelByChannelName Failed to get channel err: %+v",
-			err)
-		return
-	}
-
-	if createdAt.Valid {
-		channelData.CreatedAt = createdAt.Time
-	}
-
-	if updatedAt.Valid {
-		channelData.UpdatedAt = updatedAt.Time
-	}
-
-	if deletedAt.Valid {
-		channelData.DeletedAt = deletedAt.Time
-	}
-
-	return &channelData, nil
-}
-
 func GetChannelByUUID(query *string, channelUUID uuid.UUID) (channelInfo *Channel, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -397,4 +356,45 @@ func RestoreChannelRow(query string, channelName string, channelPrivate bool, de
 		return
 	}
 	return
+}
+
+func GetChannelByHandle(query *string, channelHandle *string) (channelInfo *Channel, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	var channelData Channel
+	var createdAt sql.NullTime
+	var updatedAt sql.NullTime
+	var deletedAt sql.NullTime
+
+	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, *query, *channelHandle)
+	err = row.Scan(
+		&channelData.Id,
+		&channelData.Name,
+		&channelData.CreatedBy,
+		&createdAt,
+		&updatedAt,
+		&deletedAt,
+	)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/GetChannelByChannelName Failed to get channel err: %+v",
+			err)
+		return
+	}
+
+	if createdAt.Valid {
+		channelData.CreatedAt = createdAt.Time
+	}
+
+	if updatedAt.Valid {
+		channelData.UpdatedAt = updatedAt.Time
+	}
+
+	if deletedAt.Valid {
+		channelData.DeletedAt = deletedAt.Time
+	}
+
+	return &channelData, nil
 }

@@ -23,20 +23,6 @@ func CreateOrUpdateLastSeenActivity(ctx context.Context, userID uuid.UUID) (err 
 	return
 }
 
-func GetLastSeenActivityByUserId(ctx context.Context, userID uuid.UUID) (lastSeenActivityTime time.Time, err error) {
-
-	lastSeenActivityTime, err = domain.GetLastSeenActivityByUserId(ctx, userID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetLastSeenActivityByUserId Failed to get last seen activity err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func GetTotalUnreadActivityCount(ctx context.Context, userDgraphId string, userID uuid.UUID) (totalCount uint64, err error) {
 
 	totalCount, err = domain.GetTotalUnreadActivityCount(ctx, userDgraphId, userID)
@@ -44,6 +30,20 @@ func GetTotalUnreadActivityCount(ctx context.Context, userDgraphId string, userI
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/GetTotalUnreadActivityCount Failed to get total unread count err: %+v",
+			err)
+		return
+	}
+
+	return
+}
+
+func GetLastSeenActivityByUserId(ctx context.Context, userID uuid.UUID) (lastSeenActivityTime time.Time, err error) {
+
+	lastSeenActivityTime, err = domain.GetLastSeenActivityByUserId(ctx, userID)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/GetLastSeenActivityByUserId Failed to get last seen activity err: %+v",
 			err)
 		return
 	}

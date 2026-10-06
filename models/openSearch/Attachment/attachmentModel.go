@@ -11,39 +11,6 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
-func CreateAttachmentInOpenSearch(ctx context.Context, openSearchAttachment *openSearchStruct.OpenSearchAttachment) (err error) {
-
-	jsonData, err := json.Marshal(openSearchAttachment)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateAttachmentInOpenSearch Error mashiling strut to json err: %+v",
-			err)
-		return
-	}
-
-	document := openSearchStruct.IndexReader(jsonData)
-
-	docId := openSearchAttachment.Uuid
-
-	_, err = opensearchInit.OpenSearchClient.Document.Create(
-		context.Background(),
-		opensearchapi.DocumentCreateReq{
-			Index:      "attachments",
-			DocumentID: docId,
-			Body:       document,
-		},
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateAttachmentInOpenSearch failed to create attachment document err: %+v",
-			err)
-		return
-	}
-	return
-}
-
 func UpdateAttachmentInOpenSearch(ctx context.Context, openSearchAttachment *openSearchStruct.OpenSearchAttachment) (err error) {
 
 	jsonData, err := json.Marshal(openSearchAttachment)
@@ -90,4 +57,37 @@ func DeleteAttachmentInOpenSearch(ctx context.Context, attachmentUUID string) er
 		return err
 	}
 	return nil
+}
+
+func CreateAttachmentInOpenSearch(ctx context.Context, openSearchAttachment *openSearchStruct.OpenSearchAttachment) (err error) {
+
+	jsonData, err := json.Marshal(openSearchAttachment)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/CreateAttachmentInOpenSearch Error mashiling strut to json err: %+v",
+			err)
+		return
+	}
+
+	document := openSearchStruct.IndexReader(jsonData)
+
+	docId := openSearchAttachment.Uuid
+
+	_, err = opensearchInit.OpenSearchClient.Document.Create(
+		context.Background(),
+		opensearchapi.DocumentCreateReq{
+			Index:      "attachments",
+			DocumentID: docId,
+			Body:       document,
+		},
+	)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/CreateAttachmentInOpenSearch failed to create attachment document err: %+v",
+			err)
+		return
+	}
+	return
 }

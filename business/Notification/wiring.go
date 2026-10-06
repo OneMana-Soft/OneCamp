@@ -137,26 +137,33 @@ func DispatchCalendarBooking(ownerUUID, guestName, pageTitle, when, bookingID st
 // delivery. It still honors the recipient's email settings + suppression
 // downstream in Dispatch. The unique dedup token (nanosecond) guarantees each
 // test is delivered rather than collapsed into the daily digest.
-func DispatchMemoryDigestTest(recipientUUID, subject, body string) {
+// DispatchMemoryDigestTestNow is the SYNCHRONOUS variant, for the admin
+// "send me a test digest" button. It returns how many recipients were actually
+// dispatched to.
+//
+// The scheduled digest dispatches fire-and-forget, which is right when nobody is
+// waiting on the result. It is wrong for a test, because the entire
+// point of the button is to find out whether delivery works, and an async
+// dispatch reports success before it knows. That is how a PREPARE-time SQL
+// failure in the email queue went unnoticed: the button said "Test digest sent"
+// every time while nothing was ever enqueued.
+func DispatchMemoryDigestTestNow(ctx context.Context, recipientUUID, subject, body string) int {
 	if recipientUUID == "" || body == "" {
-		return
+		return 0
 	}
-	go func() {
-		defer recoverDispatch("DispatchMemoryDigestTest")
-		ctx := context.Background()
-		Dispatch(ctx, Event{
-			Type:            EventMemoryDigest,
-			SubjectLine:     subject,
-			Title:           "Your open items (test)",
-			Subtitle:        "From your workspace memory",
-			Body:            body,
-			CTAURL:          frontendMemoryURL(),
-			CTAText:         "Review in OneCamp",
-			DedupKeyParts:   []string{"memory_digest_test", strconv.FormatInt(time.Now().UnixNano(), 10)},
-			Recipients:      recipientsFromStrings([]string{recipientUUID}),
-			SkipOnlineCheck: true,
-		})
-	}()
+	defer recoverDispatch("DispatchMemoryDigestTestNow")
+	return Dispatch(ctx, Event{
+		Type:            EventMemoryDigest,
+		SubjectLine:     subject,
+		Title:           "Your open items (test)",
+		Subtitle:        "From your workspace memory",
+		Body:            body,
+		CTAURL:          frontendMemoryURL(),
+		CTAText:         "Review in OneCamp",
+		DedupKeyParts:   []string{"memory_digest_test", strconv.FormatInt(time.Now().UnixNano(), 10)},
+		Recipients:      recipientsFromStrings([]string{recipientUUID}),
+		SkipOnlineCheck: true,
+	})
 }
 
 // DispatchChatDM is the integration point used by business/Chat right after
@@ -477,6 +484,33 @@ func DispatchChatCall(actorUUID, actorName, actorAvatar string,
 			CTAText:       "Join call",
 			DedupKeyParts: []string{"chat_call", grpId, helpers.NowDateKey()},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
+		})
+	}()
+}
+
+// DispatchMemoryDigestTest sends a one-off TEST digest to a single recipient,
+// bypassing the per-(recipient, day) dedup so an admin can re-send and verify
+// delivery. It still honors the recipient's email settings + suppression
+// downstream in Dispatch. The unique dedup token (nanosecond) guarantees each
+// test is delivered rather than collapsed into the daily digest.
+func DispatchMemoryDigestTest(recipientUUID, subject, body string) {
+	if recipientUUID == "" || body == "" {
+		return
+	}
+	go func() {
+		defer recoverDispatch("DispatchMemoryDigestTest")
+		ctx := context.Background()
+		Dispatch(ctx, Event{
+			Type:            EventMemoryDigest,
+			SubjectLine:     subject,
+			Title:           "Your open items (test)",
+			Subtitle:        "From your workspace memory",
+			Body:            body,
+			CTAURL:          frontendMemoryURL(),
+			CTAText:         "Review in OneCamp",
+			DedupKeyParts:   []string{"memory_digest_test", strconv.FormatInt(time.Now().UnixNano(), 10)},
+			Recipients:      recipientsFromStrings([]string{recipientUUID}),
+			SkipOnlineCheck: true,
 		})
 	}()
 }

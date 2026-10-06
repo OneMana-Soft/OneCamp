@@ -21,29 +21,6 @@ import (
 	"strings"
 )
 
-// VerifyRepoAccess reports whether the workspace's connected GitHub account can
-// access owner/name. It returns:
-//   - (true, nil)  when GitHub answers 200 (the repo exists and is visible);
-//   - (false, nil) when GitHub answers 404 or 403 (no such repo / no access) —
-//     a definitive "can't use it", not an error;
-//   - (false, err) only on a transport/auth/unexpected-status failure, so the
-//     caller can distinguish "checked, no access" from "couldn't check".
-//
-// It never follows a repo's contents or leaks the token (the credential lives in
-// the client's Authorization header, never in the URL or a returned message).
-func VerifyRepoAccess(ctx context.Context, owner, name string) (bool, error) {
-	owner = strings.TrimSpace(owner)
-	name = strings.TrimSpace(name)
-	if owner == "" || name == "" {
-		return false, fmt.Errorf("owner and repo are required")
-	}
-	client, err := GitHubHTTPClient(ctx)
-	if err != nil {
-		return false, err
-	}
-	return verifyRepoAccessWithClient(ctx, client, owner, name)
-}
-
 // RepoAccess is what one identity may actually DO with a repository. Visibility
 // and writability are different questions and the distinction matters: a coding
 // run needs to push a branch and open a pull request, so "I can see it" is not
@@ -131,6 +108,47 @@ func repoPushAccessWithClient(ctx context.Context, client *http.Client, owner, n
 	}, nil
 }
 
+// tokenAuthClient returns an HTTP client that attaches a bearer token to every
+// request. Kept tiny and local so the token lives only in the transport.
+func tokenAuthClient(token string) *http.Client {
+	return &http.Client{Transport: bearerTransport{token: token, base: http.DefaultTransport}}
+}
+
+type bearerTransport struct {
+	token string
+	base  http.RoundTripper
+}
+
+func (b bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	// Clone before mutating: RoundTrippers must not modify the caller's request.
+	clone := r.Clone(r.Context())
+	clone.Header.Set("Authorization", "Bearer "+b.token)
+	return b.base.RoundTrip(clone)
+}
+
+// VerifyRepoAccess reports whether the workspace's connected GitHub account can
+// access owner/name. It returns:
+//   - (true, nil)  when GitHub answers 200 (the repo exists and is visible);
+//   - (false, nil) when GitHub answers 404 or 403 (no such repo / no access) —
+//     a definitive "can't use it", not an error;
+//   - (false, err) only on a transport/auth/unexpected-status failure, so the
+//     caller can distinguish "checked, no access" from "couldn't check".
+//
+// It never follows a repo's contents or leaks the token (the credential lives in
+// the client's Authorization header, never in the URL or a returned message).
+func VerifyRepoAccess(ctx context.Context, owner, name string) (bool, error) {
+	owner = strings.TrimSpace(owner)
+	name = strings.TrimSpace(name)
+	if owner == "" || name == "" {
+		return false, fmt.Errorf("owner and repo are required")
+	}
+	client, err := GitHubHTTPClient(ctx)
+	if err != nil {
+		return false, err
+	}
+	return verifyRepoAccessWithClient(ctx, client, owner, name)
+}
+
 // VerifyRepoAccessWithToken reports whether a SPECIFIC token can reach
 // owner/name, using the identical request and status mapping as VerifyRepoAccess.
 //
@@ -152,24 +170,6 @@ func VerifyRepoAccessWithToken(ctx context.Context, token, owner, name string) (
 		return false, fmt.Errorf("a token is required")
 	}
 	return verifyRepoAccessWithClient(ctx, tokenAuthClient(token), owner, name)
-}
-
-// tokenAuthClient returns an HTTP client that attaches a bearer token to every
-// request. Kept tiny and local so the token lives only in the transport.
-func tokenAuthClient(token string) *http.Client {
-	return &http.Client{Transport: bearerTransport{token: token, base: http.DefaultTransport}}
-}
-
-type bearerTransport struct {
-	token string
-	base  http.RoundTripper
-}
-
-func (b bearerTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	// Clone before mutating: RoundTrippers must not modify the caller's request.
-	clone := r.Clone(r.Context())
-	clone.Header.Set("Authorization", "Bearer "+b.token)
-	return b.base.RoundTrip(clone)
 }
 
 // verifyRepoAccessWithClient issues the GET /repos/{owner}/{name} using the

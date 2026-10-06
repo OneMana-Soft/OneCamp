@@ -254,7 +254,11 @@ func SendEmailWithOptions(ctx context.Context, opt SendOptions) (SendResult, err
 		payload.Headers = headers
 	}
 	for k, v := range opt.Tags {
-		payload.Tags = append(payload.Tags, resendTag{Name: k, Value: v})
+		name, value := resendTagText(k), resendTagText(v)
+		if name == "" || value == "" {
+			continue
+		}
+		payload.Tags = append(payload.Tags, resendTag{Name: name, Value: value})
 	}
 
 	jsonData, err := json.Marshal(payload)
@@ -364,4 +368,30 @@ func SendPasswordResetEmail(ctx context.Context, to string, senderEmail string, 
 	textBody := fmt.Sprintf("Reset your OneCamp password\n\nWe received a request to reset your password. Open the link below to set a new password:\n\n%s\n\nThis link expires in 1 hour. If you didn't request this, you can safely ignore this email.", resetLink)
 
 	return SendEmail(ctx, senderEmail, to, subject, htmlBody, textBody)
+}
+
+// resendTagText makes a tag name or value one Resend accepts: ASCII letters,
+// digits, underscores and dashes, at most 256 characters. Anything else
+// becomes an underscore.
+//
+// Resend answers anything else with 422, which is terminal, so the email is
+// never retried. The notification worker tags every email with its event type,
+// and every event type has a dot in it ("channel.mention"), so every
+// notification email sent through Resend was refused outright. Tags are
+// analytics; they must never be the reason an email does not arrive. Pure.
+func resendTagText(s string) string {
+	const max = 256
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(s) {
+		if b.Len() >= max {
+			break
+		}
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }

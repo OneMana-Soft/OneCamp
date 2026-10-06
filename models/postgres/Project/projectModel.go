@@ -58,53 +58,6 @@ func CheckIfProjectExistByProjectNameAndTeamUUID(query string, projectName strin
 	return
 }
 
-func GetProjectByUUID(query string, uuid uuid.UUID) (project *Project, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var projectInfo Project
-	var projectName sql.NullString
-	var createdAt sql.NullTime
-	var updatedAt sql.NullTime
-	var deletedAt sql.NullTime
-
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, uuid)
-	err = row.Scan(
-		&projectInfo.Id,
-		&projectName,
-		&projectInfo.CreatedBy,
-		&projectInfo.TeamId,
-		&createdAt,
-		&updatedAt,
-		&deletedAt,
-	)
-
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetProjectByUUID Failed to get project err: %+v",
-			err)
-		return
-	}
-	if projectName.Valid {
-		projectInfo.ProjectName = projectName.String
-	}
-
-	if createdAt.Valid {
-		projectInfo.CreatedAt = createdAt.Time
-	}
-
-	if updatedAt.Valid {
-		projectInfo.UpdatedAt = updatedAt.Time
-	}
-
-	if deletedAt.Valid {
-		projectInfo.DeletedAt = deletedAt.Time
-	}
-
-	return &projectInfo, nil
-
-}
-
 func UpdateProjectNameByProjectUUID(query string, projectName string, currentTime time.Time, projectUUID uuid.UUID) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -188,4 +141,51 @@ func HardDeleteProject(query string, projectUUID uuid.UUID) (err error) {
 		return
 	}
 	return
+}
+
+func GetProjectByUUID(query string, uuid uuid.UUID) (project *Project, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	var projectInfo Project
+	var projectName sql.NullString
+	var createdAt sql.NullTime
+	var updatedAt sql.NullTime
+	var deletedAt sql.NullTime
+
+	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, uuid)
+	err = row.Scan(
+		&projectInfo.Id,
+		&projectName,
+		&projectInfo.CreatedBy,
+		&projectInfo.TeamId,
+		&createdAt,
+		&updatedAt,
+		&deletedAt,
+	)
+
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		helpers.LogErrorWithContext(ctx,
+			"models/GetProjectByUUID Failed to get project err: %+v",
+			err)
+		return
+	}
+	if projectName.Valid {
+		projectInfo.ProjectName = projectName.String
+	}
+
+	if createdAt.Valid {
+		projectInfo.CreatedAt = createdAt.Time
+	}
+
+	if updatedAt.Valid {
+		projectInfo.UpdatedAt = updatedAt.Time
+	}
+
+	if deletedAt.Valid {
+		projectInfo.DeletedAt = deletedAt.Time
+	}
+
+	return &projectInfo, nil
+
 }

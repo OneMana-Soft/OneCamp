@@ -37,14 +37,6 @@ const (
 	githubSyncStaleTimeout = 10 * time.Minute
 )
 
-type githubSyncPayload struct {
-	Status   string `json:"status,omitempty"`
-	Name     string `json:"name,omitempty"`
-	Desc     string `json:"description,omitempty"`
-	Assignee string `json:"assignee_uuid,omitempty"`
-	Label    string `json:"label,omitempty"`
-}
-
 // ttlCacheEntry holds a cached value with an expiration time.
 type ttlCacheEntry struct {
 	value     string
@@ -1459,4 +1451,12 @@ func aggregateCheckStatus(runs []githubCheckRun) string {
 		return "success"
 	}
 	return "pending"
+}
+
+type githubSyncPayload struct {
+	Status   string `json:"status,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Desc     string `json:"description,omitempty"`
+	Assignee string `json:"assignee_uuid,omitempty"`
+	Label    string `json:"label,omitempty"`
 }

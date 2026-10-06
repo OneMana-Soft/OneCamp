@@ -276,6 +276,13 @@ func hasChartFence(text string) bool {
 // (case-insensitive), so ```chart, ``` chart, ```Chart, ````chart, and
 // ```CHART all match — whatever the model emits.
 func findChartMarker(s string, from int) (start, after int) {
+	return findFenceMarker(s, from, "chart")
+}
+
+// findFenceMarker is the same scan for ANY fence keyword, so a second block type
+// (```diff) reuses the tolerance already built for models that write ``` diff,
+// ```Diff or ````diff rather than duplicating it and drifting.
+func findFenceMarker(s string, from int, kw string) (start, after int) {
 	if from < 0 {
 		from = 0
 	}
@@ -283,11 +290,43 @@ func findChartMarker(s string, from int) (start, after int) {
 		if s[i] != '`' {
 			continue
 		}
-		if l := chartMarkerLen(s, i); l > 0 {
+		if l := fenceMarkerLen(s, i, kw); l > 0 {
 			return i, i + l
 		}
 	}
 	return -1, -1
+}
+
+// fenceMarkerLen returns the byte length of a fence marker for kw starting at
+// s[i] (backticks + optional spaces + kw + a word boundary), or 0 when there is
+// no marker there. The word boundary is what stops "charter" matching "chart"
+// and "different" matching "diff". Pure.
+func fenceMarkerLen(s string, i int, kw string) int {
+	j := i
+	ticks := 0
+	for j < len(s) && s[j] == '`' {
+		ticks++
+		j++
+	}
+	if ticks < 3 {
+		return 0
+	}
+	for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
+		j++
+	}
+	if j+len(kw) > len(s) || !strings.EqualFold(s[j:j+len(kw)], kw) {
+		return 0
+	}
+	j += len(kw)
+	if j < len(s) && isWordByte(s[j]) {
+		return 0 // e.g. "charter" / "different" — not a fence for kw
+	}
+	return j - i
+}
+
+// isWordByte reports whether b is an ASCII letter or digit.
+func isWordByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
 
 // chartMarkerLen returns the byte length of a chart fence marker starting at
@@ -316,9 +355,4 @@ func chartMarkerLen(s string, i int) int {
 		return 0 // e.g. "charter" — not a chart fence
 	}
 	return j - i
-}
-
-// isWordByte reports whether b is an ASCII letter or digit.
-func isWordByte(b byte) bool {
-	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }

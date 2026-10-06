@@ -167,3 +167,66 @@ func ListByUser(ctx context.Context, createdBy uuid.UUID) ([]*ApiToken, error) {
 	}
 	return out, rows.Err()
 }
+
+// ListActive returns every credential that can still be used, across the
+// workspace, newest first. For the admin inventory, which has to answer "what
+// can act here" rather than "what did I make".
+func ListActive(ctx context.Context) ([]*ApiToken, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	const q = `SELECT ` + tokenColumns + ` FROM api_tokens
+		WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())
+		ORDER BY created_at DESC LIMIT 1000`
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/ListActive err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*ApiToken
+	for rows.Next() {
+		t, scanErr := scanToken(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// RevokeAny revokes a credential whoever made it. Only an admin path may call
+// this; RevokeToken is the owner's. Returns sql.ErrNoRows when there was
+// nothing live to revoke.
+func RevokeAny(ctx context.Context, id uuid.UUID) (*ApiToken, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	const q = `UPDATE api_tokens SET revoked_at=NOW(), updated_at=NOW()
+		WHERE id=$1 AND revoked_at IS NULL RETURNING ` + tokenColumns
+	t, err := scanToken(postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, id))
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			helpers.LogErrorWithContext(ctx, "models/RevokeAny err: %+v", err)
+		}
+		return nil, err
+	}
+	return t, nil
+}
+
+// RotateSecret replaces a live credential's secret and expiry in place.
+// Returns sql.ErrNoRows when the credential is revoked or gone, which is what
+// ends an OAuth connection an admin has revoked from the inventory.
+func RotateSecret(ctx context.Context, id uuid.UUID, tokenHash, tokenPrefix string, expiresAt time.Time) error {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	const q = `UPDATE api_tokens SET token_hash=$2, token_prefix=$3, expires_at=$4, updated_at=NOW()
+		WHERE id=$1 AND revoked_at IS NULL`
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, tokenHash, tokenPrefix, expiresAt)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/RotateSecret err: %+v", err)
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}

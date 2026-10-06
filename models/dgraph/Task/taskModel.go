@@ -98,33 +98,6 @@ func GetDgraphTaskInfoByUUID(ctx context.Context, query string, variables map[st
 	return
 }
 
-func GetDgraphTaskList(ctx context.Context, query string, variables map[string]string) (dgraphTasks []*dgraphStruct.DgraphTask, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
-	resp, err := txn.QueryWithVars(ctx, query, variables)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphTaskList failed to get task err: %+v",
-			err)
-		return
-	}
-
-	type Tasks struct {
-		TaskInfo []*dgraphStruct.DgraphTask `json:"taskInfo"`
-	}
-
-	var tasksInfo Tasks
-	err = json.Unmarshal(resp.Json, &tasksInfo)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphTaskList failed to unmarshal response json err: %+v",
-			err)
-		return
-	}
-	dgraphTasks = tasksInfo.TaskInfo
-	return
-}
-
 // BulkSoftDeleteDgraphTasks sets task_deleted_at on multiple tasks in a single Dgraph mutation.
 func BulkSoftDeleteDgraphTasks(ctx context.Context, tasks []*dgraphStruct.DgraphTask, query string) error {
 	txn := dgraphInit.DgraphClient.NewTxn()
@@ -224,4 +197,31 @@ func UpdateExistingTasksReturning(ctx context.Context, set *dgraphStruct.DgraphT
 		}
 	}
 	return uuids, nil
+}
+
+func GetDgraphTaskList(ctx context.Context, query string, variables map[string]string) (dgraphTasks []*dgraphStruct.DgraphTask, err error) {
+	txn := dgraphInit.DgraphClient.NewTxn()
+
+	resp, err := txn.QueryWithVars(ctx, query, variables)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/GetDgraphTaskList failed to get task err: %+v",
+			err)
+		return
+	}
+
+	type Tasks struct {
+		TaskInfo []*dgraphStruct.DgraphTask `json:"taskInfo"`
+	}
+
+	var tasksInfo Tasks
+	err = json.Unmarshal(resp.Json, &tasksInfo)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/GetDgraphTaskList failed to unmarshal response json err: %+v",
+			err)
+		return
+	}
+	dgraphTasks = tasksInfo.TaskInfo
+	return
 }

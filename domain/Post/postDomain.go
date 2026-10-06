@@ -37,43 +37,6 @@ func CreatePost(ctx context.Context, postUUID uuid.UUID, userUUID uuid.UUID, cha
 	return
 }
 
-func CreatePostsBulk(ctx context.Context, postUUIDs []uuid.UUID, channelUUIDs []uuid.UUID, userUUID uuid.UUID) (err error) {
-	// Row i pairs post i with channel i, so the two lists must agree. This check was already
-	// here and was right to be; it now goes through the shared helper so every bulk writer
-	// states the invariant the same way.
-	if err := helpers.RequireSameLength("domain/CreatePostsBulk",
-		helpers.NamedLen{Name: "postUUIDs", Len: len(postUUIDs)},
-		helpers.NamedLen{Name: "channelUUIDs", Len: len(channelUUIDs)},
-	); err != nil {
-		return err
-	}
-
-	if len(postUUIDs) == 0 {
-		return nil
-	}
-
-	query := `INSERT INTO posts (id, post_channel, created_by) VALUES `
-	values := []interface{}{}
-	placeholders := []string{}
-
-	for i := 0; i < len(postUUIDs); i++ {
-		placeholders = append(placeholders, fmt.Sprintf("($%d, $%d, $%d)", i*3+1, i*3+2, i*3+3))
-		values = append(values, postUUIDs[i], channelUUIDs[i], userUUID)
-	}
-
-	query += strings.Join(placeholders, ",")
-
-	err = models.BulkInsertPost(query, values...)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/CreatePostsBulk Failed to create posts err: %+v",
-			err)
-		return err
-	}
-
-	return nil
-}
-
 func UpdatePostByUUID(ctx context.Context, postUUID uuid.UUID, currentTime time.Time) (err error) {
 	query := `
 		UPDATE posts
@@ -241,6 +204,7 @@ func GetDgraphOldPostFromDgraph(ctx context.Context, channelUUID string, lastPos
 						post_by {
 							user_uuid
 							user_name
+							user_full_name
 							user_profile_object_key
 							is_bot
 							user_status
@@ -304,6 +268,7 @@ func GetDgraphNewPostFromDgraph(ctx context.Context, channelUUID string, lastPos
 						post_by {
 							user_uuid
 							user_name
+							user_full_name
 							user_profile_object_key
 							is_bot
 							user_status
@@ -368,6 +333,7 @@ func GetDgraphNewPostIncludiongPostFromDgraph(ctx context.Context, channelUUID s
 						post_by {
 							user_uuid
 							user_name
+							user_full_name
 							user_profile_object_key
 							is_bot
 							user_status
@@ -416,6 +382,7 @@ func GetDgraphPostOnlyTextDgraph(ctx context.Context, postUUID string) (dgraphPo
 						uid
 						user_uuid
 						user_name
+						user_full_name
 						user_profile_object_key
 						is_bot
 						user_status
@@ -454,6 +421,7 @@ func GetDgraphLatestPostFromDgraph(ctx context.Context, channelUUID string) (dgr
 						post_by {
 							user_uuid
 							user_name
+							user_full_name
 							user_profile_object_key
 							is_bot
 							user_status
@@ -488,6 +456,7 @@ func GetDgraphLatestPostFromDgraph(ctx context.Context, channelUUID string) (dgr
 							post_by {
 								user_uuid
 								user_name
+								user_full_name
 								user_profile_object_key
 								is_bot
 								user_status
@@ -515,6 +484,7 @@ func GetDgraphLatestPostFromDgraph(ctx context.Context, channelUUID string) (dgr
 							post_by {
 								user_uuid
 								user_name
+								user_full_name
 								user_profile_object_key
 								is_bot
 								user_status
@@ -538,48 +508,6 @@ func GetDgraphLatestPostFromDgraph(ctx context.Context, channelUUID string) (dgr
 	return
 }
 
-// GetDgraphRecentPostsForAI fetches lightweight recent posts for AI summarization.
-// Returns only text, author, and timestamp — no attachments/reactions/comments.
-func GetDgraphRecentPostsForAI(ctx context.Context, channelUUID string, count int) (dgraphPosts []*dgraphStruct.DgraphPost, channelName string, err error) {
-
-	variables := make(map[string]string)
-	variables["$chId"] = channelUUID
-	variables["$first"] = strconv.Itoa(count)
-	query := `query PostInfo($chId: string, $first: int){
-				postInfo(func: eq(ch_uuid, $chId)) @filter(NOT has(ch_deleted_at)) {
-					ch_name
-
-					ch_posts @filter(not gt(post_deleted_at, "1970-01-01T00:00:00Z") ) (orderdesc: post_created_at, first: $first) {
-						post_uuid
-						post_text
-						post_created_at
-						post_by {
-							user_uuid
-							user_name
-							user_full_name
-						}
-					}
-				}
-			}`
-
-	// Use the same underlying DGraph query mechanism
-	dgraphPosts, err = dgraphModels.GetDgraphPosts(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphRecentPostsForAI Failed to get posts from dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	// Channel name will be resolved from the user's DGraph channel list
-	// since GetDgraphPosts only returns the posts array
-	channelName = channelUUID
-
-	return
-}
-
 func GetUnDeletedDgraphPostChannelBasicInfo(ctx context.Context, postUUID string) (dgraphPost *dgraphStruct.DgraphPost, err error) {
 
 	variables := make(map[string]string)
@@ -594,6 +522,7 @@ func GetUnDeletedDgraphPostChannelBasicInfo(ctx context.Context, postUUID string
 						uid
 						user_uuid
 						user_name
+						user_full_name
 						user_status
 					}
 					post_channel {
@@ -636,6 +565,7 @@ func GetDgraphPostByUUIDWithAllComments(ctx context.Context, postUUID string, us
 						uid
 						user_uuid
 						user_name
+						user_full_name
 						user_profile_object_key
 						is_bot
 					}
@@ -646,6 +576,7 @@ func GetDgraphPostByUUIDWithAllComments(ctx context.Context, postUUID string, us
 						post_by {
 							user_uuid
 							user_name
+							user_full_name
 							user_profile_object_key
 							is_bot
 						}
@@ -661,6 +592,7 @@ func GetDgraphPostByUUIDWithAllComments(ctx context.Context, postUUID string, us
 						post_by {
 							user_uuid
 							user_name
+							user_full_name
 							user_profile_object_key
 							is_bot
 							user_status
@@ -724,6 +656,7 @@ func GetDgraphPostByUUIDWithAllComments(ctx context.Context, postUUID string, us
 							user_profile_object_key
 							is_bot
 							user_name
+							user_full_name
 						}
 						comment_created_at
 					}
@@ -762,6 +695,7 @@ func GetDgraphPostByUUIDWithChannelMembers(ctx context.Context, postUUID string,
 						uid
 						user_uuid
 						user_name
+						user_full_name
 						user_profile_object_key
 						is_bot
 					}
@@ -809,6 +743,7 @@ func GetDgraphPostByUUID(ctx context.Context, postUUID string, userDraphUid stri
 						uid
 						user_uuid
 						user_name
+						user_full_name
 						user_profile_object_key
 						is_bot
 					}
@@ -884,20 +819,6 @@ func DeletePostReaction(ctx context.Context, postDgraphUUID string, reactionDgra
 	}
 
 	return
-}
-
-func CreatePostInOpenSearch(openSearchPost *openSearchStruct.OpenSearchPost) {
-	ctx := context.Background()
-	err := OpenSearchModels.CreatePostInOpenSearch(ctx, openSearchPost)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/CreatePostInOpenSearch Failed to insert to openSearch err: %+v",
-			err,
-		)
-		return
-	}
-
 }
 
 func UpdatePostInOpenSearch(openSearchPost *openSearchStruct.OpenSearchPost) {
@@ -1062,28 +983,6 @@ func DeletePostWithAttachmentsInOpenSearch(openSearchPost *openSearchStruct.Open
 
 }
 
-// GetPostIdsOlderThan returns UUIDs of active posts created before the cutoff.
-func GetPostIdsOlderThan(ctx context.Context, cutoff time.Time) ([]string, error) {
-	query := `SELECT id::text FROM posts WHERE created_at < $1 AND deleted_at IS NULL`
-	ids, err := models.GetEntityIdsOlderThan(query, cutoff)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/GetPostIdsOlderThan Failed err: %+v", err)
-		return nil, err
-	}
-	return ids, nil
-}
-
-// BulkArchivePosts soft-deletes posts created before the cutoff.
-func BulkArchivePosts(ctx context.Context, cutoff time.Time) (int64, error) {
-	query := `UPDATE posts SET deleted_at = NOW(), updated_at = NOW() WHERE created_at < $1 AND deleted_at IS NULL`
-	count, err := models.BulkArchiveEntity(query, cutoff)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/BulkArchivePosts Failed err: %+v", err)
-		return 0, err
-	}
-	return count, nil
-}
-
 // BulkArchivePostsInDgraph sets post_deleted_at on multiple posts in a single Dgraph mutation (batched).
 func BulkArchivePostsInDgraph(ctx context.Context, postUUIDs []string) error {
 	if len(postUUIDs) == 0 {
@@ -1184,4 +1083,119 @@ func AddAttachmentToPostInDgraph(ctx context.Context, postUUID string, att *dgra
 		return err
 	}
 	return nil
+}
+
+func CreatePostsBulk(ctx context.Context, postUUIDs []uuid.UUID, channelUUIDs []uuid.UUID, userUUID uuid.UUID) (err error) {
+	// Row i pairs post i with channel i, so the two lists must agree. This check was already
+	// here and was right to be; it now goes through the shared helper so every bulk writer
+	// states the invariant the same way.
+	if err := helpers.RequireSameLength("domain/CreatePostsBulk",
+		helpers.NamedLen{Name: "postUUIDs", Len: len(postUUIDs)},
+		helpers.NamedLen{Name: "channelUUIDs", Len: len(channelUUIDs)},
+	); err != nil {
+		return err
+	}
+
+	if len(postUUIDs) == 0 {
+		return nil
+	}
+
+	query := `INSERT INTO posts (id, post_channel, created_by) VALUES `
+	values := []interface{}{}
+	placeholders := []string{}
+
+	for i := 0; i < len(postUUIDs); i++ {
+		placeholders = append(placeholders, fmt.Sprintf("($%d, $%d, $%d)", i*3+1, i*3+2, i*3+3))
+		values = append(values, postUUIDs[i], channelUUIDs[i], userUUID)
+	}
+
+	query += strings.Join(placeholders, ",")
+
+	err = models.BulkInsertPost(query, values...)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/CreatePostsBulk Failed to create posts err: %+v",
+			err)
+		return err
+	}
+
+	return nil
+}
+
+// GetDgraphRecentPostsForAI fetches lightweight recent posts for AI summarization.
+// Returns only text, author, and timestamp — no attachments/reactions/comments.
+func GetDgraphRecentPostsForAI(ctx context.Context, channelUUID string, count int) (dgraphPosts []*dgraphStruct.DgraphPost, channelName string, err error) {
+
+	variables := make(map[string]string)
+	variables["$chId"] = channelUUID
+	variables["$first"] = strconv.Itoa(count)
+	query := `query PostInfo($chId: string, $first: int){
+				postInfo(func: eq(ch_uuid, $chId)) @filter(NOT has(ch_deleted_at)) {
+					ch_name
+
+					ch_posts @filter(not gt(post_deleted_at, "1970-01-01T00:00:00Z") ) (orderdesc: post_created_at, first: $first) {
+						post_uuid
+						post_text
+						post_created_at
+						post_by {
+							user_uuid
+							user_name
+							user_full_name
+						}
+					}
+				}
+			}`
+
+	// Use the same underlying DGraph query mechanism
+	dgraphPosts, err = dgraphModels.GetDgraphPosts(ctx, query, variables)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetDgraphRecentPostsForAI Failed to get posts from dgraph err: %+v",
+			err,
+		)
+		return
+	}
+
+	// Channel name will be resolved from the user's DGraph channel list
+	// since GetDgraphPosts only returns the posts array
+	channelName = channelUUID
+
+	return
+}
+
+func CreatePostInOpenSearch(openSearchPost *openSearchStruct.OpenSearchPost) {
+	ctx := context.Background()
+	err := OpenSearchModels.CreatePostInOpenSearch(ctx, openSearchPost)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/CreatePostInOpenSearch Failed to insert to openSearch err: %+v",
+			err,
+		)
+		return
+	}
+
+}
+
+// GetPostIdsOlderThan returns UUIDs of active posts created before the cutoff.
+func GetPostIdsOlderThan(ctx context.Context, cutoff time.Time) ([]string, error) {
+	query := `SELECT id::text FROM posts WHERE created_at < $1 AND deleted_at IS NULL`
+	ids, err := models.GetEntityIdsOlderThan(query, cutoff)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetPostIdsOlderThan Failed err: %+v", err)
+		return nil, err
+	}
+	return ids, nil
+}
+
+// BulkArchivePosts soft-deletes posts created before the cutoff.
+func BulkArchivePosts(ctx context.Context, cutoff time.Time) (int64, error) {
+	query := `UPDATE posts SET deleted_at = NOW(), updated_at = NOW() WHERE created_at < $1 AND deleted_at IS NULL`
+	count, err := models.BulkArchiveEntity(query, cutoff)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/BulkArchivePosts Failed err: %+v", err)
+		return 0, err
+	}
+	return count, nil
 }

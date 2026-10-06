@@ -121,23 +121,6 @@ func BulkUpdateGrpIdInChatAndAtachment(ctx context.Context, oldGrpID string, new
 	return
 }
 
-func GetChatByUUID(ctx context.Context, chatUUID uuid.UUID) (chatInfo *models.Chat, err error) {
-	query := `
-		SELECT id, created_by, created_at, updated_at, deleted_at
-        FROM chats
-        WHERE id = $1
-	`
-	chatInfo, err = models.GetChatByUUID(query, chatUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetChatByUUID Failed to get chat err: %+v",
-			err)
-		return
-	}
-	return
-}
-
 func SoftDeleteChatByUUIUD(ctx context.Context, chatUUID uuid.UUID) (err error) {
 	query := `
 		UPDATE chats
@@ -278,6 +261,7 @@ func GetDgraphChatOnlyTextByUUID(ctx context.Context, chatUUID string) (dgraphCh
 						uid
 						user_uuid
 						user_name
+						user_full_name
 						user_profile_object_key
 						is_bot
 						user_deleted_at
@@ -317,6 +301,14 @@ func GetDgraphChatOnlyTextByUUID(ctx context.Context, chatUUID string) (dgraphCh
 
 }
 
+// dmParticipantVisible is who a DM shows as its participants: everyone but
+// external users, except bots. Bots are external by class (they are not
+// members) but they are messageable, which is why the DM user picker and
+// channel members already exempt them. Leaving them out here made a DM with
+// OneCamp AI show no other participant, so the list named it after the reader
+// themselves.
+const dmParticipantVisible = "NOT eq(is_external, true) OR eq(is_bot, true)"
+
 func GetDgraphChatBasicByUUID(ctx context.Context, chatUUID string, userDgraphUID string) (dgraphChat *dgraphStruct.DgraphChat, err error) {
 	variables := make(map[string]string)
 	variables["$id"] = chatUUID
@@ -329,6 +321,7 @@ func GetDgraphChatBasicByUUID(ctx context.Context, chatUUID string, userDgraphUI
 						uid
 						user_uuid
 						user_name
+						user_full_name
 						user_profile_object_key
 						is_bot
 						user_deleted_at
@@ -336,9 +329,10 @@ func GetDgraphChatBasicByUUID(ctx context.Context, chatUUID string, userDgraphUI
 					chat_dm {
 						dm_grouping_id
 						dm_is_member: count(dm_participants @filter(uid($userId)))
-						dm_participants @filter(NOT eq(is_external, true)) {
+						dm_participants @filter(` + dmParticipantVisible + `) {
 							user_uuid
 							user_name
+							user_full_name
 							user_profile_object_key
 							is_bot
 						}
@@ -380,6 +374,7 @@ func GetDgraphChatByUUID(ctx context.Context, chatUUID string) (dgraphChat *dgra
 						uid
 						user_uuid
 						user_name
+						user_full_name
 						user_profile_object_key
 						is_bot
 						user_deleted_at
@@ -436,6 +431,7 @@ func GetUserListWithLatestChatWithUserIdAndSearchText(ctx context.Context, userU
 							chat_body_text
 							chat_from {
 								user_name
+								user_full_name
 							}
 							chat_created_at
 							chat_attachments {
@@ -443,8 +439,9 @@ func GetUserListWithLatestChatWithUserIdAndSearchText(ctx context.Context, userU
 								attachment_file_name
 							}
 						}
-						dm_participants @filter(regexp(user_name,  /.*%s.*/i) AND NOT eq(is_external, true)) {
+						dm_participants @filter(regexp(user_name,  /.*%s.*/i) AND (`+dmParticipantVisible+`)) {
 							user_name
+							user_full_name
 							user_profile_object_key
 							is_bot
 							user_device_connected
@@ -477,9 +474,10 @@ func GetUserChatListWithLatestChat(ctx context.Context, userUUID string) (dgraph
 					user_uuid
 					user_dms @cascade(dm_chats){
 						dm_grouping_id
-						dm_participants @filter(NOT eq(is_external, true)) {
+						dm_participants @filter(` + dmParticipantVisible + `) {
 							user_uuid
 							user_name
+							user_full_name
 							user_profile_object_key
 							is_bot
 							user_device_connected
@@ -492,6 +490,7 @@ func GetUserChatListWithLatestChat(ctx context.Context, userUUID string) (dgraph
 							chat_from {
 								user_uuid
 								user_name
+								user_full_name
 								user_profile_object_key
 								is_bot
 								user_device_connected
@@ -543,6 +542,7 @@ func GetDgraphOldChatFromDgraph(ctx context.Context, groupingId string, lastChat
 						chat_from {
 							user_uuid
 							user_name
+							user_full_name
 							user_profile_object_key
 							is_bot
 							user_deleted_at
@@ -600,6 +600,7 @@ func GetDgraphOldChatFromDgraph(ctx context.Context, groupingId string, lastChat
 							chat_from {
 								user_uuid
 								user_name
+								user_full_name
 								user_profile_object_key
 								is_bot
 							}
@@ -611,6 +612,7 @@ func GetDgraphOldChatFromDgraph(ctx context.Context, groupingId string, lastChat
 							chat_from {
 								user_uuid
 								user_name
+								user_full_name
 								user_profile_object_key
 								is_bot
 							}
@@ -648,6 +650,7 @@ func GetDgraphNewChatFromDgraph(ctx context.Context, groupingId string, lastChat
 						chat_from {
 							user_uuid
 							user_name
+							user_full_name
 							user_profile_object_key
 							is_bot
 							user_deleted_at
@@ -705,6 +708,7 @@ func GetDgraphNewChatFromDgraph(ctx context.Context, groupingId string, lastChat
 							chat_from {
 								user_uuid
 								user_name
+								user_full_name
 								user_profile_object_key
 								is_bot
 							}
@@ -716,6 +720,7 @@ func GetDgraphNewChatFromDgraph(ctx context.Context, groupingId string, lastChat
 							chat_from {
 								user_uuid
 								user_name
+								user_full_name
 								user_profile_object_key
 								is_bot
 							}
@@ -729,73 +734,6 @@ func GetDgraphNewChatFromDgraph(ctx context.Context, groupingId string, lastChat
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/GetDgraphNewPostFromDgraph Failed to get chats in dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
-}
-
-func GetDgraphDmBasicInfoWithChatInfoFromDgraph(ctx context.Context, userId string, groupingId string) (dgraphDm *dgraphStruct.DgraphDm, err error) {
-	variables := make(map[string]string)
-	variables["$grpId"] = groupingId
-	variables["$userId"] = userId
-
-	query := `
-			query DmInfo($grpId: string, $userId: string){
-				dmInfo(func: eq(dm_grouping_id, $grpId)) {
-					dm_participants @filter(NOT eq(is_external, true)) {
-						user_uuid
-						user_name
-						user_profile_object_key
-						is_bot
-					}
-					dm_is_member: count(dm_participants @filter(uid($userId)))
-					dm_chats: {
-						uid
-						chat_from {
-							uid
-							user_uuid
-							user_name
-							user_profile_object_key
-							is_bot
-							user_deleted_at
-						}
-						chat_to {
-							uid
-							user_uuid
-							user_name
-							user_profile_object_key
-							is_bot
-							user_deleted_at
-						}
-						chat_created_at
-						chat_updated_at
-						chat_deleted_at
-						chat_body_text
-						chat_reactions  {
-							uid
-							reaction_emoji_id
-							reaction_added_by {
-								user_uuid
-								user_name
-							}
-						}
-						chat_attachments {
-							attachment_file_name
-							attachment_obj_key
-						}
-						chat_uuid
-					}
-				}
-			}`
-
-	dgraphDm, err = dgraphModels.GetDgraphBasicDmsInfoByGrpId(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphNewChatIncludingChatFromDgraph Failed to get chats in dgraph err: %+v",
 			err,
 		)
 		return
@@ -928,9 +866,10 @@ func GetDgraphDmBasicInfoFromDgraph(ctx context.Context, userId string, grouping
 				dmInfo(func: eq(dm_grouping_id, $grpId)) {
 					uid
 					dm_grouping_id
-					dm_participants @filter(NOT eq(is_external, true)) {
+					dm_participants @filter(` + dmParticipantVisible + `) {
 						user_uuid
 						user_name
+						user_full_name
 						user_email_id
 						user_job_title
 						user_profile_object_key
@@ -969,6 +908,7 @@ func GetDgraphNewChatIncludingChatFromDgraph(ctx context.Context, groupingId str
 						chat_from {
 							user_uuid
 							user_name
+							user_full_name
 							user_profile_object_key
 							is_bot
 							user_deleted_at
@@ -1026,6 +966,7 @@ func GetDgraphNewChatIncludingChatFromDgraph(ctx context.Context, groupingId str
 							chat_from {
 								user_uuid
 								user_name
+								user_full_name
 								user_profile_object_key
 								is_bot
 							}
@@ -1037,6 +978,7 @@ func GetDgraphNewChatIncludingChatFromDgraph(ctx context.Context, groupingId str
 							chat_from {
 								user_uuid
 								user_name
+								user_full_name
 								user_profile_object_key
 								is_bot
 							}
@@ -1072,6 +1014,7 @@ func GetDgraphLatestChatFromDgraph(ctx context.Context, groupingId string) (dgra
 						chat_from {
 							user_uuid
 							user_name
+							user_full_name
 							user_profile_object_key
 							is_bot
 							user_deleted_at
@@ -1129,6 +1072,7 @@ func GetDgraphLatestChatFromDgraph(ctx context.Context, groupingId string) (dgra
 							chat_from {
 								user_uuid
 								user_name
+								user_full_name
 								user_profile_object_key
 								is_bot
 							}
@@ -1140,6 +1084,7 @@ func GetDgraphLatestChatFromDgraph(ctx context.Context, groupingId string) (dgra
 							chat_from {
 								user_uuid
 								user_name
+								user_full_name
 								user_profile_object_key
 								is_bot
 							}
@@ -1230,6 +1175,7 @@ func GetDgraphChatByUUIDWithAllComments(ctx context.Context, chatUUID string) (d
 					chat_from {
 						user_uuid
 						user_name
+						user_full_name
 						user_profile_object_key
 						is_bot
 					}
@@ -1304,20 +1250,6 @@ func GetDgraphChatByUUIDWithAllComments(ctx context.Context, chatUUID string) (d
 		return
 	}
 
-	return
-}
-
-func CreateChatInOpenSearch(openSearchChat *openSearchStruct.OpenSearchChat) (err error) {
-	ctx := context.Background()
-	err = OpenSearchModels.CreateChatInOpenSearch(ctx, openSearchChat)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/CreateChatInOpenSearch Failed to insert to openSearch err: %+v",
-			err,
-		)
-		return
-	}
 	return
 }
 
@@ -1511,10 +1443,11 @@ func GetUserGroupChatListWithSearchText(ctx context.Context, userUUID string, us
 				user_dms @filter(gt(count(dm_participants), 2)) {
 					uid
 					dm_grouping_id
-					dm_participants @filter(regexp(user_name, /.*%s.*/i) AND NOT eq(user_uuid, $user_id) AND NOT eq(is_external, true)) {
+					dm_participants @filter(regexp(user_name, /.*%s.*/i) AND NOT eq(user_uuid, $user_id) AND (`+dmParticipantVisible+`)) {
 						uid
 						user_uuid
 						user_name
+						user_full_name
 						user_profile_object_key
 						is_bot
 					}
@@ -1543,28 +1476,6 @@ func GetUserGroupChatListWithSearchText(ctx context.Context, userUUID string, us
 	}
 
 	return
-}
-
-// GetChatIdsOlderThan returns UUIDs of active chats created before the cutoff.
-func GetChatIdsOlderThan(ctx context.Context, cutoff time.Time) ([]string, error) {
-	query := `SELECT id::text FROM chats WHERE created_at < $1 AND deleted_at IS NULL`
-	ids, err := models.GetEntityIdsOlderThan(query, cutoff)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/GetChatIdsOlderThan Failed err: %+v", err)
-		return nil, err
-	}
-	return ids, nil
-}
-
-// BulkArchiveChats soft-deletes chats created before the cutoff.
-func BulkArchiveChats(ctx context.Context, cutoff time.Time) (int64, error) {
-	query := `UPDATE chats SET deleted_at = NOW(), updated_at = NOW() WHERE created_at < $1 AND deleted_at IS NULL`
-	count, err := models.BulkArchiveEntity(query, cutoff)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/BulkArchiveChats Failed err: %+v", err)
-		return 0, err
-	}
-	return count, nil
 }
 
 // BulkArchiveChatsInDgraph sets chat_deleted_at on multiple chats in a single Dgraph mutation (batched).
@@ -1705,4 +1616,124 @@ func GetDmParticipation(ctx context.Context, groupingId string, userDgraphUID st
 		return
 	}
 	return
+}
+
+func GetChatByUUID(ctx context.Context, chatUUID uuid.UUID) (chatInfo *models.Chat, err error) {
+	query := `
+		SELECT id, created_by, created_at, updated_at, deleted_at
+        FROM chats
+        WHERE id = $1
+	`
+	chatInfo, err = models.GetChatByUUID(query, chatUUID)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetChatByUUID Failed to get chat err: %+v",
+			err)
+		return
+	}
+	return
+}
+
+func GetDgraphDmBasicInfoWithChatInfoFromDgraph(ctx context.Context, userId string, groupingId string) (dgraphDm *dgraphStruct.DgraphDm, err error) {
+	variables := make(map[string]string)
+	variables["$grpId"] = groupingId
+	variables["$userId"] = userId
+
+	query := `
+			query DmInfo($grpId: string, $userId: string){
+				dmInfo(func: eq(dm_grouping_id, $grpId)) {
+					dm_participants @filter(NOT eq(is_external, true)) {
+						user_uuid
+						user_name
+						user_profile_object_key
+						is_bot
+					}
+					dm_is_member: count(dm_participants @filter(uid($userId)))
+					dm_chats: {
+						uid
+						chat_from {
+							uid
+							user_uuid
+							user_name
+							user_profile_object_key
+							is_bot
+							user_deleted_at
+						}
+						chat_to {
+							uid
+							user_uuid
+							user_name
+							user_profile_object_key
+							is_bot
+							user_deleted_at
+						}
+						chat_created_at
+						chat_updated_at
+						chat_deleted_at
+						chat_body_text
+						chat_reactions  {
+							uid
+							reaction_emoji_id
+							reaction_added_by {
+								user_uuid
+								user_name
+							}
+						}
+						chat_attachments {
+							attachment_file_name
+							attachment_obj_key
+						}
+						chat_uuid
+					}
+				}
+			}`
+
+	dgraphDm, err = dgraphModels.GetDgraphBasicDmsInfoByGrpId(ctx, query, variables)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetDgraphNewChatIncludingChatFromDgraph Failed to get chats in dgraph err: %+v",
+			err,
+		)
+		return
+	}
+
+	return
+}
+
+func CreateChatInOpenSearch(openSearchChat *openSearchStruct.OpenSearchChat) (err error) {
+	ctx := context.Background()
+	err = OpenSearchModels.CreateChatInOpenSearch(ctx, openSearchChat)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/CreateChatInOpenSearch Failed to insert to openSearch err: %+v",
+			err,
+		)
+		return
+	}
+	return
+}
+
+// GetChatIdsOlderThan returns UUIDs of active chats created before the cutoff.
+func GetChatIdsOlderThan(ctx context.Context, cutoff time.Time) ([]string, error) {
+	query := `SELECT id::text FROM chats WHERE created_at < $1 AND deleted_at IS NULL`
+	ids, err := models.GetEntityIdsOlderThan(query, cutoff)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetChatIdsOlderThan Failed err: %+v", err)
+		return nil, err
+	}
+	return ids, nil
+}
+
+// BulkArchiveChats soft-deletes chats created before the cutoff.
+func BulkArchiveChats(ctx context.Context, cutoff time.Time) (int64, error) {
+	query := `UPDATE chats SET deleted_at = NOW(), updated_at = NOW() WHERE created_at < $1 AND deleted_at IS NULL`
+	count, err := models.BulkArchiveEntity(query, cutoff)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/BulkArchiveChats Failed err: %+v", err)
+		return 0, err
+	}
+	return count, nil
 }

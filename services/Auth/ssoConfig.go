@@ -119,6 +119,29 @@ func FrontendBaseURL() string {
 	return scheme(frontendDomain) + "://" + strings.TrimRight(frontendDomain, "/")
 }
 
+// BackendBaseURL returns this server's public origin, with scheme, from
+// BACKEND_DOMAIN. The same scheme rule as FrontendBaseURL. Used wherever the
+// server names itself to someone outside: email links, and the OAuth issuer
+// and resource an MCP client checks against the URL it was given.
+func BackendBaseURL() string {
+	backend := strings.TrimRight(strings.TrimSpace(os.Getenv("BACKEND_DOMAIN")), "/")
+	if backend == "" {
+		backend = "localhost:3000"
+	}
+	if strings.HasPrefix(backend, "http://") || strings.HasPrefix(backend, "https://") {
+		return backend
+	}
+	return scheme(backend) + "://" + backend
+}
+
+// MCPResourceMetadataURL is where an MCP client that was refused learns how to
+// sign in (RFC 9728). Here rather than in the OAuth package so the API-token
+// middleware, which every edition compiles, can name it without importing
+// agent code.
+func MCPResourceMetadataURL() string {
+	return BackendBaseURL() + "/.well-known/oauth-protected-resource/v1/mcp"
+}
+
 // IsRedirectAllowed defends against open-redirect: only same-origin (FE base
 // URL) targets may be used as the post-login landing.
 //
@@ -146,19 +169,6 @@ func IsRedirectAllowed(target string) bool {
 	}
 	return strings.EqualFold(tgtURL.Scheme, feURL.Scheme) &&
 		strings.EqualFold(tgtURL.Host, feURL.Host)
-}
-
-// BackendBaseURL is this server's public origin: where a third party (Slack's
-// Events API, for one) must send its requests.
-func BackendBaseURL() string {
-	backend := strings.TrimRight(strings.TrimSpace(os.Getenv("BACKEND_DOMAIN")), "/")
-	if backend == "" {
-		backend = "localhost:3000"
-	}
-	if strings.HasPrefix(backend, "http://") || strings.HasPrefix(backend, "https://") {
-		return backend
-	}
-	return scheme(backend) + "://" + backend
 }
 
 func scheme(host string) string {

@@ -8,7 +8,6 @@ import (
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
-	"github.com/akashc777/OneCamp/helpers"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -263,7 +262,6 @@ func resolveUserUUID(ctx context.Context, job *importModels.Job, sourceId string
 	if err != nil || dgUser == nil {
 		return ocUUID, &userModels.UserInfo{UserPostgresInfo: *pgUser}
 	}
-	_ = helpers.LogDebugWithContext // satisfy the import; not used in hot path
 	return ocUUID, &userModels.UserInfo{
 		UserPostgresInfo: *pgUser,
 		UserDgraphInfo:   *dgUser,

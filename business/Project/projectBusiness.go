@@ -328,17 +328,6 @@ func recoverProjectMemoryCascade(phase string) {
 	}
 }
 
-func GetDgraphProjectInfo(ctx context.Context, projectUUID string, userDgraphUID string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
-	dgraphProject, err = domain.GetDgraphProjectInfoByUUID(ctx, projectUUID, userDgraphUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetDgraphProjectInfo failed to get project from dgraph err: %+v", err)
-		return
-	}
-
-	return
-}
-
 func GetBasicDgraphProjectInfo(ctx context.Context, projectUUID string, userDgraphUID string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
 	dgraphProject, err = domain.GetBasicDgraphProjectInfo(ctx, projectUUID, userDgraphUID)
 
@@ -461,8 +450,8 @@ func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgrap
 	return
 }
 
-func GetDgraphProjectTaskListForKanban(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
-	dgraphProject, err = domain.GetDgraphProjectTaskListForKanban(ctx, projectUUID, userDgraphUID, filterQuery)
+func GetDgraphProjectTaskListForKanban(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, closedLimit int) (dgraphProject *dgraphStruct.DgraphProject, err error) {
+	dgraphProject, err = domain.GetDgraphProjectTaskListForKanban(ctx, projectUUID, userDgraphUID, filterQuery, closedLimit)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/GetDgraphProjectTaskListForKanban failed to get project task list from dgraph err: %+v", err)
 		return
@@ -555,6 +544,17 @@ func GetDgraphProjectInfoAndTeamAdminFlag(ctx context.Context, projectUUID strin
 	dgraphProject, err = domain.GetDgraphProjectInfoAndTeamAdminFlagAndAttachments(ctx, projectUUID, userDgraphUID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/GetDgraphProjectInfoAndTeamAdminFlag failed to get projectInfo err: %+v", err)
+		return
+	}
+
+	return
+}
+
+func GetDgraphProjectInfo(ctx context.Context, projectUUID string, userDgraphUID string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
+	dgraphProject, err = domain.GetDgraphProjectInfoByUUID(ctx, projectUUID, userDgraphUID)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/GetDgraphProjectInfo failed to get project from dgraph err: %+v", err)
 		return
 	}
 

@@ -535,28 +535,6 @@ func HeartbeatChunk(ctx context.Context, chunkId uuid.UUID, itemsDone int, lastC
 	return err
 }
 
-// ReapStuckChunks resets in_progress chunks whose claim is older than
-// staleAfter back to pending so another worker can pick them up. Called
-// from a periodic ticker. Mirrors the GitHub-sync reaper pattern.
-func ReapStuckChunks(ctx context.Context, staleAfter time.Duration) (int64, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		UPDATE import_chunks
-		SET status = 'pending',
-		    claimed_by = NULL,
-		    claimed_at = NULL,
-		    updated_at = NOW()
-		WHERE status = 'in_progress'
-		  AND claimed_at < NOW() - $1::interval`,
-		fmt.Sprintf("%d milliseconds", staleAfter.Milliseconds()))
-	if err != nil {
-		return 0, err
-	}
-	n, _ := res.RowsAffected()
-	return n, nil
-}
-
 // CancelAllPendingChunks bulk-cancels every non-terminal chunk for a job.
 // Called when the operator clicks Cancel; in-progress workers detect the
 // job-status change via their periodic check and exit gracefully.
@@ -941,51 +919,6 @@ func SetContentHash(ctx context.Context, jobId uuid.UUID, hash string) error {
 	return err
 }
 
-// LookupWorkspaceMappingsBatch is the cross-import equivalent of
-// LookupIdMappingsBatch. Used at plan time to discount entities that
-// already exist in OneCamp from a previous import of the same workspace.
-//
-// Returns a map keyed by slack_id; missing keys mean "not yet imported
-// for this workspace".
-func LookupWorkspaceMappingsBatch(ctx context.Context, workspaceName, entityType string,
-	slackIds []string) (map[string]uuid.UUID, error) {
-
-	if len(slackIds) == 0 {
-		return map[string]uuid.UUID{}, nil
-	}
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	args := make([]interface{}, 0, len(slackIds)+2)
-	args = append(args, workspaceName, entityType)
-	placeholders := make([]string, 0, len(slackIds))
-	for _, s := range slackIds {
-		args = append(args, s)
-		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
-	}
-	q := fmt.Sprintf(`
-		SELECT source_id, onecamp_uuid FROM import_workspace_id_map
-		WHERE provider = 'slack' AND source_workspace_name = $1 AND entity_type = $2 AND source_id IN (%s)`,
-		joinComma(placeholders))
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := make(map[string]uuid.UUID, len(slackIds))
-	for rows.Next() {
-		var s string
-		var u uuid.UUID
-		if err := rows.Scan(&s, &u); err != nil {
-			return nil, err
-		}
-		out[s] = u
-	}
-	return out, rows.Err()
-}
-
 // LookupWorkspaceMapping is the single-key version of the batch helper.
 // Returns uuid.Nil and nil error when not found so callers can branch
 // cleanly without checking sql.ErrNoRows.
@@ -1070,88 +1003,6 @@ func IdMappingsByTypeOwned(ctx context.Context, importId uuid.UUID, entityType s
 }
 
 // ─── Cleanup support ─────────────────────────────────────────────────────
-
-// ListJobsForRawCleanup returns jobs whose raw_object_key should be
-// reaped: terminal status (completed/failed/cancelled/rolled_back),
-// completed_at older than cutoff, and raw_object_key still set.
-//
-// We bound at 200 rows per tick so a backlog from a long downtime can't
-// hammer MinIO with thousands of deletes in one shot. The next hourly
-// tick picks up the rest.
-func ListJobsForRawCleanup(ctx context.Context, cutoff time.Time) ([]*Job, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, `
-		SELECT id, source_workspace_name, source, raw_object_key, status, stage,
-		       started_at, completed_at, options, plan, progress,
-		       error_message, digest, triggered_by, created_at, updated_at
-		FROM import_jobs
-		WHERE provider = 'slack'
-		  AND status IN ('completed','failed','cancelled','rolled_back')
-		  AND raw_object_key IS NOT NULL
-		  AND COALESCE(completed_at, updated_at) < $1
-		ORDER BY COALESCE(completed_at, updated_at)
-		LIMIT 200`, cutoff)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := make([]*Job, 0, 16)
-	for rows.Next() {
-		j := &Job{}
-		if err := rows.Scan(
-			&j.Id, &j.SlackWorkspaceName, &j.Source, &j.RawObjectKey, &j.Status, &j.Stage,
-			&j.StartedAt, &j.CompletedAt, &j.Options, &j.Plan, &j.Progress,
-			&j.ErrorMessage, &j.Digest, &j.TriggeredBy, &j.CreatedAt, &j.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		out = append(out, j)
-	}
-	return out, rows.Err()
-}
-
-// ListAbandonedPendingJobs returns jobs in 'pending' status (created via
-// /presign but never finalised) older than cutoff. The orchestrator
-// never moves a job to 'pending' on its own, so any row in this state
-// is necessarily an abandoned upload.
-//
-// Bounded at 200 rows like ListJobsForRawCleanup.
-func ListAbandonedPendingJobs(ctx context.Context, cutoff time.Time) ([]*Job, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, `
-		SELECT id, source_workspace_name, source, raw_object_key, status, stage,
-		       started_at, completed_at, options, plan, progress,
-		       error_message, digest, triggered_by, created_at, updated_at
-		FROM import_jobs
-		WHERE provider = 'slack'
-		  AND status = 'pending'
-		  AND created_at < $1
-		ORDER BY created_at
-		LIMIT 200`, cutoff)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := make([]*Job, 0, 16)
-	for rows.Next() {
-		j := &Job{}
-		if err := rows.Scan(
-			&j.Id, &j.SlackWorkspaceName, &j.Source, &j.RawObjectKey, &j.Status, &j.Stage,
-			&j.StartedAt, &j.CompletedAt, &j.Options, &j.Plan, &j.Progress,
-			&j.ErrorMessage, &j.Digest, &j.TriggeredBy, &j.CreatedAt, &j.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		out = append(out, j)
-	}
-	return out, rows.Err()
-}
 
 // ClearRawObjectKey nullifies raw_object_key on a job. Called after the
 // staged ZIP has been deleted from MinIO (either by the cleanup loop,
@@ -1292,4 +1143,153 @@ func HasAnyOwnedMessageForDM(ctx context.Context, importId uuid.UUID, slackDMId 
 		return false, err
 	}
 	return exists, nil
+}
+
+// ReapStuckChunks resets in_progress chunks whose claim is older than
+// staleAfter back to pending so another worker can pick them up. Called
+// from a periodic ticker. Mirrors the GitHub-sync reaper pattern.
+func ReapStuckChunks(ctx context.Context, staleAfter time.Duration) (int64, error) {
+	dbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
+		UPDATE import_chunks
+		SET status = 'pending',
+		    claimed_by = NULL,
+		    claimed_at = NULL,
+		    updated_at = NOW()
+		WHERE status = 'in_progress'
+		  AND claimed_at < NOW() - $1::interval`,
+		fmt.Sprintf("%d milliseconds", staleAfter.Milliseconds()))
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// LookupWorkspaceMappingsBatch is the cross-import equivalent of
+// LookupIdMappingsBatch. Used at plan time to discount entities that
+// already exist in OneCamp from a previous import of the same workspace.
+//
+// Returns a map keyed by slack_id; missing keys mean "not yet imported
+// for this workspace".
+func LookupWorkspaceMappingsBatch(ctx context.Context, workspaceName, entityType string,
+	slackIds []string) (map[string]uuid.UUID, error) {
+
+	if len(slackIds) == 0 {
+		return map[string]uuid.UUID{}, nil
+	}
+	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	args := make([]interface{}, 0, len(slackIds)+2)
+	args = append(args, workspaceName, entityType)
+	placeholders := make([]string, 0, len(slackIds))
+	for _, s := range slackIds {
+		args = append(args, s)
+		placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+	}
+	q := fmt.Sprintf(`
+		SELECT source_id, onecamp_uuid FROM import_workspace_id_map
+		WHERE provider = 'slack' AND source_workspace_name = $1 AND entity_type = $2 AND source_id IN (%s)`,
+		joinComma(placeholders))
+
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]uuid.UUID, len(slackIds))
+	for rows.Next() {
+		var s string
+		var u uuid.UUID
+		if err := rows.Scan(&s, &u); err != nil {
+			return nil, err
+		}
+		out[s] = u
+	}
+	return out, rows.Err()
+}
+
+// ListJobsForRawCleanup returns jobs whose raw_object_key should be
+// reaped: terminal status (completed/failed/cancelled/rolled_back),
+// completed_at older than cutoff, and raw_object_key still set.
+//
+// We bound at 200 rows per tick so a backlog from a long downtime can't
+// hammer MinIO with thousands of deletes in one shot. The next hourly
+// tick picks up the rest.
+func ListJobsForRawCleanup(ctx context.Context, cutoff time.Time) ([]*Job, error) {
+	dbCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, `
+		SELECT id, source_workspace_name, source, raw_object_key, status, stage,
+		       started_at, completed_at, options, plan, progress,
+		       error_message, digest, triggered_by, created_at, updated_at
+		FROM import_jobs
+		WHERE provider = 'slack'
+		  AND status IN ('completed','failed','cancelled','rolled_back')
+		  AND raw_object_key IS NOT NULL
+		  AND COALESCE(completed_at, updated_at) < $1
+		ORDER BY COALESCE(completed_at, updated_at)
+		LIMIT 200`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]*Job, 0, 16)
+	for rows.Next() {
+		j := &Job{}
+		if err := rows.Scan(
+			&j.Id, &j.SlackWorkspaceName, &j.Source, &j.RawObjectKey, &j.Status, &j.Stage,
+			&j.StartedAt, &j.CompletedAt, &j.Options, &j.Plan, &j.Progress,
+			&j.ErrorMessage, &j.Digest, &j.TriggeredBy, &j.CreatedAt, &j.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// ListAbandonedPendingJobs returns jobs in 'pending' status (created via
+// /presign but never finalised) older than cutoff. The orchestrator
+// never moves a job to 'pending' on its own, so any row in this state
+// is necessarily an abandoned upload.
+//
+// Bounded at 200 rows like ListJobsForRawCleanup.
+func ListAbandonedPendingJobs(ctx context.Context, cutoff time.Time) ([]*Job, error) {
+	dbCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, `
+		SELECT id, source_workspace_name, source, raw_object_key, status, stage,
+		       started_at, completed_at, options, plan, progress,
+		       error_message, digest, triggered_by, created_at, updated_at
+		FROM import_jobs
+		WHERE provider = 'slack'
+		  AND status = 'pending'
+		  AND created_at < $1
+		ORDER BY created_at
+		LIMIT 200`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]*Job, 0, 16)
+	for rows.Next() {
+		j := &Job{}
+		if err := rows.Scan(
+			&j.Id, &j.SlackWorkspaceName, &j.Source, &j.RawObjectKey, &j.Status, &j.Stage,
+			&j.StartedAt, &j.CompletedAt, &j.Options, &j.Plan, &j.Progress,
+			&j.ErrorMessage, &j.Digest, &j.TriggeredBy, &j.CreatedAt, &j.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
 }

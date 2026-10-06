@@ -147,52 +147,6 @@ func CheckIfUserExistByUsername(query string, uname string) (exist bool, err err
 	return
 }
 
-func GetUserByUname(query string, uname *string) (user *User, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var userInfo User
-	var userName sql.NullString
-	var createdAt sql.NullTime
-	var updatedAt sql.NullTime
-	var deletedAt sql.NullTime
-
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, uname)
-	err = row.Scan(
-		&userInfo.Id,
-		&userName,
-		&userInfo.EmailID,
-		&createdAt,
-		&updatedAt,
-		&deletedAt,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetUserByUname Failed to get user err: %+v",
-			err)
-		return
-	}
-
-	if userName.Valid {
-		// userInfo.UserName = userName.String
-	}
-
-	if createdAt.Valid {
-		userInfo.CreatedAt = createdAt.Time
-	}
-
-	if updatedAt.Valid {
-		userInfo.UpdatedAt = updatedAt.Time
-	}
-
-	if deletedAt.Valid {
-		userInfo.DeletedAt = deletedAt.Time
-	}
-
-	return &userInfo, nil
-}
-
 func GetUserByEmailId(query string, emailID *string) (user *User, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -320,27 +274,6 @@ func GetUserByUUID(query string, uuid uuid.UUID) (user *User, err error) {
 
 }
 
-func UpdateUNameByEmailID(query string, uName string, currentTime time.Time, emailID string) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		uName,
-		currentTime,
-		emailID,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/UpdateUNameByEmailID Failed to update user name err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func UpdateDeletedTimeByUUID(query string, deleteTime *time.Time, updateTime *time.Time, userUUID uuid.UUID) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -380,51 +313,6 @@ func UpdateDeletedTimeToNullByUUID(query string, updateTime *time.Time, userUUID
 	}
 
 	return
-}
-
-func GetAdminUserByUserUUID(query string, userUUID uuid.UUID) (user *User, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var userInfo User
-	var userName sql.NullString
-	var createdAt sql.NullTime
-	var updatedAt sql.NullTime
-	var deletedAt sql.NullTime
-
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, userUUID)
-	err = row.Scan(
-		&userInfo.Id,
-		&userInfo.EmailID,
-		&createdAt,
-		&updatedAt,
-		&deletedAt,
-	)
-
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetAdminUserByUserUUID Failed to get user err: %+v",
-			err)
-		return
-	}
-
-	if userName.Valid {
-		// userInfo.UserName = userName.String
-	}
-
-	if createdAt.Valid {
-		userInfo.CreatedAt = createdAt.Time
-	}
-
-	if updatedAt.Valid {
-		userInfo.UpdatedAt = updatedAt.Time
-	}
-
-	if deletedAt.Valid {
-		user.DeletedAt = deletedAt.Time
-	}
-
-	return &userInfo, nil
 }
 
 func HardDeleteAdminUserByEmailId(query string, emailId string) (err error) {
@@ -778,4 +666,172 @@ func HardDeleteUser(query string, userUUID uuid.UUID) (err error) {
 		return
 	}
 	return
+}
+
+// DisplayNamesByUUIDs labels a set of users in one query.
+//
+// For any list that holds user ids and has to show who they are. Without it
+// each row costs its own lookup, which is how an N+1 gets into a page that
+// renders a thousand rows — and the first caller, the agents list, renders up
+// to a thousand.
+//
+// Falls back to the address when no display name is set: a row that says
+// "acting as" and then nothing is worse than one that says an email, and this
+// is admin-facing, where the audit log already shows addresses.
+//
+// Unknown and deleted ids are simply absent from the map, so a caller that
+// ranges over its own ids decides what a missing one should read as.
+func DisplayNamesByUUIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]string, error) {
+	out := make(map[uuid.UUID]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	args := make([]string, 0, len(ids))
+	seen := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		if id == uuid.Nil || seen[id] {
+			continue
+		}
+		seen[id] = true
+		args = append(args, id.String())
+	}
+	if len(args) == 0 {
+		return out, nil
+	}
+
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx,
+		`SELECT id, COALESCE(NULLIF(display_name, ''), email_id)
+		 FROM users WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`,
+		"{"+strings.Join(args, ",")+"}")
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/DisplayNamesByUUIDs err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id uuid.UUID
+		var label string
+		if err := rows.Scan(&id, &label); err != nil {
+			return nil, err
+		}
+		out[id] = label
+	}
+	return out, rows.Err()
+}
+
+func GetUserByUname(query string, uname *string) (user *User, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	var userInfo User
+	var userName sql.NullString
+	var createdAt sql.NullTime
+	var updatedAt sql.NullTime
+	var deletedAt sql.NullTime
+
+	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, uname)
+	err = row.Scan(
+		&userInfo.Id,
+		&userName,
+		&userInfo.EmailID,
+		&createdAt,
+		&updatedAt,
+		&deletedAt,
+	)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/GetUserByUname Failed to get user err: %+v",
+			err)
+		return
+	}
+
+	if userName.Valid {
+		// userInfo.UserName = userName.String
+	}
+
+	if createdAt.Valid {
+		userInfo.CreatedAt = createdAt.Time
+	}
+
+	if updatedAt.Valid {
+		userInfo.UpdatedAt = updatedAt.Time
+	}
+
+	if deletedAt.Valid {
+		userInfo.DeletedAt = deletedAt.Time
+	}
+
+	return &userInfo, nil
+}
+
+func UpdateUNameByEmailID(query string, uName string, currentTime time.Time, emailID string) (err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	_, err = postgresInit.DBConn.SqlDB.ExecContext(
+		ctx,
+		query,
+		uName,
+		currentTime,
+		emailID,
+	)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/UpdateUNameByEmailID Failed to update user name err: %+v",
+			err)
+		return
+	}
+
+	return
+}
+
+func GetAdminUserByUserUUID(query string, userUUID uuid.UUID) (user *User, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	var userInfo User
+	var userName sql.NullString
+	var createdAt sql.NullTime
+	var updatedAt sql.NullTime
+	var deletedAt sql.NullTime
+
+	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, userUUID)
+	err = row.Scan(
+		&userInfo.Id,
+		&userInfo.EmailID,
+		&createdAt,
+		&updatedAt,
+		&deletedAt,
+	)
+
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		helpers.LogErrorWithContext(ctx,
+			"models/GetAdminUserByUserUUID Failed to get user err: %+v",
+			err)
+		return
+	}
+
+	if userName.Valid {
+		// userInfo.UserName = userName.String
+	}
+
+	if createdAt.Valid {
+		userInfo.CreatedAt = createdAt.Time
+	}
+
+	if updatedAt.Valid {
+		userInfo.UpdatedAt = updatedAt.Time
+	}
+
+	if deletedAt.Valid {
+		user.DeletedAt = deletedAt.Time
+	}
+
+	return &userInfo, nil
 }

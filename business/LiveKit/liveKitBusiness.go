@@ -117,20 +117,6 @@ func IsAgentIdentity(identity string) bool {
 	return livekitInit.IsAgentIdentity(identity)
 }
 
-func ListAllRooms(ctx context.Context) (rooms []*livekit.Room, err error) {
-	rooms, err = livekitInit.LiveKitService.ListAllRooms(ctx)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/ListAllRooms Failed to list all livekit rooms err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
-}
-
 func CreateRoomAndGetToken(ctx context.Context, roomId string, userDgraphInfo *dgraphStruct.DgraphUser, isAdmin bool, audioEnabled bool, videoEnabled bool) (token string, alreadyExisted bool, err error) {
 
 	alreadyExisted, err = CheckRoomExists(ctx, roomId)
@@ -188,6 +174,20 @@ func StopRecording(ctx context.Context, roomName string) (err error) {
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/StopRecording Failed to stop recording err: %+v",
+			err,
+		)
+		return
+	}
+
+	return
+}
+
+func ListAllRooms(ctx context.Context) (rooms []*livekit.Room, err error) {
+	rooms, err = livekitInit.LiveKitService.ListAllRooms(ctx)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/ListAllRooms Failed to list all livekit rooms err: %+v",
 			err,
 		)
 		return

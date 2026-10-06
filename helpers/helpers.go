@@ -336,11 +336,6 @@ func LogErrorWithContext(ctx context.Context, message string, args ...interface{
 	LogWithContext(ctx, "ERROR", message, args...)
 }
 
-// LogDebugWithContext logs a debug message with context
-func LogDebugWithContext(ctx context.Context, message string, args ...interface{}) {
-	LogWithContext(ctx, "DEBUG", message, args...)
-}
-
 // LogWarnWithContext logs a warning message with context
 func LogWarnWithContext(ctx context.Context, message string, args ...interface{}) {
 	LogWithContext(ctx, "WARN", message, args...)
@@ -351,23 +346,6 @@ func LogWarnWithContext(ctx context.Context, message string, args ...interface{}
 // string onto the pre-slog MessageLogs pair; it was referenced by nothing, and it could only
 // express two levels, silently folding WARN and DEBUG into the info log. MessageLogs itself
 // stays — direct *log.Logger users remain — but nothing should route by level through it.
-
-func ReadJSON(w http.ResponseWriter, r *http.Request, data interface{}) error {
-	maxByte := 1048576
-	r.Body = http.MaxBytesReader(w, r.Body, int64(maxByte))
-	dec := json.NewDecoder(r.Body)
-	err := dec.Decode(data)
-	if err != nil {
-		return err
-	}
-
-	err = dec.Decode(&struct{}{})
-
-	if err != nil {
-		return errors.New("Body must have only a single json object")
-	}
-	return nil
-}
 
 func WriteJSON(w http.ResponseWriter, status int, data interface{}, headers ...http.Header) {
 	// Strip error values before they reach the wire. See RedactErrorsInResponse: ~790 handlers
@@ -415,26 +393,6 @@ func ErrorJSON(w http.ResponseWriter, err error, status ...int) {
 	payload.Error = true
 	payload.Message = err.Error()
 	WriteJSON(w, statusCode, payload)
-}
-
-func GetHashTags(source string) (res []string, err error) {
-	re, err := regexp.Compile(`\#[a-zA-Z]+\b`)
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetHashTags Failed to compile regex err: %+v",
-			err)
-		return
-	}
-
-	matches := re.FindAllString(source, -1)
-
-	for _, match := range matches {
-		if match[len(match)-1] != ';' {
-			res = append(res, match[1:])
-		}
-	}
-
-	return
 }
 
 func GetUserEmojiExipryTime(expiryAt string, loc *time.Location) (finalExpiryTime time.Time) {
@@ -606,21 +564,6 @@ func GetMqttTopicForDmTyping(groupingId string) (topicName string) {
 		return
 	}
 
-	return "typing/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
-}
-
-func GetMqttTopicForBroadcast() (topicName string) {
-
-	JWTKey := os.Getenv("JWT_SECRET")
-	key := sha256.Sum256([]byte(JWTKey))
-
-	ciphertext, err := encrypt([]byte("public_broadcast"), key[:])
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetMqttTopicForChannelTyping Failed to encrypt err: %+v",
-			err)
-		return
-	}
 	return "typing/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
 }
 
@@ -977,17 +920,6 @@ func IsValidName(name string) bool {
 	return n >= 2 && n <= 40 && workspaceNamePattern.MatchString(name)
 }
 
-func StringSliceToJSONString(slice []string) string {
-	if slice == nil {
-		return "[]"
-	}
-	jsonData, err := json.Marshal(slice)
-	if err != nil {
-		return "[]"
-	}
-	return string(jsonData)
-}
-
 func Int64Pointer(v int64) *int64 {
 	return &v
 }
@@ -1074,4 +1006,72 @@ func edgeSafeStatus(status int) int {
 		return http.StatusServiceUnavailable
 	}
 	return status
+}
+
+// LogDebugWithContext logs a debug message with context
+func LogDebugWithContext(ctx context.Context, message string, args ...interface{}) {
+	LogWithContext(ctx, "DEBUG", message, args...)
+}
+
+func ReadJSON(w http.ResponseWriter, r *http.Request, data interface{}) error {
+	maxByte := 1048576
+	r.Body = http.MaxBytesReader(w, r.Body, int64(maxByte))
+	dec := json.NewDecoder(r.Body)
+	err := dec.Decode(data)
+	if err != nil {
+		return err
+	}
+
+	err = dec.Decode(&struct{}{})
+
+	if err != nil {
+		return errors.New("Body must have only a single json object")
+	}
+	return nil
+}
+
+func GetHashTags(source string) (res []string, err error) {
+	re, err := regexp.Compile(`\#[a-zA-Z]+\b`)
+	if err != nil {
+		MessageLogs.ErrorLog.Printf(
+			"helpers/GetHashTags Failed to compile regex err: %+v",
+			err)
+		return
+	}
+
+	matches := re.FindAllString(source, -1)
+
+	for _, match := range matches {
+		if match[len(match)-1] != ';' {
+			res = append(res, match[1:])
+		}
+	}
+
+	return
+}
+
+func GetMqttTopicForBroadcast() (topicName string) {
+
+	JWTKey := os.Getenv("JWT_SECRET")
+	key := sha256.Sum256([]byte(JWTKey))
+
+	ciphertext, err := encrypt([]byte("public_broadcast"), key[:])
+	if err != nil {
+		MessageLogs.ErrorLog.Printf(
+			"helpers/GetMqttTopicForChannelTyping Failed to encrypt err: %+v",
+			err)
+		return
+	}
+	return "typing/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
+}
+
+func StringSliceToJSONString(slice []string) string {
+	if slice == nil {
+		return "[]"
+	}
+	jsonData, err := json.Marshal(slice)
+	if err != nil {
+		return "[]"
+	}
+	return string(jsonData)
 }

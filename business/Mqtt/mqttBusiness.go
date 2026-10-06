@@ -717,19 +717,6 @@ func PublishToTopics(topics []string, msgType int8, data interface{}) {
 	}
 }
 
-func MqttClientConnectedByUserId(ctx context.Context, userUUID string) (err error) {
-
-	err = userDomain.IncrementDeviceConnectedDgraphUser(ctx, userUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/MqttClientConnectedByUserId failed to increment user device connected err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func PublishGitHubSync(mqttGitHubSync *mqttStruct.MqttGitHubSync, projectId string) {
 	ctx := context.Background()
 
@@ -912,4 +899,17 @@ func PublishPollUpdate(channelId, pollId string) {
 			helpers.LogErrorWithContext(ctx, "business/PublishPollUpdate publish err: %+v", res.Error())
 		}
 	}()
+}
+
+func MqttClientConnectedByUserId(ctx context.Context, userUUID string) (err error) {
+
+	err = userDomain.IncrementDeviceConnectedDgraphUser(ctx, userUUID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/MqttClientConnectedByUserId failed to increment user device connected err: %+v",
+			err)
+		return
+	}
+
+	return
 }

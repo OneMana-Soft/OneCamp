@@ -192,21 +192,6 @@ func HandleGoogleCalendarWebhookEvent(ctx context.Context, channelID, channelTok
 	return nil
 }
 
-// HandleGoogleCalendarWebhook is the legacy entry point; retained to
-// keep the package's external surface stable. Delegates to the new
-// header-only variant.
-func HandleGoogleCalendarWebhook(ctx context.Context, req *http.Request) error {
-	if req == nil {
-		return nil
-	}
-	return HandleGoogleCalendarWebhookEvent(ctx,
-		req.Header.Get("X-Goog-Channel-ID"),
-		req.Header.Get("X-Goog-Channel-Token"),
-		req.Header.Get("X-Goog-Resource-State"),
-		req.Header.Get("X-Goog-Resource-ID"),
-	)
-}
-
 func UpdateGoogleCalendarSyncTask(ctx context.Context, enabled bool, userInfo *model.UserInfo) error {
 	userId := userInfo.UserPostgresInfo.Id
 	err := domain.UpdateTaskSyncEnabled(ctx, "user", userId, "google_calendar", enabled)
@@ -645,6 +630,21 @@ func DeclineGoogleCalendarEvent(ctx context.Context, googleEventId string, userI
 		helpers.LogErrorWithContext(ctx, "business/DeclineGoogleCalendarEvent failed to patch event %s err: %+v", googleEventId, err)
 	}
 	return err
+}
+
+// HandleGoogleCalendarWebhook is the legacy entry point; retained to
+// keep the package's external surface stable. Delegates to the new
+// header-only variant.
+func HandleGoogleCalendarWebhook(ctx context.Context, req *http.Request) error {
+	if req == nil {
+		return nil
+	}
+	return HandleGoogleCalendarWebhookEvent(ctx,
+		req.Header.Get("X-Goog-Channel-ID"),
+		req.Header.Get("X-Goog-Channel-Token"),
+		req.Header.Get("X-Goog-Resource-State"),
+		req.Header.Get("X-Goog-Resource-ID"),
+	)
 }
 
 func CreateGoogleCalendarEvent(ctx context.Context, input adapter.CreateOrUpdateEventInput, userInfo *model.UserInfo) (string, error) {

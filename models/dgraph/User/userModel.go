@@ -142,29 +142,6 @@ func GetDgraphUsersList(ctx context.Context, query string, variables map[string]
 	return
 }
 
-func ExecDgraphQuery(ctx context.Context, query string, setJson []byte) (err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
-	mu := &api.Mutation{
-		SetJson: setJson,
-	}
-	req := &api.Request{
-		Query:     query,
-		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
-	}
-
-	_, err = txn.Do(ctx, req)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/ExecDgraphQuery failed to get user err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func DeleteUserEdge(ctx context.Context, delStringJSON string) (err error) {
 	txn := dgraphInit.DgraphClient.NewTxn()
 
@@ -194,4 +171,27 @@ func DeleteUserEdge(ctx context.Context, delStringJSON string) (err error) {
 	}()
 
 	return nil
+}
+
+func ExecDgraphQuery(ctx context.Context, query string, setJson []byte) (err error) {
+	txn := dgraphInit.DgraphClient.NewTxn()
+
+	mu := &api.Mutation{
+		SetJson: setJson,
+	}
+	req := &api.Request{
+		Query:     query,
+		Mutations: []*api.Mutation{mu},
+		CommitNow: true,
+	}
+
+	_, err = txn.Do(ctx, req)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"models/ExecDgraphQuery failed to get user err: %+v",
+			err)
+		return
+	}
+
+	return
 }

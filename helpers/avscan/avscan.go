@@ -104,20 +104,6 @@ func Default() Scanner {
 	return nil
 }
 
-// ScanWithDefault is the call-site convenience: scan via the default
-// scanner if one is configured, otherwise return VerdictUnknown,nil.
-//
-// Honours AVSCAN_FAIL_OPEN. With fail-open=true (default), scanner
-// errors are logged-and-ignored at the caller; this function returns
-// (VerdictUnknown, err) and the caller decides whether to allow.
-func ScanWithDefault(ctx context.Context, r io.Reader) (Result, error) {
-	s := Default()
-	if s == nil {
-		return Result{Verdict: VerdictUnknown}, nil
-	}
-	return s.Scan(ctx, r)
-}
-
 // FailOpen reports whether the operator wants to allow uploads when
 // the scanner errors. Default true; set AVSCAN_FAIL_OPEN=false to
 // switch to fail-closed (refuse uploads when AV is down).
@@ -283,4 +269,18 @@ func (c *ClamAV) Scan(ctx context.Context, r io.Reader) (Result, error) {
 	default:
 		return Result{Verdict: VerdictUnknown, Bytes: totalSent}, fmt.Errorf("clamd unexpected response: %q", resp)
 	}
+}
+
+// ScanWithDefault is the call-site convenience: scan via the default
+// scanner if one is configured, otherwise return VerdictUnknown,nil.
+//
+// Honours AVSCAN_FAIL_OPEN. With fail-open=true (default), scanner
+// errors are logged-and-ignored at the caller; this function returns
+// (VerdictUnknown, err) and the caller decides whether to allow.
+func ScanWithDefault(ctx context.Context, r io.Reader) (Result, error) {
+	s := Default()
+	if s == nil {
+		return Result{Verdict: VerdictUnknown}, nil
+	}
+	return s.Scan(ctx, r)
 }

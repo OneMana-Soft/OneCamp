@@ -274,38 +274,6 @@ func ExecJobs(ctx context.Context, query string, args []any) ([]*ScheduledJob, e
 	return jobs, rows.Err()
 }
 
-// GetByID returns a single job (nil if not found / soft-deleted).
-func GetByID(ctx context.Context, id uuid.UUID) (*ScheduledJob, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	const q = `SELECT ` + SelectColumns + ` FROM scheduled_jobs WHERE id = $1 AND deleted_at IS NULL`
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, id)
-	j, err := scanFullJob(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/GetByID err: %+v", err)
-		return nil, err
-	}
-	return j, nil
-}
-
-// CancelByUser soft-cancels a job the user owns. Returns true if a row changed.
-func CancelByUser(ctx context.Context, id uuid.UUID, userUUID uuid.UUID) (bool, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	const q = `UPDATE scheduled_jobs SET status = 'cancelled', updated_at = NOW()
-		WHERE id = $1 AND user_uuid = $2 AND status IN ('pending','running') AND deleted_at IS NULL`
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, userUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/CancelByUser err: %+v", err)
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
-}
-
 // GetUserJob returns one of a user's jobs of a type, or nil when it is not
 // theirs (or does not exist), so a caller can never reach another's job.
 func GetUserJob(ctx context.Context, id, userUUID uuid.UUID, jobType string) (*ScheduledJob, error) {
@@ -391,4 +359,36 @@ func CountJobs(ctx context.Context, query string, args []any) (int, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+// GetByID returns a single job (nil if not found / soft-deleted).
+func GetByID(ctx context.Context, id uuid.UUID) (*ScheduledJob, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	const q = `SELECT ` + SelectColumns + ` FROM scheduled_jobs WHERE id = $1 AND deleted_at IS NULL`
+	row := postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, id)
+	j, err := scanFullJob(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/GetByID err: %+v", err)
+		return nil, err
+	}
+	return j, nil
+}
+
+// CancelByUser soft-cancels a job the user owns. Returns true if a row changed.
+func CancelByUser(ctx context.Context, id uuid.UUID, userUUID uuid.UUID) (bool, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	const q = `UPDATE scheduled_jobs SET status = 'cancelled', updated_at = NOW()
+		WHERE id = $1 AND user_uuid = $2 AND status IN ('pending','running') AND deleted_at IS NULL`
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, userUUID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/CancelByUser err: %+v", err)
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }

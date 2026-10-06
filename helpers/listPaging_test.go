@@ -23,3 +23,12 @@ func TestListPaging(t *testing.T) {
 		}
 	}
 }
+
+func TestClosedLimit(t *testing.T) {
+	q := func(s string) url.Values { v, _ := url.ParseQuery(s); return v }
+	for in, want := range map[string]int{"": 200, "closedLimit=x": 200, "closedLimit=50": 200, "closedLimit=400": 400, "closedLimit=99999": 2000} {
+		if got := ClosedLimit(q(in)); got != want {
+			t.Errorf("%q: got %d, want %d", in, got, want)
+		}
+	}
+}

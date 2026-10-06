@@ -63,14 +63,6 @@ var (
 	appCtx = context.Background()
 )
 
-// SetAppContext sets the application-level context for background webhook operations.
-// Call this once at application startup (e.g. from main or router setup).
-func SetAppContext(ctx context.Context) {
-	if ctx != nil {
-		appCtx = ctx
-	}
-}
-
 // Pre-compiled mrkdwn regexes for block rendering performance.
 var (
 	reMrkdwnBold     = regexp.MustCompile(`\*([^*]+)\*`)
@@ -1345,4 +1337,12 @@ func renderMrkdwn(text string) string {
 	})
 
 	return "<p>" + text + "</p>"
+}
+
+// SetAppContext sets the application-level context for background webhook operations.
+// Call this once at application startup (e.g. from main or router setup).
+func SetAppContext(ctx context.Context) {
+	if ctx != nil {
+		appCtx = ctx
+	}
 }

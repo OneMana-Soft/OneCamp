@@ -610,26 +610,6 @@ func flushMessageContext(ctx context.Context, mc *messageContext) {
 	_ = importModels.HeartbeatChunk(ctx, mc.chunkId, mc.itemsDone, &cursor)
 }
 
-// scheduleFileChunk inserts a single file chunk into the queue. The metadata payload
-// carries the URL and original Slack file id so the file worker doesn't need to crack
-// the zip again.
-//
-// unreachable-by-design: kept for callers that want immediate persistence (a path that
-// cannot reasonably batch). Every per-message loop prefers buildFileChunk +
-// flushFileChunks to amortise the round-trip, so nothing calls this today. Retained
-// rather than deleted because it is the correct API for the unbatched case, and
-// deleting it would only mean writing it again the first time that case appears.
-func scheduleFileChunk(ctx context.Context, importId uuid.UUID, channelSlackId, parentTs string, f SlackFile) {
-	chunk := buildFileChunk(importId, channelSlackId, parentTs, f)
-	if chunk == nil {
-		return
-	}
-	if err := importModels.CreateChunks(ctx, []*importModels.Chunk{chunk}); err != nil {
-		helpers.LogWarnWithContext(ctx,
-			"SlackImport.scheduleFileChunk insert failed file=%s err=%+v", f.ID, err)
-	}
-}
-
 // buildFileChunk constructs a single ChunkFile row in memory without
 // touching Postgres. Used by callers that buffer up file enqueues and
 // flush in batch via flushFileChunks.
@@ -925,4 +905,24 @@ func applyMessageDelete(ctx context.Context, mc *messageContext, originalTs stri
 		return nil
 	}
 	return nil
+}
+
+// scheduleFileChunk inserts a single file chunk into the queue. The metadata payload
+// carries the URL and original Slack file id so the file worker doesn't need to crack
+// the zip again.
+//
+// unreachable-by-design: kept for callers that want immediate persistence (a path that
+// cannot reasonably batch). Every per-message loop prefers buildFileChunk +
+// flushFileChunks to amortise the round-trip, so nothing calls this today. Retained
+// rather than deleted because it is the correct API for the unbatched case, and
+// deleting it would only mean writing it again the first time that case appears.
+func scheduleFileChunk(ctx context.Context, importId uuid.UUID, channelSlackId, parentTs string, f SlackFile) {
+	chunk := buildFileChunk(importId, channelSlackId, parentTs, f)
+	if chunk == nil {
+		return
+	}
+	if err := importModels.CreateChunks(ctx, []*importModels.Chunk{chunk}); err != nil {
+		helpers.LogWarnWithContext(ctx,
+			"SlackImport.scheduleFileChunk insert failed file=%s err=%+v", f.ID, err)
+	}
 }

@@ -5,11 +5,12 @@ import (
 
 	"context"
 	"encoding/json"
+	"net/http"
+	"strings"
+
 	models "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
-	"net/http"
-	"strings"
 
 	adapter "github.com/akashc777/OneCamp/adapter/LiveKit"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
@@ -183,13 +184,16 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 			// Skipped for instant meetings (meet-<uuid>): they are not tied to
 			// a channel/DM/group conversation, so there is no surface to post
 			// a recap into.
-			// Meeting recap is an AI-edition feature. v1 has no recap agent.
+			if !guestBusiness.IsMeetingRoom(roomName) {
+				/* AI call omitted in v1 */
+			}
 
-			// The workflow trigger is NOT an AI feature and belongs here too: a
-			// finished call is the workspace event most likely to produce work,
-			// and on this edition it is the only thing that reacts to one.
-			// Detached and panic-guarded inside, so a workflow can never hold up
-			// or crash call teardown.
+			// A finished call is the workspace event most likely to produce
+			// work — a decision to record, a task somebody agreed to, a status
+			// update the team is waiting on — and until now it was the only one
+			// nothing could react to. Detached and panic-guarded inside, so a
+			// workflow can never hold up or crash call teardown. Present on
+			// both editions: the workflow engine is not an AI feature.
 			workflowBusiness.NotifyMeetingEnded(roomName)
 		}
 

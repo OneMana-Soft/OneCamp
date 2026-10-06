@@ -100,12 +100,6 @@ func register(p Provider) {
 	providerRegistry[p.ID] = p
 }
 
-// GetProvider returns a provider definition by id.
-func GetProvider(id string) (Provider, bool) {
-	p, ok := providerRegistry[id]
-	return p, ok
-}
-
 // Providers returns all registered connector providers (stable order by name).
 func Providers() []Provider {
 	out := make([]Provider, 0, len(providerRegistry))
@@ -223,4 +217,10 @@ func Disconnect(ctx context.Context, userUUID uuid.UUID, provider string) error 
 // key it must bust.
 func invalidateBriefingDayCache(ctx context.Context, userUUID uuid.UUID) {
 	_ = redisStore.Delete(ctx, registry.ConnectorBriefingDay, []string{userUUID.String()})
+}
+
+// GetProvider returns a provider definition by id.
+func GetProvider(id string) (Provider, bool) {
+	p, ok := providerRegistry[id]
+	return p, ok
 }

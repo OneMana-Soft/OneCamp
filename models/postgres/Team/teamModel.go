@@ -56,52 +56,6 @@ func CheckIfTeamExistByTeamName(query string, teamName string) (exist bool, err 
 	return
 }
 
-func GetTeamByUUID(query string, uuid uuid.UUID) (team *Team, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var teamInfo Team
-	var teamName sql.NullString
-	var createdAt sql.NullTime
-	var updatedAt sql.NullTime
-	var deletedAt sql.NullTime
-
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, uuid)
-	err = row.Scan(
-		&teamInfo.Id,
-		&teamName,
-		&teamInfo.CreatedBy,
-		&createdAt,
-		&updatedAt,
-		&deletedAt,
-	)
-
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetTeamByUUID Failed to get team err: %+v",
-			err)
-		return
-	}
-	if teamName.Valid {
-		teamInfo.TeamName = teamName.String
-	}
-
-	if createdAt.Valid {
-		teamInfo.CreatedAt = createdAt.Time
-	}
-
-	if updatedAt.Valid {
-		teamInfo.UpdatedAt = updatedAt.Time
-	}
-
-	if deletedAt.Valid {
-		teamInfo.DeletedAt = deletedAt.Time
-	}
-
-	return &teamInfo, nil
-
-}
-
 func UpdateTeamNameByTeamUUID(query string, teamName string, teamUUID uuid.UUID, currentTime time.Time) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -185,4 +139,50 @@ func HardDeleteTeam(query string, teamUUID uuid.UUID) (err error) {
 		return
 	}
 	return
+}
+
+func GetTeamByUUID(query string, uuid uuid.UUID) (team *Team, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	var teamInfo Team
+	var teamName sql.NullString
+	var createdAt sql.NullTime
+	var updatedAt sql.NullTime
+	var deletedAt sql.NullTime
+
+	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, uuid)
+	err = row.Scan(
+		&teamInfo.Id,
+		&teamName,
+		&teamInfo.CreatedBy,
+		&createdAt,
+		&updatedAt,
+		&deletedAt,
+	)
+
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		helpers.LogErrorWithContext(ctx,
+			"models/GetTeamByUUID Failed to get team err: %+v",
+			err)
+		return
+	}
+	if teamName.Valid {
+		teamInfo.TeamName = teamName.String
+	}
+
+	if createdAt.Valid {
+		teamInfo.CreatedAt = createdAt.Time
+	}
+
+	if updatedAt.Valid {
+		teamInfo.UpdatedAt = updatedAt.Time
+	}
+
+	if deletedAt.Valid {
+		teamInfo.DeletedAt = deletedAt.Time
+	}
+
+	return &teamInfo, nil
+
 }

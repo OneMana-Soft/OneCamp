@@ -36,6 +36,14 @@ func MarkGitHubWebhookDeliveryFailed(ctx context.Context, deliveryID, errMsg str
 	return models.MarkDeliveryFailed(ctx, deliveryID, errMsg)
 }
 
+// GetGitHubWebhookHealth surfaces aggregate inbound delivery stats
+// (count of completed / failed / still-processing in the last 24h plus
+// the last error message) so admins can spot flaky webhook behaviour
+// without trawling the DB.
+func GetGitHubWebhookHealth(ctx context.Context) (*models.HealthSummary, error) {
+	return models.GetHealthSummary(ctx)
+}
+
 // RecordGitHubWebhookDelivery is the legacy dedup primitive. It inserts
 // a row in 'completed' state on receipt — meaning a failed first attempt
 // was permanently lost. Kept for callers that haven't migrated to the
@@ -54,12 +62,4 @@ func RecordGitHubWebhookDelivery(ctx context.Context, deliveryID string, eventTy
 		return false, err
 	}
 	return inserted, nil
-}
-
-// GetGitHubWebhookHealth surfaces aggregate inbound delivery stats
-// (count of completed / failed / still-processing in the last 24h plus
-// the last error message) so admins can spot flaky webhook behaviour
-// without trawling the DB.
-func GetGitHubWebhookHealth(ctx context.Context) (*models.HealthSummary, error) {
-	return models.GetHealthSummary(ctx)
 }

@@ -1,6 +1,7 @@
 package models
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -434,6 +435,22 @@ type DgraphMemoryItem struct {
 // finished work sent all of it to every board load; the *_count fields carry
 // the real totals.
 const BoardClosedLimit = 200
+
+// BoardClosedMax is the most a board may ask for with "show more".
+const BoardClosedMax = 2000
+
+// ClosedFirst is the Dgraph paging for a board's closed columns: the newest
+// limit of them, or all of them when limit is 0 (the time report needs every
+// task's name).
+func ClosedFirst(limit int) string {
+	if limit <= 0 {
+		return ""
+	}
+	if limit > BoardClosedMax {
+		limit = BoardClosedMax
+	}
+	return fmt.Sprintf(", first: %d", limit)
+}
 
 type DgraphEvent struct {
 	Uid                   string        `json:"uid,omitempty"`

@@ -553,74 +553,6 @@ func GetDgraphBasicTaskInfoWithAttachmentsByUUID(ctx context.Context, teamUUID s
 	return
 }
 
-func GetDgraphBasicTaskInfoByUUIDWithProjectMembers(ctx context.Context, teamUUID string, userDgraphUID string) (dgraphTask *dgraphStruct.DgraphTask, err error) {
-
-	variables := make(map[string]string)
-	variables["$id"] = teamUUID
-	variables["$userUid"] = userDgraphUID
-	query := `query TaskInfo($id: string, $userUid: string){
-				taskInfo(func: eq(task_uuid, $id)) {
-					uid
-					task_uuid
-					task_name
-					task_status
-					task_priority
-					task_label
-					task_start_date
-					task_due_date
-					task_description
-					task_team {
-						team_name
-						team_uuid
-					}
-					task_attachments {
-						uid
-						attachment_uuid
-						attachment_file_name
-					}
-					task_project {
-						uid
-						project_uuid
-						project_name
-						project_is_member: count(project_members @filter(uid($userUid)))
-						project_is_admin: count(project_admins @filter(uid($userUid))) 
-						project_members {
-							user_uuid
-							user_name
-							user_profile_object_key
-						}
-
-					}
-					task_assignee {
-						uid
-						user_uuid
-						user_name
-						user_profile_object_key
-					}
-					task_parent_task {
-						task_uuid
-						task_name
-					}
-					task_created_by {
-						uid
-						user_uuid
-					}
-				}
-			}`
-
-	dgraphTask, err = dgraphModels.GetDgraphTaskInfoByUUID(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphBasicTaskInfoByUUIDWithProjectMembers Failed to get task in dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
-}
-
 func GetDgraphBasicTaskInfoByUUID(ctx context.Context, teamUUID string, userDgraphUID string) (dgraphTask *dgraphStruct.DgraphTask, err error) {
 
 	variables := make(map[string]string)
@@ -908,39 +840,6 @@ func GetDgraphTaskInfoByUUID(ctx context.Context, teamUUID string, userDgraphUID
 	return
 }
 
-// GetTaskIdsOlderThan returns UUIDs of active tasks created before the cutoff.
-func GetTaskIdsOlderThan(ctx context.Context, cutoff time.Time) ([]string, error) {
-	query := `SELECT id::text FROM tasks WHERE created_at < $1 AND deleted_at IS NULL`
-	ids, err := models.GetEntityIdsOlderThan(query, cutoff)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/GetTaskIdsOlderThan Failed err: %+v", err)
-		return nil, err
-	}
-	return ids, nil
-}
-
-// BulkArchiveTasks soft-deletes tasks created before the cutoff.
-func BulkArchiveTasks(ctx context.Context, cutoff time.Time) (int64, error) {
-	query := `UPDATE tasks SET deleted_at = NOW(), updated_at = NOW() WHERE created_at < $1 AND deleted_at IS NULL`
-	count, err := models.BulkArchiveEntity(query, cutoff)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/BulkArchiveTasks Failed err: %+v", err)
-		return 0, err
-	}
-	return count, nil
-}
-
-// LinkPRToTaskByBranch sets PR fields on a task matching the given branch within a project.
-func LinkPRToTaskByBranch(ctx context.Context, prNumber int, prURL string, branch string, projectId uuid.UUID) (taskUUID string, err error) {
-	query := `UPDATE tasks SET github_pr_number = $1, github_pr_url = $2 WHERE github_branch = $3 AND project_id = $4 RETURNING id::text`
-	taskUUID, err = models.LinkPRToTaskByBranch(query, prNumber, prURL, branch, projectId)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/LinkPRToTaskByBranch Failed err: %+v", err)
-		return "", err
-	}
-	return taskUUID, nil
-}
-
 // SetGitHubPRFieldsOnTask sets PR metadata on a specific task.
 func SetGitHubPRFieldsOnTask(ctx context.Context, taskUUID uuid.UUID, prNumber int, prURL string, branch string) error {
 	query := `UPDATE tasks SET github_pr_number = $1, github_pr_url = $2, github_branch = $3, github_last_synced_at = NOW(), updated_at = NOW() WHERE id = $4`
@@ -991,17 +890,6 @@ func FindTaskUUIDByGitHubIssueURL(ctx context.Context, issueURL string) (string,
 	taskUUID, err := models.FindTaskUUIDByGitHubIssueURL(query, issueURL)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/FindTaskUUIDByGitHubIssueURL Failed err: %+v", err)
-		return "", err
-	}
-	return taskUUID, nil
-}
-
-// FindTaskUUIDByGitHubPRURL finds a task by its GitHub PR URL.
-func FindTaskUUIDByGitHubPRURL(ctx context.Context, prURL string) (string, error) {
-	query := `SELECT id::text FROM tasks WHERE github_pr_url = $1 AND deleted_at IS NULL LIMIT 1`
-	taskUUID, err := models.FindTaskUUIDByGitHubPRURL(query, prURL)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/FindTaskUUIDByGitHubPRURL Failed err: %+v", err)
 		return "", err
 	}
 	return taskUUID, nil
@@ -1097,17 +985,6 @@ func FindTaskUUIDByGitHubBranch(ctx context.Context, branch string) (string, err
 		return "", err
 	}
 	return taskUUID, nil
-}
-
-// GetTaskLastSyncedAtByTaskID returns the last sync time for a task by its UUID.
-func GetTaskLastSyncedAtByTaskID(ctx context.Context, taskUUID uuid.UUID) (*time.Time, error) {
-	query := `SELECT github_last_synced_at FROM tasks WHERE id = $1 LIMIT 1`
-	lastSyncedAt, err := models.GetTaskLastSyncedAtByTaskID(query, taskUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/GetTaskLastSyncedAtByTaskID Failed err: %+v", err)
-		return nil, err
-	}
-	return lastSyncedAt, nil
 }
 
 // SetGitHubLastSyncedAt updates the last sync timestamp for a task.
@@ -1446,4 +1323,127 @@ func GetDgraphTaskForGuest(ctx context.Context, taskUUID string) (*dgraphStruct.
 		helpers.LogErrorWithContext(ctx, "domain/GetDgraphTaskForGuest err: %+v", err)
 	}
 	return t, err
+}
+
+func GetDgraphBasicTaskInfoByUUIDWithProjectMembers(ctx context.Context, teamUUID string, userDgraphUID string) (dgraphTask *dgraphStruct.DgraphTask, err error) {
+
+	variables := make(map[string]string)
+	variables["$id"] = teamUUID
+	variables["$userUid"] = userDgraphUID
+	query := `query TaskInfo($id: string, $userUid: string){
+				taskInfo(func: eq(task_uuid, $id)) {
+					uid
+					task_uuid
+					task_name
+					task_status
+					task_priority
+					task_label
+					task_start_date
+					task_due_date
+					task_description
+					task_team {
+						team_name
+						team_uuid
+					}
+					task_attachments {
+						uid
+						attachment_uuid
+						attachment_file_name
+					}
+					task_project {
+						uid
+						project_uuid
+						project_name
+						project_is_member: count(project_members @filter(uid($userUid)))
+						project_is_admin: count(project_admins @filter(uid($userUid))) 
+						project_members {
+							user_uuid
+							user_name
+							user_profile_object_key
+						}
+
+					}
+					task_assignee {
+						uid
+						user_uuid
+						user_name
+						user_profile_object_key
+					}
+					task_parent_task {
+						task_uuid
+						task_name
+					}
+					task_created_by {
+						uid
+						user_uuid
+					}
+				}
+			}`
+
+	dgraphTask, err = dgraphModels.GetDgraphTaskInfoByUUID(ctx, query, variables)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetDgraphBasicTaskInfoByUUIDWithProjectMembers Failed to get task in dgraph err: %+v",
+			err,
+		)
+		return
+	}
+
+	return
+}
+
+// GetTaskIdsOlderThan returns UUIDs of active tasks created before the cutoff.
+func GetTaskIdsOlderThan(ctx context.Context, cutoff time.Time) ([]string, error) {
+	query := `SELECT id::text FROM tasks WHERE created_at < $1 AND deleted_at IS NULL`
+	ids, err := models.GetEntityIdsOlderThan(query, cutoff)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetTaskIdsOlderThan Failed err: %+v", err)
+		return nil, err
+	}
+	return ids, nil
+}
+
+// BulkArchiveTasks soft-deletes tasks created before the cutoff.
+func BulkArchiveTasks(ctx context.Context, cutoff time.Time) (int64, error) {
+	query := `UPDATE tasks SET deleted_at = NOW(), updated_at = NOW() WHERE created_at < $1 AND deleted_at IS NULL`
+	count, err := models.BulkArchiveEntity(query, cutoff)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/BulkArchiveTasks Failed err: %+v", err)
+		return 0, err
+	}
+	return count, nil
+}
+
+// LinkPRToTaskByBranch sets PR fields on a task matching the given branch within a project.
+func LinkPRToTaskByBranch(ctx context.Context, prNumber int, prURL string, branch string, projectId uuid.UUID) (taskUUID string, err error) {
+	query := `UPDATE tasks SET github_pr_number = $1, github_pr_url = $2 WHERE github_branch = $3 AND project_id = $4 RETURNING id::text`
+	taskUUID, err = models.LinkPRToTaskByBranch(query, prNumber, prURL, branch, projectId)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/LinkPRToTaskByBranch Failed err: %+v", err)
+		return "", err
+	}
+	return taskUUID, nil
+}
+
+// FindTaskUUIDByGitHubPRURL finds a task by its GitHub PR URL.
+func FindTaskUUIDByGitHubPRURL(ctx context.Context, prURL string) (string, error) {
+	query := `SELECT id::text FROM tasks WHERE github_pr_url = $1 AND deleted_at IS NULL LIMIT 1`
+	taskUUID, err := models.FindTaskUUIDByGitHubPRURL(query, prURL)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/FindTaskUUIDByGitHubPRURL Failed err: %+v", err)
+		return "", err
+	}
+	return taskUUID, nil
+}
+
+// GetTaskLastSyncedAtByTaskID returns the last sync time for a task by its UUID.
+func GetTaskLastSyncedAtByTaskID(ctx context.Context, taskUUID uuid.UUID) (*time.Time, error) {
+	query := `SELECT github_last_synced_at FROM tasks WHERE id = $1 LIMIT 1`
+	lastSyncedAt, err := models.GetTaskLastSyncedAtByTaskID(query, taskUUID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetTaskLastSyncedAtByTaskID Failed err: %+v", err)
+		return nil, err
+	}
+	return lastSyncedAt, nil
 }
