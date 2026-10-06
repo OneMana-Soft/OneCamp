@@ -1,7 +1,8 @@
 package domain
 
 // notPaused is the push gate every token lookup shares: a person who has
-// paused notifications, or is inside their quiet hours, gets no push. It sits
+// paused notifications, is inside their quiet hours, or is in one of their own
+// focus-time events (migration 184), gets no push. It sits
 // in the SQL so the ten places that send pushes need no change of their own.
 // userCol is the lookup's user id column (its tables use different aliases).
 //
@@ -25,5 +26,10 @@ func notPaused(userCol string) string {
 		            THEN ` + local + ` >= p.quiet_hours_start::time AND ` + local + ` < p.quiet_hours_end::time
 		          ELSE ` + local + ` >= p.quiet_hours_start::time OR ` + local + ` < p.quiet_hours_end::time
 		        END)
-		  )) `
+		  ))
+		AND NOT EXISTS (
+		  SELECT 1 FROM calendar_events fe
+		  WHERE fe.created_by = ` + userCol + `
+		    AND fe.is_focus AND fe.deleted_at IS NULL
+		    AND fe.start_time <= NOW() AND fe.end_time > NOW()) `
 }

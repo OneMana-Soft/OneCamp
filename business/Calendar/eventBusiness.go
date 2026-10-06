@@ -45,6 +45,13 @@ func CreateEvent(ctx context.Context, userInfo *model.UserInfo, eventInfo adapte
 		return nil, err
 	}
 
+	isFocus := eventInfo.IsFocus != nil && *eventInfo.IsFocus
+	if isFocus {
+		if err := domain.SetCalendarEventFocus(ctx, eventUUID, true); err != nil {
+			return nil, err
+		}
+	}
+
 	var participants []*dgraphStruct.DgraphUser
 	var participantUuids []string
 	// Batched lookup: one Dgraph round-trip for all participants
@@ -77,6 +84,7 @@ func CreateEvent(ctx context.Context, userInfo *model.UserInfo, eventInfo adapte
 			Uid: userInfo.UserDgraphInfo.Uid,
 		},
 		Participants: participants,
+		IsFocus:      &isFocus,
 		CreatedAt:    &currentTime,
 		UpdatedAt:    &currentTime,
 		DeletedAt:    &zeroUnixTime,
@@ -99,6 +107,7 @@ func CreateEvent(ctx context.Context, userInfo *model.UserInfo, eventInfo adapte
 		EndTime:      &endTime,
 		CreatedBy:    userInfo.UserDgraphInfo.Uuid,
 		Participants: participantUuids,
+		IsFocus:      isFocus,
 	}, nil
 }
 
@@ -143,6 +152,11 @@ func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.Cre
 		helpers.LogErrorWithContext(ctx, "business/UpdateEvent failed to update event in postgres err: %+v", err)
 		return err
 	}
+	if eventInfo.IsFocus != nil {
+		if err := domain.SetCalendarEventFocus(ctx, eventUUID, *eventInfo.IsFocus); err != nil {
+			return err
+		}
+	}
 
 	var participants []*dgraphStruct.DgraphUser
 	if len(eventInfo.Participants) > 0 {
@@ -168,6 +182,7 @@ func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.Cre
 		StartTime:    &startTime,
 		EndTime:      &endTime,
 		Participants: participants,
+		IsFocus:      eventInfo.IsFocus,
 		UpdatedAt:    &currentTime,
 	}
 

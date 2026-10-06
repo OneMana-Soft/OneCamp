@@ -76,6 +76,9 @@ func GetMyNotificationPreferences(w http.ResponseWriter, r *http.Request) {
 			"quiet_hours_end":            pref.QuietHoursEnd,
 			"quiet_hours_tz":             pref.QuietHoursTZ,
 			"notifications_paused_until": pausedUntil(pref.NotificationsPausedUntil),
+			// Focus time from the calendar: separate, because resuming a pause
+			// does not end it; the event does.
+			"focus_until": pausedUntil(pref.FocusUntil),
 		},
 	})
 }
@@ -126,7 +129,10 @@ func PauseMyNotifications(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Couldn't change your notifications. Try again."})
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"notifications_paused_until": pausedUntil(pref.NotificationsPausedUntil)}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{
+		"notifications_paused_until": pausedUntil(pref.NotificationsPausedUntil),
+		"focus_until":                pausedUntil(pref.FocusUntil),
+	}})
 }
 
 // pauseEnd turns a request into the moment the pause ends (nil = resume).

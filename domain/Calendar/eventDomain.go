@@ -39,6 +39,16 @@ func UpdateCalendarEvent(ctx context.Context, id uuid.UUID, title, description s
 	return nil
 }
 
+// SetCalendarEventFocus marks an event as focus time: while it runs, its
+// creator's notifications are paused (see domain/UserFCMToken/pushGate.go).
+func SetCalendarEventFocus(ctx context.Context, id uuid.UUID, isFocus bool) error {
+	if err := models.SetCalendarEventFocus(id, isFocus); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/SetCalendarEventFocus err: %+v", err)
+		return err
+	}
+	return nil
+}
+
 func DeleteCalendarEvent(ctx context.Context, id uuid.UUID, deletedAt time.Time) error {
 	query := `
 		UPDATE calendar_events
@@ -118,6 +128,7 @@ func GetDgraphEventInfoByUUID(ctx context.Context, eventUuid string) (*dgraphStr
 				uid
 				event_uuid
 				event_title
+				event_is_focus
 				event_description
 				event_start_time
 				event_end_time
@@ -164,6 +175,7 @@ func GetDgraphEventsByUserId(ctx context.Context, userUuid string, startDate *ti
 					uid
 					event_uuid
 					event_title
+					event_is_focus
 					event_description
 					event_start_time
 					event_end_time
@@ -185,6 +197,7 @@ func GetDgraphEventsByUserId(ctx context.Context, userUuid string, startDate *ti
 					uid
 					event_uuid
 					event_title
+					event_is_focus
 					event_description
 					event_start_time
 					event_end_time

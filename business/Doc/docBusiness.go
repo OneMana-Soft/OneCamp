@@ -96,9 +96,13 @@ func DeleteDoc(ctx context.Context, docUUID string) (err error) {
 
 	currentTime := time.Now()
 
+	// Uuid is what the upsert finds the doc by. It was missing, so the query
+	// matched nothing, the mutation changed nothing, and every delete answered
+	// 200 while the doc stayed (found by the daily journey, 6 Oct 2026).
 	dgraphDoc := &dgraphStruct.DgraphDoc{
 		DType:     []string{"Doc"},
 		Uid:       "uid(doc)",
+		Uuid:      docUUID,
 		DeletedAt: &currentTime,
 	}
 

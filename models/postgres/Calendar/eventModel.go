@@ -117,6 +117,14 @@ func UpdateCalendarEvent(query string, id uuid.UUID, title string, description s
 	return nil
 }
 
+// SetCalendarEventFocus marks an event as focus time, or not.
+func SetCalendarEventFocus(id uuid.UUID, isFocus bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `UPDATE calendar_events SET is_focus = $2 WHERE id = $1`, id, isFocus)
+	return err
+}
+
 func DeleteCalendarEvent(query string, id uuid.UUID, deletedAt time.Time) error {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()

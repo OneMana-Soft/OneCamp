@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -15,10 +16,18 @@ import (
 	OpenSearchDocModels "github.com/akashc777/OneCamp/models/openSearch/Doc"
 )
 
+// ErrNoDocToUpdate is an update that names no doc: without a uuid the upsert
+// would match nothing and report success.
+var ErrNoDocToUpdate = errors.New("domain/doc: an update needs the doc's uuid")
+
 func CreateOrUpdateDgraphDoc(ctx context.Context, dgraphDoc *dgraphStruct.DgraphDoc) (docUid string, err error) {
 
 	var query string
 	if dgraphDoc.Uid == "uid(doc)" {
+		// An upsert with no uuid finds no doc and silently changes nothing.
+		if dgraphDoc.Uuid == "" {
+			return "", ErrNoDocToUpdate
+		}
 		query = fmt.Sprintf(`query {
 									  doc as var(func: eq(doc_uuid, "%s"))
 								  }`, dgraphDoc.Uuid)
@@ -265,7 +274,7 @@ func GetDgraphPublicDocFromDgraph(ctx context.Context, pageIndex int, pageSize i
 	transcriptParams := fmt.Sprintf(", orderdesc: doc_created_at, first: %v, offset: %v", firstVal, offsetVal)
 
 	query := fmt.Sprintf(`query DocInfo(){
-				var(func: eq(doc_private, false)) {
+				var(func: eq(doc_private, false)) @filter(not gt(doc_deleted_at, "1970-01-01T00:00:00Z")) {
 					public_doc_count as count(uid)
 				}
 				
@@ -273,7 +282,7 @@ func GetDgraphPublicDocFromDgraph(ctx context.Context, pageIndex int, pageSize i
 					count: val(public_doc_count)
 				}
 
-				docInfo(func: eq(doc_private, false)%s) {
+				docInfo(func: eq(doc_private, false)%s) @filter(not gt(doc_deleted_at, "1970-01-01T00:00:00Z")) {
 					doc_uuid
 					doc_title
 					doc_snippet
@@ -316,8 +325,8 @@ func GetDgraphPrivateDocFromDgraph(ctx context.Context, userUID string, pageInde
 
 	query := fmt.Sprintf(`query DocInfo($userId: string){
 				var(func: uid($userId)) {
-					user_private_docs as ~doc_created_by @filter(eq(doc_private, true))
-					private_doc_count_val as count(~doc_created_by) @filter(eq(doc_private, true))
+					user_private_docs as ~doc_created_by @filter(eq(doc_private, true) AND not gt(doc_deleted_at, "1970-01-01T00:00:00Z"))
+					private_doc_count_val as count(~doc_created_by) @filter(eq(doc_private, true) AND not gt(doc_deleted_at, "1970-01-01T00:00:00Z"))
 				}
 
 				doc_count(func: uid($userId)) {
@@ -364,7 +373,7 @@ func GetDgraphPublicDocFromDgraphWithSearchText(ctx context.Context, inputDocNam
 	transcriptParams := fmt.Sprintf(", orderdesc: doc_created_at, first: %v, offset: %v", firstVal, offsetVal)
 
 	query := fmt.Sprintf(`query DocInfo(){
-				var(func: eq(doc_private, false)) @filter(regexp(doc_title, /%s/i)) {
+				var(func: eq(doc_private, false)) @filter(regexp(doc_title, /%s/i) AND not gt(doc_deleted_at, "1970-01-01T00:00:00Z")) {
 					public_doc_count as count(uid)
 				}
 				
@@ -372,7 +381,7 @@ func GetDgraphPublicDocFromDgraphWithSearchText(ctx context.Context, inputDocNam
 					count: val(public_doc_count)
 				}
 
-				docInfo(func: eq(doc_private, false)%s) @filter(regexp(doc_title, /%s/i)) {
+				docInfo(func: eq(doc_private, false)%s) @filter(regexp(doc_title, /%s/i) AND not gt(doc_deleted_at, "1970-01-01T00:00:00Z")) {
 					doc_uuid
 					doc_title
 					doc_snippet
@@ -415,8 +424,8 @@ func GetDgraphPrivateDocFromDgraphWithSearchText(ctx context.Context, userUID st
 
 	query := fmt.Sprintf(`query DocInfo($userId: string){
 				var(func: uid($userId)) {
-					user_private_docs as ~doc_created_by @filter(eq(doc_private, true) AND regexp(doc_title, /%s/i))
-					private_doc_count_val as count(~doc_created_by) @filter(eq(doc_private, true) AND regexp(doc_title, /%s/i))
+					user_private_docs as ~doc_created_by @filter(eq(doc_private, true) AND regexp(doc_title, /%s/i) AND not gt(doc_deleted_at, "1970-01-01T00:00:00Z"))
+					private_doc_count_val as count(~doc_created_by) @filter(eq(doc_private, true) AND regexp(doc_title, /%s/i) AND not gt(doc_deleted_at, "1970-01-01T00:00:00Z"))
 				}
 
 				doc_count(func: uid($userId)) {
