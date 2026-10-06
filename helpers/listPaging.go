@@ -30,3 +30,24 @@ func ListPaging(q url.Values) (getAll bool, pageSize, pageIndex int, err error) 
 	}
 	return getAll, pageSize, pageIndex, nil
 }
+
+// boardClosedDefault and boardClosedMax mirror models/dgraph BoardClosedLimit
+// and BoardClosedMax (helpers cannot import models).
+const (
+	boardClosedDefault = 200
+	boardClosedMax     = 2000
+)
+
+// ClosedLimit reads a board request's closedLimit: how many of its newest
+// done and cancelled tasks to load. Missing or bad means the default; it is
+// held to at least the default and at most the maximum.
+func ClosedLimit(q url.Values) int {
+	n, err := strconv.Atoi(q.Get("closedLimit"))
+	if err != nil || n < boardClosedDefault {
+		return boardClosedDefault
+	}
+	if n > boardClosedMax {
+		return boardClosedMax
+	}
+	return n
+}

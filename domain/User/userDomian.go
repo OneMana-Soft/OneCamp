@@ -796,7 +796,7 @@ func GetAllUserEmojiStatusList(ctx context.Context, userUUID string) (dgraphUser
 	return
 }
 
-func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDgraphUID string, filterQuery string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
+func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDgraphUID string, filterQuery string, closedLimit int) (dgraphUser *dgraphStruct.DgraphUser, err error) {
 
 	if len(filterQuery) > 0 {
 		filterQuery = "AND " + filterQuery
@@ -944,7 +944,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 						task_created_at
 						task_rank
 					}
-					user_tasks_canceled: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "canceled") %s) (orderdesc: task_created_at, first: %d) {
+					user_tasks_canceled: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "canceled") %s) (orderdesc: task_created_at%s) {
 						task_uuid
 						id: task_uuid
 						task_name
@@ -979,7 +979,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 					}
 					user_tasks_canceled_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "canceled") %s))
 
-					user_tasks_done: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "done") %s) (orderdesc: task_created_at, first: %d) {
+					user_tasks_done: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "done") %s) (orderdesc: task_created_at%s) {
 						task_uuid
 						id:task_uuid
 						task_name
@@ -1014,7 +1014,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 					}
 					user_tasks_done_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "done") %s))
 				}
-			}`, filterQuery, filterQuery, filterQuery, filterQuery, filterQuery, dgraphStruct.BoardClosedLimit, filterQuery, filterQuery, dgraphStruct.BoardClosedLimit, filterQuery)
+			}`, filterQuery, filterQuery, filterQuery, filterQuery, filterQuery, dgraphStruct.ClosedFirst(closedLimit), filterQuery, filterQuery, dgraphStruct.ClosedFirst(closedLimit), filterQuery)
 	dgraphUser, err = dgraphModels.GetDgraphUserInfoByUUID(ctx, query, variables)
 
 	if err != nil {

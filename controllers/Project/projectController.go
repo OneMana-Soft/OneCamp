@@ -1434,7 +1434,7 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 		sortingQuery = "orderdesc: task_created_at"
 	}
 
-	dgraphProjectWithTasks, err := business.GetDgraphProjectTaskListForKanban(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid, filterQuery)
+	dgraphProjectWithTasks, err := business.GetDgraphProjectTaskListForKanban(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid, filterQuery, helpers.ClosedLimit(r.URL.Query()))
 
 	if err != nil {
 

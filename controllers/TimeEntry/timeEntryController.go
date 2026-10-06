@@ -310,7 +310,7 @@ func ProjectTime(w http.ResponseWriter, r *http.Request) {
 	}
 	names := timeBusiness.Names{People: peopleNames(r, ids), Tasks: map[uuid.UUID]string{}}
 	if len(entries) > 0 {
-		if p, err := projectBusiness.GetDgraphProjectTaskListForKanban(r.Context(), projectID.String(), me(r).UserDgraphInfo.Uid, ""); err == nil && p != nil {
+		if p, err := projectBusiness.GetDgraphProjectTaskListForKanban(r.Context(), projectID.String(), me(r).UserDgraphInfo.Uid, "", 0); err == nil && p != nil {
 			for _, col := range [][]*dgraphStruct.DgraphTask{p.TasksTodo, p.TasksInProgresss, p.TasksBacklog, p.TasksInReview, p.TasksCanceled, p.TasksDone} {
 				for _, t := range col {
 					if id, err := uuid.Parse(t.Uuid); err == nil {

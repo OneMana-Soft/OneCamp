@@ -1387,8 +1387,8 @@ func GetDgraphUserProjectList(ctx context.Context, userUUID string) (dgraphUser 
 
 }
 
-func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDgraphUID string, filterQuery string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
-	dgraphUser, err = domain.GetDgraphUserTaskListForKanban(ctx, userUUID, userDgraphUID, filterQuery)
+func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDgraphUID string, filterQuery string, closedLimit int) (dgraphUser *dgraphStruct.DgraphUser, err error) {
+	dgraphUser, err = domain.GetDgraphUserTaskListForKanban(ctx, userUUID, userDgraphUID, filterQuery, closedLimit)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/GetDgraphUserTaskListForKanban Failed to get user's task list in dgraph err: %+v",
