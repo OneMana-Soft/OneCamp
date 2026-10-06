@@ -9,6 +9,9 @@ type CreateOrUpdateEventInput struct {
 	EndTime              string   `json:"endTime" binding:"required"`
 	Participants         []string `json:"participants"`
 	SyncToGoogleCalendar bool     `json:"syncToGoogleCalendar"`
+	// IsFocus pauses the creator's notifications while the event runs. A
+	// pointer: an update that leaves it out leaves focus as it was.
+	IsFocus *bool `json:"isFocus,omitempty"`
 }
 
 type OutputEvent struct {
@@ -19,4 +22,5 @@ type OutputEvent struct {
 	EndTime      *time.Time `json:"endTime"`
 	CreatedBy    string     `json:"createdByUuid"`
 	Participants []string   `json:"participants"`
+	IsFocus      bool       `json:"isFocus"`
 }

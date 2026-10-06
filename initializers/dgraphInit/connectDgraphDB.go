@@ -290,6 +290,7 @@ func createSchema() (err error) {
 		event_updated_at: dateTime .
 		event_participants: [uid] @reverse .
 		event_deleted_at: dateTime .
+		event_is_focus: bool .
 
 		team_uuid: string @index(exact) @upsert .
 		team_name: string .
@@ -586,6 +587,7 @@ func createSchema() (err error) {
 			event_end_time
 			event_created_by: User
 			event_google_calendar_id
+			event_is_focus
 			event_participants: [User]
 			event_created_at
 			event_updated_at

@@ -338,8 +338,8 @@ func isUserOnline(ctx context.Context, userUUID string) bool {
 // hours as they stand at that moment. Returns (whenToDeliver, deferred).
 func deliveryTime(now time.Time, p *prefModels.UserNotificationPreference) (time.Time, bool) {
 	from := now
-	if p.NotificationsPausedUntil != nil && p.NotificationsPausedUntil.After(now) {
-		from = *p.NotificationsPausedUntil
+	if until := p.QuietUntil(now); until != nil {
+		from = *until
 	}
 	at, _ := quietHoursDelay(from, p)
 	return at, at.After(now)

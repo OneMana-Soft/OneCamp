@@ -441,6 +441,8 @@ type DgraphEvent struct {
 	CreatedAt             *time.Time    `json:"event_created_at,omitempty"`
 	UpdatedAt             *time.Time    `json:"event_updated_at,omitempty"`
 	DeletedAt             *time.Time    `json:"event_deleted_at,omitempty"`
+	// IsFocus marks focus time: the creator's notifications pause while it runs.
+	IsFocus *bool `json:"event_is_focus,omitempty"`
 }
 
 // const TASK_STATUS_TODO = "todo"

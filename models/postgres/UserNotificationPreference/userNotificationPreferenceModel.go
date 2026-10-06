@@ -36,16 +36,25 @@ type UserNotificationPreference struct {
 	// NotificationsPausedUntil is a pause the person set (Slack's "pause
 	// notifications"); nil or past means not paused. See domain/UserFCMToken.
 	NotificationsPausedUntil *time.Time `json:"notifications_paused_until,omitempty"`
-	UnsubscribeToken         string     `json:"-"` // never expose to the client
-	CreatedAt                time.Time  `json:"created_at"`
-	UpdatedAt                time.Time  `json:"updated_at"`
+	// FocusUntil is when the focus-time event the person is in ends; nil when
+	// they are in none. Computed, never written.
+	FocusUntil       *time.Time `json:"focus_until,omitempty"`
+	UnsubscribeToken string     `json:"-"` // never expose to the client
+	CreatedAt        time.Time  `json:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
 const allColumns = `id, user_id, email_enabled, email_mentions, email_dms, email_task_assigned,
 		email_task_status, email_comments, email_calls, email_channel_invites,
 		email_only_when_offline, email_digest_frequency, quiet_hours_enabled,
 		quiet_hours_start, quiet_hours_end, quiet_hours_tz, unsubscribe_token,
-		created_at, updated_at, notifications_paused_until`
+		created_at, updated_at, notifications_paused_until, ` + focusUntilColumn
+
+// focusUntilColumn is when the focus-time event the person is in now ends, or
+// NULL. Read with the row so every reader of a pause sees focus time too.
+const focusUntilColumn = `(SELECT max(fe.end_time) FROM calendar_events fe
+		WHERE fe.created_by = users_notification_preferences.user_id AND fe.is_focus AND fe.deleted_at IS NULL
+		  AND fe.start_time <= NOW() AND fe.end_time > NOW()) AS focus_until`
 
 // rowScanner is a *sql.Row or *sql.Rows.
 type rowScanner interface{ Scan(dest ...any) error }
@@ -61,6 +70,7 @@ func scanRow(row rowScanner) (*UserNotificationPreference, error) {
 		&p.EmailChannelInvites, &p.EmailOnlyWhenOffline, &p.EmailDigestFrequency,
 		&p.QuietHoursEnabled, &p.QuietHoursStart, &p.QuietHoursEnd, &p.QuietHoursTZ,
 		&p.UnsubscribeToken, &p.CreatedAt, &p.UpdatedAt, &p.NotificationsPausedUntil,
+		&p.FocusUntil,
 	)
 	if err != nil {
 		return nil, err
@@ -302,4 +312,16 @@ func KnownTimeZone(name string) (bool, error) {
 	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx,
 		`SELECT EXISTS (SELECT 1 FROM pg_timezone_names WHERE name = $1)`, name).Scan(&ok)
 	return ok, err
+}
+
+// QuietUntil is when notifications may reach the person again: the later of a
+// pause they set and the focus time they are in. Nil when neither applies.
+func (p *UserNotificationPreference) QuietUntil(now time.Time) *time.Time {
+	var out *time.Time
+	for _, t := range []*time.Time{p.NotificationsPausedUntil, p.FocusUntil} {
+		if t != nil && t.After(now) && (out == nil || t.After(*out)) {
+			out = t
+		}
+	}
+	return out
 }
