@@ -17,10 +17,11 @@ package ai
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // retryConfig tunes the backoff. maxAttempts counts the first try.
@@ -107,9 +108,7 @@ func parseRetryAfter(h http.Header) time.Duration {
 func backoffWait(ctx context.Context, attempt int, cfg retryConfig, suggested time.Duration) error {
 	wait := suggested
 	if wait <= 0 {
-		// Exponential backoff: base * 2^(attempt-1), plus up to 250ms jitter.
-		backoff := cfg.baseDelay << (attempt - 1)
-		wait = backoff + time.Duration(rand.Int63n(int64(250*time.Millisecond)))
+		wait = helpers.Backoff(attempt, cfg.baseDelay, cfg.maxDelay)
 	}
 	if wait > cfg.maxDelay {
 		wait = cfg.maxDelay

@@ -11,11 +11,12 @@ import (
 	"time"
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 func TestCommentTextToHTML_BasicShape(t *testing.T) {
 	in := "First paragraph.\n\nSecond paragraph."
-	got := commentTextToHTML(in)
+	got := helpers.PlainTextToHTML(in)
 	if !strings.Contains(got, "<p>First paragraph.</p>") || !strings.Contains(got, "<p>Second paragraph.</p>") {
 		t.Fatalf("expected two paragraphs, got %q", got)
 	}
@@ -23,7 +24,7 @@ func TestCommentTextToHTML_BasicShape(t *testing.T) {
 
 func TestCommentTextToHTML_HtmlEscape(t *testing.T) {
 	in := `<img onerror="alert(1)">`
-	got := commentTextToHTML(in)
+	got := helpers.PlainTextToHTML(in)
 	if strings.Contains(got, "<img") {
 		t.Fatalf("expected raw <img> to be escaped, got %q", got)
 	}

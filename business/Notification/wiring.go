@@ -132,6 +132,37 @@ func DispatchCalendarBooking(ownerUUID, guestName, pageTitle, when, bookingID st
 	}()
 }
 
+// DispatchProjectUpdate tells a project's members that one of its admins
+// posted an update: where the project stands, and the note. The author is
+// left out.
+func DispatchProjectUpdate(authorUUID, authorName, projectUUID, projectName, healthLabel, body, updateID string, members []string) {
+	recipients := make([]string, 0, len(members))
+	for _, m := range members {
+		if m != "" && m != authorUUID {
+			recipients = append(recipients, m)
+		}
+	}
+	if len(recipients) == 0 {
+		return
+	}
+	go func() {
+		defer recoverDispatch("DispatchProjectUpdate")
+		Dispatch(context.Background(), Event{
+			Type:          EventProjectUpdate,
+			ActorName:     authorName,
+			ActorUUID:     authorUUID,
+			SubjectLine:   projectName + ": " + healthLabel,
+			Title:         authorName + " posted an update",
+			Subtitle:      projectName + " · " + healthLabel,
+			Body:          body,
+			CTAURL:        frontendBaseURL() + "/app/project/" + projectUUID + "?tab=updates",
+			CTAText:       "Read the update",
+			DedupKeyParts: []string{"project.update", updateID},
+			Recipients:    recipientsFromStrings(recipients),
+		})
+	}()
+}
+
 // DispatchMemoryDigestTest sends a one-off TEST digest to a single recipient,
 // bypassing the per-(recipient, day) dedup so an admin can re-send and verify
 // delivery. It still honors the recipient's email settings + suppression

@@ -445,10 +445,28 @@ func GetDgraphChatCommentInfoByUUID(ctx context.Context, commentUUID string, use
 }
 
 func GetDgraphCommentInfoByUUID(ctx context.Context, commentUUID string) (dgraphComment *dgraphStruct.DgraphComment, err error) {
+	return getDgraphCommentInfo(ctx, commentUUID, "")
+}
 
+// GetDgraphCommentInfoForUser is GetDgraphCommentInfoByUUID that also says
+// whether userDgraphUID administers the project of the task the comment is on
+// (Task.Project.IsProjectAdmin). Without it that flag was always 0, so a
+// project's admins could not remove a comment on their own tasks, a client's
+// included: only its author could.
+func GetDgraphCommentInfoForUser(ctx context.Context, commentUUID, userDgraphUID string) (*dgraphStruct.DgraphComment, error) {
+	return getDgraphCommentInfo(ctx, commentUUID, userDgraphUID)
+}
+
+func getDgraphCommentInfo(ctx context.Context, commentUUID, userDgraphUID string) (dgraphComment *dgraphStruct.DgraphComment, err error) {
 	variables := make(map[string]string)
 	variables["$id"] = commentUUID
-	query := `query CommentInfo($id: string){
+	decl, isAdmin := "$id: string", ""
+	if userDgraphUID != "" {
+		variables["$userUid"] = userDgraphUID
+		decl += ", $userUid: string"
+		isAdmin = "project_is_admin: count(project_admins @filter(uid($userUid)))"
+	}
+	query := `query CommentInfo(` + decl + `){
 				commentInfo(func: eq(comment_uuid, $id)) {
 					uid
 					comment_by {
@@ -487,6 +505,7 @@ func GetDgraphCommentInfoByUUID(ctx context.Context, commentUUID string) (dgraph
 						 task_uuid
 						task_project {
 							 project_uuid
+							` + isAdmin + `
 						}
 					}
 				}

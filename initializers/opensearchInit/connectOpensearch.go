@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/opensearch-project/opensearch-go/v4"
@@ -29,9 +30,9 @@ type OpenSearchConfig struct {
 // declare them, so search was never initialised at all.
 var indicesToCreate map[string]string
 
-func ConnectOpenSearch(config *OpenSearchConfig) (err error) {
-	ctx := context.Background()
-	OpenSearchClient, err = opensearchapi.NewClient(
+// newClient is the client every OpenSearch call in OneCamp goes through.
+func newClient(config *OpenSearchConfig) (*opensearchapi.Client, error) {
+	return opensearchapi.NewClient(
 		opensearchapi.Config{
 			Client: opensearch.Config{
 				Transport: &http.Transport{
@@ -40,9 +41,22 @@ func ConnectOpenSearch(config *OpenSearchConfig) (err error) {
 				Addresses: []string{config.Host},
 				Username:  config.Username,
 				Password:  config.Password,
+				// A busy node answers 429 when a burst of writes trips its memory
+				// breaker (a small heap, an import, the demo's nightly reset).
+				// Such a write did no work, but it was dropped: posts went
+				// missing from search and AI recall. So 429 is retried like
+				// the client's default 502/503/504, after a growing pause.
+				RetryOnStatus: []int{http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout},
+				MaxRetries:    3,
+				RetryBackoff:  func(attempt int) time.Duration { return helpers.Backoff(attempt, 250*time.Millisecond, 2*time.Second) },
 			},
 		},
 	)
+}
+
+func ConnectOpenSearch(config *OpenSearchConfig) (err error) {
+	ctx := context.Background()
+	OpenSearchClient, err = newClient(config)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "opensearchInit/connectOpenSearch Failed to connect to openSearch err:= %+v", err)
@@ -353,6 +367,8 @@ func ConnectOpenSearch(config *OpenSearchConfig) (err error) {
 			return err
 		}
 	}
+
+	go ensureAuditLogRetention(context.Background())
 
 	return nil
 }

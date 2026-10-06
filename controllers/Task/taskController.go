@@ -61,7 +61,8 @@ func DeleteTaskComment(w http.ResponseWriter, r *http.Request) {
 
 	isComentOwner := false
 
-	dgraphCommentInfo, err := commentBusiness.GetDgraphCommentInfoByUUID(ctx, deleteTaskCommentInfoInput.Uuid)
+	// With the reader, so the project's admins may remove any comment on its tasks.
+	dgraphCommentInfo, err := commentBusiness.GetDgraphCommentInfoForUser(ctx, deleteTaskCommentInfoInput.Uuid, userInfo.UserDgraphInfo.Uid)
 
 	if err != nil {
 
@@ -85,11 +86,13 @@ func DeleteTaskComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphCommentInfo.CommentBy.Uuid == userInfo.UserDgraphInfo.Uuid {
+	if dgraphCommentInfo.CommentBy != nil && dgraphCommentInfo.CommentBy.Uuid == userInfo.UserDgraphInfo.Uuid {
 		isComentOwner = true
 	}
 
-	if dgraphCommentInfo.Task.Project.IsProjectAdmin == 0 && !isComentOwner {
+	// Not a comment on a task (or one whose task is gone): its author only.
+	projectAdmin := dgraphCommentInfo.Task != nil && dgraphCommentInfo.Task.Project != nil && dgraphCommentInfo.Task.Project.IsProjectAdmin > 0
+	if !projectAdmin && !isComentOwner {
 
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not authorised",

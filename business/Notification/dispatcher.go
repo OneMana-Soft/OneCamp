@@ -56,6 +56,7 @@ const (
 	EventChatCall         EventType = "chat.call"
 	EventMemoryDigest     EventType = "memory.digest"
 	EventCalendarBooking  EventType = "calendar.booking"
+	EventProjectUpdate    EventType = "project.update"
 )
 
 // Recipient describes a single user the dispatcher should consider. Only the
@@ -308,7 +309,9 @@ func eventEnabledForPref(t EventType, p *prefModels.UserNotificationPreference) 
 		return p.EmailMentions
 	case EventTaskAssigned:
 		return p.EmailTaskAssigned
-	case EventTaskStatus:
+	case EventTaskStatus, EventProjectUpdate:
+		// A project's update is news about its tasks, wanted (or not) by
+		// the same people who want to hear when tasks change status.
 		return p.EmailTaskStatus
 	case EventTaskComment, EventPostComment, EventDocComment, EventChatComment:
 		return p.EmailComments

@@ -57,6 +57,15 @@ os() {
 }
 
 status() { printf '%s\n' "$1" | tail -1; }
+
+# What a backup holds: every index but the system ones (security, task results)
+# and the node's own housekeeping (the security plugin's audit log, a new index
+# every day, and query insights). Those belong to the node: restoring system
+# indices over a live cluster fails or overwrites its users, and the
+# housekeeping only grew every backup and came back with every restore.
+content='*,-.*,-security-auditlog-*,-top_queries-*'
+housekeeping='^(security-auditlog-|top_queries-)'
+
 body() { printf '%s\n' "$1" | sed '$d'; }
 
 # The snapshot directory is a bind mount Docker may have created as root; the
@@ -91,9 +100,7 @@ save)
 		exit 0
 	fi
 	name="backup-$(date -u +%Y%m%dt%H%M%Sz)"
-	# Every index but the system ones (security, task results): those belong to
-	# the node, and restoring them over a live cluster fails or overwrites its users.
-	r=$(os PUT "/_snapshot/$repo/$name?wait_for_completion=true" '{"indices":"*,-.*","include_global_state":false}') || {
+	r=$(os PUT "/_snapshot/$repo/$name?wait_for_completion=true" "{\"indices\":\"$content\",\"include_global_state\":false}") || {
 		echo "    warn  search snapshot could not run"; exit 0; }
 	if ! body "$r" | grep -q '"state":"SUCCESS"'; then
 		echo "    warn  search snapshot did not succeed:"
@@ -122,10 +129,11 @@ restore)
 	name=$(snapshots | tail -1)
 	[ -n "$name" ] || { echo "    FAIL  the search archive holds no snapshot"; exit 1; }
 	r=$(os GET "/_snapshot/$repo/$name")
-	indices=$(body "$r" | grep -o '"indices":\[[^]]*\]' | head -1 | sed 's/^"indices":\[//; s/\]$//; s/"//g')
-	# Only what the snapshot brings back is replaced; anything else is left alone.
+	# Only what the snapshot brings back is replaced; anything else is left
+	# alone, including the housekeeping an older backup still holds.
+	indices=$(body "$r" | grep -o '"indices":\[[^]]*\]' | head -1 | sed 's/^"indices":\[//; s/\]$//; s/"//g' | tr ',' '\n' | grep -v -E "$housekeeping" | paste -sd, -)
 	[ -n "$indices" ] && os DELETE "/$indices?ignore_unavailable=true" > /dev/null
-	r=$(os POST "/_snapshot/$repo/$name/_restore?wait_for_completion=true" '{"indices":"*,-.*","include_global_state":false}')
+	r=$(os POST "/_snapshot/$repo/$name/_restore?wait_for_completion=true" "{\"indices\":\"$content\",\"include_global_state\":false}")
 	if [ "$(status "$r")" != 200 ]; then
 		echo "    FAIL  search restore:"
 		body "$r" | head -c 300; echo

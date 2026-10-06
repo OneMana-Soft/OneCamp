@@ -533,6 +533,12 @@ func GetDgraphCommentInfoByUUID(ctx context.Context, commentUUID string) (dgraph
 	return
 }
 
+// GetDgraphCommentInfoForUser also says whether the user administers the
+// project of the task the comment is on.
+func GetDgraphCommentInfoForUser(ctx context.Context, commentUUID, userDgraphUID string) (*dgraphStruct.DgraphComment, error) {
+	return domain.GetDgraphCommentInfoForUser(ctx, commentUUID, userDgraphUID)
+}
+
 func GetDgraphChatCommentInfoByUUID(ctx context.Context, commentUUID string, userDgraphUID string) (dgraphComment *dgraphStruct.DgraphComment, err error) {
 	dgraphComment, err = domain.GetDgraphChatCommentInfoByUUID(ctx, commentUUID, userDgraphUID)
 

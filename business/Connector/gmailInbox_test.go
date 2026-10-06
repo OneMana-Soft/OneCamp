@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/akashc777/OneCamp/helpers"
 	"google.golang.org/api/gmail/v1"
 )
 
@@ -32,8 +33,8 @@ func TestEmailHTMLIsSafeToShow(t *testing.T) {
 }
 
 func TestPlainTextIsEscaped(t *testing.T) {
-	got := PlainToHTML("a < b\r\n<script>x</script>")
-	if got != "<p>a &lt; b<br/>&lt;script&gt;x&lt;/script&gt;</p>" {
+	got := helpers.PlainTextToHTML("a < b\r\n<script>x</script>")
+	if got != "<p>a &lt; b<br>&lt;script&gt;x&lt;/script&gt;</p>" {
 		t.Fatalf("got %q", got)
 	}
 }

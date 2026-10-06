@@ -51,6 +51,7 @@ import (
 	pollController "github.com/akashc777/OneCamp/controllers/Poll"
 	postController "github.com/akashc777/OneCamp/controllers/Post"
 	projectController "github.com/akashc777/OneCamp/controllers/Project"
+	projectUpdateController "github.com/akashc777/OneCamp/controllers/ProjectUpdate"
 	publicController "github.com/akashc777/OneCamp/controllers/Public"
 	recordingController "github.com/akashc777/OneCamp/controllers/Recording"
 	savedItemController "github.com/akashc777/OneCamp/controllers/SavedItem"
@@ -1196,6 +1197,12 @@ func Routes() http.Handler {
 		r.Post("/{project_uuid}/forms/{form_id}/delete", formController.DeleteForm)
 		r.Get("/{project_uuid}/time", timeEntryController.ProjectTime)
 		r.Get("/{project_uuid}/tags", taskController.ProjectTags)
+		// Project updates: see business/ProjectUpdate.
+		r.Get("/{project_uuid}/updates", projectUpdateController.ListUpdates)
+		r.Get("/{project_uuid}/updates/draft", projectUpdateController.DraftUpdate)
+		r.Post("/{project_uuid}/updates", projectUpdateController.PostUpdate)
+		r.Post("/{project_uuid}/updates/{update_id}/edit", projectUpdateController.EditUpdate)
+		r.Post("/{project_uuid}/updates/{update_id}/delete", projectUpdateController.DeleteUpdate)
 		r.Get("/{project_uuid}/cycles", cycleController.ListCycles)
 		r.Post("/{project_uuid}/cycles", cycleController.CreateCycle)
 		r.Post("/{project_uuid}/cycles/{cycle_id}/rename", cycleController.RenameCycle)
@@ -1531,6 +1538,8 @@ func Routes() http.Handler {
 		r.Get("/governance-drill", aiController.GetGovernanceDrill)
 		r.Post("/governance-drill/run", aiController.RunMyGovernanceDrill)
 
+		// A project's next update, drafted from its tasks with an AI summary on top.
+		r.Post("/project-update/draft", aiController.DraftProjectUpdate)
 		r.Post("/summarize/channel", aiController.SummarizeChannel)
 		r.Post("/summarize/dm", aiController.SummarizeDM)
 		r.Post("/summarize/group", aiController.SummarizeGroup)

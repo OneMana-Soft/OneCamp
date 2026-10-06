@@ -16,6 +16,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	updateBusiness "github.com/akashc777/OneCamp/business/ProjectUpdate"
+
 	adapter "github.com/akashc777/OneCamp/adapter/Task"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
@@ -59,7 +61,22 @@ type GuestProjectView struct {
 	TotalTasks  int           `json:"total_tasks"`
 	DoneTasks   int           `json:"done_tasks"`
 	GeneratedAt time.Time     `json:"generated_at"`
+	// Updates are the project's updates its team shared with the client,
+	// newest first.
+	Updates []GuestUpdate `json:"updates"`
 }
+
+// GuestUpdate is a project update as its client reads it.
+type GuestUpdate struct {
+	Health      string    `json:"health"`
+	HealthLabel string    `json:"health_label"`
+	Body        string    `json:"body"`
+	Author      string    `json:"author"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// guestUpdatesShown is how many shared updates the client's page lists.
+const guestUpdatesShown = 10
 
 // GuestTaskView is one task opened by its project's guest.
 type GuestTaskView struct {
@@ -190,8 +207,23 @@ func GetGuestProject(ctx context.Context, grant *guestModel.GuestGrant) (*GuestP
 		view.TotalTasks += len(col.Tasks)
 		if s.status == dgraphStruct.TASK_STATUS_DONE {
 			view.DoneTasks = len(col.Tasks)
+			// The board lists the newest finished tasks; the count is all of them.
+			if p.TasksDoneCount > view.DoneTasks {
+				view.TotalTasks += p.TasksDoneCount - view.DoneTasks
+				view.DoneTasks = p.TasksDoneCount
+			}
 		}
 		view.Columns = append(view.Columns, col)
+	}
+	view.Updates = []GuestUpdate{}
+	if shared, err := updateBusiness.List(ctx, projectID, guestUpdatesShown, true); err == nil {
+		for _, u := range shared {
+			view.Updates = append(view.Updates, GuestUpdate{
+				Health: u.Health, HealthLabel: updateBusiness.HealthLabels[u.Health], Body: u.Body, Author: u.AuthorName, CreatedAt: u.CreatedAt,
+			})
+		}
+	} else {
+		helpers.LogErrorWithContext(ctx, "business/Guest/GetGuestProject updates err: %+v", err)
 	}
 	return view, nil
 }
