@@ -1317,17 +1317,25 @@ enable-backups:
 # day at 04:40. Container logs are capped in the stack definition itself.
 BUILD_CACHE_KEEP ?= 5GB
 
+# How full the disk is, as a bare percentage, and the lines that matter: from
+# DISK_WARN_PCT it is worth acting on, and near DISK_FAIL_PCT Postgres stops
+# accepting writes. The admin warning in the app draws the same lines
+# (helpers/disk.go), and housekeeping and storage-report both read them here.
+DISK_USED_PCT = df -P . 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$$5); print $$5}'
+DISK_WARN_PCT ?= 85
+DISK_FAIL_PCT ?= 95
+
 housekeeping:
 	@: "--max-used-space is Docker 29's name; --keep-storage is the older one."
 	@docker builder prune -f --max-used-space $(BUILD_CACHE_KEEP) > /dev/null 2>&1 \
 		|| docker builder prune -f --keep-storage $(BUILD_CACHE_KEEP) > /dev/null 2>&1 \
 		|| echo "    warn  could not trim the build cache"
 	@docker image prune -f > /dev/null 2>&1 || true
-	@$(MAKE) -f $(SELF) --no-print-directory backup-rotate
-	@use=$$(df -P . 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$$5); print $$5}'); \
+	@$(MAKE) -f $(SELF) --no-print-directory backup-rotate || echo "    warn  could not trim old backups"
+	@use=$$($(DISK_USED_PCT)); \
 	free=$$(df -Ph . 2>/dev/null | awk 'NR==2 {print $$4}'); \
 	echo "    ok    housekeeping done $$(date -u +%FT%TZ): disk $$use% used, $$free free"; \
-	if [ -n "$$use" ] && [ "$$use" -ge 85 ]; then \
+	if [ -n "$$use" ] && [ "$$use" -ge $(DISK_WARN_PCT) ]; then \
 		echo "    warn  disk $$use% used. Free room: remove files you no longer need with"; \
 		echo "          \"Remove for good\" (Admin, then Archive), or move to a larger disk."; \
 	fi
@@ -1559,11 +1567,11 @@ storage-report:
 	else \
 		echo "    warn  no RAID array found — this machine has no disk redundancy"; \
 	fi; \
-	use=$$(df -P . 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$$5); print $$5}'); \
+	use=$$($(DISK_USED_PCT)); \
 	if [ -n "$$use" ]; then \
-		if [ "$$use" -ge 95 ]; then \
+		if [ "$$use" -ge $(DISK_FAIL_PCT) ]; then \
 			echo "    FAIL  disk $$use% full — postgres stops accepting writes near this point"; fail=1; \
-		elif [ "$$use" -ge 85 ]; then \
+		elif [ "$$use" -ge $(DISK_WARN_PCT) ]; then \
 			echo "    warn  disk $$use% full"; \
 		else \
 			echo "    ok    disk $$use% used"; \

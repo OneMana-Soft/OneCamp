@@ -7,7 +7,6 @@ import (
 	"net/http"
 
 	business "github.com/akashc777/OneCamp/business/ProjectTemplate"
-	teamBusiness "github.com/akashc777/OneCamp/business/Team"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -19,10 +18,6 @@ import (
 // a project's admins save the project as one; a saved one is its author's, or
 // an admin's, to delete. Starting a project from one is CreateProject's
 // template_id.
-
-// maxFile is the largest template file read: MaxTasks tasks with long
-// descriptions fit.
-const maxFile = 12 << 20
 
 func write(w http.ResponseWriter, r *http.Request, where string, err error) {
 	var te *business.TemplateError
@@ -48,7 +43,7 @@ func me(w http.ResponseWriter, r *http.Request) (*userModels.UserInfo, bool) {
 }
 
 func read(w http.ResponseWriter, r *http.Request, into any) bool {
-	if err := json.NewDecoder(io.LimitReader(r.Body, maxFile)).Decode(into); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, business.MaxFileBytes)).Decode(into); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That template couldn't be read. Is it a OneCamp template file?"})
 		return false
 	}
@@ -89,16 +84,12 @@ func ImportTemplate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !u.UserPostgresInfo.IsAdmin {
-		teams, err := teamBusiness.GetDgraphTeamListByAdminDgraphUID(r.Context(), u.UserDgraphInfo.Uid)
-		if err != nil {
-			write(w, r, "ImportTemplate teams", err)
-			return
-		}
-		if len(teams) == 0 {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only a team's admins, who create its projects, can add templates."})
-			return
-		}
+	if may, err := business.MayCreateProjects(r.Context(), u); err != nil {
+		write(w, r, "ImportTemplate teams", err)
+		return
+	} else if !may {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only a team's admins, who create its projects, can add templates."})
+		return
 	}
 	var t business.Template
 	if !read(w, r, &t) {

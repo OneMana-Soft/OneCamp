@@ -16,11 +16,16 @@ import (
 	"github.com/google/uuid"
 )
 
-// Start is when a project made from a template starts: Day is midnight of
-// that day in the creator's zone. With SkipWeekends a date that falls on a
-// Saturday or a Sunday moves to the Monday after.
+// Start is when a project made from a template starts. Day is that calendar
+// day (midnight UTC, used only for its date) and Loc the creator's zone. The
+// days are counted on the calendar, not on a clock in Loc: in a zone whose
+// clocks skip midnight (Santiago, Havana, the Azores) local midnight on the
+// change day doesn't exist, and counting from it lands every date a day
+// early. With SkipWeekends a date that falls on a Saturday or a Sunday moves
+// to the Monday after.
 type Start struct {
 	Day          time.Time
+	Loc          *time.Location
 	SkipWeekends bool
 }
 
@@ -28,16 +33,16 @@ type Start struct {
 // empty or unreadable date is today there. Pure but for the clock.
 func StartOn(date, zone string, skipWeekends bool) Start {
 	loc := helpers.Location(zone)
-	d, err := time.ParseInLocation(time.DateOnly, strings.TrimSpace(date), loc)
+	d, err := time.Parse(time.DateOnly, strings.TrimSpace(date))
 	if err != nil {
 		y, m, dd := time.Now().In(loc).Date()
-		d = time.Date(y, m, dd, 0, 0, 0, 0, loc)
+		d = time.Date(y, m, dd, 0, 0, 0, 0, time.UTC)
 	}
-	return Start{Day: d, SkipWeekends: skipWeekends}
+	return Start{Day: d, Loc: loc, SkipWeekends: skipWeekends}
 }
 
-// At is the moment a template day falls on, at hour o'clock, in RFC 3339 as a
-// task's dates are written. Pure.
+// At is the moment a template day falls on, at hour o'clock in the creator's
+// zone, in RFC 3339 as a task's dates are written. Pure.
 func (s Start) At(day, hour int) string {
 	d := s.Day.AddDate(0, 0, day)
 	if s.SkipWeekends {
@@ -48,7 +53,11 @@ func (s Start) At(day, hour int) string {
 			d = d.AddDate(0, 0, 1)
 		}
 	}
-	return time.Date(d.Year(), d.Month(), d.Day(), hour, 0, 0, 0, d.Location()).Format(time.RFC3339)
+	loc := s.Loc
+	if loc == nil {
+		loc = time.UTC
+	}
+	return time.Date(d.Year(), d.Month(), d.Day(), hour, 0, 0, 0, loc).Format(time.RFC3339)
 }
 
 // A task made from a template starts at the beginning of its day and is due

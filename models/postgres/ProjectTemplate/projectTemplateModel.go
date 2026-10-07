@@ -96,12 +96,15 @@ func Get(ctx context.Context, id uuid.UUID) (*Template, error) {
 	return &t, nil
 }
 
-// Delete removes a template; false when it was already gone.
+// Delete removes a template; false when it was already gone. The row stays,
+// marked deleted, but without its plan: a deleted template must free its
+// space, or saving and deleting one in a loop would fill the disk.
 func Delete(ctx context.Context, id uuid.UUID) (bool, error) {
 	ctx, cancel := withTimeout(ctx)
 	defer cancel()
 	res, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `
-		UPDATE project_templates SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL`, id)
+		UPDATE project_templates SET deleted_at = NOW(), body = '{}'::jsonb, preview = '{}'
+		 WHERE id = $1 AND deleted_at IS NULL`, id)
 	if err != nil {
 		return false, err
 	}

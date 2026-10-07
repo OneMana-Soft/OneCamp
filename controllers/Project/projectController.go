@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -32,8 +33,14 @@ func CreateProject(w http.ResponseWriter, r *http.Request) {
 
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
-	var createProjectInfo adapter.CreateOrUpdateProjectInput
-	err := json.NewDecoder(r.Body).Decode(&createProjectInfo)
+	// A template can come whole, as a plan the AI drafted that hasn't been
+	// saved: it is checked as a template file is.
+	var body struct {
+		adapter.CreateOrUpdateProjectInput
+		Template *templateBusiness.Template `json:"template,omitempty"`
+	}
+	err := json.NewDecoder(io.LimitReader(r.Body, templateBusiness.MaxFileBytes)).Decode(&body)
+	createProjectInfo := body.CreateOrUpdateProjectInput
 	if err != nil {
 
 		helpers.LogErrorWithContext(ctx,
@@ -72,7 +79,14 @@ func CreateProject(w http.ResponseWriter, r *http.Request) {
 	// A template is found before anything is made, so one that's gone is a
 	// message, not a project without its tasks.
 	var template *templateBusiness.Template
-	if createProjectInfo.TemplateID != "" {
+	if body.Template != nil {
+		t, err := templateBusiness.Check(*body.Template)
+		if err != nil {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+			return
+		}
+		template = &t
+	} else if createProjectInfo.TemplateID != "" {
 		t, err := templateBusiness.Get(ctx, createProjectInfo.TemplateID)
 		if errors.Is(err, templateBusiness.ErrNotFound) {
 			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That template isn't there any more. Pick another, or start blank."})
