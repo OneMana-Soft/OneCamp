@@ -86,6 +86,9 @@ func createSchema() (err error) {
 		user_dms: [uid] .
 		user_teams: [uid] @reverse .
 		user_projects: [uid] .
+		# How many tasks a week the person takes on, as the workload view
+		# measures them; unset, the default applies. business/Project/workload.go
+		user_weekly_capacity: int .
 		user_tasks: [uid] .
 		user_events: [uid] .
 		user_fav_channels: [uid] @reverse .
@@ -279,6 +282,9 @@ func createSchema() (err error) {
 		task_status_since: dateTime .
 		task_deleted_at: dateTime .
 		task_rank: float .
+		# A task waits on these (finish-to-start): it can start once they are
+		# done. @reverse reads the tasks waiting on it. business/Task/taskDependency.go
+		task_blocked_by: [uid] @reverse .
 
 		event_uuid: string @index(exact) @upsert .
 		event_title: string @index(trigram) .
@@ -316,6 +322,10 @@ func createSchema() (err error) {
 		project_created_at: dateTime .
 		project_updated_at: dateTime .
 		project_deleted_at: dateTime .
+		# When a dependency between the project's tasks last changed. Every change
+		# writes it, so two at once conflict and one is run again, seeing the
+		# other: two links made at the same moment can't close a loop together.
+		project_dependencies_at: dateTime .
 
 		# Generic entity links: a task or project can link docs and boards.
 		# @reverse lets a doc/board surface the tasks/projects that link it.
@@ -458,6 +468,7 @@ func createSchema() (err error) {
 			user_job_title
 			user_department
 			user_hobbies
+			user_weekly_capacity
 			user_profile_object_key
 			user_dms: [Dm]
 			user_device_connected
@@ -577,6 +588,7 @@ func createSchema() (err error) {
 			task_status_since
 			task_deleted_at
 			task_rank
+			task_blocked_by: [Task]
 			linked_docs: [Doc]
 			linked_boards: [Board]
 		}
@@ -609,6 +621,7 @@ func createSchema() (err error) {
 			project_created_at
 			project_updated_at
 			project_deleted_at
+			project_dependencies_at
 			linked_docs: [Doc]
 			linked_boards: [Board]
 		}

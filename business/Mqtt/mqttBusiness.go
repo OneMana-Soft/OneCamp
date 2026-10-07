@@ -290,6 +290,34 @@ func PublishPostCommentReaction(mqttPostCommentReaction *mqttStruct.MqttPostComm
 	}()
 }
 
+// publishToProject sends one message to everyone in a project.
+func publishToProject(ctx context.Context, projectID string, kind int8, data any, what string) {
+	if mqttInit.MqttClient == nil {
+		// No broker connected (a test, a tool): nobody is listening.
+		return
+	}
+	payload, err := json.Marshal(mqttStruct.Message{Type: kind, Data: data})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/%s marshal err: %+v", what, err)
+		return
+	}
+	res := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForProjectMessage(projectID), 1, false, payload)
+	go func() {
+		_ = res.Wait()
+		if res.Error() != nil {
+			helpers.LogErrorWithContext(ctx, "business/%s publish err: %+v", what, res.Error())
+		}
+	}()
+}
+
+// PublishTaskDates tells a task's project that its dates changed.
+func PublishTaskDates(msg *mqttStruct.MqttTaskDates) {
+	if msg == nil || msg.ProjectUuid == "" {
+		return
+	}
+	publishToProject(context.Background(), msg.ProjectUuid, mqttStruct.MESSAGE_TASK_DATES, msg, "PublishTaskDates")
+}
+
 func PublishTaskCommentReaction(mqttTaskCommentReaction *mqttStruct.MqttTaskCommentReaction, projectId string) {
 	ctx := context.Background()
 

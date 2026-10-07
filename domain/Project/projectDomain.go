@@ -55,7 +55,8 @@ const projectTaskFields = `
 						}
 						task_created_at
 						task_rank
-						task_status_since`
+						task_status_since
+						` + dgraphStruct.TASK_BLOCKED_OPEN
 
 func CreateProject(ctx context.Context, projectUUID uuid.UUID, projectName string, teamUUID uuid.UUID, createdByUUID uuid.UUID, createdTime time.Time) (err error) {
 
@@ -317,6 +318,7 @@ func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgrap
 						}
 						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
 						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
+						`+dgraphStruct.TASK_BLOCKED_OPEN+`
 						task_team {
 							team_name
 							team_uuid
@@ -1137,9 +1139,11 @@ func GetDgraphProjectTimeline(ctx context.Context, projectUUID, userDgraphUID st
 						user_profile_object_key
 					}
 					task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
+					task_blocked_by @filter(%s) { task_uuid }
+					%s
 				}
 			}
-		}`, first)
+		}`, first, dgraphStruct.TASK_LIVE_FILTER, dgraphStruct.TASK_BLOCKED_OPEN)
 	return dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, map[string]string{"$id": projectUUID, "$user": userDgraphUID})
 }
 
@@ -1158,6 +1162,34 @@ type ProjectCounts struct {
 	Done    int `json:"done"`
 	Overdue int `json:"overdue"`
 	DueSoon int `json:"due_soon"`
+	// The days its top-level tasks run across: the earliest start (or due)
+	// date to the latest due (or start) date. None without dated tasks.
+	FirstDay *time.Time `json:"first_day,omitempty"`
+	LastDay  *time.Time `json:"last_day,omitempty"`
+}
+
+// projectCountsRow is a ProjectCounts as Dgraph answers it, with the dates
+// its tasks start and end on that FirstDay and LastDay are made of.
+type projectCountsRow struct {
+	ProjectCounts
+	MinStart *time.Time `json:"min_start"`
+	MaxStart *time.Time `json:"max_start"`
+	MinDue   *time.Time `json:"min_due"`
+	MaxDue   *time.Time `json:"max_due"`
+}
+
+func earliest(a, b *time.Time) *time.Time {
+	if a == nil || (b != nil && b.Before(*a)) {
+		return b
+	}
+	return a
+}
+
+func latest(a, b *time.Time) *time.Time {
+	if a == nil || (b != nil && b.After(*a)) {
+		return b
+	}
+	return a
 }
 
 // GetDgraphProjectCounts returns every live project the person is in, with
@@ -1165,11 +1197,32 @@ type ProjectCounts struct {
 // the week's end) tasks. today and weekEnd are instants, the start of the
 // person's today and seven days on, so days are theirs.
 func GetDgraphProjectCounts(ctx context.Context, userDgraphUID string, today, weekEnd time.Time) ([]ProjectCounts, error) {
-	const live = `not gt(task_deleted_at, "1970-01-01T00:00:00Z")`
+	const live = dgraphStruct.TASK_LIVE_FILTER
 	open := live + ` AND ` + dgraphStruct.TASK_OPEN_FILTER
+	top := live + ` AND NOT has(task_parent_task)`
+	// The first and last days come from aggregates over the tasks, so the
+	// tasks themselves never leave Dgraph.
 	query := `query Overview($user: string, $today: string, $weekEnd: string){
+			var(func: uid($user)) {
+				user_projects {
+					project_tasks @filter(` + top + ` AND gt(task_start_date, "1970-01-01T00:00:00Z")) { s as task_start_date }
+					min_start as min(val(s))
+					max_start as max(val(s))
+				}
+			}
+			var(func: uid($user)) {
+				user_projects {
+					project_tasks @filter(` + top + ` AND gt(task_due_date, "1970-01-01T00:00:00Z")) { d as task_due_date }
+					min_due as min(val(d))
+					max_due as max(val(d))
+				}
+			}
 			me(func: uid($user)) {
 				user_projects @filter(not gt(project_deleted_at, "1970-01-01T00:00:00Z")) {
+					min_start: val(min_start)
+					max_start: val(max_start)
+					min_due: val(min_due)
+					max_due: val(max_due)
 					project_uuid
 					project_name
 					is_admin: count(project_admins @filter(uid($user)))
@@ -1190,14 +1243,21 @@ func GetDgraphProjectCounts(ctx context.Context, userDgraphUID string, today, we
 	}
 	var out struct {
 		Me []struct {
-			Projects []ProjectCounts `json:"user_projects"`
+			Projects []projectCountsRow `json:"user_projects"`
 		} `json:"me"`
 	}
 	if err := json.Unmarshal(resp.Json, &out); err != nil {
 		return nil, err
 	}
-	if len(out.Me) == 0 || out.Me[0].Projects == nil {
-		return []ProjectCounts{}, nil
+	list := []ProjectCounts{}
+	if len(out.Me) == 0 {
+		return list, nil
 	}
-	return out.Me[0].Projects, nil
+	for _, r := range out.Me[0].Projects {
+		c := r.ProjectCounts
+		c.FirstDay = earliest(r.MinStart, r.MinDue)
+		c.LastDay = latest(r.MaxDue, r.MaxStart)
+		list = append(list, c)
+	}
+	return list, nil
 }

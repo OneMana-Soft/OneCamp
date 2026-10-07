@@ -191,7 +191,10 @@ type DgraphUser struct {
 	DMs                      []*DgraphDm              `json:"user_dms,omitempty"`
 	ThemeColor               string                   `json:"user_theme_color,omitempty"`
 	ThemeMode                string                   `json:"user_theme_mode,omitempty"`
-	DType                    []string                 `json:"dgraph.type,omitempty"`
+	// WeeklyCapacity is how many tasks a week they take on (the workload
+	// view); nil, the default applies.
+	WeeklyCapacity *int     `json:"user_weekly_capacity,omitempty"`
+	DType          []string `json:"dgraph.type,omitempty"`
 }
 
 type DgraphChat struct {
@@ -402,6 +405,12 @@ type DgraphTask struct {
 	LinkedBoards []*DgraphBoard `json:"linked_boards,omitempty"`
 	// Rank orders the task within its kanban column; see business/TaskRank.
 	Rank *float64 `json:"task_rank,omitempty"`
+	// The tasks it waits on (finish-to-start) and, read through the reverse
+	// edge, the tasks waiting on it; see business/Task/taskDependency.go.
+	BlockedBy []*DgraphTask `json:"task_blocked_by,omitempty"`
+	Blocks    []*DgraphTask `json:"task_blocks,omitempty"`
+	// How many of the tasks it waits on are still open (TASK_BLOCKED_OPEN).
+	BlockedOpen uint32 `json:"task_blocked_open,omitempty"`
 	// The project's own status the task is in, if any, and its name at the
 	// time it was set (kept in step on rename). Status above holds the built-in
 	// category it belongs to; see business/TaskStatus.
@@ -558,6 +567,14 @@ var VALID_TASK_STATUSES = []string{TASK_STATUS_TODO, TASK_STATUS_INPROGRESS, TAS
 // "upcoming" query uses it rather than spelling its own.
 const TASK_OPEN_FILTER = `not eq(task_status, "` + TASK_STATUS_DONE + `") AND not eq(task_status, "` + TASK_STATUS_CANCELED + `")`
 
+// TASK_LIVE_FILTER keeps the tasks nobody deleted (a live task's
+// task_deleted_at is the zero time).
+const TASK_LIVE_FILTER = `not gt(task_deleted_at, "1970-01-01T00:00:00Z")`
+
+// TASK_BLOCKED_OPEN counts the live, open tasks a task waits on: its
+// "blocked" badge on a board, a list and the timeline.
+const TASK_BLOCKED_OPEN = `task_blocked_open: count(task_blocked_by @filter(` + TASK_LIVE_FILTER + ` AND ` + TASK_OPEN_FILTER + `))`
+
 const TASK_PRIORITY_HIGH = "high"
 const TASK_PRIORITY_MEDIUM = "medium"
 const TASK_PRIORITY_LOW = "low"
@@ -583,3 +600,8 @@ const ACTIVITY_TYPE_DELETE_COMMENT = "commentDelete"
 const ACTIVITY_TYPE_DELETE_TASK = "taskDelete"
 const ACTIVITY_TYPE_UNDELETE_TASK = "taskUnDelete"
 const ACTIVITY_TYPE_CREATE_TASK = "taskCreate"
+
+// A dependency added to or taken off the task that waits: NextState (added)
+// or PrevState (taken off) holds the other task's uuid.
+const ACTIVITY_TYPE_ADD_DEPENDENCY = "dependencyAdd"
+const ACTIVITY_TYPE_REMOVE_DEPENDENCY = "dependencyRemove"

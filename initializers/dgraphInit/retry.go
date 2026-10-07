@@ -44,3 +44,35 @@ func DoCommitNow(ctx context.Context, req *api.Request) (*api.Response, error) {
 	}
 	return nil, lastErr
 }
+
+// InTxn runs fn in one read-write transaction and commits what it wrote, so
+// what fn read and decided on is still true when its write lands. When Dgraph
+// aborts the commit because a concurrent transaction wrote the same thing,
+// fn runs again in a fresh transaction and sees that write. An error from fn
+// is returned as it is, with nothing written.
+func InTxn(ctx context.Context, fn func(txn *dgo.Txn) error) error {
+	var lastErr error
+	for attempt := 0; attempt < abortRetries; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt*attempt) * 50 * time.Millisecond):
+			}
+		}
+		txn := DgraphClient.NewTxn()
+		err := fn(txn)
+		if err == nil {
+			err = txn.Commit(ctx)
+		}
+		_ = txn.Discard(ctx)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !errors.Is(err, dgo.ErrAborted) {
+			return err
+		}
+	}
+	return lastErr
+}
