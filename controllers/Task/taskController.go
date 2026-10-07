@@ -2812,3 +2812,61 @@ func RefreshFromGitHub(w http.ResponseWriter, r *http.Request) {
 		"status": "accepted",
 	})
 }
+
+// UpdateTaskDates handles POST /task/updateTaskDates {task_uuid,
+// task_start_date, task_due_date}: both dates in one write, for a timeline
+// that moves or stretches a task. An empty date clears it. For the project's
+// admins, as every task edit is.
+func UpdateTaskDates(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	var in adapter.CreateOrUpdateTaskInput
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That change couldn't be read."})
+		return
+	}
+	taskUUID, err := uuid.Parse(in.Uuid)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a task."})
+		return
+	}
+	task, err := business.GetDgraphBasicTaskInfo(ctx, in.Uuid, userInfo.UserDgraphInfo.Uid)
+	if err != nil || task == nil || task.Uuid == "" || task.Project == nil {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Task not found"})
+		return
+	}
+	if task.Project.IsProjectAdmin == 0 {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the project's admins can change its tasks."})
+		return
+	}
+	start, startErr := dateOrUnset(in.StartDate)
+	due, dueErr := dateOrUnset(in.DueDate)
+	if startErr != nil || dueErr != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Dates are written like 2026-10-12T17:00:00Z."})
+		return
+	}
+	if start.Year() > 1970 && due.Year() > 1970 && start.After(*due) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "A task can't start after it's due."})
+		return
+	}
+	if err := business.UpdateTaskDates(ctx, taskUUID, business.TaskDates{Start: start, Due: due}, task, &userInfo.UserDgraphInfo); err != nil {
+		if errors.Is(err, business.ErrTaskDeleted) {
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
+			return
+		}
+		helpers.LogErrorWithContext(ctx, "controllers/UpdateTaskDates err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The dates couldn't be saved just now. Try again in a moment."})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Updated the task's dates."})
+}
+
+// dateOrUnset reads an RFC 3339 date; empty is the zero time, which unsets it.
+func dateOrUnset(s string) (*time.Time, error) {
+	if s == "" {
+		zero := time.Time{}
+		return &zero, nil
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	return &t, err
+}

@@ -1127,94 +1127,87 @@ func dispatchTaskAssignedEvent(ctx context.Context, taskUUID uuid.UUID, dgraphTa
 	webhookBusiness.DispatchEvent(ctx, "task.assigned", payload)
 }
 
-func UpdateTaskDueDateByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskDueDate *time.Time, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) (err error) {
-
-	currentTime := time.Now()
-	zeroUnixTime := time.Time{}
-	activityUUID := uuid.New()
-
-	err = domain.UpdateTaskByTaskUUID(ctx, taskUUID, currentTime)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/UpdateTaskDueDateByTaskUUID failed to update task in postgres err: %+v", err)
-		return
-	}
-
-	dgraphTask := &dgraphStruct.DgraphTask{
-		Uid:     "uid(task)",
-		Uuid:    taskUUID.String(),
-		DueDate: taskDueDate,
-		Activity: []*dgraphStruct.DgraphTaskActivity{{
-			Uuid: activityUUID.String(),
-			Type: dgraphStruct.ACTIVITY_TYPE_END_DATE,
-			CreatedBy: &dgraphStruct.DgraphUser{
-				Uid: userInfo.Uid,
-			},
-			LogTime:   &currentTime,
-			PrevState: strconv.FormatInt(dgraphTaskInfo.DueDate.Unix(), 10),
-			NextState: strconv.FormatInt(taskDueDate.Unix(), 10),
-		}},
-		UpdatedAt: &currentTime,
-		DeletedAt: &zeroUnixTime,
-	}
-
-	_, err = domain.CreateOrUpdateDgraphTask(ctx, dgraphTask)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/UpdateTaskDueDateByTaskUUID failed to update task in dgraph err: %+v", err)
-		return
-	}
-
-	if dgraphTaskInfo.Assignee != nil && dgraphTaskInfo.Assignee.Uuid != "" {
-		go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID.String(), dgraphTaskInfo.Assignee.Uuid)
-	}
-
-	return
+// TaskDates are the dates to set on a task. A nil date is left as it is; the
+// zero time clears one.
+type TaskDates struct {
+	Start *time.Time
+	Due   *time.Time
 }
 
-func UpdateTaskStartDateByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskStartDate *time.Time, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) (err error) {
+// ErrTaskDeleted is a change to a task someone has deleted: a timeline still
+// showing it, say, as nothing tells an open timeline. Writing it would bring
+// the task back in Dgraph alone, while Postgres and search still had it gone.
+var ErrTaskDeleted = errors.New("task deleted")
 
-	currentTime := time.Now()
-	zeroUnixTime := time.Time{}
-	activityUUID := uuid.New()
-
-	err = domain.UpdateTaskByTaskUUID(ctx, taskUUID, currentTime)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/UpdateTaskStartDateByTaskUUID failed to update task in postgres err: %+v", err)
-		return
+// UpdateTaskDates sets a task's start and due dates in one write: a timeline
+// that moves a task changes both, and two writes could leave one undone. Each
+// date that changes gets its line in the task's history; one set to what it
+// already was gets none. A task with an assignee is resynced to their calendar.
+func UpdateTaskDates(ctx context.Context, taskUUID uuid.UUID, dates TaskDates, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) error {
+	if dgraphTaskInfo.DeletedAt != nil && dgraphTaskInfo.DeletedAt.Year() > 1970 {
+		return ErrTaskDeleted
 	}
-
-	dgraphTask := &dgraphStruct.DgraphTask{
-		Uid:       "uid(task)",
-		Uuid:      taskUUID.String(),
-		StartDate: taskStartDate,
-		Activity: []*dgraphStruct.DgraphTaskActivity{{
-			Uuid: activityUUID.String(),
-			Type: dgraphStruct.ACTIVITY_TYPE_START_DATE,
-			CreatedBy: &dgraphStruct.DgraphUser{
-				Uid: userInfo.Uid,
-			},
-			LogTime:   &currentTime,
-			PrevState: strconv.FormatInt(dgraphTaskInfo.StartDate.Unix(), 10),
-			NextState: strconv.FormatInt(taskStartDate.Unix(), 10),
-		}},
-		UpdatedAt: &currentTime,
-		DeletedAt: &zeroUnixTime,
+	now := time.Now()
+	write := &dgraphStruct.DgraphTask{Uid: "uid(task)", Uuid: taskUUID.String(), UpdatedAt: &now}
+	record := func(kind string, before, after *time.Time) {
+		write.Activity = append(write.Activity, &dgraphStruct.DgraphTaskActivity{
+			Uuid:      uuid.NewString(),
+			Type:      kind,
+			CreatedBy: &dgraphStruct.DgraphUser{Uid: userInfo.Uid},
+			LogTime:   &now,
+			PrevState: unixOf(before),
+			NextState: unixOf(after),
+		})
 	}
-
-	_, err = domain.CreateOrUpdateDgraphTask(ctx, dgraphTask)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/UpdateTaskAssigneeByTaskUUID failed to update task in dgraph err: %+v", err)
-		return
+	if dates.Start != nil && !sameTime(dgraphTaskInfo.StartDate, dates.Start) {
+		write.StartDate = dates.Start
+		record(dgraphStruct.ACTIVITY_TYPE_START_DATE, dgraphTaskInfo.StartDate, dates.Start)
 	}
-
+	if dates.Due != nil && !sameTime(dgraphTaskInfo.DueDate, dates.Due) {
+		write.DueDate = dates.Due
+		record(dgraphStruct.ACTIVITY_TYPE_END_DATE, dgraphTaskInfo.DueDate, dates.Due)
+	}
+	if len(write.Activity) == 0 {
+		return nil
+	}
+	if err := domain.UpdateTaskByTaskUUID(ctx, taskUUID, now); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/UpdateTaskDates postgres err: %+v", err)
+		return err
+	}
+	if _, err := domain.CreateOrUpdateDgraphTask(ctx, write); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/UpdateTaskDates dgraph err: %+v", err)
+		return err
+	}
 	if dgraphTaskInfo.Assignee != nil && dgraphTaskInfo.Assignee.Uuid != "" {
 		go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID.String(), dgraphTaskInfo.Assignee.Uuid)
 	}
+	return nil
+}
 
-	return
+// unixOf is a date as a task's history writes it, in seconds; an unset one is
+// the zero time's.
+func unixOf(t *time.Time) string {
+	if t == nil {
+		return strconv.FormatInt(time.Time{}.Unix(), 10)
+	}
+	return strconv.FormatInt(t.Unix(), 10)
+}
+
+func sameTime(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(*b)
+}
+
+// UpdateTaskDueDateByTaskUUID sets a task's due date; see UpdateTaskDates.
+func UpdateTaskDueDateByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskDueDate *time.Time, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) error {
+	return UpdateTaskDates(ctx, taskUUID, TaskDates{Due: taskDueDate}, dgraphTaskInfo, userInfo)
+}
+
+// UpdateTaskStartDateByTaskUUID sets a task's start date; see UpdateTaskDates.
+func UpdateTaskStartDateByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskStartDate *time.Time, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) error {
+	return UpdateTaskDates(ctx, taskUUID, TaskDates{Start: taskStartDate}, dgraphTaskInfo, userInfo)
 }
 
 // UpdateTaskStatusByTaskUUID moves a task to a status: a built-in key or label,

@@ -551,3 +551,17 @@ func GetDgraphProjectInfoAndTeamAdminFlag(ctx context.Context, projectUUID strin
 
 	return
 }
+
+// MaxTimelineTasks is the most tasks a project's timeline is sent: the newest
+// ones, which is every task in all but the largest projects.
+const MaxTimelineTasks = 2000
+
+// GetProjectTimeline is what a project's timeline draws; see
+// domain.GetDgraphProjectTimeline.
+func GetProjectTimeline(ctx context.Context, projectUUID, userDgraphUID string) (*dgraphStruct.DgraphProject, error) {
+	p, err := domain.GetDgraphProjectTimeline(ctx, projectUUID, userDgraphUID, MaxTimelineTasks)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/GetProjectTimeline err: %+v", err)
+	}
+	return p, err
+}

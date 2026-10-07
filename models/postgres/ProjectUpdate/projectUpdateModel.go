@@ -9,6 +9,7 @@ import (
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // The healths an update can give, as Asana names them.
@@ -120,6 +121,37 @@ func List(projectID uuid.UUID, limit int, sharedOnly bool) ([]Update, error) {
 			return nil, err
 		}
 		out = append(out, *u)
+	}
+	return out, rows.Err()
+}
+
+// Latest is each project's newest live update, for the projects overview:
+// one query for all of them. A project with no update has no entry.
+func Latest(projectIDs []uuid.UUID) (map[uuid.UUID]Update, error) {
+	out := make(map[uuid.UUID]Update, len(projectIDs))
+	if len(projectIDs) == 0 {
+		return out, nil
+	}
+	ids := make([]string, len(projectIDs))
+	for i, id := range projectIDs {
+		ids[i] = id.String()
+	}
+	ctx, cancel := withTimeout()
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `
+		SELECT DISTINCT ON (project_uuid) `+columns+` FROM project_updates
+		 WHERE project_uuid = ANY($1::uuid[]) AND deleted_at IS NULL
+		 ORDER BY project_uuid, created_at DESC`, pq.Array(ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		u, err := scan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[u.ProjectUUID] = *u
 	}
 	return out, rows.Err()
 }

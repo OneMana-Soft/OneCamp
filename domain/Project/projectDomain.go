@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Project"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
@@ -989,4 +990,95 @@ func GetDgraphProjectTasksForTemplate(ctx context.Context, projectUUID string, f
 			}
 		}`, first, first)
 	return dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, map[string]string{"$id": projectUUID})
+}
+
+// GetDgraphProjectTimeline returns what a project's timeline draws: its live
+// top-level tasks with their dates, status, priority and assignee, and none of
+// the heavier fields (descriptions, comments, GitHub) a list needs. The newest
+// first ones when there are more; project_task_count says how many there are.
+func GetDgraphProjectTimeline(ctx context.Context, projectUUID, userDgraphUID string, first int) (*dgraphStruct.DgraphProject, error) {
+	query := fmt.Sprintf(`query Timeline($id: string, $user: string){
+			projectInfo(func: eq(project_uuid, $id)) {
+				project_uuid
+				project_is_admin: count(project_admins @filter(uid($user)))
+				project_task_count: count(project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND NOT has(task_parent_task)))
+				project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND NOT has(task_parent_task)) (orderdesc: task_created_at, first: %d) {
+					task_uuid
+					task_name
+					task_status
+					task_custom_status
+					task_custom_status_name
+					task_priority
+					task_start_date
+					task_due_date
+					task_created_at
+					task_assignee {
+						user_uuid
+						user_name
+						user_profile_object_key
+					}
+					task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
+				}
+			}
+		}`, first)
+	return dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, map[string]string{"$id": projectUUID, "$user": userDgraphUID})
+}
+
+// ProjectCounts is one of a person's projects with where its tasks stand, as
+// the projects overview shows it and in the same terms as the line under a
+// project's name (the app's projectGlance): every live task, subtasks too.
+type ProjectCounts struct {
+	UUID    string `json:"project_uuid"`
+	Name    string `json:"project_name"`
+	IsAdmin int    `json:"is_admin"`
+	Team    *struct {
+		UUID string `json:"team_uuid"`
+		Name string `json:"team_name"`
+	} `json:"project_team,omitempty"`
+	Open    int `json:"open"`
+	Done    int `json:"done"`
+	Overdue int `json:"overdue"`
+	DueSoon int `json:"due_soon"`
+}
+
+// GetDgraphProjectCounts returns every live project the person is in, with
+// counts of its open, done, overdue (due before today) and due-soon (today to
+// the week's end) tasks. today and weekEnd are instants, the start of the
+// person's today and seven days on, so days are theirs.
+func GetDgraphProjectCounts(ctx context.Context, userDgraphUID string, today, weekEnd time.Time) ([]ProjectCounts, error) {
+	const live = `not gt(task_deleted_at, "1970-01-01T00:00:00Z")`
+	open := live + ` AND ` + dgraphStruct.TASK_OPEN_FILTER
+	query := `query Overview($user: string, $today: string, $weekEnd: string){
+			me(func: uid($user)) {
+				user_projects @filter(not gt(project_deleted_at, "1970-01-01T00:00:00Z")) {
+					project_uuid
+					project_name
+					is_admin: count(project_admins @filter(uid($user)))
+					project_team { team_uuid team_name }
+					open: count(project_tasks @filter(` + open + `))
+					done: count(project_tasks @filter(` + live + ` AND eq(task_status, "` + dgraphStruct.TASK_STATUS_DONE + `")))
+					overdue: count(project_tasks @filter(` + open + ` AND lt(task_due_date, $today) AND gt(task_due_date, "1970-01-01T00:00:00Z")))
+					due_soon: count(project_tasks @filter(` + open + ` AND ge(task_due_date, $today) AND lt(task_due_date, $weekEnd)))
+				}
+			}
+		}`
+	resp, err := dgraphInit.DgraphClient.NewReadOnlyTxn().QueryWithVars(ctx, query, map[string]string{
+		"$user": userDgraphUID, "$today": today.UTC().Format(time.RFC3339), "$weekEnd": weekEnd.UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetDgraphProjectCounts err: %+v", err)
+		return nil, err
+	}
+	var out struct {
+		Me []struct {
+			Projects []ProjectCounts `json:"user_projects"`
+		} `json:"me"`
+	}
+	if err := json.Unmarshal(resp.Json, &out); err != nil {
+		return nil, err
+	}
+	if len(out.Me) == 0 || out.Me[0].Projects == nil {
+		return []ProjectCounts{}, nil
+	}
+	return out.Me[0].Projects, nil
 }

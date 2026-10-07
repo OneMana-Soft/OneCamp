@@ -39,6 +39,7 @@ type GuestTaskCard struct {
 	Status       string     `json:"status"`
 	StatusLabel  string     `json:"status_label"`
 	Priority     string     `json:"priority,omitempty"`
+	StartDate    *time.Time `json:"start_date,omitempty"`
 	DueDate      *time.Time `json:"due_date,omitempty"`
 	Assignee     string     `json:"assignee,omitempty"`
 	CommentCount uint32     `json:"comment_count"`
@@ -82,7 +83,6 @@ const guestUpdatesShown = 10
 type GuestTaskView struct {
 	GuestTaskCard
 	Description string         `json:"description"`
-	StartDate   *time.Time     `json:"start_date,omitempty"`
 	Comments    []GuestMessage `json:"comments"`
 	CanComment  bool           `json:"can_comment"`
 }
@@ -129,6 +129,7 @@ func cardOf(t *dgraphStruct.DgraphTask) GuestTaskCard {
 		Status:       t.Status,
 		StatusLabel:  StatusLabel(t.Status, t.CustomStatusName),
 		Priority:     t.Priority,
+		StartDate:    dateOf(t.StartDate),
 		DueDate:      dateOf(t.DueDate),
 		CommentCount: t.CommentCount,
 	}
@@ -255,7 +256,7 @@ func GetGuestTask(ctx context.Context, grant *guestModel.GuestGrant, taskID stri
 		return nil, err
 	}
 	canComment := grant.Capability == guestModel.CapabilityComment
-	v := &GuestTaskView{GuestTaskCard: cardOf(t), StartDate: dateOf(t.StartDate), Comments: []GuestMessage{}, CanComment: canComment}
+	v := &GuestTaskView{GuestTaskCard: cardOf(t), Comments: []GuestMessage{}, CanComment: canComment}
 	if t.Description != nil {
 		v.Description = PlainText(*t.Description)
 	}
