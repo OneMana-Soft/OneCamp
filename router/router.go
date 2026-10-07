@@ -1178,6 +1178,9 @@ func Routes() http.Handler {
 	projectRouter.Group(func(r chi.Router) {
 		r.Post("/createProject", projectController.CreateProject)
 		r.Get("/overview", projectUpdateController.ProjectsOverview)
+		// Who has how much each week, across the person's projects: business/Project/workload.go.
+		r.Get("/workload", projectController.Workload)
+		r.Post("/workload/capacity", projectController.SetWorkloadCapacity)
 		// Project templates: see business/ProjectTemplate.
 		r.Get("/templates", projectTemplateController.ListTemplates)
 		r.Post("/templates", projectTemplateController.ImportTemplate)
@@ -1283,6 +1286,8 @@ func Routes() http.Handler {
 		r.Post("/updateTaskStartDate", taskController.UpdateTaskStartDate)
 		r.Post("/updateTaskDueDate", taskController.UpdateTaskDueDate)
 		r.Post("/updateTaskDates", taskController.UpdateTaskDates)
+		r.Post("/dependency", taskController.AddTaskDependency)
+		r.Post("/dependency/delete", taskController.RemoveTaskDependency)
 		r.Post("/updateTaskStatus", taskController.UpdateTaskStatus)
 		r.Get("/recurrence/{task_uuid}", taskController.GetTaskRecurrence)
 		r.Get("/cycle/{task_uuid}", cycleController.GetTaskCycle)

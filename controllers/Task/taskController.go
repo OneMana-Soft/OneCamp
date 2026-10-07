@@ -2813,14 +2813,27 @@ func RefreshFromGitHub(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// datesInput is POST /task/updateTaskDates' body.
+type datesInput struct {
+	Uuid      string `json:"task_uuid"`
+	StartDate string `json:"task_start_date"`
+	DueDate   string `json:"task_due_date"`
+	// ShiftDependents moves the tasks waiting on this one along, as far as
+	// they must (business.ShiftDependents); tz is whose days count.
+	ShiftDependents bool   `json:"shift_dependents"`
+	TZ              string `json:"tz"`
+}
+
 // UpdateTaskDates handles POST /task/updateTaskDates {task_uuid,
-// task_start_date, task_due_date}: both dates in one write, for a timeline
-// that moves or stretches a task. An empty date clears it. For the project's
-// admins, as every task edit is.
+// task_start_date, task_due_date, shift_dependents, tz}: both dates in one
+// write, for a timeline that moves or stretches a task. An empty date clears
+// it. With shift_dependents, the tasks waiting on it that it now overlaps move
+// later too, and come back as shifted. For the project's admins, as every
+// task edit is.
 func UpdateTaskDates(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-	var in adapter.CreateOrUpdateTaskInput
+	var in datesInput
 	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&in); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That change couldn't be read."})
 		return
@@ -2858,7 +2871,79 @@ func UpdateTaskDates(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The dates couldn't be saved just now. Try again in a moment."})
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Updated the task's dates."})
+	shifted := []business.ShiftedTask{}
+	if in.ShiftDependents {
+		moved, err := business.ShiftDependents(ctx, task.Project.Uuid, in.Uuid, helpers.Location(in.TZ), &userInfo.UserDgraphInfo)
+		if err != nil {
+			// The task itself moved; what didn't move along is fetched again by the timeline.
+			helpers.LogErrorWithContext(ctx, "controllers/UpdateTaskDates shift err: %+v", err)
+		}
+		shifted = append(shifted, moved...)
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Updated the task's dates.", "data": map[string]any{"shifted": shifted}})
+}
+
+// dependencyInput is the body of POST /task/dependency and /task/dependency/delete.
+type dependencyInput struct {
+	Uuid      string `json:"task_uuid"`
+	BlockedBy string `json:"blocked_by_uuid"`
+}
+
+// AddTaskDependency handles POST /task/dependency {task_uuid,
+// blocked_by_uuid}: the task waits on the other (finish to start). Both
+// must be top-level tasks of one project, the person one of its admins, and
+// it mustn't close a loop.
+func AddTaskDependency(w http.ResponseWriter, r *http.Request) {
+	dependencyChange(w, r, false)
+}
+
+// RemoveTaskDependency handles POST /task/dependency/delete {task_uuid,
+// blocked_by_uuid}: the task stops waiting on the other.
+func RemoveTaskDependency(w http.ResponseWriter, r *http.Request) {
+	dependencyChange(w, r, true)
+}
+
+func dependencyChange(w http.ResponseWriter, r *http.Request, remove bool) {
+	ctx := r.Context()
+	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	var in dependencyInput
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That change couldn't be read."})
+		return
+	}
+	if _, err := uuid.Parse(in.Uuid); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a task."})
+		return
+	}
+	if _, err := uuid.Parse(in.BlockedBy); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a task."})
+		return
+	}
+	var err error
+	if remove {
+		err = business.RemoveTaskDependency(ctx, in.Uuid, in.BlockedBy, &userInfo.UserDgraphInfo)
+	} else {
+		err = business.AddTaskDependency(ctx, in.Uuid, in.BlockedBy, &userInfo.UserDgraphInfo)
+	}
+	switch {
+	case err == nil:
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Saved."})
+	case errors.Is(err, business.ErrDependencySelf):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "A task can't wait on itself."})
+	case errors.Is(err, business.ErrDependencyProject):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "A task can only wait on tasks in its own project."})
+	case errors.Is(err, business.ErrDependencySubtask):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Dependencies are between a project's tasks, not subtasks."})
+	case errors.Is(err, business.ErrDependencyLoop):
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "That would make a loop: the other task already waits on this one."})
+	case errors.Is(err, business.ErrNotProjectAdmin):
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the project's admins can change its tasks."})
+	case errors.Is(err, business.ErrDependencyMissing):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Task not found"})
+	default:
+		helpers.LogErrorWithContext(ctx, "controllers/dependencyChange (remove=%v) err: %+v", remove, err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "That couldn't be saved just now. Try again in a moment."})
+	}
 }
 
 // dateOrUnset reads an RFC 3339 date; empty is the zero time, which unsets it.

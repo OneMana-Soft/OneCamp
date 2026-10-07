@@ -838,6 +838,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 						}
 						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
 						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
+						`+dgraphStruct.TASK_BLOCKED_OPEN+`
 						task_team {
 							team_name
 							team_uuid
@@ -872,6 +873,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 						}
 						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
 						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
+						`+dgraphStruct.TASK_BLOCKED_OPEN+`
 						task_team {
 							team_name
 							team_uuid
@@ -906,6 +908,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 						}
 						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
 						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
+						`+dgraphStruct.TASK_BLOCKED_OPEN+`
 						task_team {
 							team_name
 							team_uuid
@@ -940,6 +943,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 						}
 						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
 						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
+						`+dgraphStruct.TASK_BLOCKED_OPEN+`
 						task_team {
 							team_name
 							team_uuid
@@ -974,6 +978,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 						}
 						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
 						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
+						`+dgraphStruct.TASK_BLOCKED_OPEN+`
 						task_team {
 							team_name
 							team_uuid
@@ -1010,6 +1015,7 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 						}
 						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
 						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
+						`+dgraphStruct.TASK_BLOCKED_OPEN+`
 						task_team {
 							team_name
 							team_uuid
@@ -1081,6 +1087,7 @@ func GetDgraphUserTaskList(ctx context.Context, userUUID string, userDgraphUID s
 						}
 						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
 						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
+						`+dgraphStruct.TASK_BLOCKED_OPEN+`
 						task_team {
 							team_name
 							team_uuid

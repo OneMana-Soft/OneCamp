@@ -36,19 +36,23 @@ func TestOverviews(t *testing.T) {
 		}
 		return m
 	}
+	withStart := func(m map[string]any, start string) map[string]any {
+		m["task_start_date"] = start
+		return m
+	}
 	uids := dg.Mutate(t, map[string]any{
 		"uid": "_:me", "dgraph.type": "User", "user_uuid": uuid.NewString(),
 		"user_projects": []map[string]any{
 			{"uid": "_:a", "dgraph.type": "Project", "project_uuid": a.String(), "project_name": "beta launch", "project_deleted_at": live,
 				"project_admins": []map[string]any{{"uid": "_:me"}},
 				"project_tasks": []map[string]any{
-					task("todo", "2026-03-09T17:00:00Z", false),       // overdue
-					task("inProgress", "2026-03-12T17:00:00Z", false), // due this week
-					task("todo", "2026-03-20T17:00:00Z", false),       // open, later
-					task("backlog", "", false),                        // open, no date
-					task("done", "2026-03-01T17:00:00Z", false),       // done, never overdue
-					task("canceled", "2026-03-01T17:00:00Z", false),   // neither
-					task("todo", "2026-03-09T17:00:00Z", true),        // deleted
+					task("todo", "2026-03-09T17:00:00Z", false),                   // overdue
+					task("inProgress", "2026-03-12T17:00:00Z", false),             // due this week
+					task("todo", "2026-03-20T17:00:00Z", false),                   // open, later
+					withStart(task("backlog", "", false), "2026-02-25T09:00:00Z"), // open, no due date; the first to start
+					task("done", "2026-03-01T17:00:00Z", false),                   // done, never overdue
+					task("canceled", "2026-03-01T17:00:00Z", false),               // neither
+					task("todo", "2026-03-09T17:00:00Z", true),                    // deleted
 				}},
 			{"uid": "_:b", "dgraph.type": "Project", "project_uuid": b.String(), "project_name": "Alpha", "project_deleted_at": live},
 			{"uid": "_:c", "dgraph.type": "Project", "project_uuid": c.String(), "project_name": "Archived", "project_deleted_at": gone},
@@ -83,6 +87,15 @@ func TestOverviews(t *testing.T) {
 	}
 	if beta.Team != nil {
 		t.Errorf("no team in this graph: %+v", beta.Team)
+	}
+	// Its tasks run from the first start (the backlog task's) to the last
+	// due date; the deleted task's dates don't count, and an empty project has none.
+	if beta.FirstDay == nil || !beta.FirstDay.Equal(time.Date(2026, 2, 25, 9, 0, 0, 0, time.UTC)) ||
+		beta.LastDay == nil || !beta.LastDay.Equal(time.Date(2026, 3, 20, 17, 0, 0, 0, time.UTC)) {
+		t.Errorf("the days its tasks run across: %v to %v", beta.FirstDay, beta.LastDay)
+	}
+	if alpha.FirstDay != nil || alpha.LastDay != nil {
+		t.Errorf("a project with no dated tasks has no days: %v %v", alpha.FirstDay, alpha.LastDay)
 	}
 
 	// In a zone where it's already the 11th, the task due on the 12th is

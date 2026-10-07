@@ -68,6 +68,9 @@ const (
 	// A member's scheduled message was sent, failed, or changed; an open app
 	// refreshes its scheduled list (and the conversation, when it sent).
 	MESSAGE_SCHEDULED_MESSAGE
+	// A task's dates changed (a timeline move, a panel edit, a dependency
+	// moving it along); the project's open boards, lists and timelines show it.
+	MESSAGE_TASK_DATES
 )
 
 const (
@@ -198,6 +201,17 @@ type MqttDocCommentReaction struct {
 	DocUuid         string `json:"doc_uuid,omitempty"`
 	CommentUuid     string `json:"comment_uuid,omitempty"`
 	ReactionUuid    string `json:"reaction_id,omitempty"`
+}
+
+// MqttTaskDates is a task's new dates, sent to its project's members. An
+// unset date is "". By is who changed them. Every app applies it, the
+// mover's included: their other tabs need it too.
+type MqttTaskDates struct {
+	TaskUuid    string `json:"task_uuid"`
+	ProjectUuid string `json:"project_uuid"`
+	StartDate   string `json:"task_start_date"`
+	DueDate     string `json:"task_due_date"`
+	By          string `json:"by"`
 }
 
 type MqttTaskCommentReaction struct {

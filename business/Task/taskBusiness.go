@@ -1181,7 +1181,29 @@ func UpdateTaskDates(ctx context.Context, taskUUID uuid.UUID, dates TaskDates, d
 	if dgraphTaskInfo.Assignee != nil && dgraphTaskInfo.Assignee.Uuid != "" {
 		go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID.String(), dgraphTaskInfo.Assignee.Uuid)
 	}
+	// Everyone with the project open sees the new dates without a refresh.
+	if dgraphTaskInfo.Project != nil && dgraphTaskInfo.Project.Uuid != "" {
+		start, due := dgraphTaskInfo.StartDate, dgraphTaskInfo.DueDate
+		if dates.Start != nil {
+			start = dates.Start
+		}
+		if dates.Due != nil {
+			due = dates.Due
+		}
+		go mqttBusiness.PublishTaskDates(&mqttStruct.MqttTaskDates{
+			TaskUuid: taskUUID.String(), ProjectUuid: dgraphTaskInfo.Project.Uuid,
+			StartDate: wireDate(start), DueDate: wireDate(due), By: userInfo.Uuid,
+		})
+	}
 	return nil
+}
+
+// wireDate is a date as the app reads one, "" when it is unset.
+func wireDate(t *time.Time) string {
+	if t == nil || t.Year() <= 1970 {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 // unixOf is a date as a task's history writes it, in seconds; an unset one is

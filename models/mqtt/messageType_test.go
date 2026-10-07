@@ -13,4 +13,7 @@ func TestMessageTypesKeepTheirNumbers(t *testing.T) {
 	if MESSAGE_POLL_UPDATE != 30 || MESSAGE_SCHEDULED_MESSAGE != 31 {
 		t.Fatalf("POLL_UPDATE=%d SCHEDULED_MESSAGE=%d, want 30 and 31", MESSAGE_POLL_UPDATE, MESSAGE_SCHEDULED_MESSAGE)
 	}
+	if MESSAGE_TASK_DATES != 32 {
+		t.Fatalf("TASK_DATES=%d, want 32", MESSAGE_TASK_DATES)
+	}
 }
