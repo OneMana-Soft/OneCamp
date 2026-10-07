@@ -570,6 +570,7 @@ func GetDgraphBasicTaskInfoByUUID(ctx context.Context, teamUUID string, userDgra
 					task_label
 					task_start_date
 					task_due_date
+					task_deleted_at
 					task_description
 					task_team {
 						team_name

@@ -1312,6 +1312,7 @@ func Routes() http.Handler {
 
 	projectRouter.Group(func(r chi.Router) {
 		r.Post("/createProject", projectController.CreateProject)
+		r.Get("/overview", projectUpdateController.ProjectsOverview)
 		// Project templates: see business/ProjectTemplate.
 		r.Get("/templates", projectTemplateController.ListTemplates)
 		r.Post("/templates", projectTemplateController.ImportTemplate)
@@ -1341,6 +1342,7 @@ func Routes() http.Handler {
 		r.Post("/{project_uuid}/forms/{form_id}/delete", formController.DeleteForm)
 		r.Get("/{project_uuid}/time", timeEntryController.ProjectTime)
 		r.Get("/{project_uuid}/tags", taskController.ProjectTags)
+		r.Get("/{project_uuid}/timeline", projectController.ProjectTimeline)
 		// Project updates: see business/ProjectUpdate.
 		r.Get("/{project_uuid}/updates", projectUpdateController.ListUpdates)
 		r.Get("/{project_uuid}/updates/draft", projectUpdateController.DraftUpdate)
@@ -1415,6 +1417,7 @@ func Routes() http.Handler {
 		r.Post("/updateTaskAssignee", taskController.UpdateTaskAssignee)
 		r.Post("/updateTaskStartDate", taskController.UpdateTaskStartDate)
 		r.Post("/updateTaskDueDate", taskController.UpdateTaskDueDate)
+		r.Post("/updateTaskDates", taskController.UpdateTaskDates)
 		r.Post("/updateTaskStatus", taskController.UpdateTaskStatus)
 		r.Get("/recurrence/{task_uuid}", taskController.GetTaskRecurrence)
 		r.Get("/cycle/{task_uuid}", cycleController.GetTaskCycle)

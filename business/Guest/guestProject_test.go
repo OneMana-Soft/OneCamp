@@ -72,6 +72,19 @@ func TestDateOfHidesUnsetDates(t *testing.T) {
 	}
 }
 
+// The client's timeline draws a card from its start to its due date, so the
+// card carries both, and an unset one stays out.
+func TestCardCarriesBothDates(t *testing.T) {
+	start, due, zero := time.Date(2026, 10, 5, 9, 0, 0, 0, time.UTC), time.Date(2026, 10, 9, 17, 0, 0, 0, time.UTC), time.Time{}
+	c := cardOf(&dgraphStruct.DgraphTask{Uuid: "t", Name: "Plan", Status: "todo", StartDate: &start, DueDate: &due})
+	if c.StartDate == nil || !c.StartDate.Equal(start) || c.DueDate == nil || !c.DueDate.Equal(due) {
+		t.Fatalf("the card's dates: %v %v", c.StartDate, c.DueDate)
+	}
+	if c := cardOf(&dgraphStruct.DgraphTask{Uuid: "t", Status: "todo", StartDate: &zero, DueDate: &due}); c.StartDate != nil {
+		t.Fatalf("an unset start date showed: %v", c.StartDate)
+	}
+}
+
 func TestReviewText(t *testing.T) {
 	if text, _, err := ReviewText("approved", ""); err != nil || text != "Approved." {
 		t.Errorf("approve: %q %v", text, err)
