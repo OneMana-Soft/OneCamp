@@ -285,6 +285,7 @@ install_run:
 	@$(MAKE) -f $(SELF) --no-print-directory migrate_up
 	@if [ -n "$(AUTO_DOMAIN)" ]; then $(MAKE) -f $(SELF) --no-print-directory auto-domain-https; fi
 	@$(MAKE) -f $(SELF) --no-print-directory verify
+	@$(MAKE) -f $(SELF) --no-print-directory enable-housekeeping || true
 	@echo ""
 	@echo "  The server is ready. It runs the API and the datastores."
 	# THE NEXT STEP USED TO BE MISSING ENTIRELY. This said "Done" and pointed at
@@ -1301,6 +1302,44 @@ enable-backups:
 	echo "  nightly backup scheduled at 03:30"; \
 	echo "  check it with: make backup-status"
 
+# ─── Keeping the disk in check ────────────────────────────────────────────────
+#
+# An update builds images on this machine, and Docker keeps what every build
+# leaves behind (the previous image, the build cache) until it is told
+# otherwise. Weeks of updates add up to tens of gigabytes, and a full disk is
+# the worst way for a workspace to fail: Postgres stops accepting writes, and it
+# looks like a workspace that hangs rather than one that broke.
+#
+# housekeeping keeps the build cache under BUILD_CACHE_KEEP, removes images that
+# nothing can start any more (never one a container uses), trims old backups to
+# BACKUP_KEEP, and says how full the disk is. It runs after every update and,
+# once enable-housekeeping has scheduled it (install and update both do), every
+# day at 04:40. Container logs are capped in the stack definition itself.
+BUILD_CACHE_KEEP ?= 5GB
+
+housekeeping:
+	@: "--max-used-space is Docker 29's name; --keep-storage is the older one."
+	@docker builder prune -f --max-used-space $(BUILD_CACHE_KEEP) > /dev/null 2>&1 \
+		|| docker builder prune -f --keep-storage $(BUILD_CACHE_KEEP) > /dev/null 2>&1 \
+		|| echo "    warn  could not trim the build cache"
+	@docker image prune -f > /dev/null 2>&1 || true
+	@$(MAKE) -f $(SELF) --no-print-directory backup-rotate
+	@use=$$(df -P . 2>/dev/null | awk 'NR==2 {gsub(/%/,"",$$5); print $$5}'); \
+	free=$$(df -Ph . 2>/dev/null | awk 'NR==2 {print $$4}'); \
+	echo "    ok    housekeeping done $$(date -u +%FT%TZ): disk $$use% used, $$free free"; \
+	if [ -n "$$use" ] && [ "$$use" -ge 85 ]; then \
+		echo "    warn  disk $$use% used. Free room: remove files you no longer need with"; \
+		echo "          \"Remove for good\" (Admin, then Archive), or move to a larger disk."; \
+	fi
+
+# enable-housekeeping schedules housekeeping daily, replacing any earlier entry,
+# and keeps its log from becoming the thing that fills the disk.
+enable-housekeeping:
+	@line="40 4 * * * cd $$(pwd) && f=$$(pwd)/data/housekeeping.log && { [ ! -f \$$f ] || [ \$$(wc -c < \$$f) -lt 1048576 ] || : > \$$f; } && make housekeeping >> \$$f 2>&1"; \
+	mkdir -p ./data; \
+	( crontab -l 2>/dev/null | grep -v 'make housekeeping' ; echo "$$line" ) | crontab -; \
+	echo "  daily housekeeping scheduled at 04:40 (build cache, old images, old backups, disk check)"
+
 # ─── Moving to another machine ────────────────────────────────────────────────
 #
 # A workspace moves to a larger (or smaller) machine by backing up here,
@@ -1708,6 +1747,11 @@ update_apply:
 	@: "so reaching this line is the only proof that this release is the one now"
 	@: "running. Writing it earlier would record an upgrade that did not finish."
 	@if [ -n "$(STAGED_VERSION)" ]; then printf '%s\n' "$(STAGED_VERSION)" > $(APPLIED_FILE); fi
+	@: "Then tidy: the build just left the old image and its cache behind. And"
+	@: "make sure the daily run is scheduled, so an install from before it existed"
+	@: "gets it with this update."
+	@$(MAKE) -f $(SELF) --no-print-directory housekeeping || true
+	@$(MAKE) -f $(SELF) --no-print-directory enable-housekeeping || true
 	@echo ""
 	@if [ -n "$(APPLIED_VERSION)" ] && [ "$(STAGED_VERSION)" != "$(APPLIED_VERSION)" ]; then \
 		echo "  Updated to $(STAGED_VERSION). The backup taken in step 1 is under"; \

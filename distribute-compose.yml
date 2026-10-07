@@ -1,5 +1,16 @@
+# Every container's log is capped. Docker keeps a container's log forever by
+# default, and on a small server those logs are what fills the disk (a full disk
+# stops Postgres accepting writes). Three files of 10 MB each per container; the
+# oldest lines go first. A service with its own logging block keeps it.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
+    logging: *default-logging
     # A real readiness signal, not "the container exists".
     #
     # Nothing in this file had a healthcheck, so `docker ps --filter health=...`
@@ -33,6 +44,7 @@ services:
       - traefik
 
   zero:
+    logging: *default-logging
     image: dgraph/dgraph:v25.3.3
     volumes:
       - ./data/dgraph:/dgraph
@@ -41,6 +53,7 @@ services:
     networks:
       - onecamp-shared-net
   alpha:
+    logging: *default-logging
     image: dgraph/dgraph:v25.3.3
     volumes:
       - ./data/dgraph:/dgraph
@@ -53,6 +66,7 @@ services:
       - traefik
 
   emqx:
+    logging: *default-logging
     restart: unless-stopped
     image: emqx/emqx:6.0.0
     environment:
@@ -100,6 +114,7 @@ services:
       - traefik
 
   minio:
+    logging: *default-logging
     restart: unless-stopped
     image: minio/minio:RELEASE.2025-01-18T00-31-37Z
     volumes:
@@ -138,6 +153,7 @@ services:
       - traefik
 
   opensearch-node1: # This is also the hostname of the container within the Docker network (i.e. https://opensearch-node1/)
+    logging: *default-logging
     image: opensearchproject/opensearch:${OPENSEARCH_VERSION:-3.6.0}
     container_name: opensearch-node1
     # The ninth service missing a policy, and the one 0f3d94b did not find: the guard's service pattern
@@ -175,6 +191,7 @@ services:
 
 
   opensearch-dashboards:
+    logging: *default-logging
     restart: unless-stopped
     image: opensearchproject/opensearch-dashboards:${OPENSEARCH_VERSION:-3.6.0} # Make sure the version of opensearch-dashboards matches the version of opensearch installed on other nodes
     container_name: opensearch-dashboards
@@ -194,6 +211,7 @@ services:
       - traefik
 
   redis:
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -222,6 +240,7 @@ services:
       - traefik
 
   go-service:
+    logging: *default-logging
     # /health is a plain 200 from the router (router.go), verified answering both
     # in-container and through the proxy before this was added: a healthcheck
     # pointed at a path that does not exist would mark every install permanently
@@ -325,6 +344,7 @@ services:
   # for the full account of what makes the split safe.
   # ---------------------------------------------------------------------------
   go-worker:
+    logging: *default-logging
     profiles: ["workers"]
     image: go_service_onecamp_onemana:1.0
     restart: always
@@ -420,6 +440,7 @@ services:
   # also run it under gVisor (uncomment `runtime: runsc`) once the host has it.
   # ---------------------------------------------------------------------------
   code-runner:
+    logging: *default-logging
     profiles: ["code-execution"]
     build:
       context: ./other-services/code-runner
@@ -578,6 +599,7 @@ services:
   # reboot; by then the models are already on disk and `ollama pull` would be a
   # no-op round trip at every boot.
   ollama-init:
+    logging: *default-logging
     profiles: ["local-ai"]
     image: ollama/ollama:${OLLAMA_IMAGE_TAG:-0.21.2}
     depends_on:
@@ -664,6 +686,7 @@ services:
   # fail loudly, calls simply never connect for anyone behind a restrictive network.
   # ---------------------------------------------------------------------------
   livekit:
+    logging: *default-logging
     image: livekit/livekit-server:v1.11.0
     command: --config /livekit.yaml
     restart: unless-stopped
@@ -722,6 +745,7 @@ services:
   # direct connection between them.
   # ---------------------------------------------------------------------------
   egress:
+    logging: *default-logging
     image: livekit/egress:v1.12.0
     restart: unless-stopped
     environment:
@@ -754,6 +778,7 @@ services:
   # quietly, and nobody notices until a customer says their document will not sync.
   # ---------------------------------------------------------------------------
   collaboration-service:
+    logging: *default-logging
     build:
       context: ./other-services/collaboration-service
       dockerfile: Dockerfile
@@ -782,6 +807,7 @@ services:
       - traefik-public
 
   traefik:
+    logging: *default-logging
     image: "traefik:v3.0"
     restart: unless-stopped
     labels:

@@ -56,3 +56,21 @@ func RunSystemCheck(w http.ResponseWriter, r *http.Request) {
 	// instead of the diagnosis the admin came for.
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": resp})
 }
+
+// GetDisk is how full the server's disk is, for the admins' banner. One statfs,
+// so the banner can ask every few minutes. A platform that cannot say answers
+// available: false, never an error page.
+func GetDisk(w http.ResponseWriter, r *http.Request) {
+	d, err := helpers.ServerDisk()
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"available": false}})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{
+		"available":   true,
+		"used_pct":    d.UsedPct,
+		"free_bytes":  d.FreeBytes,
+		"total_bytes": d.TotalBytes,
+		"level":       d.Level(),
+	}})
+}
