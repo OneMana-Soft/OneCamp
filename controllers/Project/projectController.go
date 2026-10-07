@@ -12,6 +12,7 @@ import (
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	cycleBusiness "github.com/akashc777/OneCamp/business/Cycle"
 	business "github.com/akashc777/OneCamp/business/Project"
+	templateBusiness "github.com/akashc777/OneCamp/business/ProjectTemplate"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	teamBusiness "github.com/akashc777/OneCamp/business/Team"
@@ -68,6 +69,23 @@ func CreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A template is found before anything is made, so one that's gone is a
+	// message, not a project without its tasks.
+	var template *templateBusiness.Template
+	if createProjectInfo.TemplateID != "" {
+		t, err := templateBusiness.Get(ctx, createProjectInfo.TemplateID)
+		if errors.Is(err, templateBusiness.ErrNotFound) {
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That template isn't there any more. Pick another, or start blank."})
+			return
+		}
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "controllers/CreateProject template err: %+v", err)
+			helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Templates couldn't be read just now. Try again in a moment."})
+			return
+		}
+		template = &t
+	}
+
 	teamUUID, err := uuid.Parse(dgraphTeam.Uuid)
 
 	if err != nil {
@@ -111,8 +129,16 @@ func CreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Created project!", "data": dgraphProject})
-
+	if template == nil {
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Created project!", "data": dgraphProject})
+		return
+	}
+	start := templateBusiness.StartOn(createProjectInfo.StartDate, createProjectInfo.TZ, createProjectInfo.SkipWeekends)
+	applied := templateBusiness.ApplyTo(ctx, *template, dgraphProject.Uuid, &userInfo, start)
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Created project!", "data": struct {
+		*dgraphStruct.DgraphProject
+		Template templateBusiness.Applied `json:"template"`
+	}{dgraphProject, applied}})
 }
 
 func GetDgraphProjectListByAdminDgraphUID(w http.ResponseWriter, r *http.Request) {

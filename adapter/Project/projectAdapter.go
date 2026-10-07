@@ -7,6 +7,14 @@ type CreateOrUpdateProjectInput struct {
 	TeamUuid    string                           `json:"project_team_uuid,omitempty"`
 	Uuid        string                           `json:"project_uuid,omitempty"`
 	Attachments []*dgraphStruct.DgraphAttachment `json:"project_attachments,omitempty"`
+
+	// Starting from a template (business/ProjectTemplate): which one, the day
+	// the project starts (YYYY-MM-DD in TZ; none is today) and whether its
+	// dates skip weekends.
+	TemplateID   string `json:"template_id,omitempty"`
+	StartDate    string `json:"start_date,omitempty"`
+	TZ           string `json:"tz,omitempty"`
+	SkipWeekends bool   `json:"skip_weekends,omitempty"`
 }
 
 type AddOrRemoveProjectMemberInput struct {

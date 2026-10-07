@@ -953,3 +953,36 @@ func HardDeleteProject(ctx context.Context, projectUUID uuid.UUID) (err error) {
 	}
 	return
 }
+
+// GetDgraphProjectTasksForTemplate returns what a template keeps of a
+// project: its live top-level tasks, oldest first, each with its live
+// subtasks, and how many top-level tasks it has. first caps both lists, so a
+// project too big for a template is found out without reading all of it.
+func GetDgraphProjectTasksForTemplate(ctx context.Context, projectUUID string, first int) (*dgraphStruct.DgraphProject, error) {
+	query := fmt.Sprintf(`query Template($id: string){
+			projectInfo(func: eq(project_uuid, $id)) {
+				project_uuid
+				project_name
+				project_task_count: count(project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND NOT has(task_parent_task)))
+				project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND NOT has(task_parent_task)) (orderasc: task_created_at, first: %d) {
+					task_uuid
+					task_name
+					task_description
+					task_status
+					task_custom_status
+					task_custom_status_name
+					task_priority
+					task_label
+					task_start_date
+					task_due_date
+					task_created_at
+					task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")) (orderasc: task_created_at, first: %d) {
+						task_name
+						task_status
+						task_due_date
+					}
+				}
+			}
+		}`, first, first)
+	return dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, map[string]string{"$id": projectUUID})
+}

@@ -1,5 +1,16 @@
+# Every container's log is capped. Docker keeps a container's log forever by
+# default, and on a small server those logs are what fills the disk (a full disk
+# stops Postgres accepting writes). Three files of 10 MB each per container; the
+# oldest lines go first. A service with its own logging block keeps it.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   postgres:
+    logging: *default-logging
     # WITHOUT A POLICY HERE, A REBOOT WAS A PERMANENT OUTAGE. Docker only starts a container on daemon
     # start for `always` and `unless-stopped`; a missing policy means `no`, and `on-failure`
     # explicitly "doesn't restart the container if the daemon restarts". Eight of this file's services
@@ -38,6 +49,7 @@ services:
       - onecamp-shared-net
 
   zero:
+    logging: *default-logging
     image: dgraph/dgraph:v25.3.3
     volumes:
       - ./data/dgraph:/dgraph
@@ -47,6 +59,7 @@ services:
       - onecamp-shared-net
 
   alpha:
+    logging: *default-logging
     image: dgraph/dgraph:v25.3.3
     volumes:
       - ./data/dgraph:/dgraph
@@ -61,6 +74,7 @@ services:
       - onecamp-shared-net
 
   ratel:
+    logging: *default-logging
     restart: unless-stopped
     # The one pin here that is a version CHOICE, not a record of what runs: no published
     # ratel tag matches the digest on the host, so upstream re-pushed or pruned it and the
@@ -76,6 +90,7 @@ services:
       - onecamp-shared-net
 
   minio:
+    logging: *default-logging
     restart: unless-stopped
     image: minio/minio:RELEASE.2025-01-18T00-31-37Z
     volumes:
@@ -115,6 +130,7 @@ services:
   # node was once stopped by a single oversized index request, and both settings
   # exist to make that outcome impossible rather than unlikely.
   opensearch-onecamp-node1:
+    logging: *default-logging
     # Pin this. `latest` means a restart can silently move you between versions,
     # which for a search cluster can mean an index it refuses to open. Set
     # OPENSEARCH_VERSION to the version you are already running — find it with:
@@ -171,6 +187,7 @@ services:
       - onecamp-shared-net
 
   opensearch-onecamp-dashboards:
+    logging: *default-logging
     restart: unless-stopped
     image: opensearchproject/opensearch-dashboards:${OPENSEARCH_VERSION:-3.6.0}
     container_name: opensearch-onecamp-dashboards
@@ -187,6 +204,7 @@ services:
       - onecamp-shared-net
 
   redis:
+    logging: *default-logging
     image: redis:8.6.2
     restart: always
     volumes:
@@ -217,6 +235,7 @@ services:
       - onecamp-shared-net
 
   livekit:
+    logging: *default-logging
     image: livekit/livekit-server:v1.11.0
     command: --config /livekit.yaml
     restart: unless-stopped
@@ -278,6 +297,7 @@ services:
       - traefik-public
 
   egress:
+    logging: *default-logging
     image: livekit/egress:v1.12.0
     restart: unless-stopped
     environment:
@@ -295,6 +315,7 @@ services:
       - onecamp-shared-net
 
   agent:
+    logging: *default-logging
     restart: unless-stopped
     build:
       context: ./livekit-agent
@@ -564,6 +585,7 @@ services:
       - traefik-public
 
   emqx:
+    logging: *default-logging
     restart: unless-stopped
     image: emqx/emqx:6.0.0
     environment:
@@ -609,6 +631,7 @@ services:
       - traefik-public
 
   collaboration-service:
+    logging: *default-logging
     build:
       context: ./other-services/collaboration-service
       dockerfile: Dockerfile
@@ -759,6 +782,7 @@ services:
   # Ollama Init — one-shot container that pulls required models on first start
   # ---------------------------------------------------------------------------
   ollama-init:
+    logging: *default-logging
     # Same pin as the ollama service above — see the note there.
     image: ollama/ollama:${OLLAMA_IMAGE_TAG:-0.21.2}
     container_name: ollama-init
@@ -790,6 +814,7 @@ services:
       - onecamp-shared-net
 
   go-service:
+    logging: *default-logging
     image: go_service_onecamp:1.0
     restart: always
     env_file:
@@ -897,6 +922,7 @@ services:
   # full account of what makes the split safe.
   # ---------------------------------------------------------------------------
   go-worker:
+    logging: *default-logging
     profiles: ["workers"]
     image: go_service_onecamp:1.0
     restart: always
@@ -975,6 +1001,7 @@ services:
   # also run it under gVisor (uncomment `runtime: runsc`) once the host has it.
   # ---------------------------------------------------------------------------
   code-runner:
+    logging: *default-logging
     profiles: ["code-execution"]
     build:
       context: ./other-services/code-runner

@@ -424,7 +424,17 @@ stop_all_service:
 # the previous commit: COPY is content-addressed, so changed source invalidates it and everything after.
 rebuild_go: build_image
 	docker compose --env-file .env --project-name $(ONECAMP_PROJECT) -f final-compose.yml up -d --force-recreate go-service
+	@$(MAKE) --no-print-directory docker_tidy
 	@echo "▶ deployed. Follow the boot with: make go_logs"
+
+# docker_tidy drops what the build just left behind: the previous image, now
+# dangling, and build cache over 10 GB. Every deploy builds, and between the
+# weekly clean the demo host's cache once reached 100 GB. The daily
+# docker-cache-gc.sh cron is the backstop. Never touches an image a container uses.
+docker_tidy:
+	@docker image prune -f > /dev/null 2>&1 || true
+	@docker builder prune -f --max-used-space 10GB > /dev/null 2>&1 \
+		|| docker builder prune -f --keep-storage 10GB > /dev/null 2>&1 || true
 
 # Needed more than it looks since 407b6fe: the KEK probes EXIT the process when a key is a template
 # placeholder, so a misconfigured deploy presents as a container that will not stay up, and the reason

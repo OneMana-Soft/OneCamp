@@ -1185,6 +1185,11 @@ func SetDgraphTaskRanks(ctx context.Context, tasks []*dgraphStruct.DgraphTask) e
 	return writeDgraphTasks(ctx, tasks, func(from, to *dgraphStruct.DgraphTask) { to.Rank = from.Rank })
 }
 
+// SetDgraphTaskCreatedAt writes when each task was made, in one transaction.
+func SetDgraphTaskCreatedAt(ctx context.Context, tasks []*dgraphStruct.DgraphTask) error {
+	return writeDgraphTasks(ctx, tasks, func(from, to *dgraphStruct.DgraphTask) { to.CreatedAt = from.CreatedAt })
+}
+
 // SetDgraphTaskStatusSince writes when each task entered its status, in one transaction.
 func SetDgraphTaskStatusSince(ctx context.Context, tasks []*dgraphStruct.DgraphTask) error {
 	return writeDgraphTasks(ctx, tasks, func(from, to *dgraphStruct.DgraphTask) { to.StatusSince = from.StatusSince })

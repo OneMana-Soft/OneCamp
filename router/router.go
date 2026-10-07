@@ -51,6 +51,7 @@ import (
 	pollController "github.com/akashc777/OneCamp/controllers/Poll"
 	postController "github.com/akashc777/OneCamp/controllers/Post"
 	projectController "github.com/akashc777/OneCamp/controllers/Project"
+	projectTemplateController "github.com/akashc777/OneCamp/controllers/ProjectTemplate"
 	projectUpdateController "github.com/akashc777/OneCamp/controllers/ProjectUpdate"
 	publicController "github.com/akashc777/OneCamp/controllers/Public"
 	recordingController "github.com/akashc777/OneCamp/controllers/Recording"
@@ -369,6 +370,8 @@ func Routes() http.Handler {
 		// probe and reports each by name. Read-only: it never touches workspace
 		// data. See helpers/systemcheck.go for why this exists.
 		r.Get("/system-check", settingsController.RunSystemCheck)
+		// How full the server's disk is, for the admins' banner (helpers/disk.go).
+		r.Get("/disk", settingsController.GetDisk)
 		r.Post("/settings", settingsController.UpdateSettings)
 
 		// Admin configuration audit log (who changed what, when, from where).
@@ -1174,6 +1177,12 @@ func Routes() http.Handler {
 
 	projectRouter.Group(func(r chi.Router) {
 		r.Post("/createProject", projectController.CreateProject)
+		// Project templates: see business/ProjectTemplate.
+		r.Get("/templates", projectTemplateController.ListTemplates)
+		r.Post("/templates", projectTemplateController.ImportTemplate)
+		r.Get("/templates/{template_id}", projectTemplateController.GetTemplate)
+		r.Post("/templates/{template_id}/delete", projectTemplateController.DeleteTemplate)
+		r.Post("/{project_uuid}/save-as-template", projectTemplateController.SaveProjectAsTemplate)
 		r.Get("/getFile/{project_uuid}/{obj_uuid}", userController.GetProjectFile)
 		r.Get("/projectListByAdminUID", projectController.GetDgraphProjectListByAdminDgraphUID)
 		r.Post("/updateName", projectController.UpdateProjectName)
