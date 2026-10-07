@@ -1549,6 +1549,8 @@ func Routes() http.Handler {
 
 		// A project's next update, drafted from its tasks with an AI summary on top.
 		r.Post("/project-update/draft", aiController.DraftProjectUpdate)
+		r.Post("/project-template/draft", aiController.StartProjectPlan)
+		r.Get("/project-template/draft/{draft_id}", aiController.ProjectPlan)
 		r.Post("/summarize/channel", aiController.SummarizeChannel)
 		r.Post("/summarize/dm", aiController.SummarizeDM)
 		r.Post("/summarize/group", aiController.SummarizeGroup)

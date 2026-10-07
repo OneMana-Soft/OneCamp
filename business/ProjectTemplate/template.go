@@ -12,6 +12,7 @@ package business
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -28,8 +29,15 @@ const (
 	MaxAboutLength     = 280
 	MaxTaskName        = 300
 	MaxTaskDescription = 50000
-	MaxDay             = 3650 // ten years from the start
-	previewSize        = 4
+	// MaxDescriptions is the most all of a template's task descriptions may
+	// add up to: real plans are tens of kilobytes, and one template must not
+	// be a row of many megabytes.
+	MaxDescriptions = 2 << 20
+	// MaxFileBytes is the most a request carrying a whole template may be:
+	// a template at every limit above, written as JSON, fits.
+	MaxFileBytes = 4 << 20
+	MaxDay       = 3650 // ten years from the start
+	previewSize  = 4
 )
 
 // Template is a project template. ID is a built-in's slug or a saved one's uuid.
@@ -122,16 +130,9 @@ func day(d *int, task string) error {
 	return nil
 }
 
-func validPriority(p string) bool {
-	if p == "" {
-		return true
-	}
-	for _, v := range dgraphStruct.VALID_TASK_PRIORITIES {
-		if v == p {
-			return true
-		}
-	}
-	return false
+// ValidPriority reports whether p is a priority a task can have; none is fine.
+func ValidPriority(p string) bool {
+	return p == "" || slices.Contains(dgraphStruct.VALID_TASK_PRIORITIES, p)
 }
 
 // Check is the template tidied as it is kept, or what to fix. Pure.
@@ -166,6 +167,7 @@ func Check(t Template) (Template, error) {
 	if n := t.Size(); n > MaxTasks {
 		return t, fix("A template holds up to %d tasks and subtasks; this one has %d.", MaxTasks, n)
 	}
+	descriptions := 0
 	for i := range t.Tasks {
 		task := &t.Tasks[i]
 		if task.Name, err = line(task.Name, MaxTaskName, fmt.Sprintf("task %d", i+1)); err != nil {
@@ -173,6 +175,9 @@ func Check(t Template) (Template, error) {
 		}
 		if len(task.Description) > MaxTaskDescription {
 			return t, fix("%q has a description longer than %d characters.", task.Name, MaxTaskDescription)
+		}
+		if descriptions += len(task.Description); descriptions > MaxDescriptions {
+			return t, fix("The task descriptions add up to more than %d MB; a template keeps up to that. Shorten the longest ones.", MaxDescriptions>>20)
 		}
 		switch {
 		case task.Status == "":
@@ -183,7 +188,7 @@ func Check(t Template) (Template, error) {
 		default:
 			return t, fix("%q is in a status the template doesn't have: %q.", task.Name, task.Status)
 		}
-		if !validPriority(task.Priority) {
+		if !ValidPriority(task.Priority) {
 			return t, fix("%q has a priority OneCamp doesn't know: %q. Use low, medium or high.", task.Name, task.Priority)
 		}
 		task.Tags = helpers.NormaliseTags(task.Tags)

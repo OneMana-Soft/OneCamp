@@ -334,6 +334,19 @@ var AIStreamLive = withArity(Spec{
 	Description: "Set while an answer for this session is being generated; cleared when it is saved.",
 }, 1) // (sessionID)
 
+// AIPlanDraft is a person's latest project plan being drafted by the AI (New
+// project, "Describe it"): drafting while it runs, then the plan or why there
+// isn't one. A small local model can take minutes, longer than a request may
+// stay open behind a proxy, so the app asks again until it's there. One per
+// person; the next draft replaces it.
+var AIPlanDraft = withArity(Spec{
+	Namespace:   "ai:plan-draft",
+	TTL:         15 * time.Minute,
+	Datatype:    DatatypeString,
+	Category:    CategoryAI,
+	Description: "JSON {id, state, template, msg, started} of a person's latest project-plan draft.",
+}, 1) // (userUUID)
+
 // AIRate limits AI requests per minute per user.
 var AIRate = withArity(Spec{
 	Namespace:   "ai:rate",

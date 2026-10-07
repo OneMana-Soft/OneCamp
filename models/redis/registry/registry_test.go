@@ -80,6 +80,7 @@ func all() []Spec {
 		ChannelBasicInfo,
 		ProjectTasks,
 		AISession,
+		AIPlanDraft,
 		AIRate,
 		AIModelList,
 		AIOllamaLatest,

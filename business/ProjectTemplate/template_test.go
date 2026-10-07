@@ -2,6 +2,7 @@ package business
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -13,8 +14,10 @@ import (
 func TestBuiltInsAreUsable(t *testing.T) {
 	seen := map[string]bool{}
 	for _, b := range builtins {
-		if b.ID == "" || seen[b.ID] {
-			t.Fatalf("built-in %q needs a unique id", b.Name)
+		// Links name a built-in by its id (?new=client-project, the template
+		// pages on onemana.dev), and the app takes one only in this shape.
+		if !regexp.MustCompile(`^[a-z][a-z0-9-]{0,59}$`).MatchString(b.ID) || seen[b.ID] {
+			t.Fatalf("built-in %q needs a unique lowercase id that starts with a letter: %q", b.Name, b.ID)
 		}
 		seen[b.ID] = true
 		checked, err := Check(b)
@@ -30,6 +33,11 @@ func TestBuiltInsAreUsable(t *testing.T) {
 			}
 			if task.Priority == "" {
 				t.Errorf("%s: %q has no priority", b.ID, task.Name)
+			}
+			// The template pages on onemana.dev promise every task says what
+			// done looks like.
+			if task.Description == "" {
+				t.Errorf("%s: %q doesn't say what done looks like", b.ID, task.Name)
 			}
 			// A plan reads in order: nothing is due before the task above it.
 			if i > 0 && checked.Tasks[i-1].DueDay != nil && task.DueDay != nil && *task.DueDay < *checked.Tasks[i-1].DueDay {
@@ -93,6 +101,12 @@ func TestCheck(t *testing.T) {
 		"unnamed subtask":  {func(t *Template) { t.Tasks[1].Subtasks = []Subtask{{Name: " "}} }, `subtask 1 of "Draft"`},
 		"same status":      {func(t *Template) { t.Statuses = append(t.Statuses, Status{Name: "client review", Category: "todo"}) }, "two statuses named"},
 		"built-in status":  {func(t *Template) { t.Statuses = append(t.Statuses, Status{Name: "Done", Category: "done"}) }, `The status "Done"`},
+		"descriptions too long": {func(t *Template) {
+			t.Tasks = nil
+			for i := 0; i < 50; i++ {
+				t.Tasks = append(t.Tasks, Task{Name: "step", Description: strings.Repeat("x", MaxTaskDescription-5000)})
+			}
+		}, "add up to more than 2 MB"},
 		"too big": {func(t *Template) {
 			t.Tasks[0].Subtasks = make([]Subtask, MaxTasks)
 			for i := range t.Tasks[0].Subtasks {
@@ -137,7 +151,7 @@ func TestFromProject(t *testing.T) {
 	zero := time.Time{}
 	statuses := []*statusModel.TaskStatus{{Name: "Triage", Category: "backlog", Color: "slate"}, {Name: "QA", Category: "inReview", Color: "violet"}}
 	tasks := []*dgraphStruct.DgraphTask{
-		// Oldest first, as the query reads them.
+		// In the order they were made, as the query reads them.
 		{Name: "Undated idea", Status: "backlog", DueDate: &zero, StartDate: &zero},
 		{Name: "Ship it", Status: "done", Priority: "high", DueDate: at("2026-03-10T11:00:00Z"), Label: ptr("launch"), Description: ptr("<p>Go</p>")},
 		{Name: "Cancelled", Status: "canceled", DueDate: at("2026-01-01T00:00:00Z")},
@@ -145,7 +159,7 @@ func TestFromProject(t *testing.T) {
 			// 20:00 UTC is 01:30 the next day in Kolkata.
 			StartDate: at("2026-03-06T10:00:00Z")},
 		{Name: "To triage", Status: "backlog", CustomStatusName: ptr("Triage"), DueDate: at("2026-03-02T05:00:00Z"),
-			SubTasks: []*dgraphStruct.DgraphTask{{Name: "early step", Status: "todo", DueDate: at("2026-03-01T04:00:00Z")}, {Name: "dropped", Status: "canceled"}}},
+			SubTasks: []*dgraphStruct.DgraphTask{{Name: "early step", Status: "todo", DueDate: at("2026-03-01T04:00:00Z")}, {Name: "dropped", Status: "canceled", DueDate: at("2026-02-01T04:00:00Z")}}},
 		{Name: "  ", Status: "todo"},
 	}
 	got := FromProject("Launch", "", statuses, tasks, kolkata)
@@ -175,7 +189,8 @@ func TestFromProject(t *testing.T) {
 		t.Errorf("backlog stays backlog: %q", s)
 	}
 
-	// Day 0 is the earliest date anywhere, a subtask's included: 1 March in Kolkata.
+	// Day 0 is the earliest date anywhere, a subtask's included, but not a
+	// cancelled one's (1 February): 1 March in Kolkata.
 	day := func(d *int) int {
 		if d == nil {
 			return -1
@@ -228,8 +243,8 @@ func TestStart(t *testing.T) {
 	kolkata, _ := time.LoadLocation("Asia/Kolkata")
 	// Friday 9 October 2026.
 	s := StartOn("2026-10-09", "Asia/Kolkata", true)
-	if !s.Day.Equal(time.Date(2026, 10, 9, 0, 0, 0, 0, kolkata)) {
-		t.Fatalf("day: %v", s.Day)
+	if !s.Day.Equal(time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC)) || s.Loc.String() != kolkata.String() {
+		t.Fatalf("day: %v in %v", s.Day, s.Loc)
 	}
 	for day, want := range map[int]string{
 		0: "2026-10-09T17:00:00+05:30", // Friday
@@ -251,6 +266,19 @@ func TestStart(t *testing.T) {
 	ny := StartOn("2026-10-30", "America/New_York", false)
 	if got := ny.At(3, 17); got != "2026-11-02T17:00:00-05:00" {
 		t.Errorf("after the clocks change: %s", got)
+	}
+
+	// Where the clocks skip midnight (Santiago, 6 September 2026), the plan
+	// still starts on the day chosen and counts calendar days from it.
+	scl := StartOn("2026-09-06", "America/Santiago", false)
+	for day, want := range map[int]string{0: "2026-09-06T09:00:00-03:00", 2: "2026-09-08T09:00:00-03:00"} {
+		if got := scl.At(day, 9); got != want {
+			t.Errorf("Santiago day %d: %s, want %s", day, got, want)
+		}
+	}
+	before := StartOn("2026-09-01", "America/Santiago", false)
+	if got := before.At(5, 17); got != "2026-09-06T17:00:00-03:00" {
+		t.Errorf("counting across the change: %s", got)
 	}
 
 	// An unreadable date is today, and an unknown zone is UTC.

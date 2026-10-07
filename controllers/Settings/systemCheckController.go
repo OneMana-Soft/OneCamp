@@ -66,11 +66,9 @@ func GetDisk(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"available": false}})
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{
-		"available":   true,
-		"used_pct":    d.UsedPct,
-		"free_bytes":  d.FreeBytes,
-		"total_bytes": d.TotalBytes,
-		"level":       d.Level(),
-	}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": struct {
+		helpers.DiskStat
+		Available bool   `json:"available"`
+		Level     string `json:"level"`
+	}{d, true, d.Level()}})
 }

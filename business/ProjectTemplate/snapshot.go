@@ -38,12 +38,12 @@ func FromProject(name, description string, statuses []*statusModel.TaskStatus, t
 	}
 	keep := make([]*dgraphStruct.DgraphTask, 0, len(tasks))
 	for _, task := range tasks {
-		if task != nil && task.Status != dgraphStruct.TASK_STATUS_CANCELED {
+		if kept(task) {
 			keep = append(keep, task)
 		}
 	}
-	// Tasks with a due date first, soonest first; then the rest as they came,
-	// oldest first. That's the order a plan is read in.
+	// Tasks with a due date first, soonest first; then the rest in the order
+	// they were made. That's the order a plan is read in.
 	sort.SliceStable(keep, func(i, j int) bool {
 		a, b := dateOf(keep[i].DueDate), dateOf(keep[j].DueDate)
 		switch {
@@ -56,7 +56,7 @@ func FromProject(name, description string, statuses []*statusModel.TaskStatus, t
 	zero := earliest(keep)
 	for _, task := range keep {
 		out := Task{Name: taskName(task.Name), Status: restart(task)}
-		if validPriority(task.Priority) {
+		if ValidPriority(task.Priority) {
 			out.Priority = task.Priority
 		}
 		if task.Description != nil {
@@ -70,13 +70,18 @@ func FromProject(name, description string, statuses []*statusModel.TaskStatus, t
 			out.StartDay = nil
 		}
 		for _, sub := range task.SubTasks {
-			if sub != nil && sub.Status != dgraphStruct.TASK_STATUS_CANCELED {
+			if kept(sub) {
 				out.Subtasks = append(out.Subtasks, Subtask{Name: taskName(sub.Name), DueDay: daysFrom(zero, sub.DueDate, loc)})
 			}
 		}
 		t.Tasks = append(t.Tasks, out)
 	}
 	return t
+}
+
+// kept: a template keeps every task and subtask that wasn't cancelled.
+func kept(t *dgraphStruct.DgraphTask) bool {
+	return t != nil && t.Status != dgraphStruct.TASK_STATUS_CANCELED
 }
 
 // taskName is a task's name as a template keeps it: on one line, cut to
@@ -109,7 +114,9 @@ func dateOf(d *time.Time) *time.Time {
 	return d
 }
 
-// earliest is the first date on any task or subtask, or nil when none has one.
+// earliest is the first date on any task or subtask the template keeps, or
+// nil when none has one. A cancelled subtask's date would start the plan on a
+// day nothing in it has.
 func earliest(tasks []*dgraphStruct.DgraphTask) *time.Time {
 	var first *time.Time
 	see := func(d *time.Time) {
@@ -121,7 +128,7 @@ func earliest(tasks []*dgraphStruct.DgraphTask) *time.Time {
 		see(task.StartDate)
 		see(task.DueDate)
 		for _, sub := range task.SubTasks {
-			if sub != nil {
+			if kept(sub) {
 				see(sub.DueDate)
 			}
 		}

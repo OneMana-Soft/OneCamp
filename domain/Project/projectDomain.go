@@ -955,16 +955,20 @@ func HardDeleteProject(ctx context.Context, projectUUID uuid.UUID) (err error) {
 }
 
 // GetDgraphProjectTasksForTemplate returns what a template keeps of a
-// project: its live top-level tasks, oldest first, each with its live
-// subtasks, and how many top-level tasks it has. first caps both lists, so a
-// project too big for a template is found out without reading all of it.
+// project: its live top-level tasks, each with its live subtasks, and how many
+// top-level tasks it has. Both lists come in the order the tasks were made
+// (uid order), not by task_created_at: a project made from a template has its
+// creation times rewritten to read newest first (business/ProjectTemplate
+// readingOrder), so sorting by them would turn its plan upside down. first
+// caps both lists, so a project too big for a template is found out without
+// reading all of it.
 func GetDgraphProjectTasksForTemplate(ctx context.Context, projectUUID string, first int) (*dgraphStruct.DgraphProject, error) {
 	query := fmt.Sprintf(`query Template($id: string){
 			projectInfo(func: eq(project_uuid, $id)) {
 				project_uuid
 				project_name
 				project_task_count: count(project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND NOT has(task_parent_task)))
-				project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND NOT has(task_parent_task)) (orderasc: task_created_at, first: %d) {
+				project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND NOT has(task_parent_task)) (first: %d) {
 					task_uuid
 					task_name
 					task_description
@@ -976,7 +980,7 @@ func GetDgraphProjectTasksForTemplate(ctx context.Context, projectUUID string, f
 					task_start_date
 					task_due_date
 					task_created_at
-					task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")) (orderasc: task_created_at, first: %d) {
+					task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")) (first: %d) {
 						task_name
 						task_status
 						task_due_date

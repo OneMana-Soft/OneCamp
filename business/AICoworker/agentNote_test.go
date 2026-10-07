@@ -8,6 +8,7 @@ import (
 
 	aiAdapter "github.com/akashc777/OneCamp/adapter/AI"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
@@ -162,7 +163,7 @@ func TestDueTimesAreSaidInTheMembersZone(t *testing.T) {
 			t.Errorf("duePhrase(%s) = %q, want %q", due, got, want)
 		}
 	}
-	if noteZone("Not/AZone") != time.UTC || noteZone("") != time.UTC {
+	if helpers.Location("Not/AZone") != time.UTC || helpers.Location("") != time.UTC {
 		t.Fatal("an unknown zone must fall back to UTC")
 	}
 	item := aiAdapter.AttentionItem{Kind: "Due soon", Title: "Write the launch announcement", Subtitle: "Due Sep 27, 5:00 PM · Q4 launch",

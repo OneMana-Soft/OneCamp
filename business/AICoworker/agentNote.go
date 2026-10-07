@@ -34,6 +34,7 @@ import (
 	aiBusiness "github.com/akashc777/OneCamp/business/AI"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	"github.com/akashc777/OneCamp/helpers"
 	aiModels "github.com/akashc777/OneCamp/models/postgres/AI"
 	noteModel "github.com/akashc777/OneCamp/models/postgres/AgentNote"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -116,7 +117,7 @@ func LeaveDailyNote(ctx context.Context, userInfo *userModels.UserInfo, clientDa
 	if err != nil || queue == nil || !queue.Enabled || len(queue.Items) == 0 {
 		return &NoteResult{BotUUID: bot.UUID}, err
 	}
-	if err := notePost(ctx, bot, userInfo, composeNote(firstName(userInfo), queue.Items, noteZone(clientZone), noteNow())); err != nil {
+	if err := notePost(ctx, bot, userInfo, composeNote(firstName(userInfo), queue.Items, helpers.Location(clientZone), noteNow())); err != nil {
 		return &NoteResult{BotUUID: bot.UUID}, err
 	}
 	return &NoteResult{Posted: true, BotUUID: bot.UUID, Items: len(queue.Items)}, nil
@@ -128,15 +129,6 @@ func firstName(u *userModels.UserInfo) string {
 		return ""
 	}
 	return strings.Fields(name)[0]
-}
-
-// noteZone is the member's time zone, from their browser, so a due time reads
-// as their clock shows it. An unknown or missing zone falls back to UTC.
-func noteZone(name string) *time.Location {
-	if loc, err := time.LoadLocation(strings.TrimSpace(name)); err == nil && name != "" {
-		return loc
-	}
-	return time.UTC
 }
 
 // duePhrase says when something is due, in the member's zone: "due today at

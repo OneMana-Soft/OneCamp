@@ -90,6 +90,10 @@ func TestSavedTemplates(t *testing.T) {
 		if err := Delete(ctx, saved.ID, author); err != nil {
 			t.Fatal(err)
 		}
+		var size int
+		if err := env.PG.QueryRow(`SELECT octet_length(body::text) + coalesce(array_length(preview, 1), 0) FROM project_templates WHERE id = $1`, saved.ID).Scan(&size); err != nil || size > 2 {
+			t.Fatalf("a deleted template keeps its plan: %d bytes, %v", size, err)
+		}
 		if err := Delete(ctx, saved.ID, author); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("twice: %v", err)
 		}
@@ -113,36 +117,47 @@ func TestProjectAsTemplateQuery(t *testing.T) {
 	dg := integration.SetupDgraph(t)
 	project := uuid.NewString()
 	live, gone := "0001-01-01T00:00:00Z", time.Now().UTC().Format(time.RFC3339)
-	uids := dg.Mutate(t, map[string]any{
-		"uid": "_:p", "dgraph.type": "Project", "project_uuid": project, "project_name": "Launch",
-		"project_tasks": []map[string]any{
-			{"uid": "_:a", "dgraph.type": "Task", "task_uuid": uuid.NewString(), "task_name": "Plan", "task_status": "todo",
-				"task_deleted_at": live, "task_created_at": "2026-03-01T09:00:00Z", "task_due_date": "2026-03-04T17:00:00Z",
-				"task_sub_tasks": []map[string]any{
-					{"uid": "_:s1", "dgraph.type": "Task", "task_name": "step one", "task_deleted_at": live, "task_created_at": "2026-03-01T10:00:00Z", "task_parent_task": map[string]any{"uid": "_:a"}},
-					{"uid": "_:s2", "dgraph.type": "Task", "task_name": "removed step", "task_deleted_at": gone, "task_created_at": "2026-03-01T11:00:00Z", "task_parent_task": map[string]any{"uid": "_:a"}},
-				}},
-			{"uid": "_:b", "dgraph.type": "Task", "task_uuid": uuid.NewString(), "task_name": "Build", "task_status": "inProgress",
-				"task_deleted_at": live, "task_created_at": "2026-03-02T09:00:00Z"},
-			{"uid": "_:c", "dgraph.type": "Task", "task_uuid": uuid.NewString(), "task_name": "Deleted", "task_status": "todo",
-				"task_deleted_at": gone, "task_created_at": "2026-03-03T09:00:00Z"},
-		},
-	})
-	// Subtasks are on the project's task list too, as the app makes them.
-	dg.Mutate(t, map[string]any{"uid": uids["p"], "project_tasks": []map[string]any{{"uid": uids["s1"]}, {"uid": uids["s2"]}}})
+	projectUID := dg.Mutate(t, map[string]any{"uid": "_:p", "dgraph.type": "Project", "project_uuid": project, "project_name": "Launch"})["p"]
+	// add makes a task in its own write, as the app makes each one, so uids
+	// follow the order of the calls. Every task goes on the project's list,
+	// subtasks too, as the app puts them; a subtask also hangs off its parent.
+	add := func(task map[string]any, parent string) string {
+		task["uid"], task["dgraph.type"] = "_:t", "Task"
+		if parent != "" {
+			task["task_parent_task"] = map[string]any{"uid": parent}
+		}
+		uid := dg.Mutate(t, task)["t"]
+		dg.Mutate(t, map[string]any{"uid": projectUID, "project_tasks": []map[string]any{{"uid": uid}}})
+		if parent != "" {
+			dg.Mutate(t, map[string]any{"uid": parent, "task_sub_tasks": []map[string]any{{"uid": uid}}})
+		}
+		return uid
+	}
+	// Creation times run against the order the tasks were made, as they do in
+	// a project made from a template (readingOrder): the read must follow the
+	// making, not the times.
+	plan := add(map[string]any{"task_uuid": uuid.NewString(), "task_name": "Plan", "task_status": "todo",
+		"task_deleted_at": live, "task_created_at": "2026-03-09T09:00:00Z", "task_due_date": "2026-03-04T17:00:00Z"}, "")
+	add(map[string]any{"task_name": "step one", "task_deleted_at": live, "task_created_at": "2026-03-08T10:00:00Z"}, plan)
+	add(map[string]any{"task_name": "removed step", "task_deleted_at": gone, "task_created_at": "2026-03-07T11:00:00Z"}, plan)
+	add(map[string]any{"task_name": "step two", "task_deleted_at": live, "task_created_at": "2026-03-06T11:00:00Z"}, plan)
+	add(map[string]any{"task_uuid": uuid.NewString(), "task_name": "Build", "task_status": "inProgress",
+		"task_deleted_at": live, "task_created_at": "2026-03-02T09:00:00Z"}, "")
+	add(map[string]any{"task_uuid": uuid.NewString(), "task_name": "Deleted", "task_status": "todo",
+		"task_deleted_at": gone, "task_created_at": "2026-03-01T09:00:00Z"}, "")
 
 	p, err := projectDomain.GetDgraphProjectTasksForTemplate(ctx, project, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if p.TaskCount != 2 || len(p.Tasks) != 2 || p.Tasks[0].Name != "Plan" || p.Tasks[1].Name != "Build" {
-		t.Fatalf("live top-level tasks, oldest first: count %d, %+v", p.TaskCount, p.Tasks)
+		t.Fatalf("live top-level tasks, in the order they were made: count %d, %+v", p.TaskCount, p.Tasks)
 	}
-	if len(p.Tasks[0].SubTasks) != 1 || p.Tasks[0].SubTasks[0].Name != "step one" {
-		t.Fatalf("live subtasks under their task: %+v", p.Tasks[0].SubTasks)
+	if subs := p.Tasks[0].SubTasks; len(subs) != 2 || subs[0].Name != "step one" || subs[1].Name != "step two" {
+		t.Fatalf("live subtasks under their task, in the order they were made: %+v", subs)
 	}
 	tpl := FromProject("Launch", "", nil, p.Tasks, time.UTC)
-	if tpl.Size() != 3 || tpl.Tasks[0].Name != "Plan" || *tpl.Tasks[0].DueDay != 0 {
+	if tpl.Size() != 4 || tpl.Tasks[0].Name != "Plan" || *tpl.Tasks[0].DueDay != 0 || tpl.Tasks[0].Subtasks[1].Name != "step two" {
 		t.Fatalf("as a template: %+v", tpl)
 	}
 
