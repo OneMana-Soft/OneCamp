@@ -468,7 +468,7 @@ func classifyAttachmentByName(name string) string {
 		return "image"
 	case ".pdf", ".txt", ".doc", ".docx", ".xls", ".xlsx", ".csv":
 		return "document"
-	case ".mp3", ".wav", ".ogg", ".m4a":
+	case ".mp3", ".wav", ".ogg", ".m4a", ".weba":
 		return "audio"
 	case ".mp4", ".mov", ".webm", ".avi", ".mkv":
 		return "video"
