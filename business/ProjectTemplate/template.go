@@ -16,6 +16,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -46,12 +47,18 @@ type Template struct {
 	Name        string   `json:"name"`
 	Description string   `json:"description,omitempty"`
 	Statuses    []Status `json:"statuses,omitempty"`
-	Tasks       []Task   `json:"tasks"`
+	// Fields are task fields of the template's own; its tasks start with no
+	// values of them.
+	Fields []Field `json:"fields,omitempty"`
+	Tasks  []Task  `json:"tasks"`
 }
 
 // Status is a status of the template's own: a name, the built-in status it
 // counts as, and its colour, as a project's admins make one.
 type Status = taskStatusBusiness.Input
+
+// Field is a task field of the template's own, as a project's admins make one.
+type Field = taskFieldBusiness.Input
 
 // Task is one task a template makes. Status is a built-in key or the name of
 // one of the template's statuses; none is To do. Days count from the day the
@@ -160,6 +167,25 @@ func Check(t Template) (Template, error) {
 			return t, fix("The template has two statuses named %q.", t.Statuses[i].Name)
 		}
 		own[key] = t.Statuses[i].Name
+	}
+	if len(t.Fields) > taskFieldBusiness.MaxPerProject {
+		return t, fix("A template has at most %d fields of its own.", taskFieldBusiness.MaxPerProject)
+	}
+	fieldNames := map[string]bool{}
+	for i, in := range t.Fields {
+		if in.Type == taskFieldBusiness.TypeMoney && strings.TrimSpace(in.Currency) == "" {
+			in.Currency = taskFieldBusiness.DefaultCurrency
+		}
+		f, err := taskFieldBusiness.Check(in, in.Type)
+		if err != nil {
+			return t, fix("The field %q: %s", in.Name, err.Error())
+		}
+		key := strings.ToLower(f.Name)
+		if fieldNames[key] {
+			return t, fix("The template has two fields named %q.", f.Name)
+		}
+		fieldNames[key] = true
+		t.Fields[i] = taskFieldBusiness.InputOf(f)
 	}
 	if len(t.Tasks) == 0 {
 		return t, fix("A template needs at least one task.")

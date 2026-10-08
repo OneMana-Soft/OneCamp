@@ -1,6 +1,7 @@
 package business
 
 import (
+	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
@@ -39,6 +40,7 @@ var builtins = []Template{
 		Name:        "Client project",
 		Description: "Kickoff to invoice for one client: assets, drafts, their review, delivery and a testimonial.",
 		Statuses:    []Status{{Name: "Client review", Category: dgraphStruct.TASK_STATUS_INREVIEW, Color: "amber"}},
+		Fields:      []Field{{Name: "Client approved", Type: "checkbox", OnCard: true}},
 		Tasks: []Task{
 			{Name: "Kickoff call", Priority: high, Tags: "client", DueDay: on(1), Description: text("Agree on the goal, the scope, the deadline and who signs off. Put the notes in this task so everyone works from the same page.")},
 			{Name: "Collect brand assets and access", Priority: high, Tags: "client", DueDay: on(3), Description: text("Ask for everything in one message, so the client answers once."),
@@ -56,6 +58,9 @@ var builtins = []Template{
 		ID:          "product-launch",
 		Name:        "Product launch",
 		Description: "Two weeks to launch day: positioning, the page, the post, the emails and a retro.",
+		Fields: []Field{{Name: "Channel", Type: "select", OnCard: true, Options: []taskFieldBusiness.OptionInput{
+			{Label: "Blog", Color: "violet"}, {Label: "Email", Color: "sky"}, {Label: "Social", Color: "pink"}, {Label: "Press", Color: "amber"},
+		}}},
 		Tasks: []Task{
 			{Name: "Write the positioning brief", Priority: high, Tags: "launch", DueDay: on(2), Description: text("Who it's for, the problem it solves, why now, and the one sentence everyone will repeat.")},
 			{Name: "Draft the launch page", Priority: high, Tags: "launch", StartDay: on(2), DueDay: on(7), Description: text("Lead with the problem and the one sentence from the brief. One clear call to action.")},

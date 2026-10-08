@@ -71,6 +71,10 @@ func TestSavedTemplates(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// The client project's own field comes back with it.
+		if len(got.Fields) != 1 || got.Fields[0].Name != "Client approved" || got.Fields[0].Type != "checkbox" || !got.Fields[0].OnCard {
+			t.Fatalf("fields read back: %+v", got.Fields)
+		}
 		if got.Name != "Retainer client" || len(got.Tasks) != len(tpl.Tasks) || len(got.Statuses) != 1 ||
 			got.Tasks[1].Subtasks[0].Name != tpl.Tasks[1].Subtasks[0].Name || *got.Tasks[0].DueDay != *tpl.Tasks[0].DueDay {
 			t.Fatalf("read back: %+v", got)

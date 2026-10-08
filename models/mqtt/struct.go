@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"time"
 
 	models "github.com/akashc777/OneCamp/models/dgraph"
@@ -71,6 +72,9 @@ const (
 	// A task's dates changed (a timeline move, a panel edit, a dependency
 	// moving it along); the project's open boards, lists and timelines show it.
 	MESSAGE_TASK_DATES
+	// A task's value of a custom field changed; the project's open lists,
+	// boards and panels show it.
+	MESSAGE_TASK_FIELD
 )
 
 const (
@@ -212,6 +216,16 @@ type MqttTaskDates struct {
 	StartDate   string `json:"task_start_date"`
 	DueDate     string `json:"task_due_date"`
 	By          string `json:"by"`
+}
+
+// MqttTaskField is a task's value of one of its project's custom fields,
+// null once it's taken off, sent to the project's members. By is who set it.
+type MqttTaskField struct {
+	TaskUuid    string          `json:"task_uuid"`
+	ProjectUuid string          `json:"project_uuid"`
+	FieldID     string          `json:"field_id"`
+	Value       json.RawMessage `json:"value"`
+	By          string          `json:"by"`
 }
 
 type MqttTaskCommentReaction struct {

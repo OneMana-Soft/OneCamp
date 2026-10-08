@@ -162,6 +162,43 @@ func TasksIn(cycle uuid.UUID) ([]string, error) {
 	return out, rows.Err()
 }
 
+// Member is a task of a cycle and when it joined. Unfinished is a task the
+// cycle hadn't finished when it was completed: it has moved on since, but it
+// was still to do here at the end (migration 191).
+type Member struct {
+	TaskUUID   string
+	AddedAt    time.Time
+	Unfinished bool
+}
+
+// MembersOf is a cycle's tasks with when each joined, the unfinished ones of
+// a completed cycle included. A task back in the cycle after being carried
+// out is listed once, as a current member.
+func MembersOf(cycle uuid.UUID) ([]Member, error) {
+	ctx, cancel := withTimeout()
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `
+		SELECT task_uuid, added_at, false FROM task_cycles WHERE cycle_id = $1
+		UNION ALL
+		SELECT u.task_uuid, u.added_at, true FROM cycle_unfinished_tasks u
+		 WHERE u.cycle_id = $1 AND NOT EXISTS (SELECT 1 FROM task_cycles tc WHERE tc.task_uuid = u.task_uuid AND tc.cycle_id = $1)`, cycle)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Member
+	for rows.Next() {
+		var m Member
+		var t uuid.UUID
+		if err := rows.Scan(&t, &m.AddedAt, &m.Unfinished); err != nil {
+			return nil, err
+		}
+		m.TaskUUID = t.String()
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 // CycleOf is the cycle a task is in, or nil.
 func CycleOf(task uuid.UUID) (*Cycle, error) {
 	ctx, cancel := withTimeout()
@@ -207,6 +244,13 @@ func Complete(id uuid.UUID, done int, carry []string, next *uuid.UUID) (bool, er
 		return false, nil
 	}
 	for _, t := range carry {
+		// Keep a trace in this cycle of what it left unfinished, before the
+		// task moves on, so its burndown ends where the work really stood.
+		if _, err = tx.ExecContext(ctx, `INSERT INTO cycle_unfinished_tasks (cycle_id, task_uuid, added_at)
+			SELECT cycle_id, task_uuid, added_at FROM task_cycles WHERE task_uuid = $1 AND cycle_id = $2
+			ON CONFLICT DO NOTHING`, t, id); err != nil {
+			return false, err
+		}
 		if next == nil {
 			_, err = tx.ExecContext(ctx, `DELETE FROM task_cycles WHERE task_uuid = $1 AND cycle_id = $2`, t, id)
 		} else {

@@ -18,3 +18,10 @@ func Location(name string) *time.Location {
 	}
 	return time.UTC
 }
+
+// DayStart is the midnight that starts t's day in loc. Days are counted in
+// the reader's zone, so "today" is the day their calendar shows.
+func DayStart(t time.Time, loc *time.Location) time.Time {
+	y, m, d := t.In(loc).Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, loc)
+}

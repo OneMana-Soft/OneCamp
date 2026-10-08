@@ -11,8 +11,20 @@ import (
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
 
+// forDgraph is a task as Dgraph stores it: its custom field values live in
+// Postgres and are only laid over a task read for the app, so a task read
+// and written back must not carry them in as a nested node.
+func forDgraph(t *dgraphStruct.DgraphTask) *dgraphStruct.DgraphTask {
+	if t == nil || t.Fields == nil {
+		return t
+	}
+	c := *t
+	c.Fields = nil
+	return &c
+}
+
 func CreateOrUpdateDgraphTask(ctx context.Context, dgraphTask *dgraphStruct.DgraphTask, query string, delStringJSON string) (taskUid string, err error) {
-	pb, err := json.Marshal(dgraphTask)
+	pb, err := json.Marshal(forDgraph(dgraphTask))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/CreateOrUpdateDgraphTask failed to marshal dgraphTask struct err: %+v",
@@ -143,7 +155,7 @@ func UpdateExistingTasks(ctx context.Context, set *dgraphStruct.DgraphTask, quer
 // It returns their uuids as they were matched, before the change, in the same
 // request as the change, so no task can be missed or counted twice.
 func UpdateExistingTasksReturning(ctx context.Context, set *dgraphStruct.DgraphTask, query string, delJSON string) ([]string, error) {
-	pb, err := json.Marshal(set)
+	pb, err := json.Marshal(forDgraph(set))
 	if err != nil {
 		return nil, err
 	}

@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	business "github.com/akashc777/OneCamp/business/Project"
 	templateBusiness "github.com/akashc777/OneCamp/business/ProjectTemplate"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	teamBusiness "github.com/akashc777/OneCamp/business/Team"
 	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
@@ -1213,14 +1215,9 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 			if param.Id == "task_assignee_name" {
 				filterValue = fmt.Sprintf(`uid_in(task_assignee, [%s])`, strings.Join(strValues, ", "))
 			}
-			// Cycles live in Postgres; see business/Cycle.
-			if param.Id == "task_cycle" {
-				clause, cErr := cycleBusiness.FilterClause(projectUUIDString, strValues)
-				if cErr != nil {
-					helpers.LogErrorWithContext(ctx, "controllers/Project cycle filter err: %+v", cErr)
-				}
+			// Cycles and custom fields live in Postgres beside the tasks.
+			if clause, ok := sideFilterClause(ctx, projectUUIDString, param.Id, strValues); ok {
 				filterValue = clause
-
 			}
 
 		}
@@ -1293,6 +1290,7 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 	// Overlay ephemeral GitHub metadata from PostgreSQL onto Dgraph tasks
 	if dgraphProjectWithTasks != nil && len(dgraphProjectWithTasks.Tasks) > 0 {
 		_ = taskBusiness.MergeGitHubMetaIntoTasks(ctx, dgraphProjectWithTasks.Tasks)
+		_ = taskFieldBusiness.MergeFieldValues(ctx, dgraphProjectWithTasks.Tasks)
 	}
 
 	pageCount := uint64(1)
@@ -1413,14 +1411,9 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 			if param.Id == "task_assignee_name" {
 				filterValue = fmt.Sprintf(`uid_in(task_assignee, [%s])`, strings.Join(strValues, ", "))
 			}
-			// Cycles live in Postgres; see business/Cycle.
-			if param.Id == "task_cycle" {
-				clause, cErr := cycleBusiness.FilterClause(projectUUIDString, strValues)
-				if cErr != nil {
-					helpers.LogErrorWithContext(ctx, "controllers/Project cycle filter err: %+v", cErr)
-				}
+			// Cycles and custom fields live in Postgres beside the tasks.
+			if clause, ok := sideFilterClause(ctx, projectUUIDString, param.Id, strValues); ok {
 				filterValue = clause
-
 			}
 
 		}
@@ -1500,10 +1493,36 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 		allTasks = append(allTasks, dgraphProjectWithTasks.TasksCanceled...)
 		allTasks = append(allTasks, dgraphProjectWithTasks.TasksDone...)
 		_ = taskBusiness.MergeGitHubMetaIntoTasks(ctx, allTasks)
+		_ = taskFieldBusiness.MergeFieldValues(ctx, allTasks)
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":  "Sucessful got task list",
 		"data": dgraphProjectWithTasks,
 	})
+}
+
+// sideFilterClause is the clause for a filter on what Postgres keeps beside a
+// project's tasks: their cycle (business/Cycle) or a custom field's value
+// (business/TaskField). ok is false for any other filter.
+func sideFilterClause(ctx context.Context, projectUUID, id string, values []string) (clause string, ok bool) {
+	var err error
+	switch {
+	case id == "task_cycle":
+		clause, err = cycleBusiness.FilterClause(projectUUID, values)
+	case strings.HasPrefix(id, taskFieldBusiness.FilterPrefix):
+		var project uuid.UUID
+		if project, err = uuid.Parse(projectUUID); err == nil {
+			clause, err = taskFieldBusiness.FilterClause(ctx, project, id, values)
+		}
+	default:
+		return "", false
+	}
+	// A filter that couldn't be read narrows to nothing: an empty list says
+	// something went wrong, where the whole list would pass for a filtered one.
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/Project %s filter err: %+v", id, err)
+		return `eq(task_uuid, "00000000-0000-0000-0000-000000000000")`, true
+	}
+	return clause, true
 }
