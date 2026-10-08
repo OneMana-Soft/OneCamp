@@ -57,6 +57,7 @@ const (
 	EventMemoryDigest     EventType = "memory.digest"
 	EventCalendarBooking  EventType = "calendar.booking"
 	EventProjectUpdate    EventType = "project.update"
+	EventCheckIn          EventType = "checkin.ask"
 )
 
 // Recipient describes a single user the dispatcher should consider. Only the
@@ -305,7 +306,8 @@ func eventEnabledForPref(t EventType, p *prefModels.UserNotificationPreference) 
 	switch t {
 	case EventChatDM:
 		return p.EmailDMs
-	case EventChannelMention, EventGroupChatMention:
+	case EventChannelMention, EventGroupChatMention, EventCheckIn:
+		// A check-in asks each of its people directly, as a mention does.
 		return p.EmailMentions
 	case EventTaskAssigned:
 		return p.EmailTaskAssigned

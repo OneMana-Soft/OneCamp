@@ -37,6 +37,7 @@ func TestClassifyBotAndBotNameFollowTheEdition(t *testing.T) {
 		cases := map[string]BotKind{
 			AgentBotEmail(agentID):          BotKindAgent,
 			SlackBridgeBotEmail:             BotKindBridge,
+			CheckInBotEmail:                 BotKindCheckIn,
 			"someone@example.com":           "",
 			"":                              "",
 			"unrecognised" + BotEmailDomain: BotKindUnknown,

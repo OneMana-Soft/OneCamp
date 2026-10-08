@@ -163,6 +163,30 @@ func DispatchProjectUpdate(authorUUID, authorName, projectUUID, projectName, hea
 	}()
 }
 
+// DispatchCheckIn tells the people a check-in asks that its question is
+// waiting in the channel. Like every email here it reaches only those who are
+// away, and follows their choice about being mentioned.
+func DispatchCheckIn(checkinID, postUUID, channelUUID, channelName, question string, people []string) {
+	if len(people) == 0 {
+		return
+	}
+	go func() {
+		defer recoverDispatch("DispatchCheckIn")
+		Dispatch(context.Background(), Event{
+			Type:          EventCheckIn,
+			ActorName:     "OneCamp",
+			SubjectLine:   "Check-in in #" + channelName + ": " + question,
+			Title:         question,
+			Subtitle:      "Check-in in #" + channelName,
+			Body:          "Answer in its thread, in a line or two. Everyone's answers are together there.",
+			CTAURL:        frontendBaseURL() + "/app/channel/" + channelUUID + "/" + postUUID,
+			CTAText:       "Answer the check-in",
+			DedupKeyParts: []string{"checkin", checkinID, postUUID},
+			Recipients:    recipientsFromStrings(people),
+		})
+	}()
+}
+
 // DispatchMemoryDigestTest sends a one-off TEST digest to a single recipient,
 // bypassing the per-(recipient, day) dedup so an admin can re-send and verify
 // delivery. It still honors the recipient's email settings + suppression

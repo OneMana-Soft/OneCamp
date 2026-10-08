@@ -26,6 +26,7 @@ import (
 	eventController "github.com/akashc777/OneCamp/controllers/Calendar"
 	channelController "github.com/akashc777/OneCamp/controllers/Channel"
 	chatController "github.com/akashc777/OneCamp/controllers/Chat"
+	checkInController "github.com/akashc777/OneCamp/controllers/CheckIn"
 	commandController "github.com/akashc777/OneCamp/controllers/Command"
 	configController "github.com/akashc777/OneCamp/controllers/Config"
 	connectorController "github.com/akashc777/OneCamp/controllers/Connector"
@@ -1272,6 +1273,7 @@ func Routes() http.Handler {
 		r.Get("/profile", userController.GetLoggedInUserProfile)
 		r.Get("/sidebarNav", userController.GetDgraphUserInfoByUUIDForSidebarNav)
 		r.Get("/profile/{user_id}", userController.GetProfileByUserId)
+		r.Get("/botKinds", userController.GetBotKinds)
 		r.Get("/assignedTaskList", userController.GetDgraphUserTaskList)
 		r.Get("/assignedTaskListForKanban", userController.GetDgraphUserTaskListForKanban)
 		r.Get("/usersListNotBelongToChannelId/{channel_id}", userController.UsersListNotBelongToChannelId)
@@ -1390,6 +1392,13 @@ func Routes() http.Handler {
 	})
 
 	channelRouter.Group(func(r chi.Router) {
+		// Automatic check-ins: see business/CheckIn.
+		r.Get("/{channel_uuid}/checkins", checkInController.ListCheckIns)
+		r.Post("/{channel_uuid}/checkins", checkInController.CreateCheckIn)
+		r.Post("/checkins/{checkin_id}/edit", checkInController.EditCheckIn)
+		r.Post("/checkins/{checkin_id}/pause", checkInController.PauseCheckIn)
+		r.Post("/checkins/{checkin_id}/delete", checkInController.DeleteCheckIn)
+		r.Post("/checkins/{checkin_id}/ask", checkInController.AskCheckInNow)
 		r.Get("/channelBasicInfo/{channel_uuid}", channelController.GetChannelBasicInfoByUUID)
 		r.Post("/markSeen/{channel_uuid}", channelController.MarkChannelSeen)
 		r.Get("/channelInfoWithMemberAdminFlag/{channel_uuid}", channelController.GetChannelInfoByUUIDWithMemberAdminFlag)

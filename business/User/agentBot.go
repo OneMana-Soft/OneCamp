@@ -177,6 +177,32 @@ func EnsureGuestBot(ctx context.Context) (*BotIdentity, error) {
 	return id, nil
 }
 
+var (
+	checkInBotMu sync.Mutex
+	checkInBot   *BotIdentity
+)
+
+// EnsureCheckInBot resolves (provisioning on first use) the principal that
+// asks channels' automatic check-ins. Its own principal, so a check-in reads as
+// "Check-in" after a reload, never as the assistant or the automation bot.
+func EnsureCheckInBot(ctx context.Context) (*BotIdentity, error) {
+	checkInBotMu.Lock()
+	defer checkInBotMu.Unlock()
+	if checkInBot != nil && checkInBot.DgraphUID != "" {
+		return checkInBot, nil
+	}
+	userID, err := domain.EnsureBotUser(ctx, domain.CheckInBotEmail, domain.CheckInBotUsername, "Check-in")
+	if err != nil {
+		return nil, err
+	}
+	id := ensureBotPrincipal(ctx, userID, domain.CheckInBotEmail, "Check-in", "")
+	if id.DgraphUID == "" {
+		return nil, fmt.Errorf("check-in principal has no graph node")
+	}
+	checkInBot = id
+	return id, nil
+}
+
 // InvalidateAgentBot drops an agent's cached principal (call after delete) so a
 // stale identity is not served. Resolution will re-provision on next use.
 func InvalidateAgentBot(agentID uuid.UUID) {
