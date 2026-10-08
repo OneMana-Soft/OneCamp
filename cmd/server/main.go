@@ -21,6 +21,7 @@ import (
 	aicoworker "github.com/akashc777/OneCamp/business/AICoworker"
 	mcpBusiness "github.com/akashc777/OneCamp/business/AIMCP"
 	archiveBusiness "github.com/akashc777/OneCamp/business/Archive"
+	checkInBusiness "github.com/akashc777/OneCamp/business/CheckIn"
 	commandBusiness "github.com/akashc777/OneCamp/business/Command"
 	githubBusiness "github.com/akashc777/OneCamp/business/GitHub"
 	mcpServerBusiness "github.com/akashc777/OneCamp/business/MCPServer"
@@ -250,6 +251,9 @@ func startBackgroundLoops(ctx context.Context) {
 	// queue safe across restarts and multiple replicas. Inert when no jobs
 	// are due. Reminder delivery is wired via business/Command init().
 	schedulerBusiness.StartWorker(ctx)
+	// Automatic check-ins: each worker sweeps for due ones; each due time is
+	// claimed by one UPDATE, so exactly one worker asks it.
+	checkInBusiness.StartWorker(ctx)
 
 	// Start the Workflow Builder engine. It subscribes to the workspace event
 	// bus and runs admin-defined "when a message matches X → reply / create

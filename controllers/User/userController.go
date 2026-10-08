@@ -818,6 +818,18 @@ func GetUsersListWhoDontBelongToTheProjectButBelongToTheTeam(w http.ResponseWrit
 
 }
 
+// GetBotKinds answers which kind each bot is (GET /user/botKinds), so a name
+// carries "Agent" only when an AI is behind it.
+func GetBotKinds(w http.ResponseWriter, r *http.Request) {
+	kinds, err := business.BotKinds(r.Context())
+	if err != nil {
+		helpers.LogErrorWithContext(r.Context(), "controllers/GetBotKinds err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Something went wrong. Try again in a moment."})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": kinds})
+}
+
 func GetProfileByUserId(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()

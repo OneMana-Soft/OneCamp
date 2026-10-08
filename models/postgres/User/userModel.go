@@ -724,6 +724,32 @@ func DisplayNamesByUUIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]st
 	return out, rows.Err()
 }
 
+// BotEmails is every bot principal's email by id: the workspace's agents and
+// built-in bots, a handful of rows. Deleted ones stay in, because the posts
+// they wrote still need to say what wrote them.
+func BotEmails(ctx context.Context) (map[uuid.UUID]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `SELECT id, email_id FROM users WHERE is_bot`)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/BotEmails err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[uuid.UUID]string{}
+	for rows.Next() {
+		var id uuid.UUID
+		var email string
+		if err := rows.Scan(&id, &email); err != nil {
+			return nil, err
+		}
+		out[id] = email
+	}
+	return out, rows.Err()
+}
+
 // FromContext is the signed-in person a request carries. The auth middleware
 // stores a UserInfo value; reading it as a *UserInfo never matches, and seven
 // handlers did, so they answered 401 ("sign in again") to everyone until

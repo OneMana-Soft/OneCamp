@@ -27,6 +27,11 @@ const (
 	ChannelGuestBotUsername = "channel-guest"
 	// ChannelGuestBotEmail keys that principal's row.
 	ChannelGuestBotEmail = ChannelGuestBotUsername + BotEmailDomain
+	// CheckInBotUsername is the principal that asks channels' automatic
+	// check-ins on their schedule.
+	CheckInBotUsername = "checkin"
+	// CheckInBotEmail keys that principal's row.
+	CheckInBotEmail = CheckInBotUsername + BotEmailDomain
 )
 
 // BotKind names what a bot principal actually IS.
@@ -59,6 +64,9 @@ const (
 	// BotKindGuest relays people outside the workspace invited to a channel.
 	// It has no AI: each message is a guest's, named in the message.
 	BotKindGuest BotKind = "guest"
+	// BotKindCheckIn asks channels' check-ins on their schedule. It has no AI:
+	// each question is one a channel's moderators set up.
+	BotKindCheckIn BotKind = "checkin"
 	// BotKindUnknown is a bot this build does not recognise. Returned rather
 	// than guessing, so a caller shows neutral copy instead of the assistant's.
 	BotKindUnknown BotKind = "bot"
@@ -85,6 +93,8 @@ func ClassifyBot(email string) BotKind {
 		return BotKindBridge
 	case email == ChannelGuestBotEmail:
 		return BotKindGuest
+	case email == CheckInBotEmail:
+		return BotKindCheckIn
 	case strings.HasPrefix(email, AgentBotPrefix):
 		return BotKindAgent
 	default:
