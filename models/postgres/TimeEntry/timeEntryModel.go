@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
@@ -184,4 +185,45 @@ const MaxReportRows = 20000
 func ForProject(projectID uuid.UUID, from, to time.Time) ([]Entry, error) {
 	return list(`SELECT `+columns+` FROM task_time_entries WHERE project_uuid = $1 AND started_at >= $2 AND started_at < $3
 		ORDER BY started_at LIMIT $4`, projectID, from, to, MaxReportRows+1)
+}
+
+// WeekSeconds is the time logged on a project in one week.
+type WeekSeconds struct {
+	ProjectUUID uuid.UUID
+	// Week is the Monday the week starts on, in the zone asked for, as a date.
+	Week    time.Time
+	Seconds int64
+}
+
+// SecondsByWeek is the time logged on the projects in each week since from,
+// weeks starting on Monday in zone (an IANA name). An entry counts in the week
+// it started; a running timer counts up to now.
+func SecondsByWeek(projectIDs []uuid.UUID, from, now time.Time, zone string) ([]WeekSeconds, error) {
+	out := []WeekSeconds{}
+	if len(projectIDs) == 0 {
+		return out, nil
+	}
+	ids := make([]string, len(projectIDs))
+	for i, id := range projectIDs {
+		ids[i] = id.String()
+	}
+	ctx, cancel := withTimeout()
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `SELECT project_uuid,
+		date_trunc('week', started_at AT TIME ZONE $3)::date AS week,
+		SUM(GREATEST(EXTRACT(EPOCH FROM (COALESCE(ended_at, $4) - started_at)), 0))::bigint
+		FROM task_time_entries WHERE project_uuid = ANY($1::uuid[]) AND started_at >= $2
+		GROUP BY 1, 2`, "{"+strings.Join(ids, ",")+"}", from, zone, now)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var w WeekSeconds
+		if err := rows.Scan(&w.ProjectUUID, &w.Week, &w.Seconds); err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
 }
