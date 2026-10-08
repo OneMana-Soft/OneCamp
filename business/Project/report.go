@@ -18,6 +18,7 @@ import (
 	domain "github.com/akashc777/OneCamp/domain/Project"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	taskStatusModels "github.com/akashc777/OneCamp/models/postgres/TaskStatus"
 	timeModels "github.com/akashc777/OneCamp/models/postgres/TimeEntry"
 	"github.com/google/uuid"
 )
@@ -91,6 +92,8 @@ type Report struct {
 	Priorities  []ReportPriorityRow `json:"priorities"`
 	All         []ReportProjectRef  `json:"all_projects"`
 	Truncated   bool                `json:"truncated"`
+	// Flow is where the tasks stood at the end of each week (flow.go).
+	Flow []FlowWeek `json:"flow"`
 }
 
 // weekStart is the Monday, at midnight in loc, of the week t falls in.
@@ -323,5 +326,28 @@ func GetReport(ctx context.Context, readerUID string, now time.Time, loc *time.L
 		helpers.LogErrorWithContext(ctx, "business/GetReport hours err: %+v", err)
 		hours = nil
 	}
-	return BuildReport(projects, hours, now, loc, weeks, keep), nil
+	r := BuildReport(projects, hours, now, loc, weeks, keep)
+	r.Flow = buildFlow(projects, ownStatuses(ctx, ids), first, now, weeks, keep)
+	return r, nil
+}
+
+// ownStatuses is each project's own statuses, lower-cased name → category,
+// by project uuid: how a task's history names them. Without them, a history
+// naming one reads as the status before it (flow.go), so a failure to read
+// them costs precision, not the report.
+func ownStatuses(ctx context.Context, ids []uuid.UUID) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	byProject, err := taskStatusModels.ListForProjects(ctx, ids)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/GetReport statuses err: %+v", err)
+		return out
+	}
+	for id, statuses := range byProject {
+		names := map[string]string{}
+		for _, st := range statuses {
+			names[strings.ToLower(strings.TrimSpace(st.Name))] = st.Category
+		}
+		out[id.String()] = names
+	}
+	return out
 }

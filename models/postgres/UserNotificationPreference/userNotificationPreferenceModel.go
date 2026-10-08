@@ -36,6 +36,9 @@ type UserNotificationPreference struct {
 	// NotificationsPausedUntil is a pause the person set (Slack's "pause
 	// notifications"); nil or past means not paused. See domain/UserFCMToken.
 	NotificationsPausedUntil *time.Time `json:"notifications_paused_until,omitempty"`
+	// ReadReceipts is whether others in a DM or group chat see when this
+	// person has read it; off, they don't see others' either.
+	ReadReceipts bool `json:"read_receipts"`
 	// FocusUntil is when the focus-time event the person is in ends; nil when
 	// they are in none. Computed, never written.
 	FocusUntil       *time.Time `json:"focus_until,omitempty"`
@@ -48,7 +51,7 @@ const allColumns = `id, user_id, email_enabled, email_mentions, email_dms, email
 		email_task_status, email_comments, email_calls, email_channel_invites,
 		email_only_when_offline, email_digest_frequency, quiet_hours_enabled,
 		quiet_hours_start, quiet_hours_end, quiet_hours_tz, unsubscribe_token,
-		created_at, updated_at, notifications_paused_until, ` + focusUntilColumn
+		created_at, updated_at, notifications_paused_until, read_receipts, ` + focusUntilColumn
 
 // focusUntilColumn is when the focus-time event the person is in now ends, or
 // NULL. Read with the row so every reader of a pause sees focus time too.
@@ -70,7 +73,7 @@ func scanRow(row rowScanner) (*UserNotificationPreference, error) {
 		&p.EmailChannelInvites, &p.EmailOnlyWhenOffline, &p.EmailDigestFrequency,
 		&p.QuietHoursEnabled, &p.QuietHoursStart, &p.QuietHoursEnd, &p.QuietHoursTZ,
 		&p.UnsubscribeToken, &p.CreatedAt, &p.UpdatedAt, &p.NotificationsPausedUntil,
-		&p.FocusUntil,
+		&p.ReadReceipts, &p.FocusUntil,
 	)
 	if err != nil {
 		return nil, err
@@ -154,6 +157,7 @@ type UpdatePreferenceInput struct {
 	QuietHoursStart      *string `json:"quiet_hours_start,omitempty"`
 	QuietHoursEnd        *string `json:"quiet_hours_end,omitempty"`
 	QuietHoursTZ         *string `json:"quiet_hours_tz,omitempty"`
+	ReadReceipts         *bool   `json:"read_receipts,omitempty"`
 }
 
 // Update writes the supplied changes to the database. The row must already
@@ -213,6 +217,9 @@ func Update(userID uuid.UUID, in UpdatePreferenceInput) error {
 	}
 	if in.QuietHoursTZ != nil {
 		add("quiet_hours_tz", *in.QuietHoursTZ)
+	}
+	if in.ReadReceipts != nil {
+		add("read_receipts", *in.ReadReceipts)
 	}
 	if len(sets) == 0 {
 		return nil

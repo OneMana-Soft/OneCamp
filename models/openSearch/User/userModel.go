@@ -30,14 +30,7 @@ func UpdateUserInOpenSearch(ctx context.Context, openSearchUser *openSearchStruc
 
 	docId := openSearchUser.Uuid
 
-	_, err = opensearchInit.OpenSearchClient.Update(
-		context.Background(),
-		opensearchapi.UpdateReq{
-			Index:      "users",
-			DocumentID: docId,
-			Body:       document,
-		},
-	)
+	err = opensearchInit.UpdateDocument(context.Background(), "users", docId, document)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

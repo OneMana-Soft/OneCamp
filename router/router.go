@@ -428,6 +428,8 @@ func Routes() http.Handler {
 		// Guest access (admin governance): toggle the workspace policy and
 		// view/revoke active guest grants. Policy defaults off.
 		r.Post("/guest-access", guestController.SetGuestPolicy)
+		// Read receipts in DMs and group chats: on unless turned off here.
+		r.Post("/read-receipts", settingsController.SetReadReceiptsPolicy)
 		r.Get("/guest-grants", guestController.ListGuestGrants)
 		r.Post("/guest-grants/{id}/revoke", guestController.RevokeGuestGrant)
 
@@ -1423,6 +1425,8 @@ func Routes() http.Handler {
 		r.Get("/newChats/{grp_id}/{time_stamp}", chatController.GetNewGroupChats)
 		r.Get("/newChatsIncludingCurrentChat/{grp_id}/{chat_uuid}", chatController.GetNewGroupChatsIncludingChat)
 		r.Get("/latestChat/{grp_id}", chatController.GetLatestGroupChats)
+		r.Get("/seen/{grp_id}", chatController.GetChatReceipts)
+		r.Post("/seen/{grp_id}", chatController.MarkChatSeen)
 		r.Post("/addParticipant", chatController.AddParticipantToGroupChat)
 		r.Post("/getCallToken", chatController.MakeVideoCallForGroup)
 		r.Post("/startCallRecording", chatController.StartVideoCallRecordingForGroup)
@@ -1446,6 +1450,9 @@ func Routes() http.Handler {
 		r.Get("/newChats/{user_uuid}/{time_stamp}", chatController.GetNewChats)
 		r.Get("/newChatsIncludingCurrentChat/{user_uuid}/{chat_uuid}", chatController.GetNewChatsIncludingChat)
 		r.Get("/latestChat/{user_uuid}", chatController.GetLatestChats)
+		// Read receipts: who has seen the DM, and marking it seen while it's open.
+		r.Get("/seen/{user_uuid}", chatController.GetChatReceipts)
+		r.Post("/seen/{user_uuid}", chatController.MarkChatSeen)
 		r.Post("/addOrCreateReaction", chatController.CreateOrUpdateChatReaction)
 		r.Post("/removeReaction", chatController.DeleteChatReaction)
 		r.Get("/chatWithAllComments/{chat_uuid}", chatController.GetDgraphChatByUUIDWithAllComments)

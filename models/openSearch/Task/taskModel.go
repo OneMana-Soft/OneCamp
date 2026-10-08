@@ -8,7 +8,6 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
-	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
 func UpdateTaskInOpenSearch(ctx context.Context, openSearchTask *openSearchStruct.OpenSearchTask) (err error) {
@@ -34,14 +33,7 @@ func UpdateTaskInOpenSearch(ctx context.Context, openSearchTask *openSearchStruc
 
 	docId := openSearchTask.Uuid
 
-	_, err = opensearchInit.OpenSearchClient.Update(
-		context.Background(),
-		opensearchapi.UpdateReq{
-			Index:      "tasks",
-			DocumentID: docId,
-			Body:       document,
-		},
-	)
+	err = opensearchInit.UpdateDocument(context.Background(), "tasks", docId, document)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

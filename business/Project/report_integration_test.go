@@ -38,7 +38,11 @@ func TestReportQuery(t *testing.T) {
 				"project_tasks": []map[string]any{
 					task("Open", "todo", map[string]any{"task_due_date": "2026-10-01T00:00:00Z", "task_assignee": map[string]any{"uid": "_:me"}}),
 					task("Reviewing", "inReview", nil),
-					task("Shipped this week", "done", map[string]any{"task_status_since": "2026-10-06T10:00:00Z", "task_created_at": "2026-09-20T10:00:00Z"}),
+					task("Shipped this week", "done", map[string]any{"task_status_since": "2026-10-06T10:00:00Z", "task_created_at": "2026-09-20T10:00:00Z",
+						"task_activities": []map[string]any{
+							{"dgraph.type": "Activity", "activity_type": "statusUpdate", "activity_time": "2026-10-06T10:00:00Z", "activity_prev_state": "inProgress", "activity_next_state": "done"},
+							{"dgraph.type": "Activity", "activity_type": "comment", "activity_time": "2026-10-05T10:00:00Z"},
+						}}),
 					task("Dropped", "canceled", map[string]any{"task_status_since": "2026-10-02T10:00:00Z"}),
 					task("Shipped long ago", "done", map[string]any{"task_status_since": "2026-06-01T10:00:00Z"}),
 					task("Deleted", "todo", map[string]any{"task_deleted_at": gone}),
@@ -65,10 +69,17 @@ func TestReportQuery(t *testing.T) {
 	if p.Closed[0].StatusSince == nil || !p.Closed[0].StatusSince.Equal(time.Date(2026, 10, 6, 10, 0, 0, 0, time.UTC)) {
 		t.Fatalf("latest closed first: %+v", p.Closed[0].StatusSince)
 	}
-	r := BuildReport(projects, nil, time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC), time.UTC, 4, nil)
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	r := BuildReport(projects, nil, now, time.UTC, 4, nil)
 	// Made on Sunday 20 September: the first week's (from Monday the 14th).
 	if r.Open != 2 || r.Overdue != 1 || r.DoneTotal != 1 || r.Done[3] != 1 || r.Added[0] != 1 {
 		t.Fatalf("the report: open %d overdue %d done %v added %v", r.Open, r.Overdue, r.Done, r.Added)
+	}
+	// The flow of work reads the task's status change from its history: in
+	// progress from when it was made, done in the last week.
+	flow := buildFlow(projects, nil, since, now, 4, nil)
+	if flow[1].InProgress != 1 || flow[3].Done != 1 || flow[3].InProgress != 0 {
+		t.Fatalf("the flow: %+v", flow)
 	}
 }
 

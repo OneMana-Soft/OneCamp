@@ -505,3 +505,27 @@ func reloadPush() error {
 		FirebaseCredJSON: business.FirebaseCredentialJSON(),
 	})
 }
+
+// SetReadReceiptsPolicy POST /admin/read-receipts {enabled}: whether people
+// may see who has read their DMs and group chats. Each person can still turn
+// their own off.
+func SetReadReceiptsPolicy(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&body); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid request body"})
+		return
+	}
+	if err := business.SetReadReceiptsEnabled(body.Enabled); err != nil {
+		helpers.LogErrorWithContext(r.Context(), "controllers/SetReadReceiptsPolicy err: %+v", err)
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Couldn't save the read receipts setting."})
+		return
+	}
+	summary := "Turned read receipts off for the workspace"
+	if body.Enabled {
+		summary = "Turned read receipts on for the workspace"
+	}
+	auditBusiness.Record(r, "settings.read_receipts", auditBusiness.CategorySettings, summary, map[string]interface{}{"enabled": body.Enabled})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{"read_receipts_enabled": body.Enabled}})
+}

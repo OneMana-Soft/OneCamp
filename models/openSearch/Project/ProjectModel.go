@@ -62,14 +62,7 @@ func UpdateProjectInOpenSearch(ctx context.Context, openSearchProject *openSearc
 
 	docId := openSearchProject.Uuid
 
-	_, err = opensearchInit.OpenSearchClient.Update(
-		context.Background(),
-		opensearchapi.UpdateReq{
-			Index:      "projects",
-			DocumentID: docId,
-			Body:       document,
-		},
-	)
+	err = opensearchInit.UpdateDocument(context.Background(), "projects", docId, document)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

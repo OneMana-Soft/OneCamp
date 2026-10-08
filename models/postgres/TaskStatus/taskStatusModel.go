@@ -75,6 +75,32 @@ func List(ctx context.Context, projectID uuid.UUID) ([]*TaskStatus, error) {
 	return out, rows.Err()
 }
 
+// ListForProjects returns the custom statuses of several projects at once,
+// by project: a report reads every project a person is in.
+func ListForProjects(ctx context.Context, projectIDs []uuid.UUID) (map[uuid.UUID][]*TaskStatus, error) {
+	out := map[uuid.UUID][]*TaskStatus{}
+	if len(projectIDs) == 0 {
+		return out, nil
+	}
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
+		`SELECT `+columns+` FROM task_statuses WHERE project_id = ANY($1::uuid[]) ORDER BY position, created_at`, pq.Array(projectIDs))
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/TaskStatus ListForProjects err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		s, err := scan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[s.ProjectID] = append(out[s.ProjectID], s)
+	}
+	return out, rows.Err()
+}
+
 // Get returns one of a project's custom statuses.
 func Get(ctx context.Context, projectID, id uuid.UUID) (*TaskStatus, error) {
 	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)

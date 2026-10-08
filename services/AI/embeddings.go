@@ -191,14 +191,7 @@ func storeEmbeddingDirect(ctx context.Context, doc EmbeddingDoc) error {
 		// If document already exists, try update
 		if strings.Contains(err.Error(), "version_conflict") {
 			updateBody := fmt.Sprintf(`{"doc": %s, "doc_as_upsert": true}`, string(jsonData))
-			_, err = opensearchInit.OpenSearchClient.Update(
-				ctx,
-				opensearchapi.UpdateReq{
-					Index:      AI_EMBEDDINGS_INDEX,
-					DocumentID: docID,
-					Body:       openSearchStruct.IndexReader([]byte(updateBody)),
-				},
-			)
+			err = opensearchInit.UpdateDocument(ctx, AI_EMBEDDINGS_INDEX, docID, openSearchStruct.IndexReader([]byte(updateBody)))
 			if err != nil {
 				return fmt.Errorf("failed to update embedding in OpenSearch: %w", err)
 			}

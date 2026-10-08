@@ -16,4 +16,7 @@ func TestMessageTypesKeepTheirNumbers(t *testing.T) {
 	if MESSAGE_TASK_DATES != 32 || MESSAGE_TASK_FIELD != 33 {
 		t.Fatalf("TASK_DATES=%d TASK_FIELD=%d, want 32 and 33", MESSAGE_TASK_DATES, MESSAGE_TASK_FIELD)
 	}
+	if MESSAGE_CHAT_SEEN != 34 {
+		t.Fatalf("CHAT_SEEN=%d, want 34", MESSAGE_CHAT_SEEN)
+	}
 }

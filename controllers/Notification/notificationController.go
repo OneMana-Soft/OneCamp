@@ -18,6 +18,7 @@ import (
 	"time"
 
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	prefDomain "github.com/akashc777/OneCamp/domain/UserNotificationPreference"
 	"github.com/akashc777/OneCamp/helpers"
@@ -79,6 +80,10 @@ func GetMyNotificationPreferences(w http.ResponseWriter, r *http.Request) {
 			// Focus time from the calendar: separate, because resuming a pause
 			// does not end it; the event does.
 			"focus_until": pausedUntil(pref.FocusUntil),
+			// Read receipts in DMs and group chats: the person's own choice,
+			// and whether the workspace allows them at all.
+			"read_receipts":         pref.ReadReceipts,
+			"read_receipts_allowed": settingsBusiness.ReadReceiptsEnabled(),
 		},
 	})
 }

@@ -101,3 +101,27 @@ func GetAllLastSeenChatsForUser(ctx context.Context, userID uuid.UUID) (map[stri
 	}
 	return out, rows.Err()
 }
+
+// GetLastSeenForGrouping returns user id → last-seen for every row of one DM
+// or group-chat grouping id (idx_last_seen_chat_grp_id).
+func GetLastSeenForGrouping(ctx context.Context, groupingID string) (map[string]time.Time, error) {
+	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(cctx,
+		`SELECT user_id, user_last_seen FROM last_seen_chat WHERE grp_id = $1`, groupingID)
+	if err != nil {
+		helpers.LogErrorWithContext(cctx, "models/GetLastSeenForGrouping err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var id uuid.UUID
+		var t time.Time
+		if err := rows.Scan(&id, &t); err != nil {
+			return nil, err
+		}
+		out[id.String()] = t
+	}
+	return out, rows.Err()
+}

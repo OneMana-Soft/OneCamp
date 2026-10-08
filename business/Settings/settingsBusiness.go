@@ -34,7 +34,15 @@ const (
 	keyGuestAccess   = "guest_access_enabled"
 	keyRetentionDays = "audit_retention_days"
 	keyFirebaseCred  = "firebase_credential" // encrypted service-account JSON
+	keyReadReceipts  = "read_receipts_enabled"
 )
+
+// settingsKeys is every key above: what loadAll reads. A key left out is
+// saved but never read back, which is how the audit retention window and the
+// Firebase credential set in Admin went unused (TestEveryKeyIsLoaded).
+var settingsKeys = []string{
+	keyUploadLimitMB, keyAllowedUsers, keyResendAPIKey, keyGuestAccess, keyRetentionDays, keyFirebaseCred, keyReadReceipts,
+}
 
 // Defaults / floors.
 const (
@@ -64,9 +72,7 @@ func loadAll() map[string]string {
 
 	out := map[string]string{}
 	if postgresInit.DBConn != nil && postgresInit.DBConn.SqlDB != nil {
-		rows, err := configModel.GetMultipleConfigsByKeys([]string{
-			keyUploadLimitMB, keyAllowedUsers, keyResendAPIKey, keyGuestAccess,
-		})
+		rows, err := configModel.GetMultipleConfigsByKeys(settingsKeys)
 		if err == nil {
 			for _, row := range rows {
 				out[row.Key] = row.Value
@@ -249,6 +255,22 @@ func SetGuestAccessEnabled(enabled bool) error {
 	return nil
 }
 
+// ReadReceiptsEnabled reports whether people may see, in DMs and group
+// chats, who has read their messages (each can still turn theirs off). On
+// unless an admin has turned it off, as Teams and Zulip ship it.
+func ReadReceiptsEnabled() bool {
+	return loadAll()[keyReadReceipts] != "false"
+}
+
+// SetReadReceiptsEnabled persists the workspace's read-receipt policy.
+func SetReadReceiptsEnabled(enabled bool) error {
+	if err := configModel.UpsertConfig(keyReadReceipts, strconv.FormatBool(enabled)); err != nil {
+		return err
+	}
+	invalidate()
+	return nil
+}
+
 // MinRetentionDays is the floor a retention window cannot go below.
 //
 // The AI Act requires automatically generated logs to be kept for at least six
@@ -330,6 +352,7 @@ type SettingsStatus struct {
 	HasResendAPIKey    bool     `json:"has_resend_api_key"`
 	ResendSource       string   `json:"resend_source"`
 	GuestAccessEnabled bool     `json:"guest_access_enabled"`
+	ReadReceipts       bool     `json:"read_receipts_enabled"`
 }
 
 // GetStatus returns the redacted settings view for the admin UI.
@@ -368,6 +391,7 @@ func GetStatus() SettingsStatus {
 		HasResendAPIKey:    hasResend,
 		ResendSource:       resendSrc,
 		GuestAccessEnabled: GuestAccessEnabled(),
+		ReadReceipts:       ReadReceiptsEnabled(),
 	}
 }
 

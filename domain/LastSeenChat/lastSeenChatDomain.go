@@ -11,12 +11,16 @@ import (
 	"github.com/google/uuid"
 )
 
+// A marker only moves forward: every write keeps the later of the two times,
+// so a backdated write (a Slack import's message times) can't make read
+// messages unread again, nor take back a read receipt.
+
 func CreateOrUpdateLastSeenChat(ctx context.Context, userID uuid.UUID, grpID string, lastSeenChannelTime time.Time) (err error) {
 	query := `
 		INSERT INTO last_seen_chat (user_id, grp_id, user_last_seen)
 		VALUES ($1, $2, $3)
 		ON CONFLICT (user_id, grp_id)
-		DO UPDATE SET user_last_seen = EXCLUDED.user_last_seen;
+		DO UPDATE SET user_last_seen = GREATEST(last_seen_chat.user_last_seen, EXCLUDED.user_last_seen);
 	`
 	err = models.CreateOrUpdateLastSeenChat(query, userID, grpID, lastSeenChannelTime)
 
@@ -46,7 +50,7 @@ func BulkCreateOrUpdateLastSeenChat(ctx context.Context, userIDs []string, grpID
 	}
 
 	query += strings.Join(placeholders, ",")
-	query += ` ON CONFLICT (user_id, grp_id) DO UPDATE SET user_last_seen = EXCLUDED.user_last_seen`
+	query += ` ON CONFLICT (user_id, grp_id) DO UPDATE SET user_last_seen = GREATEST(last_seen_chat.user_last_seen, EXCLUDED.user_last_seen)`
 
 	err = models.BulkCreateOrUpdateLastSeenChat(query, values...)
 	if err != nil {
@@ -106,7 +110,7 @@ func BulkUpdateLastSeenChatForSender(ctx context.Context, grpIDs []string, userI
 	}
 
 	query += strings.Join(placeholders, ",")
-	query += ` ON CONFLICT (user_id, grp_id) DO UPDATE SET user_last_seen = EXCLUDED.user_last_seen`
+	query += ` ON CONFLICT (user_id, grp_id) DO UPDATE SET user_last_seen = GREATEST(last_seen_chat.user_last_seen, EXCLUDED.user_last_seen)`
 
 	err = models.BulkCreateOrUpdateLastSeenChat(query, values...)
 	if err != nil {
@@ -128,4 +132,10 @@ func GetLastSeenChat(ctx context.Context, userID uuid.UUID, grpID string) (time.
 // GetAllLastSeenChatsForUser returns grp_id → last-seen for the user.
 func GetAllLastSeenChatsForUser(ctx context.Context, userID uuid.UUID) (map[string]time.Time, error) {
 	return models.GetAllLastSeenChatsForUser(ctx, userID)
+}
+
+// GetLastSeenForGrouping returns user id → last-seen for everyone with a row
+// in one DM or group chat: read receipts.
+func GetLastSeenForGrouping(ctx context.Context, grpID string) (map[string]time.Time, error) {
+	return models.GetLastSeenForGrouping(ctx, grpID)
 }
