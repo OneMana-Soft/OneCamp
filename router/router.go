@@ -1364,6 +1364,10 @@ func Routes() http.Handler {
 		r.Post("/{project_uuid}/forms", formController.SaveForm)
 		r.Post("/{project_uuid}/forms/{form_id}/delete", formController.DeleteForm)
 		r.Get("/{project_uuid}/time", timeEntryController.ProjectTime)
+		// What its time is billed at: its admins only.
+		r.Get("/{project_uuid}/rates", timeEntryController.ProjectRates)
+		r.Post("/{project_uuid}/rates", timeEntryController.SetProjectRates)
+		r.Post("/{project_uuid}/rates/delete", timeEntryController.ClearProjectRates)
 		r.Get("/{project_uuid}/tags", taskController.ProjectTags)
 		r.Get("/{project_uuid}/timeline", projectController.ProjectTimeline)
 		// Project updates: see business/ProjectUpdate.

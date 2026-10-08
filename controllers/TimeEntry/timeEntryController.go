@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	rateModel "github.com/akashc777/OneCamp/models/postgres/ProjectRate"
 	timeModel "github.com/akashc777/OneCamp/models/postgres/TimeEntry"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
@@ -285,13 +287,16 @@ func DeleteTime(w http.ResponseWriter, r *http.Request) {
 }
 
 // ProjectTime is a project's time over a range, by person and by task, or
-// every entry as a CSV file for an invoice. Any member may read it.
+// every entry as a CSV file for an invoice. Any member may read it; its
+// admins also see what the billable time comes to at the project's rates.
 // GET /project/{project_uuid}/time?from=&to=[&format=csv&tz=Area/City]
 func ProjectTime(w http.ResponseWriter, r *http.Request) {
 	projectID, project, ok := projectaccess.Require(w, r, false, "")
 	if !ok {
 		return
 	}
+	// Money is for the project's admins; everyone else reads hours.
+	rates := ratesFor(r, projectID, project.IsProjectAdmin > 0)
 	now := time.Now()
 	q := r.URL.Query()
 	from, to, err := timeBusiness.ReportRange(q.Get("from"), q.Get("to"), now)
@@ -331,12 +336,118 @@ func ProjectTime(w http.ResponseWriter, r *http.Request) {
 		file := fmt.Sprintf("%s time %s to %s.csv", safeFileName(project.Name), from.In(loc).Format("2006-01-02"), to.Add(-time.Second).In(loc).Format("2006-01-02"))
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, file))
-		if err := timeBusiness.WriteCSV(w, entries, names, loc, now); err != nil {
+		if err := timeBusiness.WriteCSV(w, entries, names, loc, now, rates); err != nil {
 			helpers.LogErrorWithContext(r.Context(), "controllers/TimeEntry/ProjectTime csv err: %+v", err)
 		}
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": timeBusiness.Summarise(entries, names, from, to, now)})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": timeBusiness.Summarise(entries, names, from, to, now, rates)})
+}
+
+// ratesFor is a project's rates for a reader who may see money: its admins.
+// Everyone else's report has hours only. A failed read leaves money out
+// rather than failing the report.
+func ratesFor(r *http.Request, projectID uuid.UUID, isAdmin bool) *timeBusiness.Rates {
+	if !isAdmin {
+		return nil
+	}
+	b, err := rateModel.Get(projectID)
+	if err != nil {
+		helpers.LogErrorWithContext(r.Context(), "controllers/TimeEntry/ratesFor err: %+v", err)
+		return nil
+	}
+	if b == nil {
+		return nil
+	}
+	return &timeBusiness.Rates{Currency: b.Currency, Default: b.DefaultRateCents, People: b.People}
+}
+
+type ratesView struct {
+	Set              bool   `json:"set"`
+	Currency         string `json:"currency,omitempty"`
+	DefaultRateCents int64  `json:"default_rate_cents"`
+	People           []struct {
+		UserUUID  string `json:"user_uuid"`
+		RateCents int64  `json:"rate_cents"`
+	} `json:"people"`
+}
+
+func viewOf(rates *timeBusiness.Rates) ratesView {
+	v := ratesView{People: []struct {
+		UserUUID  string `json:"user_uuid"`
+		RateCents int64  `json:"rate_cents"`
+	}{}}
+	if rates == nil {
+		return v
+	}
+	v.Set, v.Currency, v.DefaultRateCents = true, rates.Currency, rates.Default
+	for id, cents := range rates.People {
+		v.People = append(v.People, struct {
+			UserUUID  string `json:"user_uuid"`
+			RateCents int64  `json:"rate_cents"`
+		}{id.String(), cents})
+	}
+	// In a steady order: a map's isn't, and a client comparing two reads
+	// would take the same rates for a change.
+	sort.Slice(v.People, func(i, j int) bool { return v.People[i].UserUUID < v.People[j].UserUUID })
+	return v
+}
+
+// ProjectRates is what the project's time is billed at. Its admins only.
+// GET /project/{project_uuid}/rates
+func ProjectRates(w http.ResponseWriter, r *http.Request) {
+	projectID, _, ok := projectaccess.Require(w, r, true, "Only the project's admins see its rates.")
+	if !ok {
+		return
+	}
+	b, err := rateModel.Get(projectID)
+	if err != nil {
+		fail(w, r, "ProjectRates", err)
+		return
+	}
+	var rates *timeBusiness.Rates
+	if b != nil {
+		rates = &timeBusiness.Rates{Currency: b.Currency, Default: b.DefaultRateCents, People: b.People}
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": viewOf(rates)})
+}
+
+// SetProjectRates sets the project's currency and rates. Its admins only.
+// POST /project/{project_uuid}/rates {currency, default_rate_cents, people: [{user_uuid, rate_cents}]}
+func SetProjectRates(w http.ResponseWriter, r *http.Request) {
+	projectID, _, ok := projectaccess.Require(w, r, true, "Only the project's admins set its rates.")
+	if !ok {
+		return
+	}
+	var in timeBusiness.RatesInput
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read those rates."})
+		return
+	}
+	rates, err := timeBusiness.CheckRates(in)
+	if err != nil {
+		fail(w, r, "SetProjectRates", err)
+		return
+	}
+	if err := rateModel.Set(projectID, rates.Currency, rates.Default, rates.People, me(r).UserPostgresInfo.Id); err != nil {
+		fail(w, r, "SetProjectRates", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": viewOf(rates)})
+}
+
+// ClearProjectRates stops billing the project. Its admins only.
+// POST /project/{project_uuid}/rates/delete
+func ClearProjectRates(w http.ResponseWriter, r *http.Request) {
+	projectID, _, ok := projectaccess.Require(w, r, true, "Only the project's admins change its rates.")
+	if !ok {
+		return
+	}
+	if err := rateModel.Clear(projectID); err != nil {
+		fail(w, r, "ClearProjectRates", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": viewOf(nil)})
 }
 
 // safeFileName keeps a project's name usable in a download's file name.

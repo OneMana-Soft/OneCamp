@@ -5,6 +5,7 @@ package business
 
 import (
 	"encoding/csv"
+	"fmt"
 	"io"
 	"sort"
 	"strconv"
@@ -76,12 +77,24 @@ func ReportRange(fromStr, toStr string, now time.Time) (time.Time, time.Time, er
 	return from, to, nil
 }
 
-// Line is one person's or one task's share of a report.
+// Line is one person's or one task's share of a report. With rates, the
+// billable time's amount; for a person, the rate it was charged at; for a
+// task, its billable time at each rate, since people on different rates may
+// have worked on it (an invoice bills each at its own rate).
 type Line struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	Seconds         int64  `json:"seconds"`
-	BillableSeconds int64  `json:"billable_seconds"`
+	ID              string     `json:"id"`
+	Name            string     `json:"name"`
+	Seconds         int64      `json:"seconds"`
+	BillableSeconds int64      `json:"billable_seconds"`
+	AmountCents     *int64     `json:"amount_cents,omitempty"`
+	RateCents       *int64     `json:"rate_cents,omitempty"`
+	Rated           []RatePart `json:"rated,omitempty"`
+}
+
+// RatePart is a task's billable time at one rate.
+type RatePart struct {
+	RateCents       int64 `json:"rate_cents"`
+	BillableSeconds int64 `json:"billable_seconds"`
 }
 
 // Report is a project's time over a range.
@@ -96,7 +109,72 @@ type Report struct {
 	ByTask          []Line    `json:"by_task"`
 	// Truncated says the range held more entries than one report reads.
 	Truncated bool `json:"truncated"`
+	// With rates (for the project's admins), what the billable time comes to.
+	Currency    string `json:"currency,omitempty"`
+	AmountCents *int64 `json:"amount_cents,omitempty"`
 }
+
+// Rates is what a project's billable time is charged at, per hour, in the
+// currency's minor unit (cents, paise): a rate for anyone without their own.
+type Rates struct {
+	Currency string
+	Default  int64
+	People   map[uuid.UUID]int64
+}
+
+// For is a person's rate: their own, else the project's.
+func (r *Rates) For(user uuid.UUID) int64 {
+	if v, ok := r.People[user]; ok {
+		return v
+	}
+	return r.Default
+}
+
+// Most a rate can be: a million an hour, in minor units.
+const maxRateCents = 100_000_000
+
+// RatesInput is a project's rates as its admins write them.
+type RatesInput struct {
+	Currency         string `json:"currency"`
+	DefaultRateCents int64  `json:"default_rate_cents"`
+	People           []struct {
+		UserUUID  string `json:"user_uuid"`
+		RateCents int64  `json:"rate_cents"`
+	} `json:"people"`
+}
+
+// CheckRates is the rates as stored, or what to fix: a three-letter currency
+// code, and rates from nothing to a million an hour. Pure.
+func CheckRates(in RatesInput) (*Rates, error) {
+	cur := strings.ToUpper(strings.TrimSpace(in.Currency))
+	if len(cur) != 3 || strings.Trim(cur, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") != "" {
+		return nil, &InputError{"Choose the currency by its three-letter code, like USD, EUR or INR."}
+	}
+	ok := func(c int64) bool { return c >= 0 && c <= maxRateCents }
+	if !ok(in.DefaultRateCents) {
+		return nil, &InputError{"A rate is from 0 to 1,000,000 an hour."}
+	}
+	if len(in.People) > 500 {
+		return nil, &InputError{"Set rates for up to 500 people."}
+	}
+	out := &Rates{Currency: cur, Default: in.DefaultRateCents, People: map[uuid.UUID]int64{}}
+	for _, p := range in.People {
+		id, err := uuid.Parse(strings.TrimSpace(p.UserUUID))
+		if err != nil {
+			return nil, &InputError{"One of those people isn't someone OneCamp knows."}
+		}
+		if !ok(p.RateCents) {
+			return nil, &InputError{"A rate is from 0 to 1,000,000 an hour."}
+		}
+		out.People[id] = p.RateCents
+	}
+	return out, nil
+}
+
+// amount is what secs of billable work come to at rate per hour, to the
+// nearest minor unit. Each entry is rounded once, so a report's lines by
+// person and by task add up to the same total. Pure.
+func amount(secs, rate int64) int64 { return (secs*rate + 1800) / 3600 }
 
 // Names turns ids into what people read; a missing name has a fallback.
 type Names struct {
@@ -118,7 +196,7 @@ func (n Names) task(id uuid.UUID) string {
 	return "Deleted task"
 }
 
-func addTo(lines map[string]*Line, id, name string, secs int64, billable bool) {
+func addTo(lines map[string]*Line, id, name string, secs int64, billable bool, cents *int64) {
 	l := lines[id]
 	if l == nil {
 		l = &Line{ID: id, Name: name}
@@ -127,6 +205,12 @@ func addTo(lines map[string]*Line, id, name string, secs int64, billable bool) {
 	l.Seconds += secs
 	if billable {
 		l.BillableSeconds += secs
+	}
+	if cents != nil {
+		if l.AmountCents == nil {
+			l.AmountCents = new(int64)
+		}
+		*l.AmountCents += *cents
 	}
 }
 
@@ -145,13 +229,18 @@ func sorted(lines map[string]*Line) []Line {
 }
 
 // Summarise adds a project's entries up by person and by task, most time
-// first. Running timers count up to now.
-func Summarise(entries []timeModel.Entry, names Names, from, to, now time.Time) Report {
+// first. Running timers count up to now. With rates, it also says what the
+// billable time comes to, overall, per person (and at what rate) and per task.
+func Summarise(entries []timeModel.Entry, names Names, from, to, now time.Time, rates *Rates) Report {
 	r := Report{From: from, To: to, Entries: len(entries)}
+	if rates != nil {
+		r.Currency, r.AmountCents = rates.Currency, new(int64)
+	}
 	if len(entries) > timeModel.MaxReportRows {
 		entries, r.Truncated, r.Entries = entries[:timeModel.MaxReportRows], true, timeModel.MaxReportRows
 	}
 	people, tasks := map[string]*Line{}, map[string]*Line{}
+	parts := map[string]map[int64]int64{} // task -> rate -> billable seconds
 	for i := range entries {
 		e := &entries[i]
 		secs := e.Seconds(now)
@@ -162,10 +251,39 @@ func Summarise(entries []timeModel.Entry, names Names, from, to, now time.Time) 
 		if e.Billable {
 			r.BillableSeconds += secs
 		}
-		addTo(people, e.UserID.String(), names.person(e.UserID), secs, e.Billable)
-		addTo(tasks, e.TaskUUID.String(), names.task(e.TaskUUID), secs, e.Billable)
+		var cents *int64
+		if rates != nil {
+			c := int64(0)
+			if e.Billable {
+				rate := rates.For(e.UserID)
+				c = amount(secs, rate)
+				task := e.TaskUUID.String()
+				if parts[task] == nil {
+					parts[task] = map[int64]int64{}
+				}
+				parts[task][rate] += secs
+			}
+			cents = &c
+			*r.AmountCents += c
+		}
+		addTo(people, e.UserID.String(), names.person(e.UserID), secs, e.Billable, cents)
+		addTo(tasks, e.TaskUUID.String(), names.task(e.TaskUUID), secs, e.Billable, cents)
 	}
 	r.ByPerson, r.ByTask = sorted(people), sorted(tasks)
+	if rates != nil {
+		for i := range r.ByPerson {
+			if id, err := uuid.Parse(r.ByPerson[i].ID); err == nil {
+				rate := rates.For(id)
+				r.ByPerson[i].RateCents = &rate
+			}
+		}
+		for i := range r.ByTask {
+			for rate, secs := range parts[r.ByTask[i].ID] {
+				r.ByTask[i].Rated = append(r.ByTask[i].Rated, RatePart{RateCents: rate, BillableSeconds: secs})
+			}
+			sort.Slice(r.ByTask[i].Rated, func(a, b int) bool { return r.ByTask[i].Rated[a].RateCents > r.ByTask[i].Rated[b].RateCents })
+		}
+	}
 	return r
 }
 
@@ -183,10 +301,24 @@ func csvCell(s string) string {
 	return s
 }
 
+// Money is minor units as a decimal amount: 123456 is "1234.56". Pure.
+func Money(cents int64) string {
+	sign := ""
+	if cents < 0 {
+		sign, cents = "-", -cents
+	}
+	return fmt.Sprintf("%s%d.%02d", sign, cents/100, cents%100)
+}
+
 // WriteCSV writes one row per entry, oldest first, in the time zone given.
-func WriteCSV(w io.Writer, entries []timeModel.Entry, names Names, loc *time.Location, now time.Time) error {
+// With rates, each row also has the rate and what its billable time comes to.
+func WriteCSV(w io.Writer, entries []timeModel.Entry, names Names, loc *time.Location, now time.Time, rates *Rates) error {
 	cw := csv.NewWriter(w)
-	if err := cw.Write([]string{"Date", "Start", "End", "Person", "Task", "Hours", "Billable", "Note"}); err != nil {
+	head := []string{"Date", "Start", "End", "Person", "Task", "Hours", "Billable", "Note"}
+	if rates != nil {
+		head = append(head, "Rate ("+rates.Currency+")", "Amount ("+rates.Currency+")")
+	}
+	if err := cw.Write(head); err != nil {
 		return err
 	}
 	for i := range entries {
@@ -200,11 +332,19 @@ func WriteCSV(w io.Writer, entries []timeModel.Entry, names Names, loc *time.Loc
 			billable = "yes"
 		}
 		start := e.StartedAt.In(loc)
-		if err := cw.Write([]string{
+		row := []string{
 			start.Format("2006-01-02"), start.Format("15:04"), end,
 			csvCell(names.person(e.UserID)), csvCell(names.task(e.TaskUUID)),
 			Hours(e.Seconds(now)), billable, csvCell(e.Note),
-		}); err != nil {
+		}
+		if rates != nil {
+			rate, cents := rates.For(e.UserID), int64(0)
+			if e.Billable {
+				cents = amount(e.Seconds(now), rate)
+			}
+			row = append(row, Money(rate), Money(cents))
+		}
+		if err := cw.Write(row); err != nil {
 			return err
 		}
 	}
