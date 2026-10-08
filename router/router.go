@@ -1338,6 +1338,8 @@ func Routes() http.Handler {
 		// Who has how much each week, across the person's projects: business/Project/workload.go.
 		r.Get("/workload", projectController.Workload)
 		r.Post("/workload/capacity", projectController.SetWorkloadCapacity)
+		// How work is going across the person's projects: business/Project/report.go.
+		r.Get("/report", projectController.Report)
 		// Project templates: see business/ProjectTemplate.
 		r.Get("/templates", projectTemplateController.ListTemplates)
 		r.Post("/templates", projectTemplateController.ImportTemplate)
