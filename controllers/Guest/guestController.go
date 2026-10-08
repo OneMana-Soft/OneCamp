@@ -414,7 +414,8 @@ func GuestTable(w http.ResponseWriter, r *http.Request) {
 		notAvailable(w)
 		return
 	}
-	bundle, err := tableBusiness.GetGuestBundle(ctx, id)
+	// The guest's time zone, where a formula's TODAY() is.
+	bundle, err := tableBusiness.GetGuestBundle(tableBusiness.WithZone(ctx, r.URL.Query().Get("tz")), id)
 	if err != nil {
 		notAvailable(w)
 		return

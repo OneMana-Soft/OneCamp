@@ -880,6 +880,7 @@ func Routes() http.Handler {
 		r.Post("/{id}/fields/{fieldId}/update", dataTableController.UpdateField)
 		r.Post("/{id}/fields/{fieldId}/delete", dataTableController.DeleteField)
 		r.Post("/{id}/fields/{fieldId}/ai-fill", dataTableController.FillAIColumn)
+		r.Post("/{id}/formula/preview", dataTableController.PreviewFormula)
 		r.Post("/{id}/views", dataTableController.CreateView)
 		r.Post("/{id}/views/{viewId}/update", dataTableController.UpdateView)
 		r.Post("/{id}/views/{viewId}/delete", dataTableController.DeleteView)

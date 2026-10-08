@@ -5,7 +5,9 @@ package controllers
 // in the business layer). Row writes broadcast over MQTT for live collab.
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 
@@ -22,6 +24,12 @@ func actorFrom(r *http.Request) business.Actor {
 		UserID:  userInfo.UserPostgresInfo.Id,
 		IsAdmin: userInfo.UserPostgresInfo.IsAdmin,
 	}
+}
+
+// readerCtx is the request's context with the reader's time zone (?tz=, an
+// IANA name), where a formula's TODAY() is.
+func readerCtx(r *http.Request) context.Context {
+	return business.WithZone(r.Context(), r.URL.Query().Get("tz"))
 }
 
 func writeErr(w http.ResponseWriter, err error) {
@@ -42,7 +50,7 @@ func idParam(r *http.Request, name string) (uuid.UUID, bool) {
 
 // ListTables GET /tables
 func ListTables(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	items, err := business.ListTables(ctx, actorFrom(r))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/ListTables err: %+v", err)
@@ -54,7 +62,7 @@ func ListTables(w http.ResponseWriter, r *http.Request) {
 
 // GetTable GET /tables/{id} — returns the full bundle (table + fields + views + rows).
 func GetTable(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
 	if !ok {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
@@ -70,7 +78,7 @@ func GetTable(w http.ResponseWriter, r *http.Request) {
 
 // CreateTable POST /tables
 func CreateTable(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	var in business.TableInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
@@ -92,7 +100,7 @@ func GenerateTable(w http.ResponseWriter, r *http.Request) {
 
 // UpdateTable PUT /tables/{id}
 func UpdateTable(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
 	if !ok {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
@@ -113,7 +121,7 @@ func UpdateTable(w http.ResponseWriter, r *http.Request) {
 
 // DeleteTable DELETE /tables/{id}
 func DeleteTable(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
 	if !ok {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
@@ -128,7 +136,7 @@ func DeleteTable(w http.ResponseWriter, r *http.Request) {
 
 // ListRows GET /tables/{id}/rows?limit&offset
 func ListRows(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
 	if !ok {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
@@ -150,7 +158,7 @@ func ListRows(w http.ResponseWriter, r *http.Request) {
 // client that wants a totals/breakdown/trend without pulling every row. The
 // heavy lifting (validation, folding, bounding) is the shared, pure engine.
 func AggregateTable(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
 	if !ok {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
@@ -179,7 +187,7 @@ func AggregateTable(w http.ResponseWriter, r *http.Request) {
 // data question and get an identical-methodology answer, not a fresh guess. The
 // permission model is re-checked per call inside the business layer.
 func QueryPlan(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
 	if !ok {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
@@ -200,7 +208,7 @@ func QueryPlan(w http.ResponseWriter, r *http.Request) {
 
 // CreateRow POST /tables/{id}/rows
 func CreateRow(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
 	if !ok {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
@@ -221,7 +229,7 @@ func CreateRow(w http.ResponseWriter, r *http.Request) {
 
 // UpdateRow PUT /tables/{id}/rows/{rowId}
 func UpdateRow(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
 	rowId, ok2 := idParam(r, "rowId")
 	if !ok || !ok2 {
@@ -243,7 +251,7 @@ func UpdateRow(w http.ResponseWriter, r *http.Request) {
 
 // DeleteRow DELETE /tables/{id}/rows/{rowId}
 func DeleteRow(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
 	rowId, ok2 := idParam(r, "rowId")
 	if !ok || !ok2 {
@@ -266,7 +274,7 @@ func FillAIColumn(w http.ResponseWriter, r *http.Request) {
 
 // CreateField POST /tables/{id}/fields
 func CreateField(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
 	if !ok {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
@@ -287,7 +295,7 @@ func CreateField(w http.ResponseWriter, r *http.Request) {
 
 // UpdateField PUT /tables/{id}/fields/{fieldId}
 func UpdateField(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
 	fieldId, ok2 := idParam(r, "fieldId")
 	if !ok || !ok2 {
@@ -308,7 +316,7 @@ func UpdateField(w http.ResponseWriter, r *http.Request) {
 
 // DeleteField DELETE /tables/{id}/fields/{fieldId}
 func DeleteField(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
 	fieldId, ok2 := idParam(r, "fieldId")
 	if !ok || !ok2 {
@@ -324,7 +332,7 @@ func DeleteField(w http.ResponseWriter, r *http.Request) {
 
 // CreateView POST /tables/{id}/views
 func CreateView(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
 	if !ok {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
@@ -345,7 +353,7 @@ func CreateView(w http.ResponseWriter, r *http.Request) {
 
 // UpdateView PUT /tables/{id}/views/{viewId}
 func UpdateView(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
 	viewId, ok2 := idParam(r, "viewId")
 	if !ok || !ok2 {
@@ -366,7 +374,7 @@ func UpdateView(w http.ResponseWriter, r *http.Request) {
 
 // DeleteView DELETE /tables/{id}/views/{viewId}
 func DeleteView(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
 	viewId, ok2 := idParam(r, "viewId")
 	if !ok || !ok2 {
@@ -378,4 +386,40 @@ func DeleteView(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "deleted"})
+}
+
+// PreviewFormula POST /tables/{id}/formula/preview {formula, field_id} — a
+// formula being written, checked against the table's fields without saving
+// it: what it gives, its values in the first rows, or why it can't be read.
+// field_id is the formula field being edited; leave it out for a new one.
+func PreviewFormula(w http.ResponseWriter, r *http.Request) {
+	ctx := readerCtx(r)
+	id, ok := idParam(r, "id")
+	if !ok {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
+		return
+	}
+	var body struct {
+		Formula string `json:"formula"`
+		FieldID string `json:"field_id"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
+		return
+	}
+	fieldID := uuid.Nil
+	if body.FieldID != "" {
+		parsed, err := uuid.Parse(body.FieldID)
+		if err != nil {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid field id"})
+			return
+		}
+		fieldID = parsed
+	}
+	out, err := business.PreviewFormula(ctx, id, fieldID, body.Formula, actorFrom(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": out})
 }

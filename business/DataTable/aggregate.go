@@ -19,10 +19,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
 
+	"github.com/akashc777/OneCamp/business/DataTable/formula"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -99,7 +101,10 @@ type AggResult struct {
 	MatchedRows     int         `json:"matched_rows"`
 	ScannedRows     int         `json:"scanned_rows"`
 	DistinctGroups  int         `json:"distinct_groups"`
-	Truncated       bool        `json:"truncated"`
+	// Truncated is true when the answer leaves something out: groups past
+	// the limit, rows past the scan cap, or formula values that ran out of
+	// working out (formula.Unfinished).
+	Truncated bool `json:"truncated"`
 }
 
 // Caps keep a single aggregation bounded regardless of the spec.
@@ -144,7 +149,10 @@ func parseRowValues(raw string) map[string]interface{} {
 // cellLabels reduces a cell value to zero or more display labels. Scalars yield
 // one label; arrays (multi-select / person / relation) yield one per element so
 // grouping on them explodes correctly. Empty/nil yields none.
-func cellLabels(v interface{}) []string {
+func cellLabels(v interface{}) []string { return labelsWith(v, formatFloat) }
+
+// labelsWith is cellLabels with numbers written by format.
+func labelsWith(v interface{}, format func(float64) string) []string {
 	switch t := v.(type) {
 	case nil:
 		return nil
@@ -156,7 +164,7 @@ func cellLabels(v interface{}) []string {
 	case bool:
 		return []string{strconv.FormatBool(t)}
 	case float64:
-		return []string{formatFloat(t)}
+		return []string{format(t)}
 	case json.Number:
 		return []string{t.String()}
 	case []interface{}:
@@ -172,7 +180,7 @@ func cellLabels(v interface{}) []string {
 					out = append(out, lbl)
 				}
 			case float64:
-				out = append(out, formatFloat(el))
+				out = append(out, format(el))
 			case bool:
 				out = append(out, strconv.FormatBool(el))
 			}
@@ -199,6 +207,9 @@ func refLabel(m map[string]interface{}) string {
 	return ""
 }
 
+// maxNumberText is the longest text cellNumber reads as a number.
+const maxNumberText = 64
+
 // cellNumber attempts to read a numeric value from a cell (number column, or a
 // numeric string). Returns (value, true) only on success.
 func cellNumber(v interface{}) (float64, bool) {
@@ -215,6 +226,11 @@ func cellNumber(v interface{}) (float64, bool) {
 		}
 		return 0, true
 	case string:
+		// No number people write is longer, and a long cell is copied to
+		// find that out.
+		if len(t) > maxNumberText {
+			return 0, false
+		}
 		s := strings.TrimSpace(strings.ReplaceAll(t, ",", ""))
 		if s == "" {
 			return 0, false
@@ -226,7 +242,14 @@ func cellNumber(v interface{}) (float64, bool) {
 	return 0, false
 }
 
+// formatFloat writes a number for a label: in full, as people write numbers,
+// except from 1e21 up, which is 1e+21 as the web app shows it, and below
+// 1e-30. Written in full, one of those takes over 32 characters, and 1e308
+// takes 309: a list of them grouped 5,000 rows deep took a minute.
 func formatFloat(f float64) string {
+	if a := math.Abs(f); a >= 1e21 || (a != 0 && a < 1e-30) {
+		return strconv.FormatFloat(f, 'g', -1, 64)
+	}
 	return strconv.FormatFloat(f, 'f', -1, 64)
 }
 
@@ -389,9 +412,12 @@ func Aggregate(fields []*model.Field, rows []*model.Row, spec QuerySpec) (*AggRe
 	buckets := map[string]*accumulator{}
 	order := []string{} // first-seen order for stable tie-breaks
 	matched := 0
+	reads := formulaReads(fields, spec.Filters, groupField, valueField)
+	short := false
 
 	for _, r := range rows {
 		values := parseRowValues(r.Values)
+		short = short || readsUnfinished(values, reads)
 
 		// Row-level filters (AND).
 		skip := false
@@ -480,7 +506,7 @@ func Aggregate(fields []*model.Field, rows []*model.Row, spec QuerySpec) (*AggRe
 		MatchedRows:    matched,
 		ScannedRows:    len(rows),
 		DistinctGroups: distinct,
-		Truncated:      truncated,
+		Truncated:      truncated || short,
 	}
 	if groupField != nil {
 		res.GroupByLabel = groupField.Name
@@ -509,6 +535,35 @@ func sortBuckets(b []AggBucket, ascending bool, byLabel bool) {
 		}
 		return b[i].Label < b[j].Label
 	})
+}
+
+// formulaReads is the formula fields a query reads in each row (filters it,
+// groups by or adds up): the cells that can have run out of working out.
+func formulaReads(fields []*model.Field, filters []Filter, read ...*model.Field) []string {
+	var ids []string
+	add := func(fld *model.Field) {
+		if fld != nil && fld.Type == model.FieldFormula {
+			ids = append(ids, fld.Id.String())
+		}
+	}
+	for _, f := range filters {
+		add(resolveField(fields, f.Field))
+	}
+	for _, fld := range read {
+		add(fld)
+	}
+	return ids
+}
+
+// readsUnfinished is whether a row's cells at ids include a formula that ran
+// out of working out: an answer that reads it falls short.
+func readsUnfinished(values map[string]interface{}, ids []string) bool {
+	for _, id := range ids {
+		if formula.Unfinished(values[id]) {
+			return true
+		}
+	}
+	return false
 }
 
 // maxAggregateScanRows bounds how many rows a single aggregation loads, so a
@@ -551,8 +606,12 @@ func pushableLikeTerms(fields []*model.Field, filters []Filter) []string {
 		if v == "" || !isASCIIPrintable(v) {
 			continue
 		}
-		if resolveField(fields, f.Field) == nil {
+		rf := resolveField(fields, f.Field)
+		if rf == nil {
 			continue // unknown field is a no-op in matchFilter; must not narrow
+		}
+		if rf.Type == model.FieldFormula {
+			continue // worked out on read, so not in the stored values to match
 		}
 		terms = append(terms, v)
 	}
