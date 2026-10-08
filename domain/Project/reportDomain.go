@@ -31,9 +31,12 @@ type ReportProject struct {
 // they count: a bot or a deleted account doesn't.
 const reportPerson = `uid user_uuid user_name user_full_name user_profile_object_key user_deleted_at is_bot`
 
-// reportTask is what the report reads of a task. (With its uid: Dgraph leaves
-// out a node with nothing to show, which an unassigned one could be.)
-const reportTask = `uid task_status task_priority task_due_date task_created_at task_status_since task_assignee { ` + reportPerson + ` }`
+// reportTask is what the report reads of a task, its history included for the
+// flow of work (activity_type has no index to filter on, so the status
+// changes are picked out in Go). (With its uid: Dgraph leaves out a node with
+// nothing to show, which an unassigned one could be.)
+const reportTask = `uid task_status task_priority task_due_date task_created_at task_status_since task_assignee { ` + reportPerson + ` }
+	task_activities { activity_type activity_time activity_prev_state activity_next_state }`
 
 // GetDgraphReport reads, for every live project the person is in, its open
 // live tasks and the live tasks that closed since since.

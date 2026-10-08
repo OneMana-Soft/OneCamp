@@ -75,6 +75,9 @@ const (
 	// A task's value of a custom field changed; the project's open lists,
 	// boards and panels show it.
 	MESSAGE_TASK_FIELD
+	// Someone in a DM or group chat has seen it up to a time (MqttChatSeen),
+	// sent to each other person there who'd see the read receipt.
+	MESSAGE_CHAT_SEEN
 )
 
 const (
@@ -216,6 +219,14 @@ type MqttTaskDates struct {
 	StartDate   string `json:"task_start_date"`
 	DueDate     string `json:"task_due_date"`
 	By          string `json:"by"`
+}
+
+// MqttChatSeen is a read receipt: UserUuid has seen the conversation
+// ChatGrpId up to SeenAt.
+type MqttChatSeen struct {
+	ChatGrpId string    `json:"chat_grp_id"`
+	UserUuid  string    `json:"user_uuid"`
+	SeenAt    time.Time `json:"seen_at"`
 }
 
 // MqttTaskField is a task's value of one of its project's custom fields,

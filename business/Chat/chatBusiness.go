@@ -250,7 +250,9 @@ func CreateChatForGroup(ctx context.Context, chatInfo *adapter.ChatInfo, userInf
 	}
 
 	if len(dmUID) != 0 {
-		err = lastseenBusiness.BulkCreateOrUpdateLastSeenChat(ctx, chatInfo.GrpUuid, userUUIDs, currentTime)
+		// The others haven't seen the new conversation: their marks start at
+		// nothing (it counts as unread, and no read receipt says otherwise).
+		err = lastseenBusiness.BulkCreateLastSeenChatIfNotExists(ctx, userUUIDs, chatInfo.GrpUuid)
 
 		if err != nil {
 			helpers.LogErrorWithContext(ctx,
@@ -504,7 +506,8 @@ func CreateChat(ctx context.Context, chatInfo *adapter.ChatInfo, userInfo *userM
 	}
 
 	if len(dmUID) != 0 {
-		err = lastseenBusiness.CreateOrUpdateLastSeenChat(ctx, groupingId, toUUID, currentTime)
+		// The other person hasn't seen the new conversation: see CreateChatForGroup.
+		err = lastseenBusiness.BulkCreateLastSeenChatIfNotExists(ctx, []string{toUUID.String()}, groupingId)
 
 		if err != nil {
 			helpers.LogErrorWithContext(ctx,

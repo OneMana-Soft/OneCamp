@@ -30,14 +30,7 @@ func UpdateChatInOpenSearch(ctx context.Context, openSearchChat *openSearchStruc
 
 	docId := openSearchChat.Uuid
 
-	_, err = opensearchInit.OpenSearchClient.Update(
-		context.Background(),
-		opensearchapi.UpdateReq{
-			Index:      "chats",
-			DocumentID: docId,
-			Body:       document,
-		},
-	)
+	err = opensearchInit.UpdateDocument(context.Background(), "chats", docId, document)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

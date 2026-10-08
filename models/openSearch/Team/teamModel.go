@@ -63,14 +63,7 @@ func UpdateTeamInOpenSearch(ctx context.Context, openSearchTeam *openSearchStruc
 
 	docId := openSearchTeam.Uuid
 
-	_, err = opensearchInit.OpenSearchClient.Update(
-		context.Background(),
-		opensearchapi.UpdateReq{
-			Index:      openSearchStruct.TEAM_INDEX,
-			DocumentID: docId,
-			Body:       document,
-		},
-	)
+	err = opensearchInit.UpdateDocument(context.Background(), openSearchStruct.TEAM_INDEX, docId, document)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -95,14 +88,7 @@ func DeleteTeamInOpenSearch(ctx context.Context, teamUUID string, deletedAt int6
 
 	document := openSearchStruct.IndexReader(jsonData)
 
-	_, err = opensearchInit.OpenSearchClient.Update(
-		context.Background(),
-		opensearchapi.UpdateReq{
-			Index:      openSearchStruct.TEAM_INDEX,
-			DocumentID: teamUUID,
-			Body:       document,
-		},
-	)
+	err = opensearchInit.UpdateDocument(context.Background(), openSearchStruct.TEAM_INDEX, teamUUID, document)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/DeleteTeamInOpenSearch failed to update team document err: %+v", err)

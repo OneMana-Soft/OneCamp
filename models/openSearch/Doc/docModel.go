@@ -61,14 +61,7 @@ func UpdateDocInOpenSearch(ctx context.Context, openSearchDoc *openSearchStruct.
 
 	docId := openSearchDoc.Uuid
 
-	_, err = opensearchInit.OpenSearchClient.Update(
-		context.Background(),
-		opensearchapi.UpdateReq{
-			Index:      openSearchStruct.DOC_INDEX,
-			DocumentID: docId,
-			Body:       document,
-		},
-	)
+	err = opensearchInit.UpdateDocument(context.Background(), openSearchStruct.DOC_INDEX, docId, document)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -97,14 +90,7 @@ func DeleteDocInOpenSearch(ctx context.Context, docUUID string, deletedAt int64)
 
 	document := openSearchStruct.IndexReader(jsonData)
 
-	_, err = opensearchInit.OpenSearchClient.Update(
-		context.Background(),
-		opensearchapi.UpdateReq{
-			Index:      openSearchStruct.DOC_INDEX,
-			DocumentID: docUUID,
-			Body:       document,
-		},
-	)
+	err = opensearchInit.UpdateDocument(context.Background(), openSearchStruct.DOC_INDEX, docUUID, document)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

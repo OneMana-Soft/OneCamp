@@ -28,14 +28,7 @@ func UpdatePostInOpenSearch(ctx context.Context, openSearchPost *openSearchStruc
 
 	docId := openSearchPost.Uuid
 
-	_, err = opensearchInit.OpenSearchClient.Update(
-		context.Background(),
-		opensearchapi.UpdateReq{
-			Index:      "posts",
-			DocumentID: docId,
-			Body:       document,
-		},
-	)
+	err = opensearchInit.UpdateDocument(context.Background(), "posts", docId, document)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

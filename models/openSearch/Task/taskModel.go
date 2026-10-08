@@ -34,14 +34,7 @@ func UpdateTaskInOpenSearch(ctx context.Context, openSearchTask *openSearchStruc
 
 	docId := openSearchTask.Uuid
 
-	_, err = opensearchInit.OpenSearchClient.Update(
-		context.Background(),
-		opensearchapi.UpdateReq{
-			Index:      "tasks",
-			DocumentID: docId,
-			Body:       document,
-		},
-	)
+	err = opensearchInit.UpdateDocument(context.Background(), "tasks", docId, document)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

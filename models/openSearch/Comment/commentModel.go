@@ -62,14 +62,7 @@ func UpdateCommentInOpenSearch(ctx context.Context, openSearchComment *openSearc
 
 	docId := openSearchComment.Uuid
 
-	_, err = opensearchInit.OpenSearchClient.Update(
-		context.Background(),
-		opensearchapi.UpdateReq{
-			Index:      "comments",
-			DocumentID: docId,
-			Body:       document,
-		},
-	)
+	err = opensearchInit.UpdateDocument(context.Background(), "comments", docId, document)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

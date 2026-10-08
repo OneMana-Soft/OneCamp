@@ -24,14 +24,7 @@ func UpdateAttachmentInOpenSearch(ctx context.Context, openSearchAttachment *ope
 
 	docId := openSearchAttachment.Uuid
 
-	_, err = opensearchInit.OpenSearchClient.Update(
-		context.Background(),
-		opensearchapi.UpdateReq{
-			Index:      "attachments",
-			DocumentID: docId,
-			Body:       document,
-		},
-	)
+	err = opensearchInit.UpdateDocument(context.Background(), "attachments", docId, document)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

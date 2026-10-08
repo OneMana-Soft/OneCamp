@@ -62,14 +62,7 @@ func UpdateChannelInOpenSearch(ctx context.Context, openSearchChannel *openSearc
 
 	docId := openSearchChannel.Uuid
 
-	_, err = opensearchInit.OpenSearchClient.Update(
-		context.Background(),
-		opensearchapi.UpdateReq{
-			Index:      "channels",
-			DocumentID: docId,
-			Body:       document,
-		},
-	)
+	err = opensearchInit.UpdateDocument(context.Background(), "channels", docId, document)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

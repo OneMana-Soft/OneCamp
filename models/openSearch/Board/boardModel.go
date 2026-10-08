@@ -50,14 +50,7 @@ func UpdateBoardFieldsInOpenSearch(ctx context.Context, boardUUID string, fields
 		return
 	}
 
-	_, err = opensearchInit.OpenSearchClient.Update(
-		context.Background(),
-		opensearchapi.UpdateReq{
-			Index:      openSearchStruct.BOARD_INDEX,
-			DocumentID: boardUUID,
-			Body:       openSearchStruct.IndexReader(jsonData),
-		},
-	)
+	err = opensearchInit.UpdateDocument(context.Background(), openSearchStruct.BOARD_INDEX, boardUUID, openSearchStruct.IndexReader(jsonData))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/UpdateBoardFieldsInOpenSearch update err: %+v", err)
 		return
@@ -75,14 +68,7 @@ func DeleteBoardInOpenSearch(ctx context.Context, boardUUID string, deletedAt in
 		return
 	}
 
-	_, err = opensearchInit.OpenSearchClient.Update(
-		context.Background(),
-		opensearchapi.UpdateReq{
-			Index:      openSearchStruct.BOARD_INDEX,
-			DocumentID: boardUUID,
-			Body:       openSearchStruct.IndexReader(jsonData),
-		},
-	)
+	err = opensearchInit.UpdateDocument(context.Background(), openSearchStruct.BOARD_INDEX, boardUUID, openSearchStruct.IndexReader(jsonData))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/DeleteBoardInOpenSearch update err: %+v", err)
 		return
