@@ -38,6 +38,10 @@ const (
 	// projects). The field config carries {"relation_target": "<type>"} and the
 	// cell value is an array of {id,label,type} refs (req 4.2).
 	FieldRelation = "relation"
+	// FieldFormula is worked out from the row's other fields on each read
+	// (business/DataTable/formula). Its config carries {"formula": "..."}, with
+	// fields named by id; its cells are never stored.
+	FieldFormula = "formula"
 )
 
 // View type constants.
@@ -53,7 +57,7 @@ func ValidVisibility(v string) bool { return v == VisibilityPrivate || v == Visi
 func ValidFieldType(t string) bool {
 	switch t {
 	case FieldText, FieldNumber, FieldSelect, FieldMultiSelect, FieldDate,
-		FieldCheckbox, FieldPerson, FieldURL, FieldEmail, FieldRelation:
+		FieldCheckbox, FieldPerson, FieldURL, FieldEmail, FieldRelation, FieldFormula:
 		return true
 	default:
 		return false

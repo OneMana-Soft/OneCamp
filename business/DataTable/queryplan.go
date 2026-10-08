@@ -87,7 +87,8 @@ type PlanResult struct {
 	MatchedRows    int          `json:"matched_rows"`
 	ScannedRows    int          `json:"scanned_rows"`
 	DistinctGroups int          `json:"distinct_groups"`
-	Truncated      bool         `json:"truncated"`
+	// Truncated: the answer leaves something out (as AggResult.Truncated).
+	Truncated bool `json:"truncated"`
 }
 
 // maxPlanMetrics bounds a single plan so it can't fan out into an unbounded
@@ -172,9 +173,12 @@ func RunPlan(fields []*model.Field, rows []*model.Row, plan QueryPlan) (*PlanRes
 	buckets := map[string]*bucketAgg{}
 	order := []string{}
 	matched := 0
+	reads := formulaReads(fields, plan.Filters, append([]*model.Field{groupField}, valueFields...)...)
+	short := false
 
 	for _, r := range rows {
 		values := parseRowValues(r.Values)
+		short = short || readsUnfinished(values, reads)
 
 		skip := false
 		for _, f := range plan.Filters {
@@ -279,7 +283,7 @@ func RunPlan(fields []*model.Field, rows []*model.Row, plan QueryPlan) (*PlanRes
 		MatchedRows:    matched,
 		ScannedRows:    len(rows),
 		DistinctGroups: distinct,
-		Truncated:      truncated,
+		Truncated:      truncated || short,
 	}
 	if groupField != nil {
 		res.GroupByLabel = groupField.Name

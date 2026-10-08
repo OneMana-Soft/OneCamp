@@ -142,20 +142,66 @@ func CreateTableFromTemplate(ctx context.Context, in TableInput, fields []FieldI
 		return nil, err
 	}
 	addedField := false
+	add := func(fi FieldInput) *model.Field {
+		f, ferr := buildField(id, fi)
+		if ferr != nil {
+			helpers.LogErrorWithContext(ctx, "CreateTableFromTemplate field err: %v", ferr)
+			return nil
+		}
+		fid, cerr := model.CreateField(ctx, f)
+		if cerr != nil {
+			helpers.LogErrorWithContext(ctx, "CreateTableFromTemplate create field err: %v", cerr)
+			return nil
+		}
+		f.Id = fid
+		addedField = true
+		return f
+	}
+	// Formulas come last, so the fields they read exist, and they're stored
+	// with those fields by id, as a formula added by hand is.
+	var formulas []FieldInput
 	for _, fi := range fields {
 		if strings.TrimSpace(fi.Name) == "" {
 			continue
 		}
-		f, ferr := buildField(id, fi)
-		if ferr != nil {
-			helpers.LogErrorWithContext(ctx, "CreateTableFromTemplate field err: %v", ferr)
+		if strings.TrimSpace(fi.Type) == model.FieldFormula {
+			formulas = append(formulas, fi)
 			continue
 		}
-		if _, cerr := model.CreateField(ctx, f); cerr != nil {
-			helpers.LogErrorWithContext(ctx, "CreateTableFromTemplate create field err: %v", cerr)
-			continue
+		add(fi)
+	}
+	// Each formula after the formulas it reads, checked against the fields
+	// made so far: loaded once, and added to as each is made.
+	if len(formulas) > 0 {
+		made, err := model.ListFields(ctx, id)
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "CreateTableFromTemplate load fields err: %v", err)
+			formulas = nil
 		}
-		addedField = true
+		try := func(fi FieldInput) error {
+			cfg, err := formulaConfigWith(made, uuid.Nil, fi.Config)
+			if err != nil {
+				return err
+			}
+			fi.Config = cfg
+			if f := add(fi); f != nil {
+				made = append(made, f)
+			}
+			return nil
+		}
+		// One more pass for those that failed: of two formulas with one
+		// name, one can read a field made after it.
+		var failed []FieldInput
+		for _, fi := range formulasInOrder(formulas) {
+			if try(fi) != nil {
+				failed = append(failed, fi)
+			}
+		}
+		for _, fi := range failed {
+			if err := try(fi); err != nil {
+				helpers.LogErrorWithContext(ctx, "CreateTableFromTemplate formula %q err: %v", fi.Name, err)
+			}
+		}
 	}
 	addedView := false
 	for _, vi := range views {
@@ -350,6 +396,17 @@ func GetBundle(ctx context.Context, id uuid.UUID, actor Actor) (*TableBundle, er
 		return nil, err
 	}
 
+	return loadBundle(ctx, t, canManage(t, actor), helpers.GetMqttTopicForTable(t.Id.String()))
+}
+
+// bundleRowPage is how many rows a bundle carries; more are paged with the
+// rows endpoint.
+const bundleRowPage = 500
+
+// loadBundle reads a table's fields, views and first page of rows, with its
+// formulas worked out: the one loader behind the member's and the guest's
+// bundle.
+func loadBundle(ctx context.Context, t *model.DataTable, manage bool, topic string) (*TableBundle, error) {
 	// Fields, views, and rows are mutually independent (each only scopes by
 	// table_id) and back the single most-hit table read (the app's table view,
 	// GET /v1/tables/{id}, and the AI read_table tool). Fetch them concurrently
@@ -366,11 +423,10 @@ func GetBundle(ctx context.Context, id uuid.UUID, actor Actor) (*TableBundle, er
 	)
 	// Fetch one more than the page size so we can tell the FE/AI whether the
 	// table has more rows than this bundle carries, without a separate COUNT.
-	const bundleRowPage = 500
 	wg.Add(3)
-	go func() { defer wg.Done(); fields, fErr = model.ListFields(ctx, id) }()
-	go func() { defer wg.Done(); views, vErr = model.ListViews(ctx, id) }()
-	go func() { defer wg.Done(); rows, rErr = model.ListRows(ctx, id, bundleRowPage+1, 0) }()
+	go func() { defer wg.Done(); fields, fErr = model.ListFields(ctx, t.Id) }()
+	go func() { defer wg.Done(); views, vErr = model.ListViews(ctx, t.Id) }()
+	go func() { defer wg.Done(); rows, rErr = model.ListRows(ctx, t.Id, bundleRowPage+1, 0) }()
 	wg.Wait()
 
 	if fErr != nil {
@@ -387,7 +443,8 @@ func GetBundle(ctx context.Context, id uuid.UUID, actor Actor) (*TableBundle, er
 		rows = rows[:bundleRowPage]
 		truncated = true
 	}
-	return &TableBundle{Table: t, Fields: fields, Views: views, Rows: rows, CanManage: canManage(t, actor), MqttTopic: helpers.GetMqttTopicForTable(t.Id.String()), RowsTruncated: truncated}, nil
+	presentFormulaFields(fields, withFormulas(ctx, fields, rows))
+	return &TableBundle{Table: t, Fields: fields, Views: views, Rows: rows, CanManage: manage, MqttTopic: topic, RowsTruncated: truncated}, nil
 }
 
 // GetGuestBundle returns the open-payload for a table for an EXTERNAL guest,
@@ -405,37 +462,7 @@ func GetGuestBundle(ctx context.Context, id uuid.UUID) (*TableBundle, error) {
 		return nil, fmt.Errorf("table not found")
 	}
 
-	var (
-		fields []*model.Field
-		views  []*model.View
-		rows   []*model.Row
-		fErr   error
-		vErr   error
-		rErr   error
-		wg     sync.WaitGroup
-	)
-	const bundleRowPage = 500
-	wg.Add(3)
-	go func() { defer wg.Done(); fields, fErr = model.ListFields(ctx, id) }()
-	go func() { defer wg.Done(); views, vErr = model.ListViews(ctx, id) }()
-	go func() { defer wg.Done(); rows, rErr = model.ListRows(ctx, id, bundleRowPage+1, 0) }()
-	wg.Wait()
-
-	if fErr != nil {
-		return nil, fmt.Errorf("failed to load fields")
-	}
-	if vErr != nil {
-		return nil, fmt.Errorf("failed to load views")
-	}
-	if rErr != nil {
-		return nil, fmt.Errorf("failed to load rows")
-	}
-	truncated := false
-	if len(rows) > bundleRowPage {
-		rows = rows[:bundleRowPage]
-		truncated = true
-	}
-	return &TableBundle{Table: t, Fields: fields, Views: views, Rows: rows, CanManage: false, MqttTopic: "", RowsTruncated: truncated}, nil
+	return loadBundle(ctx, t, false, "")
 }
 
 // ───────────────────────── fields ─────────────────────────
@@ -444,6 +471,13 @@ func GetGuestBundle(ctx context.Context, id uuid.UUID) (*TableBundle, error) {
 func CreateField(ctx context.Context, tableId uuid.UUID, in FieldInput, actor Actor) (*model.Field, error) {
 	if _, err := loadManageable(ctx, tableId, actor); err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(in.Type) == model.FieldFormula {
+		cfg, err := formulaConfig(ctx, tableId, uuid.Nil, in.Config)
+		if err != nil {
+			return nil, err
+		}
+		in.Config = cfg
 	}
 	f, err := buildField(tableId, in)
 	if err != nil {
@@ -461,6 +495,13 @@ func CreateField(ctx context.Context, tableId uuid.UUID, in FieldInput, actor Ac
 func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, in FieldInput, actor Actor) error {
 	if _, err := loadManageable(ctx, tableId, actor); err != nil {
 		return err
+	}
+	if strings.TrimSpace(in.Type) == model.FieldFormula {
+		cfg, err := formulaConfig(ctx, tableId, fieldId, in.Config)
+		if err != nil {
+			return err
+		}
+		in.Config = cfg
 	}
 	f, err := buildField(tableId, in)
 	if err != nil {
@@ -511,7 +552,8 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 	if err != nil {
 		return nil, err
 	}
-	valuesJSON, verr := validateValues(in.Values)
+	values, fields := withoutFormulaValues(ctx, tableId, in.Values)
+	valuesJSON, verr := validateValues(values)
 	if verr != nil {
 		return nil, verr
 	}
@@ -520,6 +562,7 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 	if cerr != nil {
 		return nil, fmt.Errorf("failed to create row")
 	}
+	withFormulas(ctx, fields, []*model.Row{created})
 	broadcastRow(t.Id.String(), "created", created)
 	// Continuous AI autofill: recompute any auto AI columns for the new row,
 	// as the creator, off the request path. Loop-safe (writes via the model
@@ -542,7 +585,8 @@ func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor
 	if err != nil {
 		return nil, err
 	}
-	valuesJSON, verr := validateValues(in.Values)
+	values, fields := withoutFormulaValues(ctx, tableId, in.Values)
+	valuesJSON, verr := validateValues(values)
 	if verr != nil {
 		return nil, verr
 	}
@@ -550,6 +594,7 @@ func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor
 	if uerr != nil {
 		return nil, fmt.Errorf("failed to update row")
 	}
+	withFormulas(ctx, fields, []*model.Row{r})
 	broadcastRow(t.Id.String(), "updated", r)
 	// Continuous AI autofill: recompute any auto AI columns so derived cells
 	// track the row's latest inputs. Loop-safe (model-layer write, no event).
@@ -580,7 +625,11 @@ func ListRows(ctx context.Context, tableId uuid.UUID, actor Actor, limit, offset
 	if _, err := loadViewable(ctx, tableId, actor); err != nil {
 		return nil, err
 	}
-	return model.ListRows(ctx, tableId, limit, offset)
+	rows, err := model.ListRows(ctx, tableId, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	return readWithFormulas(ctx, tableId, rows), nil
 }
 
 // ListRowsFiltered returns a page of rows for a table the actor may view whose
@@ -593,7 +642,11 @@ func ListRowsFiltered(ctx context.Context, tableId uuid.UUID, actor Actor, likeS
 	if _, err := loadViewable(ctx, tableId, actor); err != nil {
 		return nil, err
 	}
-	return model.ListRowsFiltered(ctx, tableId, likeSubstrings, limit, offset)
+	rows, err := model.ListRowsFiltered(ctx, tableId, likeSubstrings, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	return readWithFormulas(ctx, tableId, rows), nil
 }
 
 // validateValues ensures the row values are a JSON object within the size cap

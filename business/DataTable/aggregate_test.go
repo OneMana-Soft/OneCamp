@@ -1,6 +1,7 @@
 package business
 
 import (
+	"strings"
 	"testing"
 
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
@@ -279,5 +280,21 @@ func TestAggregate_LimitAndSort(t *testing.T) {
 	}
 	if res.DistinctGroups != 3 {
 		t.Errorf("distinct = %d, want 3", res.DistinctGroups)
+	}
+}
+
+// A number's label is as people write it, short of a huge or a tiny one,
+// which is in exponent form instead of hundreds of digits.
+func TestNumberLabels(t *testing.T) {
+	for f, want := range map[float64]string{
+		1500000: "1500000", -2.5: "-2.5", 0.0000001: "0.0000001", 1e20: "100000000000000000000",
+		1e21: "1e+21", 1e308: "1e+308", -1e300: "-1e+300", 1e-300: "1e-300", 0: "0",
+	} {
+		if got := formatFloat(f); got != want {
+			t.Errorf("formatFloat(%g) = %q, want %q", f, got, want)
+		}
+	}
+	if got := cellLabels([]interface{}{1e308, "Live", 2.0}); strings.Join(got, ",") != "1e+308,Live,2" {
+		t.Errorf("a list's labels: %q", got)
 	}
 }
