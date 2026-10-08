@@ -650,18 +650,9 @@ func DeleteEmbedding(ctx context.Context, contentType string, contentUUID string
 // reindex buffer (used by the live path and the buffered-write replay).
 func deleteEmbeddingDirect(ctx context.Context, contentType string, contentUUID string) error {
 	docID := fmt.Sprintf("%s:%s", contentType, contentUUID)
-	_, err := opensearchInit.OpenSearchClient.Document.Delete(
-		ctx,
-		opensearchapi.DocumentDeleteReq{
-			Index:      AI_EMBEDDINGS_INDEX,
-			DocumentID: docID,
-		},
-	)
-
-	if err != nil {
+	if err := opensearchInit.DeleteDocument(ctx, AI_EMBEDDINGS_INDEX, docID); err != nil {
 		return fmt.Errorf("failed to delete embedding: %w", err)
 	}
-
 	return nil
 }
 

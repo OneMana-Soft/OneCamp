@@ -3,7 +3,6 @@ package models
 import (
 	"context"
 	"encoding/json"
-	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
@@ -48,11 +47,7 @@ func UpdateAttachmentInOpenSearch(ctx context.Context, openSearchAttachment *ope
 // for a purge, when the file itself is gone and there is nothing to hide.
 // A document that is already absent is not an error.
 func DeleteAttachmentInOpenSearch(ctx context.Context, attachmentUUID string) error {
-	_, err := opensearchInit.OpenSearchClient.Document.Delete(ctx, opensearchapi.DocumentDeleteReq{
-		Index:      openSearchStruct.ATTACHMENT_INDEX,
-		DocumentID: attachmentUUID,
-	})
-	if err != nil && !strings.Contains(err.Error(), "not_found") && !strings.Contains(err.Error(), "404") {
+	if err := opensearchInit.DeleteDocument(ctx, openSearchStruct.ATTACHMENT_INDEX, attachmentUUID); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/DeleteAttachmentInOpenSearch %s: %v", attachmentUUID, err)
 		return err
 	}

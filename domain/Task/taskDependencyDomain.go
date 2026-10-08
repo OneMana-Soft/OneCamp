@@ -26,6 +26,10 @@ type DependencyPair struct {
 	Blocker  *dgraphStruct.DgraphTask
 	Linked   bool
 	Upstream map[string]bool
+	// How the task already waits on the blocker, when Linked: the edge's
+	// facets (no kind is finish to start).
+	Kind string
+	Lag  int
 }
 
 type upstreamNode struct {
@@ -43,14 +47,15 @@ func (n upstreamNode) collect(into map[string]bool) {
 }
 
 // ChangeTaskDependency adds "task waits on blocker" (the task_blocked_by
-// edge), or with remove takes it away, once check has passed the pair as it
-// stands in the same transaction. Every change also stamps the project
+// edge, with kind and lag as its facets), changes how it waits when it's
+// there already, or with remove takes it away, once check has passed the pair
+// as it stands in the same transaction. Every change also stamps the project
 // (project_dependencies_at), so two changes in one project at once conflict:
 // Dgraph aborts one, and it runs again and sees the other. Two links made at
 // the same moment can't close a loop together. It reports whether anything
 // changed: adding a link that's there, or taking off one that isn't, writes
-// nothing.
-func ChangeTaskDependency(ctx context.Context, taskUUID, blockerUUID, userDgraphUID string, remove bool, check func(*DependencyPair) error) (bool, error) {
+// nothing, and so does adding one the way it already is.
+func ChangeTaskDependency(ctx context.Context, taskUUID, blockerUUID, userDgraphUID string, remove bool, kind string, lag int, check func(*DependencyPair) error) (bool, error) {
 	changed := false
 	err := dgraphInit.InTxn(ctx, func(txn *dgo.Txn) error {
 		changed = false
@@ -61,10 +66,19 @@ func ChangeTaskDependency(ctx context.Context, taskUUID, blockerUUID, userDgraph
 		if err := check(pair); err != nil {
 			return err
 		}
-		if pair.Linked != remove {
+		same := pair.Linked && sameKind(pair.Kind, kind) && pair.Lag == lag
+		if (remove && !pair.Linked) || (!remove && same) {
 			return nil
 		}
-		edge, err := json.Marshal(map[string]any{"uid": pair.Task.Uid, "task_blocked_by": []map[string]string{{"uid": pair.Blocker.Uid}}})
+		link := map[string]any{"uid": pair.Blocker.Uid}
+		if !remove {
+			// Setting the edge again replaces its facets.
+			link["task_blocked_by|kind"] = kind
+			if lag != 0 {
+				link["task_blocked_by|lag"] = lag
+			}
+		}
+		edge, err := json.Marshal(map[string]any{"uid": pair.Task.Uid, "task_blocked_by": []map[string]any{link}})
 		if err != nil {
 			return err
 		}
@@ -86,6 +100,17 @@ func ChangeTaskDependency(ctx context.Context, taskUUID, blockerUUID, userDgraph
 	return changed, err
 }
 
+// sameKind compares kinds, an edge with none being finish to start.
+func sameKind(a, b string) bool {
+	norm := func(k string) string {
+		if k == "" {
+			return "fs"
+		}
+		return k
+	}
+	return norm(a) == norm(b)
+}
+
 // readDependencyPair reads a DependencyPair in txn; upstream only when adding.
 func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID, userDgraphUID string, upstream bool) (*DependencyPair, error) {
 	const fields = `uid task_uuid task_name task_deleted_at task_parent_task { task_uuid }`
@@ -99,7 +124,7 @@ func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID
 		t(func: eq(task_uuid, $t)) {
 			` + fields + `
 			task_project { uid project_uuid project_is_admin: count(project_admins @filter(uid($u))) }
-			linked: count(task_blocked_by @filter(eq(task_uuid, $b)))
+			link: task_blocked_by @facets(kind, lag) @filter(eq(task_uuid, $b)) { task_uuid }
 		}
 		b(func: eq(task_uuid, $b)) {
 			` + fields + `
@@ -115,7 +140,11 @@ func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID
 	var out struct {
 		T []struct {
 			dgraphStruct.DgraphTask
-			Linked int `json:"linked"`
+			// Facets of an aliased edge go by the alias.
+			Link []struct {
+				Kind string `json:"link|kind"`
+				Lag  int    `json:"link|lag"`
+			} `json:"link"`
 		} `json:"t"`
 		B  []*dgraphStruct.DgraphTask `json:"b"`
 		Up []upstreamNode             `json:"up"`
@@ -126,7 +155,9 @@ func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID
 	pair := &DependencyPair{Upstream: map[string]bool{}}
 	if len(out.T) > 0 {
 		pair.Task = &out.T[0].DgraphTask
-		pair.Linked = out.T[0].Linked > 0
+		if link := out.T[0].Link; len(link) > 0 {
+			pair.Linked, pair.Kind, pair.Lag = true, link[0].Kind, link[0].Lag
+		}
 	}
 	if len(out.B) > 0 {
 		pair.Blocker = out.B[0]
@@ -148,7 +179,7 @@ func DownstreamSchedule(ctx context.Context, movedUUID string) ([]*dgraphStruct.
 		moved(func: eq(task_uuid, $m)) { ` + fields + ` }
 		down(func: uid(d)) @filter(` + dgraphStruct.TASK_LIVE_FILTER + ` AND NOT has(task_parent_task)) {
 			` + fields + `
-			task_blocked_by @filter(` + dgraphStruct.TASK_LIVE_FILTER + `) { task_uuid }
+			task_blocked_by @facets(kind, lag) @filter(` + dgraphStruct.TASK_LIVE_FILTER + `) { task_uuid }
 		}
 	}`
 	resp, err := dgraphInit.DgraphClient.NewReadOnlyTxn().QueryWithVars(ctx, query, map[string]string{"$m": movedUUID})

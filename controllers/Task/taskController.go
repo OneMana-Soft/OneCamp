@@ -2889,10 +2889,14 @@ func UpdateTaskDates(w http.ResponseWriter, r *http.Request) {
 type dependencyInput struct {
 	Uuid      string `json:"task_uuid"`
 	BlockedBy string `json:"blocked_by_uuid"`
+	// How it waits: fs (the default), ss, ff or sf, and days after (negative: ahead).
+	Kind string `json:"kind"`
+	Lag  int    `json:"lag"`
 }
 
 // AddTaskDependency handles POST /task/dependency {task_uuid,
-// blocked_by_uuid}: the task waits on the other (finish to start). Both
+// blocked_by_uuid, kind, lag}: the task waits on the other, finish to start
+// unless kind says otherwise, and changes how when it does already. Both
 // must be top-level tasks of one project, the person one of its admins, and
 // it mustn't close a loop.
 func AddTaskDependency(w http.ResponseWriter, r *http.Request) {
@@ -2925,11 +2929,13 @@ func dependencyChange(w http.ResponseWriter, r *http.Request, remove bool) {
 	if remove {
 		err = business.RemoveTaskDependency(ctx, in.Uuid, in.BlockedBy, &userInfo.UserDgraphInfo)
 	} else {
-		err = business.AddTaskDependency(ctx, in.Uuid, in.BlockedBy, &userInfo.UserDgraphInfo)
+		err = business.AddTaskDependency(ctx, in.Uuid, in.BlockedBy, in.Kind, in.Lag, &userInfo.UserDgraphInfo)
 	}
 	switch {
 	case err == nil:
 		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Saved."})
+	case errors.Is(err, business.ErrDependencyKind):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Choose how the task waits (finish to start, start to start, finish to finish or start to finish), with a lag of up to 365 days."})
 	case errors.Is(err, business.ErrDependencySelf):
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "A task can't wait on itself."})
 	case errors.Is(err, business.ErrDependencyProject):

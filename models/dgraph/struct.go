@@ -413,6 +413,15 @@ type DgraphTask struct {
 	// edge, the tasks waiting on it; see business/Task/taskDependency.go.
 	BlockedBy []*DgraphTask `json:"task_blocked_by,omitempty"`
 	Blocks    []*DgraphTask `json:"task_blocks,omitempty"`
+	// On a task inside another's BlockedBy: how that dependency works, from
+	// the edge's facets. No kind is finish to start; DependencyLag is days
+	// after (negative: ahead).
+	DependencyKind string `json:"task_blocked_by|kind,omitempty"`
+	DependencyLag  int    `json:"task_blocked_by|lag,omitempty"`
+	// The same, on a task inside another's Blocks: Dgraph names a facet read
+	// through an alias after the alias.
+	BlocksKind string `json:"task_blocks|kind,omitempty"`
+	BlocksLag  int    `json:"task_blocks|lag,omitempty"`
 	// How many of the tasks it waits on are still open (TASK_BLOCKED_OPEN).
 	BlockedOpen uint32 `json:"task_blocked_open,omitempty"`
 	// EstimateMinutes is how long the task should take; 0 or unset is none.
@@ -586,7 +595,11 @@ const TASK_LIVE_FILTER = `not gt(task_deleted_at, "1970-01-01T00:00:00Z")`
 
 // TASK_BLOCKED_OPEN counts the live, open tasks a task waits on: its
 // "blocked" badge on a board, a list and the timeline.
-const TASK_BLOCKED_OPEN = `task_blocked_open: count(task_blocked_by @filter(` + TASK_LIVE_FILTER + ` AND ` + TASK_OPEN_FILTER + `))`
+// Only finish to start counts, as a dependency with no kind is: the task
+// can't start while the other is open. The other kinds hang on the other
+// starting, which an open task may well have, or on finishing. (A NOT facet
+// filter keeps the edges without the facet.)
+const TASK_BLOCKED_OPEN = `task_blocked_open: count(task_blocked_by @facets(NOT eq(kind, "ss") AND NOT eq(kind, "ff") AND NOT eq(kind, "sf")) @filter(` + TASK_LIVE_FILTER + ` AND ` + TASK_OPEN_FILTER + `))`
 
 const TASK_PRIORITY_HIGH = "high"
 const TASK_PRIORITY_MEDIUM = "medium"

@@ -98,39 +98,95 @@ func TestTaskDependencies(t *testing.T) {
 		return blockedBy, out.T[0].Start, out.T[0].Due, out.T[0].N
 	}
 
-	if err := AddTaskDependency(ctx, id["b"], id["a"], admin); err != nil {
+	// how reads the facets of key's link to on: its kind ("" when it has
+	// none) and lag, and whether it's there.
+	how := func(key, on string) (kind string, lag int, there bool) {
+		t.Helper()
+		resp, err := dgraphInit.DgraphClient.NewReadOnlyTxn().QueryWithVars(ctx,
+			`query q($id: string, $on: string) { t(func: eq(task_uuid, $id)) { task_blocked_by @facets(kind, lag) @filter(eq(task_uuid, $on)) { task_uuid } } }`,
+			map[string]string{"$id": id[key], "$on": id[on]})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out struct {
+			T []struct {
+				By []dgraphStruct.DgraphTask `json:"task_blocked_by"`
+			}
+		}
+		if err := json.Unmarshal(resp.Json, &out); err != nil {
+			t.Fatal(err)
+		}
+		if len(out.T) != 1 || len(out.T[0].By) != 1 {
+			return "", 0, false
+		}
+		return out.T[0].By[0].DependencyKind, out.T[0].By[0].DependencyLag, true
+	}
+
+	if err := AddTaskDependency(ctx, id["b"], id["a"], "", 0, admin); err != nil {
 		t.Fatal(err)
 	}
 	if by, _, _, lines := read("b"); len(by) != 1 || by[0] != id["a"] || lines != 1 {
 		t.Fatalf("Build waits on Design, with a line in its history: %v %d", by, lines)
 	}
-	if err := AddTaskDependency(ctx, id["b"], id["a"], admin); err != nil {
+	if kind, lag, _ := how("b", "a"); kind != FinishToStart || lag != 0 {
+		t.Fatalf("no kind is finish to start, with no lag: %q %d", kind, lag)
+	}
+	if err := AddTaskDependency(ctx, id["b"], id["a"], FinishToStart, 0, admin); err != nil {
 		t.Fatal(err)
 	}
 	if by, _, _, lines := read("b"); len(by) != 1 || lines != 1 {
 		t.Fatalf("adding it again changes nothing, nor writes another line: %v %d", by, lines)
 	}
+	// Changing how it waits keeps one link, and the history its one line.
+	if err := AddTaskDependency(ctx, id["b"], id["a"], StartToStart, -2, admin); err != nil {
+		t.Fatal(err)
+	}
+	if kind, lag, _ := how("b", "a"); kind != StartToStart || lag != -2 {
+		t.Fatalf("Build now starts two days before Design does, at the earliest: %q %d", kind, lag)
+	}
+	if by, _, _, lines := read("b"); len(by) != 1 || lines != 1 {
+		t.Fatalf("a change of kind is no new dependency: %v %d", by, lines)
+	}
+	if err := AddTaskDependency(ctx, id["b"], id["a"], FinishToStart, 0, admin); err != nil {
+		t.Fatal(err)
+	}
+	if kind, lag, _ := how("b", "a"); kind != FinishToStart || lag != 0 {
+		t.Fatalf("back to finish to start, and the lag goes with the old kind: %q %d", kind, lag)
+	}
 	for _, c := range []struct {
 		task, on string
+		kind     string
+		lag      int
 		user     *dgraphStruct.DgraphUser
 		want     error
 	}{
-		{"b", "b", admin, ErrDependencySelf},
-		{"a", "b", admin, ErrDependencyLoop},
-		{"b", "x", admin, ErrDependencyProject},
-		{"s", "a", admin, ErrDependencySubtask},
-		{"c", "a", member, ErrNotProjectAdmin},
-		{"c", "gone", admin, ErrDependencyMissing},
+		{"b", "b", "", 0, admin, ErrDependencySelf},
+		{"a", "b", "", 0, admin, ErrDependencyLoop},
+		{"a", "b", FinishToFinish, 3, admin, ErrDependencyLoop},
+		{"b", "x", "", 0, admin, ErrDependencyProject},
+		{"s", "a", "", 0, admin, ErrDependencySubtask},
+		{"c", "a", "", 0, member, ErrNotProjectAdmin},
+		{"c", "gone", "", 0, admin, ErrDependencyMissing},
+		{"c", "a", "xx", 0, admin, ErrDependencyKind},
+		{"c", "a", StartToStart, MaxLag + 1, admin, ErrDependencyKind},
+		{"c", "a", StartToStart, -MaxLag - 1, admin, ErrDependencyKind},
 	} {
-		if err := AddTaskDependency(ctx, id[c.task], id[c.on], c.user); !errors.Is(err, c.want) {
-			t.Fatalf("%s waiting on %s: want %v, got %v", c.task, c.on, c.want, err)
+		if err := AddTaskDependency(ctx, id[c.task], id[c.on], c.kind, c.lag, c.user); !errors.Is(err, c.want) {
+			t.Fatalf("%s waiting on %s (%q %d): want %v, got %v", c.task, c.on, c.kind, c.lag, c.want, err)
 		}
 	}
-	if err := AddTaskDependency(ctx, id["c"], id["b"], admin); err != nil {
+	if _, _, there := how("c", "a"); there {
+		t.Fatal("a refused dependency isn't made")
+	}
+	if err := AddTaskDependency(ctx, id["c"], id["b"], "", 0, admin); err != nil {
 		t.Fatal(err)
 	}
-	if err := AddTaskDependency(ctx, id["a"], id["c"], admin); !errors.Is(err, ErrDependencyLoop) {
+	if err := AddTaskDependency(ctx, id["a"], id["c"], "", 0, admin); !errors.Is(err, ErrDependencyLoop) {
 		t.Fatalf("Design → Build → Ship → Design closes a loop: %v", err)
+	}
+	// Ship can start once Design has: it doesn't make Ship blocked.
+	if err := AddTaskDependency(ctx, id["c"], id["a"], StartToStart, 0, admin); err != nil {
+		t.Fatal(err)
 	}
 
 	// A board marks a task still waiting on open work as blocked.
@@ -143,10 +199,14 @@ func TestTaskDependencies(t *testing.T) {
 		blocked[tk.Uuid] = tk.BlockedOpen
 	}
 	if blocked[id["b"]] != 1 || blocked[id["c"]] != 1 || blocked[id["a"]] != 0 {
-		t.Fatalf("Build and Ship wait on one open task each, Design on none: %v", blocked)
+		t.Fatalf("Build and Ship wait to start on one open task each (Ship's start to start doesn't count), Design on none: %v", blocked)
 	}
 
-	// Design slips to the 8th; Build (which overlaps it now) moves after it.
+	// Design slips to the 8th; Build (which overlaps it now) moves after it,
+	// and a day's lag on top.
+	if err := AddTaskDependency(ctx, id["b"], id["a"], FinishToStart, 1, admin); err != nil {
+		t.Fatal(err)
+	}
 	newDue := time.Date(2026, 3, 8, 17, 0, 0, 0, time.UTC)
 	before := &dgraphStruct.DgraphTask{DueDate: ptr(time.Date(2026, 3, 4, 17, 0, 0, 0, time.UTC))}
 	if err := UpdateTaskDates(ctx, uuid.MustParse(id["a"]), TaskDates{Due: &newDue}, before, admin); err != nil {
@@ -156,8 +216,8 @@ func TestTaskDependencies(t *testing.T) {
 	if err != nil || len(shifted) != 1 || shifted[0].UUID != id["b"] {
 		t.Fatalf("only Build moves (Ship has no dates; the task in another project stays): %+v %v", shifted, err)
 	}
-	if _, start, due, lines := read("b"); !start.Equal(time.Date(2026, 3, 9, 9, 0, 0, 0, time.UTC)) || !due.Equal(time.Date(2026, 3, 11, 17, 0, 0, 0, time.UTC)) || lines != 3 {
-		t.Fatalf("Build starts the day after Design is due, keeps its 3 days, and says so twice in its history: %v %v %d", start, due, lines)
+	if _, start, due, lines := read("b"); !start.Equal(time.Date(2026, 3, 10, 9, 0, 0, 0, time.UTC)) || !due.Equal(time.Date(2026, 3, 12, 17, 0, 0, 0, time.UTC)) || lines != 3 {
+		t.Fatalf("Build starts two days after Design is due, keeps its 3 days, and says so twice in its history: %v %v %d", start, due, lines)
 	}
 
 	if err := RemoveTaskDependency(ctx, id["b"], id["a"], admin); err != nil {
@@ -199,7 +259,7 @@ func TestTaskDependenciesAtOnce(t *testing.T) {
 	arrived.Add(2)
 	link := func(task, on string) error {
 		first := true
-		_, err := taskDomain.ChangeTaskDependency(ctx, task, on, uids["admin"], false, func(pair *taskDomain.DependencyPair) error {
+		_, err := taskDomain.ChangeTaskDependency(ctx, task, on, uids["admin"], false, "fs", 0, func(pair *taskDomain.DependencyPair) error {
 			if first {
 				// Both read the graph before either writes.
 				first = false
