@@ -123,7 +123,7 @@ func TestReadItemFields_FullBoard(t *testing.T) {
 			cv("numbers", "numbers", "Estimate", "", ""),
 		},
 	}
-	f := readItemFields(item)
+	f := readItemFields(item, nil)
 	if f.Status != "Stuck" {
 		t.Fatalf("status = %q", f.Status)
 	}
@@ -151,7 +151,7 @@ func TestReadItemFields_FullBoard(t *testing.T) {
 func TestReadItemFields_TimelineGivesBothDates(t *testing.T) {
 	f := readItemFields(mondayItem{ColumnValues: []mondayColumnValue{
 		cv("timeline", "timeline", "Timeline", "", `{"from":"2026-10-01","to":"2026-10-10"}`),
-	}})
+	}}, nil)
 	if f.Start == nil || f.Due == nil || !f.Start.Equal(day("2026-10-01")) || !f.Due.Equal(day("2026-10-10")) {
 		t.Fatalf("timeline → %v / %v", f.Start, f.Due)
 	}
@@ -160,7 +160,7 @@ func TestReadItemFields_TimelineGivesBothDates(t *testing.T) {
 func TestReadItemFields_GroupTitleWhenNoStatus(t *testing.T) {
 	f := readItemFields(mondayItem{Group: &mondayGroup{Title: "Done"}, ColumnValues: []mondayColumnValue{
 		cv("date", "date", "Date", "2026-10-03", `{"date":"2026-10-03"}`),
-	}})
+	}}, nil)
 	if f.Status != "Done" {
 		t.Fatalf("status from group = %q", f.Status)
 	}
@@ -173,7 +173,7 @@ func TestReadItemFields_PrefersColumnTitledStatus(t *testing.T) {
 	f := readItemFields(mondayItem{ColumnValues: []mondayColumnValue{
 		cv("color1", "color", "QA", "Passed", `{"index":1}`),
 		cv("status", "status", "Status", "Done", `{"index":1}`),
-	}})
+	}}, nil)
 	if f.Status != "Done" {
 		t.Fatalf("status = %q, want the column titled Status", f.Status)
 	}
@@ -196,7 +196,7 @@ func TestItemToSourceTask_Mapping(t *testing.T) {
 		},
 		Subitems: []mondayItem{{ID: "201"}},
 	}
-	st := p.itemToSourceTask(item, "1", "", 3, map[string]bool{"a2": true})
+	st := p.itemToSourceTask(item, "1", "", 3, map[string]bool{"a2": true}, fieldColumns{})
 	if st.SourceID != "101" || st.ProjectSourceID != "1" || st.ParentTaskID != "" {
 		t.Fatalf("ids: %+v", st)
 	}

@@ -280,6 +280,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 			if err != nil {
 				continue
 			}
+			schema := schemaOf(db.Properties)
 			created, _ := time.Parse(time.RFC3339, db.CreatedTime)
 			name := databaseTitle(db)
 			select {
@@ -292,6 +293,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 				MemberIds:   members,
 				Created:     created,
 				Archived:    db.Archived,
+				Fields:      schema.fieldList,
 				Metadata:    map[string]any{"notion_url": db.URL},
 			}:
 			}
@@ -509,26 +511,24 @@ func databaseTitle(db *notionDatabase) string {
 }
 
 type notionDBProp struct {
+	ID     string `json:"id"`
 	Name   string `json:"name"`
 	Type   string `json:"type"`
 	Status *struct {
-		Options []struct {
-			Name string `json:"name"`
-		} `json:"options"`
+		Options []notionOption `json:"options"`
 	} `json:"status"`
 	Select *struct {
-		Options []struct {
-			Name string `json:"name"`
-		} `json:"options"`
+		Options []notionOption `json:"options"`
 	} `json:"select"`
 	People      *struct{} `json:"people,omitempty"`
 	Title       *struct{} `json:"title,omitempty"`
 	Date        *struct{} `json:"date,omitempty"`
 	MultiSelect *struct {
-		Options []struct {
-			Name string `json:"name"`
-		} `json:"options"`
+		Options []notionOption `json:"options"`
 	} `json:"multi_select,omitempty"`
+	Number *struct {
+		Format string `json:"format"`
+	} `json:"number,omitempty"`
 }
 
 // notionDBSchema bundles a database's properties with helpers that the
@@ -540,6 +540,9 @@ type notionDBSchema struct {
 	priorityProp string
 	assigneeProp string
 	dueProp      string
+	// The properties that are custom fields (fields.go).
+	fieldList   []importProvider.SourceField
+	fieldByName map[string]importProvider.SourceField
 }
 
 // statusOptions / priorityOptions return the configured options for the
@@ -588,26 +591,25 @@ type notionPage struct {
 }
 
 type notionPageProperty struct {
-	Type     string           `json:"type"`
-	Title    []notionRichText `json:"title,omitempty"`
-	RichText []notionRichText `json:"rich_text,omitempty"`
-	Status   *struct {
+	Type        string           `json:"type"`
+	Title       []notionRichText `json:"title,omitempty"`
+	RichText    []notionRichText `json:"rich_text,omitempty"`
+	Status      *notionOption    `json:"status,omitempty"`
+	Select      *notionOption    `json:"select,omitempty"`
+	MultiSelect []notionOption   `json:"multi_select,omitempty"`
+	People      []struct {
+		ID   string `json:"id"`
 		Name string `json:"name"`
-	} `json:"status,omitempty"`
-	Select *struct {
-		Name string `json:"name"`
-	} `json:"select,omitempty"`
-	MultiSelect []struct {
-		Name string `json:"name"`
-	} `json:"multi_select,omitempty"`
-	People []struct {
-		ID string `json:"id"`
 	} `json:"people,omitempty"`
 	Date *struct {
 		Start string `json:"start"`
 		End   string `json:"end"`
 	} `json:"date,omitempty"`
-	Checkbox bool `json:"checkbox,omitempty"`
+	Checkbox bool     `json:"checkbox,omitempty"`
+	Number   *float64 `json:"number,omitempty"`
+	URL      *string  `json:"url,omitempty"`
+	Email    *string  `json:"email,omitempty"`
+	Phone    *string  `json:"phone_number,omitempty"`
 }
 
 type notionQueryResp struct {
@@ -837,8 +839,14 @@ func (p *Provider) fetchDatabaseProperties(ctx context.Context, tok, dbID string
 	if err != nil {
 		return nil, err
 	}
-	s := &notionDBSchema{props: db.Properties}
-	for n, prop := range db.Properties {
+	return schemaOf(db.Properties), nil
+}
+
+// schemaOf picks which properties are the task's own: its title, status,
+// priority, assignee and due date. The rest may be custom fields.
+func schemaOf(props map[string]notionDBProp) *notionDBSchema {
+	s := &notionDBSchema{props: props}
+	for n, prop := range props {
 		switch prop.Type {
 		case "title":
 			s.titleProp = n
@@ -863,7 +871,8 @@ func (p *Provider) fetchDatabaseProperties(ctx context.Context, tok, dbID string
 			}
 		}
 	}
-	return s, nil
+	s.fieldList, s.fieldByName = s.buildFields()
+	return s
 }
 
 func (p *Provider) countDatabaseRows(ctx context.Context, tok, dbID string, cap int) (int, error) {
@@ -1030,11 +1039,13 @@ func (p *Provider) buildTaskFromPage(ctx context.Context, tok string, row *notio
 			}
 		}
 	}
+	// A Tags or Labels multi-select is the task's tags; other
+	// multi-selects are custom fields.
 	labels := []string{}
 	for n, prop := range row.Properties {
-		if prop.Type == "multi_select" {
+		if prop.Type == "multi_select" && isTagsProp(n) {
 			for _, ms := range prop.MultiSelect {
-				labels = append(labels, n+":"+ms.Name)
+				labels = append(labels, ms.Name)
 			}
 		}
 	}
@@ -1100,6 +1111,7 @@ func (p *Provider) buildTaskFromPage(ctx context.Context, tok string, row *notio
 		Updated:         updated,
 		Completed:       isDoneStatus(status),
 		AttachmentRefs:  atts,
+		Fields:          fieldValues(row.Properties, schema.fieldByName),
 		Metadata:        map[string]any{"notion_url": row.URL},
 	}, nil
 }

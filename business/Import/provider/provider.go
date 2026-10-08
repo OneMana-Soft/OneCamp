@@ -61,6 +61,7 @@ type SourceProject struct {
 	CreatedBy    string
 	Created      time.Time
 	Archived     bool
+	Fields       []SourceField  // custom fields, in the source's order (fields.go)
 	Metadata     map[string]any // includes per-provider URL, color, etc.
 }
 
@@ -84,7 +85,8 @@ type SourceTask struct {
 	AttachmentRefs  []SourceAttachment // queued lazily by worker
 	CommentCount    int                // hint
 	SubtaskCount    int                // hint
-	Metadata        map[string]any     // source URL, custom fields, etc.
+	Fields          []SourceFieldValue // custom field values (fields.go)
+	Metadata        map[string]any     // source URL, etc.
 }
 
 // SourceComment covers task/issue/card comments.

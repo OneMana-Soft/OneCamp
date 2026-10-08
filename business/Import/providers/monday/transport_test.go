@@ -315,10 +315,15 @@ func fakeAccount(t *testing.T) (*int32, *[]time.Duration) {
 			if strings.Contains(q, "workspace_ids") {
 				t.Errorf("no workspace scope given; query must not filter: %s", q)
 			}
+			if !strings.Contains(q, "columns { id title type settings }") {
+				t.Errorf("boards must bring their columns' settings: %s", q)
+			}
 			fmt.Fprint(w, `{"data":{"boards":[
 			  {"id":"1","name":"Roadmap","description":"Q4 plan","state":"active","board_kind":"public","type":"board","url":"https://acme.monday.com/boards/1",
 			   "workspace_id":"55","workspace":{"id":"55","name":"Product","description":"Product team"},
-			   "owners":[{"id":"1"}],"subscribers":[{"id":"1"},{"id":"2"}],"creator":{"id":"1"}},
+			   "owners":[{"id":"1"}],"subscribers":[{"id":"1"},{"id":"2"}],"creator":{"id":"1"},
+			   "columns":[{"id":"status","title":"Status","type":"status","settings":{"labels":[{"id":1,"label":"Done","index":0}]}},
+			              {"id":"budget","title":"Budget","type":"numbers","settings":{"unit":{"symbol":"$"}}}]},
 			  {"id":"2","name":"Empty","state":"active","board_kind":"private","type":"board","url":"https://acme.monday.com/boards/2",
 			   "workspace_id":null,"workspace":null,"owners":[{"id":"3"}],"subscribers":[],"creator":{"id":"3"}},
 			  {"id":"3","name":"Specs","state":"active","board_kind":"public","type":"document","workspace_id":"55","owners":[],"subscribers":[]},
@@ -555,6 +560,9 @@ func TestIterators_ServeTheCachedSnapshot(t *testing.T) {
 	}
 	if roadmap.TeamSourceID != "55" || strings.Join(roadmap.AdminIds, ",") != "1" || strings.Join(roadmap.MemberIds, ",") != "1,2" || roadmap.Metadata["monday_url"] != "https://acme.monday.com/boards/1" {
 		t.Fatalf("roadmap project: %+v", roadmap)
+	}
+	if len(roadmap.Fields) != 1 || roadmap.Fields[0].Name != "Budget" || roadmap.Fields[0].Currency != "USD" {
+		t.Fatalf("the board's spare column is a field, its status column the task's own: %+v", roadmap.Fields)
 	}
 
 	p.CleanupJob(job.Id.String())

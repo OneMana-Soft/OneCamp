@@ -240,6 +240,7 @@ func resolveOneProject(ctx context.Context, job *importModels.Job,
 				"name":       sp.Name,
 			}), false)
 		addProjectMembers(ctx, job, existing, sp)
+		newProjectFields(job, nil, sp.SourceID, existing, importingUser.UserPostgresInfo.Id).ensure(ctx, sp.Fields)
 		_ = scheduleProjectTaskChunk(ctx, job.Id, sp.SourceID)
 		return nil
 	}
@@ -305,6 +306,7 @@ func resolveOneProject(ctx context.Context, job *importModels.Job,
 		importModels.EntityProject, sp.SourceID, projectUUID, job.Id)
 
 	addProjectMembers(ctx, job, projectUUID, sp)
+	newProjectFields(job, nil, sp.SourceID, projectUUID, importingUser.UserPostgresInfo.Id).ensure(ctx, sp.Fields)
 	return scheduleProjectTaskChunk(ctx, job.Id, sp.SourceID)
 }
 

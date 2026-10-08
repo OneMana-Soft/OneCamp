@@ -8,6 +8,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // RollbackImport soft-deletes everything the import created, in
@@ -45,6 +46,9 @@ func RollbackImport(ctx context.Context, jobId uuid.UUID) error {
 		return err
 	}
 	if err := softDelete(ctx, jobId, importModels.EntityTask, "tasks"); err != nil {
+		return err
+	}
+	if err := deleteUnusedFields(ctx, jobId); err != nil {
 		return err
 	}
 	if err := softDelete(ctx, jobId, importModels.EntityFile, "attachments"); err != nil {
@@ -121,6 +125,29 @@ func softDelete(ctx context.Context, importId uuid.UUID, entityType, table strin
 	helpers.LogInfoWithContext(ctx,
 		"Import rollback soft-deleted %d rows from %s for job %s",
 		len(entries), table, importId)
+	return nil
+}
+
+// deleteUnusedFields takes away the custom fields this import made, once its
+// tasks are gone, unless a task still in use has a value of one: a field
+// someone has started using stays.
+func deleteUnusedFields(ctx context.Context, importId uuid.UUID) error {
+	entries, err := importModels.IdMappingsByTypeOwned(ctx, importId, importModels.EntityField)
+	if err != nil || len(entries) == 0 {
+		return err
+	}
+	ids := make([]string, 0, len(entries))
+	for _, e := range entries {
+		ids = append(ids, e.OnecampUUID.String())
+	}
+	if _, err := importModels.Exec(ctx, `
+		DELETE FROM task_fields f
+		WHERE f.id = ANY($1::uuid[])
+		  AND NOT EXISTS (
+		      SELECT 1 FROM task_field_values v JOIN tasks t ON t.id = v.task_uuid
+		      WHERE v.field_id = f.id AND t.deleted_at IS NULL)`, pq.Array(ids)); err != nil {
+		return fmt.Errorf("rollback task fields: %w", err)
+	}
 	return nil
 }
 

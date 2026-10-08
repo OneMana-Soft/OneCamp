@@ -256,6 +256,7 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 	if cleaner, ok := prov.(importProvider.JobCleaner); ok {
 		cleaner.CleanupJob(jobId.String())
 	}
+	forgetFieldWarnings(jobId)
 }
 
 // CancelImport signals a running import to stop. Generic across providers.
@@ -290,6 +291,7 @@ func CancelImport(ctx context.Context, jobId uuid.UUID) error {
 			cleaner.CleanupJob(job.Id.String())
 		}
 	}
+	forgetFieldWarnings(job.Id)
 	return nil
 }
 
@@ -461,6 +463,7 @@ func failJob(ctx context.Context, job *importModels.Job, err error) {
 			cleaner.CleanupJob(job.Id.String())
 		}
 	}
+	forgetFieldWarnings(job.Id)
 }
 
 // setStage flips a job's stage label without forcing the status back to

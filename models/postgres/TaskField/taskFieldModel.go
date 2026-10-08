@@ -24,6 +24,21 @@ type Option struct {
 	Color string `json:"color"`
 }
 
+// The field types, as the app names them (migration 192 says what a value of
+// each is). Here rather than in business/TaskField so an importer can name them
+// without that package's dependencies.
+const (
+	TypeText        = "text"
+	TypeNumber      = "number"
+	TypeMoney       = "money"
+	TypeDate        = "date"
+	TypeSelect      = "select"
+	TypeMultiSelect = "multi_select"
+	TypePerson      = "person"
+	TypeCheckbox    = "checkbox"
+	TypeURL         = "url"
+)
+
 // Field is one of a project's custom fields.
 type Field struct {
 	ID        uuid.UUID `json:"id"`
@@ -199,6 +214,43 @@ func Update(ctx context.Context, f *Field) (*Field, []string, error) {
 		return nil, nil, err
 	}
 	return out, changed, tx.Commit()
+}
+
+// AddOptions gives a field the options more returns for the ones it has. The
+// field is locked between reading and writing, so options two writers add at
+// once both stay; options are only ever added here, so no task loses a value.
+func AddOptions(ctx context.Context, projectID, id uuid.UUID, more func(have []Option) []Option) (*Field, error) {
+	c, cancel := withTimeout(ctx)
+	defer cancel()
+	tx, err := postgresInit.DBConn.SqlDB.BeginTx(c, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback() //nolint:errcheck // a no-op after Commit
+	var raw []byte
+	err = tx.QueryRowContext(c, `SELECT options FROM task_fields WHERE id = $1 AND project_id = $2 FOR UPDATE`, id, projectID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	var have []Option
+	if err := json.Unmarshal(raw, &have); err != nil {
+		return nil, err
+	}
+	options, err := json.Marshal(append(have, more(have)...))
+	if err != nil {
+		return nil, err
+	}
+	out, err := scan(tx.QueryRowContext(c, `
+		UPDATE task_fields SET options = $3, updated_at = CASE WHEN options = $3::jsonb THEN updated_at ELSE NOW() END
+		WHERE id = $1 AND project_id = $2 RETURNING `+columns, id, projectID, options))
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/TaskField AddOptions err: %+v", err)
+		return nil, err
+	}
+	return out, tx.Commit()
 }
 
 // Reorder sets positions from the order of ids. Ids not of this project are

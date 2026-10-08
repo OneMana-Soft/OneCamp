@@ -234,6 +234,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 				admins = append(admins, mb.IDMember)
 			}
 		}
+		fields, _ := boardFields(board.CustomFields)
 		select {
 		case <-ctx.Done():
 			return
@@ -243,6 +244,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 			Description: board.Desc,
 			MemberIds:   members,
 			AdminIds:    admins,
+			Fields:      fields,
 			Metadata: map[string]any{
 				"trello_url": board.URL,
 			},
@@ -270,6 +272,7 @@ func (p *Provider) IterTasksOfProject(ctx context.Context, j *importModels.Job, 
 		for _, l := range board.Lists {
 			listName[l.ID] = l.Name
 		}
+		_, fieldByID := boardFields(board.CustomFields)
 		for _, c := range board.Cards {
 			if ctx.Err() != nil {
 				return
@@ -336,6 +339,7 @@ func (p *Provider) IterTasksOfProject(ctx context.Context, j *importModels.Job, 
 				CommentCount:    c.Badges.Comments,
 				SubtaskCount:    countCheckItems(c.Checklists),
 				AttachmentRefs:  atts,
+				Fields:          cardFieldValues(c.CustomFieldItems, fieldByID),
 				Metadata: map[string]any{
 					"trello_url": c.URL,
 					"id_short":   c.IDShort,
@@ -593,23 +597,24 @@ type trelloBadges struct {
 }
 
 type trelloCard struct {
-	ID               string             `json:"id"`
-	IDShort          int                `json:"idShort"`
-	IDList           string             `json:"idList"`
-	IDBoard          string             `json:"idBoard"`
-	Name             string             `json:"name"`
-	Desc             string             `json:"desc"`
-	URL              string             `json:"url"`
-	Closed           bool               `json:"closed"`
-	Due              string             `json:"due"`
-	Start            string             `json:"start"`
-	DueComplete      bool               `json:"dueComplete"`
-	DateLastActivity string             `json:"dateLastActivity"`
-	IDMembers        []string           `json:"idMembers"`
-	Labels           []trelloLabel      `json:"labels"`
-	Checklists       []trelloChecklist  `json:"checklists"`
-	Attachments      []trelloAttachment `json:"attachments"`
-	Badges           trelloBadges       `json:"badges"`
+	ID               string                  `json:"id"`
+	IDShort          int                     `json:"idShort"`
+	IDList           string                  `json:"idList"`
+	IDBoard          string                  `json:"idBoard"`
+	Name             string                  `json:"name"`
+	Desc             string                  `json:"desc"`
+	URL              string                  `json:"url"`
+	Closed           bool                    `json:"closed"`
+	Due              string                  `json:"due"`
+	Start            string                  `json:"start"`
+	DueComplete      bool                    `json:"dueComplete"`
+	DateLastActivity string                  `json:"dateLastActivity"`
+	IDMembers        []string                `json:"idMembers"`
+	Labels           []trelloLabel           `json:"labels"`
+	Checklists       []trelloChecklist       `json:"checklists"`
+	Attachments      []trelloAttachment      `json:"attachments"`
+	Badges           trelloBadges            `json:"badges"`
+	CustomFieldItems []trelloCustomFieldItem `json:"customFieldItems"`
 }
 
 type trelloActionData struct {
@@ -628,16 +633,17 @@ type trelloAction struct {
 }
 
 type trelloBoard struct {
-	ID          string             `json:"id"`
-	Name        string             `json:"name"`
-	Desc        string             `json:"desc"`
-	URL         string             `json:"url"`
-	Members     []trelloMember     `json:"members"`
-	Memberships []trelloMembership `json:"memberships"`
-	Labels      []trelloLabel      `json:"labels"`
-	Lists       []trelloList       `json:"lists"`
-	Cards       []trelloCard       `json:"cards"`
-	Actions     []trelloAction     `json:"actions"`
+	ID           string              `json:"id"`
+	Name         string              `json:"name"`
+	Desc         string              `json:"desc"`
+	URL          string              `json:"url"`
+	Members      []trelloMember      `json:"members"`
+	Memberships  []trelloMembership  `json:"memberships"`
+	Labels       []trelloLabel       `json:"labels"`
+	Lists        []trelloList        `json:"lists"`
+	Cards        []trelloCard        `json:"cards"`
+	Actions      []trelloAction      `json:"actions"`
+	CustomFields []trelloCustomField `json:"customFields"`
 }
 
 // ─── HTTP + token helpers ────────────────────────────────────────
@@ -700,6 +706,7 @@ func (p *Provider) fetchBoard(ctx context.Context, tok *trelloToken, boardId str
 		"&card_checklists=all"+
 		"&actions=commentCard&actions_limit=1000"+
 		"&labels=all"+
+		"&customFields=true&card_customFieldItems=true"+
 		"&key=%s&token=%s",
 		url.PathEscape(boardId),
 		url.QueryEscape(tok.APIKey),

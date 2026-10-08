@@ -30,15 +30,15 @@ import (
 
 // The field types, as the app names them.
 const (
-	TypeText        = "text"
-	TypeNumber      = "number"
-	TypeMoney       = "money"
-	TypeDate        = "date"
-	TypeSelect      = "select"
-	TypeMultiSelect = "multi_select"
-	TypePerson      = "person"
-	TypeCheckbox    = "checkbox"
-	TypeURL         = "url"
+	TypeText        = model.TypeText
+	TypeNumber      = model.TypeNumber
+	TypeMoney       = model.TypeMoney
+	TypeDate        = model.TypeDate
+	TypeSelect      = model.TypeSelect
+	TypeMultiSelect = model.TypeMultiSelect
+	TypePerson      = model.TypePerson
+	TypeCheckbox    = model.TypeCheckbox
+	TypeURL         = model.TypeURL
 )
 
 // Types lists every field type.
@@ -108,6 +108,21 @@ type Input struct {
 
 func cleanName(s string) string { return strings.Join(strings.Fields(s), " ") }
 
+// FitName is a name from elsewhere (an import) made to fit a field's: spaces
+// tidied and cut to MaxNameLength. Pure.
+func FitName(s string) string { return cut(cleanName(s), MaxNameLength) }
+
+// FitLabel is an option's name from elsewhere made to fit: spaces tidied and
+// cut to MaxOptionLabel. Pure.
+func FitLabel(s string) string { return cut(cleanName(s), MaxOptionLabel) }
+
+func cut(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return strings.TrimSpace(string([]rune(s)[:n]))
+}
+
 // newOptionID is a short random id: short, so a filter on an option fits the
 // query value limit beside its field's id.
 func newOptionID() string {
@@ -170,6 +185,44 @@ func Check(in Input, typ string) (*model.Field, error) {
 		f.Currency = cur
 	}
 	return f, nil
+}
+
+// AddOptions gives a select or multi-select field the options in add that it
+// has no namesake for (whatever the case), while it has room for them, and is
+// the field as it then is. Options already there keep their ids and colours.
+func AddOptions(ctx context.Context, project, id uuid.UUID, add []OptionInput) (*model.Field, error) {
+	return model.AddOptions(ctx, project, id, func(have []model.Option) []model.Option {
+		return newOptions(have, add)
+	})
+}
+
+// newOptions is the options of add with no namesake in have, made as Check
+// makes them, up to MaxOptions in all. Pure.
+func newOptions(have []model.Option, add []OptionInput) []model.Option {
+	seen, ids := map[string]bool{}, map[string]bool{}
+	for _, o := range have {
+		seen[strings.ToLower(o.Label)] = true
+		ids[o.ID] = true
+	}
+	var out []model.Option
+	for _, o := range add {
+		label := cleanName(o.Label)
+		if label == "" || utf8.RuneCountInString(label) > MaxOptionLabel || seen[strings.ToLower(label)] || len(have)+len(out) >= MaxOptions {
+			continue
+		}
+		seen[strings.ToLower(label)] = true
+		id := o.ID
+		if !isOptionID(id) || ids[id] {
+			id = newOptionID()
+		}
+		ids[id] = true
+		color := o.Color
+		if !validColor(color) {
+			color = taskStatusBusiness.Colors[(len(have)+len(out))%len(taskStatusBusiness.Colors)]
+		}
+		out = append(out, model.Option{ID: id, Label: label, Color: color})
+	}
+	return out
 }
 
 // Normalize is a value as stored for the field, nil to take the value off, or

@@ -39,7 +39,9 @@ import (
 )
 
 const providerName = importModels.ProviderAsana
-const apiBase = "https://app.asana.com/api/1.0"
+
+// apiBase is Asana's API; a var so tests can point it at a fake.
+var apiBase = "https://app.asana.com/api/1.0"
 
 // Pagination safety cap. 200 pages × 100 items = 20k items per
 // per-project iteration, which covers every realistic Asana project.
@@ -297,6 +299,9 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 		}
 		for _, pr := range projects {
 			members, _ := p.listProjectMembers(ctx, tok, pr.GID)
+			// Custom fields need a paid Asana plan: none, or none readable,
+			// is a project without them; tasks still bring their values.
+			fields, _ := p.listProjectFields(ctx, tok, pr.GID)
 			memberIds := make([]string, 0, len(members))
 			for _, m := range members {
 				memberIds = append(memberIds, m.GID)
@@ -318,6 +323,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 				CreatedBy:    safeGID(pr.CreatedBy),
 				Created:      created,
 				Archived:     pr.Archived,
+				Fields:       fields,
 				Metadata:     map[string]any{"asana_url": "https://app.asana.com/0/" + pr.GID},
 			}:
 			}
@@ -583,17 +589,30 @@ type asanaMembership struct {
 	Section *asanaRefShort `json:"section"`
 }
 
+// asanaCustomField is a task's value of one custom field (fields.go).
 type asanaCustomField struct {
-	GID          string `json:"gid"`
-	Name         string `json:"name"`
-	Type         string `json:"type"`
-	DisplayValue string `json:"display_value"`
+	GID             string   `json:"gid"`
+	Name            string   `json:"name"`
+	Type            string   `json:"type"`
+	ResourceSubtype string   `json:"resource_subtype"`
+	Format          string   `json:"format"`
+	CurrencyCode    string   `json:"currency_code"`
+	IsFormula       bool     `json:"is_formula_field"`
+	DisplayValue    string   `json:"display_value"`
+	TextValue       *string  `json:"text_value"`
+	NumberValue     *float64 `json:"number_value"`
+	DateValue       *struct {
+		Date string `json:"date"`
+	} `json:"date_value"`
+	EnumValue       *asanaEnumOption  `json:"enum_value"`
+	MultiEnumValues []asanaEnumOption `json:"multi_enum_values"`
+	PeopleValue     []asanaRefShort   `json:"people_value"`
 }
 
 // taskOptFields is the URL-encoded list of fields we ask for. Keep
 // trimmed to what we use because Asana counts payload bytes towards
 // rate limits.
-var taskOptFields = url.QueryEscape("gid,name,notes,html_notes,completed,completed_at,created_at,modified_at,due_on,due_at,start_on,start_at,assignee.gid,assignee.name,num_subtasks,memberships.project.gid,memberships.section.gid,memberships.section.name,tags.name,custom_fields.name,custom_fields.type,custom_fields.display_value,permalink_url")
+var taskOptFields = url.QueryEscape("gid,name,notes,html_notes,completed,completed_at,created_at,modified_at,due_on,due_at,start_on,start_at,assignee.gid,assignee.name,num_subtasks,memberships.project.gid,memberships.section.gid,memberships.section.name,tags.name,permalink_url," + valueOptFields)
 
 type asanaStory struct {
 	GID             string         `json:"gid"`
@@ -997,6 +1016,7 @@ func buildSourceTask(t *asanaTask, projectGID string, sectionName map[string]str
 		Created:         created,
 		Updated:         modified,
 		Completed:       t.Completed,
+		Fields:          fieldValues(t.CustomFields),
 		Metadata:        map[string]any{"asana_url": t.Permalink},
 	}
 }

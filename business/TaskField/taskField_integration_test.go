@@ -12,6 +12,7 @@ import (
 	"errors"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -196,5 +197,47 @@ func TestCustomFields(t *testing.T) {
 	}
 	if fields, _ := List(ctx, project); len(fields) != 4 {
 		t.Errorf("%d fields left, want 4", len(fields))
+	}
+}
+
+// Options two writers add at the same moment both stay: AddOptions reads
+// and writes the field under its lock.
+func TestAddOptionsTogether(t *testing.T) {
+	ctx := context.Background()
+	env := integration.SetupEnv(t)
+	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
+		t.Fatal(err)
+	}
+	project := uuid.New()
+	f, err := Create(ctx, project, Input{Name: "Channel", Type: TypeSelect, Options: []OptionInput{{Label: "Blog"}}}, uuid.New(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := []string{"Email", "Social", "Podcast", "Video", "blog"}
+	var wg sync.WaitGroup
+	for _, l := range labels {
+		wg.Add(1)
+		go func(l string) {
+			defer wg.Done()
+			if _, err := AddOptions(ctx, project, f.ID, []OptionInput{{Label: l}}); err != nil {
+				t.Error(err)
+			}
+		}(l)
+	}
+	wg.Wait()
+	got, err := model.Get(ctx, project, f.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, o := range got.Options {
+		names = append(names, o.Label)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "Blog,Email,Podcast,Social,Video" || got.Options[0].ID != f.Options[0].ID {
+		t.Errorf("every new option once, Blog untouched: %v", names)
+	}
+	if _, err := AddOptions(ctx, project, uuid.New(), []OptionInput{{Label: "x"}}); !errors.Is(err, model.ErrNotFound) {
+		t.Errorf("another project's field: %v", err)
 	}
 }

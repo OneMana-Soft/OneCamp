@@ -39,6 +39,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -126,7 +127,7 @@ func (p *Provider) Plan(ctx context.Context, j *importModels.Job, opts importPro
 		ProjectCount: len(snap.activeProjects()),
 	}
 	for _, it := range snap.Items {
-		if it.IsDeleted == 1 {
+		if it.IsDeleted.on() {
 			continue
 		}
 		if it.ParentID != "" {
@@ -136,7 +137,7 @@ func (p *Provider) Plan(ctx context.Context, j *importModels.Job, opts importPro
 		}
 	}
 	for _, n := range snap.Notes {
-		if n.IsDeleted == 1 {
+		if n.IsDeleted.on() {
 			continue
 		}
 		plan.CommentCount++
@@ -233,7 +234,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 		// permission filtering can be a follow-up.
 		members := make([]string, 0, len(snap.Collaborators))
 		for _, c := range snap.Collaborators {
-			if c.IsDeleted == 1 {
+			if c.IsDeleted.on() {
 				continue
 			}
 			members = append(members, c.ID)
@@ -252,7 +253,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 				MemberIds: members,
 				AdminIds:  nil,
 				Created:   time.Time{},
-				Archived:  pj.IsArchived == 1,
+				Archived:  pj.IsArchived.on(),
 				Metadata:  map[string]any{"color": pj.Color, "parent_id": pj.ParentID},
 			}:
 			}
@@ -277,14 +278,14 @@ func (p *Provider) IterTasksOfProject(ctx context.Context, j *importModels.Job, 
 		// Section name lookup so we can attach section labels.
 		sectionName := map[string]string{}
 		for _, s := range snap.Sections {
-			if s.IsDeleted == 1 {
+			if s.IsDeleted.on() {
 				continue
 			}
 			sectionName[s.ID] = s.Name
 		}
 
 		for _, it := range snap.Items {
-			if it.IsDeleted == 1 || it.ProjectID != projectSourceId {
+			if it.IsDeleted.on() || it.ProjectID != projectSourceId {
 				continue
 			}
 			if it.ParentID != "" {
@@ -300,7 +301,7 @@ func (p *Provider) IterTasksOfProject(ctx context.Context, j *importModels.Job, 
 		// schedules subtask chunks for any task that has children.
 		seen := map[string]struct{}{}
 		for _, it := range snap.Items {
-			if it.IsDeleted == 1 || it.ProjectID != projectSourceId {
+			if it.IsDeleted.on() || it.ProjectID != projectSourceId {
 				continue
 			}
 			if it.ParentID == "" {
@@ -338,12 +339,12 @@ func (p *Provider) IterSubtasksOfTask(ctx context.Context, j *importModels.Job, 
 		}
 		sectionName := map[string]string{}
 		for _, s := range snap.Sections {
-			if s.IsDeleted != 1 {
+			if !s.IsDeleted.on() {
 				sectionName[s.ID] = s.Name
 			}
 		}
 		for _, it := range snap.Items {
-			if it.IsDeleted == 1 || it.ParentID != taskSourceId {
+			if it.IsDeleted.on() || it.ParentID != taskSourceId {
 				continue
 			}
 			task := buildSourceTask(snap, &it, sectionName)
@@ -373,7 +374,7 @@ func (p *Provider) IterCommentsOfTask(ctx context.Context, j *importModels.Job, 
 			return
 		}
 		for _, n := range snap.Notes {
-			if n.IsDeleted == 1 || n.ItemID != taskSourceId {
+			if n.IsDeleted.on() || n.ItemID != taskSourceId {
 				continue
 			}
 			created, _ := time.Parse(time.RFC3339, n.PostedAt)
@@ -431,7 +432,7 @@ type todoistSnapshot struct {
 func (s *todoistSnapshot) activeProjects() []todoistProject {
 	out := make([]todoistProject, 0, len(s.Projects))
 	for _, p := range s.Projects {
-		if p.IsDeleted == 1 {
+		if p.IsDeleted.on() {
 			continue
 		}
 		out = append(out, p)
@@ -451,15 +452,15 @@ type todoistProject struct {
 	Name       string `json:"name"`
 	Color      string `json:"color"`
 	ParentID   string `json:"parent_id"`
-	IsArchived int    `json:"is_archived"`
-	IsDeleted  int    `json:"is_deleted"`
+	IsArchived flag   `json:"is_archived"`
+	IsDeleted  flag   `json:"is_deleted"`
 }
 
 type todoistSection struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	ProjectID string `json:"project_id"`
-	IsDeleted int    `json:"is_deleted"`
+	IsDeleted flag   `json:"is_deleted"`
 }
 
 type todoistItem struct {
@@ -473,8 +474,8 @@ type todoistItem struct {
 	Labels         []string `json:"labels"`
 	AssignedByUID  string   `json:"assigned_by_uid"`
 	ResponsibleUID string   `json:"responsible_uid"`
-	Checked        int      `json:"checked"`
-	IsDeleted      int      `json:"is_deleted"`
+	Checked        flag     `json:"checked"`
+	IsDeleted      flag     `json:"is_deleted"`
 	AddedAt        string   `json:"added_at"`
 	CompletedAt    string   `json:"completed_at"`
 	UpdatedAt      string   `json:"updated_at"`
@@ -490,7 +491,7 @@ type todoistNote struct {
 	Content        string `json:"content"`
 	PostedUID      string `json:"posted_uid"`
 	PostedAt       string `json:"posted_at"`
-	IsDeleted      int    `json:"is_deleted"`
+	IsDeleted      flag   `json:"is_deleted"`
 	FileAttachment *struct {
 		FileName string `json:"file_name"`
 		FileSize int64  `json:"file_size"`
@@ -504,13 +505,13 @@ type todoistCollab struct {
 	FullName  string `json:"full_name"`
 	Email     string `json:"email"`
 	ImageID   string `json:"image_id"`
-	IsDeleted int    `json:"is_deleted"`
+	IsDeleted flag   `json:"is_deleted"`
 }
 
 type todoistLabel struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
-	IsDeleted int    `json:"is_deleted"`
+	IsDeleted flag   `json:"is_deleted"`
 }
 
 // loadSnapshot fetches the full workspace once per job and caches it.
@@ -540,6 +541,27 @@ func (p *Provider) loadSnapshot(ctx context.Context, j *importModels.Job) (*todo
 	return snap, nil
 }
 
+// syncURL is Todoist API v1's sync endpoint. Sync API v9
+// (/sync/v9/sync) was shut down in 2026; v1 kept the endpoint's shape
+// and its resource names ("items", "notes"). A var so tests can point it
+// at a fake.
+var syncURL = "https://api.todoist.com/api/v1/sync"
+
+// flag is a Todoist yes/no: true/false in API v1, 0/1 in older answers.
+type flag bool
+
+func (f *flag) UnmarshalJSON(b []byte) error {
+	switch strings.Trim(string(b), `"`) {
+	case "true", "1":
+		*f = true
+	default:
+		*f = false
+	}
+	return nil
+}
+
+func (f flag) on() bool { return bool(f) }
+
 // sync calls the single Todoist Sync API endpoint with the requested
 // resource_types. For our use case sync_token="*" returns everything;
 // future incremental syncs would persist the returned token.
@@ -552,8 +574,7 @@ func (p *Provider) sync(ctx context.Context, tok string, resourceTypes []string)
 	rt, _ := json.Marshal(resourceTypes)
 	body.Set("resource_types", string(rt))
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.todoist.com/sync/v9/sync",
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, syncURL,
 		bytes.NewBufferString(body.Encode()))
 	if err != nil {
 		return nil, err
@@ -623,7 +644,7 @@ func buildSourceTask(snap *todoistSnapshot, it *todoistItem, sectionName map[str
 	}
 
 	status := "active"
-	if it.Checked == 1 || it.CompletedAt != "" {
+	if it.Checked.on() || it.CompletedAt != "" {
 		status = "checked"
 	}
 

@@ -70,6 +70,7 @@ type mondayBoard struct {
 	Owners      []idOnly         `json:"owners"`
 	Subscribers []idOnly         `json:"subscribers"`
 	Creator     *idOnly          `json:"creator"`
+	Columns     []mondayColumn   `json:"columns"`
 }
 
 func (b mondayBoard) workspaceKey() string {
@@ -205,6 +206,7 @@ func (p *Provider) crawl(ctx context.Context, tok string, sc scope) (*workspaceS
 	}
 
 	for _, b := range boards {
+		fields := fieldsOfBoard(b)
 		items, err := p.fetchBoardItems(ctx, tok, b.ID)
 		if err != nil {
 			return nil, fmt.Errorf("monday.com items for board %q: %w", b.Name, err)
@@ -228,10 +230,10 @@ func (p *Provider) crawl(ctx context.Context, tok string, sc scope) (*workspaceS
 				}
 			}
 			snap.comments[it.ID] = comments
-			snap.Tasks = append(snap.Tasks, p.itemToSourceTask(it, b.ID, "", len(comments), commentAssets))
+			snap.Tasks = append(snap.Tasks, p.itemToSourceTask(it, b.ID, "", len(comments), commentAssets, fields))
 			for _, sub := range it.Subitems {
 				snap.subtasksOf[it.ID] = append(snap.subtasksOf[it.ID], len(snap.Tasks))
-				snap.Tasks = append(snap.Tasks, p.itemToSourceTask(sub, b.ID, it.ID, 0, nil))
+				snap.Tasks = append(snap.Tasks, p.itemToSourceTask(sub, b.ID, it.ID, 0, nil, fieldColumns{}))
 			}
 		}
 	}
@@ -351,7 +353,8 @@ func (p *Provider) fetchUsers(ctx context.Context, tok string) ([]mondayUser, er
 
 const boardFields = `id name description state board_kind type url workspace_id
     workspace { id name description }
-    owners { id } subscribers { id } creator { id }`
+    owners { id } subscribers { id } creator { id }
+    columns { id title type settings }`
 
 func boardsQuery(withWorkspace bool, includeArchived bool) string {
 	state := "active"

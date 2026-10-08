@@ -321,6 +321,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 			errCh <- err
 			return
 		}
+		fields := listFields(snap.Tasks)
 		for _, l := range snap.Lists {
 			name := l.Name
 			if l.FolderName != "" {
@@ -337,6 +338,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 				TeamSourceID: l.SpaceID,
 				MemberIds:    append([]string{}, l.MemberIDs...),
 				Archived:     archived,
+				Fields:       fields[l.ID],
 				Metadata: map[string]any{
 					"clickup_url":         l.URL,
 					"clickup_folder_id":   l.FolderID,
@@ -845,6 +847,7 @@ func (p *Provider) taskToSourceTask(t clickupTask) importProvider.SourceTask {
 		Completed:       t.DateClosed != "" || strings.EqualFold(t.StatusType, "closed"),
 		AttachmentRefs:  atts,
 		CommentCount:    len(t.Comments),
+		Fields:          fieldValues(t.CustomFields),
 		Metadata: map[string]any{
 			"clickup_url": t.URL,
 			"clickup_id":  t.ID,
@@ -1002,6 +1005,8 @@ type clickupTask struct {
 
 	Assignees []clickupUser `json:"assignees"`
 	Tags      []clickupTag  `json:"tags"`
+
+	CustomFields []clickupField `json:"custom_fields"`
 
 	// ParentRaw can be a string (parent task id) or null.
 	ParentRaw json.RawMessage `json:"parent"`

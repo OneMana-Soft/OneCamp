@@ -48,3 +48,24 @@ func TestLookupMappedTask(t *testing.T) {
 		t.Fatalf("a task not imported yet isn't found: %+v", m)
 	}
 }
+
+// A warning an import logs is kept, and listed for the person running it.
+func TestImportErrorsAreKept(t *testing.T) {
+	ctx := context.Background()
+	env := integration.SetupEnv(t)
+	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
+		t.Fatal(err)
+	}
+	job := &importModels.Job{Id: uuid.New(), Provider: "trello", SourceWorkspaceName: "w", Source: "api", Status: importModels.StatusRunning}
+	if err := importModels.CreateJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	importModels.LogImportError(ctx, job.Id, nil, importModels.EntityTask, "card-1", importModels.SeverityWarning, "TASK_IMPORT_FAILED", "the card couldn't be read", nil)
+	rows, err := importModels.ListErrors(ctx, job.Id, importModels.SeverityWarning, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || *(rows[0]["source_id"].(*string)) != "card-1" || rows[0]["message"] != "the card couldn't be read" {
+		t.Fatalf("the warning, with its source id: %+v", rows)
+	}
+}

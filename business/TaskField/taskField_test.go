@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	model "github.com/akashc777/OneCamp/models/postgres/TaskField"
 	"github.com/google/uuid"
@@ -130,5 +131,35 @@ func TestSameValue(t *testing.T) {
 	}
 	if sameValue(json.RawMessage(`["a","b"]`), json.RawMessage(`["b","a"]`)) {
 		t.Error("a multi-select's order is its own")
+	}
+}
+
+func TestFitNames(t *testing.T) {
+	if FitName("  Launch   channel ") != "Launch channel" || FitLabel(" In  review ") != "In review" {
+		t.Error("spaces tidied")
+	}
+	if got := FitName(strings.Repeat("é", 50)); utf8.RuneCountInString(got) != MaxNameLength {
+		t.Errorf("cut to %d letters, not bytes: %q", MaxNameLength, got)
+	}
+	if got := FitLabel(strings.Repeat("a", 39) + " b"); got != strings.Repeat("a", 39) {
+		t.Errorf("no space left at the end of a cut: %q", got)
+	}
+}
+
+func TestNewOptions(t *testing.T) {
+	have := []model.Option{{ID: "aaaa1111", Label: "Blog", Color: "violet"}}
+	got := newOptions(have, []OptionInput{{Label: "blog"}, {Label: " Email ", Color: "sky"}, {Label: ""}, {Label: strings.Repeat("a", MaxOptionLabel+1)}, {Label: "email"}, {Label: "Social", Color: "chartreuse"}})
+	if len(got) != 2 || got[0].Label != "Email" || got[0].Color != "sky" || got[1].Label != "Social" || !validColor(got[1].Color) {
+		t.Fatalf("only new names, made as Check makes them: %+v", got)
+	}
+	if !isOptionID(got[0].ID) || got[0].ID == got[1].ID {
+		t.Errorf("each gets an id of its own: %+v", got)
+	}
+	full := make([]model.Option, MaxOptions-1)
+	for i := range full {
+		full[i] = model.Option{ID: newOptionID(), Label: strings.Repeat("x", i+1)}
+	}
+	if got := newOptions(full, []OptionInput{{Label: "One"}, {Label: "Two"}}); len(got) != 1 || got[0].Label != "One" {
+		t.Errorf("no more than %d options in all: %+v", MaxOptions, got)
 	}
 }
