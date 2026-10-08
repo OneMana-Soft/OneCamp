@@ -28,8 +28,10 @@ func Workload(w http.ResponseWriter, r *http.Request) {
 	if err != nil || weeks < 1 || weeks > maxWorkloadWeeks {
 		weeks = workloadWeeks
 	}
-	until := time.Now().In(helpers.Location(r.URL.Query().Get("tz"))).AddDate(0, 0, 7*(weeks+1))
-	wl, err := business.GetWorkload(r.Context(), user.UserDgraphInfo.Uid, user.UserDgraphInfo.Uuid, user.UserPostgresInfo.IsAdmin, until)
+	now := time.Now().In(helpers.Location(r.URL.Query().Get("tz")))
+	// A week back and a week on for the zones' edges; the app keeps to its own weeks.
+	from, until := now.AddDate(0, 0, -7), now.AddDate(0, 0, 7*(weeks+1))
+	wl, err := business.GetWorkload(r.Context(), user.UserDgraphInfo.Uid, user.UserDgraphInfo.Uuid, user.UserPostgresInfo.IsAdmin, from, until)
 	if err != nil {
 		helpers.LogErrorWithContext(r.Context(), "controllers/Project/Workload err: %+v", err)
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The workload couldn't load just now. Try again in a moment."})
@@ -41,8 +43,10 @@ func Workload(w http.ResponseWriter, r *http.Request) {
 // capacityInput is the body of POST /project/workload/capacity.
 type capacityInput struct {
 	UserUUID string `json:"user_uuid"`
-	// TasksPerWeek is how many tasks a week they take on; 0 puts back the default.
-	TasksPerWeek int `json:"tasks_per_week"`
+	// TasksPerWeek is how many tasks a week they take on, HoursPerWeek how
+	// many hours they work; either may be left out, and 0 puts back its default.
+	TasksPerWeek *int `json:"tasks_per_week"`
+	HoursPerWeek *int `json:"hours_per_week"`
 }
 
 // SetWorkloadCapacity handles POST /project/workload/capacity {user_uuid,
@@ -55,12 +59,12 @@ func SetWorkloadCapacity(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Say whose capacity, and how many tasks a week."})
 		return
 	}
-	err := business.SetWeeklyCapacity(r.Context(), user.UserDgraphInfo.Uuid, user.UserPostgresInfo.IsAdmin, in.UserUUID, in.TasksPerWeek)
+	err := business.SetCapacity(r.Context(), user.UserDgraphInfo.Uuid, user.UserPostgresInfo.IsAdmin, in.UserUUID, business.Capacity{Tasks: in.TasksPerWeek, Hours: in.HoursPerWeek})
 	switch {
 	case err == nil:
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Capacity saved.", "data": map[string]any{"tasks_per_week": in.TasksPerWeek}})
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Capacity saved."})
 	case errors.Is(err, business.ErrCapacityRange):
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "A capacity is from 1 to 100 tasks a week."})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "A capacity is from 1 to 100 tasks, or 1 to 168 hours, a week."})
 	case errors.Is(err, business.ErrCapacityNotYours):
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only they or a workspace admin can change their capacity."})
 	case errors.Is(err, business.ErrPersonNotFound):

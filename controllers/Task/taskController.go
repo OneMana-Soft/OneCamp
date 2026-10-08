@@ -2955,3 +2955,48 @@ func dateOrUnset(s string) (*time.Time, error) {
 	t, err := time.Parse(time.RFC3339, s)
 	return &t, err
 }
+
+// estimateInput is the body of POST /task/updateTaskEstimate.
+type estimateInput struct {
+	Uuid string `json:"task_uuid"`
+	// Minutes is how long the task should take; 0 takes the estimate off.
+	Minutes int `json:"task_estimate_minutes"`
+}
+
+// UpdateTaskEstimate handles POST /task/updateTaskEstimate {task_uuid,
+// task_estimate_minutes}: how long a task should take, for its project's
+// admins, as every task edit is (business.UpdateTaskEstimate).
+func UpdateTaskEstimate(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	var in estimateInput
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That change couldn't be read."})
+		return
+	}
+	taskUUID, err := uuid.Parse(in.Uuid)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a task."})
+		return
+	}
+	task, err := business.GetDgraphBasicTaskInfo(ctx, in.Uuid, userInfo.UserDgraphInfo.Uid)
+	if err != nil || task == nil || task.Uuid == "" || task.Project == nil {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Task not found"})
+		return
+	}
+	if task.Project.IsProjectAdmin == 0 {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the project's admins can change its tasks."})
+		return
+	}
+	switch err := business.UpdateTaskEstimate(ctx, taskUUID, in.Minutes, task, &userInfo.UserDgraphInfo); {
+	case err == nil:
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Estimate saved.", "data": map[string]any{"task_estimate_minutes": in.Minutes}})
+	case errors.Is(err, business.ErrEstimateRange):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "An estimate is from 0 to 1000 hours."})
+	case errors.Is(err, business.ErrTaskDeleted):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
+	default:
+		helpers.LogErrorWithContext(ctx, "controllers/UpdateTaskEstimate err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The estimate couldn't be saved just now. Try again in a moment."})
+	}
+}

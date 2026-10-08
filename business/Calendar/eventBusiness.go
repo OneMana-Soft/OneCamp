@@ -45,7 +45,9 @@ func CreateEvent(ctx context.Context, userInfo *model.UserInfo, eventInfo adapte
 		return nil, err
 	}
 
-	isFocus := eventInfo.IsFocus != nil && *eventInfo.IsFocus
+	isAway := eventInfo.IsAway != nil && *eventInfo.IsAway
+	// Time off isn't focus time: away, nobody is waiting on your notifications.
+	isFocus := eventInfo.IsFocus != nil && *eventInfo.IsFocus && !isAway
 	if isFocus {
 		if err := domain.SetCalendarEventFocus(ctx, eventUUID, true); err != nil {
 			return nil, err
@@ -85,6 +87,7 @@ func CreateEvent(ctx context.Context, userInfo *model.UserInfo, eventInfo adapte
 		},
 		Participants: participants,
 		IsFocus:      &isFocus,
+		IsAway:       &isAway,
 		CreatedAt:    &currentTime,
 		UpdatedAt:    &currentTime,
 		DeletedAt:    &zeroUnixTime,
@@ -108,6 +111,7 @@ func CreateEvent(ctx context.Context, userInfo *model.UserInfo, eventInfo adapte
 		CreatedBy:    userInfo.UserDgraphInfo.Uuid,
 		Participants: participantUuids,
 		IsFocus:      isFocus,
+		IsAway:       isAway,
 	}, nil
 }
 
@@ -152,6 +156,14 @@ func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.Cre
 		helpers.LogErrorWithContext(ctx, "business/UpdateEvent failed to update event in postgres err: %+v", err)
 		return err
 	}
+	// An event is time off or focus time, never both: whichever is turned on
+	// turns the other off (away wins when both are).
+	off := false
+	if eventInfo.IsAway != nil && *eventInfo.IsAway {
+		eventInfo.IsFocus = &off
+	} else if eventInfo.IsFocus != nil && *eventInfo.IsFocus {
+		eventInfo.IsAway = &off
+	}
 	if eventInfo.IsFocus != nil {
 		if err := domain.SetCalendarEventFocus(ctx, eventUUID, *eventInfo.IsFocus); err != nil {
 			return err
@@ -183,6 +195,7 @@ func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.Cre
 		EndTime:      &endTime,
 		Participants: participants,
 		IsFocus:      eventInfo.IsFocus,
+		IsAway:       eventInfo.IsAway,
 		UpdatedAt:    &currentTime,
 	}
 

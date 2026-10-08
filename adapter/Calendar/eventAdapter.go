@@ -12,6 +12,9 @@ type CreateOrUpdateEventInput struct {
 	// IsFocus pauses the creator's notifications while the event runs. A
 	// pointer: an update that leaves it out leaves focus as it was.
 	IsFocus *bool `json:"isFocus,omitempty"`
+	// IsAway marks the creator away (time off) while it runs; the workload
+	// takes those working days off their capacity. Away is never also focus.
+	IsAway *bool `json:"isAway,omitempty"`
 }
 
 type OutputEvent struct {
@@ -23,4 +26,5 @@ type OutputEvent struct {
 	CreatedBy    string     `json:"createdByUuid"`
 	Participants []string   `json:"participants"`
 	IsFocus      bool       `json:"isFocus"`
+	IsAway       bool       `json:"isAway"`
 }

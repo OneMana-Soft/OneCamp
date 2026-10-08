@@ -571,6 +571,7 @@ func GetDgraphBasicTaskInfoByUUID(ctx context.Context, teamUUID string, userDgra
 					task_start_date
 					task_due_date
 					task_deleted_at
+					task_estimate_minutes
 					task_description
 					task_team {
 						team_name
@@ -761,6 +762,7 @@ func GetDgraphTaskInfoByUUID(ctx context.Context, teamUUID string, userDgraphUID
 				task_github_pr_number
 				task_github_pr_url
 				task_github_branch
+				task_estimate_minutes
 				task_parent_task {
 					task_uuid
 					task_name

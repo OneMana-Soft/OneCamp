@@ -434,18 +434,31 @@ func (p *Provider) IterTasksOfProject(ctx context.Context, j *importModels.Job, 
 	return out, errCh
 }
 
-// IterSubtasksOfTask is intentionally empty: Linear sub-issues are
-// regular issues with `parent.id` set, and the snapshot already
-// streams them in IterTasksOfProject with ParentTaskID populated.
-// The orchestrator's subtask stage only runs for providers that need
-// per-task subtask fan-out (Trello checklists, Asana stories with
-// subtasks). Returning an empty stream here is the supported pattern.
+// IterSubtasksOfTask streams an issue's sub-issues. They are regular issues
+// with `parent.id` set: IterTasksOfProject sends them with ParentTaskID, the
+// task worker schedules a subtask chunk for the parent instead of importing
+// them, and that chunk reads them here. (It used to be empty, and every
+// sub-issue was dropped.)
 func (p *Provider) IterSubtasksOfTask(ctx context.Context, j *importModels.Job, opts importProvider.JobOptions, taskSourceID string) (<-chan importProvider.SourceTask, <-chan error) {
-	out := make(chan importProvider.SourceTask)
-	errCh := make(chan error, 1)
-	close(out)
-	close(errCh)
-	return out, errCh
+	// The task worker turns an issue with a parent into a subtask chunk for
+	// that parent and asks for its sub-issues here; the snapshot has them.
+	// A sub-issue belongs to its own project, or to its team's inbox.
+	return importProvider.StreamTasks(ctx, "linear.IterSubtasksOfTask",
+		func() ([]linearIssue, error) {
+			snap, err := p.snapshotFor(ctx, j)
+			if err != nil {
+				return nil, err
+			}
+			return snap.Issues, nil
+		},
+		func(iss linearIssue) bool { return iss.ParentID == taskSourceID },
+		func(iss linearIssue) importProvider.SourceTask {
+			project := iss.ProjectID
+			if project == "" {
+				project = inboxProjectIDPrefix + iss.TeamID
+			}
+			return p.issueToSourceTask(iss, project)
+		})
 }
 
 // IterCommentsOfTask streams comments for one issue. Comments come

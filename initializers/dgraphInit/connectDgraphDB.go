@@ -89,6 +89,9 @@ func createSchema() (err error) {
 		# How many tasks a week the person takes on, as the workload view
 		# measures them; unset, the default applies. business/Project/workload.go
 		user_weekly_capacity: int .
+		# How many hours a week they work, for the workload counted in hours;
+		# unset, the default applies.
+		user_weekly_hours: int .
 		user_tasks: [uid] .
 		user_events: [uid] .
 		user_fav_channels: [uid] @reverse .
@@ -285,6 +288,9 @@ func createSchema() (err error) {
 		# A task waits on these (finish-to-start): it can start once they are
 		# done. @reverse reads the tasks waiting on it. business/Task/taskDependency.go
 		task_blocked_by: [uid] @reverse .
+		# How long the task should take, in minutes; unset or 0, no estimate.
+		# The workload counts it in hours. business/Task/taskEstimate.go
+		task_estimate_minutes: int .
 
 		event_uuid: string @index(exact) @upsert .
 		event_title: string @index(trigram) .
@@ -298,6 +304,10 @@ func createSchema() (err error) {
 		event_participants: [uid] @reverse .
 		event_deleted_at: dateTime .
 		event_is_focus: bool .
+		# Time off: the creator is away while it runs, and the workload takes
+		# those days off their capacity. Indexed to find the away events of a
+		# window without walking every user. business/Project/workload.go
+		event_is_away: bool @index(bool) .
 
 		team_uuid: string @index(exact) @upsert .
 		team_name: string .
@@ -469,6 +479,7 @@ func createSchema() (err error) {
 			user_department
 			user_hobbies
 			user_weekly_capacity
+			user_weekly_hours
 			user_profile_object_key
 			user_dms: [Dm]
 			user_device_connected
@@ -589,6 +600,7 @@ func createSchema() (err error) {
 			task_deleted_at
 			task_rank
 			task_blocked_by: [Task]
+			task_estimate_minutes
 			linked_docs: [Doc]
 			linked_boards: [Board]
 		}
@@ -602,6 +614,7 @@ func createSchema() (err error) {
 			event_created_by: User
 			event_google_calendar_id
 			event_is_focus
+			event_is_away
 			event_participants: [User]
 			event_created_at
 			event_updated_at
