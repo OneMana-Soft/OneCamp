@@ -318,6 +318,14 @@ func PublishTaskDates(msg *mqttStruct.MqttTaskDates) {
 	publishToProject(context.Background(), msg.ProjectUuid, mqttStruct.MESSAGE_TASK_DATES, msg, "PublishTaskDates")
 }
 
+// PublishTaskField tells a task's project that one of its field values changed.
+func PublishTaskField(msg *mqttStruct.MqttTaskField) {
+	if msg == nil || msg.ProjectUuid == "" {
+		return
+	}
+	publishToProject(context.Background(), msg.ProjectUuid, mqttStruct.MESSAGE_TASK_FIELD, msg, "PublishTaskField")
+}
+
 func PublishTaskCommentReaction(mqttTaskCommentReaction *mqttStruct.MqttTaskCommentReaction, projectId string) {
 	ctx := context.Background()
 

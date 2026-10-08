@@ -67,6 +67,26 @@ func ListCycles(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"cycles": views, "can_edit": p.IsProjectAdmin > 0}})
 }
 
+// CycleBurndown is a cycle's burndown, by day in the reader's zone, and the
+// velocity of the project's latest completed cycles.
+// GET /project/{p}/cycles/{c}/burndown?tz=
+func CycleBurndown(w http.ResponseWriter, r *http.Request) {
+	id, _, ok := project(w, r, false)
+	if !ok {
+		return
+	}
+	c, ok := cycleIn(w, r, id)
+	if !ok {
+		return
+	}
+	view, err := cycleBusiness.GetBurndown(r.Context(), c, time.Now(), helpers.Location(r.URL.Query().Get("tz")))
+	if err != nil {
+		write(w, r, "CycleBurndown", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": view})
+}
+
 // CreateCycle adds one. POST /project/{p}/cycles {name, starts_at, weeks}
 func CreateCycle(w http.ResponseWriter, r *http.Request) {
 	id, _, ok := project(w, r, true)

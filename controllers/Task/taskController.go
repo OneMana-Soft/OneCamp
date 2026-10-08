@@ -19,6 +19,7 @@ import (
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	reactionBusiness "github.com/akashc777/OneCamp/business/Reaction"
 	business "github.com/akashc777/OneCamp/business/Task"
+	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 
@@ -729,6 +730,7 @@ func GetTaskInfo(w http.ResponseWriter, r *http.Request) {
 	// Merge ephemeral GitHub metadata from PostgreSQL into the Dgraph response
 	if dgraphTaskInfo != nil {
 		_ = business.MergeGitHubMetaIntoTask(ctx, taskUUID, dgraphTaskInfo)
+		_ = taskFieldBusiness.MergeFieldValues(ctx, []*dgraphStruct.DgraphTask{dgraphTaskInfo})
 	}
 
 	// if dgraphTaskInfo == nil || dgraphTaskInfo.Project.IsProjectMember == 0 {

@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -421,6 +422,10 @@ type DgraphTask struct {
 	// category it belongs to; see business/TaskStatus.
 	CustomStatus     *string `json:"task_custom_status,omitempty"`
 	CustomStatusName *string `json:"task_custom_status_name,omitempty"`
+	// Fields is the task's values of its project's custom fields, by field id.
+	// They live in Postgres and are laid over a task read for the app; they
+	// are never written to Dgraph (see models/dgraph/Task). See business/TaskField.
+	Fields map[string]json.RawMessage `json:"task_fields,omitempty"`
 }
 
 // DgraphMemoryItem is the GraphRAG projection of a workspace_memory_items
@@ -613,4 +618,7 @@ const ACTIVITY_TYPE_CREATE_TASK = "taskCreate"
 // or PrevState (taken off) holds the other task's uuid.
 const ACTIVITY_TYPE_ADD_DEPENDENCY = "dependencyAdd"
 const ACTIVITY_TYPE_ESTIMATE = "estimate"
+
+// A custom field's value set or cleared: NextState holds the field's name.
+const ACTIVITY_TYPE_FIELD = "fieldUpdate"
 const ACTIVITY_TYPE_REMOVE_DEPENDENCY = "dependencyRemove"

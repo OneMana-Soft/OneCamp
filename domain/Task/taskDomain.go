@@ -637,7 +637,7 @@ func GetDgraphTaskActivityList(ctx context.Context, taskUUID string, userDgraphU
 						}
 						activity_time
 						activity_type
-
+						activity_next_state
 					}
 					task_project {
 						project_is_member: count(project_members @filter(uid($userUid)))
@@ -678,7 +678,7 @@ func GetDgraphTaskActivityInfo(ctx context.Context, teamUUID string, activityUUI
 						}
 						activity_time
 						activity_type
-
+						activity_next_state
 					}
 					task_project {
 						project_is_member: count(project_members @filter(uid($userUid)))
@@ -831,7 +831,7 @@ func GetDgraphTaskInfoByUUID(ctx context.Context, teamUUID string, userDgraphUID
 						}
 						activity_time
 						activity_type
-
+						activity_next_state
 					}
 				}
 			}`
@@ -1314,8 +1314,9 @@ func syncTaskStatusToOpenSearch(uuids []string, category string) {
 	}
 }
 
-// GetDgraphTaskStatuses is the status of each live task listed, for counting
-// a cycle's progress. Archived tasks are left out.
+// GetDgraphTaskStatuses is the status of each live task listed, when it was
+// set and the task's estimate, for a cycle's progress, burndown and velocity.
+// Archived tasks are left out.
 func GetDgraphTaskStatuses(ctx context.Context, taskUUIDs []string) (tasks []*dgraphStruct.DgraphTask, err error) {
 	if len(taskUUIDs) == 0 {
 		return nil, nil
@@ -1328,6 +1329,8 @@ func GetDgraphTaskStatuses(ctx context.Context, taskUUIDs []string) (tasks []*dg
 				tasks(func: eq(task_uuid, %s)) @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")) {
 					task_uuid
 					task_status
+					task_status_since
+					task_estimate_minutes
 				}
 			}`, ids)
 	return dgraphModels.QueryDgraphTasks(ctx, query, nil)

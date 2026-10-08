@@ -102,7 +102,7 @@ func Save(ctx context.Context, t Template, author *userModels.UserInfo) (Summary
 	} else if n >= MaxSaved {
 		return Summary{}, fix("This workspace has %d saved templates, the most it keeps. Delete one you no longer use first.", n)
 	}
-	body, err := json.Marshal(Template{Statuses: t.Statuses, Tasks: t.Tasks})
+	body, err := json.Marshal(Template{Statuses: t.Statuses, Fields: t.Fields, Tasks: t.Tasks})
 	if err != nil {
 		return Summary{}, err
 	}

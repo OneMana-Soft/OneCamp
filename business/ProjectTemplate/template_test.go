@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	statusModel "github.com/akashc777/OneCamp/models/postgres/TaskStatus"
 )
@@ -297,5 +298,31 @@ func TestReadingOrder(t *testing.T) {
 	}
 	if !got[1].CreatedAt.Before(*got[0].CreatedAt) || !got[2].CreatedAt.Before(*got[1].CreatedAt) {
 		t.Errorf("each is older than the one before it, so newest-first reads a, a1, b")
+	}
+}
+
+func TestCheckKeepsAProjectsFields(t *testing.T) {
+	tasks := []Task{{Name: "Plan"}}
+	got, err := Check(Template{Name: "Launch", Tasks: tasks, Fields: []Field{
+		{Name: "  Channel ", Type: "select", Options: []taskFieldBusiness.OptionInput{{ID: "aaaa1111", Label: "Blog", Color: "violet"}, {Label: "Email"}}, OnCard: true},
+		{Name: "Budget", Type: "money"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Fields) != 2 || got.Fields[0].Name != "Channel" || !got.Fields[0].OnCard || got.Fields[0].Options[0].ID != "aaaa1111" || got.Fields[0].Options[1].ID == "" {
+		t.Errorf("the fields as kept: %+v", got.Fields)
+	}
+	if got.Fields[1].Currency != taskFieldBusiness.DefaultCurrency {
+		t.Errorf("money with no currency takes the default: %+v", got.Fields[1])
+	}
+	for _, bad := range [][]Field{
+		{{Name: "Size", Type: "slider"}},
+		{{Name: "Size", Type: "text"}, {Name: "size", Type: "number"}},
+	} {
+		var te *TemplateError
+		if _, err := Check(Template{Name: "x", Tasks: tasks, Fields: bad}); !errors.As(err, &te) {
+			t.Errorf("%+v: %v, want a message for the person", bad, err)
+		}
 	}
 }

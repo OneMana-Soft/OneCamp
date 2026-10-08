@@ -8,6 +8,7 @@ import (
 	taskAdapter "github.com/akashc777/OneCamp/adapter/Task"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
@@ -70,6 +71,7 @@ const (
 // Applied is what starting a project from a template made.
 type Applied struct {
 	Statuses int `json:"statuses"`
+	Fields   int `json:"fields"`
 	Tasks    int `json:"tasks"`  // tasks and subtasks
 	Failed   int `json:"failed"` // tasks and subtasks that couldn't be made
 }
@@ -98,6 +100,14 @@ func Apply(ctx context.Context, t Template, project *dgraphStruct.DgraphProject,
 			continue
 		}
 		out.Statuses++
+	}
+	// A field that couldn't be made is left out; the tasks don't need it.
+	for _, f := range t.Fields {
+		if _, err := taskFieldBusiness.Create(ctx, projectID, f, userID, ""); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/ProjectTemplate/Apply field %q err: %+v", f.Name, err)
+			continue
+		}
+		out.Fields++
 	}
 
 	var made []string // in the order the template reads: each task, then its subtasks

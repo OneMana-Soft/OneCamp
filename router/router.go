@@ -59,6 +59,7 @@ import (
 	slackBridgeController "github.com/akashc777/OneCamp/controllers/SlackBridge"
 	slackImportController "github.com/akashc777/OneCamp/controllers/SlackImport"
 	taskController "github.com/akashc777/OneCamp/controllers/Task"
+	taskFieldController "github.com/akashc777/OneCamp/controllers/TaskField"
 	taskStatusController "github.com/akashc777/OneCamp/controllers/TaskStatus"
 	teamController "github.com/akashc777/OneCamp/controllers/Team"
 	timeEntryController "github.com/akashc777/OneCamp/controllers/TimeEntry"
@@ -1382,6 +1383,7 @@ func Routes() http.Handler {
 		r.Post("/{project_uuid}/updates/{update_id}/edit", projectUpdateController.EditUpdate)
 		r.Post("/{project_uuid}/updates/{update_id}/delete", projectUpdateController.DeleteUpdate)
 		r.Get("/{project_uuid}/cycles", cycleController.ListCycles)
+		r.Get("/{project_uuid}/cycles/{cycle_id}/burndown", cycleController.CycleBurndown)
 		r.Post("/{project_uuid}/cycles", cycleController.CreateCycle)
 		r.Post("/{project_uuid}/cycles/{cycle_id}/rename", cycleController.RenameCycle)
 		r.Post("/{project_uuid}/cycles/{cycle_id}/complete", cycleController.CompleteCycle)
@@ -1391,6 +1393,12 @@ func Routes() http.Handler {
 		r.Post("/{project_uuid}/statuses/reorder", taskStatusController.Reorder)
 		r.Post("/{project_uuid}/statuses/{status_id}", taskStatusController.Update)
 		r.Post("/{project_uuid}/statuses/{status_id}/delete", taskStatusController.Delete)
+		// A project's custom task fields: members read, admins change.
+		r.Get("/{project_uuid}/fields", taskFieldController.ListFields)
+		r.Post("/{project_uuid}/fields", taskFieldController.CreateField)
+		r.Post("/{project_uuid}/fields/reorder", taskFieldController.ReorderFields)
+		r.Post("/{project_uuid}/fields/{field_id}", taskFieldController.UpdateField)
+		r.Post("/{project_uuid}/fields/{field_id}/delete", taskFieldController.DeleteField)
 	})
 
 	channelRouter.Group(func(r chi.Router) {
@@ -1458,6 +1466,7 @@ func Routes() http.Handler {
 		r.Post("/updateTaskDueDate", taskController.UpdateTaskDueDate)
 		r.Post("/updateTaskDates", taskController.UpdateTaskDates)
 		r.Post("/updateTaskEstimate", taskController.UpdateTaskEstimate)
+		r.Post("/field", taskFieldController.SetTaskField)
 		r.Post("/dependency", taskController.AddTaskDependency)
 		r.Post("/dependency/delete", taskController.RemoveTaskDependency)
 		r.Post("/updateTaskStatus", taskController.UpdateTaskStatus)

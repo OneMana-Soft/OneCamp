@@ -5,6 +5,7 @@ import (
 	"sort"
 	"time"
 
+	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	"github.com/akashc777/OneCamp/helpers"
@@ -164,7 +165,14 @@ func Snapshot(ctx context.Context, projectID uuid.UUID, name, description string
 	if err != nil {
 		return Template{}, err
 	}
+	fields, err := taskFieldBusiness.List(ctx, projectID)
+	if err != nil {
+		return Template{}, err
+	}
 	t := FromProject(name, description, statuses.Custom, p.Tasks, loc)
+	for _, f := range fields {
+		t.Fields = append(t.Fields, taskFieldBusiness.InputOf(f))
+	}
 	n := t.Size()
 	if len(p.Tasks) > MaxTasks {
 		n = max(n, int(p.TaskCount)) // only the first ones were read

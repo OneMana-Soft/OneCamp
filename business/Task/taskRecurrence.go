@@ -14,6 +14,7 @@ import (
 
 	adapter "github.com/akashc777/OneCamp/adapter/Task"
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
+	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	"github.com/akashc777/OneCamp/helpers"
@@ -170,6 +171,12 @@ func repeatIfRecurring(ctx context.Context, taskUUID uuid.UUID, by *dgraphStruct
 	if err != nil {
 		putBack("create next", err)
 		return
+	}
+	// The next copy keeps the task's custom field values.
+	if from, err := uuid.Parse(task.Uuid); err == nil {
+		if err := taskFieldBusiness.CopyValues(ctx, from, nextUUID, actorID); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/Task recurrence: copying field values err: %+v", err)
+		}
 	}
 	r.TaskUUID = nextUUID
 	if err := recurrenceModel.Put(r); err != nil {
