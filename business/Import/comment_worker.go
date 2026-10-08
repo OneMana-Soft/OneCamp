@@ -35,8 +35,8 @@ func processTaskCommentChunk(ctx context.Context, prov importProvider.Provider,
 	}
 	taskSrcId := *chunk.ParentSourceId
 
-	taskUUID, _ := importModels.LookupIdMapping(ctx, job.Id,
-		importModels.EntityTask, taskSrcId)
+	// A task or a subtask: both have comments.
+	taskUUID := lookupMappedTask(ctx, job.Id, taskSrcId).UUID
 	if taskUUID == uuid.Nil {
 		return importModels.FinishChunk(ctx, chunk.Id, 0, nil)
 	}

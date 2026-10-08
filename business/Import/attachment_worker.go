@@ -308,8 +308,9 @@ func resolveAttachmentParent(ctx context.Context, job *importModels.Job,
 	out := &attachmentParentInfo{Kind: meta.ParentKind}
 	switch meta.ParentKind {
 	case "task":
-		taskUUID, _ := importModels.LookupIdMapping(ctx, job.Id,
-			importModels.EntityTask, meta.ParentID)
+		// A task or a subtask: both have files.
+		mapped := lookupMappedTask(ctx, job.Id, meta.ParentID)
+		taskUUID := mapped.UUID
 		if taskUUID == uuid.Nil {
 			return out, fmt.Errorf("task %s not mapped", meta.ParentID)
 		}
@@ -318,24 +319,17 @@ func resolveAttachmentParent(ctx context.Context, job *importModels.Job,
 		out.ParentUUID = taskUUID
 		out.TaskUUID = taskUUID
 		// Resolve project for OpenSearch denorm.
-		if md, _ := importModels.GetIdMapMetadata(ctx, job.Id,
-			importModels.EntityTask, meta.ParentID); len(md) > 0 {
-			var m struct {
-				ProjectSourceId string `json:"project_source_id"`
-			}
-			_ = json.Unmarshal(md, &m)
-			if m.ProjectSourceId != "" {
-				if pid, _ := importModels.LookupIdMapping(ctx, job.Id,
-					importModels.EntityProject, m.ProjectSourceId); pid != uuid.Nil {
-					out.ProjectUUID = pid
-					if pmd, _ := importModels.GetIdMapMetadata(ctx, job.Id,
-						importModels.EntityProject, m.ProjectSourceId); len(pmd) > 0 {
-						var pm struct {
-							Name string `json:"name"`
-						}
-						_ = json.Unmarshal(pmd, &pm)
-						out.ProjectName = pm.Name
+		if src := mapped.ProjectSourceID; src != "" {
+			if pid, _ := importModels.LookupIdMapping(ctx, job.Id,
+				importModels.EntityProject, src); pid != uuid.Nil {
+				out.ProjectUUID = pid
+				if pmd, _ := importModels.GetIdMapMetadata(ctx, job.Id,
+					importModels.EntityProject, src); len(pmd) > 0 {
+					var pm struct {
+						Name string `json:"name"`
 					}
+					_ = json.Unmarshal(pmd, &pm)
+					out.ProjectName = pm.Name
 				}
 			}
 		}

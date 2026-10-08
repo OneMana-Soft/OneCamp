@@ -129,6 +129,7 @@ func GetDgraphEventInfoByUUID(ctx context.Context, eventUuid string) (*dgraphStr
 				event_uuid
 				event_title
 				event_is_focus
+				event_is_away
 				event_description
 				event_start_time
 				event_end_time
@@ -176,6 +177,7 @@ func GetDgraphEventsByUserId(ctx context.Context, userUuid string, startDate *ti
 					event_uuid
 					event_title
 					event_is_focus
+				event_is_away
 					event_description
 					event_start_time
 					event_end_time
@@ -198,6 +200,7 @@ func GetDgraphEventsByUserId(ctx context.Context, userUuid string, startDate *ti
 					event_uuid
 					event_title
 					event_is_focus
+				event_is_away
 					event_description
 					event_start_time
 					event_end_time

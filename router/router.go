@@ -1286,6 +1286,7 @@ func Routes() http.Handler {
 		r.Post("/updateTaskStartDate", taskController.UpdateTaskStartDate)
 		r.Post("/updateTaskDueDate", taskController.UpdateTaskDueDate)
 		r.Post("/updateTaskDates", taskController.UpdateTaskDates)
+		r.Post("/updateTaskEstimate", taskController.UpdateTaskEstimate)
 		r.Post("/dependency", taskController.AddTaskDependency)
 		r.Post("/dependency/delete", taskController.RemoveTaskDependency)
 		r.Post("/updateTaskStatus", taskController.UpdateTaskStatus)

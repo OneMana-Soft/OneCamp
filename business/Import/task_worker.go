@@ -226,8 +226,16 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 		job.Provider, job.SourceWorkspaceName,
 		importModels.EntityTask, st.SourceID, taskUUID, job.Id)
 
+	*pendingChunks = append(*pendingChunks, followUpChunks(job, st)...)
+	return nil
+}
+
+// followUpChunks are the chunks a task or subtask needs once it exists: its
+// comments, and each of its files.
+func followUpChunks(job *importModels.Job, st *importProvider.SourceTask) []*importModels.Chunk {
+	var out []*importModels.Chunk
 	if st.CommentCount > 0 {
-		*pendingChunks = append(*pendingChunks, &importModels.Chunk{
+		out = append(out, &importModels.Chunk{
 			Id:             uuid.New(),
 			ImportId:       job.Id,
 			ChunkType:      importModels.ChunkTaskComments,
@@ -242,7 +250,7 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 		if ck == "" {
 			continue
 		}
-		*pendingChunks = append(*pendingChunks, &importModels.Chunk{
+		out = append(out, &importModels.Chunk{
 			Id:             uuid.New(),
 			ImportId:       job.Id,
 			ChunkType:      importModels.ChunkAttachment,
@@ -252,8 +260,52 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 			MaxAttempts:    5,
 		})
 	}
-	return nil
+	return out
 }
+
+// mappedTask is where a source task landed in this import: as a task, or as
+// a subtask (the subtask stage maps those apart, as EntitySubtask).
+type mappedTask struct {
+	UUID            uuid.UUID // the task or subtask itself
+	TopSourceID     string    // the top-level task it is, or sits under
+	TopUUID         uuid.UUID
+	ProjectSourceID string
+}
+
+// lookupMappedTask finds a source task as a task, else as a subtask; its
+// UUID is nil when it hasn't been imported (yet).
+func lookupMappedTask(ctx context.Context, jobID uuid.UUID, src string) mappedTask {
+	if id, _ := importModels.LookupIdMapping(ctx, jobID, importModels.EntityTask, src); id != uuid.Nil {
+		m := mappedTask{UUID: id, TopSourceID: src, TopUUID: id}
+		if md, _ := importModels.GetIdMapMetadata(ctx, jobID, importModels.EntityTask, src); len(md) > 0 {
+			var v struct {
+				ProjectSourceID string `json:"project_source_id"`
+			}
+			_ = json.Unmarshal(md, &v)
+			m.ProjectSourceID = v.ProjectSourceID
+		}
+		return m
+	}
+	if id, _ := importModels.LookupIdMapping(ctx, jobID, importModels.EntitySubtask, src); id != uuid.Nil {
+		m := mappedTask{UUID: id}
+		if md, _ := importModels.GetIdMapMetadata(ctx, jobID, importModels.EntitySubtask, src); len(md) > 0 {
+			var v struct {
+				ParentTaskUUID  string `json:"parent_task_uuid"`
+				ParentSourceID  string `json:"parent_source_id"`
+				ProjectSourceID string `json:"project_source_id"`
+			}
+			_ = json.Unmarshal(md, &v)
+			m.TopSourceID, m.ProjectSourceID = v.ParentSourceID, v.ProjectSourceID
+			m.TopUUID, _ = uuid.Parse(v.ParentTaskUUID)
+		}
+		return m
+	}
+	return mappedTask{}
+}
+
+// parentWaits is how many times a subtask chunk waits for its parent, a
+// second at a time, before saying it couldn't place the subtasks.
+const parentWaits = 30
 
 // processSubtaskChunk creates each subtask under its parent. Implemented
 // as a flat task plus a "parent_task" edge so we don't re-implement
@@ -268,22 +320,36 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 	}
 	parentSrc := *chunk.ParentSourceId
 
-	parentUUID, _ := importModels.LookupIdMapping(ctx, job.Id,
-		importModels.EntityTask, parentSrc)
-	if parentUUID == uuid.Nil {
+	// The parent may be a subtask itself (ClickUp and Linear nest them),
+	// imported by another chunk of this stage that hasn't run yet: wait for
+	// it, then say so if it never comes, rather than dropping the subtasks.
+	parent := lookupMappedTask(ctx, job.Id, parentSrc)
+	if parent.UUID == uuid.Nil || parent.TopUUID == uuid.Nil {
+		waits := 0
+		if chunk.LastCursor != nil {
+			_, _ = fmt.Sscanf(*chunk.LastCursor, "parent-wait:%d", &waits)
+		}
+		if waits < parentWaits {
+			cursor := fmt.Sprintf("parent-wait:%d", waits+1)
+			_ = importModels.HeartbeatChunk(ctx, chunk.Id, 0, &cursor)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Second):
+			}
+			_ = importModels.ResetChunkForRetry(ctx, chunk.Id, "waiting for the parent task")
+			return errReaperOnly
+		}
+		importModels.LogImportError(ctx, job.Id, &chunk.Id,
+			importModels.EntitySubtask, parentSrc,
+			importModels.SeverityWarning, "SUBTASK_PARENT_MISSING",
+			"the subtasks' parent task wasn't imported, so they weren't either", nil)
 		return importModels.FinishChunk(ctx, chunk.Id, 0, nil)
 	}
-
-	parentMeta, _ := importModels.GetIdMapMetadata(ctx, job.Id,
-		importModels.EntityTask, parentSrc)
-	parentProjectSrc := ""
-	if len(parentMeta) > 0 {
-		var m struct {
-			ProjectSourceId string `json:"project_source_id"`
-		}
-		_ = json.Unmarshal(parentMeta, &m)
-		parentProjectSrc = m.ProjectSourceId
-	}
+	// OneCamp's subtasks are one level deep: a subtask's own subtasks go
+	// under the same top-level task.
+	parentUUID := parent.TopUUID
+	parentProjectSrc := parent.ProjectSourceID
 	projectUUID := uuid.Nil
 	if parentProjectSrc != "" {
 		projectUUID, _ = importModels.LookupIdMapping(ctx, job.Id,
@@ -310,6 +376,16 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 
 	subCh, errCh := prov.IterSubtasksOfTask(ctx, job, opts, parentSrc)
 	committed := 0
+	var pending []*importModels.Chunk
+	finish := func() error {
+		// Their comments and files, as for any task.
+		if len(pending) > 0 {
+			if err := importModels.CreateChunks(ctx, pending); err != nil {
+				helpers.LogWarnWithContext(ctx, "task_worker.processSubtaskChunk chunks insert failed batch=%d err=%+v", len(pending), err)
+			}
+		}
+		return importModels.FinishChunk(ctx, chunk.Id, committed, nil)
+	}
 
 	for {
 		select {
@@ -327,7 +403,7 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 			errCh = nil
 		case st, ok := <-subCh:
 			if !ok {
-				return importModels.FinishChunk(ctx, chunk.Id, committed, nil)
+				return finish()
 			}
 			if existing, _ := importModels.LookupIdMapping(ctx, job.Id,
 				importModels.EntitySubtask, st.SourceID); existing != uuid.Nil {
@@ -382,12 +458,15 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 			_ = importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
 				importModels.EntitySubtask, st.SourceID, subUUID, &parentSrc,
 				mustMarshal(map[string]any{
-					"parent_task_uuid": parentUUID.String(),
-					"name":             st.Name,
+					"parent_task_uuid":  parentUUID.String(),
+					"parent_source_id":  parent.TopSourceID,
+					"project_source_id": parentProjectSrc,
+					"name":              st.Name,
 				}), true)
 			_ = importModels.UpsertWorkspaceMapping(ctx,
 				job.Provider, job.SourceWorkspaceName,
 				importModels.EntitySubtask, st.SourceID, subUUID, job.Id)
+			pending = append(pending, followUpChunks(job, &st)...)
 			committed++
 		}
 	}

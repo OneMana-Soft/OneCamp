@@ -23,11 +23,18 @@ const DefaultWeeklyCapacity = 5
 // MaxWeeklyCapacity is the most anyone can set.
 const MaxWeeklyCapacity = 100
 
+// DefaultWeeklyHours is how many hours a week someone works when nobody has
+// said, for the workload counted in hours; MaxWeeklyHours is the most.
+const (
+	DefaultWeeklyHours = 40
+	MaxWeeklyHours     = 168
+)
+
 // maxWorkloadTasks bounds the tasks one workload sends; the latest due stay.
 const maxWorkloadTasks = 5000
 
 var (
-	ErrCapacityRange    = errors.New("capacity must be from 1 to 100 tasks a week")
+	ErrCapacityRange    = errors.New("capacity must be from 1 to 100 tasks, or 1 to 168 hours, a week")
 	ErrCapacityNotYours = errors.New("only they or a workspace admin can change it")
 	ErrPersonNotFound   = errors.New("person not found")
 )
@@ -45,6 +52,8 @@ type WorkloadPerson struct {
 	Title       string   `json:"user_job_title,omitempty"`
 	Capacity    int      `json:"capacity"`
 	CapacitySet bool     `json:"capacity_set"`
+	Hours       int      `json:"hours"`
+	HoursSet    bool     `json:"hours_set"`
 	CanEdit     bool     `json:"can_edit_capacity"`
 	Projects    []string `json:"project_uuids"`
 
@@ -75,6 +84,16 @@ type WorkloadTask struct {
 	ProjectName  string     `json:"project_name"`
 	ParentName   string     `json:"parent_name,omitempty"`
 	CanEdit      bool       `json:"can_edit"`
+	// EstimateMinutes is how long it should take; 0 for no estimate.
+	EstimateMinutes int `json:"task_estimate_minutes,omitempty"`
+}
+
+// AwaySpan is time off someone marked on their calendar: the workload takes
+// its working days out of their capacity. Only the dates are sent.
+type AwaySpan struct {
+	UserUUID string    `json:"user_uuid"`
+	Start    time.Time `json:"start"`
+	End      time.Time `json:"end"`
 }
 
 // Workload is what the workload view draws. A task whose assignee's account
@@ -83,7 +102,9 @@ type Workload struct {
 	People          []*WorkloadPerson `json:"people"`
 	Tasks           []WorkloadTask    `json:"tasks"`
 	Undated         []UndatedCount    `json:"undated"`
+	Away            []AwaySpan        `json:"away"`
 	DefaultCapacity int               `json:"default_capacity"`
+	DefaultHours    int               `json:"default_hours"`
 	Truncated       bool              `json:"truncated"`
 }
 
@@ -97,13 +118,14 @@ func datedOrNil(t *time.Time) *time.Time {
 // GetWorkload reads the workload of every project the reader is in, for the
 // tasks that start before until. A bot isn't a row, and a task an agent has
 // is the agent's to run, so it isn't counted.
-func GetWorkload(ctx context.Context, readerUID, readerUUID string, readerIsAdmin bool, until time.Time) (*Workload, error) {
-	projects, err := domain.GetDgraphWorkload(ctx, readerUID, until)
+func GetWorkload(ctx context.Context, readerUID, readerUUID string, readerIsAdmin bool, from, until time.Time) (*Workload, error) {
+	read, err := domain.GetDgraphWorkload(ctx, readerUID, from, until)
 	if err != nil {
 		return nil, err
 	}
+	projects := read.Projects
 	people := map[string]*WorkloadPerson{}
-	w := &Workload{People: []*WorkloadPerson{}, Tasks: []WorkloadTask{}, Undated: []UndatedCount{}, DefaultCapacity: DefaultWeeklyCapacity}
+	w := &Workload{People: []*WorkloadPerson{}, Tasks: []WorkloadTask{}, Undated: []UndatedCount{}, Away: []AwaySpan{}, DefaultCapacity: DefaultWeeklyCapacity, DefaultHours: DefaultWeeklyHours}
 	add := func(u *dgraphStruct.DgraphUser, project string, member bool) *WorkloadPerson {
 		if u == nil || u.Uuid == "" || u.IsBot || datedOrNil(u.DeletedAt) != nil {
 			return nil
@@ -111,9 +133,12 @@ func GetWorkload(ctx context.Context, readerUID, readerUUID string, readerIsAdmi
 		p, ok := people[u.Uuid]
 		if !ok {
 			p = &WorkloadPerson{UUID: u.Uuid, Name: u.UserName, FullName: u.UserFullName, ProfileKey: u.ProfileKey, Title: u.Title,
-				Capacity: DefaultWeeklyCapacity, CanEdit: readerIsAdmin || u.Uuid == readerUUID, Projects: []string{}, inProject: map[string]bool{}}
+				Capacity: DefaultWeeklyCapacity, Hours: DefaultWeeklyHours, CanEdit: readerIsAdmin || u.Uuid == readerUUID, Projects: []string{}, inProject: map[string]bool{}}
 			if u.WeeklyCapacity != nil && *u.WeeklyCapacity > 0 {
 				p.Capacity, p.CapacitySet = *u.WeeklyCapacity, true
+			}
+			if u.WeeklyHours != nil && *u.WeeklyHours > 0 {
+				p.Hours, p.HoursSet = *u.WeeklyHours, true
 			}
 			people[u.Uuid] = p
 			w.People = append(w.People, p)
@@ -138,7 +163,7 @@ func GetWorkload(ctx context.Context, readerUID, readerUUID string, readerIsAdmi
 			if t.Assignee != nil && t.Assignee.IsBot {
 				continue
 			}
-			task := WorkloadTask{UUID: t.Uuid, Name: t.Name, Status: t.Status, CustomStatus: t.CustomStatus, CustomName: t.CustomStatusName,
+			task := WorkloadTask{EstimateMinutes: estimateOf(t), UUID: t.Uuid, Name: t.Name, Status: t.Status, CustomStatus: t.CustomStatus, CustomName: t.CustomStatusName,
 				Start: datedOrNil(t.StartDate), Due: datedOrNil(t.DueDate), ProjectUUID: pr.UUID, ProjectName: pr.Name, CanEdit: pr.IsAdmin > 0}
 			if p := add(t.Assignee, pr.UUID, false); p != nil {
 				task.AssigneeUUID = p.UUID
@@ -172,12 +197,27 @@ func GetWorkload(ctx context.Context, readerUID, readerUUID string, readerIsAdmi
 			w.Undated = append(w.Undated, UndatedCount{ProjectUUID: pr.UUID, UserUUID: who, Count: counts[who]})
 		}
 	}
+	// Time off of the people shown, and no one else's.
+	for _, e := range read.Away {
+		if e.CreatedBy == nil || people[e.CreatedBy.Uuid] == nil || e.StartTime == nil || e.EndTime == nil || !e.EndTime.After(*e.StartTime) {
+			continue
+		}
+		w.Away = append(w.Away, AwaySpan{UserUUID: e.CreatedBy.Uuid, Start: *e.StartTime, End: *e.EndTime})
+	}
 	sort.SliceStable(w.Tasks, func(i, j int) bool { return lastOf(w.Tasks[i]).After(lastOf(w.Tasks[j])) })
 	if len(w.Tasks) > maxWorkloadTasks {
 		w.Tasks, w.Truncated = w.Tasks[:maxWorkloadTasks], true
 	}
 	sort.SliceStable(w.People, func(i, j int) bool { return w.People[i].Name < w.People[j].Name })
 	return w, nil
+}
+
+// estimateOf is a task's estimate in minutes, 0 for none.
+func estimateOf(t *dgraphStruct.DgraphTask) int {
+	if t.EstimateMinutes == nil || *t.EstimateMinutes < 0 {
+		return 0
+	}
+	return *t.EstimateMinutes
 }
 
 // lastOf is the day a task is done by: its due date, else its start.
@@ -191,21 +231,36 @@ func lastOf(t WorkloadTask) time.Time {
 	return time.Time{}
 }
 
-// SetWeeklyCapacity sets how many tasks a week someone takes on; 0 puts back
-// the default. Anyone can set their own, and a workspace admin anyone's.
-func SetWeeklyCapacity(ctx context.Context, readerUUID string, readerIsAdmin bool, userUUID string, tasks int) error {
+// Capacity is what a person takes on in a week: Tasks, Hours, or both; nil
+// leaves one as it is, 0 puts back its default.
+type Capacity struct {
+	Tasks *int
+	Hours *int
+}
+
+// SetCapacity sets someone's weekly capacity. Anyone can set their own, and a
+// workspace admin anyone's.
+func SetCapacity(ctx context.Context, readerUUID string, readerIsAdmin bool, userUUID string, c Capacity) error {
 	if userUUID != readerUUID && !readerIsAdmin {
 		return ErrCapacityNotYours
 	}
-	if tasks < 0 || tasks > MaxWeeklyCapacity {
+	if (c.Tasks == nil && c.Hours == nil) || (c.Tasks != nil && (*c.Tasks < 0 || *c.Tasks > MaxWeeklyCapacity)) || (c.Hours != nil && (*c.Hours < 0 || *c.Hours > MaxWeeklyHours)) {
 		return ErrCapacityRange
 	}
-	found, err := domain.SetDgraphWeeklyCapacity(ctx, userUUID, tasks)
-	if err != nil {
-		return err
-	}
-	if !found {
-		return ErrPersonNotFound
+	for _, set := range []struct {
+		value     *int
+		predicate string
+	}{{c.Tasks, domain.CapacityTasks}, {c.Hours, domain.CapacityHours}} {
+		if set.value == nil {
+			continue
+		}
+		found, err := domain.SetDgraphCapacity(ctx, userUUID, set.predicate, *set.value)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return ErrPersonNotFound
+		}
 	}
 	return nil
 }

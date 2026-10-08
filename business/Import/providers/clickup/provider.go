@@ -382,15 +382,24 @@ func (p *Provider) IterTasksOfProject(ctx context.Context, j *importModels.Job, 
 	return out, errCh
 }
 
-// IterSubtasksOfTask is empty: ClickUp's subtasks are regular tasks
-// with `parent` set, already streamed in IterTasksOfProject with
-// ParentTaskID populated. Same pattern as Linear.
+// IterSubtasksOfTask streams a task's subtasks. ClickUp's subtasks are
+// regular tasks with `parent` set: IterTasksOfProject sends them with
+// ParentTaskID, the task worker schedules a subtask chunk for the parent
+// instead of importing them, and that chunk reads them here. (It used to be
+// empty, and every subtask was dropped.)
 func (p *Provider) IterSubtasksOfTask(ctx context.Context, j *importModels.Job, opts importProvider.JobOptions, taskSourceID string) (<-chan importProvider.SourceTask, <-chan error) {
-	out := make(chan importProvider.SourceTask)
-	errCh := make(chan error, 1)
-	close(out)
-	close(errCh)
-	return out, errCh
+	// The task worker turns a task with a parent into a subtask chunk for
+	// that parent and asks for its subtasks here; the snapshot has them.
+	return importProvider.StreamTasks(ctx, "clickup.IterSubtasksOfTask",
+		func() ([]clickupTask, error) {
+			snap, err := p.snapshotFor(ctx, j, opts)
+			if err != nil {
+				return nil, err
+			}
+			return snap.Tasks, nil
+		},
+		func(t clickupTask) bool { return t.ParentID == taskSourceID },
+		p.taskToSourceTask)
 }
 
 // IterCommentsOfTask streams comments for one task. The snapshot

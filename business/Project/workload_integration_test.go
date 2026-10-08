@@ -53,7 +53,7 @@ func TestWorkload(t *testing.T) {
 					person("left", "Left", map[string]any{"user_deleted_at": gone}),
 				},
 				"project_tasks": []map[string]any{
-					task("Spec", map[string]any{"task_assignee": on("alice"), "task_start_date": "2026-10-05T09:00:00Z", "task_due_date": "2026-10-09T17:00:00Z"}),
+					task("Spec", map[string]any{"task_assignee": on("alice"), "task_start_date": "2026-10-05T09:00:00Z", "task_due_date": "2026-10-09T17:00:00Z", "task_estimate_minutes": 120}),
 					task("Review", map[string]any{"task_assignee": on("alice"), "task_due_date": "2026-10-14T17:00:00Z"}),
 					task("Nobody's", map[string]any{"task_due_date": "2026-10-15T17:00:00Z"}),
 					task("Agent's", map[string]any{"task_assignee": on("bot"), "task_due_date": "2026-10-15T17:00:00Z"}),
@@ -87,7 +87,7 @@ func TestWorkload(t *testing.T) {
 	}})
 
 	until := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
-	w, err := GetWorkload(ctx, uids["me"], id["me"], false, until)
+	w, err := GetWorkload(ctx, uids["me"], id["me"], false, time.Now().AddDate(0, 0, -400), until)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,6 +143,9 @@ func TestWorkload(t *testing.T) {
 			t.Fatalf("want %v, got %v", want, tasks)
 		}
 	}
+	if got["Spec"].EstimateMinutes != 120 || got["Review"].EstimateMinutes != 0 {
+		t.Fatalf("Spec is estimated at two hours, Review not at all: %d %d", got["Spec"].EstimateMinutes, got["Review"].EstimateMinutes)
+	}
 	if got["Spec"].AssigneeUUID != id["alice"] || !got["Spec"].CanEdit || got["Spec"].Start == nil || got["Spec"].ProjectName != "Launch" {
 		t.Fatalf("Spec is Alice's, in Launch, which the reader runs: %+v", got["Spec"])
 	}
@@ -157,32 +160,38 @@ func TestWorkload(t *testing.T) {
 	}
 
 	// Capacity: their own, or anyone's for a workspace admin.
-	if err := SetWeeklyCapacity(ctx, id["me"], false, id["alice"], 4); !errors.Is(err, ErrCapacityNotYours) {
+	num := func(n int) *int { return &n }
+	if err := SetCapacity(ctx, id["me"], false, id["alice"], Capacity{Tasks: num(4)}); !errors.Is(err, ErrCapacityNotYours) {
 		t.Fatalf("a member can't change someone else's: %v", err)
 	}
 	for _, bad := range []int{-1, MaxWeeklyCapacity + 1} {
-		if err := SetWeeklyCapacity(ctx, id["me"], false, id["me"], bad); !errors.Is(err, ErrCapacityRange) {
+		if err := SetCapacity(ctx, id["me"], false, id["me"], Capacity{Tasks: num(bad)}); !errors.Is(err, ErrCapacityRange) {
 			t.Fatalf("%d is out of range: %v", bad, err)
 		}
 	}
-	if err := SetWeeklyCapacity(ctx, id["me"], true, uuid.NewString(), 4); !errors.Is(err, ErrPersonNotFound) {
+	if err := SetCapacity(ctx, id["me"], true, uuid.NewString(), Capacity{Tasks: num(4)}); !errors.Is(err, ErrPersonNotFound) {
 		t.Fatalf("nobody by that id: %v", err)
 	}
-	if err := SetWeeklyCapacity(ctx, id["me"], false, id["me"], 8); err != nil {
+	if err := SetCapacity(ctx, id["me"], false, id["me"], Capacity{Tasks: num(8), Hours: num(30)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := SetWeeklyCapacity(ctx, id["me"], true, id["alice"], 0); err != nil {
+	for _, bad := range []Capacity{{}, {Hours: num(MaxWeeklyHours + 1)}, {Hours: num(-1)}} {
+		if err := SetCapacity(ctx, id["me"], false, id["me"], bad); !errors.Is(err, ErrCapacityRange) {
+			t.Fatalf("%+v is out of range: %v", bad, err)
+		}
+	}
+	if err := SetCapacity(ctx, id["me"], true, id["alice"], Capacity{Tasks: num(0)}); err != nil {
 		t.Fatal(err)
 	}
-	w, err = GetWorkload(ctx, uids["me"], id["me"], true, until)
+	w, err = GetWorkload(ctx, uids["me"], id["me"], true, time.Now().AddDate(0, 0, -400), until)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range w.People {
 		switch p.Name {
 		case "Me":
-			if p.Capacity != 8 || !p.CapacitySet {
-				t.Fatalf("the reader set 8: %+v", p)
+			if p.Capacity != 8 || !p.CapacitySet || p.Hours != 30 || !p.HoursSet {
+				t.Fatalf("the reader set 8 tasks and 30 hours: %+v", p)
 			}
 		case "Alice":
 			if p.Capacity != DefaultWeeklyCapacity || p.CapacitySet || !p.CanEdit {
@@ -208,7 +217,7 @@ func TestWorkloadStartOnlyTasksSurviveTheCap(t *testing.T) {
 		"user_projects": []map[string]any{{"uid": "_:p", "dgraph.type": "Project", "project_uuid": uuid.NewString(), "project_name": "P",
 			"project_admins": []map[string]any{{"uid": "_:me"}}, "project_tasks": tasks}},
 	})
-	w, err := GetWorkload(ctx, uids["me"], me, false, time.Now().AddDate(0, 0, 91))
+	w, err := GetWorkload(ctx, uids["me"], me, false, time.Now().AddDate(0, 0, -400), time.Now().AddDate(0, 0, 91))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +258,7 @@ func TestWorkloadUndatedOfFormerPeople(t *testing.T) {
 			},
 		}},
 	})
-	w, err := GetWorkload(ctx, uids["me"], me, false, time.Now().AddDate(0, 0, 91))
+	w, err := GetWorkload(ctx, uids["me"], me, false, time.Now().AddDate(0, 0, -400), time.Now().AddDate(0, 0, 91))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,5 +268,44 @@ func TestWorkloadUndatedOfFormerPeople(t *testing.T) {
 	}
 	if len(got) != 2 || got[""] != 1 || got[ex] != 1 {
 		t.Fatalf("a deleted account's task without dates is nobody's, an ex-member's stays theirs: %v", got)
+	}
+}
+
+// Time off: away events of the people shown, in the window, and nothing else
+// (not a deleted one, not focus time, not someone outside the projects).
+func TestWorkloadAway(t *testing.T) {
+	ctx := context.Background()
+	dg := integration.SetupDgraph(t)
+	live, gone := "0001-01-01T00:00:00Z", "2026-09-01T00:00:00Z"
+	me, alice, stranger := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	event := func(by map[string]any, start, end string, more map[string]any) map[string]any {
+		m := map[string]any{"dgraph.type": "Event", "event_uuid": uuid.NewString(), "event_title": "Leave", "event_is_away": true,
+			"event_start_time": start, "event_end_time": end, "event_deleted_at": live, "event_created_by": by}
+		for k, v := range more {
+			m[k] = v
+		}
+		return m
+	}
+	uids := dg.Mutate(t, map[string]any{
+		"uid": "_:me", "dgraph.type": "User", "user_uuid": me, "user_name": "Me",
+		"user_projects": []map[string]any{{"uid": "_:p", "dgraph.type": "Project", "project_uuid": uuid.NewString(), "project_name": "P",
+			"project_admins":  []map[string]any{{"uid": "_:me"}},
+			"project_members": []map[string]any{{"uid": "_:alice", "dgraph.type": "User", "user_uuid": alice, "user_name": "Alice"}}}},
+	})
+	a, s := map[string]any{"uid": uids["alice"]}, map[string]any{"uid": "_:s", "dgraph.type": "User", "user_uuid": stranger, "user_name": "Stranger"}
+	dg.Mutate(t, event(a, "2026-10-12T00:00:00Z", "2026-10-15T00:00:00Z", nil))
+	dg.Mutate(t, event(a, "2027-06-01T00:00:00Z", "2027-06-05T00:00:00Z", nil))
+	dg.Mutate(t, event(a, "2026-10-19T00:00:00Z", "2026-10-20T00:00:00Z", map[string]any{"event_deleted_at": gone}))
+	dg.Mutate(t, event(a, "2026-10-21T09:00:00Z", "2026-10-21T11:00:00Z", map[string]any{"event_is_away": false, "event_is_focus": true}))
+	dg.Mutate(t, event(s, "2026-10-12T00:00:00Z", "2026-10-15T00:00:00Z", nil))
+	dg.Mutate(t, event(a, "2026-10-26T00:00:00Z", "2026-10-26T00:00:00Z", nil))
+
+	from, until := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)
+	w, err := GetWorkload(ctx, uids["me"], me, false, from, until)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(w.Away) != 1 || w.Away[0].UserUUID != alice || w.Away[0].Start.Day() != 12 || w.Away[0].End.Day() != 15 {
+		t.Fatalf("only Alice's live time off in the weeks shown: %+v", w.Away)
 	}
 }

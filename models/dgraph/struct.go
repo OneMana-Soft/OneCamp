@@ -193,8 +193,11 @@ type DgraphUser struct {
 	ThemeMode                string                   `json:"user_theme_mode,omitempty"`
 	// WeeklyCapacity is how many tasks a week they take on (the workload
 	// view); nil, the default applies.
-	WeeklyCapacity *int     `json:"user_weekly_capacity,omitempty"`
-	DType          []string `json:"dgraph.type,omitempty"`
+	WeeklyCapacity *int `json:"user_weekly_capacity,omitempty"`
+	// WeeklyHours is how many hours a week they work (the workload in
+	// hours); nil, the default applies.
+	WeeklyHours *int     `json:"user_weekly_hours,omitempty"`
+	DType       []string `json:"dgraph.type,omitempty"`
 }
 
 type DgraphChat struct {
@@ -411,6 +414,8 @@ type DgraphTask struct {
 	Blocks    []*DgraphTask `json:"task_blocks,omitempty"`
 	// How many of the tasks it waits on are still open (TASK_BLOCKED_OPEN).
 	BlockedOpen uint32 `json:"task_blocked_open,omitempty"`
+	// EstimateMinutes is how long the task should take; 0 or unset is none.
+	EstimateMinutes *int `json:"task_estimate_minutes,omitempty"`
 	// The project's own status the task is in, if any, and its name at the
 	// time it was set (kept in step on rename). Status above holds the built-in
 	// category it belongs to; see business/TaskStatus.
@@ -479,6 +484,9 @@ type DgraphEvent struct {
 	DeletedAt             *time.Time    `json:"event_deleted_at,omitempty"`
 	// IsFocus marks focus time: the creator's notifications pause while it runs.
 	IsFocus *bool `json:"event_is_focus,omitempty"`
+	// IsAway marks time off: the creator is away, and the workload counts
+	// those working days out of their capacity.
+	IsAway *bool `json:"event_is_away,omitempty"`
 }
 
 // const TASK_STATUS_TODO = "todo"
@@ -604,4 +612,5 @@ const ACTIVITY_TYPE_CREATE_TASK = "taskCreate"
 // A dependency added to or taken off the task that waits: NextState (added)
 // or PrevState (taken off) holds the other task's uuid.
 const ACTIVITY_TYPE_ADD_DEPENDENCY = "dependencyAdd"
+const ACTIVITY_TYPE_ESTIMATE = "estimate"
 const ACTIVITY_TYPE_REMOVE_DEPENDENCY = "dependencyRemove"

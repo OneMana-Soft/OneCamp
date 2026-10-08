@@ -14,6 +14,7 @@ import (
 	_ "github.com/akashc777/OneCamp/business/Import/providers/clickup"
 	_ "github.com/akashc777/OneCamp/business/Import/providers/jira"
 	_ "github.com/akashc777/OneCamp/business/Import/providers/linear"
+	_ "github.com/akashc777/OneCamp/business/Import/providers/monday"
 	_ "github.com/akashc777/OneCamp/business/Import/providers/notion"
 	_ "github.com/akashc777/OneCamp/business/Import/providers/todoist"
 	_ "github.com/akashc777/OneCamp/business/Import/providers/trello"
