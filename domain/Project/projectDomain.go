@@ -1139,7 +1139,7 @@ func GetDgraphProjectTimeline(ctx context.Context, projectUUID, userDgraphUID st
 						user_profile_object_key
 					}
 					task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
-					task_blocked_by @filter(%s) { task_uuid }
+					task_blocked_by @facets(kind, lag) @filter(%s) { task_uuid }
 					%s
 				}
 			}

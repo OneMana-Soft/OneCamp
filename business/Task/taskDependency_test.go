@@ -242,3 +242,44 @@ func TestPlanShiftsResolvesALongChainInOnePass(t *testing.T) {
 		}
 	}
 }
+
+// A moved to run from the 10th to the 14th; B waits on it in each way.
+func TestPlanShiftsByKindAndLag(t *testing.T) {
+	loc := time.UTC
+	cases := []struct {
+		name               string
+		kind               string
+		lag                int
+		start, due         int
+		wantStart, wantDue int // 0: B stays where it is
+	}{
+		// The day after A's last, two days on: the 17th.
+		{"finish to start, 2 days after", FinishToStart, 2, 12, 13, 17, 18},
+		// No earlier than A's first day, the 10th: B already starts later.
+		{"start to start", StartToStart, 0, 12, 13, 0, 0},
+		{"start to start, 3 days after", StartToStart, 3, 12, 13, 13, 14},
+		// B ends no earlier than A's last day, keeping its three days.
+		{"finish to finish", FinishToFinish, 0, 8, 11, 11, 14},
+		// B ends no earlier than A's first day.
+		{"start to finish", StartToFinish, 0, 5, 7, 8, 10},
+		// Two days ahead: B may start on the 13th, and does already.
+		{"finish to start, 2 days ahead", FinishToStart, -2, 13, 15, 0, 0},
+		// An edge with no kind is finish to start.
+		{"no kind", "", 0, 12, 13, 15, 16},
+	}
+	for _, c := range cases {
+		b := waits("B", at(loc, 2026, 10, c.start, 9), at(loc, 2026, 10, c.due, 17))
+		b.BlockedBy = []*dgraphStruct.DgraphTask{{Uuid: "A", DependencyKind: c.kind, DependencyLag: c.lag}}
+		tasks := []*dgraphStruct.DgraphTask{waits("A", at(loc, 2026, 10, 10, 9), at(loc, 2026, 10, 14, 17)), b}
+		got, moved := shiftsOf(PlanShifts(tasks, "A", loc))["B"]
+		if c.wantStart == 0 {
+			if moved {
+				t.Errorf("%s: B moved to %v–%v", c.name, got.Start, got.Due)
+			}
+			continue
+		}
+		if !moved || !got.Start.Equal(*at(loc, 2026, 10, c.wantStart, 9)) || !got.Due.Equal(*at(loc, 2026, 10, c.wantDue, 17)) {
+			t.Errorf("%s: B at %v–%v, want the %d–%d", c.name, got.Start, got.Due, c.wantStart, c.wantDue)
+		}
+	}
+}

@@ -767,10 +767,10 @@ func GetDgraphTaskInfoByUUID(ctx context.Context, teamUUID string, userDgraphUID
 					task_uuid
 					task_name
 				}
-				task_blocked_by @filter(` + dgraphStruct.TASK_LIVE_FILTER + `) {
+				task_blocked_by @facets(kind, lag) @filter(` + dgraphStruct.TASK_LIVE_FILTER + `) {
 					` + dependencyFields + `
 				}
-				task_blocks: ~task_blocked_by @filter(` + dgraphStruct.TASK_LIVE_FILTER + `) {
+				task_blocks: ~task_blocked_by @facets(kind, lag) @filter(` + dgraphStruct.TASK_LIVE_FILTER + `) {
 					` + dependencyFields + `
 				}
 				task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")){

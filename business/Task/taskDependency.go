@@ -1,10 +1,12 @@
 package business
 
-// Dependencies: a task can wait on other tasks of its project (finish to
-// start: it can start once they are done). The timeline draws them as arrows
-// and, when a task moves later, moves the tasks waiting on it along
-// (ShiftDependents); a board, a list and the timeline mark a task that is
-// still waiting as blocked. Only a project's top-level tasks take part.
+// Dependencies: a task can wait on other tasks of its project. Most often
+// finish to start (it can start once they are done); also start to start,
+// finish to finish and start to finish, each with a lag of days after (or,
+// negative, ahead). The timeline draws them as arrows and, when a task moves
+// later, moves the tasks waiting on it along (ShiftDependents); a board, a
+// list and the timeline mark a task still waiting to start as blocked. Only a
+// project's top-level tasks take part.
 
 import (
 	"context"
@@ -23,21 +25,52 @@ var (
 	ErrDependencyLoop    = errors.New("the dependency would make a loop")
 	ErrDependencyMissing = errors.New("task not found")
 	ErrNotProjectAdmin   = errors.New("not one of the project's admins")
+	ErrDependencyKind    = errors.New("not a kind of dependency, or too long a lag")
 )
+
+// The kinds of dependency, as the edge's kind facet keeps them. A
+// dependency with no kind is finish to start.
+const (
+	FinishToStart  = "fs"
+	StartToStart   = "ss"
+	FinishToFinish = "ff"
+	StartToFinish  = "sf"
+	// MaxLag bounds a lag, either way, in days.
+	MaxLag = 365
+)
+
+// kindOf is a dependency's kind, finish to start when it has none.
+func kindOf(blocker *dgraphStruct.DgraphTask) string {
+	switch blocker.DependencyKind {
+	case StartToStart, FinishToFinish, StartToFinish:
+		return blocker.DependencyKind
+	}
+	return FinishToStart
+}
 
 func live(t *dgraphStruct.DgraphTask) bool {
 	return t != nil && t.Uuid != "" && (t.DeletedAt == nil || t.DeletedAt.Year() <= 1970)
 }
 
-// AddTaskDependency makes taskUUID wait on blockerUUID. Both must be live
-// top-level tasks of one project, the person one of its admins, and the
+// AddTaskDependency makes taskUUID wait on blockerUUID in the way kind says
+// (empty is finish to start), lag days after (negative: ahead). Both must be
+// live top-level tasks of one project, the person one of its admins, and the
 // blocker must not already wait on the task, however indirectly. Adding a
-// dependency that's already there changes nothing.
-func AddTaskDependency(ctx context.Context, taskUUID, blockerUUID string, user *dgraphStruct.DgraphUser) error {
+// dependency that's already there changes how it waits, if that's different;
+// it goes into the task's history only when it's new.
+func AddTaskDependency(ctx context.Context, taskUUID, blockerUUID, kind string, lag int, user *dgraphStruct.DgraphUser) error {
 	if taskUUID == blockerUUID {
 		return ErrDependencySelf
 	}
-	changed, err := domain.ChangeTaskDependency(ctx, taskUUID, blockerUUID, user.Uid, false, func(pair *domain.DependencyPair) error {
+	if kind == "" {
+		kind = FinishToStart
+	}
+	if kind != FinishToStart && kind != StartToStart && kind != FinishToFinish && kind != StartToFinish || lag < -MaxLag || lag > MaxLag {
+		return ErrDependencyKind
+	}
+	existed := false
+	changed, err := domain.ChangeTaskDependency(ctx, taskUUID, blockerUUID, user.Uid, false, kind, lag, func(pair *domain.DependencyPair) error {
+		existed = pair.Linked
 		if !live(pair.Task) || !live(pair.Blocker) {
 			return ErrDependencyMissing
 		}
@@ -55,7 +88,7 @@ func AddTaskDependency(ctx context.Context, taskUUID, blockerUUID string, user *
 		}
 		return nil
 	})
-	if err != nil || !changed {
+	if err != nil || !changed || existed {
 		return err
 	}
 	return recordDependency(ctx, taskUUID, user, dgraphStruct.ACTIVITY_TYPE_ADD_DEPENDENCY, "", blockerUUID)
@@ -65,7 +98,7 @@ func AddTaskDependency(ctx context.Context, taskUUID, blockerUUID string, user *
 // since have been deleted; the person must be an admin of the task's project.
 // Taking off a dependency that isn't there changes nothing.
 func RemoveTaskDependency(ctx context.Context, taskUUID, blockerUUID string, user *dgraphStruct.DgraphUser) error {
-	changed, err := domain.ChangeTaskDependency(ctx, taskUUID, blockerUUID, user.Uid, true, func(pair *domain.DependencyPair) error {
+	changed, err := domain.ChangeTaskDependency(ctx, taskUUID, blockerUUID, user.Uid, true, "", 0, func(pair *domain.DependencyPair) error {
 		if pair.Task == nil || pair.Task.Uuid == "" || pair.Task.Project == nil {
 			return ErrDependencyMissing
 		}
@@ -175,9 +208,10 @@ func closed(t *dgraphStruct.DgraphTask) bool {
 // PlanShifts is ShiftDependents' arithmetic: which tasks move, and to what
 // dates, given the tasks waiting on movedUUID however indirectly (and it,
 // with its new dates). A task moves only when a task it waits on moved (the
-// one moved, or one this plan moves) and is now due on or after the day it
-// starts; it then starts the day after the last of those is due, keeping how
-// long it runs and its times of day. Nothing moves earlier. A finished task
+// one moved, or one this plan moves) and the dependency no longer holds: for
+// finish to start, that one is now due on or after the day it starts. It
+// then moves just far enough for all of them (see shifted), keeping how long
+// it runs and its times of day. Nothing moves earlier. A finished task
 // neither moves nor holds up another, and a task without dates stays where
 // it is (Asana's "keep the buffer", monday's "flexible"). A conflict the move
 // didn't cause is left as it was.
@@ -262,9 +296,19 @@ func PlanShifts(tasks []*dgraphStruct.DgraphTask, movedUUID string, loc *time.Lo
 	return out
 }
 
-// shifted is t moved to start the day after the last of the moved, open
-// tasks it waits on is due, or nil when it starts late enough already, is
-// finished, or has no dates. It's a copy: t is left as it was.
+// shifted is t moved just far enough for every moved, open task it waits on,
+// or nil when it's late enough already, finished, or has no dates. It's a
+// copy: t is left as it was.
+//
+// Each dependency sets the earliest day t can start, from the blocker's day
+// it hangs on, plus its lag:
+//
+//	finish to start   the day after the blocker's last day
+//	start to start    the blocker's first day
+//	finish to finish  the blocker's last day is t's last day at the earliest
+//	start to finish   the blocker's first day is t's last day at the earliest
+//
+// The last two hold t's end, so its start is that day less how long it runs.
 func shifted(t *dgraphStruct.DgraphTask, moved map[string]*dgraphStruct.DgraphTask, loc *time.Location) *dgraphStruct.DgraphTask {
 	if closed(t) {
 		return nil
@@ -273,15 +317,36 @@ func shifted(t *dgraphStruct.DgraphTask, moved map[string]*dgraphStruct.DgraphTa
 	if !ok {
 		return nil
 	}
+	end, _ := lastDay(t, loc)
+	runs := end.Sub(from)
 	var need time.Time
 	for _, b := range t.BlockedBy {
 		if b == nil {
 			continue
 		}
-		if bt := moved[b.Uuid]; bt != nil && !closed(bt) {
-			if last, ok := lastDay(bt, loc); ok && !last.Before(need) {
-				need = last.AddDate(0, 0, 1)
-			}
+		bt := moved[b.Uuid]
+		if bt == nil || closed(bt) {
+			continue
+		}
+		kind := kindOf(b)
+		var day time.Time
+		if kind == StartToStart || kind == StartToFinish {
+			day, ok = firstDay(bt, loc)
+		} else {
+			day, ok = lastDay(bt, loc)
+		}
+		if !ok {
+			continue
+		}
+		earliest := day.AddDate(0, 0, b.DependencyLag)
+		switch kind {
+		case FinishToStart:
+			earliest = earliest.AddDate(0, 0, 1)
+		case FinishToFinish, StartToFinish:
+			earliest = earliest.Add(-runs)
+		}
+		if earliest.After(need) {
+			need = earliest
 		}
 	}
 	if !from.Before(need) {

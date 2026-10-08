@@ -42,6 +42,7 @@ import (
 	guestController "github.com/akashc777/OneCamp/controllers/Guest"
 	importController "github.com/akashc777/OneCamp/controllers/Import"
 	integrationController "github.com/akashc777/OneCamp/controllers/Integration"
+	invoiceController "github.com/akashc777/OneCamp/controllers/Invoice"
 	livekitController "github.com/akashc777/OneCamp/controllers/LiveKit"
 	marketplaceController "github.com/akashc777/OneCamp/controllers/Marketplace"
 	notificationController "github.com/akashc777/OneCamp/controllers/Notification"
@@ -1373,6 +1374,13 @@ func Routes() http.Handler {
 		r.Get("/{project_uuid}/rates", timeEntryController.ProjectRates)
 		r.Post("/{project_uuid}/rates", timeEntryController.SetProjectRates)
 		r.Post("/{project_uuid}/rates/delete", timeEntryController.ClearProjectRates)
+		// Its saved invoices: its admins only. See business/Invoice.
+		r.Get("/{project_uuid}/invoices", invoiceController.ListInvoices)
+		r.Post("/{project_uuid}/invoices", invoiceController.CreateInvoice)
+		r.Get("/{project_uuid}/invoices/{invoice_id}", invoiceController.GetInvoice)
+		r.Post("/{project_uuid}/invoices/{invoice_id}", invoiceController.UpdateInvoice)
+		r.Post("/{project_uuid}/invoices/{invoice_id}/status", invoiceController.SetInvoiceStatus)
+		r.Post("/{project_uuid}/invoices/{invoice_id}/delete", invoiceController.DeleteInvoice)
 		r.Get("/{project_uuid}/tags", taskController.ProjectTags)
 		r.Get("/{project_uuid}/timeline", projectController.ProjectTimeline)
 		// Project updates: see business/ProjectUpdate.

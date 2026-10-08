@@ -147,7 +147,6 @@ ScopeForTool
 SearchCode
 SetMemoryItemStatus
 SetScopeExcluded
-SetStatus
 SortedKeys
 # Edition-only, not debt: reads poll options an agent wrote as one string, for the AI's
 # create_poll tool, which this edition leaves out. Kept so business/Poll stays the same in both.
