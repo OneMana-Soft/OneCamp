@@ -37,6 +37,7 @@ import (
 	formController "github.com/akashc777/OneCamp/controllers/Form"
 	githubController "github.com/akashc777/OneCamp/controllers/GitHub"
 	globalSearchController "github.com/akashc777/OneCamp/controllers/GlobalSearch"
+	goalController "github.com/akashc777/OneCamp/controllers/Goal"
 	guestController "github.com/akashc777/OneCamp/controllers/Guest"
 	importController "github.com/akashc777/OneCamp/controllers/Import"
 	integrationController "github.com/akashc777/OneCamp/controllers/Integration"
@@ -151,6 +152,7 @@ func Routes() http.Handler {
 	dataSourceRouter := chi.NewRouter()
 	apiTokenRouter := chi.NewRouter()
 	marketplaceRouter := chi.NewRouter()
+	goalRouter := chi.NewRouter()
 
 	router.Get("/oauth_login/{oauth_provider}", userController.OAuthLogin)
 	router.Get("/oauth_callback/{oauth_provider}", userController.OAuthCallback)
@@ -817,6 +819,7 @@ func Routes() http.Handler {
 		r.Mount("/data-sources", dataSourceRouter)
 		r.Mount("/api-tokens", apiTokenRouter)
 		r.Mount("/marketplace", marketplaceRouter)
+		r.Mount("/goal", goalRouter)
 		// Save for later: private to the member; see business/SavedItem.
 		// Send later: channels, DMs and groups; see business/ScheduledMessage.
 		r.Route("/message", func(r chi.Router) {
@@ -916,6 +919,23 @@ func Routes() http.Handler {
 	// can browse, publish, and install; install runs as the member and reuses
 	// the app's Create logic (re-checking capabilities for agent/workflow
 	// kinds). POST/GET only.
+	// Goals: see business/Goal. Everyone sees them; the owner, the creator
+	// and workspace admins change them and check in.
+	goalRouter.Group(func(r chi.Router) {
+		r.Get("/list", goalController.ListGoals)
+		r.Post("/create", goalController.CreateGoal)
+		r.Get("/{goal_id}", goalController.GetGoal)
+		r.Post("/{goal_id}/edit", goalController.EditGoal)
+		r.Post("/{goal_id}/delete", goalController.DeleteGoal)
+		r.Post("/{goal_id}/reopen", goalController.ReopenGoal)
+		r.Post("/{goal_id}/projects", goalController.LinkGoalProject)
+		r.Post("/{goal_id}/projects/{project_uuid}/delete", goalController.UnlinkGoalProject)
+		r.Get("/{goal_id}/checkins/draft", goalController.DraftCheckIn)
+		r.Post("/{goal_id}/checkins", goalController.PostCheckIn)
+		r.Post("/{goal_id}/checkins/{checkin_id}/edit", goalController.EditCheckIn)
+		r.Post("/{goal_id}/checkins/{checkin_id}/delete", goalController.DeleteCheckIn)
+	})
+
 	marketplaceRouter.Group(func(r chi.Router) {
 		r.Get("/templates", marketplaceController.ListTemplates)
 		r.Post("/templates", marketplaceController.CreateTemplate)
@@ -1347,6 +1367,7 @@ func Routes() http.Handler {
 		r.Get("/{project_uuid}/tags", taskController.ProjectTags)
 		r.Get("/{project_uuid}/timeline", projectController.ProjectTimeline)
 		// Project updates: see business/ProjectUpdate.
+		r.Get("/{project_uuid}/goals", goalController.ProjectGoals)
 		r.Get("/{project_uuid}/updates", projectUpdateController.ListUpdates)
 		r.Get("/{project_uuid}/updates/draft", projectUpdateController.DraftUpdate)
 		r.Post("/{project_uuid}/updates", projectUpdateController.PostUpdate)

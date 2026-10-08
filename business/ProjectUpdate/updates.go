@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	postAdapter "github.com/akashc777/OneCamp/adapter/Post"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
@@ -217,23 +216,7 @@ func Post(ctx context.Context, user *userModels.UserInfo, projectID uuid.UUID, p
 	}
 
 	if in.ChannelUUID != "" {
-		post, err := sendBusiness.PrepareChannelPost(ctx, user, &postAdapter.InputCreateOrUpdatePostInfo{
-			ChannelUuid: in.ChannelUUID,
-			HTMLText:    ChannelHTML(projectID, projectName, u),
-		})
-		if err == nil {
-			_, err = post.Commit(ctx)
-		}
-		if err != nil {
-			out.ChannelError = "Posted on the project, but not in the channel."
-			if r, ok := sendBusiness.AsRejection(err); ok && r.Status < 500 {
-				out.ChannelError = "Posted on the project, but not in the channel: " + r.Msg + "."
-			} else {
-				helpers.LogErrorWithContext(ctx, "business/ProjectUpdate/Post channel err: %+v", err)
-			}
-		} else {
-			out.Channel = post.Channel().Name
-		}
+		out.Channel, out.ChannelError = sendBusiness.AlsoInChannel(ctx, user, in.ChannelUUID, ChannelHTML(projectID, projectName, u), "Posted on the project")
 	}
 	return out, nil
 }

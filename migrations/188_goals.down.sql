@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS goal_checkins;
+DROP TABLE IF EXISTS goal_projects;
+DROP TABLE IF EXISTS goals;

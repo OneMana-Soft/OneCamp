@@ -116,6 +116,26 @@ func (p *ChannelPost) Commit(ctx context.Context) (*postAdapter.OutputCreatePost
 	return created, nil
 }
 
+// AlsoInChannel posts html in a channel as the person, for a feature that
+// offers "also post it in a channel" beside what it saves (a project update,
+// a goal check-in). It answers the channel's name, or, when the channel
+// refused it or the post failed, a sentence saying so that begins with saved
+// ("Posted on the project"): what was saved stays saved either way.
+func AlsoInChannel(ctx context.Context, user *userModels.UserInfo, channelUUID, html, saved string) (channel, problem string) {
+	post, err := PrepareChannelPost(ctx, user, &postAdapter.InputCreateOrUpdatePostInfo{ChannelUuid: channelUUID, HTMLText: html})
+	if err == nil {
+		_, err = post.Commit(ctx)
+	}
+	if err == nil {
+		return post.Channel().Name, ""
+	}
+	if r, ok := AsRejection(err); ok && r.Status < http.StatusInternalServerError {
+		return "", saved + ", but not in the channel: " + r.Msg + "."
+	}
+	helpers.LogErrorWithContext(ctx, "Send/AlsoInChannel err: %+v", err)
+	return "", saved + ", but not in the channel."
+}
+
 // --------------------------------------------------------------- direct message
 
 // DirectMessage is a DM that has passed every rule and can be written.

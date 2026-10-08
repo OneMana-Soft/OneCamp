@@ -2,6 +2,7 @@ package helpers
 
 import (
 	"html"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -98,4 +99,12 @@ func OneLine(s string, n int) string {
 		return TruncateRunes("…", n)
 	}
 	return strings.TrimSpace(TruncateRunes(s, n-1)) + "…"
+}
+
+// Count is a number of things as a sentence says it: "1 task", "3 tasks".
+func Count(n int, one, many string) string {
+	if n == 1 {
+		return "1 " + one
+	}
+	return strconv.Itoa(n) + " " + many
 }
