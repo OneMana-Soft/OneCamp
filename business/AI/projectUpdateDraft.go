@@ -27,18 +27,44 @@ Use only the facts given. Never invent names, dates, numbers, reasons or blocker
 Plain text only: no headings, no lists, no emoji, no greeting, no sign-off.
 If nothing happened in the period, say so in one sentence.`
 
-// projectUpdatePrompt is what the model reads: the facts, and the lead's
-// last updates for their voice. Pure.
-func projectUpdatePrompt(project, facts string, previous []string) string {
+// factsPrompt is what the model reads for a summary of a factual draft: what
+// it is about ("Project: Q4 launch"), the facts, and the author's last few
+// posts of the kind ("updates", "check-ins") for their voice. Pure.
+func factsPrompt(subject, name, facts, kind string, previous []string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Project: %s\n\nFacts:\n%s\n", project, facts)
+	fmt.Fprintf(&b, "%s: %s\n\nFacts:\n%s\n", subject, name, facts)
 	if len(previous) > 0 {
-		b.WriteString("\nPrevious updates, newest first:\n")
+		fmt.Fprintf(&b, "\nPrevious %s, newest first:\n", kind)
 		for i, p := range previous {
 			fmt.Fprintf(&b, "--- %d ---\n%s\n", i+1, p)
 		}
 	}
 	return b.String()
+}
+
+// summaryOnTop puts the model's short summary of a factual draft above the
+// facts. The prompt is only built when there is a model to read it. Without a
+// working AI, or when it says nothing, the facts come back alone (false): the
+// person always gets them.
+func summaryOnTop(ctx context.Context, system, facts string, prompt func() string) (string, bool) {
+	svc := ai.GetService()
+	if svc == nil || !svc.IsEnabled() {
+		return facts, false
+	}
+	if err := svc.Resiliency.CB.Allow(); err != nil {
+		return facts, false
+	}
+	summary, err := svc.Summarize(ctx, prompt(), system)
+	if err != nil {
+		svc.Resiliency.CB.RecordResult(err)
+		return facts, false
+	}
+	svc.Resiliency.CB.RecordSuccess()
+	summary = strings.TrimSpace(SanitizeResponse(summary))
+	if summary == "" {
+		return facts, false
+	}
+	return helpers.NormaliseText(summary) + "\n\n" + facts, true
 }
 
 // AIDraft is a draft with the AI's summary on top, and whether it got one.
@@ -55,30 +81,14 @@ func DraftProjectUpdate(ctx context.Context, projectID uuid.UUID, userDgraphUID 
 		return nil, err
 	}
 	out := &AIDraft{Draft: *d}
-	svc := ai.GetService()
-	if svc == nil || !svc.IsEnabled() {
-		return out, nil
-	}
-	if err := svc.Resiliency.CB.Allow(); err != nil {
-		return out, nil
-	}
-	var previous []string
-	if prev, err := updateBusiness.List(ctx, projectID, 3, false); err == nil {
-		for _, p := range prev {
-			previous = append(previous, helpers.OneLine(p.Body, 1200))
+	out.Text, out.AI = summaryOnTop(ctx, projectUpdateSystemPrompt, d.Text, func() string {
+		var previous []string
+		if prev, err := updateBusiness.List(ctx, projectID, 3, false); err == nil {
+			for _, p := range prev {
+				previous = append(previous, helpers.OneLine(p.Body, 1200))
+			}
 		}
-	}
-	summary, err := svc.Summarize(ctx, projectUpdatePrompt(d.Facts.Project, d.Text, previous), projectUpdateSystemPrompt)
-	if err != nil {
-		svc.Resiliency.CB.RecordResult(err)
-		return out, nil
-	}
-	svc.Resiliency.CB.RecordSuccess()
-	summary = strings.TrimSpace(SanitizeResponse(summary))
-	if summary == "" {
-		return out, nil
-	}
-	out.Text = helpers.NormaliseText(summary) + "\n\n" + d.Text
-	out.AI = true
+		return factsPrompt("Project", d.Facts.Project, d.Text, "updates", previous)
+	})
 	return out, nil
 }

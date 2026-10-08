@@ -6,6 +6,7 @@ import (
 	"time"
 
 	taskStatus "github.com/akashc777/OneCamp/business/TaskStatus"
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	model "github.com/akashc777/OneCamp/models/postgres/ProjectUpdate"
 )
@@ -201,13 +202,6 @@ func SuggestHealth(f Facts) string {
 	}
 }
 
-func plural(n int, one, many string) string {
-	if n == 1 {
-		return "1 " + one
-	}
-	return fmt.Sprintf("%d %s", n, many)
-}
-
 // Duration is seconds as people say it: "6h 20m", "45m".
 func Duration(sec int64) string {
 	h, m := sec/3600, (sec%3600)/60
@@ -245,7 +239,7 @@ func section(sb *strings.Builder, title string, tasks []TaskFact, detail func(Ta
 // DraftText is the facts as an update's text, ready to edit. Pure.
 func DraftText(f Facts) string {
 	var sb strings.Builder
-	parts := []string{plural(len(f.Done), "task done", "tasks done"), fmt.Sprintf("%d in progress", f.Started)}
+	parts := []string{helpers.Count(len(f.Done), "task done", "tasks done"), fmt.Sprintf("%d in progress", f.Started)}
 	if n := len(f.Overdue); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d overdue", n))
 	}
