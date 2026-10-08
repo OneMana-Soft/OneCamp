@@ -218,7 +218,7 @@ func parsePeopleValue(cv mondayColumnValue) []string {
 		if pt.Kind != "" && !strings.EqualFold(pt.Kind, "person") {
 			continue
 		}
-		id := rawID(pt.ID)
+		id := importProvider.IDString(pt.ID)
 		if id == "" || seen[id] {
 			continue
 		}
@@ -252,21 +252,6 @@ func cleanLabel(s string) string {
 		return r
 	}, s)
 	return strings.Join(strings.Fields(s), " ")
-}
-
-func rawID(raw json.RawMessage) string {
-	if len(raw) == 0 || string(raw) == "null" {
-		return ""
-	}
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return s
-	}
-	var n json.Number
-	if json.Unmarshal(raw, &n) == nil {
-		return n.String()
-	}
-	return ""
 }
 
 func parseDay(s string) *time.Time {
@@ -441,7 +426,9 @@ type itemReading struct {
 	Extra     [][2]string // title, text of columns not mapped above
 }
 
-func readItemFields(item mondayItem) itemReading {
+// carried are columns a custom field holds whole: they stay out of the
+// description.
+func readItemFields(item mondayItem, carried map[string]bool) itemReading {
 	pk := pickColumns(item.ColumnValues)
 	var f itemReading
 	if pk.status != nil {
@@ -492,7 +479,7 @@ func readItemFields(item mondayItem) itemReading {
 	}
 
 	for _, cv := range item.ColumnValues {
-		if pk.used[cv.ID] || skipInDescription[cv.kind()] || skipInDescription[cv.ID] {
+		if pk.used[cv.ID] || carried[cv.ID] || skipInDescription[cv.kind()] || skipInDescription[cv.ID] {
 			continue
 		}
 		if txt := cv.text(); txt != "" {
@@ -523,9 +510,12 @@ func renderExtra(extra [][2]string) string {
 
 // itemToSourceTask maps one item (or subitem when parentID != "").
 // commentAssetIDs are assets that belong to an update; they are
-// imported on the comment, so they're dropped from the task.
-func (p *Provider) itemToSourceTask(item mondayItem, boardID, parentID string, commentCount int, commentAssetIDs map[string]bool) importProvider.SourceTask {
-	f := readItemFields(item)
+// imported on the comment, so they're dropped from the task. fields are
+// the board's columns that are custom fields (none for subitems, whose
+// board is another).
+func (p *Provider) itemToSourceTask(item mondayItem, boardID, parentID string, commentCount int, commentAssetIDs map[string]bool, fields fieldColumns) importProvider.SourceTask {
+	values, carried := fieldValues(item, fields)
+	f := readItemFields(item, carried)
 
 	atts := make([]importProvider.SourceAttachment, 0, len(item.Assets))
 	for _, a := range item.Assets {
@@ -565,6 +555,7 @@ func (p *Provider) itemToSourceTask(item mondayItem, boardID, parentID string, c
 		AttachmentRefs:  atts,
 		CommentCount:    commentCount,
 		SubtaskCount:    len(item.Subitems),
+		Fields:          values,
 		Metadata: map[string]any{
 			"monday_url":      item.URL,
 			"monday_item_id":  item.ID,

@@ -19,6 +19,7 @@
 package jira
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -53,12 +54,15 @@ type Provider struct {
 	// site URL so each Iter* doesn't re-resolve from token metadata.
 	mu        sync.Mutex
 	siteCache map[uuid.UUID]string
+	// fieldsCache maps job id → the site's custom fields (fields.go).
+	fieldsCache map[uuid.UUID]siteFields
 }
 
 func New() *Provider {
 	return &Provider{
-		rl:        importProvider.NewSleepLimiter(100*time.Millisecond, 10),
-		siteCache: make(map[uuid.UUID]string, 4),
+		rl:          importProvider.NewSleepLimiter(100*time.Millisecond, 10),
+		siteCache:   make(map[uuid.UUID]string, 4),
+		fieldsCache: make(map[uuid.UUID]siteFields, 4),
 	}
 }
 
@@ -342,55 +346,81 @@ func (p *Provider) IterTasksOfProject(ctx context.Context, j *importModels.Job, 
 			errCh <- err
 			return
 		}
+		fields, err := p.customFields(ctx, j, tok, site)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		// Every navigable field, custom ones included: a site's custom fields
+		// are too many to name one by one in a URL.
+		asked := append([]string{"*navigable"}, strings.Split(issueFields, ",")...)
 		jql := fmt.Sprintf(`project = "%s" ORDER BY created ASC`, projectSourceId)
-		startAt := 0
-		page := 0
-		seenSubtaskParents := map[string]struct{}{}
-		for page < maxPages {
-			page++
-			endpoint := fmt.Sprintf("%s/rest/api/3/search?jql=%s&startAt=%d&maxResults=100&fields=%s&expand=renderedFields",
-				site,
-				url.QueryEscape(jql),
-				startAt,
-				url.QueryEscape("summary,description,status,priority,assignee,reporter,creator,issuetype,labels,duedate,created,updated,parent,subtasks,attachment"))
-			var resp jiraSearchResp
-			if err := p.getJSON(ctx, tok, endpoint, &resp); err != nil {
-				errCh <- err
-				return
+		err = p.searchIssues(ctx, tok, site, jql, asked, func(iss *jiraIssue) bool {
+			if iss.Fields.IssueType.Subtask {
+				// Skip subtasks here; they're emitted by IterSubtasksOfTask.
+				return true
 			}
-			for _, iss := range resp.Issues {
-				task := buildSourceTask(&iss, projectSourceId, site)
-				if iss.Fields.IssueType.Subtask {
-					// Skip subtasks here; they're emitted by IterSubtasksOfTask.
-					continue
-				}
+			select {
+			case <-ctx.Done():
+				return false
+			case out <- buildSourceTask(iss, projectSourceId, site, fields):
+			}
+			// If the issue has subtasks, schedule a subtask chunk (once: the
+			// search meets each issue once).
+			if len(iss.Fields.Subtasks) > 0 {
 				select {
 				case <-ctx.Done():
-					return
-				case out <- task:
-				}
-				// If the issue has subtasks, schedule a subtask chunk.
-				if len(iss.Fields.Subtasks) > 0 {
-					if _, dup := seenSubtaskParents[iss.Key]; !dup {
-						seenSubtaskParents[iss.Key] = struct{}{}
-						select {
-						case <-ctx.Done():
-							return
-						case out <- importProvider.SourceTask{
-							SourceID:     "__sub__:" + iss.Key,
-							ParentTaskID: iss.Key,
-						}:
-						}
-					}
+					return false
+				case out <- importProvider.SourceTask{SourceID: "__sub__:" + iss.Key, ParentTaskID: iss.Key}:
 				}
 			}
-			startAt += len(resp.Issues)
-			if len(resp.Issues) == 0 || startAt >= resp.Total {
-				return
-			}
+			return true
+		})
+		if err != nil {
+			errCh <- err
 		}
 	}()
 	return out, errCh
+}
+
+// searchIssues runs a JQL search (GET /rest/api/3/search/jql), calling each
+// for every issue once, until the last page or until each says to stop.
+// Pages follow nextPageToken; a page with no issue not seen before is the
+// end too, since some sites go on handing out tokens past the last page.
+func (p *Provider) searchIssues(ctx context.Context, tok, site, jql string, fields []string, each func(*jiraIssue) bool) error {
+	seen := map[string]bool{}
+	token := ""
+	for page := 0; page < maxPages; page++ {
+		q := url.Values{}
+		q.Set("jql", jql)
+		q.Set("maxResults", "100")
+		q.Set("fields", strings.Join(fields, ","))
+		q.Set("expand", "renderedFields")
+		if token != "" {
+			q.Set("nextPageToken", token)
+		}
+		var resp jiraSearchResp
+		if err := p.getJSON(ctx, tok, site+"/rest/api/3/search/jql?"+q.Encode(), &resp); err != nil {
+			return err
+		}
+		fresh := 0
+		for i := range resp.Issues {
+			iss := &resp.Issues[i]
+			if seen[iss.Key] {
+				continue
+			}
+			seen[iss.Key] = true
+			fresh++
+			if !each(iss) {
+				return nil
+			}
+		}
+		if resp.IsLast || resp.NextPageToken == "" || resp.NextPageToken == token || fresh == 0 {
+			return nil
+		}
+		token = resp.NextPageToken
+	}
+	return nil
 }
 
 // IterSubtasksOfTask fetches the parent issue with subtasks expanded.
@@ -413,6 +443,11 @@ func (p *Provider) IterSubtasksOfTask(ctx context.Context, j *importModels.Job, 
 			errCh <- err
 			return
 		}
+		fields, err := p.customFields(ctx, j, tok, site)
+		if err != nil {
+			errCh <- err
+			return
+		}
 		// Pull parent with subtasks.
 		var parent jiraIssue
 		if err := p.getJSON(ctx, tok,
@@ -427,7 +462,7 @@ func (p *Provider) IterSubtasksOfTask(ctx context.Context, j *importModels.Job, 
 				site+"/rest/api/3/issue/"+url.PathEscape(st.Key)+"?expand=renderedFields", &iss); err != nil {
 				continue // tolerate per-subtask failures
 			}
-			task := buildSourceTask(&iss, projectKeyFromIssue(&iss), site)
+			task := buildSourceTask(&iss, projectKeyFromIssue(&iss), site, fields)
 			task.ParentTaskID = taskSourceId
 			select {
 			case <-ctx.Done():
@@ -552,6 +587,33 @@ type jiraIssue struct {
 	Key            string              `json:"key"`
 	Fields         jiraIssueFields     `json:"fields"`
 	RenderedFields *jiraRenderedFields `json:"renderedFields"`
+	// Custom holds the issue's customfield_NNNNN values that are set.
+	Custom map[string]json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON reads an issue, keeping its custom fields' raw values,
+// whose shapes depend on each field's kind (fields.go).
+func (i *jiraIssue) UnmarshalJSON(b []byte) error {
+	type plain jiraIssue
+	if err := json.Unmarshal(b, (*plain)(i)); err != nil {
+		return err
+	}
+	var raw struct {
+		Fields map[string]json.RawMessage `json:"fields"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	i.Custom = nil
+	for k, v := range raw.Fields {
+		if strings.HasPrefix(k, "customfield_") && len(v) > 0 && string(v) != "null" {
+			if i.Custom == nil {
+				i.Custom = map[string]json.RawMessage{}
+			}
+			i.Custom[k] = v
+		}
+	}
+	return nil
 }
 
 type jiraIssueFields struct {
@@ -602,11 +664,12 @@ type jiraAttachment struct {
 	Created  string    `json:"created"`
 }
 
+// jiraSearchResp is a page of GET /rest/api/3/search/jql, which pages by
+// token: there's no total, and nextPageToken is empty on the last page.
 type jiraSearchResp struct {
-	StartAt    int         `json:"startAt"`
-	MaxResults int         `json:"maxResults"`
-	Total      int         `json:"total"`
-	Issues     []jiraIssue `json:"issues"`
+	Issues        []jiraIssue `json:"issues"`
+	NextPageToken string      `json:"nextPageToken"`
+	IsLast        bool        `json:"isLast"`
 }
 
 type jiraComment struct {
@@ -627,13 +690,40 @@ type jiraCommentsResp struct {
 // ─── HTTP helpers ─────────────────────────────────────────────────
 
 // getJSON does GET <url> with the appropriate auth header. Honours 429.
+// statusError is Jira answering with an error status.
+type statusError struct {
+	Code int
+	Msg  string
+}
+
+func (e *statusError) Error() string { return e.Msg }
+
 func (p *Provider) getJSON(ctx context.Context, tok, urlStr string, out any) error {
+	return p.call(ctx, tok, http.MethodGet, urlStr, nil, out)
+}
+
+func (p *Provider) postJSON(ctx context.Context, tok, urlStr string, body, out any) error {
+	return p.call(ctx, tok, http.MethodPost, urlStr, body, out)
+}
+
+func (p *Provider) call(ctx context.Context, tok, method, urlStr string, body, out any) error {
 	if err := p.rl.Wait(ctx); err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	var reader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, urlStr, reader)
 	if err != nil {
 		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	// tok may be Basic <b64> or Bearer <pat>, we just prepend "Basic " if not already prefixed.
 	if strings.HasPrefix(tok, "Bearer ") || strings.HasPrefix(tok, "Basic ") {
@@ -659,10 +749,10 @@ func (p *Provider) getJSON(ctx context.Context, tok, urlStr string, out any) err
 		}
 		return &importProvider.ErrRateLimited{RetryAfter: retryAfter, Reason: "Jira 429"}
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return fmt.Errorf("jira auth failed (HTTP %d); reconnect token", resp.StatusCode)
+		return &statusError{Code: resp.StatusCode, Msg: fmt.Sprintf("jira auth failed (HTTP %d); reconnect token", resp.StatusCode)}
 	case resp.StatusCode >= 400:
 		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("jira HTTP %d: %s", resp.StatusCode, string(raw))
+		return &statusError{Code: resp.StatusCode, Msg: fmt.Sprintf("jira HTTP %d: %s", resp.StatusCode, string(raw))}
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
@@ -767,16 +857,18 @@ func (p *Provider) listProjectCategories(ctx context.Context, tok, site string) 
 	return resp, nil
 }
 
+// countIssues asks Jira how many issues a project has. The search that
+// used to say (GET /rest/api/3/search) is gone from Jira Cloud; this is
+// its counting replacement.
 func (p *Provider) countIssues(ctx context.Context, tok, site, projectKey string) (int, error) {
-	jql := fmt.Sprintf(`project = "%s"`, projectKey)
-	endpoint := fmt.Sprintf("%s/rest/api/3/search?jql=%s&maxResults=0", site, url.QueryEscape(jql))
 	var resp struct {
-		Total int `json:"total"`
+		Count int `json:"count"`
 	}
-	if err := p.getJSON(ctx, tok, endpoint, &resp); err != nil {
+	body := map[string]string{"jql": fmt.Sprintf(`project = "%s"`, projectKey)}
+	if err := p.postJSON(ctx, tok, site+"/rest/api/3/search/approximate-count", body, &resp); err != nil {
 		return 0, err
 	}
-	return resp.Total, nil
+	return resp.Count, nil
 }
 
 // ─── Auth + site resolution ──────────────────────────────────────
@@ -885,7 +977,10 @@ func parseJiraTime(s string) time.Time {
 }
 
 // buildSourceTask converts a Jira issue to the generic SourceTask.
-func buildSourceTask(iss *jiraIssue, projectKey, site string) importProvider.SourceTask {
+// issueFields are the fields a search asks for, besides custom ones.
+const issueFields = "summary,description,status,priority,assignee,reporter,creator,issuetype,labels,duedate,created,updated,parent,subtasks,attachment"
+
+func buildSourceTask(iss *jiraIssue, projectKey, site string, fields siteFields) importProvider.SourceTask {
 	created := parseJiraTime(iss.Fields.Created)
 	updated := parseJiraTime(iss.Fields.Updated)
 	var due *time.Time
@@ -944,6 +1039,7 @@ func buildSourceTask(iss *jiraIssue, projectKey, site string) importProvider.Sou
 		DueDate:         due,
 		Completed:       isDoneStatus(iss.Fields.Status.Name),
 		AttachmentRefs:  atts,
+		Fields:          issueFieldValues(iss.Custom, fields),
 		Metadata:        map[string]any{"jira_url": site + "/browse/" + iss.Key, "type": iss.Fields.IssueType.Name},
 	}
 }
@@ -1031,5 +1127,6 @@ func (p *Provider) CleanupJob(jobId string) {
 	}
 	p.mu.Lock()
 	delete(p.siteCache, id)
+	delete(p.fieldsCache, id)
 	p.mu.Unlock()
 }

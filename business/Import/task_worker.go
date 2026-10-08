@@ -58,6 +58,7 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 	defaultStatus := prov.DefaultStatusMap()
 	defaultPriority := prov.DefaultPriorityMap()
 
+	fields := newProjectFields(job, &chunk.Id, projectSrcId, projectUUID, importingUser.UserPostgresInfo.Id)
 	taskCh, errCh := prov.IterTasksOfProject(ctx, job, opts, projectSrcId)
 
 	committed := 0
@@ -101,7 +102,7 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 			if st.ParentTaskID == "" {
 				if err := importOneTask(ctx, job, &st, projectUUID, projectInfo,
 					statusMap, priorityMap, defaultStatus, defaultPriority,
-					importingUser, &pendingChunks); err != nil {
+					importingUser, fields, &pendingChunks); err != nil {
 					importModels.LogImportError(ctx, job.Id, &chunk.Id,
 						importModels.EntityTask, st.SourceID,
 						importModels.SeverityError, "TASK_IMPORT_FAILED",
@@ -137,7 +138,7 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 	st *importProvider.SourceTask,
 	projectUUID uuid.UUID, projectInfo *dgraphStruct.DgraphProject,
 	statusMap, priorityMap, defaultStatus, defaultPriority map[string]string,
-	importingUser *userModels.UserInfo, pendingChunks *[]*importModels.Chunk,
+	importingUser *userModels.UserInfo, fields *projectFields, pendingChunks *[]*importModels.Chunk,
 ) error {
 	if existing, _ := importModels.LookupIdMapping(ctx, job.Id,
 		importModels.EntityTask, st.SourceID); existing != uuid.Nil {
@@ -177,7 +178,10 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 	finalStatus := importProvider.ApplyStatusMap(st.Status, statusMap, defaultStatus)
 	finalPriority := importProvider.ApplyPriorityMap(st.Priority, priorityMap, defaultPriority)
 
-	descHTML := renderTaskDescription(st, extraAssignees)
+	// Field values are read first: one no field can keep goes into the
+	// description, which is written with the task.
+	values, lost := fields.prepare(ctx, st.Fields)
+	descHTML := renderTaskDescription(st, extraAssignees) + renderLostValues(lost)
 	label := ""
 	if len(st.Labels) > 0 {
 		label = st.Labels[0]
@@ -210,6 +214,8 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 	if err != nil {
 		return err
 	}
+	// Before the task is recorded as imported: a retry skips recorded tasks.
+	fields.write(ctx, taskUUID, values)
 
 	if err := importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
 		importModels.EntityTask, st.SourceID, taskUUID, nil,
@@ -374,6 +380,7 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 	defaultStatus := prov.DefaultStatusMap()
 	defaultPriority := prov.DefaultPriorityMap()
 
+	fields := newProjectFields(job, &chunk.Id, parentProjectSrc, projectUUID, importingUser.UserPostgresInfo.Id)
 	subCh, errCh := prov.IterSubtasksOfTask(ctx, job, opts, parentSrc)
 	committed := 0
 	var pending []*importModels.Chunk
@@ -432,6 +439,7 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 			if createdAt.IsZero() {
 				createdAt = time.Now()
 			}
+			values, lost := fields.prepare(ctx, st.Fields)
 			subUUID, err := writeTask(ctx, job, importTaskInput{
 				ProjectUUID: projectUUID,
 				Project:     projectInfo,
@@ -439,7 +447,7 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 				Creator:     creator,
 				Assignee:    assigneeDg,
 				Name:        truncate(st.Name, 256),
-				Description: renderTaskDescription(&st, nil),
+				Description: renderTaskDescription(&st, nil) + renderLostValues(lost),
 				Status:      finalStatus,
 				Priority:    finalPriority,
 				Label:       label,
@@ -455,6 +463,7 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 					err.Error(), nil)
 				continue
 			}
+			fields.write(ctx, subUUID, values)
 			_ = importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
 				importModels.EntitySubtask, st.SourceID, subUUID, &parentSrc,
 				mustMarshal(map[string]any{

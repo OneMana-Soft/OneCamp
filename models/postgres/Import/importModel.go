@@ -107,6 +107,7 @@ const (
 	EntityTask    = "task"
 	EntitySubtask = "subtask"
 	EntityLabel   = "label"
+	EntityField   = "task_field" // a project's custom field (business/Import/fields.go)
 )
 
 // Severity levels for error rows.
@@ -792,6 +793,29 @@ func IdMappingsByTypeOwned(ctx context.Context, importId uuid.UUID, entityType s
 	return out, rows.Err()
 }
 
+// SourceIdsFor is the source ids this import mapped to one OneCamp entity.
+func SourceIdsFor(ctx context.Context, importId uuid.UUID, entityType string, onecampUUID uuid.UUID) ([]string, error) {
+	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, `
+		SELECT source_id FROM import_id_map
+		WHERE import_id = $1 AND entity_type = $2 AND onecamp_uuid = $3`,
+		importId, entityType, onecampUUID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // GetIdMapMetadata returns the JSONB metadata blob for one mapping row.
 // Returns nil bytes + nil error when missing.
 func GetIdMapMetadata(ctx context.Context, importId uuid.UUID, entityType, sourceId string) (json.RawMessage, error) {
@@ -861,11 +885,14 @@ func UpsertWorkspaceMapping(ctx context.Context, provider, workspace, entityType
 // Best-effort; never blocks a worker on telemetry.
 func LogImportError(ctx context.Context, importId uuid.UUID, chunkId *uuid.UUID,
 	entityType, sourceId, severity, code, message string, errorContext json.RawMessage) {
+	if postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
+		return // not connected (a provider's unit test): nowhere to keep it
+	}
 	dbCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
 		INSERT INTO import_errors
-		    (import_id, chunk_id, entity_type, slack_id, severity, code, message, context)
+		    (import_id, chunk_id, entity_type, source_id, severity, code, message, context)
 		VALUES ($1, $2, NULLIF($3,''), NULLIF($4,''), $5, NULLIF($6,''), $7, $8)`,
 		importId, chunkId, entityType, sourceId, severity, code, message, errorContext)
 	if err != nil {
@@ -874,8 +901,8 @@ func LogImportError(ctx context.Context, importId uuid.UUID, chunkId *uuid.UUID,
 }
 
 // ListErrors returns up to limit error rows, optionally filtered by severity.
-// The JSON shape uses "source_id" but the underlying column is still
-// "slack_id" for backward compatibility with the legacy Slack model.
+// Each row carries the source id as "source_id", and again as "slack_id" for
+// the legacy Slack screen.
 func ListErrors(ctx context.Context, importId uuid.UUID, severity string, limit, offset int) ([]map[string]interface{}, error) {
 	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -892,7 +919,7 @@ func ListErrors(ctx context.Context, importId uuid.UUID, severity string, limit,
 		sevClause = " AND severity = $4"
 	}
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, `
-		SELECT id, entity_type, slack_id, severity, code, message, context, created_at
+		SELECT id, entity_type, source_id, severity, code, message, context, created_at
 		FROM import_errors
 		WHERE import_id = $1`+sevClause+`
 		ORDER BY created_at DESC

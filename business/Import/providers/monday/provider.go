@@ -378,6 +378,7 @@ func boardToSourceProject(b mondayBoard) importProvider.SourceProject {
 		AdminIds:     admins,
 		CreatedBy:    creator,
 		Archived:     strings.EqualFold(b.State, "archived"),
+		Fields:       fieldsOfBoard(b).list,
 		Metadata: map[string]any{
 			"monday_url":        b.URL,
 			"monday_board_id":   b.ID,
