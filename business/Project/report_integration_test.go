@@ -13,6 +13,7 @@ import (
 
 	domain "github.com/akashc777/OneCamp/domain/Project"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	timeModels "github.com/akashc777/OneCamp/models/postgres/TimeEntry"
 	"github.com/akashc777/OneCamp/tests/integration"
 	"github.com/google/uuid"
@@ -74,6 +75,14 @@ func TestReportQuery(t *testing.T) {
 	// Made on Sunday 20 September: the first week's (from Monday the 14th).
 	if r.Open != 2 || r.Overdue != 1 || r.DoneTotal != 1 || r.Done[3] != 1 || r.Added[0] != 1 {
 		t.Fatalf("the report: open %d overdue %d done %v added %v", r.Open, r.Overdue, r.Done, r.Added)
+	}
+	// The report reads a task's status changes, not its other history.
+	for _, tk := range p.Closed {
+		for _, a := range tk.Activity {
+			if a.Type != dgraphStruct.ACTIVITY_TYPE_STATUS {
+				t.Fatalf("the report read a %q activity", a.Type)
+			}
+		}
 	}
 	// The flow of work reads the task's status change from its history: in
 	// progress from when it was made, done in the last week.
