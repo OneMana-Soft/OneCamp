@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
+	tableModel "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	memoryModels "github.com/akashc777/OneCamp/models/postgres/WorkspaceMemory"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -28,6 +29,7 @@ func registerTableExecutors() {
 	ai.RegisterExecutor("query_plan", executeQueryPlan)
 	ai.RegisterExecutor("create_table_row", executeCreateTableRow)
 	ai.RegisterExecutor("update_table_row", executeUpdateTableRow)
+	ai.RegisterExecutor("link_table_rows", executeLinkTableRows)
 }
 
 // tableActor builds a DataTable actor for the acting user, carrying their admin
@@ -429,6 +431,13 @@ func executeCreateTableRow(ctx context.Context, action ai.ProposedAction, userUU
 	if err != nil {
 		return "", nil, err
 	}
+	named := make(map[string]bool, len(values))
+	for id := range values {
+		named[id] = true
+	}
+	if err := ownLinks(ctx, tableID, named, actor, "make the row without it, then link it from there"); err != nil {
+		return "", nil, err
+	}
 	row, cerr := dataTableBusiness.CreateRow(ctx, tableID, dataTableBusiness.RowInput{Values: values}, actor)
 	if cerr != nil {
 		return "", nil, mapTableErr(cerr, "create row")
@@ -454,10 +463,129 @@ func executeUpdateTableRow(ctx context.Context, action ai.ProposedAction, userUU
 	if err != nil {
 		return "", nil, err
 	}
+	linkCells := linkFieldsNamed(ctx, tableID, values, actor)
 	if _, uerr := dataTableBusiness.UpdateRow(ctx, tableID, rowID, dataTableBusiness.RowInput{Values: values}, actor); uerr != nil {
 		return "", nil, mapTableErr(uerr, "update row")
 	}
+	if len(linkCells) > 0 {
+		return fmt.Sprintf("Updated row %s. Its links in %s are as they were: change them with link_table_rows.", rowID, strings.Join(linkCells, ", ")), nil, nil
+	}
 	return fmt.Sprintf("Updated row %s.", rowID), nil, nil
+}
+
+// linkFieldsNamed is the names of the fields among values that link to a
+// table's rows, which a row update leaves as they are.
+func linkFieldsNamed(ctx context.Context, tableID uuid.UUID, values map[string]interface{}, actor dataTableBusiness.Actor) []string {
+	fields, err := dataTableBusiness.ListTableFields(ctx, tableID, actor)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, f := range fields {
+		var cfg struct {
+			Target string `json:"relation_target"`
+		}
+		_ = json.Unmarshal([]byte(f.Config), &cfg)
+		if _, named := values[f.Id.String()]; named && f.Type == "relation" && cfg.Target == "table" {
+			names = append(names, fmt.Sprintf("%q", f.Name))
+		}
+	}
+	return names
+}
+
+// executeLinkTableRows links a row to rows of the table a field links to,
+// and unlinks it from others.
+func executeLinkTableRows(ctx context.Context, action ai.ProposedAction, userUUID string) (string, map[string]string, error) {
+	var ids [3]uuid.UUID
+	for i, name := range []string{"table_uuid", "row_uuid", "field_uuid"} {
+		id, err := uuid.Parse(strings.TrimSpace(action.Params[name]))
+		if err != nil {
+			return "", nil, fmt.Errorf("a valid %s is required", name)
+		}
+		ids[i] = id
+	}
+	add, err := rowIDsParam(action.Params["add"], "add")
+	if err != nil {
+		return "", nil, err
+	}
+	remove, err := rowIDsParam(action.Params["remove"], "remove")
+	if err != nil {
+		return "", nil, err
+	}
+	if len(add)+len(remove) == 0 {
+		return "", nil, fmt.Errorf("give the ids of rows to add or remove")
+	}
+	actor, err := tableActor(ctx, userUUID)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := ownLinks(ctx, ids[0], map[string]bool{ids[2].String(): true}, actor, "change them from there, for each linked row,"); err != nil {
+		return "", nil, err
+	}
+	_, done, err := dataTableBusiness.ChangeLinks(ctx, ids[0], ids[1], ids[2], add, remove, actor)
+	if err != nil {
+		return "", nil, mapTableErr(err, "change the links")
+	}
+	return fmt.Sprintf("Row %s: %d links made and %d removed.", ids[1], done.Added, done.Removed), nil, nil
+}
+
+// ownLinks refuses fields among ids showing the links another table's
+// relations make: those links are that table's, and changed from its side.
+// The table tools change only links a table's own relations make, so the
+// table a call names is the one whose links change, and the one MCP checks
+// the caller may change. then says what to do from there.
+func ownLinks(ctx context.Context, tableID uuid.UUID, ids map[string]bool, actor dataTableBusiness.Actor, then string) error {
+	fields, err := dataTableBusiness.ListTableFields(ctx, tableID, actor)
+	if err != nil {
+		return mapTableErr(err, "read the table's fields")
+	}
+	return othersLinks(fields, ids, then)
+}
+
+// othersLinks is ownLinks' answer for a table with fields, as readers get
+// them.
+func othersLinks(fields []*tableModel.Field, ids map[string]bool, then string) error {
+	for _, f := range fields {
+		if !ids[f.Id.String()] {
+			continue
+		}
+		var cfg struct {
+			InverseOf string `json:"inverse_of"`
+			Table     string `json:"table_id"`
+			TableName string `json:"table_name"`
+		}
+		_ = json.Unmarshal([]byte(f.Config), &cfg)
+		if cfg.InverseOf != "" {
+			other := "another table"
+			if cfg.TableName != "" {
+				other = fmt.Sprintf("the table %q", cfg.TableName)
+			}
+			return fmt.Errorf("the %q field shows the links %s makes to this one; %s with link_table_rows: table_uuid %s, field_uuid %s",
+				f.Name, other, then, cfg.Table, cfg.InverseOf)
+		}
+	}
+	return nil
+}
+
+// rowIDsParam reads a JSON array of row ids, given as name.
+func rowIDsParam(raw, name string) ([]uuid.UUID, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "[]" {
+		return nil, nil
+	}
+	var items []string
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		return nil, fmt.Errorf("%s must be a JSON array of row ids", name)
+	}
+	out := make([]uuid.UUID, 0, len(items))
+	for _, it := range items {
+		id, err := uuid.Parse(strings.TrimSpace(it))
+		if err != nil {
+			return nil, fmt.Errorf("%s: %q isn't a row id", name, it)
+		}
+		out = append(out, id)
+	}
+	return out, nil
 }
 
 // parseValuesParam parses the agent-provided JSON object string of field id ->
@@ -474,7 +602,8 @@ func parseValuesParam(raw string) (map[string]interface{}, error) {
 	return m, nil
 }
 
-// mapTableErr maps a DataTable business error to a friendly executor error.
+// mapTableErr maps a DataTable business error to a friendly executor error,
+// with what was wrong, as the API says it, so an agent can put it right.
 func mapTableErr(err error, op string) error {
 	if dataTableBusiness.IsForbidden(err) {
 		return fmt.Errorf("you don't have access to this table")
@@ -482,7 +611,7 @@ func mapTableErr(err error, op string) error {
 	if dataTableBusiness.IsNotFound(err) {
 		return fmt.Errorf("table not found")
 	}
-	return fmt.Errorf("failed to %s", op)
+	return fmt.Errorf("failed to %s: %v", op, err)
 }
 
 // compactValues trims a row values blob for compact display in tool output.

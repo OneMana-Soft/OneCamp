@@ -53,7 +53,7 @@ var functions = map[string]*function{
 	"OR":      {min: 1, max: -1, result: KindBool, eager: fnOr},
 	"NOT":     {min: 1, max: 1, result: KindBool, eager: func(e *env, a []Value) Value { return Bool(!e.truthy(a[0])) }},
 	"BLANK":   {min: 0, max: 0, result: KindBlank, eager: func(*env, []Value) Value { return Blank() }},
-	"ISBLANK": {min: 1, max: 1, result: KindBool, eager: func(e *env, a []Value) Value { return Bool(e.trimmed(a[0].text()) == "") }},
+	"ISBLANK": {min: 1, max: 1, result: KindBool, eager: func(e *env, a []Value) Value { return Bool(e.trimmed(a[0].Text()) == "") }},
 	"ISERROR": {min: 1, max: 1, result: KindBool, takesErrors: true, eager: func(_ *env, a []Value) Value { return Bool(a[0].Kind == KindError) }},
 	"TRUE":    {min: 0, max: 0, result: KindBool, eager: func(*env, []Value) Value { return Bool(true) }},
 	"FALSE":   {min: 0, max: 0, result: KindBool, eager: func(*env, []Value) Value { return Bool(false) }},
@@ -80,7 +80,7 @@ var functions = map[string]*function{
 	"LEN":         {min: 1, max: 1, result: KindNumber, eager: fnLen},
 	"UPPER":       {min: 1, max: 1, result: KindText, eager: changeCase(strings.ToUpper)},
 	"LOWER":       {min: 1, max: 1, result: KindText, eager: changeCase(strings.ToLower)},
-	"TRIM":        {min: 1, max: 1, result: KindText, eager: func(e *env, a []Value) Value { return Text(e.trimmed(a[0].text())) }},
+	"TRIM":        {min: 1, max: 1, result: KindText, eager: func(e *env, a []Value) Value { return Text(e.trimmed(a[0].Text())) }},
 	"LEFT":        {min: 2, max: 2, result: KindText, eager: fnLeft},
 	"RIGHT":       {min: 2, max: 2, result: KindText, eager: fnRight},
 	"MID":         {min: 3, max: 3, result: KindText, eager: fnMid},
@@ -174,7 +174,7 @@ func numbersOf(name string, a []Value) (nums []float64, bad Value, ok bool) {
 		}
 		f, isNum := v.number()
 		if !isNum {
-			return nil, Error(fmt.Sprintf("%s needs numbers, and %q isn't one", name, clip(v.text()))), false
+			return nil, Error(fmt.Sprintf("%s needs numbers, and %q isn't one", name, clip(v.Text()))), false
 		}
 		nums = append(nums, f)
 	}
@@ -237,7 +237,7 @@ func fnMax(_ *env, a []Value) Value {
 func num(name string, v Value) (float64, Value, bool) {
 	f, ok := v.number()
 	if !ok {
-		return 0, Error(fmt.Sprintf("%s needs a number, and %q isn't one", name, clip(v.text()))), false
+		return 0, Error(fmt.Sprintf("%s needs a number, and %q isn't one", name, clip(v.Text()))), false
 	}
 	return f, Value{}, true
 }
@@ -356,7 +356,7 @@ func fnValue(_ *env, a []Value) Value {
 // changeCase is UPPER or LOWER, which go through text a character at a time.
 func changeCase(to func(string) string) func(*env, []Value) Value {
 	return func(e *env, a []Value) Value {
-		s := a[0].text()
+		s := a[0].Text()
 		e.slow(len(s))
 		return Text(to(s))
 	}
@@ -365,7 +365,7 @@ func changeCase(to func(string) string) func(*env, []Value) Value {
 func fnConcat(_ *env, a []Value) Value {
 	var b strings.Builder
 	for _, v := range a {
-		b.WriteString(v.text())
+		b.WriteString(v.Text())
 		if b.Len() > 4*maxText {
 			return tooLong()
 		}
@@ -407,10 +407,10 @@ func runes(e *env, s string) int {
 	return utf8.RuneCountInString(s)
 }
 
-func fnLen(e *env, a []Value) Value { return Number(float64(runes(e, a[0].text()))) }
+func fnLen(e *env, a []Value) Value { return Number(float64(runes(e, a[0].Text()))) }
 
 func fnLeft(e *env, a []Value) Value {
-	s := a[0].text()
+	s := a[0].Text()
 	n, bad, ok := count("LEFT", a[1])
 	if !ok {
 		return bad
@@ -419,7 +419,7 @@ func fnLeft(e *env, a []Value) Value {
 }
 
 func fnRight(e *env, a []Value) Value {
-	s := a[0].text()
+	s := a[0].Text()
 	n, bad, ok := count("RIGHT", a[1])
 	if !ok {
 		return bad
@@ -432,7 +432,7 @@ func fnRight(e *env, a []Value) Value {
 
 // MID(text, start, count), with start counted from 1.
 func fnMid(e *env, a []Value) Value {
-	s := a[0].text()
+	s := a[0].Text()
 	start, bad, ok := count("MID", a[1])
 	if !ok {
 		return bad
@@ -454,7 +454,7 @@ func fnMid(e *env, a []Value) Value {
 // FIND(what, in, [from]) is where what first appears in in, counted from 1,
 // or 0 when it doesn't. It minds case, as Airtable's does.
 func fnFind(e *env, a []Value) Value {
-	what, in := a[0].text(), a[1].text()
+	what, in := a[0].Text(), a[1].Text()
 	from := 1
 	if len(a) == 3 {
 		f, bad, ok := count("FIND", a[2])
@@ -481,7 +481,7 @@ func fnFind(e *env, a []Value) Value {
 // longer as long as it was: swapping a long cell's line breaks for spaces
 // works.
 func fnSubstitute(e *env, a []Value) Value {
-	s, old, repl := a[0].text(), a[1].text(), a[2].text()
+	s, old, repl := a[0].Text(), a[1].Text(), a[2].Text()
 	if old == "" {
 		return Text(s)
 	}
@@ -499,7 +499,7 @@ func fnSubstitute(e *env, a []Value) Value {
 }
 
 func fnRept(_ *env, a []Value) Value {
-	s := a[0].text()
+	s := a[0].Text()
 	n, bad, ok := count("REPT", a[1])
 	if !ok {
 		return bad
@@ -515,7 +515,7 @@ func fnRept(_ *env, a []Value) Value {
 func date(e *env, name string, v Value) (Value, Value, bool) {
 	d, ok := asDate(v)
 	if !ok {
-		return Value{}, Error(fmt.Sprintf("%s needs a date, and %q isn't one", name, clip(v.text()))), false
+		return Value{}, Error(fmt.Sprintf("%s needs a date, and %q isn't one", name, clip(v.Text()))), false
 	}
 	return e.local(d), Value{}, true
 }
@@ -544,13 +544,13 @@ func datePart(name string, part func(time.Time) int) func(*env, []Value) Value {
 
 // unit reads a unit of time: years, months, weeks, days, hours or minutes.
 func unit(name string, v Value) (string, Value, bool) {
-	if s := v.text(); len(s) <= maxReadLen {
+	if s := v.Text(); len(s) <= maxReadLen {
 		switch u := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), "s"); u {
 		case "year", "month", "week", "day", "hour", "minute":
 			return u, Value{}, true
 		}
 	}
-	return "", Error(fmt.Sprintf("%s counts in years, months, weeks, days, hours or minutes, not %q", name, clip(v.text()))), false
+	return "", Error(fmt.Sprintf("%s counts in years, months, weeks, days, hours or minutes, not %q", name, clip(v.Text()))), false
 }
 
 // addTo moves a date by n of a unit. A day moved by whole days stays a day.

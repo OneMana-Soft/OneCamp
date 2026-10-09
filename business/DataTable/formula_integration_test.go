@@ -274,7 +274,7 @@ func TestFormulaFieldsHaveALimit(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 	var first *model.Field
-	for i := 0; i < maxFormulaFields; i++ {
+	for i := 0; i < maxComputed[model.FieldFormula]; i++ {
 		f, err := CreateField(ctx, table.Id, FieldInput{Name: fmt.Sprint("F", i), Type: model.FieldFormula, Config: map[string]interface{}{"formula": fmt.Sprint(i, " * 2")}}, actor)
 		if err != nil {
 			t.Fatalf("formula %d: %v", i, err)

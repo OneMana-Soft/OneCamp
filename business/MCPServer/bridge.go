@@ -201,6 +201,10 @@ var bridgedTools = []binding{
 	// a table, and a row cannot be reached except through it.
 	{Tool: "update_table_row", Kind: ResourceTable, IDArg: "table_uuid",
 		Behaviour: ToolBehaviour{ReadOnly: false, Destructive: false, Idempotent: true}},
+	// Linking a row twice, or unlinking it twice, leaves it as once: a link is
+	// there or it isn't. Unlinking is undone by linking again.
+	{Tool: "link_table_rows", Kind: ResourceTable, IDArg: "table_uuid",
+		Behaviour: ToolBehaviour{ReadOnly: false, Destructive: false, Idempotent: true}},
 
 	// THE FIRST WRITES THAT ARE NOT SAFE TO REPEAT. Calling either twice produces two
 	// rows or two messages, so each retry a client makes after a lost response would

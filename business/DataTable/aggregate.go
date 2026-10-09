@@ -102,8 +102,9 @@ type AggResult struct {
 	ScannedRows     int         `json:"scanned_rows"`
 	DistinctGroups  int         `json:"distinct_groups"`
 	// Truncated is true when the answer leaves something out: groups past
-	// the limit, rows past the scan cap, or formula values that ran out of
-	// working out (formula.Unfinished).
+	// the limit, rows past the scan cap, formula or rollup values that
+	// weren't worked out (formula.Unfinished), or links past those a cell
+	// shows (readsShort).
 	Truncated bool `json:"truncated"`
 }
 
@@ -176,7 +177,7 @@ func labelsWith(v interface{}, format func(float64) string) []string {
 					out = append(out, el)
 				}
 			case map[string]interface{}:
-				if lbl := refLabel(el); lbl != "" {
+				if lbl := refLabel(el); lbl != "" && !moreRef(el) {
 					out = append(out, lbl)
 				}
 			case float64:
@@ -187,7 +188,7 @@ func labelsWith(v interface{}, format func(float64) string) []string {
 		}
 		return out
 	case map[string]interface{}:
-		if lbl := refLabel(t); lbl != "" {
+		if lbl := refLabel(t); lbl != "" && !moreRef(t) {
 			return []string{lbl}
 		}
 		return nil
@@ -272,10 +273,11 @@ func matchFilter(values map[string]interface{}, fields []*model.Field, f Filter)
 	op := FilterOp(strings.ToLower(strings.TrimSpace(f.Op)))
 
 	switch op {
+	// A link cell counting links it doesn't name has links.
 	case FilterEmpty:
-		return firstLabel(cell) == ""
+		return firstLabel(cell) == "" && !hasMoreRef(cell)
 	case FilterNotEmpty:
-		return firstLabel(cell) != ""
+		return firstLabel(cell) != "" || hasMoreRef(cell)
 	case FilterGt, FilterGte, FilterLt, FilterLte:
 		cv, ok1 := cellNumber(cell)
 		fv, ok2 := cellNumber(f.Value)
@@ -318,7 +320,7 @@ func labelEquals(cell interface{}, value string) bool {
 		}
 	}
 	// An empty cell equals an empty target.
-	if want == "" && firstLabel(cell) == "" {
+	if want == "" && firstLabel(cell) == "" && !hasMoreRef(cell) {
 		return true
 	}
 	return false
@@ -412,12 +414,12 @@ func Aggregate(fields []*model.Field, rows []*model.Row, spec QuerySpec) (*AggRe
 	buckets := map[string]*accumulator{}
 	order := []string{} // first-seen order for stable tie-breaks
 	matched := 0
-	reads := formulaReads(fields, spec.Filters, groupField, valueField)
+	reads := computedReads(fields, spec.Filters, groupField, valueField)
 	short := false
 
 	for _, r := range rows {
 		values := parseRowValues(r.Values)
-		short = short || readsUnfinished(values, reads)
+		short = short || readsShort(values, reads)
 
 		// Row-level filters (AND).
 		skip := false
@@ -537,12 +539,16 @@ func sortBuckets(b []AggBucket, ascending bool, byLabel bool) {
 	})
 }
 
-// formulaReads is the formula fields a query reads in each row (filters it,
-// groups by or adds up): the cells that can have run out of working out.
-func formulaReads(fields []*model.Field, filters []Filter, read ...*model.Field) []string {
+// computedReads is the fields a query reads in each row (filters it, groups
+// by or adds up) whose cells each read works out: formulas, rollups and
+// links to tables, the cells that can leave something out.
+func computedReads(fields []*model.Field, filters []Filter, read ...*model.Field) []string {
 	var ids []string
 	add := func(fld *model.Field) {
-		if fld != nil && fld.Type == model.FieldFormula {
+		if fld == nil {
+			return
+		}
+		if _, isLink := linkOf(fld); isLink || fld.Type == model.FieldFormula || fld.Type == model.FieldRollup {
 			ids = append(ids, fld.Id.String())
 		}
 	}
@@ -555,11 +561,30 @@ func formulaReads(fields []*model.Field, filters []Filter, read ...*model.Field)
 	return ids
 }
 
-// readsUnfinished is whether a row's cells at ids include a formula that ran
-// out of working out: an answer that reads it falls short.
-func readsUnfinished(values map[string]interface{}, ids []string) bool {
+// readsShort is whether a row's cells at ids leave something out: a formula
+// or a rollup that wasn't worked out (formula.Unfinished), or a link cell
+// with more links than it shows. An answer that reads one falls short.
+func readsShort(values map[string]interface{}, ids []string) bool {
 	for _, id := range ids {
-		if formula.Unfinished(values[id]) {
+		if formula.Unfinished(values[id]) || hasMoreRef(values[id]) {
+			return true
+		}
+	}
+	return false
+}
+
+// moreRef is whether a cell's item is a link cell's count of the links past
+// those it shows ({"type": "more"}), not a link.
+func moreRef(item interface{}) bool {
+	m, ok := item.(map[string]interface{})
+	return ok && m["type"] == "more"
+}
+
+// hasMoreRef is whether a link cell, as read, shows only some of its links.
+func hasMoreRef(cell interface{}) bool {
+	items, _ := cell.([]interface{})
+	for _, it := range items {
+		if moreRef(it) {
 			return true
 		}
 	}
@@ -610,90 +635,83 @@ func pushableLikeTerms(fields []*model.Field, filters []Filter) []string {
 		if rf == nil {
 			continue // unknown field is a no-op in matchFilter; must not narrow
 		}
-		if rf.Type == model.FieldFormula {
-			continue // worked out on read, so not in the stored values to match
+		if _, isLink := linkOf(rf); isLink || rf.Type == model.FieldFormula || rf.Type == model.FieldRollup {
+			continue // worked out on read (links store ids, not names), so not in the stored values to match
 		}
 		terms = append(terms, v)
 	}
 	return terms
 }
 
-// scanRowsForQuery loads the rows a filter-bearing query needs, bounded by the
-// scan cap, and reports whether it reached the end of the (candidate) set. It
-// is the single, generic row-loading path shared by AggregateTable and
-// ExecutePlan: when the filters yield DB-pushable terms it pages the narrowed
-// superset via ListRowsFiltered (so a filtered aggregation over a large table
-// completes instead of truncating); otherwise it uses the bundle's first page
-// and pages the remainder unfiltered, exactly as before. Either way the caller
-// re-applies the exact filters in memory, so results never diverge.
-func scanRowsForQuery(ctx context.Context, tableID uuid.UUID, actor Actor, bundle *TableBundle, filters []Filter) ([]*model.Row, bool, error) {
-	terms := pushableLikeTerms(bundle.Fields, filters)
+// queryPage is how many rows a query reads at a time.
+const queryPage = 500
 
-	// No safe pushdown: keep the historical path (bundle page + unfiltered paging).
-	if len(terms) == 0 {
-		rows := bundle.Rows
-		if !bundle.RowsTruncated {
+// tableForQuery is the table a query reads, which the actor must be able to
+// view, and its fields.
+func tableForQuery(ctx context.Context, tableID uuid.UUID, actor Actor) (*model.DataTable, []*model.Field, error) {
+	t, err := loadViewable(ctx, tableID, actor)
+	if err != nil {
+		return nil, nil, err
+	}
+	fields, err := model.ListFields(ctx, tableID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load fields")
+	}
+	return t, fields, nil
+}
+
+// scanRowsForQuery loads the rows a query reads, a page at a time up to the
+// scan cap, and reports whether it reached the end of them. Each page has
+// only the computed cells the query reads worked out (read, by id, and what
+// those read). It is the one row-loading path behind AggregateTable and
+// ExecutePlan: when the filters give terms the database can match
+// (pushableLikeTerms) it pages only the rows holding them, a superset of the
+// matches, so a filtered query over a large table completes instead of
+// stopping short. The caller applies the exact filters either way, so the
+// answer is the same as a full scan's.
+func scanRowsForQuery(ctx context.Context, tableID uuid.UUID, actor Actor, fields []*model.Field, filters []Filter, read []string) ([]*model.Row, bool, error) {
+	ctx = asViewer(ctx, actor)
+	terms := pushableLikeTerms(fields, filters)
+	var rows []*model.Row
+	for len(rows) < maxAggregateScanRows {
+		var page []*model.Row
+		var err error
+		if len(terms) == 0 {
+			page, err = model.ListRows(ctx, tableID, queryPage, len(rows))
+		} else {
+			page, err = model.ListRowsFiltered(ctx, tableID, terms, queryPage, len(rows))
+		}
+		if err != nil {
+			return nil, false, fmt.Errorf("failed to load rows")
+		}
+		withComputedFor(ctx, fields, page, read)
+		rows = append(rows, page...)
+		if len(page) < queryPage {
 			return rows, true, nil
 		}
-		offset := len(rows)
-		for len(rows) < maxAggregateScanRows {
-			page, perr := ListRows(ctx, tableID, actor, 500, offset)
-			if perr != nil {
-				return nil, false, perr
-			}
-			if len(page) == 0 {
-				return rows, true, nil
-			}
-			rows = append(rows, page...)
-			offset += len(page)
-		}
-		if len(rows) > maxAggregateScanRows {
-			rows = rows[:maxAggregateScanRows]
-		}
-		return rows, false, nil
 	}
-
-	// Pushdown path: page only the DB-narrowed candidate superset.
-	var rows []*model.Row
-	offset := 0
-	scannedAll := false
-	for len(rows) < maxAggregateScanRows {
-		page, perr := ListRowsFiltered(ctx, tableID, actor, terms, 500, offset)
-		if perr != nil {
-			return nil, false, perr
-		}
-		if len(page) == 0 {
-			scannedAll = true
-			break
-		}
-		rows = append(rows, page...)
-		offset += len(page)
-	}
-	if len(rows) > maxAggregateScanRows {
-		rows = rows[:maxAggregateScanRows]
-	}
-	return rows, scannedAll, nil
+	return rows[:maxAggregateScanRows], false, nil
 }
 
 // AggregateTable loads a table's fields + rows (permission-checked, bounded) and
 // runs Aggregate over them. It is the entry point tools call.
 func AggregateTable(ctx context.Context, tableID uuid.UUID, actor Actor, spec QuerySpec) (*AggResult, *model.DataTable, error) {
-	bundle, err := GetBundle(ctx, tableID, actor)
+	t, fields, err := tableForQuery(ctx, tableID, actor)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	rows, scannedAll, serr := scanRowsForQuery(ctx, tableID, actor, bundle, spec.Filters)
+	read := computedReads(fields, spec.Filters, resolveField(fields, spec.GroupBy), resolveField(fields, spec.ValueField))
+	rows, scannedAll, serr := scanRowsForQuery(ctx, tableID, actor, fields, spec.Filters, read)
 	if serr != nil {
 		return nil, nil, serr
 	}
 
-	res, aerr := Aggregate(bundle.Fields, rows, spec)
+	res, aerr := Aggregate(fields, rows, spec)
 	if aerr != nil {
 		return nil, nil, aerr
 	}
 	if !scannedAll {
 		res.Truncated = true
 	}
-	return res, bundle.Table, nil
+	return res, t, nil
 }

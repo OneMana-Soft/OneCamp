@@ -769,17 +769,14 @@ func mayShare(w http.ResponseWriter, r *http.Request, userInfo userModels.UserIn
 			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid table id"})
 			return false
 		}
-		// The caller must be able to MANAGE the table to share it externally.
-		// GetBundle enforces view access; CanManage gates the privileged share.
-		bundle, berr := tableBusiness.GetBundle(ctx, tid, tableBusiness.Actor{
-			UserID:  userInfo.UserPostgresInfo.Id,
-			IsAdmin: userInfo.UserPostgresInfo.IsAdmin,
-		})
-		if berr != nil {
+		// The caller must be able to MANAGE the table to share it externally:
+		// one they can't see is not found, one they can only see is refused.
+		actor := tableBusiness.Actor{UserID: userInfo.UserPostgresInfo.Id, IsAdmin: userInfo.UserPostgresInfo.IsAdmin}
+		if tableBusiness.CanView(ctx, tid, actor) != nil {
 			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Table not found"})
 			return false
 		}
-		if !bundle.CanManage {
+		if tableBusiness.CanManage(ctx, tid, actor) != nil {
 			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You need manage access to share this table."})
 			return false
 		}

@@ -148,6 +148,7 @@ func emptyObjIfBlank(s string) string {
 // failing the whole fill. Returns counts. Idempotent: re-running replaces the
 // prior AI value.
 func FillAIColumn(ctx context.Context, tableId, fieldId uuid.UUID, rowIds []uuid.UUID, actor Actor) (*FillResult, error) {
+	ctx = asViewer(ctx, actor)
 	t, err := loadViewable(ctx, tableId, actor)
 	if err != nil {
 		return nil, err
@@ -232,9 +233,10 @@ func FillAIColumn(ctx context.Context, tableId, fieldId uuid.UUID, rowIds []uuid
 // UpdateRow business path) means an autofill write never re-triggers row events.
 func fillOneCell(ctx context.Context, llm ai.LLMProvider, cb *ai.CircuitBreaker, t *model.DataTable, fields []*model.Field, rw *model.Row, target *model.Field, prompt string) (filled bool, stop bool) {
 	// The prompt sees the row's formulas too; they go into a copy, as the
-	// row itself is written back.
+	// row itself is written back. It's read as a guest: the answer is stored
+	// for every reader, so it can't come from a table only this one opens.
 	view := *rw
-	withFormulas(ctx, fields, []*model.Row{&view})
+	withComputed(asGuest(ctx), fields, []*model.Row{&view})
 	cellPrompt := buildCellPrompt(prompt, fields, view.Values, target.Id.String())
 	answer, cerr := ai.ChatWithRescue(ctx, llm, []ai.ChatMessage{
 		{Role: "system", Content: "You fill a single spreadsheet cell. Reply with only the cell value, concise and plain."},
@@ -317,8 +319,9 @@ func writeCell(ctx context.Context, t *model.DataTable, rw *model.Row, fieldID, 
 		values = map[string]interface{}{}
 	}
 	values[fieldID] = value
-	// Formula values are worked out on each read, never stored.
-	values, _ = withoutFormulaValues(ctx, t.Id, values)
+	// Formula, rollup and other tables' link values are worked out on each
+	// read, never stored.
+	values, _ = withoutComputedValues(ctx, t.Id, values)
 	blob, merr := json.Marshal(values)
 	if merr != nil {
 		return merr
@@ -328,5 +331,6 @@ func writeCell(ctx context.Context, t *model.DataTable, rw *model.Row, fieldID, 
 		return uerr
 	}
 	broadcastRow(t.Id.String(), "updated", updated)
+	go tellLinkedTables(context.WithoutCancel(ctx), t.Id, rw.Id, false)
 	return nil
 }

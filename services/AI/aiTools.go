@@ -458,16 +458,27 @@ var ToolRegistry = []ToolDef{
 		Description: "Add a row to a data table. Use when the user asks to add an entry/record/item to a table. First read_table to learn the field ids.",
 		Parameters: []ToolParam{
 			{Name: "table_uuid", Type: "string", Required: true, Description: "UUID of the table"},
-			{Name: "values", Type: "string", Required: true, Description: "JSON object mapping field id -> value, e.g. {\"<fieldId>\":\"Acme\",\"<fieldId2>\":42}"},
+			{Name: "values", Type: "string", Required: true, Description: "JSON object mapping field id -> value, e.g. {\"<fieldId>\":\"Acme\",\"<fieldId2>\":42}. A field linking to another table's rows takes a list of those rows' ids (read_table on that table)."},
 		},
 	},
 	{
 		Name:        "update_table_row",
-		Description: "Update an existing row in a data table. Use read_table first to get the row id and field ids.",
+		Description: "Update an existing row in a data table. Use read_table first to get the row id and field ids. Its links to other tables' rows stay as they are: change them with link_table_rows.",
 		Parameters: []ToolParam{
 			{Name: "table_uuid", Type: "string", Required: true, Description: "UUID of the table"},
 			{Name: "row_uuid", Type: "string", Required: true, Description: "UUID of the row to update"},
 			{Name: "values", Type: "string", Required: true, Description: "JSON object mapping field id -> value for the updated row"},
+		},
+	},
+	{
+		Name:        "link_table_rows",
+		Description: "Link a table row to rows of another table (or of its own), or unlink them, through a field of its table that links to a table (not one showing another table's links). Use read_table first for the row id and the field id, and read_table on the linked table for its rows' ids.",
+		Parameters: []ToolParam{
+			{Name: "table_uuid", Type: "string", Required: true, Description: "UUID of the table the row is in"},
+			{Name: "row_uuid", Type: "string", Required: true, Description: "UUID of the row"},
+			{Name: "field_uuid", Type: "string", Required: true, Description: "UUID of the field that links to a table"},
+			{Name: "add", Type: "string", Required: false, Description: "JSON array of the ids of the rows to link to"},
+			{Name: "remove", Type: "string", Required: false, Description: "JSON array of the ids of the rows to unlink"},
 		},
 	},
 	{

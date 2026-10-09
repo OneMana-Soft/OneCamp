@@ -23,6 +23,7 @@ import (
 	archiveBusiness "github.com/akashc777/OneCamp/business/Archive"
 	checkInBusiness "github.com/akashc777/OneCamp/business/CheckIn"
 	commandBusiness "github.com/akashc777/OneCamp/business/Command"
+	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
 	githubBusiness "github.com/akashc777/OneCamp/business/GitHub"
 	mcpServerBusiness "github.com/akashc777/OneCamp/business/MCPServer"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
@@ -254,6 +255,9 @@ func startBackgroundLoops(ctx context.Context) {
 	// Automatic check-ins: each worker sweeps for due ones; each due time is
 	// claimed by one UPDATE, so exactly one worker asks it.
 	checkInBusiness.StartWorker(ctx)
+	// Vacuum the links between tables' rows as they change, which Postgres 12
+	// doesn't for a table that's mostly added to, so they stay quick to count.
+	dataTableBusiness.StartLinkUpkeep(ctx)
 
 	// Start the Workflow Builder engine. It subscribes to the workspace event
 	// bus and runs admin-defined "when a message matches X → reply / create

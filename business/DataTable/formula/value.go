@@ -176,8 +176,8 @@ func FormatNumber(f float64) string {
 	return strconv.FormatFloat(f, 'f', -1, 64)
 }
 
-// text is the value as text, the way & and CONCATENATE join it.
-func (v Value) text() string {
+// Text is the value as text, the way & and CONCATENATE join it.
+func (v Value) Text() string {
 	switch v.Kind {
 	case KindNumber:
 		return FormatNumber(v.Num)

@@ -147,7 +147,7 @@ scopes — that alone makes the whole write path unreachable for it.
 
 ## Governed tools
 
-All 30 of the 30 public tools are **governed**: before the tool runs, the server resolves
+All 31 of the 31 public tools are **governed**: before the tool runs, the server resolves
 exactly what the call will touch and checks the authorising person's live permission on
 it.
 
@@ -157,7 +157,7 @@ it.
 | `projects` | `list_projects`, `read_project`, `list_teams` | `create_project` |
 | `docs` | `read_doc` | `create_doc` |
 | `messages` | `summarize_channel`, `summarize_dm`, `summarize_group_chat` | `send_message`, `send_dm`, `send_group_chat` |
-| `tables` | `list_tables`, `read_table`, `query_table`, `query_plan` | `create_table_row`, `update_table_row` |
+| `tables` | `list_tables`, `read_table`, `query_table`, `query_plan` | `create_table_row`, `update_table_row`, `link_table_rows` |
 | `search` | `search_workspace` | — |
 | `data_sources` | `list_data_sources`, `read_data_source`, `query_data_source`, `query_data_source_plan` | — |
 | `calendar` | — | `set_reminder` |

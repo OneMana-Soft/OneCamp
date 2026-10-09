@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -39,14 +40,36 @@ type compiled struct {
 
 // Program is a table's formulas, ready to run on the rows of one read of it
 // (a page): each formula read once, in an order where it comes after the
-// formulas it reads. The rows share the read's budget (maxReadSteps), so a
-// Program is for one read, from one goroutine.
+// formulas it reads. The rows share the read's Budget, so a Program is for
+// one read, from one goroutine.
 type Program struct {
-	order []compiled
-	kinds map[string]Kind
-	// read is the work done for the rows run so far.
-	read int
+	order  []compiled
+	kinds  map[string]Kind
+	budget *Budget
 }
+
+// Budget is the work one read can take (maxReadSteps): its own table's
+// formulas, those of the tables it links to, and the rollups adding them up
+// all draw on the same one.
+type Budget struct{ spent int }
+
+// NewBudget is a read's budget, none of it spent.
+func NewBudget() *Budget { return &Budget{} }
+
+// Spend charges n steps, and says whether the budget had them.
+func (b *Budget) Spend(n int) bool {
+	b.spent += n
+	return b.spent <= maxReadSteps
+}
+
+// Within has the program's rows draw on budget b.
+func (p *Program) Within(b *Budget) *Program {
+	p.budget = b
+	return p
+}
+
+// RanOut is the value of anything a read's budget ran out before working out.
+func RanOut() Value { return tooMuchRead }
 
 // resolver finds a field by its id ({#id}) or name ({Name}, ignoring case).
 func resolver(fields []Field) func(ref string) (string, error) {
@@ -117,7 +140,7 @@ func Compile(fields []Field) *Program {
 	// Each formula after those it reads; what can't be placed reads itself
 	// through a loop.
 	ordered, looped := topo.Order(ids, func(id string) []string { return deps[id] })
-	p := &Program{kinds: kinds}
+	p := &Program{kinds: kinds, budget: NewBudget()}
 	for _, id := range ordered {
 		c := formulas[id]
 		switch {
@@ -164,16 +187,45 @@ const maxRowText = 100 << 10
 
 var tooMuchText = Error("This row's formulas give more text than a row can hold")
 
-// Unfinished is true for a formula's cell, as sent (Value.JSON), when the
-// formula wasn't worked out because the work or the text it was allowed ran
-// out: a total that reads it falls short.
+// shortWhys is the reasons a value is missing rather than wrong, by text:
+// the work or the text a formula was allowed ran out, or what a Short value
+// says.
+var shortWhys sync.Map
+
+func init() {
+	for _, v := range []Value{tooMuch, tooMuchRead, tooMuchText} {
+		shortWhys.Store(v.Str, true)
+	}
+}
+
+// Short is an error value saying why a read left something out: no answer,
+// rather than a wrong one, so a total reading it falls short (Unfinished).
+func Short(why string) Value {
+	shortWhys.Store(why, true)
+	return Error(why)
+}
+
+func isShort(why string) bool {
+	_, ok := shortWhys.Load(why)
+	return ok
+}
+
+// IsUnfinished is whether a value is one a formula gave because the work or
+// the text it was allowed ran out, or a Short one, rather than an answer.
+func (v Value) IsUnfinished() bool {
+	return v.Kind == KindError && isShort(v.Str)
+}
+
+// Unfinished is true for a cell, as sent (Value.JSON), that wasn't worked
+// out because the work or the text it was allowed ran out, or that's a Short
+// value: a total that reads it falls short.
 func Unfinished(cell interface{}) bool {
 	m, ok := cell.(map[string]interface{})
 	if !ok {
 		return false
 	}
 	why, _ := m["error"].(string)
-	return why != "" && (why == tooMuch.Str || why == tooMuchRead.Str || why == tooMuchText.Str)
+	return why != "" && isShort(why)
 }
 
 // ReadCost is the steps reading a stored cell takes, from its JSON, for Run's
@@ -194,7 +246,7 @@ func ReadCost(raw string) int {
 func (p *Program) Run(cell func(id string) (Value, int), now time.Time, loc *time.Location) map[string]Value {
 	out := make(map[string]Value, len(p.order))
 	read := map[string]Value{}
-	e := &env{now: now, loc: loc, read: &p.read}
+	e := &env{now: now, loc: loc, read: &p.budget.spent}
 	e.cell = func(id string) Value {
 		if v, ok := out[id]; ok {
 			return v

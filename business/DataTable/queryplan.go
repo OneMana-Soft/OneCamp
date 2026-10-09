@@ -173,12 +173,12 @@ func RunPlan(fields []*model.Field, rows []*model.Row, plan QueryPlan) (*PlanRes
 	buckets := map[string]*bucketAgg{}
 	order := []string{}
 	matched := 0
-	reads := formulaReads(fields, plan.Filters, append([]*model.Field{groupField}, valueFields...)...)
+	reads := computedReads(fields, plan.Filters, append([]*model.Field{groupField}, valueFields...)...)
 	short := false
 
 	for _, r := range rows {
 		values := parseRowValues(r.Values)
-		short = short || readsUnfinished(values, reads)
+		short = short || readsShort(values, reads)
 
 		skip := false
 		for _, f := range plan.Filters {
@@ -375,22 +375,25 @@ func sortPlanBuckets(b []PlanBucket, sortBy string, ascending, byLabel bool) {
 // like AggregateTable) and runs RunPlan. It is the entry point the query_plan
 // tool calls. Returns the result + the table (for its display name).
 func ExecutePlan(ctx context.Context, tableID uuid.UUID, actor Actor, plan QueryPlan) (*PlanResult, *model.DataTable, error) {
-	bundle, err := GetBundle(ctx, tableID, actor)
+	t, fields, err := tableForQuery(ctx, tableID, actor)
 	if err != nil {
 		return nil, nil, err
 	}
-
-	rows, scannedAll, serr := scanRowsForQuery(ctx, tableID, actor, bundle, plan.Filters)
+	reads := []*model.Field{resolveField(fields, plan.GroupBy)}
+	for _, m := range plan.Metrics {
+		reads = append(reads, resolveField(fields, m.ValueField))
+	}
+	rows, scannedAll, serr := scanRowsForQuery(ctx, tableID, actor, fields, plan.Filters, computedReads(fields, plan.Filters, reads...))
 	if serr != nil {
 		return nil, nil, serr
 	}
 
-	res, rerr := RunPlan(bundle.Fields, rows, plan)
+	res, rerr := RunPlan(fields, rows, plan)
 	if rerr != nil {
 		return nil, nil, rerr
 	}
 	if !scannedAll {
 		res.Truncated = true
 	}
-	return res, bundle.Table, nil
+	return res, t, nil
 }

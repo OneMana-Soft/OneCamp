@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
+	tableModel "github.com/akashc777/OneCamp/models/postgres/DataTable"
+	"github.com/google/uuid"
 )
 
 // These lock the MODEL-FACING output of query_table: the human breakdown plus
@@ -141,5 +143,47 @@ func TestRenderAggregateResult_NoRows(t *testing.T) {
 	out := renderAggregateResult("Deals", res, dataTableBusiness.QuerySpec{})
 	if !strings.Contains(out, "No rows matched") || strings.Contains(out, "```chart") {
 		t.Errorf("empty result should say no rows and have no chart, got:\n%s", out)
+	}
+}
+
+// link_table_rows reads its rows as a JSON array of ids, and names what it
+// can't read.
+func TestRowIDsParam(t *testing.T) {
+	ids, err := rowIDsParam(` ["3f0c5c64-1c1f-4b0e-9a55-4a3d6e1f7a10", " 8a7c1e2d-0b3f-4c5d-8e9f-0a1b2c3d4e5f "] `, "add")
+	if err != nil || len(ids) != 2 || ids[1].String() != "8a7c1e2d-0b3f-4c5d-8e9f-0a1b2c3d4e5f" {
+		t.Errorf("two ids: %v, %v", ids, err)
+	}
+	for _, raw := range []string{"", "[]", "  "} {
+		if ids, err := rowIDsParam(raw, "add"); err != nil || ids != nil {
+			t.Errorf("%q: %v, %v", raw, ids, err)
+		}
+	}
+	if _, err := rowIDsParam(`["Acme"]`, "add"); err == nil || !strings.Contains(err.Error(), `"Acme" isn't a row id`) {
+		t.Errorf("a name: %v", err)
+	}
+	if _, err := rowIDsParam(`"3f0c5c64-1c1f-4b0e-9a55-4a3d6e1f7a10"`, "remove"); err == nil || !strings.Contains(err.Error(), "remove must be a JSON array") {
+		t.Errorf("not a list: %v", err)
+	}
+}
+
+// The table tools change only the links a table's own relations make: a
+// field showing another table's links is refused, naming where to change
+// them, so the table a call names is the one whose links change.
+func TestTableToolsChangeOnlyTheirTablesLinks(t *testing.T) {
+	vendor := &tableModel.Field{Id: uuid.New(), Name: "Vendor", Type: "relation", Config: `{"relation_target":"table","table_id":"v","inverse":"b"}`}
+	back := &tableModel.Field{Id: uuid.New(), Name: "Budget", Type: "relation",
+		Config: `{"relation_target":"table","table_id":"budget-table","inverse_of":"` + vendor.Id.String() + `","table_name":"Budget"}`}
+	name := &tableModel.Field{Id: uuid.New(), Name: "Name", Type: "text", Config: "{}"}
+	fields := []*tableModel.Field{vendor, back, name}
+	if err := othersLinks(fields, map[string]bool{vendor.Id.String(): true, name.Id.String(): true}, "then"); err != nil {
+		t.Errorf("a table's own relation and a name: %v", err)
+	}
+	err := othersLinks(fields, map[string]bool{name.Id.String(): true, back.Id.String(): true}, "make the row without it, then link it from there")
+	want := `the "Budget" field shows the links the table "Budget" makes to this one; make the row without it, then link it from there with link_table_rows: table_uuid budget-table, field_uuid ` + vendor.Id.String()
+	if err == nil || err.Error() != want {
+		t.Errorf("another table's links:\n got %v\nwant %s", err, want)
+	}
+	if err := othersLinks(fields, map[string]bool{uuid.New().String(): true}, "then"); err != nil {
+		t.Errorf("a field it doesn't have is left to the business to refuse: %v", err)
 	}
 }

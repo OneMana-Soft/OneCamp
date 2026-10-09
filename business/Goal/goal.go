@@ -117,7 +117,7 @@ func Check(in Input) (*goalModel.Goal, []uuid.UUID, error) {
 		return nil, nil, refuse("Keep a goal's title under %d characters.", MaxTitle)
 	}
 	if len([]rune(g.Description)) > MaxDescription {
-		return nil, nil, refuse("Keep the description under %s characters.", thousands(MaxDescription))
+		return nil, nil, refuse("Keep the description under %s characters.", helpers.Thousands(MaxDescription))
 	}
 	owner, err := uuid.Parse(strings.TrimSpace(in.OwnerUUID))
 	if err != nil {
@@ -281,31 +281,13 @@ func PaceHealth(progress *float64, expected float64) string {
 // Percent is a progress as people read it: "55%". Pure.
 func Percent(v float64) string { return strconv.Itoa(int(math.Round(clamp01(v)*100))) + "%" }
 
-// thousands writes an integer with thousands separators: 4,000. Pure.
-func thousands(n int64) string {
-	s := strconv.FormatInt(n, 10)
-	neg := strings.HasPrefix(s, "-")
-	s = strings.TrimPrefix(s, "-")
-	var b strings.Builder
-	for i, r := range s {
-		if i > 0 && (len(s)-i)%3 == 0 {
-			b.WriteByte(',')
-		}
-		b.WriteRune(r)
-	}
-	if neg {
-		return "-" + b.String()
-	}
-	return b.String()
-}
-
 // Amount writes a number goal's value with its unit: "410 teams", "$250,000",
 // "12.5%". A unit that is one currency sign goes first; any other follows. Up
 // to two decimals, none when whole. Pure.
 func Amount(v float64, unit string) string {
 	r := math.Round(v*100) / 100
 	whole, frac := math.Modf(math.Abs(r))
-	s := thousands(int64(whole))
+	s := helpers.Thousands(int64(whole))
 	if frac > 0 {
 		s += strings.TrimRight(strings.TrimPrefix(strconv.FormatFloat(frac, 'f', 2, 64), "0"), "0")
 	}

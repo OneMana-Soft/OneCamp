@@ -58,6 +58,18 @@ func kindOf(fieldType string) formula.Kind {
 	}
 }
 
+// kindOfField is how a field's cells read in a formula: a rollup by what it
+// gives, any other field by its type.
+func kindOfField(f *model.Field) formula.Kind {
+	if cfg, ok := rollupOf(f); ok {
+		if k, ok := rollupGives[cfg.Aggregate]; ok {
+			return k
+		}
+		return formula.KindText
+	}
+	return kindOf(f.Type)
+}
+
 // cellValue reads a cell for a formula, with the same helpers totals and
 // filters use: a number field as a number, a date as a date, a checkbox as
 // yes or no, and anything else as its labels ("Design, Launch" for a
@@ -98,7 +110,7 @@ func storedFormula(f *model.Field) string {
 func formulaInputs(fields []*model.Field) []formula.Field {
 	out := make([]formula.Field, 0, len(fields))
 	for _, f := range fields {
-		in := formula.Field{ID: f.Id.String(), Name: f.Name, Kind: kindOf(f.Type)}
+		in := formula.Field{ID: f.Id.String(), Name: f.Name, Kind: kindOfField(f)}
 		if f.Type == model.FieldFormula {
 			in.IsFormula, in.Formula = true, storedFormula(f)
 		}
@@ -107,46 +119,23 @@ func formulaInputs(fields []*model.Field) []formula.Field {
 	return out
 }
 
-// withFormulas works out the table's formulas for rows (one read, sharing its
-// budget) and writes each value into its row, where every reader finds a
-// cell. A row's stored text is kept as it is and the values are added to it:
-// only the cells formulas read are decoded. It returns the program, for the
-// fields' result types.
-func withFormulas(ctx context.Context, fields []*model.Field, rows []*model.Row) *formula.Program {
-	p := formula.Compile(formulaInputs(fields))
-	if p.Empty() || len(rows) == 0 {
-		return p
+// withComputed works out a page of rows' computed cells, as one read
+// (computed.go): the labels of the rows they link to, the links other tables
+// make to them, rollups and formulas. It writes them into each row's stored
+// text, where every reader finds a cell, and returns what it found, for
+// presentComputedFields.
+func withComputed(ctx context.Context, fields []*model.Field, rows []*model.Row) *computed {
+	c := planComputed(ctx, fields)
+	c.apply(ctx, rows)
+	return c
+}
+
+// withComputedFor is withComputed for only the computed cells of the fields
+// ids names, and of those they read: a query's, which reads no others.
+func withComputedFor(ctx context.Context, fields []*model.Field, rows []*model.Row, ids []string) {
+	if len(ids) > 0 {
+		planComputedFor(ctx, fields, computedNeeds(fields, ids)).apply(ctx, rows)
 	}
-	types := make(map[string]string, len(fields))
-	for _, f := range fields {
-		types[f.Id.String()] = f.Type
-	}
-	now, loc := time.Now(), zoneFrom(ctx)
-	for _, r := range rows {
-		if r == nil {
-			continue
-		}
-		cells, ok := rowMembers(r.Values)
-		if !ok {
-			cells, r.Values = canonicalMembers(r.Values)
-		}
-		at := make(map[string]int, len(cells))
-		for i, m := range cells {
-			at[m.key] = i // a key given twice reads as its last, as in encoding/json
-		}
-		out := p.Run(func(id string) (formula.Value, int) {
-			i, ok := at[id]
-			if !ok {
-				return cellValue(types[id], nil), 0
-			}
-			raw := r.Values[cells[i].value:cells[i].end]
-			var v interface{}
-			_ = json.Unmarshal([]byte(raw), &v)
-			return cellValue(types[id], v), formula.ReadCost(raw)
-		}, now, loc)
-		r.Values = withValues(r.Values, cells, out)
-	}
-	return p
 }
 
 // member is one of the cells in a row's stored text: its key, and where it
@@ -276,9 +265,10 @@ func skipValue(s string, i int) (int, bool) {
 	return j, j > i
 }
 
-// withValues is a row's stored text with the formulas' values: the stored
-// cells as they were, less any left under a formula's id, then the values.
-func withValues(s string, cells []member, out map[string]formula.Value) string {
+// withValues is a row's stored text with its computed values (out, by field
+// id, as JSON values; nil for none): the stored cells as they were, less any
+// under a computed field's id, then the values.
+func withValues(s string, cells []member, out map[string]interface{}) string {
 	ids := make([]string, 0, len(out))
 	for id := range out {
 		ids = append(ids, id)
@@ -295,13 +285,13 @@ func withValues(s string, cells []member, out map[string]formula.Value) string {
 		n++
 	}
 	for _, m := range cells {
-		if _, isFormula := out[m.key]; !isFormula {
+		if _, computed := out[m.key]; !computed {
 			next()
 			b.WriteString(s[m.start:m.end])
 		}
 	}
 	for _, id := range ids {
-		j := out[id].JSON()
+		j := out[id]
 		if j == nil {
 			continue
 		}
@@ -319,75 +309,84 @@ func withValues(s string, cells []member, out map[string]formula.Value) string {
 	return b.String()
 }
 
-// presentFormulaFields gives each formula field's config as readers want it:
-// the formula with fields by name, what it gives ("result": number, text,
-// date or checkbox) and, when it can't be worked out, why ("error").
-func presentFormulaFields(fields []*model.Field, p *formula.Program) {
-	inputs := formulaInputs(fields)
-	for _, f := range fields {
-		if f.Type != model.FieldFormula {
-			continue
-		}
-		cfg := map[string]interface{}{}
-		_ = json.Unmarshal([]byte(f.Config), &cfg)
-		cfg["formula"] = formula.Display(storedFormula(f), inputs)
-		cfg["result"] = p.Kind(f.Id.String()).Name()
-		delete(cfg, "error")
-		if err := p.Err(f.Id.String()); err != nil {
-			cfg["error"] = formula.Message(err)
-		}
-		if b, err := json.Marshal(cfg); err == nil {
-			f.Config = string(b)
-		}
-	}
-}
-
-// readWithFormulas loads a table's fields and works out its formulas for
-// rows: the rows API, totals and AI columns, which load rows on their own.
-func readWithFormulas(ctx context.Context, tableID uuid.UUID, rows []*model.Row) []*model.Row {
+// readWithComputed loads a table's fields and works out its computed cells
+// for rows: the rows API, totals and AI columns, which load rows on their own.
+func readWithComputed(ctx context.Context, tableID uuid.UUID, rows []*model.Row) []*model.Row {
 	if len(rows) == 0 {
 		return rows
 	}
 	fields, err := model.ListFields(ctx, tableID)
 	if err == nil {
-		withFormulas(ctx, fields, rows)
+		withComputed(ctx, fields, rows)
 	}
 	return rows
 }
 
-// withoutFormulaValues drops values for a table's formula fields from a row
-// being written: they're worked out on each read, never stored, and the grid
-// sends a row back with them in.
-func withoutFormulaValues(ctx context.Context, tableID uuid.UUID, values map[string]interface{}) (map[string]interface{}, []*model.Field) {
+// stripComputed takes what each read works out out of a row being written,
+// as the grid sends a row back with it in: formula and rollup values, and
+// the cells of links to tables, which aren't stored in a row's values (a
+// write sets them with takeLinks).
+func stripComputed(fields []*model.Field, values map[string]interface{}) map[string]interface{} {
+	for _, f := range fields {
+		if _, isLink := linkOf(f); isLink || f.Type == model.FieldFormula || f.Type == model.FieldRollup {
+			delete(values, f.Id.String())
+		}
+	}
+	return values
+}
+
+// withoutComputedValues is stripComputed for a table, by id. It returns the
+// table's fields.
+func withoutComputedValues(ctx context.Context, tableID uuid.UUID, values map[string]interface{}) (map[string]interface{}, []*model.Field) {
 	fields, err := model.ListFields(ctx, tableID)
 	if err != nil {
 		return values, nil
 	}
-	for _, f := range fields {
-		if f.Type == model.FieldFormula {
-			delete(values, f.Id.String())
-		}
-	}
-	return values, fields
+	return stripComputed(fields, values), fields
 }
 
-// maxFormulaFields is how many formula fields a table can have: every read
-// works each one out for every row.
-const maxFormulaFields = 100
+// How many fields a table can have of each kind worked out on every read,
+// for every row: formulas, rollups, and relations linking to tables (each
+// reads another table).
+var maxComputed = map[string]int{
+	model.FieldFormula:  100,
+	model.FieldRollup:   100,
+	model.FieldRelation: 50,
+}
 
-// roomForFormula is why field self can't be a formula: the table already has
-// as many as it can, not counting self.
-func roomForFormula(fields []*model.Field, self uuid.UUID) error {
+// computedName is how the limit names each kind of field.
+var computedName = map[string]string{
+	model.FieldFormula:  "formula fields",
+	model.FieldRollup:   "rollups",
+	model.FieldRelation: "fields linking to tables",
+}
+
+// roomFor is why field self can't be of a kind worked out on every read
+// (fieldType; for a relation, linking is whether it links to a table): the
+// table already has as many as it can, not counting self.
+func roomFor(fields []*model.Field, self uuid.UUID, fieldType string, linking bool) error {
+	limit, ok := maxComputed[fieldType]
+	if !ok || (fieldType == model.FieldRelation && !linking) {
+		return nil
+	}
 	n := 0
 	for _, f := range fields {
-		if f.Type == model.FieldFormula && f.Id != self {
+		if f.Id == self || f.Type != fieldType {
+			continue
+		}
+		if _, isLink := linkOf(f); fieldType != model.FieldRelation || isLink {
 			n++
 		}
 	}
-	if n >= maxFormulaFields {
-		return fmt.Errorf("A table can have at most %d formula fields", maxFormulaFields)
+	if n >= limit {
+		return fmt.Errorf("A table can have at most %d %s", limit, computedName[fieldType])
 	}
 	return nil
+}
+
+// roomForFormula is roomFor a formula field.
+func roomForFormula(fields []*model.Field, self uuid.UUID) error {
+	return roomFor(fields, self, model.FieldFormula, false)
 }
 
 // draftID is how a formula check names the field being saved: its id, or
@@ -399,18 +398,9 @@ func draftID(self uuid.UUID) string {
 	return self.String()
 }
 
-// formulaConfig checks a formula field's formula against the table's other
-// fields, and returns the config to store: the formula with fields by id. self
-// is the field being saved (uuid.Nil for a new one).
-func formulaConfig(ctx context.Context, tableID, self uuid.UUID, cfg map[string]interface{}) (map[string]interface{}, error) {
-	fields, err := model.ListFields(ctx, tableID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load fields")
-	}
-	return formulaConfigWith(fields, self, cfg)
-}
-
-// formulaConfigWith is formulaConfig against the table's fields, loaded.
+// formulaConfigWith checks a formula field's formula against the table's
+// other fields, and returns the config to store: the formula with fields by
+// id. self is the field being saved (uuid.Nil for a new one).
 func formulaConfigWith(fields []*model.Field, self uuid.UUID, cfg map[string]interface{}) (map[string]interface{}, error) {
 	if err := roomForFormula(fields, self); err != nil {
 		return nil, err
@@ -519,7 +509,7 @@ func PreviewFormula(ctx context.Context, tableID, fieldID uuid.UUID, src string,
 	if err != nil {
 		return nil, fmt.Errorf("failed to load rows")
 	}
-	withFormulas(ctx, with, rows)
+	withComputed(asViewer(ctx, actor), with, rows)
 	out := &FormulaPreview{Result: kind.Name(), Values: make([]interface{}, 0, len(rows))}
 	for _, r := range rows {
 		out.Values = append(out.Values, parseRowValues(r.Values)[draft.Id.String()])
