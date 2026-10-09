@@ -3,7 +3,10 @@ package firebaseInit
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
+	"sync/atomic"
 	"time"
 
 	firebase "firebase.google.com/go/v4"
@@ -116,7 +119,22 @@ func ConnectFirebase(config *FirebaseAppConfigStruct) (err error) {
 	return nil
 }
 
+// pushObserver sees every push MultiCastPush is asked for, sent or not. Only
+// tests set it (ObservePushesForTest).
+var pushObserver atomic.Pointer[func(data map[string]string, tokens []string)]
+
+// ObservePushesForTest shows fn every push MultiCastPush is asked for, whether
+// or not push is configured, so an integration test can see whom a path
+// notifies without a Firebase project. restore stops it.
+func ObservePushesForTest(fn func(data map[string]string, tokens []string)) (restore func()) {
+	pushObserver.Store(&fn)
+	return func() { pushObserver.Store(nil) }
+}
+
 func (f *firebaseAppStruct) MultiCastPush(ctx context.Context, pushData map[string]string, tokens []string) (err error) {
+	if observe := pushObserver.Load(); observe != nil {
+		(*observe)(maps.Clone(pushData), slices.Clone(tokens))
+	}
 	// Push is optional. A self-hosted install may have no Firebase credentials, in
 	// which case MessagingClient is nil and every notification path still reaches
 	// here. Returning quietly is the whole point of treating push as optional:

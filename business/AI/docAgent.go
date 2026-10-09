@@ -80,12 +80,8 @@ func executeReadDoc(ctx context.Context, action ai.ProposedAction, userUUID stri
 	}
 
 	// Permission gate. The dgraph query returns the node regardless of access
-	// (it carries access counts), so we must decide here.
-	isPrivate := doc.IsPrivate != nil && *doc.IsPrivate
-	isCreator := doc.CreatedBy != nil && doc.CreatedBy.Uuid == dgraphUser.Uuid
-	hasAccess := !isPrivate || isCreator ||
-		doc.HasReadAccess > 0 || doc.HasEditAccess > 0 || doc.HasCommentAccess > 0
-	if !hasAccess {
+	// (it carries access counts), so the app's own read rule decides here.
+	if !docBusiness.CanRead(doc, dgraphUser.Uuid) {
 		return "", nil, fmt.Errorf("document not found or you don't have access")
 	}
 

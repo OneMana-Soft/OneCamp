@@ -140,7 +140,7 @@ func MeetingPrepBrief(ctx context.Context, userInfo *userModels.UserInfo, req ad
 	query := strings.TrimSpace(title + " " + helpers.HTMLToPlainText(strings.TrimSpace(event.Description)))
 	var related []ai.SimilarResult
 	if query != "" {
-		if res, serr := ai.SearchSimilar(ctx, query, me, channels, projects, grpIDs, prepMaxRelated); serr == nil {
+		if res, serr := searchSimilar(ctx, userInfo, query, channels, projects, grpIDs, prepMaxRelated); serr == nil {
 			related = res
 		} else {
 			helpers.LogInfoWithContext(ctx, "meeting prep: related search failed: %v", serr)

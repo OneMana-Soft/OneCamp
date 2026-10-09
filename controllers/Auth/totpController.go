@@ -299,7 +299,7 @@ func TOTPLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, err := authBusiness.ParseTOTPChallenge(body.Challenge)
+	userID, method, err := authBusiness.ParseTOTPChallenge(body.Challenge)
 	if err != nil {
 		// 401 and the "start again" wording: an expired challenge is the common case by far, and the
 		// user's next action is to re-enter their password.
@@ -334,8 +334,9 @@ func TOTPLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Recorded HERE rather than at the password step, because this is the moment a sign-in actually
 	// happened. A password that produced a challenge and was never followed by a code is not a login,
-	// and counting it as one would make the audit trail overstate what took place.
-	_ = domain.RecordLoginMethod(ctx, userID, models.AuthMethodEmail)
+	// and counting it as one would make the audit trail overstate what took place. The challenge says
+	// which password it was: the email one, or the directory's.
+	_ = domain.RecordLoginMethod(ctx, userID, method)
 
 	// Only now does a session exist. issueAuthCookies writes the success body itself.
 	issueAuthCookies(w, r, ctx, userID.String())

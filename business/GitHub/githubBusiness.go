@@ -1057,6 +1057,7 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 			"title":      event.PullRequest.Title,
 			"body":       event.PullRequest.Body,
 			"task_uuid":  linkedTaskUUID,
+			"project_id": link.ProjectId.String(),
 			"created_by": link.CreatedBy.String(),
 		})
 	}
@@ -2267,6 +2268,7 @@ func handlePullRequestReviewEvent(ctx context.Context, body []byte) error {
 		"review_state": strings.ToUpper(event.Review.State),
 		"reviewer":     event.Review.User.Login,
 		"body":         event.Review.Body,
+		"project_id":   link.ProjectId.String(),
 	})
 
 	taskUUIDStr, err := taskDomain.FindTaskUUIDByGitHubBranch(ctx, event.PullRequest.Head.Ref)
@@ -2389,7 +2391,7 @@ func handleCheckRunEvent(ctx context.Context, body []byte) error {
 	for _, pr := range event.CheckRun.PullRequests {
 		prNumbers = append(prNumbers, pr.Number)
 	}
-	maybeEmitCIConcluded(ctx, event.Repository.Owner.Login, event.Repository.Name, event.CheckRun.HeadSHA, prNumbers)
+	maybeEmitCIConcluded(ctx, event.Repository.Owner.Login, event.Repository.Name, link.ProjectId.String(), event.CheckRun.HeadSHA, prNumbers)
 
 	for _, pr := range event.CheckRun.PullRequests {
 		prURL := fmt.Sprintf("https://github.com/%s/%s/pull/%d", event.Repository.Owner.Login, event.Repository.Name, pr.Number)
@@ -2472,7 +2474,7 @@ func aggregateCheckRuns(runs []githubCheckRun) ciConclusion {
 // means no aggregate event this round (the per-check task sync still ran). It
 // costs one check-runs API read per completed check on a PR-syncing repo, and
 // the dedup guarantees a single emit per commit.
-func maybeEmitCIConcluded(ctx context.Context, owner, repo, headSHA string, prNumbers []int) {
+func maybeEmitCIConcluded(ctx context.Context, owner, repo, projectID, headSHA string, prNumbers []int) {
 	headSHA = strings.TrimSpace(headSHA)
 	if headSHA == "" || len(prNumbers) == 0 {
 		return
@@ -2501,6 +2503,7 @@ func maybeEmitCIConcluded(ctx context.Context, owner, repo, headSHA string, prNu
 			"repo":          repo,
 			"pr_number":     num,
 			"pr_url":        prURL,
+			"project_id":    projectID,
 			"conclusion":    agg.Conclusion,
 			"checks_total":  agg.Total,
 			"checks_passed": agg.Passed,

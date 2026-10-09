@@ -345,6 +345,9 @@ func CreateAgent(ctx context.Context, in AgentInput, createdBy uuid.UUID) (*mode
 	if err := validateAgentModelPref(ctx, v.modelPref); err != nil {
 		return nil, err
 	}
+	if err := reach.checkReach(ctx, createdBy.String(), v.triggerType, v.triggerCfgJSON, v.scopeJSON); err != nil {
+		return nil, err
+	}
 	a := &model.AiAgent{
 		Name:            v.name,
 		Description:     v.description,
@@ -405,6 +408,14 @@ func UpdateAgent(ctx context.Context, id uuid.UUID, in AgentInput, actor Actor) 
 	if err := validateAgentModelPref(ctx, v.modelPref); err != nil {
 		return nil, err
 	}
+	// It acts as the person it works for, whoever edits it.
+	kept := ""
+	if strings.TrimSpace(existing.TriggerType) == model.TriggerEvent {
+		kept = parseTriggerConfig(existing).Event
+	}
+	if err := reach.checkReachKeeping(ctx, existing.CreatedBy.String(), kept, v.triggerType, v.triggerCfgJSON, v.scopeJSON); err != nil {
+		return nil, err
+	}
 	existing.Name = v.name
 	existing.Description = v.description
 	existing.AvatarKey = v.avatarKey
@@ -454,6 +465,10 @@ func SetActive(ctx context.Context, id uuid.UUID, isActive bool, actor Actor) er
 	if err := model.SetAgentActive(ctx, id, isActive); err != nil {
 		return err
 	}
+	if !isActive {
+		// Paused means stopped: its queued and running jobs too.
+		stopAgentWork(ctx, id, actor.UserID)
+	}
 	go ReloadTriggerCache(context.WithoutCancel(ctx))
 	return nil
 }
@@ -473,6 +488,7 @@ func DeleteAgent(ctx context.Context, id uuid.UUID, actor Actor) error {
 	if err := model.SoftDeleteAgent(ctx, id); err != nil {
 		return err
 	}
+	stopAgentWork(ctx, id, actor.UserID)
 	// Drop the cached per-agent bot principal so a recreated/renamed agent does
 	// not serve a stale identity (the bot user row is left intact since it owns
 	// the agent's previously authored messages).
@@ -633,7 +649,9 @@ func AgentStats(ctx context.Context, id uuid.UUID, actor Actor) (*model.AgentRun
 
 // RunAgentManual executes an agent on demand (the builder's "test" action),
 // for an actor who may manage it. The run executes as the agent's owner with
-// per-call permission re-checks; dryRun previews without performing writes.
+// per-call permission re-checks, and is for the actor: an admin testing someone
+// else's agent reaches only what both of them can, not the owner's DMs or mail.
+// dryRun previews without performing writes.
 func RunAgentManual(ctx context.Context, id uuid.UUID, actor Actor, prompt string, dryRun bool) (*RunOutcome, error) {
 	a, err := model.GetAgentByID(ctx, id)
 	if err != nil {
@@ -645,5 +663,5 @@ func RunAgentManual(ctx context.Context, id uuid.UUID, actor Actor, prompt strin
 	if !canManage(actor, a) {
 		return nil, errForbidden
 	}
-	return RunAgent(ctx, a, "manual", prompt, dryRun), nil
+	return RunAgent(WithAgentAskerWords(askedBy(ctx, actor.UserID.String()), prompt), a, "manual", prompt, dryRun), nil
 }

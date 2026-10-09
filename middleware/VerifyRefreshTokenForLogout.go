@@ -2,15 +2,11 @@ package middleware
 
 import (
 	"context"
-	"fmt"
 	"net/http"
-	"os"
-	"time"
 
 	domain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 )
 
@@ -35,65 +31,32 @@ func VerifyRefreshTokenForLogout(next http.Handler) http.Handler {
 		}
 
 		tokenString := tsc.Value
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			// Don't forget to validate the alg is what you expect:
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("Unexpected signing method: %v", token.Header["alg"])
-			}
-
-			hmacSampleSecret := []byte(os.Getenv("JWT_SECRET"))
-			// hmacSampleSecret is a []byte containing your secret, e.g. []byte("my_secret_key")
-			return hmacSampleSecret, nil
-		})
+		userUUID, err := helpers.ParseSessionToken(tokenString, helpers.TokenTypeRefresh)
 		if err != nil {
-			// Even if token parsing fails, we allow logout to proceed
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		if claims, ok := token.Claims.(jwt.MapClaims); ok {
-
-			if float64(time.Now().Unix()) > claims["exp"].(float64) {
-				// Even if expired, we allow logout to proceed
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			userUUID, err := uuid.Parse(claims["sub"].(string))
-
-			if err != nil {
-				helpers.LogErrorWithContext(ctx,
-					"middleware/VerifyAuth Failed to parse string to uuid err: %+v",
-					err)
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			emptyUUID := uuid.UUID{}
-			userDBInfo, err := domain.GetUserByUUID(ctx, userUUID)
-			if err == nil && userDBInfo.Id == emptyUUID {
-				next.ServeHTTP(w, r)
-				return
-			}
-			if err != nil {
-				helpers.MessageLogs.ErrorLog.Printf(
-					"middleware/VerifyAuth Error getting user from postgres err: %+v",
-					err)
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			userInfo := models.UserInfo{
-				UserPostgresInfo: *userDBInfo,
-			}
-
-			ctx := context.WithValue(ctx, helpers.UserInfoContextKey, userInfo)
-			r = r.WithContext(ctx)
-
-		} else {
-			w.WriteHeader(http.StatusBadRequest)
+		emptyUUID := uuid.UUID{}
+		userDBInfo, err := domain.GetUserByUUID(ctx, userUUID)
+		if err == nil && userDBInfo.Id == emptyUUID {
+			next.ServeHTTP(w, r)
 			return
 		}
+		if err != nil {
+			helpers.MessageLogs.ErrorLog.Printf(
+				"middleware/VerifyAuth Error getting user from postgres err: %+v",
+				err)
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		userInfo := models.UserInfo{
+			UserPostgresInfo: *userDBInfo,
+		}
+
+		ctx = context.WithValue(ctx, helpers.UserInfoContextKey, userInfo)
+		r = r.WithContext(ctx)
 
 		next.ServeHTTP(w, r)
 	})

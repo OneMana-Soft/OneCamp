@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	postAdapter "github.com/akashc777/OneCamp/adapter/Post"
-	postBusiness "github.com/akashc777/OneCamp/business/Post"
+	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -16,16 +16,22 @@ import (
 
 // reminderChannel.go — channel-targeted /remind delivery.
 //
-// resolveChannelForReminder runs at command time (we have the invoking user's
-// context): it resolves "#name" → channel UUID, verifies the user is a member
-// or admin of that channel, and returns the UUID to persist on the job. We
-// prefer the channel the command was invoked in when its name matches, so
-// "/remind #here ..." behaves intuitively.
+// A channel reminder is a post, written in its owner's name, so it obeys the
+// rules every post does (business/Send.PrepareChannelPost: the channel is
+// live, the owner is in it, and only its admins post in an announcement
+// channel). They are checked when the reminder is set and again each time it
+// fires, by the same code: someone who has left the channel, or whose channel
+// was archived or made announcement-only since, doesn't post into it.
+//
+// resolveChannelForReminder runs at command time: it resolves "#name", or
+// "#here" (the channel the command was typed in), to a channel the person may
+// post in, and returns its UUID to persist on the job.
 //
 // postChannelReminder runs at fire time (inside the scheduler worker): it posts
 // a visible message into the channel authored by the user who set the reminder,
-// reusing the standard Post business path (PG + Dgraph + OpenSearch + MQTT +
-// notifications). This is the Slack-parity behavior for /remind #channel.
+// through the same path as a post sent from the composer (PG + Dgraph +
+// OpenSearch + MQTT + notifications). This is the Slack-parity behavior for
+// /remind #channel.
 
 func resolveChannelForReminder(ctx context.Context, cc CommandContext, channelName string) (string, error) {
 	name := strings.TrimPrefix(strings.TrimSpace(channelName), "#")
@@ -33,35 +39,39 @@ func resolveChannelForReminder(ctx context.Context, cc CommandContext, channelNa
 		return "", fmt.Errorf("empty channel name")
 	}
 
-	// "#here"/"#channel"/"#this" → the channel the command was invoked in.
+	// "#here"/"#channel"/"#this" → the channel the command was invoked in. The
+	// id comes with the request, so it is checked like any other channel.
+	var channelID string
 	if cc.ChannelID != nil && (strings.EqualFold(name, "here") || strings.EqualFold(name, "this") || strings.EqualFold(name, "channel")) {
-		return cc.ChannelID.String(), nil
+		channelID = cc.ChannelID.String()
+	} else {
+		ch, err := channelDomain.GetChannelByName(ctx, name)
+		if err != nil || ch == nil {
+			return "", fmt.Errorf("channel not found")
+		}
+		channelID = ch.Id.String()
 	}
 
-	ch, err := channelDomain.GetChannelByName(ctx, name)
-	if err != nil || ch == nil {
-		return "", fmt.Errorf("channel not found")
+	if _, err := prepareChannelReminder(ctx, &cc.User, channelID, ""); err != nil {
+		return "", err
 	}
+	return channelID, nil
+}
 
-	// Verify the invoking user can post to this channel (member or admin).
-	dgraphCh, err := channelDomain.GetBasicDgraphChannelInfoByUUID(ctx, ch.Id.String(), cc.User.UserDgraphInfo.Uid)
-	if err != nil || dgraphCh == nil {
-		return "", fmt.Errorf("channel access check failed")
-	}
-	if dgraphCh.IsMember == 0 && dgraphCh.IsAdmin == 0 {
-		return "", fmt.Errorf("not a member of #%s", name)
-	}
-	return ch.Id.String(), nil
+// prepareChannelReminder runs the rules for posting text as user in the
+// channel. Nothing is written until the result is committed.
+func prepareChannelReminder(ctx context.Context, user *userModels.UserInfo, channelID, text string) (*sendBusiness.ChannelPost, error) {
+	safeText := helpers.RemoveHTMLTags(text)
+	return sendBusiness.PrepareChannelPost(ctx, user, &postAdapter.InputCreateOrUpdatePostInfo{
+		HTMLText:    fmt.Sprintf("<p>⏰ <strong>Reminder:</strong> %s</p>", safeText),
+		ChannelUuid: channelID,
+	})
 }
 
 // postChannelReminder posts the reminder as a visible message into the target
-// channel, authored by the reminder's creator.
+// channel, authored by the reminder's creator, if the rules still let them
+// post there. A refusal is a sendBusiness.Rejection.
 func postChannelReminder(ctx context.Context, p reminderPayload) error {
-	channelParsedUUID, err := uuid.Parse(p.TargetID)
-	if err != nil {
-		return fmt.Errorf("invalid channel id: %w", err)
-	}
-
 	// Build the full UserInfo (postgres + dgraph) for the creator.
 	creatorUUID, err := uuid.Parse(p.CreatedBy)
 	if err != nil {
@@ -75,27 +85,15 @@ func postChannelReminder(ctx context.Context, p reminderPayload) error {
 	if err != nil || dgraphUser == nil {
 		return fmt.Errorf("creator dgraph not found")
 	}
-
-	// Re-resolve channel against the creator so membership/permission is
-	// re-checked at fire time (membership may have changed since scheduling).
-	dgraphChannel, err := channelDomain.GetDgraphChannelInfoByUUID(ctx, channelParsedUUID.String(), dgraphUser.Uid)
-	if err != nil || dgraphChannel == nil {
-		return fmt.Errorf("channel not found at fire time")
-	}
-
-	safeText := helpers.RemoveHTMLTags(p.Text)
-	htmlText := fmt.Sprintf("<p>⏰ <strong>Reminder:</strong> %s</p>", safeText)
-
-	postInfo := &postAdapter.InputCreateOrUpdatePostInfo{
-		HTMLText:    htmlText,
-		ChannelUuid: channelParsedUUID.String(),
-		ChannelUUID: channelParsedUUID,
-	}
-
 	userInfo := &userModels.UserInfo{
 		UserPostgresInfo: *postgresUser,
 		UserDgraphInfo:   *dgraphUser,
 	}
-	_, err = postBusiness.CreatePost(ctx, postInfo, userInfo, nil, dgraphChannel)
+
+	post, err := prepareChannelReminder(ctx, userInfo, p.TargetID, p.Text)
+	if err != nil {
+		return err
+	}
+	_, err = post.Commit(ctx)
 	return err
 }

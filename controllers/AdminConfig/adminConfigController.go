@@ -7,10 +7,12 @@ import (
 
 	"encoding/json"
 
+	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/minioInit"
 	configModels "github.com/akashc777/OneCamp/models/postgres/Config"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
+	emailService "github.com/akashc777/OneCamp/services/Email"
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 )
@@ -42,13 +44,20 @@ func GetEmailConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result := make(map[string]interface{})
+	stored := map[string]string{}
 	for _, cfg := range configs {
-		if cfg.Key == "invitation_email_logo" {
-			result["has_logo"] = cfg.Value != ""
-		} else {
-			result[cfg.Key] = cfg.Value
-		}
+		stored[cfg.Key] = cfg.Value
+	}
+	// What is sent, so the editor shows the email people get: the subject and
+	// template every workspace was seeded with are sent as today's (they name
+	// who invited them, and to where), and the seeded sender, OneCamp's own
+	// domain, reads as none chosen, which sends from default_sender.
+	result := map[string]interface{}{
+		"has_logo":                  stored["invitation_email_logo"] != "",
+		"sender_email":              emailService.ChosenSender(stored["sender_email"]),
+		"default_sender":            emailService.SenderAddress(),
+		"invitation_email_subject":  userBusiness.InviteSubject(stored["invitation_email_subject"]),
+		"invitation_email_template": userBusiness.InviteTemplate(stored["invitation_email_template"]),
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{

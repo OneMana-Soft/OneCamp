@@ -244,6 +244,11 @@ func processImportJob(shutdownCtx context.Context, job *importJobModel.Job) {
 	// via shutdownCtx.
 	ctx, cancel := context.WithTimeout(shutdownCtx, 30*time.Minute)
 	defer cancel()
+	// Every task below is made from an issue, with the title and body anyone
+	// could write on GitHub, so the import is marked as the webhook marks its
+	// work: what it writes is not sent back, and the events it sets off are
+	// asked for by nobody identified (eventAsker).
+	ctx = helpers.WithGitHubOrigin(ctx)
 
 	getQuery := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1 AND deleted_at IS NULL`
 	link, err := githubLinkModel.GetGitHubLinkById(getQuery, job.LinkId)

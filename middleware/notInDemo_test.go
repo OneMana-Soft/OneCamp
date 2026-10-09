@@ -26,14 +26,19 @@ func TestOnlyTheSharedDemoVisitorIsRefused(t *testing.T) {
 		{"the demo's own team on the demo", "true", "owner@company.example", false},
 		{"the same address on a normal install", "", "visitor@demo.example", false},
 	}
-	for _, c := range cases {
-		t.Setenv("DEMO_MODE", c.demoMode)
-		reached := false
-		h := NoPersonalAccountsInDemo(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, requestAs(c.email))
-		if refused := w.Code == http.StatusForbidden && !reached; refused != c.refused {
-			t.Errorf("%s: refused=%v, want %v", c.name, refused, c.refused)
+	for _, guard := range []struct {
+		name string
+		mw   func(http.Handler) http.Handler
+	}{{"connecting an account", NoPersonalAccountsInDemo}, {"changing how it signs in", DemoSignInStays}} {
+		for _, c := range cases {
+			t.Setenv("DEMO_MODE", c.demoMode)
+			reached := false
+			h := guard.mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, requestAs(c.email))
+			if refused := w.Code == http.StatusForbidden && !reached; refused != c.refused {
+				t.Errorf("%s, %s: refused=%v, want %v", guard.name, c.name, refused, c.refused)
+			}
 		}
 	}
 }

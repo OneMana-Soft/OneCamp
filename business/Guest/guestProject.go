@@ -26,6 +26,8 @@ import (
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	projectModels "github.com/akashc777/OneCamp/models/dgraph/Project"
+	taskModels "github.com/akashc777/OneCamp/models/dgraph/Task"
 	reviewModel "github.com/akashc777/OneCamp/models/postgres/ClientReview"
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -158,7 +160,10 @@ func liveProject(ctx context.Context, grant *guestModel.GuestGrant) (uuid.UUID, 
 		return uuid.Nil, nil, err
 	}
 	p, err := projectBusiness.GetBasicDgraphProjectInfo(helpers.WithSystemRead(ctx), projectID.String(), bot.DgraphUID)
-	if err != nil || p == nil || p.Uuid == "" || helpers.IsSoftDeleted(p.DeletedAt) {
+	if readFailed(err, projectModels.ErrNotFound) {
+		return uuid.Nil, nil, err
+	}
+	if p == nil || p.Uuid == "" || helpers.IsSoftDeleted(p.DeletedAt) {
 		return uuid.Nil, nil, ErrNotFound
 	}
 	return projectID, bot, nil
@@ -171,7 +176,10 @@ func GetGuestProject(ctx context.Context, grant *guestModel.GuestGrant) (*GuestP
 		return nil, err
 	}
 	p, err := projectBusiness.GetDgraphProjectTaskListForKanban(helpers.WithSystemRead(ctx), projectID.String(), bot.DgraphUID, "", dgraphStruct.BoardClosedLimit)
-	if err != nil || p == nil {
+	if readFailed(err, projectModels.ErrNotFound) {
+		return nil, err
+	}
+	if p == nil {
 		return nil, ErrNotFound
 	}
 	byStatus := map[string][]*dgraphStruct.DgraphTask{
@@ -237,7 +245,10 @@ func guestTask(ctx context.Context, projectID uuid.UUID, taskID string) (*dgraph
 		return nil, ErrNotFound
 	}
 	t, err := taskDomain.GetDgraphTaskForGuest(helpers.WithSystemRead(ctx), id.String())
-	if err != nil || t == nil || t.Uuid == "" || t.Project == nil || t.Project.Uuid != projectID.String() ||
+	if readFailed(err, taskModels.ErrNotFound) {
+		return nil, err
+	}
+	if t == nil || t.Uuid == "" || t.Project == nil || t.Project.Uuid != projectID.String() ||
 		helpers.IsSoftDeleted(t.DeletedAt) || t.Status == dgraphStruct.TASK_STATUS_CANCELED {
 		return nil, ErrNotFound
 	}

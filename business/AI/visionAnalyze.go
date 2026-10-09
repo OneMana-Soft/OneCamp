@@ -135,12 +135,7 @@ func resolveAndAuthorizeSource(ctx context.Context, userInfo *userModels.UserInf
 		return srcRef, nil
 	case postgresStruct.ATTACHMENT_SRC_DOC:
 		doc, err := docBusiness.GetBasicDgraphDocByUUID(ctx, srcRef, userInfo.UserDgraphInfo.Uid)
-		if err != nil || doc == nil {
-			return "", denied
-		}
-		isPrivate := doc.IsPrivate != nil && *doc.IsPrivate
-		isCreator := doc.CreatedBy != nil && doc.CreatedBy.Uuid == userInfo.UserDgraphInfo.Uuid
-		if isPrivate && !isCreator && doc.HasReadAccess == 0 && doc.HasEditAccess == 0 && doc.HasCommentAccess == 0 {
+		if err != nil || !docBusiness.CanRead(doc, userInfo.UserDgraphInfo.Uuid) {
 			return "", denied
 		}
 		return srcRef, nil

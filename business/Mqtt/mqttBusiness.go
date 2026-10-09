@@ -8,7 +8,6 @@ import (
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Mqtt"
-	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/mqttInit"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
@@ -19,7 +18,9 @@ func GetMqttConfig(ctx context.Context, userUUID string, isSystemAdmin bool) (mq
 	mqttWsUrL := os.Getenv("MQTT_WS_URL")
 	jwtSecret := os.Getenv("JWT_SECRET")
 
-	dgraphUsers, err := userDomain.GetDgraphUserInfoByUUIDForMQTTConfig(ctx, userUUID)
+	// A fresh read, kept for the broker's questions: a client fetches this
+	// after joining a channel or starting a conversation, then subscribes.
+	member, err := readMemberTopics(ctx, userUUID)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -31,21 +32,7 @@ func GetMqttConfig(ctx context.Context, userUUID string, isSystemAdmin bool) (mq
 
 	var mqttConfigInfo adapter.OutputMqttConfig
 
-	for _, channel := range dgraphUsers.Channels {
-		msgTopic, typingTopic := helpers.GetMqttTopicForChannel(channel.Uuid)
-		mqttConfigInfo.Topics = append(mqttConfigInfo.Topics, msgTopic, typingTopic)
-	}
-
-	for _, dms := range dgraphUsers.DMs {
-		msgTopic, typingTopic := helpers.GetMqttTopicForDm(dms.GroupingId)
-		mqttConfigInfo.Topics = append(mqttConfigInfo.Topics, msgTopic, typingTopic)
-	}
-
-	// Subscribe to project topics so task comments, reactions, and GitHub sync
-	// messages arrive in real-time (these publish to GetMqttTopicForProjectMessage).
-	for _, project := range dgraphUsers.Projects {
-		mqttConfigInfo.Topics = append(mqttConfigInfo.Topics, helpers.GetMqttTopicForProjectMessage(project.Uuid))
-	}
+	mqttConfigInfo.Topics = append(mqttConfigInfo.Topics, member.list...)
 
 	mqttConfigInfo.Topics = append(mqttConfigInfo.Topics, helpers.GetMqttTopicForUserActivity(userUUID))
 
@@ -864,11 +851,7 @@ func PublishSlackImportProgress(p *mqttStruct.MqttSlackImportProgress) {
 	}
 
 	ctx := context.Background()
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_SLACK_IMPORT_PROGRESS,
-		Data: p,
-	}
-	marshalled, err := json.Marshal(mqttMessage)
+	marshalled, err := importProgressPayload(p)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/PublishSlackImportProgress marshal err: %+v", err)
@@ -888,6 +871,16 @@ func PublishSlackImportProgress(p *mqttStruct.MqttSlackImportProgress) {
 				"business/PublishSlackImportProgress publish err: %+v", res.Error())
 		}
 	}()
+}
+
+// importProgressPayload is an import's progress event as every admin's page
+// receives it. Its error goes without URL query strings: a provider's network
+// error carries its request's URL, and Trello's carries the key and token in
+// it. The caller's event is left as it is. Pure.
+func importProgressPayload(p *mqttStruct.MqttSlackImportProgress) ([]byte, error) {
+	sent := *p
+	sent.ErrorMessage = helpers.WithoutURLQueries(p.ErrorMessage)
+	return json.Marshal(mqttStruct.Message{Type: mqttStruct.MESSAGE_SLACK_IMPORT_PROGRESS, Data: &sent})
 }
 
 // PublishTableRow broadcasts a data-table row change (create/update/delete) to

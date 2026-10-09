@@ -113,16 +113,24 @@ func handleTaskAssignedForAgent(ctx context.Context, eventType string, data map[
 	prompt := synthAssignmentPrompt(data)
 	owner := agent.CreatedBy
 	t := &model.AgentTask{
-		AgentId:     agent.Id,
-		SourceType:  model.TaskSourceAssignment,
-		SourceId:    strings.TrimSpace(taskID),
-		Prompt:      prompt,
+		AgentId:    agent.Id,
+		SourceType: model.TaskSourceAssignment,
+		SourceId:   strings.TrimSpace(taskID),
+		// Nobody's words to keep (assigning a task asks for the task), and the
+		// trailer that says so, which the worker takes off (agentAskerWords.go).
+		Prompt:      withAskerWordsTrailer(prompt, nil),
 		RunAsUserId: &owner,
 	}
-	// The person who assigned it is who started it: the audit says so, and it
-	// is who hears when the agent needs a decision or has finished. The agent
-	// still acts with its sponsor's access (RunAsUserId), never theirs.
-	if by, perr := uuid.Parse(strings.TrimSpace(fmt.Sprint(data["assigned_by"]))); perr == nil && by != uuid.Nil {
+	// The person who assigned it is who started it: the audit says so, it is
+	// who hears when the agent needs a decision or has finished, and it is who
+	// the work is for. The agent's tools execute as its sponsor (RunAsUserId),
+	// and reach only what the assigner can reach as well.
+	//
+	// Not a task filed from outside (writtenOutside): a public form files a
+	// visitor's words as the form's owner, who asked for none of it. That job
+	// records no asker, so it can still answer on the task, and every tool that
+	// needs someone's reach refuses (jobRequester).
+	if by, perr := uuid.Parse(strings.TrimSpace(fmt.Sprint(data["assigned_by"]))); perr == nil && by != uuid.Nil && !writtenOutside(ctx) {
 		t.TriggeredBy = &by
 	}
 	id, created, eerr := model.EnqueueAgentTask(ctx, t)
@@ -161,6 +169,13 @@ func handleTaskCommentForAgent(ctx context.Context, eventType string, data map[s
 	body = strings.TrimSpace(body)
 	if taskID == "" || body == "" {
 		return
+	}
+	// A comment from GitHub has no author anyone vouches for. The sync writes it
+	// as the person whose GitHub account it maps to, or as the task's creator
+	// when it maps to no one, so whoever can comment on the issue would be taken
+	// for them. It steers, answers and follows up nothing (ContinueAgentWork).
+	if helpers.IsGitHubOrigin(ctx) {
+		authorID = ""
 	}
 
 	// Continue every AI teammate with a durable job on this task — resume a

@@ -60,3 +60,15 @@ func TestSetupPlaceholderIsNotAPin(t *testing.T) {
 		t.Errorf("a real address should be kept, normalised; got %q", got)
 	}
 }
+
+// The pinned owner's address is compared after lowercasing A to Z only: the
+// Kelvin sign lowercases to "k" the Unicode way, which let "\u212Aate@..."
+// claim a workspace pinned to kate@....
+func TestThePinIsNotClaimedWithALookalikeAddress(t *testing.T) {
+	if SetupPermittedFor("kate@example.com", "\u212Aate@example.com") {
+		t.Error("an address with the Kelvin sign claimed the workspace pinned to kate@example.com")
+	}
+	if !SetupPermittedFor("Kate@Example.com", " kate@example.COM ") {
+		t.Error("the pinned owner, in another case, is refused")
+	}
+}

@@ -21,12 +21,24 @@ package business
 // enqueues ONE fresh follow-up job after a finished/failed one, reusing the
 // durable engine (idempotent against a comment burst via the open-job unique
 // index). The loop guard drops the agent's own status comment.
+//
+// WHOSE WORK IT IS. A job runs for the person who asked for it (triggered_by),
+// reaching only what they and the agent's sponsor both can. Folding someone
+// else's message into it — steering a running job, answering a paused one —
+// would carry out that person's instruction with the asker's reach, so only the
+// asker and the sponsor may continue a job in place. Anyone else is told so and
+// can ask the agent themselves; a follow-up after the job has finished is their
+// own new job, for them. A message nobody identified wrote continues nothing:
+// feedback from outside OneCamp, on a pull request a job opened, goes to the
+// owner of the account it would push with instead (ProposePullRequestFeedback).
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
+	codepr "github.com/akashc777/OneCamp/business/CodePR"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
@@ -90,6 +102,14 @@ func ContinueAgentWork(ctx context.Context, entityID, authorID, followup string)
 		if gerr != nil || agent == nil {
 			continue
 		}
+		// Written by nobody identified: it may not steer, answer or follow up
+		// anyone's work, which would carry it out with the reach of whoever the
+		// job is for. Handled, so no competing run starts either.
+		if strings.TrimSpace(authorID) == "" {
+			handled[t.AgentId] = true
+			helpers.LogInfoWithContext(ctx, "ContinueAgentWork: a follow-up with no author was not given to job %s", t.Id)
+			continue
+		}
 		// Loop guard: an agent's own status/result comment must never drive its
 		// own work. Resolve the bot principal once per agent.
 		if authorID != "" {
@@ -99,6 +119,18 @@ func ContinueAgentWork(ctx context.Context, entityID, authorID, followup string)
 					continue
 				}
 			}
+		}
+
+		// Steering or resuming in place hands this message to a run that acts for
+		// the job's asker; only they or the sponsor may do that (see above).
+		inPlace := t.State == model.TaskAwaiting || t.State == model.TaskQueued || t.State == model.TaskRunning
+		if inPlace && !mayContinueInPlace(t, agent, authorID) {
+			handled[t.AgentId] = true // their message must not start a competing run either
+			if ClassifyMentionIntent(followup, agent) != IntentGreeting {
+				tellOnJobSurface(ctx, agent, t, notYourJobNote(ctx, agent, t))
+			}
+			helpers.LogInfoWithContext(ctx, "ContinueAgentWork: %s may not steer job %s, which is for someone else", authorID, t.Id)
+			continue
 		}
 
 		switch t.State {
@@ -115,6 +147,9 @@ func ContinueAgentWork(ctx context.Context, entityID, authorID, followup string)
 			if t.LastError != nil {
 				resume = resolveResumeText(*t.LastError, followup)
 			}
+			// Added after the job's asker-words trailer, so it carries no mark of
+			// its own (the question it may quote is the agent's text).
+			resume = withoutSep(resume)
 			if ok, rerr := model.ResumeAgentTaskWithFollowup(ctx, t.Id, resume); rerr == nil && ok {
 				handled[t.AgentId] = true
 				WakeAgentTaskWorker() // a person is waiting on this answer
@@ -151,13 +186,26 @@ func ContinueAgentWork(ctx context.Context, entityID, authorID, followup string)
 				Surface:     t.Surface,
 				MaxAttempts: t.MaxAttempts,
 			}
+			// The follow-up is its author's words (a coding job's prompt is its
+			// instruction, read whole, and needs none).
+			if t.SourceType != codepr.TaskSourceType {
+				ft.Prompt = withAskerWordsTrailer(ft.Prompt, []string{followup})
+			}
 			if tb, perr := uuid.Parse(strings.TrimSpace(authorID)); perr == nil {
+				// The follow-up is its author's own request, for them.
 				ft.TriggeredBy = &tb
+				// A coding follow-up pushes with its author's GitHub account, not
+				// with the account of whoever asked for the earlier change.
+				if t.SourceType == codepr.TaskSourceType {
+					ft.RunAsUserId = &tb
+				}
 			}
 			if id, created, eerr := model.EnqueueAgentTask(ctx, ft); eerr == nil {
 				// "Keep going" after a job ran out of steps continues its
-				// conversation rather than starting over.
-				if carried := carryOverConversation(t, followup); created && carried != "" {
+				// conversation rather than starting over. Only for the people who
+				// may continue it: the conversation holds what the earlier run read
+				// for its asker, which is not someone else's to pick up.
+				if carried := carryOverConversation(t, followup); created && carried != "" && mayContinueInPlace(t, agent, authorID) {
 					if _, serr := seedConversation(ctx, id, carried); serr != nil {
 						helpers.LogErrorWithContext(ctx, "ContinueAgentWork: carry the conversation into %s failed: %v", id, serr)
 					}
@@ -168,6 +216,57 @@ func ContinueAgentWork(ctx context.Context, entityID, authorID, followup string)
 		}
 	}
 	return handled
+}
+
+// mayContinueInPlace reports whether authorID may add to job t as it stands:
+// steer it, answer it, or carry its conversation forward. The asker may, and so
+// may the sponsor, whose instruction gains nothing (the job stays bounded by
+// the asker's reach). Nobody else may, and nor may a message without an author:
+// from outside OneCamp, it is anyone's (a comment on a public repository).
+func mayContinueInPlace(t *model.AgentTask, agent *model.AiAgent, authorID string) bool {
+	author := strings.TrimSpace(authorID)
+	if author == "" {
+		return false
+	}
+	if agent != nil && strings.EqualFold(author, agent.CreatedBy.String()) {
+		return true
+	}
+	return t != nil && t.TriggeredBy != nil && strings.EqualFold(author, t.TriggeredBy.String())
+}
+
+// notYourJobNote tells someone why the agent did not take their message: the
+// work in this thread is someone else's request. A job its sponsor asked for
+// is the sponsor's alone. A job with no recorded asker is nobody's, and only
+// the sponsor may add to it (mayContinueInPlace).
+func notYourJobNote(ctx context.Context, agent *model.AiAgent, t *model.AgentTask) string {
+	sponsor := personName(ctx, agent.CreatedBy.String(), "the person who set me up")
+	if t == nil || t.TriggeredBy == nil || *t.TriggeredBy == uuid.Nil {
+		return fmt.Sprintf("I don't have a record of who asked for this, so I can only take instructions on it from %s. "+
+			"If you need something yourself, ask me separately.", sponsor)
+	}
+	if *t.TriggeredBy == agent.CreatedBy {
+		return fmt.Sprintf("I'm working on this for %s, so I can only take instructions on it from them. "+
+			"If you need something yourself, ask me separately.", sponsor)
+	}
+	asker := personName(ctx, t.TriggeredBy.String(), "the person who asked")
+	return fmt.Sprintf("I'm working on this for %s, so I can only take instructions on it from them or from %s. "+
+		"If you need something yourself, ask me separately.", asker, sponsor)
+}
+
+// tellOnJobSurface posts a one-off note, as the agent, where job t talks to
+// people. Best-effort: a note that cannot be posted is logged by the poster.
+func tellOnJobSurface(ctx context.Context, agent *model.AiAgent, t *model.AgentTask, text string) {
+	surface := DecodeSurface(t.Surface)
+	switch surface.Kind {
+	case SurfaceTask:
+		postAgentTaskStatus(ctx, agent, t, text)
+	case SurfaceChannelPost:
+		postAgentReply(ctx, agent, resolveAgentBot(ctx, agent), surface.ChannelID, surface.PostID, text)
+	default:
+		if p := newStatusPoster(ctx, agent, surface); p != nil {
+			p.Set(ctx, text)
+		}
+	}
 }
 
 // seedConversation starts a queued job from a saved conversation; a seam.

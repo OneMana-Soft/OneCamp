@@ -1766,7 +1766,7 @@ func buildUserContext(ctx context.Context, userInfo *userModels.UserInfo, questi
 		// This fixes the "evasive answer" bug where broad questions like
 		// "What are the recent updates?" returned zero chronological context.
 		if len(results) == 0 {
-			res, err := ai.SearchRecentGlobal(ctx, userUUID, accessibleChannels, accessibleProjects, accessibleGrps, 15)
+			res, err := searchRecentGlobal(ctx, userInfo, accessibleChannels, accessibleProjects, accessibleGrps, 15)
 			if err == nil && len(res) > 0 {
 				results = res
 			}
@@ -1778,7 +1778,7 @@ func buildUserContext(ctx context.Context, userInfo *userModels.UserInfo, questi
 	// 2. Concurrent Semantic Search
 	go func() {
 		// Reduced limit (12 -> 5) to save prompt tokens on local LLMs
-		res, err := ai.SearchSimilar(ctx, question, userUUID, accessibleChannels, accessibleProjects, accessibleGrps, 5)
+		res, err := searchSimilar(ctx, userInfo, question, accessibleChannels, accessibleProjects, accessibleGrps, 5)
 		semanticChan <- searchResult{res, err}
 	}()
 

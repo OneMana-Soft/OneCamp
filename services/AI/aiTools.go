@@ -463,11 +463,11 @@ var ToolRegistry = []ToolDef{
 	},
 	{
 		Name:        "update_table_row",
-		Description: "Update an existing row in a data table. Use read_table first to get the row id and field ids. Its links to other tables' rows stay as they are: change them with link_table_rows.",
+		Description: "Update an existing row in a data table: only the fields you give change, and the rest of the row stays as it is. Use read_table first to get the row id and field ids. Its links to other tables' rows stay as they are: change them with link_table_rows.",
 		Parameters: []ToolParam{
 			{Name: "table_uuid", Type: "string", Required: true, Description: "UUID of the table"},
 			{Name: "row_uuid", Type: "string", Required: true, Description: "UUID of the row to update"},
-			{Name: "values", Type: "string", Required: true, Description: "JSON object mapping field id -> value for the updated row"},
+			{Name: "values", Type: "string", Required: true, Description: "JSON object mapping field id -> new value, for the fields to change only"},
 		},
 	},
 	{
@@ -569,7 +569,12 @@ var ToolRegistry = []ToolDef{
 	{
 		Name:         "code_pr",
 		DefersResult: true,
-		Description:  "Make a code change to the workspace's connected GitHub repo and open a pull request for a human to review. Provide a clear `instruction` describing the change (bug to fix, small feature, refactor). The change is made in an ISOLATED sandbox, verified against the repo's own build/tests, and opened as a reviewable PR on a fresh branch — it is NEVER merged automatically. This is the ONLY tool for writing code / creating a branch / opening a PR: when the user asks to change code or open a PR, call THIS and nothing else — do NOT use any other GitHub tool (e.g. create-branch, create-pull-request, add-review-comment) to make the branch or PR, or you'll leave a half-finished branch with no PR. This runs as a BACKGROUND job: call it once, then tell the user you're on it and will post the pull request link here when it's ready (do not wait or call it again for the same request). Use ONLY when explicitly asked to change/fix/implement code and open a PR — for read-only investigation use code_analyze instead. Available only when an admin has enabled code PRs and deployed a coding runner.",
+		// Pushes a branch and opens a pull request under a person's GitHub
+		// identity, notifying everyone watching the repository. Closing the pull
+		// request does not unpush the branch or recall the notifications, so a
+		// person approves it first: the one whose account it pushes with.
+		ExternalEffect: true,
+		Description:    "Make a code change to the workspace's connected GitHub repo and open a pull request for a human to review. Provide a clear `instruction` describing the change (bug to fix, small feature, refactor). The change is made in an ISOLATED sandbox, verified against the repo's own build/tests, and opened as a reviewable PR on a fresh branch — it is NEVER merged automatically. This is the ONLY tool for writing code / creating a branch / opening a PR: when the user asks to change code or open a PR, call THIS and nothing else — do NOT use any other GitHub tool (e.g. create-branch, create-pull-request, add-review-comment) to make the branch or PR, or you'll leave a half-finished branch with no PR. This runs as a BACKGROUND job: call it once, then tell the user you're on it and will post the pull request link here when it's ready (do not wait or call it again for the same request). Use ONLY when explicitly asked to change/fix/implement code and open a PR — for read-only investigation use code_analyze instead. Available only when an admin has enabled code PRs and deployed a coding runner.",
 		Parameters: []ToolParam{
 			{Name: "instruction", Type: "string", Required: true, Description: "A clear, self-contained description of the change to make and open a PR for."},
 			{Name: "repo", Type: "string", Required: false, Description: "The target repository as \"owner/name\" (e.g. \"octocat/hello-world\"). Provide it when the user names a specific repo; omit to use the workspace's linked repo. Only repositories the connected GitHub account can access are allowed."},

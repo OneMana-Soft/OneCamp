@@ -221,6 +221,8 @@ func createSchema() (err error) {
 		doc_uuid: string @index(exact) @upsert .
 		doc_title: string @index(trigram) .
 		doc_body: string .
+		doc_yjs_state: string .
+		doc_yjs_body_hash: string .
 		doc_editing_users: [uid] .
 		doc_reading_users: [uid] .
 		doc_public_comment: bool .
@@ -367,6 +369,8 @@ func createSchema() (err error) {
 			doc_uuid
 			doc_title
 			doc_body
+			doc_yjs_state
+			doc_yjs_body_hash
 			doc_created_by: User
 			doc_comments: [Comment]
 			doc_private

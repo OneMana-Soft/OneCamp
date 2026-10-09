@@ -58,6 +58,8 @@ var providerStep = onboarding.Step{
 	Title:  "Connect a model provider",
 	Detail: "Bring your own key, or run a local model. Nothing leaves your server without it.",
 	Href:   "/app/admin?tab=ai-models",
+	// OneCamp Cloud runs a local model for a workspace it runs.
+	SelfHostedOnly: true,
 }
 
 func init() {

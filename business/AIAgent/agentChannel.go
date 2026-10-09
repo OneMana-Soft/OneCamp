@@ -10,10 +10,17 @@ package business
 // the Agent Builder edits, so the in-channel control and the builder's channel
 // picker stay one source of truth. Only mention-trigger agents are offered,
 // since they are the ones that respond to an @mention in a channel.
+//
+// Who may: the agent's owner, or a workspace admin, puts it in a channel or
+// takes it out; a channel's admins may also take it out of their channel
+// (mayPlaceInChannel). Being in the channel isn't enough: anyone in a public
+// channel could otherwise move any agent, including narrowing one that
+// answered everywhere down to their channel.
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sort"
 	"strings"
 
@@ -108,7 +115,11 @@ func ListChannelMentionAgents(ctx context.Context, channelID string) ([]ChannelM
 
 // it does (or does not) respond to @mentions there. Idempotent; reloads the
 // trigger cache so the change takes effect immediately.
-func SetAgentChannelMembership(ctx context.Context, agentID uuid.UUID, channelID string, enabled bool) error {
+//
+// actor is who asks, and channelAdmin whether they are an admin of the
+// channel; mayPlaceInChannel decides. The caller has already checked that
+// they may manage the channel's members at all.
+func SetAgentChannelMembership(ctx context.Context, actor Actor, channelAdmin bool, agentID uuid.UUID, channelID string, enabled bool) error {
 	channelID = strings.TrimSpace(channelID)
 	if channelID == "" {
 		return errNotFound
@@ -123,6 +134,9 @@ func SetAgentChannelMembership(ctx context.Context, agentID uuid.UUID, channelID
 
 	ids := parseScope(a).ChannelIDs
 	next, changed := applyChannelMembership(ids, channelID, enabled)
+	if err := mayPlaceInChannel(actor, a, channelAdmin, enabled, len(next)); err != nil {
+		return err
+	}
 	if !changed {
 		return nil // already in the desired state
 	}
@@ -166,6 +180,34 @@ func SetAgentChannelMembership(ctx context.Context, agentID uuid.UUID, channelID
 	}
 
 	go ReloadTriggerCache(context.WithoutCancel(ctx))
+	return nil
+}
+
+// errOnlyChannel refuses a channel admin taking an agent out of the only
+// channel it is in: an agent in no channel answers @mentions everywhere, so
+// that would widen it, which is its owner's choice.
+var errOnlyChannel = errors.New("taking an agent out of its only channel is its owner's choice")
+
+// IsOnlyChannel reports a refusal for that reason, so it can be said in its
+// own words.
+func IsOnlyChannel(err error) bool { return errors.Is(err, errOnlyChannel) }
+
+// mayPlaceInChannel is who may put an agent in a channel or take it out.
+// Where an agent answers is its owner's choice, or a workspace admin's: it
+// runs as its owner, with their tools, and adding one that answered in every
+// channel narrows it to the ones picked. A channel's admins may also take an
+// agent out of their channel, unless it would be left in none, which would
+// make it answer everywhere. channelsLeft is how many channels the agent
+// would be in afterwards.
+func mayPlaceInChannel(actor Actor, a *model.AiAgent, channelAdmin, adding bool, channelsLeft int) error {
+	switch {
+	case canManage(actor, a):
+		return nil
+	case adding || !channelAdmin:
+		return errForbidden
+	case channelsLeft == 0:
+		return errOnlyChannel
+	}
 	return nil
 }
 

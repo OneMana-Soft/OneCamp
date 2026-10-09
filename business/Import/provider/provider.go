@@ -245,6 +245,22 @@ type Provider interface {
 // worker creates a placeholder attachment and continues.
 var ErrAttachmentGone = errors.New("attachment gone (404/410)")
 
+// ErrTokenRejected is a provider refusing the credentials themselves: a token
+// that is wrong, revoked or expired. Each provider says so in its own words
+// (TokenRejected), and the screens test for this, not for the words, to say
+// "it didn't accept that token" and offer to reconnect instead of relaying an
+// HTTP status.
+var ErrTokenRejected = errors.New("the provider didn't accept the token")
+
+// TokenRejected is a provider's own message for a refused token.
+// errors.Is(err, ErrTokenRejected) holds for it.
+type TokenRejected struct{ Msg string }
+
+func (e *TokenRejected) Error() string { return e.Msg }
+
+// Is makes a TokenRejected match ErrTokenRejected.
+func (e *TokenRejected) Is(target error) bool { return target == ErrTokenRejected }
+
 // ErrRateLimited signals the provider hit a 429 / quota limit. The
 // worker uses ResetChunkForRetry so the chunk's attempt count is not
 // burned. RetryAfter (when non-zero) is honoured before the next claim.

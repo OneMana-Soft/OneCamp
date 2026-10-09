@@ -14,6 +14,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	aiBusiness "github.com/akashc777/OneCamp/business/AI"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
@@ -82,13 +84,40 @@ func handleMemoryTool(ctx context.Context, agent *model.AiAgent, a ai.ProposedAc
 			rec.Skipped = "not remembering that: nobody in this conversation asked me to keep anything"
 			return
 		}
-		if _, err := aiBusiness.RememberFact(ctx, sc.ChannelID, sc.GroupID, agent.CreatedBy.String(), content); err != nil {
+		// And what is kept is their instruction, not someone else's line they
+		// pointed at ("remember that"): their own words, or put to them first.
+		if !fromAskerWords(ctx, content) {
+			askToKeep(ctx, rec, "Shall I remember: "+content+"?", "not remembering that")
+			return
+		}
+		// Kept as the instruction of the person who asked for this run, which
+		// decides whose runs follow it (aiBusiness.AgentScopedMemoryBlock). It
+		// used to be kept as the sponsor's whoever asked, so a teammate's
+		// instruction was then followed by every run the agent made for its
+		// sponsor, with the sponsor's whole reach.
+		author, known := askerOf(ctx, agent)
+		if !known {
+			rec.Skipped = "not remembering that: I couldn't tell who asked me to"
+			return
+		}
+		if _, err := aiBusiness.RememberFact(ctx, sc.ChannelID, sc.GroupID, author.String(), content); err != nil {
 			rec.Error = "could not remember that: " + err.Error()
 			return
 		}
 		rec.Result = "remembered for this conversation"
 	case forgetToolName:
-		n, err := aiBusiness.ForgetFacts(ctx, sc.ChannelID, sc.GroupID, strings.TrimSpace(a.Params["query"]))
+		// Someone other than the sponsor may drop only what they asked to be
+		// kept: the sponsor's instructions shape the sponsor's own runs.
+		onlyBy := ""
+		if _, _, forOther := ai.RunRequester(ctx); forOther {
+			author, known := askerOf(ctx, agent)
+			if !known {
+				rec.Skipped = "not forgetting anything: I couldn't tell who asked me to"
+				return
+			}
+			onlyBy = author.String()
+		}
+		n, err := aiBusiness.ForgetFacts(ctx, sc.ChannelID, sc.GroupID, strings.TrimSpace(a.Params["query"]), onlyBy)
 		if err != nil {
 			rec.Error = "could not update what I remember: " + err.Error()
 			return
@@ -129,6 +158,18 @@ var memoryIntentCues = []string{
 	"bear in mind", "for future", "in future",
 }
 
+// routineIntentCues are the ways a person asks for work on a schedule.
+var routineIntentCues = []string{
+	"every ", "each ", "daily", "weekly", "hourly", "weekday", "routine", "schedule", "recurring", "remind",
+}
+
+// humanAskedForRoutine reports whether a human in this run asked for something
+// to be done on a schedule: humanAskedToRemember's test, with its own cues, for
+// the other thing a run sets up that outlives it.
+func humanAskedForRoutine(ctx context.Context) bool {
+	return humanTurnsHold(ctx, routineIntentCues)
+}
+
 // humanAskedToRemember reports whether a human in this run asked for something to
 // be kept.
 //
@@ -155,13 +196,115 @@ var memoryIntentCues = []string{
 // not been wired up loses the ability to remember, and says so in the run
 // transcript, rather than quietly accepting writes from anywhere.
 func humanAskedToRemember(ctx context.Context) bool {
+	return humanTurnsHold(ctx, memoryIntentCues)
+}
+
+// fromAskerWords reports whether content is what a person in this run wrote:
+// every word of it that says something is among theirs. More than half was
+// not enough: a clause of someone else's rode along with the asker's own.
+//
+// A cue word is not enough on its own. "Remember that", said under someone
+// else's line, asks to keep that person's words, and they would be kept as the
+// asker's instruction, which every run for the asker then follows; the sponsor's
+// with the sponsor's whole reach. So what is remembered, or what a routine is
+// told to do, has to come from the asker, or be put to them first (askToKeep).
+// Their answer to that question quotes it, so a yes makes the words theirs.
+// Normalised (contentWords): case, punctuation, small words and plurals don't
+// count. A rewording that adds words is put to the asker first. Fails closed:
+// no words, no match.
+func fromAskerWords(ctx context.Context, content string) bool {
+	fn := agentHumanTextFromCtx(ctx)
+	if fn == nil {
+		return false
+	}
+	said := map[string]bool{}
+	for _, turn := range fn() {
+		for _, w := range contentWords(turn) {
+			said[w] = true
+		}
+	}
+	words := contentWords(content)
+	found := 0
+	for _, w := range words {
+		if said[w] {
+			found++
+		}
+	}
+	return len(words) > 0 && found == len(words)
+}
+
+// contentWords are the words of s that carry what it says, once each: lower
+// case, without punctuation or a sentence's small words, plurals as their
+// singular. Pure.
+func contentWords(s string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, w := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }) {
+		if len(w) < 2 || smallWords[w] {
+			continue
+		}
+		switch {
+		case len(w) > 4 && strings.HasSuffix(w, "ies"):
+			w = w[:len(w)-3] + "y"
+		case len(w) > 3 && strings.HasSuffix(w, "s") && !strings.HasSuffix(w, "ss"):
+			w = w[:len(w)-1]
+		}
+		if !seen[w] {
+			seen[w] = true
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// smallWords are the words of a sentence that say nothing about what is to be
+// kept. Not "never", "always" or "not": those are the instruction.
+var smallWords = map[string]bool{
+	"a": true, "an": true, "the": true, "to": true, "of": true, "in": true, "on": true, "at": true, "for": true,
+	"and": true, "or": true, "but": true, "with": true, "into": true, "onto": true, "from": true, "by": true,
+	"as": true, "is": true, "are": true, "was": true, "were": true, "be": true, "been": true, "it": true, "its": true,
+	"this": true, "that": true, "these": true, "those": true, "me": true, "my": true, "we": true, "our": true,
+	"you": true, "your": true, "he": true, "she": true, "they": true, "them": true, "his": true, "her": true,
+	"their": true, "please": true, "can": true, "could": true, "would": true, "will": true, "shall": true,
+	"should": true, "do": true, "does": true, "did": true, "so": true, "if": true, "then": true, "than": true,
+	"there": true, "here": true, "just": true, "also": true, "about": true, "what": true, "which": true,
+	"who": true, "when": true, "where": true, "how": true, "all": true, "any": true, "some": true,
+}
+
+// askToKeep answers a memory or routine call whose content is not the asker's
+// own words. A durable job asks them, pausing as needs_human does (the runner
+// reads rec.Confirm), and resumes on their reply. Any other run, one answered
+// in place included, even with the hand-off's resume state, can't be resumed:
+// a "yes" would start a fresh run whose only words are "yes", which would ask
+// again, so it keeps nothing and says why.
+func askToKeep(ctx context.Context, rec *toolCallRecord, question, refused string) {
+	if inDurableJob(ctx) {
+		// One line: a rendered question's options follow its first line.
+		question = strings.Join(strings.Fields(question), " ")
+		// Asked whole or not at all: a question cut to fit would ask about
+		// part of it, and a yes to that part would then pass for all of it.
+		if utf8.RuneCountInString(question) > maxElicitationQuestionRunes {
+			rec.Skipped = refused + ": it's too long to confirm here; ask for a shorter one"
+			return
+		}
+		rec.Confirm = question
+		rec.Skipped = "waiting for the person who asked to confirm"
+		return
+	}
+	rec.Skipped = refused + ": it isn't what the person who asked wrote. If they want it, they can ask again in full, in their own words"
+}
+
+// humanTurnsHold reports whether a human turn of this run holds any of cues.
+// The human turns are what the person who asked wrote and what was said while
+// it worked (agentRunner), never the prompt around them.
+func humanTurnsHold(ctx context.Context, cues []string) bool {
 	fn := agentHumanTextFromCtx(ctx)
 	if fn == nil {
 		return false
 	}
 	for _, turn := range fn() {
 		t := strings.ToLower(turn)
-		for _, cue := range memoryIntentCues {
+		for _, cue := range cues {
 			if strings.Contains(t, cue) {
 				return true
 			}

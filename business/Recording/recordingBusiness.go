@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	archiveBusiness "github.com/akashc777/OneCamp/business/Archive"
 	domain "github.com/akashc777/OneCamp/domain/Recording"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -93,8 +94,32 @@ func UpdateStopRecordingTime(ctx context.Context, egressId string, duration floa
 	return
 }
 
-// SoftDeleteRecording soft-deletes a recording by egress ID.
-// Requires the caller to verify permissions (channel admin, DM participant, group member).
-func SoftDeleteRecording(ctx context.Context, egressId string) error {
-	return domain.SoftDeleteDgraphRecording(ctx, egressId)
+// DeleteRecording removes a recording someone deleted, for good: its file in
+// storage, then the recording and its transcript, as the purge of archived
+// recordings does (archiveBusiness.PurgeRecording).
+//
+// It was a soft delete that never reached the recording: its mutation named no
+// node, so it made a new one (see domain.setRecordingsDeletedAt), and the
+// recording stayed listed and playable. Had it worked, the file would still
+// have stayed in storage unless the workspace had set a purge.
+//
+// The caller checks who may delete it: a channel's moderators or a workspace
+// admin, or anyone in the conversation.
+func DeleteRecording(ctx context.Context, egressId string) error {
+	recs, err := recordingsToPurge(ctx, egressId)
+	if err != nil {
+		return err
+	}
+	for _, r := range recs {
+		if _, err := purgeRecording(ctx, r); err != nil {
+			return err
+		}
+	}
+	return nil
 }
+
+// The seams DeleteRecording's tests replace.
+var (
+	recordingsToPurge = domain.RecordingsToPurge
+	purgeRecording    = archiveBusiness.PurgeRecording
+)

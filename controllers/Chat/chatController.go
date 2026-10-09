@@ -2159,6 +2159,7 @@ func MakeVideoCallForChat(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "Failed user does not exist",
 		})
+		return
 	}
 
 	grpId := helpers.GetGroupingId(userInfo.UserDgraphInfo.Uuid, userUUIDString)
@@ -2245,6 +2246,7 @@ func StartVideoCallRecordingForChat(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "Failed user does not exist",
 		})
+		return
 	}
 
 	actualGrpId := helpers.GetGroupingId(userInfo.UserDgraphInfo.Uuid, userUUIDString)
@@ -2317,6 +2319,7 @@ func StopVideoCallRecordingForChat(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "Failed user does not exist",
 		})
+		return
 	}
 
 	grpId := helpers.GetGroupingId(userInfo.UserDgraphInfo.Uuid, userUUIDString)

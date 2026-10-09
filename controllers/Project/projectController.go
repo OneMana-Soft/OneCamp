@@ -13,6 +13,7 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/Project"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	cycleBusiness "github.com/akashc777/OneCamp/business/Cycle"
+	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
 	business "github.com/akashc777/OneCamp/business/Project"
 	templateBusiness "github.com/akashc777/OneCamp/business/ProjectTemplate"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
@@ -996,6 +997,12 @@ func ArchiveProject(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
+		return
+	}
+
+	// The demo's own projects stay for every visitor (business/DemoGuard).
+	if demoGuard.KeepsFromVisitor(userInfo.UserPostgresInfo.EmailID, dgraphProjectInfo.CreatedAt) {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "demo", "msg": helpers.DemoSeededMsg})
 		return
 	}
 

@@ -357,3 +357,35 @@ func RestoreChannelRow(query string, channelName string, channelPrivate bool, de
 	}
 	return
 }
+
+// PublicLiveChannels returns the live public channels among ids, or every one
+// (up to limit) when ids is nil, by name. A channel that is missing, archived
+// or private is left out: these are the channels anyone may join themselves.
+func PublicLiveChannels(ctx context.Context, ids []string, limit int) ([]Channel, error) {
+	ctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	var filter interface{}
+	if ids != nil {
+		filter = pq.Array(ids)
+	}
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `
+		SELECT id, ch_name FROM channels
+		WHERE ch_private = false AND deleted_at IS NULL
+		  AND ($1::uuid[] IS NULL OR id = ANY($1::uuid[]))
+		ORDER BY ch_name
+		LIMIT $2`, filter, limit)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/PublicLiveChannels err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Channel{}
+	for rows.Next() {
+		var ch Channel
+		if err := rows.Scan(&ch.Id, &ch.Name); err != nil {
+			return nil, err
+		}
+		out = append(out, ch)
+	}
+	return out, rows.Err()
+}

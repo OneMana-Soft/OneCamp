@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"regexp"
@@ -9,9 +10,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dgraph-io/dgo/v230/protos/api"
 	"github.com/lib/pq"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
+	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	recordingDgraphModels "github.com/akashc777/OneCamp/models/dgraph/Recording"
@@ -55,12 +59,15 @@ func CreateUser(ctx context.Context, emailID string, userUUID uuid.UUID) (err er
 //     CONSTRAINT unique_id_and_obj_key UNIQUE ("id", "obj_key")
 // );
 
+// CheckIfUserExistByUsername reports whether a member has this handle,
+// compared without case. It asked for a column that does not exist
+// (user_name), so it failed every time and answered "free".
 func CheckIfUserExistByUsername(ctx context.Context, uname *string) (exist bool, err error) {
 	query := `
         SELECT EXISTS (
             SELECT 1
             FROM users
-            WHERE user_name = $1
+            WHERE LOWER(username) = LOWER($1)
             AND is_external = false
         );
     `
@@ -80,9 +87,10 @@ func GetUserByEmailId(ctx context.Context, emailId *string) (userInfo *models.Us
 	query := `
         SELECT id, email_id, created_at, updated_at, deleted_at
         FROM users
-        WHERE email_id = $1
+        WHERE LOWER(email_id) = LOWER($1)
 		AND deleted_at IS NULL
 		AND is_external = false
+		` + sameAddressFirst + `
     `
 
 	userInfo, err = models.GetUserByEmailId(query, emailId)
@@ -95,6 +103,42 @@ func GetUserByEmailId(ctx context.Context, emailId *string) (userInfo *models.Us
 	}
 
 	return
+}
+
+// GetUserSignInFlags reads whether a person is an admin and whether single
+// sign-on manages their account: what a directory sign-in needs to keep the
+// admin role in step with the directory's groups.
+func GetUserSignInFlags(ctx context.Context, userID uuid.UUID) (isAdmin, isSSOManaged bool, err error) {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	err = postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+		SELECT (au.id IS NOT NULL), COALESCE(u.is_sso_managed, false)
+		FROM users u
+		LEFT JOIN admin_users au ON au.email_id = u.email_id
+		WHERE u.id = $1
+		LIMIT 1`, userID).Scan(&isAdmin, &isSSOManaged)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetUserSignInFlags err: %+v", err)
+	}
+	return
+}
+
+// FirstSignInOfProvisioned reports whether this person's account was made
+// for them by the directory (SCIM) and they have never signed in: their
+// first sign-in is when they arrive, as joining is for everyone else. A read
+// failure reads as no.
+func FirstSignInOfProvisioned(ctx context.Context, userID uuid.UUID) bool {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	var first bool
+	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+		SELECT COALESCE(signup_method, '') = $2 AND last_login_at IS NULL
+		FROM users WHERE id = $1`, userID, models.AuthMethodSCIM).Scan(&first)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/FirstSignInOfProvisioned err: %+v", err)
+		return false
+	}
+	return first
 }
 
 // searchTextMaxLen bounds the needle. A regex is built from it, and an
@@ -170,7 +214,9 @@ func GetActiveUserWithAdminFlagByUserUUID(ctx context.Context, userUUID uuid.UUI
 			u.created_at,
 			u.updated_at,
 			u.deleted_at,
-			(CASE WHEN au.id IS NOT NULL THEN true ELSE false END) AS is_admin
+			(CASE WHEN au.id IS NOT NULL THEN true ELSE false END) AS is_admin,
+			u.is_external,
+			u.is_bot
 		FROM users u
 		LEFT JOIN admin_users au ON u.email_id = au.email_id
 		WHERE u.id = $1
@@ -195,7 +241,7 @@ func GetActiveUserWithAdminFlagByUserUUID(ctx context.Context, userUUID uuid.UUI
 
 func GetActiveUserByUUID(ctx context.Context, uuid uuid.UUID) (userInfo *models.User, err error) {
 	query := `
-        SELECT id, email_id, created_at, updated_at, deleted_at
+        SELECT id, email_id, created_at, updated_at, deleted_at, is_external, is_bot
         FROM users
         WHERE id = $1
 		AND deleted_at IS NULL
@@ -215,7 +261,7 @@ func GetActiveUserByUUID(ctx context.Context, uuid uuid.UUID) (userInfo *models.
 
 func GetUserByUUID(ctx context.Context, uuid uuid.UUID) (userInfo *models.User, err error) {
 	query := `
-        SELECT id, email_id, created_at, updated_at, deleted_at
+        SELECT id, email_id, created_at, updated_at, deleted_at, is_external, is_bot
         FROM users
         WHERE id = $1
     `
@@ -304,7 +350,7 @@ func GetAllAdminUsers(ctx context.Context, pageIndex int, pageSize int) (usersIn
 func HardDeleteAdminUserByEmailId(ctx context.Context, emailId string, userUUID ...string) (err error) {
 	query := `
 		DELETE FROM admin_users
-        WHERE email_id = $1
+        WHERE LOWER(email_id) = LOWER($1)
 	`
 	err = models.HardDeleteAdminUserByEmailId(query, emailId)
 
@@ -336,7 +382,9 @@ func HardDeleteAdminUserByEmailId(ctx context.Context, emailId string, userUUID 
 func CreateAdminUser(ctx context.Context, emailId string, userUUID ...string) (err error) {
 	query := `
 		INSERT INTO admin_users (email_id)
-        VALUES ($1)
+        VALUES (COALESCE(
+			(SELECT email_id FROM users WHERE LOWER(email_id) = LOWER($1) AND is_external = false AND is_bot = false ` + sameAddressFirst + `),
+			LOWER($1)))
         ON CONFLICT (email_id) DO NOTHING;
 	`
 	err = models.CreateAdminUser(query, emailId)
@@ -366,10 +414,150 @@ func CreateAdminUser(ctx context.Context, emailId string, userUUID ...string) (e
 	return
 }
 
+// sameAddressFirst picks one account when a lookup by address finds more
+// than one: an install from before addresses were lowercased can hold two
+// whose addresses differ only in capital letters. The one spelt exactly as
+// asked comes first, then the older one. Callers pass a NormalizeEmail'd
+// address, so for a sign-in that is the all-lowercase account.
+// The admin's system check names such addresses (AddressesWithMoreThanOneAccount).
+const sameAddressFirst = `ORDER BY (email_id = $1) DESC, created_at ASC LIMIT 1`
+
+// AddressesWithMoreThanOneAccount lists up to limit addresses that more than
+// one member's account has, compared without case.
+func AddressesWithMoreThanOneAccount(ctx context.Context, limit int) ([]string, error) {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
+		SELECT LOWER(email_id) FROM users
+		WHERE is_external = false AND is_bot = false
+		GROUP BY LOWER(email_id) HAVING count(*) > 1
+		ORDER BY 1 LIMIT $1`, limit)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/AddressesWithMoreThanOneAccount err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var email string
+		if err := rows.Scan(&email); err != nil {
+			return nil, err
+		}
+		out = append(out, email)
+	}
+	return out, rows.Err()
+}
+
+// TakenHandles is every handle in use that a new one based on base could
+// collide with: base itself and base-<anything>, compared without case.
+func TakenHandles(ctx context.Context, base string) ([]string, error) {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	escaped := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(strings.ToLower(base))
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
+		SELECT LOWER(username) FROM users
+		WHERE LOWER(username) = LOWER($1) OR LOWER(username) LIKE $2 ESCAPE '\'`, base, escaped+"-%")
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/TakenHandles err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	var taken []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return nil, err
+		}
+		taken = append(taken, h)
+	}
+	return taken, rows.Err()
+}
+
+// GetHandle is a person's handle (users.username), or "" when they have none.
+func GetHandle(ctx context.Context, userID uuid.UUID) (string, error) {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	var handle sql.NullString
+	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `SELECT username FROM users WHERE id = $1`, userID).Scan(&handle)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetHandle err: %+v", err)
+		return "", err
+	}
+	return handle.String, nil
+}
+
+// HandleTakenByAnother reports whether someone other than userID has this
+// handle, compared without case.
+func HandleTakenByAnother(ctx context.Context, handle string, userID uuid.UUID) (bool, error) {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	var taken bool
+	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+		SELECT EXISTS (SELECT 1 FROM users WHERE LOWER(username) = LOWER($1) AND id <> $2)`, handle, userID).Scan(&taken)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/HandleTakenByAnother err: %+v", err)
+	}
+	return taken, err
+}
+
+// SetHandle changes someone's handle. A unique violation means another person
+// has it.
+func SetHandle(ctx context.Context, userID uuid.UUID, handle string) error {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(c,
+		`UPDATE users SET username = $2, updated_at = NOW() WHERE id = $1`, userID, handle)
+	return err
+}
+
+// SetHandleIfMissing gives someone without a handle this one, and reports
+// whether it did. A unique violation means another person took it first.
+func SetHandleIfMissing(ctx context.Context, userID uuid.UUID, handle string) (bool, error) {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(c, `
+		UPDATE users SET username = $2, updated_at = NOW()
+		WHERE id = $1 AND (username IS NULL OR username = '')`, userID, handle)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// ExternalName is the name an import or a GitHub sync gave the person at
+// this address, on the external row it left for them, or "" for none.
+func ExternalName(ctx context.Context, email string) (string, error) {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	var name sql.NullString
+	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+		SELECT COALESCE(NULLIF(display_name, ''), username) FROM users
+		WHERE LOWER(email_id) = LOWER($1) AND is_external = true AND is_bot = false AND deleted_at IS NULL
+		`+sameAddressFirst, email).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/ExternalName err: %+v", err)
+		return "", err
+	}
+	return name.String, nil
+}
+
+// CheckIfUserExistByEmail reports whether an account, LIVE OR DEACTIVATED, has
+// this address: what signing in and signing up ask, since a deactivated
+// account still owns its address. It is not a live-member check: a
+// deactivated account answers true here, and MemberAccountState says which
+// it is. The external row an import or GitHub sync made for someone's address
+// isn't their account, and neither is a bot's: it counted as one, so its
+// owner signed in through Google or GitHub without an invitation, either way
+// as an external who never took a seat. JoinAsMember adopts such a row
+// instead.
 func CheckIfUserExistByEmail(ctx context.Context, emailID string) (err error, exist bool) {
 	query := `
-		SELECT EXISTS 
-		(SELECT 1 FROM users WHERE email_id = $1);
+		SELECT EXISTS
+		(SELECT 1 FROM users WHERE LOWER(email_id) = LOWER($1) AND is_external = false AND is_bot = false);
 	`
 
 	exist, err = models.CheckIfUserExistByEmail(query, emailID)
@@ -426,7 +614,7 @@ func GetAllInvitations(ctx context.Context) (invitations []*models.Invitation, e
 func DeleteInvitationByEmail(ctx context.Context, email string) (err error) {
 	query := `
 		DELETE FROM invitations
-		WHERE email = $1
+		WHERE LOWER(email) = LOWER($1)
 	`
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -434,23 +622,6 @@ func DeleteInvitationByEmail(ctx context.Context, email string) (err error) {
 	_, err = postgresInit.DBConn.SqlDB.ExecContext(ctx, query, email)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/DeleteInvitationByEmail Failed to delete invitation err: %+v", err)
-		return
-	}
-	return
-}
-
-func CheckIfInvitationExists(ctx context.Context, email string) (exist bool, err error) {
-	query := `
-		SELECT EXISTS (
-			SELECT 1 FROM invitations WHERE email = $1
-		)
-	`
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, email).Scan(&exist)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/CheckIfInvitationExists Failed to check invitation err: %+v", err)
 		return
 	}
 	return
@@ -760,6 +931,19 @@ func GetActiveDgraphUserInfoByUUID(ctx context.Context, userUUID string) (dgraph
 	}
 
 	return
+}
+
+// InvalidateUserMemberships drops a person's cached graph profile after a
+// write that took a channel, project or team from them. The profile
+// (user:dgraph, kept an hour) lists their channels, projects and teams; every
+// request reads it through the auth middleware, and search, the AI's reach and
+// command delivery are scoped by it. Until it's dropped, someone removed from
+// a private channel keeps finding what's posted there.
+func InvalidateUserMemberships(ctx context.Context, userUUID string) {
+	if userUUID == "" {
+		return
+	}
+	_ = redisStore.Delete(ctx, registry.UserDgraphProfile, []string{userUUID})
 }
 
 func GetAllUserEmojiStatusList(ctx context.Context, userUUID string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
@@ -1372,6 +1556,10 @@ func GetDgraphUserInfoByUUIDForMQTTConfig(ctx context.Context, userUUID string) 
 }
 
 func GetDgraphUserInfoByUUIDs(ctx context.Context, userUUIDs []string) (dgraphUser []*dgraphStruct.DgraphUser, err error) {
+	// Despite the name these are graph uids, written into the query below.
+	if !dgraphquery.AllUIDs(userUUIDs) {
+		return nil, errors.New("not a list of user ids")
+	}
 
 	variables := make(map[string]string)
 	dgraphUids := strings.Join(userUUIDs, ", ")
@@ -1540,12 +1728,34 @@ func DeleteFavChannelEdge(ctx context.Context, userDgraphUID string, channelDgra
 	return
 }
 
+// GetDgraphUserInfoByEmailId finds the member with this address, for signing
+// them in: never an external person or a bot.
+//
+// The address is matched in Postgres, without regard to case, and the graph
+// node by its id. The graph can only match an address exactly, and accounts
+// made before addresses were lowercased (helpers.NormalizeEmail) keep the
+// case they arrived with, so asking it by address would sign nobody in whose
+// provider spells their address differently from the way it was stored.
 func GetDgraphUserInfoByEmailId(ctx context.Context, userEmailId string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	var userID uuid.UUID
+	err = postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+		SELECT id FROM users
+		WHERE LOWER(email_id) = LOWER($1) AND deleted_at IS NULL AND is_external = false AND is_bot = false
+		`+sameAddressFirst, userEmailId).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetDgraphUserInfoByEmailId Failed to find the member err: %+v", err)
+		return nil, err
+	}
 
 	variables := make(map[string]string)
-	variables["$id"] = userEmailId
+	variables["$id"] = userID.String()
 	query := `query UserInfo($id: string){
-				userInfo(func: eq(user_email_id, $id)) @filter(not gt(user_deleted_at, "1970-01-01T00:00:00Z")) {
+				userInfo(func: eq(user_uuid, $id)) @filter(not gt(user_deleted_at, "1970-01-01T00:00:00Z") AND NOT eq(is_external, true) AND NOT eq(is_bot, true)) {
 					uid
 					user_uuid
 					user_name
@@ -1631,13 +1841,19 @@ func GetUserRecordingsList(ctx context.Context, userDgraphUID string, startDate 
 
 // ===== Email Auth Domain Functions =====
 
+// GetUserByEmailIdWithPassword loads a member's sign-in details by address.
+// Members only: an external row or a bot's never signs in, even holding a
+// password (accepting an invitation used to set one on an external row).
 func GetUserByEmailIdWithPassword(ctx context.Context, emailID string) (userInfo *models.User, err error) {
 	query := `
 		SELECT id, email_id, password_hash, username, created_at, updated_at,
 		       COALESCE(is_sso_managed, false), signup_method, last_login_method
 		FROM users
-		WHERE email_id = $1
+		WHERE LOWER(email_id) = LOWER($1)
 		AND deleted_at IS NULL
+		AND is_external = false
+		AND is_bot = false
+		` + sameAddressFirst + `
 	`
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -1739,6 +1955,79 @@ func CreateUserWithMethod(
 	}
 
 	return
+}
+
+// AdoptExternalUser makes the external row an import or GitHub sync left for
+// emailID the account of the person now joining with that address. It keeps
+// its id, so the history imported under it (messages, tasks, comments) is
+// theirs, and takes the sign-in method and password they joined with. Bots are
+// external too, and never adopted.
+//
+// It reports false, changing nothing, when there's no such row. Adopting one
+// adds a person, so it takes a seat as CreateUserWithMethod does, refusing a
+// full workspace. The row is locked until both stores agree: Postgres commits
+// only once the graph node is a member's too (member pickers and lists leave
+// out anyone the graph marks external), and a sign-up racing this one waits,
+// then finds nothing left to adopt.
+func AdoptExternalUser(ctx context.Context, emailID string, passwordHash *string, signupMethod string, isSSOManaged bool) (userID uuid.UUID, adopted bool, err error) {
+	c, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	tx, err := postgresInit.DBConn.SqlDB.BeginTx(c, nil)
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	err = tx.QueryRowContext(c, `
+		SELECT id FROM users
+		WHERE LOWER(email_id) = LOWER($1) AND is_external = true AND is_bot = false AND deleted_at IS NULL
+		`+sameAddressFirst+`
+		FOR UPDATE`, emailID).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	if err = EnsureSeatAvailable(ctx); err != nil {
+		return uuid.Nil, false, err
+	}
+	if _, err = tx.ExecContext(c, `
+		UPDATE users
+		SET is_external = false, password_hash = $2, signup_method = NULLIF($3, ''),
+			is_sso_managed = $4, updated_at = NOW()
+		WHERE id = $1`, userID, passwordHash, signupMethod, isSSOManaged); err != nil {
+		return uuid.Nil, false, err
+	}
+	if err = setDgraphExternal(c, userID.String(), false); err != nil {
+		return uuid.Nil, false, err
+	}
+	if err = tx.Commit(); err != nil {
+		_ = helpers.CompensateOnFailure(ctx, "the member mark on the graph node of an adopted "+emailID,
+			func(undoCtx context.Context) error { return setDgraphExternal(undoCtx, userID.String(), true) })
+		return uuid.Nil, false, err
+	}
+	_ = redisStore.Delete(ctx, registry.UserProfile, []string{userID.String()})
+	_ = redisStore.Delete(ctx, registry.UserDgraphProfile, []string{userID.String()})
+	return userID, true, nil
+}
+
+// setDgraphExternal marks a person's graph node external, or makes it a
+// member's: one without the mark.
+func setDgraphExternal(ctx context.Context, userUUID string, external bool) error {
+	mu := &api.Mutation{Cond: "@if(eq(len(u), 1))", DelNquads: []byte(`uid(u) <is_external> * .`)}
+	if external {
+		mu = &api.Mutation{Cond: "@if(eq(len(u), 1))", SetJson: []byte(`{"uid": "uid(u)", "is_external": true}`)}
+	}
+	_, err := dgraphInit.DoCommitNow(ctx, &api.Request{
+		Query:     `query q($id: string) { found(func: eq(user_uuid, $id)) { u as uid } }`,
+		Vars:      map[string]string{"$id": userUUID},
+		Mutations: []*api.Mutation{mu},
+	})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/setDgraphExternal err: %+v", err)
+	}
+	return err
 }
 
 // IsUniqueViolationOnUsername inspects an error from a postgres INSERT/UPDATE
@@ -1933,28 +2222,120 @@ func CheckIfAnyAdminExists(ctx context.Context) (exists bool, err error) {
 	return
 }
 
-func UpdateInvitationTokenByEmail(ctx context.Context, email string, token string, expiresAt time.Time) (err error) {
-	query := `
-		UPDATE invitations
-		SET token = $1, token_expires_at = $2, status = 'sent'
-		WHERE email = $3
-	`
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+// UpdateInvitationTokenByID gives one invitation a new link and expiry, from
+// invitedBy, who renewed it: the invitation is theirs now, and its email
+// names them.
+//
+// By id, not by address: an address can have more than one invitation row
+// (made before inviting a member twice was refused), and setting every one of
+// them to the same new token broke on token's unique index, so sending such
+// an invitation again failed. The caller renews the newest
+// (GetInvitationByEmail).
+func UpdateInvitationTokenByID(ctx context.Context, id uuid.UUID, token string, expiresAt time.Time, invitedBy uuid.UUID) error {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
-
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(ctx, query, token, expiresAt, email)
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(c, `
+		UPDATE invitations
+		SET token = $1, token_expires_at = $2, status = 'sent', invited_by = $4
+		WHERE id = $3`, token, expiresAt, id, invitedBy)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"domain/UpdateInvitationTokenByEmail Failed to update invitation token err: %+v", err)
-		return
+			"domain/UpdateInvitationTokenByID Failed to update invitation token err: %+v", err)
 	}
+	return err
+}
 
-	return
+// GetInvitationByEmail is the newest invitation for an address, the one that
+// is renewed and judged, or nil when there is none.
+func GetInvitationByEmail(ctx context.Context, email string) (*models.Invitation, error) {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	var inv models.Invitation
+	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+		SELECT id, email, invited_by, status, token, token_expires_at, created_at
+		FROM invitations
+		WHERE LOWER(email) = LOWER($1)
+		ORDER BY created_at DESC
+		LIMIT 1`, email).Scan(&inv.Id, &inv.Email, &inv.InvitedBy, &inv.Status, &inv.Token, &inv.TokenExpiresAt, &inv.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetInvitationByEmail err: %+v", err)
+		return nil, err
+	}
+	return &inv, nil
+}
+
+// HasUsableInvitation reports whether email holds an invitation that can
+// still let someone in, as models.Invitation.LiveAt decides: the rows are
+// read and judged by that one predicate, not by a copy of it in SQL.
+func HasUsableInvitation(ctx context.Context, email string) (bool, error) {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
+		SELECT id, email, invited_by, status, token, token_expires_at, created_at
+		FROM invitations
+		WHERE LOWER(email) = LOWER($1)`, email)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/HasUsableInvitation err: %+v", err)
+		return false, err
+	}
+	defer rows.Close()
+	now := time.Now()
+	usable := false
+	for rows.Next() {
+		var inv models.Invitation
+		if err := rows.Scan(&inv.Id, &inv.Email, &inv.InvitedBy, &inv.Status, &inv.Token, &inv.TokenExpiresAt, &inv.CreatedAt); err != nil {
+			helpers.LogErrorWithContext(ctx, "domain/HasUsableInvitation scan err: %+v", err)
+			return false, err
+		}
+		usable = usable || inv.LiveAt(now)
+	}
+	if err := rows.Err(); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/HasUsableInvitation rows err: %+v", err)
+		return false, err
+	}
+	return usable, nil
+}
+
+// MarkInvitationJoined records that the person invited at email has joined,
+// however they came in. Nothing to mark is not an error.
+func MarkInvitationJoined(ctx context.Context, email string) error {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(c, `
+		UPDATE invitations SET status = 'joined'
+		WHERE LOWER(email) = LOWER($1) AND status <> 'joined'`, email)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/MarkInvitationJoined err: %+v", err)
+	}
+	return err
+}
+
+// MemberAccountState reports whether a member's account has this address,
+// and whether it is deactivated. External rows and bots are not members.
+func MemberAccountState(ctx context.Context, email string) (exists bool, deactivated bool, err error) {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	err = postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+		SELECT deleted_at IS NOT NULL FROM users
+		WHERE LOWER(email_id) = LOWER($1) AND is_external = false AND is_bot = false
+		ORDER BY (deleted_at IS NULL) DESC, created_at ASC
+		LIMIT 1`, email).Scan(&deactivated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, nil
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/MemberAccountState err: %+v", err)
+		return false, false, err
+	}
+	return true, deactivated, nil
 }
 
 // GetUserIDByEmail finds a user ID by email address.
 func GetUserIDByEmail(ctx context.Context, email string) (uuid.UUID, error) {
-	query := `SELECT id FROM users WHERE email_id = $1 AND deleted_at IS NULL`
+	query := `SELECT id FROM users WHERE LOWER(email_id) = LOWER($1) AND deleted_at IS NULL ` + sameAddressFirst
 	userID, err := models.GetUserIDByEmail(query, email)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetUserIDByEmail Failed err: %+v", err)

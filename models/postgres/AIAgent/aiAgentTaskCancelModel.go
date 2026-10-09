@@ -83,6 +83,40 @@ func RequestAgentTaskCancel(ctx context.Context, id, by uuid.UUID) (string, erro
 	return CancelRequested, nil
 }
 
+// RequestAgentTasksCancel is RequestAgentTaskCancel for every open job of an
+// agent, as pausing or deleting it means. It answers the jobs it touched.
+func RequestAgentTasksCancel(ctx context.Context, agentID, by uuid.UUID) ([]uuid.UUID, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	const q = `UPDATE ai_agent_tasks
+		SET cancel_requested_at = COALESCE(cancel_requested_at, now()),
+		    cancel_requested_by = COALESCE(cancel_requested_by, $2),
+		    state = CASE WHEN state IN ('queued','awaiting_input') THEN 'cancelled' ELSE state END,
+		    result = CASE WHEN state IN ('queued','awaiting_input') THEN COALESCE(result, $3) ELSE result END,
+		    ended_at = CASE WHEN state IN ('queued','awaiting_input') THEN now() ELSE ended_at END,
+		    lease_token = CASE WHEN state IN ('queued','awaiting_input') THEN NULL ELSE lease_token END,
+		    lease_expires_at = CASE WHEN state IN ('queued','awaiting_input') THEN NULL ELSE lease_expires_at END,
+		    updated_at = now()
+		WHERE agent_id=$1 AND state IN ('queued','running','awaiting_input')
+		RETURNING id`
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q, agentID, by, cancelledBeforeStartNote)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/RequestAgentTasksCancel err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // AgentTaskCancelRequested reports whether a stop has been requested for a job.
 // Called by the worker's lease heartbeat (which is already polling), so it is a
 // single indexed existence check and never mutates state. An error is treated as

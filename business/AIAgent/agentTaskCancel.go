@@ -227,6 +227,26 @@ func settleStoppedAgentWork(ctx context.Context, t *model.AgentTask, lease uuid.
 	return true
 }
 
+// settleAgentOffWork ends a job whose agent was switched off while it ran
+// (agentOff.go). Pausing or deleting an agent records a stop on its jobs, so
+// the job ends as a person's Stop does, naming them; a sponsor leaving records
+// none, so the job ends cancelled with the reason.
+func settleAgentOffWork(ctx context.Context, t *model.AgentTask, lease uuid.UUID, outcome *RunOutcome, runID *uuid.UUID, postStatus, notify func(string)) {
+	if settleStoppedAgentWork(ctx, t, lease, outcome.Result, runID, postStatus, notify) {
+		return
+	}
+	note := "Stopped: " + helpers.FirstNonBlank(outcome.Error, "this AI teammate is switched off") + "."
+	if postStatus != nil {
+		postStatus(note)
+	}
+	if notify != nil {
+		notify(note)
+	}
+	commitAgentTaskState(ctx, t.Id, "cancel (agent switched off)", func(c context.Context) error {
+		return model.CancelLeasedAgentTask(c, t.Id, lease, note, outcome.Result, runID)
+	})
+}
+
 // stopRequester resolves who asked for the stop. The claimed row carries it when
 // the request predates the claim; otherwise it is read back on a detached context
 // (the run context is cancelled by the stop itself). Nil when unknown, which the

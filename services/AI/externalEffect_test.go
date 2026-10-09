@@ -7,7 +7,7 @@ import (
 	apiTokenBusiness "github.com/akashc777/OneCamp/business/ApiToken"
 )
 
-// The three tools whose effect leaves the workspace and cannot be recalled.
+// The tools whose effect leaves the workspace and cannot be recalled.
 //
 // Written out rather than derived so that adding a fourth is a deliberate edit to
 // a list a reviewer can read, and so that REMOVING the flag from one of these
@@ -16,6 +16,7 @@ var wantExternalEffect = map[string]string{
 	"gmail_send":            "delivers mail to a third party; nothing in OneCamp unsends it",
 	"calendar_create_event": "notifies attendees; deleting the event does not recall the invitations",
 	"github_comment":        "publishes under the connected human's name to everyone watching the thread",
+	"code_pr":               "pushes a branch and opens a pull request under a person's GitHub identity; closing it unpushes nothing",
 }
 
 // TestExternalEffectSetIsExactlyTheIrrecoverableWrites pins the flag to the set

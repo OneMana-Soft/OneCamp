@@ -398,6 +398,17 @@ func (e Elicitation) MatchAnswer(reply string) (ElicitationAction, string) {
 	return ElicitAccept, ""
 }
 
+// declinedNoteLead starts the note a declined question resumes with, which
+// splitAskerWords leaves out of the asker's words (withoutDeclines).
+const declinedNoteLead = "The person declined to answer \""
+
+// answeredNoteLead and repliedNoteLead start the notes for an option chosen
+// and for a free reply to a question (withoutDeclines reads them).
+const (
+	answeredNoteLead = "The person answered \""
+	repliedNoteLead  = "The person replied to \""
+)
+
 // ResumeNote is what the agent is told when the run picks back up.
 //
 // The chosen option is stated as fact when there was one, so the model resumes
@@ -408,16 +419,16 @@ func (e Elicitation) MatchAnswer(reply string) (ElicitationAction, string) {
 func (e Elicitation) ResumeNote(action ElicitationAction, choice, reply string) string {
 	switch action {
 	case ElicitDecline:
-		return "The person declined to answer \"" + e.Question + "\". Do not ask this again. " +
+		return declinedNoteLead + e.Question + "\". Do not ask this again. " +
 			"Continue with what you can do without it, or stop and say plainly what is left undone."
 	case ElicitCancel:
 		return "The person cancelled this work."
 	}
 	if choice != "" {
-		return "The person answered \"" + e.Question + "\" with: " + choice
+		return answeredNoteLead + e.Question + "\" with: " + choice
 	}
 	if r := strings.TrimSpace(reply); r != "" {
-		return "The person replied to \"" + e.Question + "\": " + r
+		return repliedNoteLead + e.Question + "\": " + r
 	}
 	return ""
 }

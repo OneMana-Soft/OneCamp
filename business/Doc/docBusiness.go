@@ -15,6 +15,7 @@ import (
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Activity"
+	docModels "github.com/akashc777/OneCamp/models/dgraph/Doc"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	openSearchGlobalSearchModels "github.com/akashc777/OneCamp/models/openSearch/GlobalSearch"
@@ -159,6 +160,10 @@ func DeleteDoc(ctx context.Context, docUUID string) (err error) {
 
 	return
 }
+
+// ErrNotFound is the error a doc lookup gives for a doc that doesn't exist, as
+// opposed to one the graph couldn't be asked about.
+var ErrNotFound = docModels.ErrNotFound
 
 func GetDgraphDocByUUIDOnlyEditingInfo(ctx context.Context, docUUID string, userUID string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
 
@@ -333,6 +338,24 @@ func UpdateDoc(ctx context.Context, updateInput *adapter.InputUpdateDoc) (err er
 	go func() {
 		domain.UpdateDocInOpenSearch(openSearchDoc)
 
+		// The doc as it is now: who may see it and who it's shared with. The
+		// AI index's entries are filtered by these, so they come from the
+		// doc, not from the update, which carries privacy only when the
+		// owner changes it (a save from the editor carries the body alone,
+		// and indexing that as public put a private doc in everyone's AI
+		// search).
+		updatedDoc, err := domain.GetDocPermissions(context.Background(), updateInput.DocId)
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "business/UpdateDoc Failed to get updated doc for OpenSearch sync err: %+v", err)
+			return
+		}
+
+		if updatedDoc == nil {
+			helpers.LogErrorWithContext(ctx, "business/UpdateDoc Failed to get updated doc for OpenSearch sync: doc is nil")
+			return
+		}
+		access := docAccessOf(updateInput.DocId, updatedDoc)
+
 		// Re-embed for AI Second Brain if content changed
 		if updateInput.Title != nil || updateInput.Body != nil {
 			title := ""
@@ -349,44 +372,19 @@ func UpdateDoc(ctx context.Context, updateInput *adapter.InputUpdateDoc) (err er
 				// quietly degrades semantic search for that doc.
 				body = helpers.HTMLToPlainText(*updateInput.Body)
 			}
-			isPrivate := false
-			if updateInput.IsPrivate != nil {
-				isPrivate = *updateInput.IsPrivate
+			ai.EmbedDocContent(title, body, updateInput.DocId, "", "", access.Private, access.CreatedBy, access.Reading, access.Editing, access.Commenting)
+		}
+
+		// Who may see it changed: its comments' entries follow (and its own,
+		// when no text changed and it wasn't re-embedded).
+		if updateInput.IsPrivate != nil {
+			if err := ai.SetDocAccess(context.Background(), []ai.DocAccess{access}); err != nil {
+				helpers.LogErrorWithContext(ctx, "business/UpdateDoc Failed to write the doc's privacy to the AI index err: %+v", err)
 			}
-			ai.EmbedDocContent(title, body, updateInput.DocId, "", "", isPrivate, "", nil, nil, nil)
 		}
 
 		// 2. Cascading update for doc comments and attachments
-		updatedDoc, err := domain.GetDocPermissions(context.Background(), updateInput.DocId)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/UpdateDoc Failed to get updated doc for OpenSearch sync err: %+v", err)
-			return
-		}
-
-		if updatedDoc == nil {
-			helpers.LogErrorWithContext(ctx, "business/UpdateDoc Failed to get updated doc for OpenSearch sync: doc is nil")
-			return
-		}
-
-		readingUsers := []string{}
-		for _, u := range updatedDoc.ReadingUser {
-			readingUsers = append(readingUsers, u.Uuid)
-		}
-		editingUsers := []string{}
-		for _, u := range updatedDoc.EditingUser {
-			editingUsers = append(editingUsers, u.Uuid)
-		}
-		commentingUsers := []string{}
-		for _, u := range updatedDoc.CommentingUser {
-			commentingUsers = append(commentingUsers, u.Uuid)
-		}
-
-		createdBy := ""
-		if updatedDoc.CreatedBy != nil {
-			createdBy = updatedDoc.CreatedBy.Uuid
-		}
-
-		err = openSearchGlobalSearchModels.SyncDocMetadataInOpenSearch(ctx, updateInput.DocId, updateInput.Title, updatedDoc.IsPrivate, readingUsers, editingUsers, commentingUsers, createdBy)
+		err = openSearchGlobalSearchModels.SyncDocMetadataInOpenSearch(ctx, updateInput.DocId, updateInput.Title, updatedDoc.IsPrivate, access.Reading, access.Editing, access.Commenting, access.CreatedBy)
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "business/UpdateDoc Failed to sync metadata for doc comments/attachments err: %+v", err)
 		}
@@ -395,19 +393,39 @@ func UpdateDoc(ctx context.Context, updateInput *adapter.InputUpdateDoc) (err er
 	return
 }
 
+// docAccessOf is a doc's privacy and sharing, from the doc as GetDocPermissions
+// reads it, in the form the search indices carry them (user uuids; empty lists,
+// not nil, so an index is told "nobody" rather than nothing). A doc with no
+// privacy recorded is read as CanRead reads it: not private.
+func docAccessOf(docUUID string, doc *dgraphStruct.DgraphDoc) ai.DocAccess {
+	uuids := func(users []*dgraphStruct.DgraphUser) []string {
+		out := []string{}
+		for _, u := range users {
+			if u != nil {
+				out = append(out, u.Uuid)
+			}
+		}
+		return out
+	}
+	a := ai.DocAccess{
+		DocUUID:    docUUID,
+		Private:    doc.IsPrivate != nil && *doc.IsPrivate,
+		Reading:    uuids(doc.ReadingUser),
+		Editing:    uuids(doc.EditingUser),
+		Commenting: uuids(doc.CommentingUser),
+	}
+	if doc.CreatedBy != nil {
+		a.CreatedBy = doc.CreatedBy.Uuid
+	}
+	return a
+}
+
 func CheckUserDocEditAccess(ctx context.Context, docUUID string, userUID string) (bool, error) {
 	checkDoc, err := domain.GetDgraphDocByUUIDOnlyEditingInfo(ctx, docUUID, userUID)
 	if err != nil {
 		return false, err
 	}
-	if checkDoc == nil {
-		return false, nil
-	}
-	// Check if user is editor OR owner
-	if checkDoc.HasEditAccess > 0 || checkDoc.CreatedBy != nil {
-		return true, nil
-	}
-	return false, nil
+	return CanEdit(checkDoc, userUID), nil
 }
 
 func UpdateDocPermissions(ctx context.Context, input adapter.InputUpdateDocPermissions, userUID string) (err error) {
@@ -421,7 +439,7 @@ func UpdateDocPermissions(ctx context.Context, input adapter.InputUpdateDocPermi
 		return errors.New("document not found")
 	}
 
-	if checkDoc.CreatedBy == nil || checkDoc.CreatedBy.Uid != userUID {
+	if !IsOwner(checkDoc, userUID) {
 		return errors.New("unauthorized: only document owner can manage permissions")
 	}
 
@@ -501,6 +519,12 @@ func UpdateDocPermissions(ctx context.Context, input adapter.InputUpdateDocPermi
 		err = openSearchGlobalSearchModels.SyncDocMetadataInOpenSearch(ctx, input.DocId, nil, updatedDoc.IsPrivate, openSearchDoc.DocReadingUsers, openSearchDoc.DocEditingUsers, openSearchDoc.DocCommentingUsers, createdBy)
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "business/UpdateDocPermissions Failed to sync permissions for doc comments/attachments err: %+v", err)
+		}
+
+		// 4. And for its AI search entries, the doc's and its comments': a
+		// person it's no longer shared with stops finding it there too.
+		if err := ai.SetDocAccess(context.Background(), []ai.DocAccess{docAccessOf(input.DocId, updatedDoc)}); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/UpdateDocPermissions Failed to write the doc's sharing to the AI index err: %+v", err)
 		}
 	}()
 
@@ -853,7 +877,8 @@ func GetPublicDocListWithSearchText(ctx context.Context, inputDocName *adapter.I
 
 func GetSystemDocByUUID(ctx context.Context, docUUID string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
 
-	dgraphDoc, err = domain.GetSystemDocByUUID(ctx, docUUID)
+	// As the collaboration service opens it: with its saved Yjs state.
+	dgraphDoc, err = domain.GetCollabDocByUUID(ctx, docUUID)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

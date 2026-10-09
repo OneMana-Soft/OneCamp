@@ -42,12 +42,50 @@ import (
 	"github.com/google/uuid"
 )
 
-// notAvailable is the single response for every guest-link failure (no oracle).
+// recordGuestAccess writes the audit row for a guest opening a shared
+// resource (what it is, which link, and the name the guest gave when there is
+// one), when guestBusiness.AuditAccessDue says it is due.
+func recordGuestAccess(r *http.Request, grant *guestModel.GuestGrant, what, guestName string) {
+	if !guestBusiness.AuditAccessDue(r.Context(), grant.Id, guestName) {
+		return
+	}
+	details := map[string]interface{}{
+		"resource_type": grant.ResourceType,
+		"resource_id":   grant.ResourceID,
+		"grant_id":      grant.Id.String(),
+	}
+	if guestName != "" {
+		details["display_name"] = guestName
+	}
+	auditBusiness.Record(r, "guest.resource.access", auditBusiness.CategorySecurity, "A guest opened a shared "+what, details)
+}
+
+// notAvailable is the one answer for a link that is off, invalid, expired,
+// revoked or gone, whichever it is (no oracle). A server that couldn't answer
+// gets guestReadFailed's 503 instead.
 func notAvailable(w http.ResponseWriter) {
 	helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{
 		"msg":       "This link is no longer available.",
 		"available": false,
 	})
+}
+
+// guestReadFailed answers a guest request that couldn't be served. An answer
+// about the link or what it opens (guestBusiness.IsUnavailable) is the uniform
+// "not available", or goneMsg for one item of what the link opens. Anything
+// else is a store or service that didn't answer (Postgres, Dgraph, the call
+// server), and gets a 503 the guest's page retries: those used to read as "not
+// available" too, and a client's page gave up on a link that still worked.
+func guestReadFailed(w http.ResponseWriter, r *http.Request, where string, err error, goneMsg string) {
+	switch {
+	case guestBusiness.IsUnavailable(err) && goneMsg != "":
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": goneMsg})
+	case guestBusiness.IsUnavailable(err):
+		notAvailable(w)
+	default:
+		helpers.LogErrorWithContext(r.Context(), "controllers/Guest/%s err: %+v", where, err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The server couldn't answer just now. Try again in a moment."})
+	}
 }
 
 // CreateInstantMeeting POST /meet/instant — member starts a shareable meeting.
@@ -93,13 +131,14 @@ func CreateInstantMeeting(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetGuestMeeting GET /guest/meet/{token} — public link status. Returns 200
-// {available:true} for a usable link, else a uniform 404.
+// {available:true} for a usable link, else the uniform 404, or a 503 when the
+// server couldn't answer.
 func GetGuestMeeting(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	token := chi.URLParam(r, "token")
 
 	if _, err := guestBusiness.ValidateMeetingGrant(ctx, token); err != nil {
-		notAvailable(w)
+		guestReadFailed(w, r, "GetGuestMeeting", err, "")
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{"available": true}})
@@ -123,7 +162,7 @@ func JoinGuestMeeting(w http.ResponseWriter, r *http.Request) {
 
 	grant, err := guestBusiness.ValidateMeetingGrant(ctx, token)
 	if err != nil {
-		notAvailable(w)
+		guestReadFailed(w, r, "JoinGuestMeeting", err, "")
 		return
 	}
 
@@ -133,8 +172,9 @@ func JoinGuestMeeting(w http.ResponseWriter, r *http.Request) {
 			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Please enter a display name."})
 			return
 		}
-		// ErrGuestDisabled or any other → uniform not-available.
-		notAvailable(w)
+		// ErrGuestDisabled → uniform not-available; a call server that didn't
+		// answer → try again.
+		guestReadFailed(w, r, "JoinGuestMeeting", err, "")
 		return
 	}
 
@@ -280,13 +320,13 @@ func GuestCollabToken(w http.ResponseWriter, r *http.Request) {
 
 	grant, err := guestBusiness.ValidateCollabGrant(ctx, token)
 	if err != nil {
-		notAvailable(w)
+		guestReadFailed(w, r, "GuestCollabToken", err, "")
 		return
 	}
 
 	collabToken, err := guestBusiness.IssueGuestCollabToken(ctx, grant, body.DisplayName)
 	if err != nil {
-		notAvailable(w)
+		guestReadFailed(w, r, "GuestCollabToken", err, "")
 		return
 	}
 
@@ -298,14 +338,7 @@ func GuestCollabToken(w http.ResponseWriter, r *http.Request) {
 	// R4.4: record the guest access (resource + time), content-free and with no
 	// member actor. Display name is whatever the guest supplied (already only
 	// used for the collab awareness label, never resolved to a member).
-	auditBusiness.Record(r, "guest.resource.access", auditBusiness.CategorySecurity,
-		"A guest opened a shared "+grant.ResourceType,
-		map[string]interface{}{
-			"resource_type": grant.ResourceType,
-			"resource_id":   grant.ResourceID,
-			"grant_id":      grant.Id.String(),
-			"display_name":  guestBusiness.SanitizeGuestName(body.DisplayName),
-		})
+	recordGuestAccess(r, grant, grant.ResourceType, guestBusiness.SanitizeGuestName(body.DisplayName))
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{
 		"collab_token":  collabToken,
@@ -313,6 +346,7 @@ func GuestCollabToken(w http.ResponseWriter, r *http.Request) {
 		"resource_type": grant.ResourceType,
 		"resource_id":   grant.ResourceID,
 		"capability":    grant.Capability,
+		"title":         guestBusiness.SharedTitle(ctx, grant),
 	}})
 }
 
@@ -371,15 +405,21 @@ func GuestBoardAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A read that failed is a 503 the board retries, as every other guest
+	// read: it said "no longer available", and the image never came back.
 	grant, err := guestBusiness.ValidateResourceGrant(ctx, token, "board")
 	if err != nil {
-		notAvailable(w)
+		guestReadFailed(w, r, "GuestBoardAttachment", err, "")
 		return
 	}
 
 	att, err := attachmentBusiness.GetAttachmentByObjUUID(ctx, objUUID, postgressStruct.ATTACHMENT_SRC_BOARD)
-	if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
 		notAvailable(w)
+		return
+	}
+	if err != nil {
+		guestReadFailed(w, r, "GuestBoardAttachment", err, "")
 		return
 	}
 	if att.SrcKey != postgressStruct.ATTACHMENT_SRC_BOARD || att.SrcValue != grant.ResourceID {
@@ -389,7 +429,7 @@ func GuestBoardAttachment(w http.ResponseWriter, r *http.Request) {
 
 	url, err := fileBusiness.GetFileURLByObjectName(ctx, att.ObjKey)
 	if err != nil {
-		notAvailable(w)
+		guestReadFailed(w, r, "GuestBoardAttachment", err, "")
 		return
 	}
 	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
@@ -406,7 +446,7 @@ func GuestTable(w http.ResponseWriter, r *http.Request) {
 
 	grant, err := guestBusiness.ValidateResourceGrant(ctx, token, "table")
 	if err != nil {
-		notAvailable(w)
+		guestReadFailed(w, r, "GuestTable", err, "")
 		return
 	}
 	id, err := uuid.Parse(grant.ResourceID)
@@ -417,17 +457,14 @@ func GuestTable(w http.ResponseWriter, r *http.Request) {
 	// The guest's time zone, where a formula's TODAY() is.
 	bundle, err := tableBusiness.GetGuestBundle(tableBusiness.WithZone(ctx, r.URL.Query().Get("tz")), id)
 	if err != nil {
-		notAvailable(w)
+		if tableBusiness.IsNotFound(err) {
+			err = guestBusiness.ErrNotFound
+		}
+		guestReadFailed(w, r, "GuestTable", err, "")
 		return
 	}
 	// R4.4: record the guest table access (resource + time), no member actor.
-	auditBusiness.Record(r, "guest.resource.access", auditBusiness.CategorySecurity,
-		"A guest opened a shared table",
-		map[string]interface{}{
-			"resource_type": "table",
-			"resource_id":   grant.ResourceID,
-			"grant_id":      grant.Id.String(),
-		})
+	recordGuestAccess(r, grant, "table", "")
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": bundle})
 }
 
@@ -453,12 +490,12 @@ func GuestDocComments(w http.ResponseWriter, r *http.Request) {
 
 	grant, err := guestBusiness.ValidateResourceGrant(ctx, token, "doc")
 	if err != nil {
-		notAvailable(w)
+		guestReadFailed(w, r, "GuestDocComments", err, "")
 		return
 	}
 	comments, err := guestBusiness.ListGuestDocComments(ctx, grant.ResourceID)
 	if err != nil {
-		notAvailable(w)
+		guestReadFailed(w, r, "GuestDocComments", err, "")
 		return
 	}
 	out := make([]guestCommentItem, 0, len(comments))
@@ -496,7 +533,7 @@ func CreateGuestDocComment(w http.ResponseWriter, r *http.Request) {
 
 	grant, err := guestBusiness.ValidateResourceGrant(ctx, token, "doc")
 	if err != nil {
-		notAvailable(w)
+		guestReadFailed(w, r, "CreateGuestDocComment", err, "")
 		return
 	}
 
@@ -509,7 +546,7 @@ func CreateGuestDocComment(w http.ResponseWriter, r *http.Request) {
 		case err.Error() == "empty comment":
 			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Please enter a comment."})
 		default:
-			notAvailable(w)
+			guestWriteFailed(w, r, "CreateGuestDocComment", err, "")
 		}
 		return
 	}
@@ -545,11 +582,12 @@ func CreateGuestDocComment(w http.ResponseWriter, r *http.Request) {
 // ─── Channel guests (capability = view | post) ─────────────────────────
 
 // grantFor is the active grant behind the {token} in the URL for a kind of
-// resource, or a uniform "not available" written for the caller.
+// resource, or the answer written for the caller: the uniform "not
+// available", or a 503 when the server couldn't answer.
 func grantFor(w http.ResponseWriter, r *http.Request, resourceType string) (*guestModel.GuestGrant, bool) {
 	grant, err := guestBusiness.ValidateResourceGrant(r.Context(), chi.URLParam(r, "token"), resourceType)
 	if err != nil {
-		notAvailable(w)
+		guestReadFailed(w, r, "grantFor", err, "")
 		return nil, false
 	}
 	return grant, true
@@ -569,13 +607,11 @@ func GuestChannel(w http.ResponseWriter, r *http.Request) {
 	before, _ := time.Parse(time.RFC3339Nano, r.URL.Query().Get("before"))
 	view, err := guestBusiness.GetGuestChannel(r.Context(), grant, before)
 	if err != nil {
-		notAvailable(w)
+		guestReadFailed(w, r, "GuestChannel", err, "")
 		return
 	}
 	if before.IsZero() {
-		auditBusiness.Record(r, "guest.resource.access", auditBusiness.CategorySecurity,
-			"A guest opened a shared channel",
-			map[string]interface{}{"resource_type": "channel", "resource_id": grant.ResourceID, "grant_id": grant.Id.String()})
+		recordGuestAccess(r, grant, "channel", "")
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": view})
 }
@@ -588,7 +624,7 @@ func GuestChannelThread(w http.ResponseWriter, r *http.Request) {
 	}
 	t, err := guestBusiness.GetGuestThread(r.Context(), grant, chi.URLParam(r, "post_id"))
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message isn't here any more."})
+		guestReadFailed(w, r, "GuestChannelThread", err, "That message isn't here any more.")
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": t})
@@ -627,8 +663,10 @@ func guestWriteFailed(w http.ResponseWriter, r *http.Request, where string, err 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": in.Msg})
 	case errors.Is(err, guestBusiness.ErrForbidden):
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "This link is read only."})
-	case errors.Is(err, guestBusiness.ErrNotFound):
+	case errors.Is(err, guestBusiness.ErrNotFound) && goneMsg != "":
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": goneMsg})
+	case guestBusiness.IsUnavailable(err):
+		notAvailable(w)
 	default:
 		helpers.LogErrorWithContext(r.Context(), "controllers/Guest/%s err: %+v", where, err)
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't send that. Try again."})
@@ -644,13 +682,11 @@ func GuestProject(w http.ResponseWriter, r *http.Request) {
 	}
 	view, err := guestBusiness.GetGuestProject(r.Context(), grant)
 	if err != nil {
-		notAvailable(w)
+		guestReadFailed(w, r, "GuestProject", err, "")
 		return
 	}
 	if r.URL.Query().Get("refresh") == "" {
-		auditBusiness.Record(r, "guest.resource.access", auditBusiness.CategorySecurity,
-			"A guest opened a shared project",
-			map[string]interface{}{"resource_type": "project", "resource_id": grant.ResourceID, "grant_id": grant.Id.String()})
+		recordGuestAccess(r, grant, "project", "")
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": view})
 }
@@ -663,7 +699,7 @@ func GuestProjectTask(w http.ResponseWriter, r *http.Request) {
 	}
 	t, err := guestBusiness.GetGuestTask(r.Context(), grant, chi.URLParam(r, "task_id"))
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task isn't here any more."})
+		guestReadFailed(w, r, "GuestProjectTask", err, "That task isn't here any more.")
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": t})
@@ -747,8 +783,7 @@ func mayShare(w http.ResponseWriter, r *http.Request, userInfo userModels.UserIn
 			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Document not found"})
 			return false
 		}
-		isOwner := d.CreatedBy != nil && d.CreatedBy.Uuid == userInfo.UserDgraphInfo.Uuid
-		if d.HasEditAccess == 0 && !isOwner {
+		if !docBusiness.CanEdit(d, userInfo.UserDgraphInfo.Uid) {
 			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You need edit access to share this document."})
 			return false
 		}

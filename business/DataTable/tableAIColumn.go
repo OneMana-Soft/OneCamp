@@ -311,22 +311,16 @@ func AutofillRowOnWrite(ctx context.Context, t *model.DataTable, row *model.Row,
 	}
 }
 
-// writeCell merges a single field's value into a row and persists + broadcasts
-// it (so the live grid updates).
+// writeCell writes a single field's value into a row and broadcasts it (so
+// the live grid updates). Only that cell: the row was read before the model
+// was asked, seconds ago, and writing that copy back undid whatever anyone
+// changed in the meantime, a cell or the row's place.
 func writeCell(ctx context.Context, t *model.DataTable, rw *model.Row, fieldID, value string) error {
-	var values map[string]interface{}
-	if err := json.Unmarshal([]byte(emptyObjIfBlank(rw.Values)), &values); err != nil {
-		values = map[string]interface{}{}
-	}
-	values[fieldID] = value
-	// Formula, rollup and other tables' link values are worked out on each
-	// read, never stored.
-	values, _ = withoutComputedValues(ctx, t.Id, values)
-	blob, merr := json.Marshal(values)
+	blob, merr := json.Marshal(map[string]string{fieldID: value})
 	if merr != nil {
 		return merr
 	}
-	updated, uerr := model.UpdateRowValues(ctx, t.Id, rw.Id, string(blob), rw.Position)
+	updated, uerr := model.MergeRowValues(ctx, t.Id, rw.Id, string(blob), maxValuesBytes)
 	if uerr != nil {
 		return uerr
 	}

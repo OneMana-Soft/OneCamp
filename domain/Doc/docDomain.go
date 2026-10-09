@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -10,10 +11,13 @@ import (
 
 	adapter "github.com/akashc777/OneCamp/adapter/Doc"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Doc"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	OpenSearchDocModels "github.com/akashc777/OneCamp/models/openSearch/Doc"
+	"github.com/dgraph-io/dgo/v230/protos/api"
+	"github.com/google/uuid"
 )
 
 // ErrNoDocToUpdate is an update that names no doc: without a uuid the upsert
@@ -26,6 +30,10 @@ func CreateOrUpdateDgraphDoc(ctx context.Context, dgraphDoc *dgraphStruct.Dgraph
 	if dgraphDoc.Uid == "uid(doc)" {
 		// An upsert with no uuid finds no doc and silently changes nothing.
 		if dgraphDoc.Uuid == "" {
+			return "", ErrNoDocToUpdate
+		}
+		// It's written into the query below: a uuid, and nothing else.
+		if _, err := uuid.Parse(dgraphDoc.Uuid); err != nil {
 			return "", ErrNoDocToUpdate
 		}
 		query = fmt.Sprintf(`query {
@@ -90,6 +98,8 @@ func GetBasicDgraphDocByUUID(ctx context.Context, docUUID string, userUID string
 					doc_private
 					doc_public_comment
 					doc_title
+					doc_deleted_at
+					doc_created_at
 					doc_created_by {
 						uid
 						user_uuid
@@ -194,6 +204,52 @@ func GetSystemDocByUUID(ctx context.Context, docUUID string) (dgraphDoc *dgraphS
 	}
 
 	return
+}
+
+// GetCollabDocByUUID is a doc as the collaboration service opens it: its body,
+// and the Yjs state saved with the hash of the body it matches.
+func GetCollabDocByUUID(ctx context.Context, docUUID string) (*dgraphStruct.DgraphDoc, error) {
+	query := `query DocInfo($id: string){
+				docInfo(func: eq(doc_uuid, $id)) {
+					uid
+					doc_uuid
+					doc_title
+					doc_body
+					doc_yjs_state
+					doc_yjs_body_hash
+				}
+			}`
+	doc, err := dgraphModels.GetDgraphDocInfoByUUID(ctx, query, map[string]string{"$id": docUUID})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetCollabDocByUUID err: %+v", err)
+	}
+	return doc, err
+}
+
+// SetDocCollabState saves the collaboration service's Yjs state of a doc and
+// the hash of the body it was saved with. It writes nothing when no doc has
+// the uuid: a mutation naming an empty variable would make a new node.
+func SetDocCollabState(ctx context.Context, docUUID, state, bodyHash string) error {
+	if _, err := uuid.Parse(docUUID); err != nil {
+		return ErrNoDocToUpdate
+	}
+	set, err := json.Marshal(map[string]string{
+		"uid":               "uid(doc)",
+		"doc_yjs_state":     state,
+		"doc_yjs_body_hash": bodyHash,
+	})
+	if err != nil {
+		return err
+	}
+	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{
+		Query:     `query q($id: string) { doc as var(func: eq(doc_uuid, $id)) }`,
+		Vars:      map[string]string{"$id": docUUID},
+		Mutations: []*api.Mutation{{SetJson: set, Cond: "@if(eq(len(doc), 1))"}},
+	})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/SetDocCollabState err: %+v", err)
+	}
+	return err
 }
 
 func GetDgraphDocAllCommentList(ctx context.Context, docUUID string, userUID string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
@@ -513,6 +569,39 @@ func GetDocPermissions(ctx context.Context, docUUID string) (dgraphDoc *dgraphSt
 	}
 
 	return
+}
+
+// GetPrivateDocAccessPage reads one page of private docs, deleted ones
+// included, with who made them and who they're shared with: what their AI
+// search entries are filtered by (business/Doc's backfill). The graph returns
+// them in uid order, so offsets page through them steadily.
+func GetPrivateDocAccessPage(ctx context.Context, offset, first int) ([]*dgraphStruct.DgraphDoc, error) {
+	query := fmt.Sprintf(`{
+				docInfo(func: eq(doc_private, true), first: %d, offset: %d) {
+					uid
+					doc_uuid
+					doc_private
+					doc_created_by {
+						user_uuid
+					}
+					doc_reading_users {
+						user_uuid
+					}
+					doc_editing_users {
+						user_uuid
+					}
+					doc_commenting_users {
+						user_uuid
+					}
+				}
+			}`, first, offset)
+
+	docs, err := dgraphModels.GetDgraphDocs(ctx, query, map[string]string{})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetPrivateDocAccessPage Failed to get docs from dgraph err: %+v", err)
+		return nil, err
+	}
+	return docs, nil
 }
 
 func CreateDocInOpenSearch(openSearchDoc *openSearchStruct.OpenSearchDoc) (err error) {

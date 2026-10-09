@@ -46,6 +46,9 @@ type InputDocCollabUpdate struct {
 	Content     any    `json:"content"`
 	TextContent string `json:"textContent"`
 	HtmlContent string `json:"htmlContent"`
+	// YjsState is the collaboration service's Yjs state for HtmlContent,
+	// base64. Saved beside it (business UpdateDocFromCollab).
+	YjsState string `json:"yjsState,omitempty"`
 	// Contributors is the set of editor user uuids who changed the doc since the
 	// last persist, used to attribute the version snapshot. May be empty.
 	Contributors []string `json:"contributors,omitempty"`

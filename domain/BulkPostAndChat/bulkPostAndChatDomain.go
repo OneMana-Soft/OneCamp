@@ -13,24 +13,7 @@ import (
 
 func BulkAddChatAndPostToDgraph(ctx context.Context, dgraphPosts []*dgraphStruct.DgraphPost, dgraphDMs []*dgraphStruct.DgraphDm) (dgraphChatAndPostUUID []string, err error) {
 
-	// Build query
-	queryBuilder := strings.Builder{}
-	queryBuilder.WriteString("query {\n")
-	for i := range dgraphDMs {
-		queryBuilder.WriteString(fmt.Sprintf(
-			`dm_%d as var(func: eq(dm_grouping_id, %s))`+"\n"+
-				`ch_%d as var(func: eq(chat_uuid, %s))`+"\n",
-			i, dgraphDMs[i].GroupingId, i, dgraphDMs[i].Chats[0].Uuid))
-	}
-	for i := range dgraphPosts {
-		queryBuilder.WriteString(fmt.Sprintf(
-			`post_%d as var(func: eq(post_uuid, %s))`+"\n",
-			i, dgraphPosts[i].Uuid))
-
-	}
-	queryBuilder.WriteString("}")
-
-	dgraphChatAndPostUUID, err = dgraphModels.BulkAddChatAndPostToDgraph(ctx, queryBuilder.String(), dgraphPosts, dgraphDMs)
+	dgraphChatAndPostUUID, err = dgraphModels.BulkAddChatAndPostToDgraph(ctx, forwardUpsertQuery(dgraphPosts, dgraphDMs), dgraphPosts, dgraphDMs)
 
 	if err != nil {
 		helpers.MessageLogs.ErrorLog.Printf(
@@ -42,6 +25,50 @@ func BulkAddChatAndPostToDgraph(ctx context.Context, dgraphPosts []*dgraphStruct
 
 	return
 
+}
+
+// forwardUpsertQuery is the query of a forward's upsert. Each post, chat and
+// conversation the mutation writes is named by a variable (uid(po_0)), which
+// this defines as whatever already has its id: nothing has a new post's or
+// chat's, so its variable is empty and the mutation makes the node, while a
+// conversation found by its grouping id is the one that exists. The variables
+// are read off the mutation, so the two can't disagree: the query named a
+// post's post_N where the mutation said po_N, and never defined a group
+// chat's grpch_N, so the graph refused every forward into a channel or a
+// group chat. The values are quoted, never pasted in bare.
+func forwardUpsertQuery(posts []*dgraphStruct.DgraphPost, dms []*dgraphStruct.DgraphDm) string {
+	var b strings.Builder
+	b.WriteString("query {\n")
+	defined := map[string]bool{}
+	define := func(ref, predicate, value string) {
+		name, ok := strings.CutPrefix(ref, "uid(")
+		if !ok || !strings.HasSuffix(name, ")") {
+			return // a node named by its uid, which needs no variable
+		}
+		name = strings.TrimSuffix(name, ")")
+		if defined[name] {
+			return
+		}
+		defined[name] = true
+		fmt.Fprintf(&b, "%s as var(func: eq(%s, %q))\n", name, predicate, value)
+	}
+	for _, dm := range dms {
+		define(dm.Uid, "dm_grouping_id", dm.GroupingId)
+		for _, ch := range dm.Chats {
+			define(ch.Uid, "chat_uuid", ch.Uuid)
+		}
+	}
+	for _, p := range posts {
+		define(p.Uid, "post_uuid", p.Uuid)
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
+// BulkRemoveChatAndPostFromPostgres takes back the rows a forward wrote before
+// its graph write failed: posts and chats the graph doesn't have.
+func BulkRemoveChatAndPostFromPostgres(ctx context.Context, postUUIDs, chatUUIDs []string) error {
+	return models.BulkDeleteChatsAndPosts(ctx, postUUIDs, chatUUIDs)
 }
 
 func BulkAddChatAndPostToPostgres(postUUIDs []string, channelUUIDs []string, chatUUIDs []string, chatGrpIDs []string, userUUID string) (err error) {

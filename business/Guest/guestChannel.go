@@ -20,11 +20,14 @@ import (
 	"unicode/utf8"
 
 	botpost "github.com/akashc777/OneCamp/business/BotPost"
+	postBusiness "github.com/akashc777/OneCamp/business/Post"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	channelModels "github.com/akashc777/OneCamp/models/dgraph/Channel"
+	postModels "github.com/akashc777/OneCamp/models/dgraph/Post"
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
 	"github.com/google/uuid"
 )
@@ -137,9 +140,9 @@ func GetGuestChannel(ctx context.Context, grant *guestModel.GuestGrant, before t
 	if err != nil {
 		return nil, err
 	}
-	ch, err := channelDomain.GetDgraphChannelInfoByUUID(ctx, channelID.String(), bot.DgraphUID)
-	if err != nil || ch == nil || ch.Uuid == "" || helpers.IsSoftDeleted(ch.DeletedAt) {
-		return nil, ErrNotFound
+	ch, err := liveChannel(ctx, channelID, bot)
+	if err != nil {
+		return nil, err
 	}
 	if before.IsZero() {
 		before = time.Now()
@@ -162,6 +165,20 @@ func GetGuestChannel(ctx context.Context, grant *guestModel.GuestGrant, before t
 	return view, nil
 }
 
+// liveChannel is the guest's channel as they may use it: there, and neither
+// archived nor deleted (both set its deletion time), which answer ErrNotFound.
+// A read that failed is its own error.
+func liveChannel(ctx context.Context, channelID uuid.UUID, bot *userBusiness.BotIdentity) (*dgraphStruct.DgraphChannel, error) {
+	ch, err := channelDomain.GetDgraphChannelInfoByUUID(ctx, channelID.String(), bot.DgraphUID)
+	if readFailed(err, channelModels.ErrNotFound) {
+		return nil, err
+	}
+	if ch == nil || ch.Uuid == "" || helpers.IsSoftDeleted(ch.DeletedAt) {
+		return nil, ErrNotFound
+	}
+	return ch, nil
+}
+
 // GuestThread is one message and its replies.
 type GuestThread struct {
 	Message GuestMessage   `json:"message"`
@@ -179,8 +196,14 @@ func GetGuestThread(ctx context.Context, grant *guestModel.GuestGrant, postID st
 	if err != nil {
 		return nil, err
 	}
+	if _, err := uuid.Parse(postID); err != nil {
+		return nil, ErrNotFound
+	}
 	p, err := postDomain.GetDgraphPostByUUIDWithAllComments(ctx, postID, bot.DgraphUID)
-	if err != nil || p == nil || p.Channel == nil || p.Channel.Uuid != channelID.String() || helpers.IsSoftDeleted(p.DeletedAt) {
+	if readFailed(err, postModels.ErrNotFound) {
+		return nil, err
+	}
+	if p == nil || p.Channel == nil || p.Channel.Uuid != channelID.String() || helpers.IsSoftDeleted(p.DeletedAt) {
 		return nil, ErrNotFound
 	}
 	t := &GuestThread{Message: guestMessage(p.Uuid, p.PostBy, p.Text, p.CreatedAt), Replies: []GuestMessage{}}
@@ -206,11 +229,30 @@ func GuestMessageHTML(name, text string) (string, error) {
 	if utf8.RuneCountInString(text) > maxGuestMessage {
 		return "", &ErrGuestInput{"Keep messages under 4,000 characters."}
 	}
-	body := "<p>" + strings.ReplaceAll(html.EscapeString(text), "\n", "<br>") + "</p>"
-	return botpost.LabelledHTML(body, name+" (guest)"), nil
+	return botpost.LabelledHTML(guestBody(text), guestLabel(name)), nil
 }
 
-// PostAsGuest writes in the guest's channel, or replies in a thread of it.
+// guestBody is a guest's text as message HTML, escaped, line breaks kept. Pure.
+func guestBody(text string) string {
+	return "<p>" + strings.ReplaceAll(html.EscapeString(text), "\n", "<br>") + "</p>"
+}
+
+// guestLabel is how a guest is named to members: "Priya (guest)", or "A guest"
+// when they gave no name. Pure.
+func guestLabel(name string) string {
+	if name = SanitizeGuestName(name); name == "" || name == "Guest" {
+		return "A guest"
+	}
+	return name + " (guest)"
+}
+
+// PostAsGuest writes in the guest's channel, or replies in a thread of it,
+// and tells the members as a member's message would: the channel's members by
+// their setting for it, a thread's people of a reply, once per channel or
+// thread per few minutes (notifyDue). An archived or deleted
+// channel takes nothing, message or reply, and tells nobody: posting went
+// straight to the channel, so a link left on a channel archived after the
+// project ended still wrote into it and woke its members.
 func PostAsGuest(ctx context.Context, grant *guestModel.GuestGrant, name, text, replyTo string) error {
 	channelID, err := channelOf(grant)
 	if err != nil {
@@ -223,7 +265,12 @@ func PostAsGuest(ctx context.Context, grant *guestModel.GuestGrant, name, text, 
 	if err != nil {
 		return err
 	}
+	text, who := strings.TrimSpace(text), guestLabel(name)
 	bot, err := userBusiness.EnsureGuestBot(ctx)
+	if err != nil {
+		return err
+	}
+	ch, err := liveChannel(ctx, channelID, bot)
 	if err != nil {
 		return err
 	}
@@ -233,12 +280,27 @@ func PostAsGuest(ctx context.Context, grant *guestModel.GuestGrant, name, text, 
 			return ErrNotFound
 		}
 		p, err := postDomain.GetDgraphPostByUUIDWithAllComments(ctx, postID.String(), bot.DgraphUID)
-		if err != nil || p == nil || p.Channel == nil || p.Channel.Uuid != channelID.String() || helpers.IsSoftDeleted(p.DeletedAt) {
+		if readFailed(err, postModels.ErrNotFound) {
+			return err
+		}
+		if p == nil || p.Channel == nil || p.Channel.Uuid != channelID.String() || helpers.IsSoftDeleted(p.DeletedAt) {
 			return ErrNotFound
 		}
-		_, err = botpost.PostCommentToPostAsBot(ctx, postID, body, bot)
+		res, err := botpost.PostCommentToPostAsBot(ctx, postID, body, bot)
+		if err != nil {
+			return err
+		}
+		if notifyDue(ctx, "thread", postID.String()) {
+			postBusiness.NotifyReplyFor(bot, who, p, res.CommentUUID, guestBody(text), text)
+		}
+		return nil
+	}
+	res, err := botpost.PostToChannelAsBot(ctx, channelID, body, bot)
+	if err != nil {
 		return err
 	}
-	_, err = botpost.PostToChannelAsBot(ctx, channelID, body, bot)
-	return err
+	if notifyDue(ctx, "channel", channelID.String()) {
+		postBusiness.NotifyPostFor(bot, who, ch, res.PostUUID, text)
+	}
+	return nil
 }

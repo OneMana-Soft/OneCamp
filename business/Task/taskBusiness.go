@@ -181,12 +181,9 @@ func publishTaskCommentActivity(commentBody string, currentTime *time.Time, ment
 		activityBusiness.PublishActivityToUser(recipientID, activityItem)
 	}
 
-	assigneeCreatedUserUID := ""
-	if rawTaskDgraph.CreatedBy != nil {
-		assigneeCreatedUserUID = rawTaskDgraph.CreatedBy.Uid
-	}
-	if rawTaskDgraph.Assignee != nil {
-		assigneeCreatedUserUID = rawTaskDgraph.Assignee.Uuid
+	recipient := commentRecipient(rawTaskDgraph, createdByUserDgraph.Uuid)
+	if recipient == "" {
+		return
 	}
 
 	activityItem := &dgraphModels.UnifiedActivityItem{
@@ -209,7 +206,27 @@ func publishTaskCommentActivity(commentBody string, currentTime *time.Time, ment
 			CreatedAt: currentTime,
 		},
 	}
-	activityBusiness.PublishActivityToUser(assigneeCreatedUserUID, activityItem)
+	activityBusiness.PublishActivityToUser(recipient, activityItem)
+}
+
+// commentRecipient is who hears about a new comment on a task: its assignee,
+// or its creator when nobody is assigned, and nobody when that is the person
+// who wrote it. The creator was named by their graph uid, which no one listens
+// on, so comments on an unassigned task (a client's approval included) reached
+// nobody. Pure.
+func commentRecipient(task *dgraphStruct.DgraphTask, commenterUUID string) string {
+	recipient := ""
+	switch {
+	case task == nil:
+	case task.Assignee != nil && task.Assignee.Uuid != "":
+		recipient = task.Assignee.Uuid
+	case task.CreatedBy != nil:
+		recipient = task.CreatedBy.Uuid
+	}
+	if recipient == commenterUUID {
+		return ""
+	}
+	return recipient
 }
 
 func UpdateTaskCommentBody(ctx context.Context, commentUUID uuid.UUID, createTaskCommentInfoInput *adapter.CreateOrUpdateTaskCommentInput, rawDgraphCommentInfo *dgraphStruct.DgraphComment, mentionsDgraphUsersList []*dgraphStruct.DgraphUser) (err error) {
@@ -459,6 +476,12 @@ func RemoveAttachmentFromTask(ctx context.Context, attachmentUUID uuid.UUID, dgr
 }
 
 func AddAttachmentToTask(ctx context.Context, taskUUID uuid.UUID, dgraphTaskInfo *dgraphStruct.DgraphTask, taskInfo *adapter.CreateOrUpdateTaskInput, userInfo *dgraphStruct.DgraphUser) (err error) {
+	// A deleted task stays deleted: these writes set its deletion time to the
+	// zero (live) value, so a late edit from an open tab, an agent or a sync
+	// brought it back in the graph while Postgres still had it deleted.
+	if dgraphTaskInfo != nil && helpers.IsSoftDeleted(dgraphTaskInfo.DeletedAt) {
+		return ErrTaskDeleted
+	}
 
 	zeroUnixTime := time.Time{}
 	currentTime := time.Now()
@@ -847,6 +870,12 @@ func sendNewTaskNotification(body string, projectId string, taskName string, men
 }
 
 func UpdateTaskDesByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskDesc string, mentionUsers []*dgraphStruct.DgraphUser, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) (err error) {
+	// A deleted task stays deleted: these writes set its deletion time to the
+	// zero (live) value, so a late edit from an open tab, an agent or a sync
+	// brought it back in the graph while Postgres still had it deleted.
+	if dgraphTaskInfo != nil && helpers.IsSoftDeleted(dgraphTaskInfo.DeletedAt) {
+		return ErrTaskDeleted
+	}
 	// Guard: skip no-op updates (normalize empty HTML paragraphs to empty string)
 	normalizeDesc := func(s string) string {
 		s = strings.TrimSpace(s)
@@ -932,6 +961,12 @@ func UpdateTaskDesByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskDesc s
 }
 
 func UpdateTaskNameByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskName string, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) (err error) {
+	// A deleted task stays deleted: these writes set its deletion time to the
+	// zero (live) value, so a late edit from an open tab, an agent or a sync
+	// brought it back in the graph while Postgres still had it deleted.
+	if dgraphTaskInfo != nil && helpers.IsSoftDeleted(dgraphTaskInfo.DeletedAt) {
+		return ErrTaskDeleted
+	}
 
 	currentTime := time.Now()
 	zeroUnixTime := time.Time{}
@@ -989,6 +1024,12 @@ func UpdateTaskNameByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskName 
 }
 
 func UpdateTaskAssigneeByTaskUUID(ctx context.Context, taskUUID uuid.UUID, newAssigneeDgraphInfo *dgraphStruct.DgraphUser, dgraphOldUserUID string, dgraphTaskUID string, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) (err error) {
+	// A deleted task stays deleted: these writes set its deletion time to the
+	// zero (live) value, so a late edit from an open tab, an agent or a sync
+	// brought it back in the graph while Postgres still had it deleted.
+	if dgraphTaskInfo != nil && helpers.IsSoftDeleted(dgraphTaskInfo.DeletedAt) {
+		return ErrTaskDeleted
+	}
 
 	currentTime := time.Now()
 	activityUUID := uuid.New()
@@ -1238,6 +1279,12 @@ func UpdateTaskStartDateByTaskUUID(ctx context.Context, taskUUID uuid.UUID, task
 // the activity log, search, GitHub sync and webhooks see all of them. Asking
 // for the status the task is already in does nothing.
 func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskStatus string, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) (err error) {
+	// A deleted task stays deleted: these writes set its deletion time to the
+	// zero (live) value, so a late edit from an open tab, an agent or a sync
+	// brought it back in the graph while Postgres still had it deleted.
+	if dgraphTaskInfo != nil && helpers.IsSoftDeleted(dgraphTaskInfo.DeletedAt) {
+		return ErrTaskDeleted
+	}
 	projectID := ""
 	if dgraphTaskInfo.Project != nil {
 		projectID = dgraphTaskInfo.Project.Uuid
@@ -1360,6 +1407,12 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 }
 
 func UpdateTaskPriorityByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskPriority string, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) (err error) {
+	// A deleted task stays deleted: these writes set its deletion time to the
+	// zero (live) value, so a late edit from an open tab, an agent or a sync
+	// brought it back in the graph while Postgres still had it deleted.
+	if dgraphTaskInfo != nil && helpers.IsSoftDeleted(dgraphTaskInfo.DeletedAt) {
+		return ErrTaskDeleted
+	}
 
 	currentTime := time.Now()
 	zeroUnixTime := time.Time{}

@@ -43,7 +43,11 @@ type EmbeddingDoc struct {
 	ChatGrpID            string   `json:"chat_grp_id,omitempty"`
 
 	// --- Doc-specific permission fields ---
-	DocPrivate         bool     `json:"doc_private"`
+	// DocPrivate is set by writers that know the doc's privacy (a doc's own
+	// entry, a doc comment's) and left nil by every other. An entry that exists
+	// is updated with only the fields a write sends, so a nil here keeps what
+	// is stored: a write that didn't know the privacy used to store "public".
+	DocPrivate         *bool    `json:"doc_private,omitempty"`
 	DocCreatedByUserID string   `json:"doc_created_by_user_id,omitempty"`
 	DocReadingUsers    []string `json:"doc_reading_users,omitempty"`
 	DocEditingUsers    []string `json:"doc_editing_users,omitempty"`
@@ -313,8 +317,9 @@ func buildPermissionFilter(userUUID string, channelUUIDs []string, projectUUIDs 
 		fmt.Sprintf(`{"term": {"doc_reading_users": %s}}`, string(userUUIDJSON)),
 		fmt.Sprintf(`{"term": {"doc_editing_users": %s}}`, string(userUUIDJSON)),
 		fmt.Sprintf(`{"term": {"doc_commenting_users": %s}}`, string(userUUIDJSON)),
-		// Public-doc grant, constrained to ACTUAL doc comments. doc_private is
-		// stored false on every embedding (it has no omitempty), so a bare
+		// Public-doc grant, constrained to ACTUAL doc comments. doc_private was
+		// stored false on every embedding (it had no omitempty, and entries
+		// written before that changed still carry it), so a bare
 		// {"doc_private": false} term would blanket-match every comment and leak
 		// private channel/DM comments. Requiring doc_uuid to exist scopes this
 		// grant to doc comments only (post/chat/task comments never set it).
@@ -414,6 +419,13 @@ func SearchSimilar(ctx context.Context, query string, userUUID string, channelUU
 		limit = 5
 	}
 
+	// Decided before the query is embedded, so a search that may not run (an
+	// agent acting for someone whose reach cannot be resolved) spends nothing.
+	permissionFilter, err := runPermissionFilter(ctx, userUUID, channelUUIDs, projectUUIDs, grpIDs)
+	if err != nil {
+		return nil, err
+	}
+
 	// Embed the query through the metered chokepoint. On-demand work, so this IS
 	// refused once a daily cap is exhausted (search_workspace over MCP included).
 	queryVectors, err := svc.GenerateEmbeddings(ctx, []string{query})
@@ -426,8 +438,6 @@ func SearchSimilar(ctx context.Context, query string, userUUID string, channelUU
 	queryVector := queryVectors[0]
 	vectorJSON, _ := json.Marshal(queryVector)
 
-	permissionFilter := buildPermissionFilter(userUUID, channelUUIDs, projectUUIDs, grpIDs)
-
 	searchBody := fmt.Sprintf(`{
 		"size": %d,
 		"query": {
@@ -439,7 +449,7 @@ func SearchSimilar(ctx context.Context, query string, userUUID string, channelUU
 				}
 			}
 		},
-		"_source": ["content_text", "content_type", "content_uuid", "channel_uuid", "channel_name", "project_uuid", "author_name"]
+		"_source": ["content_text", "content_type", "content_uuid", "channel_uuid", "channel_name", "project_uuid", "author_name", "doc_uuid"]
 	}`, limit, string(vectorJSON), limit, permissionFilter)
 
 	// Execute search
@@ -503,7 +513,10 @@ func SearchRecent(ctx context.Context, userUUID string, channelUUIDs []string, p
 	}
 
 	// Build unified permission filter
-	permissionFilter := buildPermissionFilter(userUUID, channelUUIDs, projectUUIDs, grpIDs)
+	permissionFilter, err := runPermissionFilter(ctx, userUUID, channelUUIDs, projectUUIDs, grpIDs)
+	if err != nil {
+		return nil, err
+	}
 
 	searchBody := fmt.Sprintf(`{
 		"size": %d,
@@ -519,7 +532,7 @@ func SearchRecent(ctx context.Context, userUUID string, channelUUIDs []string, p
 		"sort": [
 			{"created_date": {"order": "desc"}}
 		],
-		"_source": ["content_text", "content_type", "content_uuid", "channel_uuid", "channel_name", "project_uuid", "author_name"]
+		"_source": ["content_text", "content_type", "content_uuid", "channel_uuid", "channel_name", "project_uuid", "author_name", "doc_uuid"]
 	}`, limit, termClause, permissionFilter)
 
 	type osHit struct {
@@ -532,7 +545,7 @@ func SearchRecent(ctx context.Context, userUUID string, channelUUIDs []string, p
 	}
 
 	var resp osResp
-	_, err := opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{
+	_, err = opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{
 		Indices: []string{AI_EMBEDDINGS_INDEX},
 		Body:    strings.NewReader(searchBody),
 	}, &resp)
@@ -566,7 +579,10 @@ func SearchRecentGlobal(ctx context.Context, userUUID string, channelUUIDs []str
 	}
 
 	// Build unified permission filter (same as SearchSimilar)
-	permissionFilter := buildPermissionFilter(userUUID, channelUUIDs, projectUUIDs, grpIDs)
+	permissionFilter, err := runPermissionFilter(ctx, userUUID, channelUUIDs, projectUUIDs, grpIDs)
+	if err != nil {
+		return nil, err
+	}
 
 	// Highlights = recent raw workspace ACTIVITY (posts/chats/docs/tasks/
 	// comments). We exclude content_type:memory here for two reasons:
@@ -606,7 +622,7 @@ func SearchRecentGlobal(ctx context.Context, userUUID string, channelUUIDs []str
 	}
 
 	var resp osResp
-	_, err := opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{
+	_, err = opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{
 		Indices: []string{AI_EMBEDDINGS_INDEX},
 		Body:    strings.NewReader(searchBody),
 	}, &resp)
@@ -763,7 +779,7 @@ func EmbedDocContent(docTitle string, docBody string, docUUID string, authorUUID
 		ContentText:        text,
 		ContentType:        "doc",
 		ContentUUID:        docUUID,
-		DocPrivate:         docPrivate,
+		DocPrivate:         &docPrivate,
 		DocCreatedByUserID: docCreatedByUserID,
 		DocReadingUsers:    readingUsers,
 		DocEditingUsers:    editingUsers,
@@ -835,7 +851,7 @@ func EmbedDocCommentContent(commentText string, commentUUID string, authorUUID s
 		ContentType:        "comment",
 		ContentUUID:        commentUUID,
 		DocUUID:            docUUID,
-		DocPrivate:         docPrivate,
+		DocPrivate:         &docPrivate,
 		DocCreatedByUserID: docCreatedByUserID,
 		DocReadingUsers:    docReadingUsers,
 		DocEditingUsers:    docEditingUsers,
@@ -1025,7 +1041,10 @@ func FetchUnreadAcrossScopes(ctx context.Context, userUUID string, channelUUIDs,
 		limit = 300
 	}
 
-	permissionFilter := buildPermissionFilter(userUUID, channelUUIDs, projectUUIDs, grpIDs)
+	permissionFilter, err := runPermissionFilter(ctx, userUUID, channelUUIDs, projectUUIDs, grpIDs)
+	if err != nil {
+		return nil, err
+	}
 
 	// Newest-first for the size cap so a flood of old content can't bury the
 	// most recent unread; we re-sort to chronological after fetching.
@@ -1057,7 +1076,7 @@ func FetchUnreadAcrossScopes(ctx context.Context, userUUID string, channelUUIDs,
 	}
 
 	var resp osResp
-	_, err := opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{
+	_, err = opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{
 		Indices: []string{AI_EMBEDDINGS_INDEX},
 		Body:    strings.NewReader(searchBody),
 	}, &resp)

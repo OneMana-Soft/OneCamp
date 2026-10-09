@@ -64,6 +64,34 @@ func asGuest(ctx context.Context) context.Context {
 	return context.WithValue(ctx, viewerKey{}, guest{})
 }
 
+// alsoKey carries the second person a read or a write is made for (AlsoFor).
+type alsoKey struct{}
+
+// AlsoFor has the reads and writes made with ctx open only the tables a second
+// person can open too, besides the actor they are made as: the table read,
+// every table its links and rollups reach into, and every table a link is made
+// to.
+//
+// An AI agent's tools act as its sponsor, and asked by someone else it may
+// reach only what both of them can (business/AIAgent agentRequester.go). The
+// table a tool names is checked for that person before it runs; its links and
+// rollups reach other tables from in here, as the actor, so here is where the
+// second person has to be asked too.
+func AlsoFor(ctx context.Context, a Actor) context.Context {
+	return context.WithValue(ctx, alsoKey{}, a)
+}
+
+// opens is whether a, and the second person ctx names (AlsoFor), can open t.
+func opens(ctx context.Context, t *model.DataTable, a Actor) bool {
+	if t == nil || !canView(t, a) {
+		return false
+	}
+	if also, ok := ctx.Value(alsoKey{}).(Actor); ok {
+		return canView(t, also)
+	}
+	return true
+}
+
 // mayOpen is whether a read's viewer can open table t; own is the table being
 // read.
 func mayOpen(ctx context.Context, t *model.DataTable, own uuid.UUID) bool {
@@ -71,7 +99,7 @@ func mayOpen(ctx context.Context, t *model.DataTable, own uuid.UUID) bool {
 		return false
 	}
 	if a, ok := ctx.Value(viewerKey{}).(Actor); ok {
-		return canView(t, a)
+		return opens(ctx, t, a)
 	}
 	return t.Id == own
 }
@@ -253,7 +281,7 @@ func takeLinks(ctx context.Context, actor Actor, fields []*model.Field, values m
 			continue
 		}
 		t, err := model.GetTableByID(ctx, l.table)
-		if err != nil || t == nil || !canView(t, actor) {
+		if err != nil || !opens(ctx, t, actor) {
 			continue
 		}
 		ids, bad := linkItems(raw)
@@ -399,7 +427,7 @@ func ChangeLinks(ctx context.Context, tableID, rowID, fieldID uuid.UUID, add, re
 	}
 	field, ok := l.linkField()
 	other, err := model.GetTableByID(ctx, l.table)
-	if !ok || err != nil || other == nil || !canView(other, actor) {
+	if !ok || err != nil || !opens(ctx, other, actor) {
 		return nil, LinksChanged{}, errForbidden
 	}
 	row, err := model.GetRowByID(ctx, tableID, rowID)
@@ -476,7 +504,7 @@ func linkFieldConfig(ctx context.Context, actor Actor, self uuid.UUID, cfg map[s
 		}
 	}
 	t, err := model.GetTableByID(ctx, id)
-	if err != nil || t == nil || !canView(t, actor) {
+	if err != nil || !opens(ctx, t, actor) {
 		return nil, nil, fmt.Errorf("Choose a table you can open")
 	}
 	if !twoWay {
@@ -678,7 +706,7 @@ func rollupFieldConfig(ctx context.Context, actor Actor, own uuid.UUID, fields [
 		return nil, fmt.Errorf("Choose how to add it up")
 	}
 	t, err := model.GetTableByID(ctx, l.table)
-	if err != nil || t == nil || !canView(t, actor) {
+	if err != nil || !opens(ctx, t, actor) {
 		return nil, fmt.Errorf("Choose a relation to a table you can open")
 	}
 	out := map[string]interface{}{"relation": rel, "aggregate": how}

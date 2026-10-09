@@ -117,7 +117,7 @@ func (p *Provider) Validate(ctx context.Context, j *importModels.Job, opts impor
 // returns aggregate counts. The cached snapshot is reused by every
 // Iter* call for the same job id.
 func (p *Provider) Plan(ctx context.Context, j *importModels.Job, opts importProvider.JobOptions) (*importProvider.Plan, []*importModels.Chunk, error) {
-	snap, err := p.loadSnapshot(ctx, j)
+	snap, err := p.loadSnapshot(ctx, j, opts)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -165,7 +165,7 @@ func (p *Provider) IterUsers(ctx context.Context, j *importModels.Job, opts impo
 		defer close(out)
 		defer close(errCh)
 		defer helpers.RecoverToErr("todoist.IterUsers", errCh)
-		snap, err := p.loadSnapshot(ctx, j)
+		snap, err := p.loadSnapshot(ctx, j, opts)
 		if err != nil {
 			errCh <- err
 			return
@@ -222,7 +222,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 		defer close(out)
 		defer close(errCh)
 		defer helpers.RecoverToErr("todoist.IterProjects", errCh)
-		snap, err := p.loadSnapshot(ctx, j)
+		snap, err := p.loadSnapshot(ctx, j, opts)
 		if err != nil {
 			errCh <- err
 			return
@@ -270,7 +270,7 @@ func (p *Provider) IterTasksOfProject(ctx context.Context, j *importModels.Job, 
 		defer close(out)
 		defer close(errCh)
 		defer helpers.RecoverToErr("todoist.IterTasksOfProject", errCh)
-		snap, err := p.loadSnapshot(ctx, j)
+		snap, err := p.loadSnapshot(ctx, j, opts)
 		if err != nil {
 			errCh <- err
 			return
@@ -332,7 +332,7 @@ func (p *Provider) IterSubtasksOfTask(ctx context.Context, j *importModels.Job, 
 		defer close(out)
 		defer close(errCh)
 		defer helpers.RecoverToErr("todoist.IterSubtasksOfTask", errCh)
-		snap, err := p.loadSnapshot(ctx, j)
+		snap, err := p.loadSnapshot(ctx, j, opts)
 		if err != nil {
 			errCh <- err
 			return
@@ -368,7 +368,7 @@ func (p *Provider) IterCommentsOfTask(ctx context.Context, j *importModels.Job, 
 		defer close(out)
 		defer close(errCh)
 		defer helpers.RecoverToErr("todoist.IterCommentsOfTask", errCh)
-		snap, err := p.loadSnapshot(ctx, j)
+		snap, err := p.loadSnapshot(ctx, j, opts)
 		if err != nil {
 			errCh <- err
 			return
@@ -514,9 +514,68 @@ type todoistLabel struct {
 	IsDeleted flag   `json:"is_deleted"`
 }
 
-// loadSnapshot fetches the full workspace once per job and caches it.
+// loadSnapshot is the part of the account this import brings in: the
+// project the admin picked, or all of it when they chose every project.
+func (p *Provider) loadSnapshot(ctx context.Context, j *importModels.Job, opts importProvider.JobOptions) (*todoistSnapshot, error) {
+	snap, err := p.fullSnapshot(ctx, j)
+	if err != nil {
+		return nil, err
+	}
+	return snap.scoped(importProvider.PickedID(opts, importProvider.OptTodoistProjectID))
+}
+
+// scoped is the snapshot narrowed to one project: its sections, its items
+// (subtasks included), their notes, and the people who appear in them. A
+// pick that isn't an active project any more is an error, never a reason to
+// import everything in its place. "" is the whole account. Pure.
+func (s *todoistSnapshot) scoped(projectID string) (*todoistSnapshot, error) {
+	if projectID == "" {
+		return s, nil
+	}
+	var picked *todoistProject
+	for _, pr := range s.activeProjects() {
+		if pr.ID == projectID {
+			picked = &pr
+			break
+		}
+	}
+	if picked == nil {
+		return nil, fmt.Errorf("the Todoist project you picked isn't there any more (it was deleted, or this token can't see it). Pick another project")
+	}
+	out := &todoistSnapshot{User: s.User, Labels: s.Labels, SyncToken: s.SyncToken, Projects: []todoistProject{*picked}}
+	for _, sec := range s.Sections {
+		if sec.ProjectID == projectID {
+			out.Sections = append(out.Sections, sec)
+		}
+	}
+	items := map[string]bool{}
+	people := map[string]bool{}
+	for _, it := range s.Items {
+		if it.ProjectID != projectID {
+			continue
+		}
+		out.Items = append(out.Items, it)
+		items[it.ID] = true
+		people[it.ResponsibleUID] = true
+		people[it.AssignedByUID] = true
+	}
+	for _, n := range s.Notes {
+		if items[n.ItemID] {
+			out.Notes = append(out.Notes, n)
+			people[n.PostedUID] = true
+		}
+	}
+	for _, c := range s.Collaborators {
+		if people[c.ID] {
+			out.Collaborators = append(out.Collaborators, c)
+		}
+	}
+	return out, nil
+}
+
+// fullSnapshot fetches the full workspace once per job and caches it.
 // Concurrent callers see a consistent snapshot.
-func (p *Provider) loadSnapshot(ctx context.Context, j *importModels.Job) (*todoistSnapshot, error) {
+func (p *Provider) fullSnapshot(ctx context.Context, j *importModels.Job) (*todoistSnapshot, error) {
 	p.mu.Lock()
 	if cached, ok := p.snapshot[j.Id]; ok {
 		p.mu.Unlock()
@@ -598,7 +657,7 @@ func (p *Provider) sync(ctx context.Context, tok string, resourceTypes []string)
 		}
 		return nil, &importProvider.ErrRateLimited{RetryAfter: retryAfter, Reason: "Todoist 429"}
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return nil, fmt.Errorf("todoist auth failed (HTTP %d); reconnect token", resp.StatusCode)
+		return nil, &importProvider.TokenRejected{Msg: fmt.Sprintf("todoist auth failed (HTTP %d); reconnect token", resp.StatusCode)}
 	case resp.StatusCode >= 400:
 		raw, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("todoist HTTP %d: %s", resp.StatusCode, string(raw))

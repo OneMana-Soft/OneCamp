@@ -123,6 +123,12 @@ func CreatePlanAction(ctx context.Context, requestedBy uuid.UUID, surfaceType, s
 // per-step permission re-checks. Used by ApprovePendingAction so the
 // security-critical approve flow has one execution entry point.
 func approveExecute(ctx context.Context, approverInfo *userModels.UserInfo, action *pendingModels.PendingAction) (*adapter.ExecuteActionResponse, error) {
+	// Which agent proposed this, from the stored row: a tool that reports back
+	// where its run was asked (code_pr) needs it, and the approval request has
+	// nothing else to say so.
+	if action.AgentID != nil {
+		ctx = ai.WithApprovedAgentProposal(ctx, action.AgentID.String())
+	}
 	if action.ToolName == planSentinelTool {
 		return executePlanSteps(ctx, approverInfo, action.Params)
 	}

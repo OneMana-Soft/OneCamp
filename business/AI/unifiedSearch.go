@@ -124,14 +124,25 @@ func UnifiedSearch(ctx context.Context, userInfo *userModels.UserInfo, query str
 	resp.Query = query
 
 	// Short-window cache: a debounced search box would otherwise hit the live
-	// Gmail/GitHub APIs on every keystroke. Keyed per (user, normalized query).
-	cacheArgs := unifiedSearchCacheArgs(userInfo.UserDgraphInfo.Uuid, query)
+	// Gmail/GitHub APIs on every keystroke. Keyed per (user, normalized query),
+	// and per asker when an agent searches for someone other than its sponsor:
+	// the same question asked of the same agent by two people has two answers,
+	// and keyed by the sponsor alone the first answer would serve both.
+	cacheUser := userInfo.UserDgraphInfo.Uuid
+	requester, _, forOther := ai.RunRequester(ctx)
+	if forOther {
+		cacheUser += ":for:" + requester
+	}
+	cacheArgs := unifiedSearchCacheArgs(cacheUser, query)
 	var cached UnifiedSearchResponse
 	if found, _ := redisStore.GetJSON(ctx, registry.AIUnifiedSearch, cacheArgs, &cached); found {
 		return &cached, nil
 	}
 
 	searchers := buildUnifiedSearchers(userInfo, query)
+	if forOther {
+		searchers = withoutPersonalSources(searchers)
+	}
 
 	// Fan out: each searcher gets its own bounded context so one slow source
 	// can't hold the others. Results collected by index to preserve order.
@@ -189,6 +200,28 @@ func UnifiedSearch(ctx context.Context, userInfo *userModels.UserInfo, query str
 	return resp, nil
 }
 
+// personalSources are the searchers that read one person's own connected
+// accounts rather than the workspace.
+var personalSources = map[string]bool{UnifiedSourceGmail: true, UnifiedSourceGitHub: true}
+
+// withoutPersonalSources replaces the connected-account searchers with ones
+// that report they were not searched, for a search an agent makes for someone
+// other than its sponsor. The sponsor's mail and repositories are theirs; the
+// workspace sources stay, already narrowed by the run's requester.
+func withoutPersonalSources(searchers []unifiedSearcher) []unifiedSearcher {
+	out := make([]unifiedSearcher, 0, len(searchers))
+	for _, s := range searchers {
+		if personalSources[s.source] {
+			label := s.label
+			s.run = func(context.Context) ([]UnifiedHit, bool, string) {
+				return nil, false, label + " belongs to the person who set up this agent, so it was not searched."
+			}
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 // unifiedSearchCacheArgs builds a deterministic cache key for a (user, query)
 // pair: the user UUID plus a sha256 of the normalized query (so distinct
 // queries never collide and the key stays bounded). Pure.
@@ -213,7 +246,7 @@ func buildUnifiedSearchers(userInfo *userModels.UserInfo, query string) []unifie
 			source: UnifiedSourceWorkspace,
 			label:  "Workspace",
 			run: func(ctx context.Context) ([]UnifiedHit, bool, string) {
-				results, err := ai.SearchSimilar(ctx, query, userUUID, channels, projects, grpIDs, unifiedMaxPerSource)
+				results, err := searchSimilar(ctx, userInfo, query, channels, projects, grpIDs, unifiedMaxPerSource)
 				if err != nil {
 					return nil, true, "Couldn't search the workspace right now."
 				}

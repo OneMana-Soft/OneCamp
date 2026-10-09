@@ -42,3 +42,16 @@ func TestSplitLabel(t *testing.T) {
 		}
 	}
 }
+
+func TestAGuestIsNamedAsAGuest(t *testing.T) {
+	for in, want := range map[string]string{
+		"Priya":          "Priya (guest)",
+		"  Priya\n Rao ": "Priya Rao (guest)",
+		"":               "A guest",
+		"Guest":          "A guest",
+	} {
+		if got := guestLabel(in); got != want {
+			t.Errorf("guestLabel(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

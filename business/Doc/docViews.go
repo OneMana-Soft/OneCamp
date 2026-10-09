@@ -22,10 +22,7 @@ func RecordDocView(ctx context.Context, docUUID, userUID, userUUID string) error
 	if doc == nil {
 		return errors.New("doc not found")
 	}
-	isOwner := doc.CreatedBy != nil && doc.CreatedBy.Uid == userUID
-	hasAccess := doc.HasEditAccess > 0 || doc.HasReadAccess > 0 || doc.HasCommentAccess > 0
-	isPublic := doc.IsPrivate == nil || !*doc.IsPrivate
-	if !isOwner && !hasAccess && !isPublic {
+	if !CanRead(doc, userUUID) {
 		return errors.New("unauthorized")
 	}
 	return resourceViewBusiness.RecordView(ctx, resourceViewBusiness.ResourceDoc, docUUID, userUUID)
@@ -41,8 +38,7 @@ func ListDocViewers(ctx context.Context, docUUID, userUID string, limit, offset 
 	if doc == nil {
 		return nil, errors.New("doc not found")
 	}
-	isOwner := doc.CreatedBy != nil && doc.CreatedBy.Uid == userUID
-	if !isOwner && doc.HasEditAccess == 0 {
+	if !CanEdit(doc, userUID) {
 		return nil, errors.New("unauthorized")
 	}
 	return resourceViewBusiness.ListViewersResolved(ctx, resourceViewBusiness.ResourceDoc, docUUID, limit, offset)

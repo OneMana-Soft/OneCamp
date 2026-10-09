@@ -19,7 +19,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
+	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
 	demoBusiness "github.com/akashc777/OneCamp/business/DemoSeed"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -57,6 +59,12 @@ func Main(ctx context.Context, adminEmail string, refresh bool) int {
 	}
 
 	res, err := demoBusiness.Run(ctx, *admin, refresh)
+	// Everything made so far is the demo's own, even if the run stopped part
+	// way: the shared visitor may not archive or delete it, and what visitors
+	// make after this moment stays theirs to remove (business/DemoGuard).
+	if markErr := demoGuard.MarkSeeded(time.Now()); markErr != nil {
+		fmt.Fprintf(os.Stderr, "demoseed could not record when it finished, which is what keeps the demo's content from visitors: %v\n", markErr)
+	}
 	if res != nil {
 		fmt.Printf("channels created: %d\nposts written:    %d\nchannels archived: %d\n",
 			res.ChannelsCreated, res.PostsWritten, res.ChannelsArchived)

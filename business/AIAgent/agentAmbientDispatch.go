@@ -45,33 +45,45 @@ func dispatchAmbientAgents(ctx context.Context, agents []*model.AiAgent, data ma
 	}
 	postID, _ := data["post_id"].(string)
 	authorID, _ := data["author_id"].(string)
-	lower := strings.ToLower(text)
 	mentionIDs := mentionIDsFromEvent(data["mention_ids"])
 
 	for _, a := range agents {
-		// If the agent was @mentioned, the mention path already handles it.
-		if mentionMatchesAgent(ctx, a, mentionIDs, lower) {
-			continue
-		}
-		// Only in channels the agent is allowed in (explicit scope, or open).
-		if !agentAllowedInChannel(a, channelID) {
-			continue
-		}
-		// Never react to the agent's own message (defensive; the loop guard
-		// already suppresses agent/automation posts from emitting events).
-		if a.BotUserId != nil && authorID != "" && a.BotUserId.String() == authorID {
-			continue
-		}
-		// Cheap candidacy pre-filter: questions / topic-keyword messages only.
-		if !ambientCandidate(text, parseAmbientKeywords(a.AmbientKeywords)) {
+		if !ambientConsiders(ctx, a, channelID, authorID, text, mentionIDs) {
 			continue
 		}
 		// Per-(agent, channel) cooldown: at most one unprompted reply per window.
 		if !ambientCooldownAcquire(ctx, a.Id.String(), channelID) {
 			continue
 		}
-		launchAmbient(ctx, a, channelID, postID, text)
+		launchAmbient(ctx, a, channelID, postID, authorID, text)
 	}
+}
+
+// ambientConsiders reports whether an ambient agent should consider replying
+// to a channel message: every gate but the cooldown, cheapest first.
+func ambientConsiders(ctx context.Context, a *model.AiAgent, channelID, authorID, text string, mentionIDs []string) bool {
+	// If the agent was @mentioned, the mention path already handles it.
+	if mentionMatchesAgent(ctx, a, mentionIDs, strings.ToLower(text)) {
+		return false
+	}
+	// Only in channels the agent is allowed in (explicit scope, or open).
+	if !agentAllowedInChannel(a, channelID) {
+		return false
+	}
+	// Never react to the agent's own message (defensive; the loop guard
+	// already suppresses agent/automation posts from emitting events).
+	if a.BotUserId != nil && authorID != "" && a.BotUserId.String() == authorID {
+		return false
+	}
+	// Cheap candidacy pre-filter: questions / topic-keyword messages only.
+	if !ambientCandidate(text, parseAmbientKeywords(a.AmbientKeywords)) {
+		return false
+	}
+	// Only where the person it works for can read: it replies as them, and
+	// its private note quotes the message to them. An agent with no channel
+	// scope otherwise considered every channel, private ones included.
+	ok, err := reach.readsChannel(ctx, a.CreatedBy.String(), channelID)
+	return err == nil && ok
 }
 
 // ambientCooldownAcquire returns true only for the first attempt in the current
@@ -89,8 +101,15 @@ func ambientCooldownAcquire(ctx context.Context, agentID, channelID string) bool
 // concise in-thread reply on the triggering message ONLY when the agent judged
 // it worthwhile (non-sentinel result). Serialized per (agent, channel) so
 // overlapping messages don't stack.
-func launchAmbient(ctx context.Context, a *model.AiAgent, channelID, postID, triggerText string) {
-	runCtx := context.WithoutCancel(ctx)
+//
+// The run is asked for by the message's author. Nobody addressed the agent, but
+// their words are what it acts on, and it replies in their thread: run as an
+// unasked run, it had its sponsor's whole reach, so anyone posting where an
+// agent listens could have that reach put to work for them. It now reaches only
+// what the author and the sponsor both can; an author that cannot be identified
+// refuses everything rather than borrow the sponsor's reach.
+func launchAmbient(ctx context.Context, a *model.AiAgent, channelID, postID, authorID, triggerText string) {
+	runCtx := WithAgentAskerWords(askedBy(context.WithoutCancel(ctx), authorID), triggerText)
 	serialKey := fmt.Sprintf("ambient:%s:%s", a.Id, channelID)
 	go func() {
 		defer func() {
@@ -117,11 +136,13 @@ func launchAmbient(ctx context.Context, a *model.AiAgent, channelID, postID, tri
 		}
 		runCtx = WithAgentRunScope(runCtx, channelID, "")
 
-		// What the sponsor's workspace already says about this elsewhere: the
-		// cross-channel view a colleague has, offered for private use only.
+		// What the workspace already says about this in its public channels:
+		// the cross-channel view a colleague has. Public only, because the same
+		// run may reply in this channel, and only its instructions would keep a
+		// private channel's text out of the reply.
 		var related []string
 		if hits, err := relatedSearch(runCtx, a.CreatedBy, triggerText); err == nil {
-			related = relatedElsewhere(hits, channelID, relatedElsewhereMax)
+			related = relatedElsewhere(hits, channelID, relatedElsewhereMax, publicChannelFor(runCtx, a.CreatedBy.String()))
 		}
 		outcome := RunAgent(runCtx, a, triggerSourceAmbient, ambientRunPrompt(triggerText, related), false)
 

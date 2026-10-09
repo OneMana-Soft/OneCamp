@@ -455,6 +455,62 @@ func TestRelationLimits(t *testing.T) {
 	}
 }
 
+// Work done as one person for another (an AI agent acting as its sponsor for a
+// teammate, AlsoFor) opens only the tables both of them can: a link into a
+// table only the actor can open reads as a private row, a rollup over it isn't
+// worked out, no link into it is made either way, and it isn't read at all.
+func TestRelationsReadForSomeoneElse(t *testing.T) {
+	w := newRelationWorld(t)
+	ctx := w.ctx
+	staff, sName := w.table("Staff")
+	pay := w.field(staff, "Pay", model.FieldNumber, nil)
+	if _, err := UpdateTable(ctx, staff.Id, TableInput{Name: "Staff", Visibility: "private"}, w.me); err != nil {
+		t.Fatalf("make private: %v", err)
+	}
+	teams, tName := w.table("Teams")
+	people := w.field(teams, "People", model.FieldRelation, map[string]interface{}{"relation_target": "table", "table_id": staff.Id.String()})
+	payroll := w.field(teams, "Payroll", model.FieldRollup, map[string]interface{}{"relation": people.Id.String(), "field": pay.Id.String(), "aggregate": "sum"})
+	alice := w.row(staff, map[string]interface{}{sName.Id.String(): "Alice", pay.Id.String(): 9100})
+	bob := w.row(staff, map[string]interface{}{sName.Id.String(): "Bob", pay.Id.String(): 8800})
+	core := w.row(teams, map[string]interface{}{tName.Id.String(): "Core", people.Id.String(): []interface{}{alice.String()}})
+
+	// For the owner alone: Alice by name, and what she is paid.
+	if mine := w.cells(teams, &w.me)[core]; labels(mine[people.Id.String()]) != "Alice" || mine[payroll.Id.String()] != float64(9100) {
+		t.Fatalf("the owner reads %v and %v", mine[people.Id.String()], mine[payroll.Id.String()])
+	}
+
+	both := AlsoFor(ctx, w.member)
+	b, err := GetBundle(both, teams.Id, w.me)
+	if err != nil {
+		t.Fatalf("read for the member as well: %v", err)
+	}
+	var cells map[string]interface{}
+	for _, r := range b.Rows {
+		if r.Id == core {
+			cells = parseRowValues(r.Values)
+		}
+	}
+	if got := labels(cells[people.Id.String()]); got != privateRow {
+		t.Errorf("read for the member as well, the link names %q", got)
+	}
+	if got := cells[payroll.Id.String()]; got == float64(9100) {
+		t.Errorf("read for the member as well, the payroll adds up a table they can't open: %v", got)
+	}
+	if _, _, err := ChangeLinks(both, teams.Id, core, people.Id, []uuid.UUID{bob}, nil, w.me); !IsForbidden(err) {
+		t.Errorf("a link into a table the member can't open was made for them: %v", err)
+	}
+	ops, err := CreateRow(both, teams.Id, RowInput{Values: map[string]interface{}{tName.Id.String(): "Ops", people.Id.String(): []interface{}{bob.String()}}}, w.me)
+	if err != nil {
+		t.Fatalf("a row made for the member as well: %v", err)
+	}
+	if n := w.links(people.Id, ops.Id); n != 0 {
+		t.Errorf("a row made for the member linked %d rows of a table they can't open", n)
+	}
+	if _, err := GetBundle(both, staff.Id, w.me); !IsForbidden(err) {
+		t.Errorf("a table only the owner can open was read for the member as well: %v", err)
+	}
+}
+
 // links is how many links a row makes through a field.
 func (w *relationWorld) links(field, from uuid.UUID) int {
 	w.t.Helper()

@@ -62,8 +62,11 @@ type Invoice struct {
 	Notes         string     `json:"notes"`
 	SentAt        *time.Time `json:"sent_at,omitempty"`
 	PaidAt        *time.Time `json:"paid_at,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	// FirstSentAt is when it was first sent, kept when it goes back to draft:
+	// from then on its number is spoken for.
+	FirstSentAt *time.Time `json:"first_sent_at,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
 var (
@@ -73,7 +76,7 @@ var (
 
 const columns = `id, project_id, number, status, to_char(issued_on, 'YYYY-MM-DD'), to_char(due_on, 'YYYY-MM-DD'),
 	period_from, period_to, currency, seller, client, lines, subtotal_cents, tax_percent::float8, tax_cents,
-	total_cents, notes, sent_at, paid_at, created_at, updated_at`
+	total_cents, notes, sent_at, paid_at, first_sent_at, created_at, updated_at`
 
 func withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
@@ -82,10 +85,10 @@ func withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 func scan(row interface{ Scan(...any) error }) (*Invoice, error) {
 	var inv Invoice
 	var seller, client, lines []byte
-	var from, to, sent, paid sql.NullTime
+	var from, to, sent, paid, firstSent sql.NullTime
 	err := row.Scan(&inv.ID, &inv.ProjectID, &inv.Number, &inv.Status, &inv.IssuedOn, &inv.DueOn,
 		&from, &to, &inv.Currency, &seller, &client, &lines, &inv.SubtotalCents, &inv.TaxPercent, &inv.TaxCents,
-		&inv.TotalCents, &inv.Notes, &sent, &paid, &inv.CreatedAt, &inv.UpdatedAt)
+		&inv.TotalCents, &inv.Notes, &sent, &paid, &firstSent, &inv.CreatedAt, &inv.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -107,7 +110,7 @@ func scan(row interface{ Scan(...any) error }) (*Invoice, error) {
 		v := t.Time
 		return &v
 	}
-	inv.PeriodFrom, inv.PeriodTo, inv.SentAt, inv.PaidAt = at(from), at(to), at(sent), at(paid)
+	inv.PeriodFrom, inv.PeriodTo, inv.SentAt, inv.PaidAt, inv.FirstSentAt = at(from), at(to), at(sent), at(paid), at(firstSent)
 	if inv.Lines == nil {
 		inv.Lines = []Line{}
 	}
@@ -185,9 +188,11 @@ func Create(ctx context.Context, inv *Invoice, by uuid.UUID) (*Invoice, error) {
 	defer cancel()
 	out, err := scan(postgresInit.DBConn.SqlDB.QueryRowContext(c, `
 		INSERT INTO invoices (id, project_id, number, status, issued_on, due_on, period_from, period_to, currency,
-			seller, client, lines, subtotal_cents, tax_percent, tax_cents, total_cents, notes, sent_at, paid_at, created_by)
+			seller, client, lines, subtotal_cents, tax_percent, tax_cents, total_cents, notes, sent_at, paid_at,
+			first_sent_at, created_by)
 		VALUES ($1, $2, $3, $4::text, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-			CASE WHEN $4::text IN ('sent', 'paid') THEN NOW() END, CASE WHEN $4::text = 'paid' THEN NOW() END, $18)
+			CASE WHEN $4::text IN ('sent', 'paid') THEN NOW() END, CASE WHEN $4::text = 'paid' THEN NOW() END,
+			CASE WHEN $4::text IN ('sent', 'paid') THEN NOW() END, $18)
 		RETURNING `+columns,
 		uuid.New(), inv.ProjectID, inv.Number, inv.Status, inv.IssuedOn, inv.DueOn, inv.PeriodFrom, inv.PeriodTo, inv.Currency,
 		seller, client, lines, inv.SubtotalCents, inv.TaxPercent, inv.TaxCents, inv.TotalCents, inv.Notes, by))
@@ -213,7 +218,7 @@ func Update(ctx context.Context, inv *Invoice) (*Invoice, error) {
 		UPDATE invoices SET number = $3, issued_on = $4, due_on = $5, period_from = $6, period_to = $7, currency = $8,
 			seller = $9, client = $10, lines = $11, subtotal_cents = $12, tax_percent = $13, tax_cents = $14,
 			total_cents = $15, notes = $16, updated_at = NOW()
-		WHERE id = $1 AND project_id = $2 AND status = 'draft'
+		WHERE id = $1 AND project_id = $2 AND status = 'draft' AND (first_sent_at IS NULL OR number = $3)
 		RETURNING `+columns,
 		inv.ID, inv.ProjectID, inv.Number, inv.IssuedOn, inv.DueOn, inv.PeriodFrom, inv.PeriodTo, inv.Currency,
 		seller, client, lines, inv.SubtotalCents, inv.TaxPercent, inv.TaxCents, inv.TotalCents, inv.Notes))
@@ -233,17 +238,19 @@ func SetStatus(ctx context.Context, projectID, id uuid.UUID, status string) (*In
 		UPDATE invoices SET status = $3::text,
 			sent_at = CASE WHEN $3::text = 'draft' THEN NULL WHEN $3::text IN ('sent', 'paid') THEN COALESCE(sent_at, NOW()) ELSE sent_at END,
 			paid_at = CASE WHEN $3::text = 'paid' THEN COALESCE(paid_at, NOW()) WHEN $3::text = 'void' THEN paid_at ELSE NULL END,
+			first_sent_at = CASE WHEN $3::text IN ('sent', 'paid') THEN COALESCE(first_sent_at, NOW()) ELSE first_sent_at END,
 			updated_at = NOW()
 		WHERE id = $1 AND project_id = $2 AND status <> 'void'
 		RETURNING `+columns, id, projectID, status))
 }
 
-// Delete removes a draft. A sent invoice is voided, not deleted, so its
-// number is never given to another.
+// Delete removes a draft never sent. A sent invoice is voided, not deleted,
+// so its number is never given to another; that holds after it goes back to
+// draft too.
 func Delete(ctx context.Context, projectID, id uuid.UUID) error {
 	c, cancel := withTimeout(ctx)
 	defer cancel()
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(c, `DELETE FROM invoices WHERE id = $1 AND project_id = $2 AND status = 'draft'`, id, projectID)
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(c, `DELETE FROM invoices WHERE id = $1 AND project_id = $2 AND status = 'draft' AND first_sent_at IS NULL`, id, projectID)
 	if err != nil {
 		return err
 	}

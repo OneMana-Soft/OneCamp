@@ -45,12 +45,14 @@ enabled per agent. Because they're writes, they flow through the agent's
 Set the agent's trigger in the builder:
 - **Mention** — a teammate `@`s the agent on a channel/thread/DM ("fix the null
   check in auth.go and open a PR").
-- **Event** — pick a GitHub event so the agent runs itself:
-  - `github.issue.opened` — triage/propose a fix when an issue lands.
-  - `github.pr.review_submitted` — react when a review lands.
-  - `github.check_run.completed` — fires **once per PR when all checks finish**
-    (aggregated, not per-check), with the overall pass/fail + counts. This is how
-    a PR-follow agent reacts to CI without being spammed.
+- **Schedule** — the agent runs on its own at set times.
+
+GitHub events (`github.issue.opened`, `github.pr.opened`,
+`github.pr.review_submitted`, `github.check_run.completed`) can no longer be
+chosen as an agent's trigger: anyone who can write on the repository writes what
+they carry, so a run on one would be asked for by nobody identified and refuse
+every tool. An agent bound to one before no longer runs on it; it can still be paused,
+deleted, or edited.
 
 ### 4. Durability, progress, notifications (automatic)
 - Turn on **Run tasks in the background** for multi-step work: the run becomes a
@@ -68,16 +70,13 @@ Set the agent's trigger in the builder:
 3. It searches, reads the file, analyzes, proposes the PR write (a human approves),
    opens the draft PR via MCP, and posts the link in the thread.
 
-### B. Autonomous PR-follow (event trigger)
-1. Agent trigger: **Event → `github.check_run.completed`**. Scope: the channel to
-   report in. Tools: `read_repo_file` (optional, to read logs/files on failure).
-2. When a PR's CI finishes, the agent runs once with the aggregate result and
-   posts, e.g., "✅ CI green on PR #482 (12/12 checks)" or "❌ 2 checks failed on
-   #482 — @author take a look", tagging the author.
+### B. Autonomous PR-follow (withdrawn)
+This used an event trigger on `github.check_run.completed`, which can no longer
+be chosen (see Triggers). Mention the agent on the PR's thread instead.
 
 ## The full loop
-`@mention or github.issue.opened` → `search_repo_code`/`read_repo_file`/`code_analyze`
-→ **MCP open-PR** (approval-gated) → `github.check_run.completed` (CI concluded)
+`@mention` → `search_repo_code`/`read_repo_file`/`code_analyze`
+→ **MCP open-PR** (approval-gated) → a teammate's follow-up on the thread
 → agent reacts / re-proposes. Every step reuses the agent runtime — budgets,
 per-tool permission re-checks, audit, the durable/async engine — so the loop is
 governed end to end.

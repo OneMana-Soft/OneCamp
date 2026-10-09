@@ -1,6 +1,7 @@
 package business
 
-// Pins that an internal event cannot be bound as an agent's event trigger.
+// Pins that only the events an agent may hear can be bound as its event
+// trigger (agentEvents in agentEventAccess.go), internal ones never.
 //
 // The delegation guard (AuthorizeDelegation) is only consulted by
 // dispatchMentionAgents. handleAgentEvent's generic event loop runs first and
@@ -29,7 +30,7 @@ func TestInternalEventTypesAreNotBindableAsTriggers(t *testing.T) {
 		"Agent.Message",
 		"agent.something.future", // a later internal event is covered on day one
 	} {
-		if !isInternalEventType(ev) {
+		if bindableEvent(ev) || boundEvent(ev) {
 			t.Errorf("event %q must not be bindable as an agent trigger: the generic "+
 				"launch path performs no delegation or permission checks", ev)
 		}
@@ -50,26 +51,40 @@ func TestRealWorkspaceEventsStayBindable(t *testing.T) {
 		"user.joined",
 		"table.row.created",
 		"table.row.updated",
-		"github.pr.opened",
-		"github.pr.review_submitted",
-		"github.check_run.completed",
-		"github.issue.opened",
 	} {
-		if isInternalEventType(ev) {
+		if !bindableEvent(ev) || !boundEvent(ev) {
 			t.Errorf("event %q is a real workspace event and must stay bindable", ev)
 		}
 	}
 }
 
-// TestInternalEventPrefixMatchesTheEventItGuards is the consistency check between
-// the constant and the event it exists for. If someone renames the event without
-// renaming the prefix, the guard silently stops covering it and everything else
-// still passes.
-func TestInternalEventPrefixMatchesTheEventItGuards(t *testing.T) {
-	if !strings.HasPrefix(EventTypeAgentMessage, internalEventPrefix) {
-		t.Fatalf("EventTypeAgentMessage (%q) no longer starts with internalEventPrefix (%q), "+
-			"so the delegation-bypass guard does not cover it",
-			EventTypeAgentMessage, internalEventPrefix)
+// A GitHub event can't be newly bound, and an agent bound to one before is not
+// run on it: the trigger cache skips it, with a line saying so.
+func TestGitHubEventsAreWithdrawn(t *testing.T) {
+	for _, ev := range []string{"github.pr.opened", "github.pr.review_submitted", "github.check_run.completed", "github.issue.opened"} {
+		if bindableEvent(ev) {
+			t.Errorf("event %q can still be chosen for an agent", ev)
+		}
+	}
+	raw, err := os.ReadFile("agentTriggers.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := regexp.MustCompile(`//[^\n]*`).ReplaceAllString(string(raw), " ")
+	start := strings.Index(src, "byEvent := make(")
+	end := strings.Index(src, "eventCache = byEvent")
+	if start < 0 || end < start || !strings.Contains(src[start:end], "withdrawnEvents[ev]") {
+		t.Error("the trigger cache still runs agents bound to a withdrawn GitHub event")
+	}
+}
+
+// TestConversationsAreNotBindable: a direct message, and anything else that
+// isn't one of the offered events, never reaches an event agent.
+func TestConversationsAreNotBindable(t *testing.T) {
+	for _, ev := range []string{"chat.created", "chat.updated", "chat.comment.created", "post.updated", "task.assigned", "", "Task.Created"} {
+		if bindableEvent(ev) {
+			t.Errorf("event %q must not be bindable", ev)
+		}
 	}
 }
 
@@ -104,8 +119,8 @@ func TestInternalEventGuardIsWiredIntoTheEventCache(t *testing.T) {
 	}
 	builder := src[start : start+end]
 
-	if !strings.Contains(builder, "isInternalEventType(") {
-		t.Error("the event-trigger cache is built without calling isInternalEventType, " +
+	if !strings.Contains(builder, "boundEvent(") {
+		t.Error("the event-trigger cache is built without calling boundEvent, " +
 			"so an agent can be bound to an internal event such as agent.message and " +
 			"will then run through the generic launch path — which performs no hop " +
 			"budget, no cycle check, and no AuthorizeDelegation permission check.")

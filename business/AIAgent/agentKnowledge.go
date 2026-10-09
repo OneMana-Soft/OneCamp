@@ -5,6 +5,11 @@ package business
 // OWNER (permissions re-checked by the same reads the assistant uses;
 // inaccessible sources are silently skipped), bounded in size, and prepend it to
 // the agent's system prompt. Additive: an agent with no sources is unchanged.
+//
+// The grounding is read for the run, so a run someone other than the owner
+// asked for reads it within their reach too: a source they could not open
+// themselves is skipped like any other inaccessible one, rather than being put
+// in front of a model that answers them.
 
 import (
 	"context"
@@ -40,10 +45,11 @@ func buildKnowledgeContext(ctx context.Context, agent *model.AiAgent) string {
 		return ""
 	}
 
+	gate := newRequesterGate(ctx)
 	var b strings.Builder
 	total := 0
 	for _, ref := range refs {
-		text := strings.TrimSpace(fetchKnowledge(ctx, ownerInfo, ref))
+		text := strings.TrimSpace(fetchKnowledge(ctx, gate, ownerInfo, ref))
 		if text == "" {
 			continue
 		}
@@ -68,27 +74,33 @@ func buildKnowledgeContext(ctx context.Context, agent *model.AiAgent) string {
 }
 
 // fetchKnowledge reads one source AS THE OWNER, reusing the existing
-// permission-checked read paths/executors. Unknown/inaccessible -> "".
-func fetchKnowledge(ctx context.Context, ownerInfo *userModels.UserInfo, ref KnowledgeRef) string {
+// permission-checked read paths/executors. Unknown/inaccessible -> "". A channel
+// is read through the semantic index, which narrows to the run's asker itself.
+func fetchKnowledge(ctx context.Context, gate *requesterGate, ownerInfo *userModels.UserInfo, ref KnowledgeRef) string {
 	switch ref.Type {
 	case "channel":
 		return aiBusiness.GetRecentChannelTranscript(ctx, ownerInfo, ref.Id, knowledgeChannelMaxMsgs)
 	case "doc":
-		return runReadExecutor(ctx, ownerInfo, "read_doc", map[string]string{"doc_uuid": ref.Id})
+		return runReadExecutor(ctx, gate, ownerInfo, "read_doc", map[string]string{"doc_uuid": ref.Id})
 	case "project":
-		return runReadExecutor(ctx, ownerInfo, "read_project", map[string]string{"project_uuid": ref.Id})
+		return runReadExecutor(ctx, gate, ownerInfo, "read_project", map[string]string{"project_uuid": ref.Id})
 	}
 	return ""
 }
 
 // runReadExecutor invokes a read-only tool executor as the owner (permissions
-// re-checked inside the executor) and returns its text, or "" on any error.
-func runReadExecutor(ctx context.Context, ownerInfo *userModels.UserInfo, tool string, params map[string]string) string {
+// re-checked inside the executor) and returns its text, or "" on any error or
+// when the run's asker could not read it themselves.
+func runReadExecutor(ctx context.Context, gate *requesterGate, ownerInfo *userModels.UserInfo, tool string, params map[string]string) string {
+	action := ai.ProposedAction{ToolName: tool, Params: params}
+	if gate.refusal(ctx, action) != "" {
+		return ""
+	}
 	exec, ok := ai.GetExecutor(tool)
 	if !ok {
 		return ""
 	}
-	res, _, err := exec(ctx, ai.ProposedAction{ToolName: tool, Params: params}, ownerInfo.UserDgraphInfo.Uuid)
+	res, _, err := exec(ctx, action, ownerInfo.UserDgraphInfo.Uuid)
 	if err != nil {
 		return ""
 	}

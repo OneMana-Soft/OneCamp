@@ -37,7 +37,12 @@ const maxRoutinesPerTick = 100
 
 // routineLoop fires due routines once per tick (same cadence as the schedule
 // tick — one minute is the finest granularity a routine's fire time exposes).
+// Not one fires before the routines nobody known asked for are paused
+// (agentRoutineAskers.go).
 func routineLoop(ctx context.Context) {
+	if !awaitRoutineAskers(ctx) {
+		return
+	}
 	t := time.NewTicker(scheduleTickInterval)
 	defer t.Stop()
 	for {
@@ -122,6 +127,7 @@ func launchRoutine(ctx context.Context, r *model.AgentRoutine) {
 		if aerr != nil || agent == nil || !agent.IsActive {
 			return // agent gone/disabled — routine stays but does nothing
 		}
+		runCtx = routineRunFor(runCtx, agent, r)
 		channelID := r.ChannelId.String()
 
 		// Author posts as the agent's own principal (named, badged teammate).
@@ -150,6 +156,22 @@ func launchRoutine(ctx context.Context, r *model.AgentRoutine) {
 			postAgentMessage(runCtx, agent, agentBot, channelID, text)
 		}
 	}()
+}
+
+// routineRunFor says who a routine's run is for. A routine someone other than
+// the sponsor set up runs for them, every time, reaching only what they and the
+// sponsor both can; otherwise asking an agent for recurring work would be a way
+// to get later runs with the sponsor's whole reach. One nobody known asked for
+// (agentRoutineAskers.go) refuses everything, and one the sponsor set up runs
+// for the sponsor.
+func routineRunFor(ctx context.Context, agent *model.AiAgent, r *model.AgentRoutine) context.Context {
+	switch {
+	case r.CreatedBy == uuid.Nil:
+		return askedBy(ctx, "")
+	case r.CreatedBy != agent.CreatedBy:
+		return askedBy(ctx, r.CreatedBy.String())
+	}
+	return ai.WithoutRunRequester(ctx)
 }
 
 // routineRunPrompt frames a routine's standing instruction as a scheduled run:

@@ -22,6 +22,11 @@ func TestTheProviderStepIsRegisteredFromHere(t *testing.T) {
 	if providerStep.Title == "" || providerStep.Detail == "" {
 		t.Error("the provider step has no title or detail")
 	}
+	// OneCamp Cloud runs a local model for a workspace it runs, so nobody there
+	// is told to connect one.
+	if !providerStep.SelfHostedOnly {
+		t.Error("the provider step would ask a Cloud workspace's admin to connect a model provider")
+	}
 }
 
 // TestProviderProbeIsCached guards the cost. The home page asks for the

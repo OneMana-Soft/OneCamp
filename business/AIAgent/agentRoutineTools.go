@@ -42,8 +42,9 @@ func isRoutineTool(name string) bool {
 
 // handleRoutineTool executes a routine control tool, recording the outcome on
 // rec. Scope-bound: a no-op (skipped) when the run has no channel/DM surface to
-// attach the routine to. Every routine is attributed to and run as the agent's
-// owner.
+// attach the routine to. Every routine runs as the agent's owner, and is
+// attributed to the person who asked for it, whose reach bounds every run of it
+// (see launchRoutine).
 func handleRoutineTool(ctx context.Context, agent *model.AiAgent, a ai.ProposedAction, rec *toolCallRecord) {
 	sc := agentRunScopeFromCtx(ctx)
 	if !sc.hasScope() {
@@ -71,6 +72,12 @@ func handleCreateRoutine(ctx context.Context, agent *model.AiAgent, sc agentRunS
 		rec.Error = "I can set up routines in a channel (add me to one and ask there) — not in a direct message yet"
 		return
 	}
+	// A routine keeps running after this run, so like remember it needs the
+	// person who asked to have asked for it (agentMemoryScope.go).
+	if !humanAskedForRoutine(ctx) {
+		rec.Skipped = "not setting that up: nobody in this conversation asked me to do something on a schedule"
+		return
+	}
 
 	norm, err := NormalizeRoutineInput(RoutineInput{
 		Name:        a.Params["name"],
@@ -83,9 +90,22 @@ func handleCreateRoutine(ctx context.Context, agent *model.AiAgent, sc agentRunS
 		return
 	}
 
+	createdBy, cerr := routineCreator(ctx, agent)
+	if cerr != nil {
+		rec.Error = cerr.Error()
+		return
+	}
+	// What it will do each time is the asker's instruction, not a line of
+	// someone else's they pointed at: their own words, or put to them first.
+	if !fromAskerWords(ctx, norm.Prompt) {
+		askToKeep(ctx, rec, fmt.Sprintf("Shall I set up %q, %s: %s?", norm.Name, describeCadence(norm.Recurrence, norm.AtMinuteUTC), norm.Prompt),
+			"not setting that up")
+		return
+	}
+
 	routine := &model.AgentRoutine{
 		AgentId:     agent.Id,
-		CreatedBy:   agent.CreatedBy,
+		CreatedBy:   createdBy,
 		GroupId:     sc.GroupID,
 		Name:        norm.Name,
 		Prompt:      norm.Prompt,
@@ -109,6 +129,19 @@ func handleCreateRoutine(ctx context.Context, agent *model.AiAgent, sc agentRunS
 	}
 	rec.Result = fmt.Sprintf("Routine %q created (id %s) — runs %s. Say \"list routines\" to see it or \"cancel routine %s\" to stop it.",
 		norm.Name, id, describeCadence(norm.Recurrence, norm.AtMinuteUTC), id)
+}
+
+// routineCreator is who a new routine is recorded as created by: the person
+// who asked for it, not the sponsor. A routine runs later with nobody
+// watching, and its runs act for whoever created it (routineRunFor), so
+// recording the sponsor would turn "every morning, post X here" from a
+// teammate into a standing run with the sponsor's whole reach.
+func routineCreator(ctx context.Context, agent *model.AiAgent) (uuid.UUID, error) {
+	id, known := askerOf(ctx, agent)
+	if !known {
+		return uuid.Nil, fmt.Errorf("I couldn't tell who asked for this routine, so I didn't set it up")
+	}
+	return id, nil
 }
 
 // handleListRoutines lists the active routines for the current surface, so a
@@ -154,6 +187,10 @@ func handleCancelRoutine(ctx context.Context, agent *model.AiAgent, sc agentRunS
 			rec.Error = "no such routine here"
 			return
 		}
+		if !mayCancelRoutine(ctx, agent, r) {
+			rec.Error = routineNotYoursToCancel
+			return
+		}
 		if derr := model.DeleteRoutine(ctx, id); derr != nil {
 			rec.Error = "could not cancel that routine: " + derr.Error()
 			return
@@ -175,7 +212,7 @@ func handleCancelRoutine(ctx context.Context, agent *model.AiAgent, sc agentRunS
 	}
 	var matches []*model.AgentRoutine
 	for _, r := range routines {
-		if routineInScope(r, sc) && strings.EqualFold(strings.TrimSpace(r.Name), nameParam) {
+		if routineInScope(r, sc) && strings.EqualFold(strings.TrimSpace(r.Name), nameParam) && mayCancelRoutine(ctx, agent, r) {
 			matches = append(matches, r)
 		}
 	}
@@ -191,6 +228,21 @@ func handleCancelRoutine(ctx context.Context, agent *model.AiAgent, sc agentRunS
 	default:
 		rec.Error = fmt.Sprintf("more than one routine is named %q — cancel it by id instead (say \"list routines\")", nameParam)
 	}
+}
+
+// routineNotYoursToCancel is why a run for someone else won't cancel a routine.
+const routineNotYoursToCancel = "that routine was set up by someone else, so only they or the person who set me up can cancel it"
+
+// mayCancelRoutine reports whether this run may cancel routine r. A run for
+// someone other than the sponsor may cancel only the routines that person set
+// up: the others' run for their own askers, and the sponsor's for the sponsor.
+// A run for the sponsor, or for nobody, may cancel any here.
+func mayCancelRoutine(ctx context.Context, agent *model.AiAgent, r *model.AgentRoutine) bool {
+	if _, _, forOther := ai.RunRequester(ctx); !forOther {
+		return true
+	}
+	who, known := askerOf(ctx, agent)
+	return known && r.CreatedBy == who
 }
 
 // routineInScope reports whether a routine belongs to the current run surface

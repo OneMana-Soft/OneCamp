@@ -588,6 +588,11 @@ func AddAttachmentsToTask(w http.ResponseWriter, r *http.Request) {
 
 	err = business.AddAttachmentToTask(ctx, taskUUID, dgraphTaskInfo, &createTaskInfoInput, &userInfo.UserDgraphInfo)
 
+	if errors.Is(err, business.ErrTaskDeleted) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
+		return
+	}
+
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/AddAttachmentToTask Failed to add attachment to task err: %+v",
@@ -812,6 +817,11 @@ func UpdateTaskName(w http.ResponseWriter, r *http.Request) {
 
 	err = business.UpdateTaskNameByTaskUUID(ctx, taskUUID, createTaskInfoInput.TaskName, dgraphTaskInfo, &userInfo.UserDgraphInfo)
 
+	if errors.Is(err, business.ErrTaskDeleted) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
+		return
+	}
+
 	if err != nil {
 
 		helpers.LogErrorWithContext(ctx,
@@ -934,6 +944,11 @@ func UpdateTaskDesc(w http.ResponseWriter, r *http.Request) {
 
 	err = business.UpdateTaskDesByTaskUUID(ctx, taskUUID, createTaskInfoInput.TaskDescription, mentionUsers, dgraphTaskInfo, &userInfo.UserDgraphInfo)
 
+	if errors.Is(err, business.ErrTaskDeleted) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
+		return
+	}
+
 	if err != nil {
 
 		helpers.LogErrorWithContext(ctx,
@@ -1052,6 +1067,11 @@ func UpdateTaskAssignee(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err = business.UpdateTaskAssigneeByTaskUUID(ctx, taskUUID, newAssigneeDgraphInfo, oldAssigneeDgraphUID, dgraphTask.Uid, dgraphTask, &userInfo.UserDgraphInfo)
+
+	if errors.Is(err, business.ErrTaskDeleted) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
+		return
+	}
 
 	if err != nil {
 
@@ -1479,6 +1499,11 @@ func UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 
 	err = business.UpdateTaskStatusByTaskUUID(ctx, taskUUID, createTaskInfoInput.Status, dgraphTaskInfo, &userInfo.UserDgraphInfo)
 
+	if errors.Is(err, business.ErrTaskDeleted) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
+		return
+	}
+
 	if errors.Is(err, taskStatusBusiness.ErrUnknownStatus) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "That is not a status in this project. Use one of: " + taskStatusBusiness.Describe(ctx, dgraphTaskInfo.Project.Uuid),
@@ -1586,6 +1611,11 @@ func UpdateTaskPriority(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err = business.UpdateTaskPriorityByTaskUUID(ctx, taskUUID, createTaskInfoInput.Priority, dgraphTaskInfo, &userInfo.UserDgraphInfo)
+
+	if errors.Is(err, business.ErrTaskDeleted) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
+		return
+	}
 
 	if err != nil {
 

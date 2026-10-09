@@ -180,6 +180,53 @@ func SetRoutineEnabled(ctx context.Context, id uuid.UUID, enabled bool) error {
 	return nil
 }
 
+// ListRoutinesRecordedAsSponsorBefore returns the live routines created before
+// t that are recorded as created by their agent's sponsor: every routine from
+// before the person who asked for one was recorded looks like that.
+func ListRoutinesRecordedAsSponsorBefore(ctx context.Context, t time.Time) ([]*AgentRoutine, error) {
+	return queryRoutines(ctx,
+		`SELECT `+routineColumns+` FROM agent_routines
+		 WHERE deleted_at IS NULL AND created_at < $1
+		   AND created_by = (SELECT created_by FROM ai_agents WHERE ai_agents.id = agent_routines.agent_id)
+		 ORDER BY created_at ASC`, t.UTC())
+}
+
+// ForgetRoutineAsker pauses a routine and records that nobody known asked for
+// it (created_by is the nil uuid), unless that is already so. changed reports
+// whether this call did it.
+func ForgetRoutineAsker(ctx context.Context, id uuid.UUID) (changed bool, err error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx,
+		`UPDATE agent_routines SET enabled = false, created_by = $2, updated_at = NOW()
+		 WHERE id = $1 AND deleted_at IS NULL AND created_by <> $2`, id, uuid.Nil)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/ForgetRoutineAsker err: %+v", err)
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// ClaimRoutine turns on a routine nobody known asked for, recording createdBy
+// as the person who did. sql.ErrNoRows when there is no such routine left.
+func ClaimRoutine(ctx context.Context, id, createdBy uuid.UUID) error {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx,
+		`UPDATE agent_routines SET enabled = true, created_by = $2, updated_at = NOW()
+		 WHERE id = $1 AND deleted_at IS NULL AND created_by = $3`, id, createdBy, uuid.Nil)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
 // DeleteRoutine soft-deletes a routine (cancel).
 func DeleteRoutine(ctx context.Context, id uuid.UUID) error {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)

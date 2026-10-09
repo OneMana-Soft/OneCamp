@@ -105,7 +105,7 @@ func GetBriefing(ctx context.Context, userInfo *userModels.UserInfo) (*adapter.B
 	// Recent highlights across accessible content (same permission model as
 	// AskAI recall). Best-effort.
 	go func() {
-		res, rerr := ai.SearchRecentGlobal(bctx, userUUID, channels, projects, grpIDs, briefingMaxHighlights)
+		res, rerr := searchRecentGlobal(bctx, userInfo, channels, projects, grpIDs, briefingMaxHighlights)
 		if rerr != nil {
 			helpers.LogInfoWithContext(bctx, "briefing: highlights failed: %v", rerr)
 			hlCh <- hlResult{}

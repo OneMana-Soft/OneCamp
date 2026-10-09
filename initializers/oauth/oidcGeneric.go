@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 )
@@ -16,8 +18,12 @@ type GenericOIDCProvider struct {
 
 var OIDCGeneric GenericOIDCProvider
 
+// InitGenericOIDC sets OIDC sign-in up at boot, when OIDC_ENABLED is on. The
+// issuer is discovered once, here, so an error leaves OIDC sign-in off until
+// the API restarts, and the error is the only record of why: the caller logs
+// it (cmd/server).
 func InitGenericOIDC() error {
-	if os.Getenv("OIDC_ENABLED") != "true" {
+	if !helpers.EnvFlag("OIDC_ENABLED") {
 		return nil
 	}
 
@@ -27,8 +33,18 @@ func InitGenericOIDC() error {
 	clientSecret := os.Getenv("OIDC_CLIENT_SECRET")
 	backendDomain := os.Getenv("BACKEND_DOMAIN")
 
-	if issuer == "" || clientID == "" || clientSecret == "" || backendDomain == "" {
-		return fmt.Errorf("missing required OIDC environment variables")
+	// Named, so the boot log says which one to set.
+	var missing []string
+	for _, v := range [][2]string{
+		{"OIDC_ISSUER_URL", issuer}, {"OIDC_CLIENT_ID", clientID},
+		{"OIDC_CLIENT_SECRET", clientSecret}, {"BACKEND_DOMAIN", backendDomain},
+	} {
+		if v[1] == "" {
+			missing = append(missing, v[0])
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("OIDC_ENABLED but missing required env: %s", strings.Join(missing, ", "))
 	}
 
 	provider, err := oidc.NewProvider(ctx, issuer)

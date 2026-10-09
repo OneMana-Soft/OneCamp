@@ -12,8 +12,9 @@ package business
 // owns the chat.created plumbing. This mirrors the DM split in agentDM.go.
 //
 // The runner executes AS the agent's owner with per-call permission re-checks
-// (identical envelope to a channel mention / DM run), so a group mention never
-// becomes an unscoped escalation path.
+// (identical envelope to a channel mention / DM run), bounded by what the person
+// mentioning it can reach too, so a group mention never becomes an escalation
+// path.
 
 import (
 	"context"
@@ -88,6 +89,7 @@ func RunAgentGroupReply(ctx context.Context, a *model.AiAgent, senderID, groupID
 	}
 	defer agentRunLock.Release(key)
 
+	ctx = WithAgentAskerWords(askedBy(ctx, senderID), text)
 	prompt := groupChatPromptWithContext(ctx, a, senderID, groupID, text)
 	if strings.TrimSpace(imageContext) != "" {
 		prompt += imageContext
@@ -117,7 +119,7 @@ func EnqueueGroupRunIfBackground(ctx context.Context, a *model.AiAgent, senderID
 	if strings.TrimSpace(imageContext) != "" {
 		prompt += imageContext
 	}
-	return EnqueueDurableAgentRun(ctx, a, Surface{Kind: SurfaceGroupChat, GroupID: groupID, MessageID: messageID}, prompt, senderID)
+	return EnqueueDurableAgentRun(WithAgentAskerWords(ctx, text), a, Surface{Kind: SurfaceGroupChat, GroupID: groupID, MessageID: messageID}, prompt, senderID)
 }
 
 // groupChatPromptWithContext enriches the group-chat run prompt with the
@@ -125,9 +127,8 @@ func EnqueueGroupRunIfBackground(ctx context.Context, a *model.AiAgent, senderID
 // so it respects exactly what that member can see in the group — never as the
 // agent owner, who may not be a participant. On any miss (asker unresolved,
 // empty transcript) it returns the base single-turn prompt unchanged, so a run
-// is never blocked by missing context. The agent's tool actions still execute
-// within its owner envelope; only the read-only context is asker-scoped, so
-// there is no confused-deputy.
+// is never blocked by missing context. The run is the asker's: its tools reach
+// only what they and the owner both can.
 func groupChatPromptWithContext(ctx context.Context, a *model.AiAgent, senderID, groupID, text string) string {
 	base := synthGroupChatPrompt(text)
 	if strings.TrimSpace(senderID) == "" || strings.TrimSpace(groupID) == "" {

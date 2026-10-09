@@ -483,8 +483,15 @@ func runAndScore(ctx context.Context, agent *model.AiAgent, s *model.EvalScenari
 	_ = json.Unmarshal([]byte(s.Expectations), &exp)
 
 	// Dry-run: read-only tools execute for a realistic transcript; writes never
-	// happen. Runs AS the agent's owner with per-call permission re-checks.
-	outcome := RunAgent(ctx, agent, "eval", s.Prompt, true)
+	// happen. Runs AS the agent's owner with per-call permission re-checks, and
+	// for the person running the scenario: its reads reach only what they and
+	// the owner both can, because they read the transcript. The background watch
+	// runs as the owner, so its scenarios see what the agent sees in production.
+	runCtx := ctx
+	if actor.UserID != uuid.Nil {
+		runCtx = askedBy(ctx, actor.UserID.String())
+	}
+	outcome := RunAgent(WithAgentAskerWords(runCtx, s.Prompt), agent, "eval", s.Prompt, true)
 	score := ScoreRun(outcome, exp)
 
 	checksJSON, _ := json.Marshal(score.Checks)

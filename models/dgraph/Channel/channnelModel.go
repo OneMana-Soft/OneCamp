@@ -3,7 +3,7 @@ package models
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -11,9 +11,11 @@ import (
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
 
-func CreateOrUpdateDgraphChannel(ctx context.Context, dgraphChannel *dgraphStruct.DgraphChannel, query string) (channelUid string, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+// ErrNotFound is a channel the graph has no node for, as opposed to a graph
+// that didn't answer.
+var ErrNotFound = errors.New("channel not found in dgraph")
 
+func CreateOrUpdateDgraphChannel(ctx context.Context, dgraphChannel *dgraphStruct.DgraphChannel, query string) (channelUid string, err error) {
 	pb, err := json.Marshal(dgraphChannel)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -22,17 +24,13 @@ func CreateOrUpdateDgraphChannel(ctx context.Context, dgraphChannel *dgraphStruc
 		return
 	}
 
-	mu := &api.Mutation{
-		SetJson: pb,
-	}
-	req := &api.Request{
+	// An upsert on the channel node, so two writes to one channel at once (two
+	// people joining it, say) conflict, and Dgraph aborts one and asks for a
+	// retry. DoCommitNow retries it rather than failing the loser.
+	res, err := dgraphInit.DoCommitNow(ctx, &api.Request{
 		Query:     query,
-		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
-	}
-
-	res, err := txn.Do(ctx, req)
-
+		Mutations: []*api.Mutation{{SetJson: pb}},
+	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"dgraphModel/CreateOrUpdateDgraphChannel dgraph txn failed err: %+v",
@@ -41,16 +39,6 @@ func CreateOrUpdateDgraphChannel(ctx context.Context, dgraphChannel *dgraphStruc
 	}
 	// uid will only get assigned only if new object gets created
 	channelUid = res.Uids["uid(ch)"]
-	defer func() {
-		err = txn.Discard(ctx)
-
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/CreateOrUpdateDgraphChannel failed to discard dgraph txn err: %+v",
-				err)
-		}
-
-	}()
 	return
 }
 
@@ -159,7 +147,7 @@ func GetDgraphChannelInfoByUUID(ctx context.Context, query string, variables map
 	}
 
 	if len(channelInfo.ChannelInfo) == 0 {
-		err = fmt.Errorf("channel not found in dgraph")
+		err = ErrNotFound
 		helpers.LogErrorWithContext(ctx,
 			"models/GetDgraphChannelInfoByUUID failed to get channelInfo")
 		return

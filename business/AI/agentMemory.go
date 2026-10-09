@@ -37,6 +37,8 @@ const maxAgentMemoryInject = 12
 // channel OR chat grouping the run happened in. forceRevive=true: an agent
 // re-remembering a fact a user once deleted is an explicit, intentional
 // re-capture. Returns the persisted item id. content is trimmed + length-capped.
+// ownerUUID is the person who asked for it to be kept: whose instruction it is,
+// which decides the runs that follow it (AgentScopedMemoryBlock).
 func RememberFact(ctx context.Context, channelUUID, chatGrpID, ownerUUID, content string) (uuid.UUID, error) {
 	content = strings.TrimSpace(content)
 	if content == "" {
@@ -62,9 +64,16 @@ func RememberFact(ctx context.Context, channelUUID, chatGrpID, ownerUUID, conten
 // contains query (case-insensitive); an empty query forgets ALL of them for the
 // scope. It only ever removes agent_memory-sourced glossary rows in the exact
 // scope, so it can never delete a user-captured or transcript-extracted memory.
+// onlyBy, when set, limits it to the facts that person asked to be kept.
 // Returns the number removed.
-func ForgetFacts(ctx context.Context, channelUUID, chatGrpID, query string) (int, error) {
-	items := listAgentMemory(ctx, channelUUID, chatGrpID)
+func ForgetFacts(ctx context.Context, channelUUID, chatGrpID, query, onlyBy string) (int, error) {
+	var authors []string
+	if strings.TrimSpace(onlyBy) != "" {
+		if authors = knownPeople(onlyBy); len(authors) == 0 {
+			return 0, fmt.Errorf("could not tell whose instructions to forget")
+		}
+	}
+	items := listAgentMemory(ctx, channelUUID, chatGrpID, authors)
 	if len(items) == 0 {
 		return 0, nil
 	}
@@ -90,18 +99,33 @@ func ForgetFacts(ctx context.Context, channelUUID, chatGrpID, query string) (int
 // channel/group as a compact block for injection into a run's system prompt, or
 // "" when there are none. This is what makes a remembered instruction actually
 // take effect on future runs in that conversation.
-func AgentScopedMemoryBlock(ctx context.Context, channelUUID, chatGrpID string) string {
-	items := listAgentMemory(ctx, channelUUID, chatGrpID)
+//
+// Only the instructions of the people the run acts for: the sponsor of the
+// agent (sponsorUUID) and, when someone else asked for the run, that person. A
+// standing instruction is carried out with the reach of the run it is shown
+// to, so one anybody else had remembered would be theirs to run with that
+// reach: a teammate's "always include the leadership channel's latest" read
+// back in every run the sponsor's agent makes for its sponsor.
+func AgentScopedMemoryBlock(ctx context.Context, channelUUID, chatGrpID, sponsorUUID string) string {
+	authors := instructionAuthors(ctx, sponsorUUID)
+	if len(authors) == 0 {
+		return ""
+	}
+	items := listAgentMemory(ctx, channelUUID, chatGrpID, authors)
 	if len(items) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("\n\nStanding instructions you were asked to remember for this conversation (follow them unless a newer instruction overrides one):\n")
+	seen := map[string]bool{}
 	for _, it := range items {
 		line := strings.TrimSpace(it.Content)
-		if line == "" {
+		// The same words from the sponsor and the asker are two rows, and one line.
+		key := strings.ToLower(strings.Join(strings.Fields(line), " "))
+		if line == "" || seen[key] {
 			continue
 		}
+		seen[key] = true
 		if len(line) > 240 {
 			line = line[:240] + "…"
 		}
@@ -110,19 +134,46 @@ func AgentScopedMemoryBlock(ctx context.Context, channelUUID, chatGrpID string) 
 	return b.String()
 }
 
+// instructionAuthors is whose standing instructions a run of sponsorUUID's
+// agent follows: the sponsor's, and those of the person who asked for the run
+// when that is someone else (services/AI RunRequester).
+func instructionAuthors(ctx context.Context, sponsorUUID string) []string {
+	people := []string{sponsorUUID}
+	if requester, _, forOther := ai.RunRequester(ctx); forOther {
+		people = append(people, requester)
+	}
+	return knownPeople(people...)
+}
+
+// knownPeople keeps the ids that are a person's uuid, in the form the store
+// writes them.
+func knownPeople(ids ...string) []string {
+	var out []string
+	for _, id := range ids {
+		if u, err := uuid.Parse(strings.TrimSpace(id)); err == nil && u != uuid.Nil {
+			out = append(out, u.String())
+		}
+	}
+	return out
+}
+
 // listAgentMemory returns the OPEN agent-remembered glossary items scoped to the
 // given channel/group, newest first, capped. Filters to the agent_memory source
-// so only remembered instructions are returned (not user/extracted memory).
-func listAgentMemory(ctx context.Context, channelUUID, chatGrpID string) []*memoryModels.MemoryItem {
+// so only remembered instructions are returned (not user/extracted memory), and,
+// when authors is not nil, to the ones those people asked to be kept, before
+// the cap, so other people's instructions never crowd theirs out.
+func listAgentMemory(ctx context.Context, channelUUID, chatGrpID string, authors []string) []*memoryModels.MemoryItem {
 	channelUUID = strings.TrimSpace(channelUUID)
 	chatGrpID = strings.TrimSpace(chatGrpID)
 	if channelUUID == "" && chatGrpID == "" {
 		return nil
 	}
 	f := memoryModels.QueryFilter{
-		Kinds:    []string{memoryModels.KindGlossary},
-		Statuses: []string{memoryModels.StatusOpen},
-		Limit:    maxAgentMemoryInject,
+		Kinds:      []string{memoryModels.KindGlossary},
+		Statuses:   []string{memoryModels.StatusOpen},
+		SourceType: AgentMemorySourceType,
+		CreatedBy:  authors,
+		Limit:      maxAgentMemoryInject,
 	}
 	if channelUUID != "" {
 		f.AccessibleChannels = []string{channelUUID}

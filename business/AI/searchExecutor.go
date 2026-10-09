@@ -15,6 +15,7 @@ import (
 	globalSearchBusiness "github.com/akashc777/OneCamp/business/GlobalSearch"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -67,12 +68,64 @@ var namedSearch = func(ctx context.Context, userInfo *userModels.UserInfo, query
 	if full, err := userDomain.GetActiveDgraphUserInfoByUUID(ctx, scope.Uuid); err == nil && full != nil {
 		scope = full
 	}
+	hits, ok := namedHitsAs(ctx, scope, query)
+	if !ok {
+		return nil
+	}
+	// An agent searching for someone other than its sponsor keeps only what
+	// both of them find. The global index decides visibility per person (a
+	// private doc by its grant lists, not by a scope list), so the asker's own
+	// search is the only way to learn what they can see; an asker who cannot be
+	// resolved gets no named results rather than the sponsor's.
+	if requester, _, forOther := ai.RunRequester(ctx); forOther {
+		asker, err := profileOf(ctx, requester)
+		if err != nil {
+			return nil
+		}
+		theirs, ok := namedHitsAs(ctx, asker, query)
+		if !ok {
+			return nil
+		}
+		hits = sharedHits(hits, theirs)
+	}
+	return rankNamedHits(hits, query, unifiedMaxPerSource)
+}
+
+// namedHitsAs runs the global name search as one person.
+func namedHitsAs(ctx context.Context, scope *dgraphStruct.DgraphUser, query string) ([]UnifiedHit, bool) {
 	page, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, scope.Uuid, scope.Channels, scope.Projects, scope.Teams, query)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/AI/namedSearch global search failed err: %v", err)
-		return nil
+		return nil, false
 	}
-	return rankNamedHits(namedHits(page.Page, 0), query, unifiedMaxPerSource)
+	return namedHits(page.Page, 0), true
+}
+
+// sharedHits keeps the hits of mine that also appear in theirs, by the object
+// each names. Pure.
+func sharedHits(mine, theirs []UnifiedHit) []UnifiedHit {
+	seen := make(map[string]bool, len(theirs))
+	for _, h := range theirs {
+		seen[namedHitKey(h)] = true
+	}
+	out := make([]UnifiedHit, 0, len(mine))
+	for _, h := range mine {
+		if k := namedHitKey(h); k != "" && seen[k] {
+			out = append(out, h)
+		}
+	}
+	return out
+}
+
+// namedHitKey names the object a named hit points at. Empty for a hit that
+// names nothing, which therefore never counts as shared.
+func namedHitKey(h UnifiedHit) string {
+	for _, id := range []string{h.DocUUID, h.TaskUUID, h.ContentUUID, h.ProjectUUID, h.ChannelUUID} {
+		if id != "" {
+			return h.ContentType + ":" + id
+		}
+	}
+	return ""
 }
 
 // namedHits turns global-search results into hits, keeping only named things

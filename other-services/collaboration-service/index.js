@@ -152,6 +152,7 @@ async function applyBufferedUpdates(documentName, ydoc) {
 const TOMBSTONE_PRUNE_AGE_MS = 10 * 60 * 1000
 
 import { TiptapTransformer } from '@hocuspocus/transformer'
+import { encodeState, savedStateFor } from './docState.js'
 import { generateHTML, generateJSON } from '@tiptap/html'
 import { COLLAB_EXTENSIONS } from './extensions.js'
 import { createAppendHandler } from './appendToDoc.js'
@@ -354,9 +355,18 @@ const server = new Server({
             const docBody = response.data?.data?.doc_body
 
             if (typeof docBody === 'string' && docBody.trim().length > 0) {
-                console.log(`[Collab] Loading existing content for ${id} (${docBody.length} chars)`);
-                const json = generateJSON(docBody, COLLAB_EXTENSIONS)
-                const ydoc = TiptapTransformer.toYdoc(json, 'default', COLLAB_EXTENSIONS)
+                // The state it was last saved with, while the stored body is
+                // still the one saved with it, so a browser holding that state
+                // syncs to the same document instead of doubling it
+                // (docState.js); else the body, converted.
+                let ydoc = savedStateFor(docBody, response.data?.data?.doc_yjs_state, response.data?.data?.doc_yjs_body_hash)
+                if (ydoc) {
+                    console.log(`[Collab] Loading saved state for ${id}`);
+                } else {
+                    console.log(`[Collab] Loading existing content for ${id} (${docBody.length} chars)`);
+                    const json = generateJSON(docBody, COLLAB_EXTENSIONS)
+                    ydoc = TiptapTransformer.toYdoc(json, 'default', COLLAB_EXTENSIONS)
+                }
                 await applyBufferedUpdates(data.documentName, ydoc)
                 return ydoc
             } else {
@@ -482,8 +492,20 @@ const server = new Server({
         try {
             html = generateHTML(json, COLLAB_EXTENSIONS)
         } catch (e) {
-            console.error('[Collab] HTML Generation failed:', e)
-            html = '<p>Error generating HTML</p>'
+            // Never save a placeholder over the document: it was saved as
+            // "<p>Error generating HTML</p>", replacing everything in it.
+            // Throwing keeps it in memory, and the save is tried again.
+            console.error(`[Collab] HTML generation failed for ${id}, not saving:`, e)
+            throw e
+        }
+        // Saved beside the body, so the next load opens the same document
+        // (docState.js). A state that won't encode is left out, and the next
+        // load rebuilds from the body as before.
+        let yjsState = ''
+        try {
+            yjsState = encodeState(data.document)
+        } catch (e) {
+            console.error(`[Collab] Failed to encode the state of ${id}:`, e.message)
         }
 
         console.log(`[Collab] Saving document ${id} to backend...`);
@@ -494,6 +516,7 @@ const server = new Server({
                 content: json,
                 textContent: getText(json),
                 htmlContent: html,
+                yjsState,
                 contributors,
             }, {
                 headers: {

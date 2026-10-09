@@ -20,6 +20,7 @@ import (
 
 	chatAdapter "github.com/akashc777/OneCamp/adapter/Chat"
 	aiBusiness "github.com/akashc777/OneCamp/business/AI"
+	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -49,15 +50,16 @@ var relatedSearch = func(ctx context.Context, sponsor uuid.UUID, text string) ([
 }
 
 // relatedElsewhere keeps the hits that are channel conversations in OTHER
-// channels (never a DM, never this channel), as one line each. Pure.
-func relatedElsewhere(hits []aiBusiness.UnifiedHit, channelID string, max int) []string {
+// public channels (never a DM, never this channel, never a channel public
+// says isn't public), as one line each. Pure, given public.
+func relatedElsewhere(hits []aiBusiness.UnifiedHit, channelID string, max int, public func(channelID string) bool) []string {
 	seen := map[string]bool{}
 	var out []string
 	for _, h := range hits {
 		if len(out) == max {
 			break
 		}
-		if h.ChannelUUID == "" || h.ChannelUUID == channelID || h.ChatGrpID != "" {
+		if h.ChannelUUID == "" || h.ChannelUUID == channelID || h.ChatGrpID != "" || !public(h.ChannelUUID) {
 			continue
 		}
 		snippet := strings.Join(strings.Fields(h.Snippet), " ")
@@ -75,6 +77,21 @@ func relatedElsewhere(hits []aiBusiness.UnifiedHit, channelID string, max int) [
 		out = append(out, where+": "+snippet)
 	}
 	return out
+}
+
+// publicChannelFor answers whether a channel is public, asked as the person
+// with userUUID, remembering each answer for the one run. A channel whose
+// privacy couldn't be read isn't public.
+func publicChannelFor(ctx context.Context, userUUID string) func(channelID string) bool {
+	seen := map[string]bool{}
+	return func(channelID string) bool {
+		if public, ok := seen[channelID]; ok {
+			return public
+		}
+		public, err := channelBusiness.IsPublic(ctx, userUUID, channelID)
+		seen[channelID] = err == nil && public
+		return seen[channelID]
+	}
 }
 
 // ambientPrivatePrefix starts a reply meant only for the sponsor.

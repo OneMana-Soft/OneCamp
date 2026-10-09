@@ -74,7 +74,7 @@ var sleepFn = func(ctx context.Context, d time.Duration) error {
 }
 
 // errAuth is returned for a token monday rejects outright.
-var errAuth = errors.New("monday.com rejected the API token; open monday.com → your avatar → Developers → My access tokens, copy a fresh personal API token, and reconnect")
+var errAuth error = &importProvider.TokenRejected{Msg: "monday.com rejected the API token; open monday.com → your avatar → Developers → My access tokens, copy a fresh personal API token, and reconnect"}
 
 // errServer marks a retryable 5xx.
 type errServer struct {
@@ -344,7 +344,7 @@ func rateLimitFrom(resp *http.Response, env envelope, errs []gqlError) *importPr
 		}
 	}
 	if normCode(reason) == "DAILYLIMITEXCEEDED" {
-		reason = "daily API call limit reached for this monday.com plan"
+		reason = "daily API limit for this plan is used up"
 	}
 	return &importProvider.ErrRateLimited{RetryAfter: retry, Reason: "monday.com " + reason}
 }

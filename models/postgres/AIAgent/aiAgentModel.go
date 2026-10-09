@@ -287,6 +287,12 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
+// sponsorPresent keeps an agent whose sponsor (created_by, whom it acts as)
+// has left the workspace out of what the trigger workers start. The runner
+// stops such an agent at its first step anyway (business/AIAgent agentOff.go);
+// this keeps its triggers from starting runs only to stop them.
+const sponsorPresent = ` AND EXISTS (SELECT 1 FROM users u WHERE u.id = ai_agents.created_by AND u.deleted_at IS NULL)`
+
 const agentColumns = `id, name, avatar_key, description, instructions, model_pref,
 	enabled_tools, trigger_type, trigger_config, scope, max_steps, is_active,
 	created_by, bot_user_id, run_count, last_run_at, last_error, created_at, updated_at, deleted_at, dm_able, autonomy, knowledge, skill_ids, max_daily_tokens, sandbox_daily_seconds, sandbox_daily_runs, run_in_background, ambient, ambient_keywords,
@@ -671,7 +677,7 @@ func ListDMable(ctx context.Context) ([]*AiAgent, error) {
 	defer cancel()
 
 	q := `SELECT ` + agentColumns + ` FROM ai_agents
-		WHERE dm_able=true AND is_active=true AND deleted_at IS NULL ORDER BY name ASC LIMIT 1000`
+		WHERE dm_able=true AND is_active=true AND deleted_at IS NULL` + sponsorPresent + ` ORDER BY name ASC LIMIT 1000`
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/ListDMable Failed err: %+v", err)
@@ -699,7 +705,7 @@ func ListAmbient(ctx context.Context) ([]*AiAgent, error) {
 	defer cancel()
 
 	q := `SELECT ` + agentColumns + ` FROM ai_agents
-		WHERE ambient=true AND is_active=true AND deleted_at IS NULL ORDER BY name ASC LIMIT 1000`
+		WHERE ambient=true AND is_active=true AND deleted_at IS NULL` + sponsorPresent + ` ORDER BY name ASC LIMIT 1000`
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/ListAmbient Failed err: %+v", err)
@@ -801,7 +807,7 @@ func ListActiveByTrigger(ctx context.Context, triggerType string) ([]*AiAgent, e
 	defer cancel()
 
 	q := `SELECT ` + agentColumns + ` FROM ai_agents
-		WHERE trigger_type=$1 AND is_active=true AND deleted_at IS NULL`
+		WHERE trigger_type=$1 AND is_active=true AND deleted_at IS NULL` + sponsorPresent
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q, triggerType)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/ListActiveByTrigger Failed err: %+v", err)

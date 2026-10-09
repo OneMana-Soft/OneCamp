@@ -216,7 +216,12 @@ type QueryFilter struct {
 	AccessibleProjects []string
 	AccessibleGrpIDs   []string
 	OwnerID            *uuid.UUID
-	Limit              int
+	// SourceType and CreatedBy narrow the visible items before the limit
+	// applies: only items from that source, and only items written by one of
+	// those people. Empty means any.
+	SourceType string
+	CreatedBy  []string
+	Limit      int
 }
 
 // List returns memory items visible under the permission filter, newest
@@ -248,6 +253,16 @@ func List(ctx context.Context, f QueryFilter) ([]*MemoryItem, error) {
 	if len(f.Statuses) > 0 {
 		ph, vals := inClause(&n, f.Statuses)
 		where = append(where, "status IN ("+ph+")")
+		args = append(args, vals...)
+	}
+	if f.SourceType != "" {
+		where = append(where, fmt.Sprintf("source_type = $%d", n))
+		args = append(args, f.SourceType)
+		n++
+	}
+	if len(f.CreatedBy) > 0 {
+		ph, vals := inClause(&n, f.CreatedBy)
+		where = append(where, "created_by_user_id::text IN ("+ph+")")
 		args = append(args, vals...)
 	}
 

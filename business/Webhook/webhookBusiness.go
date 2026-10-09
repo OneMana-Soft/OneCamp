@@ -90,6 +90,12 @@ func CheckWebhookRateLimit(webhookID string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	res := redisStore.AllowSlidingWindow(ctx, registry.WebhookRateLimit, []string{webhookID}, WebhookRateLimitPerMin, 60)
+	if res.Unchecked {
+		// The call failed: an outage after boot, when the client exists but
+		// Redis doesn't answer. Counted here, as with no client, rather than
+		// let through.
+		return checkWebhookRateLimitInMemory(webhookID)
+	}
 	if !res.Allowed {
 		webhookRateLimitedTotal.Inc()
 		return false
@@ -890,6 +896,11 @@ func ProcessIncomingMessage(ctx context.Context, webhook *webhookModel.Webhook, 
 	// subscribers still see the message. In-process listeners (the workflow
 	// engine) are NOT suppressed here intentionally: an incoming-webhook
 	// message is a legitimate workspace message that a workflow may react to.
+	//
+	// It names no author: the shared bot posted it, and the words are whoever
+	// holds the webhook's URL, or whatever wrote the alert or CI text it
+	// relays. Not the webhook's creator, who wrote none of it. So an AI agent
+	// the post reaches acts for nobody identified (business/AIAgent).
 	go DispatchEvent(appCtx, "post.created", map[string]interface{}{
 		"post_id":    res.PostUUID,
 		"channel_id": channelUUID.String(),

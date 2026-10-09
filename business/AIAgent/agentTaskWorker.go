@@ -664,7 +664,7 @@ func runOneAgentTask(ctx context.Context, t *model.AgentTask) {
 			resumeMsgs = nil // corrupt/older state: fall back to a fresh run
 		}
 	}
-	runCtx := WithAgentResumeState(WithAnotherSession(leaseCtx, t.Sessions < maxAgentTaskSessions), resumeMsgs, func(msgs []ai.ChatMessage) {
+	runCtx := WithAgentResumeState(withAgentDurableJob(WithAnotherSession(leaseCtx, t.Sessions < maxAgentTaskSessions)), resumeMsgs, func(msgs []ai.ChatMessage) {
 		if b, merr := json.Marshal(msgs); merr == nil {
 			commitAgentTaskState(ctx, t.Id, "checkpoint conversation", func(c context.Context) error {
 				return model.SaveAgentTaskMessages(c, t.Id, lease, string(b))
@@ -672,11 +672,15 @@ func runOneAgentTask(ctx context.Context, t *model.AgentTask) {
 		}
 	})
 	// Conversation scope for the memory tools, from the durable job's surface,
-	// so remember/forget work identically on a background run.
+	// so remember/forget work identically on a background run. The full surface
+	// too, so a change proposed from here (code_pr) is posted back to this
+	// thread rather than to the channel at large.
 	if surface.Kind == SurfaceChannelPost {
 		runCtx = WithAgentRunScope(runCtx, surface.ChannelID, "")
+		runCtx = WithAgentRunSurface(runCtx, surface)
 	} else if surface.Kind == SurfaceGroupChat || surface.Kind == SurfaceDM {
 		runCtx = WithAgentRunScope(runCtx, "", surface.GroupID)
+		runCtx = WithAgentRunSurface(runCtx, surface)
 	}
 	// Live progress: update the status comment as stages complete (throttled).
 	runCtx = WithAgentProgress(runCtx, func(tools []string) {
@@ -699,8 +703,18 @@ func runOneAgentTask(ctx context.Context, t *model.AgentTask) {
 	// The launch vocabulary did not survive the queue; the delegation hop did.
 	// Say who started this before the runner sees the generic trigger source.
 	runCtx = auditBusiness.WithInitiator(runCtx, initiatorForTask(t))
+	// Who the job is for: the person who asked for it, recorded on the row
+	// (run_as_user_id is the sponsor, whose identity the tools execute as). Every
+	// job that reaches the tool loop was asked for by someone — a mention, a DM,
+	// a task handed over, a follow-up — so a job with no recorded asker refuses
+	// whatever needs one instead of running with the sponsor's whole reach.
+	runCtx = askedBy(runCtx, jobRequester(t))
+	// What the person who asked wrote, carried at the end of the stored prompt
+	// (agentAskerWords.go), and taken off before the model sees it.
+	prompt, askerWords := splitAskerWords(t.Prompt)
+	runCtx = WithAgentAskerWords(runCtx, askerWords...)
 
-	outcome := RunAgent(runCtx, agent, "task_assignment", t.Prompt, false)
+	outcome := RunAgent(runCtx, agent, "task_assignment", prompt, false)
 	if outcome == nil {
 		// A stop unwinds the run context, so "no outcome" can also mean "a person
 		// stopped it" — settle that honestly instead of retrying stopped work.
@@ -721,6 +735,10 @@ func runOneAgentTask(ctx context.Context, t *model.AgentTask) {
 	// input). Checked once here, so the honest "stopped" message and terminal row
 	// happen exactly once whether the run stopped mid-step or had already
 	// finished when the request landed. Keeps whatever the run produced.
+	if outcome.StopReason == StopReasonAgentOff {
+		settleAgentOffWork(ctx, t, lease, outcome, runID, postStatus, notifyTrigger)
+		return
+	}
 	if leaseHold.StopAsked() || outcome.StopReason == StopReasonCanceled {
 		if settleStoppedAgentWork(ctx, t, lease, outcome.Result, runID, postStatus, notifyTrigger) {
 			return
@@ -834,6 +852,15 @@ func runOneAgentTask(ctx context.Context, t *model.AgentTask) {
 	}
 }
 
+// jobRequester is the person a durable job was asked for by, or "" when the
+// row does not say.
+func jobRequester(t *model.AgentTask) string {
+	if t == nil || t.TriggeredBy == nil || *t.TriggeredBy == uuid.Nil {
+		return ""
+	}
+	return t.TriggeredBy.String()
+}
+
 // stopDisposition is the durable action the worker takes for a RunStopped
 // outcome. Deriving it is pure logic (classifyStop), so it is unit-tested
 // without a DB; the worker then performs the matching state transition.
@@ -862,6 +889,10 @@ func classifyStop(stopReason, errText string) stopDisposition {
 		// lease-guarded, so a lost lease makes it a no-op.
 		return stopRetryTransient
 	case StopReasonStepLimit, StopReasonRunTokenLimit:
+		return stopFinalizePartial
+	case StopReasonAgentOff:
+		// Settled before classifying (settleAgentOffWork); never retried, as a
+		// retry would stop the same way.
 		return stopFinalizePartial
 	}
 	reason := strings.ToLower(errText)
@@ -1223,8 +1254,9 @@ func postAgentTaskStatus(ctx context.Context, agent *model.AiAgent, t *model.Age
 		return
 	}
 	// Tag the comment write as workflow-generated so the agent's own status
-	// comment never re-triggers the comment-resume listener (loop-safe).
-	ctx = helpers.WithWorkflowGenerated(ctx)
+	// comment never re-triggers the comment-resume listener (loop-safe), and as
+	// the agent's, so it is not copied onto a linked GitHub issue.
+	ctx = helpers.WithAgentWrite(helpers.WithWorkflowGenerated(ctx))
 	bot, berr := userBusiness.EnsureAgentBot(ctx, agent.Id, agent.Name, deref(agent.AvatarKey))
 	if berr != nil || bot == nil || bot.UUID == "" {
 		helpers.LogErrorWithContext(ctx, "agentTaskWorker: resolve agent principal failed (agent=%s): %v", agent.Id, berr)

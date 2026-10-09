@@ -57,7 +57,7 @@ func executeRunAnalysis(ctx context.Context, action ai.ProposedAction, userUUID 
 		return "", nil, fmt.Errorf("could not read AI settings")
 	}
 
-	actor, aerr := tableActor(ctx, userUUID)
+	ctx, actor, aerr := tableActor(ctx, userUUID)
 	if aerr != nil {
 		return "", nil, aerr
 	}

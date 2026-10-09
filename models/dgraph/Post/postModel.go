@@ -11,6 +11,10 @@ import (
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
 
+// ErrNotFound is a post read that found nothing: an answer, unlike a query
+// that failed. Its text is the one this read always gave.
+var ErrNotFound = errors.New("failed to get dgraph user")
+
 func CreateOrUpdatePost(ctx context.Context, query string, dgraphPost *dgraphStruct.DgraphPost, delStringJSON string) (postUID string, err error) {
 	txn := dgraphInit.DgraphClient.NewTxn()
 
@@ -125,7 +129,7 @@ func GetDgraphPostInfoByUUID(ctx context.Context, query string, variables map[st
 	}
 
 	if len(postsInfo.PostInfo) == 0 {
-		err = errors.New("failed to get dgraph user")
+		err = ErrNotFound
 		helpers.LogErrorWithContext(ctx,
 			"models/GetDgraphPostInfoByUUID failed to get dgraph post")
 

@@ -335,16 +335,6 @@ func stripComputed(fields []*model.Field, values map[string]interface{}) map[str
 	return values
 }
 
-// withoutComputedValues is stripComputed for a table, by id. It returns the
-// table's fields.
-func withoutComputedValues(ctx context.Context, tableID uuid.UUID, values map[string]interface{}) (map[string]interface{}, []*model.Field) {
-	fields, err := model.ListFields(ctx, tableID)
-	if err != nil {
-		return values, nil
-	}
-	return stripComputed(fields, values), fields
-}
-
 // How many fields a table can have of each kind worked out on every read,
 // for every row: formulas, rollups, and relations linking to tables (each
 // reads another table).

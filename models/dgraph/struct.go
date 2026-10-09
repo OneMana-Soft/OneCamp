@@ -176,7 +176,11 @@ type DgraphUser struct {
 	// above. is_bot alone cannot carry it: the assistant, an agent's principal
 	// and the AI-free automation bot are all is_bot, and describing them
 	// identically told users an agent could do things only the assistant does.
-	BotKind                  string                   `json:"user_bot_kind,omitempty"`
+	BotKind string `json:"user_bot_kind,omitempty"`
+	// Handle is the person's @handle (users.username), for the profile they
+	// read. Filled in when answering and never stored in the graph, like
+	// BotKind: the handle lives in Postgres, where it is unique.
+	Handle                   string                   `json:"user_handle,omitempty"`
 	Doc                      []*DgraphDoc             `json:"user_docs,omitempty"`
 	Board                    []*DgraphBoard           `json:"user_boards,omitempty"`
 	CreatedAt                *time.Time               `json:"user_created_at,omitempty"`
@@ -285,12 +289,18 @@ type DgraphMentions struct {
 }
 
 type DgraphDoc struct {
-	Uid              string           `json:"uid,omitempty"`
-	Uuid             string           `json:"doc_uuid,omitempty"`
-	DType            []string         `json:"dgraph.type,omitempty"`
-	Title            string           `json:"doc_title,omitempty"`
-	Body             string           `json:"doc_body,omitempty"`
-	Snippet          string           `json:"doc_snippet,omitempty"`
+	Uid     string   `json:"uid,omitempty"`
+	Uuid    string   `json:"doc_uuid,omitempty"`
+	DType   []string `json:"dgraph.type,omitempty"`
+	Title   string   `json:"doc_title,omitempty"`
+	Body    string   `json:"doc_body,omitempty"`
+	Snippet string   `json:"doc_snippet,omitempty"`
+	// The collaboration service's Yjs state of the doc, and the hash of the
+	// body it was saved with: it opens from the state while that body is still
+	// the stored one (other-services/collaboration-service/docState.js). Read
+	// by that service only.
+	YjsState         string           `json:"doc_yjs_state,omitempty"`
+	YjsBodyHash      string           `json:"doc_yjs_body_hash,omitempty"`
 	IsPrivate        *bool            `json:"doc_private,omitempty"`
 	MqttTopic        string           `json:"doc_mqtt_topic,omitempty"`
 	PublicComment    *bool            `json:"doc_public_comment,omitempty"`

@@ -280,7 +280,7 @@ func HandlePresignUpload(w http.ResponseWriter, r *http.Request) {
 	maxBytes := uploadCap()
 	if body.FileSize > maxBytes {
 		helpers.WriteJSON(w, http.StatusRequestEntityTooLarge, helpers.Envolope{
-			"error":     fmt.Sprintf("file exceeds IMPORT_MAX_BYTES (%d)", maxBytes),
+			"error":     uploadTooLarge(body.FileSize, maxBytes),
 			"max_bytes": maxBytes,
 		})
 		return
@@ -389,19 +389,15 @@ func HandleFinalizeUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if stat.Size <= 0 {
-		_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusFailed,
-			strPtr("failed"), strPtr("uploaded object is empty"))
+		_, _ = leavePending(ctx, jobId, importModels.StatusFailed, strPtr("uploaded object is empty"))
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "uploaded object is empty"})
 		return
 	}
 	if stat.Size > uploadCap() {
 		_ = minioInit.MinioClient.RemoveObject(ctx, bucket, *job.RawObjectKey, minio.RemoveObjectOptions{})
-		_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusFailed,
-			strPtr("failed"),
-			strPtr(fmt.Sprintf("uploaded object %d bytes exceeds IMPORT_MAX_BYTES (%d)",
-				stat.Size, uploadCap())))
+		_, _ = leavePending(ctx, jobId, importModels.StatusFailed, strPtr(uploadTooLarge(stat.Size, uploadCap())))
 		helpers.WriteJSON(w, http.StatusRequestEntityTooLarge, helpers.Envolope{
-			"error":     fmt.Sprintf("uploaded file exceeds IMPORT_MAX_BYTES (%d)", uploadCap()),
+			"error":     uploadTooLarge(stat.Size, uploadCap()),
 			"max_bytes": uploadCap(),
 			"actual":    stat.Size,
 		})
@@ -419,8 +415,7 @@ func HandleFinalizeUpload(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(job.Options, &opts)
 		if err := prov.Validate(ctx, job, opts); err != nil {
 			msg := err.Error()
-			_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusFailed,
-				strPtr("failed"), &msg)
+			_, _ = leavePending(ctx, jobId, importModels.StatusFailed, &msg)
 			helpers.LogWarnWithContext(ctx,
 				"Import.HandleFinalizeUpload validate failed provider=%s job=%s err=%+v",
 				provName, jobId, err)
@@ -433,22 +428,34 @@ func HandleFinalizeUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := importModels.UpdateStatus(ctx, jobId, importModels.StatusValidating,
-		strPtr("validating"), nil); err != nil {
-		if errors.Is(err, importModels.ErrConflictActiveJob) {
-			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
-				"error": "another import is already active for this provider/workspace",
-				"code":  "active_job",
-			})
-			return
-		}
+	moved, err := leavePending(ctx, jobId, importModels.StatusValidating, nil)
+	switch {
+	case errors.Is(err, importModels.ErrConflictActiveJob):
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+			"error": "another import is already active for this provider/workspace",
+			"code":  "active_job",
+		})
+		return
+	case err != nil:
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
+		return
+	case !moved:
+		p := importBusiness.JobChanged
+		helpers.WriteJSON(w, p.Status, helpers.Envolope{"error": p.Msg, "code": p.Code})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"job_id": jobId,
 		"size":   stat.Size,
 	})
+}
+
+// leavePending moves a job waiting for its upload on to status (its stage
+// named the same), and reports whether it did. From pending only: an import
+// discarded while its file uploaded was brought back to waiting, or failed,
+// by the upload finishing.
+func leavePending(ctx context.Context, jobId uuid.UUID, status string, errMsg *string) (bool, error) {
+	return importModels.UpdateStatusFrom(ctx, jobId, []string{importModels.StatusPending}, status, strPtr(status), errMsg)
 }
 
 // ─── Plan / Run / Cancel / Rollback / Get ──────────────────────────
@@ -470,9 +477,17 @@ func HandlePlan(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "job not found"})
 		return
 	}
-	if job.Status != importModels.StatusValidating && job.Status != importModels.StatusPlanned {
+	switch job.Status {
+	case importModels.StatusValidating, importModels.StatusPlanned:
+	case importModels.StatusFailed:
+		// Planned again: back to waiting first, or what stands in the way.
+		if problem := importBusiness.PlanAgain(ctx, job); problem != nil {
+			helpers.WriteJSON(w, problem.Status, helpers.Envolope{"error": problem.Msg, "code": problem.Code})
+			return
+		}
+	default:
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
-			"error": "plan can only be run on a validating or planned job",
+			"error": "Only an import waiting to be planned, or one that failed, can be planned.",
 			"code":  "invalid_status",
 		})
 		return
@@ -492,7 +507,20 @@ func HandlePlan(w http.ResponseWriter, r *http.Request) {
 	}
 	plan, err := importBusiness.BuildPlan(ctx, jobId)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": err.Error()})
+		if errors.Is(err, importModels.ErrJobChanged) {
+			p := importBusiness.JobChanged
+			helpers.WriteJSON(w, p.Status, helpers.Envolope{"error": p.Msg, "code": p.Code})
+			return
+		}
+		if errors.Is(err, importModels.ErrConflictActiveJob) {
+			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+				"error": "Another import of this workspace is waiting or running. Finish or discard it first.",
+				"code":  "active_job",
+			})
+			return
+		}
+		problem := importBusiness.DescribePlanError(ctx, job, err)
+		helpers.WriteJSON(w, problem.Status, helpers.Envolope{"error": problem.Msg, "code": problem.Code})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, plan)
@@ -539,20 +567,37 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 	if body.PriorityMappings != nil {
 		_ = importModels.SetPriorityMappings(ctx, jobId, body.PriorityMappings)
 	}
-	if err := importModels.UpdateStatus(ctx, jobId, importModels.StatusRunning,
-		strPtr("queued"), nil); err != nil {
-		if errors.Is(err, importModels.ErrConflictActiveJob) {
-			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
-				"error": "another import is already active for this provider/workspace",
-				"code":  "active_job",
-			})
-			return
-		}
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
+	if !startRunning(w, r, jobId, []string{importModels.StatusPlanned, importModels.StatusFailed}) {
 		return
 	}
 	go importBusiness.RunImport(context.Background(), jobId, user)
 	helpers.WriteJSON(w, http.StatusAccepted, helpers.Envolope{"job_id": jobId})
+}
+
+// startRunning moves the job to running from one of from, writing why not
+// when it can't: its label taken by another import, or the job changed in the
+// meantime. Reports whether the job is running now.
+func startRunning(w http.ResponseWriter, r *http.Request, jobId uuid.UUID, from []string) bool {
+	started, err := importModels.StartRunning(r.Context(), jobId, from)
+	switch {
+	case errors.Is(err, importModels.ErrConflictActiveJob):
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+			"error": "Another import of this workspace is waiting or running. Finish or discard it first.",
+			"code":  "active_job",
+		})
+		return false
+	case err != nil:
+		helpers.LogErrorWithContext(r.Context(), "Import.startRunning job=%s err=%+v", jobId, err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"error": "Couldn't start the import. Try again."})
+		return false
+	case !started:
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+			"error": "This import changed in the meantime. Refresh and try again.",
+			"code":  "invalid_status",
+		})
+		return false
+	}
+	return true
 }
 
 // HandleCancel signals a running import to stop.
@@ -655,6 +700,82 @@ func HandleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, jobToView(ctx, j))
+}
+
+// HandleImportPeople returns who an import brought across that the admin can
+// invite now, how many it can't and why, and the plan's room for them. The
+// invitations themselves go through the workspace's invitation endpoint, one
+// per person, so each has the seat check, the email and the link every
+// invitation has.
+func HandleImportPeople(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+		return
+	}
+	if job, err := importModels.GetJob(ctx, jobId); err != nil || job == nil {
+		if errors.Is(err, importModels.ErrJobNotFound) {
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "This import is no longer here."})
+			return
+		}
+		helpers.LogErrorWithContext(ctx, "Import.HandleImportPeople get job=%s err=%+v", jobId, err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"error": "Couldn't load the people from this import. Try again."})
+		return
+	}
+	people, err := importBusiness.PeopleToInvite(ctx, jobId)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "Import.HandleImportPeople job=%s err=%+v", jobId, err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"error": "Couldn't load the people from this import. Try again."})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, people)
+}
+
+// HandleImportOutcomes returns how the caller's recent imports ended, the ones
+// they haven't dismissed: what the admin banner shows.
+func HandleImportOutcomes(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	user, ok := requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	outcomes, err := importBusiness.OutcomesFor(ctx, user.UserPostgresInfo.Id, time.Now())
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "Import.HandleImportOutcomes err=%+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"error": "Couldn't load your imports. Try again."})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"outcomes": outcomes})
+}
+
+// HandleOutcomeSeen dismisses how an import ended, for the admin who started
+// it, on every device they use.
+func HandleOutcomeSeen(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	user, ok := requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+		return
+	}
+	mine, err := importBusiness.MarkOutcomeSeen(ctx, jobId, user.UserPostgresInfo.Id, time.Now())
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "Import.HandleOutcomeSeen job=%s err=%+v", jobId, err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"error": "Couldn't dismiss that. Try again."})
+		return
+	}
+	if !mine {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "This import is no longer here."})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"ok": true})
 }
 
 // HandleListErrors returns paginated error log entries.
@@ -772,14 +893,26 @@ func HandleConnect(w http.ResponseWriter, r *http.Request) {
 		md, _ := json.Marshal(body.Metadata)
 		tok.Metadata = md
 	}
+	// Ask the provider what the token can see before saving it: a token it
+	// refuses, or a site that can't be reached, is said now, in words, instead
+	// of being saved as "connected" and failing at plan time.
+	items, problem := importBusiness.TestConnection(ctx, importProvider.Get(provName), user.UserPostgresInfo.Id.String(), tok, siteOf(tok.Metadata))
+	if problem != nil {
+		helpers.LogWarnWithContext(ctx, "Import.HandleConnect test failed provider=%s code=%s", provName, problem.Code)
+		helpers.WriteJSON(w, problem.Status, helpers.Envolope{"error": problem.Msg, "code": problem.Code})
+		return
+	}
 	if err := importModels.SaveToken(ctx, tok); err != nil {
 		helpers.LogErrorWithContext(ctx, "Import.HandleConnect SaveToken err: %+v", err)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": "could not save token"})
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": "Couldn't save the connection. Try again."})
 		return
 	}
 	// New token = potentially different scope/account, so the cached
-	// discovery list is stale. Drop it.
+	// discovery list is stale: replace it with what the test just saw.
 	_ = redisStore.Delete(ctx, registry.ImportDiscover, []string{provName, user.UserPostgresInfo.Id.String()})
+	if items != nil {
+		_ = redisStore.SetJSON(ctx, registry.ImportDiscover, []string{provName, user.UserPostgresInfo.Id.String()}, items)
+	}
 	importProvider.InvalidateImportTokenSource(provName, user.UserPostgresInfo.Id)
 	helpers.WriteJSON(w, http.StatusOK, importAdapter.ConnectResponse{
 		Provider:          provName,
@@ -856,6 +989,25 @@ func jobToView(ctx context.Context, j *importModels.Job) importAdapter.JobView {
 	return view
 }
 
+// siteOf is the address a self-addressed provider (Jira) was connected to,
+// from its token's metadata, for saying which address couldn't be reached.
+func siteOf(metadata json.RawMessage) string {
+	var md struct {
+		SiteURL string `json:"site_url"`
+	}
+	if len(metadata) > 0 {
+		_ = json.Unmarshal(metadata, &md)
+	}
+	return strings.TrimRight(strings.TrimSpace(md.SiteURL), "/")
+}
+
+// uploadTooLarge is the answer for an upload over the cap, in sizes people
+// read.
+func uploadTooLarge(size, limit int64) string {
+	return fmt.Sprintf("That file is %s, and this server takes uploads up to %s. "+
+		"Whoever runs it can raise the limit (IMPORT_MAX_BYTES).", helpers.ReadableBytes(size), helpers.ReadableBytes(limit))
+}
+
 func uploadCap() int64 {
 	if v := os.Getenv("IMPORT_MAX_BYTES"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
@@ -919,17 +1071,30 @@ func HandleDiscover(w http.ResponseWriter, r *http.Request) {
 
 	tok, err := importModels.LoadToken(ctx, provName, user.UserPostgresInfo.Id)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"error": "no token saved for this provider; connect first",
-			"code":  "no_token",
-		})
+		// No saved token, or one that can't be read any more, is
+		// "not_connected", which the card answers with Reconnect: it was
+		// "no_token", which the card didn't know, so the list showed an error
+		// and nothing to do. A database that didn't answer is a 503.
+		if !errors.Is(err, importModels.ErrTokenNotFound) && !errors.Is(err, importModels.ErrTokenUnreadable) {
+			helpers.LogErrorWithContext(ctx, "Import discover could not load the token provider=%s err=%+v", provName, err)
+			helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{
+				"error": "Couldn't read the saved connection just now. Try again in a moment.",
+				"code":  "unavailable",
+			})
+			return
+		}
+		problem := importBusiness.DescribeProviderError(provName, "", err)
+		helpers.WriteJSON(w, problem.Status, helpers.Envolope{"error": problem.Msg, "code": problem.Code})
 		return
 	}
 	items, err := disc.Discover(ctx, user.UserPostgresInfo.Id.String(), tok)
 	if err != nil {
-		// Surface auth-flavoured errors as 401 so the FE prompts to reconnect.
-		helpers.LogWarnWithContext(ctx, "Import discover failed provider=%s err=%+v", provName, err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"error": err.Error()})
+		// Said in words, with a code the web app turns into "Reconnect" for a
+		// refused token. Never a 401: the web app reads that as its own
+		// session ending.
+		problem := importBusiness.DescribeProviderError(provName, siteOf(tok.Metadata), err)
+		helpers.LogWarnWithContext(ctx, "Import discover failed provider=%s code=%s", provName, problem.Code)
+		helpers.WriteJSON(w, problem.Status, helpers.Envolope{"error": problem.Msg, "code": problem.Code})
 		return
 	}
 
@@ -988,9 +1153,7 @@ func HandleRetryFailedChunks(w http.ResponseWriter, r *http.Request) {
 	// Flip job to running and kick a fresh orchestrator goroutine. The
 	// orchestrator picks up only the (now-reset) pending chunks for
 	// each stage, so completed work isn't redone.
-	if err := importModels.UpdateStatus(ctx, jobId, importModels.StatusRunning,
-		strPtr("queued"), nil); err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
+	if !startRunning(w, r, jobId, []string{importModels.StatusFailed, importModels.StatusCancelled, importModels.StatusCompleted}) {
 		return
 	}
 	go importBusiness.RunImport(context.Background(), jobId, user)

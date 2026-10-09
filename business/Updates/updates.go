@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	"github.com/akashc777/OneCamp/helpers"
 )
 
@@ -77,7 +78,7 @@ func Check(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	return buildStatus(helpers.ReleaseVersion, byLine, managed(), releasesHost(), at), nil
+	return buildStatus(helpers.ReleaseVersion, byLine, settingsBusiness.Managed(), releasesHost(), at), nil
 }
 
 // latestByLine returns the current release per edition, from the cache when
@@ -108,10 +109,6 @@ func buildStatus(running string, byLine map[string]string, isManaged bool, host 
 		s.UpdateAvailable = helpers.CompareReleaseTags(s.Latest, s.Running) > 0
 	}
 	return s
-}
-
-func managed() bool {
-	return strings.EqualFold(strings.TrimSpace(os.Getenv("ONECAMP_MANAGED")), "true")
 }
 
 // releasesHost is the host the release list comes from, which also serves the

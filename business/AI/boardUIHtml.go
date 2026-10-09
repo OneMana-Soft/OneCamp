@@ -11,11 +11,11 @@ package business
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
 	ai "github.com/akashc777/OneCamp/services/AI"
+	"golang.org/x/net/html"
 )
 
 const (
@@ -241,24 +241,118 @@ func extractHTMLBody(s string) string {
 	return strings.TrimSpace(s)
 }
 
+// sanitizeGeneratedHTML keeps a generated screen's design and drops whatever
+// in it could act: script-like elements with their content, every on* handler,
+// and any URL that isn't a web, mail, phone, relative or data-image one.
+//
+// The markup is a model's, so it's untrusted, and the preview frame runs
+// scripts (it needs Tailwind's) with the app's origin (the PNG export reads
+// it), so the frame's CSP is what stops inline script there. This is the
+// layer under it, and what Copy and Download HTML hand out. It reads the
+// markup with an HTML tokenizer: the patterns it replaces missed a handler
+// written after a "/" or a closing quote (<img/onerror=...>,
+// <img src="x"onerror=...>), and a scheme behind a character reference.
+func sanitizeGeneratedHTML(s string) string {
+	z := html.NewTokenizer(strings.NewReader(s))
+	var b strings.Builder
+	dropping := "" // the element whose content is being dropped
+	for {
+		tt := z.Next()
+		switch tt {
+		case html.ErrorToken: // io.EOF, or input the tokenizer gave up on
+			return strings.TrimSpace(b.String())
+		case html.StartTagToken, html.SelfClosingTagToken, html.EndTagToken:
+			tok := z.Token()
+			name := strings.ToLower(tok.Data)
+			if dropping != "" {
+				if tt == html.EndTagToken && name == dropping {
+					dropping = ""
+				}
+				continue
+			}
+			if droppedWithContent[name] {
+				if tt == html.StartTagToken {
+					dropping = name
+				}
+				continue
+			}
+			if droppedTag[name] {
+				continue
+			}
+			if tt != html.EndTagToken {
+				tok.Attr = safeAttrs(tok.Attr)
+			}
+			b.WriteString(tok.String())
+		case html.TextToken:
+			if dropping == "" {
+				// Raw, not re-escaped: a <style> block's CSS must keep its ">"
+				// selectors. A text token can't hold a tag; the tokenizer
+				// ended it at the next one.
+				b.Write(z.Raw())
+			}
+		}
+		// Comments and doctypes are dropped.
+	}
+}
+
 var (
-	reScriptBlock = regexp.MustCompile(`(?is)<script.*?</script>`)
-	reScriptOpen  = regexp.MustCompile(`(?is)</?script[^>]*>`)
-	reIframeBlock = regexp.MustCompile(`(?is)<iframe.*?</iframe>`)
-	reIframeOpen  = regexp.MustCompile(`(?is)</?iframe[^>]*>`)
-	reOnAttr      = regexp.MustCompile(`(?is)\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)`)
-	reJsURL       = regexp.MustCompile(`(?is)(href|src)\s*=\s*("javascript:[^"]*"|'javascript:[^']*')`)
+	// droppedWithContent go with everything inside them.
+	droppedWithContent = map[string]bool{
+		"script": true, "iframe": true, "frame": true, "frameset": true,
+		"object": true, "applet": true, "noembed": true, "noframes": true,
+	}
+	// droppedTag go alone: they have no content, or none worth dropping.
+	droppedTag = map[string]bool{"embed": true, "base": true, "meta": true, "link": true}
+	// urlAttrs hold a URL; it's kept only when safeDesignURL says so.
+	urlAttrs = map[string]bool{
+		"href": true, "src": true, "xlink:href": true, "action": true, "formaction": true,
+		"poster": true, "background": true, "cite": true, "data": true, "longdesc": true,
+	}
+	// droppedAttrs carry markup or URLs a design has no use for.
+	droppedAttrs = map[string]bool{"srcdoc": true, "srcset": true, "ping": true, "manifest": true, "codebase": true}
 )
 
-// sanitizeGeneratedHTML strips active content. This is defense in depth: the
-// client renders the markup in an iframe with scripts disabled via sandbox, so
-// even unsanitized script could not execute, but we remove it regardless.
-func sanitizeGeneratedHTML(s string) string {
-	s = reScriptBlock.ReplaceAllString(s, "")
-	s = reScriptOpen.ReplaceAllString(s, "")
-	s = reIframeBlock.ReplaceAllString(s, "")
-	s = reIframeOpen.ReplaceAllString(s, "")
-	s = reOnAttr.ReplaceAllString(s, "")
-	s = reJsURL.ReplaceAllString(s, `$1="#"`)
-	return strings.TrimSpace(s)
+// safeAttrs is attrs without handlers, the attributes in droppedAttrs, and
+// URLs safeDesignURL refuses. The tokenizer has already decoded character
+// references in the values.
+func safeAttrs(attrs []html.Attribute) []html.Attribute {
+	out := attrs[:0]
+	for _, a := range attrs {
+		key := strings.ToLower(a.Key)
+		if a.Namespace != "" {
+			key = strings.ToLower(a.Namespace) + ":" + key
+		}
+		switch {
+		case strings.HasPrefix(key, "on"), droppedAttrs[key]:
+			continue
+		case urlAttrs[key] && !safeDesignURL(key, a.Val):
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// safeDesignURL reports whether a URL may stay in a design: http, https,
+// mailto, tel, or no scheme at all (a relative path or a #fragment); and, for
+// an image's src or poster, a data:image URL. The scheme is read with every
+// control character and space taken out, as a browser drops them. Pure.
+func safeDesignURL(attr, v string) bool {
+	clean := strings.ToLower(strings.Map(func(r rune) rune {
+		if r <= ' ' || r == 0x7f || r == 0xa0 || r == 0xad || r == 0xfeff || (r >= 0x2000 && r <= 0x200f) {
+			return -1
+		}
+		return r
+	}, v))
+	colon := strings.IndexByte(clean, ':')
+	if colon < 0 || strings.ContainsAny(clean[:colon], "/?#") {
+		return true // no scheme
+	}
+	switch clean[:colon] {
+	case "http", "https", "mailto", "tel":
+		return true
+	case "data":
+		return (attr == "src" || attr == "poster") && strings.HasPrefix(clean, "data:image/")
+	}
+	return false
 }

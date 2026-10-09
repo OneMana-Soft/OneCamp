@@ -10,7 +10,6 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -47,7 +46,7 @@ func Record(r *http.Request, action, category, summary string, metadata map[stri
 		Category:  category,
 		Summary:   summary,
 		ActorKind: ActorHuman,
-		IPAddress: clientIP(r),
+		IPAddress: helpers.ClientIP(r),
 		UserAgent: truncate(r.UserAgent(), 512),
 	}
 
@@ -156,27 +155,6 @@ func EntriesToCSV(entries []*auditModel.AuditEntry) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
-}
-
-// clientIP mirrors middleware/loginRateLimit.clientIP: trust proxy headers only
-// when TRUST_PROXY_HEADERS=true (behind a known LB), else use RemoteAddr.
-func clientIP(r *http.Request) string {
-	if strings.EqualFold(os.Getenv("TRUST_PROXY_HEADERS"), "true") {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if comma := strings.IndexByte(xff, ','); comma > 0 {
-				return strings.TrimSpace(xff[:comma])
-			}
-			return strings.TrimSpace(xff)
-		}
-		if xrip := r.Header.Get("X-Real-IP"); xrip != "" {
-			return strings.TrimSpace(xrip)
-		}
-	}
-	addr := r.RemoteAddr
-	if i := strings.LastIndexByte(addr, ':'); i > 0 {
-		return addr[:i]
-	}
-	return addr
 }
 
 func truncate(s string, n int) string {

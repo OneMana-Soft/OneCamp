@@ -80,9 +80,11 @@ func codePRSurface(s Surface) codepr.Surface {
 // (via codepr.SourceID + the queue's ON CONFLICT), so a duplicate @mention or a
 // retry never opens two conflicting PRs. Returns created=false when an open job
 // already existed. agentID may be uuid.Nil (an assistant/API trigger with no
-// agent); owner is whose permissions the run uses; triggeredBy (optional) is the
-// human to notify. MaxAttempts is 1: a coding run reaches a terminal, honest
-// outcome, and must never auto-retry into a duplicate PR.
+// agent); owner is the person the change is for, whose GitHub account pushes
+// it; triggeredBy (optional) is the person who asked, notified as it goes, and
+// the account a follow-up by someone else pushes with. MaxAttempts is 1: a
+// coding run reaches a terminal, honest outcome, and must never auto-retry into
+// a duplicate PR.
 func EnqueueCodePRTask(ctx context.Context, agentID, owner uuid.UUID, triggeredBy *uuid.UUID, surface Surface, instruction string) (bool, error) {
 	instruction = strings.TrimSpace(instruction)
 	if instruction == "" {
@@ -113,7 +115,9 @@ func EnqueueCodePRTask(ctx context.Context, agentID, owner uuid.UUID, triggeredB
 // coding job inline — it enqueues a durable background job and returns an honest
 // "on it" acknowledgement, so the agent's turn stays fast and the PR arrives in
 // the thread when ready. Gated on the feature being enabled. Recovers the acting
-// agent + reply surface from the run context (best-effort).
+// agent + reply surface from the run context, or from the approved proposal it
+// is executing (best-effort). The job is for the person who asked, and pushes
+// with their GitHub account (codePRFor).
 func executeCodePRTool(ctx context.Context, action ai.ProposedAction, userUUID string) (string, map[string]string, error) {
 	if !ai.CodePREnabled() {
 		return "Code pull requests aren't enabled in this workspace. An admin can turn them on under AI settings.", nil, nil
@@ -130,20 +134,14 @@ func executeCodePRTool(ctx context.Context, action ai.ProposedAction, userUUID s
 	// unparseable value is ignored (never corrupts the instruction); access is
 	// still verified per-run downstream.
 	instruction = codePRComposeInstruction(action.Params["repo"], instruction)
-	owner, err := uuid.Parse(strings.TrimSpace(userUUID))
+	owner, err := codePRFor(ctx, userUUID)
 	if err != nil {
-		return "", nil, fmt.Errorf("couldn't resolve the acting user for the coding task")
+		return "", nil, err
 	}
 
-	agentID := uuid.Nil
-	if aid := ai.AgentBudgetID(ctx); aid != "" {
-		if p, perr := uuid.Parse(aid); perr == nil {
-			agentID = p
-		}
-	}
-	surface := agentRunSurfaceFromCtx(ctx)
-	// The person who asked is, on a mention/DM run, the acting owner — notify
-	// them when the PR is ready or the run blocks. Best-effort.
+	agentID, surface := codePRRunContext(ctx, action)
+	// The person the change is for asked for it: they are told when the pull
+	// request is ready or the run needs them.
 	triggeredBy := &owner
 
 	created, eerr := EnqueueCodePRTask(ctx, agentID, owner, triggeredBy, surface, instruction)
@@ -161,6 +159,74 @@ func executeCodePRTool(ctx context.Context, action ai.ProposedAction, userUUID s
 		return "I'm already working on that change — I'll post the pull request here as soon as it's ready.", terminal, nil
 	}
 	return "On it — I'll make the change in an isolated sandbox, verify it against the repo's build and tests, and open a pull request here for you to review. I'll post the link when it's ready.", terminal, nil
+}
+
+// codePRFor is the person a code change is for, and so the GitHub account it is
+// pushed with: the person who asked for the run when that is not the agent's
+// sponsor, otherwise the person executing the call (the sponsor in their own or
+// an unattended run, or whoever approved the proposal). Never the sponsor on
+// someone else's behalf, which is how a teammate's request used to push with
+// the sponsor's credential.
+func codePRFor(ctx context.Context, actingUserUUID string) (uuid.UUID, error) {
+	who := actingUserUUID
+	if requester, _, forOther := ai.RunRequester(ctx); forOther {
+		who = requester
+	}
+	id, err := uuid.Parse(strings.TrimSpace(who))
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("couldn't tell who this change is for, so no pull request was started")
+	}
+	return id, nil
+}
+
+// codePRRunContext recovers the agent and the reply thread a code_pr call
+// belongs to. In a live run both are on the context. For an approved proposal
+// they are not: the agent comes from the stored proposal, and the thread from
+// the surface the runner stamped on it when it proposed (ProposalSurfaceParam),
+// which is trusted only on that path.
+func codePRRunContext(ctx context.Context, action ai.ProposedAction) (uuid.UUID, Surface) {
+	if aid := ai.AgentBudgetID(ctx); aid != "" {
+		agentID, _ := uuid.Parse(aid)
+		return agentID, agentRunSurfaceFromCtx(ctx)
+	}
+	if aid, ok := ai.ApprovedAgentProposal(ctx); ok {
+		agentID, _ := uuid.Parse(aid)
+		surface := Surface{Kind: SurfaceTask}
+		if raw := strings.TrimSpace(action.Params[ai.ProposalSurfaceParam]); raw != "" {
+			surface = DecodeSurface(raw)
+		}
+		return agentID, surface
+	}
+	return uuid.Nil, agentRunSurfaceFromCtx(ctx)
+}
+
+// codePRNeedsApproval reports whether a code_pr call must wait for a person:
+// always under approval or plan autonomy, and otherwise unless the deployment
+// opted out of the external-effect backstop (code_pr is ExternalEffect).
+func codePRNeedsApproval(autonomy string) bool {
+	return autonomy == model.AutonomyApproval || autonomy == model.AutonomyPlan || unattendedApprovalRequired(codePRToolName)
+}
+
+// codePRProposal is the approval request for a code_pr call: proposed to the
+// person whose GitHub account the change would be pushed with (the asker, or
+// the sponsor when nobody else asked), carrying the thread the run is working
+// in so the pull request is posted back there once approved. A model-supplied
+// value for that parameter is replaced, never trusted.
+func codePRProposal(ctx context.Context, agent *model.AiAgent, a ai.ProposedAction) (uuid.UUID, map[string]string, error) {
+	approver, err := codePRFor(ctx, agent.CreatedBy.String())
+	if err != nil {
+		return uuid.Nil, nil, err
+	}
+	params := make(map[string]string, len(a.Params)+1)
+	for k, v := range a.Params {
+		if k != ai.ProposalSurfaceParam {
+			params[k] = v
+		}
+	}
+	if enc, eerr := EncodeSurface(agentRunSurfaceFromCtx(ctx)); eerr == nil {
+		params[ai.ProposalSurfaceParam] = enc
+	}
+	return approver, params, nil
 }
 
 // codePRRepoParamRe validates a `repo` tool param as a GitHub "owner/name" slug

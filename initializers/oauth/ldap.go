@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // InitLDAP performs config sanity-checks at boot when LDAP_ENABLED=true.
@@ -15,7 +17,7 @@ import (
 // when required env is missing. Caller should log + continue (parity with
 // InitOAuth / InitGenericOIDC behaviour).
 func InitLDAP() error {
-	if !strings.EqualFold(os.Getenv("LDAP_ENABLED"), "true") {
+	if !helpers.EnvFlag("LDAP_ENABLED") {
 		return nil
 	}
 

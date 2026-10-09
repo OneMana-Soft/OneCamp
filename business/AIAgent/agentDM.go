@@ -9,8 +9,9 @@ package business
 // principal) lives in the AICoworker package, which already owns the chat.created
 // plumbing; this file provides the agent-side lookup and run so AIAgent stays
 // free of a chat-package dependency. The runner executes AS the agent's owner
-// with per-call permission re-checks (the same envelope as a mention run), so a
-// DM-able agent never becomes an unscoped escalation path.
+// with per-call permission re-checks (the same envelope as a mention run), and
+// is bounded by what the person DMing it can reach too (agentRequester.go), so
+// a DM-able agent never lends its owner's access to whoever messages it.
 
 import (
 	"context"
@@ -134,9 +135,8 @@ const maxDMTurnsPerConversation = 4
 // senderID + groupID also drive multi-turn continuity: the agent is fed the
 // DM's recent transcript (including its own earlier replies), read AS THE ASKER
 // (a participant who legitimately sees the DM) — never as the agent owner, who
-// is usually not in the DM. The agent's tool actions still execute within its
-// owner envelope; only the read-only context is asker-scoped, so there is no
-// confused-deputy and no third party can be shown the DM.
+// is usually not in the DM. The run is for the sender: its tools execute as the
+// owner but reach only what the sender can reach as well.
 func RunAgentDMReply(ctx context.Context, a *model.AiAgent, senderID, groupID, text, imageContext string) string {
 	if !dmConversationLock.Acquire(groupID, maxDMTurnsPerConversation) {
 		// Backlog full for this DM (the member is flooding faster than the
@@ -145,6 +145,7 @@ func RunAgentDMReply(ctx context.Context, a *model.AiAgent, senderID, groupID, t
 	}
 	defer dmConversationLock.Release(groupID)
 
+	ctx = WithAgentAskerWords(askedBy(ctx, senderID), text)
 	prompt := dmPromptWithContext(ctx, senderID, groupID, text)
 	if strings.TrimSpace(imageContext) != "" {
 		prompt += imageContext
@@ -178,7 +179,7 @@ func EnqueueDMRunIfBackground(ctx context.Context, a *model.AiAgent, senderID, g
 	if strings.TrimSpace(imageContext) != "" {
 		prompt += imageContext
 	}
-	return EnqueueDurableAgentRun(ctx, a, Surface{Kind: SurfaceDM, GroupID: groupID, MessageID: messageID}, prompt, senderID)
+	return EnqueueDurableAgentRun(WithAgentAskerWords(ctx, text), a, Surface{Kind: SurfaceDM, GroupID: groupID, MessageID: messageID}, prompt, senderID)
 }
 
 // dmPromptWithContext enriches the DM run prompt with the conversation's recent

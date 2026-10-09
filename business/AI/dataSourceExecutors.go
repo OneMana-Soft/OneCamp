@@ -51,6 +51,20 @@ func executeListDataSources(ctx context.Context, _ ai.ProposedAction, userUUID s
 	if lerr != nil {
 		return "", nil, fmt.Errorf("failed to list data sources")
 	}
+	// Only the sources the asker may query too, when someone else asked.
+	queryable, err := askerDataSources(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	if queryable != nil {
+		kept := items[:0:0]
+		for _, d := range items {
+			if queryable[d.Id] {
+				kept = append(kept, d)
+			}
+		}
+		items = kept
+	}
 	if len(items) == 0 {
 		return "There are no external data sources you can query.", nil, nil
 	}

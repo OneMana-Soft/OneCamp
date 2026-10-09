@@ -36,7 +36,10 @@ func agentNativeToolsEnabled() bool {
 // agent on the native path can still pause for a human or checkpoint progress —
 // capabilities that are otherwise injected as text-prompt directives and would
 // be unavailable once the text tool prompt is dropped for native mode.
-func nativeControlToolSpecs(scoped bool) []ai.ToolSpec {
+//
+// progress is false for a run someone other than the sponsor asked for, which
+// may not write the notes every run of the agent reads (see the runner).
+func nativeControlToolSpecs(scoped, progress bool) []ai.ToolSpec {
 	specs := []ai.ToolSpec{
 		{
 			Name:        blockerToolName, // "needs_human"
@@ -61,7 +64,9 @@ func nativeControlToolSpecs(scoped bool) []ai.ToolSpec {
 				"required": []string{"reason"},
 			},
 		},
-		{
+	}
+	if progress {
+		specs = append(specs, ai.ToolSpec{
 			Name:        progressToolName, // "save_progress"
 			Description: "Save a concise note of what is done and what remains, to carry progress across runs. Saves silently; you then continue.",
 			Parameters: map[string]interface{}{
@@ -74,7 +79,7 @@ func nativeControlToolSpecs(scoped bool) []ai.ToolSpec {
 				},
 				"required": []string{"notes"},
 			},
-		},
+		})
 	}
 	// Conversational memory is only meaningful when the run has a channel/DM to
 	// scope it to; advertise it only then so a scheduled/manual run doesn't

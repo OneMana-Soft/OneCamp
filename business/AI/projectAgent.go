@@ -42,6 +42,12 @@ func executeListProjects(ctx context.Context, action ai.ProposedAction, userUUID
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to list projects: %w", err)
 	}
+	// Asked for by someone other than the sponsor: only the projects they are
+	// in too. A list takes no id the runner could check, so it is narrowed here.
+	asker, err := askerView(ctx)
+	if err != nil {
+		return "", nil, err
+	}
 	if dgraphUser == nil || len(dgraphUser.Projects) == 0 {
 		return "You are not a member of any projects.", nil, nil
 	}
@@ -65,6 +71,9 @@ func executeListProjects(ctx context.Context, action ai.ProposedAction, userUUID
 		}
 		// Skip soft-deleted/archived projects.
 		if p.DeletedAt != nil && p.DeletedAt.Year() > 1970 {
+			continue
+		}
+		if asker != nil && !asker.projects[p.Uuid] {
 			continue
 		}
 		name := strings.TrimSpace(p.Name)
@@ -160,6 +169,20 @@ func executeListTeams(ctx context.Context, action ai.ProposedAction, userUUID st
 	teams, err := teamBusiness.GetDgraphTeamListByUserDgraphUID(ctx, actingUser.Uid)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to list teams: %w", err)
+	}
+	// Narrowed to the asker's teams too, for the same reason as list_projects.
+	asker, err := askerView(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	if asker != nil {
+		kept := teams[:0:0]
+		for _, t := range teams {
+			if t != nil && asker.teams[t.Uuid] {
+				kept = append(kept, t)
+			}
+		}
+		teams = kept
 	}
 	if len(teams) == 0 {
 		return "You are not a member of any teams.", nil, nil

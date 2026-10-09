@@ -70,6 +70,7 @@ func handleTaskStatusChanged(ctx context.Context, data map[string]interface{}) {
 		}
 		runWorkflow(ctx, cw, triggerEvent{
 			channelID:      cw.channelID,
+			projectID:      move.ProjectID,
 			text:           vars["task"],
 			targetUserUUID: str("updated_by_uuid"),
 			vars:           vars,

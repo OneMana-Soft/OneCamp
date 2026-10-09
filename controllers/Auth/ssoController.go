@@ -7,9 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 
+	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	business "github.com/akashc777/OneCamp/business/User"
 	domain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -20,6 +20,7 @@ import (
 	samlService "github.com/akashc777/OneCamp/services/SAML"
 	oidc "github.com/coreos/go-oidc/v3/oidc"
 	saml "github.com/crewjam/saml"
+	"github.com/google/uuid"
 	"golang.org/x/oauth2"
 )
 
@@ -36,7 +37,8 @@ import (
 //  2. Resolve LDAP config (single-tenant today; per-org tomorrow).
 //  3. Bind + search + re-bind via the LDAP service.
 //  4. JIT-provision if first time, marking the user as SSO-managed.
-//  5. Issue auth cookies via the canonical helper from authController.go.
+//  5. Ask for the second step if they have two-step on, as an email sign-in does.
+//  6. Issue auth cookies via the canonical helper from authController.go.
 func LDAPLogin(w http.ResponseWriter, r *http.Request) {
 	if planLocked(w, r, helpers.FeatureLDAP, false) {
 		return
@@ -93,9 +95,10 @@ func LDAPLogin(w http.ResponseWriter, r *http.Request) {
 		BaseDN:         cfg.BaseDN,
 		UserFilter:     cfg.UserFilter,
 		GroupAttribute: cfg.GroupAttribute,
+		CACertPath:     cfg.CACertPath,
 	}
 
-	ldapUser, err := client.Authenticate(requestBody.UsernameOrEmail, requestBody.Password)
+	ldapUser, err := authenticateWithDirectory(client, requestBody.UsernameOrEmail, requestBody.Password)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/LDAPLogin auth failed: %+v", err)
 		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
@@ -106,20 +109,22 @@ func LDAPLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// SECURITY: refuse to provision a user without an authoritative email.
-	// The previous "<username>@ldap.local" fallback collides across orgs that
-	// share usernames and would log the second user into the first user's
-	// account.
+	// An address made up from the user name ("<username>@ldap.local", which
+	// the directory client fell back to until 9 Oct 2026) collides across orgs
+	// that share usernames and would log the second user into the first
+	// user's account. Said after the password was checked, never before, so
+	// it tells nobody else what the directory holds.
 	if ldapUser.Email == "" || !strings.Contains(ldapUser.Email, "@") {
 		helpers.LogErrorWithContext(ctx,
-			"controllers/LDAPLogin user %q missing email; refusing to provision", ldapUser.DN)
+			"controllers/LDAPLogin directory entry %q has no email address (mail or userPrincipalName); sign-in refused", ldapUser.DN)
 		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
-			"msg":    "Your directory account has no email attribute. Contact your administrator.",
+			"msg":    "Your directory entry has no email address (mail or userPrincipalName), so you can't sign in with it yet. Ask your administrator to add one.",
 			"status": "failed",
 		})
 		return
 	}
 
-	email := strings.ToLower(strings.TrimSpace(ldapUser.Email))
+	email := helpers.NormalizeEmail(ldapUser.Email)
 	if !emailRegex.MatchString(email) {
 		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
 			"msg":    "Your directory account has an invalid email format. Contact your administrator.",
@@ -133,10 +138,17 @@ func LDAPLogin(w http.ResponseWriter, r *http.Request) {
 		username = strings.Split(email, "@")[0]
 	}
 
-	user, err := lookupOrProvision(ctx, email, username, userModels.AuthMethodLDAP)
+	user, landing, err := lookupOrProvision(ctx, email, username, userModels.AuthMethodLDAP)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/LDAPLogin lookupOrProvision: %+v", err)
 		if helpers.WriteSeatLimit(w, err) {
+			return
+		}
+		if errors.Is(err, business.ErrAddressNotASCII) {
+			helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+				"msg":    "Your directory account's email address has characters other than plain letters, digits and symbols, so it can't sign in here. Ask your administrator.",
+				"status": "failed",
+			})
 			return
 		}
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
@@ -146,14 +158,34 @@ func LDAPLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = domain.RecordLoginMethod(ctx, user.Id, userModels.AuthMethodLDAP)
-
-	// Best-effort admin sync from directory groups.
+	// Best-effort admin sync from directory groups. It follows what the
+	// directory says, not what the person proves, so it doesn't wait for the
+	// second step.
 	syncSSOAdmin(ctx, email, user.IsSSOManaged, user.IsAdmin, ldapUser.Groups, cfg.AdminGroupAllow)
 
-	// issueAuthCookies (in authController.go) writes the success JSON envelope
-	// and Set-Cookie headers.
-	issueAuthCookies(w, r, ctx, user.Id.String())
+	// The directory checked the password and nothing more: two-step is asked
+	// for as after an email password, and the sign-in recorded once complete.
+	if challengeIfTwoStep(w, ctx, user.Id, userModels.AuthMethodLDAP) {
+		return
+	}
+	_ = domain.RecordLoginMethod(ctx, user.Id, userModels.AuthMethodLDAP)
+
+	// issueAuthCookiesWith (in authController.go) writes the success JSON
+	// envelope and Set-Cookie headers, and where someone who has just joined
+	// starts.
+	issueAuthCookiesWith(w, r, ctx, user.Id.String(), landingField(landing))
+}
+
+// authenticateWithDirectory binds to the directory as the person signing in.
+// A variable, so a test can stand in for a directory server.
+var authenticateWithDirectory = (*ldapService.LDAPClient).Authenticate
+
+// UseDirectoryForTest makes LDAP sign-in ask answer instead of a directory
+// server, and returns the function that puts the real one back.
+func UseDirectoryForTest(answer func(c *ldapService.LDAPClient, usernameOrEmail, password string) (*ldapService.LDAPUser, error)) (restore func()) {
+	prev := authenticateWithDirectory
+	authenticateWithDirectory = answer
+	return func() { authenticateWithDirectory = prev }
 }
 
 // ----------------------------------------------------------------------------
@@ -216,13 +248,13 @@ func SAMLCallback(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	if !authService.ResolveSAMLConfig(ctx).Enabled || samlService.SAMLMiddleware == nil {
-		http.Redirect(w, r, ssoErrorRedirect("saml_disabled", "SAML is disabled"), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL("saml_disabled", "SAML is disabled"), http.StatusFound)
 		return
 	}
 
 	if err := r.ParseForm(); err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/SAMLCallback form parse err: %+v", err)
-		http.Redirect(w, r, ssoErrorRedirect("saml_invalid", "Malformed SAML response"), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL("saml_invalid", "Malformed SAML response"), http.StatusFound)
 		return
 	}
 
@@ -238,14 +270,14 @@ func SAMLCallback(w http.ResponseWriter, r *http.Request) {
 	assertion, err := samlService.SAMLMiddleware.ServiceProvider.ParseResponse(r, possibleRequestIDs)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/SAMLCallback ParseResponse err: %+v", err)
-		http.Redirect(w, r, ssoErrorRedirect("saml_invalid", "Invalid SAML assertion from directory provider"), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL("saml_invalid", "Invalid SAML assertion from directory provider"), http.StatusFound)
 		return
 	}
 
 	email, username, samlGroups, identityErr := extractSAMLIdentity(assertion)
 	if identityErr != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/SAMLCallback identity extract err: %+v", identityErr)
-		http.Redirect(w, r, ssoErrorRedirect("saml_no_email", identityErr.Error()), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL("saml_no_email", identityErr.Error()), http.StatusFound)
 		return
 	}
 
@@ -271,7 +303,7 @@ func extractSAMLIdentity(assertion *saml.Assertion) (email, username string, gro
 	// with an email value; that's still safer than transient/persistent IDs).
 	if assertion.Subject != nil && assertion.Subject.NameID != nil {
 		nid := assertion.Subject.NameID
-		nidValue := strings.ToLower(strings.TrimSpace(nid.Value))
+		nidValue := helpers.NormalizeEmail(nid.Value)
 		if isEmailNameIDFormat(nid.Format) && emailRegex.MatchString(nidValue) {
 			email = nidValue
 		} else if nid.Format == "" && emailRegex.MatchString(nidValue) {
@@ -316,7 +348,7 @@ func extractSAMLIdentity(assertion *saml.Assertion) (email, username string, gro
 			key := strings.ToLower(strings.TrimSpace(attr.Name))
 			if email == "" {
 				if _, ok := emailAttrNames[key]; ok && len(attr.Values) > 0 {
-					candidate := strings.ToLower(strings.TrimSpace(attr.Values[0].Value))
+					candidate := helpers.NormalizeEmail(attr.Values[0].Value)
 					if emailRegex.MatchString(candidate) {
 						email = candidate
 					}
@@ -400,7 +432,7 @@ func GenericOIDCLogin(w http.ResponseWriter, r *http.Request) {
 	state, err := authService.GenerateAndStoreSSOState(ctx, redirectURL)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GenericOIDCLogin state mint err: %+v", err)
-		http.Redirect(w, r, ssoErrorRedirect("oidc_state_mint_failed", "Could not start OIDC login"), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL("oidc_state_mint_failed", "Could not start OIDC login"), http.StatusFound)
 		return
 	}
 
@@ -417,52 +449,63 @@ func GenericOIDCCallback(w http.ResponseWriter, r *http.Request) {
 
 	cfg := authService.ResolveOIDCConfig(ctx)
 	if !cfg.Enabled {
-		http.Redirect(w, r, ssoErrorRedirect("oidc_disabled", "OIDC is disabled"), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL("oidc_disabled", "OIDC is disabled"), http.StatusFound)
 		return
 	}
 	if oauth.OIDCGeneric.Config == nil || oauth.OIDCGeneric.Verifier == nil {
-		http.Redirect(w, r, ssoErrorRedirect("oidc_misconfigured", "OIDC is misconfigured on the server"), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL("oidc_misconfigured", "OIDC is misconfigured on the server"), http.StatusFound)
 		return
 	}
 
 	state := r.FormValue("state")
 	oauthCode := r.FormValue("code")
 	if state == "" || oauthCode == "" {
-		http.Redirect(w, r, ssoErrorRedirect("oidc_invalid_request", "Missing state or code"), http.StatusFound)
+		// Cancelling at the identity provider comes back as
+		// error=access_denied, and is said so rather than as a bad request.
+		if r.FormValue("error") == "access_denied" {
+			http.Redirect(w, r, authService.SignInErrorURL(authService.SignInCancelled, authService.SignInCancelledMessage), http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, authService.SignInErrorURL("oidc_invalid_request", "Missing state or code"), http.StatusFound)
 		return
 	}
 
-	// Atomically consume the state — single-use, prevents replay/CSRF.
+	// Atomically consume the state — single-use, prevents replay/CSRF. One
+	// that is gone took too long or was used already (a second tab, the back
+	// button): the same "start again" as Google and GitHub say.
 	redirectURL, err := authService.ConsumeSSOState(ctx, state)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GenericOIDCCallback consume state err: %+v", err)
-		http.Redirect(w, r, ssoErrorRedirect("oidc_invalid_state", "Login session expired or was tampered with"), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL(authService.SignInExpired, authService.SignInExpiredMessage), http.StatusFound)
 		return
 	}
 
 	oauth2Token, err := oauth.OIDCGeneric.Config.Exchange(ctx, oauthCode)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GenericOIDCCallback Exchange err: %+v", err)
-		http.Redirect(w, r, ssoErrorRedirect("oidc_invalid_code", "Authorization code exchange failed"), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL("oidc_invalid_code", "Authorization code exchange failed"), http.StatusFound)
 		return
 	}
 
 	rawIDToken, ok := oauth2Token.Extra("id_token").(string)
 	if !ok || rawIDToken == "" {
-		http.Redirect(w, r, ssoErrorRedirect("oidc_no_token", "Identity provider did not return ID token"), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL("oidc_no_token", "Identity provider did not return ID token"), http.StatusFound)
 		return
 	}
 
 	idToken, err := oauth.OIDCGeneric.Verifier.Verify(ctx, rawIDToken)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GenericOIDCCallback Verify err: %+v", err)
-		http.Redirect(w, r, ssoErrorRedirect("oidc_verification_failed", "ID token signature verification failed"), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL("oidc_verification_failed", "ID token signature verification failed"), http.StatusFound)
 		return
 	}
 
 	var claims struct {
-		Email         string `json:"email"`
-		EmailVerified bool   `json:"email_verified"`
+		Email string `json:"email"`
+		// A boolean, or from some providers (AWS Cognito among them) the
+		// string "true". Read as a bool, "true" failed the whole sign-in as
+		// unreadable claims.
+		EmailVerified any    `json:"email_verified"`
 		PreferredName string `json:"preferred_username"`
 		Name          string `json:"name"`
 		// Groups is the standard OIDC group claim. Not all IdPs emit it; many
@@ -471,7 +514,7 @@ func GenericOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		Groups []string `json:"groups"`
 	}
 	if err := idToken.Claims(&claims); err != nil {
-		http.Redirect(w, r, ssoErrorRedirect("oidc_invalid_claims", "Failed to extract directory claims"), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL("oidc_invalid_claims", "Failed to extract directory claims"), http.StatusFound)
 		return
 	}
 
@@ -482,18 +525,18 @@ func GenericOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		claims.Groups = append(claims.Groups, customGroups...)
 	}
 
-	email := strings.ToLower(strings.TrimSpace(claims.Email))
+	email := helpers.NormalizeEmail(claims.Email)
 	if email == "" || !emailRegex.MatchString(email) {
-		http.Redirect(w, r, ssoErrorRedirect("oidc_no_email", "OIDC provider did not provide a valid email"), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL("oidc_no_email", "OIDC provider did not provide a valid email"), http.StatusFound)
 		return
 	}
 
 	// SECURITY: enforce email_verified unless the operator explicitly turned
 	// the check off via OIDC_REQUIRE_VERIFIED_EMAIL=false (some private IdPs
 	// don't emit the claim).
-	if cfg.RequireVerifiedEmail && !claims.EmailVerified {
+	if cfg.RequireVerifiedEmail && !helpers.TrueClaim(claims.EmailVerified) {
 		helpers.LogErrorWithContext(ctx, "controllers/GenericOIDCCallback rejecting unverified email %q", email)
-		http.Redirect(w, r, ssoErrorRedirect("oidc_email_unverified", "Your IdP reports this email as unverified"), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL("oidc_email_unverified", "Your IdP reports this email as unverified"), http.StatusFound)
 		return
 	}
 
@@ -572,15 +615,19 @@ func provisionAndRedirectWithGroups(
 		target = authService.FrontendBaseURL() + "/app"
 	}
 
-	user, err := lookupOrProvision(ctx, email, username, method)
+	user, landing, err := lookupOrProvision(ctx, email, username, method)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/provisionAndRedirect: %+v", err)
 		var seat *helpers.SeatLimitError
 		if errors.As(err, &seat) {
-			http.Redirect(w, r, ssoErrorRedirect("seat_limit", seat.Error()), http.StatusFound)
+			http.Redirect(w, r, authService.SignInErrorURL("seat_limit", seat.Error()), http.StatusFound)
 			return
 		}
-		http.Redirect(w, r, ssoErrorRedirect("provision_failed", "Failed to provision account"), http.StatusFound)
+		if errors.Is(err, business.ErrAddressNotASCII) {
+			http.Redirect(w, r, authService.SignInErrorURL("address_unsupported", business.ErrAddressNotASCII.Error()), http.StatusFound)
+			return
+		}
+		http.Redirect(w, r, authService.SignInErrorURL("provision_failed", "Failed to provision account"), http.StatusFound)
 		return
 	}
 
@@ -591,10 +638,12 @@ func provisionAndRedirectWithGroups(
 
 	if err := emitAuthCookiesNoBody(w, r, ctx, user.Id.String()); err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/provisionAndRedirect emit cookies: %+v", err)
-		http.Redirect(w, r, ssoErrorRedirect("session_failed", "Failed to start session"), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL("session_failed", "Failed to start session"), http.StatusFound)
 		return
 	}
-	http.Redirect(w, r, target, http.StatusFound)
+	// Someone who has just joined opens on the channel they were put in,
+	// instead of Home.
+	http.Redirect(w, r, authService.LandingAfterSignIn(target, landing), http.StatusFound)
 }
 
 // syncSSOAdmin promotes/demotes the user's admin flag based on IdP-asserted
@@ -627,32 +676,53 @@ func syncSSOAdmin(ctx context.Context, email string, isSSOManaged, currentlyAdmi
 	}
 }
 
-// lookupOrProvision returns the existing user or creates a fresh SSO-managed
-// one. SSO-method users get is_sso_managed=true so SetPassword/ChangePassword
+// lookupOrProvision returns the existing member or makes one, SSO-managed:
+// SSO-method users get is_sso_managed=true so SetPassword/ChangePassword
 // reject them — there's no local-password backdoor to a user the IdP owns.
-func lookupOrProvision(ctx context.Context, email, username, method string) (*userModels.User, error) {
+// Making one adopts the external row an import left for the address, as
+// creating one would have been allowed (the directory vouches for it).
+//
+// landing is the channel a new member starts in: one just made, or one the
+// directory provisioned (SCIM) signing in for the first time. uuid.Nil for
+// everyone else, who keeps Home.
+func lookupOrProvision(ctx context.Context, email, username, method string) (*userModels.User, uuid.UUID, error) {
+	// An address outside ASCII is matched to no account, so a lookup that
+	// folds case the Unicode way can't find someone else's (NormalizeEmail).
+	if email = helpers.NormalizeEmail(email); !helpers.AddressIsASCII(email) {
+		return nil, uuid.Nil, business.ErrAddressNotASCII
+	}
 	err, exists := domain.CheckIfUserExistByEmail(ctx, email)
 	if err != nil {
-		return nil, fmt.Errorf("user existence check failed: %w", err)
+		return nil, uuid.Nil, fmt.Errorf("user existence check failed: %w", err)
 	}
 
+	landing := uuid.Nil
 	if !exists {
 		isSSO := userModels.IsSSOMethod(method)
 		// nil passwordHash → no local password.
-		if _, err := business.CreateUserWithMethod(ctx, email, username, nil, method, isSSO); err != nil {
-			return nil, fmt.Errorf("create user: %w", err)
+		joined, err := business.JoinAsMember(ctx, email, username, nil, method, isSSO)
+		if err != nil {
+			return nil, uuid.Nil, fmt.Errorf("create user: %w", err)
 		}
+		landing = joined.Landing
 	}
 
 	user, err := domain.GetUserByEmailId(ctx, &email)
 	if err != nil || user == nil {
-		return nil, fmt.Errorf("post-provision lookup failed: %w", err)
+		return nil, uuid.Nil, fmt.Errorf("post-provision lookup failed: %w", err)
 	}
-	return user, nil
+	// What syncSSOAdmin decides from. The lookup above reads neither, so both
+	// were always false, and someone the directory took out of its admin
+	// groups stayed an admin here.
+	if user.IsAdmin, user.IsSSOManaged, err = domain.GetUserSignInFlags(ctx, user.Id); err != nil {
+		return nil, uuid.Nil, fmt.Errorf("post-provision lookup failed: %w", err)
+	}
+	if exists {
+		landing = channelBusiness.FirstSignInLanding(ctx, user.Id)
+	}
+	return user, landing, nil
 }
 
-// ssoErrorRedirect builds a frontend URL with the standardized error/message
-// query params. Allowed error codes are documented in the FE login page.
 // planLocked refuses a sign-in method the plan leaves out (helpers/planFeatures.go).
 // A browser flow lands back on the sign-in page with the reason, the same way a
 // full seat plan does; an API caller gets the JSON 403.
@@ -661,25 +731,9 @@ func planLocked(w http.ResponseWriter, r *http.Request, f helpers.PlanFeature, b
 		return false
 	}
 	if browser {
-		http.Redirect(w, r, ssoErrorRedirect("plan_required", helpers.PlanRequiredMessage(f)), http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL("plan_required", helpers.PlanRequiredMessage(f)), http.StatusFound)
 	} else {
 		helpers.WritePlanRequired(w, f)
 	}
 	return true
-}
-
-func ssoErrorRedirect(errCode, errMsg string) string {
-	feBase := authService.FrontendBaseURL()
-	if feBase == "" {
-		return fmt.Sprintf("/?error=%s&message=%s", url.QueryEscape(errCode), url.QueryEscape(errMsg))
-	}
-	u, err := url.Parse(feBase)
-	if err != nil || u.Host == "" {
-		return fmt.Sprintf("/?error=%s&message=%s", url.QueryEscape(errCode), url.QueryEscape(errMsg))
-	}
-	q := u.Query()
-	q.Set("error", errCode)
-	q.Set("message", errMsg)
-	u.RawQuery = q.Encode()
-	return u.String()
 }

@@ -25,6 +25,8 @@ func fail(w http.ResponseWriter, r *http.Request, where string, err error) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ie.Error()})
 	case errors.Is(err, business.ErrNumberTaken):
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "An invoice with that number already exists. Give this one another."})
+	case errors.Is(err, business.ErrWasSent):
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "This invoice has been sent before, so its number stays. Void it rather than delete it."})
 	case errors.Is(err, business.ErrNotDraft):
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "This invoice has been sent, so it stays as it was sent. Void it and make a new one to change it."})
 	case errors.Is(err, business.ErrNotFound):

@@ -8,6 +8,7 @@ import (
 
 	adapter "github.com/akashc777/OneCamp/adapter/Channel"
 	business "github.com/akashc777/OneCamp/business/Channel"
+	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	userChannelNotificationBusiness "github.com/akashc777/OneCamp/business/UserChannelNotification"
 	"github.com/akashc777/OneCamp/helpers"
@@ -107,6 +108,7 @@ func GetIfChannelNameIsAvailable(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
+		return
 	}
 
 	if !helpers.IsValidName(chName[0]) {
@@ -749,6 +751,12 @@ func UpdateChannelInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The demo's own channels stay for every visitor (business/DemoGuard).
+	if updateChannelNameInfo.ChannelArchived && demoGuard.KeepsFromVisitor(userInfo.UserPostgresInfo.EmailID, channelInfo.CreatedAt) {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "demo", "msg": helpers.DemoSeededMsg})
+		return
+	}
+
 	err = business.UpdateChannelInfo(ctx, &updateChannelNameInfo, channelUUID)
 
 	if err != nil {
@@ -1096,6 +1104,24 @@ func AddChannelModerators(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Added moderator successfully!"})
 }
 
+// GetSuggestedChannel handles GET /ch/suggested: the channel Home offers a
+// member who is in none, as "Join #general". A member in no channel used to
+// see nothing on Home about channels at all. data is null when there is none
+// to offer, and Home then offers the channel list alone.
+func GetSuggestedChannel(w http.ResponseWriter, r *http.Request) {
+	ch, ok, err := business.SuggestedChannel(r.Context())
+	if err != nil {
+		helpers.LogErrorWithContext(r.Context(), "controllers/GetSuggestedChannel err: %+v", err)
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Couldn't find a channel to suggest."})
+		return
+	}
+	if !ok {
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": nil})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": ch})
+}
+
 func JoinChannel(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -1134,7 +1160,7 @@ func JoinChannel(w http.ResponseWriter, r *http.Request) {
 	channelInfo, err := business.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"controllers/JoinChannel Failed to parse new member stringUUID to uuid err: %+v",
+			"controllers/JoinChannel Failed to get the channel err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "Failed to add member",
@@ -1143,14 +1169,15 @@ func JoinChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if *channelInfo.IsPrivate {
-		if err != nil {
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "User can't add itself to a private channel",
-				"err": err,
-			})
-			return
+	// Only a live public channel can be joined by oneself; a private one
+	// takes someone in it adding you.
+	if refusal := business.CanJoin(channelInfo); refusal != nil {
+		status := http.StatusForbidden
+		if refusal == business.ErrJoinMissing {
+			status = http.StatusNotFound
 		}
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": refusal.Error()})
+		return
 	}
 
 	err = business.AddChannelMemberEdge(ctx, channelUUID, &userInfo.UserDgraphInfo, userInfo.UserPostgresInfo.Id)

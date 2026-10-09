@@ -1,20 +1,19 @@
 package aicoworker
 
-// PR follow-up: continue an AI teammate's work when a human comments on — or
-// requests changes in a review of — a pull request that teammate opened.
+// PR follow-up: when someone comments on — or requests changes in a review of —
+// a pull request an AI teammate opened, propose the change they ask for.
 //
 // The code-PR job that opened the PR has already reached a terminal state, and
 // a GitHub webhook only knows the PR URL. Migration 128 persists the OneCamp
 // reply surface on code_pr_runs, so this listener maps the PR URL back to the
-// thread the agent posted to and feeds the feedback into the SAME unified
-// continuation engine used for in-app follow-ups (agentbusiness.ContinueAgentWork),
-// which enqueues a fresh coding follow-up that addresses the comment and posts
-// back to that thread.
+// agent and the thread it posted to. A GitHub commenter is nobody in OneCamp
+// (on a public repository, anyone), so the feedback is proposed to the owner of
+// the account the job pushes with (agentbusiness.ProposePullRequestFeedback),
+// and only once they approve does a coding follow-up address it, posting back
+// to that thread.
 //
-// Decoupled via the workspace event bus (the GitHub package stays AI-free) and
-// loop-bounded: the continuation engine keeps at most one open follow-up job per
-// agent+surface, so a burst of PR comments never stacks duplicate work, and bot
-// senders are dropped upstream so an app/agent comment can't self-drive.
+// Decoupled via the workspace event bus (the GitHub package stays AI-free), and
+// bot senders are dropped upstream so an app/agent comment can't self-drive.
 
 import (
 	"context"
@@ -61,8 +60,8 @@ func handlePRComment(ctx context.Context, eventType string, data map[string]inte
 		return
 	}
 
-	_, surfaceRaw, found, err := aiModels.GetCodePRRunSurfaceByPRURL(ctx, prURL)
-	if err != nil || !found {
+	agentID, surfaceRaw, found, err := aiModels.GetCodePRRunSurfaceByPRURL(ctx, prURL)
+	if err != nil || !found || agentID == nil {
 		return // no agent opened this PR (a human PR) — cheap best-effort no-op
 	}
 	entityID := codePRSurfaceEntityID(surfaceRaw)
@@ -70,11 +69,10 @@ func handlePRComment(ctx context.Context, eventType string, data map[string]inte
 		return // the run had no in-thread surface to continue in
 	}
 
-	followup := synthPRCommentFollowup(prURL, commenter, body)
-	// authorID is empty: a GitHub commenter is not a OneCamp user, and the
-	// engine's loop guard is for a OneCamp bot author. Self-comment loops are
-	// bounded instead by the engine's one-open-job-per-agent+surface rule.
-	agentbusiness.ContinueAgentWork(ctx, entityID, "", followup)
+	// Only to the agent that opened the pull request, and as a proposal to the
+	// owner of the account it pushes with: never into the thread's work at
+	// large, where a commenter nobody can identify would steer whatever runs.
+	agentbusiness.ProposePullRequestFeedback(ctx, *agentID, entityID, synthPRCommentFollowup(prURL, commenter, body))
 }
 
 // codePRSurfaceEntityID extracts the OneCamp thread entity id (post / message /

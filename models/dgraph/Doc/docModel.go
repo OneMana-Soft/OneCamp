@@ -11,7 +11,36 @@ import (
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/dgraph-io/dgo/v230/protos/api"
+	"github.com/google/uuid"
 )
+
+// ErrSharingIDs refuses a sharing change naming something that isn't a uuid:
+// the ids are written into the change's query.
+var ErrSharingIDs = errors.New("a doc and the people it's shared with are named by their uuids")
+
+// sharingIDsValid reports whether the doc and every person a sharing change
+// names is a uuid, written as one is.
+func sharingIDsValid(input *adapter.InputUpdateDocPermissions) bool {
+	valid := func(s string) bool {
+		id, err := uuid.Parse(s)
+		return err == nil && id.String() == s
+	}
+	if !valid(input.DocId) {
+		return false
+	}
+	for _, list := range [][]string{input.AddEditors, input.RemoveEditors, input.AddViewers, input.RemoveViewers, input.AddCommenters, input.RemoveCommenters} {
+		for _, s := range list {
+			if s != "" && !valid(s) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ErrNotFound is a doc the graph has no node for, as opposed to a graph that
+// didn't answer.
+var ErrNotFound = errors.New("failed to get dgraph doc")
 
 func CreateOrUpdateDoc(ctx context.Context, query string, dgraphDoc *dgraphStruct.DgraphDoc, delStringJSON string) (docUID string, err error) {
 	txn := dgraphInit.DgraphClient.NewTxn()
@@ -83,7 +112,7 @@ func GetDgraphDocInfoByUUID(ctx context.Context, query string, variables map[str
 	}
 
 	if len(docsInfo.DocInfo) == 0 {
-		err = errors.New("failed to get dgraph doc")
+		err = ErrNotFound
 		helpers.LogErrorWithContext(ctx,
 			"models/GetDgraphDocInfoByUUID failed to get dgraph doc")
 
@@ -166,6 +195,10 @@ func GetDgraphDocsWithCount(ctx context.Context, query string, variables map[str
 }
 
 func UpdateDocPermissions(ctx context.Context, input *adapter.InputUpdateDocPermissions) (err error) {
+	// Every id below is written into the query as text, so each must be a uuid.
+	if !sharingIDsValid(input) {
+		return ErrSharingIDs
+	}
 	txn := dgraphInit.DgraphClient.NewTxn()
 	defer txn.Discard(ctx)
 

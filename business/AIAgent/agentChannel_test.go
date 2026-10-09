@@ -3,6 +3,9 @@ package business
 import (
 	"encoding/json"
 	"testing"
+
+	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
+	"github.com/google/uuid"
 )
 
 func TestApplyChannelMembership(t *testing.T) {
@@ -86,5 +89,39 @@ func TestMentionIDsFromEvent(t *testing.T) {
 	// Unknown shapes yield nil.
 	if mentionIDsFromEvent(42) != nil {
 		t.Fatal("expected nil for unsupported type")
+	}
+}
+
+// Who may put an agent in a channel or take it out: its owner or a workspace
+// admin, either way; a channel's admins may take it out of their channel
+// unless that leaves it in none (and so answering everywhere); anyone else
+// in the channel, neither.
+func TestMayPlaceInChannel(t *testing.T) {
+	owner, someone := uuid.New(), uuid.New()
+	agent := &model.AiAgent{Id: uuid.New(), CreatedBy: owner}
+	for _, c := range []struct {
+		name         string
+		actor        Actor
+		channelAdmin bool
+		adding       bool
+		channelsLeft int
+		want         error
+	}{
+		{"its owner adds it", Actor{UserID: owner}, false, true, 1, nil},
+		{"its owner takes it out of its last channel", Actor{UserID: owner}, false, false, 0, nil},
+		{"a workspace admin adds it", Actor{UserID: someone, IsAdmin: true}, false, true, 1, nil},
+		{"a workspace admin takes it out of its last channel", Actor{UserID: someone, IsAdmin: true}, false, false, 0, nil},
+		{"a member adds it", Actor{UserID: someone}, false, true, 1, errForbidden},
+		{"a member takes it out", Actor{UserID: someone}, false, false, 1, errForbidden},
+		{"a channel admin adds it", Actor{UserID: someone}, true, true, 1, errForbidden},
+		{"a channel admin takes it out", Actor{UserID: someone}, true, false, 1, nil},
+		{"a channel admin takes it out of its only channel", Actor{UserID: someone}, true, false, 0, errOnlyChannel},
+	} {
+		if got := mayPlaceInChannel(c.actor, agent, c.channelAdmin, c.adding, c.channelsLeft); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+	if !IsOnlyChannel(errOnlyChannel) || IsOnlyChannel(errForbidden) || !IsForbidden(errForbidden) {
+		t.Error("the refusals aren't told apart")
 	}
 }

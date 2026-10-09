@@ -41,6 +41,7 @@ import (
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
@@ -648,7 +649,9 @@ func resolveParticipantUsers(ctx context.Context, raw interface{}) []*dgraphStru
 	if len(uuids) == 0 {
 		return nil
 	}
-	users, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, uuids)
+	// By their uuids: GetDgraphUserInfoByUUIDs takes graph uids, and refused
+	// these, so the reply's participants were always empty.
+	users, err := userDomain.GetActiveDgraphUsersByUUIDsLight(ctx, uuids)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "AI coworker (chat): resolve participants failed: %v", err)
 		return nil

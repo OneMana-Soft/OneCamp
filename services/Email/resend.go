@@ -26,17 +26,70 @@ var SharedHTTPClient = &http.Client{Timeout: 15 * time.Second}
 // IsEmailEnabled is the global feature flag. The whole notification email
 // system is a no-op when this returns false: the dispatcher, queue inserts,
 // worker, and digest scheduler all check it. An operator who deploys
-// OneCamp without setting RESEND_API_KEY gets exactly zero email-related
-// behaviour: no rows inserted, no goroutines started, no log noise beyond
-// a one-time startup notice.
+// OneCamp without a sending key gets exactly zero email-related behaviour:
+// no rows inserted, no goroutines started, no log noise beyond a one-time
+// startup notice.
 func IsEmailEnabled() bool {
-	return strings.TrimSpace(os.Getenv("RESEND_API_KEY")) != ""
+	return apiKeyFrom() != ""
 }
 
-// SenderAddress returns the configured sender email address (from system
-// configs or env fallback). Avoids emitting invalid addresses like "noreply@"
-// when FE_DOMAIN is empty.
+// apiKeyFrom is where the sending key comes from: the environment's
+// RESEND_API_KEY until business/Settings says otherwise (UseAPIKeyFrom).
+var apiKeyFrom = func() string { return strings.TrimSpace(os.Getenv("RESEND_API_KEY")) }
+
+// UseAPIKeyFrom sets where the sending key comes from. business/Settings
+// points it at the key an admin saved in Admin > Email, before the
+// environment's: that key was saved, shown as "Email is on", and never used
+// to send anything, because this package read only the environment.
+func UseAPIKeyFrom(resolve func() string) {
+	apiKeyFrom = func() string { return strings.TrimSpace(resolve()) }
+}
+
+// What a send can fail on before it reaches the provider.
+var (
+	// ErrNotConfigured: no sending key, so nothing can be sent.
+	ErrNotConfigured = errors.New("transactional email is disabled: no sending key is set")
+	// ErrBadSender and ErrBadRecipient: an address that is not one.
+	ErrBadSender    = errors.New("invalid sender email")
+	ErrBadRecipient = errors.New("invalid recipient email")
+)
+
+// SeededSender is the sender migration 24 stored for every workspace:
+// OneCamp's own domain, which no workspace's own key can send from. It stands
+// for "none chosen" (ChosenSender).
+const SeededSender = "noreply@onemana.dev"
+
+// ChosenSender is the sender an admin chose in Admin > Email, from what is
+// stored: "" when none was, or when it is still the seeded one. Pure.
+func ChosenSender(stored string) string {
+	s := strings.TrimSpace(stored)
+	if strings.EqualFold(s, SeededSender) {
+		return ""
+	}
+	return s
+}
+
+// senderFrom is the sender that goes with a key saved in Admin, or "" for the
+// environment's sender (SenderAddress).
+var senderFrom = func() string { return "" }
+
+// UseSenderFrom sets where the sender that goes with the key comes from.
+// business/Settings answers with the sender saved in Admin > Email while the
+// key in use was saved there too: that key sends for the admin's own domain,
+// and the environment's sender (on OneCamp Cloud, OneCamp's own) is not one
+// it can send from.
+func UseSenderFrom(resolve func() string) {
+	senderFrom = func() string { return strings.TrimSpace(resolve()) }
+}
+
+// SenderAddress returns the sender address: the one that goes with a key
+// saved in Admin (UseSenderFrom), else SENDER_EMAIL, else noreply@ the web
+// app's domain. Avoids emitting invalid addresses like "noreply@" when
+// FE_DOMAIN is empty.
 func SenderAddress() string {
+	if sender := senderFrom(); sender != "" {
+		return sender
+	}
 	if sender := strings.TrimSpace(os.Getenv("SENDER_EMAIL")); sender != "" {
 		return sender
 	}
@@ -77,6 +130,10 @@ type SendOptions struct {
 	ListUnsubscribePost bool // adds List-Unsubscribe-Post for one-click (RFC 8058)
 	ReplyTo             string
 	Tags                map[string]string
+	// Keep is how many of the day's capped messages must be left after this
+	// one (EMAIL_DAILY_CAP): an invitation keeps InvitationReserve for
+	// password resets, or a quarter of the cap when that is less.
+	Keep int
 }
 
 // SendResult is what callers use to record the delivery outcome.
@@ -196,9 +253,9 @@ func SendEmail(ctx context.Context, from string, to string, subject string, html
 // failure visibly. The notification worker already gates on IsEmailEnabled();
 // direct callers (password-reset, invitation) must handle the error.
 func SendEmailWithOptions(ctx context.Context, opt SendOptions) (SendResult, error) {
-	apiKey := strings.TrimSpace(os.Getenv("RESEND_API_KEY"))
+	apiKey := apiKeyFrom()
 	if apiKey == "" {
-		return SendResult{}, errors.New("RESEND_API_KEY is not set: transactional email is disabled")
+		return SendResult{}, ErrNotConfigured
 	}
 	if opt.From == "" || opt.To == "" || opt.Subject == "" {
 		return SendResult{}, errors.New("from/to/subject are required")
@@ -211,17 +268,17 @@ func SendEmailWithOptions(ctx context.Context, opt SendOptions) (SendResult, err
 	// addresses like "noreply@" (empty domain) produce a 422 that is hard
 	// to diagnose in production.
 	if _, err := mail.ParseAddress(opt.From); err != nil {
-		return SendResult{}, fmt.Errorf("invalid sender email %q: %w", opt.From, err)
+		return SendResult{}, fmt.Errorf("%w %q: %v", ErrBadSender, opt.From, err)
 	}
 	if _, err := mail.ParseAddress(opt.To); err != nil {
-		return SendResult{}, fmt.Errorf("invalid recipient email %q: %w", opt.To, err)
+		return SendResult{}, fmt.Errorf("%w %q: %v", ErrBadRecipient, opt.To, err)
 	}
 	if !Deliverable(ctx, opt.To) {
 		return SendResult{}, ErrUndeliverable
 	}
 
 	// Counted after validation, so a malformed request spends none of the day.
-	if err := sentToday.take(time.Now(), dailyCapFromEnv()); err != nil {
+	if err := sentToday.take(time.Now(), dailyCapFromEnv(), opt.Keep); err != nil {
 		return SendResult{}, err
 	}
 	if err := globalBucket.take(ctx); err != nil {
@@ -297,10 +354,13 @@ func SendEmailWithOptions(ctx context.Context, opt SendOptions) (SendResult, err
 		errStr := fmt.Sprintf("resend API returned status %d: %s", resp.StatusCode, respBody.String())
 		helpers.LogErrorWithContext(ctx,
 			"services/Email/SendEmailWithOptions failed status=%d body=%s", resp.StatusCode, respBody.String())
+		var refused resendResponse
+		_ = json.Unmarshal(respBody.Bytes(), &refused)
 		return SendResult{}, &SendError{
 			StatusCode: resp.StatusCode,
 			Message:    errStr,
 			Terminal:   isTerminalStatus(resp.StatusCode),
+			Detail:     strings.TrimSpace(refused.Message),
 		}
 	}
 
@@ -318,6 +378,12 @@ type SendError struct {
 	StatusCode int
 	Message    string
 	Terminal   bool
+	// Detail is the provider's own explanation, when it gave one ("The
+	// example.com domain is not verified").
+	Detail string
+	// ForPeople is a refusal already worded for a person (the day's cap, a
+	// domain that cannot receive mail), which Reason passes on as it is.
+	ForPeople string
 }
 
 func (e *SendError) Error() string { return e.Message }
@@ -343,11 +409,36 @@ func isTerminalStatus(code int) bool {
 	return false
 }
 
-// SendInvitationEmail sends an invitation email with the signup link.
-// Kept for backward compatibility with the existing user-controller flow.
-func SendInvitationEmail(ctx context.Context, to string, senderEmail string, subject string, template string, signupLink string) error {
-	htmlBody := strings.ReplaceAll(template, "{{signup_link}}", signupLink)
-	return SendEmail(ctx, senderEmail, to, subject, htmlBody)
+// Reason says, for the person who asked for an email, why it did not go, in
+// a phrase that follows "Couldn't email it: ". "" for no error. Pure.
+func Reason(err error) string {
+	if err == nil {
+		return ""
+	}
+	var se *SendError
+	switch {
+	case errors.Is(err, ErrNotConfigured):
+		return "email isn't set up on this server"
+	case errors.Is(err, ErrBadSender):
+		return "the sender address set in Admin > Email isn't a valid address"
+	case errors.Is(err, ErrBadRecipient):
+		return "that isn't a valid email address"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "the email provider didn't answer in time"
+	case errors.As(err, &se):
+		switch {
+		case se.ForPeople != "":
+			return se.ForPeople
+		case se.StatusCode == http.StatusTooManyRequests:
+			return "the email provider is sending too much at once; try again in a minute"
+		case se.StatusCode >= 500:
+			return "the email provider had a problem; try again later"
+		case se.Detail != "":
+			return "the email provider refused it (" + strings.TrimRight(se.Detail, ".") + ")"
+		}
+		return fmt.Sprintf("the email provider refused it (status %d)", se.StatusCode)
+	}
+	return "the email provider couldn't be reached"
 }
 
 // SendPasswordResetEmail sends a password reset email.

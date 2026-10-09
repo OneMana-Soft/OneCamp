@@ -138,6 +138,26 @@ func executeListTasks(ctx context.Context, action ai.ProposedAction, userUUID st
 	if dgraphUser == nil || len(dgraphUser.Tasks) == 0 {
 		return "You have no tasks matching that.", nil, nil
 	}
+	// The sponsor's tasks, and when someone else asked, only those in projects
+	// that person is in too: project membership is what grants sight of a task.
+	asker, err := askerView(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	if asker != nil {
+		kept := dgraphUser.Tasks[:0:0]
+		for _, t := range dgraphUser.Tasks {
+			if t != nil && t.Project != nil && asker.projects[t.Project.Uuid] {
+				kept = append(kept, t)
+			}
+		}
+		// The total counted every task, so it would announce ones that are not
+		// shown; the narrowed list is the whole answer.
+		dgraphUser.Tasks, dgraphUser.TaskCount = kept, uint64(len(kept))
+		if len(kept) == 0 {
+			return "There are no tasks matching that which you can see.", nil, nil
+		}
+	}
 
 	meta := taskListMeta("Your tasks", dgraphUser.Tasks, int(dgraphUser.TaskCount))
 	var b strings.Builder

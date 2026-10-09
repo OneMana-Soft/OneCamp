@@ -53,7 +53,17 @@ func BuildPlan(ctx context.Context, jobId uuid.UUID, arc *Archive) (*importAdapt
 	}
 
 	// Pre-compute channel name conflicts. Cover both public and private.
+	_, generalFolds := seededGeneral(ctx)
 	for _, c := range parsed.Channels {
+		if c.IsGeneral && generalFolds {
+			resp.Warnings = append(resp.Warnings,
+				fmt.Sprintf("Slack's #%s goes into this workspace's #general, which only has its welcome post so far.", c.Name))
+			continue
+		}
+		if c.IsGeneral && generalSharedWithGuests(ctx) {
+			resp.Warnings = append(resp.Warnings,
+				fmt.Sprintf("Slack's #%s goes beside this workspace's #general, not into it: #general is shared with guests, who would see its whole history.", c.Name))
+		}
 		desired := sanitizeChannelName(strings.ToLower(c.Name))
 		if exist, _ := channelBusiness.CheckIfChannelExist(ctx, &desired); exist {
 			resp.ChannelConflict++
@@ -199,12 +209,8 @@ func BuildPlan(ctx context.Context, jobId uuid.UUID, arc *Archive) (*importAdapt
 
 	warnIfFileLinksHaveExpired(resp, parsed, time.Now())
 
-	if err := importModels.CreateChunks(ctx, chunks); err != nil {
-		return nil, fmt.Errorf("create chunks: %w", err)
-	}
-
 	planJSON, _ := json.Marshal(resp)
-	if err := importModels.UpdatePlan(ctx, jobId, planJSON); err != nil {
+	if err := importModels.SavePlan(ctx, jobId, planJSON, chunks); err != nil {
 		return nil, err
 	}
 	return resp, nil

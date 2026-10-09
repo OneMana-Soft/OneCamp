@@ -289,7 +289,18 @@ func persistMemoryItemReturningID(ctx context.Context, it rawExtractedItem, scop
 // scope) so re-extraction of the same conversation upserts in place.
 // Delegates to the model's canonical hasher so the dedup key has a single
 // source of truth shared with the content-refresh-on-edit path.
+//
+// An instruction an agent was told to remember (RememberFact) also keys on its
+// source and its author. An instruction is its author's: it is followed in the
+// runs that act for them (AgentScopedMemoryBlock), so the same words from two
+// people are two instructions, and neither is a fact the memory layer drew
+// from the conversation. Keyed on the words alone, a second author's remember
+// updated the first author's row, or revived it from a forget, and it stayed
+// the first author's.
 func memoryDedupHash(kind, content string, scope MemoryScope) string {
+	if scope.SourceType == AgentMemorySourceType {
+		content += "\x00" + scope.SourceType + "\x00" + strings.ToLower(strings.TrimSpace(scope.CreatedByUUID))
+	}
 	return memoryModels.DedupHash(kind, content, scope.ChannelUUID, scope.ProjectUUID, scope.ChatGrpID)
 }
 

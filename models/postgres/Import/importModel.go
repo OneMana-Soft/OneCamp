@@ -31,6 +31,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // Provider names — keep in sync with migration 60 CHECK constraints.
@@ -124,6 +125,11 @@ var ErrJobNotFound = errors.New("import job not found")
 // active-per-(provider, workspace) partial unique index. Controllers
 // surface this as 409 Conflict.
 var ErrConflictActiveJob = errors.New("import already active for this provider/workspace")
+
+// ErrJobChanged fires when a job is no longer in a status a change was made
+// for: another request moved it in the meantime (Run started it while it was
+// being planned, say). Controllers surface this as 409 Conflict.
+var ErrJobChanged = errors.New("import job changed in the meantime")
 
 // Job is the row shape of import_jobs.
 type Job struct {
@@ -222,13 +228,20 @@ const JobSelectColumns = `id, provider, source_workspace_name, source, raw_objec
 	status, stage, started_at, completed_at, options, plan, progress,
 	content_hash, error_message, triggered_by, created_at, updated_at`
 
+// scanJob reads one import_jobs row.
+//
+// The plan is scanned as plain bytes. It is NULL until the job is planned, and
+// database/sql stores a NULL only into a *[]byte, never into the
+// *json.RawMessage the field is: every job waiting to be planned failed to
+// read, so it could not be planned, the list of imports failed to load while
+// it existed, and it kept its label busy for good.
 func scanJob(row interface {
 	Scan(dest ...interface{}) error
 }) (*Job, error) {
 	j := &Job{}
 	err := row.Scan(
 		&j.Id, &j.Provider, &j.SourceWorkspaceName, &j.Source, &j.RawObjectKey,
-		&j.Status, &j.Stage, &j.StartedAt, &j.CompletedAt, &j.Options, &j.Plan, &j.Progress,
+		&j.Status, &j.Stage, &j.StartedAt, &j.CompletedAt, &j.Options, (*[]byte)(&j.Plan), &j.Progress,
 		&j.ContentHash, &j.ErrorMessage, &j.TriggeredBy, &j.CreatedAt, &j.UpdatedAt,
 	)
 	return j, err
@@ -276,43 +289,143 @@ func ExecJobs(ctx context.Context, query string, args []interface{}) ([]*Job, er
 // started_at and completed_at where appropriate. ErrConflictActiveJob
 // surfaces if the partial unique index trips during a transition.
 //
+// It is the one status change for every import job, Slack's included
+// (models/postgres/SlackImport delegates here): both write this table, and
+// Slack's own copy had neither guard below.
+//
 // Safety: when transitioning TO 'running', refuse if the job is
 // already in a terminal state (cancelled/failed/rolled_back/completed).
 // This guards against a stage worker writing 'running' on top of an
-// operator-issued cancel during a per-stage transition.
+// operator-issued cancel during a per-stage transition. Starting a job is
+// StartRunning's, from the statuses its caller names.
+//
+// The status is cast at every use: uncast, Postgres can take it as varchar
+// where it is stored and as text where it is compared, and refuse to prepare
+// the statement ("inconsistent types deduced for parameter $2").
 func UpdateStatus(ctx context.Context, jobId uuid.UUID, status string, stage *string, errMsg *string) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		UPDATE import_jobs
-		SET status = $2,
-		    stage = COALESCE($3, stage),
-		    error_message = $4,
-		    started_at = CASE
-		        WHEN $2 = 'running' AND started_at IS NULL THEN NOW()
-		        ELSE started_at END,
-		    completed_at = CASE
-		        WHEN $2 IN ('completed','failed','cancelled','rolled_back') THEN NOW()
-		        ELSE completed_at END,
-		    updated_at = NOW()
-		WHERE id = $1
-		  AND NOT (
-		      $2 = 'running' AND status IN ('cancelled','failed','rolled_back','completed')
-		  )`, jobId, status, stage, errMsg)
-	if err != nil && isUniqueViolation(err) {
-		return ErrConflictActiveJob
-	}
+	_, err := updateStatus(ctx, jobId, nil, status, stage, errMsg)
 	return err
 }
 
-// UpdatePlan stores the plan and atomically advances status to planned.
-func UpdatePlan(ctx context.Context, jobId uuid.UUID, plan json.RawMessage) error {
+// UpdateStatusFrom is UpdateStatus only from one of the statuses in from,
+// decided in the same statement, and reports whether it moved the job. A
+// status read and then written moves whatever the job has become in between:
+// planning a failed import again put one that Run had just started back to
+// waiting, and Run started it a second time.
+func UpdateStatusFrom(ctx context.Context, jobId uuid.UUID, from []string, status string, stage *string, errMsg *string) (bool, error) {
+	if len(from) == 0 {
+		return false, nil
+	}
+	return updateStatus(ctx, jobId, from, status, stage, errMsg)
+}
+
+// updateStatus is the statement behind both: from any status when from is
+// nil, else only from one of from.
+func updateStatus(ctx context.Context, jobId uuid.UUID, from []string, status string, stage *string, errMsg *string) (bool, error) {
+	errMsg = withoutURLQueries(errMsg)
 	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
+		UPDATE import_jobs
+		SET status = $2::varchar,
+		    stage = COALESCE($3, stage),
+		    error_message = $4,
+		    started_at = CASE
+		        WHEN $2::varchar = 'running' AND started_at IS NULL THEN NOW()
+		        ELSE started_at END,
+		    completed_at = CASE
+		        WHEN $2::varchar IN ('completed','failed','cancelled','rolled_back') THEN NOW()
+		        ELSE completed_at END,
+		    updated_at = NOW()
+		WHERE id = $1
+		  AND ($5::varchar[] IS NULL OR status = ANY($5::varchar[]))
+		  AND NOT (
+		      $2::varchar = 'running' AND status IN ('cancelled','failed','rolled_back','completed')
+		  )`, jobId, status, stage, errMsg, pq.Array(from))
+	if err != nil {
+		if isUniqueViolation(err) {
+			return false, ErrConflictActiveJob
+		}
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// Error text is stored without URL query strings (helpers.WithoutURLQueries):
+// a provider's network error carries its request's URL, and Trello's carries
+// the key and token in it. The job's error is shown to admins and its
+// progress broadcast to their pages.
+func withoutURLQueries(msg *string) *string {
+	if msg == nil {
+		return nil
+	}
+	clean := helpers.WithoutURLQueries(*msg)
+	return &clean
+}
+
+// contextWithoutURLQueries is an error's JSON context with the same done to
+// every URL in it. Pure.
+func contextWithoutURLQueries(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	return json.RawMessage(helpers.WithoutURLQueries(string(raw)))
+}
+
+// StartRunning moves a job to running from one of the statuses in from, and
+// reports whether it did. UpdateStatus refuses to make a finished job running
+// again (that guard keeps an operator's cancel from being overwritten between
+// stages), so running a failed job or retrying its failed chunks went through
+// UpdateStatus, changed nothing, and answered as if it had started.
+func StartRunning(ctx context.Context, jobId uuid.UUID, from []string) (bool, error) {
+	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
+		UPDATE import_jobs
+		SET status = 'running', stage = 'queued', error_message = NULL,
+		    started_at = COALESCE(started_at, NOW()), completed_at = NULL, updated_at = NOW()
+		WHERE id = $1 AND status = ANY($2)`, jobId, pq.Array(from))
+	if err != nil {
+		if isUniqueViolation(err) {
+			return false, ErrConflictActiveJob
+		}
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// SavePlan stores a job's plan and the chunks it runs in, and moves it to
+// planned, only while it waits to be planned (validating, or planned before);
+// ErrJobChanged otherwise. The plan used to be written over whatever the job
+// had become: one that landed after Run had started it put the running import
+// back to planned, and Run started it a second time.
+//
+// One transaction, the job's row first: a Run arriving meanwhile waits for
+// the chunks to be in and starts with all of them, and a plan landing after
+// a Run adds none of its chunks to the import under way.
+func SavePlan(ctx context.Context, jobId uuid.UUID, plan json.RawMessage, chunks []*Chunk) error {
+	dbCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	tx, err := postgresInit.DBConn.SqlDB.BeginTx(dbCtx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(dbCtx, `
 		UPDATE import_jobs SET plan = $2, status = 'planned', stage = 'planned', updated_at = NOW()
-		WHERE id = $1`, jobId, plan)
-	return err
+		WHERE id = $1 AND status IN ('validating','planned')`, jobId, plan)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrJobChanged
+	}
+	if err := insertChunks(dbCtx, tx, chunks); err != nil {
+		return fmt.Errorf("create chunks: %w", err)
+	}
+	return tx.Commit()
 }
 
 // SetStageIfRunning updates stage only when the job is still in the
@@ -413,6 +526,51 @@ func ListAbandonedPendingJobs(ctx context.Context, cutoff time.Time) ([]*Job, er
 	return out, rows.Err()
 }
 
+// ListAbandonedWaitingJobs returns jobs left waiting to be planned or run
+// ('validating', 'planned') since before cutoff, by when they were last
+// touched. Bounded at 200 rows per call.
+func ListAbandonedWaitingJobs(ctx context.Context, cutoff time.Time) ([]*Job, error) {
+	dbCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, `
+		SELECT `+JobSelectColumns+` FROM import_jobs
+		WHERE status IN ('validating', 'planned')
+		  AND updated_at < $1
+		ORDER BY updated_at
+		LIMIT 200`, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]*Job, 0, 16)
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// SetAsideIfStillWaiting fails a job that is still waiting to be planned or
+// run, with errMsg, and reports whether it was: an admin who planned or ran it
+// a moment ago keeps it.
+func SetAsideIfStillWaiting(ctx context.Context, jobId uuid.UUID, cutoff time.Time, errMsg string) (bool, error) {
+	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
+		UPDATE import_jobs
+		SET status = 'failed', stage = 'failed', error_message = $3,
+		    completed_at = NOW(), updated_at = NOW()
+		WHERE id = $1 AND status IN ('validating', 'planned') AND updated_at < $2`, jobId, cutoff, errMsg)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 // ClearRawObjectKey nullifies raw_object_key after MinIO deletion.
 func ClearRawObjectKey(ctx context.Context, jobId uuid.UUID) error {
 	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
@@ -462,12 +620,22 @@ func SumItemsImported(ctx context.Context, jobId uuid.UUID) (int, error) {
 // CreateChunks bulk-inserts chunks, idempotent on the logical key.
 // Batches at 500 to keep bind-param count well under PG's ~32k limit.
 func CreateChunks(ctx context.Context, chunks []*Chunk) error {
+	dbCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return insertChunks(dbCtx, postgresInit.DBConn.SqlDB, chunks)
+}
+
+// execer is the database or a transaction.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// insertChunks is CreateChunks' statements, run by db.
+func insertChunks(dbCtx context.Context, db execer, chunks []*Chunk) error {
 	if len(chunks) == 0 {
 		return nil
 	}
 	const batchSize = 500
-	dbCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 
 	for start := 0; start < len(chunks); start += batchSize {
 		end := start + batchSize
@@ -501,7 +669,7 @@ func CreateChunks(ctx context.Context, chunks []*Chunk) error {
 			             COALESCE(object_key, '')) DO NOTHING
 		`, strings.Join(values, ","))
 
-		if _, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, query, args...); err != nil {
+		if _, err := db.ExecContext(dbCtx, query, args...); err != nil {
 			return fmt.Errorf("CreateChunks batch %d: %w", start, err)
 		}
 	}
@@ -609,6 +777,7 @@ func FinishChunk(ctx context.Context, chunkId uuid.UUID, itemsDone int, lastCurs
 // FailChunk marks a chunk failed with an error message; eligible for
 // retry while attempts < max_attempts.
 func FailChunk(ctx context.Context, chunkId uuid.UUID, itemsDone int, lastCursor *string, errMsg string) error {
+	errMsg = helpers.WithoutURLQueries(errMsg)
 	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
@@ -634,6 +803,7 @@ func HeartbeatChunk(ctx context.Context, chunkId uuid.UUID, itemsDone int, lastC
 // ResetChunkForRetry sends a chunk back to 'pending' WITHOUT bumping
 // attempts. Used for transient conditions (rate-limit, retry-after).
 func ResetChunkForRetry(ctx context.Context, chunkId uuid.UUID, reason string) error {
+	reason = helpers.WithoutURLQueries(reason)
 	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
@@ -888,6 +1058,7 @@ func LogImportError(ctx context.Context, importId uuid.UUID, chunkId *uuid.UUID,
 	if postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
 		return // not connected (a provider's unit test): nowhere to keep it
 	}
+	message, errorContext = helpers.WithoutURLQueries(message), contextWithoutURLQueries(errorContext)
 	dbCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `

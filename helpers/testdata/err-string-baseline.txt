@@ -53,7 +53,7 @@ controllers/Channel/channelController.go 1
 controllers/Doc/docController.go 6
 controllers/EntityLink/entityLinkController.go 4
 controllers/GitHub/githubController.go 17
-controllers/Import/importController.go 17
+controllers/Import/importController.go 13
 controllers/SlackImport/slackImportController.go 8
 controllers/Task/taskController.go 6
 controllers/Webhook/webhookController.go 8

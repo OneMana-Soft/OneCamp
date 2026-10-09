@@ -25,6 +25,7 @@ import (
 	codeagent "github.com/akashc777/OneCamp/business/CodeAgent"
 	codepr "github.com/akashc777/OneCamp/business/CodePR"
 	memoryModels "github.com/akashc777/OneCamp/models/postgres/WorkspaceMemory"
+	ai "github.com/akashc777/OneCamp/services/AI"
 )
 
 // codeContextMemoryLimit bounds how many workspace-memory items we pull for one
@@ -48,6 +49,18 @@ const (
 )
 
 type codeContextProvider struct{}
+
+// runSponsor is whose agent the run making this call is: the sponsor its
+// requester is bound to, or, when nobody else asked, actingUUID, the person
+// the call executes as (the sponsor, in an agent's own runs; the member, when
+// they use the assistant themselves). It is never the person the run acts
+// for, whose instructions AgentScopedMemoryBlock adds itself.
+func runSponsor(ctx context.Context, actingUUID string) string {
+	if _, sponsor, forOther := ai.RunRequester(ctx); forOther && strings.TrimSpace(sponsor) != "" {
+		return sponsor
+	}
+	return actingUUID
+}
 
 // Fragments returns permission-scoped org-context fragments for a code analysis.
 // Returns nil (OFF-safe) unless there is an acting user, AI + the memory layer
@@ -98,8 +111,10 @@ func (codeContextProvider) Fragments(ctx context.Context, subj codeagent.Context
 
 	// 2. Standing instructions the team gave the agent in THIS conversation
 	//    (channel/DM the request came from), if we know it — directive "how the
-	//    team wants the agent to behave here" facts.
-	if block := AgentScopedMemoryBlock(ctx, subj.ChannelUUID, subj.ChatGrpID); strings.TrimSpace(block) != "" {
+	//    team wants the agent to behave here" facts. The ones the agent's
+	//    sponsor gave, and the asker's when someone else asked
+	//    (AgentScopedMemoryBlock).
+	if block := AgentScopedMemoryBlock(ctx, subj.ChannelUUID, subj.ChatGrpID, runSponsor(ctx, actor)); strings.TrimSpace(block) != "" {
 		fragments = append(fragments, codepr.ContextFragment{
 			Kind:   codepr.KindMemory,
 			Title:  "Standing instructions for this conversation",

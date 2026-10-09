@@ -17,7 +17,7 @@ var SyncSignal = make(chan struct{}, 1)
 
 // EnqueueGitHubSync is the shared entry point for queueing GitHub sync operations.
 //
-// BOTH GUARDS LIVE HERE rather than at the fifteen call sites, because the call
+// THE GUARDS LIVE HERE rather than at the fifteen call sites, because the call
 // sites are ordinary task writes that have no reason to know GitHub exists, and
 // one of them being forgotten is exactly how this went wrong.
 //
@@ -34,6 +34,12 @@ var SyncSignal = make(chan struct{}, 1)
 // GitHub renaming an issue made OneCamp PATCH the same title back. See
 // helpers.GitHubOriginContextKey.
 //
+// GUARD 3: NOT AN AGENT'S COMMENT. A linked task's comment thread is copied
+// onto the issue, which is often public, and an agent's reply there is written
+// for the people in the workspace from what they can see. It stays in the
+// workspace. The agent's other changes to the task, its status say, still sync.
+// See helpers.WithAgentWrite.
+//
 // The lookup costs one indexed read on a path that previously cost an insert, a
 // worker wake, an API call and three retries.
 func EnqueueGitHubSync(ctx context.Context, taskID uuid.UUID, syncType string, payload map[string]interface{}) {
@@ -49,6 +55,9 @@ func EnqueueGitHubSync(ctx context.Context, taskID uuid.UUID, syncType string, p
 	}()
 
 	if helpers.IsGitHubOrigin(ctx) {
+		return
+	}
+	if helpers.IsAgentWrite(ctx) && commentSyncs[syncType] {
 		return
 	}
 
@@ -79,6 +88,9 @@ func EnqueueGitHubSync(ctx context.Context, taskID uuid.UUID, syncType string, p
 	default:
 	}
 }
+
+// commentSyncs are the sync types that carry a comment to GitHub.
+var commentSyncs = map[string]bool{"comment": true, "comment_edit": true, "comment_delete": true}
 
 // TaskHasGitHubLink reports whether a task points at a GitHub issue or PR.
 //

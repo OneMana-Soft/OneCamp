@@ -773,15 +773,17 @@ func executeSummarizeDM(ctx context.Context, action ai.ProposedAction, userUUID 
 }
 
 // executeSummarizeGroupChat fetches and summarizes recent messages in a group chat.
+//
+// The conversation is read from grp_id, the parameter the tool declares, and
+// from nothing else: a call is authorised by what its declared parameters
+// name (business/MCPServer), and an undeclared alias read first let a call
+// pass that check naming one conversation and summarize another.
 func executeSummarizeGroupChat(ctx context.Context, action ai.ProposedAction, userUUID string) (string, map[string]string, error) {
-	groupingId := action.Params["grouping_id"]
-	if groupingId == "" {
-		groupingId = action.Params["grp_id"]
-	}
+	groupingId := strings.TrimSpace(action.Params["grp_id"])
 	countStr := action.Params["count"]
 
 	if groupingId == "" {
-		return "", nil, fmt.Errorf("grouping_id is required")
+		return "", nil, fmt.Errorf("grp_id is required")
 	}
 
 	count := 0

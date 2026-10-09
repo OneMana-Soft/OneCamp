@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 	"github.com/google/uuid"
 )
@@ -21,25 +22,17 @@ func TestImportTokenRoundTrip(t *testing.T) {
 	t.Setenv("IMPORT_TOKEN_KEK", "integration-kek-1234567890abcdefghij")
 
 	env := SetupEnv(t)
+	if err := postgresInit.ConnectPostgres(context.Background(), env.DSN); err != nil {
+		t.Fatal(err)
+	}
 
 	// The integration harness applies every migration but doesn't seed
-	// users. SaveToken FKs into users(id), so we insert a minimal user
-	// row here. The user model has many columns; we only need id.
+	// users. SaveToken FKs into users(id), so a minimal user row goes in:
+	// id and email_id, the only columns without a default. (This used to
+	// insert columns users doesn't have and skip itself, so it never ran.)
 	ownerID := uuid.New()
-	_, err := env.PG.Exec(`
-		INSERT INTO users (id, email, name, created_at, updated_at)
-		VALUES ($1, $2, $3, NOW(), NOW())
-	`, ownerID, "ci-test@example.com", "CI Test")
-	if err != nil {
-		// Schemas across migrations differ. Try the leaner shape if the
-		// first one doesn't match.
-		_, err = env.PG.Exec(`
-			INSERT INTO users (id, email, name)
-			VALUES ($1, $2, $3)
-		`, ownerID, "ci-test@example.com", "CI Test")
-		if err != nil {
-			t.Skipf("users schema differs from this test's expectation: %v", err)
-		}
+	if _, err := env.PG.Exec(`INSERT INTO users (id, email_id) VALUES ($1, $2)`, ownerID, "ci-test-"+ownerID.String()[:8]+"@example.com"); err != nil {
+		t.Fatalf("seed user: %v", err)
 	}
 
 	expiry := time.Now().Add(45 * time.Minute).UTC().Truncate(time.Second)

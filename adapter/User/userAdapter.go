@@ -5,13 +5,15 @@ import (
 )
 
 type InputEditUserProfile struct {
-	UserFullName  string `json:"user_full_name,omitempty"`
-	UserName      string `json:"user_name,omitempty"`
-	Title         string `json:"user_job_title,omitempty"`
-	Hobbies       string `json:"user_hobbies,omitempty"`
-	ProfilePicKey string `json:"user_profile_object_key,omitempty"`
-	AppLang       string `json:"user_app_lang,omitempty"`
-	Status        string `jso:"user_status,omitempty"`
+	UserFullName string `json:"user_full_name,omitempty"`
+	UserName     string `json:"user_name,omitempty"`
+	// Handle is sent only when the person changes it; nil keeps it.
+	Handle        *string `json:"user_handle,omitempty"`
+	Title         string  `json:"user_job_title,omitempty"`
+	Hobbies       string  `json:"user_hobbies,omitempty"`
+	ProfilePicKey string  `json:"user_profile_object_key,omitempty"`
+	AppLang       string  `json:"user_app_lang,omitempty"`
+	Status        string  `jso:"user_status,omitempty"`
 }
 
 type InputUserNameValid struct {

@@ -8,20 +8,79 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/akashc777/OneCamp/helpers"
 )
 
-// defaultHTTPClient covers the typical attachment download path. Long
-// timeout because some provider CDNs (Notion S3, Asana S3, Trello CDN)
-// can take a while on multi-MB files.
-var defaultHTTPClient = &http.Client{
-	Timeout: 5 * time.Minute,
-	Transport: &http.Transport{
-		MaxIdleConns:        16,
-		MaxIdleConnsPerHost: 4,
-		IdleConnTimeout:     90 * time.Second,
-	},
+// downloadClient fetches every attachment an import brings in. An
+// attachment's URL is whatever the source workspace holds, and anyone in it
+// can add a link attachment pointing anywhere, so this is the SSRF-safe client
+// (helpers.SSRFSafeClient): https only, and no address on this server or its
+// networks, checked as each connection is made and at every redirect. Long
+// timeout because some provider CDNs (Notion S3, Asana S3, Trello CDN) can take
+// a while on multi-MB files.
+var downloadClient = func() *http.Client {
+	c := helpers.SSRFSafeClient(false)
+	c.Timeout = 5 * time.Minute
+	checkAddress := c.CheckRedirect
+	c.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := checkAddress(req, via); err != nil {
+			return err
+		}
+		// A provider's credential was checked for the host it was set for, and
+		// goes no further. net/http already drops it for a host that isn't
+		// that one or under it; this drops it for any other host at all.
+		if !strings.EqualFold(req.URL.Hostname(), via[0].URL.Hostname()) {
+			req.Header.Del("Authorization")
+		}
+		return nil
+	}
+	return c
+}()
+
+// CredentialAllowed reports whether a download URL may be sent a provider's
+// credential: it is https, and its host is one of hosts or a subdomain of
+// one. The host is read from the parsed URL, never searched for in the text:
+// "https://evil.example/?u=uploads.linear.app" is evil.example's, and so is
+// "https://uploads.linear.app.evil.example/". The request is made from the
+// same parse, so what is checked is what is dialled.
+func CredentialAllowed(rawURL string, hosts ...string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "https" {
+		return false
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host == "" {
+		return false
+	}
+	for _, h := range hosts {
+		h = strings.ToLower(h)
+		if host == h || strings.HasSuffix(host, "."+h) {
+			return true
+		}
+	}
+	return false
+}
+
+// WithAuthorization is att carrying an Authorization header of value when its
+// URL may be sent the credential (CredentialAllowed for hosts), and carrying
+// none when it may not.
+func WithAuthorization(att SourceAttachment, value string, hosts ...string) SourceAttachment {
+	headers := make(map[string]string, len(att.Headers)+1)
+	for k, v := range att.Headers {
+		if !strings.EqualFold(k, "Authorization") {
+			headers[k] = v
+		}
+	}
+	if CredentialAllowed(att.URL, hosts...) {
+		headers["Authorization"] = value
+	}
+	att.Headers = headers
+	return att
 }
 
 // DefaultFetchAttachment is the helper providers can call from inside
@@ -31,6 +90,9 @@ var defaultHTTPClient = &http.Client{
 // Caller is responsible for calling RateLimiter().Wait first if it
 // wants to be polite to the upstream.
 func DefaultFetchAttachment(ctx context.Context, att SourceAttachment, dest io.Writer) (string, int64, error) {
+	if _, err := helpers.ValidateOutboundURL(att.URL, false); err != nil {
+		return "", 0, fmt.Errorf("attachment URL refused: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, att.URL, nil)
 	if err != nil {
 		return "", 0, err
@@ -38,7 +100,7 @@ func DefaultFetchAttachment(ctx context.Context, att SourceAttachment, dest io.W
 	for k, v := range att.Headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := defaultHTTPClient.Do(req)
+	resp, err := downloadClient.Do(req)
 	if err != nil {
 		return "", 0, err
 	}

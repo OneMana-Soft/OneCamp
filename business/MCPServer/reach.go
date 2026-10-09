@@ -67,6 +67,10 @@ type ReachDecision struct {
 	PrincipalDgraphUID string
 }
 
+// ReasonNotChannelMember is the refusal for a channel the person isn't in. A
+// public one included: it is membership that decides, here as in the AI index.
+const ReasonNotChannelMember = "the originating person is not a member of this channel"
+
 // PrincipalCanReach decides whether principalUserID may act on ref.
 //
 // principalUserID is the api_token's created_by — the human at the root. It is
@@ -164,7 +168,7 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 			return ReachDecision{Reason: "this channel has been deleted"}
 		}
 		if info.IsMember <= 0 {
-			return ReachDecision{Reason: "the originating person is not a member of this channel"}
+			return ReachDecision{Reason: ReasonNotChannelMember}
 		}
 		// WRITE needs more than membership. A channel can be admins-only, and the
 		// shipped rule for that is exactly this comparison — see the identical check

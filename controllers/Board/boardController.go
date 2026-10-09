@@ -60,11 +60,7 @@ func GetBoardInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Same access rule as GetDocInfo: a private board with no granted access and
-	// not owned by the caller is forbidden.
-	if dgraphBoard.IsPrivate != nil && *dgraphBoard.IsPrivate &&
-		dgraphBoard.HasEditAccess == 0 && dgraphBoard.HasReadAccess == 0 && dgraphBoard.HasCommentAccess == 0 &&
-		(dgraphBoard.CreatedBy == nil || dgraphBoard.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid) {
+	if !business.CanRead(dgraphBoard, userInfo.UserDgraphInfo.Uuid) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
 	}
@@ -176,12 +172,7 @@ func BoardCollabAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isOwner := boardDgraph.CreatedBy != nil && boardDgraph.CreatedBy.Uuid == userInfo.UserDgraphInfo.Uuid
-	hasAccess := boardDgraph.HasEditAccess > 0 || boardDgraph.HasReadAccess > 0 || boardDgraph.HasCommentAccess > 0
-	// A public (non-private) board is joinable by any authenticated member.
-	isPublic := boardDgraph.IsPrivate == nil || !*boardDgraph.IsPrivate
-
-	if !isOwner && !hasAccess && !isPublic {
+	if !business.CanRead(boardDgraph, userInfo.UserDgraphInfo.Uuid) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Unauthorized board access"})
 		return
 	}
@@ -189,6 +180,7 @@ func BoardCollabAuthorize(w http.ResponseWriter, r *http.Request) {
 	// canEdit drives server-side read-only enforcement in the collaboration
 	// service: viewers (no edit access, not owner) join the live session but
 	// their document writes are rejected.
+	isOwner := boardDgraph.CreatedBy != nil && boardDgraph.CreatedBy.Uuid == userInfo.UserDgraphInfo.Uuid
 	canEdit := isOwner || boardDgraph.HasEditAccess > 0
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Authorised", "canEdit": canEdit})

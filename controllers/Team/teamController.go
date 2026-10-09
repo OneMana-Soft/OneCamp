@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Team"
+	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
 	business "github.com/akashc777/OneCamp/business/Team"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -465,7 +466,7 @@ func RemoveMemberFromTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.RemoveMemberFromTeam(ctx, dgraphTeamInfo, dgraphTeamInfo.Members[0].Uid)
+	err = business.RemoveMemberFromTeam(ctx, dgraphTeamInfo, dgraphTeamInfo.Members[0].Uid, dgraphTeamInfo.Members[0].Uuid)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -786,6 +787,13 @@ func ArchiveTeam(w http.ResponseWriter, r *http.Request) {
 			"msg": "Failed to get team dgraph info",
 			"err": err,
 		})
+		return
+	}
+
+	// The demo's own team stays for every visitor (business/DemoGuard). The
+	// visitor is not an admin, so this is for the day somebody makes it one.
+	if demoGuard.KeepsFromVisitor(userInfo.UserPostgresInfo.EmailID, dgraphTeam.CreatedAt) {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "demo", "msg": helpers.DemoSeededMsg})
 		return
 	}
 

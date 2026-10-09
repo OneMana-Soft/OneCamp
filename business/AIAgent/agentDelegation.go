@@ -546,26 +546,34 @@ func EmitAgentMessage(ctx context.Context, where Surface, entityID, channelName,
 // Permissions: delegation must not launder authority.
 // ---------------------------------------------------------------------------
 //
-// An agent always runs as its OWN owner (agentRunner: userUUID =
-// agent.CreatedBy). For a direct human mention that is a deliberate, bounded
-// design — to mention an agent you must be able to post in a channel the agent is
-// scoped to, so the authority a person has over an agent is exactly "we share a
-// channel".
+// An agent's tools execute as its OWN owner (agentRunner: userUUID =
+// agent.CreatedBy), but a run is FOR the person who asked, and reaches only
+// what both the owner and that person can (agentRequester.go). That intersection
+// is enforced on every tool call, every search and every list.
 //
-// Delegation breaks that reasoning if left alone. Consider: Alice is a limited
-// member. She mentions @triage, owned by an admin, which runs with the admin's
-// rights. @triage's reply mentions @coder, owned by a different admin, which runs
-// with THEIR rights. A chain Alice started now executes with authority Alice never
-// had, and the audit records the owner as the actor. That is privilege laundering,
-// and it is reachable through delegation in a way a direct mention is not, because
-// the delegated hop bypasses whether Alice could address @coder at all.
+// It used to rest on an argument instead: to mention an agent you must be able
+// to post in a channel the agent is scoped to, so the authority a person had
+// over an agent was exactly "we share a channel". That never held. A DM to a
+// dm_able agent needs no shared channel, an unscoped agent answers in any
+// channel, and the tools were never confined to the channel anyway: search,
+// other channels, DMs, docs, tasks and the owner's connected accounts all ran
+// with the owner's reach for whoever asked. So the asker's reach is now checked
+// directly rather than inferred from where they spoke.
 //
-// The invariant: A DELEGATED RUN MAY NEVER REACH AN AGENT THE ORIGINATING PERSON
-// COULD NOT HAVE ADDRESSED THEMSELVES. If Alice could have mentioned @coder in
-// this channel, then @coder acting as its owner is exposure Alice already had
-// directly, and delegation adds no authority. Enforced as a pre-flight check,
-// which is far smaller than intersecting every tool grant and provably closes the
-// laundering path.
+// Delegation is covered by the same rule, because a chain carries its origin.
+// Alice, a limited member, mentions @triage (owned by an admin); @triage's reply
+// mentions @coder (owned by another admin). Each hop is a run FOR Alice
+// (dispatchMentionAgents credits rooted.OriginUserID, and a durable hop records
+// her as triggered_by), so @coder's tools reach only what Alice and @coder's
+// owner can both reach. A chain Alice started can never execute with authority
+// Alice never had.
+//
+// The check below answers the question that remains: may the originating person
+// address this agent on this surface at all? A DELEGATED RUN MAY NEVER REACH AN
+// AGENT THE ORIGINATING PERSON COULD NOT HAVE ADDRESSED THEMSELVES. It is a
+// pre-flight check on the hop, cheaper than starting a run whose every call
+// would then be refused, and it keeps a chain out of a channel its origin
+// cannot see even when nothing in that run would read anything.
 //
 // Today the chain happens to stay in the channel the human posted in, so
 // membership holds BY CONSTRUCTION. That is exactly why this is checked

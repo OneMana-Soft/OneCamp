@@ -65,13 +65,15 @@ func TestRelatedElsewhere(t *testing.T) {
 		{ChannelUUID: "here", ChannelName: "eng", Snippet: "same channel, never shown"},
 		{ChatGrpID: "dm-1", ChannelUUID: "x", Snippet: "a DM, never shown"},
 		{ChannelUUID: "", Snippet: "a doc, not a conversation"},
+		{ChannelUUID: "exec", ChannelName: "exec", Snippet: "a private channel, never shown"},
 		{ChannelUUID: "fin", ChannelName: "finance", Snippet: "We are  renegotiating the vendor contract"},
 		{ChannelUUID: "fin", ChannelName: "finance", Snippet: "We are renegotiating the vendor contract"},
 		{ChannelUUID: "ops", ChannelName: "#ops", Snippet: "Vendor outage postmortem"},
 		{ChannelUUID: "sales", ChannelName: "", Snippet: "Vendor asked about pricing"},
 		{ChannelUUID: "legal", ChannelName: "legal", Snippet: "one too many"},
 	}
-	got := relatedElsewhere(hits, "here", 3)
+	public := func(id string) bool { return id != "exec" }
+	got := relatedElsewhere(hits, "here", 3, public)
 	want := []string{
 		"#finance: We are renegotiating the vendor contract",
 		"#ops: Vendor outage postmortem",

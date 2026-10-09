@@ -33,13 +33,19 @@ func registerTableExecutors() {
 }
 
 // tableActor builds a DataTable actor for the acting user, carrying their admin
-// flag so the permission model resolves correctly.
-func tableActor(ctx context.Context, userUUID string) (dataTableBusiness.Actor, error) {
+// flag so the permission model resolves correctly. The context it returns is
+// the one to read and write with: when an agent run acts for someone other
+// than its sponsor, it also names that person (forAskerToo).
+func tableActor(ctx context.Context, userUUID string) (context.Context, dataTableBusiness.Actor, error) {
 	userInfo, err := getUserInfoForExecutor(ctx, userUUID)
 	if err != nil {
-		return dataTableBusiness.Actor{}, fmt.Errorf("failed to look up user: %w", err)
+		return ctx, dataTableBusiness.Actor{}, fmt.Errorf("failed to look up user: %w", err)
 	}
-	return dataTableBusiness.Actor{
+	ctx, err = forAskerToo(ctx)
+	if err != nil {
+		return ctx, dataTableBusiness.Actor{}, err
+	}
+	return ctx, dataTableBusiness.Actor{
 		UserID:  userInfo.UserPostgresInfo.Id,
 		IsAdmin: userInfo.UserPostgresInfo.IsAdmin,
 	}, nil
@@ -47,13 +53,27 @@ func tableActor(ctx context.Context, userUUID string) (dataTableBusiness.Actor, 
 
 // executeListTables lists the tables the acting user can see.
 func executeListTables(ctx context.Context, _ ai.ProposedAction, userUUID string) (string, map[string]string, error) {
-	actor, err := tableActor(ctx, userUUID)
+	ctx, actor, err := tableActor(ctx, userUUID)
 	if err != nil {
 		return "", nil, err
 	}
 	tables, err := dataTableBusiness.ListTables(ctx, actor)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to list tables")
+	}
+	// Only the tables the asker may view too, when someone else asked.
+	visible, err := askerTables(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	if visible != nil {
+		kept := tables[:0:0]
+		for _, t := range tables {
+			if t != nil && visible[t.Id.String()] {
+				kept = append(kept, t)
+			}
+		}
+		tables = kept
 	}
 	if len(tables) == 0 {
 		return "You have no tables yet.", nil, nil
@@ -80,6 +100,10 @@ func executeReadTable(ctx context.Context, action ai.ProposedAction, userUUID st
 	actor := dataTableBusiness.Actor{
 		UserID:  userInfo.UserPostgresInfo.Id,
 		IsAdmin: userInfo.UserPostgresInfo.IsAdmin,
+	}
+	ctx, aerr := forAskerToo(ctx)
+	if aerr != nil {
+		return "", nil, aerr
 	}
 	bundle, berr := dataTableBusiness.GetBundle(ctx, tableID, actor)
 	if berr != nil {
@@ -171,7 +195,7 @@ func executeQueryTable(ctx context.Context, action ai.ProposedAction, userUUID s
 	if err != nil {
 		return "", nil, fmt.Errorf("a valid table_uuid is required (use list_tables/read_table to find it)")
 	}
-	actor, err := tableActor(ctx, userUUID)
+	ctx, actor, err := tableActor(ctx, userUUID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -219,7 +243,7 @@ func executeQueryPlan(ctx context.Context, action ai.ProposedAction, userUUID st
 	if err != nil {
 		return "", nil, fmt.Errorf("a valid table_uuid is required (use list_tables/read_table to find it)")
 	}
-	actor, err := tableActor(ctx, userUUID)
+	ctx, actor, err := tableActor(ctx, userUUID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -427,7 +451,7 @@ func executeCreateTableRow(ctx context.Context, action ai.ProposedAction, userUU
 	if perr != nil {
 		return "", nil, perr
 	}
-	actor, err := tableActor(ctx, userUUID)
+	ctx, actor, err := tableActor(ctx, userUUID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -459,12 +483,12 @@ func executeUpdateTableRow(ctx context.Context, action ai.ProposedAction, userUU
 	if perr != nil {
 		return "", nil, perr
 	}
-	actor, err := tableActor(ctx, userUUID)
+	ctx, actor, err := tableActor(ctx, userUUID)
 	if err != nil {
 		return "", nil, err
 	}
 	linkCells := linkFieldsNamed(ctx, tableID, values, actor)
-	if _, uerr := dataTableBusiness.UpdateRow(ctx, tableID, rowID, dataTableBusiness.RowInput{Values: values}, actor); uerr != nil {
+	if _, uerr := dataTableBusiness.PatchRow(ctx, tableID, rowID, values, actor); uerr != nil {
 		return "", nil, mapTableErr(uerr, "update row")
 	}
 	if len(linkCells) > 0 {
@@ -515,7 +539,7 @@ func executeLinkTableRows(ctx context.Context, action ai.ProposedAction, userUUI
 	if len(add)+len(remove) == 0 {
 		return "", nil, fmt.Errorf("give the ids of rows to add or remove")
 	}
-	actor, err := tableActor(ctx, userUUID)
+	ctx, actor, err := tableActor(ctx, userUUID)
 	if err != nil {
 		return "", nil, err
 	}

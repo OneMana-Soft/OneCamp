@@ -31,6 +31,23 @@ func ListWorkspaceMemory(ctx context.Context, userInfo *userModels.UserInfo, kin
 	channels, projects := getAccessibleResourceUUIDs(userInfo)
 	grpIDs := accessibleGroupingIDs(userInfo)
 	ownerID := userInfo.UserPostgresInfo.Id
+	ownerItems := true
+
+	// An agent asked for something by a person other than its sponsor reads
+	// memory as the sponsor, so it would see the sponsor's own notes (the owner
+	// items below) and every scope the sponsor is in. Only scopes both people
+	// share are kept, and owner items are dropped: a person's private memory is
+	// theirs alone, whoever is asking.
+	asker, err := askerView(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if asker != nil {
+		channels = keepIn(channels, asker.channels)
+		projects = keepIn(projects, asker.projects)
+		grpIDs = keepIn(grpIDs, asker.grpIDs)
+		ownerItems = false
+	}
 
 	// Optional channel scoping: intersect with accessible channels so an
 	// arbitrary ?channel= param can never reveal items outside the user's
@@ -69,6 +86,10 @@ func ListWorkspaceMemory(ctx context.Context, userInfo *userModels.UserInfo, kin
 		filter.OwnerID = nil
 		countFilter.AccessibleProjects = nil
 		countFilter.AccessibleGrpIDs = nil
+		countFilter.OwnerID = nil
+	}
+	if !ownerItems {
+		filter.OwnerID = nil
 		countFilter.OwnerID = nil
 	}
 
@@ -510,6 +531,17 @@ func channelAccessUUIDs(userInfo *userModels.UserInfo) []string {
 	for _, ch := range userInfo.UserDgraphInfo.Channels {
 		if ch.Uuid != "" {
 			out = append(out, ch.Uuid)
+		}
+	}
+	return out
+}
+
+// keepIn returns the ids of list that are in set, in list's order.
+func keepIn(list []string, set map[string]bool) []string {
+	out := make([]string, 0, len(list))
+	for _, id := range list {
+		if set[id] {
+			out = append(out, id)
 		}
 	}
 	return out

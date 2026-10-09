@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	"github.com/akashc777/OneCamp/helpers"
 	minioInit "github.com/akashc777/OneCamp/initializers/minioInit"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
@@ -21,6 +22,7 @@ const (
 //  1. Deletes staged ZIPs for jobs that finished N+ days ago.
 //  2. Marks abandoned 'pending' jobs (presigned but never finalised)
 //     as failed and deletes their orphaned upload (if any).
+//  3. Sets aside jobs left waiting to be planned or run for a day.
 //
 // Mirrors the legacy SlackImport cleanup loop but generic across providers.
 func StartCleanupLoop() {
@@ -56,6 +58,51 @@ func runCleanupTick() {
 		helpers.LogInfoWithContext(ctx,
 			"Import cleanup failed %d abandoned pending upload(s)", n)
 	}
+	if n, err := SetAsideAbandonedImports(ctx, time.Now()); err != nil {
+		helpers.LogWarnWithContext(ctx, "Import cleanup reap waiting err: %+v", err)
+	} else if n > 0 {
+		helpers.LogInfoWithContext(ctx,
+			"Import cleanup set aside %d import(s) left waiting", n)
+	}
+}
+
+// abandonedWaitingMsg is what a job set aside by the cleanup says.
+const abandonedWaitingMsg = "Waited more than a day to be planned or run, so it was set aside. Plan it again to carry on, or start a new import."
+
+// SetAsideAbandonedImports fails the jobs left waiting to be planned or run
+// for IMPORT_PENDING_TTL_HOURS (a day by default), as of now. A waiting job keeps its
+// label busy, so one somebody walked away from blocked importing that
+// workspace again. Failed, it frees the label and can still be planned again
+// (its uploaded file is kept as long as any finished import's).
+func SetAsideAbandonedImports(ctx context.Context, now time.Time) (int, error) {
+	ttl := envIntDefault("IMPORT_PENDING_TTL_HOURS", defaultPendingTTLHours)
+	if ttl <= 0 {
+		return 0, nil
+	}
+	cutoff := now.Add(-time.Duration(ttl) * time.Hour)
+	jobs, err := importModels.ListAbandonedWaitingJobs(ctx, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	setAside := 0
+	for _, j := range jobs {
+		done, err := importModels.SetAsideIfStillWaiting(ctx, j.Id, cutoff, abandonedWaitingMsg)
+		if err != nil {
+			helpers.LogWarnWithContext(ctx, "Import cleanup set aside %s err: %+v", j.Id, err)
+			continue
+		}
+		if !done {
+			continue // planned or run in the meantime
+		}
+		publishProgress(ctx, j, "failed", "failed", abandonedWaitingMsg)
+		if prov := importProvider.Get(j.Provider); prov != nil {
+			if cleaner, ok := prov.(importProvider.JobCleaner); ok {
+				cleaner.CleanupJob(j.Id.String())
+			}
+		}
+		setAside++
+	}
+	return setAside, nil
 }
 
 func reapStaleStagedZips(ctx context.Context) (int, error) {

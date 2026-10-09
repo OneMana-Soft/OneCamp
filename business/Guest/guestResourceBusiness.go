@@ -31,7 +31,11 @@ import (
 	"strings"
 	"time"
 
+	boardBusiness "github.com/akashc777/OneCamp/business/Board"
+	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
+	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
+	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
 	"github.com/golang-jwt/jwt/v5"
@@ -191,7 +195,57 @@ func CreateGuestDocComment(ctx context.Context, grant *guestModel.GuestGrant, di
 	if err != nil {
 		return nil, err
 	}
+	go notifyDocKeepers(context.WithoutCancel(ctx), grant.ResourceID, name, id.String(), plain)
 	return &GuestCommentView{ID: id, GuestName: name, Body: plain, CreatedAt: createdAt}, nil
+}
+
+// notifyDocKeepers tells whoever made a doc, and its editors, that a guest
+// commented on it: guest comments are kept apart from members', so nothing
+// else does. Read as the "Guests" principal, the way guest pages read a
+// channel; a doc deleted since the link was made tells nobody.
+//
+// Once per doc per few minutes (notifyDue), the window taken only once the
+// doc has been read, as a channel's is once its message is written: taken
+// first, a doc that couldn't be read just then (a Dgraph blip) spent it, and
+// the comments that followed told nobody.
+func notifyDocKeepers(ctx context.Context, docUUID, name, commentID, plain string) {
+	bot, err := userBusiness.EnsureGuestBot(ctx)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Guest/notifyDocKeepers principal err: %+v", err)
+		return
+	}
+	doc, err := docBusiness.GetBasicDgraphDocByUUID(ctx, docUUID, bot.DgraphUID)
+	if err != nil || doc == nil || doc.Uuid == "" || helpers.IsSoftDeleted(doc.DeletedAt) {
+		return
+	}
+	if !notifyDue(ctx, "doc", docUUID) {
+		return // told about this doc a moment ago; the comment is there when they look
+	}
+	commentBusiness.NotifyDocCommentFor(ctx, doc, guestLabel(name), commentID, plain)
+}
+
+// SharedTitle is the name of the doc or board a link opens, for the guest's
+// page header, which said "Shared document" whatever it was. Read as the
+// "Guests" principal; "" when it has no name or can't be read just now.
+func SharedTitle(ctx context.Context, grant *guestModel.GuestGrant) string {
+	if grant == nil {
+		return ""
+	}
+	bot, err := userBusiness.EnsureGuestBot(ctx)
+	if err != nil {
+		return ""
+	}
+	switch grant.ResourceType {
+	case guestModel.ResourceDoc:
+		if d, err := docBusiness.GetBasicDgraphDocByUUID(ctx, grant.ResourceID, bot.DgraphUID); err == nil && d != nil {
+			return strings.TrimSpace(d.Title)
+		}
+	case guestModel.ResourceBoard:
+		if b, err := boardBusiness.GetBasicBoardByUUID(ctx, grant.ResourceID, bot.DgraphUID); err == nil && b != nil {
+			return strings.TrimSpace(b.Title)
+		}
+	}
+	return ""
 }
 
 // sanitizeGuestCommentBody is the security boundary for guest-submitted comment
@@ -235,7 +289,7 @@ func ListGuestDocComments(ctx context.Context, docUUID string) ([]*GuestCommentV
 // ValidateResourceGrant resolves a raw link token to its active grant for the
 // expected resource type, enforcing the workspace policy. Returns a sentinel
 // error (mapped to a uniform "not available" upstream) when access is not
-// available for any reason — no oracle.
+// available for any reason — no oracle — and a read that failed as it is.
 func ValidateResourceGrant(ctx context.Context, rawToken, expectedType string) (*guestModel.GuestGrant, error) {
 	if !settingsBusiness.GuestAccessEnabled() {
 		return nil, ErrGuestDisabled

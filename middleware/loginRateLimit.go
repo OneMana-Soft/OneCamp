@@ -2,11 +2,8 @@ package middleware
 
 import (
 	"context"
-	"fmt"
 	"net/http"
-	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -21,7 +18,7 @@ const loginRateMaxAttempts = 20
 // LoginRateLimit returns a middleware that rate-limits POST requests to login
 // endpoints by client IP. It uses the registry-backed fixed-window
 // limiter (registry.LoginRate, 15-minute window). If Redis is
-// unavailable the limiter fails OPEN.
+// unavailable it counts in this process instead (see IPRateLimit).
 //
 // `kind` separates buckets across surfaces (email, ldap, forgot, etc).
 func LoginRateLimit(kind string) func(http.Handler) http.Handler {
@@ -41,22 +38,25 @@ func OAuthRegisterRateLimit() func(http.Handler) http.Handler {
 
 // IPRateLimit rate-limits mutating requests per (kind, client IP) in the
 // registry.LoginRate 15-minute window, answering 429 with msg once max is
-// reached. Fails OPEN when Redis is unavailable.
+// reached.
+//
+// When Redis can't be asked, the request is counted in this process instead
+// (redisStore.AllowFixedWindowOrLocal). It used to be let through, so a Redis
+// outage lifted the sign-in, two-step and reset limits, the ones standing
+// between a guesser and a password or a six-digit code.
 func IPRateLimit(kind string, max int, msg string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Don't gate preflights or non-mutating probes
+			// Don't gate preflights or non-mutating probes. Every sign-in,
+			// two-step and reset route is a POST; the guest, booking and
+			// unsubscribe GETs this is also attached to go uncounted, which
+			// costs load, not guessing (their tokens are 24 or 32 random bytes).
 			if r.Method == http.MethodOptions || r.Method == http.MethodGet {
 				next.ServeHTTP(w, r)
 				return
 			}
 
-			if !redisStore.IsAvailable() {
-				next.ServeHTTP(w, r)
-				return
-			}
-
-			ip := clientIP(r)
+			ip := helpers.ClientIP(r)
 			if ip == "" {
 				next.ServeHTTP(w, r)
 				return
@@ -67,7 +67,7 @@ func IPRateLimit(kind string, max int, msg string) func(http.Handler) http.Handl
 			rctx, cancel := contextWithRedisTimeout(ctx)
 			defer cancel()
 
-			res := redisStore.AllowFixedWindow(rctx, registry.LoginRate, []string{kind, ip}, max)
+			res := redisStore.AllowFixedWindowOrLocal(rctx, registry.LoginRate, []string{kind, ip}, max)
 			if !res.Allowed {
 				retryAfter := res.RetryAfterSeconds()
 				if retryAfter <= 0 {
@@ -91,56 +91,4 @@ func IPRateLimit(kind string, max int, msg string) func(http.Handler) http.Handl
 // affected, short enough that a hung Redis doesn't queue requests.
 func contextWithRedisTimeout(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(parent, 500*time.Millisecond)
-}
-
-// clientIP extracts the originating client IP.
-//
-// Trust of X-Forwarded-For / X-Real-IP is gated on the TRUST_PROXY_HEADERS
-// env var because in dev and self-hosted deployments without a proxy, those
-// headers can be spoofed by directly hitting the backend. In production
-// behind Traefik / a load-balancer, set TRUST_PROXY_HEADERS=true.
-//
-// When trusted, only the LEFT-MOST entry of X-Forwarded-For is considered
-// (that's the original client per the RFC), and X-Real-IP is the fallback.
-func clientIP(r *http.Request) string {
-	if strings.EqualFold(os.Getenv("TRUST_PROXY_HEADERS"), "true") {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if comma := strings.IndexByte(xff, ','); comma > 0 {
-				return strings.TrimSpace(xff[:comma])
-			}
-			return strings.TrimSpace(xff)
-		}
-		if xri := r.Header.Get("X-Real-IP"); xri != "" {
-			return strings.TrimSpace(xri)
-		}
-	}
-
-	// RemoteAddr is "host:port"; strip the port. Handles IPv4 and IPv6.
-	addr := r.RemoteAddr
-	if h, _, err := splitHostPort(addr); err == nil {
-		return h
-	}
-	return addr
-}
-
-// splitHostPort is net.SplitHostPort but tolerant of an absent port.
-func splitHostPort(addr string) (host, port string, err error) {
-	if addr == "" {
-		return "", "", fmt.Errorf("empty address")
-	}
-	// IPv6 literals are bracketed: [::1]:80
-	if strings.HasPrefix(addr, "[") {
-		if i := strings.LastIndexByte(addr, ']'); i > 0 {
-			host = addr[1:i]
-			rest := addr[i+1:]
-			if strings.HasPrefix(rest, ":") {
-				port = rest[1:]
-			}
-			return host, port, nil
-		}
-	}
-	if i := strings.LastIndexByte(addr, ':'); i > 0 && strings.Count(addr, ":") == 1 {
-		return addr[:i], addr[i+1:], nil
-	}
-	return addr, "", nil
 }

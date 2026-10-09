@@ -25,13 +25,15 @@ func TestUnattendedApprovalRequiredByDefault(t *testing.T) {
 			t.Errorf("%s is ordinary reversible work and must run unattended", tool)
 		}
 	}
-	// code_pr is external, and is deliberately NOT gated: its entire purpose is that
-	// an agent opens a pull request on its own, and the human decision is the review
-	// before merge — it is never merged automatically. Gating it would mean asking
-	// permission to ask permission.
-	if unattendedApprovalRequired("code_pr") {
-		t.Error("code_pr must stay unattended — the PR review IS its human gate, and requiring approval " +
-			"to open a reviewable PR would break the feature")
+	// code_pr is gated too. It used to be left out on the reasoning that the review
+	// before merge is its human gate, but that review decides whether the change
+	// lands, not whether a branch is pushed and a pull request opened under a
+	// person's GitHub identity — which notifies everyone watching the repository and
+	// is not taken back by closing it. The approval is the person whose account it
+	// pushes with saying yes to that (see codePRProposal).
+	if !unattendedApprovalRequired("code_pr") {
+		t.Error("code_pr must require approval unattended: it pushes as a person, and that person " +
+			"has to agree before it does")
 	}
 }
 

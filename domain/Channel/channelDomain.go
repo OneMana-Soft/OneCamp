@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Channel"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
@@ -73,6 +74,12 @@ func GetChannelByName(ctx context.Context, channelName string) (channelInfo *mod
 		return
 	}
 	return
+}
+
+// PublicLiveChannels returns the live public channels among ids, or all of
+// them (up to limit) when ids is nil: the ones a person may join themselves.
+func PublicLiveChannels(ctx context.Context, ids []string, limit int) ([]models.Channel, error) {
+	return models.PublicLiveChannels(ctx, ids, limit)
 }
 
 func GetChannelInfoByUUID(ctx context.Context, channelUUID uuid.UUID) (channelInfo *models.Channel, err error) {
@@ -372,7 +379,10 @@ func GetBasicDgraphChannelInfoByUUID(ctx context.Context, channelUUID string, us
 
 	variables := make(map[string]string)
 	variables["$id"] = channelUUID
-	variables["$userId"] = userDgraphUUID
+	// A caller reading the channel as nobody in particular (a Slack import's
+	// workers) passes "", which uid() refuses: every imported message failed
+	// on "ID can't be empty".
+	variables["$userId"] = dgraphUIDOrNone(userDgraphUUID)
 	query := `query ChannelInfo($id: string, $userId: string){
 				channelInfo(func: eq(ch_uuid, $id)) {
 					uid
@@ -439,7 +449,7 @@ func GetChannelRecordingTranscript(ctx context.Context, channelUUID string, user
 			ch_uuid
 			ch_handle
 			ch_is_member: count(ch_members @filter(uid($userId)))
-			ch_recording @filter( uid(recUID) AND gt(recording_ended_at, "1970-01-01T00:00:00Z") AND NOT eq(recording_transcript_only, true)) {
+			ch_recording @filter( uid(recUID) AND gt(recording_ended_at, "1970-01-01T00:00:00Z") AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z") AND NOT eq(recording_transcript_only, true)) {
 				recording_egress_id
 				recording_stared_at
 				recording_ended_at
@@ -671,7 +681,13 @@ func GetChannelListWithSearchText(ctx context.Context, userUUID string, searchTe
 }
 
 func GetChannelListWithMemberFlag(ctx context.Context, userDgraphID string, channelDgraphUIDs []string) (dgraphChannels []*dgraphStruct.DgraphChannel, err error) {
+	// Written into the query below, and they come from the request.
+	if !dgraphquery.AllUIDs(channelDgraphUIDs) {
+		return nil, errors.New("not a list of channel ids")
+	}
 
+	// With what the rule for writing in a channel reads (business/Send.MayPostIn):
+	// whether it's archived, and whether only its admins post.
 	dgraphUids := strings.Join(channelDgraphUIDs, ", ")
 	variables := make(map[string]string)
 	variables["$userId"] = userDgraphID
@@ -679,8 +695,11 @@ func GetChannelListWithMemberFlag(ctx context.Context, userDgraphID string, chan
 				channelInfo(func: has(ch_uuid)) @filter(uid(%+v)) {
 					uid
 					ch_uuid
+					ch_name
 					ch_is_member: count(ch_members @filter(uid($userId)))
-
+					ch_is_admin: count(ch_moderators @filter(uid($userId)))
+					ch_post_policy
+					ch_deleted_at
 				}
 			}`, dgraphUids)
 

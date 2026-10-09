@@ -86,7 +86,7 @@ var publicRoutes = map[string]string{
 	"/integration/github/webhook":          "HMAC signature verified in the handler",
 	"/slack/events":                        "Slack signing-secret HMAC verified in the handler; before connection it only echoes Slack's URL challenge",
 	"/integration/google-calendar/webhook": "channel token verified in the handler",
-	"/webhooks/resend":                     "provider signature verified in the handler",
+	"/webhooks/resend":                     "Svix signature verified in the handler, refused without the secret; rate limited per address",
 	"/webhook/incoming/{token}":            "the 32-byte path token IS the credential",
 
 	// Guest share links. The token is the credential; every one is rate-limited
@@ -131,6 +131,9 @@ var publicRoutes = map[string]string{
 	// user; authenticated by a shared runner token compared with
 	// subtle.ConstantTimeCompare in business/AI/codePRLLMProxy.go.
 	"/internal/code-run/llm": "shared runner token, constant-time compared",
+	// The broker's question before each subscription. VerifyInternalServiceRequest:
+	// the broker sends INTERNAL_SECRET with every ask.
+	"/internal/mqtt/authorize": "internal secret, constant-time compared",
 }
 
 // mountsProtectedElsewhere are sub-routers deliberately mounted outside the auth
@@ -311,4 +314,19 @@ func TestNoStateChangingGetRoutes(t *testing.T) {
 			t.Errorf("router.go:%d registers a state-changing handler as GET: %s", i+1, strings.TrimSpace(line))
 		}
 	}
+}
+
+// Anyone can post to the Resend webhook. Its handler refuses what isn't
+// signed, and the route is limited per address like the sign-in routes, so a
+// stream of forged events costs little.
+func TestResendWebhookIsRateLimited(t *testing.T) {
+	for _, line := range routerSource(t) {
+		if strings.Contains(line, `"/webhooks/resend"`) {
+			if !strings.Contains(line, "RateLimit(") {
+				t.Fatalf("/webhooks/resend has no rate limit: %s", strings.TrimSpace(line))
+			}
+			return
+		}
+	}
+	t.Fatal("/webhooks/resend is not registered")
 }

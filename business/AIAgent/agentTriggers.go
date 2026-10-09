@@ -178,14 +178,21 @@ func loadTriggerCache(ctx context.Context) {
 		if ev == "" {
 			continue // misconfigured: no event to bind to
 		}
-		if isInternalEventType(ev) {
-			// Refused, not honoured. See isInternalEventType: binding a plain
-			// event trigger to an internal event would run the agent through the
-			// generic launch loop, which performs none of the delegation checks
-			// that event is meant to be gated by.
+		if !boundEvent(ev) {
+			// Refused, not honoured, however the row got written (the form
+			// offers only bindable events; the API takes any text). See
+			// agentEvents: an internal event such as agent.message would run the
+			// agent through the generic launch loop, which performs none of the
+			// delegation checks that event is meant to be gated by.
 			helpers.MessageLogs.InfoLog.Printf(
-				"agentTriggers: agent %s is bound to internal event %q; ignoring "+
-					"(internal events are not bindable as agent triggers)", a.Id, ev)
+				"agentTriggers: agent %s is bound to event %q, which agents can't be bound to; ignoring", a.Id, ev)
+			continue
+		}
+		if withdrawnEvents[ev] {
+			// Withdrawn (agentEventAccess.go): its run could only refuse every
+			// tool, and anyone who can open an issue would spend its budget.
+			helpers.MessageLogs.InfoLog.Printf(
+				"agentTriggers: agent %s is bound to %q, a GitHub event agents no longer run on; not starting it", a.Id, ev)
 			continue
 		}
 		byEvent[ev] = append(byEvent[ev], a)
@@ -293,11 +300,26 @@ func handleAgentEvent(ctx context.Context, eventType string, data map[string]int
 	amAgents := ambientCache
 	trigMu.RUnlock()
 
+	// Who each run is for (eventAsker): a message's author; nobody identified,
+	// for a GitHub event or anything the GitHub sync did, whose text anyone on
+	// GitHub may have written; nobody, for the rest, which run for the sponsor
+	// alone. A message that names no author (an incoming webhook's post) starts
+	// no run: an event run answers only through its tools, all of which it
+	// would refuse.
+	asker, asked := eventAsker(ctx, eventType, data)
 	for _, a := range evAgents {
-		if !eventWanted(a, eventType, data) {
+		// Only an occurrence the person it works for could see (agentEventAccess.go).
+		if !eventWanted(a, eventType, data) || !reach.sees(ctx, a.CreatedBy.String(), eventType, data) {
 			continue
 		}
-		launchAgent(ctx, a, model.TriggerEvent, synthEventPrompt(eventType, data), "", "", nil, "")
+		if asked && asker == "" && messageEvents[eventType] {
+			continue
+		}
+		runCtx := ai.WithoutRunRequester(ctx)
+		if asked {
+			runCtx = askedBy(ctx, asker)
+		}
+		launchAgent(runCtx, a, model.TriggerEvent, synthEventPrompt(eventType, data), "", "", nil, asker)
 	}
 
 	// An agent's own message reaches ONLY the mention dispatcher, and only when
@@ -411,8 +433,25 @@ func dispatchMentionAgents(ctx context.Context, agents []*model.AiAgent, data ma
 			continue
 		}
 
+		// What the person who asked wrote, which is what a run may keep or set
+		// up (agentAskerWords.go). A delegated hop's text is another agent's,
+		// written from whatever that agent read, so the hop has none: the person
+		// it runs for asked the first agent, in their own words, not this one.
+		if agentAuthored(lineage, data) {
+			runCtx = WithAgentAskerWords(runCtx)
+		} else {
+			runCtx = WithAgentAskerWords(runCtx, text)
+		}
 		launchAgent(runCtx, a, model.TriggerMention, synthMentionPrompt(channelID, channelName, authorName, text), channelID, postID, nil, attributedTo)
 	}
+}
+
+// agentAuthored reports whether a message being dispatched is an agent's: a
+// hop of a delegation chain, written by an agent's principal, or sent as an
+// agent's message (EmitAgentMessage). Any one of them is enough.
+func agentAuthored(lineage DelegationContext, data map[string]interface{}) bool {
+	source, _ := data["source"].(string)
+	return lineage.Hop > 0 || strings.TrimSpace(lineage.AuthorAgentID) != "" || strings.EqualFold(strings.TrimSpace(source), "agent")
 }
 
 // originLineage fills in the originating person for a chain that is starting now.
@@ -531,7 +570,7 @@ func dispatchThreadAgents(ctx context.Context, agents []*model.AiAgent, data map
 			continue
 		}
 
-		launchAgent(ctx, a, model.TriggerMention, synthThreadPrompt(channelName, authorName, text, transcript), channelID, postID, nil, authorID)
+		launchAgent(WithAgentAskerWords(ctx, text), a, model.TriggerMention, synthThreadPrompt(channelName, authorName, text, transcript), channelID, postID, nil, authorID)
 	}
 }
 
@@ -792,7 +831,7 @@ func EnqueueDurableAgentRun(ctx context.Context, agent *model.AiAgent, surface S
 		AgentId:     agent.Id,
 		SourceType:  string(surface.Kind),
 		SourceId:    sourceID,
-		Prompt:      prompt,
+		Prompt:      withAskerWordsTrailer(prompt, agentAskerWords(ctx)),
 		RunAsUserId: &owner,
 		Surface:     enc,
 	}
@@ -838,7 +877,7 @@ func handOffMentionToDurable(ctx context.Context, a *model.AiAgent, channelID, p
 		AgentId:     a.Id,
 		SourceType:  string(surface.Kind),
 		SourceId:    postID,
-		Prompt:      agentRunPrompt(ctx, a, channelID, postID, prompt),
+		Prompt:      withAskerWordsTrailer(agentRunPrompt(ctx, a, channelID, postID, prompt), agentAskerWords(ctx)),
 		RunAsUserId: &owner,
 		Surface:     enc,
 	}
@@ -882,6 +921,19 @@ func handOffMentionToDurable(ctx context.Context, a *model.AiAgent, channelID, p
 // @mention is never dropped.
 func launchAgent(ctx context.Context, a *model.AiAgent, triggerSource, prompt, replyChannelID, replyPostID string, postChannelIDs []string, triggeredBy string) {
 	runCtx := context.WithoutCancel(ctx)
+	// Who the run is for. A mention is asked for by its author (for a delegated
+	// hop, the person at the root of the chain): the run reaches only what they
+	// and the sponsor both can, and an author that cannot be identified refuses
+	// rather than borrowing the sponsor's reach. An event's is the event loop's
+	// to say (handleAgentEvent binds every one). A schedule has nobody, and
+	// clears anything the dispatching context carried.
+	switch triggerSource {
+	case model.TriggerMention:
+		runCtx = askedBy(runCtx, triggeredBy)
+	case model.TriggerEvent:
+	default:
+		runCtx = ai.WithoutRunRequester(runCtx)
+	}
 	serialKey, maxInFlight := agentLaunchSerialKey(a.Id, triggerSource, replyChannelID)
 	go func() {
 		defer func() {
@@ -1175,7 +1227,7 @@ const (
 // @mention is never met with silence (Req 6.2). Pure + DB-free for unit tests.
 func mentionNoAnswerReply(outcome *RunOutcome) (string, bool) {
 	switch outcome.StopReason {
-	case StopReasonCircuitOpen, StopReasonRateLimited:
+	case StopReasonCircuitOpen, StopReasonRateLimited, StopReasonAgentOff:
 		return "", false
 	case StopReasonUserBudget, StopReasonAgentBudget, StopReasonChannelBudget, StopReasonWorkspaceBudget:
 		return budgetPausedMentionMsg, true
@@ -1272,9 +1324,10 @@ func agentRunPrompt(ctx context.Context, a *model.AiAgent, replyChannelID, reply
 }
 
 // earlier replies. The transcript is fetched AS the agent's owner (so it
-// respects that user's access); on any miss it returns the original prompt
-// unchanged, so a run is never blocked by missing context. Only the mention
-// reply path (replyChannelID set) is enriched.
+// respects that user's access) and, for a run someone else asked for, only as
+// far as they can see too (the index narrows to the run's requester); on any
+// miss it returns the original prompt unchanged, so a run is never blocked by
+// missing context. Only the mention reply path (replyChannelID set) is enriched.
 func mentionPromptWithContext(ctx context.Context, a *model.AiAgent, replyChannelID, prompt string) string {
 	if replyChannelID == "" {
 		return prompt
@@ -1431,40 +1484,6 @@ func scalarToString(v interface{}) string {
 	default:
 		return ""
 	}
-}
-
-// internalEventPrefix marks event types that exist only to drive OneCamp's own
-// dispatchers. They are not part of the workspace event vocabulary an agent may
-// subscribe to.
-const internalEventPrefix = "agent."
-
-// isInternalEventType reports whether an event type is internal and therefore not
-// bindable as an agent's event trigger.
-//
-// WHY THIS GUARD EXISTS. handleAgentEvent launches every event-trigger agent for
-// the incoming type BEFORE it reaches the type-specific branches:
-//
-//	for _, a := range evAgents { launchAgent(ctx, a, model.TriggerEvent, …) }
-//
-// That loop is the generic path and performs no delegation checks — no hop budget,
-// no cycle detection, no AuthorizeDelegation, and it passes an empty attributed-to
-// user. agent.message is the event that carries delegation lineage, and the ONLY
-// dispatcher that knows how to gate it is dispatchMentionAgents. So an agent bound
-// to "agent.message" as a plain event trigger would fire on other agents' messages
-// while skipping the check that the originating person could address it at all —
-// exactly the privilege laundering AuthorizeDelegation exists to prevent — and
-// would record a run with no human actor.
-//
-// The admin UI only offers a fixed list of real workspace events and does not
-// include this one, so the gap is reachable only by writing trigger_config through
-// the API directly. That is precisely why the guard lives HERE, at the point the
-// cache is built, rather than in request validation: it holds however the row got
-// written, including rows that predate this check.
-//
-// Matched by prefix rather than by exact name so a future internal event is
-// covered the day it is added, instead of the day someone remembers this function.
-func isInternalEventType(ev string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(ev)), internalEventPrefix)
 }
 
 // parseTriggerConfig decodes an agent's trigger_config JSON, returning a zero

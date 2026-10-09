@@ -59,7 +59,7 @@ const (
 // network requests promptly.
 func StartEmailWorker(shutdownCtx context.Context) {
 	if !emailService.NotificationEmailEnabled() {
-		helpers.MessageLogs.InfoLog.Println("Email worker not started (RESEND_API_KEY unset)")
+		helpers.MessageLogs.InfoLog.Println("Email worker not started (no sending key, or essentials only)")
 		return
 	}
 

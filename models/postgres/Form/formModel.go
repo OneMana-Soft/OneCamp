@@ -112,9 +112,9 @@ func Update(f Form) (*Form, error) {
 	defer cancel()
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `
 		UPDATE project_forms SET title = $3, description = $4, fields = $5, title_field = $6, priority = $7,
-		       assignee_uuid = $8, active = $9, updated_at = NOW()
+		       assignee_uuid = $8, active = $9, created_by = $10, updated_at = NOW()
 		 WHERE id = $1 AND project_uuid = $2`,
-		f.Id, f.ProjectUUID, f.Title, f.Description, []byte(f.Fields), f.TitleField, f.Priority, f.AssigneeUUID, f.Active)
+		f.Id, f.ProjectUUID, f.Title, f.Description, []byte(f.Fields), f.TitleField, f.Priority, f.AssigneeUUID, f.Active, f.CreatedBy)
 	if err != nil {
 		return nil, err
 	}

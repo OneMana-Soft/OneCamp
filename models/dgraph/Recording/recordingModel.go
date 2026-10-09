@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -153,27 +154,34 @@ func GetDgraphRecordingsWithCount(ctx context.Context, query string, variables m
 	return result, nil
 }
 
-// BulkSoftDeleteDgraphRecordings sets recording_deleted_at on multiple recordings in a single mutation.
-func BulkSoftDeleteDgraphRecordings(ctx context.Context, recordings []*dgraphStruct.DgraphRecording, query string) error {
+// SetDgraphRecordingsDeletedAt sets recording_deleted_at to at on the nodes
+// query collects into the variable named found, in one upsert. When it
+// collects none, nothing is written: uid() of an empty variable in a mutation
+// would make a new node.
+func SetDgraphRecordingsDeletedAt(ctx context.Context, query string, variables map[string]string, found string, at time.Time) error {
 	txn := dgraphInit.DgraphClient.NewTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
-	pb, err := json.Marshal(recordings)
+	pb, err := json.Marshal(map[string]interface{}{
+		"uid":                  "uid(" + found + ")",
+		"recording_deleted_at": at,
+	})
 	if err != nil {
 		return err
 	}
 
-	mu := &api.Mutation{SetJson: pb}
 	req := &api.Request{
-		Query:     query,
-		Mutations: []*api.Mutation{mu},
+		Query: query,
+		Vars:  variables,
+		Mutations: []*api.Mutation{{
+			SetJson: pb,
+			Cond:    "@if(gt(len(" + found + "), 0))",
+		}},
 		CommitNow: true,
 	}
-
-	_, err = txn.Do(ctx, req)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/BulkSoftDeleteDgraphRecordings failed: %v", err)
+	if _, err = txn.Do(ctx, req); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/SetDgraphRecordingsDeletedAt failed: %v", err)
 		return err
 	}
-
 	return nil
 }

@@ -3,8 +3,10 @@ package controllers
 // In-channel "AI teammates" management: list the workspace's mention-trigger
 // agents and toggle whether each responds in THIS channel (the Slack/Claude-Tag
 // "add the AI to a channel" model). Authorization mirrors AddChannelMember: the
-// caller must be a member of a public channel, or an admin of a private one.
-// The agent presence itself is expressed through the agent's channel scope
+// caller must be a member of a public channel, or an admin of a private one;
+// and moving an agent is also its owner's (or a workspace admin's), with a
+// channel's admins able to take one out of their channel (business/AIAgent
+// mayPlaceInChannel). The agent presence itself is expressed through the agent's channel scope
 // (enforced by the mention trigger), so this is the in-channel front door to
 // the same governance the Agent Builder edits.
 
@@ -17,6 +19,7 @@ import (
 	agentBusiness "github.com/akashc777/OneCamp/business/AIAgent"
 	business "github.com/akashc777/OneCamp/business/Channel"
 	"github.com/akashc777/OneCamp/helpers"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/go-chi/chi/v5"
@@ -27,14 +30,21 @@ import (
 // (and AI teammates) on a channel: a member of a public channel, or an admin of
 // a private one. Mirrors the gate in AddChannelMember.
 func canManageChannelMembership(ctx context.Context, channelUUID uuid.UUID, userDgraphUID string) bool {
+	_, ok := channelManagedBy(ctx, channelUUID, userDgraphUID)
+	return ok
+}
+
+// channelManagedBy reads the channel as the caller sees it, and reports
+// whether they may manage its members (canManageChannelMembership's rule).
+func channelManagedBy(ctx context.Context, channelUUID uuid.UUID, userDgraphUID string) (*dgraphStruct.DgraphChannel, bool) {
 	channelInfo, err := business.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userDgraphUID)
 	if err != nil || channelInfo == nil || channelInfo.IsPrivate == nil {
-		return false
+		return nil, false
 	}
 	if *channelInfo.IsPrivate {
-		return channelInfo.IsAdmin != 0
+		return channelInfo, channelInfo.IsAdmin != 0
 	}
-	return channelInfo.IsMember != 0
+	return channelInfo, channelInfo.IsMember != 0
 }
 
 // canViewChannel reports whether the caller may see/compose in a channel:
@@ -137,14 +147,30 @@ func SetChannelAITeammate(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid agent id"})
 		return
 	}
-	if !canManageChannelMembership(ctx, channelUUID, userInfo.UserDgraphInfo.Uid) {
+	channelInfo, ok := channelManagedBy(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
+	if !ok {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
 	}
 
-	if err := agentBusiness.SetAgentChannelMembership(ctx, agentUUID, channelUUID.String(), req.Enabled); err != nil {
+	// Who may move this agent, not only this channel's members: its owner or
+	// a workspace admin, and to take it out, also this channel's admins.
+	actor := agentBusiness.Actor{UserID: userInfo.UserPostgresInfo.Id, IsAdmin: userInfo.UserPostgresInfo.IsAdmin}
+	if err := agentBusiness.SetAgentChannelMembership(ctx, actor, channelInfo.IsAdmin != 0, agentUUID, channelUUID.String(), req.Enabled); err != nil {
 		if agentBusiness.IsNotFound(err) {
 			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Agent not found"})
+			return
+		}
+		if agentBusiness.IsOnlyChannel(err) {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "This is the only channel the agent is in, and an agent in no channel answers everywhere, so only its owner or a workspace admin can take it out."})
+			return
+		}
+		if agentBusiness.IsForbidden(err) {
+			msg := "Only the agent's owner or a workspace admin can add it to a channel."
+			if !req.Enabled {
+				msg = "Only the agent's owner, a workspace admin or one of this channel's admins can take it out."
+			}
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": msg})
 			return
 		}
 		helpers.LogErrorWithContext(ctx, "controllers/SetChannelAITeammate err: %+v", err)

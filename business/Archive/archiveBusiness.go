@@ -21,6 +21,7 @@ import (
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // ArchiveAlreadyRunningError is returned when an archive job is already in progress.
@@ -59,7 +60,7 @@ var entityRestoreQuery = map[string]string{
 	"posts":       `UPDATE posts SET deleted_at = NULL, updated_at = NOW() WHERE id::text IN (%s) AND deleted_at IS NOT NULL RETURNING id::text`,
 	"chats":       `UPDATE chats SET deleted_at = NULL, updated_at = NOW() WHERE id::text IN (%s) AND deleted_at IS NOT NULL RETURNING id::text`,
 	"tasks":       `UPDATE tasks SET deleted_at = NULL, updated_at = NOW() WHERE id::text IN (%s) AND deleted_at IS NOT NULL RETURNING id::text`,
-	"attachments": `UPDATE attachments SET deleted_at = NULL, updated_at = NOW() WHERE id::text IN (%s) AND deleted_at IS NOT NULL RETURNING id::text`,
+	"attachments": `UPDATE attachments SET deleted_at = NULL WHERE id::text IN (%s) AND deleted_at IS NOT NULL RETURNING id::text`, // no updated_at column
 }
 
 // entityRecentCountQuery holds the COUNT query per entity type for recently-archived listings.
@@ -667,12 +668,44 @@ func archiveChats(ctx context.Context, cutoff time.Time) (int64, int64, []string
 	return archiveTable(ctx, "chats", "", cutoff)
 }
 
+// archiveTaskBatch bounds one run of archiving completed tasks; the next run
+// takes the rest.
+const archiveTaskBatch = 5000
+
 func archiveTasks(ctx context.Context, cutoff time.Time, archiveCompletedTasks bool) (int64, int64, []string, error) {
-	extra := ""
-	if archiveCompletedTasks {
-		extra = "status IN ('done', 'canceled')"
+	if !archiveCompletedTasks {
+		return archiveTable(ctx, "tasks", "", cutoff)
 	}
-	return archiveTable(ctx, "tasks", extra, cutoff)
+	// Only the done and canceled ones, closed before the cutoff. Their status
+	// is in the graph: Postgres has no status column, so this asked it for one
+	// and, with the setting on (the default), every task archive failed.
+	closed, err := taskDomain.ClosedTaskUUIDsBefore(ctx, cutoff, archiveTaskBatch)
+	if err != nil || len(closed) == 0 {
+		return 0, 0, nil, err
+	}
+
+	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout*10)
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx,
+		`UPDATE tasks SET deleted_at = NOW(), updated_at = NOW()
+		 WHERE id = ANY($2::uuid[]) AND created_at < $1 AND deleted_at IS NULL
+		 RETURNING id::text`, cutoff, pq.Array(closed))
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return 0, 0, nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, 0, nil, err
+	}
+	return int64(len(ids)), int64(len(ids)), ids, nil
 }
 
 // archiveAttachments writes deleted_at without updating updated_at

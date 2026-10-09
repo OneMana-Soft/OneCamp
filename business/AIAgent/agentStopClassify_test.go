@@ -26,6 +26,9 @@ func TestClassifyStop_ByStableCode(t *testing.T) {
 		// shutting down. Both must put the job back on the queue — finalizing it
 		// as a bounded completion would quietly abandon unfinished work.
 		{"canceled retries", StopReasonCanceled, stopRetryTransient},
+		// Paused, deleted or its sponsor gone: done with what it did, never
+		// retried (a retry would just stop again).
+		{"agent off finalizes", StopReasonAgentOff, stopFinalizePartial},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -81,6 +84,7 @@ func TestMentionNoAnswerReply_ByStableCode(t *testing.T) {
 	}{
 		{"circuit stays silent", StopReasonCircuitOpen, false, ""},
 		{"rate limit stays silent", StopReasonRateLimited, false, ""},
+		{"a paused agent stays silent", StopReasonAgentOff, false, ""},
 		{"agent budget explains pause", StopReasonAgentBudget, true, budgetPausedMentionMsg},
 		{"workspace budget explains pause", StopReasonWorkspaceBudget, true, budgetPausedMentionMsg},
 		{"timeout gets generic note", StopReasonRunTimeout, true, genericMentionRetryMsg},

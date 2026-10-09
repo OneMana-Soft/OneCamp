@@ -8,7 +8,8 @@ package business
 //
 // Safety model:
 //   - Runs AS the agent's owner (agent.CreatedBy); every tool call re-checks
-//     that user's permissions inside the executor.
+//     that user's permissions inside the executor. When someone else asked for
+//     the run, it is also bounded by what THEY can reach (agentRequester.go).
 //   - May only call tools on the agent's allow-list; anything else is dropped.
 //   - Bounded by the agent's max_steps (hard-capped) and the AI budget
 //     (circuit breaker + rate limit), so a loop can't run away or run up cost.
@@ -114,6 +115,10 @@ const (
 	// as a failure; the durable caller decides which of the two it was and
 	// settles accordingly.
 	StopReasonCanceled = "canceled"
+	// StopReasonAgentOff: the agent was paused or deleted, or the person it
+	// works for left the workspace, while (or before) it ran. Finalized with
+	// what it had done, never retried, and a mention gets no reply.
+	StopReasonAgentOff = "agent_off"
 )
 
 // replyStyleRule is how every agent writes to people, whatever its sponsor's
@@ -156,6 +161,22 @@ type agentResumeState struct {
 // be nil (resume without persisting). Used only by the durable task worker.
 func WithAgentResumeState(ctx context.Context, messages []ai.ChatMessage, checkpoint func([]ai.ChatMessage)) context.Context {
 	return context.WithValue(ctx, agentResumeKey{}, &agentResumeState{messages: messages, checkpoint: checkpoint})
+}
+
+// agentDurableJobKey marks a run of a durable job, which a person's reply
+// resumes where it paused. A run answered in place may carry resume state too
+// (the hand-off, AI_AGENT_ASYNC_HANDOFF), but a reply to it starts afresh.
+type agentDurableJobKey struct{}
+
+// withAgentDurableJob marks ctx as a durable job's run. Set only by the worker.
+func withAgentDurableJob(ctx context.Context) context.Context {
+	return context.WithValue(ctx, agentDurableJobKey{}, true)
+}
+
+// inDurableJob reports whether this run is a durable job's.
+func inDurableJob(ctx context.Context) bool {
+	v, _ := ctx.Value(agentDurableJobKey{}).(bool)
+	return v
 }
 
 // agentSessionLeftKey marks a durable run whose job may carry on in another
@@ -333,6 +354,9 @@ type toolCallRecord struct {
 	// machine. This workspace did not run it and could not have refused it;
 	// the record is the remote's account, kept so the transcript is whole.
 	Remote bool `json:"remote,omitempty"`
+	// Confirm is a question to put to the person who asked before the call
+	// can go ahead (askToKeep); the run pauses on it as on needs_human.
+	Confirm string `json:"-"`
 }
 
 // Governance category codes recorded on a gated tool call (see toolCallRecord).
@@ -382,6 +406,10 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 	// the run summary, the drill and anything a tool records all agree; a
 	// dispatcher that knows more (a delegation hop) has already set it.
 	ctx = withRunInitiator(ctx, triggerSource)
+	// Who the run is for, bound to THIS agent's sponsor. Done before anything is
+	// read, so the knowledge grounding and the conversation context below are
+	// narrowed to the asker exactly as the tools are.
+	ctx = bindRunRequester(ctx, agent)
 	runID, _ := model.CreateRun(ctx, agent.Id, triggerSource, &agent.CreatedBy, prompt)
 	out = &RunOutcome{RunID: runID, Status: model.RunRunning}
 	steps := make([]stepRecord, 0, 4)
@@ -486,6 +514,9 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 	}
 
 	userUUID := agent.CreatedBy.String()
+	// The asker's bound, when someone other than the sponsor asked. nil for a run
+	// that acts for its sponsor alone, which then behaves exactly as before.
+	gate := newRequesterGate(ctx)
 
 	// Tools the agent is allowed to use.
 	enabledTools := agentEnabledTools(agent)
@@ -583,8 +614,9 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 	ctx = ai.WithModelLimits(ctx, runLimits)
 
 	// Tag the context so any writes the agent performs do not re-trigger
-	// workflows or other agents (cascade guard).
-	ctx = helpers.WithWorkflowGenerated(ctx)
+	// workflows or other agents (cascade guard), and are known as the agent's
+	// (a comment it leaves on a task linked to GitHub stays in the workspace).
+	ctx = helpers.WithAgentWrite(helpers.WithWorkflowGenerated(ctx))
 
 	// loopCtx carries the token-usage sink (providers report each call's usage
 	// into it) and a wall-clock deadline so a slow or stuck run can't hang a
@@ -645,6 +677,7 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 	// composes, so it has to be said in the system prompt or not at all.
 	system += ai.UntrustedContentRule
 	system += replyStyleRule
+	system += actingForPrompt(ctx, gate)
 	// Native function calling: prefer the provider's structured tools API when
 	// it is available and enabled (reliable, no `<tool_call>` text parsing, and
 	// the model cannot fabricate a result it wasn't given). When active we do
@@ -667,7 +700,7 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 			// save_progress, and — when the run has a channel/DM scope —
 			// remember/forget) natively so the agent keeps those abilities
 			// without the text directives.
-			toolSpecs = append(toolSpecs, nativeControlToolSpecs(agentRunScopeFromCtx(ctx).hasScope())...)
+			toolSpecs = append(toolSpecs, nativeControlToolSpecs(agentRunScopeFromCtx(ctx).hasScope(), gate == nil)...)
 		}
 	}
 	if !useNative {
@@ -734,11 +767,17 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 	// Continue-the-work: inject the agent's durable working notes from prior
 	// runs (so a scheduled/long task advances slice-by-slice instead of starting
 	// cold) and tell it how to update them. Best-effort; absent on a first run.
-	if st, serr := model.GetAgentState(ctx, agent.Id); serr == nil && strings.TrimSpace(st) != "" {
-		system += "\n\nYour working notes from previous runs (continue from where you left off; do not repeat finished work):\n\"\"\"\n" +
-			strings.TrimSpace(st) + "\n\"\"\""
+	// Neither for a run someone else asked for. Reading them: the notes are
+	// whatever earlier runs wrote down, and those ran with the sponsor's reach.
+	// Writing them: every run of the agent reads them as its own plan, so a note
+	// written for someone else would be followed later with the sponsor's reach.
+	if gate == nil {
+		if st, serr := model.GetAgentState(ctx, agent.Id); serr == nil && strings.TrimSpace(st) != "" {
+			system += "\n\nYour working notes from previous runs (continue from where you left off; do not repeat finished work):\n\"\"\"\n" +
+				strings.TrimSpace(st) + "\n\"\"\""
+		}
 	}
-	if !useNative {
+	if !useNative && gate == nil {
 		system += "\n\nYou may be re-run later. To carry progress forward across runs, emit " +
 			"<tool_call>{\"tool_name\":\"save_progress\",\"params\":{\"notes\":\"<a concise, self-contained summary of what is done and what remains>\"}}</tool_call> " +
 			"before finishing. It saves silently and you continue; keep the notes short and overwrite them each time."
@@ -749,7 +788,7 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 	// remember/forget tools. Only when the run has a conversation scope, so a
 	// manual/scheduled run spends no tokens on it.
 	if runScope := agentRunScopeFromCtx(ctx); runScope.hasScope() {
-		if mem := aiBusiness.AgentScopedMemoryBlock(ctx, runScope.ChannelID, runScope.GroupID); mem != "" {
+		if mem := aiBusiness.AgentScopedMemoryBlock(ctx, runScope.ChannelID, runScope.GroupID, agent.CreatedBy.String()); mem != "" {
 			system += mem
 		}
 		if !useNative {
@@ -886,11 +925,12 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 	// explained rather than mysterious.
 	steer := agentSteeringFromCtx(ctx)
 	var pendingSteering []string
-	// Human-authored turns of this run, for the memory guard. The prompt is what
-	// a person (or a trigger acting for one) asked for; steering is what they
-	// said while it worked. Tool results are deliberately absent: that is the
-	// whole distinction the guard rests on.
-	humanTurns := []string{prompt}
+	// Human-authored turns of this run, for the memory and routine guards: what
+	// the person who asked wrote (agentAskerWords.go), and what was said while
+	// it worked (steering). Not the prompt, which also quotes other people (the
+	// channel, the thread, a transcript), and not tool results: that is the
+	// whole distinction the guards rest on.
+	humanTurns := agentAskerWords(ctx)
 	loopCtx = WithAgentHumanText(loopCtx, func() []string {
 		return append([]string(nil), humanTurns...)
 	})
@@ -1043,6 +1083,15 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 	}
 
 	for i := 0; i < maxSteps; i++ {
+		// The kill switch, read afresh every step (agentOff.go). A run that
+		// writes nothing (an eval's dry run) may test a paused agent. Its text
+		// so far is dropped, not handed back: an agent switched off posts
+		// nothing more.
+		if !dryRun {
+			if why := agentOffReason(loopCtx, agent.Id); why != "" {
+				return finalizeStopped(StopReasonAgentOff, "", why)
+			}
+		}
 		if err := cb.Allow(); err != nil {
 			return finalizeStopped(StopReasonCircuitOpen, finalText, "AI temporarily unavailable (circuit open)")
 		}
@@ -1207,6 +1256,18 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 			cleanText = strings.TrimSpace(cleanText)
 		}
 		step := stepRecord{Iteration: i + 1, Assistant: cleanText, Steering: pendingSteering, Compaction: pendingCompaction}
+		// confirmFirst pauses the run on rec's question, as a needs_human call
+		// does: something a memory or routine tool would keep that is not the
+		// asker's own words is put to them first (askToKeep).
+		confirmFirst := func(rec toolCallRecord) *RunOutcome {
+			elic := Elicitation{Question: helpers.TruncateRunes(rec.Confirm, maxElicitationQuestionRunes), Options: []string{"Yes", "No"}}
+			step.ToolCalls = append(step.ToolCalls, rec)
+			steps = append(steps, step)
+			out.Blocked = true
+			out.BlockReason = elic.Question
+			out.BlockOptions = elic.Options
+			return finalizeStopped(StopReasonBlocked, elic.Render(), "")
+		}
 		pendingSteering, pendingCompaction = nil, nil
 		// What the remote did on its own machine during this turn. Recorded
 		// as its own account, never executed and never governed here, so the
@@ -1315,6 +1376,11 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 			return finalize(model.RunSucceeded, finalText, "")
 		}
 
+		// What the person this run acts for may not have done, when that is not
+		// the sponsor. Decided once per call, before anything runs, so the
+		// concurrent pre-pass and the sequential path below cannot disagree.
+		refused := gate.refusals(loopCtx, actions, allow)
+
 		// Lookups in one turn are independent of each other, so run them at the
 		// same time instead of paying the sum of their round trips while a person
 		// watches a "working…" comment. ONLY read-only calls that the sequential
@@ -1324,6 +1390,8 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 		prefetched := prefetchReadOnlyTools(loopCtx, actions, userUUID, func(a ai.ProposedAction) bool {
 			switch {
 			case !ai.ToolIsReadOnly(a.ToolName): // writes stay strictly sequential
+				return false
+			case refused[ai.ActionSignature(a)] != "":
 				return false
 			case ai.ToolNeedsHumanBeforeUnattended(a.ToolName): // belt and braces: never pre-run one
 				return false
@@ -1395,11 +1463,15 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 				return finalizeStopped(StopReasonBlocked, elic.Render(), "")
 			}
 			// Continue-the-work: persist the agent's durable state blob and keep
-			// going. Self-state (not an external write), so it always runs and is
-			// never approval-gated. Registry-free.
+			// going. Self-state (not an external write), so it is never
+			// approval-gated. Registry-free. Not for a run someone else asked
+			// for: it is not offered there, and a call made anyway is refused,
+			// because the next run nobody asked for would follow those notes with
+			// the sponsor's whole reach.
 			if a.ToolName == progressToolName {
-				notes := strings.TrimSpace(a.Params["notes"])
-				if serr := model.SetAgentState(ctx, agent.Id, notes); serr != nil {
+				if gate != nil {
+					rec.Skipped = progressRefusal(gate)
+				} else if serr := model.SetAgentState(ctx, agent.Id, strings.TrimSpace(a.Params["notes"])); serr != nil {
 					rec.Error = "could not save progress: " + serr.Error()
 				} else {
 					rec.Result = "progress saved"
@@ -1408,6 +1480,8 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 				obs := rec.Result
 				if rec.Error != "" {
 					obs = "error: " + rec.Error
+				} else if rec.Skipped != "" {
+					obs = "skipped: " + rec.Skipped
 				}
 				resultLines = append(resultLines, fmt.Sprintf("%s -> %s", a.ToolName, obs))
 				obsList = append(obsList, obs)
@@ -1417,8 +1491,14 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 			// agent a standing instruction for THIS channel/DM, or drop one.
 			// Scope-bound + governed (workspace memory), so it is self-knowledge
 			// like save_progress — always runs, never approval-gated. Registry-free.
+			// On loopCtx, which carries the run's human turns: remember checks
+			// that a person asked for it (humanAskedToRemember), and on ctx it
+			// found none, so it refused every instruction anyone gave.
 			if a.ToolName == rememberToolName || a.ToolName == forgetToolName {
-				handleMemoryTool(ctx, agent, a, &rec)
+				handleMemoryTool(loopCtx, agent, a, &rec)
+				if rec.Confirm != "" {
+					return confirmFirst(rec)
+				}
 				step.ToolCalls = append(step.ToolCalls, rec)
 				obs := rec.Result
 				if rec.Error != "" {
@@ -1435,7 +1515,10 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 			// self-configuration (not an external write), so it always runs and is
 			// never approval-gated. Registry-free.
 			if isRoutineTool(a.ToolName) {
-				handleRoutineTool(ctx, agent, a, &rec)
+				handleRoutineTool(loopCtx, agent, a, &rec)
+				if rec.Confirm != "" {
+					return confirmFirst(rec)
+				}
 				step.ToolCalls = append(step.ToolCalls, rec)
 				obs := rec.Result
 				if rec.Error != "" {
@@ -1455,6 +1538,14 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 				rec.Skipped = ai.ValidateAction(a).Error()
 			case outsideScope(a, scopeChannels, scopeProjects):
 				rec.Skipped = "target is outside this agent's allowed scope"
+				rec.Governance = govBlocked
+			case refused[ai.ActionSignature(a)] != "":
+				// Asked for by someone other than the sponsor, and that person could
+				// not do this themselves. Checked ahead of the autonomy routing below,
+				// so it is not proposed for approval either: a proposal approved by
+				// the sponsor would still be someone else's request using the
+				// sponsor's reach.
+				rec.Skipped = refused[ai.ActionSignature(a)]
 				rec.Governance = govBlocked
 			case ai.CodePREnabled() && allow[codePRToolName] && isGitHubContentWriteTool(a.ToolName):
 				// Governed coding path: opening a PR / changing files by hand
@@ -1481,6 +1572,25 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 				}
 				if dryRun && !ai.ToolIsReadOnly(a.ToolName) {
 					rec.Skipped = "dry-run: write not executed"
+					break
+				}
+				// code_pr pushes a branch and opens a pull request under a person's
+				// GitHub identity, so a person approves it first, and it is the person
+				// whose account it pushes with: whoever asked for the run, or the
+				// sponsor when nobody else did. Never folded into a plan, which the
+				// sponsor approves and which would push as the sponsor.
+				if a.ToolName == codePRToolName && codePRNeedsApproval(agent.Autonomy) {
+					approver, params, perr := codePRProposal(loopCtx, agent, a)
+					if perr == nil {
+						_, perr = aiBusiness.CreatePendingAction(loopCtx, approver, "agent", agent.Id.String(), a.ToolName, params, proposalDescription(agent, a), "", pendingModels.Attribution{AgentID: &agent.Id, RunID: runIDPtr(runID)})
+					}
+					if perr != nil {
+						rec.Error = "could not queue this change for approval: " + perr.Error()
+					} else {
+						rec.Skipped = "proposed for approval — the pull request opens only after the person whose GitHub account it uses approves it"
+						rec.Governance = govApprovalRequired
+						proposed = append(proposed, actionLabel(a))
+					}
 					break
 				}
 				// Plan-approve ("plan" mode): the agent does the read/think work

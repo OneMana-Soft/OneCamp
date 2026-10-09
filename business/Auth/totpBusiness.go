@@ -25,6 +25,7 @@ package business
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -86,29 +87,50 @@ func totpIssuer() string {
 	return "OneCamp"
 }
 
-// IssueTOTPChallenge mints the token that carries a completed password step.
-func IssueTOTPChallenge(userID uuid.UUID) (string, error) {
+// challengeKey is the key a two-step challenge is signed with: one derived from JWT_SECRET for
+// this alone. It used to be JWT_SECRET itself, the key sessions are signed with, and every check
+// of a session took the challenge for one: a password alone signed in, without the second step.
+// The session checks now also refuse any token with a purpose (helpers.ParseSessionToken).
+func challengeKey(secret string) []byte {
+	sum := sha256.Sum256([]byte("onecamp two-step challenge:" + secret))
+	return sum[:]
+}
+
+// challengeMethod reports whether method is a first step that hands out a challenge: a password
+// this server checks, its own (email) or the directory's (LDAP).
+func challengeMethod(method string) bool {
+	return method == userModels.AuthMethodEmail || method == userModels.AuthMethodLDAP
+}
+
+// IssueTOTPChallenge mints the token that carries a completed password step. method is how that step
+// was passed, so the sign-in is recorded as it once the code is in.
+func IssueTOTPChallenge(userID uuid.UUID, method string) (string, error) {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
-		// The same key that signs sessions. Its absence is a misconfiguration that must not degrade
-		// into an unsigned or predictable challenge.
+		// The key the challenge key derives from. Its absence is a misconfiguration that must not
+		// degrade into an unsigned or predictable challenge.
 		return "", errors.New("JWT_SECRET is not configured")
+	}
+	if !challengeMethod(method) {
+		return "", fmt.Errorf("a %q sign-in has no two-step challenge", method)
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"sub":     userID.String(),
 		"purpose": totpChallengePurpose,
+		"method":  method,
 		"exp":     time.Now().Add(totpChallengeTTL).Unix(),
 		"iat":     time.Now().Unix(),
 	})
-	return token.SignedString([]byte(secret))
+	return token.SignedString(challengeKey(secret))
 }
 
-// ParseTOTPChallenge validates a challenge and returns the user it was issued for.
-func ParseTOTPChallenge(raw string) (uuid.UUID, error) {
+// ParseTOTPChallenge validates a challenge and returns the user it was issued for, and how they
+// passed the first step.
+func ParseTOTPChallenge(raw string) (uuid.UUID, string, error) {
 	secret := os.Getenv("JWT_SECRET")
 	if secret == "" {
-		return uuid.UUID{}, errors.New("JWT_SECRET is not configured")
+		return uuid.UUID{}, "", errors.New("JWT_SECRET is not configured")
 	}
 
 	parsed, err := jwt.Parse(strings.TrimSpace(raw), func(t *jwt.Token) (interface{}, error) {
@@ -117,26 +139,34 @@ func ParseTOTPChallenge(raw string) (uuid.UUID, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method %v", t.Header["alg"])
 		}
-		return []byte(secret), nil
+		return challengeKey(secret), nil
 	}, jwt.WithValidMethods([]string{"HS256"}))
 	if err != nil || !parsed.Valid {
-		return uuid.UUID{}, ErrTOTPChallengeInvalid
+		return uuid.UUID{}, "", ErrTOTPChallengeInvalid
 	}
 
 	claims, ok := parsed.Claims.(jwt.MapClaims)
 	if !ok {
-		return uuid.UUID{}, ErrTOTPChallengeInvalid
+		return uuid.UUID{}, "", ErrTOTPChallengeInvalid
 	}
 	// THE PURPOSE CHECK. Without it a session token, signed with this same key, would be accepted here.
 	if purpose, _ := claims["purpose"].(string); purpose != totpChallengePurpose {
-		return uuid.UUID{}, ErrTOTPChallengeInvalid
+		return uuid.UUID{}, "", ErrTOTPChallengeInvalid
 	}
 	subject, _ := claims["sub"].(string)
 	userID, perr := uuid.Parse(subject)
 	if perr != nil {
-		return uuid.UUID{}, ErrTOTPChallengeInvalid
+		return uuid.UUID{}, "", ErrTOTPChallengeInvalid
 	}
-	return userID, nil
+	method, _ := claims["method"].(string)
+	if method == "" {
+		// Minted before a challenge said, by the only sign-in that handed one out then.
+		method = userModels.AuthMethodEmail
+	}
+	if !challengeMethod(method) {
+		return uuid.UUID{}, "", ErrTOTPChallengeInvalid
+	}
+	return userID, method, nil
 }
 
 // TOTPEnrollment is what the user needs to add the account to an authenticator app.

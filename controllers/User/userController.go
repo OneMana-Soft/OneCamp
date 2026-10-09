@@ -9,9 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -31,7 +29,6 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
 	aiModels "github.com/akashc777/OneCamp/models/postgres/AI"
-	configModels "github.com/akashc777/OneCamp/models/postgres/Config"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
@@ -43,6 +40,7 @@ import (
 	"github.com/google/uuid"
 
 	bulkPostAndChatbusiness "github.com/akashc777/OneCamp/business/BulkPostAndChat"
+	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	business "github.com/akashc777/OneCamp/business/User"
 	userChannelNotificationBusiness "github.com/akashc777/OneCamp/business/UserChannelNotification"
 	userChatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
@@ -52,9 +50,6 @@ import (
 	"github.com/akashc777/OneCamp/helpers/authcookie"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 )
-
-const MAX_USERNAME_LENGTH = 25
-const USERNAME_REGEX = `[^a-zA-Z0-9- ]`
 
 // getFrontendCookieDomain delegates to the canonical authcookie helper so
 // all cookie-construction code uses the same domain-resolution logic.
@@ -73,7 +68,29 @@ func GetLoggedInUserProfile(w http.ResponseWriter, r *http.Request) {
 
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": userInfo.UserDgraphInfo})
+	// The @handle lives in Postgres, where it is unique; the profile editor
+	// shows it and lets them change it. A copy, so it never reaches a write to
+	// the graph.
+	profile := userInfo.UserDgraphInfo
+	if handle, err := userDomain.GetHandle(ctx, userInfo.UserPostgresInfo.Id); err == nil {
+		profile.Handle = handle
+	}
+
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": profile})
+}
+
+// changedNameProblem is why a display or full name that changed cannot be
+// kept, or "" when it can: one rule for a person's name, the web app's
+// (helpers.IsValidPersonName), checked only for a name that changes. One
+// already saved, whatever made it (a sign-up before the rule, an identity
+// provider), never stops someone saving the rest of their profile. An empty
+// one keeps what is saved. Pure.
+func changedNameProblem(label, sent, saved string) string {
+	sent = helpers.NormalizePersonName(sent)
+	if sent == "" || sent == helpers.NormalizePersonName(saved) || helpers.IsValidPersonName(sent) {
+		return ""
+	}
+	return label + " can use letters, spaces, apostrophes, hyphens and full stops, up to 60 characters, with at least one letter or number."
 }
 
 func GetActiveUserEmojiStatus(w http.ResponseWriter, r *http.Request) {
@@ -499,6 +516,7 @@ func AddChannelToUserFav(w http.ResponseWriter, r *http.Request) {
 			"msg": "Failed to get parse channelUUID",
 			"err": err,
 		})
+		return
 	}
 
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
@@ -558,6 +576,7 @@ func RemoveChannelToUserFav(w http.ResponseWriter, r *http.Request) {
 			"msg": "Failed to get parse channelUUID",
 			"err": err,
 		})
+		return
 	}
 
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
@@ -1273,14 +1292,13 @@ func RefreshToken(w http.ResponseWriter, r *http.Request) {
 	feDomain := getFrontendCookieDomain()
 	secure, sameSite := getCookieSecureAndSameSite()
 
-	//tsc, err := r.Cookie("RefreshToken")
-	//if err != nil {
-	//
-	//	helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
-	//		"msg": "Not Authorised",
-	//	})
-	//	return
-	//}
+	tsc, err := r.Cookie("RefreshToken")
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+			"msg": "Not Authorised",
+		})
+		return
+	}
 
 	dsc, err := r.Cookie("DeviceId")
 
@@ -1294,30 +1312,23 @@ func RefreshToken(w http.ResponseWriter, r *http.Request) {
 
 	deviceId := dsc.Value
 
-	//refreshTokenString := tsc.Value
-
-	refreshTokenInRedis, _, err := redisStore.GetString(ctx, registry.UserRefreshToken, []string{userInfo.UserPostgresInfo.Id.String(), deviceId})
-
-	if err != nil || len(refreshTokenInRedis) == 0 {
-
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
-		return
-	}
-
-	//if refreshTokenString != refreshTokenInRedis {
-	//	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{})
-	//	return
-	//}
-
 	refreshTokenTTLDuration := registry.UserRefreshToken.TTL
 
 	authExpiryTime := time.Now().Add(time.Minute * 6)
 	authCookieExpiryTime := time.Now().Add(time.Minute * 5)
 	refreshExpiryTime := time.Now().Add(refreshTokenTTLDuration)
 
-	authTokenString, newRefreshTokenString, err := business.ResetToken(ctx, userInfo.UserPostgresInfo.Id.String(), deviceId, authExpiryTime.Unix(), refreshExpiryTime.Unix())
+	authTokenString, newRefreshTokenString, err := business.RotateRefreshToken(ctx, userInfo.UserPostgresInfo.Id.String(), deviceId,
+		tsc.Value, authExpiryTime.Unix(), refreshExpiryTime.Unix())
+	if errors.Is(err, business.ErrRefreshUnknown) || errors.Is(err, business.ErrRefreshReused) {
+		if errors.Is(err, business.ErrRefreshReused) {
+			helpers.LogWarnWithContext(ctx, "controllers/RefreshToken a rotated refresh token was used again; device signed out")
+		}
+		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+			"msg": "Not Authorised",
+		})
+		return
+	}
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1374,9 +1385,15 @@ func OAuthCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Defense-in-depth: a missing code means the IdP never authenticated
 	// the user (consent denied, navigation accident). Send them back to
-	// the login page rather than to a half-broken callback.
+	// the login page rather than to a half-broken callback, saying which:
+	// pressing Cancel at Google or GitHub comes back as error=access_denied,
+	// and used to read as "your account is not authorized".
 	if state == "" || oauthCode == "" {
-		http.Redirect(w, r, authService.FrontendBaseURL()+"/?error=unauthorized&message=missing-callback-params", http.StatusFound)
+		code, message := oauthFailed, oauthFailedMessage
+		if r.FormValue("error") == "access_denied" {
+			code, message = authService.SignInCancelled, authService.SignInCancelledMessage
+		}
+		http.Redirect(w, r, authService.SignInErrorURL(code, message), http.StatusFound)
 		return
 	}
 
@@ -1385,9 +1402,11 @@ func OAuthCallback(w http.ResponseWriter, r *http.Request) {
 	// trust whatever the IdP echoed back.
 	redirectURL, err := authService.ConsumeSSOState(ctx, state)
 	if err != nil {
+		// The sign-in took longer than the state lives, or this callback was
+		// opened twice (a back button, a second tab): start again.
 		helpers.LogErrorWithContext(ctx,
 			"controllers/OAuthCallback consume state err: %+v", err)
-		http.Redirect(w, r, authService.FrontendBaseURL()+"/?error=unauthorized&message=invalid-state", http.StatusFound)
+		http.Redirect(w, r, authService.SignInErrorURL(authService.SignInExpired, authService.SignInExpiredMessage), http.StatusFound)
 		return
 	}
 
@@ -1397,18 +1416,17 @@ func OAuthCallback(w http.ResponseWriter, r *http.Request) {
 		redirectURL = authService.FrontendBaseURL() + "/app"
 	}
 
-	emailID, uname, err := business.OAuthCallback(ctx, oauthCode, provider)
+	emailID, uname, landing, err := business.OAuthCallback(ctx, oauthCode, provider)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/OAuthCallback Failed to get user email err: %+v",
 			err)
 
-		// Redirect to the login page (root) — not /app — with error info
-		// so the frontend can show feedback without a double-redirect
-		loginURL := getLoginRedirectURL(redirectURL)
-		errorRedirect := appendQueryParam(loginURL, "error", "unauthorized")
-		errorRedirect = appendQueryParam(errorRedirect, "message", "Your account is not authorized to access this workspace. Please contact your administrator for an invitation.")
-		http.Redirect(w, r, errorRedirect, http.StatusFound)
+		// Back to the sign-in page (not /app, which would only bounce there),
+		// saying why in a code the page has words for: a full workspace, an
+		// address to verify, an invitation that expired or none at all.
+		code, message := oauthRefusal(err)
+		http.Redirect(w, r, authService.SignInErrorURL(code, message), http.StatusFound)
 		return
 	}
 
@@ -1420,23 +1438,14 @@ func OAuthCallback(w http.ResponseWriter, r *http.Request) {
 
 	_, authTokenString, refreshTokenString, deviceId, err := business.LoginUserByEmailID(ctx, emailID, uname, authExpiryTime.Unix(), refreshExpiryTime.Unix())
 
-	if len(authTokenString) == 0 {
-		errorRedirect := appendQueryParam(redirectURL, "error", "login_failed")
-		errorRedirect = appendQueryParam(errorRedirect, "message", "Login failed. Please try again.")
-		http.Redirect(w, r, errorRedirect, http.StatusFound)
-		return
-	}
-	if err != nil {
-
+	if err != nil || len(authTokenString) == 0 {
 		helpers.LogErrorWithContext(ctx,
-			"controllers/OAuthCallback Failed to login err: %+v",
-			err)
-
-		errorRedirect := appendQueryParam(redirectURL, "error", "login_failed")
-		errorRedirect = appendQueryParam(errorRedirect, "message", "Something went wrong during login. Please try again.")
-		http.Redirect(w, r, errorRedirect, http.StatusFound)
+			"controllers/OAuthCallback could not start the session: %+v", err)
+		// Back to the sign-in page, which says to try again. This used to go to
+		// /app?error=login_failed, which the web app has no words for, so a
+		// person admitted by Google or GitHub met a blank failure instead.
+		http.Redirect(w, r, authService.SignInErrorURL(oauthFailed, oauthFailedMessage), http.StatusFound)
 		return
-
 	}
 	feDomain := getFrontendCookieDomain()
 	secure, sameSite := getCookieSecureAndSameSite()
@@ -1473,46 +1482,55 @@ func OAuthCallback(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Best-effort audit: record which provider this login came through.
-	// "google" / "github" — the URL-param value is canonical.
+	// "google" / "github" — the URL-param value is canonical. Before it, the
+	// one thing a first sign-in decides: a member the directory provisioned
+	// arrives now, and starts where a new member does.
 	if user, err := userDomain.GetUserByEmailId(ctx, &emailID); err == nil && user != nil {
+		if landing == uuid.Nil {
+			landing = channelBusiness.FirstSignInLanding(ctx, user.Id)
+		}
 		_ = userDomain.RecordLoginMethod(ctx, user.Id, provider)
 	}
 
-	http.Redirect(w, r, redirectURL, http.StatusFound)
+	// Someone who has just joined opens on the channel they were put in,
+	// with the message box ready, instead of an empty Home.
+	http.Redirect(w, r, authService.LandingAfterSignIn(redirectURL, landing), http.StatusFound)
 
 }
 
-// appendQueryParam safely adds a query parameter to a URL string,
-// handling both URLs that already have query params and those that don't.
-func appendQueryParam(rawURL, key, value string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		// Fallback: just append manually
-		sep := "?"
-		if strings.Contains(rawURL, "?") {
-			sep = "&"
-		}
-		return rawURL + sep + url.QueryEscape(key) + "=" + url.QueryEscape(value)
-	}
-	q := u.Query()
-	q.Set(key, value)
-	u.RawQuery = q.Encode()
-	return u.String()
-}
+// oauthFailed is the sign-in page's code for a Google or GitHub sign-in that
+// didn't finish: failed on either side. Cancelling at the provider and a
+// sign-in that outlived its state have codes of their own
+// (authService.SignInCancelled, SignInExpired). The page says to try again.
+const (
+	oauthFailed        = "oauth_failed"
+	oauthFailedMessage = "Signing in with Google or GitHub didn't finish. Please try again."
+)
 
-// getLoginRedirectURL extracts the base URL (scheme + host) from a redirect URI
-// to safely redirect users to the login page on failure without losing query params
-// by redirecting into a protected route.
-func getLoginRedirectURL(redirectURI string) string {
-	u, err := url.Parse(redirectURI)
-	if err != nil || u.Host == "" {
-		// Fallback to origin or root if parsing fails
-		return "/"
+// oauthRefusal is why a Google or GitHub sign-in was refused, as a code the
+// sign-in page has words for (app/page.tsx in the web app), and those words
+// for the URL. Four are the person's to act on, and each has its own code:
+// an address the provider hasn't verified, one nobody invited, an invitation
+// past its expiry, and a free workspace with no seat left. Anything else is a
+// sign-in that didn't finish;
+// its error is logged and never sent, since it can carry what the provider
+// answered. All three used to arrive as "unauthorized", which the page reads
+// as not invited. Pure.
+func oauthRefusal(err error) (code, message string) {
+	var seat *helpers.SeatLimitError
+	switch {
+	case errors.As(err, &seat):
+		return "seat_limit", seat.Error()
+	case errors.Is(err, business.ErrUnverifiedEmail):
+		return "oauth_email_unverified", business.ErrUnverifiedEmail.Error()
+	case errors.Is(err, business.ErrNotInvited):
+		return "oauth_not_invited", business.ErrNotInvited.Error()
+	case errors.Is(err, business.ErrInvitationExpired):
+		return "invitation_expired", business.ErrInvitationExpired.Error()
+	case errors.Is(err, business.ErrAddressNotASCII):
+		return "address_unsupported", business.ErrAddressNotASCII.Error()
 	}
-	u.Path = "/"
-	u.RawQuery = ""
-	u.Fragment = ""
-	return u.String()
+	return oauthFailed, oauthFailedMessage
 }
 
 func UsersListNotBelongToChannelId(w http.ResponseWriter, r *http.Request) {
@@ -1879,7 +1897,7 @@ func GetDocFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if *dgraphDoc.IsPrivate == true && dgraphDoc.HasEditAccess == 0 && dgraphDoc.HasReadAccess == 0 && dgraphDoc.HasCommentAccess == 0 && dgraphDoc.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
+	if !docBusiness.CanRead(dgraphDoc, userInfo.UserDgraphInfo.Uuid) {
 
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
@@ -1973,7 +1991,7 @@ func GetDocAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if *dgraphDoc.IsPrivate == true && dgraphDoc.HasEditAccess == 0 && dgraphDoc.HasReadAccess == 0 && dgraphDoc.HasCommentAccess == 0 && dgraphDoc.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
+	if !docBusiness.CanRead(dgraphDoc, userInfo.UserDgraphInfo.Uuid) {
 
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
@@ -2652,25 +2670,59 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Bug 3: Verify user is a member of each group chat destination
-	for _, fwdTarget := range userFwdMsgRawInfo.FwdTo {
-		if fwdTarget.GrpId == "" {
-			continue
-		}
-		grpDmInfo, errGrp := chatBusiness.GetDgraphDmBasicByGrpId(ctx, fwdTarget.GrpId, userInfo.UserDgraphInfo.Uid)
-		if errGrp != nil {
-			helpers.LogErrorWithContext(ctx,
-				"controllers/FwdUserMessage Failed to verify group chat membership err: %+v",
-				errGrp)
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "Failed to verify group chat membership",
-			})
-			return
-		}
-		if grpDmInfo == nil || grpDmInfo.ParticipantIsMember == 0 {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-				"msg": "Not authorised to forward to this group",
-			})
+	// Every destination is checked, then written from what was checked: a
+	// channel by its graph uid (its uuid and name come from the channel), a
+	// group by its grouping id (its node from the group), a person by their
+	// uuid (their node and name from them). The other ids a request carries
+	// used to be written as they came, so a check on one id and a write to
+	// another, or a channel uuid with no uid to check at all, put a forward
+	// into a channel or conversation the sender isn't in.
+	var channelDgraphUIDs []string
+	for i := range userFwdMsgRawInfo.FwdTo {
+		t := &userFwdMsgRawInfo.FwdTo[i]
+		switch {
+		case t.ChannelDgraphUid != "" || t.ChannelUuid != "":
+			if t.ChannelDgraphUid == "" {
+				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "A channel to forward to needs its id"})
+				return
+			}
+			t.GrpId, t.UserUuid = "", ""
+			channelDgraphUIDs = append(channelDgraphUIDs, t.ChannelDgraphUid)
+		case t.GrpId != "":
+			grpDmInfo, errGrp := chatBusiness.GetDgraphDmBasicByGrpId(ctx, t.GrpId, userInfo.UserDgraphInfo.Uid)
+			if errGrp != nil {
+				helpers.LogErrorWithContext(ctx,
+					"controllers/FwdUserMessage Failed to verify group chat membership err: %+v",
+					errGrp)
+				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+					"msg": "Failed to verify group chat membership",
+				})
+				return
+			}
+			if grpDmInfo == nil || grpDmInfo.ParticipantIsMember == 0 {
+				helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
+					"msg": "Not authorised to forward to this group",
+				})
+				return
+			}
+			t.GrpDgraphUid, t.UserUuid = grpDmInfo.Uid, ""
+		case t.UserUuid != "":
+			to, errTo := business.GetDgraphUserInfoByUUID(ctx, t.UserUuid)
+			if errTo != nil || to == nil {
+				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "There's no such person to forward to"})
+				return
+			}
+			// The rule a direct message is sent by (business/Send).
+			if rj := sendBusiness.MayMessage(to); rj != nil {
+				helpers.WriteJSON(w, rj.Status, helpers.Envolope{"msg": rj.Msg})
+				return
+			}
+			t.UserDgraphUid, t.UserName, t.UserProfileKey = to.Uid, to.UserName, ""
+			if to.ProfileKey != nil {
+				t.UserProfileKey = *to.ProfileKey
+			}
+		default:
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Each place to forward to needs its id"})
 			return
 		}
 	}
@@ -2701,14 +2753,6 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var channelDgraphUIDs []string
-
-	for _, fwdChannel := range userFwdMsgRawInfo.FwdTo {
-		if fwdChannel.ChannelDgraphUid != "" {
-			channelDgraphUIDs = append(channelDgraphUIDs, fwdChannel.ChannelDgraphUid)
-		}
-	}
-
 	if len(channelDgraphUIDs) > 0 {
 
 		dgraphChannelList, err := channelBusiness.GetChannelListWithMemberFlag(ctx, userInfo.UserDgraphInfo.Uid, channelDgraphUIDs)
@@ -2725,18 +2769,29 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		for _, dgraphChannel := range dgraphChannelList {
-
-			if dgraphChannel.IsMember == 0 {
-
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+		byUID := make(map[string]*dgraphStruct.DgraphChannel, len(dgraphChannelList))
+		for _, ch := range dgraphChannelList {
+			byUID[ch.Uid] = ch
+		}
+		for i := range userFwdMsgRawInfo.FwdTo {
+			t := &userFwdMsgRawInfo.FwdTo[i]
+			if t.ChannelDgraphUid == "" {
+				continue
+			}
+			ch := byUID[t.ChannelDgraphUid]
+			if ch == nil || ch.IsMember == 0 {
+				helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 					"msg": "User is not member of channel",
-					"err": err,
 				})
 				return
-
 			}
-
+			// The rule a post is written by (business/Send): not an archived
+			// channel, and in an announcement channel only its admins.
+			if rj := sendBusiness.MayPostIn(ch); rj != nil {
+				helpers.WriteJSON(w, rj.Status, helpers.Envolope{"msg": rj.Msg})
+				return
+			}
+			t.ChannelUuid, t.ChannelName = ch.Uuid, ch.Name
 		}
 	}
 
@@ -2991,14 +3046,47 @@ func UpdateUserProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	usernameSpecialCharPattern := regexp.MustCompile(USERNAME_REGEX)
-	if usernameSpecialCharPattern.MatchString(userRawInfo.UserName) || len(userRawInfo.UserName) >= MAX_USERNAME_LENGTH {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg":    fmt.Sprintf("username contains special character or has length greater than %v", MAX_USERNAME_LENGTH),
-			"err":    err,
-			"status": "failed",
-		})
-		return
+	// Names: refused only when they change and break the rule. The rule this
+	// replaced allowed ASCII letters, digits, hyphens and spaces under 25
+	// bytes, so José, O'Brien, priya.raman and most names sign-up or an
+	// identity provider gave could never be saved, even to change a job title.
+	saved := userInfo.UserDgraphInfo
+	for _, name := range []struct{ label, sent, saved string }{
+		{"Display name", userRawInfo.UserName, saved.UserName},
+		{"Full name", userRawInfo.UserFullName, saved.UserFullName},
+	} {
+		if problem := changedNameProblem(name.label, name.sent, name.saved); problem != "" {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+				"msg":    problem,
+				"status": "failed",
+			})
+			return
+		}
+	}
+
+	// The handle has its own rule, and is unique: checked only when it is
+	// sent, and only when it changes.
+	if userRawInfo.Handle != nil {
+		if _, err := business.ChangeHandle(ctx, userInfo.UserPostgresInfo.Id, *userRawInfo.Handle); err != nil {
+			var refusal *business.HandleRefusal
+			if errors.As(err, &refusal) {
+				status := http.StatusBadRequest
+				if refusal.Taken {
+					status = http.StatusConflict
+				}
+				helpers.WriteJSON(w, status, helpers.Envolope{
+					"msg":    refusal.Msg,
+					"status": "failed",
+				})
+				return
+			}
+			helpers.LogErrorWithContext(ctx, "controllers/UpdateUserProfile Failed to change the handle err: %+v", err)
+			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
+				"msg":    "Couldn't change your handle. Try again in a moment.",
+				"status": "failed",
+			})
+			return
+		}
 	}
 
 	currentTime := time.Now()
@@ -3018,10 +3106,17 @@ func UpdateUserProfile(w http.ResponseWriter, r *http.Request) {
 	// 	return
 
 	// }
-	userInfo.UserDgraphInfo.UserName = userRawInfo.UserName
+	// An empty name keeps the one saved: written empty, it would blank the
+	// name in search too.
+	// Kept in NFC (helpers.NormalizePersonName), as sign-up keeps them.
+	if name := helpers.NormalizePersonName(userRawInfo.UserName); name != "" {
+		userInfo.UserDgraphInfo.UserName = name
+	}
 	userInfo.UserDgraphInfo.Hobbies = userRawInfo.Hobbies
 	userInfo.UserDgraphInfo.Title = userRawInfo.Title
-	userInfo.UserDgraphInfo.UserFullName = userRawInfo.UserFullName
+	if name := helpers.NormalizePersonName(userRawInfo.UserFullName); name != "" {
+		userInfo.UserDgraphInfo.UserFullName = name
+	}
 	userInfo.UserDgraphInfo.Uuid = userInfo.UserPostgresInfo.Id.String()
 	userInfo.UserDgraphInfo.ProfileKey = &userRawInfo.ProfilePicKey
 	userInfo.UserDgraphInfo.CreatedAt = &userInfo.UserPostgresInfo.CreatedAt
@@ -3889,9 +3984,12 @@ func UpdateUserChannelNotification(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetAllInvitations lists every invitation as it stands now: expired once
+// its link has run out, joined once used, and, while it can still be used,
+// the days its link has left and the link itself to copy.
 func GetAllInvitations(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	invitations, err := business.GetAllInvitations(ctx)
+	invitations, err := business.ListInvitations(ctx)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
 			"msg":    err.Error(),
@@ -3920,13 +4018,22 @@ func AddInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requestBody.Email = strings.TrimSpace(strings.ToLower(requestBody.Email))
+	requestBody.Email = helpers.NormalizeEmail(requestBody.Email)
 
 	if requestBody.Email == "" {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg":    "email is required",
 			"status": "failed",
 		})
+		return
+	}
+	if refuseNonASCIIInvitation(w, requestBody.Email) {
+		return
+	}
+
+	// A member an admin let invite people invites at most
+	// memberInvitesPerDay a day.
+	if refuseOverInviteLimit(w, ctx, userInfo) {
 		return
 	}
 
@@ -3947,26 +4054,104 @@ func AddInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expiresAt := time.Now().Add(7 * 24 * time.Hour) // 7 days
+	expiresAt := time.Now().Add(business.InvitationTTL)
 
-	err = business.AddInvitationWithToken(ctx, requestBody.Email, userInfo.UserPostgresInfo.Id, token, expiresAt)
+	// renewed: an expired invitation to this address was given this new link.
+	// A member (members can be let invite) is refused in one set of words,
+	// and can't renew an expired invitation: AddInvitationWithToken.
+	renewed, err := business.AddInvitationWithToken(ctx, requestBody.Email, userInfo.UserPostgresInfo.Id, userInfo.UserPostgresInfo.IsAdmin, token, expiresAt)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg":    err.Error(),
+		writeInviteRefusal(w, err)
+		return
+	}
+
+	sendErr := sendInvitation(ctx, requestBody.Email, token, userInfo)
+	respondInvitation(w, renewed, business.InvitationLink(token), sendErr)
+}
+
+// inviteSendTimeout bounds how long inviting someone waits for the email
+// provider. Long enough for a slow answer, short enough that the admin is
+// not left watching a spinner: past it they are told so, and have the link.
+const inviteSendTimeout = 10 * time.Second
+
+// sendInvitation emails an invitation from the person inviting, and waits
+// for the provider's answer, which the admin is then told. It is not cut
+// short if the admin's request goes away: the email still goes.
+func sendInvitation(ctx context.Context, to, token string, inviter models.UserInfo) error {
+	sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), inviteSendTimeout)
+	defer cancel()
+	return business.SendInvitationEmail(sendCtx, business.InvitationEmail{
+		To:           to,
+		Token:        token,
+		InviterName:  business.NameOnRecord(inviter.UserDgraphInfo),
+		InviterEmail: inviter.UserPostgresInfo.EmailID,
+	})
+}
+
+// memberInvitesPerDay is how many invitations one member (not an admin) can
+// make in a day. Inviting sends email in the workspace's name, with the
+// member's name in it; without a bound, one person could mail anyone at all,
+// as often as they liked, spending the workspace's sending reputation and its
+// daily allowance. Admins aren't counted: they invite whole teams at once (an
+// import), and the workspace's own daily email limit bounds them.
+const memberInvitesPerDay = 50
+
+// refuseOverInviteLimit refuses a member who has made memberInvitesPerDay
+// invitations in the last day, and reports whether it did. Counted in Redis,
+// or in this process when Redis can't be reached.
+func refuseOverInviteLimit(w http.ResponseWriter, ctx context.Context, inviter models.UserInfo) bool {
+	if inviter.UserPostgresInfo.IsAdmin {
+		return false
+	}
+	res := redisStore.AllowFixedWindowOrLocal(ctx, registry.InviterDailyInvites,
+		[]string{inviter.UserPostgresInfo.Id.String()}, memberInvitesPerDay)
+	if res.Allowed {
+		return false
+	}
+	if res.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(res.RetryAfter.Seconds())))
+	}
+	helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{
+		"msg":    fmt.Sprintf("You've made %d invitations today, the most one person can in a day. You can invite more tomorrow, or ask an admin.", memberInvitesPerDay),
+		"status": "failed",
+	})
+	return true
+}
+
+// refuseNonASCIIInvitation refuses an invitation to an address with
+// characters outside ASCII, which no sign-in is matched to
+// (helpers.NormalizeEmail), and reports whether it did.
+func refuseNonASCIIInvitation(w http.ResponseWriter, email string) bool {
+	if helpers.AddressIsASCII(email) {
+		return false
+	}
+	helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+		"msg":    "That address has characters other than plain letters, digits and symbols. OneCamp can't match those to an account, so it can't be invited.",
+		"status": "failed",
+	})
+	return true
+}
+
+// writeInviteRefusal answers a failed invitation: a refusal (a member, an
+// invitation still live) in its own words with 409, anything else as the
+// failure it is.
+func writeInviteRefusal(w http.ResponseWriter, err error) {
+	if refusal, ok := business.IsInviteRefusal(err); ok {
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+			"msg":    refusal.Msg,
 			"status": "failed",
 		})
 		return
 	}
-
-	// Send invitation email asynchronously
-	go sendInvitationEmail(requestBody.Email, token)
-
-	respondInvitation(w, false, invitationLink(authService.FrontendBaseURL(), token))
+	helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
+		"msg":    "Couldn't save the invitation. Try again in a moment.",
+		"status": "failed",
+	})
 }
 
 func ResendInvitation(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	_ = ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
 
 	var requestBody struct {
 		Email string `json:"email"`
@@ -3979,7 +4164,10 @@ func ResendInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requestBody.Email = strings.TrimSpace(strings.ToLower(requestBody.Email))
+	requestBody.Email = helpers.NormalizeEmail(requestBody.Email)
+	if refuseNonASCIIInvitation(w, requestBody.Email) {
+		return
+	}
 
 	// Generate new token
 	newToken, err := generateInvitationToken()
@@ -3991,22 +4179,17 @@ func ResendInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expiresAt := time.Now().Add(7 * 24 * time.Hour)
+	expiresAt := time.Now().Add(business.InvitationTTL)
 
-	// Update the invitation with new token, reset status to sent
-	err = business.UpdateInvitationTokenByEmail(ctx, requestBody.Email, newToken, expiresAt)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg":    err.Error(),
-			"status": "failed",
-		})
+	// A new link and expiry, status back to sent; the old link stops working.
+	// Refused for a member, an invitation already used, or none at all.
+	if err = business.RenewInvitation(ctx, requestBody.Email, userInfo.UserPostgresInfo.Id, newToken, expiresAt); err != nil {
+		writeInviteRefusal(w, err)
 		return
 	}
 
-	// Send email asynchronously
-	go sendInvitationEmail(requestBody.Email, newToken)
-
-	respondInvitation(w, true, invitationLink(authService.FrontendBaseURL(), newToken))
+	sendErr := sendInvitation(ctx, requestBody.Email, newToken, userInfo)
+	respondInvitation(w, true, business.InvitationLink(newToken), sendErr)
 }
 
 func DeleteInvitation(w http.ResponseWriter, r *http.Request) {
@@ -4188,95 +4371,31 @@ func generateInvitationToken() (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// invitationLink is the URL an invitation resolves to, built on the same base
-// the password-reset and SSO redirects use.
-//
-// WHY THIS EXISTS. The email used to build its link from FE_HOST_DOMAIN as
-// written, and as written it has no scheme: make install sets it to
-// onecamp.<domain>. An <a href="onecamp.example.com/signup?token=..."> is a
-// RELATIVE link to a mail client, so every invitation this server ever sent
-// pointed nowhere, and the recipient's "the link does not work" looked like a
-// spam filter or a slow server rather than what it was. FrontendBaseURL adds the
-// scheme and honours FRONTEND_DOMAIN, so an invitation now lands where a reset
-// link already did.
-func invitationLink(base, token string) string {
-	return fmt.Sprintf("%s/signup?token=%s", strings.TrimRight(base, "/"), token)
-}
-
 // respondInvitation is the one answer both creating and resending give.
 //
-// It carries the link, so the admin can hand it over themselves, and it says
-// whether an email is actually going out. A fresh install cannot send mail until
-// somebody adds a key, and this endpoint used to answer "invitation sent
-// successfully" regardless, so the first thing a new admin did after setting up
-// was invite a colleague and then wait for an email that was never going to
-// come. The link is theirs to share either way: it is their invitation, and a
+// It carries the link, so the admin can hand it over themselves, and what
+// happened to the email: whether the provider took it (email_sent) and, if
+// not, why (email_error, words that follow "Couldn't email it: "). It used to
+// say "Invitation sent. The link below is the same one in the email" whenever
+// a key was set, while the send ran in the background and its error was
+// dropped: a refused domain, the day's cap or an address that bounces all
+// read as sent. The link is theirs either way: it is their invitation, and a
 // mail client's spam folder is a reason to want it even when sending works.
-func respondInvitation(w http.ResponseWriter, resent bool, link string) {
-	sent := emailService.IsEmailEnabled()
-	msg := "Invitation created. Email is not set up on this server, so share the link yourself."
-	if sent && resent {
-		msg = "Invitation resent. The link below is the same one in the email."
-	} else if sent {
-		msg = "Invitation sent. The link below is the same one in the email."
+func respondInvitation(w http.ResponseWriter, resent bool, link string, sendErr error) {
+	sent := sendErr == nil
+	msg := "Invitation sent. The link below is the same one in the email."
+	if resent && sent {
+		msg = "Invitation sent again with a new link. The old link no longer works."
+	} else if !sent {
+		msg = "Invitation created, but it couldn't be emailed: " + emailService.Reason(sendErr) + ". Copy the link and send it yourself."
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"status":      "success",
 		"msg":         msg,
 		"invite_link": link,
 		"email_sent":  sent,
+		"email_error": emailService.Reason(sendErr),
 	})
-}
-
-func sendInvitationEmail(toEmail string, token string) {
-	ctx := context.Background()
-
-	signupLink := invitationLink(authService.FrontendBaseURL(), token)
-
-	// 2. Evaluate backend domain
-	backendDomain := strings.TrimRight(os.Getenv("BACKEND_DOMAIN"), "/")
-	if backendDomain != "" && !strings.HasPrefix(backendDomain, "http") {
-		// Assuming https for prod, http for localhost
-		if strings.Contains(backendDomain, "localhost") {
-			backendDomain = "http://" + backendDomain
-		} else {
-			backendDomain = "https://" + backendDomain
-		}
-	} else if backendDomain == "" {
-		backendDomain = "http://localhost:3000" // absolute fallback
-	}
-	logoImageHtml := fmt.Sprintf(`<img src="%s/public/email/logo" alt="Logo" style="max-height:80px; max-width:200px;" />`, backendDomain)
-
-	// 3. Get email config with robust fallbacks
-	senderEmail := fmt.Sprintf("noreply@%s", os.Getenv("FE_DOMAIN"))
-	subject := "You're invited to OneCamp!"
-	template := `<h2>Welcome to OneCamp!</h2>
-{{logo_image}}
-<p>You've been invited to join. Click the link below to set up your account:</p>
-<p><a href="{{signup_link}}">Accept Invitation</a></p>
-<p>This link expires in 7 days.</p>`
-
-	if cfg, err := configModels.GetConfigByKey("sender_email"); err == nil && cfg != nil && cfg.Value != "" {
-		senderEmail = cfg.Value
-	}
-	if cfg, err := configModels.GetConfigByKey("invitation_email_subject"); err == nil && cfg != nil && cfg.Value != "" {
-		subject = cfg.Value
-	}
-	if cfg, err := configModels.GetConfigByKey("invitation_email_template"); err == nil && cfg != nil && cfg.Value != "" {
-		template = cfg.Value
-	}
-
-	// 4. Inject logo if available
-	logoCfg, err := configModels.GetConfigByKey("invitation_email_logo")
-	if err != nil || logoCfg == nil || logoCfg.Value == "" {
-		logoImageHtml = "" // if no logo config, remove the placeholder completely
-	}
-
-	// 5. Replace placeholders
-	finalTemplate := strings.ReplaceAll(template, "{{signup_link}}", signupLink)
-	finalTemplate = strings.ReplaceAll(finalTemplate, "{{logo_image}}", logoImageHtml)
-
-	_ = emailService.SendInvitationEmail(ctx, toEmail, senderEmail, subject, finalTemplate, signupLink)
 }
 
 func GetExternalUsers(w http.ResponseWriter, r *http.Request) {

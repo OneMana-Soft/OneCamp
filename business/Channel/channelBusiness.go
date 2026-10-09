@@ -17,9 +17,11 @@ import (
 	domain "github.com/akashc777/OneCamp/domain/Channel"
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	dgraphChannelModels "github.com/akashc777/OneCamp/models/dgraph/Channel"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
@@ -415,6 +417,10 @@ func GetChannelRecordingTranscript(ctx context.Context, channelUUID uuid.UUID, u
 
 	return
 }
+
+// ErrNotFound is GetBasicDgraphChannelInfoByUUID's error for a channel that
+// doesn't exist, as opposed to one the graph couldn't be asked about.
+var ErrNotFound = dgraphChannelModels.ErrNotFound
 
 func GetBasicDgraphChannelInfoByUUID(ctx context.Context, channelUUID uuid.UUID, userDgraphUUID string) (channelInfo *dgraphStruct.DgraphChannel, err error) {
 
@@ -827,8 +833,10 @@ func DeleteChannelMemberEdge(ctx context.Context, channelDgraphUID string, userD
 	}
 
 	// Before any of the best-effort fan-out below, and synchronously: until this
-	// runs, every permission gate still reads a cached "yes".
+	// runs, every permission gate still reads a cached "yes", and search still
+	// covers the channel for them.
 	domain.InvalidateChannelBasicInfo(ctx, channelUUID)
+	userDomain.InvalidateUserMemberships(ctx, memberUUID)
 
 	go userChannelNotificationBusiness.DeleteNotificationTypeWhenUserIsRemovedFormChannel(memberUUID, channelUUID)
 	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "user.left", map[string]interface{}{
