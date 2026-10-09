@@ -423,3 +423,63 @@ func PreviewFormula(w http.ResponseWriter, r *http.Request) {
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": out})
 }
+
+// ListFields GET /tables/{id}/fields: a table's fields, for choosing what a
+// rollup adds up there.
+func ListFields(w http.ResponseWriter, r *http.Request) {
+	ctx := readerCtx(r)
+	id, ok := idParam(r, "id")
+	if !ok {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
+		return
+	}
+	fields, err := business.ListTableFields(ctx, id, actorFrom(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": fields})
+}
+
+// PickRows GET /tables/{id}/rows/pick?q=: rows to link to, by name.
+func PickRows(w http.ResponseWriter, r *http.Request) {
+	ctx := readerCtx(r)
+	id, ok := idParam(r, "id")
+	if !ok {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
+		return
+	}
+	rows, err := business.PickRows(ctx, id, r.URL.Query().Get("q"), actorFrom(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": rows})
+}
+
+// ChangeLinks POST /tables/{id}/rows/{rowId}/links: links a row to rows, or
+// unlinks it, through a field linking to a table.
+func ChangeLinks(w http.ResponseWriter, r *http.Request) {
+	ctx := readerCtx(r)
+	id, ok := idParam(r, "id")
+	rowId, ok2 := idParam(r, "rowId")
+	if !ok || !ok2 {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid id"})
+		return
+	}
+	var in struct {
+		Field  uuid.UUID   `json:"field"`
+		Add    []uuid.UUID `json:"add"`
+		Remove []uuid.UUID `json:"remove"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
+		return
+	}
+	row, _, err := business.ChangeLinks(ctx, id, rowId, in.Field, in.Add, in.Remove, actorFrom(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": row})
+}

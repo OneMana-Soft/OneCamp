@@ -42,6 +42,11 @@ const (
 	// (business/DataTable/formula). Its config carries {"formula": "..."}, with
 	// fields named by id; its cells are never stored.
 	FieldFormula = "formula"
+	// FieldRollup is worked out on each read from the rows a relation field
+	// links to (business/DataTable/relations.go). Its config carries
+	// {"relation": "<relation field id>", "field": "<field id in the linked
+	// table>", "aggregate": "<how>"}; its cells are never stored.
+	FieldRollup = "rollup"
 )
 
 // View type constants.
@@ -57,7 +62,7 @@ func ValidVisibility(v string) bool { return v == VisibilityPrivate || v == Visi
 func ValidFieldType(t string) bool {
 	switch t {
 	case FieldText, FieldNumber, FieldSelect, FieldMultiSelect, FieldDate,
-		FieldCheckbox, FieldPerson, FieldURL, FieldEmail, FieldRelation, FieldFormula:
+		FieldCheckbox, FieldPerson, FieldURL, FieldEmail, FieldRelation, FieldFormula, FieldRollup:
 		return true
 	default:
 		return false
@@ -417,22 +422,33 @@ func UpdateRowValues(ctx context.Context, tableId, rowId uuid.UUID, valuesJSON s
 	return out, nil
 }
 
-// DeleteRow soft-deletes a row.
-func DeleteRow(ctx context.Context, tableId, rowId uuid.UUID) error {
+// DeleteRow soft-deletes a row, and its links to and from other rows
+// (relationModel.go), in one transaction. It says whether it had links.
+func DeleteRow(ctx context.Context, tableId, rowId uuid.UUID) (bool, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
+	tx, err := postgresInit.DBConn.SqlDB.BeginTx(dbctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
 	const q = `UPDATE data_table_rows SET deleted_at=NOW(), updated_at=NOW()
 		WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL`
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, rowId, tableId)
+	res, err := tx.ExecContext(dbctx, q, rowId, tableId)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/DeleteRow err: %+v", err)
-		return err
+		return false, err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return sql.ErrNoRows
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, sql.ErrNoRows
 	}
-	return nil
+	res, err = tx.ExecContext(dbctx, `DELETE FROM data_table_links WHERE from_row = $1 OR to_row = $1`, rowId)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/DeleteRow links err: %+v", err)
+		return false, err
+	}
+	linked, _ := res.RowsAffected()
+	return linked > 0, tx.Commit()
 }
 
 // GetRowByID returns a single non-deleted row, or (nil, nil) if absent.

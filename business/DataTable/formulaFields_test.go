@@ -78,7 +78,7 @@ func TestLongCellsAreReadOnce(t *testing.T) {
 			src := strings.TrimSuffix(strings.Repeat(tc.ref+tc.join, names), tc.join)
 			rows := rowsOf(5, map[string]interface{}{tc.cell: tc.value})
 			start := time.Now()
-			withFormulas(context.Background(), table(1, src), rows)
+			withComputed(context.Background(), table(1, src), rows)
 			return time.Since(start)
 		}
 		// As many names as a formula has room for.
@@ -94,7 +94,7 @@ func TestLongCellsAreReadOnce(t *testing.T) {
 // makes of their text.
 func TestRowsStayTheirSize(t *testing.T) {
 	rows := rowsOf(1, map[string]interface{}{})
-	withFormulas(context.Background(), table(12, `REPT("<", 10000)`), rows)
+	withComputed(context.Background(), table(12, `REPT("<", 10000)`), rows)
 	if n := len(rows[0].Values); n > 110<<10 {
 		t.Errorf("the row's values are %d bytes", n)
 	}
@@ -124,7 +124,7 @@ func TestTotalsOfALongTableAreRight(t *testing.T) {
 	var all []*model.Row
 	for page := 0; page < 10; page++ {
 		rows := rowsOf(500, values)
-		withFormulas(context.Background(), fields, rows)
+		withComputed(context.Background(), fields, rows)
 		all = append(all, rows...)
 	}
 	res, err := Aggregate(fields, all, QuerySpec{Op: OpSum, ValueField: "Total"})
@@ -156,7 +156,7 @@ func TestRowsPassThroughAsStored(t *testing.T) {
 	// and a value left behind for the formula.
 	stored := `{"` + notes + `": "<b>Café</b>  ", "x": 1.50, "y": [1e2, {"label": "A"}], "` + f0 + `": "stale"}`
 	rows := []*model.Row{{Id: uuid.New(), Values: stored}, {Id: uuid.New(), Values: "not json"}}
-	withFormulas(context.Background(), fields, rows)
+	withComputed(context.Background(), fields, rows)
 	var got map[string]interface{}
 	if err := json.Unmarshal([]byte(rows[0].Values), &got); err != nil {
 		t.Fatal(err)
@@ -183,7 +183,7 @@ func TestRowsPassThroughAsStored(t *testing.T) {
 	}
 	rewrite := time.Since(start)
 	start = time.Now()
-	withFormulas(context.Background(), table(1, "1"), long)
+	withComputed(context.Background(), table(1, "1"), long)
 	if took := time.Since(start); took > rewrite {
 		t.Errorf("adding a formula to 30 rows took %v; decoding and writing them again takes %v", took, rewrite)
 	}
@@ -203,7 +203,7 @@ func TestTotalsSayWhenFormulasRanOut(t *testing.T) {
 		fields = append(fields, &model.Field{Id: uuid.New(), Name: f[0], Type: model.FieldFormula, Config: string(cfg)})
 	}
 	rows := rowsOf(3, map[string]interface{}{notes.String(): strings.Repeat("x", 64<<10)})
-	withFormulas(context.Background(), fields, rows)
+	withComputed(context.Background(), fields, rows)
 	for _, c := range []struct {
 		value string
 		short bool
@@ -221,6 +221,63 @@ func TestTotalsSayWhenFormulasRanOut(t *testing.T) {
 	res, _ := Aggregate(fields, rows, QuerySpec{Op: OpCount, Filters: []Filter{{Field: "Heavy", Op: "not_empty"}}})
 	if !res.Truncated {
 		t.Error("a count filtered on a formula that ran out doesn't say it's short")
+	}
+}
+
+// Totals over link cells, as reads give them, count the links shown and say
+// they fall short of those past them; so do totals over a rollup a read
+// left out.
+func TestTotalsSayWhenLinksAreCut(t *testing.T) {
+	vendor, spend := uuid.New(), uuid.New()
+	other := uuid.New().String()
+	fields := []*model.Field{
+		{Id: vendor, Name: "Vendor", Type: model.FieldRelation, Config: fmt.Sprintf(`{"relation_target":"table","table_id":%q}`, other)},
+		{Id: spend, Name: "Spend", Type: model.FieldRollup, Config: `{"aggregate":"sum"}`},
+	}
+	ref := func(label string) map[string]interface{} {
+		return map[string]interface{}{"id": uuid.New().String(), "label": label, "type": "row", "table_id": other}
+	}
+	more := map[string]interface{}{"id": "", "label": "250 more", "type": "more", "table_id": other}
+	row := func(cell []interface{}, sum interface{}) *model.Row {
+		b, _ := json.Marshal(map[string]interface{}{vendor.String(): cell, spend.String(): sum})
+		return &model.Row{Id: uuid.New(), Values: string(b)}
+	}
+	whole := []*model.Row{row([]interface{}{ref("Acme")}, 10), row([]interface{}{ref("Acme"), ref("Globex")}, 20)}
+	cut := append(whole, row([]interface{}{ref("Acme"), more}, errTooManyLinked.JSON()))
+	for _, c := range []struct {
+		rows  []*model.Row
+		spec  QuerySpec
+		short bool
+	}{
+		{whole, QuerySpec{Op: OpCount, GroupBy: "Vendor"}, false},
+		{whole, QuerySpec{Op: OpSum, ValueField: "Spend"}, false},
+		{cut, QuerySpec{Op: OpCount, GroupBy: "Vendor"}, true},
+		{cut, QuerySpec{Op: OpSum, ValueField: "Spend"}, true},
+		{cut, QuerySpec{Op: OpCount, Filters: []Filter{{Field: "Vendor", Op: "contains", Value: "Initech"}}}, true},
+	} {
+		res, err := Aggregate(fields, c.rows, c.spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Truncated != c.short {
+			t.Errorf("%+v over %d rows: short %v, want %v", c.spec, len(c.rows), res.Truncated, c.short)
+		}
+		for _, b := range res.Buckets {
+			if strings.Contains(b.Label, "more") {
+				t.Errorf("%+v: a group for the links not shown, %q", c.spec, b.Label)
+			}
+		}
+	}
+	res, _ := Aggregate(fields, cut, QuerySpec{Op: OpCount, GroupBy: "Vendor"})
+	if len(res.Buckets) != 2 || res.Buckets[0].Label != "Acme" || res.Buckets[0].Count != 3 {
+		t.Errorf("grouped by the links shown: %+v", res.Buckets)
+	}
+	// A cell counting links it names none of still has links.
+	unnamed := append(whole, row([]interface{}{map[string]interface{}{"id": "", "label": "12 links", "type": "more", "table_id": other}}, nil))
+	for op, want := range map[string]int{"empty": 0, "not_empty": 3} {
+		if res, _ := Aggregate(fields, unnamed, QuerySpec{Op: OpCount, Filters: []Filter{{Field: "Vendor", Op: op}}}); res.MatchedRows != want {
+			t.Errorf("%s: %d rows, want %d", op, res.MatchedRows, want)
+		}
 	}
 }
 
@@ -313,7 +370,7 @@ func TestListCellsAreChargedAsRead(t *testing.T) {
 		items[i] = "a"
 	}
 	rows := rowsOf(500, map[string]interface{}{tags.String(): items})
-	withFormulas(context.Background(), fields, rows)
+	withComputed(context.Background(), fields, rows)
 	if strings.Contains(rows[0].Values, `"error"`) || !strings.Contains(rows[499].Values, "This table's formulas take too much working out") {
 		t.Errorf("the first row %.80s…, the last %.200s…", rows[0].Values, rows[499].Values)
 	}
@@ -325,7 +382,7 @@ func TestNumbersInListsReadAsNumbers(t *testing.T) {
 	tags := uuid.New()
 	fields := append(table(1, `{Tags} & ""`)[2:], &model.Field{Id: tags, Name: "Tags", Type: model.FieldMultiSelect, Config: "{}"})
 	rows := rowsOf(1, map[string]interface{}{tags.String(): []interface{}{1e308, 1500000, 0.25, "Live"}})
-	withFormulas(context.Background(), fields, rows)
+	withComputed(context.Background(), fields, rows)
 	var got map[string]interface{}
 	_ = json.Unmarshal([]byte(rows[0].Values), &got)
 	if v := got[fields[0].Id.String()]; v != "1e+308, 1500000, 0.25, Live" {

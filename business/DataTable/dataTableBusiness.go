@@ -14,6 +14,7 @@ package business
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -143,6 +144,10 @@ func CreateTableFromTemplate(ctx context.Context, in TableInput, fields []FieldI
 	}
 	addedField := false
 	add := func(fi FieldInput) *model.Field {
+		if target, _ := fi.Config["relation_target"].(string); target == linksTable || strings.TrimSpace(fi.Type) == model.FieldRollup {
+			helpers.LogErrorWithContext(ctx, "CreateTableFromTemplate skips %q: it links to another table", fi.Name)
+			return nil
+		}
 		f, ferr := buildField(id, fi)
 		if ferr != nil {
 			helpers.LogErrorWithContext(ctx, "CreateTableFromTemplate field err: %v", ferr)
@@ -391,6 +396,7 @@ func ListTables(ctx context.Context, actor Actor) ([]*model.DataTable, error) {
 
 // GetBundle returns the full open-payload for a table the actor may view.
 func GetBundle(ctx context.Context, id uuid.UUID, actor Actor) (*TableBundle, error) {
+	ctx = asViewer(ctx, actor)
 	t, err := loadViewable(ctx, id, actor)
 	if err != nil {
 		return nil, err
@@ -443,7 +449,7 @@ func loadBundle(ctx context.Context, t *model.DataTable, manage bool, topic stri
 		rows = rows[:bundleRowPage]
 		truncated = true
 	}
-	presentFormulaFields(fields, withFormulas(ctx, fields, rows))
+	presentComputedFields(fields, withComputed(ctx, fields, rows))
 	return &TableBundle{Table: t, Fields: fields, Views: views, Rows: rows, CanManage: manage, MqttTopic: topic, RowsTruncated: truncated}, nil
 }
 
@@ -469,48 +475,54 @@ func GetGuestBundle(ctx context.Context, id uuid.UUID) (*TableBundle, error) {
 
 // CreateField adds a column (manage only).
 func CreateField(ctx context.Context, tableId uuid.UUID, in FieldInput, actor Actor) (*model.Field, error) {
-	if _, err := loadManageable(ctx, tableId, actor); err != nil {
+	t, err := loadManageable(ctx, tableId, actor)
+	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(in.Type) == model.FieldFormula {
-		cfg, err := formulaConfig(ctx, tableId, uuid.Nil, in.Config)
-		if err != nil {
-			return nil, err
-		}
-		in.Config = cfg
+	other, err := computedFieldConfig(ctx, actor, t, uuid.Nil, &in)
+	if err != nil {
+		return nil, err
 	}
 	f, err := buildField(tableId, in)
 	if err != nil {
 		return nil, err
 	}
-	id, err := model.CreateField(ctx, f)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create field")
+	if other != nil {
+		f, err = createLinkPair(ctx, f, t, other)
+	} else if f.Id, err = model.CreateField(ctx, f); err != nil {
+		err = fmt.Errorf("failed to create field")
 	}
-	f.Id = id
+	if err != nil {
+		return nil, err
+	}
+	go tellTablesLinkedWith(context.WithoutCancel(ctx), tableId)
 	return f, nil
 }
 
 // UpdateField edits a column (manage only).
 func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, in FieldInput, actor Actor) error {
-	if _, err := loadManageable(ctx, tableId, actor); err != nil {
+	t, err := loadManageable(ctx, tableId, actor)
+	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(in.Type) == model.FieldFormula {
-		cfg, err := formulaConfig(ctx, tableId, fieldId, in.Config)
-		if err != nil {
-			return err
-		}
-		in.Config = cfg
+	other, err := computedFieldConfig(ctx, actor, t, fieldId, &in)
+	if err != nil {
+		return err
 	}
 	f, err := buildField(tableId, in)
 	if err != nil {
 		return err
 	}
 	f.Id = fieldId
-	if err := model.UpdateField(ctx, f); err != nil {
-		return fmt.Errorf("failed to update field")
+	if other != nil {
+		err = showLinksIn(ctx, f, t, other)
+	} else if model.UpdateField(ctx, f) != nil {
+		err = fmt.Errorf("failed to update field")
 	}
+	if err != nil {
+		return err
+	}
+	go tellTablesLinkedWith(context.WithoutCancel(ctx), tableId)
 	return nil
 }
 
@@ -519,7 +531,29 @@ func DeleteField(ctx context.Context, tableId, fieldId uuid.UUID, actor Actor) e
 	if _, err := loadManageable(ctx, tableId, actor); err != nil {
 		return err
 	}
-	return model.DeleteField(ctx, tableId, fieldId)
+	fields, err := model.ListFields(ctx, tableId)
+	if err != nil {
+		return fmt.Errorf("failed to load fields")
+	}
+	var field *model.Field
+	for _, f := range fields {
+		if f.Id == fieldId {
+			field = f
+		}
+	}
+	// The tables told are those linking with this one before the field goes.
+	linked, _ := model.TablesLinkedWith(ctx, tableId)
+	if field != nil {
+		// A relation linking to a table goes with the field showing its links
+		// there.
+		err = unlinkPair(ctx, field)
+	} else {
+		err = model.DeleteField(ctx, tableId, fieldId)
+	}
+	if err == nil {
+		tellTables(linked...)
+	}
+	return err
 }
 
 func buildField(tableId uuid.UUID, in FieldInput) (*model.Field, error) {
@@ -548,22 +582,39 @@ func buildField(tableId uuid.UUID, in FieldInput) (*model.Field, error) {
 
 // CreateRow inserts a row (view/edit access) and broadcasts it.
 func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor) (*model.Row, error) {
+	ctx = asViewer(ctx, actor)
 	t, err := loadViewable(ctx, tableId, actor)
 	if err != nil {
 		return nil, err
 	}
-	values, fields := withoutFormulaValues(ctx, tableId, in.Values)
-	valuesJSON, verr := validateValues(values)
+	fields, ferr := model.ListFields(ctx, tableId)
+	if ferr != nil {
+		return nil, fmt.Errorf("failed to load fields")
+	}
+	values := in.Values
+	if values == nil {
+		values = map[string]interface{}{}
+	}
+	id := uuid.New()
+	links, linkedTables, lerr := takeLinks(ctx, actor, fields, values, id)
+	if lerr != nil {
+		return nil, lerr
+	}
+	valuesJSON, verr := validateValues(stripComputed(fields, values))
 	if verr != nil {
 		return nil, verr
 	}
-	r := &model.Row{TableId: tableId, Values: valuesJSON, Position: in.Position, CreatedBy: &actor.UserID}
-	created, cerr := model.CreateRow(ctx, r)
+	r := &model.Row{Id: id, TableId: tableId, Values: valuesJSON, Position: in.Position, CreatedBy: &actor.UserID}
+	created, cerr := model.CreateRowWithLinks(ctx, r, links, maxLinks)
+	if errors.Is(cerr, model.ErrTooManyLinks) {
+		return nil, errTooManyLinks
+	}
 	if cerr != nil {
 		return nil, fmt.Errorf("failed to create row")
 	}
-	withFormulas(ctx, fields, []*model.Row{created})
+	withComputed(ctx, fields, []*model.Row{created})
 	broadcastRow(t.Id.String(), "created", created)
+	tellTables(linkedTables...)
 	// Continuous AI autofill: recompute any auto AI columns for the new row,
 	// as the creator, off the request path. Loop-safe (writes via the model
 	// layer, not CreateRow/UpdateRow).
@@ -581,12 +632,23 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 
 // UpdateRow replaces a row's values (view/edit access) and broadcasts it.
 func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor Actor) (*model.Row, error) {
+	ctx = asViewer(ctx, actor)
 	t, err := loadViewable(ctx, tableId, actor)
 	if err != nil {
 		return nil, err
 	}
-	values, fields := withoutFormulaValues(ctx, tableId, in.Values)
-	valuesJSON, verr := validateValues(values)
+	fields, ferr := model.ListFields(ctx, tableId)
+	if ferr != nil {
+		return nil, fmt.Errorf("failed to load fields")
+	}
+	values := in.Values
+	if values == nil {
+		values = map[string]interface{}{}
+	}
+	// Its links stay as they are: a row written back as an earlier read gave
+	// it would otherwise put back links removed since, or take away those
+	// added. They change through ChangeLinks.
+	valuesJSON, verr := validateValues(stripComputed(fields, values))
 	if verr != nil {
 		return nil, verr
 	}
@@ -594,7 +656,8 @@ func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor
 	if uerr != nil {
 		return nil, fmt.Errorf("failed to update row")
 	}
-	withFormulas(ctx, fields, []*model.Row{r})
+	go tellLinkedTables(context.WithoutCancel(ctx), tableId, rowId, false)
+	withComputed(ctx, fields, []*model.Row{r})
 	broadcastRow(t.Id.String(), "updated", r)
 	// Continuous AI autofill: recompute any auto AI columns so derived cells
 	// track the row's latest inputs. Loop-safe (model-layer write, no event).
@@ -613,15 +676,20 @@ func DeleteRow(ctx context.Context, tableId, rowId uuid.UUID, actor Actor) error
 	if err != nil {
 		return err
 	}
-	if err := model.DeleteRow(ctx, tableId, rowId); err != nil {
+	linked, err := model.DeleteRow(ctx, tableId, rowId)
+	if err != nil {
 		return fmt.Errorf("failed to delete row")
 	}
 	mqttBusiness.PublishTableRow(t.Id.String(), map[string]interface{}{"action": "deleted", "row_id": rowId.String()})
+	if linked {
+		go tellLinkedTables(context.WithoutCancel(ctx), tableId, rowId, true)
+	}
 	return nil
 }
 
 // ListRows returns a page of rows for a table the actor may view.
 func ListRows(ctx context.Context, tableId uuid.UUID, actor Actor, limit, offset int) ([]*model.Row, error) {
+	ctx = asViewer(ctx, actor)
 	if _, err := loadViewable(ctx, tableId, actor); err != nil {
 		return nil, err
 	}
@@ -629,24 +697,7 @@ func ListRows(ctx context.Context, tableId uuid.UUID, actor Actor, limit, offset
 	if err != nil {
 		return nil, err
 	}
-	return readWithFormulas(ctx, tableId, rows), nil
-}
-
-// ListRowsFiltered returns a page of rows for a table the actor may view whose
-// raw JSONB text contains every one of likeSubstrings (case-insensitive). It is
-// the permission-checked wrapper the aggregation engine uses to push a coarse,
-// superset row filter down to the database (see model.ListRowsFiltered): the
-// exact typed predicates are still re-applied in memory, so it only reduces how
-// many rows are scanned, never the result.
-func ListRowsFiltered(ctx context.Context, tableId uuid.UUID, actor Actor, likeSubstrings []string, limit, offset int) ([]*model.Row, error) {
-	if _, err := loadViewable(ctx, tableId, actor); err != nil {
-		return nil, err
-	}
-	rows, err := model.ListRowsFiltered(ctx, tableId, likeSubstrings, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	return readWithFormulas(ctx, tableId, rows), nil
+	return readWithComputed(ctx, tableId, rows), nil
 }
 
 // validateValues ensures the row values are a JSON object within the size cap
@@ -665,12 +716,14 @@ func validateValues(values map[string]interface{}) (string, error) {
 	return string(b), nil
 }
 
-// broadcastRow publishes a created/updated row to the table's live topic.
+// broadcastRow tells a table's live topic a row was created or updated, by
+// id: readers fetch it again, each as they may see it. The row itself isn't
+// sent, as its links to other tables were worked out for its writer.
 func broadcastRow(tableID, action string, r *model.Row) {
 	if r == nil {
 		return
 	}
-	mqttBusiness.PublishTableRow(tableID, map[string]interface{}{"action": action, "row_id": r.Id.String(), "row": r})
+	mqttBusiness.PublishTableRow(tableID, map[string]interface{}{"action": action, "row_id": r.Id.String()})
 }
 
 // ───────────────────────── views ─────────────────────────

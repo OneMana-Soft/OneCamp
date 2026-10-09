@@ -25,7 +25,6 @@ BulkArchiveTasks
 CalendarCreate
 CalendarList
 CanQuery
-CanView
 CancelByUser
 ChartsAsText
 CheckIfChannelHandleExist
@@ -81,7 +80,6 @@ GetMqttTopicForBroadcast
 GetPostIdsOlderThan
 GetPostgresChatByUUID
 GetProvider
-GetRowByID
 GetSetMembers
 GetSystemBotUser
 GetTaskIdsOlderThan

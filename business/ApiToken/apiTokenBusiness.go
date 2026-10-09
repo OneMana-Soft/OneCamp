@@ -96,6 +96,7 @@ var ToolScope = map[string]string{
 	"query_plan":       ScopeTablesRead,
 	"create_table_row": ScopeTablesWrite,
 	"update_table_row": ScopeTablesWrite,
+	"link_table_rows":  ScopeTablesWrite,
 	// External data sources (read-only). Distinct scope from tables.
 	"list_data_sources":      ScopeDataSourcesRead,
 	"read_data_source":       ScopeDataSourcesRead,

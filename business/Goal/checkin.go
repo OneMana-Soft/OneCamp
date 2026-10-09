@@ -36,7 +36,7 @@ func CheckCheckIn(g *goalModel.Goal, in CheckInInput) (CheckInInput, error) {
 	}
 	in.Body = helpers.NormaliseText(in.Body)
 	if len([]rune(in.Body)) > MaxBody {
-		return in, refuse("Keep a check-in under %s characters.", thousands(MaxBody))
+		return in, refuse("Keep a check-in under %s characters.", helpers.Thousands(MaxBody))
 	}
 	if in.Value != nil {
 		if g.Measure != goalModel.MeasureNumber {
@@ -149,7 +149,7 @@ func EditCheckIn(ctx context.Context, r Reader, goalID, id uuid.UUID, health, bo
 	}
 	body = helpers.NormaliseText(body)
 	if len([]rune(body)) > MaxBody {
-		return nil, refuse("Keep a check-in under %s characters.", thousands(MaxBody))
+		return nil, refuse("Keep a check-in under %s characters.", helpers.Thousands(MaxBody))
 	}
 	if body == "" && cur.Value == nil && !Closing(health) {
 		return nil, refuse("Write a few words about how the goal is going.")

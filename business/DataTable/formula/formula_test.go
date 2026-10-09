@@ -594,10 +594,10 @@ func TestCharactersCountedInPlace(t *testing.T) {
 	for _, s := range texts {
 		rs := []rune(s)
 		for n := 0; n <= len(rs)+2; n++ {
-			if got, want := fnLeft(e, []Value{Text(s), Number(float64(n))}).text(), string(rs[:min(n, len(rs))]); got != want && !strings.Contains(s, "\xff") {
+			if got, want := fnLeft(e, []Value{Text(s), Number(float64(n))}).Text(), string(rs[:min(n, len(rs))]); got != want && !strings.Contains(s, "\xff") {
 				t.Errorf("LEFT(%q, %d) = %q, want %q", s, n, got, want)
 			}
-			if got, want := fnRight(e, []Value{Text(s), Number(float64(n))}).text(), string(rs[len(rs)-min(n, len(rs)):]); got != want && !strings.Contains(s, "\xff") {
+			if got, want := fnRight(e, []Value{Text(s), Number(float64(n))}).Text(), string(rs[len(rs)-min(n, len(rs)):]); got != want && !strings.Contains(s, "\xff") {
 				t.Errorf("RIGHT(%q, %d) = %q, want %q", s, n, got, want)
 			}
 			for c := 0; c <= len(rs)+1; c++ {
@@ -606,7 +606,7 @@ func TestCharactersCountedInPlace(t *testing.T) {
 					want = string(rs[n-1 : min(n-1+c, len(rs))])
 				}
 				if n >= 1 {
-					if got := fnMid(e, []Value{Text(s), Number(float64(n)), Number(float64(c))}).text(); got != want && !strings.Contains(s, "\xff") {
+					if got := fnMid(e, []Value{Text(s), Number(float64(n)), Number(float64(c))}).Text(); got != want && !strings.Contains(s, "\xff") {
 						t.Errorf("MID(%q, %d, %d) = %q, want %q", s, n, c, got, want)
 					}
 				}
@@ -715,7 +715,7 @@ func TestHiddenWorkIsCharged(t *testing.T) {
 		fields[2].Formula = src
 		p := Compile(fields)
 		runOn(p, cells)
-		return p.read
+		return p.budget.spent
 	}
 	repeating := map[string]Value{"h": Text(strings.Repeat(block, 3750)), "n": Text(strings.Repeat(block, 2499) + "abcdefghijklmnoX")}
 	// 1,250 places each compared 40 KB: about 50 MB.

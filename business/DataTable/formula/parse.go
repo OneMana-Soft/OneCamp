@@ -168,7 +168,7 @@ func (n *unary) eval(e *env) Value {
 	}
 	f, ok := v.number()
 	if !ok {
-		return Error(fmt.Sprintf("%q isn't a number", clip(v.text())))
+		return Error(fmt.Sprintf("%q isn't a number", clip(v.Text())))
 	}
 	if n.op == "-" {
 		f = -f
@@ -189,7 +189,7 @@ func (n *binary) eval(e *env) Value {
 	}
 	switch n.op {
 	case "&":
-		ls, rs := l.text(), r.text()
+		ls, rs := l.Text(), r.Text()
 		if len(ls)+len(rs) > 4*maxText {
 			return tooLong()
 		}
@@ -278,7 +278,7 @@ func arith(op string, l, r Value) Value {
 		case l.Kind == KindDate && (op == "+" || op == "-"):
 			n, ok := r.number()
 			if !ok {
-				return Error(fmt.Sprintf("%q isn't a number of days", clip(r.text())))
+				return Error(fmt.Sprintf("%q isn't a number of days", clip(r.Text())))
 			}
 			if op == "-" {
 				n = -n
@@ -287,7 +287,7 @@ func arith(op string, l, r Value) Value {
 		case r.Kind == KindDate && op == "+":
 			n, ok := l.number()
 			if !ok {
-				return Error(fmt.Sprintf("%q isn't a number of days", clip(l.text())))
+				return Error(fmt.Sprintf("%q isn't a number of days", clip(l.Text())))
 			}
 			return addTo(r, n, "day")
 		}
@@ -295,11 +295,11 @@ func arith(op string, l, r Value) Value {
 	}
 	a, ok := l.number()
 	if !ok {
-		return Error(fmt.Sprintf("%q isn't a number", clip(l.text())))
+		return Error(fmt.Sprintf("%q isn't a number", clip(l.Text())))
 	}
 	b, ok := r.number()
 	if !ok {
-		return Error(fmt.Sprintf("%q isn't a number", clip(r.text())))
+		return Error(fmt.Sprintf("%q isn't a number", clip(r.Text())))
 	}
 	switch op {
 	case "+":
@@ -344,7 +344,7 @@ func compare(e *env, l, r Value) int {
 			return 0
 		}
 	}
-	c, walked := compareFold(l.text(), r.text())
+	c, walked := compareFold(l.Text(), r.Text())
 	e.slow(walked)
 	return c
 }
