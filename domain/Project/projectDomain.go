@@ -348,6 +348,7 @@ func GetDgraphProjectInfoAndTeamAdminFlagAndAttachments(ctx context.Context, pro
 	query := `query ProjectInfo($id: string, $userUid: string){
 				projectInfo(func: eq(project_uuid, $id)) {
 					project_uuid
+					project_created_at
 					project_is_admin: count(project_admins @filter(uid($userUid)))
 					project_team {
 						uid

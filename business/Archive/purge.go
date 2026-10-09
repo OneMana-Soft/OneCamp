@@ -229,18 +229,10 @@ func purgeRecordings(ctx context.Context, cutoff time.Time) (PurgeResult, error)
 	if err != nil {
 		return res, err
 	}
-	bucket := helpers.UserUploadBucket()
 	for _, r := range due {
-		var size int64
-		if r.ObjectKey != "" {
-			size, err = removeObject(ctx, bucket, r.ObjectKey)
-			if err != nil {
-				helpers.LogErrorWithContext(ctx, "purge recordings: removing %s: %v", r.EgressId, err)
-				res.Failed++
-				continue
-			}
-		}
-		if err := deleteRecordingNodes(ctx, r); err != nil {
+		size, err := PurgeRecording(ctx, r)
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "purge recordings: %v", err)
 			res.Failed++
 			continue
 		}
@@ -248,4 +240,24 @@ func purgeRecordings(ctx context.Context, cutoff time.Time) (PurgeResult, error)
 		res.Bytes += size
 	}
 	return res, nil
+}
+
+// PurgeRecording removes one recording for good, file first, then its node
+// and transcript, and says how many bytes went. If the file can't be removed
+// the node stays, so whatever runs next can find the file to try again. The
+// hourly purge of archived recordings and someone deleting a recording both
+// end here.
+func PurgeRecording(ctx context.Context, r recordingDomain.ArchivedRecording) (int64, error) {
+	var size int64
+	if r.ObjectKey != "" {
+		var err error
+		size, err = removeObject(ctx, helpers.UserUploadBucket(), r.ObjectKey)
+		if err != nil {
+			return 0, fmt.Errorf("removing the file of recording %s: %w", r.EgressId, err)
+		}
+	}
+	if err := deleteRecordingNodes(ctx, r); err != nil {
+		return 0, fmt.Errorf("removing recording %s from the graph: %w", r.EgressId, err)
+	}
+	return size, nil
 }

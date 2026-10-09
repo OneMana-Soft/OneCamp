@@ -9,6 +9,7 @@ import (
 
 	commandAdapter "github.com/akashc777/OneCamp/adapter/Command"
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
+	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	jobDomain "github.com/akashc777/OneCamp/domain/ScheduledJob"
 	jobModel "github.com/akashc777/OneCamp/models/postgres/ScheduledJob"
 	"github.com/google/uuid"
@@ -55,9 +56,9 @@ func handleRemind(ctx context.Context, cc CommandContext) (*commandAdapter.Comma
 	}
 
 	// For channel reminders, resolve the channel name → UUID now (while we have
-	// the invoking user's context) and verify membership, so the fired job can
-	// post a visible message without re-resolving. If the user is in this
-	// channel right now, prefer the current channel id.
+	// the invoking user's context) and check they may post there, so the fired
+	// job can post a visible message without re-resolving. "#here" is the
+	// channel the command was typed in.
 	if target.kind == "channel" {
 		resolvedID, rerr := resolveChannelForReminder(ctx, cc, target.name)
 		if rerr != nil || resolvedID == "" {
@@ -126,17 +127,27 @@ func runReminderJob(ctx context.Context, job *jobModel.ScheduledJob) error {
 	}
 
 	// Channel reminder: post a visible message into the channel, authored by
-	// the user who set it (Slack parity). Reuses the AI executor's send_message
-	// path, which handles permissions, MQTT fan-out, search indexing and
-	// notifications. Falls back to nudging the setter if the post fails.
+	// the user who set it (Slack parity), through the composer's own rules and
+	// path (business/Send). Falls back to nudging the setter if the post fails.
 	if p.TargetType == "channel" && p.TargetID != "" {
-		if err := postChannelReminder(ctx, p); err != nil {
-			logErr(ctx, "runReminderJob/postChannelReminder", err)
-			// Fall back: nudge the creator so the reminder isn't silently lost.
-			resp.Text = fmt.Sprintf("⏰ Reminder for #%s: %s (couldn't post to the channel)", p.TargetName, p.Text)
+		err := postChannelReminder(ctx, p)
+		if err == nil {
+			return nil
+		}
+		if rj, ok := sendBusiness.AsRejection(err); ok {
+			// The rules say no (they left the channel, it was archived, only
+			// its admins post now), and would say no every time: the
+			// reminder stops, a repeating one included, and its owner hears.
+			resp.Text = fmt.Sprintf("⏰ Reminder for #%s: %s (not posted: you can't post there any more, so this reminder has stopped)", p.TargetName, p.Text)
 			PublishEphemeralToUser(p.CreatedBy, resp)
 			pushReminder(ctx, p.CreatedBy, resp.Text)
+			return &schedulerBusiness.Terminal{Reason: "Not posted: " + rj.Msg}
 		}
+		logErr(ctx, "runReminderJob/postChannelReminder", err)
+		// Fall back: nudge the creator so the reminder isn't silently lost.
+		resp.Text = fmt.Sprintf("⏰ Reminder for #%s: %s (couldn't post to the channel)", p.TargetName, p.Text)
+		PublishEphemeralToUser(p.CreatedBy, resp)
+		pushReminder(ctx, p.CreatedBy, resp.Text)
 		return nil
 	}
 

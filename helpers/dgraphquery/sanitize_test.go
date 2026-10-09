@@ -102,3 +102,21 @@ func TestIsAllowedColumnName(t *testing.T) {
 		})
 	}
 }
+
+func TestOnlyUIDsGoIntoAQuerysUIDList(t *testing.T) {
+	if !AllUIDs([]string{"0x1", "0xAbC123", "0x7fffffffffffffff"}) {
+		t.Error("real uids were refused")
+	}
+	for _, bad := range [][]string{
+		{"0x1) OR has(user_email_id"},
+		{"0x1", "1"},
+		{""},
+		{"0x"},
+		{"0x1 "},
+		{"0x12345678901234567"},
+	} {
+		if AllUIDs(bad) {
+			t.Errorf("%q was taken as uids", bad)
+		}
+	}
+}

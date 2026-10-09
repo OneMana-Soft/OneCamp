@@ -59,11 +59,17 @@ func TestTaskStatusWorkflowRunsOnTheMoveItNames(t *testing.T) {
 	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
 		t.Fatal(err)
 	}
-	integration.SetupDgraph(t)
+	dg := integration.SetupDgraph(t)
 	user, project := uuid.New(), uuid.New()
 	if _, err := env.PG.Exec(`INSERT INTO users (id, email_id) VALUES ($1, $2)`, user, user.String()[:8]+"@example.test"); err != nil {
 		t.Fatal(err)
 	}
+	// A workflow hears moves only in a project its owner is in (access.go).
+	dg.Mutate(t, []map[string]any{
+		{"uid": "_:u", "user_uuid": user.String(), "user_name": "maya"},
+		{"uid": "_:p", "project_uuid": project.String(), "project_name": "Q4 launch",
+			"project_members": []map[string]any{{"uid": "_:u"}}},
+	})
 	qa, err := taskStatusBusiness.Create(ctx, project, user, taskStatusBusiness.Input{Name: "QA", Category: "inReview"})
 	if err != nil {
 		t.Fatal(err)

@@ -14,6 +14,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	jobs "github.com/akashc777/OneCamp/models/postgres/Import"
 	"github.com/google/uuid"
 )
 
@@ -79,10 +80,21 @@ var ErrJobNotFound = errors.New("slack import job not found")
 
 // ErrConflictActiveJob is returned when an attempt to create a new job
 // for a workspace would violate the active-per-workspace partial unique
-// index. Callers should surface this as 409 Conflict.
-var ErrConflictActiveJob = errors.New("slack import already active for this workspace")
+// index. Callers should surface this as 409 Conflict. It is the generic
+// import's, since status changes go through that package (UpdateStatus).
+var ErrConflictActiveJob = jobs.ErrConflictActiveJob
+
+// ErrJobChanged is returned when a job is no longer in a status a change was
+// made for: another request moved it in the meantime. Callers should surface
+// this as 409 Conflict.
+var ErrJobChanged = jobs.ErrJobChanged
 
 // Job is the row shape of import_jobs.
+//
+// Plan is NULL until the job is planned and is scanned through a *[]byte,
+// which is the only destination database/sql stores a NULL into: scanned as
+// the json.RawMessage it is, every uploaded export waiting to be planned failed
+// to read (see models/postgres/Import scanJob).
 type Job struct {
 	Id                 uuid.UUID
 	SlackWorkspaceName string
@@ -180,7 +192,7 @@ func GetJob(ctx context.Context, jobId uuid.UUID) (*Job, error) {
 	j := &Job{}
 	err := row.Scan(
 		&j.Id, &j.SlackWorkspaceName, &j.Source, &j.RawObjectKey, &j.Status, &j.Stage,
-		&j.StartedAt, &j.CompletedAt, &j.Options, &j.Plan, &j.Progress,
+		&j.StartedAt, &j.CompletedAt, &j.Options, (*[]byte)(&j.Plan), &j.Progress,
 		&j.ErrorMessage, &j.Digest, &j.TriggeredBy, &j.CreatedAt, &j.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -222,7 +234,7 @@ func ListJobs(ctx context.Context, limit int) ([]*Job, error) {
 		j := &Job{}
 		if err := rows.Scan(
 			&j.Id, &j.SlackWorkspaceName, &j.Source, &j.RawObjectKey, &j.Status, &j.Stage,
-			&j.StartedAt, &j.CompletedAt, &j.Options, &j.Plan, &j.Progress,
+			&j.StartedAt, &j.CompletedAt, &j.Options, (*[]byte)(&j.Plan), &j.Progress,
 			&j.ErrorMessage, &j.Digest, &j.TriggeredBy, &j.CreatedAt, &j.UpdatedAt,
 		); err != nil {
 			return nil, err
@@ -233,47 +245,40 @@ func ListJobs(ctx context.Context, limit int) ([]*Job, error) {
 }
 
 // UpdateStatus transitions a job's status (and optionally stage). Used at
-// every lifecycle boundary. The error_message column is set when status
-// is failed, cleared otherwise so a re-run of the same id is clean.
+// every lifecycle boundary. It is the generic import's (models/postgres/Import),
+// which writes the same table: Slack's own copy had no guard, so a stage
+// writing "running" after an operator's cancel ran the import on.
 func UpdateStatus(ctx context.Context, jobId uuid.UUID, status string, stage *string, errMsg *string) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		UPDATE import_jobs
-		SET status = $2,
-		    stage = COALESCE($3, stage),
-		    error_message = $4,
-		    started_at = CASE
-		        WHEN $2 = 'running' AND started_at IS NULL THEN NOW()
-		        ELSE started_at END,
-		    completed_at = CASE
-		        WHEN $2 IN ('completed','failed','cancelled','rolled_back') THEN NOW()
-		        ELSE completed_at END,
-		    updated_at = NOW()
-		WHERE id = $1
-	`, jobId, status, stage, errMsg)
-	if err != nil {
-		// Two concurrent finalize calls for the same workspace can both
-		// transition pending → validating; the partial unique index
-		// uq_import_jobs_active_per_workspace catches the second
-		// one. Surface ErrConflictActiveJob so the controller can return
-		// 409 just like CreateJob does on the same conflict.
-		if isUniqueViolation(err) {
-			return ErrConflictActiveJob
-		}
-	}
-	return err
+	return jobs.UpdateStatus(ctx, jobId, status, stage, errMsg)
 }
 
-// UpdatePlan stores the planning result. Called once after the plan stage.
-func UpdatePlan(ctx context.Context, jobId uuid.UUID, plan json.RawMessage) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		UPDATE import_jobs SET plan = $2, status = 'planned', stage = 'planned', updated_at = NOW()
-		WHERE id = $1`, jobId, plan)
-	return err
+// StartRunning moves a job to running from one of the statuses in from, in one
+// statement, and reports whether it did: two clicks on Run start one import.
+func StartRunning(ctx context.Context, jobId uuid.UUID, from []string) (bool, error) {
+	return jobs.StartRunning(ctx, jobId, from)
+}
+
+// UpdateStatusFrom is UpdateStatus only from one of the statuses in from, in
+// one statement, and reports whether it moved the job.
+func UpdateStatusFrom(ctx context.Context, jobId uuid.UUID, from []string, status string, stage *string, errMsg *string) (bool, error) {
+	return jobs.UpdateStatusFrom(ctx, jobId, from, status, stage, errMsg)
+}
+
+// SavePlan stores the planning result and the chunks the import runs in, and
+// moves the job to planned, only while it waits to be planned; ErrJobChanged
+// otherwise. It is the generic import's: Slack's own copy wrote "planned"
+// over a job Run had started in the meantime, and Run started it again.
+func SavePlan(ctx context.Context, jobId uuid.UUID, plan json.RawMessage, chunks []*Chunk) error {
+	generic := make([]*jobs.Chunk, len(chunks))
+	for i, c := range chunks {
+		generic[i] = &jobs.Chunk{
+			Id: c.Id, ImportId: c.ImportId, ChunkType: c.ChunkType, ParentSourceId: c.ChannelSlackId,
+			ObjectKey: c.ObjectKey, Status: c.Status, Attempts: c.Attempts, MaxAttempts: c.MaxAttempts,
+			ItemsTotal: c.ItemsTotal, ItemsDone: c.ItemsDone, LastCursor: c.LastCursor, ClaimedBy: c.ClaimedBy,
+			ClaimedAt: c.ClaimedAt, Error: c.Error, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt,
+		}
+	}
+	return jobs.SavePlan(ctx, jobId, plan, generic)
 }
 
 // UpdateOptions is called by Run if the operator tweaked knobs after planning.
@@ -506,6 +511,7 @@ func FinishChunk(ctx context.Context, chunkId uuid.UUID, itemsDone int, lastCurs
 // FailChunk marks the chunk as failed with an error message. It will be
 // re-claimed if attempts < max_attempts.
 func FailChunk(ctx context.Context, chunkId uuid.UUID, itemsDone int, lastCursor *string, errMsg string) error {
+	errMsg = helpers.WithoutURLQueries(errMsg) // see models/postgres/Import UpdateStatus
 	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
@@ -690,6 +696,10 @@ func IdMappingsByType(ctx context.Context, importId uuid.UUID, entityType string
 func LogImportError(ctx context.Context, importId uuid.UUID, chunkId *uuid.UUID,
 	entityType, slackId, severity, code, message string, errorContext json.RawMessage) {
 	// Best-effort; never block a worker on telemetry.
+	message = helpers.WithoutURLQueries(message)
+	if len(errorContext) > 0 {
+		errorContext = json.RawMessage(helpers.WithoutURLQueries(string(errorContext)))
+	}
 	dbCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
@@ -896,7 +906,7 @@ func FindCompletedJobByHash(ctx context.Context, workspaceName, contentHash stri
 	j := &Job{}
 	err := row.Scan(
 		&j.Id, &j.SlackWorkspaceName, &j.Source, &j.RawObjectKey, &j.Status, &j.Stage,
-		&j.StartedAt, &j.CompletedAt, &j.Options, &j.Plan, &j.Progress,
+		&j.StartedAt, &j.CompletedAt, &j.Options, (*[]byte)(&j.Plan), &j.Progress,
 		&j.ErrorMessage, &j.Digest, &j.TriggeredBy, &j.CreatedAt, &j.UpdatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1002,6 +1012,19 @@ func IdMappingsByTypeOwned(ctx context.Context, importId uuid.UUID, entityType s
 	return out, rows.Err()
 }
 
+// CountChannelPosts counts a channel's live posts: all of them, and those
+// written by someone other than author. Used to tell a workspace's seeded
+// #general (one post, by the admin who made it) from one the team uses.
+func CountChannelPosts(ctx context.Context, channelUUID, author uuid.UUID) (total int, others int, err error) {
+	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	err = postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx, `
+		SELECT COUNT(*), COUNT(*) FILTER (WHERE created_by IS DISTINCT FROM $2)
+		FROM posts
+		WHERE post_channel = $1 AND deleted_at IS NULL`, channelUUID, author).Scan(&total, &others)
+	return total, others, err
+}
+
 // ─── Cleanup support ─────────────────────────────────────────────────────
 
 // ClearRawObjectKey nullifies raw_object_key on a job. Called after the
@@ -1024,6 +1047,7 @@ func ClearRawObjectKey(ctx context.Context, jobId uuid.UUID) error {
 // This also clears the claim so another worker can pick it up
 // immediately rather than waiting for the reaper's stale-claim window.
 func ResetChunkForRetry(ctx context.Context, chunkId uuid.UUID, reason string) error {
+	reason = helpers.WithoutURLQueries(reason)
 	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `

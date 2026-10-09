@@ -12,6 +12,22 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
+// exactClauses match a field holding one of ids exactly: as the field, and as
+// its keyword sub-field. A field an index mapped by itself as text (the AI
+// index's doc_uuid, on a comment's entry) is analyzed, so a term query for a
+// whole uuid never matches it, and deleting a doc left its comments findable
+// in AI search; its .keyword holds the value whole. Where no such sub-field
+// exists, that clause matches nothing.
+func exactClauses(field string, ids []string) []string {
+	idsJSON, _ := json.Marshal(ids)
+	fieldJSON, _ := json.Marshal(field)
+	keywordJSON, _ := json.Marshal(field + ".keyword")
+	return []string{
+		fmt.Sprintf(`{ "terms": { %s: %s } }`, fieldJSON, idsJSON),
+		fmt.Sprintf(`{ "terms": { %s: %s } }`, keywordJSON, idsJSON),
+	}
+}
+
 // SyncCascadingDeletionInOpenSearch updates the deleted_date for all documents in specified indices
 // that match any of the provided parent fields with the given parentID.
 // deletedBy tags the deletion source: "cascade" for parent archive, "user" for individual deletion.
@@ -22,7 +38,7 @@ func SyncCascadingDeletionInOpenSearch(ctx context.Context, parentFields []strin
 
 	var shouldClauses []string
 	for _, field := range parentFields {
-		shouldClauses = append(shouldClauses, fmt.Sprintf(`{ "term": { "%s": "%s" } }`, field, parentID))
+		shouldClauses = append(shouldClauses, exactClauses(field, []string{parentID})...)
 	}
 
 	body := fmt.Sprintf(`{
@@ -77,7 +93,7 @@ func SyncCascadingUnarchiveInOpenSearch(ctx context.Context, parentFields []stri
 
 	var shouldClauses []string
 	for _, field := range parentFields {
-		shouldClauses = append(shouldClauses, fmt.Sprintf(`{ "term": { "%s": "%s" } }`, field, parentID))
+		shouldClauses = append(shouldClauses, exactClauses(field, []string{parentID})...)
 	}
 
 	body := fmt.Sprintf(`{
@@ -264,8 +280,7 @@ func SyncCascadingDeletionInOpenSearchCombined(ctx context.Context, fieldIDs map
 
 	var termsClauses []string
 	for field, ids := range fieldIDs {
-		idsJSON, _ := json.Marshal(ids)
-		termsClauses = append(termsClauses, fmt.Sprintf(`{ "terms": { "%s": %s } }`, field, string(idsJSON)))
+		termsClauses = append(termsClauses, exactClauses(field, ids)...)
 	}
 
 	body := fmt.Sprintf(`{
@@ -306,8 +321,7 @@ func SyncCascadingUnarchiveInOpenSearchCombined(ctx context.Context, fieldIDs ma
 
 	var termsClauses []string
 	for field, ids := range fieldIDs {
-		idsJSON, _ := json.Marshal(ids)
-		termsClauses = append(termsClauses, fmt.Sprintf(`{ "terms": { "%s": %s } }`, field, string(idsJSON)))
+		termsClauses = append(termsClauses, exactClauses(field, ids)...)
 	}
 
 	body := fmt.Sprintf(`{

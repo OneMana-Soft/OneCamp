@@ -78,16 +78,33 @@ services:
       EMQX_AUTHENTICATION__1__MECHANISM: jwt
       EMQX_AUTHENTICATION__1__USE_JWKS: false
       EMQX_AUTHENTICATION__1__VERIFY_CLAIMS: '{username: "$${username}"}'
-      # Provisioned ACL (see emqx/acl.conf). Anything outside the
-      # allow list is denied. New topic prefixes added in helpers.go
-      # MUST be added to acl.conf or end users will get
-      # "Subscribe error: Not authorized" from the broker.
+      # Who may subscribe to what. emqx/acl.conf answers first: the backend's
+      # own client may do anything, and a person's client may not publish.
+      # Then the backend answers each subscription a person's client makes,
+      # allowing only topics of things that person can read
+      # (business/MqttAccess). Anything neither allows is denied, including a
+      # subscription made while the backend can't be reached; the web app
+      # asks again.
       EMQX_AUTHORIZATION__SOURCES__1__TYPE: file
       EMQX_AUTHORIZATION__SOURCES__1__ENABLE: true
       EMQX_AUTHORIZATION__SOURCES__1__PATH: /opt/emqx/etc/acl.conf
+      EMQX_AUTHORIZATION__SOURCES__2__TYPE: http
+      EMQX_AUTHORIZATION__SOURCES__2__ENABLE: true
+      EMQX_AUTHORIZATION__SOURCES__2__METHOD: post
+      EMQX_AUTHORIZATION__SOURCES__2__URL: http://go-service:3000/internal/mqtt/authorize
+      EMQX_AUTHORIZATION__SOURCES__2__BODY: '{username = "$${username}", topic = "$${topic}", action = "$${action}"}'
+      EMQX_AUTHORIZATION__SOURCES__2__HEADERS: '{"content-type" = "application/json", "x-internal-secret" = "${INTERNAL_SECRET}"}'
+      EMQX_AUTHORIZATION__SOURCES__2__REQUEST_TIMEOUT: 5s
+      # Every subscription is one ask, and a client asks for all of its
+      # topics as it connects: after a restart, every client at once.
+      EMQX_AUTHORIZATION__SOURCES__2__POOL_SIZE: 32
       EMQX_AUTHORIZATION__NO_MATCH: deny
+      # A remembered answer would outlive a change of access by its lifetime.
+      EMQX_AUTHORIZATION__CACHE__ENABLE: false
       EMQX_LOG__CONSOLE_HANDLER__ENABLE: true
-      EMQX_LOG__CONSOLE_HANDLER__LEVEL: debug
+      # Not debug: at debug the broker logs every packet, so every message
+      # anyone sends, in full.
+      EMQX_LOG__CONSOLE_HANDLER__LEVEL: warning
     volumes:
       - ./emqx/acl.conf:/opt/emqx/etc/acl.conf:ro
       - ./data/emqx_data/data:/opt/emqx/data
@@ -98,7 +115,12 @@ services:
       - traefik.docker.network=traefik-public
       - traefik.http.services.emqx-ws.loadbalancer.server.port=8083
       - traefik.http.routers.emqx-ws-https.rule=Host(`${EMQX_WS_DOMAIN}`)
-      - traefik.http.routers.emqx-ws-https.entrypoints=wss
+      # ON 443, WHERE THE APP CONNECTS. The installer gives the app
+      # MQTT_WS_URL=wss://<host>/mqtt, with no port, so browsers dial 443; the
+      # router was on 8084 alone, so no message ever arrived live on an install
+      # made from this file (a proxy in front, as on Cloud, cannot carry 8084
+      # at all). 8084 stays for anything already pointed at it.
+      - traefik.http.routers.emqx-ws-https.entrypoints=https,wss
       - traefik.http.routers.emqx-ws-https.tls=true
       - traefik.http.routers.emqx-ws-https.service=emqx-ws
       - traefik.http.routers.emqx-ws-https.tls.certresolver=le
@@ -262,6 +284,16 @@ services:
     # has to arrive the way compose intends.
     env_file:
       - .env
+    # SAML's key pair (make saml-cert). Mounted, not built in: the image leaves
+    # *.key files out. Read-only, and empty unless SAML is set up.
+    # ./ldap holds the certificate of a company's own certificate authority, for
+    # LDAPS to a directory whose certificate it issued: put the PEM file there
+    # and set LDAP_CA_CERT=/app/ldap/<file>. The image leaves *.pem out too.
+    # Shipped rather than left for an operator to add, because an update
+    # replaces this file. Read-only, and empty unless that is set up.
+    volumes:
+      - ./saml:/app/saml:ro
+      - ./ldap:/app/ldap:ro
     labels:
       - traefik.enable=true
       - traefik.docker.network=traefik-public

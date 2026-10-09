@@ -5,9 +5,9 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -24,7 +24,6 @@ import (
 	passwordResetModels "github.com/akashc777/OneCamp/models/postgres/PasswordReset"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/models/redis/registry"
-	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 	authService "github.com/akashc777/OneCamp/services/Auth"
 	emailService "github.com/akashc777/OneCamp/services/Email"
 	"github.com/google/uuid"
@@ -61,11 +60,21 @@ func EmailLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requestBody.Email = strings.TrimSpace(strings.ToLower(requestBody.Email))
+	requestBody.Email = helpers.NormalizeEmail(requestBody.Email)
 
 	if requestBody.Email == "" || requestBody.Password == "" {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg":    "email and password are required",
+			"status": "failed",
+		})
+		return
+	}
+
+	// An address outside ASCII is matched to no account (see
+	// helpers.NormalizeEmail): the same answer as a wrong password.
+	if !helpers.AddressIsASCII(requestBody.Email) {
+		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+			"msg":    "invalid email or password",
 			"status": "failed",
 		})
 		return
@@ -130,6 +139,32 @@ func EmailLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A workspace that turned passwords off (AUTH_EMAIL_DISABLED=true) takes
+	// them from admins only. BREAK-GLASS: when Google, GitHub or single
+	// sign-on breaks (an expired client secret, an identity provider down),
+	// an admin's password is the way back in to fix it, so it keeps working;
+	// everyone else signs in through the provider. Checked after the password,
+	// as the second step is, so an unauthenticated caller learns nothing about
+	// who is an admin.
+	if helpers.PasswordSignInOff() {
+		isAdmin, _, err := domain.GetUserSignInFlags(ctx, user.Id)
+		if err != nil {
+			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
+				"msg":    "could not complete sign-in, please try again",
+				"status": "failed",
+			})
+			return
+		}
+		if !isAdmin {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
+				"msg":    passwordsOffMessage(signInMethods(ctx), false),
+				"status": "failed",
+				"reason": "passwords_off",
+			})
+			return
+		}
+	}
+
 	// A PASSWORD ALONE MUST NOT MINT A SESSION FOR AN ENROLLED USER.
 	//
 	// This is the entire load-bearing line of two-factor authentication, and the way to get it wrong is
@@ -139,43 +174,11 @@ func EmailLogin(w http.ResponseWriter, r *http.Request) {
 	//
 	// So: stop, and hand back a short-lived challenge that proves only that this step succeeded. The
 	// challenge is not a session — it carries a purpose claim no middleware accepts. See
-	// business/Auth.IssueTOTPChallenge.
+	// business/Auth.IssueTOTPChallenge, and challengeIfTwoStep for the sign-ins that ask.
 	//
 	// The check is ordered AFTER password verification on purpose. Asking first would tell an
 	// unauthenticated caller which accounts have 2FA enabled, which is a map of who is worth attacking.
-	//
-	// A FAILURE HERE REFUSES THE LOGIN rather than falling through to cookies. If the database cannot
-	// say whether this user is enrolled, the safe answer is not "probably not": treating an unknown as
-	// unenrolled would turn a transient error into a bypass of the second factor.
-	required, terr := authBusiness.TOTPRequired(ctx, user.Id)
-	if terr != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/EmailLogin: cannot determine 2FA state: %+v", terr)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
-			"msg":    "could not complete sign-in, please try again",
-			"status": "failed",
-		})
-		return
-	}
-	if required {
-		challenge, cerr := authBusiness.IssueTOTPChallenge(user.Id)
-		if cerr != nil {
-			helpers.LogErrorWithContext(ctx, "controllers/EmailLogin: cannot issue 2FA challenge: %+v", cerr)
-			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
-				"msg":    "could not complete sign-in, please try again",
-				"status": "failed",
-			})
-			return
-		}
-		// 200, not 401: the password was correct and the client's next step is defined. The login is
-		// not finished, which is what status says, and no auth cookie has been written.
-		//
-		// The login method is deliberately NOT recorded yet — nobody has signed in. It is recorded by
-		// the challenge endpoint once the second factor is satisfied.
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-			"status":    "totp_required",
-			"msg":       "Enter the code from your authenticator app.",
-			"challenge": challenge,
-		})
+	if challengeIfTwoStep(w, ctx, user.Id, models.AuthMethodEmail) {
 		return
 	}
 
@@ -186,12 +189,169 @@ func EmailLogin(w http.ResponseWriter, r *http.Request) {
 	issueAuthCookies(w, r, ctx, user.Id.String())
 }
 
+// challengeIfTwoStep answers a sign-in whose password just checked out, when the account has two-step
+// on: with a challenge instead of a session, reporting true so the caller stops. POST /auth/login/totp
+// takes the code and records method as how they signed in.
+//
+// Every sign-in that checks a password here asks it: the email password (EmailLogin) and the
+// directory's (LDAPLogin), which skipped the second step until it did. SAML, OIDC and Google/GitHub
+// don't: the identity provider authenticates the person, with whatever second factor it enforces, and
+// no password reaches this server. Nor do passkeys, which are two factors already (the device, and
+// what unlocks it).
+//
+// A FAILURE HERE REFUSES THE SIGN-IN (and still reports true, having answered) rather than falling
+// through to cookies. If the database cannot say whether this user is enrolled, the safe answer is not
+// "probably not": treating an unknown as unenrolled would turn a transient error into a bypass of the
+// second factor.
+func challengeIfTwoStep(w http.ResponseWriter, ctx context.Context, userID uuid.UUID, method string) bool {
+	required, err := authBusiness.TOTPRequired(ctx, userID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/challengeIfTwoStep: cannot determine 2FA state: %+v", err)
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
+			"msg":    "could not complete sign-in, please try again",
+			"status": "failed",
+		})
+		return true
+	}
+	if !required {
+		return false
+	}
+	challenge, err := authBusiness.IssueTOTPChallenge(userID, method)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/challengeIfTwoStep: cannot issue 2FA challenge: %+v", err)
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
+			"msg":    "could not complete sign-in, please try again",
+			"status": "failed",
+		})
+		return true
+	}
+	// 200, not 401: the password was correct and the client's next step is defined. The login is
+	// not finished, which is what status says, and no auth cookie has been written.
+	//
+	// The login method is deliberately NOT recorded yet — nobody has signed in. It is recorded by
+	// the challenge endpoint once the second factor is satisfied.
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
+		"status":    "totp_required",
+		"msg":       "Enter the code from your authenticator app.",
+		"challenge": challenge,
+	})
+	return true
+}
+
+// passwordsOffMessage is what someone is told when they send a password to a
+// workspace that has turned passwords off: the ways in it does have, and
+// only those (signInMethods). joining is for someone signing up through an
+// invitation. Pure.
+func passwordsOffMessage(providers map[string]bool, joining bool) string {
+	var ways []string
+	if providers["google"] {
+		ways = append(ways, "Google")
+	}
+	if providers["github"] {
+		ways = append(ways, "GitHub")
+	}
+	if providers["oidc"] || providers["saml"] {
+		ways = append(ways, "single sign-on")
+	}
+	if providers["ldap"] {
+		ways = append(ways, "your directory account")
+	}
+	if len(ways) == 0 {
+		return "This workspace doesn't use passwords, and no other way to sign in is set up yet. Ask your administrator."
+	}
+	list := ways[0]
+	if n := len(ways); n > 1 {
+		list = strings.Join(ways[:n-1], ", ") + " or " + ways[n-1]
+	}
+	if joining {
+		return "This workspace doesn't use passwords. Join with " + list + ", using the address you were invited at."
+	}
+	return "This workspace doesn't use passwords. Sign in with " + list + " instead."
+}
+
+// NoWayInProblem says why members can't sign in at all, or "" when they
+// can: passwords are off (AUTH_EMAIL_DISABLED=true) and no other way in is
+// set up. Admins still can, with their passwords (EmailLogin). Logged at boot
+// (cmd/server) and shown by the admin's system check ("sign-in").
+func NoWayInProblem(ctx context.Context) string {
+	return noWayIn(signInMethods(ctx))
+}
+
+// noWayIn is NoWayInProblem for given sign-in methods. Pure.
+func noWayIn(methods map[string]bool) string {
+	if methods["email"] {
+		return ""
+	}
+	for _, way := range []string{"google", "github", "oidc", "saml", "ldap"} {
+		if methods[way] {
+			return ""
+		}
+	}
+	return "Passwords are off (AUTH_EMAIL_DISABLED=true) and no other way to sign in is set up, so members " +
+		"can't sign in at all; only admins can, with their passwords. Set up Google, GitHub or single sign-on, " +
+		"or turn passwords back on."
+}
+
+func init() {
+	helpers.RegisterSystemCheck(helpers.SystemCheck{
+		Name: "sign-in",
+		Describe: "Members have a way to sign in: passwords, or Google, GitHub or single sign-on when passwords are off. " +
+			"It does not try signing in.",
+		Probe: func(ctx context.Context) error {
+			if problem := NoWayInProblem(ctx); problem != "" {
+				return errors.New(problem)
+			}
+			return nil
+		},
+	})
+}
+
+// signInMethods is how this workspace lets people sign in, as the sign-in
+// page is told (GET /auth/providers): each method's name, and whether it is
+// on.
+func signInMethods(ctx context.Context) map[string]bool {
+	oauthStatus := oauth.GetOAuthConfigStatus()
+	return map[string]bool{
+		// Email is on by default; only off with AUTH_EMAIL_DISABLED=true. It
+		// was read backwards: "false" turned it off, and "true" left it on.
+		"email": !helpers.PasswordSignInOff(),
+		// Google + GitHub login are gated on their credentials being present
+		// (DB-first, ENV-fallback — see initializers/oauth/credentials.go).
+		"google": oauthStatus.GoogleConfigured,
+		"github": oauthStatus.GithubConfigured,
+		// Company controls the plan leaves out are reported off, so the sign-in
+		// page never offers a button that would only refuse. On or off as the
+		// sign-in itself reads it (helpers.EnvFlag, as the setup at boot does).
+		"oidc": authService.ResolveOIDCConfig(ctx).Enabled && helpers.PlanAllows(helpers.FeatureSSO),
+		"saml": authService.ResolveSAMLConfig(ctx).Enabled && helpers.PlanAllows(helpers.FeatureSSO),
+		"ldap": authService.ResolveLDAPConfig(ctx).Enabled && helpers.PlanAllows(helpers.FeatureLDAP),
+		"demo": helpers.DemoMode(),
+	}
+}
+
 // EmailSignup handles POST /auth/signup
 func EmailSignup(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
+	// No password accounts where passwords are off: the invitation admits its
+	// address through Google, GitHub or single sign-on instead, which the
+	// sign-up page offers.
+	if helpers.PasswordSignInOff() {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
+			"msg":    passwordsOffMessage(signInMethods(ctx), true),
+			"status": "failed",
+			"reason": "passwords_off",
+		})
+		return
+	}
+
 	var requestBody struct {
-		Token    string `json:"token"`
+		Token string `json:"token"`
+		// Name is what they are called, in any language: the display name.
+		// Their @handle is derived from it.
+		Name string `json:"name"`
+		// Username is what sign-up pages before "Your name" sent; read as the
+		// name when name is missing.
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
@@ -203,11 +363,14 @@ func EmailSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requestBody.Username = strings.TrimSpace(requestBody.Username)
+	name := helpers.NormalizePersonName(requestBody.Name)
+	if name == "" {
+		name = helpers.NormalizePersonName(requestBody.Username)
+	}
 
-	if requestBody.Token == "" || requestBody.Username == "" || requestBody.Password == "" {
+	if requestBody.Token == "" || name == "" || requestBody.Password == "" {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg":    "token, username, and password are required",
+			"msg":    "Your name and a password are needed.",
 			"status": "failed",
 		})
 		return
@@ -221,42 +384,29 @@ func EmailSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(requestBody.Username) > 25 {
+	// One rule for a person's name, the web app's (lib/validation/names.ts),
+	// which the profile editor uses too: a name accepted here can be saved
+	// there.
+	if !helpers.IsValidPersonName(name) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg":    "username must be 25 characters or less",
+			"msg":    helpers.PersonNameRuleMessage,
 			"status": "failed",
 		})
 		return
 	}
 
 	// Validate invitation token
-	invitation, err := domain.GetInvitationByToken(ctx, requestBody.Token)
-	if err != nil || invitation == nil {
+	invitation, problem := usableInvitation(ctx, requestBody.Token)
+	if problem != "" {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg":    "invalid or expired invitation token",
+			"msg":    problem,
 			"status": "failed",
 		})
 		return
 	}
 
-	if invitation.TokenExpiresAt != nil && invitation.TokenExpiresAt.Before(time.Now()) {
-		_ = domain.UpdateInvitationStatus(ctx, invitation.Id, "expired")
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg":    "invitation token has expired. Please request a new invitation.",
-			"status": "failed",
-		})
-		return
-	}
-
-	if invitation.Status == "joined" {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg":    "this invitation has already been used",
-			"status": "failed",
-		})
-		return
-	}
-
-	// Check if user already exists
+	// Check if a member already has the address. An external row for it (from
+	// an import or GitHub sync) isn't one: joining below adopts it.
 	err, userExists := domain.CheckIfUserExistByEmail(ctx, invitation.Email)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
@@ -267,59 +417,18 @@ func EmailSignup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if userExists {
-		// Cross-auth: OAuth user accepting an invitation — set their password
-		existingUser, uErr := domain.GetUserByEmailIdWithPassword(ctx, invitation.Email)
-		if uErr != nil || existingUser == nil {
-			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
-				"msg":    "an account with this email already exists. Please login instead.",
-				"status": "failed",
-			})
-			return
-		}
-
-		if existingUser.PasswordHash != nil && *existingUser.PasswordHash != "" {
-			// Already has a password — genuine duplicate
-			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
-				"msg":    "an account with this email already exists. Please login instead.",
-				"status": "failed",
-			})
-			return
-		}
-
-		// SSO-managed users (LDAP/SAML/OIDC) can't be cross-auth'd into a
-		// local-password account via an invitation — the IdP owns them.
-		if existingUser.IsSSOManaged {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-				"msg":    "this email is managed by your single sign-on provider; sign in there instead",
-				"status": "failed",
-			})
-			return
-		}
-
-		// OAuth user with no password — link it by setting the password
-		hashedPw, hashErr := bcrypt.GenerateFromPassword([]byte(requestBody.Password), bcrypt.DefaultCost)
-		if hashErr != nil {
-			helpers.LogErrorWithContext(ctx, "controllers/EmailSignup Failed to hash password for OAuth link err: %+v", hashErr)
-			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
-				"msg":    "internal server error",
-				"status": "failed",
-			})
-			return
-		}
-
-		hashStr := string(hashedPw)
-		if err = domain.UpdatePasswordByUserID(ctx, existingUser.Id, &hashStr); err != nil {
-			helpers.LogErrorWithContext(ctx, "controllers/EmailSignup Failed to set password on OAuth user err: %+v", err)
-			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
-				"msg":    "failed to set password",
-				"status": "failed",
-			})
-			return
-		}
-
-		// Mark invitation as joined and log them in
-		_ = domain.UpdateInvitationStatus(ctx, invitation.Id, "joined")
-		issueAuthCookies(w, r, ctx, existingUser.Id.String())
+		// The address has an account already, and signing up never touches
+		// it. Sign-up used to set a password on such an account when it had
+		// none (one that joined through Google or GitHub), which let whoever
+		// held a live invitation link for a member's address give the account
+		// a password of their choosing and sign in as its owner. The owner
+		// signs in as they always have, and sets a password from their
+		// profile if they want one. (Migration 204 closed the invitations
+		// this left live.)
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+			"msg":    "You already have an account; sign in instead.",
+			"status": "failed",
+		})
 		return
 	}
 
@@ -334,9 +443,11 @@ func EmailSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create user with password
+	// Join with a password: a new member, or the external row an import left
+	// for this address, adopted with its history. Either takes a seat, and
+	// puts them in the workspace's default channels.
 	hashStr := string(hashedPassword)
-	err = business.CreateUserWithPassword(ctx, invitation.Email, requestBody.Username, &hashStr)
+	joined, err := business.JoinAsMember(ctx, invitation.Email, name, &hashStr, models.AuthMethodEmail, false)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/EmailSignup Failed to create user err: %+v", err)
 		if helpers.WriteSeatLimit(w, err) {
@@ -364,21 +475,35 @@ func EmailSignup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Mark invitation as joined
-	_ = domain.UpdateInvitationStatus(ctx, invitation.Id, "joined")
-
-	// Get the newly created user to get their UUID
-	user, err := domain.GetUserByEmailId(ctx, &invitation.Email)
-	if err != nil || user == nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
-			"msg":    "account created but failed to login. Please try logging in.",
-			"status": "failed",
-		})
-		return
+	// An account adopted from an import keeps the name the import gave it,
+	// unless the person says otherwise, and they just did. Best effort: the
+	// account works either way, and the name can be changed in their profile.
+	if joined.Adopted {
+		if err := business.RenameMember(ctx, joined.UserID, name); err != nil {
+			helpers.LogWarnWithContext(ctx, "controllers/EmailSignup could not give the adopted account the name typed: %+v", err)
+		}
 	}
 
-	// Issue JWT tokens
-	issueAuthCookies(w, r, ctx, user.Id.String())
+	// Joining marked the invitation used (JoinAsMember). Signed in, and told
+	// where a new member starts (the channel they were put in, rather than an
+	// empty Home) and what they are called: their name, and the @handle made
+	// from it, which the page shows them.
+	answer := landingField(joined.Landing)
+	if answer == nil {
+		answer = helpers.Envolope{}
+	}
+	answer["name"] = name
+	answer["handle"] = joined.Handle
+	issueAuthCookiesWith(w, r, ctx, joined.UserID.String(), answer)
+}
+
+// landingField is the "landing" a sign-in answers with for someone who has
+// just joined (authService.NewMemberLanding), or nothing.
+func landingField(landing uuid.UUID) helpers.Envolope {
+	if path := authService.NewMemberLanding(landing); path != "" {
+		return helpers.Envolope{"landing": path}
+	}
+	return nil
 }
 
 // ForgotPassword handles POST /auth/forgot-password
@@ -396,7 +521,7 @@ func ForgotPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requestBody.Email = strings.TrimSpace(strings.ToLower(requestBody.Email))
+	requestBody.Email = helpers.NormalizeEmail(requestBody.Email)
 
 	// Always return success to prevent email enumeration
 	successResponse := helpers.Envolope{
@@ -404,7 +529,8 @@ func ForgotPassword(w http.ResponseWriter, r *http.Request) {
 		"status": "success",
 	}
 
-	if requestBody.Email == "" {
+	// An address outside ASCII is matched to no account (helpers.NormalizeEmail).
+	if requestBody.Email == "" || !helpers.AddressIsASCII(requestBody.Email) {
 		helpers.WriteJSON(w, http.StatusOK, successResponse)
 		return
 	}
@@ -553,6 +679,11 @@ func ResetPassword(w http.ResponseWriter, r *http.Request) {
 	// Mark token as used and invalidate all other tokens for this user
 	_ = passwordResetModels.MarkTokenUsed(resetToken.ID)
 	_ = passwordResetModels.InvalidateAllTokensForUser(resetToken.UserID)
+	// A reset is how someone takes their account back: every device signed
+	// in with the old password is signed out, so a stolen session ends here.
+	if err := business.EndAllSessions(ctx, resetToken.UserID.String()); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/ResetPassword Failed to end sessions err: %+v", err)
+	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":    "password updated successfully. You can now login with your new password.",
@@ -623,7 +754,7 @@ func AdminSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requestBody.Email = strings.TrimSpace(strings.ToLower(requestBody.Email))
+	requestBody.Email = helpers.NormalizeEmail(requestBody.Email)
 	requestBody.Username = strings.TrimSpace(requestBody.Username)
 
 	if requestBody.Email == "" || requestBody.Password == "" {
@@ -634,7 +765,7 @@ func AdminSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !emailRegex.MatchString(requestBody.Email) {
+	if !emailRegex.MatchString(requestBody.Email) || !helpers.AddressIsASCII(requestBody.Email) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg":    "invalid email format",
 			"status": "failed",
@@ -719,6 +850,12 @@ func AdminSetup(w http.ResponseWriter, r *http.Request) {
 	if requestBody.Generated {
 		// Best effort: without it the checklist simply does not ask.
 		_ = domain.MarkPasswordGenerated(ctx, user.Id)
+		// Only OneCamp Cloud generates the first password, so this is a Cloud
+		// workspace, hours before its environment says so (settings Managed):
+		// nobody here is told to set up email or a model provider.
+		if err := settingsBusiness.MarkManaged(); err != nil {
+			helpers.LogWarnWithContext(ctx, "controllers/AdminSetup could not mark the workspace managed: %+v", err)
+		}
 	}
 
 	// Give the workspace something to be, before the admin's first screen loads.
@@ -764,29 +901,10 @@ func ValidateInvitationToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	invitation, err := domain.GetInvitationByToken(ctx, token)
-	if err != nil || invitation == nil {
+	invitation, problem := usableInvitation(ctx, token)
+	if problem != "" {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg":    "invalid or expired invitation token",
-			"status": "failed",
-			"valid":  false,
-		})
-		return
-	}
-
-	if invitation.TokenExpiresAt != nil && invitation.TokenExpiresAt.Before(time.Now()) {
-		_ = domain.UpdateInvitationStatus(ctx, invitation.Id, "expired")
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg":    "invitation token has expired",
-			"status": "failed",
-			"valid":  false,
-		})
-		return
-	}
-
-	if invitation.Status == "joined" {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg":    "this invitation has already been used",
+			"msg":    problem,
 			"status": "failed",
 			"valid":  false,
 		})
@@ -797,12 +915,43 @@ func ValidateInvitationToken(w http.ResponseWriter, r *http.Request) {
 		"status": "success",
 		"valid":  true,
 		"email":  invitation.Email,
+		// The name to suggest: the one an import already knows them by, or ""
+		// to leave the field for them.
+		"name": business.NameForInvitation(ctx, invitation.Email),
+		// Who invited them, and to where: the page says so, as the email did.
+		"inviter_name": business.InviterName(ctx, invitation.InvitedBy),
+		"workspace":    business.WorkspaceAddress(),
 	})
+}
+
+// usableInvitation is the invitation a sign-up link carries, or why it
+// cannot be used, in words for the person holding it (naming who to ask for
+// another). One opened past its expiry is marked expired.
+func usableInvitation(ctx context.Context, token string) (*models.Invitation, string) {
+	invitation, err := domain.GetInvitationByToken(ctx, token)
+	if err != nil || invitation == nil {
+		return nil, business.InvitationLinkProblem(nil, time.Now(), "")
+	}
+	now := time.Now()
+	problem := business.InvitationLinkProblem(invitation, now, "")
+	if problem == "" || invitation.Status == business.InvitationJoined {
+		return invitation, problem
+	}
+	if invitation.Status != business.InvitationExpired {
+		_ = domain.UpdateInvitationStatus(ctx, invitation.Id, business.InvitationExpired)
+	}
+	return invitation, business.InvitationLinkProblem(invitation, now, business.InviterName(ctx, invitation.InvitedBy))
 }
 
 // issueAuthCookies generates JWT tokens, stores refresh in Redis, and sets auth cookies.
 // Follows the exact same pattern as OAuthCallback in userController.go.
 func issueAuthCookies(w http.ResponseWriter, r *http.Request, ctx context.Context, userUUID string) {
+	issueAuthCookiesWith(w, r, ctx, userUUID, nil)
+}
+
+// issueAuthCookiesWith is issueAuthCookies with more to say in the answer:
+// where a new member lands, say.
+func issueAuthCookiesWith(w http.ResponseWriter, r *http.Request, ctx context.Context, userUUID string, extra helpers.Envolope) {
 	if err := emitAuthCookiesNoBody(w, r, ctx, userUUID); err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/issueAuthCookies %v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
@@ -811,10 +960,14 @@ func issueAuthCookies(w http.ResponseWriter, r *http.Request, ctx context.Contex
 		})
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
+	answer := helpers.Envolope{
 		"msg":    "login successful",
 		"status": "success",
-	})
+	}
+	for k, v := range extra {
+		answer[k] = v
+	}
+	helpers.WriteJSON(w, http.StatusOK, answer)
 }
 
 // emitAuthCookiesNoBody runs the JWT mint + Redis-store + Set-Cookie sequence
@@ -830,23 +983,13 @@ func emitAuthCookiesNoBody(w http.ResponseWriter, r *http.Request, ctx context.C
 	authCookieExpiryTime := time.Now().Add(time.Minute * 5)
 	refreshExpiryTime := time.Now().Add(refreshTokenTTLDuration)
 
-	authTokenString, err := business.GenerateAuthTokenString(ctx, userUUID, authExpiryTime.Unix())
-	if err != nil {
-		return fmt.Errorf("failed to generate authentication token: %w", err)
-	}
-
-	refreshTokenString, err := business.GenerateRefreshTokenString(ctx, userUUID, refreshExpiryTime.Unix())
-	if err != nil {
-		return fmt.Errorf("failed to generate refresh token: %w", err)
-	}
-
 	deviceId, err := helpers.GenerateUniqueDeviceId()
 	if err != nil {
 		return fmt.Errorf("failed to generate device id: %w", err)
 	}
-
-	if err := redisStore.SetString(ctx, registry.UserRefreshToken, []string{userUUID, deviceId}, refreshTokenString); err != nil {
-		return fmt.Errorf("failed to store session: %w", err)
+	authTokenString, refreshTokenString, err := business.StartSession(ctx, userUUID, deviceId, authExpiryTime.Unix(), refreshExpiryTime.Unix())
+	if err != nil {
+		return fmt.Errorf("failed to start session: %w", err)
 	}
 
 	feDomain := getFrontendCookieDomain()
@@ -1098,6 +1241,15 @@ func ChangePassword(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// Every other device is signed out; this one, where the password was
+	// changed, stays signed in.
+	keep := ""
+	if dc, err := r.Cookie("DeviceId"); err == nil {
+		keep = dc.Value
+	}
+	if err := business.EndOtherSessions(ctx, userID.String(), keep); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/ChangePassword Failed to end other sessions err: %+v", err)
+	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":    "password updated successfully",
@@ -1151,28 +1303,9 @@ func HasPassword(w http.ResponseWriter, r *http.Request) {
 // We expose only enable/disable, not credentials. Issuer URLs, tenant IDs,
 // etc. are server-side only.
 func GetEnabledProviders(w http.ResponseWriter, r *http.Request) {
-	envTrue := func(k string) bool { return strings.EqualFold(os.Getenv(k), "true") }
-	envExplicitFalse := func(k string) bool { return strings.EqualFold(os.Getenv(k), "false") }
-
-	oauthStatus := oauth.GetOAuthConfigStatus()
-	providers := map[string]bool{
-		// Email is on by default; only off if explicitly disabled.
-		"email": !envExplicitFalse("AUTH_EMAIL_DISABLED"),
-		// Google + GitHub login are gated on their credentials being present
-		// (DB-first, ENV-fallback — see initializers/oauth/credentials.go).
-		"google": oauthStatus.GoogleConfigured,
-		"github": oauthStatus.GithubConfigured,
-		// Company controls the plan leaves out are reported off, so the sign-in
-		// page never offers a button that would only refuse.
-		"oidc": envTrue("OIDC_ENABLED") && helpers.PlanAllows(helpers.FeatureSSO),
-		"saml": envTrue("SAML_ENABLED") && helpers.PlanAllows(helpers.FeatureSSO),
-		"ldap": envTrue("LDAP_ENABLED") && helpers.PlanAllows(helpers.FeatureLDAP),
-		"demo": helpers.DemoMode(),
-	}
-
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"status":           "success",
-		"providers":        providers,
+		"providers":        signInMethods(r.Context()),
 		"email_configured": emailService.IsEmailEnabled(),
 		"email_sender":     emailService.SenderAddress(),
 	})

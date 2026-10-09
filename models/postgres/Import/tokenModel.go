@@ -72,6 +72,11 @@ type TokenView struct {
 // ErrTokenNotFound is returned when no token exists for the lookup.
 var ErrTokenNotFound = errors.New("import oauth token not found")
 
+// ErrTokenUnreadable is a saved token that can't be decrypted any more (the
+// key that sealed it changed): as good as none, and connecting again is the
+// way out.
+var ErrTokenUnreadable = errors.New("saved import token can't be decrypted")
+
 // SaveToken upserts the (provider, owner) row with fresh ciphertext.
 // Re-saving overwrites — used by the OAuth callback when the user
 // re-authorises.
@@ -147,12 +152,12 @@ func LoadToken(ctx context.Context, provider string, ownerUserId uuid.UUID) (*To
 	}
 	t.AccessToken, err = decryptToken(accessCipher)
 	if err != nil {
-		return nil, fmt.Errorf("decrypt access: %w", err)
+		return nil, fmt.Errorf("decrypt access: %w: %w", ErrTokenUnreadable, err)
 	}
 	if len(refreshCipher) > 0 {
 		t.RefreshToken, err = decryptToken(refreshCipher)
 		if err != nil {
-			return nil, fmt.Errorf("decrypt refresh: %w", err)
+			return nil, fmt.Errorf("decrypt refresh: %w: %w", ErrTokenUnreadable, err)
 		}
 	}
 	return t, nil

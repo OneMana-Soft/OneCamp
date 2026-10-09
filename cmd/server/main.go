@@ -27,6 +27,7 @@ import (
 	slackBridgeBusiness "github.com/akashc777/OneCamp/business/SlackBridge"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	workflowBusiness "github.com/akashc777/OneCamp/business/Workflow"
+	authController "github.com/akashc777/OneCamp/controllers/Auth"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/avscan"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -50,6 +51,7 @@ import (
 	demoseed "github.com/akashc777/OneCamp/services/DemoSeed"
 	journey "github.com/akashc777/OneCamp/services/Journey"
 
+	customMiddleware "github.com/akashc777/OneCamp/middleware"
 	"github.com/akashc777/OneCamp/router"
 )
 
@@ -311,16 +313,6 @@ func main() {
 	// Initialize Logger
 	loggerInit.InitLogger()
 
-	// Email startup diagnostic — print once at boot so operators can see
-	// immediately whether transactional email is wired up correctly.
-	if emailService.IsEmailEnabled() {
-		helpers.LogInfoWithContext(ctx,
-			"Email subsystem ENABLED, sender=%s", emailService.SenderAddress())
-	} else {
-		helpers.LogWarnWithContext(ctx,
-			"Email subsystem DISABLED — RESEND_API_KEY is empty. Password reset and invitation emails will not be sent.")
-	}
-
 	// Validate IMPORT_TOKEN_KEK round-trips. In production we refuse
 	// to start if the dev fallback is still in place; in dev we log a
 	// single-line warning and continue. This prevents a production
@@ -378,6 +370,17 @@ func main() {
 		helpers.LogErrorWithContext(ctx, "Database schema advisory: %s", advisory)
 	}
 
+	// Email startup diagnostic, printed once at boot so operators can see
+	// whether transactional email is wired up. After the database connects:
+	// a key saved in Admin > Email counts as much as RESEND_API_KEY.
+	if emailService.IsEmailEnabled() {
+		helpers.LogInfoWithContext(ctx,
+			"Email subsystem ENABLED, sender=%s", emailService.SenderAddress())
+	} else {
+		helpers.LogWarnWithContext(ctx,
+			"Email subsystem DISABLED: no key in Admin > Email or RESEND_API_KEY. Password reset and invitation emails will not be sent.")
+	}
+
 	// connect to minio object storage
 	boolValueMinioSSl, err := strconv.ParseBool(os.Getenv("MINIO_SSL"))
 	if err != nil {
@@ -430,7 +433,7 @@ func main() {
 	}
 	mqttConfig := mqttInit.MqttConfig{
 		Broker:       os.Getenv("MQTT_BROKER"),
-		ClientID:     os.Getenv("MQTT_CLIENT_ID"),
+		ClientID:     mqttInit.ProcessClientID(os.Getenv("MQTT_CLIENT_ID"), role),
 		Username:     os.Getenv("MQTT_USERNAME"),
 		CleanSession: boolValueMqttCleanSession,
 	}
@@ -439,6 +442,13 @@ func main() {
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "Cannot connect to mqtt broker err := %+v", err)
 		os.Exit(1)
+	}
+
+	// The broker asks this server before every subscription a person's client
+	// makes, sending INTERNAL_SECRET (business/MqttAccess). Without a usable
+	// secret every ask is refused, and nothing updates live.
+	if secret := os.Getenv("INTERNAL_SECRET"); secret == "" || customMiddleware.WeakInternalSecret(secret) {
+		helpers.LogErrorWithContext(ctx, "INTERNAL_SECRET is not set, or is a placeholder: the broker cannot ask who may subscribe to what, so nothing will update live (and docs and boards will not open). Set it in .env (make secrets) and restart.")
 	}
 
 	// connect to opensearch
@@ -594,14 +604,26 @@ func main() {
 		}
 	}()
 
-	// Initialise OAuth
-	_ = oauth.InitOAuth()
-	_ = oauth.InitGenericOIDC()
+	// Initialise OAuth. A sign-in method that can't be set up stays off and the
+	// server starts regardless, so the log is where an admin learns why its
+	// button answers with an error. Both of these used to be thrown away.
+	if err := oauth.InitOAuth(); err != nil {
+		helpers.LogErrorWithContext(ctx, "Google sign-in init: %v", err)
+	}
+	if err := oauth.InitGenericOIDC(); err != nil {
+		helpers.LogErrorWithContext(ctx, "OIDC init (issuer %q): %v; OIDC sign-in is unavailable until this is fixed and the API restarts",
+			os.Getenv("OIDC_ISSUER_URL"), err)
+	}
 	if err := oauth.InitLDAP(); err != nil {
 		helpers.LogErrorWithContext(ctx, "LDAP init: %v", err)
 	}
 	if err := saml.InitSAML(); err != nil {
 		helpers.LogErrorWithContext(ctx, "Failed to initialize SAML: %v", err)
+	}
+	// Passwords off and nothing else set up: members can't get in. Said at
+	// boot, as the admin's system check says it too.
+	if problem := authController.NoWayInProblem(ctx); problem != "" {
+		helpers.LogWarnWithContext(ctx, "Sign-in: %s", problem)
 	}
 
 	// NOTE: Admin user creation is handled via POST /auth/admin-setup endpoint.

@@ -47,11 +47,13 @@ type taskRecurrenceInput struct {
 	Rule string `json:"rule"`
 	// Mode is "schedule" (default) or "completion".
 	Mode string `json:"mode"`
+	// TZ is the setter's time zone (IANA): the days in the rule are theirs.
+	TZ string `json:"tz"`
 }
 
 // SetTaskRecurrence makes a task repeat, changes how, or stops it. The same
 // people who may change its status may do this.
-// POST /task/recurrence {task_uuid, rule, mode}
+// POST /task/recurrence {task_uuid, rule, mode, tz}
 func SetTaskRecurrence(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
@@ -78,7 +80,7 @@ func SetTaskRecurrence(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the project's admins can make its tasks repeat."})
 		return
 	}
-	rec, err := business.SetTaskRecurrence(ctx, task, in.Rule, in.Mode, userInfo.UserPostgresInfo.Id)
+	rec, err := business.SetTaskRecurrence(ctx, task, in.Rule, in.Mode, in.TZ, userInfo.UserPostgresInfo.Id)
 	var re *business.RecurrenceError
 	if errors.As(err, &re) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": re.Error()})

@@ -1089,6 +1089,28 @@ func GetGitHubMetaForTasks(ctx context.Context, taskUUIDs []uuid.UUID) (map[uuid
 }
 
 // BulkArchiveTasksInDgraph sets task_deleted_at on multiple tasks in a single Dgraph mutation (batched).
+// ClosedTaskUUIDsBefore answers up to limit live tasks that are done or
+// canceled, were created before cutoff, and have been closed since before it
+// (a task closed before the status date was recorded counts as closed since
+// it was created): what archiving completed tasks may move. A task's status
+// is kept here, in the graph, not in Postgres.
+func ClosedTaskUUIDsBefore(ctx context.Context, cutoff time.Time, limit int) ([]string, error) {
+	query := fmt.Sprintf(`query ClosedTasks($cutoff: string) {
+		tasks(func: eq(task_status, ["%s", "%s"]), first: %d) @filter(%s AND lt(task_created_at, $cutoff) AND (not has(task_status_since) OR lt(task_status_since, $cutoff))) {
+			task_uuid
+		}
+	}`, dgraphStruct.TASK_STATUS_DONE, dgraphStruct.TASK_STATUS_CANCELED, limit, dgraphStruct.TASK_LIVE_FILTER)
+	tasks, err := dgraphModels.QueryDgraphTasks(ctx, query, map[string]string{"$cutoff": cutoff.UTC().Format(time.RFC3339)})
+	if err != nil {
+		return nil, err
+	}
+	uuids := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		uuids = append(uuids, t.Uuid)
+	}
+	return uuids, nil
+}
+
 func BulkArchiveTasksInDgraph(ctx context.Context, taskUUIDs []string) error {
 	if len(taskUUIDs) == 0 {
 		return nil

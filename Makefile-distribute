@@ -73,10 +73,10 @@ IMAGE   = go_service_onecamp_onemana:1.0
 .PHONY: install_run auto-domain-https coding-up coding-smoke coding-down help setup update-admin-email update-server-ip replace-domain \
         create-traefik-password update-traefik-email update-allowed-domains \
         create-swap configure-livekit create_postgres_db migrate_up migrate_status \
-        build_restart_all build_restart_service console-tunnel doctor verify \
+        build_restart_all build_restart_service console-tunnel doctor verify logs \
         set-flat-domains secrets install \
         reset-link reset-password clear-2fa change-email update \
-        ollama_up ollama_down ollama_update
+        ollama_up ollama_down ollama_update saml-cert
 
 help:
 	@echo "Install everything in one command:"
@@ -100,6 +100,7 @@ help:
 	@echo "  make update-allowed-domains DOMAINS=example.com"
 	@echo "  make create-swap"
 	@echo "  make configure-livekit    writes livekit.yaml from your .env"
+	@echo "  make saml-cert            makes SAML sign-in's certificate and key (licence)"
 	@echo ""
 	@echo "Then bring it up:"
 	@echo "  make build_restart_all      build the image and start everything"
@@ -111,6 +112,7 @@ help:
 	@echo "  make migrate_status         what the database believes is applied"
 	@echo "  make console-tunnel         reach the admin consoles safely"
 	@echo "  make verify                 check a finished install is actually working"
+	@echo "  make logs SERVICE=go-service  a service's recent log (web, traefik, ...; LINES=500 for more)"
 	@echo "  make journey                prove the product works: creates a task, reads it back"
 	@echo "  make update                 apply a version you just downloaded"
 	@echo "  make update REBUILD=1       rebuild the version already running"
@@ -284,10 +286,18 @@ install_run:
 	@$(MAKE) -f $(SELF) --no-print-directory create_postgres_db || echo "  database already exists, continuing"
 	@$(MAKE) -f $(SELF) --no-print-directory migrate_up
 	@if [ -n "$(AUTO_DOMAIN)" ]; then $(MAKE) -f $(SELF) --no-print-directory auto-domain-https; fi
-	@$(MAKE) -f $(SELF) --no-print-directory verify
+	@: "VERIFY'S ANSWER IS KEPT, NOT ACTED ON YET. A failing check used to stop"
+	@: "the install here, before it printed the address to create the first admin"
+	@: "at and the one-time dashboard password, which no later command shows again."
+	@: "So everything below is printed first, and the result is the last word."
+	@rm -f .install-not-ready; $(MAKE) -f $(SELF) --no-print-directory verify || touch .install-not-ready
 	@$(MAKE) -f $(SELF) --no-print-directory enable-housekeeping || true
 	@echo ""
-	@echo "  The server is ready. It runs the API and the datastores."
+	@if [ -f .install-not-ready ]; then \
+		echo "  The server is installed, but make verify found something to fix (FAIL above)."; \
+	else \
+		echo "  The server is ready. It runs the API and the datastores."; \
+	fi
 	# THE NEXT STEP USED TO BE MISSING ENTIRELY. This said "Done" and pointed at
 	# /admin-setup on a host that nothing had deployed yet, so a correct install
 	# ended at a dead URL. On the managed path the frontend is deployed for the
@@ -322,6 +332,12 @@ install_run:
 		echo ""; \
 		echo "  This address is for getting started. When you have a domain, move to it with:"; \
 		echo "    make replace-domain DOMAIN=example.com && make build_restart_all"; \
+	fi
+	@if [ -f .install-not-ready ]; then \
+		rm -f .install-not-ready; \
+		echo ""; \
+		echo "  NOT READY: fix the FAIL lines in the check above, then run: make verify"; \
+		exit 1; \
 	fi
 
 # ─── Serving the web app from this server ─────────────────────────────────────
@@ -383,6 +399,47 @@ setup:
 	@$(MAKE) -f $(SELF) --no-print-directory create-swap
 	@echo ""
 	@echo "Configuration written to .env. Next: make doctor, then make build_restart_all"
+
+# saml-cert makes SAML sign-in's key pair, in ./saml, and points
+# SAML_SP_CERT_PATH and SAML_SP_KEY_PATH at it as the API sees it. The
+# certificate is published in OneCamp's SAML metadata, for the identity provider
+# to encrypt what it sends; sign-in requests are not signed with it.
+#
+# MOUNTED, NOT BUILT IN. The API image is the install directory copied in, but
+# .dockerignore leaves *.key out (rightly), so a key put next to the Makefile
+# never reached the container and SAML could not start without editing the
+# compose file. The compose file mounts ./saml read-only at /app/saml.
+#
+# An existing pair is kept: the identity provider holds a copy of this
+# certificate, and replacing it would stop every sign-in until it was updated
+# there too. Delete ./saml to make a new one on purpose.
+#
+# A ./saml DOCKER MADE. A mount's missing source is created by Docker, as root,
+# so after the stack's first start ./saml is root's, and an operator who isn't
+# root could not write the pair into it ("openssl could not make the key
+# pair"). Docker can: a throwaway container, with no network, hands the
+# directory to whoever runs this, and the pair is made here as before, the key
+# readable by its owner alone. The API runs as root, so it still reads it.
+saml-cert:
+	@mkdir -p saml
+	@if [ -f saml/sp.key ] && [ -f saml/sp.crt ]; then \
+		echo "  saml/sp.crt and saml/sp.key already exist; keeping them"; \
+	else \
+		if [ ! -w saml ]; then \
+			docker run --rm --network none -v "$(CURDIR)/saml:/saml" alpine:3.22 \
+				chown -R "$$(id -u):$$(id -g)" /saml >/dev/null 2>&1; \
+			[ -w saml ] || { echo "  ERROR: ./saml is root's (Docker made it for the compose file's mount), and"; \
+				echo "  Docker could not hand it to you. Run: sudo make saml-cert"; exit 1; }; \
+		fi; \
+		be=$$(grep -E '^BACKEND_DOMAIN=' .env 2>/dev/null | cut -d= -f2-); \
+		openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=$${be:-onecamp}" \
+			-keyout saml/sp.key -out saml/sp.crt 2>/dev/null || { echo "  ERROR: openssl could not make the key pair"; exit 1; }; \
+		chmod 600 saml/sp.key; \
+		echo "  made saml/sp.crt and saml/sp.key (valid ten years)"; \
+	fi
+	$(call set_env,SAML_SP_CERT_PATH,/app/saml/sp.crt)
+	$(call set_env,SAML_SP_KEY_PATH,/app/saml/sp.key)
+	@echo "  Next: set SAML_IDP_METADATA_URL and SAML_ENABLED=true in .env, then: make restart-api"
 
 # configure-livekit writes livekit.yaml from the sample, filling in the three values
 # that are specific to YOUR server.
@@ -511,6 +568,13 @@ endif
 # in a few seconds.
 restart-api:
 	$(COMPOSE) up -d --force-recreate --no-deps go-service
+
+# logs shows a service's recent log, where an install says why something is
+# off: SERVICE=go-service for the API, web for the web app, traefik for
+# certificates (docker compose ps names the rest). LINES=500 for more; no
+# SERVICE is every service's, which is a lot. verify's advice points here.
+logs:
+	@$(COMPOSE) logs --tail $(or $(LINES),200) $(SERVICE)
 
 # The public IP is detected rather than asked for, because an operator typing
 # their own server's IP is a step that can be wrong in a way nothing catches.
@@ -766,8 +830,7 @@ secrets:
 	for tok in __CHANGE_ME_STRONG_DB_PASSWORD__ __CHANGE_ME_STRONG_REDIS_PASSWORD__ \
 	           __CHANGE_ME_STRONG_MINIO_PASSWORD__ __CHANGE_ME_STRONG_DGRAPH_PASSWORD__ \
 	           __CHANGE_ME_STRONG_EMQX_PASSWORD__ __CHANGE_ME_STRONG_OPENSEARCH_PASSWORD__ \
-	           __CHANGE_ME_RANDOM_64_CHARS__ __CHANGE_ME_RANDOM_40_CHARS__ \
-	           __CHANGE_ME_SEE_LIVEKIT_API_KEY_NAME_AND_PASS__; do \
+	           __CHANGE_ME_RANDOM_64_CHARS__ __CHANGE_ME_RANDOM_40_CHARS__; do \
 	  if grep -q "$$tok" .env; then \
 	    val=$$(gen 40); \
 	    tmp=$$(mktemp) && sed "s|$$tok|$$val|g" .env > "$$tmp" && mv "$$tmp" .env; \
@@ -782,6 +845,21 @@ secrets:
 	    echo "  generated $$var"; changed=$$((changed+1)); \
 	  fi; \
 	done; \
+	: "LIVEKIT_API_KEY IS THE NAME:SECRET PAIR LiveKit reads as LIVEKIT_KEYS, the"; \
+	: "same name and secret the API signs call tokens with. Filled like the other"; \
+	: "placeholders it became a bare random token, which LiveKit refuses to parse,"; \
+	: "so on every install made this way the call server never started and make"; \
+	: "verify said NOT READY. Set from the two values, and repaired where an"; \
+	: "earlier run left a value with no name in it."; \
+	lk_name=$$(grep -E '^LIVEKIT_API_KEY_NAME=' .env | cut -d= -f2-); \
+	lk_pass=$$(grep -E '^LIVEKIT_API_PASS=' .env | cut -d= -f2-); \
+	lk_key=$$(grep -E '^LIVEKIT_API_KEY=' .env | cut -d= -f2-); \
+	case "$$lk_key" in *": "*) ;; *) \
+	  if [ -n "$$lk_name" ] && [ -n "$$lk_pass" ]; then \
+	    tmp=$$(mktemp) && awk -v k=LIVEKIT_API_KEY -v v="$$lk_name: $$lk_pass" -F= 'BEGIN{OFS="="} $$1==k{print k, v; next} {print}' .env > "$$tmp" && mv "$$tmp" .env; \
+	    echo "  set LIVEKIT_API_KEY from LIVEKIT_API_KEY_NAME and LIVEKIT_API_PASS"; changed=$$((changed+1)); \
+	  fi;; \
+	esac; \
 	for var in RESEND_API_KEY; do \
 	  if grep -qE "^$$var=__[A-Za-z0-9_-]+__$$" .env; then \
 	    tmp=$$(mktemp) && awk -v k="$$var" -F= 'BEGIN{OFS="="} $$1==k{print k, ""; next} {print}' .env > "$$tmp" && mv "$$tmp" .env; \
@@ -1003,7 +1081,7 @@ verify:
 		case "$$code" in \
 			2*|3*) echo "    ok    https://$(FE_HOST_DOMAIN)/ (the web app) answered $$code";; \
 			000) echo "    FAIL  https://$(FE_HOST_DOMAIN)/ unreachable: point it at this server (an A record)"; fail=1;; \
-			*) echo "    FAIL  https://$(FE_HOST_DOMAIN)/ answered $$code: check make logs for the web service"; fail=1;; \
+			*) echo "    FAIL  https://$(FE_HOST_DOMAIN)/ answered $$code: run make logs SERVICE=web"; fail=1;; \
 		esac; \
 	fi; \
 	\
@@ -1032,16 +1110,24 @@ verify:
 		warn=$$((warn+1)); \
 	fi; \
 	\
+	: "ONLY WHERE AI IS SWITCHED ON. The edition without AI ships no AI_ENABLED, and"; \
+	: "reporting a model provider there described a feature it does not have."; \
+	if [ -n "$(filter 1 true yes on,$(AI_ENABLED))" ]; then \
 	echo "  AI"; \
 	if $(COMPOSE) exec -T ollama ollama list >/dev/null 2>&1; then \
 		echo "    ok    local model engine responding"; \
 	elif [ -n "$(LOCAL_AI_PROFILE)" ]; then \
 		echo "    FAIL  local models are enabled but the engine is not responding"; fail=1; \
-	elif [ "$(AI_PROVIDER)" = "ollama" ]; then \
-		echo "    FAIL  AI_PROVIDER=ollama but no local model engine is responding."; \
-		echo "          Run 'make ollama_up', or set a hosted provider in .env or the admin AI panel."; fail=1; \
+	elif [ -z "$(AI_PROVIDER)" ] || [ "$(AI_PROVIDER)" = "ollama" ]; then \
+		: "A TO-DO, NOT A FAILURE. The template's provider is the local engine, which"; \
+		: "nothing starts by default, and a hosted provider chosen in the admin panel"; \
+		: "lives in the database where this cannot see it. Failing here ended every"; \
+		: "fresh install in NOT READY before it printed the address to set it up at."; \
+		echo "    TODO  no model engine on this server. Unless a provider is already chosen"; \
+		echo "          in Admin -> AI, choose one there, or run 'make use_local_ai'."; warn=$$((warn+1)); \
 	else \
 		echo "    ok    AI_PROVIDER=$(AI_PROVIDER) — configure the key in the admin AI panel"; \
+	fi; \
 	fi; \
 	\
 	echo ""; \
@@ -1083,6 +1169,8 @@ BACKUP_KEEP   ?= 7
 # it exists to prevent is worse than no backup, and a full disk stops postgres
 # accepting writes.
 BACKUP_MIN_FREE_PCT ?= 15
+# How long a backup waits for Dgraph to finish exporting the graph, in seconds.
+BACKUP_DGRAPH_WAIT ?= 1800
 
 backup:
 	@set -e; \
@@ -1114,28 +1202,55 @@ backup:
 	: "gzip -t proves the file is complete. A truncated dump restores silently up to"; \
 	: "the point it stops, which is the worst possible failure for a backup."; \
 	gzip -t "$$dest.partial/postgres.sql.gz"; \
-	if [ ! -s "$$dest.partial/postgres.sql.gz" ]; then echo "    FAIL  empty postgres dump"; exit 1; fi; \
+	: "AND THAT THE DUMP FINISHED. A pg_dumpall that wrote nothing (the database"; \
+	: "down, a wrong user) still left a valid, non-empty gzip, which passed both"; \
+	: "checks, and the backup said ok. Its last lines say it got to the end."; \
+	gzip -dc "$$dest.partial/postgres.sql.gz" | tail -n 3 | grep -q 'PostgreSQL database cluster dump complete' \
+		|| { echo "    FAIL  the postgres dump did not finish"; exit 1; }; \
 	\
 	echo "    dgraph"; \
-	if $(COMPOSE) exec -T alpha curl -sf -X POST localhost:8080/admin \
+	: "AN EXPORT IS QUEUED, NOT FINISHED, when the request returns: Dgraph answers"; \
+	: "'Export queued with ID 0x...'. This used to sleep three seconds, tar what"; \
+	: "was there and delete the directory, so on a graph bigger than the demo's the"; \
+	: "backup held part of it and nothing said so. It now waits until Dgraph says"; \
+	: "that export is done. And a backup without the graph is a failed backup:"; \
+	: "restoring Postgres alone leaves the graph as it is now, mixed with an older"; \
+	: "database. A leftover export from a run that died goes first, so the archive"; \
+	: "holds this export and no other."; \
+	$(COMPOSE) exec -T alpha rm -rf /dgraph/export; \
+	resp=$$($(COMPOSE) exec -T alpha curl -sf -X POST localhost:8080/admin \
 		-H 'Content-Type: application/json' \
-		-d '{"query":"mutation { export(input: {format: \"rdf\"}) { response { message } } }"}' \
-		| grep -q '"message"'; then \
-		sleep 3; \
-		if [ -d ./data/dgraph/export ]; then \
-			: "TARRED FROM INSIDE THE CONTAINER. Dgraph runs as root, so the export"; \
-			: "it just wrote is owned by root, and tar running as the host user"; \
-			: "cannot read it: 'Cannot open: Permission denied', and with set -e"; \
-			: "the whole backup dies. Streaming it out of the container reads the"; \
-			: "files as the user that created them and needs no sudo on the host."; \
-			$(COMPOSE) exec -T alpha tar -czf - -C /dgraph export > "$$dest.partial/dgraph.tar.gz"; \
-			gzip -t "$$dest.partial/dgraph.tar.gz"; \
-			: "Removed in the container for the same reason it was read there."; \
-			$(COMPOSE) exec -T alpha rm -rf /dgraph/export; \
-		fi; \
-	else \
-		echo "    warn  dgraph export could not be triggered"; \
+		-d '{"query":"mutation { export(input: {format: \"rdf\"}) { response { message code } } }"}') \
+		|| { echo "    FAIL  the graph export could not be started"; exit 1; }; \
+	task=$$(printf '%s' "$$resp" | sed -n 's/.*queued with ID \(0x[0-9a-fA-F]*\).*/\1/p'); \
+	if [ -n "$$task" ]; then \
+		waited=0; status=""; \
+		while [ "$$waited" -lt "$(BACKUP_DGRAPH_WAIT)" ]; do \
+			status=$$($(COMPOSE) exec -T alpha curl -sf -X POST localhost:8080/admin \
+				-H 'Content-Type: application/json' \
+				-d "{\"query\":\"query { task(input: {id: \\\"$$task\\\"}) { status } }\"}" \
+				| sed -n 's/.*"status":"\([A-Za-z]*\)".*/\1/p'); \
+			[ "$$status" = "Success" ] && break; \
+			[ "$$status" = "Failed" ] && { echo "    FAIL  the graph export failed"; exit 1; }; \
+			sleep 2; waited=$$((waited + 2)); \
+		done; \
+		[ "$$status" = "Success" ] || { echo "    FAIL  the graph export did not finish within $(BACKUP_DGRAPH_WAIT)s"; exit 1; }; \
+	elif ! printf '%s' "$$resp" | grep -q '"code":"Success"'; then \
+		echo "    FAIL  the graph export was refused"; exit 1; \
 	fi; \
+	$(COMPOSE) exec -T alpha test -d /dgraph/export \
+		|| { echo "    FAIL  the graph export wrote nothing"; exit 1; }; \
+	: "TARRED FROM INSIDE THE CONTAINER. Dgraph runs as root, so the export"; \
+	: "it just wrote is owned by root, and tar running as the host user"; \
+	: "cannot read it: 'Cannot open: Permission denied', and with set -e"; \
+	: "the whole backup dies. Streaming it out of the container reads the"; \
+	: "files as the user that created them and needs no sudo on the host."; \
+	$(COMPOSE) exec -T alpha tar -czf - -C /dgraph export > "$$dest.partial/dgraph.tar.gz"; \
+	gzip -t "$$dest.partial/dgraph.tar.gz"; \
+	tar -tzf "$$dest.partial/dgraph.tar.gz" | grep -q '\.rdf\.gz$$' \
+		|| { echo "    FAIL  the graph export holds no data"; exit 1; }; \
+	: "Removed in the container for the same reason it was read there."; \
+	$(COMPOSE) exec -T alpha rm -rf /dgraph/export; \
 	\
 	: "Search, beside the dumps it matches. Never fails the backup: a node from"; \
 	: "before path.repo gets a warning and the backup is what it always was."; \
@@ -1172,11 +1287,18 @@ backup-rotate:
 	keep=$(BACKUP_KEEP); [ "$$keep" -lt 1 ] && keep=1; \
 	if [ "$$total" -gt "$$keep" ]; then \
 		echo "$$complete" | head -n $$(( total - keep )) | while read -r d; do \
+			: "Never the one a restore is reading. restore backs up the current"; \
+			: "state before it starts, that backup rotates, and this used to delete"; \
+			: "the oldest: restoring from the oldest deleted it after it had been"; \
+			: "checked and before the database was dropped."; \
+			if [ -f "$$d/.in-use" ]; then echo "    keeping $$(basename $$d): a restore is reading it"; continue; fi; \
 			echo "    removing old backup $$(basename $$d)"; rm -rf "$$d"; \
 		done; \
 	fi; \
-	: "Half-written runs from a crash or a full disk, which are not backups."; \
-	rm -rf $(BACKUP_DIR)/*.partial 2>/dev/null || true
+	: "Half-written runs from a crash or a full disk, which are not backups. Only"; \
+	: "old ones: a backup that is still running has one too, and this also runs"; \
+	: "on its own, from housekeeping."; \
+	find $(BACKUP_DIR) -maxdepth 1 -name '*.partial' -mmin +720 -exec rm -rf {} + 2>/dev/null || true
 
 # backup-status reports whether there IS a usable backup and how old it is.
 #
@@ -1240,17 +1362,176 @@ backup-list:
 # CONFIRM=restore is the real guard and it works. Preview by reading the recipe,
 # never by adding -n and passing CONFIRM.
 restore:
-	@if [ -z "$(FROM)" ]; then 		echo "Usage: make restore FROM=<backup-dir-or-'latest'> CONFIRM=restore"; 		echo ""; 		$(MAKE) -f $(firstword $(MAKEFILE_LIST)) --no-print-directory backup-list; 		exit 1; 	fi
-	@if [ "$(CONFIRM)" != "restore" ]; then 		echo "This REPLACES the current workspace with the backup, and what is here now is gone."; 		echo "Re-run with:  make restore FROM=$(FROM) CONFIRM=restore"; 		exit 1; 	fi
-	@set -e; 	src="$(FROM)"; 	if [ "$$src" = "latest" ]; then 		src=$$(ls -1d $(BACKUP_DIR)/*/ 2>/dev/null | while read -r d; do 			[ -f "$$d/COMPLETE" ] && echo "$$d"; done | tail -1); 	fi; 	[ -n "$$src" ] || { echo "  FAIL  no complete backup found"; exit 1; }; 	src=$${src%/}; 	: "COMPLETE is written last by backup, so its absence means the backup died"; 	: "part way and restoring it would hand you a truncated database."; 	[ -f "$$src/COMPLETE" ] || { echo "  FAIL  $$src has no COMPLETE marker, so it is not restorable"; exit 1; }; 	[ -s "$$src/postgres.sql.gz" ] || { echo "  FAIL  $$src has no postgres dump"; exit 1; }; 	gzip -t "$$src/postgres.sql.gz" || { echo "  FAIL  $$src postgres dump is corrupt"; exit 1; }; 	echo "Restoring from $$src"; 		: "A backup of the current state before destroying it. The most common reason"; 	: "to restore is that something went wrong, and the second most common is that"; 	: "the restore was the thing that went wrong."; 	echo "▶ 1/5  backing up the current state first"; 	$(MAKE) -f $(SELF) --no-print-directory backup || echo "    warn  could not back up first, continuing"; 		echo "▶ 2/5  stopping the application"; 	$(COMPOSE) stop go-service collaboration-service 2>/dev/null || true; 		echo "▶ 3/5  postgres"; 	: "THE DATABASE IS DROPPED FIRST, and this is the whole correctness of this"; 	: "step. pg_dumpall emits CREATE DATABASE and CREATE TABLE, never DROP: replay"; 	: "it over a database that already exists and every statement fails as already"; 	: "exists, psql exits 0 having changed almost nothing, and the restore reports"; 	: "success while the data you were restoring away from is still sitting there."; 	: "Found by restoring over a row added after the backup and watching it live."; 	$(COMPOSE) exec -T postgres psql -U "$(DB_USER)" -d postgres -q -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$(DB_NAME)' AND pid <> pg_backend_pid();" > /dev/null 2>&1 || true; 	$(COMPOSE) exec -T postgres psql -U "$(DB_USER)" -d postgres -q -c 'DROP DATABASE IF EXISTS "$(DB_NAME)";' > /dev/null; 	gzip -dc "$$src/postgres.sql.gz" \
-		| $(COMPOSE) exec -T postgres psql -U "$(DB_USER)" -d postgres -v ON_ERROR_STOP=0 -q > /dev/null; 	$(COMPOSE) exec -T postgres psql -U "$(DB_USER)" -d "$(DB_NAME)" -qtAc 'SELECT 1' > /dev/null || { echo "    FAIL  the database did not come back; the dump may not match this server"; exit 1; }; 	echo "    ok    database restored"; 		echo "▶ 4/5  dgraph"; 	if [ -f "$$src/dgraph.tar.gz" ]; then 		$(COMPOSE) exec -T alpha curl -sf -X POST localhost:8080/alter \
+	@if [ -z "$(FROM)" ]; then \
+		echo "Usage: make restore FROM=<backup-dir-or-'latest'> CONFIRM=restore"; \
+		echo ""; \
+		$(MAKE) -f $(firstword $(MAKEFILE_LIST)) --no-print-directory backup-list; \
+		exit 1; \
+	fi
+	@if [ "$(CONFIRM)" != "restore" ]; then \
+		echo "This REPLACES the current workspace with the backup, and what is here now is gone."; \
+		echo "Re-run with:  make restore FROM=$(FROM) CONFIRM=restore"; \
+		exit 1; \
+	fi
+	@set -e; \
+	src="$(FROM)"; \
+	if [ "$$src" = "latest" ]; then \
+		src=$$(ls -1d $(BACKUP_DIR)/*/ 2>/dev/null | while read -r d; do \
+			[ -f "$$d/COMPLETE" ] && echo "$$d"; done | tail -1); \
+	fi; \
+	[ -n "$$src" ] || { echo "  FAIL  no complete backup found"; exit 1; }; \
+	src=$${src%/}; \
+	: "EVERYTHING IS CHECKED BEFORE ANYTHING IS TOUCHED. A check that fails after"; \
+	: "the database is dropped leaves nothing at all."; \
+	check() { \
+		: "COMPLETE is written last by backup, so its absence means the backup died"; \
+		: "part way and restoring it would hand you a truncated database."; \
+		[ -f "$$src/COMPLETE" ] || { echo "  FAIL  $$src has no COMPLETE marker, so it is not restorable"; return 1; }; \
+		[ -s "$$src/postgres.sql.gz" ] || { echo "  FAIL  $$src has no postgres dump"; return 1; }; \
+		gzip -t "$$src/postgres.sql.gz" || { echo "  FAIL  $$src postgres dump is corrupt"; return 1; }; \
+		if [ -f "$$src/dgraph.tar.gz" ]; then \
+			gzip -t "$$src/dgraph.tar.gz" || { echo "  FAIL  $$src graph archive is corrupt"; return 1; }; \
+			tar -tzf "$$src/dgraph.tar.gz" | grep -q '\.rdf\.gz$$' || tar -tzf "$$src/dgraph.tar.gz" | grep -q '\.rdf$$' \
+				|| { echo "  FAIL  $$src graph archive holds no data"; return 1; }; \
+		elif [ "$(WITHOUT_GRAPH)" != "1" ]; then \
+			: "Postgres without the graph is half a workspace: the graph would stay as"; \
+			: "it is now, beside an older database."; \
+			echo "  FAIL  $$src has no graph (dgraph.tar.gz), so restoring it would mix an older"; \
+			echo "        database with the current graph. If you mean to, add WITHOUT_GRAPH=1."; \
+			return 1; \
+		fi; \
+	}; \
+	check || exit 1; \
+	echo "Restoring from $$src"; \
+	: "IN USE until this finishes, so no rotation deletes it while it is being read:"; \
+	: "the backup in step 1 rotates, and restoring the oldest used to delete it."; \
+	touch "$$src/.in-use"; \
+	trap 'rm -f "$$src/.in-use"' EXIT; \
+	\
+	: "A backup of the current state before destroying it. The most common reason"; \
+	: "to restore is that something went wrong, and the second most common is that"; \
+	: "the restore was the thing that went wrong."; \
+	echo "▶ 1/5  backing up the current state first"; \
+	newest() { ls -1d $(BACKUP_DIR)/*/ 2>/dev/null | while read -r d; do \
+		[ -f "$$d/COMPLETE" ] && echo "$${d%/}"; done | tail -1; }; \
+	before=$$(newest); \
+	$(MAKE) -f $(SELF) --no-print-directory backup || echo "    warn  could not back up first, continuing"; \
+	safety=$$(newest); \
+	if [ "$$safety" = "$$before" ] || [ "$$safety" = "$$src" ]; then safety=""; fi; \
+	: "A failure from here on says what state it left and how to get back."; \
+	fail() { \
+		echo "    FAIL  $$1"; \
+		echo "          The application is stopped."; \
+		if [ -n "$$safety" ]; then \
+			echo "          What was here before this restore is in $$safety:"; \
+			echo "            make restore FROM=$$safety CONFIRM=restore"; \
+		fi; \
+		echo "          To start it as it is:  make app-start"; \
+		exit 1; \
+	}; \
+	check || fail "the backup changed while the current state was being saved"; \
+	\
+	echo "▶ 2/5  stopping the application"; \
+	$(COMPOSE) stop go-service collaboration-service 2>/dev/null || true; \
+	: "The worker too, when there is one: it writes as much as the API does."; \
+	$(COMPOSE) stop go-worker 2>/dev/null || true; \
+	\
+	echo "▶ 3/5  postgres"; \
+	: "THE DATABASE IS DROPPED FIRST, and this is the whole correctness of this"; \
+	: "step. pg_dumpall emits CREATE DATABASE and CREATE TABLE, never DROP: replay"; \
+	: "it over a database that already exists and every statement fails as already"; \
+	: "exists, psql exits 0 having changed almost nothing, and the restore reports"; \
+	: "success while the data you were restoring away from is still sitting there."; \
+	: "Found by restoring over a row added after the backup and watching it live."; \
+	$(COMPOSE) exec -T postgres psql -U "$(DB_USER)" -d postgres -q -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$(DB_NAME)' AND pid <> pg_backend_pid();" > /dev/null 2>&1 || true; \
+	$(COMPOSE) exec -T postgres psql -U "$(DB_USER)" -d postgres -q -c 'DROP DATABASE IF EXISTS "$(DB_NAME)";' > /dev/null \
+		|| fail "could not drop the current database"; \
+	gzip -dc "$$src/postgres.sql.gz" \
+		| $(COMPOSE) exec -T postgres psql -U "$(DB_USER)" -d postgres -v ON_ERROR_STOP=0 -q > /dev/null; \
+	: "The tables, not just the database: a replay that stopped early leaves a"; \
+	: "database with nothing in it, which answers SELECT 1 perfectly well."; \
+	$(COMPOSE) exec -T postgres psql -U "$(DB_USER)" -d "$(DB_NAME)" -qtAc 'SELECT 1 FROM users LIMIT 1' > /dev/null \
+		|| fail "the database did not come back; the dump may not match this server"; \
+	echo "    ok    database restored"; \
+	\
+	echo "▶ 4/5  dgraph"; \
+	if [ -f "$$src/dgraph.tar.gz" ]; then \
+		$(COMPOSE) exec -T alpha curl -sf -X POST localhost:8080/alter \
 			-H 'Content-Type: application/json' -d '{"drop_all": true}' > /dev/null \
 			&& echo "    ok    dropped existing graph" \
-			|| { echo "    FAIL  could not drop the graph; refusing to merge a backup into live data"; exit 1; }; 		rm -rf ./data/dgraph/restore && mkdir -p ./data/dgraph/restore; 		tar -xzf "$$src/dgraph.tar.gz" -C ./data/dgraph/restore; 		f=$$(find ./data/dgraph/restore -name '*.rdf.gz' -o -name '*.rdf' | head -1); 		sch=$$(find ./data/dgraph/restore -name '*.schema.gz' -o -name '*.schema' | head -1); 		if [ -n "$$f" ]; then 			rel=$$(echo "$$f" | sed 's|^\./data/dgraph|/dgraph|'); 			relsch=$$(echo "$$sch" | sed 's|^\./data/dgraph|/dgraph|'); 			$(COMPOSE) exec -T alpha dgraph live -f "$$rel" $${relsch:+-s "$$relsch"} \
-				-a localhost:9080 -z zero:5080 > /dev/null \
-				&& echo "    ok    graph reloaded" \
-				|| echo "    warn  graph reload reported a problem — check make verify"; 		else 			echo "    warn  no rdf file inside dgraph.tar.gz"; 		fi; 		rm -rf ./data/dgraph/restore; 	else 		echo "    skip  no dgraph in this backup"; 	fi; 		if [ -d "$$src/minio" ]; then 		echo "    files (minio)"; 		rsync -a --delete "$$src/minio/" ./data/minio/; 	fi; 	: "Search as it was when the backup was taken, so results and AI answers"; 	: "match the restored data. A failure leaves search as it was; results for"; 	: "content that no longer exists are filtered out as they are met."; 	COMPOSE="$(COMPOSE)" sh other-services/opensearch/snapshot.sh restore "$$src" 		|| echo "    warn  search was not restored; it will catch up as content is written"; 		echo "▶ 5/5  schema, restart, check"; 	: "NEVER let a failure here leave the application stopped. Step 2/5 stopped it,"; 	: "and an operator whose restore failed is left with a workspace that is down"; 	: "with nothing saying so — which is exactly how the demo host stayed dead for"; 	: "four days. A running server that complains about its schema tells you what"; 	: "is wrong; a stopped one tells you nothing."; 	$(MAKE) -f $(SELF) --no-print-directory migrate_up || echo "    FAIL  migrations did not run; starting anyway so the failure is visible in the logs"; 	$(COMPOSE) up -d > /dev/null; 	$(COMPOSE) restart > /dev/null; 	: "WAIT FOR READY, do not sleep and hope. This was sleep 8, and eight seconds is"; 	: "not how long a stack takes to come back: the application connects to Postgres,"; 	: "Dgraph, Redis, MinIO, MQTT and OpenSearch before it reports running. So verify"; 	: "ran against a stack that was still starting and printed NOT READY on a restore"; 	: "that had worked — the demo host logged exactly that every night for seventeen"; 	: "nights, and a customer meets it at the one moment they are least able to tell a"; 	: "real failure from a false one. Same service list verify uses, so the two cannot"; 	: "disagree about what ready means."; 	waited=0; good=0; missing=""; 	expected=$$($(COMPOSE) config --services 2>/dev/null | grep -v '^ollama-init$$'); 	while [ $$waited -lt 120 ]; do 		running=$$($(COMPOSE) ps --format '{{.Service}} {{.State}}' 2>/dev/null | awk '$$2 == "running" {print $$1}'); 		missing=""; 		for svc in $$expected; do echo "$$running" | grep -qx "$$svc" || missing="$$missing $$svc"; done; 		: "RUNNING IS NOT READY. A container that crash-loops is running for a"; 		: "moment between each crash, so waiting on state alone let verify judge a"; 		: "stack mid-restart and call a real crash-loop a false alarm — which is"; 		: "what happened the first time this wait was written. Anything Docker"; 		: "reports unhealthy counts as not ready, the same signal verify uses."; 		sick=$$(docker ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null | grep '^onecamp' || true); 		: "TWICE, a few seconds apart. A single snapshot passes for a service that is"; 		: "running at the instant it is asked and restarts a moment later, and then"; 		: "verify catches it mid-restart and reports NOT READY on a restore that"; 		: "worked. Requiring the condition to hold on two consecutive checks costs"; 		: "three seconds and removes the flap."; 		if [ -z "$$missing" ] && [ -z "$$sick" ]; then 			good=$$((good + 1)); 			[ $$good -ge 2 ] && break; 		else good=0; fi; 		sleep 3; waited=$$((waited + 3)); 	done; 	[ -n "$$missing" ] && echo "    warn  still starting after $$waited""s:$$missing" || true; 	[ -n "$$sick" ] && echo "    warn  still unhealthy after $$waited""s: $$sick" || true; 	$(MAKE) -f $(SELF) --no-print-directory verify || true; 	echo ""; 	echo "  Restored from $$src."
-
+			|| fail "could not drop the graph; refusing to merge a backup into live data"; \
+		rm -rf ./data/dgraph/restore && mkdir -p ./data/dgraph/restore; \
+		tar -xzf "$$src/dgraph.tar.gz" -C ./data/dgraph/restore; \
+		f=$$(find ./data/dgraph/restore -name '*.rdf.gz' -o -name '*.rdf' | head -1); \
+		sch=$$(find ./data/dgraph/restore -name '*.schema.gz' -o -name '*.schema' | head -1); \
+		[ -n "$$f" ] || fail "no data file inside dgraph.tar.gz"; \
+		rel=$$(echo "$$f" | sed 's|^\./data/dgraph|/dgraph|'); \
+		relsch=$$(echo "$$sch" | sed 's|^\./data/dgraph|/dgraph|'); \
+		: "A graph that didn't load is a failed restore, not a warning: the"; \
+		: "database is the backup's and the graph is now empty."; \
+		$(COMPOSE) exec -T alpha dgraph live -f "$$rel" $${relsch:+-s "$$relsch"} \
+			-a localhost:9080 -z zero:5080 > /dev/null \
+			|| fail "the graph did not load from $$src"; \
+		echo "    ok    graph reloaded"; \
+		rm -rf ./data/dgraph/restore; \
+	else \
+		echo "    skip  no dgraph in this backup (WITHOUT_GRAPH=1)"; \
+	fi; \
+	if [ -d "$$src/minio" ]; then \
+		echo "    files (minio)"; \
+		rsync -a --delete "$$src/minio/" ./data/minio/; \
+	fi; \
+	: "Search as it was when the backup was taken, so results and AI answers"; \
+	: "match the restored data. A failure leaves search as it was; results for"; \
+	: "content that no longer exists are filtered out as they are met."; \
+	COMPOSE="$(COMPOSE)" sh other-services/opensearch/snapshot.sh restore "$$src" \
+		|| echo "    warn  search was not restored; it will catch up as content is written"; \
+	\
+	echo "▶ 5/5  schema, restart, check"; \
+	: "NEVER let a failure here leave the application stopped. Step 2/5 stopped it,"; \
+	: "and an operator whose restore failed is left with a workspace that is down"; \
+	: "with nothing saying so — which is exactly how the demo host stayed dead for"; \
+	: "four days. A running server that complains about its schema tells you what"; \
+	: "is wrong; a stopped one tells you nothing."; \
+	$(MAKE) -f $(SELF) --no-print-directory migrate_up || echo "    FAIL  migrations did not run; starting anyway so the failure is visible in the logs"; \
+	$(COMPOSE) up -d > /dev/null; \
+	$(COMPOSE) restart > /dev/null; \
+	: "WAIT FOR READY, do not sleep and hope. This was sleep 8, and eight seconds is"; \
+	: "not how long a stack takes to come back: the application connects to Postgres,"; \
+	: "Dgraph, Redis, MinIO, MQTT and OpenSearch before it reports running. So verify"; \
+	: "ran against a stack that was still starting and printed NOT READY on a restore"; \
+	: "that had worked — the demo host logged exactly that every night for seventeen"; \
+	: "nights, and a customer meets it at the one moment they are least able to tell a"; \
+	: "real failure from a false one. Same service list verify uses, so the two cannot"; \
+	: "disagree about what ready means."; \
+	waited=0; good=0; missing=""; \
+	expected=$$($(COMPOSE) config --services 2>/dev/null | grep -v '^ollama-init$$'); \
+	while [ $$waited -lt 120 ]; do \
+		running=$$($(COMPOSE) ps --format '{{.Service}} {{.State}}' 2>/dev/null | awk '$$2 == "running" {print $$1}'); \
+		missing=""; \
+		for svc in $$expected; do echo "$$running" | grep -qx "$$svc" || missing="$$missing $$svc"; done; \
+		: "RUNNING IS NOT READY. A container that crash-loops is running for a"; \
+		: "moment between each crash, so waiting on state alone let verify judge a"; \
+		: "stack mid-restart and call a real crash-loop a false alarm — which is"; \
+		: "what happened the first time this wait was written. Anything Docker"; \
+		: "reports unhealthy counts as not ready, the same signal verify uses."; \
+		sick=$$(docker ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null | grep '^onecamp' || true); \
+		: "TWICE, a few seconds apart. A single snapshot passes for a service that is"; \
+		: "running at the instant it is asked and restarts a moment later, and then"; \
+		: "verify catches it mid-restart and reports NOT READY on a restore that"; \
+		: "worked. Requiring the condition to hold on two consecutive checks costs"; \
+		: "three seconds and removes the flap."; \
+		if [ -z "$$missing" ] && [ -z "$$sick" ]; then \
+			good=$$((good + 1)); \
+			[ $$good -ge 2 ] && break; \
+		else good=0; fi; \
+		sleep 3; waited=$$((waited + 3)); \
+	done; \
+	[ -n "$$missing" ] && echo "    warn  still starting after $$waited""s:$$missing" || true; \
+	[ -n "$$sick" ] && echo "    warn  still unhealthy after $$waited""s: $$sick" || true; \
+	$(MAKE) -f $(SELF) --no-print-directory verify || true; \
+	echo ""; \
+	echo "  Restored from $$src."
 # ─── Coding agent (opt-in) ────────────────────────────────────────────────────
 # The AI teammate can open pull requests, but the runner that does it is NOT
 # started by default and there was no target for it, so turning it on meant
@@ -1619,7 +1900,7 @@ create_postgres_db:
 # of predicting it.
 migrate_up:
 	@net=$$($(COMPOSE) ps -q postgres 2>/dev/null | head -1 \
-		| xargs -r docker inspect -f '{{range $$$$k, $$$$v := .NetworkSettings.Networks}}{{$$$$k}} {{end}}' 2>/dev/null \
+		| xargs -r docker inspect -f '{{range $$k, $$v := .NetworkSettings.Networks}}{{$$k}} {{end}}' 2>/dev/null \
 		| tr ' ' '\n' | grep -- '-shared-net' | head -1); \
 	if [ -z "$$net" ]; then \
 		echo "    FAIL  cannot find the network postgres is on. Is the stack up? (make up)"; \
@@ -1747,6 +2028,9 @@ update_apply:
 	@echo "▶ 2/4  applying migrations, while the current version is still running"
 	@$(MAKE) -f $(SELF) --no-print-directory migrate_up
 	@$(MAKE) -f $(SELF) --no-print-directory tune
+	@: "Fills any placeholder a newer release added and repairs the call key an"
+	@: "older installer wrote unusable; touches nothing already set."
+	@$(MAKE) -f $(SELF) --no-print-directory secrets
 	@echo "▶ 3/4  rebuilding and restarting"
 	@$(MAKE) -f $(SELF) --no-print-directory build_restart_all
 	@echo "▶ 4/4  checking the result"

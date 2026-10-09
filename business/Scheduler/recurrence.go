@@ -22,6 +22,14 @@ import (
 // just elapsed; the next occurrence is always strictly after `from`. Returns
 // the zero time if the rule is empty/invalid so the caller marks the job done.
 func NextRun(rule string, from time.Time, prev time.Time) (time.Time, error) {
+	return NextRunOnDay(rule, from, prev, 0)
+}
+
+// NextRunOnDay is NextRun with the day of the month a MONTHLY or YEARLY rule
+// lands on given, rather than taken from prev (0: prev's). A series whose
+// last date was clamped (the 31st falling on Feb 28) is a prev that no longer
+// says which day it was for; the day comes back in the months that have it.
+func NextRunOnDay(rule string, from time.Time, prev time.Time, day int) (time.Time, error) {
 	parts := parseRule(rule)
 	freq := parts["FREQ"]
 	if freq == "" {
@@ -61,10 +69,10 @@ func NextRun(rule string, from time.Time, prev time.Time) (time.Time, error) {
 		return nextWeekly(parts["BYDAY"], base, from, interval), nil
 
 	case "MONTHLY":
-		return nextByMonths(base, from, interval), nil
+		return nextByMonths(base, from, interval, day), nil
 
 	case "YEARLY":
-		return nextByMonths(base, from, 12*interval), nil
+		return nextByMonths(base, from, 12*interval, day), nil
 
 	default:
 		return time.Time{}, nil
@@ -75,12 +83,17 @@ func NextRun(rule string, from time.Time, prev time.Time) (time.Time, error) {
 // where the month has it and using the month's last day where it doesn't:
 // the 31st repeats on Feb 28 (or 29), Apr 30, then May 31 again. Counting from
 // base, not from the last step, is what keeps a short month from dragging
-// every later one down to the 28th.
-func nextByMonths(base, from time.Time, months int) time.Time {
+// every later one down to the 28th. onDay, when 1-31, is the day kept in place
+// of base's.
+func nextByMonths(base, from time.Time, months int, onDay int) time.Time {
+	want := base.Day()
+	if onDay >= 1 && onDay <= 31 {
+		want = onDay
+	}
 	for k := 1; ; k++ {
 		y, m := base.Year(), base.Month()+time.Month(k*months)
 		last := time.Date(y, m+1, 0, 0, 0, 0, 0, base.Location()).Day()
-		day := base.Day()
+		day := want
 		if day > last {
 			day = last
 		}

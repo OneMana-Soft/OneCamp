@@ -201,6 +201,19 @@ var UserRefreshToken = withArity(Spec{
 	Description: "Per-user-per-device refresh token. Rotated on every refresh; deleted on logout.",
 }, 2) // (userId, deviceId)
 
+// UserRefreshTokenPrev is a device's refresh token from before its last
+// rotation, accepted until the device next rotates or for ten minutes: a tab
+// that sent it while another tab refreshed, or a device whose refresh answer
+// was lost on the way, gets the current one rather than being taken for a
+// stolen copy. (A minute signed out anyone whose answer went missing.)
+var UserRefreshTokenPrev = withArity(Spec{
+	Namespace:   "auth:refresh-prev",
+	TTL:         10 * time.Minute,
+	Datatype:    DatatypeString,
+	Category:    CategoryAuth,
+	Description: "A device's refresh token before its last rotation, accepted for ten minutes so concurrent tabs and lost answers don't sign it out.",
+}, 2) // (userId, deviceId)
+
 // LoginRate is a sliding-window login attempt counter per IP and
 // surface (email vs. ldap). Backed by INCR + TTL window pin.
 var LoginRate = withArity(Spec{
@@ -621,6 +634,16 @@ var WebhookRateLimit = withArity(Spec{
 	Description: "Sliding-window incoming-webhook rate limit. ZADD timestamp; trim by score.",
 }, 1) // (webhookID)
 
+// InviterDailyInvites counts the invitations one member made or sent again
+// in the last day (controllers/User AddInvitation). Fixed window.
+var InviterDailyInvites = withArity(Spec{
+	Namespace:   "invite:inviter:day",
+	TTL:         24 * time.Hour,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Per-member invitation counter: invitations a member made in the last day. Fixed window.",
+}, 1) // (inviterUUID)
+
 // ApiTokenRate is the per-token fixed-window rate limit for the public /v1
 // API and the MCP server endpoint. Bounds how fast a single scoped token can
 // drive the API, independent of the owner's interactive session. Fixed window,
@@ -671,6 +694,29 @@ var MCPToolWriteRate = withArity(Spec{
 // per token per minute. Touching on every request would mean a DB UPDATE per
 // API call (write amplification); this fixed-window-of-1 gate keeps the
 // timestamp fresh without the per-request write.
+// GuestAccessAudit lets the "a guest opened a shared ..." audit row be
+// written at most once per link (and guest name) per half hour. A guest's
+// channel and project pages refresh every few seconds, and auditing every
+// refresh wrote about 720 rows an hour for one open tab.
+var GuestAccessAudit = withArity(Spec{
+	Namespace:   "guest:access:audit",
+	TTL:         30 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Per-link throttle for the guest access audit row. At most one per half hour.",
+}, 2) // (grantID, guest name or "")
+
+// GuestNotifyOnce lets what guests write through a link tell the team at
+// most once per channel, thread or doc per five minutes: a client writing a
+// dozen short messages woke every member a dozen times.
+var GuestNotifyOnce = withArity(Spec{
+	Namespace:   "guest:notify:once",
+	TTL:         5 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Per-target throttle for notifications of guests' words. At most one per five minutes per channel, thread or doc.",
+}, 2) // (what: channel|thread|doc, its uuid)
+
 var ApiTokenTouch = withArity(Spec{
 	Namespace:   "apitoken:touch",
 	TTL:         1 * time.Minute,
@@ -940,6 +986,9 @@ func All() []Spec {
 		MCPToolReadRate,
 		MCPToolWriteRate,
 		ApiTokenTouch,
+		GuestAccessAudit,
+		GuestNotifyOnce,
+		InviterDailyInvites,
 		AITokenBudget,
 		AIUserTokenBudget,
 		AITokenUserLeaderboard,

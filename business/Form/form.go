@@ -185,6 +185,9 @@ func Save(project uuid.UUID, in Input, by uuid.UUID) (*formModel.Form, error) {
 		f.CreatedBy = by
 		return formModel.Create(f)
 	}
+	// Whoever saves a form files its tasks from then on: a project admin now,
+	// which is what brings back a form whose maker has left the project.
+	f.CreatedBy = by
 	saved, err := formModel.Update(f)
 	if err == nil && saved == nil {
 		return nil, &FormError{"That isn't one of this project's forms."}
@@ -320,8 +323,10 @@ type live struct {
 }
 
 // load finds an active form whose project is still there. A form of an
-// archived project, or one whose owner has gone, answers as no form at all:
-// nobody should be filing tasks into a project nobody sees.
+// archived project, or one whose owner has gone (from the workspace or from
+// the project), answers as no form at all: nobody should be filing tasks into
+// a project nobody sees, and its tasks are filed as the owner, whose
+// notifications would carry the answers to someone no longer in the project.
 func load(ctx context.Context, token string) (*live, error) {
 	if len(token) != 24 {
 		return nil, ErrNoForm
@@ -343,7 +348,8 @@ func load(ctx context.Context, token string) (*live, error) {
 		return nil, ErrNoForm
 	}
 	project, err := projectDomain.GetBasicDgraphProjectInfo(sys, f.ProjectUUID.String(), owner.Uid)
-	if err != nil || project == nil || project.Uid == "" || project.Team == nil || helpers.IsSoftDeleted(project.DeletedAt) {
+	if err != nil || project == nil || project.Uid == "" || project.Team == nil || helpers.IsSoftDeleted(project.DeletedAt) ||
+		project.IsProjectMember == 0 {
 		return nil, ErrNoForm
 	}
 	return &live{form: f, fields: fields, owner: owner, project: project}, nil

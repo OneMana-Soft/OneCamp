@@ -734,7 +734,7 @@ func (p *Provider) getJSON(ctx context.Context, tok, path string, out any) error
 		retry := time.Duration(parseRetryAfter(resp.Header.Get("Retry-After"))) * time.Second
 		return &importProvider.ErrRateLimited{RetryAfter: retry, Reason: "clickup 429"}
 	case resp.StatusCode == http.StatusUnauthorized:
-		return errors.New("clickup unauthorized; reconnect this provider")
+		return &importProvider.TokenRejected{Msg: "clickup unauthorized; reconnect this provider"}
 	case resp.StatusCode == http.StatusNotFound:
 		return importProvider.ErrAttachmentGone
 	case resp.StatusCode >= 400:

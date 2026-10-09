@@ -12,17 +12,19 @@ import (
 
 func BulkAddChatAndPostToDgraph(ctx context.Context, query string, dgraphPosts []*dgraphStruct.DgraphPost, dgraphDMs []*dgraphStruct.DgraphDm) (dgraphChaatAndPostUUID []string, err error) {
 
-	data := struct {
-		Chats []*dgraphStruct.DgraphDm   `json:"chats,omitempty"`
-		Posts []*dgraphStruct.DgraphPost `json:"posts,omitempty"`
-	}{
-		Chats: dgraphDMs,
-		Posts: dgraphPosts,
+	// One list of the nodes to write. Wrapping them in an object made a node of
+	// its own, holding "chats" and "posts", on every forward.
+	nodes := make([]interface{}, 0, len(dgraphDMs)+len(dgraphPosts))
+	for _, dm := range dgraphDMs {
+		nodes = append(nodes, dm)
+	}
+	for _, p := range dgraphPosts {
+		nodes = append(nodes, p)
 	}
 
-	// Convert data to JSON
 	txn := dgraphInit.DgraphClient.NewTxn()
-	pb, err := json.Marshal(data)
+	defer func() { _ = txn.Discard(ctx) }()
+	pb, err := json.Marshal(nodes)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/BulkAddChatAndPostToDgraph failed to marshal dgraphChatsAndPosts struct err: %+v",
@@ -52,15 +54,5 @@ func BulkAddChatAndPostToDgraph(ctx context.Context, query string, dgraphPosts [
 		dgraphChaatAndPostUUID = append(dgraphChaatAndPostUUID, dgraphUid)
 	}
 
-	// userUid = res.Uids["uid(attachment)"]
-
-	defer func() {
-		err = txn.Discard(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/BulkAddAttachmentsToDgraph failed to discard dgraph txn err: %+v",
-				err)
-		}
-	}()
 	return
 }

@@ -13,10 +13,10 @@ import (
 	"time"
 
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
-	userBusiness "github.com/akashc777/OneCamp/business/User"
 	attachmentDomain "github.com/akashc777/OneCamp/domain/Attachment"
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/avscan"
 	"github.com/akashc777/OneCamp/helpers/uploadsafe"
@@ -650,7 +650,9 @@ func buildChatParticipants(ctx context.Context, memberUUIDs []string) []*openSea
 	if len(memberUUIDs) == 0 {
 		return nil
 	}
-	users, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, memberUUIDs)
+	// By their uuids: GetDgraphUserInfoByUUIDs takes graph uids, and refused
+	// these, so every attachment got id-only participants.
+	users, err := userDomain.GetActiveDgraphUsersByUUIDsLight(ctx, memberUUIDs)
 	if err != nil || len(users) == 0 {
 		// Fall back to id-only entries; even without name/profile the
 		// uuid is enough for permission filtering on attachment search.

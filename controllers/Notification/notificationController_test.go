@@ -1,9 +1,12 @@
 package controllers
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"testing"
 	"time"
@@ -73,6 +76,57 @@ func TestVerifyResendWebhookSignature(t *testing.T) {
 			t.Fatalf("expected at-least-one-match to pass")
 		}
 	})
+}
+
+// The webhook takes only events Resend signed. Without a secret it refuses
+// them all: unsigned ones used to be taken, so anyone could post a bounce for
+// any address and the workspace stopped emailing it. A refused event never
+// reaches the database (there's none here: reaching it would panic).
+func TestResendWebhookTakesOnlySignedEvents(t *testing.T) {
+	rawKey := []byte("super-secret-bytes")
+	secret := "whsec_" + base64.StdEncoding.EncodeToString(rawKey)
+	bounce := []byte(`{"type":"email.bounced","data":{"to":["someone@example.test"],"bounce":{"type":"Permanent"}}}`)
+	delivered := []byte(`{"type":"email.delivered","data":{"to":["someone@example.test"]}}`)
+
+	signed := func(key, body []byte) http.Header {
+		id, ts := "msg_2NfqDZ", strconv.FormatInt(time.Now().Unix(), 10)
+		mac := hmac.New(sha256.New, key)
+		mac.Write([]byte(id + "." + ts + "."))
+		mac.Write(body)
+		h := http.Header{}
+		h.Set("Svix-Id", id)
+		h.Set("Svix-Timestamp", ts)
+		h.Set("Svix-Signature", "v1,"+base64.StdEncoding.EncodeToString(mac.Sum(nil)))
+		return h
+	}
+	send := func(body []byte, h http.Header) int {
+		req := httptest.NewRequest(http.MethodPost, "/webhooks/resend", bytes.NewReader(body))
+		for k, v := range h {
+			req.Header[k] = v
+		}
+		rec := httptest.NewRecorder()
+		ResendWebhook(rec, req)
+		return rec.Code
+	}
+
+	t.Setenv("RESEND_WEBHOOK_SECRET", "")
+	if code := send(bounce, nil); code != http.StatusUnauthorized {
+		t.Errorf("no secret set: an unsigned bounce got %d, want 401", code)
+	}
+	if code := send(bounce, signed(rawKey, bounce)); code != http.StatusUnauthorized {
+		t.Errorf("no secret set: a signed bounce got %d, want 401 (nothing to check it against)", code)
+	}
+
+	t.Setenv("RESEND_WEBHOOK_SECRET", secret)
+	if code := send(bounce, nil); code != http.StatusUnauthorized {
+		t.Errorf("an unsigned bounce got %d, want 401", code)
+	}
+	if code := send(bounce, signed([]byte("someone-elses-key"), bounce)); code != http.StatusUnauthorized {
+		t.Errorf("a bounce signed with another key got %d, want 401", code)
+	}
+	if code := send(delivered, signed(rawKey, delivered)); code != http.StatusOK {
+		t.Errorf("a signed event got %d, want 200", code)
+	}
 }
 
 // TestValidHHMM covers the HH:MM input validator used by the prefs endpoint.

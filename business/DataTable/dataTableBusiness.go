@@ -320,6 +320,16 @@ func CanView(ctx context.Context, id uuid.UUID, actor Actor) error {
 	return err
 }
 
+// ViewableBy is CanView as a yes or no: no for a table the actor may not see
+// or that doesn't exist, and an error only when it couldn't be decided.
+func ViewableBy(ctx context.Context, actor Actor, id uuid.UUID) (bool, error) {
+	err := CanView(ctx, id, actor)
+	if IsForbidden(err) || IsNotFound(err) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // CanManage answers "may this actor CHANGE this table" — a strictly stronger claim
 // than CanView, since a workspace-visible table is readable by everyone and
 // modifiable only by its creator or an admin.
@@ -465,7 +475,7 @@ func GetGuestBundle(ctx context.Context, id uuid.UUID) (*TableBundle, error) {
 		return nil, fmt.Errorf("failed to load table")
 	}
 	if t == nil {
-		return nil, fmt.Errorf("table not found")
+		return nil, errNotFound // gone, unlike a load that failed (IsNotFound)
 	}
 
 	return loadBundle(ctx, t, false, "")
@@ -656,7 +666,46 @@ func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor
 	if uerr != nil {
 		return nil, fmt.Errorf("failed to update row")
 	}
-	go tellLinkedTables(context.WithoutCancel(ctx), tableId, rowId, false)
+	return rowUpdated(ctx, t, fields, r, actor), nil
+}
+
+// PatchRow changes only the cells it is given, leaving the row's other cells
+// and its place as they are when it's written: what an agent asking to set a
+// field means. update_table_row used to replace the row with the cells it
+// named, erasing the rest and moving the row to the top.
+func PatchRow(ctx context.Context, tableId, rowId uuid.UUID, values map[string]interface{}, actor Actor) (*model.Row, error) {
+	ctx = asViewer(ctx, actor)
+	t, err := loadViewable(ctx, tableId, actor)
+	if err != nil {
+		return nil, err
+	}
+	fields, ferr := model.ListFields(ctx, tableId)
+	if ferr != nil {
+		return nil, fmt.Errorf("failed to load fields")
+	}
+	if values == nil {
+		values = map[string]interface{}{}
+	}
+	// Links change through ChangeLinks, as for UpdateRow.
+	patchJSON, verr := validateValues(stripComputed(fields, values))
+	if verr != nil {
+		return nil, verr
+	}
+	r, uerr := model.MergeRowValues(ctx, tableId, rowId, patchJSON, maxValuesBytes)
+	if errors.Is(uerr, model.ErrRowTooLarge) {
+		return nil, fmt.Errorf("row is too large")
+	}
+	if uerr != nil {
+		return nil, fmt.Errorf("failed to update row")
+	}
+	return rowUpdated(ctx, t, fields, r, actor), nil
+}
+
+// rowUpdated is what follows a change to a row's cells: tables linking to it
+// recount, its computed cells are worked out, open views hear of it, its AI
+// columns refill, and webhooks fire.
+func rowUpdated(ctx context.Context, t *model.DataTable, fields []*model.Field, r *model.Row, actor Actor) *model.Row {
+	go tellLinkedTables(context.WithoutCancel(ctx), t.Id, r.Id, false)
 	withComputed(ctx, fields, []*model.Row{r})
 	broadcastRow(t.Id.String(), "updated", r)
 	// Continuous AI autofill: recompute any auto AI columns so derived cells
@@ -667,7 +716,7 @@ func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor
 		"table_name": t.Name,
 		"row_id":     r.Id.String(),
 	})
-	return r, nil
+	return r
 }
 
 // DeleteRow soft-deletes a row (view/edit access) and broadcasts it.

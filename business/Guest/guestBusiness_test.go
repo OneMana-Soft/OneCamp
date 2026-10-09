@@ -1,6 +1,9 @@
 package business
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -78,5 +81,28 @@ func TestIsMeetingRoom(t *testing.T) {
 	}
 	if IsMeetingRoom("uuid1 uuid2") {
 		t.Fatal("a DM room must not be treated as a meeting room")
+	}
+}
+
+func TestAnAnswerAboutTheLinkIsNotAFault(t *testing.T) {
+	for _, err := range []error{ErrGuestDisabled, ErrInvalidGrant, ErrNotFound, ErrForbidden, fmt.Errorf("reading: %w", ErrNotFound)} {
+		if !IsUnavailable(err) {
+			t.Errorf("%v is an answer about the link", err)
+		}
+	}
+	for _, err := range []error{errors.New("sql: database is closed"), context.DeadlineExceeded, nil} {
+		if IsUnavailable(err) {
+			t.Errorf("%v says nothing about the link", err)
+		}
+	}
+}
+
+func TestAReadThatFoundNothingIsNotAFailedRead(t *testing.T) {
+	notFound := errors.New("failed to get dgraph post")
+	if readFailed(nil, notFound) || readFailed(notFound, notFound) || readFailed(fmt.Errorf("reading: %w", notFound), notFound) {
+		t.Error("nothing found is an answer")
+	}
+	if !readFailed(errors.New("rpc error: code = Unavailable"), notFound) || !readFailed(context.DeadlineExceeded, notFound) {
+		t.Error("a store that didn't answer is a failed read")
 	}
 }

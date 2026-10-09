@@ -121,7 +121,7 @@ func TestSearchIssuesFollowsTokens(t *testing.T) {
 	}))
 	defer srv.Close()
 	var keys []string
-	err := New().searchIssues(context.Background(), "tok", srv.URL, `project = "A"`, []string{"*navigable", "summary"}, func(iss *jiraIssue) bool {
+	err := New().searchIssues(context.Background(), "tok", srv.URL, `project = "A"`, []string{"*navigable", "summary"}, true, func(iss *jiraIssue) bool {
 		keys = append(keys, iss.Key)
 		return true
 	})

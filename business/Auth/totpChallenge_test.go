@@ -7,6 +7,8 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 )
 
 // withSecret sets JWT_SECRET for one test and restores it after.
@@ -15,22 +17,55 @@ func withSecret(t *testing.T) {
 	t.Setenv("JWT_SECRET", "test-jwt-secret-with-enough-length-1234567890")
 }
 
-// A challenge round-trips to the user it was issued for.
+// A challenge round-trips to the user it was issued for, and how they passed the first step: an email
+// password or the directory's, each recorded as such once the code is in.
 func TestTOTPChallengeRoundTrips(t *testing.T) {
 	withSecret(t)
 	userID := uuid.New()
 
-	challenge, err := IssueTOTPChallenge(userID)
-	if err != nil {
-		t.Fatalf("issue: %v", err)
+	for _, method := range []string{userModels.AuthMethodEmail, userModels.AuthMethodLDAP} {
+		challenge, err := IssueTOTPChallenge(userID, method)
+		if err != nil {
+			t.Fatalf("issue (%s): %v", method, err)
+		}
+		got, gotMethod, err := ParseTOTPChallenge(challenge)
+		if err != nil {
+			t.Fatalf("parse (%s): %v", method, err)
+		}
+		if got != userID || gotMethod != method {
+			t.Errorf("round-tripped to %s by %q, want %s by %q", got, gotMethod, userID, method)
+		}
 	}
 
-	got, err := ParseTOTPChallenge(challenge)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
+	// Single sign-on and passkeys hand out no challenge.
+	if _, err := IssueTOTPChallenge(userID, userModels.AuthMethodSAML); err == nil {
+		t.Error("issued a challenge for a SAML sign-in")
 	}
-	if got != userID {
-		t.Errorf("round-tripped to %s, want %s", got, userID)
+}
+
+// A challenge minted before it said how the first step was passed came from the only sign-in that
+// handed one out then, a password; one saying anything a challenge can't is refused.
+func TestTOTPChallengeMethodClaim(t *testing.T) {
+	withSecret(t)
+	userID := uuid.New()
+	sign := func(claims jwt.MapClaims) string {
+		t.Helper()
+		claims["sub"] = userID.String()
+		claims["purpose"] = totpChallengePurpose
+		claims["exp"] = time.Now().Add(time.Minute).Unix()
+		signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).
+			SignedString(challengeKey("test-jwt-secret-with-enough-length-1234567890"))
+		if err != nil {
+			t.Fatalf("sign: %v", err)
+		}
+		return signed
+	}
+
+	if _, method, err := ParseTOTPChallenge(sign(jwt.MapClaims{})); err != nil || method != userModels.AuthMethodEmail {
+		t.Errorf("an older challenge: method %q, err %v; want email", method, err)
+	}
+	if _, _, err := ParseTOTPChallenge(sign(jwt.MapClaims{"method": userModels.AuthMethodSAML})); !errors.Is(err, ErrTOTPChallengeInvalid) {
+		t.Errorf("a challenge claiming a SAML sign-in: %v, want ErrTOTPChallengeInvalid", err)
 	}
 }
 
@@ -57,7 +92,7 @@ func TestParseTOTPChallengeRejectsASessionToken(t *testing.T) {
 		t.Fatalf("sign: %v", err)
 	}
 
-	if _, err := ParseTOTPChallenge(signed); !errors.Is(err, ErrTOTPChallengeInvalid) {
+	if _, _, err := ParseTOTPChallenge(signed); !errors.Is(err, ErrTOTPChallengeInvalid) {
 		t.Errorf("a token with no purpose claim was accepted as a challenge (err=%v)", err)
 	}
 }
@@ -76,7 +111,7 @@ func TestParseTOTPChallengeRejectsAWrongPurpose(t *testing.T) {
 	})
 	signed, _ := other.SignedString([]byte("test-jwt-secret-with-enough-length-1234567890"))
 
-	if _, err := ParseTOTPChallenge(signed); !errors.Is(err, ErrTOTPChallengeInvalid) {
+	if _, _, err := ParseTOTPChallenge(signed); !errors.Is(err, ErrTOTPChallengeInvalid) {
 		t.Errorf("a token with purpose=password_reset was accepted (err=%v)", err)
 	}
 }
@@ -95,7 +130,7 @@ func TestParseTOTPChallengeRejectsAnExpiredToken(t *testing.T) {
 	})
 	signed, _ := expired.SignedString([]byte("test-jwt-secret-with-enough-length-1234567890"))
 
-	if _, err := ParseTOTPChallenge(signed); !errors.Is(err, ErrTOTPChallengeInvalid) {
+	if _, _, err := ParseTOTPChallenge(signed); !errors.Is(err, ErrTOTPChallengeInvalid) {
 		t.Errorf("an expired challenge was accepted (err=%v)", err)
 	}
 }
@@ -111,7 +146,7 @@ func TestParseTOTPChallengeRejectsAForeignSignature(t *testing.T) {
 	})
 	signed, _ := forged.SignedString([]byte("a-completely-different-signing-key-000000"))
 
-	if _, err := ParseTOTPChallenge(signed); !errors.Is(err, ErrTOTPChallengeInvalid) {
+	if _, _, err := ParseTOTPChallenge(signed); !errors.Is(err, ErrTOTPChallengeInvalid) {
 		t.Errorf("a challenge signed with the wrong key was accepted (err=%v)", err)
 	}
 }
@@ -133,7 +168,7 @@ func TestParseTOTPChallengeRejectsAnUnsignedToken(t *testing.T) {
 		t.Skipf("this jwt version refuses to mint an unsigned token at all: %v", err)
 	}
 
-	if _, err := ParseTOTPChallenge(signed); !errors.Is(err, ErrTOTPChallengeInvalid) {
+	if _, _, err := ParseTOTPChallenge(signed); !errors.Is(err, ErrTOTPChallengeInvalid) {
 		t.Errorf("an alg=none token was accepted (err=%v)", err)
 	}
 }
@@ -153,7 +188,7 @@ func TestParseTOTPChallengeRejectsMalformedInput(t *testing.T) {
 		"....",
 		"eyJhbGciOiJIUzI1NiJ9",
 	} {
-		if _, err := ParseTOTPChallenge(raw); err == nil {
+		if _, _, err := ParseTOTPChallenge(raw); err == nil {
 			t.Errorf("%q must not parse as a challenge", raw)
 		}
 	}
@@ -173,7 +208,7 @@ func TestParseTOTPChallengeRejectsANonUUIDSubject(t *testing.T) {
 	})
 	signed, _ := odd.SignedString([]byte("test-jwt-secret-with-enough-length-1234567890"))
 
-	if _, err := ParseTOTPChallenge(signed); !errors.Is(err, ErrTOTPChallengeInvalid) {
+	if _, _, err := ParseTOTPChallenge(signed); !errors.Is(err, ErrTOTPChallengeInvalid) {
 		t.Errorf("a non-uuid subject was accepted (err=%v)", err)
 	}
 }
@@ -204,10 +239,10 @@ func TestTOTPChallengeRequiresASigningKey(t *testing.T) {
 
 	t.Setenv("JWT_SECRET", "")
 
-	if _, err := IssueTOTPChallenge(uuid.New()); err == nil {
+	if _, err := IssueTOTPChallenge(uuid.New(), userModels.AuthMethodEmail); err == nil {
 		t.Error("issuing a challenge with no JWT_SECRET must fail rather than sign with a default")
 	}
-	if _, err := ParseTOTPChallenge(signed); err == nil {
+	if _, _, err := ParseTOTPChallenge(signed); err == nil {
 		t.Error("with no JWT_SECRET, a token signed with a guessable default was ACCEPTED — the " +
 			"implementation is falling back to a hardcoded key, which makes the challenge forgeable")
 	}

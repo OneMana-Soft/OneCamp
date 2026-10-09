@@ -2,7 +2,10 @@ package ldap
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"github.com/akashc777/OneCamp/helpers"
+	"os"
 	"strings"
 
 	"github.com/go-ldap/ldap/v3"
@@ -21,6 +24,11 @@ type LDAPClient struct {
 	// lists their group DNs (or names for non-AD directories). Defaults to
 	// "memberOf" when empty. Used by the admin-sync flow.
 	GroupAttribute string
+
+	// CACertPath is a PEM bundle of certificate authorities LDAPS trusts as
+	// well as the system's (LDAP_CA_CERT): a company's own, which an internal
+	// directory's certificate usually comes from. Empty trusts the system's.
+	CACertPath string
 }
 
 type LDAPUser struct {
@@ -42,10 +50,16 @@ func (lc *LDAPClient) Authenticate(usernameOrEmail, password string) (*LDAPUser,
 	var err error
 
 	if lc.UseTLS {
-		conn, err = ldap.DialTLS("tcp", address, &tls.Config{
+		tlsConfig := &tls.Config{
 			InsecureSkipVerify: false,
 			ServerName:         lc.Host,
-		})
+		}
+		if lc.CACertPath != "" {
+			if tlsConfig.RootCAs, err = rootCAs(lc.CACertPath); err != nil {
+				return nil, err
+			}
+		}
+		conn, err = ldap.DialTLS("tcp", address, tlsConfig)
 	} else {
 		conn, err = ldap.Dial("tcp", address)
 	}
@@ -98,14 +112,39 @@ func (lc *LDAPClient) Authenticate(usernameOrEmail, password string) (*LDAPUser,
 		return nil, fmt.Errorf("ldap credential bind failed: %w", err)
 	}
 
-	// Extract standard attributes securely
+	return userFromEntry(userEntry, groupAttr), nil
+}
+
+// rootCAs is who LDAPS trusts when LDAP_CA_CERT is set: the system's
+// certificate authorities and those in the PEM bundle at caCertPath. Read at
+// each sign-in, so a replaced bundle is used without a restart. A file that
+// can't be read, or holds no certificate, is an error naming LDAP_CA_CERT,
+// not a quiet fallback to the system's alone that fails every sign-in with a
+// certificate error.
+func rootCAs(caCertPath string) (*x509.CertPool, error) {
+	bundle, err := os.ReadFile(caCertPath)
+	if err != nil {
+		return nil, fmt.Errorf("LDAP_CA_CERT: %w", err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(bundle) {
+		return nil, fmt.Errorf("LDAP_CA_CERT: %s holds no PEM certificate", caCertPath)
+	}
+	return pool, nil
+}
+
+// userFromEntry is the person a directory entry describes. Their address is
+// one the directory holds, mail else userPrincipalName, or none: LDAPLogin
+// refuses an entry without one. It used to be made up from what was typed,
+// "<typed>@ldap.local", an address no mail reaches, which two directories with
+// the same user name would share, and which became the account. Pure.
+func userFromEntry(userEntry *ldap.Entry, groupAttr string) *LDAPUser {
 	email := userEntry.GetAttributeValue("mail")
 	if email == "" {
 		email = userEntry.GetAttributeValue("userPrincipalName")
-	}
-	if email == "" {
-		// Fallback if LDAP has username but no email attribute: compile with host domain
-		email = fmt.Sprintf("%s@ldap.local", usernameOrEmail)
 	}
 
 	username := userEntry.GetAttributeValue("sAMAccountName")
@@ -125,10 +164,10 @@ func (lc *LDAPClient) Authenticate(usernameOrEmail, password string) (*LDAPUser,
 	}
 
 	return &LDAPUser{
-		DN:       userDN,
-		Email:    strings.ToLower(email),
+		DN:       userEntry.DN,
+		Email:    helpers.NormalizeEmail(email),
 		Username: username,
 		FullName: fullName,
 		Groups:   userEntry.GetAttributeValues(groupAttr),
-	}, nil
+	}
 }

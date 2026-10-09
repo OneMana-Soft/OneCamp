@@ -491,18 +491,27 @@ func (p *Provider) FetchAttachment(ctx context.Context, j *importModels.Job, opt
 	if err != nil {
 		return "", 0, err
 	}
-	// For private board attachments we append the auth on the URL.
-	url := att.URL
-	if strings.Contains(url, "trello.com") && tok != nil {
-		sep := "?"
-		if strings.Contains(url, "?") {
-			sep = "&"
-		}
-		url += fmt.Sprintf("%skey=%s&token=%s", sep, tok.APIKey, tok.Token)
+	att.URL = trelloDownloadURL(att.URL, tok)
+	return importProvider.DefaultFetchAttachment(ctx, att, dest)
+}
+
+// trelloHost serves the files uploaded to Trello, which need the importing
+// admin's key and token on a private board. Nothing else may be sent them; the
+// check used to be a substring search, so "https://evil.example/trello.com"
+// got both.
+const trelloHost = "trello.com"
+
+// trelloDownloadURL is raw with the key and token added when it is a Trello
+// URL, and as it is when it isn't.
+func trelloDownloadURL(raw string, tok *trelloToken) string {
+	if tok == nil || !importProvider.CredentialAllowed(raw, trelloHost) {
+		return raw
 	}
-	att2 := att
-	att2.URL = url
-	return importProvider.DefaultFetchAttachment(ctx, att2, dest)
+	sep := "?"
+	if strings.Contains(raw, "?") {
+		sep = "&"
+	}
+	return raw + fmt.Sprintf("%skey=%s&token=%s", sep, tok.APIKey, tok.Token)
 }
 
 // DefaultStatusMap returns the proposed Trello-list-name → OneCamp
@@ -772,7 +781,7 @@ func (p *Provider) getJSON(ctx context.Context, urlStr string, out any) error {
 		}
 		return &importProvider.ErrRateLimited{RetryAfter: retryAfter, Reason: "Trello 429"}
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return fmt.Errorf("trello auth failed (HTTP %d); reconnect token", resp.StatusCode)
+		return &importProvider.TokenRejected{Msg: fmt.Sprintf("trello auth failed (HTTP %d); reconnect token", resp.StatusCode)}
 	case resp.StatusCode >= 400:
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("trello HTTP %d: %s", resp.StatusCode, string(body))

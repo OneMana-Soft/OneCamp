@@ -1,7 +1,9 @@
 package controllers
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -378,10 +380,27 @@ func UpdatePost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphPost.Channel.IsMember == 0 && !(dgraphPost.PostBy.Uuid == userInfo.UserDgraphInfo.Uuid) {
-
+	// Only a post's author edits it, while they're in its channel. This
+	// allowed anyone in the channel: their edit then showed under the
+	// author's name.
+	if dgraphPost.PostBy == nil || dgraphPost.PostBy.Uuid != userInfo.UserDgraphInfo.Uuid || dgraphPost.Channel.IsMember == 0 {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorized",
+			"msg": "Only the person who wrote a message can edit it.",
+		})
+		return
+	}
+	// A deleted message isn't edited. A database that didn't answer says
+	// nothing about the message, so that is a fault the person can retry.
+	row, err := business.GetPostByUUID(ctx, postUUID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
+			"msg": "Couldn't check the message just now. Try again in a moment.",
+		})
+		return
+	}
+	if row == nil || !row.DeletedAt.IsZero() {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{
+			"msg": "That message was deleted.",
 		})
 		return
 	}
@@ -464,7 +483,8 @@ func DeleteCommentInPost(w http.ResponseWriter, r *http.Request) {
 
 	dgraphComment, err := commentBusiness.GetDgraphPostCommentInfoByUUID(ctx, commentInfo.Uuid, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || !dgraphComment.Post.Channel.DeletedAt.IsZero() {
+	if err != nil || dgraphComment == nil || dgraphComment.Post == nil || dgraphComment.Post.Channel == nil ||
+		dgraphComment.CommentBy == nil || !dgraphComment.Post.Channel.DeletedAt.IsZero() {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/DeleteCommentInPost Failed to get comment from dgraph err: %+v",
 			err)
@@ -477,10 +497,13 @@ func DeleteCommentInPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The reply's author (still in the channel) or a channel admin. This
+	// wrote its 403 and went on to delete the reply anyway.
 	if (dgraphComment.CommentBy.Uuid != userInfo.UserDgraphInfo.Uuid || dgraphComment.Post.Channel.IsMember == 0) && dgraphComment.Post.Channel.IsAdmin == 0 {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorized",
 		})
+		return
 	}
 
 	err = business.DeleteCommentOnPost(ctx, commentUUID, dgraphComment, userInfo.UserDgraphInfo.Uuid)
@@ -538,7 +561,8 @@ func UpdateCommentInPost(w http.ResponseWriter, r *http.Request) {
 
 	dgraphComment, err := commentBusiness.GetDgraphPostCommentInfoByUUID(ctx, commentInfo.Uuid, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || !dgraphComment.Post.Channel.DeletedAt.IsZero() {
+	if err != nil || dgraphComment == nil || dgraphComment.Post == nil || dgraphComment.Post.Channel == nil ||
+		dgraphComment.CommentBy == nil || !dgraphComment.Post.Channel.DeletedAt.IsZero() {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/UpdateCommentInPost Failed to comment from dgraph err: %+v",
 			err)
@@ -551,10 +575,14 @@ func UpdateCommentInPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only the reply's author, still in the channel. This wrote its 403 and
+	// went on to rewrite the reply anyway, which then showed under the
+	// author's name.
 	if dgraphComment.CommentBy.Uuid != userInfo.UserDgraphInfo.Uuid || dgraphComment.Post.Channel.IsMember == 0 {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorized",
 		})
+		return
 	}
 
 	mentions, err := helpers.GetMentions(commentInfo.HTMLText)
@@ -665,6 +693,24 @@ func CreateCommentInPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// "Also send to channel" (Slack parity) also posts the reply as a
+	// top-level message in the thread's channel, so people not following the
+	// thread still see it. That is a post, so it takes the rules a post does
+	// (business/Send): in an announcement channel only its admins may. They
+	// are asked before anything is written, so a refusal sends nothing.
+	var alsoPost *sendBusiness.ChannelPost
+	if commentInfo.AlsoSendToChannel && strings.TrimSpace(commentInfo.HTMLText) != "" {
+		alsoPost, err = sendBusiness.PrepareChannelPost(ctx, &userInfo, &adapter.InputCreateOrUpdatePostInfo{
+			HTMLText:    commentInfo.HTMLText,
+			MediaObj:    commentInfo.MediaObj,
+			ChannelUuid: dgraphPost.Channel.Uuid,
+		})
+		if err != nil {
+			writeSendError(w, err)
+			return
+		}
+	}
+
 	createdCommentData, err := business.CreatePostComment(ctx, &commentInfo, &userInfo, mentionsDgraphUsersList, dgraphPost)
 
 	if err != nil {
@@ -679,34 +725,12 @@ func CreateCommentInPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// "Also send to channel" (Slack parity): additionally post the reply as a
-	// top-level message in the thread's channel, so people not following the
-	// thread still see it in the main timeline. Best-effort — a failure here
-	// must not fail the (already-succeeded) reply, so we only log it.
-	if commentInfo.AlsoSendToChannel && strings.TrimSpace(commentInfo.HTMLText) != "" {
-		channelUUIDParsed, puErr := uuid.Parse(dgraphPost.Channel.Uuid)
-		if puErr != nil {
+	// The reply is written, so posting it in the channel too is best-effort:
+	// a failure here must not fail the reply, so it is only logged.
+	if alsoPost != nil {
+		if _, perr := alsoPost.Commit(ctx); perr != nil {
 			helpers.LogErrorWithContext(ctx,
-				"controllers/AddCommentToPost also_send_to_channel bad channel uuid err: %+v", puErr)
-		} else {
-			// Fetch full channel info (the post query's embedded channel omits
-			// ch_name, which CreatePost needs for the notification title).
-			fullChannel, chErr := channelBusiness.GetDgraphChannelInfoByUUID(ctx, channelUUIDParsed, userInfo.UserDgraphInfo.Uid)
-			if chErr != nil || fullChannel == nil {
-				helpers.LogErrorWithContext(ctx,
-					"controllers/AddCommentToPost also_send_to_channel channel lookup err: %+v", chErr)
-			} else {
-				postInput := &adapter.InputCreateOrUpdatePostInfo{
-					HTMLText:    commentInfo.HTMLText,
-					MediaObj:    commentInfo.MediaObj,
-					ChannelUuid: dgraphPost.Channel.Uuid,
-					ChannelUUID: channelUUIDParsed,
-				}
-				if _, perr := business.CreatePost(ctx, postInput, &userInfo, mentionsDgraphUsersList, fullChannel); perr != nil {
-					helpers.LogErrorWithContext(ctx,
-						"controllers/AddCommentToPost also_send_to_channel failed err: %+v", perr)
-				}
-			}
+				"controllers/AddCommentToPost also_send_to_channel failed err: %+v", perr)
 		}
 	}
 
@@ -1100,7 +1124,7 @@ func DeletePost(w http.ResponseWriter, r *http.Request) {
 
 	dgraphPost, err := business.GetDgraphPostByUUID(ctx, postInfo.Uuid, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || !dgraphPost.Channel.DeletedAt.IsZero() {
+	if err != nil || dgraphPost == nil || dgraphPost.Channel == nil || !dgraphPost.Channel.DeletedAt.IsZero() {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/DeletePost Failed to get dgraph post info err: %+v",
 			err)
@@ -1109,6 +1133,7 @@ func DeletePost(w http.ResponseWriter, r *http.Request) {
 			"msg": "Failed to get post info",
 			"err": err,
 		})
+		return
 	}
 	// _ = msgTopic
 	// _ = typingTopic

@@ -58,6 +58,25 @@ var (
 	ErrForbidden = errors.New("this guest link does not allow that action")
 )
 
+// IsUnavailable reports whether err is an answer about the link or what it
+// opens (guest access off; the link invalid, expired or revoked; the thing
+// gone, or outside the link) rather than the server failing to answer. The
+// first gets the one uniform "not available", so there is no oracle; the
+// second a "try again", so a guest's page keeps retrying instead of telling a
+// client their link has stopped working because a database didn't answer.
+func IsUnavailable(err error) bool {
+	return errors.Is(err, ErrGuestDisabled) || errors.Is(err, ErrInvalidGrant) ||
+		errors.Is(err, ErrNotFound) || errors.Is(err, ErrForbidden)
+}
+
+// readFailed reports whether a read failed, as opposed to answering that what
+// it looked for isn't there (notFound is that read's own answer). A store that
+// didn't answer says nothing about the link, so the read's error is kept and
+// becomes the 503 a guest's page retries, never ErrNotFound's dead link.
+func readFailed(err, notFound error) bool {
+	return err != nil && !errors.Is(err, notFound)
+}
+
 // InstantMeeting is the result of starting a guest-shareable meeting.
 type InstantMeeting struct {
 	Room       string    // LiveKit room name ("meet-<uuid>")
@@ -113,7 +132,8 @@ func CreateInstantMeeting(ctx context.Context, host *dgraphStruct.DgraphUser, au
 
 // ValidateMeetingGrant resolves a raw guest link token to its active meeting
 // grant, enforcing the workspace policy. Returns a sentinel error (mapped to a
-// uniform response upstream) when access is not available for any reason.
+// uniform response upstream) when access is not available for any reason, and
+// a read that failed as it is.
 func ValidateMeetingGrant(ctx context.Context, rawToken string) (*guestModel.GuestGrant, error) {
 	if !settingsBusiness.GuestAccessEnabled() {
 		return nil, ErrGuestDisabled

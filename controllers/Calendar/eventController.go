@@ -2,6 +2,7 @@ package Calendar
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -119,6 +120,10 @@ func DeleteEventController(w http.ResponseWriter, r *http.Request) {
 		}
 
 		err = business.DeleteEvent(ctx, eventUUID, &userInfo)
+		if errors.Is(err, business.ErrNotEventCreator) {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": err.Error()})
+			return
+		}
 		if err != nil {
 			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Internal Error", "err": err})
 			return

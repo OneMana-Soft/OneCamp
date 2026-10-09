@@ -78,6 +78,20 @@ import (
 	"go.opentelemetry.io/otel"
 )
 
+// corsFor lets the web app at origins call the API. A response header the
+// app reads has to be exposed: without Retry-After here, the browser hid it
+// and a page backing off from a 429 or 503 never waited as long as asked.
+func corsFor(origins []string) func(http.Handler) http.Handler {
+	return cors.Handler(cors.Options{
+		AllowedOrigins:   origins,
+		AllowedMethods:   []string{"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Requested-With", "Origin"},
+		ExposedHeaders:   []string{"Link", "Retry-After"},
+		AllowCredentials: true,
+		MaxAge:           300,
+	})
+}
+
 func Routes() http.Handler {
 	var allowedOrigins []string
 	if feHost := strings.TrimSpace(os.Getenv("FE_HOST_DOMAIN")); feHost != "" {
@@ -100,14 +114,7 @@ func Routes() http.Handler {
 	)
 	router := chi.NewRouter()
 
-	router.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   allowedOrigins,
-		AllowedMethods:   []string{"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Requested-With", "Origin"},
-		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
+	router.Use(corsFor(allowedOrigins))
 
 	router.Use(middleware.Recoverer)
 	// Response security headers. Before the handlers so every route gets them,
@@ -121,8 +128,11 @@ func Routes() http.Handler {
 	router.Use(otelchi.Middleware(
 		"onecamp-backend",
 		otelchi.WithTracerProvider(otel.GetTracerProvider()),
-
-		// otelchi.WithFilter(health & metrics skip)
+		// The broker asks once per topic each time a client connects:
+		// hundreds of spans a sign-in, saying nothing.
+		otelchi.WithFilter(func(r *http.Request) bool {
+			return r.URL.Path != "/internal/mqtt/authorize"
+		}),
 	))
 
 	globalSearchRouter := chi.NewRouter()
@@ -235,8 +245,10 @@ func Routes() http.Handler {
 	router.With(customMiddleware.LoginRateLimit("unsubscribe")).Post("/public/notifications/resubscribe", notificationController.PublicResubscribe)
 
 	// Resend webhook for delivery / bounce / complaint events. Body-HMAC
-	// validated inside the handler when RESEND_WEBHOOK_SECRET is set.
-	router.Post("/webhooks/resend", notificationController.ResendWebhook)
+	// validated inside the handler; every event is refused while
+	// RESEND_WEBHOOK_SECRET is unset. Limited per address, generously: Resend
+	// sends from a few addresses, and retries a 429 later.
+	router.With(customMiddleware.IPRateLimit("resend-webhook", 600, "Too many requests. Try again later.")).Post("/webhooks/resend", notificationController.ResendWebhook)
 
 	// Internal coding-LLM proxy: the code-runner sidecar (network-restricted, no
 	// model of its own) calls this during a coding run for model-agnostic,
@@ -246,6 +258,12 @@ func Routes() http.Handler {
 	router.Post("/internal/code-run/llm", func(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotImplemented, helpers.Envolope{"msg": "AI features are not supported on this build"})
 	})
+
+	// The broker asks here before every subscription a person's client makes
+	// (emqx's HTTP authorization source, over the internal network), so a
+	// client reads only the channels, conversations, docs, boards and tables
+	// its person can. Internal-secret gated: the broker sends it with each ask.
+	router.With(customMiddleware.VerifyInternalServiceRequest).Post("/internal/mqtt/authorize", configController.AuthorizeMqtt)
 
 	// Public guest-meeting access (no auth). A guest opens a shareable link,
 	// the FE validates it (GET), collects a display name, then joins (POST →
@@ -263,11 +281,12 @@ func Routes() http.Handler {
 	router.With(customMiddleware.LoginRateLimit("booking-cancel")).Get("/public/booking/{token}", eventController.GetPublicBooking)
 	router.With(customMiddleware.LoginRateLimit("booking-cancel")).Post("/public/booking/{token}/cancel", eventController.CancelPublicBooking)
 	router.With(customMiddleware.LoginRateLimit("guest")).Get("/guest/meet/{token}", guestController.GetGuestMeeting)
-	router.With(customMiddleware.LoginRateLimit("guest")).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/meet/{token}/join", guestController.JoinGuestMeeting)
+	router.With(customMiddleware.GuestRateLimit(customMiddleware.GuestJoin)).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/meet/{token}/join", guestController.JoinGuestMeeting)
 	// Phase 2: exchange a doc/board share-link token for a short-lived,
-	// read-only collab JWT. Public + rate-limited; uniform not-available on
-	// any failure (no oracle).
-	router.With(customMiddleware.LoginRateLimit("guest")).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/collab/{token}", guestController.GuestCollabToken)
+	// read-only collab JWT. Public + rate-limited; a link that is off, invalid,
+	// expired or revoked gets the uniform not-available (no oracle), and a
+	// server that couldn't answer a 503 the page retries.
+	router.With(customMiddleware.GuestRateLimit(customMiddleware.GuestOpenLive)).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/collab/{token}", guestController.GuestCollabToken)
 	// Public board image fetch for a guest, authorized by the share-link grant
 	// (the attachment must belong to the grant's board). Not rate-limited: a
 	// board can load many images and the endpoint requires a valid grant token.
@@ -278,18 +297,18 @@ func Routes() http.Handler {
 	// capability, writes in) one channel. Same grant machinery as every link.
 	router.With(customMiddleware.LoginRateLimit("guest-channel-read")).Get("/guest/channel/{token}", guestController.GuestChannel)
 	router.With(customMiddleware.LoginRateLimit("guest-channel-read")).Get("/guest/channel/{token}/thread/{post_id}", guestController.GuestChannelThread)
-	router.With(customMiddleware.LoginRateLimit("guest-channel")).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/channel/{token}", guestController.GuestChannelPost)
+	router.With(customMiddleware.GuestRateLimit(customMiddleware.GuestMessage)).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/channel/{token}", guestController.GuestChannelPost)
 	// Project guests: a client follows one project's tasks and, with the
 	// comment capability, comments on them.
 	router.With(customMiddleware.LoginRateLimit("guest-project-read")).Get("/guest/project/{token}", guestController.GuestProject)
 	router.With(customMiddleware.LoginRateLimit("guest-project-read")).Get("/guest/project/{token}/task/{task_id}", guestController.GuestProjectTask)
-	router.With(customMiddleware.LoginRateLimit("guest-project")).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/project/{token}/task/{task_id}/comment", guestController.GuestProjectComment)
-	router.With(customMiddleware.LoginRateLimit("guest-project")).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/project/{token}/task/{task_id}/review", guestController.GuestProjectReview)
+	router.With(customMiddleware.GuestRateLimit(customMiddleware.GuestComment)).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/project/{token}/task/{task_id}/comment", guestController.GuestProjectComment)
+	router.With(customMiddleware.GuestRateLimit(customMiddleware.GuestApproval)).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/project/{token}/task/{task_id}/review", guestController.GuestProjectReview)
 	// Public guest doc comments: read the guest feedback thread, and (when the
 	// grant carries the comment capability) post a comment. Rate-limited and
 	// body-capped; the business layer enforces the capability and strips HTML.
 	router.With(customMiddleware.LoginRateLimit("guest")).Get("/guest/doc-comments/{token}", guestController.GuestDocComments)
-	router.With(customMiddleware.LoginRateLimit("guest")).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/doc-comments/{token}", guestController.CreateGuestDocComment)
+	router.With(customMiddleware.GuestRateLimit(customMiddleware.GuestDocComment)).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/doc-comments/{token}", guestController.CreateGuestDocComment)
 
 	router.Group(func(r chi.Router) {
 		r.Use(customMiddleware.CSRFMiddleware)
@@ -301,21 +320,22 @@ func Routes() http.Handler {
 		r.Post("/updateUserProfile", userController.UpdateUserProfile)
 		r.Post("/updateUserTheme", userController.UpdateUserTheme)
 		r.Post("/getIfUserNameIsAvailable", userController.GetIfUserNameIsAvailable)
-		r.Post("/auth/set-password", authController.SetPassword)
-		r.Post("/auth/change-password", authController.ChangePassword)
+		// The demo's shared visitor keeps its sign-in as it is (DemoSignInStays).
+		r.With(customMiddleware.DemoSignInStays).Post("/auth/set-password", authController.SetPassword)
+		r.With(customMiddleware.DemoSignInStays).Post("/auth/change-password", authController.ChangePassword)
 		r.Get("/auth/has-password", authController.HasPassword)
 		// Managing your OWN second factor. Authenticated, and scoped to the caller: none of these takes
 		// a user id, so one member cannot enrol, inspect or disable another's factor. An admin reset for
 		// a lost device is deliberately not here — that is a separate, audited action.
 		r.Get("/auth/2fa", authController.GetTwoFactorStatus)
-		r.Post("/auth/2fa/setup", authController.BeginTwoFactorSetup)
-		r.Post("/auth/2fa/confirm", authController.ConfirmTwoFactorSetup)
-		r.Post("/auth/2fa/disable", authController.DisableTwoFactor)
+		r.With(customMiddleware.DemoSignInStays).Post("/auth/2fa/setup", authController.BeginTwoFactorSetup)
+		r.With(customMiddleware.DemoSignInStays).Post("/auth/2fa/confirm", authController.ConfirmTwoFactorSetup)
+		r.With(customMiddleware.DemoSignInStays).Post("/auth/2fa/disable", authController.DisableTwoFactor)
 		r.Get("/auth/passkeys", authController.ListPasskeys)
-		r.Post("/auth/passkeys/begin", authController.BeginPasskeyRegistration)
-		r.Post("/auth/passkeys/finish", authController.FinishPasskeyRegistration)
-		r.Post("/auth/passkeys/{id}/rename", authController.RenamePasskey)
-		r.Post("/auth/passkeys/{id}/delete", authController.DeletePasskey)
+		r.With(customMiddleware.DemoSignInStays).Post("/auth/passkeys/begin", authController.BeginPasskeyRegistration)
+		r.With(customMiddleware.DemoSignInStays).Post("/auth/passkeys/finish", authController.FinishPasskeyRegistration)
+		r.With(customMiddleware.DemoSignInStays).Post("/auth/passkeys/{id}/rename", authController.RenamePasskey)
+		r.With(customMiddleware.DemoSignInStays).Post("/auth/passkeys/{id}/delete", authController.DeletePasskey)
 	})
 
 	// admin routes
@@ -427,6 +447,9 @@ func Routes() http.Handler {
 		r.Post("/guest-access", guestController.SetGuestPolicy)
 		// Read receipts in DMs and group chats: on unless turned off here.
 		r.Post("/read-receipts", settingsController.SetReadReceiptsPolicy)
+		// The channels every new member is put in (#general until chosen).
+		r.Get("/default-channels", settingsController.GetDefaultChannels)
+		r.Post("/default-channels", settingsController.SetDefaultChannels)
 		r.Get("/guest-grants", guestController.ListGuestGrants)
 		r.Post("/guest-grants/{id}/revoke", guestController.RevokeGuestGrant)
 
@@ -730,6 +753,7 @@ func Routes() http.Handler {
 		r.Get("/import/slack/jobs", slackImportController.HandleListJobs)
 		r.Get("/import/slack/jobs/{jobId}", slackImportController.HandleGetJob)
 		r.Get("/import/slack/jobs/{jobId}/errors", slackImportController.HandleListErrors)
+		r.Get("/import/slack/limits", slackImportController.HandleLimits)
 
 		// Generic import pipeline (Asana / Jira / Trello / Notion / Todoist).
 		// Provider routes are discovered from the registry; the FE picks
@@ -751,6 +775,11 @@ func Routes() http.Handler {
 		r.Post("/import/jobs/{jobId}/retry-failed", importController.HandleRetryFailedChunks)
 		r.Delete("/import/jobs/{jobId}/staged-zip", importController.HandleDeleteStagedZip)
 		r.Get("/import/jobs/{jobId}/errors", importController.HandleListErrors)
+		// Who an import brought across, for "Invite the N people who came
+		// across", and how the caller's recent imports ended (the admin banner).
+		r.Get("/import/jobs/{jobId}/people", importController.HandleImportPeople)
+		r.Get("/import/outcomes", importController.HandleImportOutcomes)
+		r.Post("/import/jobs/{jobId}/outcome-seen", importController.HandleOutcomeSeen)
 	})
 
 	router.Group(func(r chi.Router) {
@@ -1436,6 +1465,8 @@ func Routes() http.Handler {
 		r.Post("/addModerator", channelController.AddChannelModerators)
 		r.Post("/addMember", channelController.AddChannelMember)
 		r.Post("/joinChannel", channelController.JoinChannel)
+		// The channel Home offers a member who is in none (#general).
+		r.Get("/suggested", channelController.GetSuggestedChannel)
 		// In-channel "AI teammates": list mention agents + toggle whether each
 		// responds in this channel (the Slack "add the AI to a channel" model).
 		r.Get("/{channelId}/ai-teammates", func(w http.ResponseWriter, r *http.Request) {

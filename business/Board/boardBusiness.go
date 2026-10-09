@@ -693,10 +693,7 @@ func RecordBoardView(ctx context.Context, boardUUID, userUID, userUUID string) e
 	if board == nil {
 		return errors.New("board not found")
 	}
-	isOwner := board.CreatedBy != nil && board.CreatedBy.Uid == userUID
-	hasAccess := board.HasEditAccess > 0 || board.HasReadAccess > 0 || board.HasCommentAccess > 0
-	isPublic := board.IsPrivate == nil || !*board.IsPrivate
-	if !isOwner && !hasAccess && !isPublic {
+	if !CanRead(board, userUUID) {
 		return errors.New("unauthorized")
 	}
 	return resourceViewBusiness.RecordView(ctx, resourceViewBusiness.ResourceBoard, boardUUID, userUUID)

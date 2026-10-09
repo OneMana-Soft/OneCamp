@@ -422,6 +422,38 @@ func UpdateRowValues(ctx context.Context, tableId, rowId uuid.UUID, valuesJSON s
 	return out, nil
 }
 
+// ErrRowTooLarge is a merge that would take a row past the size it may be.
+var ErrRowTooLarge = errors.New("row is too large")
+
+// MergeRowValues writes the given cells into a row in one statement, leaving
+// its other cells and its place as they are now, not as they were when the
+// caller read it (an AI fill reads the row, waits seconds for the model, and
+// used to write that copy back over anything changed meanwhile). The merged
+// row may be at most maxBytes.
+func MergeRowValues(ctx context.Context, tableId, rowId uuid.UUID, patchJSON string, maxBytes int) (*Row, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	const q = `UPDATE data_table_rows SET values = values || $3::jsonb, updated_at = NOW()
+		WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL
+		  AND octet_length((values || $3::jsonb)::text) <= $4
+		RETURNING ` + rowColumns
+	out, err := scanRow(postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, rowId, tableId, patchJSON, maxBytes))
+	if errors.Is(err, sql.ErrNoRows) {
+		var live bool
+		if qerr := postgresInit.DBConn.SqlDB.QueryRowContext(dbctx,
+			`SELECT EXISTS (SELECT 1 FROM data_table_rows WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL)`,
+			rowId, tableId).Scan(&live); qerr == nil && live {
+			return nil, ErrRowTooLarge
+		}
+		return nil, sql.ErrNoRows
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/MergeRowValues err: %+v", err)
+		return nil, err
+	}
+	return out, nil
+}
+
 // DeleteRow soft-deletes a row, and its links to and from other rows
 // (relationModel.go), in one transaction. It says whether it had links.
 func DeleteRow(ctx context.Context, tableId, rowId uuid.UUID) (bool, error) {

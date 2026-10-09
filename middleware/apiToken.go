@@ -58,7 +58,9 @@ func VerifyApiToken(next http.Handler) http.Handler {
 		// business code sees a normal authenticated user.
 		userDBInfo, err := domain.GetActiveUserWithAdminFlagByUserUUID(ctx, auth.UserID)
 		emptyUUID := uuidNil()
-		if err != nil || userDBInfo == nil || userDBInfo.Id == emptyUUID {
+		// A member's: an external person or a bot never signs in, so a token
+		// one holds (minted while it wrongly could) acts for nobody.
+		if err != nil || userDBInfo == nil || userDBInfo.Id == emptyUUID || !userDBInfo.IsMember() {
 			unauthorizedJSON(w, "token owner is not an active user")
 			return
 		}

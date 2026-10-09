@@ -176,12 +176,11 @@ func processAttachmentChunk(ctx context.Context, prov importProvider.Provider,
 			return importModels.FinishChunk(ctx, chunk.Id, 0, nil)
 		}
 		if rl, isRL := importProvider.IsRateLimited(fetchErr); isRL {
-			if rl > 0 {
-				select {
-				case <-ctx.Done():
-					return ctx.Err()
-				case <-time.After(rl):
-				}
+			// Napped, not slept out: a worker asleep past five minutes has
+			// its claim on the chunk taken for a stuck one.
+			waitOutRateLimit(ctx, job, fetchErr, rl)
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
 			_ = importModels.ResetChunkForRetry(ctx, chunk.Id, "provider rate-limited")
 			return errReaperOnly

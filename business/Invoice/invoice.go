@@ -46,6 +46,9 @@ var (
 	ErrNumberTaken = model.ErrNumberTaken
 	// ErrNotDraft is changing or deleting an invoice that has been sent.
 	ErrNotDraft = errors.New("only a draft can be changed")
+	// ErrWasSent is renumbering or deleting a draft that was sent before:
+	// its number is spoken for.
+	ErrWasSent = errors.New("an invoice once sent keeps its number")
 )
 
 // LineInput is one line as the app sends it; its amount is worked out here.
@@ -252,10 +255,15 @@ func Update(ctx context.Context, project, id uuid.UUID, in Input) (*model.Invoic
 }
 
 // notDraft says why a draft-only change didn't happen: the invoice is gone,
-// or it has been sent.
+// it has been sent, or it is a draft that was sent before (whose number
+// stays).
 func notDraft(ctx context.Context, project, id uuid.UUID) error {
-	if _, err := model.Get(ctx, project, id); err != nil {
+	inv, err := model.Get(ctx, project, id)
+	if err != nil {
 		return err
+	}
+	if inv.Status == model.StatusDraft && inv.FirstSentAt != nil {
+		return ErrWasSent
 	}
 	return ErrNotDraft
 }

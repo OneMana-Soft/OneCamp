@@ -14,6 +14,8 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -197,8 +199,7 @@ func ListDocSnapshots(ctx context.Context, docUUID string, userUID string) ([]*D
 	if doc == nil {
 		return nil, errors.New("doc not found")
 	}
-	isOwner := doc.CreatedBy != nil && doc.CreatedBy.Uid == userUID
-	if !isOwner && doc.HasEditAccess == 0 {
+	if !CanEdit(doc, userUID) {
 		return nil, errors.New("unauthorized")
 	}
 
@@ -256,8 +257,7 @@ func RestoreDocSnapshot(ctx context.Context, docUUID string, snapshotID uuid.UUI
 	if doc == nil {
 		return errors.New("doc not found")
 	}
-	isOwner := doc.CreatedBy != nil && doc.CreatedBy.Uid == userUID
-	if !isOwner && doc.HasEditAccess == 0 {
+	if !CanEdit(doc, userUID) {
 		return errors.New("unauthorized: edit access required to restore")
 	}
 
@@ -345,11 +345,26 @@ func runDocSnapshotCleanupTick() {
 	}
 }
 
+// collabBodyHash is the hash a saved Yjs state is stored with: SHA-256 of the
+// body's UTF-8 bytes, in hex, as the collaboration service computes it
+// (docState.js bodyHash). The two must agree, or every open rebuilds.
+func collabBodyHash(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:])
+}
+
 // UpdateDocFromCollab persists the doc body from the collaboration service and
 // evaluates a version snapshot off the persist path. Reads the prior body first
 // so a mass-deletion can preserve it. Best-effort snapshotting never blocks the
 // save.
-func UpdateDocFromCollab(ctx context.Context, docUUID, htmlBody string, contributors []string) error {
+//
+// yjsState is the service's Yjs state for that body. It is saved with the
+// body's hash, and the service opens the doc from it while the stored body is
+// still this one (collaboration-service/docState.js): rebuilding it from the
+// body made a new Yjs document, and a browser still holding the old one doubled
+// every paragraph. A state that fails to save is logged; the next open rebuilds
+// from the body, as before.
+func UpdateDocFromCollab(ctx context.Context, docUUID, htmlBody, yjsState string, contributors []string) error {
 	newBytes := len(htmlBody)
 
 	// Only read the prior body when a mass-deletion is plausible (cheap cached
@@ -369,6 +384,9 @@ func UpdateDocFromCollab(ctx context.Context, docUUID, htmlBody string, contribu
 
 	if err := UpdateDoc(ctx, &adapter.InputUpdateDoc{DocId: docUUID, Body: &htmlBody}); err != nil {
 		return err
+	}
+	if yjsState != "" {
+		_ = domain.SetDocCollabState(ctx, docUUID, yjsState, collabBodyHash(htmlBody))
 	}
 
 	resourceViewBusiness.SetCachedStateSize(ctx, resourceViewBusiness.ResourceDoc, docUUID, newBytes)

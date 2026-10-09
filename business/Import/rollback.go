@@ -114,9 +114,9 @@ func softDelete(ctx context.Context, importId uuid.UUID, entityType, table strin
 			args = append(args, e.OnecampUUID)
 		}
 		query := fmt.Sprintf(`
-			UPDATE %s SET deleted_at = NOW(), updated_at = NOW()
+			UPDATE %s SET %s
 			WHERE id IN (%s) AND deleted_at IS NULL`,
-			tableNameWhitelist(table),
+			tableNameWhitelist(table), markDeleted(table),
 			strings.Join(placeholders, ","))
 		if _, err := importModels.Exec(ctx, query, args...); err != nil {
 			return fmt.Errorf("rollback %s batch %d: %w", table, i, err)
@@ -287,6 +287,16 @@ func softDeleteExternalUsers(ctx context.Context, importId uuid.UUID) error {
 		}
 	}
 	return nil
+}
+
+// markDeleted is the SET clause that marks a row deleted. attachments has no
+// updated_at, so setting it failed the statement, and with it the rollback of
+// every import that brought a file, after its tasks were already gone.
+func markDeleted(table string) string {
+	if table == "attachments" {
+		return "deleted_at = NOW()"
+	}
+	return "deleted_at = NOW(), updated_at = NOW()"
 }
 
 // tableNameWhitelist is a tiny defence against table-name injection.

@@ -2,12 +2,10 @@ package business
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +15,6 @@ import (
 	lastSeenActivityBusiness "github.com/akashc777/OneCamp/business/LastSeenActivity"
 	LiveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
-	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	taskrank "github.com/akashc777/OneCamp/business/TaskRank"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
@@ -37,7 +34,6 @@ import (
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 	"github.com/coreos/go-oidc/v3/oidc"
-	jwt "github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 	"golang.org/x/oauth2"
@@ -69,6 +65,7 @@ type RecordingPagination struct {
 
 func CreateUser(ctx context.Context, emailID string, userName string) (err error) {
 
+	emailID = helpers.NormalizeEmail(emailID)
 	userUUID := uuid.New()
 	err = domain.CreateUser(ctx, emailID, userUUID)
 	zeroUnixTime := time.Time{}
@@ -377,39 +374,26 @@ func GetUserByEmailId(ctx context.Context, emailId *string) (userInfo *userModel
 	return
 }
 
-func ResetToken(ctx context.Context, userId string, deviceId string, authTokenExpiryUnix int64, refreshTokenExpiryUnix int64) (AuthTokenString string, RefreshTokenString string, err error) {
-	AuthTokenString, err = GenerateAuthTokenString(ctx, userId, authTokenExpiryUnix)
+// StartSession starts a signed-in session on a device: a short-lived access
+// token, and the refresh token that renews it (RotateRefreshToken), kept under
+// the person and device so only the latest one is honoured. Every way of
+// signing in ends here.
+func StartSession(ctx context.Context, userID, deviceID string, authExp, refreshExp int64) (authToken, refreshToken string, err error) {
+	authToken, err = GenerateAuthTokenString(ctx, userID, authExp)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/ResetToken Failed to create auth token err: %+v",
-			err,
-		)
-		err = errors.New("failed to create auth token")
-		return
+		helpers.LogErrorWithContext(ctx, "business/StartSession Failed to create auth token err: %+v", err)
+		return "", "", errors.New("failed to create auth token")
 	}
-
-	RefreshTokenString, err = GenerateRefreshTokenString(ctx, userId, refreshTokenExpiryUnix)
+	refreshToken, err = GenerateRefreshTokenString(ctx, userID, refreshExp)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/ResetToken Failed to create refresh token err: %+v",
-			err,
-		)
-		err = errors.New("failed to create refresh token")
-		return
+		helpers.LogErrorWithContext(ctx, "business/StartSession Failed to create refresh token err: %+v", err)
+		return "", "", errors.New("failed to create refresh token")
 	}
-
-	err = redisStore.SetString(ctx, registry.UserRefreshToken, []string{userId, deviceId}, RefreshTokenString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/ResetToken Failed to set refresh token in redis err: %+v",
-			err,
-		)
-		err = errors.New("failed to set refreshToken in redis")
-		return
+	if err = redisStore.SetString(ctx, registry.UserRefreshToken, []string{userID, deviceID}, refreshToken); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/StartSession Failed to set refresh token in redis err: %+v", err)
+		return "", "", errors.New("failed to set refreshToken in redis")
 	}
-
-	return
+	return authToken, refreshToken, nil
 }
 
 func GetUserRecordingsList(ctx context.Context, userDgraphUID string, startDate string, endDate string, pageIndex int, pageSize int) (recordingsPagination RecordingPagination, err error) {
@@ -461,28 +445,6 @@ func LoginUserByEmailID(ctx context.Context, emailID string, uname string, authT
 	// 	}
 	// }
 
-	AuthTokenString, err = GenerateAuthTokenString(ctx, userInfo.Uuid, authTokenExpiryUnix)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/LoginUserByEmailID Failed to create auth token err: %+v",
-			err,
-		)
-		err = errors.New("failed to create auth token")
-		return
-	}
-
-	RefreshTokenString, err = GenerateRefreshTokenString(ctx, userInfo.Uuid, refreshTokenExpiryUnix)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/LoginUserByEmailID Failed to create refresh token err: %+v",
-			err,
-		)
-		err = errors.New("failed to create refresh token")
-		return
-	}
-
-	// generate deviceID
 	deviceId, err = helpers.GenerateUniqueDeviceId()
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -492,15 +454,8 @@ func LoginUserByEmailID(ctx context.Context, emailID string, uname string, authT
 		err = errors.New("Failed to generate deviceId")
 		return
 	}
-
-	err = redisStore.SetString(ctx, registry.UserRefreshToken, []string{userInfo.Uuid, deviceId}, RefreshTokenString)
-
+	AuthTokenString, RefreshTokenString, err = StartSession(ctx, userInfo.Uuid, deviceId, authTokenExpiryUnix, refreshTokenExpiryUnix)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/LoginUserByEmailID Failed to set refresh token in redis err: %+v",
-			err,
-		)
-		err = errors.New("failed to set refreshToken in redis")
 		return
 	}
 
@@ -518,13 +473,8 @@ func LoginUserByEmailID(ctx context.Context, emailID string, uname string, authT
 }
 
 func GenerateRefreshTokenString(ctx context.Context, userId string, exp int64) (RefreshTokenString string, err error) {
-	refreshToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub": userId,
-		"exp": exp,
-	})
-
-	jwtSecret := os.Getenv("JWT_SECRET")
-	RefreshTokenString, err = refreshToken.SignedString([]byte(jwtSecret))
+	// Typed, so a refresh token is never taken for a session (helpers/sessionToken.go).
+	RefreshTokenString, err = helpers.SignSessionToken(userId, helpers.TokenTypeRefresh, exp)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/GenerateRefreshTokenString Failed to generate auth token err: %+v",
@@ -536,13 +486,7 @@ func GenerateRefreshTokenString(ctx context.Context, userId string, exp int64) (
 }
 
 func GenerateAuthTokenString(ctx context.Context, userId string, exp int64) (AuthTokenString string, err error) {
-	authToken := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"sub": userId,
-		"exp": exp,
-	})
-
-	jwtSecret := os.Getenv("JWT_SECRET")
-	AuthTokenString, err = authToken.SignedString([]byte(jwtSecret))
+	AuthTokenString, err = helpers.SignSessionToken(userId, helpers.TokenTypeAccess, exp)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/GenerateAuthTokenString Failed to generate auth token err: %+v",
@@ -580,13 +524,21 @@ func OAuthLogin(ctx context.Context, oauthStateString string, provider string) (
 	return
 }
 
-func OAuthCallback(ctx context.Context, oauthCode string, provider string) (emailId string, uname string, err error) {
+// OAuthCallback reads who Google or GitHub signed in, and admits them. landing
+// is the channel someone who has just joined starts in (Joined.Landing), and
+// uuid.Nil for a member signing in again.
+func OAuthCallback(ctx context.Context, oauthCode string, provider string) (emailId string, uname string, landing uuid.UUID, err error) {
 	var user *authModels.User
+	// The Google Workspace domain that manages a Google account (the ID
+	// token's hd), or "": what a domain entry on the allow-list admits by.
+	hostedDomain := ""
 	switch provider {
 	case AuthRecipeMethodGoogle:
-		user, err = processGoogleUserInfo(ctx, oauthCode)
+		user, hostedDomain, err = processGoogleUserInfo(ctx, oauthCode)
 	case AuthRecipeMethodGithub:
 		user, err = processGithubUserInfo(ctx, oauthCode)
+	default:
+		err = errors.New("unknown provider")
 	}
 
 	if err != nil {
@@ -596,69 +548,97 @@ func OAuthCallback(ctx context.Context, oauthCode string, provider string) (emai
 
 		return
 	}
-
-	emailId = *user.Email
-	uname = *user.GivenName
-
-	err, userExist := domain.CheckIfUserExistByEmail(ctx, *user.Email)
-
-	if !userExist {
-
-		usersArray := settingsBusiness.AllowedUsers()
-
-		userAllowed := false
-		for _, userEmail := range usersArray {
-			if strings.EqualFold(strings.TrimSpace(userEmail), strings.TrimSpace(emailId)) {
-				userAllowed = true
-				break
-			}
-		}
-
-		if !userAllowed {
-			// Check if exists in invitations table
-			invited, invErr := domain.CheckIfInvitationExists(ctx, emailId)
-			if invErr == nil && invited {
-				userAllowed = true
-			}
-		}
-
-		if !userAllowed {
-			err = errors.New("user not allowed")
-			return
-		}
-
-		// Tag the new user with their signup method ("google" / "github").
-		// OAuth users are NOT marked is_sso_managed=true — they can still
-		// add a local password (SetPassword) for break-glass cases. Only
-		// LDAP/SAML/OIDC users are SSO-managed.
-		_, err = CreateUserWithMethod(ctx, *user.Email, *user.GivenName, nil, provider, false)
-
-		if err != nil {
-
-			helpers.LogErrorWithContext(ctx,
-				"business/OAuthCallback Failed to create user err: %+v",
-				err)
-
-			return
-
-		}
-
+	if user == nil || user.Email == nil || strings.TrimSpace(*user.Email) == "" {
+		err = ErrUnverifiedEmail
+		return
 	}
+
+	emailId = helpers.NormalizeEmail(*user.Email)
+	if !helpers.AddressIsASCII(emailId) {
+		err = ErrAddressNotASCII
+		return
+	}
+	uname = displayName(emailId, user.GivenName)
+
+	joined, err := AdmitOAuthUser(ctx, emailId, uname, provider, hostedDomain)
+	landing = joined.Landing
 	return
 }
 
-func processGoogleUserInfo(ctx context.Context, code string) (*authModels.User, error) {
+// AdmitOAuthUser decides whether the person Google or GitHub just vouched for
+// may sign in with that address. A member may, and gets a zero Joined. Anyone
+// else needs to be on the allow-list or invited, and then joins
+// (JoinAsMember), taking a seat.
+//
+// "Anyone else" includes the owner of an external row: an import or GitHub
+// sync makes one for an address so its history has an author. Any row with the
+// address used to count as an account, so that row's owner skipped the
+// invitation and signed in as an external who never took a seat.
+//
+// hostedDomain is the Google Workspace domain that manages a Google account
+// (the ID token's hd claim), or "": a domain entry on the allow-list admits
+// by it alone (admittedByDomain).
+func AdmitOAuthUser(ctx context.Context, emailID string, name string, provider string, hostedDomain string) (Joined, error) {
+	// Not matched at all, so a lookup that folds case the Unicode way can't
+	// find someone else's account for it.
+	if emailID = helpers.NormalizeEmail(emailID); !helpers.AddressIsASCII(emailID) {
+		return Joined{}, ErrAddressNotASCII
+	}
+	err, member := domain.CheckIfUserExistByEmail(ctx, emailID)
+	if err != nil {
+		return Joined{}, err
+	}
+	if member {
+		return Joined{}, nil
+	}
+
+	if !allowListed(emailID) && !allowListedDomain(emailID, provider, hostedDomain) {
+		// An invitation admits only while it is live: not used, and not past
+		// its expiry. Any invitation row at all used to, so an expired one, or
+		// one used by somebody signing up with the link, still let its address
+		// in through Google or GitHub. A failed check is not a "no": the
+		// person is told they aren't invited only when that is known.
+		usable, invErr := domain.HasUsableInvitation(ctx, emailID)
+		if invErr != nil {
+			return Joined{}, invErr
+		}
+		if !usable {
+			if inv, _ := domain.GetInvitationByEmail(ctx, emailID); inv != nil && inv.Status != InvitationJoined {
+				return Joined{}, ErrInvitationExpired
+			}
+			return Joined{}, ErrNotInvited
+		}
+	}
+
+	// Tag the new user with their signup method ("google" / "github").
+	// OAuth users are NOT marked is_sso_managed=true — they can still
+	// add a local password (SetPassword) for break-glass cases. Only
+	// LDAP/SAML/OIDC users are SSO-managed.
+	joined, err := JoinAsMember(ctx, emailID, name, nil, provider, false)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/AdmitOAuthUser Failed to create user err: %+v",
+			err)
+		return Joined{}, err
+	}
+	return joined, nil
+}
+
+// processGoogleUserInfo reads who Google signed in, and the Google Workspace
+// domain that manages the account (hd), "" for an account no organisation
+// manages.
+func processGoogleUserInfo(ctx context.Context, code string) (*authModels.User, string, error) {
 	googleCfg := oauth.GoogleConfig()
 	googleOIDC := oauth.GoogleOIDCProvider()
 	if googleCfg == nil || googleOIDC == nil {
-		return nil, fmt.Errorf("google login is not configured")
+		return nil, "", fmt.Errorf("google login is not configured")
 	}
 	oauth2Token, err := googleCfg.Exchange(ctx, code)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/processGoogleUserInfo Failed to exchange code for token err: %+v",
 			err)
-		return nil, fmt.Errorf("invalid google exchange code: %s", err.Error())
+		return nil, "", fmt.Errorf("invalid google exchange code: %s", err.Error())
 	}
 	verifier := googleOIDC.Verifier(&oidc.Config{ClientID: googleCfg.ClientID})
 
@@ -668,7 +648,7 @@ func processGoogleUserInfo(ctx context.Context, code string) (*authModels.User, 
 		helpers.LogErrorWithContext(ctx,
 			"business/processGoogleUserInfo Failed to extract ID Token from OAuth2 token err: %+v",
 			err)
-		return nil, fmt.Errorf("unable to extract id_token")
+		return nil, "", fmt.Errorf("unable to extract id_token")
 	}
 
 	// Parse and verify ID Token payload.
@@ -677,17 +657,29 @@ func processGoogleUserInfo(ctx context.Context, code string) (*authModels.User, 
 		helpers.LogErrorWithContext(ctx,
 			"business/processGoogleUserInfo Failed to verify ID Token err: %+v",
 			err)
-		return nil, fmt.Errorf("unable to verify id_token: %s", err.Error())
+		return nil, "", fmt.Errorf("unable to verify id_token: %s", err.Error())
 	}
-	user := &authModels.User{}
-	if err := idToken.Claims(&user); err != nil {
+	var claims struct {
+		Email         string      `json:"email"`
+		EmailVerified interface{} `json:"email_verified"`
+		GivenName     string      `json:"given_name"`
+		Name          string      `json:"name"`
+		// HostedDomain is the Google Workspace domain that manages the
+		// account; absent for an account no organisation manages.
+		HostedDomain string `json:"hd"`
+	}
+	if err := idToken.Claims(&claims); err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/processGoogleUserInfo Failed to parse ID Token claims err: %+v",
 			err)
-		return nil, fmt.Errorf("unable to extract claims")
+		return nil, "", fmt.Errorf("unable to extract claims")
 	}
-
-	return user, nil
+	email := strings.TrimSpace(claims.Email)
+	if email == "" || !helpers.TrueClaim(claims.EmailVerified) {
+		return nil, "", ErrUnverifiedEmail
+	}
+	name := displayName(email, &claims.GivenName, &claims.Name)
+	return &authModels.User{Email: &email, GivenName: &name}, strings.TrimSpace(claims.HostedDomain), nil
 }
 
 func processGithubUserInfo(ctx context.Context, code string) (*authModels.User, error) {
@@ -702,117 +694,30 @@ func processGithubUserInfo(ctx context.Context, code string) (*authModels.User, 
 			err)
 		return nil, fmt.Errorf("invalid github exchange code: %s", err.Error())
 	}
-	client := http.Client{Timeout: 30 * time.Second}
-	req, err := http.NewRequest("GET", GithubUserInfoURL, nil)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/processGithubUserInfo Failed to create github user info request err: %+v",
-			err)
-		return nil, fmt.Errorf("error creating github user info request: %s", err.Error())
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	var profile struct {
+		Login string  `json:"login"`
+		Name  *string `json:"name"`
 	}
-	req.Header.Set(
-		"Authorization", fmt.Sprintf("token %s", oauth2Token.AccessToken),
-	)
-
-	response, err := client.Do(req)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/processGithubUserInfo Failed to request github user info err: %+v",
-			err)
-		return nil, err
+	if err := githubGet(ctx, client, oauth2Token.AccessToken, GithubUserInfoURL, &profile); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/processGithubUserInfo Failed to read the github user err: %+v", err)
+		return nil, fmt.Errorf("failed to request github user info")
 	}
-
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/processGithubUserInfo Failed to read github user info response body err: %+v",
-			err)
-		return nil, fmt.Errorf("failed to read github response body: %s", err.Error())
+	// The list, not the profile's public address: only the list says which
+	// addresses GitHub has verified. Any of them may be the one this
+	// workspace knows.
+	var emails []GitHubEmail
+	if err := githubGet(ctx, client, oauth2Token.AccessToken, GithubUserEmailsURL, &emails); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/processGithubUserInfo Failed to read the github user's emails err: %+v", err)
+		return nil, fmt.Errorf("failed to request github user emails")
 	}
-	if response.StatusCode >= 400 {
-		helpers.LogErrorWithContext(ctx,
-			"business/processGithubUserInfo Failed to request github user info err: %+v",
-			err)
-		return nil, fmt.Errorf("failed to request github user info: %s", string(body))
+	email, ok := GitHubSignInAddress(ctx, emails)
+	if !ok {
+		return nil, ErrUnverifiedEmail
 	}
-
-	var githubUserInfo authModels.User
-
-	err = json.Unmarshal(body, &githubUserInfo)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/processGithubUserInfo Failed to unmarshal uaer raw data err: %+v",
-			err)
-		return nil, fmt.Errorf("failed to read github response body: %s", err.Error())
-	}
-
-	email := *githubUserInfo.Email
-
-	if email == "" {
-		type GithubUserEmails struct {
-			Email   string `json:"email"`
-			Primary bool   `json:"primary"`
-		}
-
-		// fetch using /users/email endpoint
-		req, err := http.NewRequest(http.MethodGet, GithubUserEmailsURL, nil)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/processGithubUserInfo Failed to create github emails request err: %+v",
-				err)
-			return nil, fmt.Errorf("error creating github user info request: %s", err.Error())
-		}
-		req.Header.Set(
-			"Authorization", fmt.Sprintf("token %s", oauth2Token.AccessToken),
-		)
-
-		response, err := client.Do(req)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/processGithubUserInfo Failed to request github user email err: %+v",
-				err)
-			return nil, err
-		}
-
-		defer response.Body.Close()
-		body, err := io.ReadAll(response.Body)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/processGithubUserInfo Failed to read github user email response body err: %+v",
-				err)
-			return nil, fmt.Errorf("failed to read github response body: %s", err.Error())
-		}
-		if response.StatusCode >= 400 {
-			helpers.LogErrorWithContext(ctx,
-				"business/processGithubUserInfo UserInfo Failed to request github user email err: %+v",
-				err)
-			return nil, fmt.Errorf("failed to request github user info: %s", string(body))
-		}
-
-		emailData := []GithubUserEmails{}
-		err = json.Unmarshal(body, &emailData)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/processGithubUserInfo Failed to parse github user email err: %+v",
-				err)
-			return nil, fmt.Errorf("failed to parse github user email: %s", err.Error())
-		}
-
-		for _, userEmail := range emailData {
-			email = userEmail.Email
-			if userEmail.Primary {
-				break
-			}
-		}
-	}
-
-	user := &authModels.User{
-		Email:     &email,
-		GivenName: githubUserInfo.GithubName,
-	}
-
-	return user, nil
+	name := displayName(email, profile.Name, &profile.Login)
+	return &authModels.User{Email: &email, GivenName: &name}, nil
 }
 
 func GetAllAdminUsers(ctx context.Context, pageIndex int, pageSize int) (usersInfo []*userModels.User, hasMore bool, err error) {
@@ -1683,17 +1588,132 @@ func CreateUserWithPassword(ctx context.Context, emailID string, userName string
 	if passwordHash == nil {
 		method = "" // legacy callers (OAuth code path that hasn't been migrated)
 	}
-	_, err = CreateUserWithMethod(ctx, emailID, userName, passwordHash, method, false)
+	_, _, err = CreateUserWithMethod(ctx, emailID, userName, passwordHash, method, false)
 	return
 }
 
-// CreateUserWithMethod is the canonical user-creator. It returns the new
-// user's UUID alongside any error, so callers (especially SSO callbacks) don't
-// need to round-trip back through GetUserByEmailId to learn it.
+// Joined is who JoinAsMember made a member, and where they start.
+type Joined struct {
+	UserID uuid.UUID
+	// Landing is the channel they open on: one of the workspace's default
+	// channels they were put in (WelcomeNewMember), or uuid.Nil when there is
+	// none, and they start on Home as before.
+	Landing uuid.UUID
+	// Handle is their @handle (users.username), "" only if one could not be
+	// given (logged).
+	Handle string
+	// Adopted reports that the account was an external row an import or a
+	// GitHub sync left, now theirs, rather than a new one.
+	Adopted bool
+}
+
+// welcomeNewMember puts someone who has just become a member where a new
+// member starts, and returns the channel they land in. business/Channel sets
+// it (WelcomeNewMembersWith): it imports this package, so this one cannot
+// call it.
+var welcomeNewMember func(ctx context.Context, userID uuid.UUID) uuid.UUID
+
+// WelcomeNewMembersWith sets what becoming a member does beyond the account.
+func WelcomeNewMembersWith(welcome func(ctx context.Context, userID uuid.UUID) uuid.UUID) {
+	welcomeNewMember = welcome
+}
+
+// WelcomeNewMember does it for userID, returning the channel they land in, or
+// uuid.Nil. JoinAsMember calls it; so does anything else that makes a member.
+// It never fails a join: what it cannot do, it logs.
+func WelcomeNewMember(ctx context.Context, userID uuid.UUID) uuid.UUID {
+	if welcomeNewMember == nil {
+		return uuid.Nil
+	}
+	return welcomeNewMember(ctx, userID)
+}
+
+// JoinAsMember gives emailID a member account, the way an invitation, Google or
+// GitHub, or single sign-on lets someone in: by adopting the external row an
+// import or GitHub sync left for that address (domain.AdoptExternalUser), when
+// there is one, or by creating a member. Either way a seat is taken, and the
+// new member is put in the workspace's default channels (WelcomeNewMember).
 //
-// Username uniqueness: if the requested username collides with an existing
-// row, this function appends a short hex suffix (up to 5 retries) before
-// giving up. This stops LDAP/SAML/OIDC JIT-provisioning from failing when two
+// Adopting keeps the row's id, so what was imported under it is theirs; a
+// fresh account couldn't have the address anyway (email_id is unique). They
+// keep the name the import gave them, which they can change in their profile.
+//
+// The address is lowercased (helpers.NormalizeEmail) and the external row
+// found without regard to case, so an import that wrote "Ana@Acme.com" is
+// adopted by the person who signs in as "ana@acme.com".
+func JoinAsMember(
+	ctx context.Context,
+	emailID string,
+	userName string,
+	passwordHash *string,
+	signupMethod string,
+	isSSOManaged bool,
+) (Joined, error) {
+	return joinAsMember(ctx, emailID, userName, passwordHash, signupMethod, isSSOManaged, true)
+}
+
+// JoinAsStagedMember is JoinAsMember for an account a directory makes before
+// the person starts (SCIM active:false): the account and its seat, adopted or
+// new, without the welcome. Putting them in the default channels would tell
+// those channels (user.joined) about someone who isn't there yet. They are
+// welcomed when the account is activated (business/Scim SetActive) or at
+// their first sign-in (business/Channel FirstSignInLanding).
+func JoinAsStagedMember(
+	ctx context.Context,
+	emailID string,
+	userName string,
+	passwordHash *string,
+	signupMethod string,
+	isSSOManaged bool,
+) (Joined, error) {
+	return joinAsMember(ctx, emailID, userName, passwordHash, signupMethod, isSSOManaged, false)
+}
+
+// joinAsMember is JoinAsMember, welcoming the new member or not.
+func joinAsMember(
+	ctx context.Context,
+	emailID string,
+	userName string,
+	passwordHash *string,
+	signupMethod string,
+	isSSOManaged bool,
+	welcome bool,
+) (Joined, error) {
+	emailID = helpers.NormalizeEmail(emailID)
+	if !helpers.AddressIsASCII(emailID) {
+		return Joined{}, ErrAddressNotASCII
+	}
+	userID, adopted, err := domain.AdoptExternalUser(ctx, emailID, passwordHash, signupMethod, isSSOManaged)
+	if err != nil {
+		return Joined{}, err
+	}
+	var handle string
+	if adopted {
+		handle = ensureHandle(ctx, userID, userName, emailID)
+	} else if userID, handle, err = CreateUserWithMethod(ctx, emailID, userName, passwordHash, signupMethod, isSSOManaged); err != nil {
+		return Joined{}, err
+	}
+	// Whatever the way in, an invitation to this address is now used: the
+	// admin's list says Joined, and its link no longer admits anyone.
+	_ = domain.MarkInvitationJoined(ctx, emailID)
+	joined := Joined{UserID: userID, Handle: handle, Adopted: adopted}
+	if welcome {
+		joined.Landing = WelcomeNewMember(ctx, userID)
+	}
+	return joined, nil
+}
+
+// CreateUserWithMethod is the canonical user-creator. It returns the new
+// user's UUID and handle alongside any error, so callers (especially SSO
+// callbacks) don't need to round-trip back through GetUserByEmailId to learn
+// them.
+//
+// userName is the name they joined with: from sign-up, or whatever an
+// identity provider had (a GitHub login, a directory's account name). It is
+// cleaned to the person rule (helpers.CleanPersonName) and becomes the display
+// name everyone sees. The handle is derived from it (helpers.HandleFromName)
+// and is what has to be unique: a second Sam is @sam-2, and is still called
+// Sam. This stops LDAP/SAML/OIDC JIT-provisioning from failing when two
 // upstream directories happen to share a sAMAccountName / preferred_username.
 func CreateUserWithMethod(
 	ctx context.Context,
@@ -1702,38 +1722,26 @@ func CreateUserWithMethod(
 	passwordHash *string,
 	signupMethod string,
 	isSSOManaged bool,
-) (userUUID uuid.UUID, err error) {
+) (userUUID uuid.UUID, handle string, err error) {
 	userUUID = uuid.New()
+	emailID = helpers.NormalizeEmail(emailID)
+	name := memberDisplayName(userName, emailID)
 
-	tryName := userName
-	const maxRetries = 5
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		err = domain.CreateUserWithMethod(ctx, emailID, tryName, passwordHash, userUUID, signupMethod, isSSOManaged)
-		if err == nil {
-			break
-		}
-		if !domain.IsUniqueViolationOnUsername(err) {
-			helpers.LogErrorWithContext(ctx,
-				"business/CreateUserWithMethod Failed to create user in postgres err: %+v", err)
-			return userUUID, err
-		}
-		// Username collision — append a short suffix and retry.
-		// Suffix is taken from a fresh UUID so it's unlikely to re-collide.
-		suffix := strings.ReplaceAll(uuid.New().String(), "-", "")[:5]
-		tryName = fmt.Sprintf("%s_%s", userName, suffix)
-		helpers.LogErrorWithContext(ctx,
-			"business/CreateUserWithMethod username collision, retrying as %q (attempt %d)", tryName, attempt+1)
-	}
+	handle, err = claimFreeHandle(ctx, helpers.HandleFromName(name, emailID), func(h string) error {
+		return domain.CreateUserWithMethod(ctx, emailID, h, passwordHash, userUUID, signupMethod, isSSOManaged)
+	})
 	if err != nil {
-		return userUUID, err
+		helpers.LogErrorWithContext(ctx,
+			"business/CreateUserWithMethod Failed to create user in postgres err: %+v", err)
+		return userUUID, "", err
 	}
 
 	zeroUnixTime := time.Time{}
 	dgraphUser := &dgraphStruct.DgraphUser{
 		Uuid:         userUUID.String(),
 		EmailID:      emailID,
-		UserName:     tryName,
-		UserFullName: tryName,
+		UserName:     name,
+		UserFullName: name,
 		Status:       dgraphStruct.USER_OPT_STATUS_ONLINE,
 		DeletedAt:    &zeroUnixTime,
 	}
@@ -1762,50 +1770,67 @@ func CreateUserWithMethod(
 				return domain.HardDeleteUser(undoCtx, userUUID)
 			})
 
-		return userUUID, err
+		return userUUID, "", err
 	}
 
 	openSearchUser := &openSearchStruct.OpenSearchUser{
 		Uuid:          userUUID.String(),
-		UserName:      tryName,
-		UserFullName:  tryName,
+		UserName:      name,
+		UserFullName:  name,
 		UserEmail:     emailID,
 		UserCreatedAt: time.Now().Unix(),
 	}
 
 	go domain.UpdateUserInOpenSearch(openSearchUser)
 
-	return userUUID, nil
+	return userUUID, handle, nil
 }
 
-func AddInvitationWithToken(ctx context.Context, email string, invitedBy uuid.UUID, token string, expiresAt time.Time) (err error) {
-	exists, err := domain.CheckIfInvitationExists(ctx, email)
-	if err != nil {
-		return err
+// AddInvitationWithToken invites email with a new link, from invitedBy.
+//
+// An admin is told why an address can't be invited (InviteRefusal): it has an
+// account here (live or deactivated), or a live invitation, whose link can be
+// copied or sent again from the list. An expired invitation, or one used by
+// an account that is gone, is renewed for an admin instead (renewed=true): a
+// new link, and the invitation is the admin's now.
+//
+// A member (byAdmin false; an admin can let members invite) only invites
+// addresses with no account and no invitation at all. Every other answer is
+// the same refusal (memberInviteRefusal), so inviting can't be used to learn
+// who has an account here, who has been deactivated, or who is invited; and
+// only an admin renews an invitation.
+func AddInvitationWithToken(ctx context.Context, email string, invitedBy uuid.UUID, byAdmin bool, token string, expiresAt time.Time) (renewed bool, err error) {
+	email = helpers.NormalizeEmail(email)
+	if err = refuseInvitingMember(ctx, email); err != nil {
+		if _, refused := IsInviteRefusal(err); refused && !byAdmin {
+			return false, memberInviteRefusal
+		}
+		return false, err
 	}
-	if exists {
-		return errors.New("invitation already exists")
+	existing, err := domain.GetInvitationByEmail(ctx, email)
+	if err != nil {
+		return false, errors.New("failed to add invitation")
+	}
+	if existing != nil {
+		if !byAdmin {
+			return false, memberInviteRefusal
+		}
+		if existing.LiveAt(time.Now()) {
+			return false, &InviteRefusal{Msg: fmt.Sprintf("%s is already invited and the invitation hasn't been used. Copy its link or send it again from the list.", email)}
+		}
+		if err = domain.UpdateInvitationTokenByID(ctx, existing.Id, token, expiresAt, invitedBy); err != nil {
+			return false, errors.New("failed to add invitation")
+		}
+		return true, nil
 	}
 
 	err = domain.AddInvitationWithToken(ctx, email, invitedBy, token, expiresAt)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/AddInvitationWithToken Failed to add invitation err: %+v", err)
-		err = errors.New("failed to add invitation")
-		return
+		return false, errors.New("failed to add invitation")
 	}
-	return
-}
-
-func UpdateInvitationTokenByEmail(ctx context.Context, email string, token string, expiresAt time.Time) (err error) {
-	err = domain.UpdateInvitationTokenByEmail(ctx, email, token, expiresAt)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/UpdateInvitationTokenByEmail Failed to update invitation token err: %+v", err)
-		err = errors.New("failed to update invitation token")
-		return
-	}
-	return
+	return false, nil
 }
 
 func GetExternalUsers(ctx context.Context, pageIndex int, pageSize int) (usersInfo []*userModels.User, hasMore bool, err error) {
@@ -1888,24 +1913,6 @@ func GetAdminUserByUserUUIUD(ctx context.Context, userUUID uuid.UUID) (userInfo 
 		return
 	}
 
-	return
-}
-
-func AddInvitation(ctx context.Context, email string, invitedBy uuid.UUID) (err error) {
-	exists, err := domain.CheckIfInvitationExists(ctx, email)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return errors.New("invitation already exists")
-	}
-
-	err = domain.AddInvitation(ctx, email, invitedBy)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/AddInvitation Failed to add invitation err: %+v", err)
-		err = errors.New("failed to add invitation")
-		return
-	}
 	return
 }
 

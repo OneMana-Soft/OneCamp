@@ -32,6 +32,7 @@ import (
 	"sync"
 
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
+	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	importDomain "github.com/akashc777/OneCamp/domain/Import"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -83,6 +84,11 @@ type Step struct {
 	// filtered out, because a list you can hide things from has to be a list you
 	// can get them back from.
 	Skipped bool `json:"skipped,omitempty"`
+
+	// SelfHostedOnly marks a step OneCamp Cloud does for a workspace it runs
+	// (settings Managed): email, the model provider. There it is not on the
+	// list at all, rather than telling an admin to do what is done for them.
+	SelfHostedOnly bool `json:"-"`
 }
 
 // State is the whole answer: what is left, and whether to show it at all.
@@ -205,8 +211,9 @@ func Status(ctx context.Context, user userModels.UserInfo) State {
 	}
 
 	state := State{Dismissed: isDismissed()}
+	managed := settingsBusiness.Managed()
 	for _, def := range allDefinitions() {
-		if def.include != nil && !def.include(features) {
+		if !onTheList(def, features, managed) {
 			continue
 		}
 		if def.applies != nil && !def.applies(ctx, user) {
@@ -234,6 +241,16 @@ func Status(ctx context.Context, user userModels.UserInfo) State {
 	}
 	state.Complete = state.Done == state.Total
 	return state
+}
+
+// onTheList decides whether a step applies to this build and this kind of
+// workspace at all: one an absent subsystem contributes does not, and neither
+// does one OneCamp Cloud does for a workspace it runs. Pure.
+func onTheList(def stepDef, features map[string]bool, managed bool) bool {
+	if def.include != nil && !def.include(features) {
+		return false
+	}
+	return !(def.SelfHostedOnly && managed)
 }
 
 // Dismiss hides the checklist for the whole workspace, permanently.
@@ -312,8 +329,8 @@ func withMembership(list []string, id string, present bool) []string {
 }
 
 // definitions are the built-in steps, in the order a person would actually do
-// them: make a place to talk, get people into it, make sure the invitations can
-// leave the building. What comes after is contributed by the subsystems that
+// them: make a place to talk, make sure the invitations can leave the
+// building, then get people into it. What comes after is contributed by the subsystems that
 // exist on this build.
 func definitions() []stepDef {
 	return []stepDef{
@@ -343,8 +360,8 @@ func definitions() []stepDef {
 			Step: Step{
 				ID:    "import",
 				Title: "Bring your existing work over",
-				Detail: "Slack history, or projects and tasks from Trello, Asana, Jira, Notion, Linear, ClickUp " +
-					"and Todoist. Doing it before people arrive means they land in a workspace that already has it.",
+				Detail: "Slack history, or projects and tasks from Trello, Asana, Jira, monday.com, Notion, Linear, " +
+					"ClickUp and Todoist. Doing it before people arrive means they land in a workspace that already has it.",
 				Href: "/app/admin?tab=import",
 				// NOT SLACK-SPECIFIC, and the first version of this step was.
 				//
@@ -375,6 +392,20 @@ func definitions() []stepDef {
 			done: hasAnyProject,
 		},
 		{
+			// Before inviting anyone: without email an invitation is made and
+			// never arrives. It came after "Invite your team", so an admin
+			// working down the list invited people first and then wondered.
+			Step: Step{
+				ID:     "email",
+				Title:  "Set up email",
+				Detail: "Do this before you invite anyone: invitations, password resets and digests are all sent by email.",
+				Href:   "/app/admin?tab=email-settings",
+				// OneCamp Cloud lends a workspace it runs its email.
+				SelfHostedOnly: true,
+			},
+			done: emailWorks,
+		},
+		{
 			Step: Step{
 				ID:     "people",
 				Title:  "Invite your team",
@@ -382,15 +413,6 @@ func definitions() []stepDef {
 				Href:   "/app/admin?tab=invitations",
 			},
 			done: hasOtherPeople,
-		},
-		{
-			Step: Step{
-				ID:     "email",
-				Title:  "Set up email",
-				Detail: "Invitations, password resets and digests all leave through it.",
-				Href:   "/app/admin?tab=email-settings",
-			},
-			done: emailWorks,
 		},
 		// The AI steps are not here. "Connect a model provider" and "watch an
 		// agent be refused" are registered by the AI packages through Register

@@ -236,6 +236,9 @@ func CreateWorkflow(ctx context.Context, in WorkflowInput, createdBy uuid.UUID) 
 	if err != nil {
 		return nil, err
 	}
+	if err := access.checkScope(ctx, createdBy.String(), v.channelID, v.triggerType, in.TriggerConfig); err != nil {
+		return nil, err
+	}
 	id, err := workflowModel.CreateWorkflow(ctx, in.Name, createdBy, v.triggerType, v.triggerConfigJSON, v.botName, v.channelID, v.keywordsJSON, in.MatchType, v.actionsJSON)
 	if err != nil {
 		return nil, err
@@ -268,6 +271,10 @@ func UpdateWorkflow(ctx context.Context, id uuid.UUID, in WorkflowInput, actor A
 	}
 	v, err := validate(&in)
 	if err != nil {
+		return nil, err
+	}
+	// The workflow runs as the person who made it, whoever edits it.
+	if err := access.checkScope(ctx, existing.CreatedBy.String(), v.channelID, v.triggerType, in.TriggerConfig); err != nil {
 		return nil, err
 	}
 	if err := workflowModel.UpdateWorkflow(ctx, id, in.Name, in.IsActive, v.triggerType, v.triggerConfigJSON, v.botName, v.channelID, v.keywordsJSON, in.MatchType, v.actionsJSON); err != nil {

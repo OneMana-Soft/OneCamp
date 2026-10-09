@@ -263,7 +263,12 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 		return
 	}
 
-	// Stage 8: finalize
+	// Stage 8: finalize. Channels archived in Slack are archived now that
+	// their history is in (tidy.go).
+	archiveArchivedChannels(ctx, jobId)
+	if cancelledOrCtxDone(ctx, jobId) {
+		return
+	}
 	_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusCompleted, strPtr("finalize"), nil)
 	publishProgress(ctx, jobId, job.SlackWorkspaceName, "completed", "finalize", "")
 
@@ -458,7 +463,9 @@ func publishProgress(ctx context.Context, jobId uuid.UUID, workspaceName, status
 
 // failJob is the canonical "this run is over and broken" exit.
 func failJob(ctx context.Context, jobId uuid.UUID, workspaceName string, err error) {
-	msg := err.Error()
+	// Logged, stored and broadcast without URL query strings, as the other
+	// imports' failJob: a file's private URL carries its token in one.
+	msg := helpers.WithoutURLQueries(err.Error())
 	helpers.LogErrorWithContext(ctx,
 		"SlackImport job %s failed: %s", jobId, msg)
 	_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusFailed,
@@ -469,10 +476,27 @@ func failJob(ctx context.Context, jobId uuid.UUID, workspaceName string, err err
 // CancelImport signals a running import to stop. Workers see ctx.Done()
 // at their next loop iteration and exit; the orchestrator finalises the
 // job as cancelled.
+//
+// A job still waiting (an upload, or a plan never run) is discarded: it
+// kept its workspace's label busy, and nothing could clear it, so an
+// abandoned upload blocked importing that workspace again. Its staged
+// export goes with it, since a discarded job can't be planned again.
 func CancelImport(ctx context.Context, jobId uuid.UUID) error {
 	job, err := importModels.GetJob(ctx, jobId)
 	if err != nil {
 		return err
+	}
+	switch job.Status {
+	case importModels.StatusPending, importModels.StatusValidating, importModels.StatusPlanned:
+		if err := importModels.UpdateStatus(ctx, jobId, importModels.StatusCancelled,
+			strPtr("cancelled"), strPtr("Discarded before it ran.")); err != nil {
+			return err
+		}
+		if err := DeleteStagedZip(ctx, jobId); err != nil {
+			helpers.LogWarnWithContext(ctx, "SlackImport discard could not delete staged export job=%s err=%+v", jobId, err)
+		}
+		publishProgress(ctx, jobId, job.SlackWorkspaceName, "cancelled", "cancelled", "")
+		return nil
 	}
 	if job.Status != importModels.StatusRunning && job.Status != importModels.StatusPaused {
 		return fmt.Errorf("job is not running (status=%s)", job.Status)

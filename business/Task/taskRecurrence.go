@@ -10,6 +10,7 @@ package business
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Task"
@@ -49,7 +50,8 @@ func CheckRecurrence(rule, mode string) (string, string, error) {
 
 // SetTaskRecurrence makes a task repeat (rule "" stops it). Subtasks don't
 // repeat: their copies would land under a parent that is already done.
-func SetTaskRecurrence(ctx context.Context, task *dgraphStruct.DgraphTask, rule, mode string, by uuid.UUID) (*recurrenceModel.TaskRecurrence, error) {
+// timeZone is the setter's (IANA): the days in the rule are their days.
+func SetTaskRecurrence(ctx context.Context, task *dgraphStruct.DgraphTask, rule, mode, timeZone string, by uuid.UUID) (*recurrenceModel.TaskRecurrence, error) {
 	taskUUID, err := uuid.Parse(task.Uuid)
 	if err != nil {
 		return nil, err
@@ -64,7 +66,18 @@ func SetTaskRecurrence(ctx context.Context, task *dgraphStruct.DgraphTask, rule,
 	if err != nil {
 		return nil, err
 	}
-	return recurrenceModel.Set(taskUUID, rule, mode, by)
+	zone := ""
+	if name := strings.TrimSpace(timeZone); name != "" {
+		if _, err := time.LoadLocation(name); err != nil {
+			return nil, &RecurrenceError{"That time zone isn't one we know."}
+		}
+		zone = name
+	}
+	anchor := 0
+	if isSet(task.DueDate) {
+		anchor = task.DueDate.In(helpers.Location(zone)).Day()
+	}
+	return recurrenceModel.Set(taskUUID, rule, mode, zone, anchor, by)
 }
 
 // GetTaskRecurrence is how the task repeats, or nil.
@@ -76,17 +89,26 @@ func GetTaskRecurrence(taskUUID uuid.UUID) (*recurrenceModel.TaskRecurrence, err
 func isSet(t *time.Time) bool { return t != nil && t.Year() > 1970 }
 
 // NextOccurrence is when the next one is due and starts, given the one just
-// done. A task without a due date counts from when it was done; a start date
-// keeps its distance before the due date. Pure.
-func NextOccurrence(r recurrenceModel.TaskRecurrence, due, start *time.Time, done time.Time) (nextDue time.Time, nextStart *time.Time) {
+// done, and the day of the month the series keeps from here. A task without a
+// due date counts from when it was done; a start date keeps its distance
+// before the due date.
+//
+// IN THE REPEAT'S TIME ZONE. Dates come back from the store in UTC, so a
+// weekly repeat on Monday, due at midnight in India, was Sunday evening to the
+// calendar and came out on Tuesday; "the day it was done" was the UTC day.
+// Pure.
+func NextOccurrence(r recurrenceModel.TaskRecurrence, due, start *time.Time, done time.Time) (nextDue time.Time, nextStart *time.Time, anchorDay int) {
+	loc := helpers.Location(r.TimeZone)
+	done = done.In(loc)
 	base := done
 	if isSet(due) {
-		base = *due
+		base = due.In(loc)
 	}
+	anchorDay = monthDay(r.AnchorDay, base)
 	switch r.Mode {
 	case recurrenceModel.ModeCompletion:
 		// The day it was done, at the time of day it was due.
-		b := time.Date(done.Year(), done.Month(), done.Day(), base.Hour(), base.Minute(), base.Second(), 0, base.Location())
+		b := time.Date(done.Year(), done.Month(), done.Day(), base.Hour(), base.Minute(), base.Second(), 0, loc)
 		nextDue, _ = schedulerBusiness.NextRun(r.Rule, b, b)
 	default:
 		// The calendar's next date after the due date; a task done late
@@ -95,13 +117,25 @@ func NextOccurrence(r recurrenceModel.TaskRecurrence, due, start *time.Time, don
 		if done.After(from) {
 			from = done
 		}
-		nextDue, _ = schedulerBusiness.NextRun(r.Rule, from, base)
+		nextDue, _ = schedulerBusiness.NextRunOnDay(r.Rule, from, base, anchorDay)
 	}
 	if isSet(start) && isSet(due) {
 		s := nextDue.Add(start.Sub(*due))
 		nextStart = &s
 	}
-	return nextDue, nextStart
+	return nextDue, nextStart, anchorDay
+}
+
+// monthDay is the day of the month a monthly or yearly series lands on: the
+// day it was set for, while the due date is still that day (or the month's
+// last day standing in for it, as Feb 28 does for the 31st); once someone has
+// moved the due date to another day, that day. 0 for a series with no day yet.
+func monthDay(anchor int, due time.Time) int {
+	last := time.Date(due.Year(), due.Month()+1, 0, 0, 0, 0, 0, due.Location()).Day()
+	if anchor >= 1 && anchor <= 31 && min(anchor, last) == due.Day() {
+		return anchor
+	}
+	return due.Day()
 }
 
 // repeatIfRecurring creates the next occurrence of a repeating task that was
@@ -146,7 +180,7 @@ func repeatIfRecurring(ctx context.Context, taskUUID uuid.UUID, by *dgraphStruct
 		return
 	}
 
-	due, start := NextOccurrence(*r, task.DueDate, task.StartDate, time.Now())
+	due, start, anchorDay := NextOccurrence(*r, task.DueDate, task.StartDate, time.Now())
 	in := adapter.CreateOrUpdateTaskInput{
 		TaskName:    task.Name,
 		ProjectUuid: project.Uuid,
@@ -179,6 +213,7 @@ func repeatIfRecurring(ctx context.Context, taskUUID uuid.UUID, by *dgraphStruct
 		}
 	}
 	r.TaskUUID = nextUUID
+	r.AnchorDay = anchorDay
 	if err := recurrenceModel.Put(r); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/repeatIfRecurring move rule err: %+v", err)
 	}

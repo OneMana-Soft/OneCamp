@@ -775,7 +775,7 @@ func (p *Provider) do(ctx context.Context, req *http.Request, out any) error {
 		}
 		return &importProvider.ErrRateLimited{RetryAfter: retryAfter, Reason: "Notion 429"}
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return fmt.Errorf("notion auth failed (HTTP %d); reconnect token", resp.StatusCode)
+		return &importProvider.TokenRejected{Msg: fmt.Sprintf("notion auth failed (HTTP %d); reconnect token", resp.StatusCode)}
 	case resp.StatusCode >= 400:
 		raw, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("notion HTTP %d: %s", resp.StatusCode, string(raw))

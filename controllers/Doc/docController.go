@@ -10,6 +10,7 @@ import (
 	"strconv"
 
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
+	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
 	business "github.com/akashc777/OneCamp/business/Doc"
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
 	reactionBusiness "github.com/akashc777/OneCamp/business/Reaction"
@@ -58,7 +59,7 @@ func GetDocInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if *dgraphDoc.IsPrivate == true && dgraphDoc.HasEditAccess == 0 && dgraphDoc.HasReadAccess == 0 && dgraphDoc.HasCommentAccess == 0 && dgraphDoc.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
+	if !business.CanRead(dgraphDoc, userInfo.UserDgraphInfo.Uuid) {
 
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
@@ -175,7 +176,7 @@ func CreateOrUpdateDocCommentReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if *dgraphComment.Doc.IsPrivate == false && dgraphComment.Doc.HasEditAccess == 0 && dgraphComment.Doc.HasReadAccess == 0 && dgraphComment.Doc.HasCommentAccess == 0 {
+	if !business.CanRead(dgraphComment.Doc, userInfo.UserDgraphInfo.Uuid) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
@@ -404,7 +405,9 @@ func CreateDocComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if *dgraphBasicDoc.PublicComment == false && dgraphBasicDoc.HasEditAccess == 0 && dgraphBasicDoc.HasCommentAccess == 0 && dgraphBasicDoc.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
+	// Commenting takes being able to read the doc: "anyone may comment" means
+	// anyone who can see it, and a deleted doc takes no comments.
+	if !business.CanComment(dgraphBasicDoc, userInfo.UserDgraphInfo.Uuid) {
 
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
@@ -629,7 +632,7 @@ func GetAllCommentList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if *docDgraph.IsPrivate == false && docDgraph.HasEditAccess == 0 && docDgraph.HasReadAccess == 0 && docDgraph.HasCommentAccess == 0 && userInfo.UserDgraphInfo.Uuid != docDgraph.CreatedBy.Uuid {
+	if !business.CanRead(docDgraph, userInfo.UserDgraphInfo.Uuid) {
 
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
@@ -762,6 +765,12 @@ func DeleteDoc(w http.ResponseWriter, r *http.Request) {
 
 	}
 
+	// The demo's own docs stay for every visitor (business/DemoGuard).
+	if demoGuard.KeepsFromVisitor(userInfo.UserPostgresInfo.EmailID, docDgraph.CreatedAt) {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "demo", "msg": helpers.DemoSeededMsg})
+		return
+	}
+
 	err = business.DeleteDoc(ctx, docInfo.DocId)
 
 	if err != nil {
@@ -799,6 +808,35 @@ func UpdateDocBody(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 
+	}
+
+	// Who may change what: editing a doc's body or title takes edit access;
+	// changing who can see it or comment on it is its owner's. This checked
+	// nothing, so anyone could rewrite a private doc or make it public.
+	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	if _, perr := uuid.Parse(docInfo.DocId); perr != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid doc id"})
+		return
+	}
+	access, aerr := business.GetDgraphDocByUUIDOnlyEditingInfo(ctx, docInfo.DocId, userInfo.UserDgraphInfo.Uid)
+	if errors.Is(aerr, business.ErrNotFound) || (aerr == nil && access == nil) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such doc."})
+		return
+	}
+	if aerr != nil {
+		// The graph didn't answer: not an answer about the doc, so the
+		// person can try again.
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Couldn't open the doc just now. Try again in a moment."})
+		return
+	}
+	owner := business.IsOwner(access, userInfo.UserDgraphInfo.Uid)
+	if !business.CanEdit(access, userInfo.UserDgraphInfo.Uid) {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You can't edit this doc."})
+		return
+	}
+	if !owner && (docInfo.IsPrivate != nil || docInfo.PublicComment != nil) {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the doc's owner can change who sees it or comments on it."})
+		return
 	}
 
 	err = business.UpdateDoc(ctx, &docInfo)
@@ -839,7 +877,7 @@ func UpdateDocFromCollab(w http.ResponseWriter, r *http.Request) {
 
 	// Map to InputUpdateDoc
 	// We'll store the HTML content as the doc body for now
-	err = business.UpdateDocFromCollab(ctx, collabInput.DocUuid, collabInput.HtmlContent, collabInput.Contributors)
+	err = business.UpdateDocFromCollab(ctx, collabInput.DocUuid, collabInput.HtmlContent, collabInput.YjsState, collabInput.Contributors)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -931,7 +969,7 @@ func GetDocPermissions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if docDgraph.HasEditAccess == 0 && docDgraph.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
+	if !business.CanEdit(docDgraph, userUID) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
@@ -1014,7 +1052,7 @@ func DocCollabAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphDoc.HasEditAccess == 0 && dgraphDoc.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
+	if !business.CanEdit(dgraphDoc, userInfo.UserDgraphInfo.Uid) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Unauthorized doc access",
 		})

@@ -223,7 +223,18 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"echo suppression) against real stores without a Slack workspace.",
 	"ForgetStateForTest": "drops the Slack bridge's cached configuration after the integration " +
 		"test writes the bridge tables directly; the cache would otherwise hide them for 30 seconds.",
+	"ObservePushesForTest": "shows the integration test every push a path asks for, so whom a " +
+		"guest's message, reply or doc comment reaches is checked against real stores. The harness " +
+		"has no Firebase project, and without one MultiCastPush sends nothing there is to look at.",
 
+	"ForgetSettingsForTest": "drops the workspace settings cached for 30 seconds, after an " +
+		"integration test starts a fresh database; the previous test's choices (the channels new " +
+		"members join, say) would otherwise apply in the next one.",
+
+	"UseDirectoryForTest": "stands in for the directory server, so the integration test can sign in " +
+		"through LDAP against real stores and prove that someone with two-step on is asked for their " +
+		"code before any session exists. The harness has no LDAP server, and everything under test " +
+		"comes after the directory's answer.",
 	"AgentBudgetLimit": "reads the per-agent cap off a context so business/MCPServer's tests can " +
 		"assert SpendContext actually carries it. services/AI keeps budgetDimensions unexported, " +
 		"so no other package can see the limit. The invariant is production behaviour — a metered " +

@@ -230,6 +230,10 @@ func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.Cre
 	return nil
 }
 
+// ErrNotEventCreator is someone other than an event's creator trying to
+// delete it: invitees leave an event, they don't delete it for everyone.
+var ErrNotEventCreator = errors.New("Only the person who made this event can delete it.")
+
 func DeleteEvent(ctx context.Context, eventUUID uuid.UUID, userInfo *model.UserInfo) error {
 	currentTime := time.Now()
 
@@ -237,6 +241,11 @@ func DeleteEvent(ctx context.Context, eventUUID uuid.UUID, userInfo *model.UserI
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/DeleteEvent failed to get existing event err: %+v", err)
 		return err
+	}
+	// As UpdateEvent: the creator only. This checked nothing, so anyone could
+	// delete anyone's meeting or booking.
+	if existingEvent == nil || existingEvent.CreatedBy == nil || existingEvent.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
+		return ErrNotEventCreator
 	}
 
 	err = domain.DeleteCalendarEvent(ctx, eventUUID, currentTime)

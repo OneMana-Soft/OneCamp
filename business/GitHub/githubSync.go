@@ -1151,7 +1151,9 @@ func syncCommentsFromGitHub(ctx context.Context, taskUUID uuid.UUID, owner, repo
 	}
 	var userMap map[string]*dgraphStruct.DgraphUser
 	if len(uniqueUserUUIDs) > 0 {
-		users, _ := userBusiness.GetDgraphUserInfoByUUIDs(ctx, uniqueUserUUIDs)
+		// By their uuids: GetDgraphUserInfoByUUIDs takes graph uids, so this
+		// found nobody and every comment fell back to the actor.
+		users, _ := userDomain.GetActiveDgraphUsersByUUIDsLight(ctx, uniqueUserUUIDs)
 		userMap = make(map[string]*dgraphStruct.DgraphUser, len(users))
 		for _, u := range users {
 			if u.Uuid != "" {

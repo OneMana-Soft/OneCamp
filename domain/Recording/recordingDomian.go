@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -30,34 +31,18 @@ func CreateOrUpdateDgraphRecording(ctx context.Context, dgraphRecording *dgraphS
 
 }
 
-// SoftDeleteDgraphRecording soft-deletes a recording by setting recording_deleted_at.
-func SoftDeleteDgraphRecording(ctx context.Context, egressId string) error {
-	currentTime := time.Now()
-	dgraphRec := &dgraphStruct.DgraphRecording{
-		DType:     []string{"Recording"},
-		EgressId:  egressId,
-		DeletedAt: &currentTime,
-	}
+// A recording opened by its egress id (to play it, read its transcript, or
+// delete it) must be live: one that was deleted or archived stayed playable by
+// link, since these reads didn't ask.
+const liveRecording = `gt(recording_ended_at, "1970-01-01T00:00:00Z") AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z")`
 
-	query := fmt.Sprintf(`query {
-		recording as var(func: eq(recording_egress_id, "%+v"))
-	}`, egressId)
-
-	recordingUid, err := dgraphModels.CreateOrUpdateDgraphRecording(ctx, dgraphRec, query, "")
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/SoftDeleteDgraphRecording failed for %s: %+v", egressId, err)
-		return err
-	}
-	_ = recordingUid
-	return nil
-}
 func GetDgraphChannelRecordingInfoByEgressId(ctx context.Context, egressId string, userDgraphUID string) (dgraphRecording *dgraphStruct.DgraphRecording, err error) {
 
 	variables := make(map[string]string)
 	variables["$id"] = egressId
 	variables["$userUid"] = userDgraphUID
 	query := `query RecordingInfo($id: string, $userUid: string){
-				recordingInfo(func: eq(recording_egress_id, $id))  @filter( gt(recording_ended_at, "1970-01-01T00:00:00Z")) {
+				recordingInfo(func: eq(recording_egress_id, $id))  @filter(` + liveRecording + `) {
 					recording_egress_id
 					recording_obj_key
 					recording_channel {
@@ -88,7 +73,7 @@ func GetDgraphDmRecordingInfoByEgressId(ctx context.Context, egressId string, us
 	variables["$id"] = egressId
 	variables["$userUid"] = userDgraphUID
 	query := `query RecordingInfo($id: string, $userUid: string){
-				recordingInfo(func: eq(recording_egress_id, $id))  @filter( gt(recording_ended_at, "1970-01-01T00:00:00Z")) {
+				recordingInfo(func: eq(recording_egress_id, $id))  @filter(` + liveRecording + `) {
 					recording_egress_id
 					recording_obj_key
 					recording_dm {
@@ -142,41 +127,54 @@ func GetRecordingEgressIdsOlderThan(ctx context.Context, cutoff time.Time) ([]st
 	return ids, nil
 }
 
-// BulkArchiveRecordings soft-deletes multiple recordings in a single Dgraph mutation.
+// BulkArchiveRecordings soft-deletes the recordings with these egress ids.
 func BulkArchiveRecordings(ctx context.Context, egressIds []string) error {
-	now := time.Now()
-	recordings := make([]*dgraphStruct.DgraphRecording, len(egressIds))
-	for i, egressId := range egressIds {
-		recordings[i] = &dgraphStruct.DgraphRecording{
-			DType:     []string{"Recording"},
-			EgressId:  egressId,
-			DeletedAt: &now,
-		}
-	}
-
-	query := `query { recordings as var(func: has(recording_egress_id)) }`
-	err := dgraphModels.BulkSoftDeleteDgraphRecordings(ctx, recordings, query)
+	err := setRecordingsDeletedAt(ctx, egressIds, time.Now())
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/BulkArchiveRecordings failed: %v", err)
-		return err
 	}
-	return nil
+	return err
 }
 
-// BulkRestoreRecordings clears recording_deleted_at on multiple recordings.
+// BulkRestoreRecordings clears recording_deleted_at on the recordings with
+// these egress ids.
 func BulkRestoreRecordings(ctx context.Context, egressIds []string) error {
-	zeroTime := time.Time{}
-	recordings := make([]*dgraphStruct.DgraphRecording, len(egressIds))
-	for i, egressId := range egressIds {
-		recordings[i] = &dgraphStruct.DgraphRecording{
-			DType:     []string{"Recording"},
-			EgressId:  egressId,
-			DeletedAt: &zeroTime,
+	return setRecordingsDeletedAt(ctx, egressIds, time.Time{})
+}
+
+// recordingBatch bounds the egress ids one upsert names.
+const recordingBatch = 200
+
+// setRecordingsDeletedAt stamps recording_deleted_at on the recordings with
+// these egress ids.
+//
+// The mutations used to name no node, and a node in a mutation that names none
+// is a new one: each archive or restore made a node holding only an egress id
+// and the time, once per recording per run, and never touched the recording.
+// So an archived recording was never archived, and the purge, finding those
+// stray nodes, removed them and never the recordings' files. Now the upsert's
+// query finds the recordings (by egress id, and a start time, which a stray
+// node never has) and the mutation names what it found; an id that finds
+// nothing changes nothing. The ids are query variables, never query text.
+func setRecordingsDeletedAt(ctx context.Context, egressIds []string, at time.Time) error {
+	for start := 0; start < len(egressIds); start += recordingBatch {
+		batch := egressIds[start:min(start+recordingBatch, len(egressIds))]
+		params := make([]string, len(batch))
+		names := make([]string, len(batch))
+		variables := make(map[string]string, len(batch))
+		for i, id := range batch {
+			names[i] = "$e" + strconv.Itoa(i)
+			params[i] = names[i] + ": string"
+			variables[names[i]] = id
+		}
+		query := fmt.Sprintf(`query Recordings(%s) {
+			recordings as var(func: eq(recording_egress_id, [%s])) @filter(has(recording_stared_at))
+		}`, strings.Join(params, ", "), strings.Join(names, ", "))
+		if err := dgraphModels.SetDgraphRecordingsDeletedAt(ctx, query, variables, "recordings", at); err != nil {
+			return err
 		}
 	}
-
-	query := `query { recordings as var(func: has(recording_egress_id)) }`
-	return dgraphModels.BulkSoftDeleteDgraphRecordings(ctx, recordings, query)
+	return nil
 }
 
 // CountRecentlyArchivedRecordings returns the number of recordings soft-deleted after cutoff.
@@ -220,22 +218,3 @@ func GetRecentlyArchivedRecordings(ctx context.Context, cutoffRFC3339 string, fi
 }
 
 // RestoreDgraphRecording clears recording_deleted_at (un-soft-deletes).
-func RestoreDgraphRecording(ctx context.Context, egressId string) error {
-	zeroTime := time.Time{}
-	dgraphRec := &dgraphStruct.DgraphRecording{
-		DType:     []string{"Recording"},
-		EgressId:  egressId,
-		DeletedAt: &zeroTime,
-	}
-
-	query := fmt.Sprintf(`query {
-		recording as var(func: eq(recording_egress_id, "%+v"))
-	}`, egressId)
-
-	_, err := dgraphModels.CreateOrUpdateDgraphRecording(ctx, dgraphRec, query, "")
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/RestoreDgraphRecording failed for %s: %+v", egressId, err)
-		return err
-	}
-	return nil
-}

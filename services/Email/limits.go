@@ -47,6 +47,22 @@ func dailyCapFromEnv() int {
 	return n
 }
 
+// InvitationReserve is how many of the day's capped messages an invitation
+// leaves unspent (SendOptions.Keep): password resets share the cap, and a
+// person locked out should still get theirs after an admin has invited a whole
+// imported team. At most a quarter of the cap is kept (kept).
+const InvitationReserve = 5
+
+// kept is how many of a day's cap a send asking to keep keep holds back: at
+// most a quarter of the cap. With the whole reserve, a cap of 5 or less
+// (EMAIL_DAILY_CAP) left no invitation to email at all. Pure.
+func kept(cap, keep int) int {
+	if quarter := cap / 4; keep > quarter {
+		return quarter
+	}
+	return keep
+}
+
 // dailyCounter counts messages sent in the current UTC day.
 type dailyCounter struct {
 	mu    sync.Mutex
@@ -56,25 +72,68 @@ type dailyCounter struct {
 
 var sentToday dailyCounter
 
-// take reserves one message against the cap, or refuses it. Pure given its
-// arguments and the counter.
-func (c *dailyCounter) take(now time.Time, cap int) error {
+// take reserves one message against the cap, or refuses it. keep is how many
+// of the day's messages must be left after this one (an invitation keeps
+// InvitationReserve). Pure given its arguments and the counter.
+func (c *dailyCounter) take(now time.Time, cap, keep int) error {
 	if cap <= 0 {
 		return nil
 	}
+	keep = kept(cap, keep)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	day := now.UTC().Format("2006-01-02")
-	if c.day != day {
-		c.day, c.count = day, 0
-	}
+	c.roll(now)
 	if c.count >= cap {
+		msg := "this workspace has sent its " + strconv.Itoa(cap) + " emails for today; it can send more tomorrow (UTC)"
 		return &SendError{
 			StatusCode: http.StatusTooManyRequests,
-			Message:    "this workspace has sent its " + strconv.Itoa(cap) + " emails for today; it can send more tomorrow (UTC)",
+			Message:    msg,
 			Terminal:   false,
+			ForPeople:  msg,
+		}
+	}
+	if c.count >= cap-keep {
+		msg := "today's emails for invitations are used up (the last " + strconv.Itoa(keep) + " of the day's " + strconv.Itoa(cap) +
+			" are kept for password resets); it can send more tomorrow (UTC)"
+		return &SendError{
+			StatusCode: http.StatusTooManyRequests,
+			Message:    msg,
+			Terminal:   false,
+			ForPeople:  msg,
 		}
 	}
 	c.count++
 	return nil
+}
+
+// left is how many more messages the day has after keeping keep. Pure given
+// its arguments and the counter.
+func (c *dailyCounter) left(now time.Time, cap, keep int) int {
+	keep = kept(cap, keep)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.roll(now)
+	if n := cap - keep - c.count; n > 0 {
+		return n
+	}
+	return 0
+}
+
+// roll starts a new count on a new UTC day. Called with c.mu held.
+func (c *dailyCounter) roll(now time.Time) {
+	if day := now.UTC().Format("2006-01-02"); c.day != day {
+		c.day, c.count = day, 0
+	}
+}
+
+// InvitationsLeftToday is how many more invitations can be emailed today
+// before the reserve for password resets, and whether the day has a cap at
+// all (when it doesn't, left means nothing). Email being off is
+// IsEmailEnabled's to say.
+func InvitationsLeftToday() (left int, capped bool) {
+	cap := dailyCapFromEnv()
+	if cap <= 0 {
+		return 0, false
+	}
+	return sentToday.left(time.Now(), cap, InvitationReserve), true
 }

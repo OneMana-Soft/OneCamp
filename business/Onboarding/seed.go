@@ -31,15 +31,18 @@ import (
 	postAdapter "github.com/akashc777/OneCamp/adapter/Post"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	postBusiness "github.com/akashc777/OneCamp/business/Post"
+	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 )
 
-// seedChannelName is the channel every new workspace starts with. Lowercase and
-// handle-safe because that is what the channel validator accepts. A var rather
-// than a const because the existence check takes a pointer.
-var seedChannelName = "general"
+// seedChannelName is the channel every new workspace starts with, and the one
+// new members are put in until an admin chooses others
+// (channelBusiness.DefaultChannels). Lowercase and handle-safe because that is
+// what the channel validator accepts. A var rather than a const because the
+// existence check takes a pointer.
+var seedChannelName = channelBusiness.GeneralChannelName
 
 // SeedWorkspace gives a brand-new workspace its first channel and first post.
 //
@@ -68,6 +71,11 @@ func SeedWorkspace(ctx context.Context, admin userModels.UserInfo) {
 	if err != nil {
 		helpers.LogWarnWithContext(ctx, "Onboarding seed channel failed err: %+v", err)
 		return
+	}
+	// Pinned by id: new members go here until an admin chooses other
+	// channels, whatever it is renamed to (channelBusiness.DefaultChannels).
+	if err := settingsBusiness.PinGeneralChannel(channelUUID.String()); err != nil {
+		helpers.LogWarnWithContext(ctx, "Onboarding seed could not pin #general err: %+v", err)
 	}
 	if err := postWelcome(ctx, admin, channelUUID); err != nil {
 		// The channel is the larger half of the value and it already exists, so a
@@ -107,7 +115,7 @@ func postWelcome(ctx context.Context, admin userModels.UserInfo, channelUUID uui
 	}
 
 	_, err = postBusiness.CreatePost(ctx, &postAdapter.InputCreateOrUpdatePostInfo{
-		HTMLText:    welcomeHTML(helpers.FeatureRegistered(helpers.FeatureNameAI)),
+		HTMLText:    welcomeHTML(),
 		ChannelUuid: channelUUID.String(),
 		ChannelUUID: channelUUID,
 	}, &admin, []*dgraphStruct.DgraphUser{}, dgraphChannel)
@@ -116,31 +124,23 @@ func postWelcome(ctx context.Context, admin userModels.UserInfo, channelUUID uui
 
 // welcomeHTML is the first post's body.
 //
-// It orients rather than welcomes. The failure mode of seeded content is copy
-// that congratulates the reader on their new workspace and tells them nothing, so
-// this says where the rest of the product is and names the two things that are
-// genuinely worth doing before anyone else arrives. The closing line matters as
-// much as the rest: it tells the owner this is an ordinary post, which is the
-// difference between seeded content and chrome they cannot get rid of.
+// WRITTEN FOR THE PEOPLE WHO JOIN, because they are who read it. New members
+// are put in #general (channelBusiness.JoinDefaultChannels) and open on it,
+// unless an admin chooses other channels for them, so this post is the first
+// thing a teammate sees. It used to address the
+// owner, telling every newcomer to "set up email" and "connect a model
+// provider" before inviting anyone: work only an admin can do, which the
+// admin's setup checklist already lists, and which on OneCamp Cloud is done for
+// them. So it says what a member can do here, and nothing about setup.
 //
-// withAI is the EDITION, not the current setting. On the AI-free edition the
-// provider line would describe something that does not exist in the build; with
-// AI present but unconfigured it describes exactly the thing they should go do.
-func welcomeHTML(withAI bool) string {
-	aiLine := ""
-	if withAI {
-		aiLine = "<li>Connect a model provider, so the workspace can answer questions about its own content. " +
-			"Bring your own key or point it at a local model. Nothing leaves your server without one.</li>"
-	}
-	return "<p>This is #general. Every new member lands here, so it is the right place for anything " +
-		"the whole workspace should see.</p>" +
-		"<p>The rest is in the sidebar: docs for what is worth keeping, boards and tasks for work in " +
-		"flight, a calendar that reads from both, and calls that start from any of them. Search covers " +
-		"all of it at once.</p>" +
-		"<p>Two things are worth doing before you invite anyone:</p>" +
-		"<ul>" +
-		"<li>Set up email, so invitations and password resets can leave the server.</li>" +
-		aiLine +
-		"</ul>" +
-		"<p>This is an ordinary post in an ordinary channel. Reply to it, or delete it.</p>"
+// The same in both editions and on every install: it names nothing that only
+// one edition, or only a configured workspace, has.
+func welcomeHTML() string {
+	return "<p>This is #general. New members are added here unless an admin has chosen other channels " +
+		"for them, so it is a good place for anything the whole team should see.</p>" +
+		"<p>New here? Say hello below: a line about who you are and what you work on helps everyone " +
+		"put a name to a face.</p>" +
+		"<p>The rest is in the sidebar: channels for conversations, docs for what is worth keeping, " +
+		"projects and tasks for work in flight, and a calendar that reads from both. Browse channels " +
+		"shows the ones you are not in yet, and search covers all of it at once.</p>"
 }

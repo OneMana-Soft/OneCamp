@@ -259,11 +259,15 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 	forgetFieldWarnings(jobId)
 }
 
-// CancelImport signals a running import to stop. Generic across providers.
+// CancelImport stops a running import, or discards one still waiting to be
+// planned or run. Generic across providers.
 func CancelImport(ctx context.Context, jobId uuid.UUID) error {
 	job, err := importModels.GetJob(ctx, jobId)
 	if err != nil {
 		return err
+	}
+	if IsWaiting(job.Status) {
+		return discardWaiting(ctx, job)
 	}
 	if job.Status != importModels.StatusRunning && job.Status != importModels.StatusPaused {
 		return fmt.Errorf("job is not running (status=%s)", job.Status)
@@ -285,6 +289,41 @@ func CancelImport(ctx context.Context, jobId uuid.UUID) error {
 		delete(activeJobs, jobId)
 	}
 	activeJobsMu.Unlock()
+	publishProgress(ctx, job, "cancelled", "cancelled", "")
+	if prov := importProvider.Get(job.Provider); prov != nil {
+		if cleaner, ok := prov.(importProvider.JobCleaner); ok {
+			cleaner.CleanupJob(job.Id.String())
+		}
+	}
+	forgetFieldWarnings(job.Id)
+	return nil
+}
+
+// IsWaiting is whether a job is still waiting for its admin: uploading,
+// waiting to be planned, or planned and waiting to be run. Pure.
+func IsWaiting(status string) bool {
+	switch status {
+	case importModels.StatusPending, importModels.StatusValidating, importModels.StatusPlanned:
+		return true
+	}
+	return false
+}
+
+// discardWaiting ends a job that never ran. A waiting job keeps its label
+// busy (one import per provider and label at a time), and nothing could clear
+// one, so an abandoned plan blocked importing the same workspace again for
+// good. Its staged file goes with it: a discarded job can't be planned again.
+func discardWaiting(ctx context.Context, job *importModels.Job) error {
+	if err := importModels.UpdateStatus(ctx, job.Id, importModels.StatusCancelled,
+		strPtr("cancelled"), strPtr("Discarded before it ran.")); err != nil {
+		return err
+	}
+	if err := importModels.CancelAllPendingChunks(ctx, job.Id); err != nil {
+		return err
+	}
+	if err := DeleteStagedZip(ctx, job.Id); err != nil {
+		helpers.LogWarnWithContext(ctx, "Import discard could not delete staged file job=%s err=%+v", job.Id, err)
+	}
 	publishProgress(ctx, job, "cancelled", "cancelled", "")
 	if prov := importProvider.Get(job.Provider); prov != nil {
 		if cleaner, ok := prov.(importProvider.JobCleaner); ok {
@@ -375,6 +414,7 @@ func runWorkerPool(ctx context.Context, jobId uuid.UUID, stage string, n int,
 					_ = importModels.FailChunk(ctx, chunk.Id, chunk.ItemsDone, chunk.LastCursor, reason)
 					continue
 				}
+				clearPause(ctx, jobId)
 				atomic.AddInt64(&processed, 1)
 			}
 		}(workerId)
@@ -452,7 +492,9 @@ func publishProgress(ctx context.Context, job *importModels.Job, status, stage, 
 // triggers per-provider cache eviction so a failed job doesn't leak
 // per-job state.
 func failJob(ctx context.Context, job *importModels.Job, err error) {
-	msg := err.Error()
+	// Logged, stored and broadcast without URL query strings: a provider's
+	// network error carries its request's URL, and Trello's the key and token.
+	msg := helpers.WithoutURLQueries(err.Error())
 	helpers.LogErrorWithContext(ctx,
 		"Import job %s failed: %s", job.Id, msg)
 	_ = importModels.UpdateStatus(ctx, job.Id, importModels.StatusFailed,

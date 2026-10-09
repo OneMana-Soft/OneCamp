@@ -11,13 +11,14 @@ import (
 	"os"
 	"time"
 
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/crewjam/saml/samlsp"
 )
 
 var SAMLMiddleware *samlsp.Middleware
 
 func InitSAML() error {
-	if os.Getenv("SAML_ENABLED") != "true" {
+	if !helpers.EnvFlag("SAML_ENABLED") {
 		return nil
 	}
 

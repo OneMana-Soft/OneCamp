@@ -15,6 +15,8 @@
 package business
 
 import (
+	"context"
+	"errors"
 	"os"
 	"strconv"
 	"strings"
@@ -35,6 +37,17 @@ const (
 	keyRetentionDays = "audit_retention_days"
 	keyFirebaseCred  = "firebase_credential" // encrypted service-account JSON
 	keyReadReceipts  = "read_receipts_enabled"
+	// keyDefaultChannels holds the channel ids new members join, comma
+	// separated. Absent until an admin chooses; see DefaultChannelIDs.
+	keyDefaultChannels = "default_channels"
+	// keyManagedByCloud marks a workspace OneCamp Cloud set up; see Managed.
+	keyManagedByCloud = "managed_by_onecamp"
+	// keySenderEmail is the sender saved in Admin > Email (written there by
+	// controllers/AdminConfig); see savedSender.
+	keySenderEmail = "sender_email"
+	// keyGeneralChannel is the id of the #general a workspace was seeded
+	// with; see GeneralChannelID.
+	keyGeneralChannel = "general_channel_id"
 )
 
 // settingsKeys is every key above: what loadAll reads. A key left out is
@@ -42,6 +55,7 @@ const (
 // Firebase credential set in Admin went unused (TestEveryKeyIsLoaded).
 var settingsKeys = []string{
 	keyUploadLimitMB, keyAllowedUsers, keyResendAPIKey, keyGuestAccess, keyRetentionDays, keyFirebaseCred, keyReadReceipts,
+	keyDefaultChannels, keyManagedByCloud, keySenderEmail, keyGeneralChannel,
 }
 
 // Defaults / floors.
@@ -61,6 +75,14 @@ const settingsTTL = 30 * time.Second
 
 // loadAll pulls the settings keys once (cached). Missing keys simply aren't in
 // the map, so callers apply their own env/default fallback.
+//
+// A FAILED READ IS NOT "NOTHING SET". It used to be cached as an empty map for
+// the whole TTL, so a Postgres hiccup turned every setting back to its default
+// for half a minute: read receipts a workspace had switched off came back on,
+// mail stopped (no sending key), guest links read as switched off, and new
+// members ignored the channels an admin chose. Now the last settings read are
+// kept and served until a read succeeds again, and a failure is never cached,
+// so the next call asks again.
 func loadAll() map[string]string {
 	settingsMu.RLock()
 	if settingsCache != nil && time.Now().Before(settingsExpires) {
@@ -70,28 +92,63 @@ func loadAll() map[string]string {
 	}
 	settingsMu.RUnlock()
 
-	out := map[string]string{}
-	if postgresInit.DBConn != nil && postgresInit.DBConn.SqlDB != nil {
-		rows, err := configModel.GetMultipleConfigsByKeys(settingsKeys)
-		if err == nil {
-			for _, row := range rows {
-				out[row.Key] = row.Value
-			}
-		}
-	}
-
+	rows, err := readSettings()
 	settingsMu.Lock()
+	defer settingsMu.Unlock()
+	if err != nil {
+		if !errors.Is(err, errNoDatabase) {
+			helpers.LogWarnWithContext(context.Background(), "business/Settings: reading the workspace settings (serving the last ones read): %v", err)
+		}
+		if settingsCache != nil {
+			return settingsCache
+		}
+		return map[string]string{}
+	}
+	out := map[string]string{}
+	for _, row := range rows {
+		out[row.Key] = row.Value
+	}
 	settingsCache = out
 	settingsExpires = time.Now().Add(settingsTTL)
-	settingsMu.Unlock()
 	return out
 }
 
+// errNoDatabase is a read with no database to read from (tests, early boot:
+// the boot's email check asks for the sending key before the database is
+// connected, emailKey.go). Never cached, so the first read after the
+// database connects sees what is saved.
+var errNoDatabase = errors.New("no database connection")
+
+// readSettings reads every settings row. A seam, so a failed read can be tested.
+var readSettings = func() ([]*configModel.SystemConfig, error) {
+	if postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
+		return nil, errNoDatabase
+	}
+	return configModel.GetMultipleConfigsByKeys(settingsKeys)
+}
+
+// invalidate is what a save calls: the next read goes to the database, but
+// what was read before is kept, so a read that fails right after a save
+// serves the workspace's settings rather than their defaults (loadAll).
 func invalidate() {
+	settingsMu.Lock()
+	settingsExpires = time.Time{}
+	settingsMu.Unlock()
+}
+
+// forget drops what is cached, so nothing read before is ever served again.
+func forget() {
 	settingsMu.Lock()
 	settingsCache = nil
 	settingsExpires = time.Time{}
 	settingsMu.Unlock()
+}
+
+// ForgetSettingsForTest drops what is cached, for an integration test that
+// has just started a fresh database: the cache would otherwise carry the
+// previous test's settings into it for up to settingsTTL.
+func ForgetSettingsForTest() {
+	forget()
 }
 
 // UploadLimitMB returns the effective per-file upload limit in MB. DB-first,
@@ -193,7 +250,8 @@ func SetupPermittedFor(pin, email string) bool {
 	if pin == "" {
 		return true
 	}
-	return strings.ToLower(strings.TrimSpace(email)) == strings.ToLower(strings.TrimSpace(pin))
+	email = helpers.NormalizeEmail(email)
+	return helpers.AddressIsASCII(email) && email == helpers.NormalizeEmail(pin)
 }
 
 // EmailEnabled reports whether this workspace can send mail at all.
@@ -271,6 +329,112 @@ func SetReadReceiptsEnabled(enabled bool) error {
 	return nil
 }
 
+// Managed reports whether OneCamp Cloud runs this workspace, which then
+// takes care of its updates, its email and its model provider, so nobody
+// there is told to do those things themselves.
+//
+// Two signals, because neither covers the whole life of a workspace alone.
+// ONECAMP_MANAGED arrives in the environment together with the email Cloud
+// lends, which can be hours after the workspace is handed over. The handover
+// itself comes first: Cloud makes the first admin through POST
+// /auth/admin-setup with a generated password, and that marks the workspace
+// (MarkManaged).
+//
+// AN EXPLICIT ONECAMP_MANAGED WINS, false as much as true: an operator who
+// takes a workspace off Cloud, or sets up a copy of one, says false and is
+// told to look after email and updates themselves, whatever the stored mark
+// still says. Only when it is unset (or unreadable) does the mark decide.
+func Managed() bool {
+	if managed, set := managedByEnv(os.Getenv("ONECAMP_MANAGED")); set {
+		return managed
+	}
+	return loadAll()[keyManagedByCloud] == "true"
+}
+
+// managedByEnv reads ONECAMP_MANAGED: whether it says managed, and whether it
+// says anything at all (true or false, as helpers.EnvFlag reads them). Pure.
+func managedByEnv(value string) (managed, set bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "true", "1", "yes", "on":
+		return true, true
+	case "false", "0", "no", "off":
+		return false, true
+	}
+	return false, false
+}
+
+// MarkManaged records that OneCamp Cloud set this workspace up.
+func MarkManaged() error {
+	if err := configModel.UpsertConfig(keyManagedByCloud, "true"); err != nil {
+		return err
+	}
+	invalidate()
+	return nil
+}
+
+// DefaultChannelIDs is the channels an admin chose for new members to join,
+// and whether they chose at all. chosen=false means nobody has, and the
+// workspace's own #general applies (business/Channel.DefaultChannels decides
+// that, and which of these can still be joined). An empty list with
+// chosen=true is a choice too: new members start in no channel.
+func DefaultChannelIDs() (ids []string, chosen bool) {
+	raw, present := loadAll()[keyDefaultChannels]
+	return parseDefaultChannels(raw, present)
+}
+
+// GeneralChannelID is the #general this workspace was seeded with, pinned by
+// id when it was made (PinGeneralChannel), and whether there is one. New
+// members go there until an admin chooses other channels, by id, so renaming
+// the channel doesn't send them nowhere. "" for a workspace seeded before the
+// pin, which finds #general by name.
+func GeneralChannelID() string {
+	return strings.TrimSpace(loadAll()[keyGeneralChannel])
+}
+
+// PinGeneralChannel records the channel a new workspace was seeded with.
+func PinGeneralChannel(id string) error {
+	if err := configModel.UpsertConfig(keyGeneralChannel, strings.TrimSpace(id)); err != nil {
+		return err
+	}
+	invalidate()
+	return nil
+}
+
+// SetDefaultChannelIDs saves the channels new members join. The caller checks
+// they are channels a member could join; this only stores the choice.
+func SetDefaultChannelIDs(ids []string) error {
+	if err := configModel.UpsertConfig(keyDefaultChannels, strings.Join(splitIDs(strings.Join(ids, ",")), ",")); err != nil {
+		return err
+	}
+	invalidate()
+	return nil
+}
+
+// parseDefaultChannels reads the stored value: absent is no choice, present
+// (even empty) is one. Pure.
+func parseDefaultChannels(raw string, present bool) ([]string, bool) {
+	if !present {
+		return nil, false
+	}
+	return splitIDs(raw), true
+}
+
+// splitIDs splits a comma-separated list of ids, trimmed and lowercased, with
+// blanks and repeats left out and the order kept. Pure.
+func splitIDs(raw string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, p := range strings.Split(raw, ",") {
+		id := strings.ToLower(strings.TrimSpace(p))
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
 // MinRetentionDays is the floor a retention window cannot go below.
 //
 // The AI Act requires automatically generated logs to be kept for at least six
@@ -332,7 +496,7 @@ func splitEmails(raw string) []string {
 	parts := strings.Split(raw, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		e := strings.ToLower(strings.TrimSpace(p))
+		e := helpers.NormalizeEmail(p)
 		if e != "" {
 			out = append(out, e)
 		}
@@ -404,7 +568,16 @@ type SaveInput struct {
 }
 
 // Save persists admin-entered settings (encrypting secrets) and busts the cache.
+// An allow-list that can't be saved (checkAllowList) is refused before
+// anything is written, with an AllowListRefusal.
 func Save(in SaveInput) error {
+	var allowList []string
+	if in.AllowedUsers != nil {
+		allowList = splitEmails(strings.Join(*in.AllowedUsers, ","))
+		if err := checkAllowList(allowList); err != nil {
+			return err
+		}
+	}
 	if in.UploadLimitMB != nil {
 		v := strconv.FormatInt(clampUpload(*in.UploadLimitMB), 10)
 		if err := configModel.UpsertConfig(keyUploadLimitMB, v); err != nil {
@@ -412,7 +585,7 @@ func Save(in SaveInput) error {
 		}
 	}
 	if in.AllowedUsers != nil {
-		v := strings.Join(splitEmails(strings.Join(*in.AllowedUsers, ",")), ",")
+		v := strings.Join(allowList, ",")
 		if err := configModel.UpsertConfig(keyAllowedUsers, v); err != nil {
 			return err
 		}

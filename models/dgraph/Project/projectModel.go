@@ -11,6 +11,10 @@ import (
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
 
+// ErrNotFound is a project read that found nothing: an answer, unlike a query
+// that failed. Its text is the one this read always gave.
+var ErrNotFound = errors.New("failed to get dgraph project")
+
 func CreateOrUpdateDgraphProject(ctx context.Context, dgraphProject *dgraphStruct.DgraphProject, query string) (projectUid string, err error) {
 	txn := dgraphInit.DgraphClient.NewTxn()
 	pb, err := json.Marshal(dgraphProject)
@@ -76,7 +80,7 @@ func GetDgraphProjectInfoByUUID(ctx context.Context, query string, variables map
 	}
 
 	if len(projectsInfo.ProjectInfo) == 0 {
-		err = errors.New("failed to get dgraph project")
+		err = ErrNotFound
 		helpers.LogErrorWithContext(ctx,
 			"models/GetDgraphProjectInfoByUUID failed to get dgraph project variables: %+v", variables)
 

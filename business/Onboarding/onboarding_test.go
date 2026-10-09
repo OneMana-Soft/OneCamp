@@ -2,6 +2,7 @@ package business
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -156,7 +157,9 @@ func TestStepOrderMatchesWhatSomebodyWouldActuallyDo(t *testing.T) {
 	// workspace, so the people who arrive land in one that already has it.
 	// The password comes first: it is about the account everything else is
 	// done from, and it is the credential that has sat in an inbox.
-	want := []string{"password", "channel", "import", "project", "people", "email"}
+	// Email before the invitations, for the reason above: it used to come
+	// after them.
+	want := []string{"password", "channel", "import", "project", "email", "people"}
 	if len(ids) != len(want) {
 		t.Fatalf("expected %v, got %v", want, ids)
 	}
@@ -285,5 +288,46 @@ func TestThePasswordStepAppearsOnlyWhileThePasswordIsTheEmailedOne(t *testing.T)
 	}
 	if def.done(context.Background(), userModels.UserInfo{}) {
 		t.Error("a step that is only shown while undone reports itself done")
+	}
+}
+
+// OneCamp Cloud lends a workspace it runs its email, so its admin is not told
+// to set email up; a self-hosted admin still is.
+func TestTheEmailStepIsForSelfHostedWorkspacesOnly(t *testing.T) {
+	email := findStep(t, "email")
+	if onTheList(email, nil, true) {
+		t.Error("a Cloud workspace's admin is told to set up email")
+	}
+	if !onTheList(email, nil, false) {
+		t.Error("a self-hosted admin is no longer told to set up email")
+	}
+	for _, id := range []string{"channel", "import", "project", "people"} {
+		if !onTheList(findStep(t, id), nil, true) {
+			t.Errorf("step %q left a Cloud workspace's list; only what Cloud does for it should", id)
+		}
+	}
+}
+
+// A team reads the import step to learn whether its tool can come across, so
+// the step names every provider the importer takes. It named seven of eight for
+// as long as monday.com's importer existed.
+func TestTheImportStepNamesEveryProvider(t *testing.T) {
+	entries, err := os.ReadDir("../Import/providers")
+	if err != nil {
+		t.Fatal(err)
+	}
+	detail := strings.ToLower(findStep(t, "import").Detail)
+	providers := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		providers++
+		if !strings.Contains(detail, e.Name()) {
+			t.Errorf("the import step doesn't name %s, which the importer takes", e.Name())
+		}
+	}
+	if providers == 0 {
+		t.Fatal("no providers found; business/Import/providers has moved")
 	}
 }

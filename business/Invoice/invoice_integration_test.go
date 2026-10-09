@@ -64,6 +64,31 @@ func TestInvoiceLife(t *testing.T) {
 		t.Errorf("deleting a sent invoice: %v", err)
 	}
 
+	// Taken back to draft to fix a line: its lines change, its number doesn't,
+	// and it can't be deleted, so the number is never given to another.
+	redraft, err := SetStatus(ctx, project, draft.ID, model.StatusDraft)
+	if err != nil || redraft.SentAt != nil || redraft.FirstSentAt == nil {
+		t.Fatalf("back to draft: %+v %v", redraft, err)
+	}
+	renumbered := input()
+	renumbered.Number = "QL-0099"
+	if _, err := Update(ctx, project, draft.ID, renumbered); !errors.Is(err, ErrWasSent) {
+		t.Errorf("renumbering a draft that was sent: %v, want ErrWasSent", err)
+	}
+	if fixed, err := Update(ctx, project, draft.ID, input()); err != nil || fixed.Number != "QL-0001" || len(fixed.Lines) != 2 {
+		t.Errorf("fixing a draft that was sent, number kept: %+v %v", fixed, err)
+	}
+	if err := Delete(ctx, project, draft.ID); !errors.Is(err, ErrWasSent) {
+		t.Errorf("deleting a draft that was sent: %v, want ErrWasSent", err)
+	}
+	if _, next, _ := List(ctx, project, "Q4 launch"); next != "QL-0002" {
+		t.Errorf("the next number after a sent one: %s", next)
+	}
+	if again, err := SetStatus(ctx, project, draft.ID, model.StatusSent); err != nil || !again.FirstSentAt.Equal(*redraft.FirstSentAt) {
+		t.Fatalf("sent again, first sent when it was: %+v %v", again, err)
+	}
+	sent, _ = Get(ctx, project, draft.ID)
+
 	// Paid, then taken back to sent: unpaid again, still sent when it was.
 	paid, err := SetStatus(ctx, project, draft.ID, model.StatusPaid)
 	if err != nil || paid.PaidAt == nil || !paid.SentAt.Equal(*sent.SentAt) {

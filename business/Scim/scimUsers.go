@@ -23,6 +23,7 @@ import (
 
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	fcmBusiness "github.com/akashc777/OneCamp/business/UserFCMToken"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	scimModel "github.com/akashc777/OneCamp/models/postgres/Scim"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -57,6 +58,9 @@ var (
 	// ErrScimUserNameInvalid → 400 with scimType "invalidValue".
 	ErrScimUserNameInvalid = errors.New(
 		"userName must be the user's email address; map email to userName in your identity provider")
+	// ErrScimUserNameNotASCII → 400 with scimType "invalidValue".
+	ErrScimUserNameNotASCII = errors.New(
+		"userName has characters outside ASCII; OneCamp matches only addresses written in plain ASCII to accounts")
 	// ErrScimFilterUnsupported → 400 with scimType "invalidFilter".
 	ErrScimFilterUnsupported = errors.New(`only filters of the form userName eq "value" are supported`)
 	// ErrScimPatchUnsupported → 400 with scimType "invalidValue".
@@ -307,17 +311,28 @@ func GetUser(ctx context.Context, id string, baseURL string) (*ScimUserResource,
 
 // CreateUser provisions an account from a SCIM User payload.
 //
-// Reuses userBusiness.CreateUserWithMethod, the canonical creator, so a SCIM-provisioned account is
-// identical to one made any other way: same Dgraph node, same OpenSearch document, same rollback if the
-// graph write fails. Reimplementing the INSERT here would produce users the rest of the product cannot
-// see, because every lookup in OneCamp reads Dgraph.
+// Goes through userBusiness.JoinAsMember, the way every other way in makes a member, so a
+// SCIM-provisioned account is identical to one made any other way: same Dgraph node, same OpenSearch
+// document, same rollback if the graph write fails, the same default channels. Reimplementing the
+// INSERT here would produce users the rest of the product cannot see, because every lookup in OneCamp
+// reads Dgraph.
+//
+// JoinAsMember, not the creator beneath it, because of the person an import or a GitHub sync already
+// knows: their address is on an external row (the author of what was imported), and email_id is
+// unique. Creating an account refused that address with a 500 the directory could do nothing about;
+// joining adopts the row, so the person gets their history and the directory its 201.
 func CreateUser(ctx context.Context, in ScimUserResource, baseURL string) (*ScimUserResource, error) {
-	email := strings.TrimSpace(in.UserName)
+	email := helpers.NormalizeEmail(in.UserName)
 	if email == "" {
-		email = primaryEmail(in)
+		email = helpers.NormalizeEmail(primaryEmail(in))
 	}
 	if !looksLikeEmail(email) {
 		return nil, ErrScimUserNameInvalid
+	}
+	// Refused before it is looked up: a lookup that folds case the Unicode
+	// way would find someone else's account for it (helpers.NormalizeEmail).
+	if !helpers.AddressIsASCII(email) {
+		return nil, ErrScimUserNameNotASCII
 	}
 
 	// Existence is checked BEFORE inserting so the answer is 409 rather than a constraint violation, and
@@ -333,7 +348,13 @@ func CreateUser(ctx context.Context, in ScimUserResource, baseURL string) (*Scim
 		return nil, ErrScimUserExists
 	}
 
-	userID, err := userBusiness.CreateUserWithMethod(
+	// An account staged before the person starts (active:false) isn't
+	// welcomed yet: SetActive does that, or their first sign-in.
+	join := userBusiness.JoinAsMember
+	if in.Active != nil && !*in.Active {
+		join = userBusiness.JoinAsStagedMember
+	}
+	joined, err := join(
 		ctx,
 		email,
 		deriveUserName(in, email),
@@ -346,9 +367,15 @@ func CreateUser(ctx context.Context, in ScimUserResource, baseURL string) (*Scim
 		// after the directory has deactivated it.
 		true,
 	)
+	if userDomain.IsUniqueViolationOnEmail(err) {
+		// Another create for the same person won the race: the directory gets the same answer the
+		// check above gives, not a 500 for a person who now exists.
+		return nil, ErrScimUserExists
+	}
 	if err != nil {
 		return nil, err
 	}
+	userID := joined.UserID
 
 	// An IdP may send active:false on create, to stage an account before a start date. Honoured rather
 	// than ignored: silently creating an active account for someone who has not started is exactly the
@@ -412,6 +439,12 @@ func SetActive(ctx context.Context, id string, active bool, baseURL string) (*Sc
 		if err := userBusiness.ActivateUser(ctx, userID); err != nil {
 			return nil, err
 		}
+		// Someone the directory staged (created inactive) and who has never
+		// signed in starts now: the default channels, as joining gives
+		// everyone else. Someone returning has been welcomed before.
+		if userDomain.FirstSignInOfProvisioned(ctx, userID) {
+			userBusiness.WelcomeNewMember(ctx, userID)
+		}
 	} else if err := deactivate(ctx, userID); err != nil {
 		return nil, err
 	}
@@ -443,7 +476,9 @@ func ReplaceUser(ctx context.Context, id string, in ScimUserResource, baseURL st
 		return nil, ErrScimUserNotFound
 	}
 
-	if sent := strings.TrimSpace(in.UserName); sent != "" && !strings.EqualFold(sent, u.EmailID) {
+	// Byte for byte after NormalizeEmail: EqualFold folds the Kelvin sign
+	// into "k", so another address could pass for this one.
+	if sent := helpers.NormalizeEmail(in.UserName); sent != "" && sent != helpers.NormalizeEmail(u.EmailID) {
 		return nil, ErrScimUserNameInvalid
 	}
 
@@ -561,8 +596,9 @@ func deriveDisplayName(in ScimUserResource) string {
 // deriveUserName produces the in-product name for a new account.
 //
 // Falls back to the local part of the address, because a person with no name at all renders as a blank
-// avatar and an empty mention everywhere in the product. CreateUserWithMethod resolves collisions on
-// this value by appending a suffix, so a second "jsmith" is provisioned rather than refused.
+// avatar and an empty mention everywhere in the product. It is a display name, which need not be
+// unique: the handle CreateUserWithMethod derives from it is, so a second "jsmith" is @jsmith-2 rather
+// than refused.
 func deriveUserName(in ScimUserResource, email string) string {
 	if s := deriveDisplayName(in); s != "" {
 		return s

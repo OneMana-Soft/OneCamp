@@ -4,10 +4,11 @@ package domain
 //
 // A free OneCamp licence covers a set number of people (helpers.SeatLimit,
 // stamped at build time); paid licences and builds from source have no limit.
-// The check sits here, at the two inserts that create a member and at
-// reactivation, so every way in (invitation, open sign-up, SSO, SCIM, the
-// admin's Activate button) meets it. Bots, external identities and guests
-// are not people on the licence and never count.
+// The check sits here, at the two inserts that create a member, at adopting an
+// external row (AdoptExternalUser) and at reactivation, so every way in
+// (invitation, open sign-up, SSO, SCIM, the admin's Activate button) meets it.
+// Bots, external identities and guests are not people on the licence and
+// never count.
 
 import (
 	"context"

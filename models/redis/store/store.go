@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -248,6 +249,89 @@ func DeletePattern(ctx context.Context, pattern string) error {
 	return iter.Err()
 }
 
+// DeletePatternExcept is DeletePattern keeping the keys named in keep. Each
+// key goes on its own, so a kept key is never missing for a moment (as it was
+// when everything was deleted and the kept one written back).
+func DeletePatternExcept(ctx context.Context, pattern string, keep ...string) error {
+	if !IsAvailable() {
+		return nil
+	}
+	kept := make(map[string]bool, len(keep))
+	for _, k := range keep {
+		kept[k] = true
+	}
+	iter := redisInit.RedisClient.Scan(ctx, 0, pattern, 0).Iterator()
+	for iter.Next(ctx) {
+		if kept[iter.Val()] {
+			continue
+		}
+		if err := redisInit.RedisClient.Del(ctx, iter.Val()).Err(); err != nil {
+			helpers.LogErrorWithContext(ctx, "redis store: DeletePatternExcept Del failed key=%s err=%+v", iter.Val(), err)
+		}
+	}
+	return iter.Err()
+}
+
+// =============================================================================
+// Rotation (a value traded for a new one, the old one kept briefly)
+// =============================================================================
+
+// What RotateString found.
+const (
+	// RotateDone: presented was the current value; next replaced it, and
+	// presented is now the previous one.
+	RotateDone = "rotated"
+	// RotatePrevious: presented was the previous value; nothing changed.
+	RotatePrevious = "previous"
+	// RotateUnknown: there was no current value.
+	RotateUnknown = "unknown"
+	// RotateReused: presented was neither; both values are gone.
+	RotateReused = "reused"
+)
+
+// rotateScript does the whole of RotateString in one step, so two callers
+// presenting the same value can't both rotate it: the second finds it is now
+// the previous value and gets the first one's successor.
+var rotateScript = redis.NewScript(`
+local cur = redis.call('GET', KEYS[1])
+if not cur then
+	return {'unknown', ''}
+end
+if cur == ARGV[1] then
+	redis.call('SET', KEYS[2], cur, 'PX', ARGV[4])
+	redis.call('SET', KEYS[1], ARGV[2], 'PX', ARGV[3])
+	return {'rotated', ARGV[2]}
+end
+local prev = redis.call('GET', KEYS[2])
+if prev and prev == ARGV[1] then
+	return {'previous', cur}
+end
+redis.call('DEL', KEYS[1], KEYS[2])
+return {'reused', ''}
+`)
+
+// RotateString trades presented for next under spec cur, keeping presented
+// under spec prev for prev's TTL. It answers what it found and the value now
+// current: next after a rotation, the current one when presented was the
+// previous value, "" otherwise (after RotateReused both values are deleted).
+// Fails closed: without Redis it is an error, not a rotation.
+func RotateString(ctx context.Context, cur, prev registry.Spec, args []string, presented, next string) (string, string, error) {
+	if !IsAvailable() {
+		return "", "", ErrNotConnected
+	}
+	keys := []string{cur.Build(args...), prev.Build(args...)}
+	res, err := rotateScript.Run(ctx, redisInit.RedisClient, keys,
+		presented, next, cur.TTL.Milliseconds(), prev.TTL.Milliseconds()).StringSlice()
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "redis store: RotateString failed key=%s err=%+v", keys[0], err)
+		return "", "", err
+	}
+	if len(res) != 2 {
+		return "", "", fmt.Errorf("redis store: RotateString got %d values", len(res))
+	}
+	return res[0], res[1], nil
+}
+
 // =============================================================================
 // Counter-based rate limit (window-locked)
 // =============================================================================
@@ -260,6 +344,10 @@ type RateLimitResult struct {
 	Count      int64
 	Limit      int
 	RetryAfter time.Duration
+	// Unchecked: Redis couldn't be asked (not connected, or the call failed),
+	// so Allowed is only the fail-open default. AllowFixedWindowOrLocal counts
+	// the request in this process instead.
+	Unchecked bool
 }
 
 // AllowFixedWindow atomically increments a counter and pins its TTL
@@ -307,7 +395,7 @@ func IncrByWithTTL(ctx context.Context, spec registry.Spec, args []string, delta
 
 func AllowFixedWindow(ctx context.Context, spec registry.Spec, args []string, limit int) RateLimitResult {
 	if !IsAvailable() {
-		return RateLimitResult{Allowed: true, Limit: limit}
+		return RateLimitResult{Allowed: true, Limit: limit, Unchecked: true}
 	}
 	if limit <= 0 {
 		limit = 1
@@ -320,7 +408,7 @@ func AllowFixedWindow(ctx context.Context, spec registry.Spec, args []string, li
 	pipe.ExpireNX(ctx, key, window)
 	if _, err := pipe.Exec(ctx); err != nil {
 		helpers.LogErrorWithContext(ctx, "redis store: AllowFixedWindow pipeline failed key=%s err=%+v", key, err)
-		return RateLimitResult{Allowed: true, Limit: limit}
+		return RateLimitResult{Allowed: true, Limit: limit, Unchecked: true}
 	}
 	count := incrCmd.Val()
 
@@ -344,6 +432,47 @@ func AllowFixedWindow(ctx context.Context, spec registry.Spec, args []string, li
 	}
 }
 
+// AllowFixedWindowOrLocal is AllowFixedWindow for a limit that must hold
+// while Redis is down: the brute-force limits on signing in, two-step codes
+// and password resets. Where AllowFixedWindow lets a request through when
+// Redis can't be asked (the server keeps a client, so an outage after boot is
+// a failed call, not a missing client), this counts it in the process's own
+// window of the same length and limit, as incoming webhooks keep one too.
+// Per replica, so N replicas let N times the limit through, not everything.
+func AllowFixedWindowOrLocal(ctx context.Context, spec registry.Spec, args []string, limit int) RateLimitResult {
+	res := AllowFixedWindow(ctx, spec, args, limit)
+	if !res.Unchecked {
+		return res
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	local, key := localWindow(spec, limit), spec.Build(args...)
+	if local.Allow(key) {
+		return RateLimitResult{Allowed: true, Limit: limit, Unchecked: true}
+	}
+	return RateLimitResult{Allowed: false, Limit: limit, RetryAfter: local.Retry(key), Unchecked: true}
+}
+
+// localWindows are AllowFixedWindowOrLocal's in-process windows, one per
+// spec and limit, made on first use.
+var (
+	localWindowsMu sync.Mutex
+	localWindows   = map[string]*helpers.RateLimiter{}
+)
+
+func localWindow(spec registry.Spec, limit int) *helpers.RateLimiter {
+	name := spec.Namespace + "/" + strconv.Itoa(limit)
+	localWindowsMu.Lock()
+	defer localWindowsMu.Unlock()
+	l, ok := localWindows[name]
+	if !ok {
+		l = helpers.NewRateLimiter(limit, spec.TTL)
+		localWindows[name] = l
+	}
+	return l
+}
+
 // =============================================================================
 // Sliding-window rate limit (sorted-set, by score = unix timestamp)
 // =============================================================================
@@ -361,7 +490,7 @@ func AllowFixedWindow(ctx context.Context, spec registry.Spec, args []string, li
 // sorted set never grows unbounded. Memory cost: O(limit) per key.
 func AllowSlidingWindow(ctx context.Context, spec registry.Spec, args []string, limit int, windowSec int64) RateLimitResult {
 	if !IsAvailable() {
-		return RateLimitResult{Allowed: true, Limit: limit}
+		return RateLimitResult{Allowed: true, Limit: limit, Unchecked: true}
 	}
 	if limit <= 0 {
 		limit = 1
@@ -379,7 +508,7 @@ func AllowSlidingWindow(ctx context.Context, spec registry.Spec, args []string, 
 	countCmd := pipe.ZCard(ctx, key)
 	if _, err := pipe.Exec(ctx); err != nil {
 		helpers.LogErrorWithContext(ctx, "redis store: AllowSlidingWindow phase1 failed key=%s err=%+v", key, err)
-		return RateLimitResult{Allowed: true, Limit: limit}
+		return RateLimitResult{Allowed: true, Limit: limit, Unchecked: true}
 	}
 	if countCmd.Val() >= int64(limit) {
 		return RateLimitResult{

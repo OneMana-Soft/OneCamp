@@ -513,19 +513,22 @@ func (p *Provider) FetchAttachment(ctx context.Context, j *importModels.Job, opt
 	if err != nil {
 		return "", 0, err
 	}
+	// External attachments get a plain GET; DefaultFetchAttachment turns
+	// 404/410 into ErrAttachmentGone.
+	return importProvider.DefaultFetchAttachment(ctx, linearDownload(att, tok), dest)
+}
 
-	// Linear-hosted uploads need our token attached.
-	if strings.Contains(att.URL, "uploads.linear.app") {
-		att2 := att
-		if att2.Headers == nil {
-			att2.Headers = map[string]string{}
-		}
-		att2.Headers["Authorization"] = "Bearer " + tok
-		return importProvider.DefaultFetchAttachment(ctx, att2, dest)
-	}
-	// External attachment: try a plain GET; rely on
-	// DefaultFetchAttachment to translate 404/410 into ErrAttachmentGone.
-	return importProvider.DefaultFetchAttachment(ctx, att, dest)
+// linearUploadHost serves files uploaded into Linear, which need the
+// importing admin's token. Nothing else may be sent it: a link attachment's
+// URL is whatever anyone in the Linear workspace typed, and the check used to
+// be a substring search, so "https://evil.example/?u=uploads.linear.app" got
+// the token.
+const linearUploadHost = "uploads.linear.app"
+
+// linearDownload is att as it is fetched: with the token when it is a Linear
+// upload, and without one when it isn't.
+func linearDownload(att importProvider.SourceAttachment, tok string) importProvider.SourceAttachment {
+	return importProvider.WithAuthorization(att, "Bearer "+tok, linearUploadHost)
 }
 
 // ─── Snapshot loader (single-pass GraphQL crawler) ────────────────
@@ -1066,7 +1069,7 @@ func (p *Provider) gql(ctx context.Context, tok, query string, vars map[string]a
 		retry := time.Duration(parseRetryAfter(resp.Header.Get("Retry-After"))) * time.Second
 		return &importProvider.ErrRateLimited{RetryAfter: retry, Reason: "linear 429"}
 	case resp.StatusCode == http.StatusUnauthorized:
-		return errors.New("linear unauthorized; reconnect this provider")
+		return &importProvider.TokenRejected{Msg: "linear unauthorized; reconnect this provider"}
 	case resp.StatusCode >= 400:
 		// Read a small slice of the body for diagnostics; full body
 		// would be unbounded under malicious upstreams.

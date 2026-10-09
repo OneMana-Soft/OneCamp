@@ -87,6 +87,7 @@ type compiledWorkflow struct {
 // also needs targetUserUUID).
 type triggerEvent struct {
 	channelID      string            // channel the action should act in ("" if none)
+	projectID      string            // project the event came from (task_status_changed)
 	text           string            // triggering message text (message_posted)
 	postUUID       string            // triggering post id (message_posted) for moderation
 	targetUserUUID string            // the user an ephemeral reply targets
@@ -371,8 +372,12 @@ func (cw *compiledWorkflow) matches(lowerText string) bool {
 
 // runWorkflow executes a matched workflow's actions as its owner, then records
 // the run outcome. Actions run under a workflow-generated context so they don't
-// re-trigger workflows.
+// re-trigger workflows. An event from a channel or project its owner can't see
+// is skipped before any of them (see access.go), and isn't a run.
 func runWorkflow(ctx context.Context, cw *compiledWorkflow, ev triggerEvent) {
+	if !access.allows(ctx, cw.createdBy, ev) {
+		return
+	}
 	actionCtx := helpers.WithWorkflowGenerated(ctx)
 
 	n := len(cw.actions)

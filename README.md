@@ -5,7 +5,7 @@ yourself, with AI teammates you can govern. Agents act as the person who sponsor
 them and never more, ask before they change things until you say otherwise, and
 every action they take is signed and recorded.
 
-**[Try the live demo](https://onemana.dev)**: no signup, a real workspace with
+**[Try the live demo](https://onemana.dev/demo)**: no signup, a real workspace with
 channels, docs, tasks and an AI teammate already in it.
 
 ![The OneCamp AI assistant summarising what the team discussed today, with its sources](.github/assets/ai.jpg)
@@ -16,7 +16,7 @@ channels, docs, tasks and an AI teammate already in it.
 | **Docs, edited together live** | **Every agent action on the record** |
 | ![A collaborative doc in OneCamp](.github/assets/doc.jpg) | ![An agent's refused action, with the hash-chained record that proves it](.github/assets/drill.jpg) |
 
-- Live demo, no signup: https://onemana.dev
+- Live demo, no signup: https://onemana.dev/demo
 - Documentation: https://onemana.dev/docs
 - Web app (MIT): https://github.com/OneMana-Soft/OneCamp-fe
 - Desktop app for Windows, macOS and Linux (MIT): https://github.com/OneMana-Soft/OneCamp-desktop/releases/latest
@@ -43,7 +43,7 @@ audit-log export) come with it.
 - **Open source:** this code, free for any number of people, under AGPL-3.0.
 - **Free licence:** the product as a ready-made release with a one-command installer, for teams of up to 25 people, without the company controls. [Get a key](https://onemana.dev/free).
 - **Lifetime licence:** the ready-made release for any number of people, under a commercial licence, so your company has no AGPL obligations. Pay once. [Prices](https://onemana.dev/buy).
-- **OneCamp Cloud:** we run it on a server of your own for you, with backups and updates. [Plans](https://onemana.dev/buy).
+- **OneCamp Cloud:** we run it on a server of your own for you, with backups and updates. [Plans](https://onemana.dev/buy?plan=cloud).
 
 ### What AGPL-3.0 asks of you
 

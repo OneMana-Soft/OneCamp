@@ -21,6 +21,9 @@ type ChannelResolveStats struct {
 	Created   int      `json:"created"`
 	Conflicts int      `json:"conflicts"`
 	Renamed   []string `json:"renamed,omitempty"` // for warnings
+	// IntoGeneral is the name of Slack's #general when it went into the
+	// workspace's own #general.
+	IntoGeneral string `json:"into_general,omitempty"`
 }
 
 // resolveChannels creates a OneCamp channel for each public Slack channel
@@ -100,6 +103,29 @@ func resolveChannels(ctx context.Context, importId uuid.UUID, workspaceName stri
 			continue
 		}
 
+		// Slack's #general goes into the workspace's own #general while that
+		// one holds nothing but its welcome post (tidy.go), instead of
+		// becoming #general-from-slack beside it. Not created by this import,
+		// so a rollback takes away the messages and leaves the channel.
+		if sc.IsGeneral && !e.isPrivate {
+			if general, ok := seededGeneral(ctx); ok {
+				if err := importModels.UpsertIdMappingWithOwnership(ctx, importId,
+					importModels.EntityChannel, sc.ID, general, nil,
+					mustMarshal(map[string]interface{}{
+						"matched_by": "seeded_general",
+						"slack_name": sc.Name,
+					}),
+					false); err != nil {
+					return stats, err
+				}
+				_ = importModels.UpsertWorkspaceMapping(ctx, workspaceName,
+					importModels.EntityChannel, sc.ID, general, importId)
+				addChannelMembersBulk(ctx, importId, general, sc.Members, userCache)
+				stats.IntoGeneral = sc.Name
+				continue
+			}
+		}
+
 		desired := strings.ToLower(strings.TrimSpace(sc.Name))
 		if prefix != "" {
 			desired = prefix + desired
@@ -170,6 +196,12 @@ func resolveChannels(ctx context.Context, importId uuid.UUID, workspaceName stri
 		// Wire membership inline (after the channel mapping is recorded
 		// so a crash mid-membership can still resume cleanly).
 		addChannelMembersBulk(ctx, importId, channelUUID, sc.Members, userCache)
+
+		// Creating it made the importing admin a member and its admin; a
+		// private channel they weren't in is handed on and left (tidy.go).
+		if e.isPrivate {
+			leavePrivateChannel(ctx, importId, channelUUID, sc, importingUser, userCache)
+		}
 	}
 
 	patch := mustMarshal(map[string]interface{}{"channels": stats})

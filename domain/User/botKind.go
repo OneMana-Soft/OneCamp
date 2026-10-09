@@ -77,7 +77,7 @@ const (
 // Returns "" for a non-bot, so a caller can use the result directly without
 // first testing is_bot.
 func ClassifyBot(email string) BotKind {
-	email = strings.ToLower(strings.TrimSpace(email))
+	email = helpers.NormalizeEmail(email)
 	if !strings.HasSuffix(email, BotEmailDomain) {
 		return ""
 	}

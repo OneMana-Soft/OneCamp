@@ -200,6 +200,11 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 				Uid:        fmt.Sprintf("uid(dm_%d)", dmCount),
 				GroupingId: groupingId,
 				DType:      []string{"Dm"},
+				// Its two people, as a DM started any other way has: every
+				// check of who's in it reads them, so a DM a forward started
+				// refused replies, reactions and receipts until someone wrote
+				// in it.
+				Participants: []*dgraphStruct.DgraphUser{{Uid: userInfo.Uid}, {Uid: postOrChat.UserDgraphUid}},
 				Chats: []*dgraphStruct.DgraphChat{
 					{
 						Uid:       fmt.Sprintf("uid(ch_%d)", dmCount),
@@ -289,6 +294,11 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 			"business/BulkPostAndChatForward Failed to bulk add post and chat to dgraph err: %+v",
 			err,
 		)
+		// The rows written above name posts and chats the graph doesn't
+		// have, and nothing would ever show or remove them: they go too.
+		_ = helpers.CompensateOnFailure(ctx, "forwarded posts and chats", func(c context.Context) error {
+			return domain.BulkRemoveChatAndPostFromPostgres(c, postUUIDs, allChatUUIDs)
+		})
 		return
 	}
 

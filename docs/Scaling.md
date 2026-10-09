@@ -58,6 +58,15 @@ concurrently is safe for providers that keep refresh tokens stable and a hazard
 for providers that rotate them. Narrow, because it only applies during an
 import, but real.
 
+One of those caches decides who may subscribe to what. The broker asks the
+backend before each subscription (`business/MqttAccess`), and a person's
+channel and conversation topics are kept per node for ten seconds
+(`business/Mqtt/memberTopics.go`). On a second node a channel joined a moment
+ago can be refused once, because the node asked hasn't read it yet; the web
+app asks again. A channel just left stays subscribable for those ten seconds
+on any node, which is no wider than today: a subscription made before leaving
+lasts until the client reconnects, because the broker never re-checks one.
+
 **4. The compose file.** `distribute-compose.yml` declares one `go-service` and
 no load balancer in front of it. Traefik is there and would do the job, but
 nothing configures it to.

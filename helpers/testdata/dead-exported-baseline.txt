@@ -76,7 +76,6 @@ GetDgraphRecentPostsForAI
 GetDgraphTaskList
 GetDgraphUserInfoByDgraphUID
 GetHashTags
-GetMqttTopicForBroadcast
 GetPostIdsOlderThan
 GetPostgresChatByUUID
 GetProvider
@@ -114,7 +113,6 @@ ListRepoTree
 LoadExclusionSet
 LoadGitHubIntegration
 MarketplaceTemplates
-MqttClientConnectedByUserId
 NewHTTPRunner
 NoopLimiter
 ParseScopes
@@ -137,7 +135,6 @@ RenderAgentBodyHTML
 RepoPushAccessWithToken
 RestoreByScope
 RestoreBySource
-RestoreRecording
 RetakeIdempotencyKey
 ScanWithDefault
 ScopeForTool
@@ -174,3 +171,5 @@ LogDebugWithContext
 RevokeAny
 RotateSecret
 MCPResourceMetadataURL
+IsPublic
+PatchRow

@@ -123,6 +123,8 @@ func scimFailure(w http.ResponseWriter, r *http.Request, err error) {
 		writeSCIMError(w, r, http.StatusConflict, "uniqueness", scimBusiness.ErrScimUserExists.Error())
 	case errors.Is(err, scimBusiness.ErrScimUserNameInvalid):
 		writeSCIMError(w, r, http.StatusBadRequest, "invalidValue", scimBusiness.ErrScimUserNameInvalid.Error())
+	case errors.Is(err, scimBusiness.ErrScimUserNameNotASCII):
+		writeSCIMError(w, r, http.StatusBadRequest, "invalidValue", scimBusiness.ErrScimUserNameNotASCII.Error())
 	case errors.Is(err, scimBusiness.ErrScimFilterUnsupported):
 		writeSCIMError(w, r, http.StatusBadRequest, "invalidFilter", scimBusiness.ErrScimFilterUnsupported.Error())
 	case errors.Is(err, scimBusiness.ErrScimPatchUnsupported):
@@ -290,7 +292,7 @@ func DeleteScimUser(w http.ResponseWriter, r *http.Request) {
 func GetScimServiceProviderConfig(w http.ResponseWriter, r *http.Request) {
 	writeSCIM(w, r, http.StatusOK, map[string]any{
 		"schemas":          []string{"urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"},
-		"documentationUri": "https://onecamp.in/docs/scim",
+		"documentationUri": "https://onemana.dev/docs/single-sign-on",
 		"patch":            map[string]any{"supported": true},
 		"bulk":             map[string]any{"supported": false, "maxOperations": 0, "maxPayloadSize": 0},
 		"filter":           map[string]any{"supported": true, "maxResults": scimBusiness.MaxPageSize},

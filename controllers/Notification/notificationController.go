@@ -15,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
@@ -421,16 +422,36 @@ func publicSetEmailEnabled(w http.ResponseWriter, r *http.Request, enabled bool,
 // ResendWebhook receives delivery events from Resend (delivered, bounced,
 // complained) and updates the suppression list and email log accordingly.
 //
-// Authentication: Svix-style signature verification when
-// RESEND_WEBHOOK_SECRET is set. Resend uses Svix under the hood, so the
-// signed input is `<svix_id>.<svix_timestamp>.<body>` and the resulting
-// HMAC-SHA256 is base64-encoded and prefixed with "v1,". The secret value
-// is shaped "whsec_<base64-bytes>" — we strip the prefix and base64-decode
-// to get the actual HMAC key. We also reject signatures whose timestamp
-// is older than 5 minutes to prevent replay attacks.
+// Authentication: Svix-style signature verification against
+// RESEND_WEBHOOK_SECRET, the endpoint's signing secret in Resend. Resend uses
+// Svix under the hood, so the signed input is `<svix_id>.<svix_timestamp>.<body>`
+// and the resulting HMAC-SHA256 is base64-encoded and prefixed with "v1,". The
+// secret value is shaped "whsec_<base64-bytes>" — we strip the prefix and
+// base64-decode to get the actual HMAC key. We also reject signatures whose
+// timestamp is more than 5 minutes off, to prevent replay attacks.
+//
+// Without the secret every event is refused. Unsigned events used to be
+// accepted then, so anyone could post a bounce or a complaint for any address
+// and the workspace stopped emailing it: invitations, password resets,
+// notifications. The router limits the route per address.
 //
 // POST /webhooks/resend
 func ResendWebhook(w http.ResponseWriter, r *http.Request) {
+	secret := strings.TrimSpace(os.Getenv("RESEND_WEBHOOK_SECRET"))
+	if secret == "" {
+		resendSecretMissing.Do(func() {
+			helpers.LogErrorWithContext(r.Context(),
+				"controllers/ResendWebhook refusing every event: RESEND_WEBHOOK_SECRET is not set. "+
+					"Set it to the signing secret (whsec_...) of this endpoint in Resend's webhook settings; "+
+					"until then bounces and complaints are not recorded.")
+		})
+		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+			"msg":    "webhook signing is not configured",
+			"status": "failed",
+		})
+		return
+	}
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
@@ -440,18 +461,15 @@ func ResendWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secret := strings.TrimSpace(os.Getenv("RESEND_WEBHOOK_SECRET"))
-	if secret != "" {
-		svixID := r.Header.Get("Svix-Id")
-		svixTimestamp := r.Header.Get("Svix-Timestamp")
-		svixSignature := r.Header.Get("Svix-Signature")
-		if !verifyResendWebhookSignature(secret, svixID, svixTimestamp, svixSignature, body) {
-			helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
-				"msg":    "invalid signature",
-				"status": "failed",
-			})
-			return
-		}
+	svixID := r.Header.Get("Svix-Id")
+	svixTimestamp := r.Header.Get("Svix-Timestamp")
+	svixSignature := r.Header.Get("Svix-Signature")
+	if !verifyResendWebhookSignature(secret, svixID, svixTimestamp, svixSignature, body) {
+		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
+			"msg":    "invalid signature",
+			"status": "failed",
+		})
+		return
 	}
 
 	var payload struct {
@@ -512,6 +530,10 @@ func ResendWebhook(w http.ResponseWriter, r *http.Request) {
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "ok"})
 }
+
+// resendSecretMissing says once per process that ResendWebhook refuses every
+// event for want of RESEND_WEBHOOK_SECRET.
+var resendSecretMissing sync.Once
 
 // verifyResendWebhookSignature validates a Svix-style webhook signature.
 //

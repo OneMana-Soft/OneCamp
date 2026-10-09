@@ -7,6 +7,7 @@ import (
 
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	domain "github.com/akashc777/OneCamp/domain/Team"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
@@ -221,14 +222,19 @@ func RemoveAdminMemberFromTeam(ctx context.Context, teamDgraphUID string, userDg
 
 }
 
-func RemoveMemberFromTeam(ctx context.Context, teamDgraph *dgraphStruct.DgraphTeam, userDgraphUUID string) (err error) {
+// RemoveMemberFromTeam takes someone (their graph uid, and their user uuid)
+// out of a team and the team's projects.
+func RemoveMemberFromTeam(ctx context.Context, teamDgraph *dgraphStruct.DgraphTeam, userDgraphUID string, memberUUID string) (err error) {
 
-	err = domain.DeleteTeamMemberEdge(ctx, teamDgraph, userDgraphUUID)
+	err = domain.DeleteTeamMemberEdge(ctx, teamDgraph, userDgraphUID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/RemoveMemberFromTeam failed to remove member from team in dgraph err: %+v", err)
 
 		return
 	}
+	// Their cached profile still lists the team and its projects, and search
+	// covers what it lists.
+	userDomain.InvalidateUserMemberships(ctx, memberUUID)
 
 	return
 

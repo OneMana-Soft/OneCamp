@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -41,6 +42,11 @@ func UpdateUserInOpenSearch(ctx context.Context, openSearchUser *openSearchStruc
 	return
 }
 func PropagateUserInfoChangeInOpenSearch(ctx context.Context, userUUID string, newFullName string, newProfilePic string) (err error) {
+	// Callers run this in a goroutine; with search not connected (a tool, a
+	// test) a nil client would panic there and take the process with it.
+	if opensearchInit.OpenSearchClient == nil {
+		return errors.New("search is not connected")
+	}
 	indices := []string{openSearchStruct.POST_INDEX, openSearchStruct.CHAT_INDEX, openSearchStruct.COMMENT_INDEX, openSearchStruct.ATTACHMENT_INDEX, openSearchStruct.DOC_INDEX, openSearchStruct.TASK_INDEX, openSearchStruct.USER_INDEX}
 
 	for _, index := range indices {

@@ -10,10 +10,10 @@
 // Rate limits: 1500 requests/minute per token. We use SleepLimiter
 // ticking every 40ms with 50 burst (~1500/min sustained).
 //
-// Workspace selection: the operator names the workspace in
-// SourceWorkspaceName; we resolve it to a gid by listing /workspaces.
-// If multiple workspaces match (rare), the first is used and a warning
-// is logged.
+// Workspace selection: the admin picks the workspace from the list the
+// token can see, and the job carries its gid (options.workspace_gid). A
+// job without one is matched by its label, or is the token's only
+// workspace; anything else is an error, never a guess (pickWorkspace).
 //
 // Pagination: every Iter* uses Asana's `next_page.path`. We follow up
 // to a safety cap of 200 pages (so a runaway loop can't hang a worker).
@@ -706,7 +706,7 @@ func (p *Provider) getJSON(ctx context.Context, tok, path string, out any) error
 		}
 		return &importProvider.ErrRateLimited{RetryAfter: retryAfter, Reason: "Asana 429"}
 	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return fmt.Errorf("asana auth failed (HTTP %d); reconnect token", resp.StatusCode)
+		return &importProvider.TokenRejected{Msg: fmt.Sprintf("asana auth failed (HTTP %d); reconnect token", resp.StatusCode)}
 	case resp.StatusCode >= 400:
 		raw, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("asana HTTP %d: %s", resp.StatusCode, string(raw))
@@ -857,9 +857,8 @@ func (p *Provider) countTasksInProject(ctx context.Context, tok, projectGID stri
 	return count, false, nil
 }
 
-// resolveWorkspaceGID looks up the Asana workspace by name and caches
-// the gid per job id. Names are matched case-insensitively; the first
-// match wins.
+// resolveWorkspaceGID is the Asana workspace this job imports (see
+// pickWorkspace), cached per job id.
 func (p *Provider) resolveWorkspaceGID(ctx context.Context, j *importModels.Job) (string, error) {
 	p.mu.Lock()
 	if cached, ok := p.workspaceCache[j.Id]; ok {
@@ -876,24 +875,54 @@ func (p *Provider) resolveWorkspaceGID(ctx context.Context, j *importModels.Job)
 	if err := p.getJSON(ctx, tok, "/workspaces?limit=100&opt_fields=gid,name", &resp); err != nil {
 		return "", err
 	}
-	want := strings.ToLower(strings.TrimSpace(j.SourceWorkspaceName))
-	for _, w := range resp.Data {
-		if strings.ToLower(w.Name) == want {
-			p.mu.Lock()
-			p.workspaceCache[j.Id] = w.GID
-			p.mu.Unlock()
-			return w.GID, nil
+	gid, err := pickWorkspace(resp.Data, importProvider.JobPickedID(j, importProvider.OptAsanaWorkspaceGID), j.SourceWorkspaceName)
+	if err != nil {
+		return "", err
+	}
+	p.mu.Lock()
+	p.workspaceCache[j.Id] = gid
+	p.mu.Unlock()
+	return gid, nil
+}
+
+// pickWorkspace is the workspace to import from those the token can see: the
+// one the admin picked; else the one named like the import's label; else the
+// token's only workspace. A pick it can't see any more, two workspaces with
+// the label's name, or several workspaces and no way to tell are errors that
+// say what to do. It used to fall back to the first workspace, so a label that
+// didn't match a name quietly imported some other workspace. Pure.
+func pickWorkspace(workspaces []asanaWorkspace, picked, label string) (string, error) {
+	if picked != "" {
+		for _, w := range workspaces {
+			if w.GID == picked {
+				return w.GID, nil
+			}
+		}
+		return "", errors.New("the Asana workspace you picked isn't visible to this token any more. Pick another workspace, or reconnect with an account that can see it")
+	}
+	if len(workspaces) == 0 {
+		return "", errors.New("this Asana token can't see any workspace. Reconnect with an account that belongs to the workspace you want to import")
+	}
+	want := strings.ToLower(strings.TrimSpace(label))
+	var named []asanaWorkspace
+	for _, w := range workspaces {
+		if strings.ToLower(strings.TrimSpace(w.Name)) == want {
+			named = append(named, w)
 		}
 	}
-	if len(resp.Data) == 0 {
-		return "", errors.New("asana: token has access to no workspaces")
+	switch {
+	case len(named) == 1:
+		return named[0].GID, nil
+	case len(named) > 1:
+		return "", fmt.Errorf("more than one Asana workspace is called %q. Pick the one to import", strings.TrimSpace(label))
+	case len(workspaces) == 1:
+		return workspaces[0].GID, nil
 	}
-	// Fall back to first workspace; emit a clear warning via the
-	// imports error log on the caller's side.
-	p.mu.Lock()
-	p.workspaceCache[j.Id] = resp.Data[0].GID
-	p.mu.Unlock()
-	return resp.Data[0].GID, nil
+	names := make([]string, 0, len(workspaces))
+	for _, w := range workspaces {
+		names = append(names, w.Name)
+	}
+	return "", fmt.Errorf("pick which Asana workspace to import: this token can see %d (%s)", len(workspaces), strings.Join(names, ", "))
 }
 
 func (p *Provider) loadToken(ctx context.Context, j *importModels.Job) (string, error) {

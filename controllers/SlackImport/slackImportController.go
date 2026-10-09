@@ -17,6 +17,7 @@ import (
 	"time"
 
 	importAdapter "github.com/akashc777/OneCamp/adapter/SlackImport"
+	importBusiness "github.com/akashc777/OneCamp/business/Import"
 	business "github.com/akashc777/OneCamp/business/SlackImport"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/uploadsafe"
@@ -34,6 +35,32 @@ import (
 // uploadSizeCap defends against denial-of-disk by requiring operators to
 // set EXPORT_MAX_BYTES if they need >5 GB. Most workspace exports fit.
 const defaultUploadCap int64 = 5 * 1024 * 1024 * 1024 // 5 GB
+
+// slackUploadCap is the largest export this server takes: EXPORT_MAX_BYTES,
+// or 5 GB.
+func slackUploadCap() int64 {
+	if v := os.Getenv("EXPORT_MAX_BYTES"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultUploadCap
+}
+
+// tooLarge is the answer for an export over the cap, in sizes people read.
+func tooLarge(size, limit int64) string {
+	return fmt.Sprintf("That export is %s, and this server takes exports up to %s. "+
+		"Whoever runs it can raise the limit (EXPORT_MAX_BYTES).", helpers.ReadableBytes(size), helpers.ReadableBytes(limit))
+}
+
+// HandleLimits returns the largest export this server takes, so the upload
+// dialog says the real limit instead of one of its own.
+func HandleLimits(w http.ResponseWriter, r *http.Request) {
+	if _, ok := requireAdmin(w, r); !ok {
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"max_bytes": slackUploadCap()})
+}
 
 // checkSlackImportRateLimit is a thin wrapper around the registry-
 // backed rate limiter so each call site stays a single line.
@@ -75,15 +102,15 @@ func HandleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cap := defaultUploadCap
-	if v := os.Getenv("EXPORT_MAX_BYTES"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			cap = n
-		}
-	}
+	cap := slackUploadCap()
 	r.Body = http.MaxBytesReader(w, r.Body, cap)
 
 	if err := r.ParseMultipartForm(64 * 1024 * 1024); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			helpers.WriteJSON(w, http.StatusRequestEntityTooLarge, helpers.Envolope{"error": tooLarge(r.ContentLength, cap), "max_bytes": cap})
+			return
+		}
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "could not parse multipart: " + err.Error()})
 		return
 	}
@@ -238,9 +265,40 @@ func HandlePlan(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "job not found"})
 		return
 	}
-	if job.Status != importModels.StatusValidating && job.Status != importModels.StatusPlanned {
+	switch job.Status {
+	case importModels.StatusValidating, importModels.StatusPlanned:
+	case importModels.StatusFailed:
+		// Planned again. The export has to still be there, and the job takes
+		// its workspace's label back, which another import may hold by now.
+		if job.RawObjectKey == nil || *job.RawObjectKey == "" {
+			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+				"error": "The uploaded export is gone (uploads are cleared a week after an import ends). Upload it again to start a new import.",
+				"code":  "file_gone",
+			})
+			return
+		}
+		// From failed only, decided where it's written: Run may have started
+		// it since it was read, and a running import put back to waiting was
+		// started a second time.
+		reopened, err := importModels.UpdateStatusFrom(ctx, jobId, []string{importModels.StatusFailed},
+			importModels.StatusValidating, strPtr("validating"), nil)
+		switch {
+		case errors.Is(err, importModels.ErrConflictActiveJob):
+			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+				"error": "Another import of this Slack workspace is waiting or running. Finish or discard it first.",
+				"code":  "active_job",
+			})
+			return
+		case err != nil:
+			helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"error": "Couldn't reopen this import. Try again."})
+			return
+		case !reopened:
+			writeJobChanged(w)
+			return
+		}
+	default:
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
-			"error": "plan can only be run on a freshly uploaded or already-planned job",
+			"error": "Only an uploaded export waiting to be planned, or an import that failed, can be planned.",
 			"code":  "invalid_status",
 		})
 		return
@@ -259,11 +317,23 @@ func HandlePlan(w http.ResponseWriter, r *http.Request) {
 	defer cleanup()
 
 	plan, err := business.BuildPlan(ctx, jobId, arc)
+	if errors.Is(err, importModels.ErrJobChanged) {
+		writeJobChanged(w)
+		return
+	}
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": err.Error()})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, plan)
+}
+
+// writeJobChanged answers a request for an import that moved on in the
+// meantime (Run started it from another tab, or it was discarded while its
+// export uploaded), as the other imports' do.
+func writeJobChanged(w http.ResponseWriter) {
+	p := importBusiness.JobChanged
+	helpers.WriteJSON(w, p.Status, helpers.Envolope{"error": p.Msg, "code": p.Code})
 }
 
 // HandleRun starts the import pipeline asynchronously. Returns 202 with
@@ -306,7 +376,11 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := importModels.UpdateStatus(ctx, jobId, importModels.StatusRunning, strPtr("queued"), nil); err != nil {
+	// Started in one statement, from planned or failed: the status read above
+	// can be stale by now, and two clicks used to start two runs of the same
+	// import (every channel made twice, and Cancel stopping one of them).
+	started, err := importModels.StartRunning(ctx, jobId, []string{importModels.StatusPlanned, importModels.StatusFailed})
+	if err != nil {
 		if errors.Is(err, importModels.ErrConflictActiveJob) {
 			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
 				"error": "another import is already active for this workspace",
@@ -315,6 +389,13 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
+		return
+	}
+	if !started {
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+			"error": "this import has already been started",
+			"code":  "invalid_status",
+		})
 		return
 	}
 
@@ -587,15 +668,10 @@ func HandlePresignUpload(w http.ResponseWriter, r *http.Request) {
 
 	// Honour EXPORT_MAX_BYTES even on the presigned path. Operators who
 	// want huge uploads bump this env var explicitly.
-	cap := defaultUploadCap
-	if v := os.Getenv("EXPORT_MAX_BYTES"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			cap = n
-		}
-	}
+	cap := slackUploadCap()
 	if body.FileSize > cap {
 		helpers.WriteJSON(w, http.StatusRequestEntityTooLarge, helpers.Envolope{
-			"error":     fmt.Sprintf("file exceeds EXPORT_MAX_BYTES (%d)", cap),
+			"error":     tooLarge(body.FileSize, cap),
 			"max_bytes": cap,
 		})
 		return
@@ -713,8 +789,7 @@ func HandleFinalizeUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if stat.Size <= 0 {
 		// Roll the job out of pending so the workspace can take new uploads.
-		_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusFailed,
-			strPtr("failed"), strPtr("uploaded object is empty"))
+		_, _ = leavePending(ctx, jobId, importModels.StatusFailed, strPtr("uploaded object is empty"))
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"error": "uploaded object is empty",
 		})
@@ -726,20 +801,12 @@ func HandleFinalizeUpload(w http.ResponseWriter, r *http.Request) {
 	// larger file to the same presigned URL (MinIO does not enforce a
 	// per-object size cap on presigned PUT). Reject + delete here so a
 	// rogue or buggy client cannot DOS the bucket.
-	uploadCap := defaultUploadCap
-	if v := os.Getenv("EXPORT_MAX_BYTES"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			uploadCap = n
-		}
-	}
+	uploadCap := slackUploadCap()
 	if stat.Size > uploadCap {
 		_ = minioInit.MinioClient.RemoveObject(ctx, bucket, *job.RawObjectKey, minio.RemoveObjectOptions{})
-		_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusFailed,
-			strPtr("failed"),
-			strPtr(fmt.Sprintf("uploaded object %d bytes exceeds EXPORT_MAX_BYTES (%d)",
-				stat.Size, uploadCap)))
+		_, _ = leavePending(ctx, jobId, importModels.StatusFailed, strPtr(tooLarge(stat.Size, uploadCap)))
 		helpers.WriteJSON(w, http.StatusRequestEntityTooLarge, helpers.Envolope{
-			"error":     fmt.Sprintf("uploaded file exceeds EXPORT_MAX_BYTES (%d)", uploadCap),
+			"error":     tooLarge(stat.Size, uploadCap),
 			"max_bytes": uploadCap,
 			"actual":    stat.Size,
 		})
@@ -753,9 +820,7 @@ func HandleFinalizeUpload(w http.ResponseWriter, r *http.Request) {
 		helpers.LogWarnWithContext(ctx,
 			"SlackImport finalize: magic-byte check failed for job=%s: %+v", jobId, err)
 		_ = minioInit.MinioClient.RemoveObject(ctx, bucket, *job.RawObjectKey, minio.RemoveObjectOptions{})
-		_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusFailed,
-			strPtr("failed"),
-			strPtr("uploaded blob is not a PKZIP archive"))
+		_, _ = leavePending(ctx, jobId, importModels.StatusFailed, strPtr("uploaded blob is not a PKZIP archive"))
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"error": "uploaded file is not a ZIP archive (PKZIP signature missing)",
 			"code":  "not_a_zip",
@@ -780,8 +845,7 @@ func HandleFinalizeUpload(w http.ResponseWriter, r *http.Request) {
 		// Fail this job fast and tell the operator about the existing one.
 		// We delete the staged duplicate ZIP from MinIO so storage doesn't bloat.
 		_ = minioInit.MinioClient.RemoveObject(ctx, bucket, *job.RawObjectKey, minio.RemoveObjectOptions{})
-		_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusFailed,
-			strPtr("failed"),
+		_, _ = leavePending(ctx, jobId, importModels.StatusFailed,
 			strPtr(fmt.Sprintf("duplicate upload: identical file already imported as job %s", dup.Id)))
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
 			"error":           "this exact export was already uploaded",
@@ -798,22 +862,33 @@ func HandleFinalizeUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if err := importModels.UpdateStatus(ctx, jobId, importModels.StatusValidating,
-		strPtr("validating"), nil); err != nil {
-		if errors.Is(err, importModels.ErrConflictActiveJob) {
-			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
-				"error": "another import is already active for this workspace",
-				"code":  "active_job",
-			})
-			return
-		}
+	moved, err := leavePending(ctx, jobId, importModels.StatusValidating, nil)
+	switch {
+	case errors.Is(err, importModels.ErrConflictActiveJob):
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+			"error": "another import is already active for this workspace",
+			"code":  "active_job",
+		})
+		return
+	case err != nil:
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
+		return
+	case !moved:
+		writeJobChanged(w)
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"job_id": jobId,
 		"size":   stat.Size,
 	})
+}
+
+// leavePending moves a job waiting for its export on to status (its stage
+// named the same), and reports whether it did. From pending only: an import
+// discarded while its export uploaded was brought back to waiting, or failed,
+// by the upload finishing.
+func leavePending(ctx context.Context, jobId uuid.UUID, status string, errMsg *string) (bool, error) {
+	return importModels.UpdateStatusFrom(ctx, jobId, []string{importModels.StatusPending}, status, strPtr(status), errMsg)
 }
 
 // HandleDeleteStagedZip removes the staged Slack export ZIP from MinIO

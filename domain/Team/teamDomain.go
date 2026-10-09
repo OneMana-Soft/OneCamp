@@ -172,6 +172,7 @@ func GetDgraphTeamInfoByUUIDForArchivingAndUnarchivingTeam(ctx context.Context, 
 				teamInfo(func: eq(team_uuid, $id)) {
 					uid
 					team_uuid
+					team_created_at
 					team_created_by {
 						user_uuid
 						user_name

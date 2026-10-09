@@ -2,11 +2,8 @@ package helpers
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -16,7 +13,6 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -38,8 +34,6 @@ const (
 )
 
 type ContextKey string
-
-var fixedIV = []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
 
 const (
 	UserInfoContextKey ContextKey = "userInfo"
@@ -524,241 +518,6 @@ func GenerateGroupID(uuids []string) (string, error) {
 	return hashString[:32], nil
 }
 
-func GetMqttTopicForDm(groupingId string) (messageTopicName string, typingTopicName string) {
-	JWTKey := os.Getenv("JWT_SECRET")
-	key := sha256.Sum256([]byte(JWTKey))
-
-	ciphertext, err := encrypt([]byte(groupingId), key[:])
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetMqttTopicForDm Failed to encrypt err: %+v",
-			err)
-		return
-	}
-	return "message/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext)), "typing/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
-}
-
-func GetMqttTopicForDmMessage(groupingId string) (topicName string) {
-	JWTKey := os.Getenv("JWT_SECRET")
-	key := sha256.Sum256([]byte(JWTKey))
-
-	ciphertext, err := encrypt([]byte(groupingId), key[:])
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetMqttTopicForDmTyping Failed to encrypt err: %+v",
-			err)
-		return
-	}
-	return "message/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
-}
-
-func GetMqttTopicForDmTyping(groupingId string) (topicName string) {
-	JWTKey := os.Getenv("JWT_SECRET")
-	key := sha256.Sum256([]byte(JWTKey))
-
-	ciphertext, err := encrypt([]byte(groupingId), key[:])
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetMqttTopicForDmTyping Failed to encrypt err: %+v",
-			err)
-		return
-	}
-
-	return "typing/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
-}
-
-func GetMqttTopicForChannelTyping(channelId string) (topicName string) {
-
-	JWTKey := os.Getenv("JWT_SECRET")
-	key := sha256.Sum256([]byte(JWTKey))
-
-	ciphertext, err := encrypt([]byte(channelId), key[:])
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetMqttTopicForChannelTyping Failed to encrypt err: %+v",
-			err)
-		return
-	}
-	return "typing/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
-}
-
-func GetPublicUsersStatusTopic() (topicName string) {
-
-	return "public/userStatus"
-}
-
-// GetMqttTopicForAdminBroadcast returns the topic for system-wide admin
-// notifications (archive job status, future admin events). The topic is
-// derived from the JWT secret so unauthorized clients cannot guess and
-// subscribe. Only system admins should be subscribed by GetMqttConfig.
-func GetMqttTopicForAdminBroadcast() (topicName string) {
-
-	JWTKey := os.Getenv("JWT_SECRET")
-	key := sha256.Sum256([]byte(JWTKey))
-
-	ciphertext, err := encrypt([]byte("admin_broadcast"), key[:])
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetMqttTopicForAdminBroadcast Failed to encrypt err: %+v",
-			err)
-		return
-	}
-	return "admin/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
-}
-
-func GetMqttTopicForDoc(docId string) (messageTopicName string) {
-
-	JWTKey := os.Getenv("JWT_SECRET")
-	key := sha256.Sum256([]byte(JWTKey))
-
-	ciphertext, err := encrypt([]byte(docId), key[:])
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetMqttTopicForChannel Failed to encrypt err: %+v",
-			err)
-		return
-	}
-
-	return "doc/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
-}
-
-// GetMqttTopicForBoard returns the per-board MQTT topic (board comments /
-// presence), mirroring GetMqttTopicForDoc. Real-time canvas sync itself runs
-// over the Hocuspocus/Yjs collaboration service, not MQTT.
-func GetMqttTopicForBoard(boardId string) (messageTopicName string) {
-
-	JWTKey := os.Getenv("JWT_SECRET")
-	key := sha256.Sum256([]byte(JWTKey))
-
-	ciphertext, err := encrypt([]byte(boardId), key[:])
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetMqttTopicForBoard Failed to encrypt err: %+v",
-			err)
-		return
-	}
-
-	return "board/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
-}
-
-// GetMqttTopicForTable returns the per-table MQTT topic used to broadcast row
-// create/update/delete events to open grid/board/calendar views, mirroring
-// GetMqttTopicForDoc.
-func GetMqttTopicForTable(tableId string) (messageTopicName string) {
-
-	JWTKey := os.Getenv("JWT_SECRET")
-	key := sha256.Sum256([]byte(JWTKey))
-
-	ciphertext, err := encrypt([]byte(tableId), key[:])
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetMqttTopicForTable Failed to encrypt err: %+v",
-			err)
-		return
-	}
-
-	return "table/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
-}
-
-func GetMqttTopicForChannel(channelId string) (messageTopicName string, typingTopicName string) {
-
-	JWTKey := os.Getenv("JWT_SECRET")
-	key := sha256.Sum256([]byte(JWTKey))
-
-	ciphertext, err := encrypt([]byte(channelId), key[:])
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetMqttTopicForChannel Failed to encrypt err: %+v",
-			err)
-		return
-	}
-
-	return "message/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext)), "typing/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
-}
-
-func GetMqttTopicForChannelMessage(channelId string) (topicName string) {
-
-	JWTKey := os.Getenv("JWT_SECRET")
-	key := sha256.Sum256([]byte(JWTKey))
-
-	ciphertext, err := encrypt([]byte(channelId), key[:])
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetMqttTopicForChannelMessage Failed to encrypt err: %+v",
-			err)
-		return
-	}
-
-	return "message/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
-}
-
-func GetMqttTopicForProjectMessage(projectId string) (topicName string) {
-
-	JWTKey := os.Getenv("JWT_SECRET")
-	key := sha256.Sum256([]byte(JWTKey))
-
-	ciphertext, err := encrypt([]byte(projectId), key[:])
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetMqttTopicForProjectMessage Failed to encrypt err: %+v",
-			err)
-		return
-	}
-
-	return "message/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
-}
-
-func GetMqttTopicForUserActivity(userUUID string) (topicName string) {
-	JWTKey := os.Getenv("JWT_SECRET")
-	key := sha256.Sum256([]byte(JWTKey))
-
-	ciphertext, err := encrypt([]byte(userUUID), key[:])
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetMqttTopicForUserActivity Failed to encrypt err: %+v",
-			err)
-		return
-	}
-
-	return "activity/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
-}
-
-func removeNonAlphanumeric(input string) string {
-	re := regexp.MustCompile(`[^a-zA-Z0-9]`)
-	return re.ReplaceAllString(input, "")
-}
-
-func encrypt(text, key []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-
-	// Use the fixed IV for deterministic output
-	ciphertext := make([]byte, aes.BlockSize+len(text))
-	copy(ciphertext[:aes.BlockSize], fixedIV)
-
-	stream := cipher.NewCFBEncrypter(block, fixedIV)
-	stream.XORKeyStream(ciphertext[aes.BlockSize:], text)
-
-	return ciphertext, nil
-}
-
-//func decrypt(key, text []byte) ([]byte, error) {
-//	block, err := aes.NewCipher(key)
-//	if err != nil {
-//		return nil, err
-//	}
-//	if len(text) < aes.BlockSize {
-//		return nil, errors.New("ciphertext too short")
-//	}
-//	iv := text[:aes.BlockSize]
-//	text = text[aes.BlockSize:]
-//	stream := cipher.NewCFBDecrypter(block, iv)
-//	stream.XORKeyStream(text, text)
-//	return text, nil
-//}
-
 func RemoveHTMLTags(text string) (res string) {
 	re := regexp.MustCompile(`<[^>]*>`)
 	return re.ReplaceAllString(text, "")
@@ -1048,21 +807,6 @@ func GetHashTags(source string) (res []string, err error) {
 	}
 
 	return
-}
-
-func GetMqttTopicForBroadcast() (topicName string) {
-
-	JWTKey := os.Getenv("JWT_SECRET")
-	key := sha256.Sum256([]byte(JWTKey))
-
-	ciphertext, err := encrypt([]byte("public_broadcast"), key[:])
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetMqttTopicForChannelTyping Failed to encrypt err: %+v",
-			err)
-		return
-	}
-	return "typing/" + removeNonAlphanumeric(base32.StdEncoding.EncodeToString(ciphertext))
 }
 
 func StringSliceToJSONString(slice []string) string {

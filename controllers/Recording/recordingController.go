@@ -10,8 +10,9 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// HandleDeleteChannelRecording soft-deletes a channel recording.
-// Only channel admins can delete.
+// HandleDeleteChannelRecording deletes a channel recording for good: its file,
+// then the recording and its transcript. Only the channel's moderators and
+// workspace admins can delete.
 func HandleDeleteChannelRecording(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -39,7 +40,7 @@ func HandleDeleteChannelRecording(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = recordingBusiness.SoftDeleteRecording(ctx, egressId)
+	err = recordingBusiness.DeleteRecording(ctx, egressId)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/HandleDeleteChannelRecording failed: %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": "Failed to delete recording"})
@@ -49,8 +50,8 @@ func HandleDeleteChannelRecording(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Recording deleted"})
 }
 
-// HandleDeleteChatRecording soft-deletes a DM/group chat recording.
-// DM: both participants can delete. Group: any member can delete.
+// HandleDeleteChatRecording deletes a DM/group chat recording for good, as
+// above. DM: both participants can delete. Group: any member can delete.
 func HandleDeleteChatRecording(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -77,7 +78,7 @@ func HandleDeleteChatRecording(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = recordingBusiness.SoftDeleteRecording(ctx, egressId)
+	err = recordingBusiness.DeleteRecording(ctx, egressId)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/HandleDeleteChatRecording failed: %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": "Failed to delete recording"})

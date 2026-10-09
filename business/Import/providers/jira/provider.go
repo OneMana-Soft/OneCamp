@@ -146,16 +146,20 @@ func (p *Provider) Plan(ctx context.Context, j *importModels.Job, opts importPro
 		return nil, nil, err
 	}
 
-	projects, err := p.listProjects(ctx, tok, site)
+	projects, err := p.projectsInScope(ctx, tok, site, opts)
 	if err != nil {
-		return nil, nil, fmt.Errorf("jira projects: %w", err)
+		return nil, nil, err
 	}
 
 	plan := &importProvider.Plan{
 		ProjectCount: len(projects),
 	}
 
-	users, err := p.listUsers(ctx, tok, site)
+	// Who can be assigned the picked project's issues, not who its issues
+	// name: Plan runs while the admin waits (and each time the dialog opens),
+	// and walking every issue of a large project outlasted the proxy's
+	// timeout. The run brings both.
+	users, err := p.usersInScope(ctx, tok, site, opts, false)
 	if err == nil {
 		plan.UserCount = len(users)
 	}
@@ -197,7 +201,8 @@ func (p *Provider) Plan(ctx context.Context, j *importModels.Job, opts importPro
 	return plan, nil, nil
 }
 
-// IterUsers streams active workspace users via /rest/api/3/users/search.
+// IterUsers streams the people in scope (usersInScope): the site's, or a
+// picked project's own.
 func (p *Provider) IterUsers(ctx context.Context, j *importModels.Job, opts importProvider.JobOptions) (<-chan importProvider.SourceUser, <-chan error) {
 	out := make(chan importProvider.SourceUser, 16)
 	errCh := make(chan error, 1)
@@ -215,7 +220,7 @@ func (p *Provider) IterUsers(ctx context.Context, j *importModels.Job, opts impo
 			errCh <- err
 			return
 		}
-		users, err := p.listUsers(ctx, tok, site)
+		users, err := p.usersInScope(ctx, tok, site, opts, true)
 		if err != nil {
 			errCh <- err
 			return
@@ -239,7 +244,8 @@ func (p *Provider) IterUsers(ctx context.Context, j *importModels.Job, opts impo
 
 // IterTeams emits one synthetic team per project category when
 // opts.group_by == "project_category", otherwise nothing (orchestrator
-// falls back to the default team).
+// falls back to the default team). With one project picked, only its own
+// category: every category on the site became a team, empty but for one.
 func (p *Provider) IterTeams(ctx context.Context, j *importModels.Job, opts importProvider.JobOptions) (<-chan importProvider.SourceTeam, <-chan error) {
 	out := make(chan importProvider.SourceTeam, 4)
 	errCh := make(chan error, 1)
@@ -261,7 +267,7 @@ func (p *Provider) IterTeams(ctx context.Context, j *importModels.Job, opts impo
 			errCh <- err
 			return
 		}
-		cats, err := p.listProjectCategories(ctx, tok, site)
+		cats, err := p.categoriesInScope(ctx, tok, site, opts)
 		if err != nil {
 			errCh <- err
 			return
@@ -299,7 +305,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 			errCh <- err
 			return
 		}
-		projects, err := p.listProjects(ctx, tok, site)
+		projects, err := p.projectsInScope(ctx, tok, site, opts)
 		if err != nil {
 			errCh <- err
 			return
@@ -355,7 +361,7 @@ func (p *Provider) IterTasksOfProject(ctx context.Context, j *importModels.Job, 
 		// are too many to name one by one in a URL.
 		asked := append([]string{"*navigable"}, strings.Split(issueFields, ",")...)
 		jql := fmt.Sprintf(`project = "%s" ORDER BY created ASC`, projectSourceId)
-		err = p.searchIssues(ctx, tok, site, jql, asked, func(iss *jiraIssue) bool {
+		err = p.searchIssues(ctx, tok, site, jql, asked, true, func(iss *jiraIssue) bool {
 			if iss.Fields.IssueType.Subtask {
 				// Skip subtasks here; they're emitted by IterSubtasksOfTask.
 				return true
@@ -387,7 +393,9 @@ func (p *Provider) IterTasksOfProject(ctx context.Context, j *importModels.Job, 
 // for every issue once, until the last page or until each says to stop.
 // Pages follow nextPageToken; a page with no issue not seen before is the
 // end too, since some sites go on handing out tokens past the last page.
-func (p *Provider) searchIssues(ctx context.Context, tok, site, jql string, fields []string, each func(*jiraIssue) bool) error {
+// rendered asks for the fields as HTML too (renderedFields), which only an
+// issue's own text needs: it makes every page several times the size.
+func (p *Provider) searchIssues(ctx context.Context, tok, site, jql string, fields []string, rendered bool, each func(*jiraIssue) bool) error {
 	seen := map[string]bool{}
 	token := ""
 	for page := 0; page < maxPages; page++ {
@@ -395,7 +403,9 @@ func (p *Provider) searchIssues(ctx context.Context, tok, site, jql string, fiel
 		q.Set("jql", jql)
 		q.Set("maxResults", "100")
 		q.Set("fields", strings.Join(fields, ","))
-		q.Set("expand", "renderedFields")
+		if rendered {
+			q.Set("expand", "renderedFields")
+		}
 		if token != "" {
 			q.Set("nextPageToken", token)
 		}
@@ -543,15 +553,32 @@ func (p *Provider) FetchAttachment(ctx context.Context, j *importModels.Job, opt
 	if err != nil {
 		return "", 0, err
 	}
-	// Either att.URL is the full /content URL (preferred) or we derive it.
-	dlURL := att.URL
-	if dlURL == "" {
-		dlURL = site + "/rest/api/3/attachment/content/" + url.PathEscape(att.SourceID)
+	return importProvider.DefaultFetchAttachment(ctx, jiraDownload(att, site, tok), dest)
+}
+
+// jiraDownload is att as it is fetched: its /content URL (derived from the
+// site when the issue gave none), carrying the credential only when that URL
+// is on the site the credential was connected for. It went with every URL an
+// issue named.
+func jiraDownload(att importProvider.SourceAttachment, site, tok string) importProvider.SourceAttachment {
+	if att.URL == "" {
+		att.URL = site + "/rest/api/3/attachment/content/" + url.PathEscape(att.SourceID)
 	}
-	dl := att
-	dl.URL = dlURL
-	dl.Headers = map[string]string{"Authorization": "Basic " + tok}
-	return importProvider.DefaultFetchAttachment(ctx, dl, dest)
+	var siteHost []string
+	if u, err := url.Parse(site); err == nil && u.Hostname() != "" {
+		siteHost = append(siteHost, u.Hostname())
+	}
+	return importProvider.WithAuthorization(att, authorizationHeader(tok), siteHost...)
+}
+
+// authorizationHeader is the Authorization value for a credential as loadAuth
+// returns it: "Bearer <token>" for OAuth, and the base64 of email:token, sent
+// as Basic, for an API token.
+func authorizationHeader(tok string) string {
+	if strings.HasPrefix(tok, "Bearer ") || strings.HasPrefix(tok, "Basic ") {
+		return tok
+	}
+	return "Basic " + tok
 }
 
 // ─── Jira DTOs (subset we use) ───────────────────────────────────
@@ -633,6 +660,13 @@ type jiraIssueFields struct {
 	Subtasks    []jiraIssueRef   `json:"subtasks"`
 	Attachment  []jiraAttachment `json:"attachment"`
 	Project     *jiraProjectRef  `json:"project"`
+	// Comment is the comments a search carries with an issue (the first page
+	// of them); only their authors are read (usersInScope).
+	Comment *struct {
+		Comments []struct {
+			Author *jiraUser `json:"author"`
+		} `json:"comments"`
+	} `json:"comment"`
 }
 
 type jiraRenderedFields struct {
@@ -698,6 +732,12 @@ type statusError struct {
 
 func (e *statusError) Error() string { return e.Msg }
 
+// Is makes a refusal of the credentials (401, 403) match
+// importProvider.ErrTokenRejected.
+func (e *statusError) Is(target error) bool {
+	return target == importProvider.ErrTokenRejected && (e.Code == http.StatusUnauthorized || e.Code == http.StatusForbidden)
+}
+
 func (p *Provider) getJSON(ctx context.Context, tok, urlStr string, out any) error {
 	return p.call(ctx, tok, http.MethodGet, urlStr, nil, out)
 }
@@ -725,12 +765,7 @@ func (p *Provider) call(ctx context.Context, tok, method, urlStr string, body, o
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	// tok may be Basic <b64> or Bearer <pat>, we just prepend "Basic " if not already prefixed.
-	if strings.HasPrefix(tok, "Bearer ") || strings.HasPrefix(tok, "Basic ") {
-		req.Header.Set("Authorization", tok)
-	} else {
-		req.Header.Set("Authorization", "Basic "+tok)
-	}
+	req.Header.Set("Authorization", authorizationHeader(tok))
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := importProvider.SharedAPIClient.Do(req)
@@ -804,6 +839,107 @@ func (p *Provider) listProjects(ctx context.Context, tok, site string) ([]jiraPr
 		startAt += len(resp.Values)
 	}
 	return out, nil
+}
+
+// projectsInScope is the projects this import brings in: the one the admin
+// picked, or every project the account can see when they chose all of them.
+// Its people are the project's own (usersInScope).
+func (p *Provider) projectsInScope(ctx context.Context, tok, site string, opts importProvider.JobOptions) ([]jiraProject, error) {
+	projects, err := p.listProjects(ctx, tok, site)
+	if err != nil {
+		return nil, fmt.Errorf("jira projects: %w", err)
+	}
+	return pickProjects(projects, importProvider.PickedID(opts, importProvider.OptJiraProjectKey))
+}
+
+// usersInScope is the people this import brings: the site's when every
+// project comes across, and when one is picked, that project's own: those who
+// can be assigned its issues, and those its issues name (assignee, reporter,
+// creator, and the authors of the comments a search carries). Every account
+// on the site used to come across for one project, and the invitation offer
+// then listed all of them. Bots and apps are left out, as on the site list.
+// Those the issues name are read only when issues says so: it walks every
+// issue of the project.
+func (p *Provider) usersInScope(ctx context.Context, tok, site string, opts importProvider.JobOptions, issues bool) ([]jiraUser, error) {
+	key := importProvider.PickedID(opts, importProvider.OptJiraProjectKey)
+	if key == "" {
+		return p.listUsers(ctx, tok, site)
+	}
+	var out []jiraUser
+	seen := map[string]bool{}
+	add := func(u *jiraUser) {
+		if u == nil || u.AccountID == "" || seen[u.AccountID] || (u.AccountType != "atlassian" && u.AccountType != "") {
+			return
+		}
+		seen[u.AccountID] = true
+		out = append(out, *u)
+	}
+	for startAt, page := 0, 0; page < maxPages; page++ {
+		var users []jiraUser
+		endpoint := fmt.Sprintf("%s/rest/api/3/user/assignable/search?project=%s&startAt=%d&maxResults=100", site, url.QueryEscape(key), startAt)
+		if err := p.getJSON(ctx, tok, endpoint, &users); err != nil {
+			return nil, fmt.Errorf("jira people of %s: %w", key, err)
+		}
+		for i := range users {
+			add(&users[i])
+		}
+		if len(users) < 100 {
+			break
+		}
+		startAt += len(users)
+	}
+	if !issues {
+		return out, nil
+	}
+	err := p.searchIssues(ctx, tok, site, fmt.Sprintf(`project = "%s"`, key), []string{"assignee", "reporter", "creator", "comment"}, false, func(iss *jiraIssue) bool {
+		add(iss.Fields.Assignee)
+		add(iss.Fields.Reporter)
+		add(iss.Fields.Creator)
+		if iss.Fields.Comment != nil {
+			for _, c := range iss.Fields.Comment.Comments {
+				add(c.Author)
+			}
+		}
+		return true
+	})
+	if err != nil {
+		return nil, fmt.Errorf("jira people on %s's issues: %w", key, err)
+	}
+	return out, nil
+}
+
+// categoriesInScope is the project categories that become teams: the site's,
+// or the picked project's own (none when it has no category).
+func (p *Provider) categoriesInScope(ctx context.Context, tok, site string, opts importProvider.JobOptions) ([]jiraProjectCategory, error) {
+	if importProvider.PickedID(opts, importProvider.OptJiraProjectKey) == "" {
+		return p.listProjectCategories(ctx, tok, site)
+	}
+	projects, err := p.projectsInScope(ctx, tok, site, opts)
+	if err != nil {
+		return nil, err
+	}
+	var out []jiraProjectCategory
+	for _, pr := range projects {
+		if pr.Category != nil && pr.Category.ID != "" {
+			out = append(out, *pr.Category)
+		}
+	}
+	return out, nil
+}
+
+// pickProjects narrows the site's projects to the picked one. A pick the
+// account can no longer see is an error, never a reason to import something
+// else in its place. Pure.
+func pickProjects(projects []jiraProject, key string) ([]jiraProject, error) {
+	if key == "" {
+		return projects, nil
+	}
+	for _, pr := range projects {
+		if strings.EqualFold(pr.Key, key) {
+			return []jiraProject{pr}, nil
+		}
+	}
+	return nil, fmt.Errorf("the Jira project %s isn't visible to this account any more. Pick another project, or reconnect with an account that can see it", key)
 }
 
 func (p *Provider) listProjectStatuses(ctx context.Context, tok, site, projectKey string) ([]string, error) {

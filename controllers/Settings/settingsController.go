@@ -45,11 +45,16 @@ func UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	allowListBefore := business.AllowedUsers()
 	if err := business.Save(business.SaveInput{
 		UploadLimitMB: body.UploadLimitMB,
 		AllowedUsers:  body.AllowedUsers,
 		ResendAPIKey:  body.ResendAPIKey,
 	}); err != nil {
+		if refusal, ok := business.IsAllowListRefusal(err); ok {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": refusal.Msg})
+			return
+		}
 		helpers.LogErrorWithContext(ctx, "controllers/Settings/UpdateSettings err: %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to save settings"})
 		return
@@ -61,8 +66,15 @@ func UpdateSettings(w http.ResponseWriter, r *http.Request) {
 			"Changed upload limit", map[string]interface{}{"upload_limit_mb": *body.UploadLimitMB})
 	}
 	if body.AllowedUsers != nil {
+		// Who the change lets in, or stops letting in: the entries added and
+		// removed, not just how many there are now.
+		added, removed := business.AllowListChange(allowListBefore, business.AllowedUsers())
 		auditBusiness.Record(r, "settings.allowed_users", auditBusiness.CategorySettings,
-			"Updated sign-up allow-list", map[string]interface{}{"count": len(*body.AllowedUsers)})
+			"Updated sign-up allow-list", map[string]interface{}{
+				"added":   nonNil(added),
+				"removed": nonNil(removed),
+				"count":   len(business.AllowedUsers()),
+			})
 	}
 	if body.ResendAPIKey != nil {
 		auditBusiness.Record(r, "settings.resend_api_key", auditBusiness.CategorySecurity,
@@ -70,6 +82,15 @@ func UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.GetStatus()})
+}
+
+// nonNil is list, or an empty list for none, so the audit log says [] rather
+// than null.
+func nonNil(list []string) []string {
+	if list == nil {
+		return []string{}
+	}
+	return list
 }
 
 // GetClientConfig handles GET /config/client — non-admin, authenticated. Returns

@@ -141,3 +141,19 @@ func IsAllowedFilterValue(s string) bool {
 	}
 	return true
 }
+
+// uidPattern is a Dgraph uid as the graph writes one.
+var uidPattern = regexp.MustCompile(`^0x[0-9a-fA-F]{1,16}$`)
+
+// AllUIDs reports whether every id is a Dgraph uid, so a list of them can be
+// written into a query's uid(...). The lists come from requests and from the
+// mention chips in messages anyone writes; one item like `0x1) OR has(...`
+// used to become part of the query.
+func AllUIDs(ids []string) bool {
+	for _, id := range ids {
+		if !uidPattern.MatchString(id) {
+			return false
+		}
+	}
+	return true
+}

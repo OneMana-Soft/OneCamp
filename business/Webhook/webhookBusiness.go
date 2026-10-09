@@ -90,6 +90,12 @@ func CheckWebhookRateLimit(webhookID string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	res := redisStore.AllowSlidingWindow(ctx, registry.WebhookRateLimit, []string{webhookID}, WebhookRateLimitPerMin, 60)
+	if res.Unchecked {
+		// The call failed: an outage after boot, when the client exists but
+		// Redis doesn't answer. Counted here, as with no client, rather than
+		// let through.
+		return checkWebhookRateLimitInMemory(webhookID)
+	}
 	if !res.Allowed {
 		webhookRateLimitedTotal.Inc()
 		return false

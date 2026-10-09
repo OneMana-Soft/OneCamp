@@ -12,6 +12,7 @@ import (
 	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	domain "github.com/akashc777/OneCamp/domain/Project"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
@@ -191,6 +192,8 @@ func RemoveMemberFromProject(ctx context.Context, userDgraphUID string, userDrga
 		helpers.LogErrorWithContext(ctx, "business/RemoveMemberFromProject failed to remove admin member from project in dgraph err: %+v", err)
 		return
 	}
+	// Their cached profile still lists the project, and search covers what it lists.
+	userDomain.InvalidateUserMemberships(ctx, userDrgaphUUID)
 
 	go userProjectNotificationBusiness.DeleteNotificationTypeWhenUserIsRemovedFormProject(userDrgaphUUID, projectDgraphUUID)
 

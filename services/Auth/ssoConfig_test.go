@@ -1,6 +1,7 @@
 package authService
 
 import (
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -21,6 +22,14 @@ func TestMatchAdminGroup(t *testing.T) {
 		{"multiple claimed, one matches", []string{"admins"}, []string{"users", "admins", "viewers"}, true},
 		{"no match", []string{"admins"}, []string{"users"}, false},
 		{"DN-style matches short name (ops choose)", []string{"CN=Admins,OU=Groups"}, []string{"cn=admins,ou=groups"}, true},
+		// As LDAP_ADMIN_GROUPS reaches it: comma-separated, so a DN arrives in pieces.
+		{"a directory group by its name", splitCSV("OneCamp Admins"), []string{"CN=OneCamp Admins,OU=Groups,DC=example,DC=com"}, true},
+		{"a directory group by its DN, split", splitCSV("CN=OneCamp Admins,OU=Groups,DC=example,DC=com"), []string{"CN=OneCamp Admins,OU=Groups,DC=example,DC=com"}, true},
+		{"another directory group", splitCSV("OneCamp Admins"), []string{"CN=OneCamp Users,OU=Groups,DC=example,DC=com"}, false},
+		{"a name with an escaped comma", splitCSV("Admins (EMEA)"), []string{"CN=Admins (EMEA)\\, Global,OU=Groups"}, false},
+		{"an escaped comma kept in the name", []string{"admins, global"}, []string{"CN=Admins\\, Global,OU=Groups"}, true},
+		{"a hex escape", []string{"r&d admins"}, []string{"CN=R\\26D Admins,OU=Groups"}, true},
+		{"a plain claim is only itself", splitCSV("admins"), []string{"admins-readonly"}, false},
 	}
 
 	for _, tc := range cases {
@@ -110,6 +119,26 @@ func TestIsRedirectAllowed(t *testing.T) {
 		if got := IsRedirectAllowed(target); got != want {
 			t.Errorf("IsRedirectAllowed(%q) = %v, want %v", target, got, want)
 		}
+	}
+}
+
+// A refused sign-in lands on the web app's own sign-in page, with the code the
+// page has words for. The Google and GitHub callback built its own URL from
+// the stored redirect; every browser sign-in now refuses through this one.
+func TestSignInErrorURLStaysOnTheWebApp(t *testing.T) {
+	t.Setenv("FRONTEND_DOMAIN", "app.example.com")
+	t.Setenv("FE_HOST_DOMAIN", "")
+	t.Setenv("COOKIE_SECURE", "")
+	got := SignInErrorURL("oauth_not_invited", "isn't invited & <b>here</b>")
+	if !IsRedirectAllowed(got) {
+		t.Fatalf("%q is not on the web app's origin", got)
+	}
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if u.Query().Get("error") != "oauth_not_invited" || u.Query().Get("message") != "isn't invited & <b>here</b>" {
+		t.Fatalf("%q doesn't carry the code and words it was given", got)
 	}
 }
 

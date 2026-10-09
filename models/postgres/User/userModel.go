@@ -41,6 +41,14 @@ type User struct {
 	IsSSOManaged bool `json:"is_sso_managed,omitempty"`
 }
 
+// IsMember reports whether this account is a member: a person who signs in and
+// takes a seat. External people (brought in by imports or GitHub sync) and bots
+// are rows here too, so the history they appear in has an author, but neither
+// ever signs in. Read it from a row whose query selected is_external and is_bot.
+func (u *User) IsMember() bool {
+	return u != nil && !u.IsExternal && !u.IsBot
+}
+
 // Auth method constants. Used in signup_method and last_login_method columns.
 const (
 	AuthMethodEmail  = "email"
@@ -205,6 +213,8 @@ func GetUserWithAdminFlagByUserUUID(query string, userUUID uuid.UUID) (user *Use
 		&updatedAt,
 		&deletedAt,
 		&isAdmin,
+		&userInfo.IsExternal,
+		&userInfo.IsBot,
 	)
 
 	if err != nil {
@@ -249,6 +259,8 @@ func GetUserByUUID(query string, uuid uuid.UUID) (user *User, err error) {
 		&createdAt,
 		&updatedAt,
 		&deletedAt,
+		&userInfo.IsExternal,
+		&userInfo.IsBot,
 	)
 
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {

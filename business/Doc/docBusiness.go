@@ -14,6 +14,7 @@ import (
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Activity"
+	docModels "github.com/akashc777/OneCamp/models/dgraph/Doc"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	openSearchGlobalSearchModels "github.com/akashc777/OneCamp/models/openSearch/GlobalSearch"
@@ -132,6 +133,10 @@ func DeleteDoc(ctx context.Context, docUUID string) (err error) {
 
 	return
 }
+
+// ErrNotFound is the error a doc lookup gives for a doc that doesn't exist, as
+// opposed to one the graph couldn't be asked about.
+var ErrNotFound = docModels.ErrNotFound
 
 func GetDgraphDocByUUIDOnlyEditingInfo(ctx context.Context, docUUID string, userUID string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
 
@@ -352,14 +357,7 @@ func CheckUserDocEditAccess(ctx context.Context, docUUID string, userUID string)
 	if err != nil {
 		return false, err
 	}
-	if checkDoc == nil {
-		return false, nil
-	}
-	// Check if user is editor OR owner
-	if checkDoc.HasEditAccess > 0 || checkDoc.CreatedBy != nil {
-		return true, nil
-	}
-	return false, nil
+	return CanEdit(checkDoc, userUID), nil
 }
 
 func CheckUserIsDocOwner(ctx context.Context, docUUID string, userUID string) (bool, error) {
@@ -388,7 +386,7 @@ func UpdateDocPermissions(ctx context.Context, input adapter.InputUpdateDocPermi
 		return errors.New("document not found")
 	}
 
-	if checkDoc.CreatedBy == nil || checkDoc.CreatedBy.Uid != userUID {
+	if !IsOwner(checkDoc, userUID) {
 		return errors.New("unauthorized: only document owner can manage permissions")
 	}
 
@@ -851,7 +849,8 @@ func GetPublicDocListWithSearchText(ctx context.Context, inputDocName *adapter.I
 
 func GetSystemDocByUUID(ctx context.Context, docUUID string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
 
-	dgraphDoc, err = domain.GetSystemDocByUUID(ctx, docUUID)
+	// As the collaboration service opens it: with its saved Yjs state.
+	dgraphDoc, err = domain.GetCollabDocByUUID(ctx, docUUID)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

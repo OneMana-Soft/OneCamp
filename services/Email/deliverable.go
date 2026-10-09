@@ -17,7 +17,8 @@ import (
 // mailbox providers, which a high bounce rate can lose for every message,
 // receipts and password resets included. The public demo's people all have
 // such addresses, and every booking and message there once sent one.
-var ErrUndeliverable = &SendError{Message: "the recipient's email domain cannot receive mail", Terminal: true}
+var ErrUndeliverable = &SendError{Message: "the recipient's email domain cannot receive mail", Terminal: true,
+	ForPeople: "that address's domain can't receive email"}
 
 // Names that never receive mail (RFC 2606, RFC 6761, and mDNS's .local).
 var reservedTLDs = []string{".test", ".example", ".invalid", ".localhost", ".local"}

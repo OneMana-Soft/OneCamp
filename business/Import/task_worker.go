@@ -86,7 +86,7 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 		case err, ok := <-errCh:
 			if ok && err != nil {
 				if d, ok := importProvider.IsRateLimited(err); ok {
-					sleepUntilRetryAfter(ctx, d)
+					waitOutRateLimit(ctx, job, err, d)
 					_ = importModels.ResetChunkForRetry(ctx, chunk.Id, "provider rate-limited")
 					return errReaperOnly
 				}
@@ -401,7 +401,7 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 		case err, ok := <-errCh:
 			if ok && err != nil {
 				if d, ok := importProvider.IsRateLimited(err); ok {
-					sleepUntilRetryAfter(ctx, d)
+					waitOutRateLimit(ctx, job, err, d)
 					_ = importModels.ResetChunkForRetry(ctx, chunk.Id, "provider rate-limited")
 					return errReaperOnly
 				}

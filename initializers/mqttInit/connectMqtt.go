@@ -2,9 +2,10 @@ package mqttInit
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"os"
-	"strings"
 	"sync"
 
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -13,7 +14,6 @@ import (
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	MQTT "github.com/eclipse/paho.mqtt.golang"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
 )
 
 type MqttConfig struct {
@@ -59,6 +59,7 @@ func ConnectMqtt(mqttConfig *MqttConfig) (err error) {
 	opts.SetUsername(mqttConfig.Username)
 	opts.SetPassword(tokenString)
 	opts.SetCleanSession(mqttConfig.CleanSession)
+	opts.SetOnConnectHandler(subscribeClientEvents)
 
 	MqttClient = MQTT.NewClient(opts)
 	if token := MqttClient.Connect(); token.Wait() && token.Error() != nil {
@@ -67,17 +68,62 @@ func ConnectMqtt(mqttConfig *MqttConfig) (err error) {
 	}
 	helpers.MessageLogs.InfoLog.Println("Successfully connected mqtt broker !")
 
-	if token := MqttClient.Subscribe("$SYS/brokers/+/clients/+/connected", 0, connectMessageHandler); token.Wait() && token.Error() != nil {
-		helpers.MessageLogs.ErrorLog.Printf("mqttInit/ConnectMqtt Failed to connect to mqtt broker err: %+v", token.Error())
-	}
-	helpers.MessageLogs.InfoLog.Println("Subscribed to $SYS/brokers/+/clients/+/connected")
-
-	if token := MqttClient.Subscribe("$SYS/brokers/+/clients/+/disconnected", 0, disconnectMessageHandler); token.Wait() && token.Error() != nil {
-		helpers.MessageLogs.ErrorLog.Printf("mqttInit/ConnectMqtt Failed to connect to mqtt broker err: %+v", token.Error())
-	}
-	helpers.MessageLogs.InfoLog.Println("Subscribed to $SYS/brokers/+/clients/+/disconnected")
-
 	return
+}
+
+// ProcessClientID is the MQTT client id this process connects as: the
+// configured one, then the process's service role and host. The broker keeps
+// one connection per client id and drops the older one when another arrives,
+// so go-service and a go-worker (SERVICE_ROLE=worker) both connecting as
+// MQTT_CLIENT_ID ("backend") dropped each other over and over, and whichever
+// was down could publish nothing.
+//
+// The role alone wouldn't separate them: workers scale under one role
+// (--scale go-worker=3). The host is the container's, the same across
+// restarts of that container, so a persistent session (MQTT_CLEAN_SESSION=
+// false) is still resumed; every env file uses clean sessions, which keep
+// nothing between connections, so the id only has to be unique. With no
+// configured id the broker names the client, as before.
+func ProcessClientID(configured string, role helpers.ServiceRole) string {
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		var b [4]byte
+		_, _ = rand.Read(b[:])
+		host = hex.EncodeToString(b[:])
+	}
+	return clientIDFor(configured, role, host)
+}
+
+func clientIDFor(configured string, role helpers.ServiceRole, host string) string {
+	if configured == "" {
+		return ""
+	}
+	return configured + "-" + string(role) + "-" + host
+}
+
+// The broker's announcements of a client connecting and disconnecting, which
+// keep each person's count of connected devices. Shared ($share/backend/):
+// with more than one backend process each announcement goes to one of them,
+// where a plain subscription sends it to every one, and each would count it.
+const (
+	clientConnectedTopic    = "$share/backend/$SYS/brokers/+/clients/+/connected"
+	clientDisconnectedTopic = "$share/backend/$SYS/brokers/+/clients/+/disconnected"
+)
+
+// subscribeClientEvents subscribes to them on every connection, not once at
+// boot: a clean session keeps no subscriptions, so after the broker dropped
+// this client and it reconnected, the counts stopped.
+func subscribeClientEvents(client MQTT.Client) {
+	if token := client.Subscribe(clientConnectedTopic, 0, connectMessageHandler); token.Wait() && token.Error() != nil {
+		helpers.MessageLogs.ErrorLog.Printf("mqttInit/subscribeClientEvents Failed to subscribe to %s err: %+v", clientConnectedTopic, token.Error())
+	} else {
+		helpers.MessageLogs.InfoLog.Println("Subscribed to " + clientConnectedTopic)
+	}
+	if token := client.Subscribe(clientDisconnectedTopic, 0, disconnectMessageHandler); token.Wait() && token.Error() != nil {
+		helpers.MessageLogs.ErrorLog.Printf("mqttInit/subscribeClientEvents Failed to subscribe to %s err: %+v", clientDisconnectedTopic, token.Error())
+	} else {
+		helpers.MessageLogs.InfoLog.Println("Subscribed to " + clientDisconnectedTopic)
+	}
 }
 
 var connectMessageHandler MQTT.MessageHandler = func(client MQTT.Client, msg MQTT.Message) {
@@ -90,21 +136,21 @@ var connectMessageHandler MQTT.MessageHandler = func(client MQTT.Client, msg MQT
 			err)
 		return
 	}
-	userIdString := strings.Split(mqttClientConnectInfo.ClientUserName, "_")[1]
+	// Only a person's client counts as a person's device. Another backend
+	// process ("backend") and the dashboard connect too, and the username was
+	// split on "_" and indexed, which panicked, ending the process, on one
+	// without it.
+	userUUID, ok := helpers.ParseMqttUsername(mqttClientConnectInfo.ClientUserName)
+	if !ok {
+		return
+	}
+	userIdString := userUUID.String()
 
 	lock := getUserLock(userIdString)
 	lock.Lock()
 	defer lock.Unlock()
 
 	ctx := context.Background()
-
-	userUUID, err := uuid.Parse(userIdString)
-	if err != nil {
-		helpers.MessageLogs.ErrorLog.Printf(
-			"mqttInit/connectMessageHandler Failed to parse string to uuid err: %+v",
-			err)
-		return
-	}
 
 	dgraphUser, err := userDomain.GetDgraphUserInfoByUUID(ctx, userUUID.String())
 	if err != nil || dgraphUser == nil {
@@ -155,20 +201,18 @@ var disconnectMessageHandler MQTT.MessageHandler = func(client MQTT.Client, msg 
 		return
 	}
 
-	userIdString := strings.Split(mqttClientConnectInfo.ClientUserName, "_")[1]
+	// As on connect: only a person's client is a person's device.
+	userUUID, ok := helpers.ParseMqttUsername(mqttClientConnectInfo.ClientUserName)
+	if !ok {
+		return
+	}
+	userIdString := userUUID.String()
 
 	lock := getUserLock(userIdString)
 	lock.Lock()
 	defer lock.Unlock()
 
 	ctx := context.Background()
-	userUUID, err := uuid.Parse(userIdString)
-	if err != nil {
-		helpers.MessageLogs.ErrorLog.Printf(
-			"mqttInit/disconnectMessageHandler Failed to parse string to uuid err: %+v",
-			err)
-		return
-	}
 
 	dgraphUser, err := userDomain.GetDgraphUserInfoByUUID(ctx, userUUID.String())
 	if err != nil || dgraphUser == nil {
