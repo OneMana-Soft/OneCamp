@@ -69,7 +69,6 @@ GetChatIdsOlderThan
 GetDgraphAttachmentList
 GetDgraphBasicTaskInfoWithProjectMembers
 GetDgraphChannelInfoByName
-GetDgraphDmBasicInfoWithChatInfoFromDgraph
 GetDgraphProjectInfo
 GetDgraphProjectMemberInfoForComment
 GetDgraphRecentPostsForAI

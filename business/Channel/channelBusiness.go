@@ -974,7 +974,7 @@ func NotifyChannelUpdated(channelUUID string, action string) {
 
 func PublishTypingInChannel(userInfo *dgraphStruct.DgraphUser, channelId string) {
 	mqttChannelTyping := mqttStruct.MqttChannelTyping{
-		UserName:    userInfo.UserName,
+		UserName:    userInfo.DisplayName(),
 		UserUUID:    userInfo.Uuid,
 		ChannelUuid: channelId,
 	}
@@ -999,7 +999,7 @@ func MakeVideoChannelCall(ctx context.Context, channelDraphInfo *dgraphStruct.Dg
 
 	if !alreadyExisted {
 
-		pushTitle := fmt.Sprintf("#%s - %s", channelDraphInfo.Name, userDraphInfo.UserName)
+		pushTitle := fmt.Sprintf("#%s - %s", channelDraphInfo.Name, userDraphInfo.DisplayName())
 		body := "started call"
 
 		mqttChannelCall := mqttStruct.MqttChannelCall{
@@ -1059,7 +1059,7 @@ func sendChannelCallNotification(title string, body string, channelId string, ch
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] = channelId
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = title
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.UserName
+	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 
 	// Send notifications in batches of 500 tokens
@@ -1083,7 +1083,7 @@ func sendChannelCallNotification(title string, body string, channelId string, ch
 	// Email fan-out for channel call.
 	notificationBusiness.DispatchChannelCall(
 		userDgraph.Uuid,
-		userDgraph.UserName,
+		userDgraph.DisplayName(),
 		userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey),
 		channelId,
 		channelName,

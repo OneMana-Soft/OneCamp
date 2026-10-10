@@ -22,6 +22,7 @@ import (
 	domain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/avscan"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/helpers/uploadsafe"
 	"github.com/akashc777/OneCamp/initializers/minioInit"
 	"github.com/akashc777/OneCamp/initializers/oauth"
@@ -910,6 +911,8 @@ func GetAllUsersListFromDgraph(ctx context.Context, pageIndex int, pageSize int)
 		hasMore = true
 		dgraphUsers = dgraphUsers[:pageSize]
 	}
+	// So the admin's list can show and find each member by @handle.
+	domain.AttachHandles(ctx, dgraphUsers)
 	return
 }
 
@@ -991,7 +994,7 @@ func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.Dgra
 	}
 	go domain.UpdateUserInOpenSearch(openSearchUser)
 
-	// Propagate the denormalised copies of full name / profile pic across every index that
+	// Propagate the denormalised copies of the name people see (shownNameAfter) and profile pic across every index that
 	// embeds them — ONLY IF ONE OF THEM ACTUALLY CHANGED.
 	//
 	// This used to run on every call. The only live caller is POST /updateUserProfile, which
@@ -1017,7 +1020,9 @@ func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.Dgra
 		helpers.LogInfoWithContext(ctx,
 			"business/CreateOrUpdateDgraphUser could not read the previous profile for %s (%v); "+
 				"propagating anyway rather than risk a stale name in search", dgraphUser.Uuid, prevErr)
-		go domain.PropagateUserInfoInOpenSearch(dgraphUser.Uuid, dgraphUser.UserFullName, profilePic)
+		if name := shownNameAfter(nil, dgraphUser); name != "" {
+			go domain.PropagateUserInfoInOpenSearch(dgraphUser.Uuid, name, profilePic)
+		}
 	case previous == nil:
 		// Defensive only. A missing user comes back as an ERROR from the read, not as a nil with
 		// no error, so a creation lands in the branch above rather than here — and the sole live
@@ -1028,12 +1033,40 @@ func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.Dgra
 		if previous.ProfileKey != nil {
 			prevProfilePic = *previous.ProfileKey
 		}
-		if previous.UserFullName != dgraphUser.UserFullName || prevProfilePic != profilePic {
-			go domain.PropagateUserInfoInOpenSearch(dgraphUser.Uuid, dgraphUser.UserFullName, profilePic)
+		name := shownNameAfter(previous, dgraphUser)
+		if name != previous.DisplayName() || prevProfilePic != profilePic {
+			go domain.PropagateUserInfoInOpenSearch(dgraphUser.Uuid, name, profilePic)
 		}
 	}
 
 	return
+}
+
+// shownNameAfter is the name people see for someone (DgraphUser.DisplayName)
+// once update is written over previous: an empty field in update leaves the
+// saved one as it is (the graph write omits it). previous may be nil.
+//
+// The search index's copies of an author's name are that name. A rename used
+// to copy the full name over them, and only when the full name changed, so
+// changing the display name left every search result with the old one, and
+// changing the full name replaced the display name there. Pure.
+func shownNameAfter(previous, update *dgraphStruct.DgraphUser) string {
+	merged := dgraphStruct.DgraphUser{}
+	if previous != nil {
+		merged.UserName, merged.UserFullName, merged.EmailID = previous.UserName, previous.UserFullName, previous.EmailID
+	}
+	if update != nil {
+		if update.UserName != "" {
+			merged.UserName = update.UserName
+		}
+		if update.UserFullName != "" {
+			merged.UserFullName = update.UserFullName
+		}
+		if update.EmailID != "" {
+			merged.EmailID = update.EmailID
+		}
+	}
+	return merged.DisplayName()
 }
 
 func GetUsersPosts(ctx context.Context, userUUID string, userDgraphUID string, pageIndex int, pageSize int) (userPostPagination PostPagination, err error) {
@@ -1088,6 +1121,9 @@ func GetDgraphAllUsersList(ctx context.Context) (dgraphUsers []*dgraphStruct.Dgr
 		err = errors.New("failed to get users list from dgraph")
 		return
 	}
+	// The @mention picker searches this list by display name, full name and
+	// handle, and handles are in Postgres.
+	domain.AttachHandles(ctx, dgraphUsers)
 
 	return
 }
@@ -1416,8 +1452,11 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID uuid.UUI
 }
 
 func GetChannelsAndUsers(ctx context.Context, userDgraphUID string, userDgraphUUID string, searchText string) (fwdList []*adapterUser.UserAndChannelFwdMessage, err error) {
+	// searchText is cleaned (dgraphquery.CleanSearchTerm), not escaped: the
+	// people search escapes it itself and also matches handles in Postgres.
+	safeSearch := dgraphquery.EscapeRegexLiteral(searchText)
 
-	channelList, err := channelDomain.GetChannelListWithSearchText(ctx, userDgraphUID, searchText)
+	channelList, err := channelDomain.GetChannelListWithSearchText(ctx, userDgraphUID, safeSearch)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1437,7 +1476,7 @@ func GetChannelsAndUsers(ctx context.Context, userDgraphUID string, userDgraphUU
 		return
 	}
 
-	groupChatList, err := chatDomain.GetUserGroupChatListWithSearchText(ctx, userDgraphUUID, userDgraphUID, searchText)
+	groupChatList, err := chatDomain.GetUserGroupChatListWithSearchText(ctx, userDgraphUUID, userDgraphUID, safeSearch)
 	if err != nil {
 		// Non-fatal — log and continue without group chats
 		helpers.LogErrorWithContext(ctx,
@@ -1460,9 +1499,11 @@ func GetChannelsAndUsers(ctx context.Context, userDgraphUID string, userDgraphUU
 
 	for _, u := range usersList {
 		fwdInfo := adapterUser.UserAndChannelFwdMessage{
-			Type:     "user",
-			UserUuid: u.Uuid,
-			UserName: u.UserName,
+			Type:         "user",
+			UserUuid:     u.Uuid,
+			UserName:     u.DisplayName(),
+			UserFullName: u.UserFullName,
+			UserHandle:   u.Handle,
 			// Not every person has a photo (invited or seeded people often
 			// don't); dereferencing it unguarded crashed the forward search.
 			UserProfileKey: profileKeyOrEmpty(u.ProfileKey),
@@ -1477,7 +1518,7 @@ func GetChannelsAndUsers(ctx context.Context, userDgraphUID string, userDgraphUU
 		var participantNames []string
 		for _, p := range grp.Participants {
 			if p.Uuid != userDgraphUUID {
-				participantNames = append(participantNames, p.UserName)
+				participantNames = append(participantNames, p.DisplayName())
 			}
 		}
 		grpName := "Group Chat"

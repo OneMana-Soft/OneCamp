@@ -52,6 +52,10 @@ var HealthLabels = map[string]string{
 type View struct {
 	model.Update
 	AuthorName string `json:"author_name"`
+	// GuestAuthorName is who wrote it for the project's client link, outside
+	// the workspace: the one name rule without its last step, so never part
+	// of the author's address. Set by List; never sent to members.
+	GuestAuthorName string `json:"-"`
 }
 
 // Input is an update as written: its health, its text, whether the client
@@ -98,10 +102,13 @@ func views(ctx context.Context, list []model.Update) []View {
 	}
 	out := make([]View, 0, len(list))
 	for _, u := range list {
-		v := View{Update: u, AuthorName: "Someone"}
+		v := View{Update: u, AuthorName: "Someone", GuestAuthorName: "Someone"}
 		if p := names[u.AuthorUUID.String()]; p != nil {
 			if n := nameOf(p); n != "" {
 				v.AuthorName = n
+			}
+			if n := helpers.PersonDisplayName(p.UserName, p.UserFullName, ""); n != "" {
+				v.GuestAuthorName = n
 			}
 		}
 		out = append(out, v)
@@ -164,11 +171,7 @@ type Posted struct {
 }
 
 func authorOf(user *userModels.UserInfo) (uuid.UUID, string) {
-	name := user.UserDgraphInfo.UserFullName
-	if name == "" {
-		name = user.UserDgraphInfo.UserName
-	}
-	return user.UserPostgresInfo.Id, name
+	return user.UserPostgresInfo.Id, user.UserDgraphInfo.DisplayName()
 }
 
 // projectLink is the update's place in the app.

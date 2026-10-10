@@ -362,7 +362,7 @@ func GetUnifiedGlobalSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	searchPage, err := business.GetUnifiedGlobalSearch(ctx, userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.Channels, userInfo.UserDgraphInfo.Projects, userInfo.UserDgraphInfo.Teams, searchInfo.SearchText)
+	searchPage, err := business.GetUnifiedGlobalSearch(ctx, userInfo.UserDgraphInfo.Uuid, userInfo.UserPostgresInfo.EmailID, userInfo.UserDgraphInfo.Channels, userInfo.UserDgraphInfo.Projects, userInfo.UserDgraphInfo.Teams, searchInfo.SearchText)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

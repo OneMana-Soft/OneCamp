@@ -1198,7 +1198,7 @@ func SearchUsersForDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	users, err := business.SearchUsersForDoc(ctx, userInfo.UserDgraphInfo.Uuid, sanitizeOrEmpty(searchInput.SearchText))
+	users, err := business.SearchUsersForDoc(ctx, userInfo.UserDgraphInfo.Uuid, cleanOrEmpty(searchInput.SearchText))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/SearchUsersForDoc Failed to search users err: %+v", err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
@@ -1219,12 +1219,12 @@ func SearchUsersForDoc(w http.ResponseWriter, r *http.Request) {
 // length errors return the truncated form (caller decides handling).
 // The shape mirrors how callers like SearchUsersForDoc want to behave:
 // fall back to "match anything" rather than 400 on a noisy keystroke.
-func sanitizeOrEmpty(raw string) string {
-	safe, err := dgraphquery.SanitizeSearchTerm(raw)
+func cleanOrEmpty(raw string) string {
+	clean, err := dgraphquery.CleanSearchTerm(raw)
 	if err != nil {
 		return ""
 	}
-	return safe
+	return clean
 }
 
 // GetDocSnapshots GET /doc/getDocSnapshots?doc_uuid= - document version history.

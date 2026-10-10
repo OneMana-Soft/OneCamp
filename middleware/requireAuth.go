@@ -90,6 +90,6 @@ func VerifyAuth(next http.Handler) http.Handler {
 		ctx = context.WithValue(ctx, helpers.DeviceIdContextKey, deviceId)
 		r = r.WithContext(ctx)
 
-		next.ServeHTTP(w, r)
+		helpers.ServeHidingEmails(next, w, r, userInfo.UserPostgresInfo.EmailID)
 	})
 }

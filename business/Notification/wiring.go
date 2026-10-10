@@ -231,6 +231,7 @@ func DispatchMemoryDigestTestNow(ctx context.Context, recipientUUID, subject, bo
 func DispatchChatDM(senderUUID, senderName string, senderAvatar string,
 	grpId, chatUUID, plainTextBody string,
 	recipientUUIDs []string, mentioned bool) {
+	senderName = actorOrSomeone(senderName)
 
 	if len(recipientUUIDs) == 0 {
 		return
@@ -266,6 +267,7 @@ func DispatchChatDM(senderUUID, senderName string, senderAvatar string,
 func DispatchChannelMention(actorUUID, actorName, actorAvatar string,
 	channelUUID, channelName, postUUID, postTextPlain string,
 	mentionUUIDs []string) {
+	actorName = actorOrSomeone(actorName)
 
 	if len(mentionUUIDs) == 0 {
 		return
@@ -297,6 +299,7 @@ func DispatchChannelMention(actorUUID, actorName, actorAvatar string,
 func DispatchTaskAssignment(actorUUID, actorName, actorAvatar string,
 	taskUUID, taskName, projectName string,
 	assigneeUUID string) {
+	actorName = actorOrSomeone(actorName)
 
 	if assigneeUUID == "" || assigneeUUID == actorUUID {
 		return
@@ -333,6 +336,7 @@ func DispatchTaskAssignment(actorUUID, actorName, actorAvatar string,
 func DispatchTaskStatusChange(actorUUID, actorName, actorAvatar string,
 	taskUUID, taskName, projectName, fromStatus, toStatus, changeID string,
 	recipientUUIDs []string) {
+	actorName = actorOrSomeone(actorName)
 
 	if len(recipientUUIDs) == 0 || taskUUID == "" {
 		return
@@ -371,6 +375,7 @@ func DispatchTaskStatusChange(actorUUID, actorName, actorAvatar string,
 func DispatchTaskComment(actorUUID, actorName, actorAvatar string,
 	taskUUID, taskName, plainTextBody string,
 	commentUUID string, recipientUUIDs []string) {
+	actorName = actorOrSomeone(actorName)
 
 	if len(recipientUUIDs) == 0 {
 		return
@@ -400,6 +405,7 @@ func DispatchTaskComment(actorUUID, actorName, actorAvatar string,
 func DispatchPostComment(actorUUID, actorName, actorAvatar string,
 	channelUUID, postUUID, plainTextBody, commentUUID string,
 	recipientUUIDs []string) {
+	actorName = actorOrSomeone(actorName)
 
 	if len(recipientUUIDs) == 0 {
 		return
@@ -430,6 +436,7 @@ func DispatchPostComment(actorUUID, actorName, actorAvatar string,
 func DispatchDocComment(actorUUID, actorName, actorAvatar string,
 	docUUID, docTitle, plainTextBody, commentUUID string,
 	recipientUUIDs []string) {
+	actorName = actorOrSomeone(actorName)
 
 	if len(recipientUUIDs) == 0 {
 		return
@@ -459,6 +466,7 @@ func DispatchDocComment(actorUUID, actorName, actorAvatar string,
 func DispatchChatComment(actorUUID, actorName, actorAvatar string,
 	grpId, chatUUID, plainTextBody, commentUUID string,
 	recipientUUIDs []string) {
+	actorName = actorOrSomeone(actorName)
 
 	if len(recipientUUIDs) == 0 {
 		return
@@ -488,6 +496,7 @@ func DispatchChatComment(actorUUID, actorName, actorAvatar string,
 func DispatchChannelCall(actorUUID, actorName, actorAvatar string,
 	channelUUID, channelName string,
 	recipientUUIDs []string) {
+	actorName = actorOrSomeone(actorName)
 
 	if len(recipientUUIDs) == 0 {
 		return
@@ -518,6 +527,7 @@ func DispatchChannelCall(actorUUID, actorName, actorAvatar string,
 func DispatchChatCall(actorUUID, actorName, actorAvatar string,
 	grpId string,
 	recipientUUIDs []string) {
+	actorName = actorOrSomeone(actorName)
 
 	if len(recipientUUIDs) == 0 {
 		return
@@ -568,4 +578,15 @@ func DispatchMemoryDigestTest(recipientUUID, subject, body string) {
 			SkipOnlineCheck: true,
 		})
 	}()
+}
+
+// actorOrSomeone is the name an email or its subject gives whoever acted.
+// Callers pass the name people see for them (DgraphUser.DisplayName, the one
+// name rule); one with no name at all reads "Someone", never " sent you a
+// message". Pure.
+func actorOrSomeone(name string) string {
+	if name = strings.TrimSpace(name); name != "" {
+		return name
+	}
+	return "Someone"
 }

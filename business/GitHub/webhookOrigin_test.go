@@ -40,3 +40,32 @@ func TestWebhookMarksItsContextAsGitHubOriginated(t *testing.T) {
 		t.Error("the context is marked after the event dispatch, so early cases still echo")
 	}
 }
+
+// A refresh from GitHub applies the issue to the task the way the webhook
+// does, through the same business functions a person's edit goes through:
+// name, description, status, assignee and label, then (when backfilling) the
+// issue's comments. Each of those enqueues an outbound sync, so it is marked
+// the same way, before any of them, or GitHub's own changes are sent back to
+// the issue they came from and its comments are posted on it a second time.
+//
+// Source-level: today every refresh stops before applying anything, because
+// the task read it starts from has no creator to act as.
+func TestRefreshMarksItsContextAsGitHubOriginated(t *testing.T) {
+	src, err := os.ReadFile("githubSync.go")
+	if err != nil {
+		t.Fatalf("read githubSync.go: %v", err)
+	}
+	body := string(src)
+	start := strings.Index(body, "func RefreshFromGitHub(")
+	if start < 0 {
+		t.Fatal("RefreshFromGitHub not found")
+	}
+	body = body[start:]
+	mark := strings.Index(body, "helpers.WithGitHubOrigin(ctx)")
+	fields := strings.Index(body, "syncTaskFieldsFromGitHub(")
+	comments := strings.Index(body, "syncCommentsFromGitHub(")
+	if mark < 0 || fields < 0 || comments < 0 || mark > fields || mark > comments {
+		t.Fatal("a refresh from GitHub does not mark its context as GitHub-originated before it applies the issue; " +
+			"every field and comment it brings in would be sent back to GitHub")
+	}
+}

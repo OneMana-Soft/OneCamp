@@ -67,13 +67,7 @@ func day(t time.Time) time.Time {
 func real(t *time.Time) bool { return t != nil && t.After(time.Unix(0, 0)) }
 
 func nameOf(u *dgraphStruct.DgraphUser) string {
-	if u == nil {
-		return ""
-	}
-	if u.UserFullName != "" {
-		return u.UserFullName
-	}
-	return u.UserName
+	return u.DisplayName()
 }
 
 // statusName is the status as people read it: the project's own name, else the built-in one.

@@ -33,8 +33,8 @@ type ChannelResolveStats struct {
 //
 // Three-tier dedup, in order:
 //
-//  1. slack_import_id_map (this run, re-runnable idempotency)
-//  2. slack_workspace_id_map (prior import of same workspace; cross-run
+//  1. import_id_map (this run, re-runnable idempotency)
+//  2. import_workspace_id_map (prior import of same workspace; cross-run
 //     idempotency — a re-export of the same workspace produces zero
 //     duplicate channels)
 //  3. Existing OneCamp channel by same name (collision suffix

@@ -68,12 +68,12 @@ func GetLoggedInUserProfile(w http.ResponseWriter, r *http.Request) {
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
 
 	// The @handle lives in Postgres, where it is unique; the profile editor
-	// shows it and lets them change it. A copy, so it never reaches a write to
-	// the graph.
+	// shows it and lets them change it. A member without one is given theirs
+	// here when their graph record was read (business.HandleOnRead), not on
+	// /basicSelfProfile, which reads Postgres alone. A copy, so it never
+	// reaches a write to the graph.
 	profile := userInfo.UserDgraphInfo
-	if handle, err := userDomain.GetHandle(ctx, userInfo.UserPostgresInfo.Id); err == nil {
-		profile.Handle = handle
-	}
+	profile.Handle = business.HandleOnRead(ctx, &userInfo.UserPostgresInfo, &userInfo.UserDgraphInfo)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": profile})
 }
@@ -2991,8 +2991,10 @@ func UpdateUserStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(userStatus) == 0 {
+		// The caller's mistake, not a session problem: a 401 here would read
+		// to the web app as "sign in again".
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Not Authorised",
+			"msg": "Status must be online or offline",
 		})
 		return
 	}
@@ -3585,8 +3587,8 @@ func FwdUserAndChannelList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Sanitise before passing into Dgraph regex filters in domain layer.
-	safeSearch, sErr := dgraphquery.SanitizeSearchTerm(searchTextInputRaw.SearchText)
+	// Cleaned here; each search escapes it for its own query.
+	cleanSearch, sErr := dgraphquery.CleanSearchTerm(searchTextInputRaw.SearchText)
 	if sErr != nil {
 		if errors.Is(sErr, dgraphquery.ErrEmpty) {
 			helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "empty search", "data": nil})
@@ -3596,7 +3598,7 @@ func FwdUserAndChannelList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resultList, err := business.GetChannelsAndUsers(ctx, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid, safeSearch)
+	resultList, err := business.GetChannelsAndUsers(ctx, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid, cleanSearch)
 
 	if err != nil {
 

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"sync"
 
@@ -14,6 +15,7 @@ import (
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	MQTT "github.com/eclipse/paho.mqtt.golang"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 )
 
 type MqttConfig struct {
@@ -62,6 +64,9 @@ func ConnectMqtt(mqttConfig *MqttConfig) (err error) {
 	opts.SetOnConnectHandler(subscribeClientEvents)
 
 	MqttClient = MQTT.NewClient(opts)
+	if helpers.DemoMode() {
+		MqttClient = demoClient{MqttClient}
+	}
 	if token := MqttClient.Connect(); token.Wait() && token.Error() != nil {
 		helpers.MessageLogs.ErrorLog.Printf("mqttInit/ConnectMqtt Failed to connect to mqtt broker err: %+v", token.Error())
 		return
@@ -284,4 +289,77 @@ func PublishUserDevice(mqttUserStatus *mqttStruct.MqttUserDevice) {
 		}
 	}()
 
+}
+
+// demoClient is the broker client on the public demo. The people a payload
+// carries (a forwarded post's author, an activity's actor) come with their
+// email address, and one published message reaches every subscriber of its
+// topic. So on the demo a payload for a topic the shared visitor may be
+// subscribed to goes out with every address but the visitor's own blanked
+// (helpers.DemoMqttPayload), as the visitor's HTTP answers are
+// (helpers.ServeHidingEmails). That is every shared topic (a channel's or a
+// conversation's messages, typing, a doc, a board, a table, everyone's
+// status), and so the demo's own members get those blanked too: the broker
+// sends the same bytes to each subscriber. One person's activity topic is
+// theirs alone (business/MqttAccess refuses anyone else), so another
+// person's goes out as it is, and so does the admins' broadcast, which
+// MqttAccess opens to admins alone: the visitor is not one.
+type demoClient struct{ MQTT.Client }
+
+func (c demoClient) Publish(topic string, qos byte, retained bool, payload interface{}) MQTT.Token {
+	if mayReachVisitor(topic) {
+		payload = helpers.DemoMqttPayload(payload)
+	}
+	return c.Client.Publish(topic, qos, retained, payload)
+}
+
+// mayReachVisitor reports whether the demo's shared visitor can be among
+// topic's subscribers.
+func mayReachVisitor(topic string) bool {
+	kind, id, ok := helpers.ParseMqttTopic(topic)
+	if !ok {
+		return true
+	}
+	switch kind {
+	case helpers.MqttKindAdmin:
+		return false
+	case helpers.MqttKindActivity:
+		return isDemoVisitorID(id)
+	}
+	return true
+}
+
+// demoVisitorIDs remembers, by person, whether they are the demo's visitor.
+var demoVisitorIDs sync.Map
+
+// emailOf answers a person's address; tests stand in for it.
+var emailOf = func(ctx context.Context, id uuid.UUID) (string, error) {
+	u, err := userDomain.GetActiveUserWithAdminFlagByUserUUID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if u == nil || u.Id == uuid.Nil {
+		return "", errors.New("no such person")
+	}
+	return u.EmailID, nil
+}
+
+// isDemoVisitorID reports whether the person id is the demo's shared
+// visitor. Anyone it can't tell counts as the visitor, so their payload is
+// blanked, and is asked about again next time.
+func isDemoVisitorID(id string) bool {
+	if is, ok := demoVisitorIDs.Load(id); ok {
+		return is.(bool)
+	}
+	parsed, err := uuid.Parse(id)
+	if err != nil {
+		return true
+	}
+	email, err := emailOf(context.Background(), parsed)
+	if err != nil {
+		return true
+	}
+	is := helpers.IsDemoVisitor(email)
+	demoVisitorIDs.Store(id, is)
+	return is
 }

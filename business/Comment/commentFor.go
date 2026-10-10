@@ -29,7 +29,7 @@ func NotifyPostCommentFor(by *dgraphStruct.DgraphUser, post *dgraphStruct.Dgraph
 	if by == nil || post == nil || post.PostBy == nil || post.Channel == nil {
 		return
 	}
-	sendNewPostCommentNotification(fmt.Sprintf("Comment - %+v", by.UserName), plainText, commentUUID, nil, post, by)
+	sendNewPostCommentNotification(fmt.Sprintf("Comment - %+v", by.DisplayName()), plainText, commentUUID, nil, post, by)
 }
 
 // NotifyDocCommentFor tells whoever made a doc, and those who can edit it,

@@ -264,6 +264,12 @@ func UpdateStatusFrom(ctx context.Context, jobId uuid.UUID, from []string, statu
 	return jobs.UpdateStatusFrom(ctx, jobId, from, status, stage, errMsg)
 }
 
+// RollBack moves a finished job to rolled_back and runs undo in the same
+// transaction: all of it happens or none of it does (the generic import's).
+func RollBack(ctx context.Context, jobId uuid.UUID, undo func(tx *sql.Tx) error) error {
+	return jobs.RollBack(ctx, jobId, undo)
+}
+
 // SavePlan stores the planning result and the chunks the import runs in, and
 // moves the job to planned, only while it waits to be planned; ErrJobChanged
 // otherwise. It is the generic import's: Slack's own copy wrote "planned"

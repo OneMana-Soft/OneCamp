@@ -36,6 +36,7 @@ import (
 	importAdapter "github.com/akashc777/OneCamp/adapter/Import"
 	importBusiness "github.com/akashc777/OneCamp/business/Import"
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
+	importRun "github.com/akashc777/OneCamp/business/ImportRun"
 	importDomain "github.com/akashc777/OneCamp/domain/Import"
 	"github.com/akashc777/OneCamp/helpers"
 	minioInit "github.com/akashc777/OneCamp/initializers/minioInit"
@@ -480,6 +481,15 @@ func HandlePlan(w http.ResponseWriter, r *http.Request) {
 	switch job.Status {
 	case importModels.StatusValidating, importModels.StatusPlanned:
 	case importModels.StatusFailed:
+		// The lease first: the run that failed may still be ending, and
+		// planning it again wrote its options and chunks under that run's
+		// workers. Held until the plan is stored; planning starts no run.
+		lease, err := importRun.Take(jobId)
+		if err != nil {
+			writeRunAlive(w)
+			return
+		}
+		defer lease.Release()
 		// Planned again: back to waiting first, or what stands in the way.
 		if problem := importBusiness.PlanAgain(ctx, job); problem != nil {
 			helpers.WriteJSON(w, problem.Status, helpers.Envolope{"error": problem.Msg, "code": problem.Code})
@@ -554,6 +564,15 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// The lease before the options and mappings: a run refused because the
+	// last one is still ending leaves them as they were.
+	// Given back however this ends, unless the run starts (it gives it back).
+	lease, err := importRun.Take(jobId)
+	if err != nil {
+		writeRunAlive(w)
+		return
+	}
+	defer lease.Release()
 	var body importAdapter.RunRequest
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if body.Options != nil {
@@ -567,19 +586,37 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 	if body.PriorityMappings != nil {
 		_ = importModels.SetPriorityMappings(ctx, jobId, body.PriorityMappings)
 	}
-	if !startRunning(w, r, jobId, []string{importModels.StatusPlanned, importModels.StatusFailed}) {
+	if !startRunning(w, r, lease, jobId, user, []string{importModels.StatusPlanned, importModels.StatusFailed}) {
 		return
 	}
-	go importBusiness.RunImport(context.Background(), jobId, user)
 	helpers.WriteJSON(w, http.StatusAccepted, helpers.Envolope{"job_id": jobId})
 }
 
-// startRunning moves the job to running from one of from, writing why not
-// when it can't: its label taken by another import, or the job changed in the
-// meantime. Reports whether the job is running now.
-func startRunning(w http.ResponseWriter, r *http.Request, jobId uuid.UUID, from []string) bool {
-	started, err := importModels.StartRunning(r.Context(), jobId, from)
+// startRunning moves the job to running from one of from and starts its run
+// under lease, writing why not when it can't: its last run still ending, its
+// label taken by another import, or the job changed in the meantime. Reports
+// whether the job is running now.
+func startRunning(w http.ResponseWriter, r *http.Request, lease *importRun.Lease, jobId uuid.UUID, user *userModel.UserInfo, from []string) bool {
+	started, err := lease.Start(r.Context(), from,
+		func() { importBusiness.RunImport(context.Background(), jobId, user) })
+	return answerStart(w, r, jobId, started, err)
+}
+
+// writeRunAlive answers a start refused because the job's last run is still
+// ending (importRun.ErrRunAlive).
+func writeRunAlive(w http.ResponseWriter) {
+	helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+		"error": "The last run of this import is still stopping. Try again in a moment.",
+		"code":  "run_alive",
+	})
+}
+
+// answerStart writes why a start did not happen, and reports whether it did.
+func answerStart(w http.ResponseWriter, r *http.Request, jobId uuid.UUID, started bool, err error) bool {
 	switch {
+	case errors.Is(err, importRun.ErrRunAlive):
+		writeRunAlive(w)
+		return false
 	case errors.Is(err, importModels.ErrConflictActiveJob):
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
 			"error": "Another import of this workspace is waiting or running. Finish or discard it first.",
@@ -640,6 +677,15 @@ func HandleRollback(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
 		return
 	}
+	// The lease first: a run that has just been cancelled may still be ending,
+	// its workers finishing the chunk they hold, and what they wrote after the
+	// sweep would survive it.
+	lease, err := importRun.Take(jobId)
+	if err != nil {
+		writeRunAlive(w)
+		return
+	}
+	defer lease.Release()
 	if err := importBusiness.RollbackImport(ctx, jobId); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": err.Error()})
 		return
@@ -829,6 +875,15 @@ func HandleDeleteStagedZip(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// The lease first: a run that has just been cancelled or failed may still
+	// be ending, or one may have started since the status was read, and either
+	// reads the file.
+	lease, err := importRun.Take(jobId)
+	if err != nil {
+		writeRunAlive(w)
+		return
+	}
+	defer lease.Release()
 	if err := importBusiness.DeleteStagedZip(ctx, jobId); err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
 		return
@@ -1141,6 +1196,16 @@ func HandleRetryFailedChunks(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// The lease first: a run that has just been cancelled or failed may still
+	// be ending, and chunks put back to pending under it would be claimed by
+	// its workers as well as the new run's.
+	// Given back however this ends, unless the run starts (it gives it back).
+	lease, err := importRun.Take(jobId)
+	if err != nil {
+		writeRunAlive(w)
+		return
+	}
+	defer lease.Release()
 	n, err := importModels.RetryFailedChunks(ctx, jobId)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
@@ -1153,9 +1218,10 @@ func HandleRetryFailedChunks(w http.ResponseWriter, r *http.Request) {
 	// Flip job to running and kick a fresh orchestrator goroutine. The
 	// orchestrator picks up only the (now-reset) pending chunks for
 	// each stage, so completed work isn't redone.
-	if !startRunning(w, r, jobId, []string{importModels.StatusFailed, importModels.StatusCancelled, importModels.StatusCompleted}) {
+	started, err := lease.Start(ctx, []string{importModels.StatusFailed, importModels.StatusCancelled, importModels.StatusCompleted},
+		func() { importBusiness.RunImport(context.Background(), jobId, user) })
+	if !answerStart(w, r, jobId, started, err) {
 		return
 	}
-	go importBusiness.RunImport(context.Background(), jobId, user)
 	helpers.WriteJSON(w, http.StatusAccepted, helpers.Envolope{"reset": n, "rerun": true})
 }

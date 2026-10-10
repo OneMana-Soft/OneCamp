@@ -70,6 +70,18 @@ func EscapeRegexLiteral(s string) string {
 // input to "" should not surface as a 400 — that's hostile UX. ErrTooLong,
 // on the other hand, indicates an explicit bad request.
 func SanitizeSearchTerm(in string) (string, error) {
+	clean, err := CleanSearchTerm(in)
+	if err != nil {
+		return "", err
+	}
+	return EscapeRegexLiteral(clean), nil
+}
+
+// CleanSearchTerm is SanitizeSearchTerm without the regex escape, for a
+// caller that escapes the term itself or also matches it outside Dgraph (a
+// person's handle is in Postgres). Escaping twice made a term with a full
+// stop, such as the handle priya.raman, match nothing.
+func CleanSearchTerm(in string) (string, error) {
 	in = strings.TrimSpace(in)
 	if in == "" {
 		return "", ErrEmpty
@@ -94,7 +106,7 @@ func SanitizeSearchTerm(in string) (string, error) {
 	if out == "" {
 		return "", ErrEmpty
 	}
-	return EscapeRegexLiteral(out), nil
+	return out, nil
 }
 
 // IsAllowedColumnName returns true when name matches the strict

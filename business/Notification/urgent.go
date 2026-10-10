@@ -121,10 +121,7 @@ func NotifyAnyway(ctx context.Context, sender *userModels.UserInfo, recipient uu
 		// Recorded all the same: they'll see the DM, and one ping a day holds.
 		return nil
 	}
-	name := sender.UserDgraphInfo.UserFullName
-	if name == "" {
-		name = sender.UserDgraphInfo.UserName
-	}
+	name := sender.UserDgraphInfo.DisplayName()
 	data := map[string]string{
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE:     firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT,
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:  grp,

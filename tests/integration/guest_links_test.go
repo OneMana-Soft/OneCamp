@@ -20,7 +20,8 @@ package integration_test
 // whom each reaches without a Firebase project.
 //
 // A shared doc's page is titled with the doc's name. A channel archived since
-// its link was made takes no message or reply from it, and tells nobody.
+// its link was made takes no message or reply from it, and tells nobody. A
+// project's page names who wrote an update without part of their address.
 //
 // And a guest's page is told "This link is no longer available" (or that a
 // message or task isn't there) only when that is true: when the server can't
@@ -54,6 +55,7 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
+	updateBusiness "github.com/akashc777/OneCamp/business/ProjectUpdate"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	guestController "github.com/akashc777/OneCamp/controllers/Guest"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
@@ -318,6 +320,28 @@ func TestGuestLinks(t *testing.T) {
 			if p.data[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] == archived.String() || p.data[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] == oldPost.String() {
 				t.Errorf("the archived channel's members were told: %v", p.data)
 			}
+		}
+	})
+
+	t.Run("a client reads who wrote an update without their address", func(t *testing.T) {
+		// mia has neither a display name nor a full name: members know her
+		// by her address's part before the @; a client never sees it.
+		mia := uuid.New()
+		exec(`INSERT INTO users (id, email_id) VALUES ($1, 'mia.k@acme.test')`, mia)
+		dg.Mutate(t, []map[string]any{{"dgraph.type": "User", "user_uuid": mia.String(), "user_email_id": "mia.k@acme.test"}})
+		exec(`INSERT INTO project_updates (project_uuid, author_uuid, health, body, shared_with_client)
+			VALUES ($1, $2, 'on_track', 'The home page is in review.', true)`, project, mia)
+		_, projectLink := link(t, guestModel.ResourceProject, project.String(), guestModel.CapabilityView)
+		page, err := guestBusiness.GetGuestProject(ctx, projectLink)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Updates) != 1 || page.Updates[0].Author != "Someone" {
+			t.Errorf("the client's page names the update's author as %+v, want Someone", page.Updates)
+		}
+		members, err := updateBusiness.List(ctx, project, 10, false)
+		if err != nil || len(members) != 1 || members[0].AuthorName != "mia.k" {
+			t.Errorf("members read the update as by %+v (%v), want mia.k", members, err)
 		}
 	})
 

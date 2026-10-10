@@ -64,6 +64,6 @@ func VerifyAuthOnlyPostgres(next http.Handler) http.Handler {
 		ctx = context.WithValue(ctx, helpers.UserInfoContextKey, userInfo)
 		r = r.WithContext(ctx)
 
-		next.ServeHTTP(w, r)
+		helpers.ServeHidingEmails(next, w, r, userInfo.UserPostgresInfo.EmailID)
 	})
 }

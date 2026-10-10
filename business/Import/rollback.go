@@ -2,6 +2,7 @@ package business
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
@@ -36,42 +37,47 @@ func RollbackImport(ctx context.Context, jobId uuid.UUID) error {
 		return slackRollback(ctx, jobId)
 	}
 
-	// Task-shaped rollback order: comments → subtasks → tasks →
-	// attachments → projects (only if no non-imported tasks survive)
-	// → teams (only if empty).
-	if err := softDelete(ctx, jobId, importModels.EntityComment, "comments"); err != nil {
-		return err
-	}
-	if err := softDelete(ctx, jobId, importModels.EntitySubtask, "tasks"); err != nil {
-		return err
-	}
-	if err := softDelete(ctx, jobId, importModels.EntityTask, "tasks"); err != nil {
-		return err
-	}
-	if err := deleteUnusedFields(ctx, jobId); err != nil {
-		return err
-	}
-	if err := softDelete(ctx, jobId, importModels.EntityFile, "attachments"); err != nil {
-		return err
-	}
-	if err := softDeleteEmptyProjects(ctx, jobId); err != nil {
-		return err
-	}
-	if err := softDeleteEmptyTeams(ctx, jobId); err != nil {
-		return err
-	}
-	if err := softDeleteExternalUsers(ctx, jobId); err != nil {
-		return err
+	// All of it in one transaction with the move to rolled_back, so a step
+	// that fails leaves none of it done, rather than the tasks gone and the
+	// import showing as before; and not tied to the request, which a client
+	// that stops waiting would end half way through a large one, every time.
+	ctx = context.WithoutCancel(ctx)
+	err = importModels.RollBack(ctx, jobId, func(tx *sql.Tx) error {
+		// Task-shaped rollback order: comments → subtasks → tasks →
+		// attachments → projects (only if no non-imported tasks survive)
+		// → teams (only if empty).
+		if err := softDelete(ctx, tx, jobId, importModels.EntityComment, "comments"); err != nil {
+			return err
+		}
+		if err := softDelete(ctx, tx, jobId, importModels.EntitySubtask, "tasks"); err != nil {
+			return err
+		}
+		if err := softDelete(ctx, tx, jobId, importModels.EntityTask, "tasks"); err != nil {
+			return err
+		}
+		if err := deleteUnusedFields(ctx, tx, jobId); err != nil {
+			return err
+		}
+		if err := softDelete(ctx, tx, jobId, importModels.EntityFile, "attachments"); err != nil {
+			return err
+		}
+		if err := softDeleteEmptyProjects(ctx, tx, jobId); err != nil {
+			return err
+		}
+		if err := softDeleteEmptyTeams(ctx, tx, jobId); err != nil {
+			return err
+		}
+		return softDeleteExternalUsers(ctx, tx, jobId)
+	})
+	if err != nil {
+		return fmt.Errorf("the rollback stopped and took nothing away: %w", err)
 	}
 
 	if err := DeleteStagedZip(ctx, jobId); err != nil {
 		helpers.LogWarnWithContext(ctx,
 			"Import rollback could not delete staged zip for %s: %+v", jobId, err)
 	}
-	stage := "rolled_back"
-	reason := "rolled back by operator"
-	return importModels.UpdateStatus(ctx, jobId,
-		importModels.StatusRolledBack, &stage, &reason)
+	return nil
 }
 
 // slackRollback delegates to the legacy SlackImport package. We can't
@@ -92,7 +98,7 @@ var invokeSlackRollback = func(ctx context.Context, jobId uuid.UUID) error {
 // Only entities physically created by THIS import (created_by_this_import
 // = true) are touched. Imports that re-mapped an existing entity from a
 // prior import don't tombstone it.
-func softDelete(ctx context.Context, importId uuid.UUID, entityType, table string) error {
+func softDelete(ctx context.Context, tx *sql.Tx, importId uuid.UUID, entityType, table string) error {
 	entries, err := importModels.IdMappingsByTypeOwned(ctx, importId, entityType)
 	if err != nil {
 		return err
@@ -118,7 +124,7 @@ func softDelete(ctx context.Context, importId uuid.UUID, entityType, table strin
 			WHERE id IN (%s) AND deleted_at IS NULL`,
 			tableNameWhitelist(table), markDeleted(table),
 			strings.Join(placeholders, ","))
-		if _, err := importModels.Exec(ctx, query, args...); err != nil {
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 			return fmt.Errorf("rollback %s batch %d: %w", table, i, err)
 		}
 	}
@@ -131,7 +137,7 @@ func softDelete(ctx context.Context, importId uuid.UUID, entityType, table strin
 // deleteUnusedFields takes away the custom fields this import made, once its
 // tasks are gone, unless a task still in use has a value of one: a field
 // someone has started using stays.
-func deleteUnusedFields(ctx context.Context, importId uuid.UUID) error {
+func deleteUnusedFields(ctx context.Context, tx *sql.Tx, importId uuid.UUID) error {
 	entries, err := importModels.IdMappingsByTypeOwned(ctx, importId, importModels.EntityField)
 	if err != nil || len(entries) == 0 {
 		return err
@@ -140,7 +146,7 @@ func deleteUnusedFields(ctx context.Context, importId uuid.UUID) error {
 	for _, e := range entries {
 		ids = append(ids, e.OnecampUUID.String())
 	}
-	if _, err := importModels.Exec(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM task_fields f
 		WHERE f.id = ANY($1::uuid[])
 		  AND NOT EXISTS (
@@ -154,14 +160,14 @@ func deleteUnusedFields(ctx context.Context, importId uuid.UUID) error {
 // softDeleteEmptyProjects deletes projects created by this import that
 // have zero non-imported tasks. Real-user activity inside an imported
 // project keeps it alive.
-func softDeleteEmptyProjects(ctx context.Context, importId uuid.UUID) error {
+func softDeleteEmptyProjects(ctx context.Context, tx *sql.Tx, importId uuid.UUID) error {
 	entries, err := importModels.IdMappingsByTypeOwned(ctx, importId, importModels.EntityProject)
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
 		var nonImportedCount int
-		row, err := importModels.ExecQueryRow(ctx, `
+		if err := tx.QueryRowContext(ctx, `
 			SELECT COUNT(*)
 			FROM tasks t
 			LEFT JOIN import_id_map m
@@ -170,11 +176,7 @@ func softDeleteEmptyProjects(ctx context.Context, importId uuid.UUID) error {
 			   AND m.onecamp_uuid = t.id
 			WHERE t.project_id = $2
 			  AND t.deleted_at IS NULL
-			  AND m.onecamp_uuid IS NULL`, importId, e.OnecampUUID)
-		if err != nil {
-			return err
-		}
-		if err := row.Scan(&nonImportedCount); err != nil {
+			  AND m.onecamp_uuid IS NULL`, importId, e.OnecampUUID).Scan(&nonImportedCount); err != nil {
 			return err
 		}
 		if nonImportedCount > 0 {
@@ -183,7 +185,7 @@ func softDeleteEmptyProjects(ctx context.Context, importId uuid.UUID) error {
 				e.OnecampUUID, nonImportedCount)
 			continue
 		}
-		if _, err := importModels.Exec(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE projects SET deleted_at = NOW(), updated_at = NOW()
 			WHERE id = $1 AND deleted_at IS NULL`, e.OnecampUUID); err != nil {
 			return err
@@ -194,14 +196,14 @@ func softDeleteEmptyProjects(ctx context.Context, importId uuid.UUID) error {
 
 // softDeleteEmptyTeams tombstones teams created by this import that
 // have zero non-imported projects.
-func softDeleteEmptyTeams(ctx context.Context, importId uuid.UUID) error {
+func softDeleteEmptyTeams(ctx context.Context, tx *sql.Tx, importId uuid.UUID) error {
 	entries, err := importModels.IdMappingsByTypeOwned(ctx, importId, importModels.EntityTeam)
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
 		var nonImportedCount int
-		row, err := importModels.ExecQueryRow(ctx, `
+		if err := tx.QueryRowContext(ctx, `
 			SELECT COUNT(*)
 			FROM projects p
 			LEFT JOIN import_id_map m
@@ -210,17 +212,13 @@ func softDeleteEmptyTeams(ctx context.Context, importId uuid.UUID) error {
 			   AND m.onecamp_uuid = p.id
 			WHERE p.team_id = $2
 			  AND p.deleted_at IS NULL
-			  AND m.onecamp_uuid IS NULL`, importId, e.OnecampUUID)
-		if err != nil {
-			return err
-		}
-		if err := row.Scan(&nonImportedCount); err != nil {
+			  AND m.onecamp_uuid IS NULL`, importId, e.OnecampUUID).Scan(&nonImportedCount); err != nil {
 			return err
 		}
 		if nonImportedCount > 0 {
 			continue
 		}
-		if _, err := importModels.Exec(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE teams SET deleted_at = NOW(), updated_at = NOW()
 			WHERE id = $1 AND deleted_at IS NULL`, e.OnecampUUID); err != nil {
 			return err
@@ -231,14 +229,14 @@ func softDeleteEmptyTeams(ctx context.Context, importId uuid.UUID) error {
 
 // softDeleteExternalUsers tombstones imported external users that have
 // no posts/chats/comments/tasks outside this import.
-func softDeleteExternalUsers(ctx context.Context, importId uuid.UUID) error {
+func softDeleteExternalUsers(ctx context.Context, tx *sql.Tx, importId uuid.UUID) error {
 	entries, err := importModels.IdMappingsByTypeOwned(ctx, importId, importModels.EntityUser)
 	if err != nil {
 		return err
 	}
 	for _, e := range entries {
 		var refsExternal int
-		row, err := importModels.ExecQueryRow(ctx, `
+		if err := tx.QueryRowContext(ctx, `
 			SELECT
 			    (SELECT COUNT(*) FROM tasks    WHERE created_by = $1 AND id NOT IN (
 			        SELECT onecamp_uuid FROM import_id_map
@@ -255,11 +253,7 @@ func softDeleteExternalUsers(ctx context.Context, importId uuid.UUID) error {
 			    (SELECT COUNT(*) FROM chats    WHERE created_by = $1 AND id NOT IN (
 			        SELECT onecamp_uuid FROM import_id_map
 			        WHERE import_id = $2 AND entity_type = 'message'))`,
-			e.OnecampUUID, importId)
-		if err != nil {
-			return err
-		}
-		if err := row.Scan(&refsExternal); err != nil {
+			e.OnecampUUID, importId).Scan(&refsExternal); err != nil {
 			return err
 		}
 		if refsExternal > 0 {
@@ -267,20 +261,16 @@ func softDeleteExternalUsers(ctx context.Context, importId uuid.UUID) error {
 		}
 		// Cross-import safety: if any other import mapped this user, leave them.
 		var otherImports int
-		row, err = importModels.ExecQueryRow(ctx, `
+		if err := tx.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM import_id_map
 			WHERE onecamp_uuid = $1 AND import_id <> $2 AND entity_type = 'user'`,
-			e.OnecampUUID, importId)
-		if err != nil {
-			return err
-		}
-		if err := row.Scan(&otherImports); err != nil {
+			e.OnecampUUID, importId).Scan(&otherImports); err != nil {
 			return err
 		}
 		if otherImports > 0 {
 			continue
 		}
-		if _, err := importModels.Exec(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			UPDATE users SET deleted_at = NOW(), updated_at = NOW()
 			WHERE id = $1 AND deleted_at IS NULL`, e.OnecampUUID); err != nil {
 			return err

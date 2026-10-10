@@ -203,10 +203,10 @@ func InviterName(ctx context.Context, invitedBy uuid.UUID) string {
 }
 
 // NameOnRecord is what a person is called where an invitation names them:
-// their display name, else their full name, else "". Pure.
+// the one name rule (helpers.PersonDisplayName) without its last step: their
+// display name, else their full name, else "". The invitation goes to someone
+// not yet in the workspace, who is not shown part of the inviter's address.
+// Pure.
 func NameOnRecord(u dgraphStruct.DgraphUser) string {
-	if name := strings.TrimSpace(u.UserName); name != "" {
-		return name
-	}
-	return strings.TrimSpace(u.UserFullName)
+	return helpers.PersonDisplayName(u.UserName, u.UserFullName, "")
 }

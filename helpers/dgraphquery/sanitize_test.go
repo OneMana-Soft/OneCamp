@@ -120,3 +120,15 @@ func TestOnlyUIDsGoIntoAQuerysUIDList(t *testing.T) {
 		}
 	}
 }
+
+// A cleaned term is not escaped, so a caller that escapes it again, or also
+// matches it in Postgres, gets the text as typed.
+func TestCleanSearchTermDoesNotEscape(t *testing.T) {
+	got, err := CleanSearchTerm("  priya.raman​ ")
+	if err != nil || got != "priya.raman" {
+		t.Fatalf("CleanSearchTerm = %q, %v", got, err)
+	}
+	if safe, _ := SanitizeSearchTerm("priya.raman"); safe != `priya\.raman` {
+		t.Fatalf("SanitizeSearchTerm = %q, still escaped once", safe)
+	}
+}

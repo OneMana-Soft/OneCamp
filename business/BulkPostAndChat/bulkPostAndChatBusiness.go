@@ -180,7 +180,7 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 			// ── Forward to a 1:1 DM ──
 			chatParticipantsTemp = append(chatParticipantsTemp, &openSearchStruct.OpenSearchChatParticipants{
 				Uuid:       userInfo.Uuid,
-				Name:       userInfo.UserName,
+				Name:       userInfo.DisplayName(),
 				ProfileKey: userInfo.ProfileKey,
 			})
 			chatParticipantsTemp = append(chatParticipantsTemp, &openSearchStruct.OpenSearchChatParticipants{
@@ -368,9 +368,9 @@ func sendFwdMessageNotifications(ctx context.Context, userInfo *dgraphStruct.Dgr
 		pushData := make(map[string]string)
 		pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT
 		pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] = grpId
-		pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = userInfo.UserName
+		pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = userInfo.DisplayName()
 		pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = plainText
-		pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userInfo.UserName
+		pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userInfo.DisplayName()
 		pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userInfo.ProfileKey)
 
 		batchSize := 500
@@ -398,7 +398,7 @@ func PublishChatsAndPostsMqtt(dgraphPosts []*dgraphStruct.DgraphPost,
 			PostCreatedAt:    dgraphPost.CreatedAt,
 			PostByUserUuid:   userInfo.Uuid,
 			PostByProfileKey: userInfo.ProfileKey,
-			PostByUserName:   userInfo.UserName,
+			PostByUserName:   userInfo.DisplayName(),
 			PostChannelUuid:  channelUUIDs[i],
 			PostFwdPost:      userDgraphPost,
 			PostFwdChat:      userDgraphChat,
@@ -428,7 +428,7 @@ func PublishChatsAndPostsMqtt(dgraphPosts []*dgraphStruct.DgraphPost,
 			ChatUuid:         dgraphChat.Uuid,
 			ChatCreatedAt:    dgraphChat.CreatedAt,
 			ChatByProfileKey: userInfo.ProfileKey,
-			ChatByUserName:   userInfo.UserName,
+			ChatByUserName:   userInfo.DisplayName(),
 			ChatByUserUuid:   userInfo.Uuid,
 			ChatHtmlText:     HTMLText,
 			ChatAttachments:  dgraphChat.MediaObj,
@@ -500,7 +500,7 @@ func AddChatsAndPostsToOpensearch(dgraphPosts []*dgraphStruct.DgraphPost, dgraph
 			PostChannelUuid:    channelUUIDs[i],
 			PostByUserUuid:     userInfo.Uuid,
 			PostByProfile:      userInfo.ProfileKey,
-			PostByUserFullName: userInfo.UserName,
+			PostByUserFullName: userInfo.DisplayName(),
 			PostCreatedAt:      time.Now().Unix(),
 			PostUpdatedAt:      time.Now().Unix(),
 			PostDeletedAt:      nil,
@@ -517,7 +517,7 @@ func AddChatsAndPostsToOpensearch(dgraphPosts []*dgraphStruct.DgraphPost, dgraph
 			Uuid:               target.Chat.Uuid,
 			ChatBody:           plainText,
 			ChatByProfile:      userInfo.ProfileKey,
-			ChatByUserFullName: userInfo.UserName,
+			ChatByUserFullName: userInfo.DisplayName(),
 			ChatByUserUuid:     userInfo.Uuid,
 			ChatGrpId:          target.GroupingID,
 			ChatParticipants:   target.Participants,

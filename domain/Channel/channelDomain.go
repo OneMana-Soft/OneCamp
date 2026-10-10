@@ -746,8 +746,10 @@ func GetArchivedChannelListWithLatestPostWithUserIdAndSearchText(ctx context.Con
 					  post_text
 					  post_created_at
 					  post_by {
+						user_uuid
 						user_name
 						user_full_name
+						is_bot
 					  }
 					post_attachments {
 						attachment_file_name
@@ -802,8 +804,10 @@ func GetAllActiveChannelListWithLatestPost(ctx context.Context, userDgraphId str
 					  post_text
 					  post_created_at
 					  post_by {
+						user_uuid
 						user_name
 						user_full_name
+						is_bot
 					  }
 					post_attachments {
 						attachment_file_name
@@ -857,8 +861,10 @@ func GetActiveChannelListWithLatestPostWithUserIdAndSearchText(ctx context.Conte
 					  post_text
 					  post_created_at
 					  post_by {
+						user_uuid
 						user_name
 						user_full_name
+						is_bot
 					  }
 					post_attachments {
 						attachment_file_name
@@ -913,8 +919,10 @@ func GetChannelListWithLatestPostWithUserIdAndSearchText(ctx context.Context, us
 					  post_text
 					  post_created_at
 					  post_by {
+						user_uuid
 						user_name
 						user_full_name
+						is_bot
 					  }
 					post_attachments {
 						attachment_file_name
@@ -969,8 +977,10 @@ func GetUserArchivedChannelListWithLatestPost(ctx context.Context, userDgraphId 
 					  post_text
 					  post_created_at
 					  post_by {
+						user_uuid
 						user_name
 						user_full_name
+						is_bot
 					  }
 						post_attachments {
 							attachment_file_name
@@ -1024,8 +1034,10 @@ func GetUserActiveChannelListWithLatestPost(ctx context.Context, userDgraphId st
 					  post_text
 					  post_created_at
 					  post_by {
+						user_uuid
 						user_name
 						user_full_name
+						is_bot
 					  }
 						post_attachments {
 							attachment_file_name

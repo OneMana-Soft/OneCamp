@@ -70,7 +70,7 @@ func withReplyContext(parent *dgraphStruct.DgraphPost, text string) string {
 	}
 	author := ""
 	if parent.PostBy != nil {
-		author = parent.PostBy.UserName
+		author = parent.PostBy.DisplayName()
 	}
 	snippet := helpers.HTMLToPlainText(parent.Text)
 	if len(snippet) > replyContextSnippetLen {
@@ -212,7 +212,7 @@ func CreatePost(ctx context.Context, postInfo *adapter.InputCreateOrUpdatePostIn
 		PostCreatedAt:    &currentTime,
 		PostByUserUuid:   userInfo.UserDgraphInfo.Uuid,
 		PostByProfileKey: userInfo.UserDgraphInfo.ProfileKey,
-		PostByUserName:   userInfo.UserDgraphInfo.UserName,
+		PostByUserName:   userInfo.UserDgraphInfo.DisplayName(),
 		PostByIsBot:      userInfo.UserDgraphInfo.IsBot,
 		PostChannelUuid:  postInfo.ChannelUuid,
 		PostUuid:         postUUID.String(),
@@ -238,7 +238,7 @@ func CreatePost(ctx context.Context, postInfo *adapter.InputCreateOrUpdatePostIn
 		PostCreatedAt:      currentTime.Unix(),
 		PostByUserUuid:     userInfo.UserDgraphInfo.Uuid,
 		PostByProfile:      userInfo.UserDgraphInfo.ProfileKey,
-		PostByUserFullName: userInfo.UserDgraphInfo.UserName,
+		PostByUserFullName: userInfo.UserDgraphInfo.DisplayName(),
 		PostChannelName:    dgraphChannelInfo.Name,
 		PostDeletedAt:      nil,
 	}
@@ -254,7 +254,7 @@ func CreatePost(ctx context.Context, postInfo *adapter.InputCreateOrUpdatePostIn
 		/* AI call omitted in v1 */
 
 		// send push
-		pushTitle := fmt.Sprintf("#%s - %s", dgraphChannelInfo.Name, userInfo.UserDgraphInfo.UserName)
+		pushTitle := fmt.Sprintf("#%s - %s", dgraphChannelInfo.Name, userInfo.UserDgraphInfo.DisplayName())
 		// A Discord-style inline reply implicitly pings the parent's author, so
 		// route them through the same mention pipeline (activity + push +
 		// email). Self-replies are suppressed inside sendNewPostNotification,
@@ -272,7 +272,10 @@ func CreatePost(ctx context.Context, postInfo *adapter.InputCreateOrUpdatePostIn
 		// straight from the HTML so the set is independent of mention
 		// resolution (which hides the bot from member lists) — a bot that was
 		// explicitly @mentioned must still be detectable here. For native
-		// mentions these are Dgraph node uids.
+		// mentions these are Dgraph node uids. The author is named by the one
+		// name rule without its last step, never part of their address: the
+		// Slack bridge carries the name to Slack, where a shared channel can
+		// hold people from other organisations.
 		mentionIDs, _ := helpers.GetMentions(postInfo.HTMLText)
 		go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "post.created", map[string]interface{}{
 			"post_id":      postUUID.String(),
@@ -280,7 +283,7 @@ func CreatePost(ctx context.Context, postInfo *adapter.InputCreateOrUpdatePostIn
 			"channel_name": dgraphChannelInfo.Name,
 			"text":         plainText,
 			"author_id":    userInfo.UserDgraphInfo.Uuid,
-			"author_name":  userInfo.UserDgraphInfo.UserName,
+			"author_name":  helpers.PersonDisplayName(userInfo.UserDgraphInfo.UserName, userInfo.UserDgraphInfo.UserFullName, ""),
 			"mention_ids":  mentionIDs,
 			"source":       "user",
 		})
@@ -347,7 +350,7 @@ func sendNewPostNotification(title string, body string, channelId string, mentio
 					Text: body,
 					PostBy: &dgraphStruct.DgraphUser{
 						Uuid:     userDgraph.Uuid,
-						UserName: userDgraph.UserName,
+						UserName: userDgraph.DisplayName(),
 					},
 					Channel: &dgraphStruct.DgraphChannel{
 						Uuid: channelId,
@@ -377,7 +380,7 @@ func sendNewPostNotification(title string, body string, channelId string, mentio
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = title
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] = postID
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.UserName
+	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 
 	// Send notifications in batches of 500 tokens
@@ -403,7 +406,7 @@ func sendNewPostNotification(title string, body string, channelId string, mentio
 	// (per-user pref, online check, suppressions).
 	notificationBusiness.DispatchChannelMention(
 		userDgraph.Uuid,
-		userDgraph.UserName,
+		userDgraph.DisplayName(),
 		userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey),
 		channelId,
 		dgraphChannelInfo.Name,
@@ -552,7 +555,7 @@ func CreatePostComment(ctx context.Context, commentInfo *adapter.InputCreateOrUp
 		ChannelUuid:    dgraphPostInfo.Channel.Uuid,
 		CreatedAt:      &currentTime,
 		UserUuid:       userInfo.UserDgraphInfo.Uuid,
-		UserName:       userInfo.UserDgraphInfo.UserName,
+		UserName:       userInfo.UserDgraphInfo.DisplayName(),
 		UserProfileKey: userInfo.UserDgraphInfo.ProfileKey,
 		Attachments:    commentInfo.MediaObj,
 	}
@@ -569,6 +572,7 @@ func CreatePostComment(ctx context.Context, commentInfo *adapter.InputCreateOrUp
 		// as another comment in the same thread. Loop-safe: an agent's own reply
 		// comments are written via botpost (not this path) and never dispatch;
 		// the event bus also skips listeners for workflow-generated writes.
+		// The author is named as for post.created, for the Slack bridge.
 		mentionIDs := make([]string, 0, len(mentionsDgraphUsersList))
 		for _, m := range mentionsDgraphUsersList {
 			if m != nil && m.Uid != "" {
@@ -580,7 +584,7 @@ func CreatePostComment(ctx context.Context, commentInfo *adapter.InputCreateOrUp
 			"channel_id":   dgraphPostInfo.Channel.Uuid,
 			"channel_name": dgraphPostInfo.Channel.Name,
 			"author_id":    userInfo.UserDgraphInfo.Uuid,
-			"author_name":  userInfo.UserDgraphInfo.UserName,
+			"author_name":  helpers.PersonDisplayName(userInfo.UserDgraphInfo.UserName, userInfo.UserDgraphInfo.UserFullName, ""),
 			"comment_uuid": commentUUID.String(),
 			"text":         helpers.HTMLToPlainText(commentInfo.HTMLText),
 			"mention_ids":  mentionIDs,
@@ -608,7 +612,7 @@ func PublishPostCommentActivity(commentUUID string, commentBody string, postUUID
 				Text: commentBody,
 				CommentBy: &dgraphStruct.DgraphUser{
 					Uuid:     userDgraph.Uuid,
-					UserName: userDgraph.UserName,
+					UserName: userDgraph.DisplayName(),
 				},
 				Post: &dgraphStruct.DgraphPost{
 					Uuid: postUUID,
@@ -647,7 +651,7 @@ func PublishPostCommentActivity(commentUUID string, commentBody string, postUUID
 					Text: commentBody,
 					CommentBy: &dgraphStruct.DgraphUser{
 						Uuid:     userDgraph.Uuid,
-						UserName: userDgraph.UserName,
+						UserName: userDgraph.DisplayName(),
 					},
 					Post: &dgraphStruct.DgraphPost{
 						Uuid: postUUID,
@@ -700,7 +704,7 @@ func CreateOrUpdatePostCommentReaction(ctx context.Context, reactionInfo *adapte
 		Type:            mqttStruct.TYPE_CREATE,
 		EmojiReactionId: reactionInfo.EmojiUuid,
 		CommentUuid:     reactionInfo.Uuid,
-		AddedByUserName: userDgraph.UserName,
+		AddedByUserName: userDgraph.DisplayName(),
 		AddedByUuid:     userDgraph.Uuid,
 		ReactionUuid:    reactionUUID,
 		PostUuid:        dgraphCommentRaw.Post.Uuid,
@@ -743,7 +747,7 @@ func CreateOrUpdatePostCommentReaction(ctx context.Context, reactionInfo *adapte
 						EmojiUuid: reactionInfo.EmojiUuid,
 						AddedBy: &dgraphStruct.DgraphUser{
 							Uuid:     userDgraph.Uuid,
-							UserName: userDgraph.UserName,
+							UserName: userDgraph.DisplayName(),
 						},
 						AddedAt: &currentTime,
 					},

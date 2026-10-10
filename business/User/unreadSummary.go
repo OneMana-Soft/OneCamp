@@ -87,8 +87,8 @@ func dmPlace(d *dgraphStruct.DgraphDm, selfUUID string) UnreadPlace {
 			continue
 		}
 		others = append(others, p.Uuid)
-		if p.UserName != "" {
-			names = append(names, p.UserName)
+		if n := p.DisplayName(); n != "" {
+			names = append(names, n)
 		}
 	}
 	name := strings.Join(names, ", ")

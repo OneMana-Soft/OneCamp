@@ -2,6 +2,7 @@ package business
 
 import (
 	"context"
+	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/livekit/protocol/livekit"
@@ -141,7 +142,7 @@ func CreateRoomAndGetToken(ctx context.Context, roomId string, userDgraphInfo *d
 		}
 	}
 
-	token, err = GenerateToken(ctx, roomId, userDgraphInfo.Uid, userDgraphInfo.UserName, isAdmin, audioEnabled, videoEnabled)
+	token, err = GenerateToken(ctx, roomId, userDgraphInfo.Uid, callName(roomId, userDgraphInfo), isAdmin, audioEnabled, videoEnabled)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -155,8 +156,33 @@ func CreateRoomAndGetToken(ctx context.Context, roomId string, userDgraphInfo *d
 
 }
 
+// meetingRoomPrefix starts the name of an instant meeting's room, the rooms
+// guests join from a link (business/Guest's MeetingRoomPrefix; that package
+// imports this one).
+const meetingRoomPrefix = "meet-"
+
+// callName is the name a member is shown by in a call, on their tile and as
+// whoever started its recording: the one name rule (DgraphUser.DisplayName).
+// In an instant meeting, which people from outside the workspace join, it
+// stops before the rule's last step, part of the member's address, and is
+// "Someone" when that leaves nothing. Pure.
+func callName(roomName string, user *dgraphStruct.DgraphUser) string {
+	if !strings.HasPrefix(roomName, meetingRoomPrefix) {
+		return user.DisplayName()
+	}
+	var forGuests dgraphStruct.DgraphUser
+	if user != nil {
+		forGuests = *user
+	}
+	forGuests.EmailID = ""
+	if name := forGuests.DisplayName(); name != "" {
+		return name
+	}
+	return "Someone"
+}
+
 func StartRecording(ctx context.Context, roomName string, userDgraphInfo *dgraphStruct.DgraphUser) (egresssInfo *livekit.EgressInfo, filePath string, err error) {
-	egresssInfo, filePath, err = livekitInit.LiveKitService.StartRecording(ctx, roomName, userDgraphInfo.UserName)
+	egresssInfo, filePath, err = livekitInit.LiveKitService.StartRecording(ctx, roomName, callName(roomName, userDgraphInfo))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/StartRecording Failed to start recording err: %+v",

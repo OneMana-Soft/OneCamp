@@ -875,6 +875,11 @@ func checkGitHubRateLimit(resp *http.Response) error {
 // times is safe because GitHub comment IDs are deduplicated via
 // github_comment_mappings.
 func RefreshFromGitHub(ctx context.Context, taskUUID uuid.UUID, backfillComments bool) error {
+	// Everything below applies GitHub's copy of the issue to the task, comments
+	// anyone wrote on GitHub included, so it is marked as the webhook marks its
+	// work: nothing it writes is sent back to GitHub, and no comment it brings
+	// in counts as a person in the workspace asking for anything.
+	ctx = helpers.WithGitHubOrigin(ctx)
 	_ = taskDomain.SetGitHubSyncStatus(ctx, taskUUID, "pending", nil, 0)
 
 	// 1. Resolve GitHub URLs

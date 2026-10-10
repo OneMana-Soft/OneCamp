@@ -106,7 +106,7 @@ func CreateTaskComment(ctx context.Context, taskUUID uuid.UUID, rawTaskDgraph *d
 		CommentUuid:    commentUUID.String(),
 		TaskUuid:       rawTaskDgraph.Uuid,
 		UserUuid:       createdByUser.UserDgraphInfo.Uuid,
-		UserName:       createdByUser.UserDgraphInfo.UserName,
+		UserName:       createdByUser.UserDgraphInfo.DisplayName(),
 		UserProfileKey: createdByUser.UserDgraphInfo.ProfileKey,
 		CreatedAt:      &currentTime,
 		HTMLText:       createTaskCommentInfoInput.CommentBody,
@@ -165,7 +165,7 @@ func publishTaskCommentActivity(commentBody string, currentTime *time.Time, ment
 				Text: commentBody,
 				CommentBy: &dgraphStruct.DgraphUser{
 					Uuid:     createdByUserDgraph.Uuid,
-					UserName: createdByUserDgraph.UserName,
+					UserName: createdByUserDgraph.DisplayName(),
 				},
 				Task: &dgraphStruct.DgraphTask{
 					Uuid: rawTaskDgraph.Uuid,
@@ -193,7 +193,7 @@ func publishTaskCommentActivity(commentBody string, currentTime *time.Time, ment
 			Text: commentBody,
 			CommentBy: &dgraphStruct.DgraphUser{
 				Uuid:     createdByUserDgraph.Uuid,
-				UserName: createdByUserDgraph.UserName,
+				UserName: createdByUserDgraph.DisplayName(),
 			},
 			Task: &dgraphStruct.DgraphTask{
 				Uuid: rawTaskDgraph.Uuid,
@@ -434,7 +434,7 @@ func CreateSubTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.U
 			}},
 		}
 		opensearchTask.TaskAssigneeUuid = &assigneeDgraphInfo.Uuid
-		opensearchTask.TaskAssigneeFullName = assigneeDgraphInfo.UserFullName
+		opensearchTask.TaskAssigneeFullName = assigneeDgraphInfo.DisplayName()
 	}
 
 	taskUID, err := domain.CreateOrUpdateDgraphTask(ctx, dgraphTask)
@@ -664,7 +664,7 @@ func CreateTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.User
 			}},
 		}
 		opensearchTask.TaskAssigneeUuid = &assigneeDgraphInfo.Uuid
-		opensearchTask.TaskAssigneeFullName = assigneeDgraphInfo.UserFullName
+		opensearchTask.TaskAssigneeFullName = assigneeDgraphInfo.DisplayName()
 	}
 
 	taskUID, err := domain.CreateOrUpdateDgraphTask(ctx, &dgraphTask)
@@ -729,7 +729,7 @@ func CreateTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.User
 			"name":             taskInfo.TaskName,
 			"description":      taskInfo.TaskDescription,
 			"assignee_id":      assigneeDgraphInfo.Uuid,
-			"assigned_by_name": userInfo.UserDgraphInfo.UserName,
+			"assigned_by_name": userInfo.UserDgraphInfo.DisplayName(),
 			"assigned_by":      userInfo.UserDgraphInfo.Uuid,
 		})
 	}
@@ -816,7 +816,7 @@ func sendNewTaskNotification(body string, projectId string, taskName string, men
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] = taskUUID
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = taskName
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.UserName
+	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 
 	// Send notifications in batches of 500 tokens
@@ -843,7 +843,7 @@ func sendNewTaskNotification(body string, projectId string, taskName string, men
 	if assigneeDrgraph != nil {
 		notificationBusiness.DispatchTaskAssignment(
 			userDgraph.Uuid,
-			userDgraph.UserName,
+			userDgraph.DisplayName(),
 			userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey),
 			taskUUID,
 			taskName,
@@ -1053,7 +1053,7 @@ func UpdateTaskAssigneeByTaskUUID(ctx context.Context, taskUUID uuid.UUID, newAs
 
 	if dgraphTaskInfo.Assignee != nil {
 
-		dgraphTask.Activity[0].PrevState = dgraphTaskInfo.Assignee.UserName
+		dgraphTask.Activity[0].PrevState = dgraphTaskInfo.Assignee.DisplayName()
 
 	}
 
@@ -1065,10 +1065,10 @@ func UpdateTaskAssigneeByTaskUUID(ctx context.Context, taskUUID uuid.UUID, newAs
 			}},
 		}
 
-		dgraphTask.Activity[0].NextState = newAssigneeDgraphInfo.UserName
+		dgraphTask.Activity[0].NextState = newAssigneeDgraphInfo.DisplayName()
 
 		taskOpenSearch.TaskAssigneeUuid = &newAssigneeDgraphInfo.Uuid
-		taskOpenSearch.TaskAssigneeFullName = newAssigneeDgraphInfo.UserFullName
+		taskOpenSearch.TaskAssigneeFullName = newAssigneeDgraphInfo.DisplayName()
 	}
 
 	_, err = domain.UpdateDgraphTaskAssignee(ctx, dgraphTask, dgraphOldUserUID, dgraphTaskUID)
@@ -1115,7 +1115,7 @@ func UpdateTaskAssigneeByTaskUUID(ctx context.Context, taskUUID uuid.UUID, newAs
 		}
 		notificationBusiness.DispatchTaskAssignment(
 			userInfo.Uuid,
-			userInfo.UserName,
+			userInfo.DisplayName(),
 			userBusiness.GetSignedProfileURL(ctx, userInfo.ProfileKey),
 			taskUUID.String(),
 			taskName,
@@ -1146,7 +1146,7 @@ func dispatchTaskAssignedEvent(ctx context.Context, taskUUID uuid.UUID, dgraphTa
 		}
 	}
 	if actor != nil {
-		payload["assigned_by_name"] = actor.UserName
+		payload["assigned_by_name"] = actor.DisplayName()
 		// Who handed the work over: the person told when the agent needs them.
 		payload["assigned_by"] = actor.Uuid
 	}
@@ -1361,7 +1361,7 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 	if dgraphTaskInfo.Project != nil {
 		projectName = dgraphTaskInfo.Project.Name
 	}
-	notificationBusiness.DispatchTaskStatusChange(userInfo.Uuid, userInfo.UserName,
+	notificationBusiness.DispatchTaskStatusChange(userInfo.Uuid, userInfo.DisplayName(),
 		userBusiness.GetSignedProfileURL(ctx, userInfo.ProfileKey),
 		taskUUID.String(), dgraphTaskInfo.Name, projectName, prev.Display(), next.Display(),
 		activityUUID.String(), people)
@@ -1379,7 +1379,7 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 		// What a workflow's message says: "{by} moved {task} to {status}".
 		"task_name":       dgraphTaskInfo.Name,
 		"project_name":    projectName,
-		"updated_by_name": userInfo.UserName,
+		"updated_by_name": userInfo.DisplayName(),
 		"updated_by_uuid": userInfo.Uuid,
 	})
 
@@ -1881,7 +1881,7 @@ func CreateOrUpdateTaskCommentReaction(ctx context.Context, reactionInfo *adapte
 		CommentUuid:     reactionInfo.Uuid,
 		EmojiReactionId: reactionInfo.EmojiUuid,
 		AddedByUuid:     userDgraph.Uuid,
-		AddedByUserName: userDgraph.UserName,
+		AddedByUserName: userDgraph.DisplayName(),
 		ReactionUuid:    reactionUUID,
 		TaskUuid:        dgraphCommentRaw.Task.Uuid,
 	}

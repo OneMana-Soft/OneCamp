@@ -26,6 +26,7 @@ import (
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	bookingModel "github.com/akashc777/OneCamp/models/postgres/Booking"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	authService "github.com/akashc777/OneCamp/services/Auth"
@@ -171,11 +172,7 @@ func loadPage(ctx context.Context, slug string) (*livePage, error) {
 	if err != nil || du == nil || helpers.IsSoftDeleted(du.DeletedAt) {
 		return nil, ErrNoPage
 	}
-	name := du.UserFullName
-	if name == "" {
-		name = du.UserName
-	}
-	return &livePage{page: p, hours: hours, name: name,
+	return &livePage{page: p, hours: hours, name: bookingOwnerName(du),
 		owner: &model.UserInfo{UserPostgresInfo: model.User{Id: p.UserId}, UserDgraphInfo: *du}}, nil
 }
 
@@ -401,12 +398,16 @@ func bookingForToken(ctx context.Context, token string) (*bookingModel.Booking, 
 	}
 	name := ""
 	if du, err := userDomain.GetDgraphUserInfoByUUID(ctx, p.UserId.String()); err == nil && du != nil {
-		name = du.UserFullName
-		if name == "" {
-			name = du.UserName
-		}
+		name = bookingOwnerName(du)
 	}
 	return b, p, name, nil
+}
+
+// bookingOwnerName is the name a booking page shows for its owner: the one
+// name rule (helpers.PersonDisplayName) without its last step, since whoever
+// books is outside the workspace and is not shown part of the owner's address.
+func bookingOwnerName(u *dgraphStruct.DgraphUser) string {
+	return helpers.PersonDisplayName(u.UserName, u.UserFullName, "")
 }
 
 // GetBooking is the booking behind a cancel link.

@@ -195,6 +195,9 @@ func startBackgroundLoops(ctx context.Context) {
 	archiveBusiness.StartAutoArchiver(ctx)
 	// Once: when each older task entered its status, for "time in status".
 	taskBusiness.StartStatusSinceBackfill(ctx)
+	// Every start: an @handle for each member who has none (accounts from
+	// before handles), derived from their name.
+	userBusiness.StartHandleBackfill(ctx)
 	githubBusiness.StartGitHubSyncWorker(business.SyncSignal, ctx)
 	githubBusiness.StartGitHubImportWorker(ctx)
 

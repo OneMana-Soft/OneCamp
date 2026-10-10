@@ -399,10 +399,8 @@ func checkInViews(ctx context.Context, list []goalModel.CheckIn) []CheckInView {
 	for _, c := range list {
 		v := CheckInView{CheckIn: c, AuthorName: "Someone"}
 		if p, ok := names[c.AuthorUUID.String()]; ok {
-			if p.FullName != "" {
-				v.AuthorName = p.FullName
-			} else if p.Name != "" {
-				v.AuthorName = p.Name
+			if p.Display != "" {
+				v.AuthorName = p.Display
 			}
 		}
 		out = append(out, v)

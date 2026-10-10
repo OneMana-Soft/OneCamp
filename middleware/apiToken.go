@@ -78,7 +78,7 @@ func VerifyApiToken(next http.Handler) http.Handler {
 		ctx = context.WithValue(ctx, helpers.UserInfoContextKey, userInfo)
 		ctx = context.WithValue(ctx, helpers.ApiScopesContextKey, auth.Scopes)
 		ctx = context.WithValue(ctx, helpers.ApiTokenIDContextKey, auth.TokenID.String())
-		next.ServeHTTP(w, r.WithContext(ctx))
+		helpers.ServeHidingEmails(next, w, r.WithContext(ctx), userInfo.UserPostgresInfo.EmailID)
 	})
 }
 
