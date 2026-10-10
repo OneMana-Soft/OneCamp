@@ -70,6 +70,8 @@ type UserAndChannelFwdMessage struct {
 	UserUuid         string               `json:"user_uuid,omitempty"`
 	UserDgraphUid    string               `json:"user_dgraph_uid,omitempty"`
 	UserName         string               `json:"user_name,omitempty"`
+	UserFullName     string               `json:"user_full_name,omitempty"`
+	UserHandle       string               `json:"user_handle,omitempty"`
 	UserEmail        string               `json:"user_email_id,omitempty"`
 	UserProfileKey   string               `json:"user_profile_object_key,omitempty"`
 	ChannelUuid      string               `json:"channel_uuid,omitempty"`

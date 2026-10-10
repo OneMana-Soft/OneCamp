@@ -353,9 +353,13 @@ func executeFindPeople(ctx context.Context, action ai.ProposedAction, userUUID s
 
 	// Proves the caller is a real member before reading the directory, and gives
 	// the same error shape as every other executor when they are not.
-	if _, err := getUserInfoForExecutor(ctx, userUUID); err != nil {
+	caller, err := getUserInfoForExecutor(ctx, userUUID)
+	if err != nil {
 		return "", nil, fmt.Errorf("failed to look up user: %w", err)
 	}
+	// The demo's shared visitor is anyone at all; the model would read other
+	// people's addresses out to them (helpers.ServeHidingEmails).
+	showEmails := !helpers.IsDemoVisitor(caller.UserPostgresInfo.EmailID)
 
 	people, err := domainUser.SearchPeople(ctx, query, 0)
 	if err != nil {
@@ -390,7 +394,7 @@ func executeFindPeople(ctx context.Context, action ai.ProposedAction, userUUID s
 		if d := strings.TrimSpace(u.Department); d != "" {
 			b.WriteString(", " + d)
 		}
-		if e := strings.TrimSpace(u.EmailID); e != "" {
+		if e := strings.TrimSpace(u.EmailID); e != "" && showEmails {
 			b.WriteString(" — " + e)
 		}
 		if id := strings.TrimSpace(u.Uuid); id != "" {

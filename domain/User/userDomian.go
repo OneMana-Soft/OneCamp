@@ -169,24 +169,50 @@ func escapeForDgraphRegex(s string) string {
 	return strings.ReplaceAll(regexp.QuoteMeta(s), "/", `\/`)
 }
 
+// GetUserListWithSearchText is the members whose display name, full name or
+// @handle contains searchText, without case; a leading @ is the handle's.
+// Each comes with their handle. searchText is as typed (cleaned, not
+// escaped): it is escaped here for Dgraph and matched as text in Postgres,
+// where handles are.
+//
+// It used to look at the display name alone, so nobody was found by their
+// full name or their handle.
 func GetUserListWithSearchText(ctx context.Context, userUUID string, searchText string) (dgraphUsers []*dgraphStruct.DgraphUser, err error) {
-
+	searchText = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(searchText), "@"))
+	if searchText == "" {
+		return nil, nil
+	}
 	variables := make(map[string]string)
 	variables["$user_id"] = userUUID
 	// Escaped HERE rather than in each caller: there are several, one of them
 	// feeds a DM recipient, and a caller that forgets is silent.
 	safeSearch := escapeForDgraphRegex(searchText)
+	match := fmt.Sprintf(`regexp(user_name, /.*%[1]s.*/i) OR regexp(user_full_name, /.*%[1]s.*/i)`, safeSearch)
+	// Handles are one more way to be found: when Postgres can't say whose
+	// match, the names still find people, rather than nobody being found.
+	byHandle, herr := MemberIDsWithHandleLike(ctx, searchText, userSearchHandleLimit)
+	if herr != nil {
+		helpers.LogWarnWithContext(ctx, "domain/GetUserListWithSearchText searching names only, handles unread: %+v", herr)
+	}
+	if len(byHandle) > 0 {
+		quoted := make([]string, len(byHandle))
+		for i, id := range byHandle {
+			quoted[i] = `"` + id.String() + `"`
+		}
+		match += ` OR eq(user_uuid, [` + strings.Join(quoted, ", ") + `])`
+	}
 	query := fmt.Sprintf(`query UserInfo($user_id: string){
-			userInfo(func: has(user_uuid)) @filter(regexp(user_name,  /.*%s.*/i) AND NOT eq(is_external, true)) {
+			userInfo(func: has(user_uuid)) @filter((%s) AND NOT eq(is_external, true)) {
 				uid
 				user_uuid
 				user_name
+				user_full_name
 				user_profile_object_key
 				user_device_connected
 				user_email_id
 				user_status
 		  	}
-			}`, safeSearch)
+			}`, match)
 
 	dgraphUsers, err = dgraphModels.GetDgraphUsersList(ctx, query, variables)
 
@@ -197,8 +223,85 @@ func GetUserListWithSearchText(ctx context.Context, userUUID string, searchText 
 		)
 		return
 	}
-
+	AttachHandles(ctx, dgraphUsers)
 	return
+}
+
+// userSearchHandleLimit bounds the members a people search finds by handle.
+const userSearchHandleLimit = 50
+
+// MemberIDsWithHandleLike is up to limit members (not external rows, bots or
+// deleted accounts) whose handle contains term, without case.
+func MemberIDsWithHandleLike(ctx context.Context, term string, limit int) ([]uuid.UUID, error) {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	escaped := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(strings.ToLower(term))
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
+		SELECT id FROM users
+		WHERE LOWER(username) LIKE $1 ESCAPE '\'
+		  AND is_external = false AND is_bot = false AND deleted_at IS NULL
+		ORDER BY username LIMIT $2`, "%"+escaped+"%", limit)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/MemberIDsWithHandleLike err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// HandlesByID is the handle of each of these people who has one, by id.
+func HandlesByID(ctx context.Context, ids []string) (map[string]string, error) {
+	out := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
+		SELECT id::text, username FROM users
+		WHERE id = ANY($1::uuid[]) AND username IS NOT NULL AND username <> ''`, pq.Array(ids))
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/HandlesByID err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, handle string
+		if err := rows.Scan(&id, &handle); err != nil {
+			return nil, err
+		}
+		out[id] = handle
+	}
+	return out, rows.Err()
+}
+
+// AttachHandles sets each user's Handle from Postgres, where handles are, so
+// a list of people can be searched and shown by @handle. Best effort: on a
+// failure the list goes without them.
+func AttachHandles(ctx context.Context, users []*dgraphStruct.DgraphUser) {
+	ids := make([]string, 0, len(users))
+	for _, u := range users {
+		if u != nil && u.Uuid != "" {
+			ids = append(ids, u.Uuid)
+		}
+	}
+	handles, err := HandlesByID(ctx, ids)
+	if err != nil {
+		return
+	}
+	for _, u := range users {
+		if u != nil {
+			u.Handle = handles[u.Uuid]
+		}
+	}
 }
 
 func GetActiveUserWithAdminFlagByUserUUID(ctx context.Context, userUUID uuid.UUID) (user *models.User, err error) {
@@ -484,6 +587,47 @@ func GetHandle(ctx context.Context, userID uuid.UUID) (string, error) {
 		return "", err
 	}
 	return handle.String, nil
+}
+
+// MemberWithoutHandle is a member who has no @handle yet, and when they
+// joined.
+type MemberWithoutHandle struct {
+	ID       uuid.UUID
+	Email    string
+	JoinedAt time.Time
+}
+
+// MembersWithoutHandle is up to limit members who have no handle (people,
+// not an external row, a bot or a deleted account), in the order they
+// joined and then by id, after the member after; its zero value comes before
+// everyone. Accounts from before handles (v2.70.0) have none.
+//
+// In join order, so that of two people called Sam the one who joined first
+// is @sam: in id order the later one could be. A join time never recorded
+// counts as the earliest.
+func MembersWithoutHandle(ctx context.Context, after MemberWithoutHandle, limit int) ([]MemberWithoutHandle, error) {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
+		SELECT id, email_id, COALESCE(created_at, 'epoch') AS joined FROM users
+		WHERE (username IS NULL OR username = '')
+		  AND is_external = false AND is_bot = false AND deleted_at IS NULL
+		  AND (COALESCE(created_at, 'epoch'), id) > ($1, $2)
+		ORDER BY joined, id LIMIT $3`, after.JoinedAt, after.ID, limit)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/MembersWithoutHandle err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MemberWithoutHandle
+	for rows.Next() {
+		var m MemberWithoutHandle
+		if err := rows.Scan(&m.ID, &m.Email, &m.JoinedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 // HandleTakenByAnother reports whether someone other than userID has this
@@ -1642,6 +1786,7 @@ func GetDgraphAllUsersList(ctx context.Context) (dgraphUsers []*dgraphStruct.Dgr
 					uid
 					user_uuid
 					user_name
+					user_full_name
 					user_email_id
 					user_posts
 					user_profile_object_key
@@ -2538,6 +2683,9 @@ type UserDisplay struct {
 	FullName   string `json:"user_full_name"`
 	Name       string `json:"user_name"`
 	ProfileKey string `json:"user_profile_object_key"`
+	// Display is the name people see, by the one rule
+	// (helpers.PersonDisplayName).
+	Display string `json:"-"`
 }
 
 // ResolveUserDisplays resolves a set of user UUIDs to display info in a SINGLE
@@ -2560,6 +2708,7 @@ func ResolveUserDisplays(ctx context.Context, userUUIDs []string) (map[string]Us
 			FullName:   u.UserFullName,
 			Name:       u.UserName,
 			ProfileKey: profileKey,
+			Display:    u.DisplayName(),
 		}
 	}
 	return out, nil

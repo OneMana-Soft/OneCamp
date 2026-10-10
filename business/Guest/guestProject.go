@@ -228,7 +228,7 @@ func GetGuestProject(ctx context.Context, grant *guestModel.GuestGrant) (*GuestP
 	if shared, err := updateBusiness.List(ctx, projectID, guestUpdatesShown, true); err == nil {
 		for _, u := range shared {
 			view.Updates = append(view.Updates, GuestUpdate{
-				Health: u.Health, HealthLabel: updateBusiness.HealthLabels[u.Health], Body: u.Body, Author: u.AuthorName, CreatedAt: u.CreatedAt,
+				Health: u.Health, HealthLabel: updateBusiness.HealthLabels[u.Health], Body: u.Body, Author: u.GuestAuthorName, CreatedAt: u.CreatedAt,
 			})
 		}
 	} else {

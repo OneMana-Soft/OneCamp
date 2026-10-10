@@ -219,7 +219,15 @@ func TestImportedFields(t *testing.T) {
 	if err := taskFieldModel.SetValue(ctx, used, got["Channel"].ID, json.RawMessage(`"`+got["Channel"].Options[0].ID+`"`), by); err != nil {
 		t.Fatal(err)
 	}
-	if err := deleteUnusedFields(ctx, job.Id); err != nil {
+	tx, err := postgresInit.DBConn.SqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deleteUnusedFields(ctx, tx, job.Id); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
 	if after := fieldsOf(project); len(after) != 2 || after["Channel"] == nil || after["Notes"] == nil {

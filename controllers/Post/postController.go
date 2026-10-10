@@ -317,7 +317,7 @@ func CreateOrUpdateReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	postReactionInfo.ReactionDgraphUid, err = business.CreateOrUpdatePostReaction(ctx, &postReactionInfo, postInfo.PostBy.Uid, postInfo.PostBy.Uuid, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.UserName, postInfo.Channel.Uuid)
+	postReactionInfo.ReactionDgraphUid, err = business.CreateOrUpdatePostReaction(ctx, &postReactionInfo, postInfo.PostBy.Uid, postInfo.PostBy.Uuid, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.DisplayName(), postInfo.Channel.Uuid)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

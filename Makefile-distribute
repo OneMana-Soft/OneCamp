@@ -1071,11 +1071,17 @@ verify:
 	done; \
 	\
 	echo "  public endpoints"; \
+	: "THE API ITSELF, NOT JUST THE PROXY IN FRONT OF IT. Any answer from the"; \
+	: "domain root used to pass, and with the API stopped Traefik answers 404:"; \
+	: "the demo once read READY while it served nothing. /auth/providers is the"; \
+	: "public route the sign-in page reads first, so only a serving API answers 200."; \
 	if [ -n "$(BACKEND_DOMAIN)" ]; then \
-		code=$$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$(BACKEND_DOMAIN)/" 2>/dev/null); \
-		if [ "$$code" = "000" ]; then \
-			echo "    FAIL  https://$(BACKEND_DOMAIN)/ unreachable (DNS, firewall, or certificate)"; fail=1; \
-		else echo "    ok    https://$(BACKEND_DOMAIN)/ answered $$code"; fi; \
+		code=$$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$(BACKEND_DOMAIN)/auth/providers" 2>/dev/null); \
+		case "$$code" in \
+			200) echo "    ok    https://$(BACKEND_DOMAIN)/ (the API) answered";; \
+			000) echo "    FAIL  https://$(BACKEND_DOMAIN)/ unreachable (DNS, firewall, or certificate)"; fail=1;; \
+			*) echo "    FAIL  https://$(BACKEND_DOMAIN)/auth/providers answered $$code: the API is not serving; run make logs SERVICE=go-service"; fail=1;; \
+		esac; \
 	else echo "    FAIL  BACKEND_DOMAIN is not set"; fail=1; fi; \
 	if [ -n "$(WEB_PROFILE)" ] && [ -n "$(FE_HOST_DOMAIN)" ]; then \
 		code=$$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$(FE_HOST_DOMAIN)/" 2>/dev/null); \

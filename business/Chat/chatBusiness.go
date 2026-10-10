@@ -83,7 +83,7 @@ func withChatReplyContext(parent *dgraphStruct.DgraphChat, text string) string {
 	}
 	author := ""
 	if parent.From != nil {
-		author = parent.From.UserName
+		author = parent.From.DisplayName()
 	}
 	snippet := helpers.HTMLToPlainText(parent.Body)
 	if len(snippet) > replyContextSnippetLen {
@@ -149,7 +149,7 @@ func CreateChatForGroup(ctx context.Context, chatInfo *adapter.ChatInfo, userInf
 
 			openSerachChatParticipants = append(openSerachChatParticipants, &openSearchStruct.OpenSearchChatParticipants{
 				Uuid:       u.Uuid,
-				Name:       u.UserName,
+				Name:       u.DisplayName(),
 				ProfileKey: u.ProfileKey,
 			})
 			userUUIDs = append(userUUIDs, u.Uuid)
@@ -284,7 +284,7 @@ func CreateChatForGroup(ctx context.Context, chatInfo *adapter.ChatInfo, userInf
 		ChatUuid:         chatUUID.String(),
 		ChatCreatedAt:    &currentTime,
 		ChatByProfileKey: userInfo.UserDgraphInfo.ProfileKey,
-		ChatByUserName:   userInfo.UserDgraphInfo.UserName,
+		ChatByUserName:   userInfo.UserDgraphInfo.DisplayName(),
 		ChatByUserUuid:   userInfo.UserDgraphInfo.Uuid,
 		ChatByIsBot:      userInfo.UserDgraphInfo.IsBot,
 		ChatHtmlText:     chatInfo.TextHtml,
@@ -311,17 +311,17 @@ func CreateChatForGroup(ctx context.Context, chatInfo *adapter.ChatInfo, userInf
 		ChatCreatedAt:      currentTime.Unix(),
 		ChatBody:           plainText,
 		ChatByProfile:      userInfo.UserDgraphInfo.ProfileKey,
-		ChatByUserFullName: userInfo.UserDgraphInfo.UserName,
+		ChatByUserFullName: userInfo.UserDgraphInfo.DisplayName(),
 		ChatByUserUuid:     userInfo.UserDgraphInfo.Uuid,
 		ChatGrpId:          chatInfo.GrpUuid,
 		ChatParticipants:   openSerachChatParticipants,
 		ChatDeletedAt:      nil,
 	}
 
-	pushTitle := fmt.Sprintf("Group - %s", userInfo.UserDgraphInfo.UserName)
+	pushTitle := fmt.Sprintf("Group - %s", userInfo.UserDgraphInfo.DisplayName())
 
 	if !bulk {
-		go sendNewChatNotification(pushTitle, plainText, userInfo.UserDgraphInfo.Uuid, chatInfo.GrpUuid, mentions, chatUUID.String(), userInfo.UserDgraphInfo.UserName, userInfo.UserDgraphInfo.ProfileKey, replyParentChatAuthorUUID(replyParentChat))
+		go sendNewChatNotification(pushTitle, plainText, userInfo.UserDgraphInfo.Uuid, chatInfo.GrpUuid, mentions, chatUUID.String(), userInfo.UserDgraphInfo.DisplayName(), userInfo.UserDgraphInfo.ProfileKey, replyParentChatAuthorUUID(replyParentChat))
 	}
 	go domain.CreateChatWithAttachmentsInOpenSearch(openSearchChat, chatInfo.MediaObjects)
 
@@ -330,7 +330,7 @@ func CreateChatForGroup(ctx context.Context, chatInfo *adapter.ChatInfo, userInf
 		// imports; a follow-up batch embed run handles imported content.
 		// For a reply, embed the parent snippet + reply text (contextual
 		// embedding); same-conversation guarantees no permission leak.
-		ai.EmbedChatContent(withChatReplyContext(replyParentChat, plainText), chatUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.UserName, chatInfo.GrpUuid, userInfo.UserDgraphInfo.Uuid, "", chatParticipantUUIDs)
+		ai.EmbedChatContent(withChatReplyContext(replyParentChat, plainText), chatUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.DisplayName(), chatInfo.GrpUuid, userInfo.UserDgraphInfo.Uuid, "", chatParticipantUUIDs)
 	}
 
 	if !bulk {
@@ -540,7 +540,7 @@ func CreateChat(ctx context.Context, chatInfo *adapter.ChatInfo, userInfo *userM
 		ChatUuid:         chatUUID.String(),
 		ChatCreatedAt:    &currentTime,
 		ChatByProfileKey: userInfo.UserDgraphInfo.ProfileKey,
-		ChatByUserName:   userInfo.UserDgraphInfo.UserName,
+		ChatByUserName:   userInfo.UserDgraphInfo.DisplayName(),
 		ChatByUserUuid:   userInfo.UserDgraphInfo.Uuid,
 		ChatByIsBot:      userInfo.UserDgraphInfo.IsBot,
 		ChatHtmlText:     chatInfo.TextHtml,
@@ -559,26 +559,26 @@ func CreateChat(ctx context.Context, chatInfo *adapter.ChatInfo, userInfo *userM
 		ChatCreatedAt:      currentTime.Unix(),
 		ChatBody:           plainText,
 		ChatByProfile:      userInfo.UserDgraphInfo.ProfileKey,
-		ChatByUserFullName: userInfo.UserDgraphInfo.UserName,
+		ChatByUserFullName: userInfo.UserDgraphInfo.DisplayName(),
 		ChatByUserUuid:     userInfo.UserDgraphInfo.Uuid,
 		ChatGrpId:          groupingId,
 		ChatParticipants: []*openSearchStruct.OpenSearchChatParticipants{{
 			Uuid:       userInfo.UserDgraphInfo.Uuid,
-			Name:       userInfo.UserDgraphInfo.UserName,
+			Name:       userInfo.UserDgraphInfo.DisplayName(),
 			ProfileKey: userInfo.UserDgraphInfo.ProfileKey,
 		},
 			{
 				Uuid:       sendToDgraph.Uuid,
-				Name:       sendToDgraph.UserName,
+				Name:       sendToDgraph.DisplayName(),
 				ProfileKey: sendToDgraph.ProfileKey,
 			}},
 		ChatDeletedAt: nil,
 	}
 
-	pushTitle := fmt.Sprintf("Dm - %s", userInfo.UserDgraphInfo.UserName)
+	pushTitle := fmt.Sprintf("Dm - %s", userInfo.UserDgraphInfo.DisplayName())
 
 	if !bulk {
-		go sendNewChatNotification(pushTitle, plainText, userInfo.UserDgraphInfo.Uuid, groupingId, mentions, chatUUID.String(), userInfo.UserDgraphInfo.UserName, userInfo.UserDgraphInfo.ProfileKey, replyParentChatAuthorUUID(replyParentChat))
+		go sendNewChatNotification(pushTitle, plainText, userInfo.UserDgraphInfo.Uuid, groupingId, mentions, chatUUID.String(), userInfo.UserDgraphInfo.DisplayName(), userInfo.UserDgraphInfo.ProfileKey, replyParentChatAuthorUUID(replyParentChat))
 	}
 	go domain.CreateChatWithAttachmentsInOpenSearch(openSearchChat, chatInfo.MediaObjects)
 
@@ -587,7 +587,7 @@ func CreateChat(ctx context.Context, chatInfo *adapter.ChatInfo, userInfo *userM
 		// bulk imports. For a reply, embed the parent snippet + reply text
 		// (contextual embedding) so terse replies carry the meaning of what
 		// they answer; same-conversation guarantees no permission leak.
-		ai.EmbedChatContent(withChatReplyContext(replyParentChat, plainText), chatUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.UserName, groupingId, userInfo.UserDgraphInfo.Uuid, sendToDgraph.Uuid, []string{userInfo.UserDgraphInfo.Uuid, sendToDgraph.Uuid})
+		ai.EmbedChatContent(withChatReplyContext(replyParentChat, plainText), chatUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.DisplayName(), groupingId, userInfo.UserDgraphInfo.Uuid, sendToDgraph.Uuid, []string{userInfo.UserDgraphInfo.Uuid, sendToDgraph.Uuid})
 
 		go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "chat.created", map[string]interface{}{
 			"message_id":  chatUUID.String(),
@@ -1325,7 +1325,7 @@ func CreateOrUpdateChatReaction(ctx context.Context, reactionInfo *adapter.Input
 		EmojiReactionId: reactionInfo.EmojiReactionUuid,
 		ChatUuid:        reactionInfo.Uuid,
 		AddedByUuid:     userDgraph.Uuid,
-		AddedByUserName: userDgraph.UserName,
+		AddedByUserName: userDgraph.DisplayName(),
 		ChatGrpId:       grpId,
 		ReactionUuid:    reactionUID,
 	}
@@ -1342,7 +1342,7 @@ func CreateOrUpdateChatReaction(ctx context.Context, reactionInfo *adapter.Input
 		chatSnippet = helpers.TruncateRunesWithSuffix(chatSnippet, 30, "...")
 	}
 
-	titlePush := fmt.Sprintf("%s reacted", userDgraph.UserName)
+	titlePush := fmt.Sprintf("%s reacted", userDgraph.DisplayName())
 	bodyPush := fmt.Sprintf("Reacted to: \"%s\"", chatSnippet)
 
 	go sendNewChatReactionNotification(titlePush, bodyPush, grpId, chatDgraph, userDgraph, reactionInfo.EmojiReactionUuid)
@@ -1385,7 +1385,7 @@ func sendNewChatReactionNotification(title string, body string, grpId string, ch
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = title
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] = chatDgraph.Uuid
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.UserName
+	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_REACTION_ID] = reactionID
 
@@ -1524,7 +1524,7 @@ func CreateChatComment(ctx context.Context, commentInfo *adapter.InputCreateOrUp
 		ChatCreatedAt:  &currentTime,
 		HTMLText:       commentInfo.HTMLText,
 		UserUuid:       userInfo.UserDgraphInfo.Uuid,
-		UserName:       userInfo.UserDgraphInfo.UserName,
+		UserName:       userInfo.UserDgraphInfo.DisplayName(),
 		UserProfileKey: userInfo.UserDgraphInfo.ProfileKey,
 		CommentUuid:    commentUUID.String(),
 		Attachments:    commentInfo.MediaObj,
@@ -1553,7 +1553,7 @@ func CreateChatComment(ctx context.Context, commentInfo *adapter.InputCreateOrUp
 				"message_id":   commentInfo.ChatUuid,
 				"group_id":     grpId,
 				"sender_id":    userInfo.UserDgraphInfo.Uuid,
-				"author_name":  userInfo.UserDgraphInfo.UserName,
+				"author_name":  userInfo.UserDgraphInfo.DisplayName(),
 				"comment_uuid": commentUUID.String(),
 				"text":         helpers.HTMLToPlainText(commentInfo.HTMLText),
 				"mention_ids":  mentionIDs,
@@ -1679,7 +1679,7 @@ func sendNewChatCommentActivity(currentTime time.Time, commentUUID string, comme
 				Text: commentBody,
 				CommentBy: &dgraphStruct.DgraphUser{
 					Uuid:     userDgraph.Uuid,
-					UserName: userDgraph.UserName,
+					UserName: userDgraph.DisplayName(),
 				},
 				Chat: &dgraphStruct.DgraphChat{
 					Uuid: chatDgraph.Uuid,
@@ -1700,7 +1700,7 @@ func sendNewChatCommentActivity(currentTime time.Time, commentUUID string, comme
 				Text: commentBody,
 				CommentBy: &dgraphStruct.DgraphUser{
 					Uuid:     userDgraph.Uuid,
-					UserName: userDgraph.UserName,
+					UserName: userDgraph.DisplayName(),
 				},
 				Chat: &dgraphStruct.DgraphChat{
 					Uuid: chatDgraph.Uuid,
@@ -1720,7 +1720,7 @@ func sendNewChatCommentActivity(currentTime time.Time, commentUUID string, comme
 	}
 	notificationBusiness.DispatchChatComment(
 		userDgraph.Uuid,
-		userDgraph.UserName,
+		userDgraph.DisplayName(),
 		userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey),
 		grpId,
 		chatDgraph.Uuid,
@@ -1862,7 +1862,7 @@ func CreateOrUpdateChatCommentReaction(ctx context.Context, reactionInfo *adapte
 		Type:            mqttStruct.TYPE_CREATE,
 		EmojiReactionId: reactionInfo.EmojiReactionUuid,
 		CommentUuid:     reactionInfo.Uuid,
-		AddedByUserName: userDgraph.UserName,
+		AddedByUserName: userDgraph.DisplayName(),
 		AddedByUuid:     userDgraph.Uuid,
 		ReactionUuid:    reactionUUID,
 		ChatUuid:        dgraphCommentRaw.Chat.Uuid,
@@ -1889,7 +1889,7 @@ func CreateOrUpdateChatCommentReaction(ctx context.Context, reactionInfo *adapte
 		commentSnippet = helpers.TruncateRunesWithSuffix(commentSnippet, 30, "...")
 	}
 
-	pushTitlle := fmt.Sprintf("%s reacted", userDgraph.UserName)
+	pushTitlle := fmt.Sprintf("%s reacted", userDgraph.DisplayName())
 	pushBody := fmt.Sprintf("Reacted to: \"%s\"", commentSnippet)
 	go sendNewChatCommentReactionNotification(pushTitlle, pushBody, dgraphCommentRaw, userDgraph, reactionInfo.EmojiReactionUuid)
 
@@ -1931,7 +1931,7 @@ func sendNewChatCommentReactionNotification(title string, body string, commentDg
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = title
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] = commentDgraph.Chat.Uuid
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.UserName
+	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_REACTION_ID] = reactionID
 
@@ -1981,7 +1981,7 @@ func DeleteReactionOnCommentChat(ctx context.Context, commentDgraph *dgraphStruc
 func PublishChatTyping(userDgraph *dgraphStruct.DgraphUser, grpId string) {
 	mqttChatTyping := mqttStruct.MqttChatTyping{
 		UserUUID:  userDgraph.Uuid,
-		UserName:  userDgraph.UserName,
+		UserName:  userDgraph.DisplayName(),
 		ChatGrpId: grpId,
 	}
 
@@ -2005,12 +2005,12 @@ func MakeVideoCall(ctx context.Context, grpId string, userDraphInfo *dgraphStruc
 
 	if !alreadyExisted {
 
-		pushTitle := fmt.Sprintf("Call from %s", userDraphInfo.UserName)
+		pushTitle := fmt.Sprintf("Call from %s", userDraphInfo.DisplayName())
 
 		body := "calling you..."
 
 		if isGroup {
-			pushTitle = fmt.Sprintf("%s started group call", userDraphInfo.UserName)
+			pushTitle = fmt.Sprintf("%s started group call", userDraphInfo.DisplayName())
 
 			body = "started call"
 
@@ -2023,7 +2023,7 @@ func MakeVideoCall(ctx context.Context, grpId string, userDraphInfo *dgraphStruc
 
 		go mqttBusiness.PublishChatCall(&mqttChatCall, grpId)
 
-		go sendChatCallNotification(pushTitle, body, userDraphInfo.Uuid, grpId, userDraphInfo.UserName, userDraphInfo.ProfileKey)
+		go sendChatCallNotification(pushTitle, body, userDraphInfo.Uuid, grpId, userDraphInfo.DisplayName(), userDraphInfo.ProfileKey)
 	}
 
 	return

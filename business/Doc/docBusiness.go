@@ -87,7 +87,7 @@ func CreateDoc(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, inpu
 		DocTitle:             dgraphDoc.Title,
 		DocBody:              "",
 		DocCreatedByUserUuid: createdByUser.Uuid,
-		DocCreatedByFullName: createdByUser.UserFullName,
+		DocCreatedByFullName: createdByUser.DisplayName(),
 		DocCreatedByProfile:  createdByUser.ProfileKey,
 		DocPrivate:           *dgraphDoc.IsPrivate,
 		DocEditingUsers:      []string{createdByUser.Uuid},
@@ -97,7 +97,7 @@ func CreateDoc(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, inpu
 	})
 
 	// embed for AI Second Brain (async)
-	ai.EmbedDocContent(dgraphDoc.Title, "", dgraphDoc.Uuid, createdByUser.Uuid, createdByUser.UserFullName, *dgraphDoc.IsPrivate, createdByUser.Uuid, nil, []string{createdByUser.Uuid}, nil)
+	ai.EmbedDocContent(dgraphDoc.Title, "", dgraphDoc.Uuid, createdByUser.Uuid, createdByUser.DisplayName(), *dgraphDoc.IsPrivate, createdByUser.Uuid, nil, []string{createdByUser.Uuid}, nil)
 
 	return
 }
@@ -631,7 +631,7 @@ func CreateDocComment(ctx context.Context, rawDocDgraph *dgraphStruct.DgraphDoc,
 		CreatedAt:      &currentTime,
 		HTMLText:       createTaskCommentInfoInput.CommentBody,
 		UserUuid:       createdByUser.UserDgraphInfo.Uuid,
-		UserName:       createdByUser.UserDgraphInfo.UserName,
+		UserName:       createdByUser.UserDgraphInfo.DisplayName(),
 		UserProfileKey: createdByUser.UserDgraphInfo.ProfileKey,
 		Attachments:    createTaskCommentInfoInput.Attachments,
 	}
@@ -653,7 +653,7 @@ func PublishDocCommentActivity(commentUUID string, commentBody string, currentTi
 				Text: commentBody,
 				CommentBy: &dgraphStruct.DgraphUser{
 					Uuid:     draphUser.Uuid,
-					UserName: draphUser.UserName,
+					UserName: draphUser.DisplayName(),
 				},
 				Doc: &dgraphStruct.DgraphDoc{
 					Uuid:  rawDocDgraph.Uuid,
@@ -785,7 +785,7 @@ func CreateOrUpdateDocCommentReaction(ctx context.Context, reactionInfo *adapter
 		Type:            mqttStruct.TYPE_CREATE,
 		EmojiReactionId: reactionInfo.EmojiReactionUuid,
 		CommentUuid:     reactionInfo.CommentId,
-		AddedByUserName: userDgraph.UserName,
+		AddedByUserName: userDgraph.DisplayName(),
 		AddedByUuid:     userDgraph.Uuid,
 		ReactionUuid:    reactionUUID,
 		DocUuid:         dgraphCommentRaw.Doc.Uuid,

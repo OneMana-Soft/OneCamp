@@ -16,7 +16,7 @@ const POST_AND_COMMENT_COUNT = 10
 const ATTACHMENT_COUNT = 10
 const UNIFIED_SEARCH_COUNT = 20
 
-func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, channelUUIDs []string, projectUUIDs []string, teamUUIDs []string, searchText string) (searchInfo []*openSearchStruct.GlobalSearchOpenSearchResp, err error) {
+func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, userEmail string, channelUUIDs []string, projectUUIDs []string, teamUUIDs []string, searchText string) (searchInfo []*openSearchStruct.GlobalSearchOpenSearchResp, err error) {
 
 	if channelUUIDs == nil {
 		channelUUIDs = []string{}
@@ -63,6 +63,18 @@ func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, 
 	userUUIDByte, _ := json.Marshal(userUUID)
 	userUUIDEscaped := string(userUUIDByte)
 
+	// People are found by their address as well as their name, except by the
+	// demo's shared visitor, who is anyone at all: fuzziness finds an address
+	// within two edits of a guess, so a stranger could learn whose address a
+	// guess is, or confirm one (helpers.ServeHidingEmails). And no one's address
+	// is highlighted: a person's hit carries it anyway, and highlighted
+	// (<mark>someone@example.com</mark>) it got past the demo's hiding of
+	// addresses.
+	userFields := `["user_name^5", "user_full_name^5", "user_email", "user_id"]`
+	if helpers.IsDemoVisitor(userEmail) {
+		userFields = `["user_name^5", "user_full_name^5", "user_id"]`
+	}
+
 	// doc_body is excluded from _source because it is a field to SEARCH, not one to
 	// return: a doc result renders doc_title, the highlight fragments, and
 	// doc_snippet, and nothing downstream reads the body out of a hit. Returning it
@@ -89,8 +101,7 @@ func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, 
 			"project_name": {},
 			"team_name": {},
 			"ch_name": {},
-			"user_name": {},
-			"user_email": {}
+			"user_name": {}
 		}
 	},
 	"query": {
@@ -362,7 +373,7 @@ func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, 
 										{ 
 											"multi_match": {
 												"query": %s,
-												"fields": ["user_name^5", "user_full_name^5", "user_email", "user_id"],
+												"fields": %s,
 												"fuzziness": "AUTO"
 											}
 										},
@@ -408,7 +419,7 @@ func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, 
 		projectUUIDString, teamUUIDString, searchTextEscaped, searchTextEscaped,
 		channelUUIDString, searchTextEscaped, searchTextEscaped,
 		teamUUIDString, searchTextEscaped, searchTextEscaped,
-		searchTextEscaped, searchTextEscaped, searchTextEscaped)
+		searchTextEscaped, userFields, searchTextEscaped, searchTextEscaped)
 
 	searchInfo, err = opensearchModels.GetUnifiedGlobalSearchFromOpenSearch(ctx, query)
 

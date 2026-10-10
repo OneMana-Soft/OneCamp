@@ -206,6 +206,9 @@ func startBackgroundLoops(ctx context.Context) {
 	// Once per install: every private doc's privacy and sharing onto its AI
 	// search entries, which saves had been rewriting as public.
 	docBusiness.StartEmbeddingAccessBackfill(ctx)
+	// Every start: an @handle for each member who has none (accounts from
+	// before handles), derived from their name.
+	userBusiness.StartHandleBackfill(ctx)
 	githubBusiness.StartGitHubSyncWorker(business.SyncSignal, ctx)
 	githubBusiness.StartGitHubImportWorker(ctx)
 

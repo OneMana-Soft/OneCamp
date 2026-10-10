@@ -66,11 +66,7 @@ func peopleNames(r *http.Request, ids map[uuid.UUID]bool) map[uuid.UUID]string {
 		if err != nil || u == nil {
 			continue
 		}
-		if u.UserFullName != "" {
-			out[id] = u.UserFullName
-		} else {
-			out[id] = u.UserName
-		}
+		out[id] = u.DisplayName()
 	}
 	return out
 }

@@ -171,19 +171,26 @@ func executeSendDM(ctx context.Context, action ai.ProposedAction, userUUID strin
 
 	toUUID, err := uuid.Parse(toUUIDStr)
 	if err != nil {
-		// Fallback: The LLM hallucinated a username (e.g., "to_uuid": "cannabisd")
-		// Let's try to find the user by their username using DGraph search
-		cleanUname := strings.TrimPrefix(toUUIDStr, "@")
+		// The model gave a name or an @handle (e.g. "to_uuid": "cannabisd")
+		// rather than an id. The search finds people by display name, full
+		// name or handle, so a name can match several: it is used only when
+		// it plainly means one of them (personNamed, as for an assignee),
+		// and otherwise the model is told who matched, to ask or to choose.
+		cleanUname := strings.TrimPrefix(strings.TrimSpace(toUUIDStr), "@")
 		foundUsers, uErr := domainUser.GetUserListWithSearchText(ctx, userUUID, cleanUname)
-		if uErr == nil && len(foundUsers) > 0 {
-			toUUIDStr = foundUsers[0].Uuid
-			var parseErr error
-			toUUID, parseErr = uuid.Parse(toUUIDStr)
-			if parseErr != nil {
-				return "", nil, fmt.Errorf("resolved user has invalid UUID '%s': %w", toUUIDStr, parseErr)
-			}
-		} else {
+		if uErr != nil || len(foundUsers) == 0 {
 			return "", nil, fmt.Errorf("could not find user '%s' in workspace", toUUIDStr)
+		}
+		to := personNamed(foundUsers, cleanUname)
+		if to == nil {
+			return "", nil, fmt.Errorf("more than one person matches %q: %s. Ask which one is meant, or send to their @handle",
+				toUUIDStr, peopleByNameAndHandle(foundUsers))
+		}
+		toUUIDStr = to.Uuid
+		var parseErr error
+		toUUID, parseErr = uuid.Parse(toUUIDStr)
+		if parseErr != nil {
+			return "", nil, fmt.Errorf("resolved user has invalid UUID '%s': %w", toUUIDStr, parseErr)
 		}
 	}
 
@@ -401,9 +408,10 @@ func normalizeTaskPriority(p string) string {
 
 // resolveAssigneeRef turns an assignee reference the model supplied - a user
 // UUID, or (when it could not recall the id) an @name / name - into a DGraph
-// user. An empty ref means "no assignee" (nil, nil). This mirrors executeSendDM's
-// self-healing so "assign it to John" works even when the model passes a name
-// instead of a UUID, and is shared by create_task and assign_task.
+// user. An empty ref means "no assignee" (nil, nil). A name is resolved as a
+// direct message's recipient is (personNamed), so "assign it to John" works
+// even when the model passes a name instead of a UUID. Shared by create_task
+// and assign_task.
 func resolveAssigneeRef(ctx context.Context, actingUserUUID, ref string) (*dgraphStruct.DgraphUser, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
@@ -422,23 +430,66 @@ func resolveAssigneeRef(ctx context.Context, actingUserUUID, ref string) (*dgrap
 	if err != nil || len(found) == 0 {
 		return nil, fmt.Errorf("could not find a user matching %q to assign", ref)
 	}
-	if len(found) == 1 {
-		return found[0], nil
+	if u := personNamed(found, cleanName); u != nil {
+		return u, nil
 	}
-	// Ambiguous: accept only a single exact (case-insensitive) name match.
+	return nil, fmt.Errorf("more than one user matches %q - please be more specific", ref)
+}
+
+// personNamed is the one of found, the people a search for name turned up,
+// whom name plainly means: the only one; else the one whose handle it is;
+// else the only one whose display name it is, ignoring case. nil when it
+// could be more than one of them. Pure.
+func personNamed(found []*dgraphStruct.DgraphUser, name string) *dgraphStruct.DgraphUser {
+	if len(found) == 1 {
+		return found[0]
+	}
+	// A handle is one person's: an exact one settles it.
+	for _, u := range found {
+		if u != nil && u.Handle != "" && strings.EqualFold(u.Handle, name) {
+			return u
+		}
+	}
 	var exact *dgraphStruct.DgraphUser
 	for _, u := range found {
-		if u != nil && strings.EqualFold(strings.TrimSpace(u.UserName), cleanName) {
+		if u != nil && strings.EqualFold(strings.TrimSpace(u.UserName), name) {
 			if exact != nil {
-				return nil, fmt.Errorf("more than one user matches %q - please be more specific", ref)
+				return nil
 			}
 			exact = u
 		}
 	}
-	if exact != nil {
-		return exact, nil
+	return exact
+}
+
+// ambiguousPeopleShown bounds the people an ambiguous name lists.
+const ambiguousPeopleShown = 10
+
+// peopleByNameAndHandle lists people for the model to choose from, each by
+// their name and @handle: the one name rule without its last step, so never
+// part of an address, which the model would repeat. Someone with neither is
+// left out, since they can be named only by their address. Pure.
+func peopleByNameAndHandle(people []*dgraphStruct.DgraphUser) string {
+	var out []string
+	for _, u := range people {
+		if u == nil {
+			continue
+		}
+		name := helpers.PersonDisplayName(u.UserName, u.UserFullName, "")
+		switch {
+		case name != "" && u.Handle != "":
+			name += " (@" + u.Handle + ")"
+		case u.Handle != "":
+			name = "@" + u.Handle
+		case name == "":
+			continue
+		}
+		out = append(out, name)
 	}
-	return nil, fmt.Errorf("more than one user matches %q - please be more specific", ref)
+	if len(out) > ambiguousPeopleShown {
+		out = append(out[:ambiguousPeopleShown], fmt.Sprintf("and %d more", len(out)-ambiguousPeopleShown))
+	}
+	return strings.Join(out, ", ")
 }
 
 // loadTaskForUpdateAsAdmin loads a task as the acting user and enforces the

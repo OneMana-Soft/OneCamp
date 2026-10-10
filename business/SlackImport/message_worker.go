@@ -32,7 +32,7 @@ type messageContext struct {
 
 	// workspaceName is the same as the parent job's workspace_name,
 	// cached on the context so the message worker doesn't refetch the
-	// job row per message just to consult slack_workspace_id_map.
+	// job row per message just to consult import_workspace_id_map.
 	workspaceName string
 
 	channelSlackId string
@@ -79,10 +79,10 @@ type channelRef struct {
 // before its replies.
 //
 // Idempotency layers:
-//   - Per-import: every message is recorded in slack_import_id_map; on
+//   - Per-import: every message is recorded in import_id_map; on
 //     retry we skip already-imported messages. last_cursor on the chunk
 //     speeds the resume path so we don't re-query id_map per message.
-//   - Cross-import: slack_workspace_id_map (populated by prior imports
+//   - Cross-import: import_workspace_id_map (populated by prior imports
 //     of the same workspace) is consulted before any insert. A re-export
 //     of the same workspace skips every previously-imported message.
 //

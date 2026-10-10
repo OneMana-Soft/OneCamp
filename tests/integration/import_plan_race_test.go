@@ -115,12 +115,17 @@ func newRaceEnv(t *testing.T, objects map[string][]byte) *raceEnv {
 
 // call answers h for the admin, with the route's params.
 func (e *raceEnv) call(h http.HandlerFunc, params map[string]string) (int, map[string]any) {
+	return e.send(h, params, `{}`)
+}
+
+// send answers h for the admin, with the route's params and body.
+func (e *raceEnv) send(h http.HandlerFunc, params map[string]string, body string) (int, map[string]any) {
 	rc := chi.NewRouteContext()
 	for k, v := range params {
 		rc.URLParams.Add(k, v)
 	}
 	rec := httptest.NewRecorder()
-	h(rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(`{}`))).WithContext(context.WithValue(e.asAdmin, chi.RouteCtxKey, rc)))
+	h(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body)).WithContext(context.WithValue(e.asAdmin, chi.RouteCtxKey, rc)))
 	var out map[string]any
 	_ = json.Unmarshal(rec.Body.Bytes(), &out)
 	return rec.Code, out

@@ -82,7 +82,7 @@ func CreateBoard(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, in
 		Uuid:                   newBoardUUID.String(),
 		BoardTitle:             title,
 		BoardCreatedByUserUuid: createdByUser.Uuid,
-		BoardCreatedByFullName: createdByUser.UserFullName,
+		BoardCreatedByFullName: createdByUser.DisplayName(),
 		BoardCreatedByProfile:  createdByUser.ProfileKey,
 		BoardPrivate:           isPrivate,
 		BoardEditingUsers:      []string{createdByUser.Uuid},
@@ -597,7 +597,7 @@ func indexAndEmbedBoardComment(ctx context.Context, boardUUID, commentUUID, comm
 		Uuid:                          commentUUID,
 		CommentBody:                   commentText,
 		CommentByUserUuid:             createdByUser.Uuid,
-		CommentByUserFullName:         createdByUser.UserName,
+		CommentByUserFullName:         createdByUser.DisplayName(),
 		CommentByProfile:              byProfile,
 		CommentBoardUuid:              boardUUID,
 		CommentBoardTitle:             perms.Title,
@@ -615,7 +615,7 @@ func indexAndEmbedBoardComment(ctx context.Context, boardUUID, commentUUID, comm
 		commentDomain.UpdateCommentInOpenSearch(*osComment)
 	}
 
-	ai.EmbedBoardCommentContent(commentText, commentUUID, createdByUser.Uuid, createdByUser.UserName,
+	ai.EmbedBoardCommentContent(commentText, commentUUID, createdByUser.Uuid, createdByUser.DisplayName(),
 		boardUUID, boardPrivate, createdByUUID, readingUsers, editingUsers, commentingUsers)
 }
 
@@ -644,7 +644,7 @@ func publishBoardCommentActivity(createdByUser *dgraphStruct.DgraphUser, board *
 	authorRef := func() *dgraphStruct.DgraphUser {
 		return &dgraphStruct.DgraphUser{
 			Uuid:     createdByUser.Uuid,
-			UserName: createdByUser.UserName,
+			UserName: createdByUser.DisplayName(),
 		}
 	}
 

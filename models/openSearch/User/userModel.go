@@ -146,7 +146,13 @@ func PropagateUserInfoChangeInOpenSearch(ctx context.Context, userUUID string, n
 			script = `ctx._source.task_assignee_user_full_name = params.newName; ctx._source.task_assignee_profile = params.newProfile`
 			query = fmt.Sprintf(`{"term": {"task_assignee_user_id": "%s"}}`, userUUID)
 		case openSearchStruct.USER_INDEX:
-			script = `ctx._source.user_name = params.newName; ctx._source.user_full_name = params.newName; ctx._source.user_profile_object_key = params.newProfile`
+			// The profile only. Every index above holds who wrote something
+			// (or whose task it is) by the name people see, which is newName;
+			// this one holds the person's own display name and full name,
+			// which UpdateUserInOpenSearch writes in the same call. newName
+			// copied over both would replace the full name with the display
+			// name, and a renamed member could no longer be found by it.
+			script = `ctx._source.user_profile_object_key = params.newProfile`
 			query = fmt.Sprintf(`{"term": {"uuid": "%s"}}`, userUUID)
 		}
 

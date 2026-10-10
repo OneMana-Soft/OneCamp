@@ -130,7 +130,7 @@ func GetLatestAttachmentsFromOpenSearchBeforeTime(ctx context.Context, userUUID 
 
 	return
 }
-func GetUnifiedGlobalSearch(ctx context.Context, userUUID string, userChannels []*dgraphStruct.DgraphChannel, userProjects []*dgraphStruct.DgraphProject, userTeams []*dgraphStruct.DgraphTeam, searchText string) (searchPage GlobalSearchPagination, err error) {
+func GetUnifiedGlobalSearch(ctx context.Context, userUUID string, userEmail string, userChannels []*dgraphStruct.DgraphChannel, userProjects []*dgraphStruct.DgraphProject, userTeams []*dgraphStruct.DgraphTeam, searchText string) (searchPage GlobalSearchPagination, err error) {
 	var channelUUIDs []string
 	for _, ch := range userChannels {
 		channelUUIDs = append(channelUUIDs, ch.Uuid)
@@ -157,7 +157,7 @@ func GetUnifiedGlobalSearch(ctx context.Context, userUUID string, userChannels [
 		teamUUIDs = append(teamUUIDs, team.Uuid)
 	}
 
-	searchInfo, err := domain.GetUnifiedGlobalSearchFromOpenSearch(ctx, userUUID, channelUUIDs, projectUUIDs, teamUUIDs, searchText)
+	searchInfo, err := domain.GetUnifiedGlobalSearchFromOpenSearch(ctx, userUUID, userEmail, channelUUIDs, projectUUIDs, teamUUIDs, searchText)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

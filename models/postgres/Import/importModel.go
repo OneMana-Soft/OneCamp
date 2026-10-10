@@ -428,6 +428,36 @@ func SavePlan(ctx context.Context, jobId uuid.UUID, plan json.RawMessage, chunks
 	return tx.Commit()
 }
 
+// RollBack moves a finished job to rolled_back and runs undo, the statements
+// that take away what it brought in, in one transaction: when any of them
+// fails none of it happens, and the job is as it was. A rollback used to stop
+// half way, what it had taken away gone and the import showing as before.
+//
+// The job's row first, from a finished import only (ErrJobChanged otherwise),
+// so nothing moves the job until the rest commits.
+func RollBack(ctx context.Context, jobId uuid.UUID, undo func(tx *sql.Tx) error) error {
+	tx, err := postgresInit.DBConn.SqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `
+		UPDATE import_jobs
+		SET status = 'rolled_back', stage = 'rolled_back', error_message = 'rolled back by operator',
+		    completed_at = NOW(), updated_at = NOW()
+		WHERE id = $1 AND status IN ('completed','failed','cancelled','rolled_back')`, jobId)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrJobChanged
+	}
+	if err := undo(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // SetStageIfRunning updates stage only when the job is still in the
 // running state. Returns true on update, false when the job has been
 // cancelled / failed / rolled-back / completed in the meantime.

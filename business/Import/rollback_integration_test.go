@@ -44,11 +44,19 @@ func TestRollingBackAnImportedFileRemovesIt(t *testing.T) {
 		}
 	}
 
-	if err := softDelete(ctx, job.Id, importModels.EntityFile, "attachments"); err != nil {
+	tx, err := postgresInit.DBConn.SqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := softDelete(ctx, tx, job.Id, importModels.EntityFile, "attachments"); err != nil {
 		t.Fatalf("removing the imported file: %v", err)
 	}
-	if err := softDelete(ctx, job.Id, importModels.EntityTask, "tasks"); err != nil {
+	if err := softDelete(ctx, tx, job.Id, importModels.EntityTask, "tasks"); err != nil {
 		t.Fatalf("removing the imported task: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
 	for table, id := range map[string]uuid.UUID{"attachments": file, "tasks": task} {
 		var gone bool

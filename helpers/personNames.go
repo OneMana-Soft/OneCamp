@@ -245,3 +245,27 @@ func HandleCandidate(base string, n int) string {
 	}
 	return strings.TrimRight(string(runes), "._-") + suffix
 }
+
+// PersonDisplayName is the one rule for the name people see for a member: on
+// their messages, in a notification or an email, as a comment's author, in
+// search results. It is their display name (Dgraph user_name) when they have
+// one, else their full name (user_full_name), else their address's part
+// before the @, else "". Each is trimmed. The web app applies the same rule.
+//
+// Places used to choose for themselves: most showed the display name, some
+// the full name first (an urgent ping, a project update, a booking page),
+// and none fell back to the address, so someone with no display name was
+// shown as nobody. Pure.
+func PersonDisplayName(displayName, fullName, email string) string {
+	if n := strings.TrimSpace(displayName); n != "" {
+		return n
+	}
+	if n := strings.TrimSpace(fullName); n != "" {
+		return n
+	}
+	email = strings.TrimSpace(email)
+	if at := strings.IndexByte(email, '@'); at >= 0 {
+		email = email[:at]
+	}
+	return strings.TrimSpace(email)
+}

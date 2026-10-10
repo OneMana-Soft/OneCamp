@@ -846,7 +846,7 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 		}
 		publishGitHubSyncMqtt(taskUUIDStr2, link.ProjectId.String(), "assignee_synced", map[string]interface{}{
 			"assignee_uuid":  userDgraphInfo.Uuid,
-			"assignee_name":  userDgraphInfo.UserName,
+			"assignee_name":  userDgraphInfo.DisplayName(),
 			"assignee_login": event.Issue.Assignee.Login,
 		})
 
@@ -1241,7 +1241,7 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 						_ = taskBusiness.UpdateTaskAssigneeByTaskUUID(ctx, taskUUID, assigneeDgraphInfo, oldAssigneeUID, dgraphTaskInfo.Uid, dgraphTaskInfo, assigneeDgraphInfo)
 						publishGitHubSyncMqtt(taskUUIDStr, link.ProjectId.String(), "assignee_synced", map[string]interface{}{
 							"assignee_uuid":  assigneeDgraphInfo.Uuid,
-							"assignee_name":  assigneeDgraphInfo.UserName,
+							"assignee_name":  assigneeDgraphInfo.DisplayName(),
 							"assignee_login": event.PullRequest.Assignee.Login,
 						})
 					}

@@ -93,7 +93,7 @@ var namedSearch = func(ctx context.Context, userInfo *userModels.UserInfo, query
 
 // namedHitsAs runs the global name search as one person.
 func namedHitsAs(ctx context.Context, scope *dgraphStruct.DgraphUser, query string) ([]UnifiedHit, bool) {
-	page, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, scope.Uuid, scope.Channels, scope.Projects, scope.Teams, query)
+	page, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, scope.Uuid, scope.EmailID, scope.Channels, scope.Projects, scope.Teams, query)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/AI/namedSearch global search failed err: %v", err)
 		return nil, false

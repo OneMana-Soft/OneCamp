@@ -204,6 +204,11 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"guest's message, reply or doc comment reaches is checked against real stores. The harness " +
 		"has no Firebase project, and without one MultiCastPush sends nothing there is to look at.",
 
+	"HoldRunsForTest": "keeps an import run's lease after its run returns, as if the orchestrator " +
+		"were still cleaning up after writing its last status, so the integration test can prove a " +
+		"click in that window starts nothing. The test environment's run fails at once, and without " +
+		"the hold the window is a few microseconds that load alone sometimes opens.",
+
 	"ForgetSettingsForTest": "drops the workspace settings cached for 30 seconds, after an " +
 		"integration test starts a fresh database; the previous test's choices (the channels new " +
 		"members join, say) would otherwise apply in the next one.",

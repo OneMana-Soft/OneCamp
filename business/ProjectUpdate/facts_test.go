@@ -147,3 +147,15 @@ func TestEachTaskIsToldOnce(t *testing.T) {
 		t.Errorf("the task must appear once, and still count as under way:\n%s", text)
 	}
 }
+
+// An update's author is called what they are called everywhere else: their
+// display name first. It used to be their full name first.
+func TestAnUpdateAuthorIsCalledByTheNameRule(t *testing.T) {
+	u := &dgraphStruct.DgraphUser{UserName: "Sam", UserFullName: "Samuel Rivera", EmailID: "sam@example.com"}
+	if got := nameOf(u); got != "Sam" {
+		t.Fatalf("got %q, want the display name", got)
+	}
+	if got := nameOf(&dgraphStruct.DgraphUser{EmailID: "sam.r@example.com"}); got != "sam.r" {
+		t.Fatalf("no names: got %q, want the address's part before the @", got)
+	}
+}

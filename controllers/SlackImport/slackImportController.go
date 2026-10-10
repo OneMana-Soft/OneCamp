@@ -18,6 +18,7 @@ import (
 
 	importAdapter "github.com/akashc777/OneCamp/adapter/SlackImport"
 	importBusiness "github.com/akashc777/OneCamp/business/Import"
+	importRun "github.com/akashc777/OneCamp/business/ImportRun"
 	business "github.com/akashc777/OneCamp/business/SlackImport"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/uploadsafe"
@@ -268,6 +269,15 @@ func HandlePlan(w http.ResponseWriter, r *http.Request) {
 	switch job.Status {
 	case importModels.StatusValidating, importModels.StatusPlanned:
 	case importModels.StatusFailed:
+		// The lease first: the run that failed may still be ending, and
+		// planning it again wrote its options and chunks under that run's
+		// workers. Held until the plan is stored; planning starts no run.
+		lease, err := importRun.Take(jobId)
+		if err != nil {
+			writeRunAlive(w)
+			return
+		}
+		defer lease.Release()
 		// Planned again. The export has to still be there, and the job takes
 		// its workspace's label back, which another import may hold by now.
 		if job.RawObjectKey == nil || *job.RawObjectKey == "" {
@@ -336,6 +346,15 @@ func writeJobChanged(w http.ResponseWriter) {
 	helpers.WriteJSON(w, p.Status, helpers.Envolope{"error": p.Msg, "code": p.Code})
 }
 
+// writeRunAlive answers a request refused because the job's last run is still
+// ending (importRun.ErrRunAlive).
+func writeRunAlive(w http.ResponseWriter) {
+	helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+		"error": "The last run of this import is still stopping. Try again in a moment.",
+		"code":  "run_alive",
+	})
+}
+
 // HandleRun starts the import pipeline asynchronously. Returns 202 with
 // the job id; the FE subscribes to MQTT for live progress.
 func HandleRun(w http.ResponseWriter, r *http.Request) {
@@ -368,6 +387,18 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only once the last run has ended: a run that has written "failed" may
+	// still be cleaning up, and a second one beside it lost its Cancel. And
+	// taken before the options are saved, so a run refused for it leaves them
+	// as they were.
+	// Given back however this ends, unless the run starts (it gives it back).
+	lease, err := importRun.Take(jobId)
+	if err != nil {
+		writeRunAlive(w)
+		return
+	}
+	defer lease.Release()
+
 	var body importAdapter.RunRequest
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if body.Options != nil {
@@ -379,8 +410,13 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 	// Started in one statement, from planned or failed: the status read above
 	// can be stale by now, and two clicks used to start two runs of the same
 	// import (every channel made twice, and Cancel stopping one of them).
-	started, err := importModels.StartRunning(ctx, jobId, []string{importModels.StatusPlanned, importModels.StatusFailed})
+	started, err := lease.Start(ctx, []string{importModels.StatusPlanned, importModels.StatusFailed},
+		func() { business.RunImport(context.Background(), jobId, userInfo) })
 	if err != nil {
+		if errors.Is(err, importRun.ErrRunAlive) {
+			writeRunAlive(w)
+			return
+		}
 		if errors.Is(err, importModels.ErrConflictActiveJob) {
 			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
 				"error": "another import is already active for this workspace",
@@ -399,7 +435,6 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go business.RunImport(context.Background(), jobId, userInfo)
 	helpers.WriteJSON(w, http.StatusAccepted, helpers.Envolope{"job_id": jobId})
 }
 
@@ -443,6 +478,15 @@ func HandleRollback(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
 		return
 	}
+	// The lease first: a run that has just been cancelled may still be ending,
+	// its workers finishing the chunk they hold, and what they wrote after the
+	// sweep would survive it.
+	lease, err := importRun.Take(jobId)
+	if err != nil {
+		writeRunAlive(w)
+		return
+	}
+	defer lease.Release()
 	if err := business.RollbackImport(ctx, jobId); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": err.Error()})
 		return
@@ -927,6 +971,15 @@ func HandleDeleteStagedZip(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// The lease first: a run that has just been cancelled or failed may still
+	// be ending, or one may have started since the status was read, and either
+	// reads the file.
+	lease, err := importRun.Take(jobId)
+	if err != nil {
+		writeRunAlive(w)
+		return
+	}
+	defer lease.Release()
 	if err := business.DeleteStagedZip(ctx, jobId); err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
 		return

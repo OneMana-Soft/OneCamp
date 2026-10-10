@@ -64,11 +64,10 @@ func authorName(u *dgraphStruct.DgraphUser) string {
 	if u == nil {
 		return "Someone"
 	}
-	if u.UserFullName != "" {
-		return u.UserFullName
-	}
-	if u.UserName != "" {
-		return u.UserName
+	// The one name rule without its last step: a guest is outside the
+	// workspace, and is not shown part of a member's address.
+	if n := helpers.PersonDisplayName(u.UserName, u.UserFullName, ""); n != "" {
+		return n
 	}
 	return "Someone"
 }
@@ -217,6 +216,12 @@ func GetGuestThread(ctx context.Context, grant *guestModel.GuestGrant, postID st
 // GuestMessageHTML is what a guest wrote, ready to post: escaped (a guest is
 // untrusted, and what they write renders inside members' sessions), line
 // breaks kept, and led by their name marked as a guest. Pure.
+//
+// The label stays in what is stored, so every surface that shows a message
+// without its author (search, quotes, notifications, agents reading the
+// channel) still says who wrote it. The web app's message rows read it back
+// out (lib/relayedAuthor.ts) and show the guest as the author; the shape is
+// pinned by TestGuestMessageHTMLLabelShape.
 func GuestMessageHTML(name, text string) (string, error) {
 	name = SanitizeGuestName(name)
 	if name == "" {

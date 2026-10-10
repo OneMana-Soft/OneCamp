@@ -49,7 +49,7 @@ func CreateCommentInTask(ctx context.Context, dgraphTask *dgraphStruct.DgraphTas
 		CommentProjectName:    rawDgraphTaskInfo.Project.Name,
 		CommentTaskUuid:       rawDgraphTaskInfo.Uuid,
 		CommentCreatedAt:      createdTime.Unix(),
-		CommentByUserFullName: userInfo.UserDgraphInfo.UserName,
+		CommentByUserFullName: userInfo.UserDgraphInfo.DisplayName(),
 		CommentByProfile:      userInfo.UserDgraphInfo.ProfileKey,
 		CommentDeletedAt:      nil,
 	}
@@ -61,10 +61,10 @@ func CreateCommentInTask(ctx context.Context, dgraphTask *dgraphStruct.DgraphTas
 	if rawDgraphTaskInfo.Project != nil && rawDgraphTaskInfo.Project.Team != nil {
 		teamUUID = rawDgraphTaskInfo.Project.Team.Uuid
 	}
-	ai.EmbedTaskCommentContent(plainText, commentUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.UserName,
+	ai.EmbedTaskCommentContent(plainText, commentUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.DisplayName(),
 		rawDgraphTaskInfo.Project.Uuid, rawDgraphTaskInfo.Uuid, teamUUID)
 
-	notificationTitle := fmt.Sprintf("Comment - %+v", userInfo.UserDgraphInfo.UserName)
+	notificationTitle := fmt.Sprintf("Comment - %+v", userInfo.UserDgraphInfo.DisplayName())
 	notificationBody := plainText
 	go sendNewTaskCommentNotification(notificationTitle, notificationBody, commentUUID.String(), mentionList, rawDgraphTaskInfo, &userInfo.UserDgraphInfo)
 
@@ -119,7 +119,7 @@ func sendNewTaskCommentNotification(title string, body string, commentUUID strin
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = title
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] = dgraphTask.Uuid
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.UserName
+	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 
 	// Send notifications in batches of 500 tokens
@@ -148,7 +148,7 @@ func sendNewTaskCommentNotification(title string, body string, commentUUID strin
 	taskName := dgraphTask.Name
 	notificationBusiness.DispatchTaskComment(
 		userDgraph.Uuid,
-		userDgraph.UserName,
+		userDgraph.DisplayName(),
 		userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey),
 		dgraphTask.Uuid,
 		taskName,
@@ -184,7 +184,7 @@ func CreateCommentInADoc(ctx context.Context, dgraphDoc *dgraphStruct.DgraphDoc,
 		Uuid:                  commentUUID.String(),
 		CommentBody:           plainText,
 		CommentByUserUuid:     userInfo.UserDgraphInfo.Uuid,
-		CommentByUserFullName: userInfo.UserDgraphInfo.UserFullName,
+		CommentByUserFullName: userInfo.UserDgraphInfo.DisplayName(),
 		CommentDocUuid:        rawDgraphDocInfo.Uuid,
 		CommentDocTitle:       rawDgraphDocInfo.Title,
 		CommentDocPrivate:     *rawDgraphDocInfo.IsPrivate,
@@ -225,10 +225,10 @@ func CreateCommentInADoc(ctx context.Context, dgraphDoc *dgraphStruct.DgraphDoc,
 	if dgraphDoc.CreatedBy != nil {
 		docCreatedBy = dgraphDoc.CreatedBy.Uuid
 	}
-	ai.EmbedDocCommentContent(plainText, commentUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.UserFullName,
+	ai.EmbedDocCommentContent(plainText, commentUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.DisplayName(),
 		rawDgraphDocInfo.Uuid, *rawDgraphDocInfo.IsPrivate, docCreatedBy, readUUIDs, editUUIDs, commentUUIDs)
 
-	notificationTitle := fmt.Sprintf("Comment - %+v", userInfo.UserDgraphInfo.UserName)
+	notificationTitle := fmt.Sprintf("Comment - %+v", userInfo.UserDgraphInfo.DisplayName())
 	notificationBody := plainText
 	go sendNewDocCommentNotification(notificationTitle, notificationBody, commentUUID.String(), rawDgraphDocInfo, &userInfo.UserDgraphInfo)
 
@@ -258,7 +258,7 @@ func sendNewDocCommentNotification(title string, body string, commentUUID string
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] = dgraphDoc.Uuid
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = title
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.UserName
+	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 
 	// Send notifications in batches of 500 tokens
@@ -289,7 +289,7 @@ func sendNewDocCommentNotification(title string, body string, commentUUID string
 	}
 	notificationBusiness.DispatchDocComment(
 		userDgraph.Uuid,
-		userDgraph.UserName,
+		userDgraph.DisplayName(),
 		userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey),
 		dgraphDoc.Uuid,
 		docTitle,
@@ -361,7 +361,7 @@ func CreateCommentInAPost(ctx context.Context, dgraphPost *dgraphStruct.DgraphPo
 		CommentChannelName:    rawDgraphPostInfo.Channel.Name,
 		CommentPostUuid:       dgraphPost.Uuid,
 		CommentCreatedAt:      createdTime.Unix(),
-		CommentByUserFullName: userInfo.UserDgraphInfo.UserName,
+		CommentByUserFullName: userInfo.UserDgraphInfo.DisplayName(),
 		CommentByProfile:      userInfo.UserDgraphInfo.ProfileKey,
 		CommentDeletedAt:      nil,
 	}
@@ -369,10 +369,10 @@ func CreateCommentInAPost(ctx context.Context, dgraphPost *dgraphStruct.DgraphPo
 	go domain.CreatePostCommentWithAttachmentsInOpenSearch(openSearchComment, dgraphPost.Comments[0].Attachments)
 
 	// embed comment for AI Second Brain (async) — post comment inherits channel permission
-	ai.EmbedPostCommentContent(plainText, commentUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.UserName,
+	ai.EmbedPostCommentContent(plainText, commentUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.DisplayName(),
 		rawDgraphPostInfo.Channel.Uuid, rawDgraphPostInfo.Uuid)
 
-	notificationTitle := fmt.Sprintf("Comment - %+v", userInfo.UserDgraphInfo.UserName)
+	notificationTitle := fmt.Sprintf("Comment - %+v", userInfo.UserDgraphInfo.DisplayName())
 	notificationBody := plainText
 	go sendNewPostCommentNotification(notificationTitle, notificationBody, commentUUID.String(), mentionList, rawDgraphPostInfo, &userInfo.UserDgraphInfo)
 
@@ -426,7 +426,7 @@ func sendNewPostCommentNotification(title string, body string, commentUUID strin
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = title
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] = dgraphPost.Uuid
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.UserName
+	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 
 	// Send notifications in batches of 500 tokens
@@ -453,7 +453,7 @@ func sendNewPostCommentNotification(title string, body string, commentUUID strin
 	emailRecipients = append(emailRecipients, mentionsUUIDList...)
 	notificationBusiness.DispatchPostComment(
 		userDgraph.Uuid,
-		userDgraph.UserName,
+		userDgraph.DisplayName(),
 		userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey),
 		dgraphPost.Channel.Uuid,
 		dgraphPost.Uuid,
@@ -677,7 +677,7 @@ func CreateCommentInChat(ctx context.Context, dgraphChat *dgraphStruct.DgraphCha
 		openSearchChatParticipants = append(openSearchChatParticipants, &openSearchStruct.OpenSearchChatParticipants{
 			Uuid:       p.Uuid,
 			ProfileKey: p.ProfileKey,
-			Name:       p.UserName,
+			Name:       p.DisplayName(),
 		})
 	}
 
@@ -689,7 +689,7 @@ func CreateCommentInChat(ctx context.Context, dgraphChat *dgraphStruct.DgraphCha
 		CommentChatGrpId:        dgraphChat.Comments[0].ChatGroupingId,
 		CommentChatUuid:         dgraphChat.Comments[0].Uuid,
 		CommentCreatedAt:        createdTime.Unix(),
-		CommentByUserFullName:   userInfo.UserDgraphInfo.UserName,
+		CommentByUserFullName:   userInfo.UserDgraphInfo.DisplayName(),
 		CommentByProfile:        userInfo.UserDgraphInfo.ProfileKey,
 		CommentChatFromUserUuid: userInfo.UserDgraphInfo.Uuid,
 		CommentChatParticipants: openSearchChatParticipants,
@@ -703,13 +703,13 @@ func CreateCommentInChat(ctx context.Context, dgraphChat *dgraphStruct.DgraphCha
 	for _, p := range chatDgraphInfo.DM.Participants {
 		chatParticipantUUIDs = append(chatParticipantUUIDs, p.Uuid)
 	}
-	ai.EmbedChatCommentContent(plainText, commentUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.UserName,
+	ai.EmbedChatCommentContent(plainText, commentUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.DisplayName(),
 		chatDgraphInfo.Uuid, dgraphChat.Comments[0].ChatGroupingId, userInfo.UserDgraphInfo.Uuid, "", chatParticipantUUIDs)
 
-	notificationTitle := fmt.Sprintf("Comment - %+v", userInfo.UserDgraphInfo.UserName)
+	notificationTitle := fmt.Sprintf("Comment - %+v", userInfo.UserDgraphInfo.DisplayName())
 	notificationBody := plainText
 
-	go sendNewChatCommentNotification(notificationTitle, notificationBody, userInfo.UserDgraphInfo.Uuid, dgraphChat.Comments[0].ChatGroupingId, mentionsDgraphUsersList, chatDgraphInfo.Uuid, userInfo.UserDgraphInfo.UserName, userInfo.UserDgraphInfo.ProfileKey)
+	go sendNewChatCommentNotification(notificationTitle, notificationBody, userInfo.UserDgraphInfo.Uuid, dgraphChat.Comments[0].ChatGroupingId, mentionsDgraphUsersList, chatDgraphInfo.Uuid, userInfo.UserDgraphInfo.DisplayName(), userInfo.UserDgraphInfo.ProfileKey)
 
 	return
 }

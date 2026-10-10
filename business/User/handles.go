@@ -18,6 +18,7 @@ import (
 	domain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
 
@@ -116,6 +117,26 @@ func ensureHandle(ctx context.Context, userID uuid.UUID, name, email string) str
 }
 
 var errHandleAlreadySet = errors.New("the account has a handle already")
+
+// HandleOnRead is the handle to show for someone whose profile is read,
+// giving a member without one theirs on the spot (ensureHandle, from the name
+// people see): the startup backfill (BackfillHandles) may not have reached
+// them yet, and nobody is shown an empty @handle. An external row or a bot is
+// answered with what it has, and so is a read without the member's graph
+// record (graph nil or without a uuid): /basicSelfProfile reads Postgres
+// alone, and a handle made there would come from the address rather than the
+// name, and be kept. user must come from a read that selected is_external
+// and is_bot. "" when it can't be had.
+func HandleOnRead(ctx context.Context, user *userModels.User, graph *dgraphStruct.DgraphUser) string {
+	if user == nil {
+		return ""
+	}
+	if !user.IsMember() || graph == nil || graph.Uuid == "" {
+		handle, _ := domain.GetHandle(ctx, user.Id)
+		return handle
+	}
+	return ensureHandle(ctx, user.Id, graph.DisplayName(), user.EmailID)
+}
 
 // HandleRefusal is why a handle cannot be had, in words for the person
 // choosing it. Taken reports that someone else has it.

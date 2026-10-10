@@ -170,7 +170,7 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 		}
 		for _, ex := range st.AssigneeIds[1:] {
 			if _, exInfo := resolveUserUUID(ctx, job, ex); exInfo != nil {
-				extraAssignees = append(extraAssignees, exInfo.UserDgraphInfo.UserFullName)
+				extraAssignees = append(extraAssignees, exInfo.UserDgraphInfo.DisplayName())
 			}
 		}
 	}
@@ -693,7 +693,7 @@ func writeTask(ctx context.Context, job *importModels.Job, in importTaskInput) (
 	}
 	if in.Assignee != nil {
 		osTask.TaskAssigneeUuid = &in.Assignee.Uuid
-		osTask.TaskAssigneeFullName = in.Assignee.UserFullName
+		osTask.TaskAssigneeFullName = in.Assignee.DisplayName()
 	}
 	goSafe(ctx, "task_opensearch", func() {
 		taskDomain.CreateTaskWithAttachmentsInOpensearch(osTask, nil, &in.Creator.UserDgraphInfo)

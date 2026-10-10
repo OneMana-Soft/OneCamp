@@ -2,6 +2,7 @@ package livekitInit
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -199,7 +200,7 @@ func (s *LiveKitServiceStruct) StartRecording(ctx context.Context, roomName stri
 
 	// 3. Start Recording
 	// Initial metadata before we have the ID
-	metadata := "{\"isRecording\": true, \"recordingStartedBy\": \"" + userName + "\"}"
+	metadata := recordingMetadata(userName, "")
 
 	_, err = s.LiveKitClient.UpdateRoomMetadata(ctx, &livekit.UpdateRoomMetadataRequest{
 		Room:     roomName,
@@ -241,7 +242,7 @@ func (s *LiveKitServiceStruct) StartRecording(ctx context.Context, roomName stri
 
 	// 4. Update Metadata with EgressID
 	// We append the egressId to the metadata so agents can find it
-	metadataWithID := fmt.Sprintf("{\"isRecording\": true, \"recordingStartedBy\": \"%s\", \"egressID\": \"%s\"}", userName, egressInfo.EgressId)
+	metadataWithID := recordingMetadata(userName, egressInfo.EgressId)
 	_, err = s.LiveKitClient.UpdateRoomMetadata(ctx, &livekit.UpdateRoomMetadataRequest{
 		Room:     roomName,
 		Metadata: metadataWithID,
@@ -521,4 +522,17 @@ func EgressPreset(name string) livekit.EncodingOptionsPreset {
 		return livekit.EncodingOptionsPreset_H264_1080P_60
 	}
 	return livekit.EncodingOptionsPreset_H264_1080P_30
+}
+
+// recordingMetadata is the room metadata while a recording runs: who started
+// it, by the name people see, and the egress once there is one. Encoded as
+// JSON rather than pasted into a string, so a name with a quote or a
+// backslash in it can't break the metadata every client parses. Pure.
+func recordingMetadata(startedBy, egressID string) string {
+	b, _ := json.Marshal(struct {
+		IsRecording bool   `json:"isRecording"`
+		StartedBy   string `json:"recordingStartedBy"`
+		EgressID    string `json:"egressID,omitempty"`
+	}{true, startedBy, egressID})
+	return string(b)
 }

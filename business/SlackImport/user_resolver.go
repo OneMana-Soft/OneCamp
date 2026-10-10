@@ -26,7 +26,7 @@ type UserResolveStats struct {
 
 // resolveUsers walks every Slack user in the export and ensures each has
 // a OneCamp users row. Idempotent: re-runs against the same import_id are
-// no-ops thanks to the slack_import_id_map upsert.
+// no-ops thanks to the import_id_map upsert.
 //
 // Matching policy (in order, first match wins):
 //

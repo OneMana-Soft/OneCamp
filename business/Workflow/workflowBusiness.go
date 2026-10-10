@@ -316,11 +316,13 @@ func handleUserJoinedChannel(ctx context.Context, data map[string]interface{}) {
 		return
 	}
 
-	// Resolve a friendly @mention/name for the joiner (best-effort).
+	// Resolve a friendly @mention/name for the joiner (best-effort): the one
+	// name rule without its last step, since the channel may have guests,
+	// who never see part of a member's address.
 	userName := ""
 	if userID != "" {
 		if u, err := userDomain.GetActiveDgraphUserInfoByUUID(ctx, userID); err == nil && u != nil {
-			userName = u.UserName
+			userName = helpers.PersonDisplayName(u.UserName, u.UserFullName, "")
 		}
 	}
 	userMention := userName

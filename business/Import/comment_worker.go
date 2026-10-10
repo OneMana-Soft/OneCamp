@@ -221,7 +221,7 @@ func writeTaskComment(ctx context.Context, dgTask *dgraphStruct.DgraphTask,
 		CommentBody:           body,
 		CommentTaskUuid:       dgTask.Uuid,
 		CommentByUserUuid:     author.UserDgraphInfo.Uuid,
-		CommentByUserFullName: author.UserDgraphInfo.UserFullName,
+		CommentByUserFullName: author.UserDgraphInfo.DisplayName(),
 		CommentByProfile:      author.UserDgraphInfo.ProfileKey,
 		CommentCreatedAt:      createdAt.Unix(),
 	}

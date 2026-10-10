@@ -45,7 +45,7 @@ func HashStagedZip(ctx context.Context, objectKey string) (string, error) {
 // ─── Cross-import resolution helpers ─────────────────────────────────────
 //
 // When a Slack workspace is re-imported (e.g., a fresh export taken
-// 30 days after the first), the per-import slack_import_id_map starts
+// 30 days after the first), the per-import import_id_map starts
 // empty. Without dedup, every user/channel/message would be re-created.
 //
 // resolveExisting* helpers consult the workspace-wide map (populated by

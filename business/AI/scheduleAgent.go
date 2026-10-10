@@ -32,6 +32,7 @@ import (
 	calendarAdapter "github.com/akashc777/OneCamp/adapter/Calendar"
 	calendarBusiness "github.com/akashc777/OneCamp/business/Calendar"
 	calendarDomain "github.com/akashc777/OneCamp/domain/Calendar"
+	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/google/uuid"
@@ -466,12 +467,10 @@ func ConfirmReschedule(ctx context.Context, userInfo *userModels.UserInfo, req a
 	}, nil
 }
 
-// displayName picks a username, falling back to the full name.
+// displayName is the one name rule (helpers.PersonDisplayName) for a person
+// whose address isn't at hand: display name, else full name.
 func displayName(userName, fullName string) string {
-	if s := strings.TrimSpace(userName); s != "" {
-		return s
-	}
-	return strings.TrimSpace(fullName)
+	return helpers.PersonDisplayName(userName, fullName, "")
 }
 
 // minTime returns the earlier of two times.
