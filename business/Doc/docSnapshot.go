@@ -197,7 +197,10 @@ func ListDocSnapshots(ctx context.Context, docUUID string, userUID string) ([]*D
 		return nil, err
 	}
 	if doc == nil {
-		return nil, errors.New("doc not found")
+		return nil, ErrNotFound
+	}
+	if IsDeleted(doc) {
+		return nil, goneFor(CouldEdit(doc, userUID))
 	}
 	if !CanEdit(doc, userUID) {
 		return nil, errors.New("unauthorized")
@@ -255,7 +258,10 @@ func RestoreDocSnapshot(ctx context.Context, docUUID string, snapshotID uuid.UUI
 		return err
 	}
 	if doc == nil {
-		return errors.New("doc not found")
+		return ErrNotFound
+	}
+	if IsDeleted(doc) {
+		return goneFor(CouldEdit(doc, userUID))
 	}
 	if !CanEdit(doc, userUID) {
 		return errors.New("unauthorized: edit access required to restore")
@@ -295,6 +301,9 @@ func RestoreDocSnapshot(ctx context.Context, docUUID string, snapshotID uuid.UUI
 	// OpenSearch, re-embeds). Effective on next fresh collab load.
 	if err := UpdateDoc(ctx, &adapter.InputUpdateDoc{DocId: docUUID, Body: &body}); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/RestoreDocSnapshot persist failed err: %+v", err)
+		if errors.Is(err, ErrDocDeleted) {
+			return err // deleted while the version was being read
+		}
 		return errors.New("could not restore the document")
 	}
 	return nil
@@ -353,18 +362,77 @@ func collabBodyHash(body string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// collabErrorBody is what collaboration services before v2.70.0 wrote over a
+// whole doc when they could not write its HTML. Never a real body.
+const collabErrorBody = "<p>Error generating HTML</p>"
+
+// ErrUnsafeCollabBody refuses a save that would replace a doc with nothing, or
+// with that placeholder.
+var ErrUnsafeCollabBody = errors.New("refusing to replace the document with an empty or placeholder body")
+
+// unsafeCollabBody reports whether a body from the collaboration service must
+// not be stored: blank, or the old error placeholder.
+func unsafeCollabBody(body string) bool {
+	b := strings.TrimSpace(body)
+	return b == "" || b == collabErrorBody
+}
+
 // UpdateDocFromCollab persists the doc body from the collaboration service and
 // evaluates a version snapshot off the persist path. Reads the prior body first
 // so a mass-deletion can preserve it. Best-effort snapshotting never blocks the
 // save.
 //
 // yjsState is the service's Yjs state for that body. It is saved with the
-// body's hash, and the service opens the doc from it while the stored body is
-// still this one (collaboration-service/docState.js): rebuilding it from the
-// body made a new Yjs document, and a browser still holding the old one doubled
-// every paragraph. A state that fails to save is logged; the next open rebuilds
-// from the body, as before.
-func UpdateDocFromCollab(ctx context.Context, docUUID, htmlBody, yjsState string, contributors []string) error {
+// body's hash, in the same mutation as the body, and the service opens the doc
+// from it while the stored body is still this one
+// (collaboration-service/docState.js): rebuilding it from the body made a new
+// Yjs document, and a browser still holding the old one doubled every
+// paragraph.
+//
+// keepBody stores only the state, against the stored body's hash, and leaves
+// the body as it is. The service sends it in two cases:
+//   - it could not write this doc's HTML at all (collaboration-service/
+//     storeDoc.js): the state still holds every edit, so the next open has them;
+//   - it has just rebuilt the doc from its body (collaboration-service/
+//     lineage.js), with expectBodyHash, the hash of the body it rebuilt from:
+//     the state is stored only while that is still the body, so later opens use
+//     it instead of rebuilding (each rebuild was a new copy of the doc).
+//
+// A blank or placeholder body is refused outright.
+func UpdateDocFromCollab(ctx context.Context, docUUID, htmlBody, yjsState string, contributors []string, keepBody bool, expectBodyHash string) error {
+	if keepBody {
+		if yjsState == "" {
+			return errors.New("keepBody needs the document's Yjs state")
+		}
+		prev, err := domain.GetSystemDocByUUID(ctx, docUUID)
+		if err != nil {
+			return err
+		}
+		if prev == nil {
+			return ErrNotFound
+		}
+		// A deleted doc takes no saves, its state included (410). This read
+		// only spares a deleted doc the hashing: one deleted after it is
+		// refused by the write, which stores the state only on a live doc, in
+		// one transaction, as a full save does.
+		if IsDeleted(prev) {
+			return ErrDocDeleted
+		}
+		hash := collabBodyHash(prev.Body)
+		if expectBodyHash != "" {
+			if expectBodyHash != hash {
+				// The body changed since the rebuild: that state is not its state.
+				return nil
+			}
+		} else {
+			helpers.LogErrorWithContext(ctx, "business/UpdateDocFromCollab doc %s: the collaboration service could not write its HTML; kept the stored body, saved the Yjs state only", docUUID)
+		}
+		return domain.SetDocCollabState(ctx, docUUID, yjsState, hash)
+	}
+	if unsafeCollabBody(htmlBody) {
+		helpers.LogErrorWithContext(ctx, "business/UpdateDocFromCollab doc %s: refused a blank or placeholder body (%d bytes)", docUUID, len(htmlBody))
+		return ErrUnsafeCollabBody
+	}
 	newBytes := len(htmlBody)
 
 	// Only read the prior body when a mass-deletion is plausible (cheap cached
@@ -382,11 +450,8 @@ func UpdateDocFromCollab(ctx context.Context, docUUID, htmlBody, yjsState string
 		}
 	}
 
-	if err := UpdateDoc(ctx, &adapter.InputUpdateDoc{DocId: docUUID, Body: &htmlBody}); err != nil {
+	if err := updateDoc(ctx, &adapter.InputUpdateDoc{DocId: docUUID, Body: &htmlBody}, yjsState, false); err != nil {
 		return err
-	}
-	if yjsState != "" {
-		_ = domain.SetDocCollabState(ctx, docUUID, yjsState, collabBodyHash(htmlBody))
 	}
 
 	resourceViewBusiness.SetCachedStateSize(ctx, resourceViewBusiness.ResourceDoc, docUUID, newBytes)

@@ -15,20 +15,19 @@ package businness
 // also what keeps matching sane (with markup indexed, searching for "div" matched
 // every document in the workspace).
 //
-// This reads source rather than calling UpdateDoc because that function needs
-// Dgraph, Postgres and OpenSearch to run. The assertion is narrow and specific, so
-// it is still a real check: it fails if the extraction call is removed.
+// The indexed body is checked on the entry itself (domain/Doc DocSearchEntryOf,
+// which every write of a doc's entry goes through). The snippet is still checked in the
+// source of UpdateDoc, which needs Dgraph to run.
 
 import (
 	"os"
 	"regexp"
 	"strings"
 	"testing"
-)
 
-// docBodyAssignment matches the assignment of the indexed doc body, capturing
-// whatever is on the right-hand side.
-var docBodyAssignment = regexp.MustCompile(`openSearchDoc\.DocBody\s*=\s*([^\n]+)`)
+	domain "github.com/akashc777/OneCamp/domain/Doc"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+)
 
 // snippetAssignment matches the stored doc preview. The snippet is indexed as
 // doc_snippet AND shown to users in doc lists and search results, so it has the
@@ -41,35 +40,24 @@ var snippetAssignment = regexp.MustCompile(`dgraphDoc\.Snippet\s*=\s*((?s:.*?))\
 var commentLine = regexp.MustCompile(`(?m)//.*$`)
 
 func TestDocBodyIsIndexedAsPlainTextNotMarkup(t *testing.T) {
-	raw, err := os.ReadFile("docBusiness.go")
-	if err != nil {
-		t.Fatalf("read docBusiness.go: %v", err)
-	}
-	src := commentLine.ReplaceAllString(string(raw), "")
-
-	matches := docBodyAssignment.FindAllStringSubmatch(src, -1)
-	if len(matches) == 0 {
-		t.Fatal("no assignment to openSearchDoc.DocBody found; this test has gone " +
-			"stale and needs updating to match the current code")
-	}
-
-	for _, m := range matches {
-		rhs := strings.TrimSpace(m[1])
-
-		// Assigning the empty string is fine: that is the create path, which
-		// indexes a doc before it has a body.
-		if rhs == `""` {
-			continue
+	body := `<div><h1>Launch plan</h1><p>Ship on <b>Friday</b>.</p>` +
+		`<img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB" alt="chart">` +
+		`<svg><path d="M0 0L10 10"/></svg></div>`
+	e := domain.DocSearchEntryOf(&dgraphStruct.DgraphDoc{Uuid: "d", Title: "Launch", Body: body})
+	for _, markup := range []string{"<", ">", "div", "data:image", "base64", "M0 0L10"} {
+		if strings.Contains(e.DocBody, markup) {
+			t.Errorf("the indexed body carries markup or a payload (%q): %q.\n"+
+				"Indexing markup puts image payloads (in src/d attributes) into OpenSearch "+
+				"and makes every document match a search for \"div\".", markup, e.DocBody)
 		}
-
-		if !strings.Contains(rhs, "HTMLToPlainText(") {
-			t.Errorf("openSearchDoc.DocBody is assigned raw markup:\n"+
-				"    openSearchDoc.DocBody = %s\n\n"+
-				"Index extracted text instead:\n"+
-				"    openSearchDoc.DocBody = helpers.HTMLToPlainText(...)\n\n"+
-				"Indexing markup puts image payloads (in src/d attributes) into "+
-				"OpenSearch and makes every document match a search for \"div\".", rhs)
+	}
+	for _, words := range []string{"Launch plan", "Ship on", "Friday"} {
+		if !strings.Contains(e.DocBody, words) {
+			t.Errorf("the indexed body lost the doc's words %q: %q", words, e.DocBody)
 		}
+	}
+	if strings.Contains(e.DocSnippet, "<") {
+		t.Errorf("a doc read without its stored snippet previews markup: %q", e.DocSnippet)
 	}
 }
 

@@ -7,9 +7,6 @@ import (
 	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/opensearchInit"
-
-	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
 // exactClauses match a field holding one of ids exactly: as the field, and as
@@ -28,9 +25,41 @@ func exactClauses(field string, ids []string) []string {
 	}
 }
 
-// SyncCascadingDeletionInOpenSearch updates the deleted_date for all documents in specified indices
-// that match any of the provided parent fields with the given parentID.
-// deletedBy tags the deletion source: "cascade" for parent archive, "user" for individual deletion.
+// cascadeDeleteScript marks an entry deleted by a cascade from its parent (a
+// doc, post, chat, task, channel or project going away), unless the entry is
+// deleted already: then its deletion time and marker stay as they are. The
+// cascade wrote its own over them, so a comment its author had deleted was
+// marked "cascade", and restoring the parent, which clears what the cascade
+// marked, brought the comment back to search for everyone who may read the
+// parent. A deletion time below 1 was never a deletion (a doc's new comments
+// were once written with -1, and a team's restore writes -1): such an entry is
+// live, and is marked like one.
+const cascadeDeleteScript = `def d = ctx._source.deleted_date;
+if (d != null && !(d instanceof Number && ((Number) d).longValue() < 1)) { ctx.op = 'noop'; return; }
+ctx._source.deleted_date = params.deleted_at;
+ctx._source.deleted_by = params.deleted_by;`
+
+// cascadeDeleteBody is the update-by-query body that has cascadeDeleteScript
+// mark what query matches as deleted at deletedAt by deletedBy. Pure.
+func cascadeDeleteBody(query string, deletedAt int64, deletedBy string) string {
+	script, _ := json.Marshal(map[string]any{
+		"source": cascadeDeleteScript,
+		"lang":   "painless",
+		"params": map[string]any{"deleted_at": deletedAt, "deleted_by": deletedBy},
+	})
+	return fmt.Sprintf(`{"script": %s, "query": %s}`, script, query)
+}
+
+// anyOf is a query matching what any of the clauses matches. Pure.
+func anyOf(clauses []string) string {
+	return fmt.Sprintf(`{"bool": {"should": [%s], "minimum_should_match": 1}}`, strings.Join(clauses, ","))
+}
+
+// SyncCascadingDeletionInOpenSearch marks deleted, at deletedAt, the entries
+// in indices that name parentID in any of parentFields, except those deleted
+// already (cascadeDeleteScript). deletedBy tags the deletion: "cascade" for a
+// parent going away, which restoring the parent clears; "user" for an item
+// deleted by itself, which nothing brings back.
 func SyncCascadingDeletionInOpenSearch(ctx context.Context, parentFields []string, parentID string, deletedAt int64, indices []string, deletedBy string) error {
 	if len(parentFields) == 0 || parentID == "" || len(indices) == 0 {
 		return nil
@@ -41,45 +70,12 @@ func SyncCascadingDeletionInOpenSearch(ctx context.Context, parentFields []strin
 		shouldClauses = append(shouldClauses, exactClauses(field, []string{parentID})...)
 	}
 
-	body := fmt.Sprintf(`{
-		"script": {
-			"source": "ctx._source.deleted_date = params.deleted_at; ctx._source.deleted_by = params.deleted_by",
-			"lang": "painless",
-			"params": {
-				"deleted_at": %d,
-				"deleted_by": "%s"
-			}
-		},
-		"query": {
-			"bool": {
-				"should": [
-					%s
-				],
-				"minimum_should_match": 1
-			}
-		}
-	}`, deletedAt, deletedBy, strings.Join(shouldClauses, ","))
+	body := cascadeDeleteBody(anyOf(shouldClauses), deletedAt, deletedBy)
 
-	boolTrue := true
-	resp, err := opensearchInit.OpenSearchClient.UpdateByQuery(context.Background(), opensearchapi.UpdateByQueryReq{
-		Indices: indices,
-		Body:    strings.NewReader(body),
-		Params: opensearchapi.UpdateByQueryParams{
-			Refresh:           &boolTrue,
-			WaitForCompletion: &boolTrue,
-			Conflicts:         "proceed",
-		},
-	})
-
-	if err != nil {
+	if _, err := updateByQuerySettled(context.Background(), indices, body); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SyncCascadingDeletionInOpenSearch failed: %v", err)
 		return err
 	}
-
-	if len(resp.Failures) > 0 {
-		helpers.LogErrorWithContext(ctx, "models/SyncCascadingDeletionInOpenSearch had %d failures: %+v", len(resp.Failures), resp.Failures)
-	}
-
 	return nil
 }
 
@@ -114,26 +110,10 @@ func SyncCascadingUnarchiveInOpenSearch(ctx context.Context, parentFields []stri
 		}
 	}`, deletedBy, strings.Join(shouldClauses, ","))
 
-	boolTrue := true
-	resp, err := opensearchInit.OpenSearchClient.UpdateByQuery(context.Background(), opensearchapi.UpdateByQueryReq{
-		Indices: indices,
-		Body:    strings.NewReader(body),
-		Params: opensearchapi.UpdateByQueryParams{
-			Refresh:           &boolTrue,
-			WaitForCompletion: &boolTrue,
-			Conflicts:         "proceed",
-		},
-	})
-
-	if err != nil {
+	if _, err := updateByQuerySettled(context.Background(), indices, body); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SyncCascadingUnarchiveInOpenSearch failed: %v", err)
 		return err
 	}
-
-	if len(resp.Failures) > 0 {
-		helpers.LogErrorWithContext(ctx, "models/SyncCascadingUnarchiveInOpenSearch had %d failures: %+v", len(resp.Failures), resp.Failures)
-	}
-
 	return nil
 }
 
@@ -180,22 +160,12 @@ func SyncDocMetadataInOpenSearch(ctx context.Context, docUUID string, title *str
 		}
 	}`, source, string(paramsJSON), docUUID, docUUID)
 
-	boolTrue := true
-	_, err := opensearchInit.OpenSearchClient.UpdateByQuery(context.Background(), opensearchapi.UpdateByQueryReq{
-		Indices: []string{"comments", "attachments"},
-		Body:    strings.NewReader(body),
-		Params: opensearchapi.UpdateByQueryParams{
-			Refresh:           &boolTrue,
-			WaitForCompletion: &boolTrue,
-			Conflicts:         "proceed",
-		},
-	})
-
-	if err != nil {
+	// The caller's ctx, so that its time limit holds (domain/Doc gives each
+	// doc search write two minutes).
+	if _, err := updateByQuerySettled(ctx, []string{"comments", "attachments"}, body); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SyncDocMetadataInOpenSearch failed: %v", err)
 		return err
 	}
-
 	return nil
 }
 
@@ -207,32 +177,13 @@ func SyncCascadingDeletionInOpenSearchMulti(ctx context.Context, parentField str
 	}
 
 	idsJSON, _ := json.Marshal(parentIDs)
-	body := fmt.Sprintf(`{
-		"script": {
-			"source": "ctx._source.deleted_date = params.deleted_at; ctx._source.deleted_by = params.deleted_by",
-			"lang": "painless",
-			"params": {
-				"deleted_at": %d,
-				"deleted_by": "%s"
-			}
-		},
-		"query": {
-			"terms": {
-				"%s": %s
-			}
-		}
-	}`, deletedAt, deletedBy, parentField, string(idsJSON))
+	fieldJSON, _ := json.Marshal(parentField)
+	body := cascadeDeleteBody(fmt.Sprintf(`{"terms": {%s: %s}}`, fieldJSON, idsJSON), deletedAt, deletedBy)
 
-	boolTrue := true
-	opensearchInit.OpenSearchClient.UpdateByQuery(context.Background(), opensearchapi.UpdateByQueryReq{
-		Indices: indices,
-		Body:    strings.NewReader(body),
-		Params: opensearchapi.UpdateByQueryParams{
-			Refresh:           &boolTrue,
-			WaitForCompletion: &boolTrue,
-			Conflicts:         "proceed",
-		},
-	})
+	if _, err := updateByQuerySettled(context.Background(), indices, body); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/SyncCascadingDeletionInOpenSearchMulti failed: %v", err)
+		return err
+	}
 	return nil
 }
 
@@ -258,16 +209,10 @@ func SyncCascadingUnarchiveInOpenSearchMulti(ctx context.Context, parentField st
 		}
 	}`, deletedBy, parentField, string(idsJSON))
 
-	boolTrue := true
-	opensearchInit.OpenSearchClient.UpdateByQuery(context.Background(), opensearchapi.UpdateByQueryReq{
-		Indices: indices,
-		Body:    strings.NewReader(body),
-		Params: opensearchapi.UpdateByQueryParams{
-			Refresh:           &boolTrue,
-			WaitForCompletion: &boolTrue,
-			Conflicts:         "proceed",
-		},
-	})
+	if _, err := updateByQuerySettled(context.Background(), indices, body); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/SyncCascadingUnarchiveInOpenSearchMulti failed: %v", err)
+		return err
+	}
 	return nil
 }
 
@@ -283,33 +228,12 @@ func SyncCascadingDeletionInOpenSearchCombined(ctx context.Context, fieldIDs map
 		termsClauses = append(termsClauses, exactClauses(field, ids)...)
 	}
 
-	body := fmt.Sprintf(`{
-		"script": {
-			"source": "ctx._source.deleted_date = params.deleted_at; ctx._source.deleted_by = params.deleted_by",
-			"lang": "painless",
-			"params": {
-				"deleted_at": %d,
-				"deleted_by": "%s"
-			}
-		},
-		"query": {
-			"bool": {
-				"should": [%s],
-				"minimum_should_match": 1
-			}
-		}
-	}`, deletedAt, deletedBy, strings.Join(termsClauses, ","))
+	body := cascadeDeleteBody(anyOf(termsClauses), deletedAt, deletedBy)
 
-	boolTrue := true
-	opensearchInit.OpenSearchClient.UpdateByQuery(context.Background(), opensearchapi.UpdateByQueryReq{
-		Indices: indices,
-		Body:    strings.NewReader(body),
-		Params: opensearchapi.UpdateByQueryParams{
-			Refresh:           &boolTrue,
-			WaitForCompletion: &boolTrue,
-			Conflicts:         "proceed",
-		},
-	})
+	if _, err := updateByQuerySettled(context.Background(), indices, body); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/SyncCascadingDeletionInOpenSearchCombined failed: %v", err)
+		return err
+	}
 	return nil
 }
 
@@ -340,15 +264,9 @@ func SyncCascadingUnarchiveInOpenSearchCombined(ctx context.Context, fieldIDs ma
 		}
 	}`, deletedBy, strings.Join(termsClauses, ","))
 
-	boolTrue := true
-	opensearchInit.OpenSearchClient.UpdateByQuery(context.Background(), opensearchapi.UpdateByQueryReq{
-		Indices: indices,
-		Body:    strings.NewReader(body),
-		Params: opensearchapi.UpdateByQueryParams{
-			Refresh:           &boolTrue,
-			WaitForCompletion: &boolTrue,
-			Conflicts:         "proceed",
-		},
-	})
+	if _, err := updateByQuerySettled(context.Background(), indices, body); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/SyncCascadingUnarchiveInOpenSearchCombined failed: %v", err)
+		return err
+	}
 	return nil
 }

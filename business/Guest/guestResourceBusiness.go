@@ -153,7 +153,8 @@ func CreateResourceGrant(ctx context.Context, creatorUUID uuid.UUID, resourceTyp
 	}, nil
 }
 
-// maxGuestCommentLen bounds a single guest comment body (after HTML stripping).
+// maxGuestCommentLen bounds a single guest comment body (after HTML
+// stripping), in characters.
 // Generous for a review note, but capped so the isolated table can't be abused
 // as bulk storage by a leaked comment link.
 const maxGuestCommentLen = 4000
@@ -257,10 +258,9 @@ func sanitizeGuestCommentBody(body string) (string, error) {
 	if plain == "" {
 		return "", errEmptyComment
 	}
-	if len(plain) > maxGuestCommentLen {
-		plain = plain[:maxGuestCommentLen]
-	}
-	return plain, nil
+	// Counted in characters: a byte cut could split one and store invalid
+	// UTF-8.
+	return helpers.TruncateRunes(plain, maxGuestCommentLen), nil
 }
 
 // errEmptyComment is returned when a guest comment is empty after sanitization.
@@ -305,7 +305,26 @@ func ValidateResourceGrant(ctx context.Context, rawToken, expectedType string) (
 	if g == nil || g.ResourceType != expectedType {
 		return nil, ErrInvalidGrant
 	}
+	if err := grantedDocLive(ctx, g); err != nil {
+		return nil, err
+	}
 	return g, nil
+}
+
+// grantedDocLive refuses a doc grant whose doc has been deleted (or is gone):
+// a link outlives nothing its doc doesn't, so it opens nothing, takes no
+// comment and joins no live session until the doc is restored, when it works
+// again. ErrNotFound reads to the guest as the uniform "no longer available";
+// a read that failed is kept, for the 503 their page retries.
+func grantedDocLive(ctx context.Context, g *guestModel.GuestGrant) error {
+	if g == nil || g.ResourceType != guestModel.ResourceDoc {
+		return nil
+	}
+	err := docBusiness.CheckDocLive(ctx, g.ResourceID)
+	if errors.Is(err, docBusiness.ErrNotFound) || errors.Is(err, docBusiness.ErrDocDeleted) {
+		return ErrNotFound
+	}
+	return err
 }
 
 // ValidateCollabGrant resolves a raw link token to an active grant for a LIVE
@@ -325,6 +344,9 @@ func ValidateCollabGrant(ctx context.Context, rawToken string) (*guestModel.Gues
 	}
 	if g == nil || (g.ResourceType != guestModel.ResourceDoc && g.ResourceType != guestModel.ResourceBoard) {
 		return nil, ErrInvalidGrant
+	}
+	if err := grantedDocLive(ctx, g); err != nil {
+		return nil, err
 	}
 	return g, nil
 }
@@ -403,6 +425,11 @@ func AuthorizeGuestCollab(ctx context.Context, bearerToken, kind, resourceID str
 	}
 	if g.ResourceType != kind || g.ResourceID != strings.TrimSpace(resourceID) {
 		return nil, ErrInvalidGrant
+	}
+	// Every (re)connect, so a doc deleted while a guest has it open takes
+	// them out at their next one.
+	if err := grantedDocLive(ctx, g); err != nil {
+		return nil, err
 	}
 	return g, nil
 }

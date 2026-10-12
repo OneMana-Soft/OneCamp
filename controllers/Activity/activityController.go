@@ -35,7 +35,7 @@ func GetLatestMentions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	mentionsPage, err := business.GetMentionsByUserId(ctx, userInfo.UserDgraphInfo.Uid, pageIndex, pageSize)
+	mentionsPage, err := business.GetMentionsByUserId(ctx, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid, pageIndex, pageSize)
 
 	if err != nil {
 
@@ -79,7 +79,7 @@ func GetLatestComments(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	commentsPage, err := business.GetCommentsByUserId(ctx, userInfo.UserDgraphInfo.Uid, pageIndex, pageSize)
+	commentsPage, err := business.GetCommentsByUserId(ctx, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid, pageIndex, pageSize)
 
 	if err != nil {
 
@@ -123,7 +123,7 @@ func GetLatestReactions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	reactionsPage, err := business.GetReactionsByUserId(ctx, userInfo.UserDgraphInfo.Uid, pageIndex, pageSize)
+	reactionsPage, err := business.GetReactionsByUserId(ctx, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid, pageIndex, pageSize)
 
 	if err != nil {
 
@@ -162,7 +162,9 @@ func GetUnifiedActivity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(timeValue) > 0 && timeValue[0] != "" {
-		parsedTime, err := time.Parse(time.RFC3339, timeValue[0])
+		// To the nanosecond, as the feed writes times; whole seconds from an
+		// older client still parse.
+		parsedTime, err := time.Parse(time.RFC3339Nano, timeValue[0])
 		if err == nil {
 			beforeTime = parsedTime
 		}

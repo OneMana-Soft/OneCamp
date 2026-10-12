@@ -13,6 +13,7 @@
 package controllers
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -243,10 +244,11 @@ func RevokeGuestGrant(w http.ResponseWriter, r *http.Request) {
 
 // ─── Phase 2: scoped doc/board guest links (live, read-only) ────────────
 
-// CreateResourceGuestLink POST /guest/links — a member who can EDIT a doc or
-// board mints a scoped, expiring, read-only external share link. Requiring edit
-// (or ownership) keeps sharing a privileged action: a mere viewer can't
-// re-share someone else's private resource outward.
+// CreateResourceGuestLink POST /guest/links — a member who may share a
+// resource mints a scoped, expiring, read-only external share link (mayShare
+// says who: a doc's owner; a board's editors; a table's managers; a channel's
+// or project's admins). Keeping sharing a privileged action means a mere
+// viewer can't re-share someone else's private resource outward.
 func CreateResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -275,7 +277,7 @@ func CreateResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !mayShare(w, r, userInfo, body.ResourceType, body.ResourceID) {
+	if !mayShare(w, r, userInfo, body.ResourceType, body.ResourceID, true) {
 		return
 	}
 
@@ -366,6 +368,11 @@ func GuestDocColabAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := guestBusiness.AuthorizeGuestCollab(ctx, bearer, "doc", body.DocUUID); err != nil {
+		// A doc deleted since the link was made is gone for the guest too.
+		if errors.Is(err, guestBusiness.ErrNotFound) {
+			notAvailable(w)
+			return
+		}
 		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Unauthorized"})
 		return
 	}
@@ -770,21 +777,15 @@ func TaskClientReview(w http.ResponseWriter, r *http.Request) {
 
 // mayShare says whether the caller may share a resource with people outside
 // the workspace (and so see and turn off its links), writing the refusal when
-// not. It reuses each resource's own access checks, the same ones the collab
-// authorize endpoints use.
-func mayShare(w http.ResponseWriter, r *http.Request, userInfo userModels.UserInfo, resourceType, resourceID string) bool {
+// not. It reuses each resource's own access checks. newLink is a link about to
+// be made, which a deleted doc takes no more of; its owner may still see and
+// turn off the ones it has.
+func mayShare(w http.ResponseWriter, r *http.Request, userInfo userModels.UserInfo, resourceType, resourceID string, newLink bool) bool {
 	ctx := r.Context()
-	// Verify the caller may share this resource: must have edit access or own
-	// it. Reuses the same dgraph access projection the collab authorize uses.
 	switch resourceType {
 	case "doc":
-		d, err := docBusiness.GetDgraphDocByUUIDOnlyEditingInfo(ctx, resourceID, userInfo.UserDgraphInfo.Uid)
-		if err != nil || d == nil {
-			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Document not found"})
-			return false
-		}
-		if !docBusiness.CanEdit(d, userInfo.UserDgraphInfo.Uid) {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You need edit access to share this document."})
+		if status, refusal := docShareRefusal(ctx, userInfo, resourceID, newLink); status != 0 {
+			helpers.WriteJSON(w, status, refusal)
 			return false
 		}
 	case "board":
@@ -856,6 +857,32 @@ func mayShare(w http.ResponseWriter, r *http.Request, userInfo userModels.UserIn
 	return true
 }
 
+// docShareRefusal is mayShare's answer for a doc, without writing it: 0 when
+// the caller may share it, and otherwise the status and body to refuse with.
+//
+// Sharing a doc outside the workspace is its owner's call, as sharing it
+// inside is (only the owner changes who it's shared with). Editors could mint
+// links: a link to a private doc opened it to anyone holding the link, though
+// its owner had shared it with no member beyond its editors (decided 11 Oct
+// 2026). Links editors made before keep working until the owner, an admin, or
+// whoever made them turns them off.
+func docShareRefusal(ctx context.Context, userInfo userModels.UserInfo, docID string, newLink bool) (int, helpers.Envolope) {
+	d, err := docBusiness.GetDgraphDocByUUIDOnlyEditingInfo(ctx, docID, userInfo.UserDgraphInfo.Uid)
+	if err != nil || d == nil {
+		return http.StatusNotFound, helpers.Envolope{"msg": "Document not found"}
+	}
+	if !docBusiness.IsOwner(d, userInfo.UserDgraphInfo.Uid) {
+		if docBusiness.IsDeleted(d) && !docBusiness.CouldEdit(d, userInfo.UserDgraphInfo.Uid) {
+			return http.StatusNotFound, helpers.Envolope{"msg": "Document not found"}
+		}
+		return http.StatusForbidden, helpers.Envolope{"msg": "Only the doc's owner can share it outside the workspace."}
+	}
+	if newLink && docBusiness.IsDeleted(d) {
+		return http.StatusGone, helpers.Envolope{"msg": "This doc was deleted.", "deleted": true}
+	}
+	return 0, nil
+}
+
 // GuestLinkView is one live link to a resource, for the people who may share it.
 type GuestLinkView struct {
 	ID         uuid.UUID  `json:"id"`
@@ -867,27 +894,44 @@ type GuestLinkView struct {
 
 // ListResourceGuestLinks GET /guest/links?resource_type=&resource_id= — the
 // live links to one resource, for anyone who may share it.
+//
+// A doc's links are all its owner's to see. Anyone else sees only the links
+// they made, and none when they made none: editors could make links until
+// 11 Oct 2026, those links still work, and whoever made one may always turn it
+// off (RevokeResourceGuestLink), which takes finding it. Refusing them here
+// left an editor's link open with no way for them to find it.
 func ListResourceGuestLinks(w http.ResponseWriter, r *http.Request) {
 	userInfo := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	q := r.URL.Query()
-	if !mayShare(w, r, userInfo, q.Get("resource_type"), q.Get("resource_id")) {
+	resourceType, resourceID := q.Get("resource_type"), q.Get("resource_id")
+	onlyMine := false
+	if resourceType == guestModel.ResourceDoc {
+		status, _ := docShareRefusal(r.Context(), userInfo, resourceID, false)
+		onlyMine = status != 0
+	} else if !mayShare(w, r, userInfo, resourceType, resourceID, false) {
 		return
 	}
-	grants, err := guestModel.ListActiveForResource(r.Context(), q.Get("resource_type"), q.Get("resource_id"))
+	grants, err := guestModel.ListActiveForResource(r.Context(), resourceType, resourceID)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't load the links. Try again."})
 		return
 	}
 	out := make([]GuestLinkView, 0, len(grants))
 	for _, g := range grants {
-		out = append(out, GuestLinkView{ID: g.Id, Capability: g.Capability, ExpiresAt: g.ExpiresAt, CreatedAt: g.CreatedAt, Mine: g.CreatedBy == userInfo.UserPostgresInfo.Id})
+		mine := g.CreatedBy == userInfo.UserPostgresInfo.Id
+		if onlyMine && !mine {
+			continue
+		}
+		out = append(out, GuestLinkView{ID: g.Id, Capability: g.Capability, ExpiresAt: g.ExpiresAt, CreatedAt: g.CreatedAt, Mine: mine})
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": out})
 }
 
 // RevokeResourceGuestLink POST /guest/links/{id}/revoke — turns a link off,
-// for anyone who may share what it opens (a workspace admin can also do it
-// from admin settings).
+// for anyone who may share what it opens, and for whoever made the link (a
+// workspace admin can also do it from admin settings). Turning a link off only
+// narrows who sees what it opens, so its maker keeps that, whatever they may
+// share today.
 func RevokeResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 	userInfo := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
@@ -900,7 +944,7 @@ func RevokeResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That link isn't here any more."})
 		return
 	}
-	if !mayShare(w, r, userInfo, g.ResourceType, g.ResourceID) {
+	if g.CreatedBy != userInfo.UserPostgresInfo.Id && !mayShare(w, r, userInfo, g.ResourceType, g.ResourceID, false) {
 		return
 	}
 	if err := guestModel.Revoke(r.Context(), id); err != nil && !errors.Is(err, sql.ErrNoRows) {

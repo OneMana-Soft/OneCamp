@@ -6,6 +6,7 @@ import (
 	"errors"
 	"html"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 
@@ -26,6 +27,84 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 )
+
+// docGone answers for a doc in the trash: 410 to someone it was there for,
+// so the app can say it was deleted, and to anyone else the 404 any missing
+// doc gets, which tells them nothing.
+func docGone(w http.ResponseWriter, couldSee bool) {
+	if couldSee {
+		helpers.WriteJSON(w, http.StatusGone, helpers.Envolope{"msg": "This doc was deleted.", "deleted": true})
+		return
+	}
+	noSuchDoc(w)
+}
+
+// docListPage bounds a list's paging as asked of the graph: a page of 1 to
+// maxDocListPage docs (defaultDocListPage when none, or less than one, was
+// asked for) from a page index of 0 or more (docPageIndex). Neither was
+// bounded, so a huge size read every doc at once, and a negative one reached
+// the graph's first: argument.
+func docListPage(pageIndex, pageSize int) (int, int) {
+	if pageSize < 1 {
+		pageSize = defaultDocListPage
+	}
+	pageSize = min(pageSize, maxDocListPage)
+	return docPageIndex(pageIndex, pageSize), pageSize
+}
+
+// docPageIndex bounds the index of a page of pageSize (1 or more) to 0 or
+// more, and to the pages that start before maxDocListOffset. The page starts
+// at pageIndex*pageSize, an int: a huge index overflowed it to a negative
+// offset, which the graph and Postgres refuse.
+func docPageIndex(pageIndex, pageSize int) int {
+	return min(max(pageIndex, 0), (maxDocListOffset-1)/pageSize)
+}
+
+// docViewersPage is the paging GET /doc/getViewers asks for, as a limit and an
+// offset: pages of 50 viewers, or of the 1 to 200 asked for, from page 0 or
+// the one asked for (docPageIndex).
+func docViewersPage(q url.Values) (limit, offset int) {
+	pageSize := 50
+	if v := q.Get("pageSize"); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil && n > 0 && n <= 200 {
+			pageSize = n
+		}
+	}
+	pageIndex := 0
+	if v := q.Get("pageIndex"); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil && n >= 0 {
+			pageIndex = n
+		}
+	}
+	return pageSize, docPageIndex(pageIndex, pageSize) * pageSize
+}
+
+const (
+	defaultDocListPage = 20
+	maxDocListPage     = 100
+	// maxDocListOffset is further than anyone pages through a list of docs or
+	// of a doc's viewers.
+	maxDocListOffset = 1_000_000
+)
+
+func noSuchDoc(w http.ResponseWriter) {
+	helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such doc."})
+}
+
+// docMissing answers an error that says the doc isn't there for the person
+// (business.ErrDocDeleted: 410; business.ErrNotFound: 404), and reports
+// whether it did.
+func docMissing(w http.ResponseWriter, err error) bool {
+	switch {
+	case errors.Is(err, business.ErrDocDeleted):
+		docGone(w, true)
+	case errors.Is(err, business.ErrNotFound):
+		noSuchDoc(w)
+	default:
+		return false
+	}
+	return true
+}
 
 func GetDocInfo(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -48,6 +127,9 @@ func GetDocInfo(w http.ResponseWriter, r *http.Request) {
 
 	dgraphDoc, err := business.GetDocByDocUUID(ctx, docUUIDString, userInfo.UserDgraphInfo.Uid)
 
+	if docMissing(w, err) {
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/GetDocInfo Failed to get dgraph doc info from dgraph err: %+v",
@@ -56,6 +138,11 @@ func GetDocInfo(w http.ResponseWriter, r *http.Request) {
 			"msg": "Failed to dgraph doc info from dgraph",
 			"err": err,
 		})
+		return
+	}
+
+	if business.IsDeleted(dgraphDoc) {
+		docGone(w, business.CouldRead(dgraphDoc, userInfo.UserDgraphInfo.Uuid))
 		return
 	}
 
@@ -92,29 +179,9 @@ func DeleteReactionOnCommentDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dgraphReaction, err := reactionBusiness.GetReactionNodeByDgraphUID(ctx, reactionInfo.ReactionDgraphUid)
-	if err != nil || dgraphReaction == nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/DeleteReactionOnCommentDoc Failed to parse the body of the req err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse the body of the req",
-			"err": err,
-		})
-		return
-	}
-
-	if dgraphReaction.AddedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "You can only remove your own reaction.",
-		})
-		return
-	}
-
 	commentDgraphInfo, err := commentBusiness.GetDgraphDocCommentInfoByUUID(ctx, reactionInfo.CommentId, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || commentDgraphInfo == nil || !commentDgraphInfo.Doc.DeletedAt.IsZero() {
+	if err != nil || commentDgraphInfo == nil || commentDgraphInfo.Doc == nil || commentDgraphInfo.CommentBy == nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/DeleteReactionOnCommentDoc Failed to get comment dgraph info err: %+v",
 			err)
@@ -123,6 +190,16 @@ func DeleteReactionOnCommentDoc(w http.ResponseWriter, r *http.Request) {
 			"msg": "Failed to get comment dgraph info",
 			"err": err,
 		})
+		return
+	}
+	if business.IsDeleted(commentDgraphInfo.Doc) {
+		docGone(w, business.CouldRead(commentDgraphInfo.Doc, userInfo.UserDgraphInfo.Uuid))
+		return
+	}
+
+	dgraphReaction, refusal := reactionBusiness.MayChange(ctx, reactionBusiness.OnComment, commentDgraphInfo.Uid, reactionInfo.ReactionDgraphUid, userInfo.UserDgraphInfo.Uid)
+	if refusal != nil {
+		helpers.WriteJSON(w, refusal.Status, helpers.Envolope{"msg": refusal.Msg})
 		return
 	}
 
@@ -164,7 +241,7 @@ func CreateOrUpdateDocCommentReaction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dgraphComment, err := commentBusiness.GetDgraphDocCommentInfoByUUID(ctx, reactionInfo.CommentId, userInfo.UserDgraphInfo.Uid)
-	if err != nil || dgraphComment == nil || !dgraphComment.Doc.DeletedAt.IsZero() {
+	if err != nil || dgraphComment == nil || dgraphComment.Doc == nil || dgraphComment.CommentBy == nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/CreateOrUpdateDocCommentReaction Failed to get dgraph comment err: %+v",
 			err)
@@ -175,6 +252,10 @@ func CreateOrUpdateDocCommentReaction(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if business.IsDeleted(dgraphComment.Doc) {
+		docGone(w, business.CouldRead(dgraphComment.Doc, userInfo.UserDgraphInfo.Uuid))
+		return
+	}
 
 	if !business.CanRead(dgraphComment.Doc, userInfo.UserDgraphInfo.Uuid) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
@@ -183,7 +264,21 @@ func CreateOrUpdateDocCommentReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reactionInfo.ReactionDgraphUid, err = business.CreateOrUpdateDocCommentReaction(ctx, &reactionInfo, dgraphComment, &userInfo.UserDgraphInfo)
+	// A uid changes that reaction, and only the caller's own on this comment.
+	if reactionInfo.ReactionDgraphUid != "" {
+		dgraphReaction, refusal := reactionBusiness.MayChange(ctx, reactionBusiness.OnComment, dgraphComment.Uid, reactionInfo.ReactionDgraphUid, userInfo.UserDgraphInfo.Uid)
+		if refusal != nil {
+			helpers.WriteJSON(w, refusal.Status, helpers.Envolope{"msg": refusal.Msg})
+			return
+		}
+		reactionInfo.ReactionDgraphUid = dgraphReaction.Uid
+	}
+
+	// A new reaction answers with its uid; a changed one keeps its own.
+	created, err := business.CreateOrUpdateDocCommentReaction(ctx, &reactionInfo, dgraphComment, &userInfo.UserDgraphInfo)
+	if created != "" {
+		reactionInfo.ReactionDgraphUid = created
+	}
 	if err != nil || reactionInfo.ReactionDgraphUid == "" {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/CreateOrUpdateDocCommentReaction Failed to create/update reaction on comment err: %+v",
@@ -245,6 +340,16 @@ func DeleteDocComment(w http.ResponseWriter, r *http.Request) {
 			"msg": "Failed to dgraph doc comment info from dgraph",
 			"err": err,
 		})
+		return
+	}
+	// A comment uuid that isn't a doc's comment (or isn't anyone's) is no
+	// comment here; it used to reach a nil doc further down.
+	if dgraphComment == nil || dgraphComment.Doc == nil || dgraphComment.CommentBy == nil {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such comment."})
+		return
+	}
+	if business.IsDeleted(dgraphComment.Doc) {
+		docGone(w, business.CouldRead(dgraphComment.Doc, userInfo.UserDgraphInfo.Uuid))
 		return
 	}
 
@@ -320,8 +425,19 @@ func UpdateDocComment(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if dgraphComment == nil || dgraphComment.Doc == nil || dgraphComment.CommentBy == nil {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such comment."})
+		return
+	}
+	if business.IsDeleted(dgraphComment.Doc) {
+		docGone(w, business.CouldRead(dgraphComment.Doc, userInfo.UserDgraphInfo.Uuid))
+		return
+	}
 
-	if dgraphComment.CommentBy.Uuid != userInfo.UserDgraphInfo.Uuid {
+	// Its author, and only while they can still read the doc: someone a
+	// private doc is no longer shared with can't put new words into it.
+	if dgraphComment.CommentBy.Uuid != userInfo.UserDgraphInfo.Uuid ||
+		!business.CanRead(dgraphComment.Doc, userInfo.UserDgraphInfo.Uuid) {
 
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
@@ -394,6 +510,9 @@ func CreateDocComment(w http.ResponseWriter, r *http.Request) {
 
 	dgraphBasicDoc, err := business.GetBasicDgraphDocByUUID(ctx, docCommentInfo.DocUuid, userInfo.UserDgraphInfo.Uid)
 
+	if docMissing(w, err) {
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/CreateDocComment Failed to get dgraph doc info from dgraph err: %+v",
@@ -402,6 +521,10 @@ func CreateDocComment(w http.ResponseWriter, r *http.Request) {
 			"msg": "Failed to dgraph doc info from dgraph",
 			"err": err,
 		})
+		return
+	}
+	if business.IsDeleted(dgraphBasicDoc) {
+		docGone(w, business.CouldRead(dgraphBasicDoc, userInfo.UserDgraphInfo.Uuid))
 		return
 	}
 
@@ -503,6 +626,7 @@ func GetPrivateDocList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	pageIndex, pageSize = docListPage(pageIndex, pageSize)
 	dgraphDocList, err := business.GetPrivateDoc(ctx, userInfo.UserDgraphInfo.Uid, pageIndex, pageSize)
 
 	if err != nil {
@@ -574,6 +698,7 @@ func GetPublicDocList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	pageIndex, pageSize = docListPage(pageIndex, pageSize)
 	dgraphDocList, err := business.GetPublicDoc(ctx, pageIndex, pageSize)
 
 	if err != nil {
@@ -621,6 +746,9 @@ func GetAllCommentList(w http.ResponseWriter, r *http.Request) {
 
 	docDgraph, err := business.GetDocCommentList(ctx, docUUIDString, userInfo.UserDgraphInfo.Uid)
 
+	if docMissing(w, err) {
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/GetAllCommentList Failed to get comment list from dgarph err: %+v",
@@ -629,6 +757,10 @@ func GetAllCommentList(w http.ResponseWriter, r *http.Request) {
 			"msg": "Failed to get comment list from dgarph",
 			"err": err,
 		})
+		return
+	}
+	if business.IsDeleted(docDgraph) {
+		docGone(w, business.CouldRead(docDgraph, userInfo.UserDgraphInfo.Uuid))
 		return
 	}
 
@@ -744,6 +876,9 @@ func DeleteDoc(w http.ResponseWriter, r *http.Request) {
 	}
 
 	docDgraph, err := business.GetBasicDgraphDocByUUID(ctx, docInfo.DocId, userInfo.UserDgraphInfo.Uid)
+	if docMissing(w, err) {
+		return
+	}
 	if err != nil {
 
 		helpers.LogErrorWithContext(ctx,
@@ -756,8 +891,12 @@ func DeleteDoc(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if business.IsDeleted(docDgraph) {
+		docGone(w, business.CouldRead(docDgraph, userInfo.UserDgraphInfo.Uuid))
+		return
+	}
 
-	if docDgraph.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
+	if !business.IsOwner(docDgraph, userInfo.UserDgraphInfo.Uid) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
@@ -773,6 +912,9 @@ func DeleteDoc(w http.ResponseWriter, r *http.Request) {
 
 	err = business.DeleteDoc(ctx, docInfo.DocId)
 
+	if docMissing(w, err) {
+		return
+	}
 	if err != nil {
 
 		helpers.LogErrorWithContext(ctx,
@@ -829,6 +971,10 @@ func UpdateDocBody(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Couldn't open the doc just now. Try again in a moment."})
 		return
 	}
+	if business.IsDeleted(access) {
+		docGone(w, business.CouldEdit(access, userInfo.UserDgraphInfo.Uid))
+		return
+	}
 	owner := business.IsOwner(access, userInfo.UserDgraphInfo.Uid)
 	if !business.CanEdit(access, userInfo.UserDgraphInfo.Uid) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You can't edit this doc."})
@@ -841,6 +987,9 @@ func UpdateDocBody(w http.ResponseWriter, r *http.Request) {
 
 	err = business.UpdateDoc(ctx, &docInfo)
 
+	if docMissing(w, err) {
+		return
+	}
 	if err != nil {
 
 		helpers.LogErrorWithContext(ctx,
@@ -877,13 +1026,30 @@ func UpdateDocFromCollab(w http.ResponseWriter, r *http.Request) {
 
 	// Map to InputUpdateDoc
 	// We'll store the HTML content as the doc body for now
-	err = business.UpdateDocFromCollab(ctx, collabInput.DocUuid, collabInput.HtmlContent, collabInput.YjsState, collabInput.Contributors)
+	err = business.UpdateDocFromCollab(ctx, collabInput.DocUuid, collabInput.HtmlContent, collabInput.YjsState, collabInput.Contributors, collabInput.KeepBody, collabInput.ExpectBodyHash)
 
+	// A doc deleted while an editor was still open on it takes no more saves
+	// (410), and nothing is written into the trash: the collaboration
+	// service keeps the unsaved edits rather than retrying a refusal.
+	if docMissing(w, err) {
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/UpdateDocFromCollab Failed to update doc body from collab err: %+v",
 			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+		// The collaboration service retries a save that may succeed later and
+		// gives up (quarantining the edits) on one refused for its content, so
+		// a graph that didn't answer must not look like a refusal:
+		// collaboration-service/saveFailures.js isTransient.
+		status := http.StatusServiceUnavailable
+		switch {
+		case errors.Is(err, business.ErrUnsafeCollabBody):
+			status = http.StatusUnprocessableEntity
+		case errors.Is(err, business.ErrNotFound):
+			status = http.StatusNotFound
+		}
+		helpers.WriteJSON(w, status, helpers.Envolope{
 			"msg": "Failed to update doc body",
 			"err": err,
 		})
@@ -912,6 +1078,9 @@ func UpdateDocPermissions(w http.ResponseWriter, r *http.Request) {
 
 	docDgraph, err := business.GetBasicDgraphDocByUUID(ctx, input.DocId, userInfo.UserDgraphInfo.Uid)
 
+	if docMissing(w, err) {
+		return
+	}
 	if err != nil {
 
 		helpers.LogErrorWithContext(ctx,
@@ -923,8 +1092,12 @@ func UpdateDocPermissions(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if business.IsDeleted(docDgraph) {
+		docGone(w, business.CouldRead(docDgraph, userInfo.UserDgraphInfo.Uuid))
+		return
+	}
 
-	if docDgraph.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
+	if !business.IsOwner(docDgraph, userInfo.UserDgraphInfo.Uid) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
@@ -957,6 +1130,9 @@ func GetDocPermissions(w http.ResponseWriter, r *http.Request) {
 
 	docDgraph, err := business.GetBasicDgraphDocByUUID(ctx, docUUID, userUID)
 
+	if docMissing(w, err) {
+		return
+	}
 	if err != nil {
 
 		helpers.LogErrorWithContext(ctx,
@@ -966,6 +1142,10 @@ func GetDocPermissions(w http.ResponseWriter, r *http.Request) {
 			"msg": "Failed to get dgraph doc info",
 			"err": err,
 		})
+		return
+	}
+	if business.IsDeleted(docDgraph) {
+		docGone(w, business.CouldRead(docDgraph, userInfo.UserDgraphInfo.Uuid))
 		return
 	}
 
@@ -997,11 +1177,27 @@ func GetDocForCollab(w http.ResponseWriter, r *http.Request) {
 	// Use GetSystemDocByUUID for internal fetch (no user context needed)
 	dgraphDoc, err := business.GetSystemDocByUUID(ctx, docUUIDString)
 
+	// The collaboration service refuses to open a doc it could not read, rather
+	// than serve it empty (an empty doc's first edit was saved over the body),
+	// and retries a read that may work later: so "no such doc" and "the graph
+	// didn't answer" are told apart.
+	if errors.Is(err, business.ErrNotFound) || (err == nil && dgraphDoc == nil) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such doc."})
+		return
+	}
+	// A deleted doc isn't opened either. /authorize lets nobody into one, so
+	// this is a session let in a moment before the delete; the service, which
+	// refuses to open a doc it can't read rather than serve it empty, opens
+	// nothing that could later be saved over it.
+	if err == nil && business.IsDeleted(dgraphDoc) {
+		docGone(w, true)
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/GetDocForCollab Failed to get dgraph doc info from dgraph err: %+v",
 			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{
 			"msg": "Failed to dgraph doc info from dgraph",
 			"err": err,
 		})
@@ -1038,6 +1234,9 @@ func DocCollabAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	dgraphDoc, err := business.GetDgraphDocByUUIDOnlyEditingInfo(ctx, docInfo.DocId, userInfo.UserDgraphInfo.Uid)
 
+	if docMissing(w, err) {
+		return
+	}
 	if err != nil || dgraphDoc == nil {
 
 		helpers.LogErrorWithContext(ctx,
@@ -1052,6 +1251,11 @@ func DocCollabAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	}
 
+	// Nobody joins a deleted doc live, its owner included.
+	if business.IsDeleted(dgraphDoc) {
+		docGone(w, business.CouldEdit(dgraphDoc, userInfo.UserDgraphInfo.Uid))
+		return
+	}
 	if !business.CanEdit(dgraphDoc, userInfo.UserDgraphInfo.Uid) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Unauthorized doc access",
@@ -1083,9 +1287,7 @@ func SearchPrivateDocList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if inputDocName.PageSize == 0 {
-		inputDocName.PageSize = 20
-	}
+	inputDocName.PageIndex, inputDocName.PageSize = docListPage(inputDocName.PageIndex, inputDocName.PageSize)
 
 	// Sanitise before Dgraph regex interpolation.
 	if safe, sErr := dgraphquery.SanitizeSearchTerm(inputDocName.SearchText); sErr != nil {
@@ -1142,9 +1344,7 @@ func SearchPublicDocList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if inputDocName.PageSize == 0 {
-		inputDocName.PageSize = 20
-	}
+	inputDocName.PageIndex, inputDocName.PageSize = docListPage(inputDocName.PageIndex, inputDocName.PageSize)
 
 	if safe, sErr := dgraphquery.SanitizeSearchTerm(inputDocName.SearchText); sErr != nil {
 		if errors.Is(sErr, dgraphquery.ErrEmpty) {
@@ -1240,6 +1440,9 @@ func GetDocSnapshots(w http.ResponseWriter, r *http.Request) {
 	}
 
 	list, err := business.ListDocSnapshots(ctx, docUUID, userInfo.UserDgraphInfo.Uid)
+	if docMissing(w, err) {
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetDocSnapshots failed err: %+v", err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to get doc version history", "err": err.Error()})
@@ -1271,6 +1474,9 @@ func RestoreDocSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := business.RestoreDocSnapshot(ctx, input.DocId, snapshotUUID, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid); err != nil {
+		if docMissing(w, err) {
+			return
+		}
 		helpers.LogErrorWithContext(ctx, "controllers/RestoreDocSnapshot failed err: %+v", err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to restore document", "err": err.Error()})
 		return
@@ -1296,6 +1502,10 @@ func RecordDocView(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := business.RecordDocView(ctx, input.DocId, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid); err != nil {
+		// Best effort, except about a doc that isn't there.
+		if docMissing(w, err) {
+			return
+		}
 		helpers.LogErrorWithContext(ctx, "controllers/RecordDocView failed err: %+v", err)
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Success"})
@@ -1313,21 +1523,11 @@ func GetDocViewers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	q := r.URL.Query()
-	pageSize := 50
-	if v := q.Get("pageSize"); v != "" {
-		if n, perr := strconv.Atoi(v); perr == nil && n > 0 && n <= 200 {
-			pageSize = n
-		}
+	limit, offset := docViewersPage(r.URL.Query())
+	page, err := business.ListDocViewers(ctx, docUUID, userInfo.UserDgraphInfo.Uid, limit, offset)
+	if docMissing(w, err) {
+		return
 	}
-	pageIndex := 0
-	if v := q.Get("pageIndex"); v != "" {
-		if n, perr := strconv.Atoi(v); perr == nil && n >= 0 {
-			pageIndex = n
-		}
-	}
-
-	page, err := business.ListDocViewers(ctx, docUUID, userInfo.UserDgraphInfo.Uid, pageSize, pageIndex*pageSize)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetDocViewers failed err: %+v", err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to get doc viewers", "err": err.Error()})

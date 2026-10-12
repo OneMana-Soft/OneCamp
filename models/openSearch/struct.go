@@ -51,11 +51,16 @@ type OpenSearchComment struct {
 	CommentProjectName          string                        `json:"comment_project_name,omitempty"`
 	CommentTaskUuid             string                        `json:"comment_task_id,omitempty"`
 	CommentChatUuid             string                        `json:"comment_chat_id,omitempty"`
-	CommentDocPrivate           bool                          `json:"comment_doc_private,omitempty"`
-	CommentDocReadingUsers      []string                      `json:"comment_doc_reading_users,omitempty"`
-	CommentDocEditingUsers      []string                      `json:"comment_doc_editing_users,omitempty"`
-	CommentDocCommentingUsers   []string                      `json:"comment_doc_commenting_users,omitempty"`
-	CommentDocCreatedByUserUuid string                        `json:"comment_doc_created_by_user_id,omitempty"`
+	// CommentDocPrivate is set for a comment on a doc only, and then written
+	// out, false included: global search grants a public doc's comments by
+	// comment_doc_private:false, and a plain bool left false out, so a comment
+	// on a public doc was found by nobody it wasn't shared with. Nil for every
+	// other comment, which must never carry it (the grant would open them all).
+	CommentDocPrivate           *bool    `json:"comment_doc_private,omitempty"`
+	CommentDocReadingUsers      []string `json:"comment_doc_reading_users,omitempty"`
+	CommentDocEditingUsers      []string `json:"comment_doc_editing_users,omitempty"`
+	CommentDocCommentingUsers   []string `json:"comment_doc_commenting_users,omitempty"`
+	CommentDocCreatedByUserUuid string   `json:"comment_doc_created_by_user_id,omitempty"`
 	// Board comment permission fields. CommentBoardPublic is set true only for
 	// a comment on a public board so the search permission clause can grant it
 	// to everyone without a blanket term that would leak other comment types.
@@ -92,13 +97,14 @@ type OpenSearchAttachment struct {
 	AttachmentChatParticipants     []*OpenSearchChatParticipants `json:"attachment_chat_participants,omitempty"`
 	AttachmentChatFromUserUuid     string                        `json:"attachment_chat_from_user_id,omitempty"`
 	AttachmentChatFromUserFullName string                        `json:"attachment_chat_from_user_name,omitempty"`
-	AttachmentDocPrivate           bool                          `json:"attachment_doc_private,omitempty"`
-	AttachmentDocReadingUsers      []string                      `json:"attachment_doc_reading_users,omitempty"`
-	AttachmentDocEditingUsers      []string                      `json:"attachment_doc_editing_users,omitempty"`
-	AttachmentDocCommentingUsers   []string                      `json:"attachment_doc_commenting_users,omitempty"`
-	AttachmentDocCreatedByUserUuid string                        `json:"attachment_doc_created_by_user_id,omitempty"`
-	AttachmentCreatedAt            int64                         `json:"created_date,omitempty"`
-	AttachmentDeletedAt            *int64                        `json:"deleted_date"`
+	// AttachmentDocPrivate: as CommentDocPrivate, for a file in a doc's comment.
+	AttachmentDocPrivate           *bool    `json:"attachment_doc_private,omitempty"`
+	AttachmentDocReadingUsers      []string `json:"attachment_doc_reading_users,omitempty"`
+	AttachmentDocEditingUsers      []string `json:"attachment_doc_editing_users,omitempty"`
+	AttachmentDocCommentingUsers   []string `json:"attachment_doc_commenting_users,omitempty"`
+	AttachmentDocCreatedByUserUuid string   `json:"attachment_doc_created_by_user_id,omitempty"`
+	AttachmentCreatedAt            int64    `json:"created_date,omitempty"`
+	AttachmentDeletedAt            *int64   `json:"deleted_date"`
 }
 
 type OpenSearchTask struct {
@@ -134,6 +140,32 @@ type OpenSearchDoc struct {
 	DocCreatedAt         int64    `json:"created_date,omitempty"`
 	DocUpdatedAt         int64    `json:"updated_date,omitempty"`
 	DocDeletedAt         *int64   `json:"deleted_date"`
+}
+
+// OpenSearchDocEntry is a doc's whole entry in the docs index, as it is
+// written: always whole (an index, never a partial update), and with every
+// field global search filters by written out, false and empty included.
+// OpenSearchDoc, the shape a hit is read back in, leaves those out when they
+// are false or empty, and its partial updates left an entry's old values in
+// place: no public doc said it was public, so nobody but the people it was
+// shared with ever found one; a doc made public again stayed private; and a
+// person a doc stopped being shared with went on finding its title and text.
+// DeletedAt is left out for a live doc, which a whole write clears.
+type OpenSearchDocEntry struct {
+	Uuid                 string   `json:"doc_uuid"`
+	DocTitle             string   `json:"doc_title"`
+	DocBody              string   `json:"doc_body"`
+	DocSnippet           string   `json:"doc_snippet"`
+	DocCreatedByUserUuid string   `json:"doc_created_by_user_id"`
+	DocCreatedByFullName string   `json:"doc_created_by_user_full_name"`
+	DocCreatedByProfile  *string  `json:"doc_created_by_profile,omitempty"`
+	DocPrivate           bool     `json:"doc_private"`
+	DocReadingUsers      []string `json:"doc_reading_users"`
+	DocEditingUsers      []string `json:"doc_editing_users"`
+	DocCommentingUsers   []string `json:"doc_commenting_users"`
+	DocCreatedAt         int64    `json:"created_date,omitempty"`
+	DocUpdatedAt         int64    `json:"updated_date,omitempty"`
+	DocDeletedAt         *int64   `json:"deleted_date,omitempty"`
 }
 
 type OpenSearchBoard struct {

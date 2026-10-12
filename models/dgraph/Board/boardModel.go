@@ -123,6 +123,24 @@ func GetDgraphBoardInfoByUUID(ctx context.Context, query string, variables map[s
 	return
 }
 
+// GetDgraphBoards runs a board query and returns every board in its
+// "boardInfo" block. Finding none is not an error.
+func GetDgraphBoards(ctx context.Context, query string, variables map[string]string) ([]*dgraphStruct.DgraphBoard, error) {
+	resp, err := dgraphInit.DgraphClient.NewReadOnlyTxn().QueryWithVars(ctx, query, variables)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/GetDgraphBoards failed to get boards err: %+v", err)
+		return nil, err
+	}
+	var boardsInfo struct {
+		BoardInfo []*dgraphStruct.DgraphBoard `json:"boardInfo"`
+	}
+	if err := json.Unmarshal(resp.Json, &boardsInfo); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/GetDgraphBoards failed to unmarshal response json err: %+v", err)
+		return nil, err
+	}
+	return boardsInfo.BoardInfo, nil
+}
+
 // UpdateBoardPermissions adds/removes editors/viewers/commenters on a board in
 // a single upsert, mirroring UpdateDocPermissions. Users are resolved by UUID.
 func UpdateBoardPermissions(ctx context.Context, input *adapter.InputUpdateBoardPermissions) (err error) {

@@ -20,6 +20,7 @@ import (
 	checkInBusiness "github.com/akashc777/OneCamp/business/CheckIn"
 	commandBusiness "github.com/akashc777/OneCamp/business/Command"
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
+	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	githubBusiness "github.com/akashc777/OneCamp/business/GitHub"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
@@ -195,6 +196,9 @@ func startBackgroundLoops(ctx context.Context) {
 	archiveBusiness.StartAutoArchiver(ctx)
 	// Once: when each older task entered its status, for "time in status".
 	taskBusiness.StartStatusSinceBackfill(ctx)
+	// Once per install: every doc's global search entries rewritten from the
+	// doc (who may find it, whether it is deleted), and its comments' too.
+	docBusiness.StartDocSearchRepair(ctx)
 	// Every start: an @handle for each member who has none (accounts from
 	// before handles), derived from their name.
 	userBusiness.StartHandleBackfill(ctx)
@@ -657,6 +661,34 @@ func main() {
 			}
 		}
 		os.Exit(demoseed.Main(ctx, adminEmail, refresh))
+	}
+
+	// `go-one-camp repairdocs [--apply]` finds docs whose body a collaboration
+	// service before v2.70.0 replaced with "<p>Error generating HTML</p>" (or
+	// left far shorter than its saved Yjs state) and, with --apply, restores
+	// them from that state or from their version history. Without --apply it
+	// only lists what it would do. Idempotent; business/Doc/docRepair.go.
+	if helpers.IsClientSubcommand(os.Args, "repairdocs") {
+		apply := false
+		for _, a := range os.Args[2:] {
+			if a == "--apply" {
+				apply = true
+			}
+		}
+		rep, rerr := docBusiness.RepairDocs(ctx, apply, os.Stdout)
+		// A restored doc's search entry is written in the background: exiting
+		// at once cut the last of those writes off, and those docs kept the
+		// placeholder's text in search.
+		if pending := docBusiness.WaitForSearchWrites(ctx, 10*time.Minute); pending > 0 {
+			fmt.Fprintf(os.Stderr, "repairdocs: stopped waiting with %d docs' search entries still being written; each is written again when its doc is next saved\n", pending)
+		}
+		if rerr != nil || len(rep.Failed) > 0 {
+			if rerr != nil {
+				fmt.Fprintln(os.Stderr, "repairdocs:", rerr)
+			}
+			os.Exit(1)
+		}
+		os.Exit(0)
 	}
 
 	app := &Application{

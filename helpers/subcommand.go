@@ -26,7 +26,7 @@ func IsClientSubcommand(args []string, name string) bool {
 // run its background loops: `demoseed` runs every night beside the live
 // instance, and a worker in that short-lived process could claim an agent's
 // job, exit mid-run, and leave it to be reclaimed and posted twice.
-var OneShotSubcommands = []string{"demoseed"}
+var OneShotSubcommands = []string{"demoseed", "repairdocs"}
 
 // RoleForProcess is the role this process should actually take: a one-shot
 // subcommand runs no workers, whatever SERVICE_ROLE says; anything else keeps

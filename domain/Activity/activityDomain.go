@@ -217,12 +217,13 @@ func GetLatestMentionByUserId(ctx context.Context, userDgraphId string, pageInde
 								}
 							}
 
-							comment_doc @filter(not gt(doc_deleted_at, "1970-01-01T00:00:00Z")) {
+							# Deleted too: the feed asks the doc or board (business/Activity keepReadable), which refuses a deleted one.
+							comment_doc {
 								doc_uuid
 								doc_title
 
 							}
-							comment_board @filter(not gt(board_deleted_at, "1970-01-01T00:00:00Z")) {
+							comment_board {
 								board_uuid
 								board_title
 							}
@@ -387,7 +388,9 @@ func GetUnifiedActivity(ctx context.Context, userDgraphId string, beforeTime tim
 	variables := make(map[string]string)
 	variables["$user_id"] = userDgraphId
 	variables["$limit"] = strconv.Itoa(limit + 1)
-	variables["$time"] = beforeTime.Format(time.RFC3339)
+	// To the nanosecond: cut to the second, items within the cursor's second
+	// but before it were never listed.
+	variables["$time"] = beforeTime.UTC().Format(time.RFC3339Nano)
 
 	query := `query UnifiedActivity($user_id: string, $limit: int, $time: string) {
 		mentionInfo(func: uid($user_id)) {
@@ -466,11 +469,12 @@ func GetUnifiedActivity(ctx context.Context, userDgraphId string, beforeTime tim
 							project_uuid
 						}
 					}
-					comment_doc @filter(not gt(doc_deleted_at, "1970-01-01T00:00:00Z")) {
+					# Deleted too: the feed asks the doc or board (business/Activity keepReadable), which refuses a deleted one.
+					comment_doc {
 						doc_uuid
 						doc_title
 					}
-					comment_board @filter(not gt(board_deleted_at, "1970-01-01T00:00:00Z")) {
+					comment_board {
 						board_uuid
 						board_title
 					}

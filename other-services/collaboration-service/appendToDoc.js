@@ -21,7 +21,7 @@
 import { timingSafeEqual } from 'node:crypto'
 import * as Y from 'yjs'
 import { TiptapTransformer } from '@hocuspocus/transformer'
-import { generateJSON } from '@tiptap/html'
+import { htmlToDoc } from './preserved.js'
 
 export const APPEND_PATH = /^\/internal\/docs\/([0-9a-fA-F-]{36})\/append$/
 export const MAX_APPEND_BYTES = 256 * 1024
@@ -41,8 +41,8 @@ export function internalSecretOK(presented, configured) {
 // the same extensions the editor uses, then cloned: a Yjs type belongs to one
 // document, and a clone is the unattached copy another document can take.
 export function htmlToYNodes(html, extensions) {
-    const json = generateJSON(html, extensions)
-    const scratch = TiptapTransformer.toYdoc(json, 'default', extensions)
+    const { json, extensions: withKept } = htmlToDoc(html, extensions)
+    const scratch = TiptapTransformer.toYdoc(json, 'default', withKept)
     return scratch.getXmlFragment('default').toArray().map((node) => node.clone())
 }
 
@@ -54,12 +54,12 @@ export function appendNodes(ydoc, nodes) {
     })
 }
 
-function send(response, status, body) {
+export function send(response, status, body) {
     response.writeHead(status, { 'Content-Type': 'application/json' })
     response.end(JSON.stringify(body))
 }
 
-function readBody(request, limit) {
+export function readBody(request, limit) {
     return new Promise((resolve, reject) => {
         let size = 0
         const chunks = []

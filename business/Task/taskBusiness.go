@@ -159,7 +159,7 @@ func publishTaskCommentActivity(commentBody string, currentTime *time.Time, ment
 	for _, recipientID := range eligibleMentionsUserIDs {
 		activityItem := &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
-			Time:         time.Now().Format(time.RFC3339),
+			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Comment: &dgraphStruct.DgraphComment{
 				Uuid: commentUUID,
 				Text: commentBody,
@@ -187,7 +187,7 @@ func publishTaskCommentActivity(commentBody string, currentTime *time.Time, ment
 
 	activityItem := &dgraphModels.UnifiedActivityItem{
 		ActivityType: mqttStruct.MESSAGE_ACTIVITY_COMMENT,
-		Time:         time.Now().Format(time.RFC3339),
+		Time:         time.Now().UTC().Format(time.RFC3339Nano),
 		Comment: &dgraphStruct.DgraphComment{
 			Uuid: commentUUID,
 			Text: commentBody,
@@ -780,7 +780,7 @@ func sendNewTaskNotification(body string, projectId string, taskName string, men
 		}
 		activityItem := &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION, // In channels, new posts are notifications for members
-			Time:         time.Now().Format(time.RFC3339),
+			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Mention: &dgraphStruct.DgraphMentions{
 				TaskUuid: taskUUID,
 				Task: &dgraphStruct.DgraphTask{

@@ -7,6 +7,9 @@ package integration_test
 // to everyone's comments is open to everyone who can see it, not to anyone
 // who has its id, and a deleted doc takes no comments.
 //
+// A public doc with no creator and no privacy flag takes comments like any
+// other: reading either through a nil pointer took the request down.
+//
 // Run: go test -tags=integration ./tests/integration/ -run TestDocCommentRules -v
 
 import (
@@ -62,7 +65,7 @@ func TestDocCommentRules(t *testing.T) {
 		nodes = append(nodes, map[string]any{"uid": "_:" + name, "dgraph.type": "User", "user_uuid": id.String(), "user_name": name})
 	}
 	live := "0001-01-01T00:00:00Z"
-	docs := map[string]string{"private": uuid.NewString(), "closed": uuid.NewString(), "deleted": uuid.NewString()}
+	docs := map[string]string{"private": uuid.NewString(), "closed": uuid.NewString(), "deleted": uuid.NewString(), "orphan": uuid.NewString()}
 	nodes = append(nodes,
 		// Private, but open to comments from everyone who can read it.
 		map[string]any{"uid": "_:private", "dgraph.type": "Doc", "doc_uuid": docs["private"], "doc_title": "plans",
@@ -81,6 +84,10 @@ func TestDocCommentRules(t *testing.T) {
 			"doc_private": false, "doc_public_comment": true, "doc_deleted_at": "2026-01-01T00:00:00Z",
 			"doc_created_by":    map[string]any{"uid": "_:owner"},
 			"doc_editing_users": []map[string]any{{"uid": "_:owner"}}},
+		// Open to everyone's comments, with no creator and its privacy never
+		// set, which reads as public.
+		map[string]any{"uid": "_:orphan", "dgraph.type": "Doc", "doc_uuid": docs["orphan"], "doc_title": "notes",
+			"doc_public_comment": true, "doc_deleted_at": live},
 	)
 	uids := dg.Mutate(t, nodes)
 
@@ -113,8 +120,11 @@ func TestDocCommentRules(t *testing.T) {
 		{"owner", "private", http.StatusOK},
 		{"stranger", "closed", http.StatusForbidden},
 		{"owner", "closed", http.StatusOK},
-		{"stranger", "deleted", http.StatusForbidden},
-		{"owner", "deleted", http.StatusForbidden},
+		// A deleted doc takes no comments: "it was deleted" (410), to anyone it
+		// was there for, and this one wasn't private.
+		{"stranger", "deleted", http.StatusGone},
+		{"owner", "deleted", http.StatusGone},
+		{"reader", "orphan", http.StatusOK},
 	} {
 		if got := comment(c.who, c.doc); got != c.want {
 			t.Errorf("%s commenting on the %s doc: %d, want %d", c.who, c.doc, got, c.want)
@@ -125,5 +135,8 @@ func TestDocCommentRules(t *testing.T) {
 	}
 	if n := comments("owner"); n != 2 {
 		t.Errorf("the owner has %d comments, want 2 (none on the deleted doc)", n)
+	}
+	if n := comments("reader"); n != 2 {
+		t.Errorf("the reader has %d comments, want 2 (one of them on the doc with no creator)", n)
 	}
 }

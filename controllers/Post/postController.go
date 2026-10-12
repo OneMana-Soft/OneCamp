@@ -107,17 +107,13 @@ func DeletePostCommentReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reactionDgraph, err := reactionBusiness.GetReactionNodeByDgraphUID(ctx, commentReactionInfo.ReactionDgraphUid)
-
-	if reactionDgraph.AddedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
+	reactionDgraph, refusal := reactionBusiness.MayChange(ctx, reactionBusiness.OnComment, commentInfo.Uid, commentReactionInfo.ReactionDgraphUid, userInfo.UserDgraphInfo.Uid)
+	if refusal != nil {
+		helpers.WriteJSON(w, refusal.Status, helpers.Envolope{"msg": refusal.Msg})
 		return
 	}
 
-	err = business.DeleteReactionOnCommentPost(ctx, commentInfo, commentReactionInfo.ReactionDgraphUid)
+	err = business.DeleteReactionOnCommentPost(ctx, commentInfo, reactionDgraph.Uid)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -175,26 +171,9 @@ func DeletePostReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reactionDgraphInfo, err := reactionBusiness.GetReactionNodeByDgraphUID(ctx, postReactionInfo.ReactionDgraphUid)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/DeletePostReaction Failed to reactionInfo  err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to delete reaction",
-			"err": err,
-		})
-		return
-	}
-
-	if reactionDgraphInfo.AddedBy.Uid != userInfo.UserDgraphInfo.Uid {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
+	reactionDgraphInfo, refusal := reactionBusiness.MayChange(ctx, reactionBusiness.OnPost, postInfo.Uid, postReactionInfo.ReactionDgraphUid, userInfo.UserDgraphInfo.Uid)
+	if refusal != nil {
+		helpers.WriteJSON(w, refusal.Status, helpers.Envolope{"msg": refusal.Msg})
 		return
 	}
 
@@ -258,6 +237,16 @@ func CreateOrUpdateReactionOnCommentPost(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// A uid changes that reaction, and only the caller's own on this comment.
+	if commentPostReactionInfo.ReactionDgraphUid != "" {
+		reactionDgraph, refusal := reactionBusiness.MayChange(ctx, reactionBusiness.OnComment, dgraphComment.Uid, commentPostReactionInfo.ReactionDgraphUid, userInfo.UserDgraphInfo.Uid)
+		if refusal != nil {
+			helpers.WriteJSON(w, refusal.Status, helpers.Envolope{"msg": refusal.Msg})
+			return
+		}
+		commentPostReactionInfo.ReactionDgraphUid = reactionDgraph.Uid
+	}
+
 	commentPostReactionInfo.ReactionDgraphUid, err = business.CreateOrUpdatePostCommentReaction(ctx, &commentPostReactionInfo, dgraphComment, &userInfo.UserDgraphInfo)
 
 	if err != nil {
@@ -315,6 +304,16 @@ func CreateOrUpdateReaction(w http.ResponseWriter, r *http.Request) {
 			"msg": "Not Authorized ",
 		})
 		return
+	}
+
+	// A uid changes that reaction, and only the caller's own on this post.
+	if postReactionInfo.ReactionDgraphUid != "" {
+		reactionDgraph, refusal := reactionBusiness.MayChange(ctx, reactionBusiness.OnPost, postInfo.Uid, postReactionInfo.ReactionDgraphUid, userInfo.UserDgraphInfo.Uid)
+		if refusal != nil {
+			helpers.WriteJSON(w, refusal.Status, helpers.Envolope{"msg": refusal.Msg})
+			return
+		}
+		postReactionInfo.ReactionDgraphUid = reactionDgraph.Uid
 	}
 
 	postReactionInfo.ReactionDgraphUid, err = business.CreateOrUpdatePostReaction(ctx, &postReactionInfo, postInfo.PostBy.Uid, postInfo.PostBy.Uuid, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.DisplayName(), postInfo.Channel.Uuid)

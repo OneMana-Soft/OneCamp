@@ -7,8 +7,10 @@ package notification
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
+	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
 	fcmDomain "github.com/akashc777/OneCamp/domain/UserFCMToken"
@@ -60,6 +62,42 @@ func (e *UrgentError) Error() string { return e.Msg }
 
 const urgentPerDay = 1
 
+// errNotAPerson is why anything but a person is refused.
+const errNotAPerson = "Only a person can notify someone through a pause or quiet hours. " +
+	"Agents, bots and API tokens wait until they're back."
+
+// senderRefused is the refusal when sender is not a person at the keyboard,
+// and nil when they are.
+//
+// A pause is someone saying "not now", and notify anyway is one person
+// deciding it can't wait. An agent, a bot or a script holding an API token
+// (agent-bound or not, MCP included) can't make that call for anyone: let
+// one through and a pause holds against everything but automation. The
+// route is served to signed-in sessions only, and this holds whatever
+// reaches the function: a bot or external account, a request carrying an
+// API token, and work an agent run or a schedule started (the context then
+// says what initiated it, business/AdminAudit).
+func senderRefused(ctx context.Context, sender *userModels.UserInfo) *UrgentError {
+	refuse := &UrgentError{errNotAPerson}
+	if sender == nil {
+		return refuse
+	}
+	pg, dg := sender.UserPostgresInfo, sender.UserDgraphInfo
+	if !pg.IsMember() || dg.IsBot || dg.IsExternal ||
+		strings.HasSuffix(helpers.NormalizeEmail(pg.EmailID), helpers.BotEmailDomain) {
+		return refuse
+	}
+	if ctx != nil {
+		if ctx.Value(helpers.ApiTokenIDContextKey) != nil {
+			return refuse
+		}
+		if _, set := auditBusiness.InitiatorFromCtx(ctx); set {
+			return refuse
+		}
+	}
+	return nil
+}
+
 func countRecentPings(sender, recipient uuid.UUID, since time.Time) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -80,7 +118,12 @@ func recordPing(sender, recipient uuid.UUID) error {
 
 // NotifyAnyway sends one urgent ping from sender to a teammate they have a DM
 // with, through a pause or quiet hours, at most once a day per pair.
+//
+// Only a person may: see senderRefused.
 func NotifyAnyway(ctx context.Context, sender *userModels.UserInfo, recipient uuid.UUID, now time.Time) error {
+	if e := senderRefused(ctx, sender); e != nil {
+		return e
+	}
 	if recipient == sender.UserPostgresInfo.Id {
 		return &UrgentError{"You can't ping yourself."}
 	}

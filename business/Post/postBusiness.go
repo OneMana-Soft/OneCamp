@@ -342,7 +342,7 @@ func sendNewPostNotification(title string, body string, channelId string, mentio
 	for _, recipientID := range eligibleMentionsUserIDs {
 		activityItem := &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION, // In channels, new posts are notifications for members
-			Time:         time.Now().Format(time.RFC3339),
+			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Mention: &dgraphStruct.DgraphMentions{
 				PostUuid: postID,
 				Post: &dgraphStruct.DgraphPost{
@@ -606,7 +606,7 @@ func PublishPostCommentActivity(commentUUID string, commentBody string, postUUID
 	if dgraphPostInfo.PostBy.Uuid != userDgraph.Uuid {
 		activityItem := &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_COMMENT,
-			Time:         time.Now().Format(time.RFC3339),
+			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Comment: &dgraphStruct.DgraphComment{
 				Uuid: commentUUID,
 				Text: commentBody,
@@ -643,7 +643,7 @@ func PublishPostCommentActivity(commentUUID string, commentBody string, postUUID
 		}
 		activityItem := &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
-			Time:         time.Now().Format(time.RFC3339),
+			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Mention: &dgraphStruct.DgraphMentions{
 				CommentUuid: commentUUID,
 				Comment: &dgraphStruct.DgraphComment{
@@ -741,7 +741,7 @@ func CreateOrUpdatePostCommentReaction(ctx context.Context, reactionInfo *adapte
 		for recipientID := range recipients {
 			activityItem := &dgraphModels.UnifiedActivityItem{
 				ActivityType: "REACTION",
-				Time:         time.Now().Format(time.RFC3339),
+				Time:         time.Now().UTC().Format(time.RFC3339Nano),
 				Reaction: &dgraphModels.ReactionsActivity{
 					DgraphReaction: dgraphStruct.DgraphReaction{
 						EmojiUuid: reactionInfo.EmojiUuid,
@@ -828,7 +828,7 @@ func CreateOrUpdatePostReaction(ctx context.Context, reactionInfo *adapter.Input
 		go func() {
 			activityItem := &dgraphModels.UnifiedActivityItem{
 				ActivityType: "POST_REACTION",
-				Time:         time.Now().Format(time.RFC3339),
+				Time:         time.Now().UTC().Format(time.RFC3339Nano),
 				Reaction: &dgraphModels.ReactionsActivity{
 					DgraphReaction: dgraphStruct.DgraphReaction{
 						EmojiUuid: reactionInfo.EmojiUuid,

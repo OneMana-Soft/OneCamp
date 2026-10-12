@@ -153,3 +153,14 @@ func (e *DgraphEnv) Mutate(t *testing.T, setJSON any) map[string]string {
 	}
 	return resp.GetUids()
 }
+
+// Query runs a read-only query and returns its JSON, so a test can read back
+// what the code under test wrote.
+func (e *DgraphEnv) Query(t *testing.T, q string) []byte {
+	t.Helper()
+	resp, err := dgraphInit.DgraphClient.NewReadOnlyTxn().Query(context.Background(), q)
+	if err != nil {
+		t.Fatalf("dgraph query: %v\nquery: %s", err, q)
+	}
+	return resp.GetJson()
+}

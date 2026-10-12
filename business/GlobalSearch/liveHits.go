@@ -24,6 +24,7 @@ var hitIndex = map[string]string{
 	openSearchStruct.COMMENT_TYPE: openSearchStruct.COMMENT_INDEX,
 	openSearchStruct.TASK_TYPE:    openSearchStruct.TASK_INDEX,
 	openSearchStruct.DOC_TYPE:     openSearchStruct.DOC_INDEX,
+	openSearchStruct.PROJECT_TYPE: openSearchStruct.PROJECT_INDEX,
 }
 
 // hitKey is a hit's type and the id of what it points at.
@@ -42,6 +43,8 @@ func hitKey(h *openSearchStruct.GlobalSearchOpenSearchResp) (string, string) {
 		return h.Type, h.Task.Uuid
 	case h.Doc != nil:
 		return h.Type, h.Doc.Uuid
+	case h.Project != nil:
+		return h.Type, h.Project.Uuid
 	}
 	return h.Type, ""
 }

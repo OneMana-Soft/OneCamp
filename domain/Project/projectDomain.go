@@ -707,16 +707,21 @@ func CreateProjectInOpenSearch(openSearchProject *openSearchStruct.OpenSearchPro
 	return
 }
 
-func UpdateProjectInOpenSearch(openSearchProject *openSearchStruct.OpenSearchProject) {
+// RenameProjectInOpenSearch gives a project's search document its new name,
+// and nothing else: an archived project renamed stays out of search.
+func RenameProjectInOpenSearch(projectUUID, projectName string, updatedAt int64) {
 	ctx := context.Background()
-	err := OpenSearchModels.UpdateProjectInOpenSearch(ctx, openSearchProject)
-	if err != nil {
+	if err := OpenSearchModels.UpdateProjectFieldsInOpenSearch(ctx, projectUUID, projectRenameFields(projectName, updatedAt)); err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"domain/UpdateProjectInOpenSearch Failed to update project in opensearch err: %+v",
+			"domain/RenameProjectInOpenSearch Failed to rename project in opensearch err: %+v",
 			err)
-		return
 	}
-	return
+}
+
+// projectRenameFields is what a rename changes in the search document. No
+// deleted_date, so whether the project is archived is left as it was. Pure.
+func projectRenameFields(projectName string, updatedAt int64) map[string]interface{} {
+	return map[string]interface{}{"project_name": projectName, "updated_date": updatedAt}
 }
 
 func getUpdateProjectWithTaskCommentAndAttachmentBulkOperationStringForOpenSearch(ctx context.Context, openSearchProject *openSearchStruct.OpenSearchProject, openSearchAttachments []*openSearchStruct.OpenSearchAttachment, openSearchTasks []*openSearchStruct.OpenSearchTask, openSearchComments []*openSearchStruct.OpenSearchComment) (bulkActionString string, err error) {

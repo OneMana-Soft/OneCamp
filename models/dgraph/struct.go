@@ -316,8 +316,12 @@ type DgraphDoc struct {
 	CreatedAt        *time.Time       `json:"doc_created_at,omitempty"`
 	UpdatedAt        *time.Time       `json:"doc_updated_at,omitempty"`
 	DeletedAt        *time.Time       `json:"doc_deleted_at,omitempty"`
-	LinkedTasks      []*DgraphTask    `json:"linked_tasks,omitempty"`    // query-only: tasks linking this doc
-	LinkedProjects   []*DgraphProject `json:"linked_projects,omitempty"` // query-only: projects linking this doc
+	// ArchivedAt is set, with DeletedAt, on a doc the workspace's retention
+	// archived (business/Archive), and cleared when it is restored: what
+	// tells an archived doc from one its owner deleted.
+	ArchivedAt     *time.Time       `json:"doc_archived_at,omitempty"`
+	LinkedTasks    []*DgraphTask    `json:"linked_tasks,omitempty"`    // query-only: tasks linking this doc
+	LinkedProjects []*DgraphProject `json:"linked_projects,omitempty"` // query-only: projects linking this doc
 }
 
 type DgraphDocList struct {

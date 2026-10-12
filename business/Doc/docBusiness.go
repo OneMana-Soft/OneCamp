@@ -16,8 +16,6 @@ import (
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Activity"
 	docModels "github.com/akashc777/OneCamp/models/dgraph/Doc"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
-	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
-	openSearchGlobalSearchModels "github.com/akashc777/OneCamp/models/openSearch/GlobalSearch"
 
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 
@@ -63,6 +61,9 @@ func CreateDoc(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, inpu
 			Uid: createdByUser.Uid,
 		}},
 		CreatedAt: &currentTime,
+		// Made is the first change: a doc nobody has edited yet sorted last
+		// among its owner's docs, which order by it.
+		UpdatedAt: &currentTime,
 		DeletedAt: &zeroUnixTime,
 	}
 
@@ -73,19 +74,9 @@ func CreateDoc(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, inpu
 		return
 	}
 
-	go domain.CreateDocInOpenSearch(&openSearchStruct.OpenSearchDoc{
-		Uuid:                 dgraphDoc.Uuid,
-		DocTitle:             dgraphDoc.Title,
-		DocBody:              "",
-		DocCreatedByUserUuid: createdByUser.Uuid,
-		DocCreatedByFullName: createdByUser.DisplayName(),
-		DocCreatedByProfile:  createdByUser.ProfileKey,
-		DocPrivate:           *dgraphDoc.IsPrivate,
-		DocEditingUsers:      []string{createdByUser.Uuid},
-		DocCreatedAt:         currentTime.Unix(),
-		DocUpdatedAt:         currentTime.Unix(),
-		DocDeletedAt:         nil,
-	})
+	// Its search entry, from the doc as stored: its editors include anyone
+	// it was made editable by, and a public doc says it is public.
+	syncDocSearch(dgraphDoc.Uuid, false)
 
 	// embed for AI Second Brain (async)
 	/* AI call omitted in v1 */
@@ -97,24 +88,18 @@ func DeleteDoc(ctx context.Context, docUUID string) (err error) {
 
 	currentTime := time.Now()
 
-	// Uuid is what the upsert finds the doc by. It was missing, so the query
-	// matched nothing, the mutation changed nothing, and every delete answered
-	// 200 while the doc stayed (found by the daily journey, 6 Oct 2026).
-	dgraphDoc := &dgraphStruct.DgraphDoc{
-		DType:     []string{"Doc"},
-		Uid:       "uid(doc)",
-		Uuid:      docUUID,
-		DeletedAt: &currentTime,
-	}
-
-	_, err = domain.CreateOrUpdateDgraphDoc(ctx, dgraphDoc)
+	// By its uuid, and only a live doc: a doc already deleted, or none, is an
+	// error, never a new node (found by the daily journey, 6 Oct 2026: the
+	// uuid was once missing, and every delete answered 200 while the doc
+	// stayed).
+	err = domain.MarkDocDeleted(ctx, docUUID, currentTime)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/DeleteDoc Failed to delete doc in dgraph err: %+v", err)
 		return
 	}
 
-	go domain.DeleteDocInOpenSearch(docUUID, currentTime.Unix())
+	syncDocSearch(docUUID, false)
 	go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
 		[]string{"comment_doc_id", "attachment_doc_id"},
 		docUUID,
@@ -236,6 +221,13 @@ func GetDocCommentList(ctx context.Context, docUUID string, userUID string) (dgr
 }
 
 func UpdateDoc(ctx context.Context, updateInput *adapter.InputUpdateDoc) (err error) {
+	return updateDoc(ctx, updateInput, "", false)
+}
+
+// updateDoc is UpdateDoc, and with a Yjs state also saves it beside the body,
+// with the body's hash, in the same Dgraph mutation: the body and the state it
+// was written from are stored together or not at all.
+func updateDoc(ctx context.Context, updateInput *adapter.InputUpdateDoc, yjsState string, inTrashToo bool) (err error) {
 
 	currentTime := time.Now()
 
@@ -243,6 +235,10 @@ func UpdateDoc(ctx context.Context, updateInput *adapter.InputUpdateDoc) (err er
 		Uid:       "uid(doc)",
 		Uuid:      updateInput.DocId,
 		UpdatedAt: &currentTime,
+	}
+	if yjsState != "" && updateInput.Body != nil {
+		dgraphDoc.YjsState = yjsState
+		dgraphDoc.YjsBodyHash = collabBodyHash(*updateInput.Body)
 	}
 
 	if updateInput.Body != nil {
@@ -272,82 +268,34 @@ func UpdateDoc(ctx context.Context, updateInput *adapter.InputUpdateDoc) (err er
 		dgraphDoc.PublicComment = updateInput.PublicComment
 	}
 
-	_, err = domain.CreateOrUpdateDgraphDoc(ctx, dgraphDoc)
+	// Only a live doc is written: a deleted one is refused (ErrDocDeleted), so
+	// an editor still open on a doc its owner deleted saves nothing into the
+	// trash, and no caller can bring one back by editing it. inTrashToo is a
+	// repair of what the doc itself holds (repairdocs), which a doc in the
+	// trash gets too, for when it is restored.
+	if inTrashToo {
+		err = domain.UpdateStoredDoc(ctx, dgraphDoc)
+	} else {
+		err = domain.UpdateLiveDoc(ctx, dgraphDoc)
+	}
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/UpdateDoc Failed to update doc in dgraph err: %+v", err)
 		return
 	}
 
-	openSearchDoc := &openSearchStruct.OpenSearchDoc{
-		Uuid:         updateInput.DocId,
-		DocUpdatedAt: currentTime.Unix(),
-	}
-
-	if updateInput.Title != nil {
-		openSearchDoc.DocTitle = *updateInput.Title
-	}
-
-	if updateInput.Body != nil {
-		// Index the body as PLAIN TEXT, never as markup. doc_body is a field to
-		// match against, not one to return (global search excludes it from
-		// _source), so markup buys nothing and costs plenty: an <img>, <svg> or
-		// <video> element carries its payload in an attribute, which is how an
-		// image ends up living in the search index. Extracting text drops every
-		// tag and therefore every attribute, so media cannot reach the cluster
-		// through a document body at all.
-		//
-		// This also matches how every other indexed body is built (posts,
-		// comments, chats all index helpers.HTMLToPlainText output) and makes
-		// matching behave: with markup indexed, a search for "div" hit every doc.
-		openSearchDoc.DocBody = helpers.HTMLToPlainText(*updateInput.Body)
-		openSearchDoc.DocSnippet = dgraphDoc.Snippet
-	}
-
-	if updateInput.IsPrivate != nil {
-		openSearchDoc.DocPrivate = *updateInput.IsPrivate
-	}
-
-	go func() {
-		domain.UpdateDocInOpenSearch(openSearchDoc)
-
-		/* AI call omitted in v1 */
-
-		// 2. Cascading update for doc comments and attachments
-		updatedDoc, err := domain.GetDocPermissions(context.Background(), updateInput.DocId)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/UpdateDoc Failed to get updated doc for OpenSearch sync err: %+v", err)
-			return
-		}
-
-		if updatedDoc == nil {
-			helpers.LogErrorWithContext(ctx, "business/UpdateDoc Failed to get updated doc for OpenSearch sync: doc is nil")
-			return
-		}
-
-		readingUsers := []string{}
-		for _, u := range updatedDoc.ReadingUser {
-			readingUsers = append(readingUsers, u.Uuid)
-		}
-		editingUsers := []string{}
-		for _, u := range updatedDoc.EditingUser {
-			editingUsers = append(editingUsers, u.Uuid)
-		}
-		commentingUsers := []string{}
-		for _, u := range updatedDoc.CommentingUser {
-			commentingUsers = append(commentingUsers, u.Uuid)
-		}
-
-		createdBy := ""
-		if updatedDoc.CreatedBy != nil {
-			createdBy = updatedDoc.CreatedBy.Uuid
-		}
-
-		err = openSearchGlobalSearchModels.SyncDocMetadataInOpenSearch(ctx, updateInput.DocId, updateInput.Title, updatedDoc.IsPrivate, readingUsers, editingUsers, commentingUsers, createdBy)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/UpdateDoc Failed to sync metadata for doc comments/attachments err: %+v", err)
-		}
-	}()
+	// Its search entry, written whole from the doc as it now is (searchEntry.go).
+	// The body is indexed as PLAIN TEXT, never as markup. doc_body is a field
+	// to match against, not one to return (global search excludes it from
+	// _source), so markup buys nothing and costs plenty: an <img>, <svg> or
+	// <video> element carries its payload in an attribute, which is how an
+	// image ends up living in the search index. Extracting text drops every tag
+	// and therefore every attribute, so media cannot reach the cluster through
+	// a document body at all; and with markup indexed, a search for "div" hit
+	// every doc. Its comments' and files' entries carry its title and privacy,
+	// so they are written too when those changed, and not on every save from
+	// the editor.
+	syncDocSearch(updateInput.DocId, updateInput.Title != nil || updateInput.IsPrivate != nil)
 
 	return
 }
@@ -427,47 +375,9 @@ func UpdateDocPermissions(ctx context.Context, input adapter.InputUpdateDocPermi
 		return err
 	}
 
-	// Sync with OpenSearch
-	go func() {
-		updatedDoc, err := domain.GetDocPermissions(context.Background(), input.DocId)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/UpdateDocPermissions Failed to get updated doc for OpenSearch sync err: %+v", err)
-			return
-		}
-
-		if updatedDoc == nil {
-			helpers.LogErrorWithContext(ctx, "business/UpdateDocPermissions Failed to get updated doc for OpenSearch sync: doc is nil")
-			return
-		}
-
-		openSearchDoc := &openSearchStruct.OpenSearchDoc{
-			Uuid:         input.DocId,
-			DocUpdatedAt: time.Now().Unix(),
-		}
-
-		for _, u := range updatedDoc.ReadingUser {
-			openSearchDoc.DocReadingUsers = append(openSearchDoc.DocReadingUsers, u.Uuid)
-		}
-		for _, u := range updatedDoc.EditingUser {
-			openSearchDoc.DocEditingUsers = append(openSearchDoc.DocEditingUsers, u.Uuid)
-		}
-		for _, u := range updatedDoc.CommentingUser {
-			openSearchDoc.DocCommentingUsers = append(openSearchDoc.DocCommentingUsers, u.Uuid)
-		}
-
-		domain.UpdateDocInOpenSearch(openSearchDoc)
-
-		createdBy := ""
-		if updatedDoc.CreatedBy != nil {
-			createdBy = updatedDoc.CreatedBy.Uuid
-		}
-
-		// 3. Sync permissions for doc comments and attachments
-		err = openSearchGlobalSearchModels.SyncDocMetadataInOpenSearch(ctx, input.DocId, nil, updatedDoc.IsPrivate, openSearchDoc.DocReadingUsers, openSearchDoc.DocEditingUsers, openSearchDoc.DocCommentingUsers, createdBy)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/UpdateDocPermissions Failed to sync permissions for doc comments/attachments err: %+v", err)
-		}
-	}()
+	// Its search entries, its own and its comments' and files', written from
+	// who it is shared with now: someone taken off it stops finding it.
+	syncDocSearch(input.DocId, true)
 
 	return nil
 }
@@ -500,16 +410,6 @@ func CreateDocComment(ctx context.Context, rawDocDgraph *dgraphStruct.DgraphDoc,
 
 	commentUUID := uuid.New()
 	currentTime := time.Now()
-	zeroUnixTime := time.Time{}
-
-	var commentMentions []*dgraphStruct.DgraphUser
-
-	for _, mention := range mentionsDgraphUsersList {
-		commentMentions = append(commentMentions, &dgraphStruct.DgraphUser{
-			DType: []string{"User"},
-			Uid:   mention.Uid,
-		})
-	}
 
 	for _, mediaObj := range createTaskCommentInfoInput.Attachments {
 		mediaObj.DType = []string{"Attachment"}
@@ -523,33 +423,7 @@ func CreateDocComment(ctx context.Context, rawDocDgraph *dgraphStruct.DgraphDoc,
 		Uid:  "uid(doc)",
 		Uuid: rawDocDgraph.Uuid,
 		Comments: []*dgraphStruct.DgraphComment{
-			{
-				DType: []string{"Comment"},
-				Uid:   "uid(co)",
-				Uuid:  commentUUID.String(),
-				Text:  createTaskCommentInfoInput.CommentBody,
-				Doc: &dgraphStruct.DgraphDoc{
-					Uid: "uid(doc)",
-				},
-				ContentAddedBy: &dgraphStruct.DgraphUser{
-					Uid: rawDocDgraph.CreatedBy.Uid,
-				},
-				Attachments: createTaskCommentInfoInput.Attachments,
-				CreatedAt:   &currentTime,
-				DeletedAt:   &zeroUnixTime,
-				Mentions: &dgraphStruct.DgraphMentions{
-					CreatedAt:   &currentTime,
-					Mentions:    commentMentions,
-					CommentUuid: commentUUID.String(),
-					Comment: &dgraphStruct.DgraphComment{
-						Uid: "uid(co)",
-					},
-					DType: []string{"Mention"},
-				},
-				CommentBy: &dgraphStruct.DgraphUser{
-					Uid: createdByUser.UserDgraphInfo.Uid,
-				},
-			},
+			newDocComment(rawDocDgraph, createdByUser.UserDgraphInfo.Uid, createTaskCommentInfoInput, mentionsDgraphUsersList, commentUUID, currentTime),
 		},
 	}
 
@@ -579,33 +453,108 @@ func CreateDocComment(ctx context.Context, rawDocDgraph *dgraphStruct.DgraphDoc,
 
 	go mqttBusiness.PublishDocComment(&mqttDocComment, rawDocDgraph.Uuid)
 
-	go PublishDocCommentActivity(commentUUID.String(), createTaskCommentInfoInput.CommentBody, currentTime, rawDocDgraph, createdByUser.UserDgraphInfo)
+	go PublishDocCommentActivity(commentUUID.String(), createTaskCommentInfoInput.CommentBody, currentTime, rawDocDgraph, createdByUser.UserDgraphInfo, mentionsDgraphUsersList)
 
 	return
 }
 
-func PublishDocCommentActivity(commentUUID string, commentBody string, currentTime time.Time, rawDocDgraph *dgraphStruct.DgraphDoc, draphUser dgraphStruct.DgraphUser) {
-	if rawDocDgraph.CreatedBy.Uuid != draphUser.Uuid {
-		activityItem := &dgraphModels.UnifiedActivityItem{
-			ActivityType: mqttStruct.MESSAGE_ACTIVITY_COMMENT,
-			Time:         time.Now().Format(time.RFC3339),
-			Comment: &dgraphStruct.DgraphComment{
-				Uuid: commentUUID,
-				Text: commentBody,
-				CommentBy: &dgraphStruct.DgraphUser{
-					Uuid:     draphUser.Uuid,
-					UserName: draphUser.DisplayName(),
-				},
-				Doc: &dgraphStruct.DgraphDoc{
-					Uuid:  rawDocDgraph.Uuid,
-					Title: rawDocDgraph.Title,
-				},
-				CreatedAt: &currentTime,
-			},
-		}
-		activityBusiness.PublishActivityToUser(rawDocDgraph.CreatedBy.Uuid, activityItem)
+// newDocComment is the comment node CreateDocComment adds to doc: written by
+// authorUID at at, mentioning mentions, with the input's body and files. It is
+// on the content of the doc's creator (comment_on_content_added_by), and of
+// nobody's on a doc with no creator, which everyone may comment on when it is
+// public and takes everyone's comments: reading that doc's creator took the
+// request down. Pure.
+func newDocComment(doc *dgraphStruct.DgraphDoc, authorUID string, input *adapter.CreateOrUpdateDocCommentInput, mentions []*dgraphStruct.DgraphUser, commentUUID uuid.UUID, at time.Time) *dgraphStruct.DgraphComment {
+	var mentioned []*dgraphStruct.DgraphUser
+	for _, mention := range mentions {
+		mentioned = append(mentioned, &dgraphStruct.DgraphUser{
+			DType: []string{"User"},
+			Uid:   mention.Uid,
+		})
 	}
+	zeroUnixTime := time.Time{}
+	comment := &dgraphStruct.DgraphComment{
+		DType: []string{"Comment"},
+		Uid:   "uid(co)",
+		Uuid:  commentUUID.String(),
+		Text:  input.CommentBody,
+		Doc: &dgraphStruct.DgraphDoc{
+			Uid: "uid(doc)",
+		},
+		Attachments: input.Attachments,
+		CreatedAt:   &at,
+		DeletedAt:   &zeroUnixTime,
+		Mentions: &dgraphStruct.DgraphMentions{
+			CreatedAt:   &at,
+			Mentions:    mentioned,
+			CommentUuid: commentUUID.String(),
+			Comment: &dgraphStruct.DgraphComment{
+				Uid: "uid(co)",
+			},
+			DType: []string{"Mention"},
+		},
+		CommentBy: &dgraphStruct.DgraphUser{
+			Uid: authorUID,
+		},
+	}
+	if doc != nil && doc.CreatedBy != nil && doc.CreatedBy.Uid != "" {
+		comment.ContentAddedBy = &dgraphStruct.DgraphUser{Uid: doc.CreatedBy.Uid}
+	}
+	return comment
+}
 
+// PublishDocCommentActivity puts a new comment in the activity of whoever it
+// is for, live, as their feed lists it when it loads: the doc's owner, as a
+// comment on what they made, unless they wrote it; and anyone it mentions who
+// may read the doc, as a mention. The owner was read without a check (a doc
+// with no maker took the goroutine down), and a mention reached nobody live.
+// Push and email are business/Comment's (sendNewDocCommentNotification).
+func PublishDocCommentActivity(commentUUID string, commentBody string, currentTime time.Time, rawDocDgraph *dgraphStruct.DgraphDoc, author dgraphStruct.DgraphUser, mentions []*dgraphStruct.DgraphUser) {
+	if rawDocDgraph == nil {
+		return
+	}
+	comment := func() *dgraphStruct.DgraphComment {
+		return &dgraphStruct.DgraphComment{
+			Uuid: commentUUID,
+			Text: commentBody,
+			CommentBy: &dgraphStruct.DgraphUser{
+				Uuid:     author.Uuid,
+				UserName: author.DisplayName(),
+			},
+			Doc: &dgraphStruct.DgraphDoc{
+				Uuid:  rawDocDgraph.Uuid,
+				Title: rawDocDgraph.Title,
+			},
+			CreatedAt: &currentTime,
+		}
+	}
+	owner := ""
+	if rawDocDgraph.CreatedBy != nil {
+		owner = rawDocDgraph.CreatedBy.Uuid
+	}
+	if owner != "" && owner != author.Uuid {
+		activityBusiness.PublishActivityToUser(owner, &dgraphModels.UnifiedActivityItem{
+			ActivityType: mqttStruct.MESSAGE_ACTIVITY_COMMENT,
+			Time:         time.Now().UTC().Format(time.RFC3339Nano),
+			Comment:      comment(),
+		})
+	}
+	told := map[string]bool{author.Uuid: true, owner: true, "": true}
+	for _, m := range mentions {
+		if m == nil || told[m.Uuid] || !domain.ReadableBy(rawDocDgraph, m.Uuid) {
+			continue
+		}
+		told[m.Uuid] = true
+		activityBusiness.PublishActivityToUser(m.Uuid, &dgraphModels.UnifiedActivityItem{
+			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
+			Time:         time.Now().UTC().Format(time.RFC3339Nano),
+			Mention: &dgraphStruct.DgraphMentions{
+				CommentUuid: commentUUID,
+				Comment:     comment(),
+				CreatedAt:   &currentTime,
+			},
+		})
+	}
 }
 
 func DeleteDocComment(ctx context.Context, commentUUID uuid.UUID, docId string, rawDgraphComment *dgraphStruct.DgraphComment) (err error) {

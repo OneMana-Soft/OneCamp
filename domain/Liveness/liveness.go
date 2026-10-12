@@ -43,6 +43,10 @@ var Checkers = map[string]Checker{
 	"comment": postgres("comments"),
 	"task":    postgres("tasks"),
 	"doc":     dgraphDocs,
+	// An archived project (deleted_at set) whose search entry missed the
+	// archive is dropped here, not shown: a rename once wrote the entry back
+	// to live, and the demo's retired copies turned up in searches.
+	"project": postgres("projects"),
 }
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
