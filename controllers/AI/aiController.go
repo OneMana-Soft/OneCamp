@@ -747,7 +747,7 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 	// Sent first, before any content. The client adopts it so the NEXT question
 	// continues this conversation, and so a reader can find it in the history
 	// list even if the connection drops before the answer finishes.
-	fmt.Fprintf(w, "data: {\"session_id\": %q}\n\n", sessionID)
+	writeSSE(w, map[string]string{"session_id": sessionID})
 	flusher.Flush()
 
 	// From here the answer belongs to the server, not to the connection. A tab
@@ -770,8 +770,7 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 	stream, err := ai.ChatStreamWithRescue(lt.Gen, llm, messages, opts)
 	if err != nil {
 		cb.RecordResult(err)
-		errJSON, _ := json.Marshal(ai.FriendlyProviderError(err))
-		send(fmt.Sprintf("data: {\"error\": %s}\n\n", string(errJSON)))
+		send(sseFrame(map[string]string{"error": ai.FriendlyProviderError(err)}))
 		return
 	}
 
@@ -791,8 +790,7 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			cb.RecordResult(chunk.Error)
-			errJSON, _ := json.Marshal(ai.FriendlyProviderError(chunk.Error))
-			send(fmt.Sprintf("data: {\"error\": %s}\n\n", string(errJSON)))
+			send(sseFrame(map[string]string{"error": ai.FriendlyProviderError(chunk.Error)}))
 			return
 		}
 		if chunk.Content != "" {
@@ -800,9 +798,7 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 			// Only emit the non-reasoning portion to the client.
 			visible := thinkFilter.Feed(chunk.Content)
 			if visible != "" {
-				escaped := strings.ReplaceAll(visible, "\n", "\\n")
-				escaped = strings.ReplaceAll(escaped, "\"", "\\\"")
-				send(fmt.Sprintf("data: {\"content\": \"%s\"}\n\n", escaped))
+				send(sseFrame(map[string]string{"content": visible}))
 			}
 		}
 		if chunk.Done {
@@ -867,10 +863,7 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 		if len(contextSources) > 0 {
 			business.ReconcileWriteActionsWithSources(writeActions, contextSources)
 		}
-		actionsJSON, err := json.Marshal(writeActions)
-		if err == nil {
-			send(fmt.Sprintf("data: {\"actions\": %s}\n\n", string(actionsJSON)))
-		}
+		send(sseFrame(map[string]any{"actions": writeActions}))
 	}
 
 	// Send grounding sources (citations) so the UI can show what the answer
@@ -883,7 +876,7 @@ func AskAIStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send done signal
-	send("data: {\"done\": true}\n\n")
+	send(sseFrame(map[string]bool{"done": true}))
 	if !lt.Stopped() {
 		svc.Resiliency.CB.RecordSuccess()
 	}

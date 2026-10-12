@@ -3,12 +3,14 @@ package business
 import (
 	"context"
 	"fmt"
+	"slices"
 	"time"
 
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	userFCMtokenBusiness "github.com/akashc777/OneCamp/business/UserFCMToken"
 	domain "github.com/akashc777/OneCamp/domain/Comment"
+	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
@@ -180,153 +182,206 @@ func CreateCommentInADoc(ctx context.Context, dgraphDoc *dgraphStruct.DgraphDoc,
 
 	// add to openSearch
 	plainText := helpers.HTMLToPlainText(dgraphDoc.Comments[0].Text)
-	openSearchComment := &openSearchStruct.OpenSearchComment{
-		Uuid:                  commentUUID.String(),
-		CommentBody:           plainText,
-		CommentByUserUuid:     userInfo.UserDgraphInfo.Uuid,
-		CommentByUserFullName: userInfo.UserDgraphInfo.DisplayName(),
-		CommentDocUuid:        rawDgraphDocInfo.Uuid,
-		CommentDocTitle:       rawDgraphDocInfo.Title,
-		CommentDocPrivate:     *rawDgraphDocInfo.IsPrivate,
-		CommentCreatedAt:      createdTime.Unix(),
-		CommentDeletedAt:      helpers.Int64Pointer(-1),
-	}
-
-	for _, u := range dgraphDoc.ReadingUser {
-		openSearchComment.CommentDocReadingUsers = append(openSearchComment.CommentDocReadingUsers, u.Uuid)
-	}
-	for _, u := range dgraphDoc.EditingUser {
-		openSearchComment.CommentDocEditingUsers = append(openSearchComment.CommentDocEditingUsers, u.Uuid)
-	}
-	for _, u := range dgraphDoc.CommentingUser {
-		openSearchComment.CommentDocCommentingUsers = append(openSearchComment.CommentDocCommentingUsers, u.Uuid)
-	}
-	if dgraphDoc.CreatedBy != nil {
-		openSearchComment.CommentDocCreatedByUserUuid = dgraphDoc.CreatedBy.Uuid
-	}
-	if userInfo.UserDgraphInfo.ProfileKey != nil {
-		openSearchComment.CommentByProfile = userInfo.UserDgraphInfo.ProfileKey
-	}
+	openSearchComment := docCommentEntry(rawDgraphDocInfo, commentUUID.String(), plainText, &userInfo.UserDgraphInfo, createdTime)
 
 	go domain.CreateDocCommentWithAttachmentsInOpenSearch(openSearchComment, dgraphDoc.Comments[0].Attachments)
 
-	// embed comment for AI Second Brain (async) — doc comment inherits doc permissions
-	var readUUIDs, editUUIDs, commentUUIDs []string
-	for _, u := range dgraphDoc.ReadingUser {
-		readUUIDs = append(readUUIDs, u.Uuid)
+	// embed comment for AI Second Brain (async) — doc comment inherits doc
+	// permissions. They are read from the doc: dgraphDoc is the mutation that
+	// adds the comment and carries none of them, so the entry used to say the
+	// doc was shared with nobody and made by no one, and AI search found a
+	// comment on a private doc for no one, its owner included.
+	access := rawDgraphDocInfo
+	if perms, perr := docDomain.GetDocPermissions(ctx, rawDgraphDocInfo.Uuid); perr == nil && perms != nil {
+		access = perms
+	} else {
+		helpers.LogErrorWithContext(ctx, "business/CreateCommentInADoc Failed to read the doc's sharing for AI search err: %+v", perr)
 	}
-	for _, u := range dgraphDoc.EditingUser {
-		editUUIDs = append(editUUIDs, u.Uuid)
-	}
-	for _, u := range dgraphDoc.CommentingUser {
-		commentUUIDs = append(commentUUIDs, u.Uuid)
+	uuidsOf := func(users []*dgraphStruct.DgraphUser) []string {
+		out := []string{}
+		for _, u := range users {
+			if u != nil {
+				out = append(out, u.Uuid)
+			}
+		}
+		return out
 	}
 	docCreatedBy := ""
-	if dgraphDoc.CreatedBy != nil {
-		docCreatedBy = dgraphDoc.CreatedBy.Uuid
+	if access.CreatedBy != nil {
+		docCreatedBy = access.CreatedBy.Uuid
 	}
+	// A doc that never had its privacy set is open to everyone signed in, as
+	// reading it is (business/Doc CouldRead) and as the comment's search entry
+	// says (docCommentEntry). Reading the flag through a nil pointer took the
+	// request down after the comment was written, before anyone was told.
+	docPrivate := rawDgraphDocInfo.IsPrivate != nil && *rawDgraphDocInfo.IsPrivate
 	ai.EmbedDocCommentContent(plainText, commentUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.DisplayName(),
-		rawDgraphDocInfo.Uuid, *rawDgraphDocInfo.IsPrivate, docCreatedBy, readUUIDs, editUUIDs, commentUUIDs)
+		rawDgraphDocInfo.Uuid, docPrivate, docCreatedBy,
+		uuidsOf(access.ReadingUser), uuidsOf(access.EditingUser), uuidsOf(access.CommentingUser))
 
 	notificationTitle := fmt.Sprintf("Comment - %+v", userInfo.UserDgraphInfo.DisplayName())
 	notificationBody := plainText
-	go sendNewDocCommentNotification(notificationTitle, notificationBody, commentUUID.String(), rawDgraphDocInfo, &userInfo.UserDgraphInfo)
+	author := userInfo.UserDgraphInfo
+	helpers.GoSafeNamed("doc.comment-notify", func() {
+		sendNewDocCommentNotification(notificationTitle, notificationBody, commentUUID.String(), rawDgraphDocInfo, &author, mentionList)
+	})
 
 	return
 }
 
-func sendNewDocCommentNotification(title string, body string, commentUUID string, dgraphDoc *dgraphStruct.DgraphDoc, userDgraph *dgraphStruct.DgraphUser) {
+// docCommentEntry is a new doc comment's entry in the comments index. It is
+// live from the start: it was written as deleted (-1) and global search leaves
+// out anything with a deletion time, so a comment on a doc could be found only
+// once someone edited it. And it carries its doc's privacy, sharing and maker
+// from the doc as read for the comment (doc), not from the mutation that adds
+// the comment, which holds none of them: a comment on a private doc was found
+// by nobody, its owner included, until the doc next changed. Pure.
+func docCommentEntry(doc *dgraphStruct.DgraphDoc, commentUUID, plainText string, by *dgraphStruct.DgraphUser, createdTime time.Time) *openSearchStruct.OpenSearchComment {
+	uuids := func(users []*dgraphStruct.DgraphUser) []string {
+		out := []string{}
+		for _, u := range users {
+			if u != nil && u.Uuid != "" {
+				out = append(out, u.Uuid)
+			}
+		}
+		return out
+	}
+	private := doc.IsPrivate != nil && *doc.IsPrivate
+	e := &openSearchStruct.OpenSearchComment{
+		Uuid:                      commentUUID,
+		CommentBody:               plainText,
+		CommentByUserUuid:         by.Uuid,
+		CommentByUserFullName:     by.DisplayName(),
+		CommentByProfile:          by.ProfileKey,
+		CommentDocUuid:            doc.Uuid,
+		CommentDocTitle:           doc.Title,
+		CommentDocPrivate:         &private,
+		CommentDocReadingUsers:    uuids(doc.ReadingUser),
+		CommentDocEditingUsers:    uuids(doc.EditingUser),
+		CommentDocCommentingUsers: uuids(doc.CommentingUser),
+		CommentCreatedAt:          createdTime.Unix(),
+		CommentDeletedAt:          nil,
+	}
+	if doc.CreatedBy != nil {
+		e.CommentDocCreatedByUserUuid = doc.CreatedBy.Uuid
+	}
+	return e
+}
 
+// Telling people about a member's new comment on a doc.
+//
+// It went wrong four ways: the push went to the commenter's own devices (it
+// looked up the author's tokens); a push that failed, or a token lookup that
+// did, returned before the email was sent; a comment by the doc's owner told
+// nobody at all; and it read the author of nothing for a nil maker. Now:
+//
+//   - who: the people taking part in the doc (its owner, its editors, and
+//     whoever commented on it before) and anyone the comment mentions, each
+//     once, never its author, and only people who may read the doc now (a
+//     comment is never sent to someone a private doc was taken away from);
+//   - push and email are independent: either failing leaves the other;
+//   - a push is held for anyone who paused notifications, is in quiet hours
+//     or in focus time (the token lookup's gate), and an email is held or
+//     deferred by their own settings. Nothing here goes through a pause,
+//     whoever wrote the comment: only a person's own "notify anyway" does,
+//     and an agent's never does (business/Notification urgent.go).
+
+// Seams for tests: where participants, devices, pushes and emails go.
+var (
+	docCommentParticipants = docDomain.GetDocCommentParticipants
+	docCommentDevices      = userFCMtokenBusiness.GetFCMTokenByListOfUserId
+	docCommentPush         = func(ctx context.Context, data map[string]string, tokens []string) error {
+		return firebaseInit.FirebaseApp.MultiCastPush(ctx, data, tokens)
+	}
+	docCommentEmail = notificationBusiness.DispatchDocComment
+	docCommentIcon  = userBusiness.GetSignedProfileURL
+)
+
+func sendNewDocCommentNotification(title string, body string, commentUUID string, dgraphDoc *dgraphStruct.DgraphDoc, author *dgraphStruct.DgraphUser, mentions []*dgraphStruct.DgraphUser) {
 	ctx := context.Background()
-
-	if dgraphDoc.CreatedBy.Uuid == userDgraph.Uuid {
+	if dgraphDoc == nil || author == nil {
 		return
 	}
-
-	tokens, err := userFCMtokenBusiness.GetFCMTokenByUserId(ctx, userDgraph.Uuid)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/sendNewDocCommentNotification Failed to gets user's fcm token err: %+v",
-			err)
+	// Who takes part, read afresh: a comment can't tell anyone the doc can't
+	// be shown to, so with no answer it tells nobody.
+	doc, err := docCommentParticipants(ctx, dgraphDoc.Uuid)
+	if err != nil || doc == nil {
+		helpers.LogErrorWithContext(ctx, "business/sendNewDocCommentNotification Failed to read who takes part in doc %s err: %+v", dgraphDoc.Uuid, err)
 		return
 	}
-
-	pushData := make(map[string]string)
-
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] = dgraphDoc.Uuid
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = title
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
-
-	// Send notifications in batches of 500 tokens
-	batchSize := 500
-	for i := 0; i < len(tokens); i += batchSize {
-		end := i + batchSize
-		if end > len(tokens) {
-			end = len(tokens)
+	mentioned := make([]string, 0, len(mentions))
+	for _, m := range mentions {
+		if m != nil {
+			mentioned = append(mentioned, m.Uuid)
 		}
-		tokenBatch := tokens[i:end]
+	}
+	recipients := docCommentRecipients(doc, mentioned, author.Uuid)
+	if len(recipients) == 0 {
+		return
+	}
+	icon := docCommentIcon(ctx, author.ProfileKey)
 
-		err = firebaseInit.FirebaseApp.MultiCastPush(ctx, pushData, tokenBatch)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/sendNewDocCommentNotification Failed to send push notification err: %+v",
-				err)
-			return
+	// Push: to the recipients' devices, held by the lookup for anyone paused.
+	if tokens, err := docCommentDevices(ctx, recipients); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/sendNewDocCommentNotification Failed to get the recipients' devices err: %+v", err)
+	} else if len(tokens) > 0 {
+		pushData := map[string]string{
+			firebaseInit.FIREBASE_PUSH_DATA_TYPE:     firebaseInit.FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT,
+			firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:  doc.Uuid,
+			firebaseInit.FIREBASE_PUSH_DATA_TITLE:    title,
+			firebaseInit.FIREBASE_PUSH_DATA_BODY:     body,
+			firebaseInit.FIREBASE_PUSH_DATA_USERNAME: author.DisplayName(),
+			firebaseInit.FIREBASE_PUSH_DATA_ICON:     icon,
+		}
+		// 500 tokens a call is Firebase's limit.
+		for batch := range slices.Chunk(tokens, 500) {
+			if err := docCommentPush(ctx, pushData, batch); err != nil {
+				helpers.LogErrorWithContext(ctx, "business/sendNewDocCommentNotification Failed to send push notification err: %+v", err)
+				break
+			}
 		}
 	}
 
-	// Email fan-out for doc comments. Recipients are the doc owner +
-	// reading/editing/commenting permission lists; we collect them here
-	// to keep the policy in one place.
-	emailRecipients := collectDocPermissionUUIDs(dgraphDoc, userDgraph.Uuid)
-	docTitle := dgraphDoc.Title
+	// Email (and its own holds), whatever became of the push.
+	docTitle := doc.Title
 	if docTitle == "" {
 		docTitle = "a document"
 	}
-	notificationBusiness.DispatchDocComment(
-		userDgraph.Uuid,
-		userDgraph.DisplayName(),
-		userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey),
-		dgraphDoc.Uuid,
-		docTitle,
-		body,
-		commentUUID,
-		emailRecipients,
-	)
+	docCommentEmail(author.Uuid, author.DisplayName(), icon, doc.Uuid, docTitle, body, commentUUID, recipients)
 }
 
-// collectDocPermissionUUIDs returns the union of the doc creator + reading/
-// editing/commenting permission lists, minus the actor. Used for email fan-out.
-func collectDocPermissionUUIDs(d *dgraphStruct.DgraphDoc, actorUUID string) []string {
-	if d == nil {
+// docCommentRecipients is who hears about a new comment on a doc: its owner,
+// its editors, whoever commented on it before, and anyone the comment
+// mentions, in that order and each once, never its author, and only people
+// who may read the doc now. Its readers who haven't taken part aren't told
+// of every comment. doc is read as GetDocCommentParticipants reads it. Pure.
+func docCommentRecipients(doc *dgraphStruct.DgraphDoc, mentioned []string, author string) []string {
+	if doc == nil {
 		return nil
 	}
-	seen := map[string]struct{}{}
-	add := func(u string) {
-		if u == "" || u == actorUUID {
-			return
+	var out []string
+	seen := map[string]bool{author: true, "": true}
+	add := func(id string) {
+		if !seen[id] && docDomain.ReadableBy(doc, id) {
+			out = append(out, id)
 		}
-		seen[u] = struct{}{}
+		seen[id] = true
 	}
-	if d.CreatedBy != nil {
-		add(d.CreatedBy.Uuid)
+	if doc.CreatedBy != nil {
+		add(doc.CreatedBy.Uuid)
 	}
-	for _, u := range d.ReadingUser {
-		add(u.Uuid)
+	for _, u := range doc.EditingUser {
+		if u != nil {
+			add(u.Uuid)
+		}
 	}
-	for _, u := range d.EditingUser {
-		add(u.Uuid)
+	for _, c := range doc.Comments {
+		if c != nil && c.CommentBy != nil {
+			add(c.CommentBy.Uuid)
+		}
 	}
-	for _, u := range d.CommentingUser {
-		add(u.Uuid)
-	}
-	out := make([]string, 0, len(seen))
-	for u := range seen {
-		out = append(out, u)
+	for _, id := range mentioned {
+		add(id)
 	}
 	return out
 }
@@ -491,8 +546,10 @@ func UpdateComment(ctx context.Context, dgraphComment *dgraphStruct.DgraphCommen
 
 	go domain.UpdateCommentInOpenSearch(openSearchComment)
 
-	// Re-embed updated comment text for AI Second Brain (upsert by content_uuid)
-	go ai.StoreEmbeddingAsync(ai.EmbeddingDoc{
+	// Re-embed updated comment text for AI Second Brain (upsert by content_uuid).
+	// Called in line: StoreEmbeddingAsync is asynchronous itself, and queues the
+	// write behind the earlier ones to this comment's entry in the order asked.
+	ai.StoreEmbeddingAsync(ai.EmbeddingDoc{
 		ContentText: plainText,
 		ContentType: "comment",
 		ContentUUID: commentUUID.String(),
@@ -612,13 +669,17 @@ func DeleteComment(ctx context.Context, dgraphComment *dgraphStruct.DgraphCommen
 		CommentDeletedAt: helpers.Int64Pointer(currentTime.Unix()),
 	}
 
+	// The comment's files and its AI entry are marked deleted by a person
+	// ("user"), never "cascade": restoring the doc, post, chat or task the
+	// comment was on clears what was marked "cascade", and brought a deleted
+	// comment back to AI search.
 	go domain.DeleteCommentWithAttachmentsInOpenSearch(opensearchComment, rawDgraphComment.Attachments)
 	go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
 		[]string{"attachment_comment_id"},
 		commentUUID.String(),
 		currentTime.Unix(),
 		[]string{"attachments"},
-		"cascade",
+		"user",
 	)
 	// Cascade soft-delete to AI embedding for this comment
 	go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
@@ -626,7 +687,7 @@ func DeleteComment(ctx context.Context, dgraphComment *dgraphStruct.DgraphCommen
 		commentUUID.String(),
 		currentTime.Unix(),
 		[]string{"ai_embeddings"},
-		"cascade",
+		"user",
 	)
 
 	// Remove any workspace-memory items a user captured FROM this comment so

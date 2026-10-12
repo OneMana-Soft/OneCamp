@@ -83,9 +83,18 @@ type AIActivityItem struct {
 	Source  string    `json:"source,omitempty"` // trigger source / category
 	At      time.Time `json:"at"`               // when it happened (newest-first)
 
-	// Optional routing for an agent_run (links to the run/agent in the builder).
-	AgentID string `json:"agent_id,omitempty"`
-	RunID   string `json:"run_id,omitempty"`
+	// WHICH AGENT. An agent run names its agent, and so does an audit row an
+	// agent wrote (the run's record, a call over MCP), from the agent_id and
+	// agent_name its metadata carries. Without them the record could only say
+	// "an agent acted as you", and the person reading it could not tell which
+	// one to pause. Empty for a row no agent wrote, or an older row that did
+	// not say. The id links to the agent; the name is as it was then.
+	AgentID   string `json:"agent_id,omitempty"`
+	AgentName string `json:"agent_name,omitempty"`
+	RunID     string `json:"run_id,omitempty"`
+	// ActorKind is who acted, from the audit row: "human", "agent" or
+	// "system". Empty on a run (always an agent) and on older rows.
+	ActorKind string `json:"actor_kind,omitempty"`
 
 	// THE EVIDENCE, carried on audit rows so the feed and the log stop being two
 	// accounts of one event.
@@ -176,8 +185,10 @@ func runsToActivity(runs []*agentModel.AgentRunActivity) []AIActivityItem {
 			Status:  normalizeRunStatus(r.Status),
 			Source:  strings.TrimSpace(r.TriggerSource),
 			At:      r.StartedAt,
-			AgentID: r.AgentId.String(),
-			RunID:   r.Id.String(),
+
+			AgentID:   r.AgentId.String(),
+			AgentName: strings.TrimSpace(r.AgentName),
+			RunID:     r.Id.String(),
 		})
 	}
 	return out
@@ -220,10 +231,23 @@ func auditsToActivity(entries []*auditModel.AuditEntry) []AIActivityItem {
 			PrevHash:  e.PrevHash,
 			EntryHash: e.EntryHash,
 			Initiator: metadataString(e.Metadata, auditBusiness.MetaInitiator),
+
+			ActorKind: strings.TrimSpace(e.ActorKind),
+			AgentID:   metadataString(e.Metadata, metaAgentID),
+			AgentName: metadataString(e.Metadata, metaAgentName),
+			RunID:     metadataString(e.Metadata, metaRunID),
 		})
 	}
 	return out
 }
+
+// The metadata keys an agent's audit rows name it under: the run's record
+// (business/AIAgent runAuditMeta) and a call over MCP (business/MCPServer).
+const (
+	metaAgentID   = "agent_id"
+	metaAgentName = "agent_name"
+	metaRunID     = "run_id"
+)
 
 // metadataString reads one string field out of an audit row's metadata JSON.
 // Missing, malformed or non-string reads as "", which is the honest answer for

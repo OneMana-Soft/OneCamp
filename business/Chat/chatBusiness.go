@@ -681,7 +681,7 @@ func sendNewChatNotification(title string, body string, userId string, grpId str
 		// Create a simplified activity item for MQTT
 		activityItem := &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION, // In chats, it's either a mention or a new message (which we'll treat as a notification)
-			Time:         time.Now().Format(time.RFC3339),
+			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Mention: &dgraphStruct.DgraphMentions{
 				ChatUuid: chatUUID,
 				Chat: &dgraphStruct.DgraphChat{
@@ -1360,7 +1360,7 @@ func sendNewChatReactionNotification(title string, body string, grpId string, ch
 
 	activityItem := &dgraphModels.UnifiedActivityItem{
 		ActivityType: mqttStruct.MESSAGE_ACTIVITY_REACTION, // In chats, it's either a mention or a new message (which we'll treat as a notification)
-		Time:         time.Now().Format(time.RFC3339),
+		Time:         time.Now().UTC().Format(time.RFC3339Nano),
 	}
 
 	activityBusiness.PublishActivityToUser(chatDgraph.From.Uuid, activityItem)
@@ -1673,7 +1673,7 @@ func sendNewChatCommentActivity(currentTime time.Time, commentUUID string, comme
 		// Create a simplified activity item for MQTT
 		activityItem := &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION, // In chats, it's either a mention or a new message (which we'll treat as a notification)
-			Time:         time.Now().Format(time.RFC3339),
+			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Comment: &dgraphStruct.DgraphComment{
 				Uuid: commentUUID,
 				Text: commentBody,
@@ -1694,7 +1694,7 @@ func sendNewChatCommentActivity(currentTime time.Time, commentUUID string, comme
 
 		activityItem := &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_COMMENT, // In chats, it's either a mention or a new message (which we'll treat as a notification)
-			Time:         time.Now().Format(time.RFC3339),
+			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Comment: &dgraphStruct.DgraphComment{
 				Uuid: commentUUID,
 				Text: commentBody,
@@ -1906,7 +1906,7 @@ func sendNewChatCommentReactionNotification(title string, body string, commentDg
 
 	activityItem := &dgraphModels.UnifiedActivityItem{
 		ActivityType: mqttStruct.MESSAGE_ACTIVITY_REACTION, // In chats, it's either a mention or a new message (which we'll treat as a notification)
-		Time:         time.Now().Format(time.RFC3339),
+		Time:         time.Now().UTC().Format(time.RFC3339Nano),
 	}
 
 	activityBusiness.PublishActivityToUser(commentDgraph.CommentBy.Uuid, activityItem)

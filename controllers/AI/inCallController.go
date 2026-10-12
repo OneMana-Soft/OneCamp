@@ -219,8 +219,7 @@ func InCallAskStream(w http.ResponseWriter, r *http.Request) {
 
 // writeSSEError emits a single SSE error frame.
 func writeSSEError(w http.ResponseWriter, flusher http.Flusher, msg string) {
-	b, _ := json.Marshal(msg)
-	fmt.Fprintf(w, "data: {\"error\": %s}\n\n", string(b))
+	writeSSE(w, map[string]string{"error": msg})
 	flusher.Flush()
 }
 

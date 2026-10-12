@@ -79,6 +79,13 @@ func executeReadDoc(ctx context.Context, action ai.ProposedAction, userUUID stri
 		return "", nil, fmt.Errorf("document not found or you don't have access")
 	}
 
+	// A deleted doc is read by nobody (CanRead), the assistant and the agents
+	// reading their knowledge through this included. Someone it was shared
+	// with is told it was deleted; anyone else learns nothing.
+	if docBusiness.IsDeleted(doc) && docBusiness.CouldRead(doc, dgraphUser.Uuid) {
+		return "", nil, fmt.Errorf("this document was deleted")
+	}
+
 	// Permission gate. The dgraph query returns the node regardless of access
 	// (it carries access counts), so the app's own read rule decides here.
 	if !docBusiness.CanRead(doc, dgraphUser.Uuid) {

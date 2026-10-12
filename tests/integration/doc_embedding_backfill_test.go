@@ -111,9 +111,12 @@ func TestPrivateDocsEmbeddingBackfill(t *testing.T) {
 		t.Fatalf("before: someone else finds [%s]; the test isn't starting from the leak", got)
 	}
 
-	written, err := docBusiness.RunEmbeddingAccessBackfill(ctx)
-	if err != nil || written != 2 {
-		t.Fatalf("backfill wrote %d private docs (%v), want 2", written, err)
+	// Every doc is checked; the entries that said "public" for a private doc
+	// (plans, its comment, notes) are corrected, and the public doc's entry,
+	// which was right, is left alone.
+	checked, corrected, err := docBusiness.RunEmbeddingAccessBackfill(ctx)
+	if err != nil || checked != 3 || corrected != 3 {
+		t.Fatalf("repair checked %d docs and corrected %d entries (%v), want 3 and 3", checked, corrected, err)
 	}
 	for who, want := range map[string]string{
 		stranger:        "handbook",
@@ -126,11 +129,18 @@ func TestPrivateDocsEmbeddingBackfill(t *testing.T) {
 	}
 
 	var state string
-	if err := env.PG.QueryRow(`SELECT value FROM system_configs WHERE key = 'ai_embeddings_doc_access_v1'`).Scan(&state); err != nil || state != "done" {
+	if err := env.PG.QueryRow(`SELECT value FROM system_configs WHERE key = 'ai_embeddings_doc_access_v2'`).Scan(&state); err != nil || state != "done" {
 		t.Errorf("the backfill didn't record that it ran: %q %v", state, err)
 	}
-	if again, err := docBusiness.RunEmbeddingAccessBackfill(ctx); err != nil || again != 0 {
-		t.Errorf("a second run wrote %d docs (%v), want none", again, err)
+	if again, fixed, err := docBusiness.RunEmbeddingAccessBackfill(ctx); err != nil || again != 0 || fixed != 0 {
+		t.Errorf("a second run checked %d docs and corrected %d (%v), want none", again, fixed, err)
+	}
+	// Run by hand past the record, it finds nothing left to correct.
+	if _, err := env.PG.Exec(`DELETE FROM system_configs WHERE key = 'ai_embeddings_doc_access_v2'`); err != nil {
+		t.Fatal(err)
+	}
+	if again, fixed, err := docBusiness.RunEmbeddingAccessBackfill(ctx); err != nil || again != 3 || fixed != 0 {
+		t.Errorf("a forced second run checked %d docs and corrected %d (%v), want 3 and 0", again, fixed, err)
 	}
 
 	// From here, the live path: the owner changes who may see the doc, and

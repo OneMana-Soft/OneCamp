@@ -130,13 +130,9 @@ func UpdateProjectName(ctx context.Context, projectName string, projectUUID uuid
 		return
 	}
 
-	opensearchProject := &openSearchStruct.OpenSearchProject{
-		Uuid:             projectUUID.String(),
-		ProjectName:      projectName,
-		ProjectUpdatedAt: currentTime.Unix(),
-	}
-
-	go domain.UpdateProjectInOpenSearch(opensearchProject)
+	// The name alone: a whole document would clear deleted_date and put an
+	// archived project back in search.
+	go domain.RenameProjectInOpenSearch(projectUUID.String(), projectName, currentTime.Unix())
 
 	return
 }

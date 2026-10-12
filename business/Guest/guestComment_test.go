@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
 	"github.com/google/uuid"
@@ -125,5 +126,21 @@ func TestCreateGuestDocComment_DisabledRejected(t *testing.T) {
 	}
 	if _, err := CreateGuestDocComment(context.Background(), grant, "Jane", "hi"); !errors.Is(err, ErrGuestDisabled) {
 		t.Fatalf("expected ErrGuestDisabled when policy is off, got %v", err)
+	}
+}
+
+// The cap counts characters: cut by bytes, a long comment in a script whose
+// characters take several bytes was cut through one, and stored invalid UTF-8.
+func TestGuestCommentCapNeverSplitsACharacter(t *testing.T) {
+	long := strings.Repeat("ना", maxGuestCommentLen) // 2 characters, 6 bytes, a time
+	out, err := sanitizeGuestCommentBody(long)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.ValidString(out) {
+		t.Fatal("the capped comment is not valid UTF-8")
+	}
+	if n := utf8.RuneCountInString(out); n != maxGuestCommentLen {
+		t.Fatalf("capped at %d characters, want %d", n, maxGuestCommentLen)
 	}
 }

@@ -76,7 +76,7 @@ func buildTriggererActivity(agent *model.AiAgent, bot *userBusiness.BotIdentity,
 		}
 		return &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
-			Time:         now.Format(time.RFC3339),
+			Time:         now.UTC().Format(time.RFC3339Nano),
 			Mention: &dgraphStruct.DgraphMentions{
 				PostUuid: surface.PostID,
 				Post: &dgraphStruct.DgraphPost{
@@ -101,7 +101,7 @@ func buildTriggererActivity(agent *model.AiAgent, bot *userBusiness.BotIdentity,
 		}
 		return &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
-			Time:         now.Format(time.RFC3339),
+			Time:         now.UTC().Format(time.RFC3339Nano),
 			Mention: &dgraphStruct.DgraphMentions{
 				ChatUuid: surface.MessageID,
 				Chat: &dgraphStruct.DgraphChat{

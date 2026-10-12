@@ -87,7 +87,7 @@ func generateImportDigest(ctx context.Context, req importBusiness.DigestRequest)
 	}
 
 	userUUID := user.UserDgraphInfo.Uuid
-	items, err := ai.FetchUnreadAcrossScopes(ctx, userUUID, visible, nil, nil, importDigestSince, importDigestMaxItems)
+	items, err := fetchUnreadAcrossScopes(ctx, user, visible, nil, nil, importDigestSince, importDigestMaxItems)
 	if err != nil {
 		return "", fmt.Errorf("import digest fetch failed: %w", err)
 	}

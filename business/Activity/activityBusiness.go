@@ -33,7 +33,10 @@ type ReactionPagination struct {
 	HasMore   bool                              `json:"has_more"`
 }
 
-func GetMentionsByUserId(ctx context.Context, userDgraphId string, pageIndex int, pageSize int) (mentionsPage MentionPagination, err error) {
+// GetMentionsByUserId is a page of the mentions of the person (by graph uid
+// and by uuid), the mentions tab, without those on a doc or a board they
+// can't read now (readable.go).
+func GetMentionsByUserId(ctx context.Context, userDgraphId string, userUUID string, pageIndex int, pageSize int) (mentionsPage MentionPagination, err error) {
 	dgraphMentions, actualLen, err := domain.GetLatestMentionByUserId(ctx, userDgraphId, pageIndex, pageSize)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -47,13 +50,16 @@ func GetMentionsByUserId(ctx context.Context, userDgraphId string, pageIndex int
 	} else {
 		mentionsPage.Mentions = dgraphMentions
 	}
+	mentionsPage.Mentions = keepReadable(ctx, userUUID, mentionsPage.Mentions, mentionAbout)
 
 	mentionsPage.HasMore = actualLen > pageSize
 
 	return
 }
 
-func GetCommentsByUserId(ctx context.Context, userDgraphId string, pageIndex int, pageSize int) (commentsPage CommentPagination, err error) {
+// GetCommentsByUserId is a page of the comments on what the person added,
+// without those on a doc or a board they can't read now.
+func GetCommentsByUserId(ctx context.Context, userDgraphId string, userUUID string, pageIndex int, pageSize int) (commentsPage CommentPagination, err error) {
 	dgraphComments, actualLen, err := domain.GetLatestCommentActivityByUserId(ctx, userDgraphId, pageIndex, pageSize)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -67,13 +73,16 @@ func GetCommentsByUserId(ctx context.Context, userDgraphId string, pageIndex int
 	} else {
 		commentsPage.Comments = dgraphComments
 	}
+	commentsPage.Comments = keepReadable(ctx, userUUID, commentsPage.Comments, commentAbout)
 
 	commentsPage.HasMore = actualLen > pageSize
 
 	return
 }
 
-func GetReactionsByUserId(ctx context.Context, userDgraphId string, pageIndex int, pageSize int) (reactionPage ReactionPagination, err error) {
+// GetReactionsByUserId is a page of the reactions to what the person added,
+// without those on a comment on a doc or a board they can't read now.
+func GetReactionsByUserId(ctx context.Context, userDgraphId string, userUUID string, pageIndex int, pageSize int) (reactionPage ReactionPagination, err error) {
 	dgraphReaction, actualLen, err := domain.GetReactionsByUserId(ctx, userDgraphId, pageIndex, pageSize)
 
 	if err != nil {
@@ -88,6 +97,7 @@ func GetReactionsByUserId(ctx context.Context, userDgraphId string, pageIndex in
 	} else {
 		reactionPage.Reactions = dgraphReaction
 	}
+	reactionPage.Reactions = keepReadable(ctx, userUUID, reactionPage.Reactions, reactionAbout)
 	reactionPage.HasMore = actualLen > pageSize
 
 	return
@@ -103,58 +113,7 @@ func GetUnifiedActivity(ctx context.Context, userUUID uuid.UUID, userDgraphId st
 		return
 	}
 
-	var allActivities []dgraphModels.UnifiedActivityItem
-
-	for _, m := range mentions {
-		t := ""
-		if m.CreatedAt != nil {
-			t = m.CreatedAt.Format(time.RFC3339)
-		}
-		item := dgraphModels.UnifiedActivityItem{
-			ActivityType: "MENTION",
-			Time:         t,
-			Mention:      m,
-		}
-		item.Priority = scoreActivityPriority(item)
-		allActivities = append(allActivities, item)
-	}
-
-	for _, c := range comments {
-		t := ""
-		if c.CreatedAt != nil {
-			t = c.CreatedAt.Format(time.RFC3339)
-		}
-		item := dgraphModels.UnifiedActivityItem{
-			ActivityType: "COMMENT",
-			Time:         t,
-			Comment:      c,
-		}
-		item.Priority = scoreActivityPriority(item)
-		allActivities = append(allActivities, item)
-	}
-
-	for _, r := range reactions {
-		t := ""
-		if r.AddedAt != nil {
-			t = r.AddedAt.Format(time.RFC3339)
-		}
-		item := dgraphModels.UnifiedActivityItem{
-			ActivityType: "REACTION",
-			Time:         t,
-			Reaction:     r,
-		}
-		item.Priority = scoreActivityPriority(item)
-		allActivities = append(allActivities, item)
-	}
-
-	for i := range allActivities {
-		allActivities[i].ActorKind = ActorKind(actorOf(&allActivities[i]))
-	}
-
-	// Sort by Time Descending
-	sort.Slice(allActivities, func(i, j int) bool {
-		return allActivities[i].Time > allActivities[j].Time
-	})
+	allActivities := mergeActivities(mentions, comments, reactions)
 
 	// Truncate to limit FIRST (ordering is purely by time, not priority, so
 	// truncation is independent of demotion). We then demote only the items
@@ -166,6 +125,10 @@ func GetUnifiedActivity(ctx context.Context, userUUID uuid.UUID, userDgraphId st
 		dgraphActivities.Activities = allActivities
 		dgraphActivities.HasMore = false
 	}
+	// After the page is cut: whether there is more is what the graph said, so
+	// leaving an item out makes a page short, never the last. The person's
+	// graph uuid is their account id.
+	dgraphActivities.Activities = keepReadable(ctx, userUUID.String(), dgraphActivities.Activities, itemAbout)
 
 	// Demote items the user has ALREADY engaged with (opened the
 	// conversation since the mention/comment) so the Priority view reflects
@@ -190,6 +153,58 @@ func GetUnifiedActivity(ctx context.Context, userUUID uuid.UUID, userDgraphId st
 	}
 
 	return
+}
+
+// activityTimeLayout is how an activity's time, and so the feed's beforeTime
+// cursor, is written: to the nanosecond. Cut to the second, a cursor taken
+// from the last item of a page skipped every older item within that second
+// (the next page asks for items before the cursor). A cursor an older client
+// sends in whole seconds still reads, as time.Parse takes either.
+const activityTimeLayout = time.RFC3339Nano
+
+// activityTime is t as an activity's time, or "" without one.
+func activityTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.UTC().Format(activityTimeLayout)
+}
+
+// mergeActivities is the feed's items, newest first, each scored and with its
+// actor's kind. Ordered by the times themselves: RFC 3339 with fractions of a
+// second drops trailing zeros, so the strings no longer sort as the times do
+// ("…13Z" would sort after "…13.5Z").
+func mergeActivities(mentions []*dgraphStruct.DgraphMentions, comments []*dgraphStruct.DgraphComment, reactions []*dgraphModels.ReactionsActivity) []dgraphModels.UnifiedActivityItem {
+	type timed struct {
+		item dgraphModels.UnifiedActivityItem
+		at   time.Time
+	}
+	all := make([]timed, 0, len(mentions)+len(comments)+len(reactions))
+	add := func(item dgraphModels.UnifiedActivityItem, at *time.Time) {
+		item.Time = activityTime(at)
+		item.Priority = scoreActivityPriority(item)
+		item.ActorKind = ActorKind(actorOf(&item))
+		t := time.Time{}
+		if at != nil {
+			t = *at
+		}
+		all = append(all, timed{item: item, at: t})
+	}
+	for _, m := range mentions {
+		add(dgraphModels.UnifiedActivityItem{ActivityType: "MENTION", Mention: m}, m.CreatedAt)
+	}
+	for _, c := range comments {
+		add(dgraphModels.UnifiedActivityItem{ActivityType: "COMMENT", Comment: c}, c.CreatedAt)
+	}
+	for _, r := range reactions {
+		add(dgraphModels.UnifiedActivityItem{ActivityType: "REACTION", Reaction: r}, r.AddedAt)
+	}
+	sort.SliceStable(all, func(i, j int) bool { return all[i].at.After(all[j].at) })
+	out := make([]dgraphModels.UnifiedActivityItem, len(all))
+	for i := range all {
+		out[i] = all[i].item
+	}
+	return out
 }
 
 func PublishActivityToUser(recipientUserUUID string, activityItem *dgraphModels.UnifiedActivityItem) {

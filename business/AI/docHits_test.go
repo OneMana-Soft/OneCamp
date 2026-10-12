@@ -8,9 +8,12 @@ import (
 	"go/token"
 	"io/fs"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -82,7 +85,7 @@ func TestKeepReadableDocs(t *testing.T) {
 // said a private doc was public for as long as a save had rewritten it.
 func TestWorkspaceSearchesGoThroughTheDocCheck(t *testing.T) {
 	root := filepath.Join("..", "..")
-	guarded := map[string]bool{"SearchSimilar": true, "SearchRecentGlobal": true}
+	guarded := map[string]bool{"SearchSimilar": true, "SearchRecentGlobal": true, "FetchUnreadAcrossScopes": true}
 	var offenders []string
 	scanned := 0
 	for _, dir := range []string{"adapter", "business", "cmd", "controllers", "domain", "helpers", "middleware", "router", "services"} {
@@ -122,8 +125,8 @@ func TestWorkspaceSearchesGoThroughTheDocCheck(t *testing.T) {
 		t.Fatalf("scanned %d files: the walk no longer reaches the source", scanned)
 	}
 	if len(offenders) > 0 {
-		t.Fatalf("searched the workspace without the doc check; call searchSimilar or searchRecentGlobal "+
-			"(business/AI/docHits.go) instead:\n  %s", strings.Join(offenders, "\n  "))
+		t.Fatalf("searched the workspace without the doc check; call searchSimilar, searchRecentGlobal or "+
+			"fetchUnreadAcrossScopes (business/AI/docHits.go) instead:\n  %s", strings.Join(offenders, "\n  "))
 	}
 }
 
@@ -183,5 +186,118 @@ func TestADocHitForSomeoneElseIsReadableByThemToo(t *testing.T) {
 		if got := kept(c.ctx); got != c.want {
 			t.Errorf("%s: kept %s, want %s", c.name, got, c.want)
 		}
+	}
+}
+
+// readBoardsAs stands in for the graph behind boardBusiness.ReadableBoardsFor:
+// boards, read for the person with their deletion, held to the board rule.
+func readBoardsAs(boards map[string]*dgraphStruct.DgraphBoard, reads map[string]int) func(context.Context, []string, string) (map[string]bool, error) {
+	return func(_ context.Context, ids []string, userUUID string) (map[string]bool, error) {
+		out := map[string]bool{}
+		for _, id := range ids {
+			reads[id]++
+			if id == "broken" {
+				return nil, errors.New("dgraph is down")
+			}
+			if b, ok := boards[id]; ok {
+				out[strings.ToLower(id)] = boardBusiness.CanRead(b, userUUID)
+			}
+		}
+		return out, nil
+	}
+}
+
+// A comment on a board stays only if the person can read the board now: the
+// entry's copy of the board's privacy is from when the comment was written,
+// and the board's deletion may not have reached it.
+func TestKeepReadableBoardComments(t *testing.T) {
+	yes, no := true, false
+	deleted := time.Now().Add(-time.Hour)
+	boards := map[string]*dgraphStruct.DgraphBoard{
+		"open":    {Uuid: "open", IsPrivate: &no},
+		"private": {Uuid: "private", IsPrivate: &yes, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "owner"}},
+		"shared":  {Uuid: "shared", IsPrivate: &yes, HasCommentAccess: 1, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "owner"}},
+		"binned":  {Uuid: "binned", IsPrivate: &no, DeletedAt: &deleted},
+	}
+	reads := map[string]int{}
+	restore := readableBoards
+	defer func() { readableBoards = restore }()
+	readableBoards = readBoardsAs(boards, reads)
+	me := &userModels.UserInfo{}
+	me.UserDgraphInfo = dgraphStruct.DgraphUser{Uid: "0xme", Uuid: "me-uuid"}
+
+	hits := []ai.SimilarResult{
+		{ContentType: "comment", ContentUUID: "c-open", BoardUUID: "open"},
+		{ContentType: "comment", ContentUUID: "c-private", BoardUUID: "private"},
+		{ContentType: "comment", ContentUUID: "c-private-2", BoardUUID: "private"},
+		{ContentType: "comment", ContentUUID: "c-shared", BoardUUID: "shared"},
+		{ContentType: "comment", ContentUUID: "c-binned", BoardUUID: "binned"},
+		{ContentType: "comment", ContentUUID: "c-gone", BoardUUID: "gone"},
+		{ContentType: "comment", ContentUUID: "c-broken", BoardUUID: "broken"},
+		{ContentType: "post", ContentUUID: "p1", ChannelUUID: "ch"},
+	}
+	var kept []string
+	for _, h := range keepReadableDocs(context.Background(), me, hits) {
+		kept = append(kept, h.ContentUUID)
+	}
+	if got, want := strings.Join(kept, ","), "c-open,c-shared,p1"; got != want {
+		t.Errorf("kept %s, want %s", got, want)
+	}
+	if reads["private"] != 1 {
+		t.Errorf("the private board was read %d times, want once", reads["private"])
+	}
+}
+
+// A deleted board's comments stayed in AI search and catch-up whenever the
+// delete's cascade missed their entries: the check read the board without its
+// deletion time (GetBasicBoardByUUID), so a deleted board read as live. It now
+// asks boardBusiness.ReadableBoardsFor, which reads it.
+func TestTheBoardCheckReadsTheBoardsDeletion(t *testing.T) {
+	if reflect.ValueOf(readableBoards).Pointer() != reflect.ValueOf(boardBusiness.ReadableBoardsFor).Pointer() {
+		t.Fatal("AI search checks boards with something other than boardBusiness.ReadableBoardsFor, which reads a board's deletion")
+	}
+}
+
+// The workspace catch-up window holds docs and comments on docs and boards
+// too (only memory items are left out), so it is held to the same check: an
+// item about a doc or a board the person can't read now is dropped.
+func TestCatchUpItemsAreCheckedLikeSearchHits(t *testing.T) {
+	yes := true
+	restoreDoc, restoreBoard := readDocFor, readableBoards
+	defer func() { readDocFor, readableBoards = restoreDoc, restoreBoard }()
+	no := false
+	deleted := time.Now().Add(-time.Hour)
+	readDocFor = func(_ context.Context, docUUID, _ string) (*dgraphStruct.DgraphDoc, error) {
+		if docUUID == "binned" {
+			// Readable by everyone, but deleted.
+			return &dgraphStruct.DgraphDoc{Uuid: docUUID, IsPrivate: &no, DeletedAt: &deleted}, nil
+		}
+		return &dgraphStruct.DgraphDoc{Uuid: docUUID, IsPrivate: &yes, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "owner"}}, nil
+	}
+	readableBoards = readBoardsAs(map[string]*dgraphStruct.DgraphBoard{
+		"roadmap": {Uuid: "roadmap", IsPrivate: &yes, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "owner"}},
+		// Readable by everyone, but deleted.
+		"retro": {Uuid: "retro", IsPrivate: &no, DeletedAt: &deleted},
+	}, map[string]int{})
+	me := &userModels.UserInfo{}
+	me.UserDgraphInfo = dgraphStruct.DgraphUser{Uid: "0xme", Uuid: "me-uuid"}
+
+	items := []ai.ScopedContent{
+		{ContentText: "standup notes", ContentType: "post", ContentUUID: "p1"},
+		{ContentText: "the old plan", ContentType: "doc", ContentUUID: "binned"},
+		{ContentText: "the reorg plan", ContentType: "doc", ContentUUID: "plans"},
+		{ContentText: "agreed", ContentType: "comment", ContentUUID: "c1", DocUUID: "plans"},
+		{ContentText: "move this box", ContentType: "comment", ContentUUID: "c2", BoardUUID: "roadmap"},
+		{ContentText: "keep the timer", ContentType: "comment", ContentUUID: "c3", BoardUUID: "retro"},
+		{ContentText: "ship it", ContentType: "task", ContentUUID: "t1"},
+	}
+	var kept []string
+	for _, it := range keepReadable(context.Background(), me, items, func(c ai.ScopedContent) readRef {
+		return refOf(c.ContentType, c.ContentUUID, c.DocUUID, c.BoardUUID)
+	}) {
+		kept = append(kept, it.ContentText)
+	}
+	if got, want := strings.Join(kept, ","), "standup notes,ship it"; got != want {
+		t.Errorf("kept %s, want %s", got, want)
 	}
 }

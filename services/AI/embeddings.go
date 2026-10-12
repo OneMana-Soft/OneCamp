@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -103,6 +104,9 @@ type SimilarResult struct {
 	PostUUID string `json:"post_uuid"`
 	TaskUUID string `json:"task_uuid"`
 	DocUUID  string `json:"doc_uuid"`
+	// BoardUUID is the board a board comment is on, so a hit on one can be
+	// checked against the board itself (business/AI docHits.go).
+	BoardUUID string `json:"board_uuid"`
 }
 
 const AI_EMBEDDINGS_INDEX = "ai_embeddings"
@@ -173,7 +177,7 @@ func storeEmbeddingDirect(ctx context.Context, doc EmbeddingDoc) error {
 	// Store the truncated text
 	stored.ContentText = text
 
-	jsonData, err := json.Marshal(stored)
+	jsonData, err := entryJSON(stored)
 	if err != nil {
 		return fmt.Errorf("failed to marshal embedding doc: %w", err)
 	}
@@ -207,20 +211,133 @@ func storeEmbeddingDirect(ctx context.Context, doc EmbeddingDoc) error {
 	return nil
 }
 
+// entryJSON is an entry as it is written to the index. An entry that exists is
+// updated with only the fields a write sends, and omitempty leaves out an empty
+// list and a false. So a write that knows who may see the content sends every
+// field of that rule, empty ones included: otherwise un-sharing a doc with its
+// last reader, an unassigned task or a board made private would leave the old
+// grant on the entry. A write that doesn't know (an edited comment's text)
+// sends none of them and keeps what is stored.
+//
+//   - a doc's own entry or a doc comment's (DocPrivate set): the doc's privacy,
+//     creator and reading, editing and commenting people;
+//   - a board comment's (BoardUUID set): the board's publicity, creator and people;
+//   - a task's own entry: its assignee.
+func entryJSON(stored embeddingDocWithVector) ([]byte, error) {
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		return nil, err
+	}
+	d := stored.EmbeddingDoc
+	explicit := map[string]any{}
+	list := func(s []string) []string {
+		if s == nil {
+			return []string{}
+		}
+		return s
+	}
+	if d.DocPrivate != nil {
+		explicit["doc_created_by_user_id"] = d.DocCreatedByUserID
+		explicit["doc_reading_users"] = list(d.DocReadingUsers)
+		explicit["doc_editing_users"] = list(d.DocEditingUsers)
+		explicit["doc_commenting_users"] = list(d.DocCommentingUsers)
+	}
+	if d.BoardUUID != "" {
+		explicit["board_public"] = d.BoardPublic
+		explicit["board_created_by_user_id"] = d.BoardCreatedByUserID
+		explicit["board_reading_users"] = list(d.BoardReadingUsers)
+		explicit["board_editing_users"] = list(d.BoardEditingUsers)
+		explicit["board_commenting_users"] = list(d.BoardCommentingUsers)
+	}
+	if d.ContentType == "task" {
+		explicit["task_assignee_user_id"] = d.TaskAssigneeUUID
+	}
+	if len(explicit) == 0 {
+		return raw, nil
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	for k, v := range explicit {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return nil, err
+		}
+		fields[k] = b
+	}
+	return json.Marshal(fields)
+}
+
 // StoreEmbeddingAsync fires a goroutine to store the embedding — fire-and-forget.
 // This matches the pattern used by existing OpenSearch indexing in the codebase.
+//
+// Writes to the same entry land in the order they were asked for: each waits
+// for the one asked for before it (entryWriteQueue). Each computes its vector
+// first, which takes as long as the model does, so two writes to one entry
+// used to land in whichever order their vectors came back. When an agent made
+// a doc, CreateDoc's title-only write could land after the save that followed
+// it, and the doc's text was gone from AI search until its next save.
 func StoreEmbeddingAsync(doc EmbeddingDoc) {
+	prev, done := entryWrites.queue(doc.ContentType + ":" + doc.ContentUUID)
 	go func() {
+		defer done()
+		if prev != nil {
+			// Bounded: the write before has its own deadline (below), and one
+			// that outlives it anyway must not hold this entry back for good.
+			select {
+			case <-prev:
+			case <-time.After(entryWriteWait):
+			}
+		}
+
 		// Embeddings can occasionally hang; use a timeout context
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		if err := StoreEmbedding(ctx, doc); err != nil {
+		if err := storeEmbeddingFn(ctx, doc); err != nil {
 			helpers.LogErrorWithContext(ctx,
 				"AI/embeddings StoreEmbeddingAsync failed for %s:%s err: %+v",
 				doc.ContentType, doc.ContentUUID, err)
 		}
 	}()
+}
+
+// storeEmbeddingFn is StoreEmbedding. A seam for tests.
+var storeEmbeddingFn = StoreEmbedding
+
+// entryWriteWait is how long a write waits for the one before it to the same
+// entry: longer than that write's own deadline.
+const entryWriteWait = 30 * time.Second
+
+// entryWriteQueue orders the writes to each entry: per entry, the write last
+// asked for.
+type entryWriteQueue struct {
+	mu   sync.Mutex
+	last map[string]chan struct{}
+}
+
+var entryWrites = &entryWriteQueue{last: map[string]chan struct{}{}}
+
+// queue enters a write to the entry key. prev is closed when the write asked for
+// before it has finished (nil when there is none); done is called when this one
+// has.
+func (q *entryWriteQueue) queue(key string) (prev <-chan struct{}, done func()) {
+	mine := make(chan struct{})
+	q.mu.Lock()
+	if p, ok := q.last[key]; ok {
+		prev = p
+	}
+	q.last[key] = mine
+	q.mu.Unlock()
+	return prev, func() {
+		close(mine)
+		q.mu.Lock()
+		if q.last[key] == mine {
+			delete(q.last, key)
+		}
+		q.mu.Unlock()
+	}
 }
 
 // SearchSimilar performs a k-NN vector search with per-content-type permission
@@ -449,7 +566,7 @@ func SearchSimilar(ctx context.Context, query string, userUUID string, channelUU
 				}
 			}
 		},
-		"_source": ["content_text", "content_type", "content_uuid", "channel_uuid", "channel_name", "project_uuid", "author_name", "doc_uuid"]
+		"_source": ["content_text", "content_type", "content_uuid", "channel_uuid", "channel_name", "project_uuid", "author_name", "doc_uuid", "board_uuid"]
 	}`, limit, string(vectorJSON), limit, permissionFilter)
 
 	// Execute search
@@ -532,7 +649,7 @@ func SearchRecent(ctx context.Context, userUUID string, channelUUIDs []string, p
 		"sort": [
 			{"created_date": {"order": "desc"}}
 		],
-		"_source": ["content_text", "content_type", "content_uuid", "channel_uuid", "channel_name", "project_uuid", "author_name", "doc_uuid"]
+		"_source": ["content_text", "content_type", "content_uuid", "channel_uuid", "channel_name", "project_uuid", "author_name", "doc_uuid", "board_uuid"]
 	}`, limit, termClause, permissionFilter)
 
 	type osHit struct {
@@ -609,7 +726,7 @@ func SearchRecentGlobal(ctx context.Context, userUUID string, channelUUIDs []str
 		"sort": [
 			{"created_date": {"order": "desc"}}
 		],
-		"_source": ["content_text", "content_type", "content_uuid", "channel_uuid", "channel_name", "project_uuid", "author_name", "chat_grp_id", "chat_by_user_id", "chat_to_user_id", "post_uuid", "task_uuid", "doc_uuid"]
+		"_source": ["content_text", "content_type", "content_uuid", "channel_uuid", "channel_name", "project_uuid", "author_name", "chat_grp_id", "chat_by_user_id", "chat_to_user_id", "post_uuid", "task_uuid", "doc_uuid", "board_uuid"]
 	}`, limit, permissionFilter)
 
 	type osHit struct {
@@ -929,6 +1046,14 @@ type ScopedContent struct {
 	AuthorName  string
 	ContentText string
 	CreatedDate int64
+
+	// What the item is, for a check against its source before it is used:
+	// set by FetchUnreadAcrossScopes, which reaches docs and comments on docs
+	// and boards (business/AI docHits.go).
+	ContentType string
+	ContentUUID string
+	DocUUID     string
+	BoardUUID   string
 }
 
 // memoryScopeFields enumerates the embedding-doc fields that can anchor a
@@ -1063,7 +1188,7 @@ func FetchUnreadAcrossScopes(ctx context.Context, userUUID string, channelUUIDs,
 			}
 		},
 		"sort": [{"created_date": {"order": "desc"}}],
-		"_source": ["content_text", "author_name", "created_date"]
+		"_source": ["content_text", "author_name", "created_date", "content_type", "content_uuid", "doc_uuid", "board_uuid"]
 	}`, limit, permissionFilter, sinceUnix)
 
 	type osHit struct {
@@ -1090,6 +1215,10 @@ func FetchUnreadAcrossScopes(ctx context.Context, userUUID string, channelUUIDs,
 			ContentText string `json:"content_text"`
 			AuthorName  string `json:"author_name"`
 			CreatedDate int64  `json:"created_date"`
+			ContentType string `json:"content_type"`
+			ContentUUID string `json:"content_uuid"`
+			DocUUID     string `json:"doc_uuid"`
+			BoardUUID   string `json:"board_uuid"`
 		}
 		if err := json.Unmarshal(h.Source, &row); err != nil {
 			continue
@@ -1101,6 +1230,10 @@ func FetchUnreadAcrossScopes(ctx context.Context, userUUID string, channelUUIDs,
 			AuthorName:  row.AuthorName,
 			ContentText: row.ContentText,
 			CreatedDate: row.CreatedDate,
+			ContentType: row.ContentType,
+			ContentUUID: row.ContentUUID,
+			DocUUID:     row.DocUUID,
+			BoardUUID:   row.BoardUUID,
 		})
 	}
 	// Re-sort ascending (chronological) for a natural recap reading order.

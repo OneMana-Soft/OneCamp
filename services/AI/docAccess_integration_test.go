@@ -76,7 +76,7 @@ func TestDocAccessInTheIndex(t *testing.T) {
 	}
 	setAccess := func(a DocAccess) {
 		t.Helper()
-		if err := SetDocAccess(ctx, []DocAccess{a}); err != nil {
+		if _, err := SetDocAccess(ctx, []DocAccess{a}); err != nil {
 			t.Fatal(err)
 		}
 	}

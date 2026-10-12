@@ -33,10 +33,22 @@ type DocAccess struct {
 
 // docAccessScript sets an entry's doc fields from params.docs, keyed by the
 // doc the entry belongs to: its own uuid for a doc's entry, doc_uuid for a
-// comment's. An entry of a doc not in params is left as it is.
-const docAccessScript = "def id = ctx._source.content_type == 'doc' ? ctx._source.content_uuid : ctx._source.doc_uuid; " +
+// comment's. An entry of a doc not in params is left as it is, and so is one
+// that already says what the doc says (the same people in any order; a missing
+// list is an empty one), so the update's count is the entries that were wrong.
+const docAccessScript = "boolean same(def a, def b) { " +
+	"if (a == null) { a = []; } if (b == null) { b = []; } " +
+	"if (!(a instanceof List)) { a = [a]; } if (!(b instanceof List)) { b = [b]; } " +
+	"return new HashSet(a).equals(new HashSet(b)); } " +
+	"def id = ctx._source.content_type == 'doc' ? ctx._source.content_uuid : ctx._source.doc_uuid; " +
 	"def a = id == null ? null : params.docs[id]; " +
-	"if (a == null) { ctx.op = 'noop'; } else { " +
+	"if (a == null) { ctx.op = 'noop'; } " +
+	"else if (ctx._source.doc_private == a['is_private'] && " +
+	"(ctx._source.doc_created_by_user_id == null ? '' : ctx._source.doc_created_by_user_id) == a['created_by'] && " +
+	"same(ctx._source.doc_reading_users, a['reading']) && " +
+	"same(ctx._source.doc_editing_users, a['editing']) && " +
+	"same(ctx._source.doc_commenting_users, a['commenting'])) { ctx.op = 'noop'; } " +
+	"else { " +
 	"ctx._source.doc_private = a['is_private']; " +
 	"ctx._source.doc_created_by_user_id = a['created_by']; " +
 	"ctx._source.doc_reading_users = a['reading']; " +
@@ -94,15 +106,16 @@ func docAccessUpdateBody(docs []DocAccess) ([]byte, error) {
 }
 
 // SetDocAccess writes each doc's privacy and sharing onto its own entry and
-// its comments' entries, in one request. Entries of other docs are untouched,
-// and writing the same values twice is harmless.
-func SetDocAccess(ctx context.Context, docs []DocAccess) error {
+// its comments' entries, in one request, and answers how many entries said
+// something else and were corrected. Entries of other docs are untouched, and
+// writing the same values twice changes nothing.
+func SetDocAccess(ctx context.Context, docs []DocAccess) (corrected int, err error) {
 	body, err := docAccessUpdateBody(docs)
 	if err != nil || body == nil {
-		return err
+		return 0, err
 	}
 	if opensearchInit.OpenSearchClient == nil {
-		return fmt.Errorf("OpenSearch client not initialized")
+		return 0, fmt.Errorf("OpenSearch client not initialized")
 	}
 	refresh := true
 	resp, err := opensearchInit.OpenSearchClient.UpdateByQuery(ctx, opensearchapi.UpdateByQueryReq{
@@ -115,10 +128,13 @@ func SetDocAccess(ctx context.Context, docs []DocAccess) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("writing docs' access to the AI index: %w", err)
+		return 0, fmt.Errorf("writing docs' access to the AI index: %w", err)
 	}
-	if resp != nil && len(resp.Failures) > 0 {
-		return fmt.Errorf("writing docs' access to the AI index: %d entries failed", len(resp.Failures))
+	if resp == nil {
+		return 0, nil
 	}
-	return nil
+	if len(resp.Failures) > 0 {
+		return resp.Updated, fmt.Errorf("writing docs' access to the AI index: %d entries failed", len(resp.Failures))
+	}
+	return resp.Updated, nil
 }

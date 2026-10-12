@@ -426,38 +426,61 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 		if derr != nil || doc == nil {
 			return ReachDecision{Reason: "doc could not be read"}
 		}
-		// A deleted doc keeps its reader/editor/commenter grants, so the grant
-		// check below would still pass for a doc that has been removed.
-		if helpers.IsSoftDeleted(doc.DeletedAt) {
-			return ReachDecision{Reason: "this doc has been deleted"}
-		}
-		// A non-private doc is visible workspace-wide; a private one requires an
-		// explicit grant. IsPrivate is a pointer, and a nil value is indeterminate —
-		// treated as private, because guessing "public" on a doc whose privacy is
-		// unknown is the one wrong direction to guess.
-		// WRITE is decided first and on its own terms, because it does NOT follow from
-		// visibility. A non-private doc is readable workspace-wide, and that says
-		// nothing about who may edit it — so falling through to the privacy check
-		// below would let anyone rewrite any public document.
-		if !ref.Access.IsRead() {
-			if !docGrantsEdit(doc, principal) {
-				return ReachDecision{Reason: "the originating person may not edit this doc"}
-			}
-			return ReachDecision{Allow: true, Reason: "doc editor", PrincipalDgraphUID: uid}
-		}
-		if doc.IsPrivate == nil || *doc.IsPrivate {
-			if !docGrantsAccess(doc, principal) {
-				return ReachDecision{Reason: "the originating person has no grant on this private doc"}
-			}
-			return ReachDecision{Allow: true, Reason: "explicit grant on private doc", PrincipalDgraphUID: uid}
-		}
-		return ReachDecision{Allow: true, Reason: "workspace-visible doc", PrincipalDgraphUID: uid}
+		// The grant is decided with the doc's deletion set aside, and the
+		// deletion after it (docReach): only someone the doc was there for is
+		// told it was deleted.
+		return docReach(doc, principal, uid, ref.Access.IsRead(), helpers.IsSoftDeleted(doc.DeletedAt))
 
 	default:
 		// A kind nobody has written an authority rule for. Refusing here is what
 		// makes ResourceKind's closedness meaningful.
 		return ReachDecision{Reason: "unsupported resource kind"}
 	}
+}
+
+// ReasonDocDeleted is the refusal for a doc in the trash, given only to someone
+// who could have read it (or, for a write, changed it) while it was live.
+const ReasonDocDeleted = "this doc has been deleted"
+
+// docReach decides whether principal (whose graph uid is uid) may act on a doc
+// already read: read, or change it when read is false. deleted is whether the
+// doc is in the trash. Pure.
+//
+// The grant comes first, as if the doc were live, and the deletion after it. A
+// deleted doc keeps its reader/editor/commenter grants, so the grant alone
+// would still let a removed doc through, which is why deletion is asked at
+// all. But asked first, it told anyone at all, an MCP client or an agent's
+// asker who could never read a private doc, that the doc existed and had been
+// deleted. Now only someone it was there for hears that; to anyone else a
+// deleted doc answers as it did live.
+func docReach(doc *dgraphStruct.DgraphDoc, principal, uid string, read, deleted bool) ReachDecision {
+	var granted ReachDecision
+	switch {
+	// WRITE is decided first and on its own terms, because it does NOT follow from
+	// visibility. A non-private doc is readable workspace-wide, and that says
+	// nothing about who may edit it — so falling through to the privacy check
+	// below would let anyone rewrite any public document.
+	case !read:
+		if !docGrantsEdit(doc, principal) {
+			return ReachDecision{Reason: "the originating person may not edit this doc"}
+		}
+		granted = ReachDecision{Allow: true, Reason: "doc editor", PrincipalDgraphUID: uid}
+	// A non-private doc is visible workspace-wide; a private one requires an
+	// explicit grant. IsPrivate is a pointer, and a nil value is indeterminate —
+	// treated as private, because guessing "public" on a doc whose privacy is
+	// unknown is the one wrong direction to guess.
+	case doc.IsPrivate == nil || *doc.IsPrivate:
+		if !docGrantsAccess(doc, principal) {
+			return ReachDecision{Reason: "the originating person has no grant on this private doc"}
+		}
+		granted = ReachDecision{Allow: true, Reason: "explicit grant on private doc", PrincipalDgraphUID: uid}
+	default:
+		granted = ReachDecision{Allow: true, Reason: "workspace-visible doc", PrincipalDgraphUID: uid}
+	}
+	if deleted {
+		return ReachDecision{Reason: ReasonDocDeleted}
+	}
+	return granted
 }
 
 // docGrantsEdit reports whether principalUUID may CHANGE a doc.

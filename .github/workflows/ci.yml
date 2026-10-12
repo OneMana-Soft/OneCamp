@@ -168,6 +168,27 @@ jobs:
       - name: go test
         run: go test -count=1 -race -timeout=10m ./...
 
+  collaboration-service:
+    name: Collaboration service
+    runs-on: ubuntu-latest
+    # The document server is Node, so no Go job sees it. Its tests hold its
+    # editor schema to schema-manifest.json (the web editor's; the web repo
+    # keeps a copy and tests its editor against it): a block the server does
+    # not know made every save of a doc holding it fail (11 Oct 2026). Same
+    # Node as its Dockerfile.
+    defaults:
+      run:
+        working-directory: other-services/collaboration-service
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+      - name: install
+        run: npx --yes pnpm@9 install --frozen-lockfile
+      - name: node --test
+        run: node --test
+
   integration:
     name: Integration tests
     runs-on: ubuntu-latest

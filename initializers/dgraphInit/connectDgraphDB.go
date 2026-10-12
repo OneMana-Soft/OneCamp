@@ -233,6 +233,8 @@ func createSchema() (err error) {
 		doc_created_at: dateTime .
 		doc_updated_at: dateTime .
 		doc_deleted_at: dateTime .
+		doc_archived_at: dateTime .
+		doc_restored_at: dateTime .
 
 		board_uuid: string @index(exact) @upsert .
 		board_title: string @index(trigram) .
@@ -381,6 +383,8 @@ func createSchema() (err error) {
 			doc_created_at
 			doc_updated_at
 			doc_deleted_at
+			doc_archived_at
+			doc_restored_at
 		}
 
 		type Board {

@@ -41,13 +41,14 @@ func TestEntityLabels(t *testing.T) {
 }
 
 func TestEntitySupportsUndo(t *testing.T) {
-	shouldSupport := []string{"posts", "chats", "tasks", "attachments"}
+	// Docs can be undone since a docs run records which docs it archived.
+	shouldSupport := []string{"posts", "chats", "tasks", "attachments", "docs"}
 	for _, et := range shouldSupport {
 		if !entitySupportsUndo[et] {
 			t.Errorf("entitySupportsUndo should be true for %q", et)
 		}
 	}
-	shouldNot := []string{"docs", "recordings"}
+	shouldNot := []string{"recordings"}
 	for _, et := range shouldNot {
 		if entitySupportsUndo[et] {
 			t.Errorf("entitySupportsUndo should be false for %q", et)
@@ -69,7 +70,8 @@ func TestEntityRegistryCoversAllValidTypes(t *testing.T) {
 			t.Errorf("entityRegistry[%q].ArchiveFn is nil", et)
 		}
 		// Dgraph sync functions are required for postgres-backed entities
-		if entitySupportsUndo[et] {
+		// (docs live in the graph: their ArchiveFn writes it).
+		if _, postgresBacked := entityRestoreQuery[et]; postgresBacked {
 			if ops.ArchiveDgraphFn == nil {
 				t.Errorf("entityRegistry[%q].ArchiveDgraphFn is nil", et)
 			}

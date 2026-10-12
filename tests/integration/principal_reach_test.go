@@ -109,6 +109,7 @@ func TestPrincipalCanReachDocsAgainstRealGraph(t *testing.T) {
 	outsider := uuid.NewString()
 	privateDoc := uuid.NewString()
 	publicDoc := uuid.NewString()
+	deletedDoc := uuid.NewString()
 
 	if uids := dg.Mutate(t, []map[string]any{
 		{"uid": "_:author", "user_uuid": author, "user_name": "author"},
@@ -122,6 +123,10 @@ func TestPrincipalCanReachDocsAgainstRealGraph(t *testing.T) {
 			"doc_reading_users": []map[string]any{{"uid": "_:reader"}}},
 		{"uid": "_:public", "doc_uuid": publicDoc, "doc_private": false,
 			"doc_created_by": map[string]any{"uid": "_:author"}},
+		{"uid": "_:deleted", "doc_uuid": deletedDoc, "doc_private": true,
+			"doc_deleted_at":    time.Now().UTC().Format(time.RFC3339Nano),
+			"doc_created_by":    map[string]any{"uid": "_:author"},
+			"doc_reading_users": []map[string]any{{"uid": "_:reader"}}},
 	}); len(uids) == 0 {
 		t.Fatal("seeding assigned no uids")
 	}
@@ -158,6 +163,19 @@ func TestPrincipalCanReachDocsAgainstRealGraph(t *testing.T) {
 	t.Run("a non-private doc is workspace-visible", func(t *testing.T) {
 		if d := mcpBusiness.PrincipalCanReach(ctx, outsider, ref(publicDoc)); !d.Allow {
 			t.Fatalf("a non-private doc was refused to a workspace member: %s", d.Reason)
+		}
+	})
+
+	// Only someone a deleted doc was there for is told it was deleted. Anyone
+	// else gets what the private doc tells them live, and learns neither that
+	// it existed nor that it went.
+	t.Run("a deleted doc is deleted only to those it was there for", func(t *testing.T) {
+		if d := mcpBusiness.PrincipalCanReach(ctx, reader, ref(deletedDoc)); d.Allow || d.Reason != mcpBusiness.ReasonDocDeleted {
+			t.Errorf("its reader: %+v, want refused as deleted", d)
+		}
+		live := mcpBusiness.PrincipalCanReach(ctx, outsider, ref(privateDoc))
+		if d := mcpBusiness.PrincipalCanReach(ctx, outsider, ref(deletedDoc)); d.Allow || d.Reason != live.Reason {
+			t.Errorf("someone with no grant: %+v, want what a private doc they can't read tells them, %q", d, live.Reason)
 		}
 	})
 }

@@ -1886,6 +1886,10 @@ func GetDocFile(w http.ResponseWriter, r *http.Request) {
 
 	dgraphDoc, err := docBusiness.GetBasicDgraphDocByUUID(ctx, doclUUIDString, userInfo.UserDgraphInfo.Uid)
 
+	if errors.Is(err, docBusiness.ErrNotFound) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such doc."})
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/GetDocFile Failed to get docInfo err: %+v",
@@ -1894,6 +1898,17 @@ func GetDocFile(w http.ResponseWriter, r *http.Request) {
 			"msg": " Failed to get docInfo",
 			"err": err,
 		})
+		return
+	}
+
+	// A deleted doc's files go with it: 410 to someone it was shared with,
+	// 404 to anyone else.
+	if docBusiness.IsDeleted(dgraphDoc) {
+		if docBusiness.CouldRead(dgraphDoc, userInfo.UserDgraphInfo.Uuid) {
+			helpers.WriteJSON(w, http.StatusGone, helpers.Envolope{"msg": "This doc was deleted.", "deleted": true})
+		} else {
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such doc."})
+		}
 		return
 	}
 
@@ -1980,6 +1995,10 @@ func GetDocAttachment(w http.ResponseWriter, r *http.Request) {
 
 	dgraphDoc, err := docBusiness.GetBasicDgraphDocByUUID(ctx, doclUUIDString, userInfo.UserDgraphInfo.Uid)
 
+	if errors.Is(err, docBusiness.ErrNotFound) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such doc."})
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/GetDocAttachment Failed to get docInfo err: %+v",
@@ -1988,6 +2007,17 @@ func GetDocAttachment(w http.ResponseWriter, r *http.Request) {
 			"msg": " Failed to get docInfo",
 			"err": err,
 		})
+		return
+	}
+
+	// A deleted doc's files go with it: 410 to someone it was shared with,
+	// 404 to anyone else.
+	if docBusiness.IsDeleted(dgraphDoc) {
+		if docBusiness.CouldRead(dgraphDoc, userInfo.UserDgraphInfo.Uuid) {
+			helpers.WriteJSON(w, http.StatusGone, helpers.Envolope{"msg": "This doc was deleted.", "deleted": true})
+		} else {
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such doc."})
+		}
 		return
 	}
 

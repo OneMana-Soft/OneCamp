@@ -1,14 +1,19 @@
 package businness
 
-// The AI search index's copy of every private doc's privacy, written right once.
+// The AI search index's copy of every doc's privacy and sharing, put right.
 //
-// Until this release a save from the editor re-indexed a doc for AI search as
-// public, editing a comment on a doc re-indexed it as public, and a change of
-// who a doc is shared with never reached the index. So a private doc's text,
-// and its comments, could be found by every member through AI search. Search
-// now re-checks each doc it returns against the doc, and writes keep a doc's
-// privacy; this writes the current privacy and sharing of every private doc
-// onto its entries once, so the index itself is right again, not only filtered.
+// Until 9 Oct a save from the editor re-indexed a doc for AI search as public,
+// editing a comment on a doc re-indexed it as public, and a change of who a doc
+// is shared with never reached the index. So a private doc's text, and its
+// comments, could be found by every member through AI search. Search now
+// re-checks each doc it returns against the doc, and writes keep a doc's
+// privacy; this writes the current privacy and sharing of every doc, private
+// and public, onto its entries, so the index itself is right again, not only
+// filtered. An entry that already says what the doc says is left alone, so what
+// it reports is how many entries were wrong.
+//
+// The first version (ai_embeddings_doc_access_v1) wrote private docs only and
+// counted docs, not corrections; v2 runs once more everywhere, over every doc.
 //
 // It runs in the background at startup until it has succeeded once, which the
 // system_configs key below records, so later starts skip it. Until then it
@@ -30,7 +35,7 @@ import (
 )
 
 const (
-	embeddingAccessBackfillKey  = "ai_embeddings_doc_access_v1"
+	embeddingAccessBackfillKey  = "ai_embeddings_doc_access_v2"
 	embeddingAccessBackfillPage = 200
 	// embeddingAccessBackfillTries bounds the retries in one process: about
 	// three and a half hours of waits, then the next start tries again.
@@ -48,14 +53,14 @@ func StartEmbeddingAccessBackfill(ctx context.Context) {
 				return
 			case <-time.After(wait):
 			}
-			written, err := RunEmbeddingAccessBackfill(ctx)
+			docs, corrected, err := RunEmbeddingAccessBackfill(ctx)
 			if err == nil {
-				if written > 0 {
-					helpers.MessageLogs.InfoLog.Printf("AI search: wrote the privacy and sharing of %d private docs onto their entries", written)
+				if docs > 0 {
+					helpers.MessageLogs.InfoLog.Printf("AI search: checked the privacy and sharing of %d docs on their entries and corrected %d entries", docs, corrected)
 				}
 				return
 			}
-			helpers.MessageLogs.ErrorLog.Printf("AI search: writing private docs' privacy onto their entries failed (will retry): %v", err)
+			helpers.MessageLogs.ErrorLog.Printf("AI search: writing docs' privacy onto their entries failed (will retry): %v", err)
 			if wait < 30*time.Minute {
 				wait *= 2
 			}
@@ -63,42 +68,44 @@ func StartEmbeddingAccessBackfill(ctx context.Context) {
 	})
 }
 
-// RunEmbeddingAccessBackfill writes every private doc's privacy and sharing
-// onto its AI search entries and its comments', unless that has been done, and
-// then records that it has. It answers how many docs it wrote.
-func RunEmbeddingAccessBackfill(ctx context.Context) (int, error) {
+// RunEmbeddingAccessBackfill writes every doc's privacy and sharing onto its
+// AI search entries and its comments', unless that has been done, and then
+// records that it has. It answers how many docs it checked and how many
+// entries said something else and were corrected.
+func RunEmbeddingAccessBackfill(ctx context.Context) (docs, corrected int, err error) {
 	if done, err := embeddingAccessBackfillDone(); err != nil || done {
-		return 0, err
+		return 0, 0, err
 	}
 	if ai.IsReindexRunning() {
-		return 0, errors.New("the AI search index is being rebuilt")
+		return 0, 0, errors.New("the AI search index is being rebuilt")
 	}
-	written := 0
 	for offset := 0; ; offset += embeddingAccessBackfillPage {
-		docs, err := domain.GetPrivateDocAccessPage(ctx, offset, embeddingAccessBackfillPage)
+		page, err := domain.GetDocAccessPage(ctx, offset, embeddingAccessBackfillPage)
 		if err != nil {
-			return written, err
+			return docs, corrected, err
 		}
-		access := make([]ai.DocAccess, 0, len(docs))
-		for _, d := range docs {
+		access := make([]ai.DocAccess, 0, len(page))
+		for _, d := range page {
 			if d != nil && d.Uuid != "" {
 				access = append(access, docAccessOf(d.Uuid, d))
 			}
 		}
-		if err := ai.SetDocAccess(ctx, access); err != nil {
-			return written, err
+		n, err := ai.SetDocAccess(ctx, access)
+		corrected += n
+		if err != nil {
+			return docs, corrected, err
 		}
-		written += len(access)
-		if len(docs) < embeddingAccessBackfillPage {
+		docs += len(access)
+		if len(page) < embeddingAccessBackfillPage {
 			break
 		}
 	}
 	// A rebuild that began meanwhile copied the index before these writes
 	// reached it, so they are done again once it has finished.
 	if ai.IsReindexRunning() {
-		return written, errors.New("the AI search index is being rebuilt")
+		return docs, corrected, errors.New("the AI search index is being rebuilt")
 	}
-	return written, configModel.UpsertConfig(embeddingAccessBackfillKey, "done")
+	return docs, corrected, configModel.UpsertConfig(embeddingAccessBackfillKey, "done")
 }
 
 func embeddingAccessBackfillDone() (bool, error) {

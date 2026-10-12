@@ -26,7 +26,9 @@ import (
 	"fmt"
 	"strings"
 
+	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -52,35 +54,101 @@ func searchRecentGlobal(ctx context.Context, userInfo *userModels.UserInfo, chan
 	return keepReadableDocs(ctx, userInfo, res), nil
 }
 
+// fetchUnreadAcrossScopes is ai.FetchUnreadAcrossScopes (the workspace-wide
+// catch-up window) for the person, without the docs, comments on docs and
+// comments on boards they can't read.
+func fetchUnreadAcrossScopes(ctx context.Context, userInfo *userModels.UserInfo, channels, projects, grpIDs []string, sinceUnix int64, limit int) ([]ai.ScopedContent, error) {
+	items, err := ai.FetchUnreadAcrossScopes(ctx, userInfo.UserDgraphInfo.Uuid, channels, projects, grpIDs, sinceUnix, limit)
+	if err != nil {
+		return nil, err
+	}
+	return keepReadable(ctx, userInfo, items, func(c ai.ScopedContent) readRef {
+		return refOf(c.ContentType, c.ContentUUID, c.DocUUID, c.BoardUUID)
+	}), nil
+}
+
 // readDocFor reads a doc as the person sees it. A seam for tests.
 var readDocFor = func(ctx context.Context, docUUID, userUID string) (*dgraphStruct.DgraphDoc, error) {
 	return docBusiness.GetBasicDgraphDocByUUID(ctx, docUUID, userUID)
 }
 
+// readableBoards answers which of the boards a person (by uuid) may read now,
+// a deleted board being readable by nobody: boardBusiness.ReadableBoardsFor
+// reads each board's deletion, which its basic read (GetBasicBoardByUUID, used
+// here before) leaves out. A seam for tests.
+var readableBoards = boardBusiness.ReadableBoardsFor
+
 // keepReadableDocs returns the results without the hits on a doc, or on a
 // comment on one, that the person can't read now, nor, for an agent run acting
 // for someone else, that person (docReaders). Each doc is read once per reader.
+//
+// A comment on a board is held to the board the same way: its entry carries a
+// copy of the board's privacy and sharing from when the comment was written,
+// and making the board private or no longer sharing it doesn't reach it, nor
+// does deleting it when the delete's cascade misses the entry.
 func keepReadableDocs(ctx context.Context, userInfo *userModels.UserInfo, results []ai.SimilarResult) []ai.SimilarResult {
-	if len(results) == 0 {
-		return results
+	return keepReadable(ctx, userInfo, results, func(r ai.SimilarResult) readRef {
+		return refOf(r.ContentType, r.ContentUUID, r.DocUUID, r.BoardUUID)
+	})
+}
+
+// readRef is what an item is about, when that has a reader rule of its own:
+// the doc (its own, or the one a comment is on) and the board a comment is on.
+type readRef struct{ doc, board string }
+
+// refOf reads an item's readRef from its index fields. Only doc comments carry
+// doc_uuid and only board comments board_uuid.
+func refOf(contentType, contentUUID, docUUID, boardUUID string) readRef {
+	switch contentType {
+	case "doc":
+		return readRef{doc: contentUUID}
+	case "comment":
+		return readRef{doc: docUUID, board: boardUUID}
+	}
+	return readRef{}
+}
+
+// keepReadable drops the items about a doc or a board that a reader can't read
+// now, asking each doc and board once.
+func keepReadable[T any](ctx context.Context, userInfo *userModels.UserInfo, items []T, ref func(T) readRef) []T {
+	if len(items) == 0 {
+		return items
 	}
 	readers, known := docReaders(ctx, userInfo)
 	readable := map[string]bool{}
-	kept := make([]ai.SimilarResult, 0, len(results))
-	for _, r := range results {
-		if docUUID := docOfHit(r); docUUID != "" {
-			ok, asked := readable[docUUID]
-			if !asked {
-				ok = known && readableByAll(ctx, docUUID, readers)
-				readable[docUUID] = ok
-			}
-			if !ok {
-				continue
-			}
+	allowed := func(key string, check func() bool) bool {
+		ok, asked := readable[key]
+		if !asked {
+			ok = known && check()
+			readable[key] = ok
 		}
-		kept = append(kept, r)
+		return ok
+	}
+	kept := make([]T, 0, len(items))
+	for _, it := range items {
+		r := ref(it)
+		if r.doc != "" && !allowed("doc:"+r.doc, func() bool { return readableByAll(ctx, r.doc, readers) }) {
+			continue
+		}
+		if r.board != "" && !allowed("board:"+r.board, func() bool { return boardReadableByAll(ctx, r.board, readers) }) {
+			continue
+		}
+		kept = append(kept, it)
 	}
 	return kept
+}
+
+// boardReadableByAll reports whether every reader may read the board now, read
+// for each with its deletion: a deleted board's comments, which the delete's
+// cascade missed, were still quoted, since the board read as live.
+func boardReadableByAll(ctx context.Context, boardUUID string, readers []docReader) bool {
+	for _, p := range readers {
+		readable, err := readableBoards(ctx, []string{boardUUID}, p.uuid)
+		if err != nil || !readable[strings.ToLower(boardUUID)] {
+			return false
+		}
+	}
+	return len(readers) > 0
 }
 
 // docReader is a person a doc hit must be readable by: their graph uid, which a
@@ -113,22 +181,16 @@ func docReaders(ctx context.Context, userInfo *userModels.UserInfo) (readers []d
 	return append(readers, docReader{uid: asker.Uid, uuid: requester}), true
 }
 
-// readableByAll reports whether every reader may read the doc, read for each.
+// readableByAll reports whether every reader may read the doc, read for each,
+// and the doc isn't deleted. Vector searches drop deleted docs again on their
+// own (ai.KeepLive); the catch-up window doesn't, and an entry whose doc was
+// deleted without the index hearing of it would otherwise still be quoted.
 func readableByAll(ctx context.Context, docUUID string, readers []docReader) bool {
 	for _, p := range readers {
 		doc, err := readDocFor(ctx, docUUID, p.uid)
-		if err != nil || !docBusiness.CanRead(doc, p.uuid) {
+		if err != nil || !docBusiness.CanRead(doc, p.uuid) || helpers.IsSoftDeleted(doc.DeletedAt) {
 			return false
 		}
 	}
 	return len(readers) > 0
-}
-
-// docOfHit is the doc a hit is about: the doc itself, or the doc a comment is
-// on (only doc comments carry doc_uuid); "" for anything else.
-func docOfHit(r ai.SimilarResult) string {
-	if r.ContentType == "doc" {
-		return r.ContentUUID
-	}
-	return r.DocUUID
 }

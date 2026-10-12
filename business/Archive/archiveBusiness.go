@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,9 +17,14 @@ import (
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
 	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
+	fcmDomain "github.com/akashc777/OneCamp/domain/UserFCMToken"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
+	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
+	userModel "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -51,7 +57,7 @@ var entityLabels = map[string]string{
 
 // entitySupportsUndo indicates which entity types support job undo.
 var entitySupportsUndo = map[string]bool{
-	"posts": true, "chats": true, "tasks": true, "attachments": true,
+	"posts": true, "chats": true, "tasks": true, "attachments": true, "docs": true,
 }
 
 // entityRestoreQuery holds the RETURNING id::text query template per entity type.
@@ -275,6 +281,10 @@ func RunArchiveJob(ctx context.Context, entityType string, triggeredBy *uuid.UUI
 // OpenSearchArchiveFn / OpenSearchRestoreFn fan out to the global
 // search index. They run in goroutines from RestoreItems and the
 // archive paths to keep the request-handler latency bounded.
+//
+// ArchiveFn's ids are what it archived, and only that, even when it
+// fails: docs move in batches, and a batch that fails leaves the ones
+// before it archived. A run follows its ids into search either way.
 type entityOps struct {
 	Label               string
 	ArchiveFn           func(ctx context.Context, cutoff time.Time, policy *ArchivePolicy) (archived int64, attempted int64, ids []string, err error)
@@ -423,14 +433,39 @@ var entityRegistry = map[string]entityOps{
 		},
 		OpenSearchRestoreFn: makeOpenSearchRestoreSingle("recording_egress_id", []string{"recordings"}),
 	},
+	// Docs live in the graph, so archiveDocs writes them there itself and
+	// answers which it archived (there are no Postgres rows to sync). Search
+	// follows: each doc's own entry is written from the doc, and its comments',
+	// files' and AI entries are cascaded (restoring clears what was cascaded).
 	"docs": {
 		Label: "Document",
 		ArchiveFn: func(ctx context.Context, cutoff time.Time, _ *ArchivePolicy) (int64, int64, []string, error) {
-			n, err := archiveDocs(ctx, cutoff)
-			return n, n, nil, err
+			return archiveDocs(ctx, cutoff)
 		},
-		OpenSearchRestoreFn: makeOpenSearchRestore([]string{"doc_id", "comment_doc_id", "attachment_doc_id", "content_uuid"}, []string{"docs", "comments", "attachments", "ai_embeddings"}),
+		OpenSearchArchiveFn: docSearchFollows(makeOpenSearchArchive(docCascadeFields, docCascadeIndexes)),
+		OpenSearchRestoreFn: docSearchFollows(makeOpenSearchRestore(docCascadeFields, docCascadeIndexes)),
 	},
+}
+
+// docCascadeFields are the fields a doc's comments, files and AI entries name
+// it by: comment_doc_id, attachment_doc_id, and in the AI index content_uuid
+// (the doc's own entry) and doc_uuid (its comments'). The docs index's own
+// field is doc_uuid; restore used to clear "doc_id", which no index has.
+var (
+	docCascadeFields  = []string{"comment_doc_id", "attachment_doc_id", "content_uuid", "doc_uuid"}
+	docCascadeIndexes = []string{"comments", "attachments", "ai_embeddings"}
+)
+
+// docSearchFollows has each doc's own search entry written from the doc
+// (archived or restored, whichever it now is), then runs the cascade for
+// what is in it.
+func docSearchFollows(cascade func(ids []string)) func(ids []string) {
+	return func(ids []string) {
+		for _, id := range ids {
+			docDomain.SyncDocSearch(id, false)
+		}
+		cascade(ids)
+	}
 }
 
 // executeArchiveJob runs the actual archiving logic.
@@ -441,7 +476,7 @@ func executeArchiveJob(jobId uuid.UUID, entityType string, policy *ArchivePolicy
 	ops, ok := entityRegistry[entityType]
 	if !ok {
 		helpers.LogErrorWithContext(ctx, "executeArchiveJob: unsupported entity type %s", entityType)
-		finalizeJob(ctx, jobId, entityType, 0, 0, nil, fmt.Errorf("unsupported entity type: %s", entityType))
+		finishJob(ctx, jobId, entityType, 0, 0, nil, fmt.Errorf("unsupported entity type: %s", entityType))
 		return
 	}
 
@@ -457,8 +492,11 @@ func executeArchiveJob(jobId uuid.UUID, entityType string, policy *ArchivePolicy
 
 	// Fan out to OpenSearch via the registry so each entity's
 	// cascade fields stay declarative. The closure handles its own
-	// goroutine + recover.
-	if archiveErr == nil && len(ids) > 0 && ops.OpenSearchArchiveFn != nil {
+	// goroutine + recover. Also when the run failed part way: ids are
+	// what it archived (entityOps), and a doc run whose later batch
+	// failed left the docs its earlier batches archived findable, their
+	// comments and files too.
+	if len(ids) > 0 && ops.OpenSearchArchiveFn != nil {
 		ops.OpenSearchArchiveFn(ids)
 	}
 
@@ -474,7 +512,7 @@ func executeArchiveJob(jobId uuid.UUID, entityType string, policy *ArchivePolicy
 		}(ops.MemorySourceType, ids)
 	}
 
-	finalizeJob(ctx, jobId, entityType, attempted, archived, ids, archiveErr)
+	finishJob(ctx, jobId, entityType, attempted, archived, ids, archiveErr)
 
 	var finalStatus string
 	if archiveErr != nil {
@@ -485,6 +523,9 @@ func executeArchiveJob(jobId uuid.UUID, entityType string, policy *ArchivePolicy
 	helpers.MessageLogs.InfoLog.Printf("Archive job %s finished: type=%s attempted=%d archived=%d failed=%d status=%s",
 		jobId.String(), entityType, attempted, archived, int(attempted-archived), finalStatus)
 }
+
+// finishJob records how a run ended (finalizeJob); a seam for tests.
+var finishJob = finalizeJob
 
 func finalizeJob(ctx context.Context, jobId uuid.UUID, entityType string, attempted, archived int64, ids []string, jobErr error) {
 	status := "completed"
@@ -653,7 +694,9 @@ func archiveTable(ctx context.Context, table, extraWhere string, cutoff time.Tim
 
 	result, uErr := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, updateQuery, cutoff)
 	if uErr != nil {
-		return 0, int64(len(ids)), ids, uErr
+		// One statement, so none of them was archived: no ids, or the run
+		// would take live rows out of search (entityOps).
+		return 0, int64(len(ids)), nil, uErr
 	}
 	rowsAffected, _ = result.RowsAffected()
 	total = int64(len(ids))
@@ -736,7 +779,8 @@ func archiveAttachments(ctx context.Context, cutoff time.Time) (int64, int64, []
 	result, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx,
 		`UPDATE attachments SET deleted_at = NOW() WHERE created_at < $1 AND deleted_at IS NULL`, cutoff)
 	if err != nil {
-		return 0, int64(len(ids)), ids, err
+		// None archived, so no ids (as archiveTable).
+		return 0, int64(len(ids)), nil, err
 	}
 	rowsAffected, _ := result.RowsAffected()
 	return rowsAffected, int64(len(ids)), ids, nil
@@ -757,19 +801,19 @@ func archiveRecordings(ctx context.Context, cutoff time.Time) (int64, error) {
 	return int64(len(egressIds)), nil
 }
 
-func archiveDocs(ctx context.Context, cutoff time.Time) (int64, error) {
-	docUuids, err := docDomain.GetDocUuidsOlderThan(ctx, cutoff)
-	if err != nil {
-		return 0, err
-	}
-	if len(docUuids) == 0 {
-		return 0, nil
-	}
+// archiveDocBatch bounds one run of archiving docs; the next run takes the rest.
+const archiveDocBatch = 5000
 
-	if err := docDomain.BulkArchiveDocs(ctx, docUuids); err != nil {
-		return 0, err
+// archiveDocs archives the live docs nobody has changed since the cutoff and
+// answers which it archived, which the job records (so it can be undone).
+// Every run used to fail: the graph was sent a query that was not valid DQL.
+func archiveDocs(ctx context.Context, cutoff time.Time) (int64, int64, []string, error) {
+	due, err := docDomain.GetDocsInactiveSince(ctx, cutoff, archiveDocBatch)
+	if err != nil || len(due) == 0 {
+		return 0, 0, nil, err
 	}
-	return int64(len(docUuids)), nil
+	archived, err := docDomain.BulkArchiveDocs(ctx, due, cutoff)
+	return int64(len(archived)), int64(len(due)), archived, err
 }
 
 // GetArchiveJobs returns recent archive job history.
@@ -888,7 +932,9 @@ func RestoreItems(ctx context.Context, entityType string, entityIds []uuid.UUID)
 	// have their own restore paths.
 	switch entityType {
 	case "docs":
-		return restoreDocs(ctx, entityIds)
+		// Any deleted doc, archived or deleted by its owner: there is no
+		// Trash in the app yet, so this list is how a deleted doc comes back.
+		return restoreDocs(ctx, entityIds, false)
 	case "recordings":
 		return restoreRecordings(ctx, entityIds)
 	}
@@ -1009,7 +1055,17 @@ func UndoArchiveJob(ctx context.Context, jobId uuid.UUID) (int, error) {
 		return 0, fmt.Errorf("no valid archived item ids found")
 	}
 
-	count, err := RestoreItems(ctx, job.EntityType, ids)
+	var count int
+	if job.EntityType == "docs" {
+		// Only the docs this run archived that are archived still: a doc its
+		// owner deleted since stays deleted.
+		if err := checkRunningArchiveJob(ctx, job.EntityType); err != nil {
+			return 0, err
+		}
+		count, err = restoreDocs(ctx, ids, true)
+	} else {
+		count, err = RestoreItems(ctx, job.EntityType, ids)
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -1087,24 +1143,94 @@ func GetRecentlyArchivedItems(ctx context.Context, entityType string, limit int,
 	return items, total, nil
 }
 
+// The restore list's reads of docs: production wiring, which tests replace.
+var (
+	recentlyDeletedDocs = docDomain.GetRecentlyArchivedDocs
+	docsCouldRead       = docDomain.DocsCouldReadFor
+)
+
+// getRecentlyArchivedDocs lists the docs deleted in the last 30 days for the
+// admin asking (the request's user, in ctx). A private doc they may not read
+// shows as "Private doc" with its owner, never its title: an admin restores
+// docs, which doesn't make every doc theirs to read. Decided by the doc read
+// rule with the deletion set aside (domain/Doc CouldRead, which business/Doc
+// decides by; this package can't import business/Doc, which depends on it).
+// A doc the rule can't be asked about (the graph didn't answer, or no one is
+// asking) shows as private too.
 func getRecentlyArchivedDocs(ctx context.Context, limit, offset int, label string) ([]*ArchivedItem, int64, error) {
 	cutoff := time.Now().AddDate(0, 0, -30).Format(time.RFC3339)
-	docs, total, err := docDomain.GetRecentlyArchivedDocs(ctx, cutoff, limit, offset)
+	docs, total, err := recentlyDeletedDocs(ctx, cutoff, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
+	ids := make([]string, 0, len(docs))
+	for _, d := range docs {
+		if d != nil && d.Uuid != "" {
+			ids = append(ids, d.Uuid)
+		}
+	}
+	readable := map[string]bool{}
+	if viewer, _ := askingUser(ctx); viewer != "" && len(ids) > 0 {
+		if got, rerr := docsCouldRead(ctx, ids, viewer); rerr != nil {
+			helpers.LogErrorWithContext(ctx, "business/getRecentlyArchivedDocs could not ask who may read the docs, so no title is shown: %v", rerr)
+		} else {
+			readable = got
+		}
+	}
 	items := make([]*ArchivedItem, 0, len(docs))
 	for _, d := range docs {
-		if d.Uuid == "" || d.DeletedAt == nil {
+		if d == nil || d.Uuid == "" || d.DeletedAt == nil {
 			continue
 		}
 		items = append(items, &ArchivedItem{
 			Id:         d.Uuid,
-			Name:       fmt.Sprintf("%s · %s (%s)", label, d.DeletedAt.Format("Jan 02, 3:04 PM"), d.Uuid[:8]),
+			Name:       docRestoreName(d, readable[strings.ToLower(d.Uuid)]),
 			ArchivedAt: *d.DeletedAt,
 		})
 	}
 	return items, total, nil
+}
+
+// askingUser is who a request is for: their id and the name others see them
+// by, "" for no one.
+func askingUser(ctx context.Context) (id, name string) {
+	u, ok := userModel.FromContext(ctx)
+	if !ok || u == nil {
+		return "", ""
+	}
+	id = u.UserDgraphInfo.Uuid
+	if id == "" && u.UserPostgresInfo.Id != uuid.Nil {
+		id = u.UserPostgresInfo.Id.String()
+	}
+	return id, u.UserDgraphInfo.DisplayName()
+}
+
+// docRestoreName is how a doc reads in the restore list: its title, and, for
+// one its owner deleted rather than one the retention archived, who deleted
+// it, so an admin bringing it back knows they are undoing someone's choice.
+// The list named every doc "Document · <time> (<id>)", and mixed docs owners
+// deleted in with archived ones. A doc the admin may not read (readable
+// false) is "Private doc" and whose it is, never its title; the list's time
+// says when it went. Pure.
+func docRestoreName(d *dgraphStruct.DgraphDoc, readable bool) string {
+	title := strings.TrimSpace(d.Title)
+	if title == "" {
+		title = "Untitled document"
+	}
+	if !readable {
+		title = "Private doc"
+	}
+	owner := d.CreatedBy.DisplayName()
+	if helpers.IsSoftDeleted(d.ArchivedAt) {
+		if !readable && owner != "" {
+			return title + " · owned by " + owner
+		}
+		return title
+	}
+	if owner == "" {
+		owner = "its owner"
+	}
+	return title + " · deleted by " + owner
 }
 
 func getRecentlyArchivedRecordings(ctx context.Context, limit, offset int, label string) ([]*ArchivedItem, int64, error) {
@@ -1150,35 +1276,136 @@ func restoreRecordings(ctx context.Context, entityIds []uuid.UUID) (int, error) 
 	return len(entityIds), nil
 }
 
-func restoreDocs(ctx context.Context, entityIds []uuid.UUID) (int, error) {
+// The doc restore's reads and writes: production wiring, which tests replace.
+var (
+	docsDeletion    = docDomain.GetDocsDeletion
+	restoreDocNodes = docDomain.BulkRestoreDocs
+	turnOffDocLinks = func(ctx context.Context, docUUID string) (int64, error) {
+		return guestModel.RevokeLiveForResource(ctx, guestModel.ResourceDoc, docUUID)
+	}
+	tellOwnerLinksOff = pushLinksOffNotice
+)
+
+// restoreDocs brings deleted docs back, in the graph and then in search, and
+// answers how many it restored (a live doc, or with archivedOnly one its owner
+// deleted, is left as it is and not counted).
+//
+// A doc its owner deleted comes back with its guest links off: the owner took
+// it away from everyone, and its links, dead while it was deleted, opened it
+// again to people outside the workspace without the owner's say. They are
+// turned off before the restore, so a doc whose links can't be turned off
+// stays deleted (and the error is answered), and the owner is told. A doc the
+// retention archived keeps its links, whether a run is undone (archivedOnly)
+// or an admin restores it from the list.
+func restoreDocs(ctx context.Context, entityIds []uuid.UUID, archivedOnly bool) (int, error) {
 	docUuids := make([]string, len(entityIds))
 	for i, id := range entityIds {
 		docUuids[i] = id.String()
 	}
-	// Synchronous data-path restore.
-	if err := docDomain.BulkRestoreDocs(ctx, docUuids); err != nil {
-		return 0, err
-	}
-	// OpenSearch cascade async.
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				helpers.MessageLogs.ErrorLog.Printf("panic in restoreDocs OpenSearch cascade: %v", r)
+	ownerDeleted := map[string]*dgraphStruct.DgraphDoc{}
+	linksOff := map[string]int64{}
+	var linksErr error
+	if !archivedOnly {
+		docs, err := docsDeletion(ctx, docUuids)
+		if err != nil {
+			return 0, err
+		}
+		held := map[string]bool{}
+		for _, d := range docs {
+			if d == nil || d.Uuid == "" || !helpers.IsSoftDeleted(d.DeletedAt) || helpers.IsSoftDeleted(d.ArchivedAt) {
+				continue // live, or archived by the retention
 			}
-		}()
-		globalSearchDomain.SyncCascadingUnarchiveInOpenSearchCombined(
-			map[string][]string{
-				"doc_id":            docUuids,
-				"comment_doc_id":    docUuids,
-				"attachment_doc_id": docUuids,
-				"content_uuid":      docUuids,
-			},
-			[]string{"docs", "comments", "attachments", "ai_embeddings"},
-			"cascade",
-		)
-	}()
-	return len(entityIds), nil
+			id := strings.ToLower(d.Uuid)
+			n, err := turnOffDocLinks(ctx, id)
+			if err != nil {
+				helpers.LogErrorWithContext(ctx, "business/restoreDocs could not turn off the guest links of doc %s, so it stays deleted: %v", id, err)
+				linksErr = fmt.Errorf("a doc its owner deleted was not restored: its guest links could not be turned off: %w", err)
+				held[id] = true
+				continue
+			}
+			ownerDeleted[id], linksOff[id] = d, n
+		}
+		if len(held) > 0 {
+			kept := make([]string, 0, len(docUuids))
+			for _, id := range docUuids {
+				if !held[strings.ToLower(id)] {
+					kept = append(kept, id)
+				}
+			}
+			docUuids = kept
+		}
+	}
+	restored, err := restoreDocNodes(ctx, docUuids, archivedOnly)
+	if len(restored) > 0 {
+		docSearchRestore(restored)
+		byID, byName := askingUser(ctx)
+		for _, id := range restored {
+			id = strings.ToLower(id)
+			d := ownerDeleted[id]
+			if d == nil || linksOff[id] == 0 || d.CreatedBy == nil || d.CreatedBy.Uuid == "" || d.CreatedBy.Uuid == byID {
+				continue // no link went, or no one but who restored it to tell
+			}
+			tellOwnerLinksOff(ctx, d, linksOff[id], byName)
+		}
+	}
+	if err == nil {
+		err = linksErr
+	}
+	return len(restored), err
 }
+
+// pushLinksOffNotice tells a doc's owner, on their devices, that someone
+// restored the doc they deleted and turned its guest links off (linksOffNotice
+// says what). Nothing told an owner about a restore; push is the notice this
+// package can send (email, comments and the activity feed are in packages that
+// depend on it). It opens the doc, as a push about a doc's comment does. Not
+// sent to an owner who paused notifications.
+func pushLinksOffNotice(ctx context.Context, doc *dgraphStruct.DgraphDoc, links int64, byName string) {
+	if doc == nil || doc.CreatedBy == nil || doc.CreatedBy.Uuid == "" {
+		return
+	}
+	tokens, err := fcmDomain.GetFCMTokenByListOfUserId(ctx, []string{doc.CreatedBy.Uuid})
+	if err != nil || len(tokens) == 0 {
+		return
+	}
+	title, body := linksOffNotice(byName, doc.Title, links)
+	data := map[string]string{
+		firebaseInit.FIREBASE_PUSH_DATA_TYPE:    firebaseInit.FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT,
+		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID: doc.Uuid,
+		firebaseInit.FIREBASE_PUSH_DATA_TITLE:   title,
+		firebaseInit.FIREBASE_PUSH_DATA_BODY:    body,
+	}
+	// 500 tokens a call is Firebase's limit.
+	for batch := range slices.Chunk(tokens, 500) {
+		if err := firebaseInit.FirebaseApp.MultiCastPush(ctx, data, batch); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/pushLinksOffNotice push err: %+v", err)
+			break
+		}
+	}
+}
+
+// linksOffNotice is what a doc's owner is told when someone restores the doc
+// they deleted and its guest links are turned off: who, which doc, and that
+// guests get in again only when the owner shares it again. Pure.
+func linksOffNotice(byName, title string, links int64) (heading, body string) {
+	who := strings.TrimSpace(byName)
+	if who == "" {
+		who = "An admin"
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = "Untitled document"
+	}
+	off := "Its guest link was turned off"
+	if links != 1 {
+		off = fmt.Sprintf("Its %d guest links were turned off", links)
+	}
+	return "Your doc was restored", fmt.Sprintf("%s restored “%s”, which you deleted. %s; you can turn guest access back on by sharing it again.", who, title, off)
+}
+
+// docSearchRestore is the docs registry entry's search restore, named apart
+// so restoreDocs need not read the registry while it is being built.
+var docSearchRestore = docSearchFollows(makeOpenSearchRestore(docCascadeFields, docCascadeIndexes))
 
 // StartAutoArchiver runs a background scheduler that executes archive jobs
 // based on policies where auto_archive is true. Runs every hour after a 5-minute initial delay.

@@ -117,7 +117,7 @@ func GetCatchUp(ctx context.Context, userInfo *userModels.UserInfo, req adapter.
 
 	var items []ai.ScopedContent
 	if req.ScopeType == catchUpScopeWorkspace {
-		items, err = ai.FetchUnreadAcrossScopes(ctx, userUUID, channels, projects, grpIDs, since.Unix(), catchUpMaxItems)
+		items, err = fetchUnreadAcrossScopes(ctx, userInfo, channels, projects, grpIDs, since.Unix(), catchUpMaxItems)
 	} else {
 		items, err = ai.FetchContentSince(ctx, filterType, filterValue, since.Unix(), catchUpMaxItems)
 	}

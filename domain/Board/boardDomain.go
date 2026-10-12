@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Board"
@@ -11,6 +12,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Board"
 	commentModels "github.com/akashc777/OneCamp/models/dgraph/Comment"
+	"github.com/google/uuid"
 )
 
 // CreateOrUpdateDgraphBoard upserts a board. For updates, Uid must be
@@ -98,6 +100,40 @@ func GetBasicDgraphBoardByUUID(ctx context.Context, boardUUID string, userUID st
 		return
 	}
 	return
+}
+
+// GetBoardsReadAccessFor reads, for one person (by uuid), what CanRead decides
+// each of the named boards by: its privacy, its deletion time, its creator,
+// and whether it is shared with them. One query for the lot; ids that aren't
+// uuids are left out, and so is any board that doesn't exist.
+func GetBoardsReadAccessFor(ctx context.Context, boardUUIDs []string, userUUID string) ([]*dgraphStruct.DgraphBoard, error) {
+	quoted := make([]string, 0, len(boardUUIDs))
+	for _, id := range boardUUIDs {
+		if parsed, err := uuid.Parse(id); err == nil {
+			quoted = append(quoted, `"`+parsed.String()+`"`)
+		}
+	}
+	if len(quoted) == 0 {
+		return nil, nil
+	}
+	query := `query Readable($user: string) {
+				boardInfo(func: eq(board_uuid, [` + strings.Join(quoted, ", ") + `])) {
+					board_uuid
+					board_private
+					board_deleted_at
+					board_created_by {
+						user_uuid
+					}
+					board_read_access: count(board_reading_users @filter(eq(user_uuid, $user)))
+					board_edit_access: count(board_editing_users @filter(eq(user_uuid, $user)))
+					board_comment_access: count(board_commenting_users @filter(eq(user_uuid, $user)))
+				}
+			}`
+	boards, err := dgraphModels.GetDgraphBoards(ctx, query, map[string]string{"$user": userUUID})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetBoardsReadAccessFor err: %+v", err)
+	}
+	return boards, err
 }
 
 // GetSystemBoardByUUID returns the board state for the collaboration service

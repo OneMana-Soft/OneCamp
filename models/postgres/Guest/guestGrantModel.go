@@ -142,6 +142,22 @@ func Revoke(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
+// RevokeLiveForResource turns off every live grant to one resource (revoked
+// as Revoke does; expired ones are left as they are) and answers how many.
+func RevokeLiveForResource(ctx context.Context, resourceType, resourceID string) (int64, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	const q = `UPDATE guest_grants SET revoked_at=NOW()
+		WHERE resource_type = $1 AND resource_id = $2 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())`
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, resourceType, resourceID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/Guest/RevokeLiveForResource err: %+v", err)
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ResourceExists reports whether ANY guest grant (active or not) exists for a
 // resource id. Used by the LiveKit webhook router to decide whether a `meet-`
 // room belongs to this instance (mirrors the DM "any participant in our DB"

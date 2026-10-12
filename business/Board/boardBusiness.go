@@ -7,7 +7,6 @@ import (
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Board"
-	activityBusiness "github.com/akashc777/OneCamp/business/Activity"
 	resourceViewBusiness "github.com/akashc777/OneCamp/business/ResourceView"
 	domain "github.com/akashc777/OneCamp/domain/Board"
 	commentDomain "github.com/akashc777/OneCamp/domain/Comment"
@@ -159,6 +158,10 @@ func UpdateBoard(ctx context.Context, input *adapter.InputUpdateBoard) (err erro
 			fields["board_private"] = *input.IsPrivate
 		}
 		go openSearchBoardModels.UpdateBoardFieldsInOpenSearch(context.Background(), input.BoardId, fields)
+	}
+	// And its comments' entries, which carry a copy of its privacy.
+	if input.IsPrivate != nil {
+		go syncBoardCommentSearch(context.Background(), input.BoardId, nil)
 	}
 	return
 }
@@ -328,6 +331,8 @@ func UpdateBoardPermissions(ctx context.Context, input adapter.InputUpdateBoardP
 			"board_editing_users":    editors,
 			"board_commenting_users": commenters,
 		})
+		// And its comments' entries, which carry a copy of its sharing.
+		syncBoardCommentSearch(context.Background(), input.BoardId, perms)
 	}()
 	return nil
 }
@@ -550,7 +555,8 @@ func DeleteBoardComment(ctx context.Context, createdByUser *dgraphStruct.DgraphU
 	}
 
 	// Remove from global search and the AI embedding index (soft-delete via the
-	// shared cascading-deletion path the other comment surfaces use).
+	// shared cascading-deletion path the other comment surfaces use), marked
+	// as deleted by a person, which no restore of a parent brings back.
 	go commentDomain.DeleteCommentWithAttachmentsInOpenSearch(
 		&openSearchStruct.OpenSearchComment{Uuid: commentUUID, CommentDeletedAt: helpers.Int64Pointer(now.Unix())},
 		nil,
@@ -560,7 +566,7 @@ func DeleteBoardComment(ctx context.Context, createdByUser *dgraphStruct.DgraphU
 		commentUUID,
 		now.Unix(),
 		[]string{"ai_embeddings"},
-		"cascade",
+		"user",
 	)
 	ai.DeleteMemoryBySourceAsync("comment", commentUUID)
 
@@ -633,7 +639,9 @@ func boardUserUUIDs(users []*dgraphStruct.DgraphUser) []string {
 
 // publishBoardCommentActivity emits the realtime MENTION/COMMENT activity items
 // for a persisted board comment. The board context (uuid + title) lets the
-// client navigate to the board from the activity feed.
+// client navigate to the board from the activity feed. A mention reaches only
+// someone who may read the board, as a doc comment's does: it carries the
+// comment's text and the board's title.
 func publishBoardCommentActivity(createdByUser *dgraphStruct.DgraphUser, board *dgraphStruct.DgraphBoard, commentUUID string, commentText string, currentTime time.Time, mentionedUsers []*dgraphStruct.DgraphUser, mentionedSet map[string]bool) {
 	boardRef := func() *dgraphStruct.DgraphBoard {
 		return &dgraphStruct.DgraphBoard{
@@ -649,9 +657,12 @@ func publishBoardCommentActivity(createdByUser *dgraphStruct.DgraphUser, board *
 	}
 
 	for _, mentionedUser := range mentionedUsers {
+		if !readableBy(context.Background(), board.Uuid, mentionedUser.Uuid) {
+			continue
+		}
 		activityItem := &dgraphActivityModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
-			Time:         time.Now().Format(time.RFC3339),
+			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Mention: &dgraphStruct.DgraphMentions{
 				CommentUuid: commentUUID,
 				CreatedAt:   &currentTime,
@@ -664,14 +675,14 @@ func publishBoardCommentActivity(createdByUser *dgraphStruct.DgraphUser, board *
 				},
 			},
 		}
-		activityBusiness.PublishActivityToUser(mentionedUser.Uuid, activityItem)
+		publishActivity(mentionedUser.Uuid, activityItem)
 	}
 
 	if board.CreatedBy != nil && board.CreatedBy.Uuid != "" &&
 		board.CreatedBy.Uuid != createdByUser.Uuid && !mentionedSet[board.CreatedBy.Uuid] {
 		activityItem := &dgraphActivityModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_COMMENT,
-			Time:         time.Now().Format(time.RFC3339),
+			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Comment: &dgraphStruct.DgraphComment{
 				Uuid:      commentUUID,
 				Text:      commentText,
@@ -680,7 +691,7 @@ func publishBoardCommentActivity(createdByUser *dgraphStruct.DgraphUser, board *
 				CreatedAt: &currentTime,
 			},
 		}
-		activityBusiness.PublishActivityToUser(board.CreatedBy.Uuid, activityItem)
+		publishActivity(board.CreatedBy.Uuid, activityItem)
 	}
 }
 

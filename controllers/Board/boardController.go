@@ -143,7 +143,9 @@ func UpdateBoardFromCollab(w http.ResponseWriter, r *http.Request) {
 
 	if err := business.UpdateBoardFromCollab(ctx, &input); err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/UpdateBoardFromCollab Failed to persist board err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to update board state", "err": err})
+		// Retried by the collaboration service (a 4xx would read as a refusal
+		// of the content: collaboration-service/saveFailures.js isTransient).
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Failed to update board state", "err": err})
 		return
 	}
 
@@ -195,7 +197,19 @@ func GetBoardForCollab(w http.ResponseWriter, r *http.Request) {
 	dgraphBoard, err := business.GetSystemBoardByUUID(ctx, boardUUIDString)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetBoardForCollab Failed to get board err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to get board info", "err": err})
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Failed to get board info", "err": err})
+		return
+	}
+	if dgraphBoard == nil {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such board."})
+		return
+	}
+	// A canvas kept in object storage that could not be read is not an empty
+	// board: served empty, its first stroke was saved over the real one. The
+	// collaboration service refuses to open it and the client tries again.
+	if dgraphBoard.State == "" && dgraphBoard.StateKey != "" {
+		helpers.LogErrorWithContext(ctx, "controllers/GetBoardForCollab board %s: its state %s could not be read", boardUUIDString, dgraphBoard.StateKey)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The board's canvas could not be read just now."})
 		return
 	}
 

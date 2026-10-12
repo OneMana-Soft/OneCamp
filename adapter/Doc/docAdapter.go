@@ -52,6 +52,12 @@ type InputDocCollabUpdate struct {
 	// Contributors is the set of editor user uuids who changed the doc since the
 	// last persist, used to attribute the version snapshot. May be empty.
 	Contributors []string `json:"contributors,omitempty"`
+	// KeepBody: the service could not write HtmlContent, so the stored body
+	// stays and only YjsState is saved (business UpdateDocFromCollab).
+	KeepBody bool `json:"keepBody,omitempty"`
+	// ExpectBodyHash, with KeepBody: store the state only while the body still
+	// hashes to this (the body the service rebuilt the doc from).
+	ExpectBodyHash string `json:"expectBodyHash,omitempty"`
 }
 
 // InputRestoreDocSnapshot restores a doc to a chosen snapshot from its history.

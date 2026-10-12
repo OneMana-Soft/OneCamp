@@ -1345,6 +1345,16 @@ func CreateOrUpdateReactionOnCommentTask(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// A uid changes that reaction, and only the caller's own on this comment.
+	if commentTaskReactionInfo.ReactionDgraphUid != "" {
+		reactionDgraph, refusal := reactionBusiness.MayChange(ctx, reactionBusiness.OnComment, dgraphComment.Uid, commentTaskReactionInfo.ReactionDgraphUid, userInfo.UserDgraphInfo.Uid)
+		if refusal != nil {
+			helpers.WriteJSON(w, refusal.Status, helpers.Envolope{"msg": refusal.Msg})
+			return
+		}
+		commentTaskReactionInfo.ReactionDgraphUid = reactionDgraph.Uid
+	}
+
 	commentTaskReactionInfo.ReactionDgraphUid, err = business.CreateOrUpdateTaskCommentReaction(ctx, &commentTaskReactionInfo, dgraphComment, &userInfo.UserDgraphInfo)
 
 	if err != nil {
@@ -1404,17 +1414,13 @@ func DeleteTaskCommentReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reactionDgraph, err := reactionBusiness.GetReactionNodeByDgraphUID(ctx, commentReactionInfo.ReactionDgraphUid)
-
-	if reactionDgraph.AddedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
+	reactionDgraph, refusal := reactionBusiness.MayChange(ctx, reactionBusiness.OnComment, commentInfo.Uid, commentReactionInfo.ReactionDgraphUid, userInfo.UserDgraphInfo.Uid)
+	if refusal != nil {
+		helpers.WriteJSON(w, refusal.Status, helpers.Envolope{"msg": refusal.Msg})
 		return
 	}
 
-	err = business.DeleteReactionOnCommentTask(ctx, commentInfo, commentReactionInfo.ReactionDgraphUid)
+	err = business.DeleteReactionOnCommentTask(ctx, commentInfo, reactionDgraph.Uid)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

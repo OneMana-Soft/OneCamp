@@ -13,7 +13,7 @@ import (
 const (
 	// BotEmailDomain is the reserved domain every bot principal's email sits
 	// under. Not a real mail domain and never delivered to.
-	BotEmailDomain = "@bot.onecamp.local"
+	BotEmailDomain = helpers.BotEmailDomain
 	// AgentBotPrefix begins the username and email of one agent's principal.
 	AgentBotPrefix = "agent-bot-"
 	// SlackBridgeBotUsername is the principal that carries messages from a

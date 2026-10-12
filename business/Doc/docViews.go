@@ -20,7 +20,10 @@ func RecordDocView(ctx context.Context, docUUID, userUID, userUUID string) error
 		return err
 	}
 	if doc == nil {
-		return errors.New("doc not found")
+		return ErrNotFound
+	}
+	if IsDeleted(doc) {
+		return goneFor(CouldRead(doc, userUUID))
 	}
 	if !CanRead(doc, userUUID) {
 		return errors.New("unauthorized")
@@ -36,7 +39,10 @@ func ListDocViewers(ctx context.Context, docUUID, userUID string, limit, offset 
 		return nil, err
 	}
 	if doc == nil {
-		return nil, errors.New("doc not found")
+		return nil, ErrNotFound
+	}
+	if IsDeleted(doc) {
+		return nil, goneFor(CouldEdit(doc, userUID))
 	}
 	if !CanEdit(doc, userUID) {
 		return nil, errors.New("unauthorized")

@@ -281,7 +281,7 @@ func DocAICompleteStream(w http.ResponseWriter, r *http.Request) {
 	chunks, err := ai.ChatStreamWithRescue(streamCtx, llm, messages, opts)
 	if err != nil {
 		cb.RecordResult(err)
-		fmt.Fprintf(w, "data: {\"error\": %q}\n\n", ai.FriendlyProviderError(err))
+		writeSSE(w, map[string]string{"error": ai.FriendlyProviderError(err)})
 		flusher.Flush()
 		return
 	}
@@ -290,7 +290,7 @@ func DocAICompleteStream(w http.ResponseWriter, r *http.Request) {
 	for chunk := range chunks {
 		if chunk.Error != nil {
 			cb.RecordResult(chunk.Error)
-			fmt.Fprintf(w, "data: {\"error\": %q}\n\n", ai.FriendlyProviderError(chunk.Error))
+			writeSSE(w, map[string]string{"error": ai.FriendlyProviderError(chunk.Error)})
 			flusher.Flush()
 			return
 		}
@@ -298,9 +298,7 @@ func DocAICompleteStream(w http.ResponseWriter, r *http.Request) {
 		if chunk.Content != "" {
 			visible := thinkFilter.Feed(chunk.Content)
 			if visible != "" {
-				escaped := strings.ReplaceAll(visible, "\n", "\\n")
-				escaped = strings.ReplaceAll(escaped, "\"", "\\\"")
-				fmt.Fprintf(w, "data: {\"content\": \"%s\"}\n\n", escaped)
+				writeSSE(w, map[string]string{"content": visible})
 				flusher.Flush()
 			}
 		}
@@ -311,19 +309,17 @@ func DocAICompleteStream(w http.ResponseWriter, r *http.Request) {
 			// when something was actually shortened. streamCtx descends from ctx, so
 			// this picks up both the pre-emptive trim and any rescue.
 			if notice := ai.TakeContextNotice(streamCtx).Message(); notice != "" {
-				if noticeJSON, merr := json.Marshal(map[string]string{"notice": notice}); merr == nil {
-					fmt.Fprintf(w, "data: %s\n\n", string(noticeJSON))
-					flusher.Flush()
-				}
+				writeSSE(w, map[string]string{"notice": notice})
+				flusher.Flush()
 			}
-			fmt.Fprintf(w, "data: {\"done\": true}\n\n")
+			writeSSE(w, map[string]bool{"done": true})
 			flusher.Flush()
 			return
 		}
 	}
 
 	// Stream ended
-	fmt.Fprintf(w, "data: {\"done\": true}\n\n")
+	writeSSE(w, map[string]bool{"done": true})
 	flusher.Flush()
 	cb.RecordSuccess()
 }

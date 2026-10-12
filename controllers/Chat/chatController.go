@@ -1335,6 +1335,16 @@ func CreateOrUpdateChatReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A uid changes that reaction, and only the caller's own on this message.
+	if reactionInfo.ReactionDgraphUid != "" {
+		dgraphReaction, refusal := reactionBusiness.MayChange(ctx, reactionBusiness.OnChat, dgraphChat.Uid, reactionInfo.ReactionDgraphUid, userInfo.UserDgraphInfo.Uid)
+		if refusal != nil {
+			helpers.WriteJSON(w, refusal.Status, helpers.Envolope{"msg": refusal.Msg})
+			return
+		}
+		reactionInfo.ReactionDgraphUid = dgraphReaction.Uid
+	}
+
 	reactionUID, err := business.CreateOrUpdateChatReaction(ctx, &reactionInfo, dgraphChat, &userInfo.UserDgraphInfo, dgraphChat.DM.GroupingId)
 
 	if err != nil {
@@ -1372,26 +1382,6 @@ func DeleteChatReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dgraphReaction, err := reactionBusiness.GetReactionNodeByDgraphUID(ctx, reactionInfo.ReactionDgraphUid)
-	if err != nil || dgraphReaction == nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/DeleteChatReaction Failed to parse the body of the req err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse the body of the req",
-			"err": err,
-		})
-		return
-	}
-
-	if dgraphReaction.AddedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "You can only remove your own reaction.",
-		})
-		return
-	}
-
 	dgraphChat, err := business.GetDgraphChatBasicByUUID(ctx, reactionInfo.Uuid, userInfo.UserDgraphInfo.Uid)
 
 	if err != nil || dgraphChat == nil || dgraphChat.DM.ParticipantIsMember == 0 || (dgraphChat.From.DeletedAt != nil && !dgraphChat.From.DeletedAt.IsZero()) || (dgraphChat.To != nil && dgraphChat.To.DeletedAt != nil && !dgraphChat.To.DeletedAt.IsZero()) {
@@ -1403,6 +1393,12 @@ func DeleteChatReaction(w http.ResponseWriter, r *http.Request) {
 			"msg": "Failed to get chat info",
 			"err": err,
 		})
+		return
+	}
+
+	dgraphReaction, refusal := reactionBusiness.MayChange(ctx, reactionBusiness.OnChat, dgraphChat.Uid, reactionInfo.ReactionDgraphUid, userInfo.UserDgraphInfo.Uid)
+	if refusal != nil {
+		helpers.WriteJSON(w, refusal.Status, helpers.Envolope{"msg": refusal.Msg})
 		return
 	}
 
@@ -1773,7 +1769,21 @@ func CreateOrUpdateChatCommentReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reactionInfo.ReactionDgraphUid, err = business.CreateOrUpdateChatCommentReaction(ctx, &reactionInfo, dgraphComment, &userInfo.UserDgraphInfo)
+	// A uid changes that reaction, and only the caller's own on this comment.
+	if reactionInfo.ReactionDgraphUid != "" {
+		dgraphReaction, refusal := reactionBusiness.MayChange(ctx, reactionBusiness.OnComment, dgraphComment.Uid, reactionInfo.ReactionDgraphUid, userInfo.UserDgraphInfo.Uid)
+		if refusal != nil {
+			helpers.WriteJSON(w, refusal.Status, helpers.Envolope{"msg": refusal.Msg})
+			return
+		}
+		reactionInfo.ReactionDgraphUid = dgraphReaction.Uid
+	}
+
+	// A new reaction answers with its uid; a changed one keeps its own.
+	created, err := business.CreateOrUpdateChatCommentReaction(ctx, &reactionInfo, dgraphComment, &userInfo.UserDgraphInfo)
+	if created != "" {
+		reactionInfo.ReactionDgraphUid = created
+	}
 	if err != nil || reactionInfo.ReactionDgraphUid == "" {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/CreateOrUpdateChatCommentReaction Failed to create/update reaction on comment err: %+v",
@@ -1809,26 +1819,6 @@ func DeleteReactionOnCommentChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dgraphReaction, err := reactionBusiness.GetReactionNodeByDgraphUID(ctx, reactionInfo.ReactionDgraphUid)
-	if err != nil || dgraphReaction == nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/DeleteReactionOnCommentChat Failed to parse the body of the req err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse the body of the req",
-			"err": err,
-		})
-		return
-	}
-
-	if dgraphReaction.AddedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "You can only remove your own reaction.",
-		})
-		return
-	}
-
 	commentDgraphInfo, err := commentBusiness.GetDgraphChatCommentInfoByUUID(ctx, reactionInfo.Uuid, userInfo.UserDgraphInfo.Uid)
 
 	if err != nil || commentDgraphInfo == nil || commentDgraphInfo.Chat.DM.ParticipantIsMember == 0 || (commentDgraphInfo.Chat.From.DeletedAt != nil && !commentDgraphInfo.Chat.From.DeletedAt.IsZero()) || (commentDgraphInfo.Chat.To != nil && commentDgraphInfo.Chat.To.DeletedAt != nil && !commentDgraphInfo.Chat.To.DeletedAt.IsZero()) {
@@ -1840,6 +1830,12 @@ func DeleteReactionOnCommentChat(w http.ResponseWriter, r *http.Request) {
 			"msg": "Failed to get comment dgraph info",
 			"err": err,
 		})
+		return
+	}
+
+	dgraphReaction, refusal := reactionBusiness.MayChange(ctx, reactionBusiness.OnComment, commentDgraphInfo.Uid, reactionInfo.ReactionDgraphUid, userInfo.UserDgraphInfo.Uid)
+	if refusal != nil {
+		helpers.WriteJSON(w, refusal.Status, helpers.Envolope{"msg": refusal.Msg})
 		return
 	}
 

@@ -294,28 +294,3 @@ func UpdateDocPermissions(ctx context.Context, input *adapter.InputUpdateDocPerm
 
 	return
 }
-
-// BulkSoftDeleteDgraphDocs sets doc_deleted_at on multiple docs in a single Dgraph mutation.
-func BulkSoftDeleteDgraphDocs(ctx context.Context, docs []*dgraphStruct.DgraphDoc, query string) error {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
-	pb, err := json.Marshal(docs)
-	if err != nil {
-		return err
-	}
-
-	mu := &api.Mutation{SetJson: pb}
-	req := &api.Request{
-		Query:     query,
-		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
-	}
-
-	_, err = txn.Do(ctx, req)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/BulkSoftDeleteDgraphDocs failed: %v", err)
-		return err
-	}
-
-	return nil
-}
