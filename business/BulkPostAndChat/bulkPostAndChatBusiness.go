@@ -10,9 +10,9 @@ import (
 	lastseenChannelBusiness "github.com/akashc777/OneCamp/business/LastSeenChannel"
 	lastseenBusiness "github.com/akashc777/OneCamp/business/LastSeenChat"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	chatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
-	userFCMtokenBusiness "github.com/akashc777/OneCamp/business/UserFCMToken"
 	domain "github.com/akashc777/OneCamp/domain/BulkPostAndChat"
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
@@ -335,52 +335,50 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 	go PublishChatsAndPostsMqtt(dgraphPosts, dgraphDMs, fwdMessageInput.HtmlText, channelUUIDs, userInfo, userDgraphPost, userDgraphChat)
 
 	// Bug 1 Fix: Send push notifications for DM and group chat forwards
-	go sendFwdMessageNotifications(ctx, userInfo, fwdMessageInput.HtmlText, chatGroupingUUIDs, grpChatGroupingIDs)
+	go sendFwdMessageNotifications(context.WithoutCancel(ctx), userInfo, fwdMessageInput.HtmlText, dgraphDMs)
 
 	return
 
 }
 
-// sendFwdMessageNotifications sends FCM push notifications for forwarded messages to DMs and group chats.
-// Mirrors the sendNewChatNotification pattern in chatBusiness.go.
-func sendFwdMessageNotifications(ctx context.Context, userInfo *dgraphStruct.DgraphUser, htmlText string, dmGroupingIDs []string, grpGroupingIDs []string) {
+// Who hears of a forward into a conversation, and how they are told: seams
+// for its test.
+var (
+	eligibleForForward = chatNotificationBusiness.GetEligibleUsersForChatActivity
+	deliverForward     = notificationBusiness.Deliver
+)
 
+// sendFwdMessageNotifications tells of each message forwarded into a DM or a
+// group as a new message there is told of (chatBusiness sendNewChatNotification):
+// to everyone in the conversation on "all", never the sender, through
+// notificationBusiness.Deliver, so the push gate applies by person and the
+// desktop app gets its notice. It had its own token loop, which told the
+// desktop app nothing (TN-BUG-12).
+func sendFwdMessageNotifications(ctx context.Context, userInfo *dgraphStruct.DgraphUser, htmlText string, dms []*dgraphStruct.DgraphDm) {
 	plainText := helpers.HTMLToPlainText(htmlText)
 	if len(plainText) == 0 {
 		plainText = "Forwarded a message"
 	}
+	icon := userBusiness.GetSignedProfileURL(ctx, userInfo.ProfileKey)
 
-	// slices.Concat, not append: this runs in a goroutine, and appending would write into the
-	// caller's backing array while the caller may still be using it.
-	allGroupingIDs := slices.Concat(dmGroupingIDs, grpGroupingIDs)
-
-	for _, grpId := range allGroupingIDs {
-		eligibleUserIDs, err := chatNotificationBusiness.GetEligibleUsersForChatActivity(ctx, grpId, userInfo.Uuid, nil, false)
+	for _, dm := range dms {
+		if dm == nil || dm.GroupingId == "" || len(dm.Chats) == 0 || dm.Chats[0] == nil {
+			continue
+		}
+		grpId, chatUUID := dm.GroupingId, dm.Chats[0].Uuid
+		eligibleUserIDs, err := eligibleForForward(ctx, grpId, userInfo.Uuid, nil, false)
 		if err != nil || len(eligibleUserIDs) == 0 {
 			continue
 		}
-
-		tokens, err := userFCMtokenBusiness.GetFCMTokenByListOfUserId(ctx, eligibleUserIDs)
-		if err != nil || len(tokens) == 0 {
-			continue
-		}
-
-		pushData := make(map[string]string)
-		pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT
-		pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] = grpId
-		pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = userInfo.DisplayName()
-		pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = plainText
-		pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userInfo.DisplayName()
-		pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userInfo.ProfileKey)
-
-		batchSize := 500
-		for i := 0; i < len(tokens); i += batchSize {
-			end := i + batchSize
-			if end > len(tokens) {
-				end = len(tokens)
-			}
-			_ = firebaseInit.FirebaseApp.MultiCastPush(ctx, pushData, tokens[i:end])
-		}
+		deliverForward(ctx, eligibleUserIDs, map[string]string{
+			firebaseInit.FIREBASE_PUSH_DATA_TYPE:      firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT,
+			firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:   grpId,
+			firebaseInit.FIREBASE_PUSH_DATA_TITLE:     userInfo.DisplayName(),
+			firebaseInit.FIREBASE_PUSH_DATA_BODY:      plainText,
+			firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID: chatUUID,
+			firebaseInit.FIREBASE_PUSH_DATA_USERNAME:  userInfo.DisplayName(),
+			firebaseInit.FIREBASE_PUSH_DATA_ICON:      icon,
+		}, "chat:"+grpId+":"+chatUUID)
 	}
 }
 

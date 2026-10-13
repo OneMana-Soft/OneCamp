@@ -19,4 +19,9 @@ func TestMessageTypesKeepTheirNumbers(t *testing.T) {
 	if MESSAGE_CHAT_SEEN != 34 {
 		t.Fatalf("CHAT_SEEN=%d, want 34", MESSAGE_CHAT_SEEN)
 	}
+	// 35 to 37 are the next release's (MESSAGE_CONTENT_IO_JOB,
+	// MESSAGE_DOC_META, MESSAGE_NOTICE), held free on this line.
+	if MESSAGE_CONVERSATION_ACCESS != 38 {
+		t.Fatalf("CONVERSATION_ACCESS=%d, want 38", MESSAGE_CONVERSATION_ACCESS)
+	}
 }

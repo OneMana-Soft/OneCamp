@@ -43,9 +43,24 @@ func trimSnippet(s string, max int) string {
 	return s[:cut] + "…"
 }
 
-// frontendChatURL builds the deep link for a DM/group conversation.
-func frontendChatURL(grpId string) string {
-	return frontendBaseURL() + "/app/chat/" + grpId
+// chatLinkFor is the link a DM or group email opens, per recipient
+// (helpers.ChatPath): a DM at the other person, a group at its grouping id,
+// and with messageUUID, that message's thread. One link for everyone was
+// /app/chat/<grouping id>, which the web app read as a person and opened as
+// an empty conversation with nobody.
+func chatLinkFor(grpId, messageUUID string) func(recipientUUID string) string {
+	return func(recipientUUID string) string {
+		if p := helpers.ChatPath(grpId, recipientUUID, messageUUID); p != "" {
+			return frontendBaseURL() + p
+		}
+		return ""
+	}
+}
+
+// frontendChatListURL is the conversations list, for a chat email whose own
+// link can't be built.
+func frontendChatListURL() string {
+	return frontendBaseURL() + "/app/chat"
 }
 
 // frontendChannelPostURL deep-links to a specific post in a channel.
@@ -252,7 +267,8 @@ func DispatchChatDM(senderUUID, senderName string, senderAvatar string,
 			Title:         title,
 			Subtitle:      "Direct message",
 			Body:          trimSnippet(plainTextBody, 600),
-			CTAURL:        frontendChatURL(grpId),
+			CTAURL:        frontendChatListURL(),
+			CTAURLFor:     chatLinkFor(grpId, ""),
 			CTAText:       "View conversation",
 			DedupKeyParts: []string{grpId, chatUUID},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
@@ -484,7 +500,8 @@ func DispatchChatComment(actorUUID, actorName, actorAvatar string,
 			Title:         subject,
 			Subtitle:      "Chat reply",
 			Body:          trimSnippet(plainTextBody, 600),
-			CTAURL:        frontendChatURL(grpId),
+			CTAURL:        frontendChatListURL(),
+			CTAURLFor:     chatLinkFor(grpId, chatUUID),
 			CTAText:       "View chat",
 			DedupKeyParts: []string{"chat_comment", chatUUID, commentUUID},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
@@ -545,7 +562,8 @@ func DispatchChatCall(actorUUID, actorName, actorAvatar string,
 			Title:         subject,
 			Subtitle:      "Incoming call",
 			Body:          "Tap to join the call.",
-			CTAURL:        frontendChatURL(grpId),
+			CTAURL:        frontendChatListURL(),
+			CTAURLFor:     chatLinkFor(grpId, ""),
 			CTAText:       "Join call",
 			DedupKeyParts: []string{"chat_call", grpId, helpers.NowDateKey()},
 			Recipients:    recipientsFromStrings(recipientUUIDs),

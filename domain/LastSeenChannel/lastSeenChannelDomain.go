@@ -68,3 +68,27 @@ func GetLastSeenChannel(ctx context.Context, userID, channelID uuid.UUID) (time.
 func GetAllLastSeenChannelsForUser(ctx context.Context, userID uuid.UUID) (map[string]time.Time, error) {
 	return models.GetAllLastSeenChannelsForUser(ctx, userID)
 }
+
+// UnreadBoundaryInChannel is where the `unread` newest posts by others in a
+// channel start: the time of the oldest of them, the messages the reader's
+// unread count counted (GetLatestPostInChannelCountByUserID's rules: others'
+// posts, not deleted). ok=false when the channel holds fewer.
+func UnreadBoundaryInChannel(ctx context.Context, userID uuid.UUID, channelID uuid.UUID, unread int) (time.Time, bool, error) {
+	query := `
+		SELECT created_at FROM posts
+		WHERE post_channel = $1 AND created_by <> $2 AND deleted_at IS NULL
+		ORDER BY created_at DESC
+		OFFSET $3 LIMIT 1`
+	return models.TimeOfNthNewest(ctx, query, channelID, userID, unread-1)
+}
+
+// UnreadBoundaryInChat is UnreadBoundaryInChannel for a DM or a group
+// (GetLatestChatMessageCountByUserID's rules).
+func UnreadBoundaryInChat(ctx context.Context, userID uuid.UUID, grpID string, unread int) (time.Time, bool, error) {
+	query := `
+		SELECT created_at FROM chats
+		WHERE grp_id = $1 AND created_by <> $2 AND deleted_at IS NULL
+		ORDER BY created_at DESC
+		OFFSET $3 LIMIT 1`
+	return models.TimeOfNthNewest(ctx, query, grpID, userID, unread-1)
+}

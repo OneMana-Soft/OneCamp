@@ -100,33 +100,6 @@ func GetFCMTokenByListOfUserId(ctx context.Context, userIds []string) (tokens []
 	return
 }
 
-func GetFCMTokensForNewChannelActivityExcludingUserId(ctx context.Context, userId string, channelId string, membersList []string, mentionsList []string) (tokens []string, err error) {
-	query := `
-		WITH filtered_users AS (
-			SELECT ucn.user_id, fcm.fcm_token
-			FROM users_fcm_token fcm
-			JOIN users_channel_notification ucn 
-			  ON fcm.user_id = ucn.user_id
-			WHERE ucn.channel_id = $1
-			  AND ucn.user_id != $2
-			  AND` + notPaused("fcm.user_id") + `
-			  AND (
-				  (ucn.notification_type = 'all' AND ucn.user_id = ANY($3)) OR
-				  (ucn.notification_type = 'mention' AND ucn.user_id = ANY($4))
-			  )
-		)
-		SELECT fcm_token FROM filtered_users;
-    `
-	tokens, err = models.GetFCMTokensForNewChannelActivity(query, channelId, userId, membersList, mentionsList)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetFCMTokensForNewChannelActivity Failed to get user's fcm token err: %+v",
-			err)
-		return
-	}
-	return
-}
-
 func GetFCMTokensForNewProjectActivityExcludingUserId(ctx context.Context, userId string, projectId string, membersList []string, mentionsList []string) (tokens []string, err error) {
 	query := `
 		SELECT 
@@ -158,37 +131,6 @@ func GetFCMTokensForNewProjectActivityExcludingUserId(ctx context.Context, userI
 	return
 }
 
-func GetFCMTokensForNewChatActivityExcludingUserId(ctx context.Context, userId string, grpId string, mentionsList []string) (tokens []string, err error) {
-	query := `
-		SELECT 
-			uft.fcm_token
-		FROM 
-			users_chat_notification ucn
-		JOIN 
-			users_fcm_token uft
-		ON 
-			ucn.user_id = uft.user_id
-		WHERE 
-			ucn.grp_id = $1
-			AND ucn.user_id != $2
-			AND` + notPaused("uft.user_id") + `
-			AND (
-					(ucn.notification_type = 'all') OR
-					(ucn.notification_type = 'mention' AND ucn.user_id = ANY($3))
-				);
-	`
-
-	tokens, err = models.GetFCMTokensForNewChatActivity(query, grpId, userId, mentionsList)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetFCMTokensForNewChatActivity Failed to get user's fcm token err: %+v",
-			err)
-		return
-	}
-	return
-}
-
 func DeleteFromListOfFCMToken(ctx context.Context, tokens []string) (err error) {
 	query := `
 		DELETE FROM users_fcm_token 
@@ -201,17 +143,6 @@ func DeleteFromListOfFCMToken(ctx context.Context, tokens []string) (err error) 
 			"domain/DeleteFromListOfFCMToken Failed to delete user's fcm token err: %+v",
 			err)
 		return
-	}
-	return
-}
-
-// GetFCMTokenByUserIdIgnoringPause is a person's devices even while they have
-// paused notifications or are in quiet hours. Only the urgent "notify anyway"
-// ping uses it, and that is limited to one a day per sender.
-func GetFCMTokenByUserIdIgnoringPause(ctx context.Context, userId string) (tokens []string, err error) {
-	tokens, err = models.GetFCMTokenByUserId(`SELECT fcm_token FROM users_fcm_token WHERE user_id = $1`, userId)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/GetFCMTokenByUserIdIgnoringPause err: %+v", err)
 	}
 	return
 }

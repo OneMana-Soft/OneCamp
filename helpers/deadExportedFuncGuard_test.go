@@ -209,6 +209,10 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"click in that window starts nothing. The test environment's run fails at once, and without " +
 		"the hold the window is a few microseconds that load alone sometimes opens.",
 
+	"ForgetAutomationBotForTest": "drops the automation bot identity kept for the process, so an " +
+		"integration test against databases of its own resolves the bot there; one resolved by an " +
+		"earlier test posts as a user the later test's databases don't have.",
+
 	"ForgetSettingsForTest": "drops the workspace settings cached for 30 seconds, after an " +
 		"integration test starts a fresh database; the previous test's choices (the channels new " +
 		"members join, say) would otherwise apply in the next one.",

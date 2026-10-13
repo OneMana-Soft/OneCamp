@@ -90,6 +90,10 @@ func CreateProject(ctx context.Context, projectName string, createdByUserDgraphU
 		return
 	}
 
+	// The maker is a member now; their cached profile lists their projects,
+	// and search is scoped by it.
+	userDomain.InvalidateUserMemberships(ctx, createdByUserUUID.String())
+
 	go userProjectNotificationBusiness.CreateProjectNotificationType(userDgraphInfo.Uuid, projectUUID.String(), postgressStruct.NOTIFICATION_TYPE_ALL)
 
 	opensearchProject := &openSearchStruct.OpenSearchProject{
@@ -156,6 +160,9 @@ func AddMemberToProject(ctx context.Context, projectUUID uuid.UUID, userDgraphUI
 		helpers.LogErrorWithContext(ctx, "business/AddMemberToProject failed to add member to project in dgraph err: %+v", err)
 		return
 	}
+	// Their cached profile lists the projects they had, and search covers
+	// only what it lists.
+	userDomain.InvalidateUserMemberships(ctx, userDgraphUUID)
 
 	go userProjectNotificationBusiness.CreateProjectNotificationType(userDgraphUUID, projectUUID.String(), postgressStruct.NOTIFICATION_TYPE_ALL)
 

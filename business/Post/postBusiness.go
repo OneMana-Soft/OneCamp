@@ -12,7 +12,6 @@ import (
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	channelNotificationBusiness "github.com/akashc777/OneCamp/business/UserChannelNotification"
-	userFCMtokenBusiness "github.com/akashc777/OneCamp/business/UserFCMToken"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	domain "github.com/akashc777/OneCamp/domain/Post"
@@ -364,16 +363,8 @@ func sendNewPostNotification(title string, body string, channelId string, mentio
 		activityBusiness.PublishActivityToUser(recipientID, activityItem)
 	}
 
-	// 3. Handle FCM Push Notifications
-	tokens, err := userFCMtokenBusiness.GetFCMTokenByListOfUserId(ctx, eligibleUserIDs)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/sendNewPostNotification Failed to gets user's fcm token err: %+v",
-			err)
-		return
-	}
-
+	// 3. The push, and the desktop app's notice, to those of them the push
+	// gate lets through (business/Notification Deliver).
 	pushData := make(map[string]string)
 
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHANNEL
@@ -384,23 +375,7 @@ func sendNewPostNotification(title string, body string, channelId string, mentio
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 
-	// Send notifications in batches of 500 tokens
-	batchSize := 500
-	for i := 0; i < len(tokens); i += batchSize {
-		end := i + batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
-		tokenBatch := tokens[i:end]
-
-		err = firebaseInit.FirebaseApp.MultiCastPush(ctx, pushData, tokenBatch)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/sendNewPostNotification Failed to send push notification err: %+v",
-				err)
-			return
-		}
-	}
+	notificationBusiness.Deliver(ctx, eligibleUserIDs, pushData, "channel:"+channelId+":"+postID)
 
 	// Email fan-out: only mentioned users — channel posts in general are
 	// too noisy to email everyone. The dispatcher applies its own gates
@@ -454,6 +429,9 @@ func UpdatePostComment(ctx context.Context, commentUUID uuid.UUID, commentInfo *
 			err)
 		return
 	}
+
+	// A reply sent to its channel too: the copy there says what it now says.
+	mirrorReplyEdit(ctx, commentUUID.String(), commentInfo.HTMLText)
 
 	mqttPostCommentCount := mqttStruct.MqttPostComment{
 		Type:        mqttStruct.TYPE_UPDATE,
@@ -534,7 +512,7 @@ func CreatePostComment(ctx context.Context, commentInfo *adapter.InputCreateOrUp
 		},
 	}
 
-	_, err = commentBusiness.CreateCommentInAPost(ctx, &dgraphPost, userInfo, commentUUID, currentTime, dgraphPostInfo, mentionsDgraphUsersList)
+	_, err = commentBusiness.CreateCommentInAPost(ctx, &dgraphPost, userInfo, commentUUID, currentTime, dgraphPostInfo)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -564,7 +542,18 @@ func CreatePostComment(ctx context.Context, commentInfo *adapter.InputCreateOrUp
 	if !helpers.IsBulkImport(ctx) {
 		go mqttBusiness.PublishPostComment(&mqttPostCommentCount, dgraphPostInfo.Channel.Uuid)
 
-		go PublishPostCommentActivity(commentUUID.String(), commentInfo.HTMLText, commentInfo.PostUuid, currentTime, mentionsDgraphUsersList, dgraphPostInfo, &userInfo.UserDgraphInfo)
+		// Push, email and the live Activity items, to one audience: the
+		// thread's people who are in the channel now. A bulk import, which
+		// writes years of replies, tells nobody.
+		go commentBusiness.NotifyThreadReply(commentBusiness.ThreadReply{
+			By:          &userInfo.UserDgraphInfo,
+			Post:        dgraphPostInfo,
+			CommentUUID: commentUUID.String(),
+			HTML:        commentInfo.HTMLText,
+			PlainText:   helpers.HTMLToPlainText(commentInfo.HTMLText),
+			Mentioned:   mentionsDgraphUsersList,
+			At:          currentTime,
+		})
 
 		// Notify listeners so an AI teammate can CONTINUE a thread it is part of:
 		// a person can @mention the agent again, answer its needs_human question,
@@ -593,80 +582,6 @@ func CreatePostComment(ctx context.Context, commentInfo *adapter.InputCreateOrUp
 	}
 
 	return
-}
-
-func PublishPostCommentActivity(commentUUID string, commentBody string, postUUID string, currentTime time.Time, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphPostInfo *dgraphStruct.DgraphPost, userDgraph *dgraphStruct.DgraphUser) {
-
-	ctx := context.Background()
-	mentionUUIDs := []string{}
-	for _, m := range mentionsDgraphUsersList {
-		mentionUUIDs = append(mentionUUIDs, m.Uuid)
-	}
-
-	// 1. Notify Post Owner (if not the commenter)
-	if dgraphPostInfo.PostBy.Uuid != userDgraph.Uuid {
-		activityItem := &dgraphModels.UnifiedActivityItem{
-			ActivityType: mqttStruct.MESSAGE_ACTIVITY_COMMENT,
-			Time:         time.Now().UTC().Format(time.RFC3339Nano),
-			Comment: &dgraphStruct.DgraphComment{
-				Uuid: commentUUID,
-				Text: commentBody,
-				CommentBy: &dgraphStruct.DgraphUser{
-					Uuid:     userDgraph.Uuid,
-					UserName: userDgraph.DisplayName(),
-				},
-				Post: &dgraphStruct.DgraphPost{
-					Uuid: postUUID,
-					Channel: &dgraphStruct.DgraphChannel{
-						Uuid: dgraphPostInfo.Channel.Uuid,
-					},
-				},
-				CreatedAt: &currentTime,
-			},
-		}
-		activityBusiness.PublishActivityToUser(dgraphPostInfo.PostBy.Uuid, activityItem)
-	}
-
-	// 2. Notify Mentions
-
-	eligibleUserIDs, err := channelNotificationBusiness.GetEligibleUsersForChannelActivity(ctx, dgraphPostInfo.Channel.Uuid, userDgraph.Uuid, mentionUUIDs, true)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishPostCommentActivity Failed to get eligible users err: %+v",
-			err)
-		return
-	}
-
-	for _, mentionUUID := range eligibleUserIDs {
-		if mentionUUID == dgraphPostInfo.PostBy.Uuid {
-			continue
-		}
-		activityItem := &dgraphModels.UnifiedActivityItem{
-			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
-			Time:         time.Now().UTC().Format(time.RFC3339Nano),
-			Mention: &dgraphStruct.DgraphMentions{
-				CommentUuid: commentUUID,
-				Comment: &dgraphStruct.DgraphComment{
-					Uuid: commentUUID,
-					Text: commentBody,
-					CommentBy: &dgraphStruct.DgraphUser{
-						Uuid:     userDgraph.Uuid,
-						UserName: userDgraph.DisplayName(),
-					},
-					Post: &dgraphStruct.DgraphPost{
-						Uuid: postUUID,
-						Channel: &dgraphStruct.DgraphChannel{
-							Uuid: dgraphPostInfo.Channel.Uuid,
-						},
-					},
-				},
-				CreatedAt: &currentTime,
-			},
-		}
-		activityBusiness.PublishActivityToUser(mentionUUID, activityItem)
-	}
-
 }
 
 func CreateOrUpdatePostCommentReaction(ctx context.Context, reactionInfo *adapter.InputUpdateReactionForCommentInPost, dgraphCommentRaw *dgraphStruct.DgraphComment, userDgraph *dgraphStruct.DgraphUser) (reactionUUID string, err error) {
@@ -1054,9 +969,10 @@ func DeletePost(ctx context.Context, rawDgraphPost *dgraphStruct.DgraphPost, cha
 	return
 }
 
-func GetOldPosts(ctx context.Context, channelId string, lastPostTime time.Time) (posts PostPagination, err error) {
+// GetOldPosts is the page of a channel's posts before edge (helpers.PageEdge).
+func GetOldPosts(ctx context.Context, channelId string, edge helpers.PageEdge) (posts PostPagination, err error) {
 
-	dgraphPosts, err := domain.GetDgraphOldPostFromDgraph(ctx, channelId, lastPostTime)
+	dgraphPosts, err := domain.GetDgraphOldPostFromDgraph(ctx, channelId, edge.Before())
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1066,16 +982,12 @@ func GetOldPosts(ctx context.Context, channelId string, lastPostTime time.Time) 
 		return
 	}
 
-	if len(dgraphPosts) > domain.POST_COUNT {
-		posts.Posts = dgraphPosts[:domain.POST_COUNT]
-	} else {
-		posts.Posts = dgraphPosts
-	}
-
-	posts.HasMore = len(dgraphPosts) > domain.POST_COUNT
+	posts.Posts, posts.HasMore = helpers.PageFrom(dgraphPosts, postUUIDOf, edge, domain.POST_COUNT)
 
 	return
 }
+
+func postUUIDOf(p *dgraphStruct.DgraphPost) string { return p.Uuid }
 
 func GetDgraphNewPostIncludiongPostFromDgraph(ctx context.Context, channelUUID string, lastPostTime *time.Time) (posts PostPagination, err error) {
 	dgraphPosts, err := domain.GetDgraphNewPostIncludiongPostFromDgraph(ctx, channelUUID, lastPostTime)
@@ -1113,9 +1025,10 @@ func GetDgraphPostOnlyTextDgraph(ctx context.Context, postUUID string) (dgraphPo
 	return
 }
 
-func GetNewPosts(ctx context.Context, channelId string, lastPostTime time.Time) (posts PostPagination, err error) {
+// GetNewPosts is the page of a channel's posts after edge (helpers.PageEdge).
+func GetNewPosts(ctx context.Context, channelId string, edge helpers.PageEdge) (posts PostPagination, err error) {
 
-	dgraphPosts, err := domain.GetDgraphNewPostFromDgraph(ctx, channelId, lastPostTime)
+	dgraphPosts, err := domain.GetDgraphNewPostFromDgraph(ctx, channelId, edge.After())
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1125,12 +1038,7 @@ func GetNewPosts(ctx context.Context, channelId string, lastPostTime time.Time) 
 		return
 	}
 
-	if len(dgraphPosts) > domain.POST_COUNT {
-		posts.Posts = dgraphPosts[:domain.POST_COUNT]
-	} else {
-		posts.Posts = dgraphPosts
-	}
-	posts.HasMore = len(dgraphPosts) > domain.POST_COUNT
+	posts.Posts, posts.HasMore = helpers.PageFrom(dgraphPosts, postUUIDOf, edge, domain.POST_COUNT)
 
 	return
 }
@@ -1238,6 +1146,9 @@ func DeleteCommentOnPost(ctx context.Context, commentUUID uuid.UUID, rawDgraphCo
 
 		return
 	}
+
+	// A reply sent to its channel too: its copy there goes with it.
+	mirrorReplyDelete(ctx, commentUUID.String())
 
 	mqttPostCommentCount := mqttStruct.MqttPostComment{
 		Type:        mqttStruct.TYPE_DELETE,

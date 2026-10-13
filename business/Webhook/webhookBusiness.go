@@ -232,6 +232,11 @@ type WebhookCreateInput struct {
 	Events       []string   `json:"events,omitempty"`
 	BotName      string     `json:"bot_name"`
 	BotAvatarUrl *string    `json:"bot_avatar_url,omitempty"`
+	// ScopeType and ScopeEntityId say what an outgoing webhook is sent events
+	// from: "org" (the whole workspace), "channel" or "project", with the
+	// channel's or project's id (outgoingPrivacy.go).
+	ScopeType     string     `json:"scope_type,omitempty"`
+	ScopeEntityId *uuid.UUID `json:"scope_entity_id,omitempty"`
 }
 
 // sanitizeEvents removes empty strings and duplicates from an event slice.
@@ -264,6 +269,10 @@ type WebhookUpdateInput struct {
 	IsActive     bool       `json:"is_active"`
 	BotName      string     `json:"bot_name"`
 	BotAvatarUrl *string    `json:"bot_avatar_url,omitempty"`
+	// ScopeType and ScopeEntityId as WebhookCreateInput's; an update that
+	// names no scope keeps the one it had.
+	ScopeType     string     `json:"scope_type,omitempty"`
+	ScopeEntityId *uuid.UUID `json:"scope_entity_id,omitempty"`
 }
 
 // generateSecureToken creates a cryptographically secure random token.
@@ -304,6 +313,12 @@ func CreateWebhook(ctx context.Context, input WebhookCreateInput, createdBy uuid
 
 	// Validate incoming webhook has channel_id or will accept it in payload
 	// (channel_id is optional for incoming — can be specified in payload)
+
+	// What it is sent events from, checked before anything is written.
+	scope, scopeEntity, err := webhookScope(ctx, input.Type, input.ScopeType, input.ScopeEntityId)
+	if err != nil {
+		return nil, err
+	}
 
 	// Generate secure token (32 bytes = 43 chars base64url)
 	token, err := generateSecureToken(32)
@@ -348,6 +363,11 @@ func CreateWebhook(ctx context.Context, input WebhookCreateInput, createdBy uuid
 	if err != nil {
 		return nil, err
 	}
+	if scope != ScopeOrg {
+		if err := domain.SetWebhookScope(ctx, id, scope, scopeEntity, now); err != nil {
+			return nil, err
+		}
+	}
 
 	// Invalidate the dispatch cache so the next event fan-out picks up the
 	// new webhook without waiting for the TTL to expire.
@@ -388,6 +408,15 @@ func UpdateWebhook(ctx context.Context, webhookId uuid.UUID, input WebhookUpdate
 		}
 	}
 
+	// What it is sent events from, when the update says.
+	var scope string
+	var scopeEntity *uuid.UUID
+	if input.ScopeType != "" {
+		if scope, scopeEntity, err = webhookScope(ctx, existing.Type, input.ScopeType, input.ScopeEntityId); err != nil {
+			return nil, err
+		}
+	}
+
 	input.Events = sanitizeEvents(input.Events)
 	var eventsJson *string
 	if len(input.Events) > 0 {
@@ -413,6 +442,11 @@ func UpdateWebhook(ctx context.Context, webhookId uuid.UUID, input WebhookUpdate
 	err = domain.UpdateWebhook(ctx, webhookId, input.Name, input.Description, input.TargetUrl, input.ChannelId, eventsJson, input.IsActive, input.BotName, input.BotAvatarUrl, existing.Metadata, now)
 	if err != nil {
 		return nil, err
+	}
+	if scope != "" {
+		if err := domain.SetWebhookScope(ctx, webhookId, scope, scopeEntity, now); err != nil {
+			return nil, err
+		}
 	}
 
 	// Any of name / target / events / scope / active flag could change
@@ -567,25 +601,19 @@ func DispatchEvent(ctx context.Context, eventType string, data interface{}) {
 		notifyEventListeners(ctx, eventType, m)
 	}
 
-	// Extract scope context from event data
-	var scopeType string
-	var scopeEntityId *uuid.UUID
-	if m, ok := data.(map[string]interface{}); ok {
-		if chID, ok := m["channel_id"].(string); ok && chID != "" {
-			scopeType = "channel"
-			id, _ := uuid.Parse(chID)
-			scopeEntityId = &id
-		} else if projID, ok := m["project_id"].(string); ok && projID != "" {
-			scopeType = "project"
-			id, _ := uuid.Parse(projID)
-			scopeEntityId = &id
-		}
+	// Where it happened, which decides who is sent what (outgoingPrivacy.go):
+	// a DM's or a group chat's goes to no webhook at all.
+	m, _ := data.(map[string]interface{})
+	place := placeOf(eventType, m)
+	if place.conversation {
+		return
 	}
-	if scopeType == "" {
-		scopeType = "org"
+	lookupKind := place.kind
+	if place.id == nil {
+		lookupKind = ScopeOrg // a place whose id doesn't read has no webhooks of its own
 	}
 
-	webhooks, err := getActiveOutgoingWebhooksByEventCached(ctx, eventType, scopeType, scopeEntityId)
+	webhooks, err := getActiveOutgoingWebhooksByEventCached(ctx, eventType, lookupKind, place.id)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/DispatchEvent Failed to get outgoing webhooks for event %s err: %+v",
@@ -597,31 +625,61 @@ func DispatchEvent(ctx context.Context, eventType string, data interface{}) {
 		return
 	}
 
-	payload := OutgoingWebhookPayload{
-		Event:     eventType,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
-		Data:      data,
+	// Whether a channel event's channel is public, asked only when a
+	// workspace webhook would be sent it. Not known is private.
+	public := false
+	if place.kind == ScopeChannel && place.id != nil {
+		for _, w := range webhooks {
+			if w.ScopeType == "" || w.ScopeType == ScopeOrg {
+				ok, err := domain.ChannelIsPublic(ctx, *place.id)
+				public = err == nil && ok
+				break
+			}
+		}
 	}
 
-	payloadBytes, err := json.Marshal(payload)
+	// The two payloads a webhook may be sent: the event whole, or its ids.
+	payloadFor := func(body interface{}) ([]byte, error) {
+		return json.Marshal(OutgoingWebhookPayload{
+			Event:     eventType,
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Data:      body,
+		})
+	}
+	allBytes, err := payloadFor(data)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/DispatchEvent Failed to marshal payload err: %+v",
 			err)
 		return
 	}
+	idBytes, err := payloadFor(idsOnly(m))
+	if err != nil {
+		return
+	}
 
 	// Extract plain text for trigger word matching
 	var plainText string
-	if m, ok := data.(map[string]interface{}); ok {
-		if pt, ok := m["plain_text"].(string); ok {
-			plainText = pt
-		} else if t, ok := m["text"].(string); ok {
-			plainText = t
-		}
+	if pt, ok := m["plain_text"].(string); ok {
+		plainText = pt
+	} else if t, ok := m["text"].(string); ok {
+		plainText = t
 	}
 
 	for _, webhook := range webhooks {
+		switch deliveryTo(webhook.ScopeType, webhook.ScopeEntityId, place, public) {
+		case sendNothing:
+			continue
+		case sendIDs:
+			// Trigger words would be read in the words the webhook isn't
+			// sent: one that has some isn't told of the event at all, or it
+			// would learn which private messages say "salary".
+			if webhook.TriggerWords != nil && *webhook.TriggerWords != "" && *webhook.TriggerWords != "[]" {
+				continue
+			}
+			go dispatchToWebhook(webhook, eventType, idBytes)
+			continue
+		}
 		// Trigger word filtering with word boundaries (cached compiled regexes)
 		if webhook.TriggerWords != nil && *webhook.TriggerWords != "" && plainText != "" {
 			var words []string
@@ -640,7 +698,7 @@ func DispatchEvent(ctx context.Context, eventType string, data interface{}) {
 				}
 			}
 		}
-		go dispatchToWebhook(webhook, eventType, payloadBytes)
+		go dispatchToWebhook(webhook, eventType, allBytes)
 	}
 }
 

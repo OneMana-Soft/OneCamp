@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
-	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Post"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
@@ -17,6 +15,8 @@ import (
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
+	channelDgraphModels "github.com/akashc777/OneCamp/models/dgraph/Channel"
+	postDgraphModels "github.com/akashc777/OneCamp/models/dgraph/Post"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -303,6 +303,12 @@ func CreateOrUpdateReaction(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorized ",
 		})
+		return
+	}
+
+	// A deleted message takes no reactions.
+	if helpers.IsSoftDeleted(postInfo.DeletedAt) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted."})
 		return
 	}
 
@@ -668,6 +674,12 @@ func CreateCommentInPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A deleted message takes no replies.
+	if helpers.IsSoftDeleted(dgraphPost.DeletedAt) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted."})
+		return
+	}
+
 	mentions, err := helpers.GetMentions(commentInfo.HTMLText)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -708,6 +720,8 @@ func CreateCommentInPost(w http.ResponseWriter, r *http.Request) {
 			writeSendError(w, err)
 			return
 		}
+		// The reply tells the people it mentions; the copy doesn't again.
+		alsoPost = alsoPost.WithoutMentions()
 	}
 
 	createdCommentData, err := business.CreatePostComment(ctx, &commentInfo, &userInfo, mentionsDgraphUsersList, dgraphPost)
@@ -727,9 +741,14 @@ func CreateCommentInPost(w http.ResponseWriter, r *http.Request) {
 	// The reply is written, so posting it in the channel too is best-effort:
 	// a failure here must not fail the reply, so it is only logged.
 	if alsoPost != nil {
-		if _, perr := alsoPost.Commit(ctx); perr != nil {
+		copied, perr := alsoPost.Commit(ctx)
+		if perr != nil {
 			helpers.LogErrorWithContext(ctx,
 				"controllers/AddCommentToPost also_send_to_channel failed err: %+v", perr)
+		} else if lerr := business.LinkReplyCopy(ctx, createdCommentData.Uuid, copied.Uuid); lerr != nil {
+			// The copy is posted; only following the reply's edits is lost.
+			helpers.LogErrorWithContext(ctx,
+				"controllers/AddCommentToPost Failed to link the reply to its copy err: %+v", lerr)
 		}
 	}
 
@@ -754,15 +773,20 @@ func PostByUUIDWithAllComments(w http.ResponseWriter, r *http.Request) {
 
 	dgraphPost, err := business.GetDgraphPostByUUIDWithAllComments(ctx, postId, userInfo.UserDgraphInfo.Uid)
 
+	// A message that isn't there is a 404, as a deleted one is, so the page
+	// says the thread isn't available rather than that it couldn't load; a
+	// graph that doesn't answer says nothing about the message, and is a 503
+	// the page can try again.
+	if errors.Is(err, postDgraphModels.ErrNotFound) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "This thread isn't available."})
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/PostByUUIDWithAllComments Failed to get dgraph post err: %+v",
 			err)
 
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to to get post",
-			"err": err,
-		})
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't load the thread. Try again."})
 		return
 	}
 
@@ -775,9 +799,17 @@ func PostByUUIDWithAllComments(w http.ResponseWriter, r *http.Request) {
 
 	}
 
+	// A deleted message's thread shows nothing of it: a placeholder over its
+	// replies, or no thread when there are none (business.ThreadForMember).
+	thread, ok := business.ThreadForMember(dgraphPost)
+	if !ok {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted."})
+		return
+	}
+
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":  "got post successfully!",
-		"data": dgraphPost,
+		"data": thread,
 	})
 
 }
@@ -788,10 +820,11 @@ func GetOldPosts(w http.ResponseWriter, r *http.Request) {
 	epochTimeString := chi.URLParam(r, "time_stamp")
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
-	epochTime, err := strconv.ParseInt(epochTimeString, 10, 64)
+	// The post the page starts next to (helpers.PageEdge).
+	edge, err := helpers.PageEdgeOf(r, epochTimeString)
 	if err != nil {
 		// A malformed time in the URL is the caller's mistake: say so, don't panic.
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "time_stamp must be a whole number of seconds"})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
 		return
 	}
 
@@ -802,8 +835,6 @@ func GetOldPosts(w http.ResponseWriter, r *http.Request) {
 			err)
 		return
 	}
-
-	lastPostTime := time.Unix(epochTime, 0)
 
 	channelInfo, err := channelBusiness.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
 
@@ -827,7 +858,7 @@ func GetOldPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	posts, err := business.GetOldPosts(ctx, channelUUIDString, lastPostTime)
+	posts, err := business.GetOldPosts(ctx, channelUUIDString, edge)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -914,6 +945,14 @@ func GetNewPostsWithCurrentPost(w http.ResponseWriter, r *http.Request) {
 
 }
 
+// GetOnlyPostText is a post's text, author and times, for forwarding it: GET
+// /po/getOnlyPostText/{channel_uuid}/{post_uuid}. The post is held to the
+// channel named (channelBusiness.PostReadableIn): it must be in that channel,
+// the channel one the asker can read, and the post not deleted. It used to
+// check only that the asker was in the channel named and then read the post
+// by its id alone, so anyone in any channel could read any private channel's
+// posts, deleted ones too, with a post's id. Every refusal is the same 404, so
+// the answer says nothing about a post the asker may not read.
 func GetOnlyPostText(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	channelUUIDString := chi.URLParam(r, "channel_uuid")
@@ -923,48 +962,48 @@ func GetOnlyPostText(w http.ResponseWriter, r *http.Request) {
 
 	channelUUID, err := uuid.Parse(channelUUIDString)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetNewPost Failed to parse channel UUID err: %+v",
-			err)
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "channel_uuid must be a uuid"})
 		return
+	}
+	if _, err := uuid.Parse(postUUIDString); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "post_uuid must be a uuid"})
+		return
+	}
+
+	notFound := func() {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message isn't there."})
 	}
 
 	channelInfo, err := channelBusiness.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
-
+	if errors.Is(err, channelDgraphModels.ErrNotFound) {
+		notFound()
+		return
+	}
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetOnlyPostText Failed to parse time stamp err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to to get posts",
-			"err": err,
-		})
+		helpers.LogErrorWithContext(ctx, "controllers/GetOnlyPostText Failed to get channel info err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't load that message. Try again."})
 		return
 	}
 
-	if channelInfo.IsMember == 0 {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
+	dgraphPost, err := business.GetDgraphPostTextWithChannel(ctx, postUUIDString)
+	if errors.Is(err, postDgraphModels.ErrNotFound) {
+		notFound()
 		return
 	}
-
-	dgraphPost, err := business.GetDgraphPostOnlyTextDgraph(ctx, postUUIDString)
-
 	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"business/GetOnlyPostText Failed to post err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get post",
-			"err": err,
-		})
+		helpers.LogErrorWithContext(ctx, "controllers/GetOnlyPostText Failed to get post err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't load that message. Try again."})
 		return
 	}
+
+	if !channelBusiness.PostReadableIn(channelInfo, dgraphPost) {
+		notFound()
+		return
+	}
+
+	// What this answer always held: the channel and the deletion time were
+	// read only to check the post against.
+	dgraphPost.Channel, dgraphPost.DeletedAt = nil, nil
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":  "got post successfully!",
@@ -979,14 +1018,11 @@ func GetNewPosts(w http.ResponseWriter, r *http.Request) {
 	epochTimeString := chi.URLParam(r, "time_stamp")
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
-	epochTime, err := strconv.ParseInt(epochTimeString, 10, 64)
+	// The post the page starts next to (helpers.PageEdge).
+	edge, err := helpers.PageEdgeOf(r, epochTimeString)
 	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"business/GetNewPost Failed to parse time stamp err: %+v",
-			err)
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
 		return
-
 	}
 
 	channelUUID, err := uuid.Parse(channelUUIDString)
@@ -996,8 +1032,6 @@ func GetNewPosts(w http.ResponseWriter, r *http.Request) {
 			err)
 		return
 	}
-
-	lastPostTime := time.Unix(epochTime, 0)
 
 	channelInfo, err := channelBusiness.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
 
@@ -1021,7 +1055,7 @@ func GetNewPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	posts, err := business.GetNewPosts(ctx, channelUUIDString, lastPostTime)
+	posts, err := business.GetNewPosts(ctx, channelUUIDString, edge)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

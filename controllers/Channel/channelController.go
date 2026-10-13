@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Channel"
+	botpost "github.com/akashc777/OneCamp/business/BotPost"
 	business "github.com/akashc777/OneCamp/business/Channel"
 	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
@@ -757,6 +758,15 @@ func UpdateChannelInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Opening a private channel to the whole workspace, its history and
+	// files with it, is a workspace admin's decision; closing one is any
+	// moderator's (business/Channel privacy.go).
+	privacy := business.PrivacyChangeOf(channelInfo, updateChannelNameInfo.ChannelPrivate)
+	if !business.MayChangePrivacy(privacy, userInfo.UserPostgresInfo.IsAdmin) {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only a workspace admin can make a private channel public."})
+		return
+	}
+
 	err = business.UpdateChannelInfo(ctx, &updateChannelNameInfo, channelUUID)
 
 	if err != nil {
@@ -771,6 +781,14 @@ func UpdateChannelInfo(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 
+	}
+
+	// Everyone in the channel is told who changed its privacy, and what that
+	// means, by a line in it that notifies nobody.
+	if line := business.PrivacyLine(privacy, userInfo.UserDgraphInfo.DisplayName()); line != "" && !updateChannelNameInfo.ChannelArchived {
+		if _, perr := botpost.PostToChannel(ctx, channelUUID, line, ""); perr != nil {
+			helpers.LogErrorWithContext(ctx, "controllers/UpdateChannelInfo Failed to post the privacy line err: %+v", perr)
+		}
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Updated channel successfully!"})

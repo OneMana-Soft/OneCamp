@@ -8,9 +8,12 @@ import (
 	"time"
 
 	commandAdapter "github.com/akashc777/OneCamp/adapter/Command"
+	savedItemBusiness "github.com/akashc777/OneCamp/business/SavedItem"
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	jobDomain "github.com/akashc777/OneCamp/domain/ScheduledJob"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	jobModel "github.com/akashc777/OneCamp/models/postgres/ScheduledJob"
 	"github.com/google/uuid"
 )
@@ -44,7 +47,7 @@ func handleRemind(ctx context.Context, cc CommandContext) (*commandAdapter.Comma
 		return remindList(ctx, cc)
 	}
 
-	target, rest := parseRemindTarget(text)
+	target, rest := parseRemindTarget(text, cc.Mentions)
 	what, whenPhrase, ok := splitWhatWhen(rest)
 	if !ok || strings.TrimSpace(what) == "" {
 		return errorResponse("Couldn't parse that. Try `/remind me to stretch in 30 minutes`."), nil
@@ -53,6 +56,31 @@ func handleRemind(ctx context.Context, cc CommandContext) (*commandAdapter.Comma
 	when, err := ParseWhen(whenPhrase, cc.Timezone)
 	if err != nil {
 		return errorResponse("I couldn't understand “%s”. Try `in 20 minutes`, `tomorrow at 9am`, or `every Monday at 10:00`.", whenPhrase), nil
+	}
+
+	// "@handle" is a person, found now: the reminder goes to them, never back
+	// to whoever set it. It used to keep the name only, and when it fired it
+	// reminded the person who set it, after promising to remind the other.
+	var person *dgraphStruct.DgraphUser
+	if target.kind == "user" {
+		var to *dgraphStruct.DgraphUser
+		var rerr error
+		if target.id != "" {
+			to, rerr = reachablePerson(ctx, target.id)
+		} else {
+			to, rerr = reminderRecipient(ctx, target.name)
+		}
+		if rerr != nil {
+			return errorResponse("Couldn't look up @%s just now. Please try again.", target.name), nil
+		}
+		if to == nil {
+			return errorResponse("Couldn't find @%s to remind. Use their handle, like `/remind @maya to review the deck tomorrow at 9am`.", target.name), nil
+		}
+		if to.Uuid == cc.User.UserDgraphInfo.Uuid {
+			target = remindTarget{kind: "self"}
+		} else {
+			target.id, person = to.Uuid, to
+		}
 	}
 
 	// For channel reminders, resolve the channel name → UUID now (while we have
@@ -94,9 +122,10 @@ func handleRemind(ctx context.Context, cc CommandContext) (*commandAdapter.Comma
 		return errorResponse("Couldn't save that reminder. Please try again."), nil
 	}
 
+	// Named as found, so the person setting it sees who will be reminded.
 	who := "you"
 	if target.kind == "user" {
-		who = "@" + target.name
+		who = person.DisplayName()
 	} else if target.kind == "channel" {
 		who = "#" + target.name
 	}
@@ -139,33 +168,100 @@ func runReminderJob(ctx context.Context, job *jobModel.ScheduledJob) error {
 			// its admins post now), and would say no every time: the
 			// reminder stops, a repeating one included, and its owner hears.
 			resp.Text = fmt.Sprintf("⏰ Reminder for #%s: %s (not posted: you can't post there any more, so this reminder has stopped)", p.TargetName, p.Text)
-			PublishEphemeralToUser(p.CreatedBy, resp)
-			pushReminder(ctx, p.CreatedBy, resp.Text)
+			deliverReminder(ctx, job, p.CreatedBy, resp)
 			return &schedulerBusiness.Terminal{Reason: "Not posted: " + rj.Msg}
 		}
 		logErr(ctx, "runReminderJob/postChannelReminder", err)
 		// Fall back: nudge the creator so the reminder isn't silently lost.
 		resp.Text = fmt.Sprintf("⏰ Reminder for #%s: %s (couldn't post to the channel)", p.TargetName, p.Text)
-		PublishEphemeralToUser(p.CreatedBy, resp)
-		pushReminder(ctx, p.CreatedBy, resp.Text)
+		deliverReminder(ctx, job, p.CreatedBy, resp)
 		return nil
 	}
 
-	// Resolve the recipient: explicit target user, else the creator.
+	// A reminder for someone else goes to them, saying who asked, while they
+	// can still be written to; otherwise it comes back to whoever set it,
+	// saying so, rather than being lost.
 	recipient := p.CreatedBy
-	if p.TargetType == "user" && p.TargetID != "" {
-		recipient = p.TargetID
+	if p.TargetType == "user" {
+		to, err := reminderTargetNow(ctx, p)
+		if err != nil {
+			return err // the scheduler tries again
+		}
+		if to != nil && to.Uuid != p.CreatedBy {
+			recipient = to.Uuid
+			resp.Text = fmt.Sprintf("⏰ %s asked me to remind you: %s", reminderSetterName(ctx, p.CreatedBy), p.Text)
+		} else if to == nil {
+			resp.Text = fmt.Sprintf("⏰ Reminder for @%s: %s (not delivered: I couldn't reach @%s, so it came to you)", p.TargetName, p.Text, p.TargetName)
+		}
 	}
 
-	// 1. Live clients (open tab / foreground PWA) — ephemeral card.
-	PublishEphemeralToUser(recipient, resp)
-
-	// 2. Backgrounded / closed PWA & native — FCM web push so backgrounded
-	//    mobile PWAs are woken. Best-effort: never fail the job if push is
-	//    unavailable.
-	pushReminder(ctx, recipient, resp.Text)
-
+	deliverReminder(ctx, job, recipient, resp)
 	return nil
+}
+
+// deliverReminder gives a fired reminder to the person with userUUID: first a
+// Later item, due now, where it waits whatever else reaches them
+// (savedItemBusiness.SaveFired); then an ephemeral card for an open tab, and
+// a push to wake a closed or backgrounded app. A toast and a push were all
+// there was, and the desktop app, an install without Firebase and anyone
+// offline lost the reminder. Each step is best effort.
+func deliverReminder(ctx context.Context, job *jobModel.ScheduledJob, userUUID string, resp *commandAdapter.CommandResponse) {
+	if id, err := uuid.Parse(userUUID); err == nil {
+		if _, err := savedItemBusiness.SaveFired(ctx, id, job.Id.String(), resp.Text); err != nil {
+			logErr(ctx, "runReminderJob/later", err)
+		}
+	}
+	// Live clients (open tab / foreground PWA): the ephemeral card.
+	PublishEphemeralToUser(userUUID, resp)
+	// Backgrounded or closed apps: a push.
+	pushReminder(ctx, userUUID, resp.Text)
+}
+
+// reminderRecipient is the person "@handle" names for a reminder: the active
+// member with that handle (users.username, without case) who may be written
+// to directly (sendBusiness.MayMessage), and not an agent. Nil, with no
+// error, when there is no such person.
+func reminderRecipient(ctx context.Context, handle string) (*dgraphStruct.DgraphUser, error) {
+	id, err := userDomain.GetActiveUserIDByHandle(ctx, handle)
+	if err != nil || id == uuid.Nil {
+		return nil, err
+	}
+	return reachablePerson(ctx, id.String())
+}
+
+// reachablePerson is the person with userUUID while they may be written to
+// directly and aren't an agent; nil, with no error, otherwise.
+func reachablePerson(ctx context.Context, userUUID string) (*dgraphStruct.DgraphUser, error) {
+	to, err := userDomain.GetDgraphUserInfoByUUID(ctx, userUUID)
+	if err != nil {
+		return nil, err
+	}
+	if to == nil || to.IsBot || sendBusiness.MayMessage(to) != nil {
+		return nil, nil
+	}
+	return to, nil
+}
+
+// reminderTargetNow is who a reminder for a person goes to as it fires: the
+// person it was set for, while they can still be written to. One set before
+// the person was looked up when it was made holds only their handle, and is
+// looked up now. Nil, with no error, when nobody can be reached.
+func reminderTargetNow(ctx context.Context, p reminderPayload) (*dgraphStruct.DgraphUser, error) {
+	if p.TargetID != "" {
+		return reachablePerson(ctx, p.TargetID)
+	}
+	return reminderRecipient(ctx, p.TargetName)
+}
+
+// reminderSetterName is how a reminder names whoever set it: their name, or
+// "Someone" when they can't be read.
+func reminderSetterName(ctx context.Context, userUUID string) string {
+	if u, err := userDomain.GetDgraphUserInfoByUUID(ctx, userUUID); err == nil && u != nil {
+		if name := u.DisplayName(); name != "" {
+			return name
+		}
+	}
+	return "Someone"
 }
 
 func remindHelp() *commandAdapter.CommandResponse {
@@ -216,11 +312,30 @@ type remindTarget struct {
 	name string
 }
 
-// parseRemindTarget peels an optional leading "me", "@user" or "#channel".
-func parseRemindTarget(text string) (remindTarget, string) {
+// parseRemindTarget peels an optional leading "me", "@person" or "#channel".
+// A person picked from the composer's list shows as "@" and their name, which
+// can hold spaces; mentions (shown names, lower-cased, to user ids) says who
+// it is, and the longest name that starts the text wins. Anything else after
+// "@" is one word: a handle.
+func parseRemindTarget(text string, mentions map[string]string) (remindTarget, string) {
 	fields := strings.Fields(text)
 	if len(fields) == 0 {
 		return remindTarget{kind: "self"}, text
+	}
+	if strings.HasPrefix(text, "@") {
+		best := ""
+		for name := range mentions {
+			name = strings.TrimSpace(name)
+			if name == "" || len(name) <= len(best) || len(text) < 1+len(name) || !strings.EqualFold(text[1:1+len(name)], name) {
+				continue
+			}
+			if after := text[1+len(name):]; after == "" || after[0] == ' ' {
+				best = name
+			}
+		}
+		if best != "" {
+			return remindTarget{kind: "user", id: mentions[best], name: text[1 : 1+len(best)]}, strings.TrimSpace(text[1+len(best):])
+		}
 	}
 	head := fields[0]
 	rest := strings.TrimSpace(strings.TrimPrefix(text, head))

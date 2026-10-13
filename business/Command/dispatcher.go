@@ -205,6 +205,7 @@ func buildContext(user userModels.UserInfo, name string, req commandAdapter.Exec
 		ThreadTs:  req.ThreadTs,
 		Timezone:  req.Timezone,
 		TriggerID: req.TriggerID,
+		Mentions:  req.Mentions,
 	}
 	if req.ChannelID != nil && *req.ChannelID != "" {
 		if id, err := uuid.Parse(*req.ChannelID); err == nil {
@@ -248,7 +249,7 @@ func checkRate(ctx context.Context, userUUID string) bool {
 func dispatchExternal(ctx context.Context, cmd *slashModel.SlashCommand, cc CommandContext) (*commandAdapter.CommandResponse, error) {
 	handlerURL := resolveHandlerURL(ctx, cmd)
 	if handlerURL == "" {
-		return errorResponse("`/%s` has no handler configured.", cc.Command), nil
+		return errorResponse("`/%s` isn't set up yet. An admin can finish setting it up in Admin › Apps.", cc.Command), nil
 	}
 
 	signingSecret := resolveSigningSecret(ctx, cmd)

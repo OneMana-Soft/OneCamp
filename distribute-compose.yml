@@ -370,7 +370,10 @@ services:
   # workers add capacity on top; that is fine. Set SERVICE_ROLE=api in .env to take
   # the loops off the API process entirely, and then the workers are the ONLY
   # thing draining the queue: the "agent-queue" system check in Admin goes red
-  # within two minutes if none of them is up.
+  # within two minutes if none of them is up. The events the API's requests
+  # raise (a message for an agent, a workflow, the Slack bridge) then reach the
+  # workers through Redis, and the "event-listeners" check goes red within
+  # thirty seconds if no worker is taking them.
   #
   # Config an admin saves reaches every worker within thirty seconds; nothing
   # needs a restart for that. See helpers.ServiceRole in the backend for the

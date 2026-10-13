@@ -15,13 +15,15 @@ package helpers
 //
 //	all     HTTP and every loop. The default; what every existing install runs.
 //	api     HTTP only. Takes requests, enqueues work, runs the agent a request
-//	        asks for synchronously. Claims nothing from a queue, subscribes to
-//	        no bus.
+//	        asks for synchronously. Claims nothing from a queue and runs no
+//	        event listener: the events its requests raise go to the workers
+//	        through Redis (business/Webhook's hand-off).
 //	worker  Every loop and a health endpoint, so an orchestrator can probe it.
 //	        Serves no request.
 //
 // WHAT MAKES THE SPLIT SAFE is that every loop already takes its work from the
-// store (a leased row, a due job) or from the shared bus, never from the process
+// store (a leased row, a due job) or, for the events a request raises, from the
+// hand-off stream the workers drain (business/Webhook), never from the process
 // that created it, and every cache a request depends on is reconciled from the
 // store (helpers.ConfigReconciler) rather than pushed by the handler that
 // changed it. Two loops are additionally woken by an in-process channel when a

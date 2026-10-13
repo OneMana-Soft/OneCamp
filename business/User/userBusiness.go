@@ -11,8 +11,8 @@ import (
 	"time"
 
 	adapterUser "github.com/akashc777/OneCamp/adapter/User"
+	activityBusiness "github.com/akashc777/OneCamp/business/Activity"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
-	lastSeenActivityBusiness "github.com/akashc777/OneCamp/business/LastSeenActivity"
 	LiveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	taskrank "github.com/akashc777/OneCamp/business/TaskRank"
@@ -819,6 +819,10 @@ func DeactivateUser(ctx context.Context, userUUID uuid.UUID) (err error) {
 		return
 	}
 
+	// Their open apps hold every topic they had, and the broker never asks
+	// again about a topic a client holds: disconnect them, sessions and all.
+	mqttBusiness.DisconnectPerson(userUUID.String())
+
 	return
 
 }
@@ -1409,7 +1413,8 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID uuid.UUI
 		}
 	}
 
-	activityUnreadCount, err := lastSeenActivityBusiness.GetTotalUnreadActivityCount(ctx, dgraphUser.Uid, userUUID)
+	// What the Inbox will show that's new, counted from the feed itself.
+	activityUnreadCount, err := activityBusiness.UnreadActivityCount(ctx, userUUID, dgraphUser.Uid)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/GetDgraphUserInfoByUUIDForSidebarNav Failed to get activity unread count err: %+v", err)
 		// Don't return, just log

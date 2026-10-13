@@ -50,6 +50,9 @@ type CommandContext struct {
 	ThreadTs  *string
 	Timezone  string
 	TriggerID string
+	// Mentions are the people picked from the composer's list, by their
+	// shown name lower-cased, to user ids (ExecuteCommandRequest.Mentions).
+	Mentions map[string]string
 }
 
 // Handler executes a built-in command and returns a response.

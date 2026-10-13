@@ -18,6 +18,7 @@ import (
 	userChatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
+	chatDgraphModels "github.com/akashc777/OneCamp/models/dgraph/Chat"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -250,7 +251,7 @@ func AddParticipantToGroupChat(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	err = business.AddParticipantToGroupChat(ctx, chatInfo.GrpUuid, newGrpId, newDgraphUser.Uid, newDgraphUser.Uuid)
+	err = business.AddParticipantToGroupChat(ctx, chatInfo.GrpUuid, newGrpId, newDgraphUser.Uid, newDgraphUser.Uuid, userUUIDList)
 
 	if err != nil {
 
@@ -371,6 +372,13 @@ func GetChatText(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A deleted message's text is kept in the graph, so it is refused here,
+	// as everywhere it would otherwise be read back.
+	if helpers.IsSoftDeleted(chatDgraphInfo.DeletedAt) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted."})
+		return
+	}
+
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "got chat successfully!", "data": chatDgraphInfo})
 
 }
@@ -441,6 +449,13 @@ func GetGroupChatText(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A deleted message's text is kept in the graph, so it is refused here,
+	// as everywhere it would otherwise be read back.
+	if helpers.IsSoftDeleted(chatDgraphInfo.DeletedAt) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted."})
+		return
+	}
+
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "got group chat successfully!", "data": chatDgraphInfo})
 
 }
@@ -499,11 +514,35 @@ func UpdateChatInGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if chatDgraphInfo.From.Uuid != userInfo.UserDgraphInfo.Uuid {
+	if chatDgraphInfo.From == nil || chatDgraphInfo.From.Uuid != userInfo.UserDgraphInfo.Uuid {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Failed to get chat info req",
 			"err": err,
 		})
+		return
+	}
+
+	// The conversation is the stored message's, never the request's. The
+	// request's was used: an author could publish their edit into another
+	// group's live stream, and move the message's AI entry there, with that
+	// group's id (a hash of its people's ids). Whoever edits must still be
+	// in the group, and a deleted message isn't edited.
+	if chatDgraphInfo.DM == nil || chatDgraphInfo.DM.GroupingId == "" || chatDgraphInfo.DM.GroupingId != chatInfo.GrpUuid {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message isn't in this conversation."})
+		return
+	}
+	if helpers.IsSoftDeleted(chatDgraphInfo.DeletedAt) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted."})
+		return
+	}
+	group, err := business.GetDgraphDmBasicInfoFromDgraph(ctx, userInfo.UserDgraphInfo.Uid, chatDgraphInfo.DM.GroupingId)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/UpdateChatInGroup Failed to get the group err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't save your edit. Try again."})
+		return
+	}
+	if group == nil || group.ParticipantIsMember == 0 {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not authorised"})
 		return
 	}
 
@@ -531,7 +570,7 @@ func UpdateChatInGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.UpdateChat(ctx, &chatInfo, chatUUID, chatInfo.GrpUuid, chatDgraphInfo.From.Uuid, mentionsDgraphUsersList)
+	err = business.UpdateChat(ctx, &chatInfo, chatUUID, chatDgraphInfo.DM.GroupingId, chatDgraphInfo.From.Uuid, mentionsDgraphUsersList)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/UpdateChatInGroup Failed to update chat err: %+v",
@@ -593,11 +632,22 @@ func UpdateChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if chatDgraphInfo.From.Uuid != userInfo.UserDgraphInfo.Uuid || (chatDgraphInfo != nil && chatDgraphInfo.To.DeletedAt != nil && !chatDgraphInfo.To.DeletedAt.IsZero()) {
+	// A direct message has someone it went to; a group's message is edited
+	// through the group's route, which checks the group.
+	if chatDgraphInfo == nil || chatDgraphInfo.From == nil || chatDgraphInfo.To == nil {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message isn't in a direct conversation."})
+		return
+	}
+	if chatDgraphInfo.From.Uuid != userInfo.UserDgraphInfo.Uuid || (chatDgraphInfo.To.DeletedAt != nil && !chatDgraphInfo.To.DeletedAt.IsZero()) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Failed to get chat info req",
 			"err": err,
 		})
+		return
+	}
+	// A deleted message isn't edited: its text stays in the graph.
+	if helpers.IsSoftDeleted(chatDgraphInfo.DeletedAt) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted."})
 		return
 	}
 
@@ -802,12 +852,10 @@ func GetOldGroupChats(w http.ResponseWriter, r *http.Request) {
 	grpIdString := chi.URLParam(r, "grp_id")
 	epochTimeString := chi.URLParam(r, "time_stamp")
 
-	epochTime, err := strconv.ParseInt(epochTimeString, 10, 64)
+	// The message the page starts next to (helpers.PageEdge).
+	edge, err := helpers.PageEdgeOf(r, epochTimeString)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse epoch time",
-			"err": err,
-		})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
 		return
 	}
 
@@ -819,8 +867,6 @@ func GetOldGroupChats(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	lastChatTime := time.Unix(epochTime, 0)
 
 	dgraphDm, err := business.GetDgraphDmBasicInfoFromDgraph(ctx, userInfo.UserDgraphInfo.Uid, grpIdString)
 
@@ -844,7 +890,7 @@ func GetOldGroupChats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chats, err := business.GetDgraphOldGroupChatFromDgraph(ctx, lastChatTime, grpIdString)
+	chats, err := business.GetDgraphOldGroupChatFromDgraph(ctx, edge, grpIdString)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -870,10 +916,11 @@ func GetOldChats(w http.ResponseWriter, r *http.Request) {
 	secondUserUUIDString := chi.URLParam(r, "user_uuid")
 	epochTimeString := chi.URLParam(r, "time_stamp")
 
-	epochTime, err := strconv.ParseInt(epochTimeString, 10, 64)
+	// The message the page starts next to (helpers.PageEdge).
+	edge, err := helpers.PageEdgeOf(r, epochTimeString)
 	if err != nil {
 		// A malformed time in the URL is the caller's mistake: say so, don't panic.
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "time_stamp must be a whole number of seconds"})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
 		return
 	}
 
@@ -889,8 +936,6 @@ func GetOldChats(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	lastChatTime := time.Unix(epochTime, 0)
 
 	secondUserInfo, err := userBusiness.GetUserByUUID(ctx, secondUserUUID)
 
@@ -917,7 +962,7 @@ func GetOldChats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chats, err := business.GetDgraphOldChatFromDgraph(ctx, lastChatTime, userInfo.UserDgraphInfo.Uuid, secondUserUUIDString)
+	chats, err := business.GetDgraphOldChatFromDgraph(ctx, edge, userInfo.UserDgraphInfo.Uuid, secondUserUUIDString)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1062,10 +1107,11 @@ func GetNewGroupChats(w http.ResponseWriter, r *http.Request) {
 	grpIdString := chi.URLParam(r, "grp_id")
 	epochTimeString := chi.URLParam(r, "time_stamp")
 
-	epochTime, err := strconv.ParseInt(epochTimeString, 10, 64)
+	// The message the page starts next to (helpers.PageEdge).
+	edge, err := helpers.PageEdgeOf(r, epochTimeString)
 	if err != nil {
 		// A malformed time in the URL is the caller's mistake: say so, don't panic.
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "time_stamp must be a whole number of seconds"})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
 		return
 	}
 
@@ -1091,9 +1137,7 @@ func GetNewGroupChats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	lastChatTime := time.Unix(epochTime, 0)
-
-	chats, err := business.GetDgraphNewGroupChatFromDgraph(ctx, lastChatTime, grpIdString)
+	chats, err := business.GetDgraphNewGroupChatFromDgraph(ctx, edge, grpIdString)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1119,10 +1163,11 @@ func GetNewChats(w http.ResponseWriter, r *http.Request) {
 	secondUserUUIDString := chi.URLParam(r, "user_uuid")
 	epochTimeString := chi.URLParam(r, "time_stamp")
 
-	epochTime, err := strconv.ParseInt(epochTimeString, 10, 64)
+	// The message the page starts next to (helpers.PageEdge).
+	edge, err := helpers.PageEdgeOf(r, epochTimeString)
 	if err != nil {
 		// A malformed time in the URL is the caller's mistake: say so, don't panic.
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "time_stamp must be a whole number of seconds"})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
 		return
 	}
 
@@ -1138,8 +1183,6 @@ func GetNewChats(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	lastChatTime := time.Unix(epochTime, 0)
 
 	secondUserInfo, err := userBusiness.GetUserByUUID(ctx, secondUserUUID)
 
@@ -1166,7 +1209,7 @@ func GetNewChats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chats, err := business.GetDgraphNewChatFromDgraph(ctx, lastChatTime, userInfo.UserDgraphInfo.Uuid, secondUserUUIDString)
+	chats, err := business.GetDgraphNewChatFromDgraph(ctx, edge, userInfo.UserDgraphInfo.Uuid, secondUserUUIDString)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1345,6 +1388,12 @@ func CreateOrUpdateChatReaction(w http.ResponseWriter, r *http.Request) {
 		reactionInfo.ReactionDgraphUid = dgraphReaction.Uid
 	}
 
+	// A deleted message takes no reactions.
+	if helpers.IsSoftDeleted(dgraphChat.DeletedAt) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted."})
+		return
+	}
+
 	reactionUID, err := business.CreateOrUpdateChatReaction(ctx, &reactionInfo, dgraphChat, &userInfo.UserDgraphInfo, dgraphChat.DM.GroupingId)
 
 	if err != nil {
@@ -1426,15 +1475,18 @@ func GetDgraphChatByUUIDWithAllComments(w http.ResponseWriter, r *http.Request) 
 
 	dgraphChat, err := business.GetDgraphChatBasicByUUID(ctx, chatId, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || dgraphChat == nil {
+	// A message that isn't there is a 404, as a deleted one is; a graph that
+	// doesn't answer is a 503 the page can try again.
+	if errors.Is(err, chatDgraphModels.ErrNotFound) || (err == nil && dgraphChat == nil) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "This thread isn't available."})
+		return
+	}
+	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/GetDgraphChatByUUIDWithAllComments Failed to get chat info err: %+v",
 			err)
 
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chat info",
-			"err": err,
-		})
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't load the thread. Try again."})
 		return
 	}
 
@@ -1458,7 +1510,15 @@ func GetDgraphChatByUUIDWithAllComments(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "got reaction comment successfully!", "data": dgraphChatWithAllComments})
+	// A deleted message's thread shows nothing of it: a placeholder over its
+	// replies, or no thread when there are none (business.ChatThreadForMember).
+	thread, ok := business.ChatThreadForMember(dgraphChatWithAllComments)
+	if !ok {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted."})
+		return
+	}
+
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "got reaction comment successfully!", "data": thread})
 
 }
 
@@ -1499,6 +1559,12 @@ func CreateChatComment(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorized",
 		})
+		return
+	}
+
+	// A deleted message takes no replies.
+	if helpers.IsSoftDeleted(dgraphChat.DeletedAt) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted."})
 		return
 	}
 
@@ -1599,6 +1665,27 @@ func UpdateChatComment(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
+
+	// The reply's conversation is the one it is in, never the request's: the
+	// request's was used, unchecked, so its author could publish the edit
+	// into another conversation's live stream. Whoever edits must be in the
+	// conversation, and neither a deleted reply nor one under a deleted
+	// message is edited.
+	stored, err := commentBusiness.GetDgraphChatCommentInfoByUUID(ctx, commentInfo.Uuid, userInfo.UserDgraphInfo.Uid)
+	if err != nil || stored == nil || stored.Chat == nil || stored.Chat.Uuid == "" ||
+		(commentInfo.ChatUuid != "" && commentInfo.ChatUuid != stored.Chat.Uuid) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That reply isn't in this conversation."})
+		return
+	}
+	if stored.Chat.DM == nil || stored.Chat.DM.ParticipantIsMember == 0 {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
+		return
+	}
+	if helpers.IsSoftDeleted(stored.DeletedAt) || helpers.IsSoftDeleted(stored.Chat.DeletedAt) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted."})
+		return
+	}
+	commentInfo.ChatUuid = stored.Chat.Uuid
 
 	dgraphChat, err := business.GetDgraphChatBasicByUUID(ctx, commentInfo.ChatUuid, userInfo.UserDgraphInfo.Uid)
 

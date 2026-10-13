@@ -308,7 +308,7 @@ func AddMemberToTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.AddMemberToTeam(ctx, teamUUID, memberInfo.Uid)
+	err = business.AddMemberToTeam(ctx, teamUUID, memberInfo.Uid, memberInfo.Uuid)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -378,7 +378,7 @@ func AddAdminMemberToTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.AddAdminMemberToTeam(ctx, teamUUID, dgraphTeamInfo.Members[0].Uid)
+	err = business.AddAdminMemberToTeam(ctx, teamUUID, dgraphTeamInfo.Members[0].Uid, addMemberInfo.UserUuid)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

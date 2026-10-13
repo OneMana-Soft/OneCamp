@@ -1,6 +1,6 @@
 package business
 
-// Polls: a question in a channel that everyone can answer in one click, with
+// Polls: a question in a channel, a DM or a group chat that everyone there can answer in one click, with
 // the results live for everyone. Made by a person (/poll) or by an agent
 // (create_poll), under the same rules as posting in that channel.
 
@@ -43,9 +43,12 @@ var ErrNoAccess = errors.New("poll not found or you don't have access")
 // NewPoll is what a person or an agent asks for.
 type NewPoll struct {
 	ChannelUUID string
-	Question    string
-	Options     []string
-	Multiple    bool
+	// GroupingID is a DM's or a group chat's id, for a poll in one
+	// (conversation.go); ChannelUUID is a channel's. One or the other.
+	GroupingID string
+	Question   string
+	Options    []string
+	Multiple   bool
 	// OpenHours closes voting after this many hours; 0 leaves it open.
 	OpenHours int
 	// AIGenerated marks the message as written by an agent (AI Act provenance).
@@ -118,6 +121,9 @@ func Create(ctx context.Context, user *userModels.UserInfo, in NewPoll) (*View, 
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(in.GroupingID) != "" {
+		return createInConversation(ctx, user, in)
+	}
 	channelID, err := uuid.Parse(in.ChannelUUID)
 	if err != nil {
 		return nil, InputError("not a channel id")
@@ -186,8 +192,12 @@ func isClosed(p *pollModel.Poll, now time.Time) bool {
 }
 
 func view(p *pollModel.Poll, t *pollModel.Tally, reader uuid.UUID, canClose bool) *View {
+	channel := p.ChannelID.String()
+	if inConversation(p) {
+		channel = ""
+	}
 	v := &View{
-		ID: p.ID.String(), Channel: p.ChannelID.String(), Question: p.Question, Multiple: p.Multiple,
+		ID: p.ID.String(), Channel: channel, Question: p.Question, Multiple: p.Multiple,
 		Voters: t.Voters, Mine: t.Mine, ClosesAt: p.ClosesAt, Closed: isClosed(p, time.Now()),
 		CanClose: canClose, CreatedBy: p.CreatedBy.String(),
 	}
@@ -203,33 +213,57 @@ func view(p *pollModel.Poll, t *pollModel.Tally, reader uuid.UUID, canClose bool
 	return v
 }
 
-// load fetches a poll the user may read, with the channel it lives in.
-func load(ctx context.Context, user *userModels.UserInfo, pollID string) (*pollModel.Poll, *dgraphStruct.DgraphChannel, error) {
+// where is the place a poll lives in, as its reader may see it: a channel,
+// or a DM or group chat (conversation.go).
+type where struct {
+	channel      *dgraphStruct.DgraphChannel
+	conversation string
+}
+
+// topic is the id whose message topic tells open views the poll changed: a
+// channel's and a conversation's are named alike (helpers.mqttTopic).
+func (w where) topic(p *pollModel.Poll) string {
+	if w.channel == nil {
+		return w.conversation
+	}
+	return p.ChannelID.String()
+}
+
+// load fetches a poll the user may read, with the place it lives in.
+func load(ctx context.Context, user *userModels.UserInfo, pollID string) (*pollModel.Poll, where, error) {
 	id, err := uuid.Parse(pollID)
 	if err != nil {
-		return nil, nil, ErrNoAccess
+		return nil, where{}, ErrNoAccess
 	}
 	p, err := pollModel.Get(ctx, id)
 	if errors.Is(err, pollModel.ErrNotFound) {
-		return nil, nil, ErrNoAccess
+		return nil, where{}, ErrNoAccess
 	}
 	if err != nil {
-		return nil, nil, err
+		return nil, where{}, err
+	}
+	if inConversation(p) {
+		grp, err := conversationOf(ctx, p, user)
+		if err != nil {
+			return nil, where{}, err
+		}
+		return p, where{conversation: grp}, nil
 	}
 	ch, err := channelFor(ctx, p.ChannelID.String(), user, false)
 	if err != nil {
-		return nil, nil, err
+		return nil, where{}, err
 	}
-	return p, ch, nil
+	return p, where{channel: ch}, nil
 }
 
-func canClose(p *pollModel.Poll, ch *dgraphStruct.DgraphChannel, user *userModels.UserInfo) bool {
-	return p.CreatedBy == user.UserPostgresInfo.Id || ch.IsAdmin > 0
+// canClose: the poll's author, or in a channel one of its admins.
+func canClose(p *pollModel.Poll, w where, user *userModels.UserInfo) bool {
+	return p.CreatedBy == user.UserPostgresInfo.Id || (w.channel != nil && w.channel.IsAdmin > 0)
 }
 
 // Get returns a poll as this user sees it.
 func Get(ctx context.Context, user *userModels.UserInfo, pollID string) (*View, error) {
-	p, ch, err := load(ctx, user, pollID)
+	p, w, err := load(ctx, user, pollID)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +271,7 @@ func Get(ctx context.Context, user *userModels.UserInfo, pollID string) (*View, 
 	if err != nil {
 		return nil, err
 	}
-	return view(p, t, user.UserPostgresInfo.Id, canClose(p, ch, user)), nil
+	return view(p, t, user.UserPostgresInfo.Id, canClose(p, w, user)), nil
 }
 
 // ValidateChoice checks a vote against a poll. Pure, for its test.
@@ -268,7 +302,7 @@ func ValidateChoice(p *pollModel.Poll, optionIDs []string, now time.Time) ([]str
 
 // Vote sets the user's choices (none retracts their vote) and tells the channel.
 func Vote(ctx context.Context, user *userModels.UserInfo, pollID string, optionIDs []string) (*View, error) {
-	p, ch, err := load(ctx, user, pollID)
+	p, w, err := load(ctx, user, pollID)
 	if err != nil {
 		return nil, err
 	}
@@ -279,27 +313,27 @@ func Vote(ctx context.Context, user *userModels.UserInfo, pollID string, optionI
 	if err := pollModel.ReplaceVotes(ctx, p.ID, user.UserPostgresInfo.Id, choice); err != nil {
 		return nil, err
 	}
-	go mqttBusiness.PublishPollUpdate(p.ChannelID.String(), p.ID.String())
+	go mqttBusiness.PublishPollUpdate(w.topic(p), p.ID.String())
 	t, err := pollModel.Count(ctx, p.ID, user.UserPostgresInfo.Id)
 	if err != nil {
 		return nil, err
 	}
-	return view(p, t, user.UserPostgresInfo.Id, canClose(p, ch, user)), nil
+	return view(p, t, user.UserPostgresInfo.Id, canClose(p, w, user)), nil
 }
 
 // Close ends voting. Only the poll's author or a channel admin may.
 func Close(ctx context.Context, user *userModels.UserInfo, pollID string) (*View, error) {
-	p, ch, err := load(ctx, user, pollID)
+	p, w, err := load(ctx, user, pollID)
 	if err != nil {
 		return nil, err
 	}
-	if !canClose(p, ch, user) {
+	if !canClose(p, w, user) {
 		return nil, InputError("only the person who made this poll, or a channel admin, can close it")
 	}
 	if err := pollModel.Close(ctx, p.ID); err != nil {
 		return nil, err
 	}
-	go mqttBusiness.PublishPollUpdate(p.ChannelID.String(), p.ID.String())
+	go mqttBusiness.PublishPollUpdate(w.topic(p), p.ID.String())
 	return Get(ctx, user, pollID)
 }
 

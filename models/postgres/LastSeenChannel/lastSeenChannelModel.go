@@ -101,3 +101,19 @@ func GetAllLastSeenChannelsForUser(ctx context.Context, userID uuid.UUID) (map[s
 	}
 	return out, rows.Err()
 }
+
+// TimeOfNthNewest runs a query answering one created_at (the Nth newest of
+// some messages), and reports whether there was one.
+func TimeOfNthNewest(ctx context.Context, query string, args ...interface{}) (at time.Time, ok bool, err error) {
+	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	err = postgresInit.DBConn.SqlDB.QueryRowContext(cctx, query, args...).Scan(&at)
+	if err == sql.ErrNoRows {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/TimeOfNthNewest err: %+v", err)
+		return time.Time{}, false, err
+	}
+	return at, true, nil
+}

@@ -93,6 +93,10 @@ func BeginPostCommentStream(ctx context.Context, postUUID uuid.UUID, bot *userBu
 		}
 		return nil, err
 	}
+	// A deleted message takes no replies; it is as missing as one never written.
+	if helpers.IsSoftDeleted(postInfo.DeletedAt) {
+		return nil, fmt.Errorf("target post was deleted")
+	}
 	if strings.TrimSpace(displayName) == "" {
 		displayName = bot.Name
 	}

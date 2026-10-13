@@ -150,6 +150,7 @@ func createSchema() (err error) {
 		post_fwd_msg_post: uid .
 		post_fwd_msg_chat: uid .
 		post_reply_to: uid .
+		post_broadcast_of: uid @reverse .
 
 		dm_grouping_id: string @index(term) .
 		dm_participants: [uid] @reverse .
@@ -465,6 +466,7 @@ func createSchema() (err error) {
 			post_fwd_msg_post: Post
 			post_fwd_msg_chat: Chat
 			post_reply_to: Post
+			post_broadcast_of: Comment
 		}
 
 		type User {

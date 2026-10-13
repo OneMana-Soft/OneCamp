@@ -2,7 +2,10 @@ package business
 
 import (
 	"context"
-	"time"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"math"
 
 	domain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	"github.com/akashc777/OneCamp/helpers"
@@ -13,124 +16,56 @@ import (
 type GlobalSearchPagination struct {
 	Page    []*openSearchStruct.GlobalSearchOpenSearchResp `json:"page,omitempty"`
 	HasMore bool                                           `json:"has_more"`
+	// Next is the cursor of the page after this one, while HasMore: what the
+	// search page's "Show more" sends back as after.
+	Next string `json:"next,omitempty"`
 }
 
-func GetLatestChatsAndCommentsFromOpenSearch(ctx context.Context, userUUID string, searchText string) (chatsAndCommentsPage GlobalSearchPagination, err error) {
-	chatsAndCommentsInfo, err := domain.GetLatestChatsAndCommentsFromOpenSearch(ctx, userUUID, searchText)
+// ErrBadSearchCursor is a cursor this server didn't write.
+var ErrBadSearchCursor = errors.New("that isn't a search cursor")
 
+// encodeSearchCursor writes the sort values of a page's last hit (its score,
+// then its time) as an opaque cursor; "" when there are none.
+func encodeSearchCursor(sortValues []any) string {
+	if len(sortValues) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(sortValues)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetLatestChatsAndCommentsFromOpenSearch Failed to get chats and comments from opensearch err: %+v",
-			err)
-
-		return
+		return ""
 	}
-
-	chatsAndCommentsPage = page(ctx, chatsAndCommentsInfo, domain.CHAT_AND_COMMENT_COUNT)
-
-	return
+	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
-func GetLatestChatsAndCommentsFromOpenSearchBeforeTime(ctx context.Context, userUUID string, searchText string, afterTime time.Time) (chatsAndCommentsPage GlobalSearchPagination, err error) {
-	chatsAndCommentsInfo, err := domain.GetLatestChatsAndCommentsFromOpenSearchBeforeTime(ctx, userUUID, afterTime, searchText)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetLatestChatsAndCommentsFromOpenSearchBeforeTime Failed to get chats and comments from opensearch err: %+v",
-			err)
-
-		return
+// DecodeSearchCursor reads a cursor encodeSearchCursor wrote: two finite
+// numbers, a score and a time. Anything else is ErrBadSearchCursor; the
+// values go into the query marshalled, never as text.
+func DecodeSearchCursor(cursor string) ([]float64, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil || len(raw) > 128 {
+		return nil, ErrBadSearchCursor
 	}
-
-	chatsAndCommentsPage = page(ctx, chatsAndCommentsInfo, domain.CHAT_AND_COMMENT_COUNT)
-
-	return
+	var values []float64
+	if err := json.Unmarshal(raw, &values); err != nil || len(values) != 2 {
+		return nil, ErrBadSearchCursor
+	}
+	for _, v := range values {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, ErrBadSearchCursor
+		}
+	}
+	return values, nil
 }
 
-func GetLatestPostsAndCommentsFromOpenSearch(ctx context.Context, userChannels []*dgraphStruct.DgraphChannel, searchText string) (postsAndCommentsPage GlobalSearchPagination, err error) {
-	var channelUUIDs []string
-
-	for _, channel := range userChannels {
-		channelUUIDs = append(channelUUIDs, channel.Uuid)
-	}
-	postsAndCommentsInfo, err := domain.GetLatestPostsAndCommentsFromOpenSearch(ctx, channelUUIDs, searchText)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetLatestPostsAndCommentsFromOpenSearch Failed to get posts and comments from opensearch err: %+v",
-			err)
-
-		return
-	}
-
-	postsAndCommentsPage = page(ctx, postsAndCommentsInfo, domain.POST_AND_COMMENT_COUNT)
-
-	return
-}
-
-func GetLatestPostsAndCommentsFromOpenSearchBeforeTime(ctx context.Context, userChannels []*dgraphStruct.DgraphChannel, searchText string, afterTime time.Time) (postsAndCommentsPage GlobalSearchPagination, err error) {
-	var channelUUIDs []string
-
-	for _, channel := range userChannels {
-		channelUUIDs = append(channelUUIDs, channel.Uuid)
-	}
-	postsAndCommentsInfo, err := domain.GetLatestPostsAndCommentsFromOpenSearchBeforeTime(ctx, channelUUIDs, afterTime, searchText)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetLatestPostsAndCommentsFromOpenSearchBeforeTime Failed to get posts and comments from opensearch err: %+v",
-			err)
-
-		return
-	}
-
-	postsAndCommentsPage = page(ctx, postsAndCommentsInfo, domain.POST_AND_COMMENT_COUNT)
-
-	return
-}
-
-func GetLatestAttachmentsFromOpenSearch(ctx context.Context, userUUID string, userChannels []*dgraphStruct.DgraphChannel, searchText string) (attachmentsPage GlobalSearchPagination, err error) {
-	var channelUUIDs []string
-
-	for _, channel := range userChannels {
-		channelUUIDs = append(channelUUIDs, channel.Uuid)
-	}
-	attachmentsInfo, err := domain.GetLatestAttachmentsFromOpenSearch(ctx, userUUID, channelUUIDs, searchText)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetLatestAttachmentsFromOpenSearch Failed to get attachments from opensearch err: %+v",
-			err)
-
-		return
-	}
-
-	attachmentsPage = page(ctx, attachmentsInfo, domain.ATTACHMENT_COUNT)
-
-	return
-}
-
-func GetLatestAttachmentsFromOpenSearchBeforeTime(ctx context.Context, userUUID string, userChannels []*dgraphStruct.DgraphChannel, searchText string, afterTime time.Time) (attachmentsPage GlobalSearchPagination, err error) {
-	var channelUUIDs []string
-
-	for _, channel := range userChannels {
-		channelUUIDs = append(channelUUIDs, channel.Uuid)
-	}
-	attachmentsInfo, err := domain.GetLatestAttachmentsFromOpenSearchBeforeTime(ctx, userUUID, channelUUIDs, afterTime, searchText)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetLatestAttachmentsFromOpenSearchBeforeTime Failed to get attachments from opensearch err: %+v",
-			err)
-
-		return
-	}
-
-	attachmentsPage = page(ctx, attachmentsInfo, domain.ATTACHMENT_COUNT)
-
-	return
-}
+// GetUnifiedGlobalSearch is the first page of the unified search.
 func GetUnifiedGlobalSearch(ctx context.Context, userUUID string, userEmail string, userChannels []*dgraphStruct.DgraphChannel, userProjects []*dgraphStruct.DgraphProject, userTeams []*dgraphStruct.DgraphTeam, searchText string) (searchPage GlobalSearchPagination, err error) {
+	return GetUnifiedGlobalSearchPage(ctx, userUUID, userEmail, userChannels, userProjects, userTeams, searchText, nil)
+}
+
+// GetUnifiedGlobalSearchPage is a page of the unified search: the first with
+// no after, else the one after the cursor a page answered with (Next). The
+// search page counted its 20 hits as "20 results" and never asked for more.
+func GetUnifiedGlobalSearchPage(ctx context.Context, userUUID string, userEmail string, userChannels []*dgraphStruct.DgraphChannel, userProjects []*dgraphStruct.DgraphProject, userTeams []*dgraphStruct.DgraphTeam, searchText string, after []float64) (searchPage GlobalSearchPagination, err error) {
 	var channelUUIDs []string
 	for _, ch := range userChannels {
 		channelUUIDs = append(channelUUIDs, ch.Uuid)
@@ -157,7 +92,7 @@ func GetUnifiedGlobalSearch(ctx context.Context, userUUID string, userEmail stri
 		teamUUIDs = append(teamUUIDs, team.Uuid)
 	}
 
-	searchInfo, err := domain.GetUnifiedGlobalSearchFromOpenSearch(ctx, userUUID, userEmail, channelUUIDs, projectUUIDs, teamUUIDs, searchText)
+	searchInfo, err := domain.GetUnifiedGlobalSearchFromOpenSearch(ctx, userUUID, userEmail, channelUUIDs, projectUUIDs, teamUUIDs, searchText, after)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -168,6 +103,11 @@ func GetUnifiedGlobalSearch(ctx context.Context, userUUID string, userEmail stri
 	}
 
 	searchPage = page(ctx, searchInfo, domain.UNIFIED_SEARCH_COUNT)
+	// The next page starts after the last hit the index gave this one,
+	// whether or not a check below leaves it out.
+	if searchPage.HasMore {
+		searchPage.Next = encodeSearchCursor(searchInfo[domain.UNIFIED_SEARCH_COUNT-1].Sort)
+	}
 	// After the page is cut: whether there is more is what the index said.
 	searchPage.Page = keepReadableDocHits(ctx, userUUID, searchPage.Page)
 	searchPage.Page = keepReadableBoardHits(ctx, userUUID, searchPage.Page)

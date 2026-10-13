@@ -136,6 +136,8 @@ func GetDgraphPostInfoByUUID(ctx context.Context, query string, variables map[st
 		return
 	}
 	dgraphUser = &postsInfo.PostInfo[0]
+	// A forwarded original deleted since shows as deleted, never its text.
+	dgraphUser.HideDeletedForwards()
 
 	return
 }
@@ -168,6 +170,10 @@ func GetDgraphPosts(ctx context.Context, query string, variables map[string]stri
 		return
 	}
 	dgraphPost = postsInfo.PostInfo[0].Posts
+	// A forwarded original deleted since shows as deleted, never its text.
+	for _, p := range dgraphPost {
+		p.HideDeletedForwards()
+	}
 
 	return
 }

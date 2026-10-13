@@ -67,33 +67,11 @@ func GetFCMTokenByListOfUserId(ctx context.Context, userIds []string) (tokens []
 	return
 }
 
-func GetFCMTokensForNewChannelActivityExcludingUserId(ctx context.Context, userId string, channelId string, membersList []string, mentionsList []string) (tokens []string, err error) {
-	tokens, err = domain.GetFCMTokensForNewChannelActivityExcludingUserId(ctx, userId, channelId, membersList, mentionsList)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetFCMTokensForNewChannelActivityExcludingUserId Failed to fcm tokens from list of userId err: %+v",
-			err)
-		return
-	}
-	return
-}
-
 func GetFCMTokensForNewProjectActivityExcludingUserId(ctx context.Context, userId string, projectId string, membersList []string, mentionsList []string) (tokens []string, err error) {
 	tokens, err = domain.GetFCMTokensForNewProjectActivityExcludingUserId(ctx, userId, projectId, membersList, mentionsList)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/GetFCMTokensForNewProjectActivityExcludingUserId Failed to fcm tokens from list of userId err: %+v",
-			err)
-		return
-	}
-	return
-}
-
-func GetFCMTokensForNewChatActivityExcludingUserId(ctx context.Context, userId string, grpId string, mentionsList []string) (tokens []string, err error) {
-	tokens, err = domain.GetFCMTokensForNewChatActivityExcludingUserId(ctx, userId, grpId, mentionsList)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetFCMTokensForNewChatActivityExcludingUserId Failed to fcm tokens from list of userId err: %+v",
 			err)
 		return
 	}

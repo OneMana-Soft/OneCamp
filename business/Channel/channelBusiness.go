@@ -12,7 +12,6 @@ import (
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	userChannelNotificationBusiness "github.com/akashc777/OneCamp/business/UserChannelNotification"
-	userFCMtokenBusiness "github.com/akashc777/OneCamp/business/UserFCMToken"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	domain "github.com/akashc777/OneCamp/domain/Channel"
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
@@ -101,6 +100,12 @@ func CreateChannel(ctx context.Context, channelInfo *adapter.InputCreateChannel,
 		return
 	}
 
+	// The maker is a member now. Their cached profile (kept an hour) lists
+	// their channels, and search, the AI's reach and slash commands are
+	// scoped by it: until it's dropped, the new channel is invisible to all
+	// three for them.
+	userDomain.InvalidateUserMemberships(ctx, userInfo.UserDgraphInfo.Uuid)
+
 	// update channel last seen
 	err = business.CreateOrUpdateLastSeenChannel(ctx, userInfo.UserPostgresInfo.Id, channelUUID)
 	if err != nil {
@@ -127,6 +132,9 @@ func CreateChannel(ctx context.Context, channelInfo *adapter.InputCreateChannel,
 		// hundreds of "channel.created" events for historical content.
 		return
 	}
+
+	// The maker's open apps hold no topic of a channel made just now.
+	go mqttBusiness.PublishConversationAccess(mqttStruct.CONVERSATION_KIND_CHANNEL, channelUUID.String(), mqttStruct.CONVERSATION_ADDED, userInfo.UserDgraphInfo.Uuid)
 
 	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "channel.created", map[string]interface{}{
 		"channel_id":   channelUUID.String(),
@@ -234,6 +242,18 @@ func UpdateChannelInfo(ctx context.Context, channelUpdateInfo *adapter.UpdateCha
 		}
 
 		return
+	}
+
+	// Every gate reads the channel through a cache of it as each person sees
+	// it (ChannelBasicInfo); a channel made private kept reading as public
+	// to people outside it until that expired. Dropped before anything else,
+	// the live-topic recheck below included.
+	domain.InvalidateChannelBasicInfo(ctx, channelUUID.String())
+
+	// Made private: anyone still on its live topics who isn't a member loses
+	// them (a net under the cut made at each removal).
+	if channelUpdateInfo.ChannelPrivate && (priorChannel == nil || !priorChannel.IsPrivate) {
+		mqttBusiness.RecheckTopicSubscribers(helpers.GetMqttTopicForChannel(channelUUID.String()))
 	}
 
 	var deletedAt *int64 = nil
@@ -793,6 +813,12 @@ func AddChannelMemberEdge(ctx context.Context, channelUUID uuid.UUID, userDgraph
 		return
 	}
 
+	// Joined, added, or let in by a default channel: their cached profile
+	// still lists the channels they had, and search, the AI's reach and slash
+	// commands are scoped by it, so the channel's history stayed out of their
+	// search for up to the hour it's kept. Synchronously, before the answer.
+	userDomain.InvalidateUserMemberships(ctx, newMemberUUID.String())
+
 	// update channel last seen
 	err = business.CreateOrUpdateLastSeenChannel(ctx, newMemberUUID, channelUUID)
 	if err != nil {
@@ -810,6 +836,11 @@ func AddChannelMemberEdge(ctx context.Context, channelUUID uuid.UUID, userDgraph
 		// dispatch 10k webhook events for historical membership.
 		return
 	}
+
+	// Joined, added by an admin or by a default channel on the way in: the
+	// new member's open apps hold no topic of this channel yet. The members
+	// already there hear of it on the channel's own topic, below.
+	go mqttBusiness.PublishConversationAccess(mqttStruct.CONVERSATION_KIND_CHANNEL, channelUUID.String(), mqttStruct.CONVERSATION_ADDED, newMemberUUID.String())
 
 	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "user.joined", map[string]interface{}{
 		"user_id":    userDgraphInfo.Uuid,
@@ -837,6 +868,9 @@ func DeleteChannelMemberEdge(ctx context.Context, channelDgraphUID string, userD
 	// covers the channel for them.
 	domain.InvalidateChannelBasicInfo(ctx, channelUUID)
 	userDomain.InvalidateUserMemberships(ctx, memberUUID)
+	// And the broker: their open apps hold this channel's topics, and the
+	// broker never asks again about a topic a client holds.
+	mqttBusiness.DropConversation(mqttStruct.CONVERSATION_KIND_CHANNEL, channelUUID, memberUUID)
 
 	go userChannelNotificationBusiness.DeleteNotificationTypeWhenUserIsRemovedFormChannel(memberUUID, channelUUID)
 	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "user.left", map[string]interface{}{
@@ -994,16 +1028,9 @@ func sendChannelCallNotification(title string, body string, channelId string, ch
 		return
 	}
 
-	// 2. Handle FCM Push Notifications
-	tokens, err := userFCMtokenBusiness.GetFCMTokenByListOfUserId(ctx, eligibleUserIDs)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/sendChannelCallNotification Failed to gets user's fcm token err: %+v",
-			err)
-		return
-	}
-
+	// 2. The push, and the desktop app's notice, to those of them the push
+	// gate lets through (business/Notification Deliver). Each call rings
+	// anew, so its notice is named by when it started.
 	pushData := make(map[string]string)
 
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHANNEL_CALL
@@ -1013,23 +1040,7 @@ func sendChannelCallNotification(title string, body string, channelId string, ch
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 
-	// Send notifications in batches of 500 tokens
-	batchSize := 500
-	for i := 0; i < len(tokens); i += batchSize {
-		end := i + batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
-		tokenBatch := tokens[i:end]
-
-		err = firebaseInit.FirebaseApp.MultiCastPush(ctx, pushData, tokenBatch)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/sendChannelCallNotification Failed to send push notification err: %+v",
-				err)
-			return
-		}
-	}
+	notificationBusiness.Deliver(ctx, eligibleUserIDs, pushData, fmt.Sprintf("channel_call:%s:%d", channelId, time.Now().UnixMilli()))
 
 	// Email fan-out for channel call.
 	notificationBusiness.DispatchChannelCall(

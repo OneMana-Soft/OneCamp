@@ -43,9 +43,13 @@ type CatchUpRequest struct {
 	ChannelUUID string `json:"channel_uuid,omitempty"`
 	ChatGrpID   string `json:"chat_grp_id,omitempty"`
 	ToUserUUID  string `json:"to_user_uuid,omitempty"` // DM peer; grouping id derived server-side
-	Timezone    string `json:"timezone,omitempty"`
-	Location    string `json:"location,omitempty"`
-	LocalTime   string `json:"local_time,omitempty"`
+	// Unread is how many messages were unread as the reader opened the
+	// conversation: opening it moves the last-seen the recap would otherwise
+	// start from to now. The server starts at the oldest of them, floored.
+	Unread    int    `json:"unread,omitempty"`
+	Timezone  string `json:"timezone,omitempty"`
+	Location  string `json:"location,omitempty"`
+	LocalTime string `json:"local_time,omitempty"`
 }
 
 // CatchUpResponse powers the "Catch me up" surface: an AI summary of just

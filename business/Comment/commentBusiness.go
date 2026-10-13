@@ -386,7 +386,10 @@ func docCommentRecipients(doc *dgraphStruct.DgraphDoc, mentioned []string, autho
 	return out
 }
 
-func CreateCommentInAPost(ctx context.Context, dgraphPost *dgraphStruct.DgraphPost, userInfo *userModels.UserInfo, commentUUID uuid.UUID, createdTime time.Time, rawDgraphPostInfo *dgraphStruct.DgraphPost, mentionList []*dgraphStruct.DgraphUser) (commentUid string, err error) {
+// CreateCommentInAPost writes a reply in a channel thread: Postgres, the graph,
+// search and the AI's index. Who hears of it is the caller's to say
+// (NotifyThreadReply), as a bulk import tells nobody.
+func CreateCommentInAPost(ctx context.Context, dgraphPost *dgraphStruct.DgraphPost, userInfo *userModels.UserInfo, commentUUID uuid.UUID, createdTime time.Time, rawDgraphPostInfo *dgraphStruct.DgraphPost) (commentUid string, err error) {
 
 	err = domain.CreateComment(ctx, commentUUID, userInfo.UserPostgresInfo.Id, createdTime)
 
@@ -427,95 +430,7 @@ func CreateCommentInAPost(ctx context.Context, dgraphPost *dgraphStruct.DgraphPo
 	ai.EmbedPostCommentContent(plainText, commentUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.DisplayName(),
 		rawDgraphPostInfo.Channel.Uuid, rawDgraphPostInfo.Uuid)
 
-	notificationTitle := fmt.Sprintf("Comment - %+v", userInfo.UserDgraphInfo.DisplayName())
-	notificationBody := plainText
-	go sendNewPostCommentNotification(notificationTitle, notificationBody, commentUUID.String(), mentionList, rawDgraphPostInfo, &userInfo.UserDgraphInfo)
-
 	return
-}
-
-func sendNewPostCommentNotification(title string, body string, commentUUID string, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphPost *dgraphStruct.DgraphPost, userDgraph *dgraphStruct.DgraphUser) {
-
-	mentionsUUIDList := []string{}
-	membersUUIDList := []string{}
-
-	ctx := context.Background()
-
-	for _, mention := range mentionsDgraphUsersList {
-		mentionsUUIDList = append(mentionsUUIDList, mention.Uuid)
-	}
-
-	dgraphPostComment, err := domain.GetDgraphPostCommentsInfoByUUID(ctx, dgraphPost.Uuid)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/sendNewPostCommentNotification Failed to gets post's comment err: %+v",
-			err)
-		return
-	}
-
-	for _, comment := range dgraphPostComment.Comments {
-		if comment.CommentBy.Uuid == userDgraph.Uuid {
-			continue
-		}
-		membersUUIDList = append(membersUUIDList, comment.CommentBy.Uuid)
-	}
-
-	if userDgraph.Uuid != dgraphPost.PostBy.Uuid {
-		mentionsUUIDList = append(mentionsUUIDList, dgraphPost.PostBy.Uuid)
-	}
-
-	tokens, err := userFCMtokenBusiness.GetFCMTokensForNewChannelActivityExcludingUserId(ctx, userDgraph.Uuid, dgraphPost.Channel.Uuid, membersUUIDList, mentionsUUIDList)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/sendNewPostCommentNotification Failed to gets user's fcm token err: %+v",
-			err)
-		return
-	}
-
-	pushData := make(map[string]string)
-
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_POST_COMMENT
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] = dgraphPost.Channel.Uuid
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = title
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] = dgraphPost.Uuid
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
-
-	// Send notifications in batches of 500 tokens
-	batchSize := 500
-	for i := 0; i < len(tokens); i += batchSize {
-		end := i + batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
-		tokenBatch := tokens[i:end]
-
-		err = firebaseInit.FirebaseApp.MultiCastPush(ctx, pushData, tokenBatch)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/sendNewPostCommentNotification Failed to send push notification err: %+v",
-				err)
-			return
-		}
-	}
-
-	// Email fan-out for post comments. Same recipient pool as FCM:
-	// previous commenters + mentions + post author.
-	emailRecipients := append([]string{}, membersUUIDList...)
-	emailRecipients = append(emailRecipients, mentionsUUIDList...)
-	notificationBusiness.DispatchPostComment(
-		userDgraph.Uuid,
-		userDgraph.DisplayName(),
-		userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey),
-		dgraphPost.Channel.Uuid,
-		dgraphPost.Uuid,
-		body,
-		commentUUID,
-		emailRecipients,
-	)
 }
 
 func UpdateComment(ctx context.Context, dgraphComment *dgraphStruct.DgraphComment, commentUUID uuid.UUID, currentTime time.Time) (err error) {
@@ -767,65 +682,14 @@ func CreateCommentInChat(ctx context.Context, dgraphChat *dgraphStruct.DgraphCha
 	ai.EmbedChatCommentContent(plainText, commentUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.DisplayName(),
 		chatDgraphInfo.Uuid, dgraphChat.Comments[0].ChatGroupingId, userInfo.UserDgraphInfo.Uuid, "", chatParticipantUUIDs)
 
-	notificationTitle := fmt.Sprintf("Comment - %+v", userInfo.UserDgraphInfo.DisplayName())
-	notificationBody := plainText
-
-	go sendNewChatCommentNotification(notificationTitle, notificationBody, userInfo.UserDgraphInfo.Uuid, dgraphChat.Comments[0].ChatGroupingId, mentionsDgraphUsersList, chatDgraphInfo.Uuid, userInfo.UserDgraphInfo.DisplayName(), userInfo.UserDgraphInfo.ProfileKey)
+	// Who hears of it, and how, is the chat's to decide (business/Chat
+	// notifyChatThreadReply): one audience for push, notice, Activity and email.
 
 	return
 }
 
-func sendNewChatCommentNotification(title string, body string, userId string, grpId string, mentions []*dgraphStruct.DgraphUser, chatUUID string, username string, profileKey *string) {
-
-	ctx := context.Background()
-
-	var mentionUUDs []string
-
-	for _, m := range mentions {
-		mentionUUDs = append(mentionUUDs, m.Uuid)
-	}
-
-	tokens, err := userFCMtokenBusiness.GetFCMTokensForNewChatActivityExcludingUserId(ctx, userId, grpId, mentionUUDs)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/sendNewChatCommentNotification Failed to get user's fcm token err: %+v",
-			err)
-		return
-	}
-
-	pushData := make(map[string]string)
-
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_COMMENT
-	// type_id is the CHAT GROUPING id, matching chat / chat_reaction /
-	// chat_comment_reaction. It used to be the comment author's uuid, which the
-	// clients then fed through the same "is this a DM pair or a group id?" test as
-	// every other chat notification — so a comment in a GROUP chat resolved to a
-	// one-to-one DM with the author instead of the group thread. grpId was already
-	// a parameter here and only used for the token lookup; sending it keeps the
-	// whole chat family on one rule instead of teaching each client an exception.
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] = grpId
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = title
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] = chatUUID
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = username
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, profileKey)
-
-	batchSize := 500
-	for i := 0; i < len(tokens); i += batchSize {
-		end := i + batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
-		tokenBatch := tokens[i:end]
-
-		err = firebaseInit.FirebaseApp.MultiCastPush(ctx, pushData, tokenBatch)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/sendNewChatCommentNotification Failed to send push notification err: %+v",
-				err)
-			return
-		}
-	}
-
+// ChatThreadRepliers is who has replied in the thread of the DM or group
+// message chatUUID, by user id.
+func ChatThreadRepliers(ctx context.Context, chatUUID string) ([]string, error) {
+	return domain.GetChatThreadRepliers(ctx, chatUUID)
 }

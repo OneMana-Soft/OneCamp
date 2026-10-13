@@ -7,15 +7,22 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	models "github.com/akashc777/OneCamp/models/postgres/UserChatNotification"
 )
 
+// CreateChatNotificationType gives both people in a new direct conversation
+// their setting for it. Each row stands alone: a row one of them already has
+// is kept, and the other's is still written. It was one insert that failed
+// whole on any row already there, which left the other person with no
+// setting, and so never told of a message in it.
 func CreateChatNotificationType(ctx context.Context, userId string, toUUID string, grpID string, notificationType string, updatedTime time.Time) (err error) {
 	query := `
 		INSERT INTO users_chat_notification 
 		(user_id, grp_id, notification_type, updated_at)
 		VALUES ($1, $3, $4, $5),
 		($2, $3, $4, $5)
+		ON CONFLICT (user_id, grp_id) DO NOTHING
 	`
 
 	err = models.CreateChatNotificationType(query, userId, toUUID, grpID, notificationType, updatedTime)
@@ -46,6 +53,9 @@ func BulkCreateChatNotification(ctx context.Context, userIDs []string, grpID str
 	}
 
 	query += strings.Join(placeholders, ",")
+	// As for a direct conversation: one row already there doesn't cost the
+	// others theirs.
+	query += ` ON CONFLICT (user_id, grp_id) DO NOTHING`
 
 	err = models.BulkCreateChatNotification(query, values...)
 	if err != nil {
@@ -164,4 +174,56 @@ func GetEligibleUsersForChatActivity(ctx context.Context, grpId string, userId s
 		return
 	}
 	return
+}
+
+// GetLevelsInConversation is the setting for the conversation grpId of each of
+// userIds who is in it, by lower-case user id; someone with no setting isn't
+// in it. The thread audience's read (notificationBusiness.ThreadAudience), as
+// GetLevelsInChannel is a channel's.
+func GetLevelsInConversation(ctx context.Context, grpId string, userIds []string) (map[string]string, error) {
+	if len(userIds) == 0 {
+		return map[string]string{}, nil
+	}
+	query := `
+		SELECT lower(user_id::text), notification_type
+		FROM users_chat_notification
+		WHERE grp_id = $1 AND user_id = ANY($2)
+	`
+	levels, err := models.GetLevelsInConversation(query, grpId, userIds)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetLevelsInConversation Failed to get the people's settings for the conversation err: %+v",
+			err)
+		return nil, err
+	}
+	return levels, nil
+}
+
+// GiveMissingChatSettings gives everyone who is in a conversation and has no
+// notification setting for it the default, "all", and answers how many it
+// gave. Who is in a conversation is read from last_seen_chat, which holds a
+// row for each of its people from the moment it starts or they join (written
+// only for its participants). Settings went missing two ways: adding someone
+// to a group moved the group to a new id without its settings, and a direct
+// conversation's two settings were one insert that failed whole when either
+// was already there. Either way, nobody missing one was told of anything in
+// it. Safe to run again and alongside itself: a setting already there, or
+// given meanwhile, is kept.
+func GiveMissingChatSettings(ctx context.Context) (int64, error) {
+	c, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(c, `
+		INSERT INTO users_chat_notification (user_id, grp_id, notification_type, updated_at)
+		SELECT lsc.user_id, lsc.grp_id, 'all', NOW()
+		FROM last_seen_chat lsc
+		WHERE NOT EXISTS (
+			SELECT 1 FROM users_chat_notification ucn
+			WHERE ucn.user_id = lsc.user_id AND ucn.grp_id = lsc.grp_id
+		)
+		ON CONFLICT (user_id, grp_id) DO NOTHING`)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GiveMissingChatSettings err: %+v", err)
+		return 0, err
+	}
+	return res.RowsAffected()
 }

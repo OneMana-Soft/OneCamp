@@ -13,7 +13,6 @@ import (
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
-	fcmDomain "github.com/akashc777/OneCamp/domain/UserFCMToken"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
@@ -23,21 +22,29 @@ import (
 )
 
 // HeldStatus is whether someone's notifications are held right now, until
-// when, and why ("paused" or "quiet_hours"). Empty Reason: not held.
+// when, and why ("paused", "focus" or "quiet_hours"). Empty Reason: not held.
 type HeldStatus struct {
 	Until  *time.Time `json:"until,omitempty"`
 	Reason string     `json:"reason,omitempty"`
 }
 
-// HeldFor reads a preference row as a status at now: the same rules the
-// dispatcher holds email by, so what a teammate sees is what happens. Pure.
+// HeldFor reads a preference row as a status at now: the same rules the push
+// gate and the email dispatcher hold by, so what a teammate sees is what
+// happens. A pause or the focus time the person is in, whichever lasts longer
+// (QuietUntil), then quiet hours. Focus time was left out: during it pushes
+// were held, but the sender saw no bar and Notify anyway said "not paused". Pure.
 func HeldFor(p *prefModels.UserNotificationPreference, now time.Time) HeldStatus {
 	if p == nil {
 		return HeldStatus{}
 	}
-	if p.NotificationsPausedUntil != nil && p.NotificationsPausedUntil.After(now) {
-		until := *p.NotificationsPausedUntil
-		return HeldStatus{Until: &until, Reason: "paused"}
+	if until := p.QuietUntil(now); until != nil {
+		// Named for whichever lasts to that time: the pause when it does.
+		reason := "focus"
+		if p.NotificationsPausedUntil != nil && !p.NotificationsPausedUntil.Before(*until) {
+			reason = "paused"
+		}
+		at := *until
+		return HeldStatus{Until: &at, Reason: reason}
 	}
 	if at, deferred := quietHoursDelay(now, p); deferred {
 		return HeldStatus{Until: &at, Reason: "quiet_hours"}
@@ -49,8 +56,12 @@ func HeldFor(p *prefModels.UserNotificationPreference, now time.Time) HeldStatus
 func HeldStatusOf(userID uuid.UUID, now time.Time) (HeldStatus, error) {
 	p, err := prefModels.GetByUserID(userID)
 	if err != nil {
-		// No row is no preferences: nothing is held.
-		return HeldStatus{}, nil
+		// No row is no preferences, but focus time is an event in their
+		// calendar, which the push gate holds all the same.
+		p = &prefModels.UserNotificationPreference{UserID: userID}
+		if p.FocusUntil, err = prefModels.FocusUntilOf(userID); err != nil {
+			return HeldStatus{}, nil
+		}
 	}
 	return HeldFor(p, now), nil
 }
@@ -153,16 +164,8 @@ func NotifyAnyway(ctx context.Context, sender *userModels.UserInfo, recipient uu
 	} else if n >= urgentPerDay {
 		return &UrgentError{"You've already notified them today. They'll see your messages when they're back."}
 	}
-	tokens, err := fcmDomain.GetFCMTokenByUserIdIgnoringPause(ctx, recipient.String())
-	if err != nil {
-		return err
-	}
 	if err := recordPing(sender.UserPostgresInfo.Id, recipient); err != nil {
 		return err
-	}
-	if len(tokens) == 0 {
-		// Recorded all the same: they'll see the DM, and one ping a day holds.
-		return nil
 	}
 	name := sender.UserDgraphInfo.DisplayName()
 	data := map[string]string{
@@ -173,7 +176,11 @@ func NotifyAnyway(ctx context.Context, sender *userModels.UserInfo, recipient uu
 		firebaseInit.FIREBASE_PUSH_DATA_USERNAME: name,
 		firebaseInit.FIREBASE_PUSH_DATA_ICON:     userBusiness.GetSignedProfileURL(ctx, sender.UserDgraphInfo.ProfileKey),
 	}
-	if err := firebaseInit.FirebaseApp.MultiCastPush(ctx, data, tokens); err != nil {
+	// Through the pause, to every device and the desktop app. Someone with
+	// neither is recorded all the same: they'll see the DM, and one ping a
+	// day holds.
+	noticeID := "urgent:" + grp + ":" + now.UTC().Format(time.RFC3339)
+	if err := DeliverThroughPause(ctx, []string{recipient.String()}, data, noticeID); err != nil {
 		helpers.LogErrorWithContext(ctx, "notification/NotifyAnyway push err: %+v", err)
 		return errors.New("couldn't reach their devices")
 	}

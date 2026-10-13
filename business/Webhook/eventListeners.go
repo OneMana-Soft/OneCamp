@@ -47,6 +47,11 @@ func RegisterEventListener(l EventListener) {
 // neither block nor crash the dispatch path. ctx is detached from the request
 // lifecycle so listener work isn't cancelled when the HTTP handler returns.
 func notifyEventListeners(ctx context.Context, eventType string, data map[string]interface{}) {
+	// A process that runs no listeners (SERVICE_ROLE=api) hands the event to
+	// the workers, which do (eventHandoff.go).
+	if handOff(ctx, eventType, data) {
+		return
+	}
 	listenerMu.RLock()
 	defer listenerMu.RUnlock()
 	if len(listeners) == 0 {

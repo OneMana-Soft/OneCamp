@@ -178,9 +178,9 @@ func addTeamMembers(ctx context.Context, job *importModels.Job, teamUUID uuid.UU
 		if err != nil || dgUid == "" {
 			continue
 		}
-		_ = teamBusiness.AddMemberToTeam(ctx, teamUUID, dgUid)
+		_ = teamBusiness.AddMemberToTeam(ctx, teamUUID, dgUid, ocUUID.String())
 		if _, isAdmin := adminSet[sid]; isAdmin {
-			_ = teamBusiness.AddAdminMemberToTeam(ctx, teamUUID, dgUid)
+			_ = teamBusiness.AddAdminMemberToTeam(ctx, teamUUID, dgUid, ocUUID.String())
 		}
 	}
 }

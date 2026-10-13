@@ -309,6 +309,7 @@ func GetActiveOutgoingWebhooksByEvent(query string, args ...interface{}) ([]*Web
 	for rows.Next() {
 		var w Webhook
 		var secret, targetUrl, metadata, scopeType, triggerWords sql.NullString
+		var scopeEntity uuid.NullUUID
 
 		if err := rows.Scan(
 			&w.Id,
@@ -319,6 +320,7 @@ func GetActiveOutgoingWebhooksByEvent(query string, args ...interface{}) ([]*Web
 			&metadata,
 			&scopeType,
 			&triggerWords,
+			&scopeEntity,
 		); err != nil {
 			helpers.LogErrorWithContext(ctx,
 				"models/GetActiveOutgoingWebhooksByEvent Failed to scan row err: %+v",
@@ -342,6 +344,10 @@ func GetActiveOutgoingWebhooksByEvent(query string, args ...interface{}) ([]*Web
 		}
 		if triggerWords.Valid {
 			w.TriggerWords = &triggerWords.String
+		}
+		if scopeEntity.Valid {
+			id := scopeEntity.UUID
+			w.ScopeEntityId = &id
 		}
 
 		webhooks = append(webhooks, &w)

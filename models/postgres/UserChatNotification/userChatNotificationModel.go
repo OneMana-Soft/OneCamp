@@ -119,3 +119,29 @@ func GetEligibleUsersForChatActivity(query string, grpId string, userId string, 
 
 	return
 }
+
+// GetLevelsInConversation runs query ($1 the conversation, $2 the people) and
+// answers each person's setting by the id the query reads back.
+func GetLevelsInConversation(query string, grpID string, userIDs []string) (map[string]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query, grpID, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	levels := make(map[string]string, len(userIDs))
+	for rows.Next() {
+		var userID, level string
+		if err := rows.Scan(&userID, &level); err != nil {
+			return nil, err
+		}
+		levels[userID] = level
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return levels, nil
+}

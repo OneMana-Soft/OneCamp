@@ -180,6 +180,15 @@ func scopesAllowed(scopeType string, channels, projects, groups []string) int {
 	return len(channels) + len(projects) + len(groups)
 }
 
+// Where catch-up reads the last look and the unread boundary from; seams for
+// its test.
+var (
+	lastSeenInChannel     = lastSeenChannelDomain.GetLastSeenChannel
+	lastSeenInChat        = lastSeenChatDomain.GetLastSeenChat
+	unreadBoundaryChannel = lastSeenChannelDomain.UnreadBoundaryInChannel
+	unreadBoundaryChat    = lastSeenChannelDomain.UnreadBoundaryInChat
+)
+
 // catchUpBoundary resolves (sinceTime, filterType, filterValue, scopeName)
 // for the request, enforcing scope access. The boundary is the user's
 // last-seen for the scope, floored by catchUpLookbackFloor.
@@ -200,11 +209,17 @@ func catchUpBoundary(ctx context.Context, userInfo *userModels.UserInfo, req ada
 		}
 		name := channelNameFor(userInfo, chUUID)
 		chID, _ := uuid.Parse(chUUID)
-		last, ok, err := lastSeenChannelDomain.GetLastSeenChannel(ctx, userID, chID)
+		last, ok, err := lastSeenInChannel(ctx, userID, chID)
 		if err != nil {
 			return time.Time{}, "", "", "", err
 		}
-		return floorSince(last, ok, floor), "channel_uuid", chUUID, name, nil
+		since := floorSince(last, ok, floor)
+		if n := unreadOnOpen(req.Unread); n > 0 {
+			if at, found, berr := unreadBoundaryChannel(ctx, userID, chID, n); berr == nil && found {
+				since = floorSince(sinceBefore(at), true, floor)
+			}
+		}
+		return since, "channel_uuid", chUUID, name, nil
 
 	case catchUpScopeChat:
 		grp := strings.TrimSpace(req.ChatGrpID)
@@ -219,11 +234,17 @@ func catchUpBoundary(ctx context.Context, userInfo *userModels.UserInfo, req ada
 		if !containsStr(accessibleGroupingIDs(userInfo), grp) {
 			return time.Time{}, "", "", "", fmt.Errorf("not authorized for this conversation")
 		}
-		last, ok, err := lastSeenChatDomain.GetLastSeenChat(ctx, userID, grp)
+		last, ok, err := lastSeenInChat(ctx, userID, grp)
 		if err != nil {
 			return time.Time{}, "", "", "", err
 		}
-		return floorSince(last, ok, floor), "chat_grp_id", grp, "", nil
+		since := floorSince(last, ok, floor)
+		if n := unreadOnOpen(req.Unread); n > 0 {
+			if at, found, berr := unreadBoundaryChat(ctx, userID, grp, n); berr == nil && found {
+				since = floorSince(sinceBefore(at), true, floor)
+			}
+		}
+		return since, "chat_grp_id", grp, "", nil
 
 	case catchUpScopeWorkspace, "":
 		// Workspace-wide: no single last-seen, so use the lookback floor.
@@ -233,6 +254,33 @@ func catchUpBoundary(ctx context.Context, userInfo *userModels.UserInfo, req ada
 	default:
 		return time.Time{}, "", "", "", fmt.Errorf("invalid scope_type %q", req.ScopeType)
 	}
+}
+
+// catchUpMaxUnread bounds the unread count a request may name.
+const catchUpMaxUnread = 1000
+
+// unreadOnOpen is the unread count a request names, kept to what a recap
+// can use: none below one, at most catchUpMaxUnread.
+//
+// Opening a conversation moves its last-seen to now (the channel and chat
+// reads mark it), and the recap read that same last-seen afterwards: it found
+// nothing, and the banner went for an hour. So the client says how many it
+// saw unread before it opened, and the recap starts at the oldest of them.
+func unreadOnOpen(n int) int {
+	if n < 1 {
+		return 0
+	}
+	if n > catchUpMaxUnread {
+		return catchUpMaxUnread
+	}
+	return n
+}
+
+// sinceBefore is the boundary that takes in a message sent at `at`: the
+// retrieval keeps what is newer than a whole second (gt sinceUnix), so a
+// second before it.
+func sinceBefore(at time.Time) time.Time {
+	return at.Add(-time.Second)
 }
 
 // floorSince returns the later of the user's last-seen and the lookback

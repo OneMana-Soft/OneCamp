@@ -15,7 +15,7 @@ import (
 	"context"
 	"strings"
 
-	userFCMTokenBusiness "github.com/akashc777/OneCamp/business/UserFCMToken"
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	agentModel "github.com/akashc777/OneCamp/models/postgres/AIAgent"
@@ -36,12 +36,11 @@ var (
 		}
 		return ag.Name
 	}
+	// To their devices and the desktop app (business/Notification Deliver),
+	// named by the approval's own tag so two never stand for each other.
 	sendApprovalPush = func(ctx context.Context, userUUID string, data map[string]string) error {
-		tokens, err := userFCMTokenBusiness.GetFCMTokenByUserId(ctx, userUUID)
-		if err != nil || len(tokens) == 0 {
-			return err
-		}
-		return firebaseInit.FirebaseApp.MultiCastPush(ctx, data, tokens)
+		notificationBusiness.Deliver(ctx, []string{userUUID}, data, data[firebaseInit.FIREBASE_PUSH_DATA_TAG])
+		return nil
 	}
 )
 

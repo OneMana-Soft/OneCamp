@@ -85,6 +85,11 @@ type Event struct {
 	CTAURL      string // deep link back to the relevant view
 	CTAText     string // optional override (defaults to "Open in OneCamp")
 
+	// CTAURLFor is the deep link for one recipient, where it differs per
+	// person: a DM opens at the other person, so its two sides get two
+	// links. Empty, or answering "", leaves CTAURL.
+	CTAURLFor func(recipientUUID string) string
+
 	// DedupKeyParts are joined to produce the row dedup_key. Choose stable,
 	// unique-per-event values: e.g. ["chat.dm", chatUUID, recipientUUID].
 	// The recipient UUID is automatically appended by Dispatch.
@@ -230,6 +235,7 @@ func dispatchPrepared(ctx context.Context, evt Event, user *userModels.User, pre
 	// up before the window closes.
 	deliverAt, deferred := deliveryTime(time.Now(), pref)
 
+	ctaURL := ctaURLFor(evt, user.Id.String())
 	tmplData := emailService.TemplateData{
 		RecipientName:  user.EmailID,
 		ActorName:      evt.ActorName,
@@ -238,7 +244,7 @@ func dispatchPrepared(ctx context.Context, evt Event, user *userModels.User, pre
 		Subtitle:       evt.Subtitle,
 		Body:           evt.Body,
 		CTAText:        evt.CTAText,
-		CTAURL:         evt.CTAURL,
+		CTAURL:         ctaURL,
 		UnsubscribeURL: buildUnsubscribeURL(pref.UnsubscribeToken),
 		BrandName:      "OneCamp",
 		BrandLogo:      brandLogoURL(),
@@ -280,7 +286,7 @@ func dispatchPrepared(ctx context.Context, evt Event, user *userModels.User, pre
 		Subject:   subject,
 		HTMLBody:  html,
 		TextBody:  text,
-		CTAURL:    evt.CTAURL,
+		CTAURL:    ctaURL,
 		DedupKey:  dedupKey,
 		Metadata:  metadata,
 	}
@@ -299,6 +305,17 @@ func dispatchPrepared(ctx context.Context, evt Event, user *userModels.User, pre
 
 	signalEmailWorker()
 	return true
+}
+
+// ctaURLFor is the link the email to recipientUUID opens: its own
+// (CTAURLFor) where the event gives one, else the event's.
+func ctaURLFor(evt Event, recipientUUID string) string {
+	if evt.CTAURLFor != nil {
+		if u := evt.CTAURLFor(recipientUUID); u != "" {
+			return u
+		}
+	}
+	return evt.CTAURL
 }
 
 // eventEnabledForPref maps the EventType to the right toggle in the prefs.

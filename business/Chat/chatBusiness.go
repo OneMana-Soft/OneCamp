@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -249,29 +250,27 @@ func CreateChatForGroup(ctx context.Context, chatInfo *adapter.ChatInfo, userInf
 
 	}
 
+	// The message is stored from here on. A read mark that can't be written is
+	// logged and the send goes on: returning told the sender it had failed,
+	// so nothing else happened (no live message, no push, no search) and Try
+	// again stored it twice.
 	if len(dmUID) != 0 {
 		// The others haven't seen the new conversation: their marks start at
 		// nothing (it counts as unread, and no read receipt says otherwise).
-		err = lastseenBusiness.BulkCreateLastSeenChatIfNotExists(ctx, userUUIDs, chatInfo.GrpUuid)
-
-		if err != nil {
+		if markErr := lastseenBusiness.BulkCreateLastSeenChatIfNotExists(ctx, userUUIDs, chatInfo.GrpUuid); markErr != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/CreateChatForGroup Failed to update send to last seen chat err: %+v",
-				err)
-			return
+				markErr)
 		}
 
 		chatNotificationBusiness.BulkCreateChatNotification(ctx, userUUIDs, chatInfo.GrpUuid, postgressStruct.NOTIFICATION_TYPE_ALL, currentTime)
 
 	}
 
-	err = lastseenBusiness.CreateOrUpdateLastSeenChat(ctx, chatInfo.GrpUuid, userInfo.UserPostgresInfo.Id, currentTime)
-
-	if err != nil {
+	if markErr := lastseenBusiness.CreateOrUpdateLastSeenChat(ctx, chatInfo.GrpUuid, userInfo.UserPostgresInfo.Id, currentTime); markErr != nil {
 		helpers.LogErrorWithContext(ctx,
-			"business/CreateCCreateChatForGrouphat Failed to update last seen chat err: %+v",
-			err)
-		return
+			"business/CreateChatForGroup Failed to update last seen chat err: %+v",
+			markErr)
 	}
 
 	createdChatInfo = &adapter.OutputCreateChatForChat{
@@ -304,6 +303,11 @@ func CreateChatForGroup(ctx context.Context, chatInfo *adapter.ChatInfo, userInf
 
 	if !bulk {
 		go mqttBusiness.PublishChat(&mqttChat, chatInfo.GrpUuid)
+		if len(dmUID) != 0 {
+			// A new group: nobody's open app holds its topic, the sender's
+			// included. This message reaches them when they fetch it.
+			go mqttBusiness.PublishConversationAccess(mqttStruct.CONVERSATION_KIND_GROUP, chatInfo.GrpUuid, mqttStruct.CONVERSATION_ADDED, userUUIDs...)
+		}
 	}
 
 	openSearchChat := &openSearchStruct.OpenSearchChat{
@@ -348,9 +352,12 @@ func CreateChatForGroup(ctx context.Context, chatInfo *adapter.ChatInfo, userInf
 
 }
 
-func AddParticipantToGroupChat(ctx context.Context, oldGrpId string, newGrpId string, newUserDgraphUID string, newUserUUID string) (err error) {
+// AddParticipantToGroupChat moves a group to the id of its members with one
+// more: a group's id is its members' hash. memberUUIDs is everyone in it
+// now, the person added included.
+func AddParticipantToGroupChat(ctx context.Context, oldGrpId string, newGrpId string, newUserDgraphUID string, newUserUUID string, memberUUIDs []string) (err error) {
 
-	err = domain.BulkUpdateGrpIdInChatAndAtachment(ctx, oldGrpId, newGrpId)
+	err = domain.BulkUpdateGrpIdInChatAndAtachment(ctx, oldGrpId, newGrpId, newUserUUID)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -382,6 +389,10 @@ func AddParticipantToGroupChat(ctx context.Context, oldGrpId string, newGrpId st
 
 	// Migrate AI embeddings: update chat_grp_id and append new participant to chat_participant_uuids
 	ai.MigrateEmbeddingsGroupIDAsync(oldGrpId, newGrpId, newUserUUID)
+
+	// Every open app was on the old id's topics, and the person added holds
+	// none: nothing in the group streamed to anyone after the add.
+	go mqttBusiness.PublishConversationMoved(mqttStruct.CONVERSATION_KIND_GROUP, oldGrpId, newGrpId, memberUUIDs...)
 
 	return
 
@@ -505,15 +516,14 @@ func CreateChat(ctx context.Context, chatInfo *adapter.ChatInfo, userInfo *userM
 
 	}
 
+	// The message is stored from here on: a read mark that can't be written
+	// is logged and the send goes on (see CreateChatForGroup).
 	if len(dmUID) != 0 {
 		// The other person hasn't seen the new conversation: see CreateChatForGroup.
-		err = lastseenBusiness.BulkCreateLastSeenChatIfNotExists(ctx, []string{toUUID.String()}, groupingId)
-
-		if err != nil {
+		if markErr := lastseenBusiness.BulkCreateLastSeenChatIfNotExists(ctx, []string{toUUID.String()}, groupingId); markErr != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/CreateChat Failed to update send to last seen chat err: %+v",
-				err)
-			return
+				markErr)
 		}
 		if userInfo.UserDgraphInfo.Uuid != sendToDgraph.Uuid {
 			chatNotificationBusiness.CreateChatNotificationType(ctx, userInfo.UserDgraphInfo.Uuid, sendToDgraph.Uuid, groupingId, postgressStruct.NOTIFICATION_TYPE_ALL, currentTime)
@@ -521,13 +531,10 @@ func CreateChat(ctx context.Context, chatInfo *adapter.ChatInfo, userInfo *userM
 		}
 	}
 
-	err = lastseenBusiness.CreateOrUpdateLastSeenChat(ctx, groupingId, userInfo.UserPostgresInfo.Id, currentTime)
-
-	if err != nil {
+	if markErr := lastseenBusiness.CreateOrUpdateLastSeenChat(ctx, groupingId, userInfo.UserPostgresInfo.Id, currentTime); markErr != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/CreateChat Failed to update last seen chat err: %+v",
-			err)
-		return
+			markErr)
 	}
 
 	createdChatInfo = &adapter.OutputCreateChatForChat{
@@ -552,6 +559,10 @@ func CreateChat(ctx context.Context, chatInfo *adapter.ChatInfo, userInfo *userM
 	bulk := helpers.IsBulkImport(ctx)
 	if !bulk {
 		go mqttBusiness.PublishChat(&mqttChat, groupingId)
+		if len(dmUID) != 0 {
+			// A first DM: neither person's open app holds its topic.
+			go mqttBusiness.PublishConversationAccess(mqttStruct.CONVERSATION_KIND_DM, groupingId, mqttStruct.CONVERSATION_ADDED, userInfo.UserDgraphInfo.Uuid, sendToDgraph.Uuid)
+		}
 	}
 
 	openSearchChat := &openSearchStruct.OpenSearchChat{
@@ -701,16 +712,8 @@ func sendNewChatNotification(title string, body string, userId string, grpId str
 		activityBusiness.PublishActivityToUser(recipientID, activityItem)
 	}
 
-	// 3. Handle FCM Push Notifications
-	tokens, err := userFCMtokenBusiness.GetFCMTokenByListOfUserId(ctx, eligibleUserIDs)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/sendNewChatNotification Failed to get user's fcm token err: %+v",
-			err)
-		return
-	}
-
+	// 3. The push, and the desktop app's notice, to those of them the push
+	// gate lets through (business/Notification Deliver).
 	pushData := make(map[string]string)
 
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT
@@ -721,22 +724,7 @@ func sendNewChatNotification(title string, body string, userId string, grpId str
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = username
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, profileKey)
 
-	batchSize := 500
-	for i := 0; i < len(tokens); i += batchSize {
-		end := i + batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
-		tokenBatch := tokens[i:end]
-
-		err = firebaseInit.FirebaseApp.MultiCastPush(ctx, pushData, tokenBatch)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/sendNewChatNotification Failed to send push notification err: %+v",
-				err)
-			return
-		}
-	}
+	notificationBusiness.Deliver(ctx, eligibleUserIDs, pushData, "chat:"+grpId+":"+chatUUID)
 
 	// 4. Email fan-out (no-op when RESEND_API_KEY is unset). Same eligibility
 	//    set as FCM; the dispatcher applies its own per-recipient gates
@@ -1002,8 +990,10 @@ func GetUserChatListWithLatestChat(ctx context.Context, userUUID uuid.UUID) (dgr
 	return
 }
 
-func GetDgraphOldGroupChatFromDgraph(ctx context.Context, lastChatTime time.Time, grpID string) (chats ChatPagination, err error) {
-	dgraphChats, err := domain.GetDgraphOldChatFromDgraph(ctx, grpID, lastChatTime)
+// GetDgraphOldGroupChatFromDgraph is the page of a group's messages before
+// edge (helpers.PageEdge).
+func GetDgraphOldGroupChatFromDgraph(ctx context.Context, edge helpers.PageEdge, grpID string) (chats ChatPagination, err error) {
+	dgraphChats, err := domain.GetDgraphOldChatFromDgraph(ctx, grpID, edge.Before())
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1013,20 +1003,15 @@ func GetDgraphOldGroupChatFromDgraph(ctx context.Context, lastChatTime time.Time
 		return
 	}
 
-	if len(dgraphChats) > domain.CHAT_COUNT {
-		chats.Chats = dgraphChats[:domain.CHAT_COUNT]
-	} else {
-		chats.Chats = dgraphChats
-	}
-
-	chats.HasMore = len(dgraphChats) > domain.CHAT_COUNT
+	chats.Chats, chats.HasMore = helpers.PageFrom(dgraphChats, chatUUIDOf, edge, domain.CHAT_COUNT)
 
 	return
 }
 
-func GetDgraphOldChatFromDgraph(ctx context.Context, lastChatTime time.Time, firstUserUUID string, secondUserUUID string) (chats ChatPagination, err error) {
+// GetDgraphOldChatFromDgraph is the page of a DM's messages before edge.
+func GetDgraphOldChatFromDgraph(ctx context.Context, edge helpers.PageEdge, firstUserUUID string, secondUserUUID string) (chats ChatPagination, err error) {
 	groupingId := helpers.GetGroupingId(firstUserUUID, secondUserUUID)
-	dgraphChats, err := domain.GetDgraphOldChatFromDgraph(ctx, groupingId, lastChatTime)
+	dgraphChats, err := domain.GetDgraphOldChatFromDgraph(ctx, groupingId, edge.Before())
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1036,19 +1021,15 @@ func GetDgraphOldChatFromDgraph(ctx context.Context, lastChatTime time.Time, fir
 		return
 	}
 
-	if len(dgraphChats) > domain.CHAT_COUNT {
-		chats.Chats = dgraphChats[:domain.CHAT_COUNT]
-	} else {
-		chats.Chats = dgraphChats
-	}
-
-	chats.HasMore = len(dgraphChats) > domain.CHAT_COUNT
+	chats.Chats, chats.HasMore = helpers.PageFrom(dgraphChats, chatUUIDOf, edge, domain.CHAT_COUNT)
 
 	return
 }
 
-func GetDgraphNewGroupChatFromDgraph(ctx context.Context, lastChatTime time.Time, grpId string) (chats ChatPagination, err error) {
-	dgraphChats, err := domain.GetDgraphNewChatFromDgraph(ctx, grpId, lastChatTime)
+// GetDgraphNewGroupChatFromDgraph is the page of a group's messages after
+// edge.
+func GetDgraphNewGroupChatFromDgraph(ctx context.Context, edge helpers.PageEdge, grpId string) (chats ChatPagination, err error) {
+	dgraphChats, err := domain.GetDgraphNewChatFromDgraph(ctx, grpId, edge.After())
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1058,20 +1039,15 @@ func GetDgraphNewGroupChatFromDgraph(ctx context.Context, lastChatTime time.Time
 		return
 	}
 
-	if len(dgraphChats) > domain.CHAT_COUNT {
-		chats.Chats = dgraphChats[:domain.CHAT_COUNT]
-	} else {
-		chats.Chats = dgraphChats
-	}
-
-	chats.HasMore = len(dgraphChats) > domain.CHAT_COUNT
+	chats.Chats, chats.HasMore = helpers.PageFrom(dgraphChats, chatUUIDOf, edge, domain.CHAT_COUNT)
 
 	return
 }
 
-func GetDgraphNewChatFromDgraph(ctx context.Context, lastChatTime time.Time, fromUserId string, toUserId string) (chats ChatPagination, err error) {
+// GetDgraphNewChatFromDgraph is the page of a DM's messages after edge.
+func GetDgraphNewChatFromDgraph(ctx context.Context, edge helpers.PageEdge, fromUserId string, toUserId string) (chats ChatPagination, err error) {
 	groupingId := helpers.GetGroupingId(fromUserId, toUserId)
-	dgraphChats, err := domain.GetDgraphNewChatFromDgraph(ctx, groupingId, lastChatTime)
+	dgraphChats, err := domain.GetDgraphNewChatFromDgraph(ctx, groupingId, edge.After())
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1081,16 +1057,12 @@ func GetDgraphNewChatFromDgraph(ctx context.Context, lastChatTime time.Time, fro
 		return
 	}
 
-	if len(dgraphChats) > domain.CHAT_COUNT {
-		chats.Chats = dgraphChats[:domain.CHAT_COUNT]
-	} else {
-		chats.Chats = dgraphChats
-	}
-
-	chats.HasMore = len(dgraphChats) > domain.CHAT_COUNT
+	chats.Chats, chats.HasMore = helpers.PageFrom(dgraphChats, chatUUIDOf, edge, domain.CHAT_COUNT)
 
 	return
 }
+
+func chatUUIDOf(c *dgraphStruct.DgraphChat) string { return c.Uuid }
 
 func GetDgraphDmBasicInfoFromDgraph(ctx context.Context, userId string, groupingId string) (dgraphDm *dgraphStruct.DgraphDm, err error) {
 
@@ -1350,6 +1322,22 @@ func CreateOrUpdateChatReaction(ctx context.Context, reactionInfo *adapter.Input
 	return
 }
 
+// reactionPushTo is the devices a reaction in a direct or group conversation
+// is pushed to: its author's, while their setting for the conversation is
+// "all" or "mention" (a reaction to their message is addressed to them; with
+// "block", or no setting, nothing), and not while their notifications are
+// paused, never the reactor's own.
+func reactionPushTo(ctx context.Context, grpID, authorUUID, reactorUUID string) ([]string, error) {
+	if grpID == "" || authorUUID == "" || authorUUID == reactorUUID {
+		return nil, nil
+	}
+	told, err := chatNotificationBusiness.GetEligibleUsersForChatActivity(ctx, grpID, reactorUUID, []string{authorUUID}, true)
+	if err != nil || len(told) == 0 {
+		return nil, err
+	}
+	return userFCMtokenBusiness.GetFCMTokenByListOfUserId(ctx, told)
+}
+
 func sendNewChatReactionNotification(title string, body string, grpId string, chatDgraph *dgraphStruct.DgraphChat, userDgraph *dgraphStruct.DgraphUser, reactionID string) {
 
 	if chatDgraph.From.Uuid == userDgraph.Uuid {
@@ -1365,11 +1353,9 @@ func sendNewChatReactionNotification(title string, body string, grpId string, ch
 
 	activityBusiness.PublishActivityToUser(chatDgraph.From.Uuid, activityItem)
 
-	var eligibleUserIDs []string
-
-	eligibleUserIDs = append(eligibleUserIDs, userDgraph.Uuid)
-
-	tokens, err := userFCMtokenBusiness.GetFCMTokenByListOfUserId(ctx, eligibleUserIDs)
+	// The push goes to the message's author, as their setting for the
+	// conversation allows (reactionPushTo). It went to whoever reacted.
+	tokens, err := reactionPushTo(ctx, grpId, chatDgraph.From.Uuid, userDgraph.Uuid)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1534,7 +1520,7 @@ func CreateChatComment(ctx context.Context, commentInfo *adapter.InputCreateOrUp
 	if !helpers.IsBulkImport(ctx) {
 		go mqttBusiness.PublishChatComment(&mqttChatComment, grpId)
 
-		go sendNewChatCommentActivity(currentTime, commentUUID.String(), commentInfo.HTMLText, &userInfo.UserDgraphInfo, grpId, mentionsDgraphUsersList, chatDgraphInfo)
+		go notifyChatThreadReply(currentTime, commentUUID.String(), commentInfo.HTMLText, &userInfo.UserDgraphInfo, grpId, mentionsDgraphUsersList, chatDgraphInfo)
 
 		// Notify listeners so an AI teammate can CONTINUE a group-chat thread it
 		// is part of: a person can @mention the agent again or answer its
@@ -1646,89 +1632,124 @@ func EditChatCommentAsBot(ctx context.Context, botInfo *userModels.UserInfo, cha
 	return UpdateChatComment(ctx, commentUUID, commentInfo, nil, dgraphChat, rawComment)
 }
 
-func sendNewChatCommentActivity(currentTime time.Time, commentUUID string, commentBody string, userDgraph *dgraphStruct.DgraphUser, grpId string, mentions []*dgraphStruct.DgraphUser, chatDgraph *dgraphStruct.DgraphChat) {
-	ctx := context.Background()
+// Who a reply in a DM or group thread is told to, and the ways it is told:
+// seams for its test.
+var (
+	threadLevels      = chatNotificationBusiness.GetLevelsInConversation
+	threadRepliers    = commentBusiness.ChatThreadRepliers
+	deliverTo         = notificationBusiness.Deliver
+	publishActivityTo = activityBusiness.PublishActivityToUser
+	emailChatComment  = notificationBusiness.DispatchChatComment
+)
 
-	var mentionUUDs []string
-
-	for _, m := range mentions {
-		mentionUUDs = append(mentionUUDs, m.Uuid)
+// chatThreadAudience is who hears of a reply by writer in the thread of the
+// message chat: its author, those who replied before and those mentioned, by
+// their setting for the conversation (notificationBusiness.ThreadAudience, the
+// rule a channel thread's reply uses). In a conversation of two the other
+// person is in every thread of it: a DM is addressed to them.
+func chatThreadAudience(ctx context.Context, grpId, writer string, chat *dgraphStruct.DgraphChat, mentioned []string) (notificationBusiness.Audience, error) {
+	author := ""
+	if chat.From != nil {
+		author = chat.From.Uuid
 	}
+	repliers, err := threadRepliers(ctx, chat.Uuid)
+	if err != nil {
+		return notificationBusiness.Audience{}, err
+	}
+	if chat.DM != nil && len(chat.DM.Participants) == 2 {
+		for _, p := range chat.DM.Participants {
+			if p != nil && !strings.EqualFold(p.Uuid, writer) {
+				repliers = append([]string{p.Uuid}, repliers...)
+			}
+		}
+	}
+	// Each person is asked about once, and only by a well-formed id: one
+	// malformed id would fail the whole read, and tell nobody.
+	var ask []string
+	for _, id := range slices.Concat([]string{author}, repliers, mentioned) {
+		if _, err := uuid.Parse(id); err == nil && !slices.Contains(ask, id) {
+			ask = append(ask, id)
+		}
+	}
+	levels, err := threadLevels(ctx, grpId, ask)
+	if err != nil {
+		return notificationBusiness.Audience{}, err
+	}
+	return notificationBusiness.ThreadAudience(levels, writer, author, repliers, mentioned), nil
+}
 
-	// 1. Get eligible users for notifications (based on preferences and grouping)
-	eligibleUserIDs, err := chatNotificationBusiness.GetEligibleUsersForChatActivity(ctx, grpId, userDgraph.Uuid, mentionUUDs, true)
+// notifyChatThreadReply tells of a reply in a DM or group thread: the push and
+// the desktop notice, the live Activity items (the author's "replied to your
+// message", a mention item to each one mentioned) and the email, all to one
+// audience (chatThreadAudience). They were two lists: push to everyone in the
+// conversation on "all", Activity and email to the author and those
+// mentioned. When the audience can't be worked out, nobody is told. It takes
+// its time; run it on its own goroutine.
+func notifyChatThreadReply(currentTime time.Time, commentUUID string, commentBody string, userDgraph *dgraphStruct.DgraphUser, grpId string, mentions []*dgraphStruct.DgraphUser, chatDgraph *dgraphStruct.DgraphChat) {
+	if userDgraph == nil || chatDgraph == nil {
+		return
+	}
+	ctx := context.Background()
+	var mentioned []string
+	for _, m := range mentions {
+		if m != nil {
+			mentioned = append(mentioned, m.Uuid)
+		}
+	}
+	aud, err := chatThreadAudience(ctx, grpId, userDgraph.Uuid, chatDgraph, mentioned)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"business/sendNewChatCommentActivity Failed to get eligible users err: %+v",
+			"business/notifyChatThreadReply Failed to work out who hears of the reply, telling nobody err: %+v",
 			err)
 		return
 	}
-
-	if len(eligibleUserIDs) == 0 {
+	if len(aud.Told) == 0 {
 		return
 	}
+	plain := helpers.HTMLToPlainText(commentBody)
+	icon := userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 
-	// 2. Publish MQTT Activity Events
-	for _, recipientID := range eligibleUserIDs {
-		// Create a simplified activity item for MQTT
-		activityItem := &dgraphModels.UnifiedActivityItem{
-			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION, // In chats, it's either a mention or a new message (which we'll treat as a notification)
-			Time:         time.Now().UTC().Format(time.RFC3339Nano),
-			Comment: &dgraphStruct.DgraphComment{
-				Uuid: commentUUID,
-				Text: commentBody,
-				CommentBy: &dgraphStruct.DgraphUser{
-					Uuid:     userDgraph.Uuid,
-					UserName: userDgraph.DisplayName(),
-				},
-				Chat: &dgraphStruct.DgraphChat{
-					Uuid: chatDgraph.Uuid,
-				},
-				CreatedAt: &currentTime,
-			},
+	// The push, and the desktop app's notice, to those of them the push gate
+	// lets through (business/Notification Deliver). type_id is the
+	// conversation's grouping id, as for every chat notification.
+	deliverTo(ctx, aud.Told, map[string]string{
+		firebaseInit.FIREBASE_PUSH_DATA_TYPE:      firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_COMMENT,
+		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:   grpId,
+		firebaseInit.FIREBASE_PUSH_DATA_TITLE:     "Comment - " + userDgraph.DisplayName(),
+		firebaseInit.FIREBASE_PUSH_DATA_BODY:      plain,
+		firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID: chatDgraph.Uuid,
+		firebaseInit.FIREBASE_PUSH_DATA_USERNAME:  userDgraph.DisplayName(),
+		firebaseInit.FIREBASE_PUSH_DATA_ICON:      icon,
+	}, "chat_comment:"+chatDgraph.Uuid+":"+commentUUID)
+
+	// The live Activity items.
+	comment := func() *dgraphStruct.DgraphComment {
+		at := currentTime
+		return &dgraphStruct.DgraphComment{
+			Uuid:      commentUUID,
+			Text:      commentBody,
+			CommentBy: &dgraphStruct.DgraphUser{Uuid: userDgraph.Uuid, UserName: userDgraph.DisplayName()},
+			Chat:      &dgraphStruct.DgraphChat{Uuid: chatDgraph.Uuid},
+			CreatedAt: &at,
 		}
-		activityBusiness.PublishActivityToUser(recipientID, activityItem)
 	}
-
-	if userDgraph.Uuid != chatDgraph.From.Uuid {
-
-		activityItem := &dgraphModels.UnifiedActivityItem{
-			ActivityType: mqttStruct.MESSAGE_ACTIVITY_COMMENT, // In chats, it's either a mention or a new message (which we'll treat as a notification)
+	for _, id := range aud.Mentioned {
+		publishActivityTo(id, &dgraphModels.UnifiedActivityItem{
+			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
 			Time:         time.Now().UTC().Format(time.RFC3339Nano),
-			Comment: &dgraphStruct.DgraphComment{
-				Uuid: commentUUID,
-				Text: commentBody,
-				CommentBy: &dgraphStruct.DgraphUser{
-					Uuid:     userDgraph.Uuid,
-					UserName: userDgraph.DisplayName(),
-				},
-				Chat: &dgraphStruct.DgraphChat{
-					Uuid: chatDgraph.Uuid,
-				},
-				CreatedAt: &currentTime,
-			},
-		}
-		activityBusiness.PublishActivityToUser(userDgraph.Uuid, activityItem)
-
+			Comment:      comment(),
+		})
+	}
+	if aud.Author != "" {
+		publishActivityTo(aud.Author, &dgraphModels.UnifiedActivityItem{
+			ActivityType: mqttStruct.MESSAGE_ACTIVITY_COMMENT,
+			Time:         time.Now().UTC().Format(time.RFC3339Nano),
+			Comment:      comment(),
+		})
 	}
 
-	// Email fan-out for chat comment.
-	// Recipients: mentioned users + (if not self) the original chat author.
-	emailRecipients := append([]string{}, eligibleUserIDs...)
-	if chatDgraph.From != nil && chatDgraph.From.Uuid != "" && chatDgraph.From.Uuid != userDgraph.Uuid {
-		emailRecipients = append(emailRecipients, chatDgraph.From.Uuid)
-	}
-	notificationBusiness.DispatchChatComment(
-		userDgraph.Uuid,
-		userDgraph.DisplayName(),
-		userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey),
-		grpId,
-		chatDgraph.Uuid,
-		helpers.HTMLToPlainText(commentBody),
-		commentUUID,
-		emailRecipients,
-	)
-
+	// Email, by each one's own email settings (business/Notification).
+	emailChatComment(userDgraph.Uuid, userDgraph.DisplayName(), icon, grpId, chatDgraph.Uuid, plain, commentUUID, aud.Told)
 }
 
 func UpdateChatComment(ctx context.Context, commentUUID uuid.UUID, commentInfo *adapter.InputCreateOrUpdateCommentToChat, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, rawDgraphChat *dgraphStruct.DgraphChat, rawDgraphComment *dgraphStruct.DgraphComment) (err error) {
@@ -1911,11 +1932,13 @@ func sendNewChatCommentReactionNotification(title string, body string, commentDg
 
 	activityBusiness.PublishActivityToUser(commentDgraph.CommentBy.Uuid, activityItem)
 
-	var eligibleUserIDs []string
-
-	eligibleUserIDs = append(eligibleUserIDs, userDgraph.Uuid)
-
-	tokens, err := userFCMtokenBusiness.GetFCMTokenByListOfUserId(ctx, eligibleUserIDs)
+	// The push goes to the reply's author, as their setting for the
+	// conversation allows (reactionPushTo). It went to whoever reacted.
+	grpID := commentDgraph.ChatGroupingId
+	if grpID == "" && commentDgraph.Chat != nil && commentDgraph.Chat.DM != nil {
+		grpID = commentDgraph.Chat.DM.GroupingId
+	}
+	tokens, err := reactionPushTo(ctx, grpID, commentDgraph.CommentBy.Uuid, userDgraph.Uuid)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -2059,16 +2082,9 @@ func sendChatCallNotification(title string, body string, userId string, grpId st
 		return
 	}
 
-	// 2. Handle FCM Push Notifications
-	tokens, err := userFCMtokenBusiness.GetFCMTokenByListOfUserId(ctx, eligibleUserIDs)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/sendChatCallNotification Failed to get user's fcm token err: %+v",
-			err)
-		return
-	}
-
+	// 2. The push, and the desktop app's notice, to those of them the push
+	// gate lets through (business/Notification Deliver). Each call rings
+	// anew, so its notice is named by when it started.
 	pushData := make(map[string]string)
 
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT
@@ -2078,22 +2094,7 @@ func sendChatCallNotification(title string, body string, userId string, grpId st
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = username
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, profileKey)
 
-	batchSize := 500
-	for i := 0; i < len(tokens); i += batchSize {
-		end := i + batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
-		tokenBatch := tokens[i:end]
-
-		err = firebaseInit.FirebaseApp.MultiCastPush(ctx, pushData, tokenBatch)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/sendChatCallNotification Failed to send push notification err: %+v",
-				err)
-			return
-		}
-	}
+	notificationBusiness.Deliver(ctx, eligibleUserIDs, pushData, fmt.Sprintf("chat_call:%s:%d", grpId, time.Now().UnixMilli()))
 
 	// Email fan-out for incoming chat call.
 	notificationBusiness.DispatchChatCall(

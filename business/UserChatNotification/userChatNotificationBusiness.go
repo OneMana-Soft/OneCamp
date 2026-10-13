@@ -80,3 +80,9 @@ func GetEligibleUsersForChatActivity(ctx context.Context, grpId string, userId s
 	}
 	return
 }
+
+// GetLevelsInConversation is each of userIds' setting for the conversation
+// grpId, by lower-case user id, for those in it.
+func GetLevelsInConversation(ctx context.Context, grpId string, userIds []string) (map[string]string, error) {
+	return domain.GetLevelsInConversation(ctx, grpId, userIds)
+}

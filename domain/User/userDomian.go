@@ -576,6 +576,31 @@ func TakenHandles(ctx context.Context, base string) ([]string, error) {
 	return taken, rows.Err()
 }
 
+// GetActiveUserIDByHandle is the id of the active member whose handle
+// (users.username) is handle, compared without case and without a leading
+// "@", or uuid.Nil when nobody has it.
+func GetActiveUserIDByHandle(ctx context.Context, handle string) (uuid.UUID, error) {
+	handle = strings.TrimPrefix(strings.TrimSpace(handle), "@")
+	if handle == "" {
+		return uuid.Nil, nil
+	}
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	var id uuid.UUID
+	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+		SELECT id FROM users
+		WHERE LOWER(username) = LOWER($1) AND deleted_at IS NULL AND is_external = false
+		LIMIT 1`, handle).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return uuid.Nil, nil
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetActiveUserIDByHandle err: %+v", err)
+		return uuid.Nil, err
+	}
+	return id, nil
+}
+
 // GetHandle is a person's handle (users.username), or "" when they have none.
 func GetHandle(ctx context.Context, userID uuid.UUID) (string, error) {
 	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)

@@ -29,6 +29,10 @@ const (
 	memberTopicsReread = 2 * time.Second
 )
 
+// readPersonTopics reads a person's channels, conversations and projects
+// from the graph.
+var readPersonTopics = userDomain.GetDgraphUserInfoByUUIDForMQTTConfig
+
 type memberTopics struct {
 	since  time.Time // when the read began
 	list   []string  // in the order a client is handed them
@@ -37,17 +41,35 @@ type memberTopics struct {
 
 var (
 	memberTopicsCache = helpers.NewTTLCache[*memberTopics](memberTopicsFor)
+	// memberTopicsForgotten is when each person's topics were last forgotten
+	// (ForgetMemberTopics). A read that began before then may have seen a
+	// conversation they've been taken out of since, so it's never kept.
+	memberTopicsForgotten = helpers.NewTTLCache[time.Time](time.Minute)
 	// memberTopicsMu orders replacements, so a read that began earlier never
 	// replaces one that began later (and saw a channel joined in between).
 	memberTopicsMu   sync.Mutex
 	memberTopicReads singleflight.Group
 )
 
+// ForgetMemberTopics drops what's kept of a person's topics, so the broker's
+// next question about one is answered from a fresh read. Without it, someone
+// just removed from a channel could subscribe to it again for as long as the
+// kept topics last (memberTopicsFor).
+func ForgetMemberTopics(userUUID string) {
+	memberTopicsMu.Lock()
+	memberTopicsCache.Delete(userUUID)
+	memberTopicsForgotten.Set(userUUID, time.Now())
+	memberTopicsMu.Unlock()
+	// A read under way may have begun before the change; a question asked
+	// from now on doesn't wait for its answer.
+	memberTopicReads.Forget(userUUID)
+}
+
 // readMemberTopics reads a person's member topics from the graph and keeps
 // them.
 func readMemberTopics(ctx context.Context, userUUID string) (*memberTopics, error) {
 	since := time.Now()
-	user, err := userDomain.GetDgraphUserInfoByUUIDForMQTTConfig(ctx, userUUID)
+	user, err := readPersonTopics(ctx, userUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -80,8 +102,10 @@ func readMemberTopics(ctx context.Context, userUUID string) (*memberTopics, erro
 	}
 
 	memberTopicsMu.Lock()
-	if cur, ok := memberTopicsCache.Get(userUUID); !ok || !cur.since.After(since) {
-		memberTopicsCache.Set(userUUID, mt)
+	if forgot, ok := memberTopicsForgotten.Get(userUUID); !ok || since.After(forgot) {
+		if cur, ok := memberTopicsCache.Get(userUUID); !ok || !cur.since.After(since) {
+			memberTopicsCache.Set(userUUID, mt)
+		}
 	}
 	memberTopicsMu.Unlock()
 	return mt, nil

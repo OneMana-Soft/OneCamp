@@ -183,16 +183,14 @@ func CreateOrUpdateDgraphPostReaction(ctx context.Context, dgraphPost *dgraphStr
 	return
 }
 
-func GetDgraphOldPostFromDgraph(ctx context.Context, channelUUID string, lastPostTime time.Time) (dgraphPosts []*dgraphStruct.DgraphPost, err error) {
-
-	variables := make(map[string]string)
-	variables["$time"] = lastPostTime.Format(time.RFC3339Nano)
-	variables["$chId"] = channelUUID
-	variables["$first"] = strconv.Itoa(POST_COUNT + 1)
-	query := `query PostInfo($chId: string, $time: string, $first: int){
-				postInfo(func: eq(ch_uuid, $chId)) {
-
-					ch_posts @filter(lt(post_created_at, $time) AND not gt(post_deleted_at, "1970-01-01T00:00:00Z"))(first: $first, orderdesc: post_created_at) {
+// postPageFields is what each page of a channel's messages selects for every
+// message on it: the latest page, the older and newer pages, and the page
+// around a linked message. One list, so no page shows a message with less
+// than another does. Only the latest page selected forwards and reply quotes,
+// so beyond the newest ten messages a forward showed without what it
+// forwarded and a reply without its quote. A forward is read through
+// ForwardedPostFields and ForwardedChatFields, as every read of one is.
+const postPageFields = `
 						post_uuid
 						post_text
 						post_created_at
@@ -229,7 +227,33 @@ func GetDgraphOldPostFromDgraph(ctx context.Context, channelUUID string, lastPos
 								user_name
 							}
 						}
-					}
+						post_fwd_msg_post ` + dgraphStruct.ForwardedPostFields + `
+						post_fwd_msg_chat ` + dgraphStruct.ForwardedChatFields + `
+						post_reply_to @filter(not gt(post_deleted_at, "1970-01-01T00:00:00Z")) {
+							post_uuid
+							post_text
+							post_created_at
+							post_by {
+								user_uuid
+								user_name
+								user_full_name
+								user_profile_object_key
+								is_bot
+								user_status
+							}
+						}
+`
+
+func GetDgraphOldPostFromDgraph(ctx context.Context, channelUUID string, lastPostTime time.Time) (dgraphPosts []*dgraphStruct.DgraphPost, err error) {
+
+	variables := make(map[string]string)
+	variables["$time"] = lastPostTime.Format(time.RFC3339Nano)
+	variables["$chId"] = channelUUID
+	variables["$first"] = strconv.Itoa(POST_COUNT + 1)
+	query := `query PostInfo($chId: string, $time: string, $first: int){
+				postInfo(func: eq(ch_uuid, $chId)) {
+
+					ch_posts @filter(lt(post_created_at, $time) AND not gt(post_deleted_at, "1970-01-01T00:00:00Z"))(first: $first, orderdesc: post_created_at) {` + postPageFields + `}
 					
 				}
 			}`
@@ -256,44 +280,7 @@ func GetDgraphNewPostFromDgraph(ctx context.Context, channelUUID string, lastPos
 	query := `query PostInfo($chId: string, $time: string, $first: int){
 				postInfo(func: eq(ch_uuid, $chId)) {
 
-					ch_posts @filter(gt(post_created_at, $time) AND not gt(post_deleted_at, "1970-01-01T00:00:00Z"))(first: $first, orderasc: post_created_at) {
-						post_uuid
-						post_text
-						post_created_at
-						post_updated_at
-						post_comment_count : count(post_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						post_comments (orderdesc: comment_created_at, first: 1){
-							comment_created_at
-						}
-						post_by {
-							user_uuid
-							user_name
-							user_full_name
-							user_profile_object_key
-							is_bot
-							user_status
-						}
-						post_attachments {
-							attachment_uuid
-							attachment_file_name
-							attachment_obj_key
-							attachment_width
-							attachment_height
-							attachment_size
-							attachment_raw_type
-							attachment_type
-							attachment_duration
-							attachment_created_at
-						}
-						post_reactions {
-							uid
-							reaction_emoji_id
-							reaction_added_by {
-								user_uuid
-								user_name
-							}
-						}
-					}
+					ch_posts @filter(gt(post_created_at, $time) AND not gt(post_deleted_at, "1970-01-01T00:00:00Z"))(first: $first, orderasc: post_created_at) {` + postPageFields + `}
 					
 				}
 			}`
@@ -321,36 +308,7 @@ func GetDgraphNewPostIncludiongPostFromDgraph(ctx context.Context, channelUUID s
 	query := `query PostInfo($chId: string, $time: string, $first: int){
 				postInfo(func: eq(ch_uuid, $chId)) {
 
-					ch_posts @filter(ge(post_created_at, $time) AND not gt(post_deleted_at, "1970-01-01T00:00:00Z"))(first: $first, orderasc: post_created_at) {
-						post_uuid
-						post_text
-						post_created_at
-						post_updated_at
-						post_comment_count : count(post_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						post_comments (orderdesc: comment_created_at, first: 1){
-							comment_created_at
-						}
-						post_by {
-							user_uuid
-							user_name
-							user_full_name
-							user_profile_object_key
-							is_bot
-							user_status
-						}
-						post_attachments {
-							attachment_file_name
-							attachment_obj_key
-						}
-						post_reactions {
-							uid
-							reaction_emoji_id
-							reaction_added_by {
-								user_uuid
-								user_name
-							}
-						}
-					}
+					ch_posts @filter(ge(post_created_at, $time) AND not gt(post_deleted_at, "1970-01-01T00:00:00Z"))(first: $first, orderasc: post_created_at) {` + postPageFields + `}
 					
 				}
 			}`
@@ -404,6 +362,40 @@ func GetDgraphPostOnlyTextDgraph(ctx context.Context, postUUID string) (dgraphPo
 
 }
 
+// GetDgraphPostTextWithChannel is a post's text, author and times, with the
+// channel it is in (ch_uuid) and its deletion time, so a caller can hold the
+// post to the channel it was asked about: a post uuid alone says nothing about
+// who may read it.
+func GetDgraphPostTextWithChannel(ctx context.Context, postUUID string) (dgraphPost *dgraphStruct.DgraphPost, err error) {
+	variables := map[string]string{"$id": postUUID}
+	query := `query PostInfo($id: string){
+				postInfo(func: eq(post_uuid, $id)) {
+					post_uuid
+					post_text
+					post_created_at
+					post_updated_at
+					post_deleted_at
+					post_channel {
+						ch_uuid
+					}
+					post_by {
+						uid
+						user_uuid
+						user_name
+						user_full_name
+						user_profile_object_key
+						is_bot
+						user_status
+					}
+				}
+			}`
+	dgraphPost, err = dgraphModels.GetDgraphPostInfoByUUID(ctx, query, variables)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetDgraphPostTextWithChannel Failed to get post from dgraph err: %+v", err)
+	}
+	return
+}
+
 func GetDgraphLatestPostFromDgraph(ctx context.Context, channelUUID string) (dgraphPosts []*dgraphStruct.DgraphPost, err error) {
 
 	variables := make(map[string]string)
@@ -412,85 +404,7 @@ func GetDgraphLatestPostFromDgraph(ctx context.Context, channelUUID string) (dgr
 	query := `query PostInfo($chId: string, $first: int){
 					postInfo(func: eq(ch_uuid, $chId)) {
 
-					ch_posts @filter(not gt(post_deleted_at, "1970-01-01T00:00:00Z") ) (orderdesc: post_created_at, first: $first) {
-						post_uuid
-						post_text
-						post_created_at
-						post_updated_at
-						post_comment_count : count(post_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						post_by {
-							user_uuid
-							user_name
-							user_full_name
-							user_profile_object_key
-							is_bot
-							user_status
-						}
-						post_attachments {
-							attachment_uuid
-							attachment_file_name
-							attachment_obj_key
-							attachment_width
-							attachment_height
-							attachment_size
-							attachment_raw_type
-							attachment_type
-							attachment_duration
-							attachment_created_at
-						}
-						post_comments (orderdesc: comment_created_at, first: 1){
-							comment_created_at
-						}
-						post_reactions {
-							uid
-							reaction_emoji_id
-							reaction_added_by {
-								user_uuid
-								user_name
-							}
-						}
-						post_fwd_msg_post {
-							post_uuid
-							post_text
-							post_created_at
-							post_by {
-								user_uuid
-								user_name
-								user_full_name
-								user_profile_object_key
-								is_bot
-								user_status
-							}
-							post_channel {
-								ch_name
-								ch_uuid
-							}
-						}
-						post_fwd_msg_chat {
-							chat_from: {
-								user_uuid
-								user_name
-								user_profile_object_key
-								is_bot
-							}
-							chat_created_at
-							chat_body_text
-							chat_uuid
-						}
-						post_reply_to @filter(not gt(post_deleted_at, "1970-01-01T00:00:00Z")) {
-							post_uuid
-							post_text
-							post_created_at
-							post_by {
-								user_uuid
-								user_name
-								user_full_name
-								user_profile_object_key
-								is_bot
-								user_status
-							}
-						}
-					}
+					ch_posts @filter(not gt(post_deleted_at, "1970-01-01T00:00:00Z") ) (orderdesc: post_created_at, first: $first) {` + postPageFields + `}
 					
 				}
 			}`
@@ -508,13 +422,19 @@ func GetDgraphLatestPostFromDgraph(ctx context.Context, channelUUID string) (dgr
 	return
 }
 
+// GetUnDeletedDgraphPostChannelBasicInfo is a live post with its author and
+// channel, for a Slack import's replies, edits and deletes. The query named a
+// variable it never declared ($userId, for membership counts the import never
+// reads), so the graph refused it every time: every thread reply in an import
+// was skipped, and edits and deletes reached Postgres only. And it filtered
+// on comment_deleted_at, which a post doesn't have, so a deleted post passed.
 func GetUnDeletedDgraphPostChannelBasicInfo(ctx context.Context, postUUID string) (dgraphPost *dgraphStruct.DgraphPost, err error) {
 
 	variables := make(map[string]string)
 	variables["$id"] = postUUID
 
 	query := `query PostInfo($id: string){
-				postInfo(func: eq(post_uuid, $id)) @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")) {
+				postInfo(func: eq(post_uuid, $id)) @filter(not gt(post_deleted_at, "1970-01-01T00:00:00Z")) {
 					uid
 					post_uuid
 					post_created_at
@@ -528,8 +448,7 @@ func GetUnDeletedDgraphPostChannelBasicInfo(ctx context.Context, postUUID string
 					post_channel {
 						uid
 						ch_uuid
-						ch_is_member: count(ch_members @filter(uid($userId)))
-						ch_is_admin: count(ch_moderators @filter(uid($userId)))
+						ch_name
 					}
 				}
 			}`
@@ -555,12 +474,15 @@ func GetDgraphPostByUUIDWithAllComments(ctx context.Context, postUUID string, us
 	variables := make(map[string]string)
 	variables["$id"] = postUUID
 	variables["$userId"] = dgraphUIDOrNone(userDgraphUID)
+	// post_deleted_at: a deleted post keeps its text in the graph, so every
+	// reader of this one (a member's thread, a guest's) needs to know.
 	query := `query PostInfo($id: string, $userId: string){
 				postInfo(func: eq(post_uuid, $id)) {
 					uid
 					post_uuid
 					post_text
 					post_created_at
+					post_deleted_at
 					post_by {
 						uid
 						user_uuid
@@ -569,22 +491,8 @@ func GetDgraphPostByUUIDWithAllComments(ctx context.Context, postUUID string, us
 						user_profile_object_key
 						is_bot
 					}
-					post_fwd_msg_post {
-						post_uuid
-						post_text
-						post_created_at
-						post_by {
-							user_uuid
-							user_name
-							user_full_name
-							user_profile_object_key
-							is_bot
-						}
-						post_channel {
-							ch_name
-							ch_uuid
-						}
-					}
+					post_fwd_msg_post ` + dgraphStruct.ForwardedPostFields + `
+					post_fwd_msg_chat ` + dgraphStruct.ForwardedChatFields + `
 					post_reply_to @filter(not gt(post_deleted_at, "1970-01-01T00:00:00Z")) {
 						post_uuid
 						post_text
@@ -732,6 +640,7 @@ func GetDgraphPostByUUID(ctx context.Context, postUUID string, userDraphUid stri
 	variables := make(map[string]string)
 	variables["$id"] = postUUID
 	variables["$userId"] = dgraphUIDOrNone(userDraphUid)
+	// post_deleted_at: a deleted post takes no reply, reaction or edit.
 	query := `query PostInfo($id: string, $userId: string){
 				postInfo(func: eq(post_uuid, $id)) {
 					uid
@@ -739,6 +648,7 @@ func GetDgraphPostByUUID(ctx context.Context, postUUID string, userDraphUid stri
 					post_text
 					post_created_at
 					post_updated_at
+					post_deleted_at
 					post_by {
 						uid
 						user_uuid

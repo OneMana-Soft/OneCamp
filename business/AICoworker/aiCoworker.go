@@ -908,34 +908,11 @@ func sourceDeepLink(s aiAdapter.SourceRef, askerID string) string {
 	return ""
 }
 
-// chatDeepLink routes a chat source to the right conversation, mirroring the FE
-// `chatHref`: a group chat uses its 32-char grouping id (no space); a 1:1 DM
-// encodes both user uuids separated by a space, so it routes to the OTHER
-// participant relative to the asker. Returns "" when the target can't be built.
+// chatDeepLink routes a chat source to its message in the right conversation
+// for the asker (helpers.ChatPath, the one rule): a group by its grouping id,
+// a DM at the other person. "" when there is nothing to build it from.
 func chatDeepLink(s aiAdapter.SourceRef, askerID string) string {
-	grp := strings.TrimSpace(s.ChatGrpID)
-	if grp == "" {
-		return ""
-	}
-	if !strings.Contains(grp, " ") {
-		return "/app/chat/group/" + grp + "/" + s.ContentUUID
-	}
-	other := otherParticipant(grp, askerID)
-	if other == "" {
-		return ""
-	}
-	return "/app/chat/" + other + "/" + s.ContentUUID
-}
-
-// otherParticipant returns the first uuid in a DM grouping id ("uuidA uuidB")
-// that is not selfID, i.e. the conversation partner. "" if none.
-func otherParticipant(grp, selfID string) string {
-	for _, p := range strings.Fields(grp) {
-		if p != selfID {
-			return p
-		}
-	}
-	return ""
+	return helpers.ChatPath(s.ChatGrpID, askerID, s.ContentUUID)
 }
 
 // cleanQuestion strips a leading bot @mention/handle from the plain-text

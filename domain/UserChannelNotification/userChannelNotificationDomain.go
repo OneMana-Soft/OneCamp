@@ -102,3 +102,28 @@ func GetEligibleUsersForChannelActivity(ctx context.Context, channelId string, e
 	}
 	return
 }
+
+// GetLevelsInChannel is the notification setting for the channel of each of
+// the people (by user id) who are in it, keyed by lower-case user id. Someone
+// with no setting isn't in the channel: a member has one from joining
+// (business/Channel AddChannelMemberEdge) until they leave or are removed
+// (DeleteChannelMemberEdge), which is why this is how a notice knows who is
+// in a channel now.
+func GetLevelsInChannel(ctx context.Context, channelId string, userIds []string) (map[string]string, error) {
+	if len(userIds) == 0 {
+		return map[string]string{}, nil
+	}
+	query := `
+		SELECT lower(user_id::text), notification_type
+		FROM users_channel_notification
+		WHERE channel_id = $1 AND user_id = ANY($2)
+	`
+	levels, err := models.GetLevelsInChannel(query, channelId, userIds)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetLevelsInChannel Failed to get the members' settings for the channel err: %+v",
+			err)
+		return nil, err
+	}
+	return levels, nil
+}

@@ -740,6 +740,49 @@ func PublishToTopics(topics []string, msgType int8, data interface{}) {
 	}
 }
 
+// PublishConversationAccess tells each of people, on their own activity topic
+// and nobody else's, that a conversation became theirs (CONVERSATION_ADDED)
+// or stopped being theirs (CONVERSATION_DROPPED).
+//
+// A client is subscribed only to the topics its settings named when it
+// connected. A conversation started, joined or added to since isn't among
+// them, so nothing in it streamed until a reload; one left or removed from
+// stays among them. This is what makes an open app fetch its settings again
+// and subscribe, or let go, without reconnecting. Blank and repeated people
+// are skipped; best-effort, like every publish here.
+func PublishConversationAccess(kind, id, change string, people ...string) {
+	if id == "" {
+		return
+	}
+	PublishToTopics(activityTopics(people), mqttStruct.MESSAGE_CONVERSATION_ACCESS,
+		&mqttStruct.MqttConversationAccess{Kind: kind, Id: id, Change: change})
+}
+
+// PublishConversationMoved tells each of people that a conversation of theirs
+// has a new id, and which one it replaces: a group's id is its members' hash,
+// so adding someone to it gives it a new one, and every open app was on the
+// old id's topics (the person added on none). Each moves to the new id and
+// lets the old one go, without reconnecting.
+func PublishConversationMoved(kind, previousID, id string, people ...string) {
+	if id == "" || previousID == "" {
+		return
+	}
+	PublishToTopics(activityTopics(people), mqttStruct.MESSAGE_CONVERSATION_ACCESS,
+		&mqttStruct.MqttConversationAccess{Kind: kind, Id: id, Change: mqttStruct.CONVERSATION_ADDED, PreviousId: previousID})
+}
+
+// activityTopics is each person's activity topic, blanks left out.
+// PublishToTopics sends to a repeated one once.
+func activityTopics(people []string) []string {
+	topics := make([]string, 0, len(people))
+	for _, p := range people {
+		if p != "" {
+			topics = append(topics, helpers.GetMqttTopicForUserActivity(p))
+		}
+	}
+	return topics
+}
+
 func PublishGitHubSync(mqttGitHubSync *mqttStruct.MqttGitHubSync, projectId string) {
 	ctx := context.Background()
 

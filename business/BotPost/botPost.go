@@ -144,6 +144,10 @@ func PostCommentToPostAsBot(ctx context.Context, postUUID uuid.UUID, text string
 		}
 		return nil, err
 	}
+	// A deleted message takes no replies; it is as missing as one never written.
+	if helpers.IsSoftDeleted(postInfo.DeletedAt) {
+		return nil, fmt.Errorf("target post was deleted")
+	}
 
 	commentUUID := uuid.New()
 	now := helpers.CreateTimeOrNow(ctx)

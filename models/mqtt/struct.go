@@ -78,6 +78,36 @@ const (
 	// Someone in a DM or group chat has seen it up to a time (MqttChatSeen),
 	// sent to each other person there who'd see the read receipt.
 	MESSAGE_CHAT_SEEN
+	// 35 to 37 are the next release's, not on this line yet (a doc import or
+	// export's progress; a doc's change of name, place or access; a notice):
+	// kept free so the numbers here are the same as there.
+	_
+	_
+	_
+	// A conversation became the person's, or stopped being theirs
+	// (MqttConversationAccess): a DM or group chat started or joined, a
+	// channel made, joined or added to; removed from a channel, or left it.
+	// Sent on the person's own activity topic, the one topic a client holds
+	// from the start: an open app fetches its topics again and subscribes to
+	// the new conversation's, or lets the old one's go, without reconnecting.
+	MESSAGE_CONVERSATION_ACCESS
+	// The desktop app should raise a native notification (MqttDesktopNotice):
+	// sent on the recipient's own activity topic by business/Notification's
+	// Deliver, beside the push to their devices and decided the same way. The
+	// desktop app's webview has no web push, so this is the only way it hears
+	// of a message; a browser tab ignores it, having the push.
+	MESSAGE_DESKTOP_NOTICE
+)
+
+// What MESSAGE_CONVERSATION_ACCESS says: which kind of conversation, and
+// whether it was added or dropped.
+const (
+	CONVERSATION_KIND_CHANNEL = "channel"
+	CONVERSATION_KIND_DM      = "dm"
+	CONVERSATION_KIND_GROUP   = "group"
+
+	CONVERSATION_ADDED   = "added"
+	CONVERSATION_DROPPED = "dropped"
 )
 
 const (
@@ -227,6 +257,20 @@ type MqttChatSeen struct {
 	ChatGrpId string    `json:"chat_grp_id"`
 	UserUuid  string    `json:"user_uuid"`
 	SeenAt    time.Time `json:"seen_at"`
+}
+
+// MqttConversationAccess says a conversation became the person's it's sent
+// to, or stopped being theirs: Kind is a CONVERSATION_KIND_*, Id the
+// channel's uuid or the chat's grouping id, Change CONVERSATION_ADDED or
+// CONVERSATION_DROPPED.
+type MqttConversationAccess struct {
+	Kind   string `json:"kind"`
+	Id     string `json:"id"`
+	Change string `json:"change"`
+	// PreviousId is the id the conversation had until now, when that
+	// changed: a group's id is its members' hash, so adding someone gives it
+	// a new one. Open apps move from the old id to this one.
+	PreviousId string `json:"previous_id,omitempty"`
 }
 
 // MqttTaskField is a task's value of one of its project's custom fields,

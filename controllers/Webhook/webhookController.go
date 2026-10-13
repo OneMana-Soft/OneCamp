@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -568,6 +569,11 @@ func HandleIncomingWebhook(w http.ResponseWriter, r *http.Request) {
 func isWebhookValidationError(err error) bool {
 	if err == nil {
 		return false
+	}
+	// A scope the admin can't set it up for (no channel chosen, an archived one).
+	var scope business.ScopeError
+	if errors.As(err, &scope) {
+		return true
 	}
 	msg := err.Error()
 	validationPrefixes := []string{

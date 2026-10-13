@@ -52,9 +52,17 @@ func (r rawReq) GetRequest() (*http.Request, error) {
 // a cluster without the security or ISM plugin has nothing to tidy, and search
 // works the same either way.
 func ensureAuditLogRetention(ctx context.Context) {
+	// The client this started with, for both calls. It runs in the background
+	// and a fresh cluster can keep the first call waiting for seconds; an
+	// integration test's cleanup clears the global meanwhile, and the second
+	// call read a nil client and took the whole test binary down.
+	client := OpenSearchClient
+	if client == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	res, err := OpenSearchClient.Client.Do(ctx, rawReq{http.MethodPut, "/_plugins/_ism/policies/" + auditLogPolicy, auditLogPolicyBody}, nil)
+	res, err := client.Client.Do(ctx, rawReq{http.MethodPut, "/_plugins/_ism/policies/" + auditLogPolicy, auditLogPolicyBody}, nil)
 	if err != nil {
 		helpers.LogInfoWithContext(ctx, "opensearchInit: audit log retention not set: %v", err)
 		return
@@ -65,7 +73,7 @@ func ensureAuditLogRetention(ctx context.Context) {
 		return
 	}
 	// Indices already under the policy are reported and left as they are.
-	res, err = OpenSearchClient.Client.Do(ctx, rawReq{http.MethodPost, "/_plugins/_ism/add/" + auditLogPattern, `{"policy_id":"` + auditLogPolicy + `"}`}, nil)
+	res, err = client.Client.Do(ctx, rawReq{http.MethodPost, "/_plugins/_ism/add/" + auditLogPattern, `{"policy_id":"` + auditLogPolicy + `"}`}, nil)
 	if err != nil || res.IsError() {
 		helpers.LogInfoWithContext(ctx, "opensearchInit: older audit log indices not put under retention: %v", err)
 	}

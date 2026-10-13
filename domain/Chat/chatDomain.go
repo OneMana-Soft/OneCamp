@@ -54,7 +54,16 @@ func UpdateChatByUUID(ctx context.Context, chatUUID uuid.UUID) (err error) {
 	return
 }
 
-func BulkUpdateGrpIdInChatAndAtachment(ctx context.Context, oldGrpID string, newGrpID string) (err error) {
+// BulkUpdateGrpIdInChatAndAtachment moves a group conversation to the id its
+// new set of people gives it (helpers.GenerateGroupID), in one transaction:
+// its messages, attachments and read marks, and with them each person's
+// notification setting for it, and the messages queued to be sent to it
+// later. addedUserID is the person joining: they hear of everything, as
+// whoever joins a group does. The settings and the queued messages used to
+// stay under the old id, and who hears of a group is read from those
+// settings alone, so once anyone was added nobody heard of it again, and a
+// message queued for later failed when its time came.
+func BulkUpdateGrpIdInChatAndAtachment(ctx context.Context, oldGrpID string, newGrpID string, addedUserID string) (err error) {
 	updateChatsQuery := `
 		UPDATE chats
 		SET grp_id = $1
@@ -71,6 +80,31 @@ func BulkUpdateGrpIdInChatAndAtachment(ctx context.Context, oldGrpID string, new
 		UPDATE last_seen_chat
 		SET grp_id = $1
 		WHERE grp_id = $2
+	`
+
+	// Each setting goes across as it is; a row already under the new id
+	// (from before) is kept, and nothing is left under the old one.
+	moveSettingsQuery := `
+		INSERT INTO users_chat_notification (user_id, grp_id, notification_type, updated_at)
+		SELECT user_id, $1, notification_type, NOW() FROM users_chat_notification WHERE grp_id = $2
+		ON CONFLICT (user_id, grp_id) DO NOTHING
+	`
+	dropOldSettingsQuery := `
+		DELETE FROM users_chat_notification WHERE grp_id = $1
+	`
+	addedSettingQuery := `
+		INSERT INTO users_chat_notification (user_id, grp_id, notification_type, updated_at)
+		VALUES ($1, $2, 'all', NOW())
+		ON CONFLICT (user_id, grp_id) DO NOTHING
+	`
+	// A message queued for the group names it twice: as the place it goes
+	// and in the message itself.
+	moveQueuedQuery := `
+		UPDATE scheduled_jobs
+		SET payload = jsonb_set(jsonb_set(payload, '{target}', to_jsonb($1::text)), '{body,grp_id}', to_jsonb($1::text)),
+			updated_at = NOW()
+		WHERE job_type = 'scheduled_message' AND status = 'pending' AND deleted_at IS NULL
+			AND payload->>'kind' = 'group' AND payload->>'target' = $2
 	`
 
 	tx, err := postgresInit.DBConn.SqlDB.BeginTx(ctx, nil)
@@ -109,6 +143,23 @@ func BulkUpdateGrpIdInChatAndAtachment(ctx context.Context, oldGrpID string, new
 			"domain/BulkUpdateGrpIdInChatAndAtachment Failed to update last_seen_chat err: %+v",
 			err)
 		return
+	}
+
+	for _, step := range []struct {
+		what  string
+		query string
+		args  []any
+	}{
+		{"move the notification settings", moveSettingsQuery, []any{newGrpID, oldGrpID}},
+		{"drop the old id's settings", dropOldSettingsQuery, []any{oldGrpID}},
+		{"give the person added a setting", addedSettingQuery, []any{addedUserID, newGrpID}},
+		{"move the queued messages", moveQueuedQuery, []any{newGrpID, oldGrpID}},
+	} {
+		if _, err = tx.ExecContext(ctx, step.query, step.args...); err != nil {
+			helpers.LogErrorWithContext(ctx,
+				"domain/BulkUpdateGrpIdInChatAndAtachment Failed to %s err: %+v", step.what, err)
+			return
+		}
 	}
 
 	err = tx.Commit()
@@ -403,6 +454,9 @@ func GetDgraphChatByUUID(ctx context.Context, chatUUID string) (dgraphChat *dgra
 						attachment_file_name
 						attachment_obj_key
 					}
+					chat_dm {
+						dm_grouping_id
+					}
 					chat_uuid
 				}
 			}`
@@ -578,33 +632,8 @@ func GetDgraphOldChatFromDgraph(ctx context.Context, groupingId string, lastChat
 							attachment_duration
 							attachment_created_at
 						}
-						chat_fwd_msg_post {
-							post_uuid
-							post_text
-							post_created_at
-							post_by {
-								user_uuid
-								user_name
-								user_profile_object_key
-								is_bot
-							}
-							post_channel {
-								ch_name
-								ch_uuid
-							}
-						}
-						chat_fwd_msg_chat {
-							chat_uuid
-							chat_body_text
-							chat_created_at
-							chat_from {
-								user_uuid
-								user_name
-								user_full_name
-								user_profile_object_key
-								is_bot
-							}
-						}
+						chat_fwd_msg_post ` + dgraphStruct.ForwardedPostFields + `
+						chat_fwd_msg_chat ` + dgraphStruct.ForwardedChatFields + `
 						chat_reply_to @filter(not gt(chat_deleted_at, "1970-01-01T00:00:00Z")) {
 							chat_uuid
 							chat_body_text
@@ -686,33 +715,8 @@ func GetDgraphNewChatFromDgraph(ctx context.Context, groupingId string, lastChat
 							attachment_duration
 							attachment_created_at
 						}
-						chat_fwd_msg_post {
-							post_uuid
-							post_text
-							post_created_at
-							post_by {
-								user_uuid
-								user_name
-								user_profile_object_key
-								is_bot
-							}
-							post_channel {
-								ch_name
-								ch_uuid
-							}
-						}
-						chat_fwd_msg_chat {
-							chat_uuid
-							chat_body_text
-							chat_created_at
-							chat_from {
-								user_uuid
-								user_name
-								user_full_name
-								user_profile_object_key
-								is_bot
-							}
-						}
+						chat_fwd_msg_post ` + dgraphStruct.ForwardedPostFields + `
+						chat_fwd_msg_chat ` + dgraphStruct.ForwardedChatFields + `
 						chat_reply_to @filter(not gt(chat_deleted_at, "1970-01-01T00:00:00Z")) {
 							chat_uuid
 							chat_body_text
@@ -944,33 +948,8 @@ func GetDgraphNewChatIncludingChatFromDgraph(ctx context.Context, groupingId str
 							attachment_duration
 							attachment_created_at
 						}
-						chat_fwd_msg_post {
-							post_uuid
-							post_text
-							post_created_at
-							post_by {
-								user_uuid
-								user_name
-								user_profile_object_key
-								is_bot
-							}
-							post_channel {
-								ch_name
-								ch_uuid
-							}
-						}
-						chat_fwd_msg_chat {
-							chat_uuid
-							chat_body_text
-							chat_created_at
-							chat_from {
-								user_uuid
-								user_name
-								user_full_name
-								user_profile_object_key
-								is_bot
-							}
-						}
+						chat_fwd_msg_post ` + dgraphStruct.ForwardedPostFields + `
+						chat_fwd_msg_chat ` + dgraphStruct.ForwardedChatFields + `
 						chat_reply_to @filter(not gt(chat_deleted_at, "1970-01-01T00:00:00Z")) {
 							chat_uuid
 							chat_body_text
@@ -1050,33 +1029,8 @@ func GetDgraphLatestChatFromDgraph(ctx context.Context, groupingId string) (dgra
 							attachment_duration
 							attachment_created_at
 						}
-						chat_fwd_msg_post {
-							post_uuid
-							post_text
-							post_created_at
-							post_by {
-								user_uuid
-								user_name
-								user_profile_object_key
-								is_bot
-							}
-							post_channel {
-								ch_name
-								ch_uuid
-							}
-						}
-						chat_fwd_msg_chat {
-							chat_uuid
-							chat_body_text
-							chat_created_at
-							chat_from {
-								user_uuid
-								user_name
-								user_full_name
-								user_profile_object_key
-								is_bot
-							}
-						}
+						chat_fwd_msg_post ` + dgraphStruct.ForwardedPostFields + `
+						chat_fwd_msg_chat ` + dgraphStruct.ForwardedChatFields + `
 						chat_reply_to @filter(not gt(chat_deleted_at, "1970-01-01T00:00:00Z")) {
 							chat_uuid
 							chat_body_text
@@ -1172,6 +1126,7 @@ func GetDgraphChatByUUIDWithAllComments(ctx context.Context, chatUUID string) (d
 					chat_uuid
 					chat_body_text
 					chat_created_at
+					chat_deleted_at
 					chat_from {
 						user_uuid
 						user_name

@@ -188,3 +188,20 @@ func GetUnifiedActivity(w http.ResponseWriter, r *http.Request) {
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got unified activity successfully!", "data": unifiedPage})
 }
+
+// MarkActivitySeen is the Inbox opened: everything in the feed until now is
+// seen, and the badge counts from here. The Inbox calls it; reading the feed
+// marks nothing, or Home, which reads it, cleared the badge on every load.
+func MarkActivitySeen(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+
+	if err := business.MarkActivitySeen(ctx, userInfo.UserPostgresInfo.Id); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/MarkActivitySeen Failed to mark the feed seen err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't mark your Inbox read. Try again."})
+		return
+	}
+
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Marked your Inbox read."})
+}

@@ -123,3 +123,31 @@ func GetEligibleUsersForChannelActivity(query string, channelId string, excludeU
 
 	return
 }
+
+// GetLevelsInChannel runs query, which takes the channel's id and a list of
+// user ids and answers (user_id, notification_type) rows, into a map by user
+// id. Any error, a row's included, answers no map: a partial list would read
+// as fewer members.
+func GetLevelsInChannel(query string, channelID string, userIDs []string) (map[string]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query, channelID, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	levels := make(map[string]string, len(userIDs))
+	for rows.Next() {
+		var userID, level string
+		if err := rows.Scan(&userID, &level); err != nil {
+			return nil, err
+		}
+		levels[userID] = level
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return levels, nil
+}

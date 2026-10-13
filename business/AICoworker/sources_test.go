@@ -25,7 +25,9 @@ func TestSourceDeepLink(t *testing.T) {
 		{"comment on doc", aiAdapter.SourceRef{ContentType: "comment", DocUUID: "d1"}, "/app/doc/d1/comment"},
 		{"group chat", aiAdapter.SourceRef{ContentType: "chat", ChatGrpID: "grpidnospace", ContentUUID: "c1"}, "/app/chat/group/grpidnospace/c1"},
 		{"dm routes to other participant", aiAdapter.SourceRef{ContentType: "chat", ChatGrpID: asker + " " + peer, ContentUUID: "c1"}, "/app/chat/" + peer + "/c1"},
-		{"dm with only self yields nothing", aiAdapter.SourceRef{ContentType: "chat", ChatGrpID: asker + " " + asker, ContentUUID: "c1"}, ""},
+		// As the web app routes it (helpers.ChatPath): a DM with oneself is at oneself.
+		{"dm with only self opens at self", aiAdapter.SourceRef{ContentType: "chat", ChatGrpID: asker + " " + asker, ContentUUID: "c1"}, "/app/chat/" + asker + "/c1"},
+		{"chat without a grouping id yields nothing", aiAdapter.SourceRef{ContentType: "chat", ContentUUID: "c1"}, ""},
 		{"unknown type", aiAdapter.SourceRef{ContentType: "mystery"}, ""},
 	}
 	for _, tc := range cases {

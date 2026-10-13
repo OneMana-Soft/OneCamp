@@ -253,6 +253,9 @@ type GlobalSearchOpenSearchResp struct {
 	Team       *OpenSearchTeam       `json:"team,omitempty"`
 	Channel    *OpenSearchChannel    `json:"channel,omitempty"`
 	Highlight  map[string][]string   `json:"highlight,omitempty"`
+	// Sort is where the hit sorts (its score, then its time), for the cursor
+	// of the page after it. Kept here, never sent.
+	Sort []any `json:"-"`
 }
 
 const (

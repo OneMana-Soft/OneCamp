@@ -45,6 +45,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -342,6 +343,38 @@ func TestGuestLinks(t *testing.T) {
 		members, err := updateBusiness.List(ctx, project, 10, false)
 		if err != nil || len(members) != 1 || members[0].AuthorName != "mia.k" {
 			t.Errorf("members read the update as by %+v (%v), want mia.k", members, err)
+		}
+	})
+
+	// A deleted message keeps its text in the graph, and the thread's query
+	// never read the deletion time, so a link holder still read the message
+	// and its replies, and could still reply to it.
+	t.Run("a deleted message's thread is gone for a guest", func(t *testing.T) {
+		gone := uuid.New()
+		exec(`INSERT INTO posts (id, post_channel, created_by) VALUES ($1, $2, $3)`, gone, channel, people["bo"])
+		ids := dg.Mutate(t, map[string]any{"uid": uids["ch"], "ch_posts": []map[string]any{{"uid": "_:gone", "dgraph.type": "Post",
+			"post_uuid": gone.String(), "post_text": "<p>The discount code is LAUNCH50</p>", "post_deleted_at": zero,
+			"post_created_at": time.Now().Add(-time.Minute).Format(time.RFC3339),
+			"post_by":         map[string]any{"uid": uids["bo"]}, "post_channel": map[string]any{"uid": uids["ch"]},
+			"post_comments": []map[string]any{{"dgraph.type": "Comment", "comment_uuid": uuid.NewString(),
+				"comment_text": "<p>Thanks, applied</p>", "comment_deleted_at": zero, "comment_by": map[string]any{"uid": uids["ada"]}}}}}})
+		read := func() (int, string) {
+			rc := chi.NewRouteContext()
+			rc.URLParams.Add("token", channelRaw.Token)
+			rc.URLParams.Add("post_id", gone.String())
+			rec := httptest.NewRecorder()
+			guestController.GuestChannelThread(rec, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(context.WithValue(ctx, chi.RouteCtxKey, rc)))
+			return rec.Code, rec.Body.String()
+		}
+		if code, body := read(); code != http.StatusOK || !strings.Contains(body, "LAUNCH50") {
+			t.Fatalf("the thread before the delete: %d %s", code, body)
+		}
+		dg.Mutate(t, map[string]any{"uid": ids["gone"], "post_deleted_at": time.Now().Format(time.RFC3339)})
+		if code, body := read(); code != http.StatusNotFound || strings.Contains(body, "LAUNCH50") || strings.Contains(body, "applied") {
+			t.Errorf("the thread after the delete: %d %s, want 404", code, body)
+		}
+		if err := guestBusiness.PostAsGuest(ctx, channelLink, "Priya", "Is the code still valid?", gone.String()); !errors.Is(err, guestBusiness.ErrNotFound) {
+			t.Errorf("a guest's reply to the deleted message: %v, want ErrNotFound", err)
 		}
 	})
 

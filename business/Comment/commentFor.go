@@ -6,11 +6,11 @@ package business
 // the "Guests" principal through botpost, or a comment on a doc, kept apart
 // from members' comments (business/Guest). Neither path told anyone, so a
 // client's question sat unread until somebody happened to look. These reach the
-// people a member's words would reach, the same ways, under the guest's name.
+// people a member's words would reach, the same ways, under the guest's name:
+// a reply in a thread through NotifyThreadReply, as a member's.
 
 import (
 	"context"
-	"fmt"
 	"slices"
 
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
@@ -19,18 +19,6 @@ import (
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
-
-// NotifyPostCommentFor tells a thread's people about a reply a principal posted
-// for someone (a guest's, through botpost), as a member's reply tells them
-// (sendNewPostCommentNotification): the post's author and those who replied
-// before, by push and email, each as their channel setting allows. by is the
-// principal, named as whom it wrote for, so it is never told of its own words.
-func NotifyPostCommentFor(by *dgraphStruct.DgraphUser, post *dgraphStruct.DgraphPost, commentUUID, plainText string) {
-	if by == nil || post == nil || post.PostBy == nil || post.Channel == nil {
-		return
-	}
-	sendNewPostCommentNotification(fmt.Sprintf("Comment - %+v", by.DisplayName()), plainText, commentUUID, nil, post, by)
-}
 
 // NotifyDocCommentFor tells whoever made a doc, and those who can edit it,
 // about a comment someone left on it through a share link: a push to their
