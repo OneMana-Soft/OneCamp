@@ -111,6 +111,17 @@ func EnsureAutomationBot(ctx context.Context) (*BotIdentity, error) {
 	return id, nil
 }
 
+// ForgetAutomationBotForTest drops the bot identity this process resolved, so
+// a test against databases of its own resolves the bot there. The identity is
+// kept for the process, and in production the process has one set of
+// databases; a test binary has one per test, and a test after another that
+// resolved the bot posted as a user its databases didn't have.
+func ForgetAutomationBotForTest() {
+	botMu.Lock()
+	botIdentity = nil
+	botMu.Unlock()
+}
+
 // GetAutomationBot returns the cached bot identity, resolving it on demand if
 // the process hasn't seeded it yet. Returns nil only on a hard failure.
 func GetAutomationBot(ctx context.Context) *BotIdentity {

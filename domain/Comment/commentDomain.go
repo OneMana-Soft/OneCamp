@@ -404,6 +404,7 @@ func GetDgraphChatCommentInfoByUUID(ctx context.Context, commentUUID string, use
 	query := `query CommentInfo($id: string, $userId: string){
 				commentInfo(func: eq(comment_uuid, $id)) {
 					uid
+					comment_deleted_at
 					comment_by {
 						uid
 						 user_uuid
@@ -411,6 +412,7 @@ func GetDgraphChatCommentInfoByUUID(ctx context.Context, commentUUID string, use
 					comment_chat_grouping_id
 					comment_chat {
 						 chat_uuid
+						chat_deleted_at
 						chat_from {
 							uid
 							 user_uuid

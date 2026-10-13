@@ -122,15 +122,7 @@ func CreateRow(w http.ResponseWriter, r *http.Request) {
 }
 
 // ───────────────────────── tasks / projects / messages ─────────────────────────
-
-// runTool dispatches a public AI tool by name as the token owner, reusing the
-// exact permission-checked executors the in-app assistant uses. The scope gate
-// is applied by the route's RequireScope middleware. The response carries the
-// human-readable result plus any structured action metadata the executor
-// emitted (ids, names) so SDK callers can chain operations.
-func runTool(w http.ResponseWriter, r *http.Request, toolName string, params map[string]string) {
-	helpers.WriteJSON(w, http.StatusNotImplemented, helpers.Envolope{"msg": "AI features are not supported on this build"})
-}
+// (direct.go)
 
 // decodeParams reads a JSON object body into a string-keyed param map, coercing
 // scalar values the way the tool executors expect.
@@ -166,84 +158,4 @@ func decodeParams(r *http.Request) (map[string]string, error) {
 		}
 	}
 	return out, nil
-}
-
-// ListTasksV1 GET /v1/tasks — scope tasks:read. Lists the token owner's tasks.
-// Optional query params: status, filter (overdue), search.
-func ListTasksV1(w http.ResponseWriter, r *http.Request) {
-	params := map[string]string{}
-	if v := r.URL.Query().Get("status"); v != "" {
-		params["status"] = v
-	}
-	if v := r.URL.Query().Get("filter"); v != "" {
-		params["filter"] = v
-	}
-	if v := r.URL.Query().Get("search"); v != "" {
-		params["search"] = v
-	}
-	runTool(w, r, "list_tasks", params)
-}
-
-// CreateTaskV1 POST /v1/tasks — scope tasks:write. Body: task_name, project_uuid,
-// description, priority, assignee_uuid.
-func CreateTaskV1(w http.ResponseWriter, r *http.Request) {
-	params, err := decodeParams(r)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
-		return
-	}
-	runTool(w, r, "create_task", params)
-}
-
-// UpdateTaskStatusV1 POST /v1/tasks/{id}/status — scope tasks:write. Body: status.
-func UpdateTaskStatusV1(w http.ResponseWriter, r *http.Request) {
-	params, err := decodeParams(r)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
-		return
-	}
-	params["task_uuid"] = chi.URLParam(r, "id")
-	runTool(w, r, "update_task_status", params)
-}
-
-// ListProjectsV1 GET /v1/projects — scope projects:read.
-func ListProjectsV1(w http.ResponseWriter, r *http.Request) {
-	runTool(w, r, "list_projects", map[string]string{})
-}
-
-// SendMessageV1 POST /v1/messages/channel — scope messages:write. Body:
-// channel_uuid, text.
-func SendMessageV1(w http.ResponseWriter, r *http.Request) {
-	params, err := decodeParams(r)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
-		return
-	}
-	runTool(w, r, "send_message", params)
-}
-
-// SearchV1 GET/POST /v1/search — scope search:read. Cross-source recall across
-// the token owner's workspace, Memory, and connected apps. Query via ?q= or a
-// JSON body {"query": "..."}.
-func SearchV1(w http.ResponseWriter, r *http.Request) {
-	query := r.URL.Query().Get("q")
-	if query == "" {
-		params, err := decodeParams(r)
-		if err != nil {
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
-			return
-		}
-		query = params["query"]
-	}
-	runTool(w, r, "search_workspace", map[string]string{"query": query})
-}
-
-// SendDMV1 POST /v1/messages/dm — scope messages:write. Body: to_uuid, text.
-func SendDMV1(w http.ResponseWriter, r *http.Request) {
-	params, err := decodeParams(r)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
-		return
-	}
-	runTool(w, r, "send_dm", params)
 }

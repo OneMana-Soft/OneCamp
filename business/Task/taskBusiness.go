@@ -16,7 +16,6 @@ import (
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
-	userFCMtokenBusiness "github.com/akashc777/OneCamp/business/UserFCMToken"
 	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 
@@ -797,17 +796,11 @@ func sendNewTaskNotification(body string, projectId string, taskName string, men
 		activityBusiness.PublishActivityToUser(recipientID, activityItem)
 	}
 
-	// 3. Handle FCM Push Notifications
-	if assigneeDrgraph != nil {
+	// 3. The push, and the desktop app's notice, to those of them the push
+	// gate lets through (business/Notification Deliver), and to whoever it
+	// was given to, unless that is the person who made it.
+	if assigneeDrgraph != nil && assigneeDrgraph.Uuid != userDgraph.Uuid {
 		eligibleUserIDs = append(eligibleUserIDs, assigneeDrgraph.Uuid)
-	}
-	tokens, err := userFCMtokenBusiness.GetFCMTokenByListOfUserId(ctx, eligibleUserIDs)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/sendNewTaskNotification Failed to gets user's fcm token err: %+v",
-			err)
-		return
 	}
 
 	pushData := make(map[string]string)
@@ -819,23 +812,7 @@ func sendNewTaskNotification(body string, projectId string, taskName string, men
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 
-	// Send notifications in batches of 500 tokens
-	batchSize := 500
-	for i := 0; i < len(tokens); i += batchSize {
-		end := i + batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
-		tokenBatch := tokens[i:end]
-
-		err = firebaseInit.FirebaseApp.MultiCastPush(ctx, pushData, tokenBatch)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/sendNewTaskNotification Failed to send push notification err: %+v",
-				err)
-			return
-		}
-	}
+	notificationBusiness.Deliver(ctx, eligibleUserIDs, pushData, "task:"+taskUUID)
 
 	// Email fan-out for task creation:
 	//   1. Assignee gets a "you have been assigned" email.

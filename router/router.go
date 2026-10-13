@@ -1022,7 +1022,7 @@ func Routes() http.Handler {
 	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeMessagesWrite)).
 		Post("/messages/dm", v1Controller.SendDMV1)
 
-	// Search (read): cross-source recall across workspace + Memory + connected apps.
+	// Search (read): the workspace search the app's search box runs.
 	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeSearchRead)).
 		Get("/search", v1Controller.SearchV1)
 	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeSearchRead)).
@@ -1740,15 +1740,11 @@ func Routes() http.Handler {
 		r.Get("/comments", activityController.GetLatestComments)
 		r.Get("/reactions", activityController.GetLatestReactions)
 		r.Get("/unified", activityController.GetUnifiedActivity)
+		// The Inbox marks the feed seen by asking; reading it marks nothing.
+		r.Post("/seen", activityController.MarkActivitySeen)
 	})
 
 	globalSearchRouter.Group(func(r chi.Router) {
-		r.Post("/latestChatsAndComments", globalSearchController.GetLatestChatAndCommentsGlobalSearch)
-		r.Post("/latestChatsAndCommentsBefore", globalSearchController.GetLatestChatAndCommentsGlobalSearchBeforeTime)
-		r.Post("/latestPostsAndComments", globalSearchController.GetLatestPostAndCommentGlobalSearch)
-		r.Post("/latestPostsAndCommentsBefore", globalSearchController.GetLatestPostAndCommentGlobalSearchBeforeTime)
-		r.Post("/latestAttachments", globalSearchController.GetLatestAttachmentsGlobalSearch)
-		r.Post("/latestAttachmentsBefore", globalSearchController.GetLatestAttachmentsGlobalSearchBeforeTime)
 		r.Post("/unifiedSearch", globalSearchController.GetUnifiedGlobalSearch)
 		r.Get("/unifiedSearch/{search_text}", globalSearchController.GetUnifiedGlobalSearch)
 	})

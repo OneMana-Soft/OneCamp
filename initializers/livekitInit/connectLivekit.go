@@ -3,6 +3,7 @@ package livekitInit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -314,6 +315,12 @@ func (s *LiveKitServiceStruct) ListRooms(ctx context.Context, roomName string) (
 }
 
 func (s *LiveKitServiceStruct) ListAllRooms(ctx context.Context) (rooms []*livekit.Room, err error) {
+	// Calls not set up (no LiveKit): no rooms, said as an error the callers
+	// already handle, never a nil dereference that fails the whole request
+	// (the sidebar, and /v1/unread with it).
+	if s.LiveKitClient == nil {
+		return nil, errors.New("livekit isn't configured")
+	}
 	resp, err := s.LiveKitClient.ListRooms(ctx, &livekit.ListRoomsRequest{})
 
 	if err != nil {

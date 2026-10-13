@@ -8,6 +8,7 @@ import (
 	lastSeenActivityBusiness "github.com/akashc777/OneCamp/business/LastSeenActivity"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	domain "github.com/akashc777/OneCamp/domain/Activity"
+	lastSeenActivityDomain "github.com/akashc777/OneCamp/domain/LastSeenActivity"
 	lastSeenChannelDomain "github.com/akashc777/OneCamp/domain/LastSeenChannel"
 	lastSeenChatDomain "github.com/akashc777/OneCamp/domain/LastSeenChat"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -103,32 +104,16 @@ func GetReactionsByUserId(ctx context.Context, userDgraphId string, userUUID str
 	return
 }
 
+// GetUnifiedActivity is a page of the person's feed before beforeTime, newest
+// first, scored for triage. Reading it marks nothing seen: Home reads it too,
+// and opening the app cleared the Inbox badge, unseen replies and reactions
+// included. The Inbox marks the feed seen by asking (MarkActivitySeen).
 func GetUnifiedActivity(ctx context.Context, userUUID uuid.UUID, userDgraphId string, beforeTime time.Time, limit int) (dgraphActivities dgraphModels.UnifiedActivityPagination, err error) {
 
-	go lastSeenActivityBusiness.CreateOrUpdateLastSeenActivity(ctx, userUUID)
-
-	mentions, comments, reactions, err := domain.GetUnifiedActivity(ctx, userDgraphId, beforeTime, limit)
+	dgraphActivities, err = feedPage(ctx, userUUID, userDgraphId, beforeTime, limit)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetUnifiedActivity Failed to get activity data from domain err: %+v", err)
 		return
 	}
-
-	allActivities := mergeActivities(mentions, comments, reactions)
-
-	// Truncate to limit FIRST (ordering is purely by time, not priority, so
-	// truncation is independent of demotion). We then demote only the items
-	// that actually survive into the page — no wasted work on discarded rows.
-	if len(allActivities) > limit {
-		dgraphActivities.Activities = allActivities[:limit]
-		dgraphActivities.HasMore = true
-	} else {
-		dgraphActivities.Activities = allActivities
-		dgraphActivities.HasMore = false
-	}
-	// After the page is cut: whether there is more is what the graph said, so
-	// leaving an item out makes a page short, never the last. The person's
-	// graph uuid is their account id.
-	dgraphActivities.Activities = keepReadable(ctx, userUUID.String(), dgraphActivities.Activities, itemAbout)
 
 	// Demote items the user has ALREADY engaged with (opened the
 	// conversation since the mention/comment) so the Priority view reflects
@@ -153,6 +138,81 @@ func GetUnifiedActivity(ctx context.Context, userUUID uuid.UUID, userDgraphId st
 	}
 
 	return
+}
+
+// feedPage is a page of the person's feed before beforeTime, newest first:
+// the feed's query and its model's filters, cut to limit, then kept to what
+// they may read now (readable.go). The feed and the Inbox badge both count
+// from it, so the badge never counts what the feed won't show.
+func feedPage(ctx context.Context, userUUID uuid.UUID, userDgraphId string, beforeTime time.Time, limit int) (page dgraphModels.UnifiedActivityPagination, err error) {
+	mentions, comments, reactions, err := domain.GetUnifiedActivity(ctx, userDgraphId, beforeTime, limit)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/GetUnifiedActivity Failed to get activity data from domain err: %+v", err)
+		return
+	}
+
+	allActivities := mergeActivities(mentions, comments, reactions)
+
+	// Truncate to limit FIRST (ordering is purely by time, not priority, so
+	// truncation is independent of demotion). We then demote only the items
+	// that actually survive into the page — no wasted work on discarded rows.
+	if len(allActivities) > limit {
+		page.Activities = allActivities[:limit]
+		page.HasMore = true
+	} else {
+		page.Activities = allActivities
+		page.HasMore = false
+	}
+	// After the page is cut: whether there is more is what the graph said, so
+	// leaving an item out makes a page short, never the last. The person's
+	// graph uuid is their account id.
+	page.Activities = keepReadable(ctx, userUUID.String(), page.Activities, itemAbout)
+	return
+}
+
+// unreadActivityCap is where the Inbox badge stops counting: past 99 it reads
+// "99+".
+const unreadActivityCap = 100
+
+// UnreadActivityCount is the Inbox badge: how many items of the person's feed
+// are newer than when they last marked it seen, up to unreadActivityCap. It
+// counts the feed itself (feedPage), so whatever the feed leaves out (deleted
+// messages, channels and conversations they aren't in, docs and boards they
+// can't read, their own doings) the badge leaves out too. It counted the
+// stored mentions, comments and reactions with none of those filters, so a
+// mention in a private channel they weren't in, or in a message since
+// deleted, raised a badge over an Inbox with nothing new in it.
+func UnreadActivityCount(ctx context.Context, userUUID uuid.UUID, userDgraphId string) (uint64, error) {
+	// The stored count is an upper bound for three counts' cost: nothing
+	// stored since they looked is nothing in the feed, which is most reads.
+	upper, err := lastSeenActivityBusiness.GetTotalUnreadActivityCount(ctx, userDgraphId, userUUID)
+	if err != nil || upper == 0 {
+		return 0, err
+	}
+	lastSeen, err := lastSeenActivityDomain.GetLastSeenActivityByUserId(ctx, userUUID)
+	if err != nil {
+		return 0, err
+	}
+	// Each kind of item newer than the last look is among that kind's newest
+	// `upper`, so a page that long holds every one the feed would show.
+	page, err := feedPage(ctx, userUUID, userDgraphId, time.Now().Add(time.Minute), int(min(upper, unreadActivityCap)))
+	if err != nil {
+		return 0, err
+	}
+	var n uint64
+	for _, it := range page.Activities {
+		if at, perr := time.Parse(activityTimeLayout, it.Time); perr == nil && at.After(lastSeen) {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// MarkActivitySeen is the Inbox opened: everything in the feed until now is
+// seen, and the badge drops to what arrives next. Only the Inbox asks for it
+// (POST /activity/seen); reading the feed marks nothing.
+func MarkActivitySeen(ctx context.Context, userUUID uuid.UUID) error {
+	return lastSeenActivityBusiness.CreateOrUpdateLastSeenActivity(ctx, userUUID)
 }
 
 // activityTimeLayout is how an activity's time, and so the feed's beforeTime

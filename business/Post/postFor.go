@@ -42,13 +42,19 @@ func NotifyPostFor(bot *userBusiness.BotIdentity, name string, channel *dgraphSt
 }
 
 // NotifyReplyFor is NotifyPostFor for a reply in a thread: the post's author
-// and those who replied before hear of it, as they do of a member's reply.
-// bodyHTML is the reply as the activity list shows it, already safe to render.
+// and those who replied before hear of it, as they do of a member's reply
+// (commentBusiness.NotifyThreadReply). bodyHTML is the reply as the activity
+// list shows it, already safe to render.
 func NotifyReplyFor(bot *userBusiness.BotIdentity, name string, post *dgraphStruct.DgraphPost, commentUUID, bodyHTML, plainText string) {
 	if bot == nil || post == nil || post.PostBy == nil || post.Channel == nil {
 		return
 	}
-	by := principalFor(bot, name)
-	go commentBusiness.NotifyPostCommentFor(by, post, commentUUID, plainText)
-	go PublishPostCommentActivity(commentUUID, bodyHTML, post.Uuid, time.Now(), nil, post, by)
+	go commentBusiness.NotifyThreadReply(commentBusiness.ThreadReply{
+		By:          principalFor(bot, name),
+		Post:        post,
+		CommentUUID: commentUUID,
+		HTML:        bodyHTML,
+		PlainText:   plainText,
+		At:          time.Now(),
+	})
 }

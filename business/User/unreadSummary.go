@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	lastSeenActivityBusiness "github.com/akashc777/OneCamp/business/LastSeenActivity"
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/google/uuid"
 )
@@ -43,9 +43,10 @@ func GetUnreadSummary(ctx context.Context, userUUID uuid.UUID) (*UnreadSummary, 
 	if err != nil {
 		return nil, err
 	}
+	// The sidebar's own count of what's new in the Inbox, read once.
 	var activity uint64
 	if user != nil {
-		activity, _ = lastSeenActivityBusiness.GetTotalUnreadActivityCount(ctx, user.Uid, userUUID)
+		activity = user.TotalUnreadActivityCount
 	}
 	return buildUnreadSummary(user, userUUID.String(), activity), nil
 }
@@ -77,9 +78,10 @@ func buildUnreadSummary(user *dgraphStruct.DgraphUser, selfUUID string, activity
 	return s
 }
 
-// dmPlace names a conversation by the other people in it and links it the way
-// the sidebar does: a one-to-one DM by the other person's id, a group by its
-// grouping id.
+// dmPlace names a conversation by the other people in it and links it by the
+// one rule (helpers.ChatPath): a one-to-one DM by the other person's id, a
+// group by its grouping id. Which it is, its grouping id says: a DM's is both
+// people's ids with a space between them.
 func dmPlace(d *dgraphStruct.DgraphDm, selfUUID string) UnreadPlace {
 	var names, others []string
 	for _, p := range d.Participants {
@@ -95,12 +97,9 @@ func dmPlace(d *dgraphStruct.DgraphDm, selfUUID string) UnreadPlace {
 	if name == "" {
 		name = "Direct message"
 	}
-	if len(others) > 1 {
-		return UnreadPlace{Kind: "group", Name: name, Count: d.UnreadMessageCount, Path: "/app/chat/group/" + d.GroupingId}
+	kind := "dm"
+	if !strings.Contains(d.GroupingId, " ") {
+		kind = "group"
 	}
-	path := "/app/chat/"
-	if len(others) == 1 {
-		path += others[0]
-	}
-	return UnreadPlace{Kind: "dm", Name: name, Count: d.UnreadMessageCount, Path: path}
+	return UnreadPlace{Kind: kind, Name: name, Count: d.UnreadMessageCount, Path: helpers.ChatPath(d.GroupingId, selfUUID, "")}
 }

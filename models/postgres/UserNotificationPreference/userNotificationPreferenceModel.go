@@ -47,17 +47,43 @@ type UserNotificationPreference struct {
 	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
-const allColumns = `id, user_id, email_enabled, email_mentions, email_dms, email_task_assigned,
+var allColumns = `id, user_id, email_enabled, email_mentions, email_dms, email_task_assigned,
 		email_task_status, email_comments, email_calls, email_channel_invites,
 		email_only_when_offline, email_digest_frequency, quiet_hours_enabled,
 		quiet_hours_start, quiet_hours_end, quiet_hours_tz, unsubscribe_token,
 		created_at, updated_at, notifications_paused_until, read_receipts, ` + focusUntilColumn
 
+// FocusRunning is the one rule for being in focus time: a calendar event of
+// the person's own (alias, a calendar_events row; userCol, their id) marked
+// focus, not deleted, running now. The push gate (domain/UserFCMToken), the
+// row's focus_until, which email's hold reads (QuietUntil), and the status a
+// teammate is shown (business/Notification HeldFor) all read it, so none can
+// hold for focus time while another doesn't.
+func FocusRunning(alias, userCol string) string {
+	return alias + `.created_by = ` + userCol + ` AND ` + alias + `.is_focus AND ` + alias + `.deleted_at IS NULL
+		  AND ` + alias + `.start_time <= NOW() AND ` + alias + `.end_time > NOW()`
+}
+
 // focusUntilColumn is when the focus-time event the person is in now ends, or
 // NULL. Read with the row so every reader of a pause sees focus time too.
-const focusUntilColumn = `(SELECT max(fe.end_time) FROM calendar_events fe
-		WHERE fe.created_by = users_notification_preferences.user_id AND fe.is_focus AND fe.deleted_at IS NULL
-		  AND fe.start_time <= NOW() AND fe.end_time > NOW()) AS focus_until`
+var focusUntilColumn = `(SELECT max(fe.end_time) FROM calendar_events fe
+		WHERE ` + FocusRunning("fe", "users_notification_preferences.user_id") + `) AS focus_until`
+
+// FocusUntilOf is when the focus-time event userID is in now ends, or nil, for
+// a person who may have no preferences row: the push gate holds their focus
+// time all the same.
+func FocusUntilOf(userID uuid.UUID) (*time.Time, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	var until *time.Time
+	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx,
+		`SELECT max(fe.end_time) FROM calendar_events fe WHERE `+FocusRunning("fe", "$1"), userID).Scan(&until)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/UserNotificationPreference/FocusUntilOf err: %+v", err)
+		return nil, err
+	}
+	return until, nil
+}
 
 // rowScanner is a *sql.Row or *sql.Rows.
 type rowScanner interface{ Scan(dest ...any) error }

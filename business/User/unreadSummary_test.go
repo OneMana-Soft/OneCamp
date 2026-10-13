@@ -3,6 +3,7 @@ package business
 import (
 	"testing"
 
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
@@ -15,7 +16,8 @@ func TestBuildUnreadSummary(t *testing.T) {
 			{Uuid: "c3", Name: "launch", UnreadPostCount: 9},
 		},
 		DMs: []*dgraphStruct.DgraphDm{
-			{GroupingId: "g1", UnreadMessageCount: 4, Participants: []*dgraphStruct.DgraphUser{{Uuid: me, UserName: "Me"}, {Uuid: "maya", UserName: "Maya"}}},
+			// A DM's grouping id is both people's ids, a space between them.
+			{GroupingId: helpers.GetGroupingId(me, "maya"), UnreadMessageCount: 4, Participants: []*dgraphStruct.DgraphUser{{Uuid: me, UserName: "Me"}, {Uuid: "maya", UserName: "Maya"}}},
 			{GroupingId: "g2", UnreadMessageCount: 1, Participants: []*dgraphStruct.DgraphUser{{Uuid: me}, {Uuid: "a", UserName: "Ana"}, {Uuid: "b", UserName: "Bo"}}},
 		},
 	}

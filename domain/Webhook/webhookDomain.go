@@ -69,9 +69,15 @@ func SoftDeleteWebhook(ctx context.Context, id uuid.UUID, deletedAt time.Time) e
 	return logDomainError(ctx, "SoftDeleteWebhook", models.SoftDeleteWebhook(query, deletedAt, deletedAt, id))
 }
 
+// GetActiveOutgoingWebhooksByEvent is the outgoing webhooks an event is
+// offered to: the workspace's, and for an event in a channel or a project,
+// that channel's or project's own. What each is sent is the caller's to decide
+// (business/Webhook deliveryTo): a channel event used to be offered only to
+// webhooks set up for that channel, which nothing could set up, so channel and
+// task events reached no webhook at all (SA-BUG-10).
 func GetActiveOutgoingWebhooksByEvent(ctx context.Context, eventType string, scopeType string, scopeEntityId *uuid.UUID) ([]*models.Webhook, error) {
 	query := `
-		SELECT id, name, token, secret, target_url, metadata, scope_type, trigger_words
+		SELECT id, name, token, secret, target_url, metadata, scope_type, trigger_words, scope_entity_id
 		FROM webhooks
 		WHERE type = 'outgoing'
 		  AND is_active = true
@@ -82,7 +88,7 @@ func GetActiveOutgoingWebhooksByEvent(ctx context.Context, eventType string, sco
 	var args []interface{}
 	args = append(args, `"`+eventType+`"`)
 	if scopeType != "" && scopeType != "org" && scopeEntityId != nil {
-		query += ` AND scope_type = $2 AND scope_entity_id = $3`
+		query += ` AND (scope_type = 'org' OR (scope_type = $2 AND scope_entity_id = $3))`
 		args = append(args, scopeType, scopeEntityId)
 	} else {
 		query += ` AND scope_type = 'org'`

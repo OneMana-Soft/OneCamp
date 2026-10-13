@@ -20,8 +20,8 @@ import (
 	"unicode/utf8"
 
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
-	fcmDomain "github.com/akashc777/OneCamp/domain/UserFCMToken"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
@@ -39,6 +39,9 @@ var ItemTypes = map[string]bool{
 	"doc":     true,
 	"project": true,
 	"board":   true,
+	// A /remind that fired (SaveFired): it waits in Later, due the moment it
+	// fired, for whoever missed its toast and push.
+	"reminder": true,
 }
 
 const (
@@ -126,6 +129,39 @@ func Save(ctx context.Context, userID uuid.UUID, in SaveInput) (*model.SavedItem
 		return nil, err
 	}
 	schedule(ctx, item)
+	return item, nil
+}
+
+// SaveFired keeps a /remind that fired in the member's Later list: due now,
+// and already told of (the reminder sends its own toast and push), so it waits
+// at the top of Later and nothing more is sent for it. A toast reaches an open
+// tab and a push a phone; the desktop app, an install without Firebase and
+// anyone offline when it fired had neither, and the reminder was lost.
+// reminderID names the reminder, so one that repeats comes back to the top of
+// Later each time it fires rather than piling up.
+func SaveFired(ctx context.Context, userID uuid.UUID, reminderID, text string) (*model.SavedItem, error) {
+	now := time.Now()
+	in := SaveInput{ItemType: "reminder", ItemID: reminderID, Link: "/app/later", Title: text, RemindAt: &now}
+	if err := in.Validate(now); err != nil {
+		return nil, err
+	}
+	open, _, err := model.Counts(ctx, userID, now)
+	if err != nil {
+		return nil, err
+	}
+	if open >= maxOpenItems {
+		return nil, ErrTooMany
+	}
+	item, err := model.Save(ctx, &model.SavedItem{
+		UserID: userID, ItemType: in.ItemType, ItemID: in.ItemID,
+		Link: in.Link, Title: in.Title, Context: in.Context, RemindAt: in.RemindAt,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := model.MarkReminded(ctx, item.ID, *item.RemindAt); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/SavedItem SaveFired mark reminded err: %+v", err)
+	}
 	return item, nil
 }
 
@@ -238,32 +274,22 @@ func runReminder(ctx context.Context, job *jobModel.ScheduledJob) error {
 	mqttBusiness.PublishMessageToUser(item.UserID.String(), mqttStruct.MESSAGE_SAVED_ITEM_DUE, DueNotice{
 		ID: item.ID.String(), Title: title, Link: item.Link,
 	})
-	push(ctx, item.UserID.String(), title, item.Link)
+	push(ctx, item.UserID.String(), title, item.Link, "later:"+item.ID.String()+":"+item.RemindAt.UTC().Format(time.RFC3339))
 	return nil
 }
 
-// push wakes a closed or backgrounded app. Best effort: a member without push
-// still finds the item at the top of Later.
-func push(ctx context.Context, userID, title, link string) {
-	if firebaseInit.FirebaseApp.Messaging() == nil {
-		return
-	}
-	tokens, err := fcmDomain.GetFCMTokenByUserId(ctx, userID)
-	if err != nil || len(tokens) == 0 {
-		return
-	}
+// push wakes a closed or backgrounded app, and tells the desktop app, whose
+// webview has no push (business/Notification Deliver); the notice goes out
+// with push switched off too. noticeID names this reminder of this item. Best
+// effort: a member who hears nothing still finds the item at the top of Later.
+func push(ctx context.Context, userID, title, link, noticeID string) {
 	data := map[string]string{
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE:    firebaseInit.FIREBASE_PUSH_DATA_TYPE_LATER,
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID: link,
 		firebaseInit.FIREBASE_PUSH_DATA_TITLE:   "Saved for later",
 		firebaseInit.FIREBASE_PUSH_DATA_BODY:    title,
 	}
-	for i := 0; i < len(tokens); i += 500 {
-		end := min(i+500, len(tokens))
-		if err := firebaseInit.FirebaseApp.MultiCastPush(ctx, data, tokens[i:end]); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/SavedItem push err: %+v", err)
-		}
-	}
+	notificationBusiness.Deliver(ctx, []string{userID}, data, noticeID)
 }
 
 func oneLine(s string) string {

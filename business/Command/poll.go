@@ -9,6 +9,7 @@ import (
 
 	commandAdapter "github.com/akashc777/OneCamp/adapter/Command"
 	pollBusiness "github.com/akashc777/OneCamp/business/Poll"
+	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 )
@@ -31,42 +32,34 @@ func handlePoll(ctx context.Context, cc CommandContext) (*commandAdapter.Command
 	question := args[0]
 	options := args[1:]
 
-	// IN A CHANNEL THE POLL IS DURABLE. This card kept its votes in Redis for
-	// fifteen minutes (CommandInteraction's TTL), after which every vote was lost
-	// and the card answered "This poll has expired". A channel poll is now a
-	// stored poll (business/Poll): votes persist, results update for everyone
-	// live, and an agent can read them. Its message is posted by Create, so the
-	// command itself only confirms. DMs keep the card below.
-	if cc.ChannelID != nil {
-		user := cc.User
-		if _, err := pollBusiness.Create(ctx, &user, pollBusiness.NewPoll{
-			ChannelUUID: cc.ChannelID.String(), Question: question, Options: options,
-		}); err != nil {
-			var input pollBusiness.InputError
-			if errors.As(err, &input) || errors.Is(err, pollBusiness.ErrNoAccess) {
-				return errorResponse("%s", err.Error()), nil
-			}
-			return errorResponse("Couldn't post the poll. Please try again."), nil
+	// A POLL IS DURABLE, wherever it is asked. The card this used to answer
+	// with kept its votes in Redis for fifteen minutes (CommandInteraction's
+	// TTL), after which every vote was lost and the card answered "This poll
+	// has expired"; in a DM or a group chat only its author ever saw it
+	// (MC-BUG-3). A poll is a stored poll now (business/Poll): its message is
+	// posted where it was asked, votes persist, results update for everyone
+	// live, and an agent can read them. The command itself only confirms.
+	np := pollBusiness.NewPoll{Question: question, Options: options}
+	switch {
+	case cc.ChannelID != nil:
+		np.ChannelUUID = cc.ChannelID.String()
+	case cc.DmGroupID != nil && strings.TrimSpace(*cc.DmGroupID) != "":
+		np.GroupingID = *cc.DmGroupID
+	default:
+		return errorResponse("Run /poll in a channel, a DM or a group chat."), nil
+	}
+	user := cc.User
+	if _, err := pollBusiness.Create(ctx, &user, np); err != nil {
+		var input pollBusiness.InputError
+		if errors.As(err, &input) || errors.Is(err, pollBusiness.ErrNoAccess) {
+			return errorResponse("%s", err.Error()), nil
 		}
-		return ephemeral("Poll posted."), nil
+		if rj, ok := sendBusiness.AsRejection(err); ok {
+			return errorResponse("%s", rj.Msg), nil
+		}
+		return errorResponse("Couldn't post the poll. Please try again."), nil
 	}
-	if len(options) > 10 {
-		options = options[:10]
-	}
-
-	state := pollState{
-		Question: question,
-		Options:  options,
-		Votes:    map[string]int{},
-		Voters:   map[string]int{},
-	}
-	savePollState(ctx, cc.TriggerID, &state)
-
-	return &commandAdapter.CommandResponse{
-		ResponseType: "in_channel",
-		Blocks:       renderPollBlocks(&state),
-		TriggerID:    cc.TriggerID,
-	}, nil
+	return ephemeral("Poll posted."), nil
 }
 
 // handlePollInteract records a vote and re-renders the card in place. The vote
@@ -190,14 +183,6 @@ func progressBar(pct int) string {
 		filled = 10
 	}
 	return strings.Repeat("█", filled) + strings.Repeat("░", 10-filled)
-}
-
-func savePollState(ctx context.Context, triggerID string, s *pollState) {
-	// Store the struct directly (single JSON encoding) so this matches how
-	// UpdateJSONAtomic reads/writes the same key. A manual pre-marshal would
-	// double-encode the value, breaking the atomic vote path (vote silently
-	// lost, then the next load reports the poll as "expired").
-	_ = redisStore.SetJSON(ctx, registry.CommandInteraction, []string{triggerID}, s)
 }
 
 func loadPollState(ctx context.Context, triggerID string) (*pollState, bool) {

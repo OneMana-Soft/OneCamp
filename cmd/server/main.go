@@ -27,6 +27,8 @@ import (
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	slackBridgeBusiness "github.com/akashc777/OneCamp/business/SlackBridge"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	chatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
+	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	workflowBusiness "github.com/akashc777/OneCamp/business/Workflow"
 	authController "github.com/akashc777/OneCamp/controllers/Auth"
 	"github.com/akashc777/OneCamp/helpers"
@@ -202,6 +204,10 @@ func startBackgroundLoops(ctx context.Context) {
 	// Every start: an @handle for each member who has none (accounts from
 	// before handles), derived from their name.
 	userBusiness.StartHandleBackfill(ctx)
+	// Every start: the default notification setting for anyone in a direct or
+	// group conversation who has none (groups someone was added to, and
+	// direct conversations, before the fix), or they are never told of it.
+	chatNotificationBusiness.StartChatSettingsRepair(ctx)
 	githubBusiness.StartGitHubSyncWorker(business.SyncSignal, ctx)
 	githubBusiness.StartGitHubImportWorker(ctx)
 
@@ -237,6 +243,12 @@ func startBackgroundLoops(ctx context.Context) {
 	// Start the live Slack bridge. Inert until an admin connects Slack and
 	// links a channel.
 	slackBridgeBusiness.Start()
+
+	// Run this process's event listeners on the events an api-only replica
+	// hands over (business/Webhook's hand-off). LAST, after every listener
+	// above has registered: an event taken before one had would be
+	// acknowledged without it.
+	webhookBusiness.StartEventDrain(ctx)
 }
 
 // healthOnlyHandler is what a worker replica serves: the one route an
@@ -291,6 +303,13 @@ func main() {
 	// LogInfoWithContext, not MessageLogs: the logger is not initialised yet
 	// this early in main, and a nil dereference here is a crash loop at boot.
 	helpers.LogInfoWithContext(ctx, "Service role: %s (serves HTTP: %v, runs workers: %v)", role, role.ServesHTTP(), role.RunsWorkers())
+	// An api-only replica runs no event listener (they start with the loops),
+	// so the events its requests raise go to the workers, which run them
+	// (business/Webhook's hand-off). From the first moment, before anything
+	// can raise one.
+	if !role.RunsWorkers() {
+		webhookBusiness.HandEventsToWorkers()
+	}
 
 	// The SECOND place .env was loaded, and the second place a missing one killed
 	// the process. Fixing only initializers/env left this one, so the container

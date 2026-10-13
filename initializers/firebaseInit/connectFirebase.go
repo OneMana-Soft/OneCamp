@@ -126,6 +126,48 @@ func ObservePushesForTest(fn func(data map[string]string, tokens []string)) (res
 	return func() { pushObserver.Store(nil) }
 }
 
+// tokenIsDead says whether a send's error means the token itself is gone, so
+// it is deleted: UNREGISTERED (the app was removed, or the token expired),
+// SENDER_ID_MISMATCH (a token of another project), or an INVALID_ARGUMENT about
+// the registration token. Every token used to be deleted on any error, so an
+// FCM outage, or one message too big to send, unregistered every device it
+// was going to until each reopened the app (TN-BUG-14).
+func tokenIsDead(err error) bool {
+	if err == nil {
+		return false
+	}
+	if messaging.IsUnregistered(err) || messaging.IsSenderIDMismatch(err) {
+		return true
+	}
+	return messaging.IsInvalidArgument(err) && strings.Contains(strings.ToLower(err.Error()), "registration token")
+}
+
+// dropTokens deletes tokens FCM says are gone. A variable so a test can see
+// which it drops without a database.
+var dropTokens = userFCMtokenBusiness.DeleteFromListOfFCMToken
+
+// fcmDataMax is the data payload a push may carry: FCM refuses one over 4096
+// bytes, and this leaves room for its own encoding.
+const fcmDataMax = 3800
+
+// fitPushBody cuts the body to helpers.PushBodyMax, or to what the rest of the
+// data leaves under fcmDataMax if that is less. Message bodies went in whole,
+// so one long paste was refused for every device it went to (TN-BUG-14).
+// Idempotent: MultiCastPush runs once per batch of tokens on the same map.
+func fitPushBody(data map[string]string) {
+	body, ok := data[FIREBASE_PUSH_DATA_BODY]
+	if !ok {
+		return
+	}
+	room := fcmDataMax - len(FIREBASE_PUSH_DATA_BODY)
+	for k, v := range data {
+		if k != FIREBASE_PUSH_DATA_BODY {
+			room -= len(k) + len(v)
+		}
+	}
+	data[FIREBASE_PUSH_DATA_BODY] = helpers.CutPushBody(body, min(helpers.PushBodyMax, room))
+}
+
 func (f *firebaseAppStruct) MultiCastPush(ctx context.Context, pushData map[string]string, tokens []string) (err error) {
 	if observe := pushObserver.Load(); observe != nil {
 		(*observe)(maps.Clone(pushData), slices.Clone(tokens))
@@ -151,6 +193,7 @@ func (f *firebaseAppStruct) MultiCastPush(ctx context.Context, pushData map[stri
 	if pushData[FIREBASE_PUSH_DATA_ICON] == "" {
 		pushData[FIREBASE_PUSH_DATA_ICON] = "/icons/icon-circle-512.png"
 	}
+	fitPushBody(pushData)
 
 	message := &messaging.MulticastMessage{
 		Tokens: tokens,
@@ -177,14 +220,21 @@ func (f *firebaseAppStruct) MultiCastPush(ctx context.Context, pushData map[stri
 	}
 
 	removeTokenList := []string{}
+	var failed error
 	for ind, resp := range response.Responses {
-		if resp.Error != nil || messaging.IsUnregistered(resp.Error) || messaging.IsInvalidArgument(resp.Error) {
+		if tokenIsDead(resp.Error) {
 			removeTokenList = append(removeTokenList, tokens[ind])
+		} else if resp.Error != nil && failed == nil {
+			failed = resp.Error
 		}
+	}
+	if failed != nil {
+		// The send failed, not the device: the token stays for the next one.
+		helpers.LogErrorWithContext(ctx, "firebaseInit/MultiCastPush a send failed, tokens kept, first err: %+v", failed)
 	}
 
 	if len(removeTokenList) > 0 {
-		err = userFCMtokenBusiness.DeleteFromListOfFCMToken(ctx, removeTokenList)
+		err = dropTokens(ctx, removeTokenList)
 		if err != nil {
 			helpers.LogErrorWithContext(ctx,
 				"firebaseInit/UpdateChannelNotificationType failed delete fcm tokens err: %+v",

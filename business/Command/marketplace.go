@@ -25,6 +25,8 @@ package business
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"strings"
 
 	commandAdapter "github.com/akashc777/OneCamp/adapter/Command"
 	"github.com/akashc777/OneCamp/helpers"
@@ -446,6 +448,51 @@ func MarketplaceTemplates() []appTemplate {
 	return marketplaceTemplates
 }
 
+// dispatchesExternally is whether a template's commands are answered at an
+// address of the app's own (exec mode external): every directory app but the
+// built-ins.
+func dispatchesExternally(t appTemplate) bool {
+	for _, c := range t.Commands {
+		if c.ExecMode == slashModel.ExecExternal {
+			return true
+		}
+	}
+	return false
+}
+
+// handlerField is what an app answered at an address of its own needs before
+// it is set up: that address.
+var handlerField = commandAdapter.SetupField{Key: "handler_url", Label: "The address that answers its commands", Type: setupHandler, Required: true}
+
+// setupFor is what a template needs before it counts as set up: what it
+// declares, and, for an app whose commands go to an address of its own, the
+// address. Twenty of the directory's apps declared only a key or a sign-in:
+// they counted as set up once those were pasted, their commands entered every
+// member's "/" menu, and each answered "has no handler configured".
+func setupFor(t appTemplate) []commandAdapter.SetupField {
+	if !dispatchesExternally(t) {
+		return t.Setup
+	}
+	for _, f := range t.Setup {
+		if f.Type == setupHandler {
+			return t.Setup
+		}
+	}
+	return append(append([]commandAdapter.SetupField{}, t.Setup...), handlerField)
+}
+
+// handlerWorks is whether an app's handler address is one a command can be
+// sent to: an https address with a host, as the dispatcher sends to nothing
+// else. Where it leads is checked each time a command is sent
+// (helpers.ValidateOutboundURL), not here, which runs on every directory read.
+func handlerWorks(handlerURL *string) bool {
+	if handlerURL == nil {
+		return false
+	}
+	u, err := url.Parse(strings.TrimSpace(*handlerURL))
+	return err == nil && u.Scheme == "https" && u.Hostname() != ""
+}
+
 func getTemplate(slug string) (appTemplate, bool) {
 	for _, t := range marketplaceTemplates {
 		if t.Slug == slug {
@@ -478,7 +525,7 @@ func ListMarketplace(ctx context.Context) ([]commandAdapter.MarketplaceItem, err
 			Kind:        t.Kind,
 			Featured:    t.Featured,
 			SetupNote:   t.SetupNote,
-			Setup:       t.Setup,
+			Setup:       setupFor(t),
 			Commands:    make([]string, 0, len(t.Commands)),
 		}
 		for _, c := range t.Commands {
@@ -506,7 +553,7 @@ func ListMarketplace(ctx context.Context) ([]commandAdapter.MarketplaceItem, err
 // required credential/endpoint declared by its template. The decrypted secret
 // bag is passed in (loaded once by the caller) so this is allocation-free.
 func templateNeedsSetup(t appTemplate, app *slashModel.App, bag *appSecretBag) bool {
-	for _, f := range t.Setup {
+	for _, f := range setupFor(t) {
 		if !f.Required {
 			continue
 		}
@@ -516,7 +563,7 @@ func templateNeedsSetup(t appTemplate, app *slashModel.App, bag *appSecretBag) b
 				return true
 			}
 		case setupHandler:
-			if app.HandlerUrl == nil || *app.HandlerUrl == "" {
+			if !handlerWorks(app.HandlerUrl) {
 				return true
 			}
 		case setupOAuthCred:

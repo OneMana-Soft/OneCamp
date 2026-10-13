@@ -3,10 +3,12 @@ package business
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"time"
 
 	commandAdapter "github.com/akashc777/OneCamp/adapter/Command"
-	fcmDomain "github.com/akashc777/OneCamp/domain/UserFCMToken"
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	"github.com/akashc777/OneCamp/initializers/mqttInit"
@@ -76,33 +78,17 @@ func PublishEphemeralToUser(userUUID string, resp *commandAdapter.CommandRespons
 	}()
 }
 
-// pushReminder sends an FCM web-push so a backgrounded / closed PWA (mobile
-// especially) surfaces the reminder via the service worker. Best-effort: any
-// failure is logged and swallowed so the scheduler job still succeeds.
+// pushReminder tells the person a reminder is for that it came due: a push,
+// so a backgrounded or closed app shows it through the service worker, and the
+// desktop app's notice, whose webview has no push (business/Notification
+// Deliver). The notice goes out with push switched off too. Best-effort: the
+// scheduler job succeeds whatever happens here.
 func pushReminder(ctx context.Context, userUUID string, text string) {
-	if firebaseInit.FirebaseApp.Messaging() == nil {
-		return
-	}
-	tokens, err := fcmDomain.GetFCMTokenByUserId(ctx, userUUID)
-	if err != nil || len(tokens) == 0 {
-		return
-	}
-
 	pushData := map[string]string{
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE:    firebaseInit.FIREBASE_PUSH_DATA_TYPE_REMINDER,
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID: userUUID,
 		firebaseInit.FIREBASE_PUSH_DATA_TITLE:   "Reminder",
 		firebaseInit.FIREBASE_PUSH_DATA_BODY:    text,
 	}
-
-	const batchSize = 500
-	for i := 0; i < len(tokens); i += batchSize {
-		end := i + batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
-		if err := firebaseInit.FirebaseApp.MultiCastPush(ctx, pushData, tokens[i:end]); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/Command/pushReminder MultiCastPush err: %+v", err)
-		}
-	}
+	notificationBusiness.Deliver(ctx, []string{userUUID}, pushData, fmt.Sprintf("reminder:%s:%d", userUUID, time.Now().UnixMilli()))
 }

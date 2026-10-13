@@ -80,6 +80,10 @@ func CreateTeam(ctx context.Context, teamName string, userInfo *userModels.UserI
 		return
 	}
 
+	// The maker is a member now; their cached profile lists their teams,
+	// and search is scoped by it.
+	userDomain.InvalidateUserMemberships(ctx, userInfo.UserDgraphInfo.Uuid)
+
 	go domain.CreateTeamInOpenSearch(&openSearchStruct.OpenSearchTeam{
 		Uuid:          teamUUID.String(),
 		TeamName:      teamName,
@@ -137,7 +141,9 @@ func UpdateTeamName(ctx context.Context, teamName string, teamUUID uuid.UUID) (e
 	return
 }
 
-func AddMemberToTeam(ctx context.Context, teamUUID uuid.UUID, userDgraphUUID string) (err error) {
+// AddMemberToTeam adds someone (their graph uid, and their user uuid) to a
+// team.
+func AddMemberToTeam(ctx context.Context, teamUUID uuid.UUID, userDgraphUUID string, memberUUID string) (err error) {
 
 	dgraphTeam := dgraphStruct.DgraphTeam{
 		Uid:  "uid(team)",
@@ -157,11 +163,16 @@ func AddMemberToTeam(ctx context.Context, teamUUID uuid.UUID, userDgraphUUID str
 
 		return
 	}
+	// Their cached profile lists the teams they had, and search covers only
+	// what it lists.
+	userDomain.InvalidateUserMemberships(ctx, memberUUID)
 
 	return
 }
 
-func AddAdminMemberToTeam(ctx context.Context, teamUUID uuid.UUID, userDgraphUUID string) (err error) {
+// AddAdminMemberToTeam makes someone (their graph uid, and their user uuid)
+// an admin of a team, and so a member of it.
+func AddAdminMemberToTeam(ctx context.Context, teamUUID uuid.UUID, userDgraphUUID string, memberUUID string) (err error) {
 
 	dgraphTeam := dgraphStruct.DgraphTeam{
 		Uid:  "uid(team)",
@@ -181,6 +192,7 @@ func AddAdminMemberToTeam(ctx context.Context, teamUUID uuid.UUID, userDgraphUUI
 
 		return
 	}
+	userDomain.InvalidateUserMemberships(ctx, memberUUID)
 
 	return
 }

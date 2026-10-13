@@ -133,6 +133,11 @@ func ListCommandsForScopes(ctx context.Context, teamIDs []uuid.UUID, channelIDs 
 		WHERE sc.deleted_at IS NULL
 		  AND sc.is_enabled = true
 		  AND (a.id IS NULL OR a.is_enabled = true)
+		  -- A command answered at an app's address waits until there is one:
+		  -- a directory app installed without it put commands in every
+		  -- member's "/" menu that only said "has no handler configured".
+		  AND (sc.exec_mode <> 'external'
+		       OR COALESCE(NULLIF(sc.handler_url, ''), NULLIF(a.handler_url, '')) IS NOT NULL)
 		  AND (
 		        sc.scope_type = 'org'
 		     OR (sc.scope_type = 'team'    AND sc.scope_entity_id = ANY($1::uuid[]))

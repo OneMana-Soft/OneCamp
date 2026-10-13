@@ -96,6 +96,10 @@ func UpdateChat(ctx context.Context, query string, dgraphChat *dgraphStruct.Dgra
 	return
 }
 
+// ErrNotFound is a message that isn't in the graph: an answer about the
+// message, where any other error is the graph not answering.
+var ErrNotFound = errors.New("failed to get dgraph chats")
+
 func GetDgraphChatInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphChats *dgraphStruct.DgraphChat, err error) {
 	txn := dgraphInit.DgraphClient.NewTxn()
 
@@ -121,13 +125,15 @@ func GetDgraphChatInfoByUUID(ctx context.Context, query string, variables map[st
 	}
 
 	if len(chatsInfo.ChatInfo) == 0 {
-		err = errors.New("failed to get dgraph chats")
+		err = ErrNotFound
 		helpers.LogErrorWithContext(ctx,
 			"models/GetDgraphChatInfoByGroupingID failed to get dgraph post")
 
 		return
 	}
 	dgraphChats = &(chatsInfo.ChatInfo[0])
+	// A forwarded original deleted since shows as deleted, never its text.
+	dgraphChats.HideDeletedForwards()
 
 	return
 }
@@ -192,6 +198,10 @@ func GetDgraphDmsInfoByGrpId(ctx context.Context, query string, variables map[st
 		return
 	}
 	dgraphChats = dmsInfo.DmInfo[0].Chats
+	// A forwarded original deleted since shows as deleted, never its text.
+	for _, c := range dgraphChats {
+		c.HideDeletedForwards()
+	}
 
 	return
 }

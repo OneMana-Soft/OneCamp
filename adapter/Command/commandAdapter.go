@@ -13,6 +13,10 @@ type ExecuteCommandRequest struct {
 	ThreadTs  *string `json:"thread_ts,omitempty"`   // optional thread anchor
 	Timezone  string  `json:"timezone,omitempty"`    // IANA tz, for /remind time parsing
 	TriggerID string  `json:"trigger_id,omitempty"`  // client-generated correlation id
+	// Mentions are the people picked from the composer's list, by the name
+	// the text shows them as ("@Maya Chen"), lower-cased, to their user ids:
+	// the text alone loses which Maya was picked.
+	Mentions map[string]string `json:"mentions,omitempty"`
 }
 
 // InteractRequest is the body of POST /command/interact (a button/select click

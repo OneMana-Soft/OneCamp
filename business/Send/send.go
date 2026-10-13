@@ -123,6 +123,15 @@ func MayPostIn(channel *dgraphStruct.DgraphChannel) *Rejection {
 func (p *ChannelPost) Channel() *dgraphStruct.DgraphChannel { return p.channel }
 
 // Commit writes the post and marks the channel read up to it for the sender.
+// WithoutMentions is the post as the copy of a thread reply sent to the
+// channel too ("Also send to #channel"): it names nobody of its own. The reply
+// tells the people it mentions; the copy told them a second time, and listed
+// the mention twice in their Activity. Its text still shows them.
+func (p *ChannelPost) WithoutMentions() *ChannelPost {
+	p.mentions = nil
+	return p
+}
+
 func (p *ChannelPost) Commit(ctx context.Context) (*postAdapter.OutputCreatePostForPost, error) {
 	created, err := postBusiness.CreatePost(ctx, p.in, p.user, p.mentions, p.channel)
 	if err != nil {

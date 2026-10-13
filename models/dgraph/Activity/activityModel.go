@@ -23,6 +23,24 @@ type ReactionsActivity struct {
 	Comment *dgraphStruct.DgraphComment `json:"comment,omitempty"`
 }
 
+// mentionShown reports whether a mention, as the feed's queries read it, has
+// something the reader may see: a post or a chat that passed the queries'
+// filters (deleted, membership), or a comment whose own post, chat, task, doc
+// or board did. The queries return a comment's text whatever became of its
+// parent, so someone mentioned in a reply in a private channel, a group chat
+// or a project they aren't in found the reply's text in their feed. A doc's
+// or a board's is held back later (business/Activity keepReadable). Pure.
+func mentionShown(m *dgraphStruct.DgraphMentions) bool {
+	if m == nil {
+		return false
+	}
+	if m.Post != nil || m.Chat != nil {
+		return true
+	}
+	c := m.Comment
+	return c != nil && (c.Post != nil || c.Chat != nil || c.Task != nil || c.Doc != nil || c.Board != nil)
+}
+
 func GetComments(ctx context.Context, query string, variables map[string]string) (dgraphComment []*dgraphStruct.DgraphComment, actualLen int, err error) {
 	txn := dgraphInit.DgraphClient.NewTxn()
 
@@ -106,7 +124,7 @@ func GetMentions(ctx context.Context, query string, variables map[string]string)
 
 	// Filter out orphaned mentions where all parent content is nil (deleted/filtered/self-mention)
 	for _, m := range mentionInfo.MentionInfo[0].Mentions {
-		if m.Post == nil && m.Chat == nil && m.Comment == nil {
+		if !mentionShown(m) {
 			continue
 		}
 		dgraphMention = append(dgraphMention, m)
@@ -230,7 +248,7 @@ func GetUnifiedActivity(ctx context.Context, query string, variables map[string]
 	if len(unifiedResp.MentionInfo) > 0 {
 		// Filter out orphaned mentions where all parent content is nil
 		for _, m := range unifiedResp.MentionInfo[0].Mentions {
-			if m.Post == nil && m.Chat == nil && m.Comment == nil {
+			if !mentionShown(m) {
 				continue
 			}
 			mentions = append(mentions, m)

@@ -1,8 +1,11 @@
 package domain
 
+import prefModels "github.com/akashc777/OneCamp/models/postgres/UserNotificationPreference"
+
 // notPaused is the push gate every token lookup shares: a person who has
 // paused notifications, is inside their quiet hours, or is in one of their own
-// focus-time events (migration 184), gets no push. It sits
+// focus-time events (migration 184; prefModels.FocusRunning, the rule email
+// and the held status read too), gets no push. It sits
 // in the SQL so the ten places that send pushes need no change of their own.
 // userCol is the lookup's user id column (its tables use different aliases).
 //
@@ -29,7 +32,5 @@ func notPaused(userCol string) string {
 		  ))
 		AND NOT EXISTS (
 		  SELECT 1 FROM calendar_events fe
-		  WHERE fe.created_by = ` + userCol + `
-		    AND fe.is_focus AND fe.deleted_at IS NULL
-		    AND fe.start_time <= NOW() AND fe.end_time > NOW()) `
+		  WHERE ` + prefModels.FocusRunning("fe", userCol) + `) `
 }

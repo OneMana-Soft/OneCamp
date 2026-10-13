@@ -5,6 +5,7 @@ import (
 
 	domain "github.com/akashc777/OneCamp/domain/Channel"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
@@ -20,6 +21,18 @@ func CanRead(channel *dgraphStruct.DgraphChannel) bool {
 		return true
 	}
 	return channel.IsPrivate != nil && !*channel.IsPrivate
+}
+
+// PostReadableIn reports whether post may be shown to someone who asked for it
+// in channel, as read for them: they can read the channel (CanRead), the post
+// is in that channel, and it isn't deleted. A post's id alone says nothing
+// about who may read it, so a post is always held to the channel it is in:
+// read by its id under any channel the asker could read, a private channel's
+// posts, and deleted ones, were readable by anyone who had one of their ids.
+// post is read with its channel's uuid (post_channel) and its deletion time.
+func PostReadableIn(channel *dgraphStruct.DgraphChannel, post *dgraphStruct.DgraphPost) bool {
+	return CanRead(channel) && post != nil && post.Channel != nil &&
+		post.Channel.Uuid == channel.Uuid && !helpers.IsSoftDeleted(post.DeletedAt)
 }
 
 // ReadableBy reports whether the person with userUUID can read the channel's

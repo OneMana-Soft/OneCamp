@@ -2666,6 +2666,13 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 		}
 
 		userDgraphPost = channelDgraph.Posts[0]
+		// A forward shows the message it carries, so a deleted one isn't
+		// forwarded back into view: its text stays in the graph after the
+		// delete. 404, as for a reply or a reaction to a deleted message.
+		if helpers.IsSoftDeleted(userDgraphPost.DeletedAt) {
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted, so it can't be forwarded."})
+			return
+		}
 	}
 
 	if userFwdMsgRawInfo.ChatUuid != "" {
@@ -2689,6 +2696,11 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 				"msg": "Not authorised to forward this message",
 			})
+			return
+		}
+		// A deleted message isn't forwarded back into view.
+		if helpers.IsSoftDeleted(userDgraphChat.DeletedAt) {
+			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted, so it can't be forwarded."})
 			return
 		}
 	}

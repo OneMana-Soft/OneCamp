@@ -932,6 +932,9 @@ services:
   # workers add capacity on top; that is fine. Set SERVICE_ROLE=api in .env to
   # take the loops off the API process entirely, and then the workers are the
   # ONLY thing draining the queues: make sure at least one is up.
+  # The events the API's requests raise (a workflow, the Slack bridge) then
+  # reach the workers through Redis, and the "event-listeners" system check in
+  # Admin goes red within thirty seconds if no worker is taking them.
   #
   # Workflow rules an admin saves reach every worker within thirty seconds;
   # nothing needs a restart for that. See helpers.ServiceRole in the backend

@@ -115,13 +115,11 @@ MarketplaceTemplates
 NewHTTPRunner
 NoopLimiter
 ParseScopes
-ParticipatesInGrouping
 PostChatCommentAsBot
 PostToChannelAs
 PurgeOldTerminal
 # Edition-only, not debt: filters tasks by a named status for the AI's task tools and /v1,
 # which this edition leaves out. Kept so business/TaskStatus stays the same in both editions.
-QueryClause
 QueryOwnedOpenItems
 QueryScopeOpenItems
 ReadJSON
