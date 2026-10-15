@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/akashc777/OneCamp/helpers"
 	"strings"
 	"testing"
 
@@ -28,21 +29,21 @@ func TestRemoteProtocolDefaultsToAGUIAndRefusesTheUnknown(t *testing.T) {
 func TestSavingAnA2AAgentReadsItsCard(t *testing.T) {
 	old := fetchA2ACardFn
 	t.Cleanup(func() { fetchA2ACardFn = old })
-	fetchA2ACardFn = func(_ context.Context, given, header, secret string) (*ai.A2ACard, error) {
+	fetchA2ACardFn = func(_ context.Context, given, header, secret string, _ helpers.EndpointPolicy) (*ai.A2ACard, error) {
 		if given == "https://bad.example" {
 			return nil, errors.New("a2a: could not read the agent card: a2a: https://bad.example/.well-known/agent-card.json answered 404")
 		}
 		return &ai.A2ACard{Name: "Notes", Endpoint: "https://a.example/rpc", ProtocolVersion: "1.0"}, nil
 	}
-	raw, err := resolveRemoteCard(context.Background(), model.RemoteA2A, "https://a.example", "", "s")
+	raw, err := resolveRemoteCard(context.Background(), model.RemoteA2A, "https://a.example", "", "s", true)
 	var card ai.A2ACard
 	if err != nil || json.Unmarshal(raw, &card) != nil || card.Endpoint != "https://a.example/rpc" {
 		t.Fatalf("card not stored: %s %v", raw, err)
 	}
-	if _, err := resolveRemoteCard(context.Background(), model.RemoteA2A, "https://bad.example", "", "s"); err == nil || !strings.Contains(err.Error(), "404") {
+	if _, err := resolveRemoteCard(context.Background(), model.RemoteA2A, "https://bad.example", "", "s", true); err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("a bad address must fail with the reason: %v", err)
 	}
-	if raw, err := resolveRemoteCard(context.Background(), model.RemoteAGUI, "https://x", "", ""); raw != nil || err != nil {
+	if raw, err := resolveRemoteCard(context.Background(), model.RemoteAGUI, "https://x", "", "", true); raw != nil || err != nil {
 		t.Fatal("AG-UI agents have no card")
 	}
 }
@@ -50,12 +51,12 @@ func TestSavingAnA2AAgentReadsItsCard(t *testing.T) {
 func TestAnA2AAgentRunsOnTheEndpointItsCardNamed(t *testing.T) {
 	card, _ := json.Marshal(ai.A2ACard{Name: "Notes", Endpoint: "https://a.example/rpc", ProtocolVersion: "0.3.0"})
 	a := &model.AiAgent{Id: uuid.New(), AGUIEndpoint: "https://a.example", RemoteProtocol: model.RemoteA2A, RemoteCard: card}
-	p, err := remoteProvider(a, "run")
+	p, err := remoteProvider(context.Background(), a, "run")
 	if err != nil || p.Label() != "a2a:a.example" || remoteLabel(a) != "a2a:a.example" {
 		t.Fatalf("got %v %v", p, err)
 	}
 	a.RemoteCard = nil
-	if _, err := remoteProvider(a, "run"); err == nil || !strings.Contains(err.Error(), "save it again") {
+	if _, err := remoteProvider(context.Background(), a, "run"); err == nil || !strings.Contains(err.Error(), "save it again") {
 		t.Fatalf("an agent without its card must say how to fix it: %v", err)
 	}
 }

@@ -1961,10 +1961,10 @@ func GetUserRecordingsList(ctx context.Context, userDgraphUID string, startDate 
 	query := `query UserRecordings($user_uid: string, $startDate: string, $endDate: string, $first: int, $offset: int){
 				var(func: uid($user_uid)) {
 					~ch_members {
-						ch_recs as ch_recording @filter(ge(recording_stared_at, $startDate) AND le(recording_stared_at, $endDate) AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z") AND NOT eq(recording_transcript_only, true))
+						ch_recs as ch_recording @filter(ge(recording_stared_at, $startDate) AND le(recording_stared_at, $endDate) AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z") AND (NOT eq(recording_transcript_only, true) OR gt(recording_ended_at, "1970-01-01T00:00:00Z")))
 					}
 					~dm_participants {
-						dm_recs as dm_recording @filter(ge(recording_stared_at, $startDate) AND le(recording_stared_at, $endDate) AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z") AND NOT eq(recording_transcript_only, true))
+						dm_recs as dm_recording @filter(ge(recording_stared_at, $startDate) AND le(recording_stared_at, $endDate) AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z") AND (NOT eq(recording_transcript_only, true) OR gt(recording_ended_at, "1970-01-01T00:00:00Z")))
 					}
 				}
 				recordingInfo(func: uid(ch_recs, dm_recs), orderdesc: recording_stared_at, first: $first, offset: $offset) {
@@ -1980,6 +1980,8 @@ func GetUserRecordingsList(ctx context.Context, userDgraphUID string, startDate 
 					recording_duration
 					recording_obj_key
 					recording_size
+					recording_transcript_only
+					recording_status
 					recording_channel {
 						ch_uuid
 						ch_name
@@ -2820,3 +2822,14 @@ func SearchPeople(ctx context.Context, needle string, limit int) (dgraphUsers []
 // peopleSearchMaxResults bounds what a single lookup returns. A directory is not
 // something an agent should be able to page through one tool call at a time.
 const peopleSearchMaxResults = 15
+
+// IsActiveAdmin reports whether the account id is active and a workspace admin
+// now. No id, a deleted account or a failed lookup is false, so a rule that
+// grants admins more fails closed.
+func IsActiveAdmin(ctx context.Context, id *uuid.UUID) bool {
+	if id == nil || *id == uuid.Nil {
+		return false
+	}
+	u, err := GetActiveUserWithAdminFlagByUserUUID(ctx, *id)
+	return err == nil && u != nil && u.Id == *id && u.IsAdmin
+}

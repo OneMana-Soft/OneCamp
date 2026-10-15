@@ -65,18 +65,37 @@ func handleRoutineTool(ctx context.Context, agent *model.AiAgent, a ai.ProposedA
 // surface. It normalizes the request (routineSpec) so a bad cadence or blank
 // prompt yields an actionable error the model relays, never a broken row.
 func handleCreateRoutine(ctx context.Context, agent *model.AiAgent, sc agentRunScope, a ai.ProposedAction, rec *toolCallRecord) {
+	routine, ok := mayCreateRoutine(ctx, agent, sc, a, rec)
+	if !ok {
+		return
+	}
+	id, cerr := model.CreateRoutine(ctx, routine)
+	if cerr != nil {
+		rec.Error = "could not create the routine: " + cerr.Error()
+		return
+	}
+	rec.Result = fmt.Sprintf("Routine %q created (id %s) — runs %s. Say \"list routines\" to see it or \"cancel routine %s\" to stop it.",
+		routine.Name, id, describeCadence(routine.Recurrence, routine.AtMinuteUTC), id)
+}
+
+// mayCreateRoutine decides a create_routine call in a run that has a
+// conversation, and sets nothing up: the routine to create, or false with the
+// reason on rec. The reason may be a question to put to the person who asked
+// first (rec.Confirm), which the run asks before any of its turn runs
+// (pauseFirst).
+func mayCreateRoutine(ctx context.Context, agent *model.AiAgent, sc agentRunScope, a ai.ProposedAction, rec *toolCallRecord) (*model.AgentRoutine, bool) {
 	// Routines post their result to a channel, so they can only be set up in a
 	// channel (not a 1:1/group DM) for now. Fail clearly rather than create a
 	// routine that would have nowhere to post.
 	if sc.ChannelID == "" {
 		rec.Error = "I can set up routines in a channel (add me to one and ask there) — not in a direct message yet"
-		return
+		return nil, false
 	}
 	// A routine keeps running after this run, so like remember it needs the
 	// person who asked to have asked for it (agentMemoryScope.go).
 	if !humanAskedForRoutine(ctx) {
 		rec.Skipped = "not setting that up: nobody in this conversation asked me to do something on a schedule"
-		return
+		return nil, false
 	}
 
 	norm, err := NormalizeRoutineInput(RoutineInput{
@@ -87,20 +106,20 @@ func handleCreateRoutine(ctx context.Context, agent *model.AiAgent, sc agentRunS
 	})
 	if err != nil {
 		rec.Error = err.Error()
-		return
+		return nil, false
 	}
 
 	createdBy, cerr := routineCreator(ctx, agent)
 	if cerr != nil {
 		rec.Error = cerr.Error()
-		return
+		return nil, false
 	}
 	// What it will do each time is the asker's instruction, not a line of
 	// someone else's they pointed at: their own words, or put to them first.
 	if !fromAskerWords(ctx, norm.Prompt) {
 		askToKeep(ctx, rec, fmt.Sprintf("Shall I set up %q, %s: %s?", norm.Name, describeCadence(norm.Recurrence, norm.AtMinuteUTC), norm.Prompt),
 			"not setting that up")
-		return
+		return nil, false
 	}
 
 	routine := &model.AgentRoutine{
@@ -117,18 +136,11 @@ func handleCreateRoutine(ctx context.Context, agent *model.AiAgent, sc agentRunS
 		id, perr := uuid.Parse(sc.ChannelID)
 		if perr != nil {
 			rec.Error = "could not resolve this channel for the routine"
-			return
+			return nil, false
 		}
 		routine.ChannelId = &id
 	}
-
-	id, cerr := model.CreateRoutine(ctx, routine)
-	if cerr != nil {
-		rec.Error = "could not create the routine: " + cerr.Error()
-		return
-	}
-	rec.Result = fmt.Sprintf("Routine %q created (id %s) — runs %s. Say \"list routines\" to see it or \"cancel routine %s\" to stop it.",
-		norm.Name, id, describeCadence(norm.Recurrence, norm.AtMinuteUTC), id)
+	return routine, true
 }
 
 // routineCreator is who a new routine is recorded as created by: the person

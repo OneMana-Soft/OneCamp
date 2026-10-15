@@ -16,11 +16,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	userDomain "github.com/akashc777/OneCamp/domain/User"
+	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/AIMCP"
 	ai "github.com/akashc777/OneCamp/services/AI"
 )
@@ -103,7 +104,10 @@ var ErrAuthSecretUnreadable = errors.New(
 // configured to require one is not a degraded call — it is an unauthenticated call to an external
 // endpoint that is about to receive workspace data. If the remote refuses it, the error names the
 // wrong cause; if the remote does not refuse it, the auth was never enforced.
-func NewClient(s *model.McpServer) (*Client, error) {
+//
+// What it may reach is decided as it connects: this server's own network only
+// when the server's creator is an admin now (helpers.EndpointPolicyFor).
+func NewClient(ctx context.Context, s *model.McpServer) (*Client, error) {
 	if s.AuthSecretUnreadable {
 		return nil, ErrAuthSecretUnreadable
 	}
@@ -116,73 +120,24 @@ func NewClient(s *model.McpServer) (*Client, error) {
 		authType:   s.AuthType,
 		authHeader: authHeader,
 		authSecret: s.AuthSecret,
-		http:       newMCPHTTPClient(),
+		http:       newMCPHTTPClient(helpers.EndpointPolicyFor(creatorIsAdmin(ctx, s.CreatedBy))),
 	}, nil
 }
 
-// newMCPHTTPClient builds the outbound HTTP client used for every MCP call,
-// with an SSRF guard. An MCP server URL is admin-supplied and may legitimately
-// be an INTERNAL endpoint (a self-hosted MCP server in the same cluster), so we
-// deliberately do NOT block private/loopback ranges - that would defeat the
-// product, same as the AI provider guard. What we DO block, at dial time (so
-// DNS rebinding can't bypass it) and across redirects, is link-local, which
-// includes the cloud metadata endpoint (169.254.169.254) - the one target with
-// no legitimate use and a real credential-theft risk.
-func newMCPHTTPClient() *http.Client {
-	dialer := &net.Dialer{Timeout: 10 * time.Second}
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, port, err := net.SplitHostPort(addr)
-			if err != nil {
-				return nil, err
-			}
-			ips, err := net.LookupIP(host)
-			if err != nil {
-				return nil, fmt.Errorf("mcp dial lookup failed: %w", err)
-			}
-			// Validate every resolved IP, then dial the validated IP DIRECTLY
-			// (not the hostname). Dialing addr would let the dialer re-resolve
-			// DNS independently, reopening a rebinding window between our check
-			// and the connect; pinning the connection to an IP we just verified
-			// closes it.
-			var chosen net.IP
-			for _, ip := range ips {
-				if isBlockedMCPIP(ip) {
-					return nil, fmt.Errorf("mcp dial blocked address for host %s: %s", host, ip)
-				}
-				if chosen == nil {
-					chosen = ip
-				}
-			}
-			if chosen == nil {
-				return nil, fmt.Errorf("mcp dial: no address found for host %s", host)
-			}
-			return dialer.DialContext(ctx, network, net.JoinHostPort(chosen.String(), port))
-		},
-	}
-	return &http.Client{
-		Timeout:   requestTimeout,
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= 5 {
-				return fmt.Errorf("stopped after 5 redirects")
-			}
-			if ip := net.ParseIP(req.URL.Hostname()); ip != nil && isBlockedMCPIP(ip) {
-				return fmt.Errorf("mcp redirect to blocked address: %s", ip)
-			}
-			return nil
-		},
-	}
+// newMCPHTTPClient builds the outbound HTTP client for every MCP call. An MCP
+// server's address is typed by whoever added it, and every call carries its
+// credential, so it is held to the one address rule for such endpoints
+// (helpers.EndpointPolicyFor): this server's own network only for a server an
+// admin added, never a metadata or link-local address, checked as each
+// connection is made. A redirect off the server's own origin is never
+// followed, so the credential stays with the address it was given for. A
+// seam, so tests can reach a local test server.
+var newMCPHTTPClient = func(p helpers.EndpointPolicy) *http.Client {
+	return helpers.EndpointClient(p, requestTimeout)
 }
 
-// isBlockedMCPIP reports whether an IP must never be reached by an MCP call:
-// link-local (which contains the 169.254.169.254 cloud metadata endpoint),
-// multicast, and the unspecified address. Private/loopback are intentionally
-// allowed so internal/self-hosted MCP servers stay reachable.
-func isBlockedMCPIP(ip net.IP) bool {
-	return ip == nil || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
-}
+// creatorIsAdmin reports whether a server's creator is an admin now. A seam.
+var creatorIsAdmin = userDomain.IsActiveAdmin
 
 // jsonRPCRequest is a JSON-RPC 2.0 request envelope.
 type jsonRPCRequest struct {

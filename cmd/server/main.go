@@ -26,6 +26,7 @@ import (
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	githubBusiness "github.com/akashc777/OneCamp/business/GitHub"
+	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	mcpServerBusiness "github.com/akashc777/OneCamp/business/MCPServer"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
@@ -218,6 +219,12 @@ func startBackgroundLoops(ctx context.Context) {
 	// group conversation who has none (groups someone was added to, and
 	// direct conversations, before the fix), or they are never told of it.
 	chatNotificationBusiness.StartChatSettingsRepair(ctx)
+
+	// Every start, idempotent: transcripts of unrecorded calls from before
+	// calls had an end get one (so they are listed, deletable and under
+	// retention); ones linked to no conversation are counted in the log and
+	// kept, since deleting them is the owner's decision (calls O3).
+	liveKitBusiness.StartCallTranscriptRepair(ctx)
 	githubBusiness.StartGitHubSyncWorker(business.SyncSignal, ctx)
 	githubBusiness.StartGitHubImportWorker(ctx)
 

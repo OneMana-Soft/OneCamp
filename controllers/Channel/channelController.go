@@ -10,6 +10,7 @@ import (
 	botpost "github.com/akashc777/OneCamp/business/BotPost"
 	business "github.com/akashc777/OneCamp/business/Channel"
 	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
+	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	userChannelNotificationBusiness "github.com/akashc777/OneCamp/business/UserChannelNotification"
 	"github.com/akashc777/OneCamp/helpers"
@@ -1417,9 +1418,14 @@ func MakeVideoChannelCall(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var uerToken adapter.UserTokenOutput
-	uerToken.TokenString, uerToken.AlreadyExisted, err = business.MakeVideoChannelCall(ctx, channelDraphInfo, &userInfo.UserDgraphInfo, false, makeVideoChannelCallInfo.AudioEnabled, makeVideoChannelCallInfo.VideoEnabled)
+	uerToken.TokenString, uerToken.AlreadyExisted, err = business.MakeVideoChannelCall(ctx, channelDraphInfo, &userInfo.UserDgraphInfo, false, makeVideoChannelCallInfo.Language)
 
 	if err != nil {
+		if errors.Is(err, liveKitBusiness.ErrRemovedFromCall) {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "removed_from_call", "msg": liveKitBusiness.RemovedFromCallMsg})
+			return
+		}
+
 		helpers.LogErrorWithContext(ctx,
 			"controllers/MakeVideoChannelCall Failed to make video call err: %+v",
 			err)

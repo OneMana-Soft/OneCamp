@@ -60,8 +60,9 @@ func TestApplicationWaitsForItsDatastores(t *testing.T) {
 		}
 		// The three the application also dials at boot. It EXITS when the broker is
 		// missing, so emqx in particular is the difference between a slow start and
-		// a crash-loop. Only service_started is available: none of them defines a
-		// healthcheck, and ordering the start is still worth having.
+		// a crash-loop. service_started: alpha and emqx define no healthcheck, minio's
+		// isn't waited on (the API serves without files), and ordering the start is
+		// still worth having.
 		for _, svc := range []string{"alpha", "minio", "emqx"} {
 			if !strings.Contains(block, svc+":\n        condition: service_") {
 				t.Errorf("%s: go-service does not wait for %s at all. It connects to it at boot, "+

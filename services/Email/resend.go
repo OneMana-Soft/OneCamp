@@ -3,6 +3,7 @@ package email
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -134,6 +135,16 @@ type SendOptions struct {
 	// one (EMAIL_DAILY_CAP): an invitation keeps InvitationReserve for
 	// password resets, or a quarter of the cap when that is less.
 	Keep int
+	// Attachments go with the message: a booking's calendar invite.
+	Attachments []Attachment
+}
+
+// Attachment is a file sent with a message. ContentType defaults to what
+// the filename says.
+type Attachment struct {
+	Filename    string
+	ContentType string
+	Content     []byte
 }
 
 // SendResult is what callers use to record the delivery outcome.
@@ -142,19 +153,28 @@ type SendResult struct {
 }
 
 type resendPayload struct {
-	From    string            `json:"from"`
-	To      []string          `json:"to"`
-	Subject string            `json:"subject"`
-	HTML    string            `json:"html"`
-	Text    string            `json:"text,omitempty"`
-	ReplyTo string            `json:"reply_to,omitempty"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Tags    []resendTag       `json:"tags,omitempty"`
+	From        string             `json:"from"`
+	To          []string           `json:"to"`
+	Subject     string             `json:"subject"`
+	HTML        string             `json:"html"`
+	Text        string             `json:"text,omitempty"`
+	ReplyTo     string             `json:"reply_to,omitempty"`
+	Headers     map[string]string  `json:"headers,omitempty"`
+	Tags        []resendTag        `json:"tags,omitempty"`
+	Attachments []resendAttachment `json:"attachments,omitempty"`
 }
 
 type resendTag struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
+}
+
+// resendAttachment is an attachment as Resend's API takes it: the content in
+// base64.
+type resendAttachment struct {
+	Filename    string `json:"filename"`
+	Content     string `json:"content"`
+	ContentType string `json:"content_type,omitempty"`
 }
 
 type resendResponse struct {
@@ -319,6 +339,11 @@ func SendEmailWithOptions(ctx context.Context, opt SendOptions) (SendResult, err
 			continue
 		}
 		payload.Tags = append(payload.Tags, resendTag{Name: name, Value: value})
+	}
+	for _, a := range opt.Attachments {
+		payload.Attachments = append(payload.Attachments, resendAttachment{
+			Filename: a.Filename, Content: base64.StdEncoding.EncodeToString(a.Content), ContentType: a.ContentType,
+		})
 	}
 
 	jsonData, err := json.Marshal(payload)

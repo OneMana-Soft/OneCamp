@@ -76,7 +76,7 @@ func TestAMeetingNeverNamesAMemberByTheirAddress(t *testing.T) {
 		{"meet-6f1c", named, "Mia Kapoor"},
 		{"6f1c0e2a-channel", nameless, "mia.k"}, // a member's own call: the whole rule
 	} {
-		token, _, err := CreateRoomAndGetToken(ctx, c.room, c.user, true, true, true)
+		token, _, err := CreateRoomAndGetToken(ctx, c.room, c.user, true, "")
 		if err != nil {
 			t.Fatal(err)
 		}

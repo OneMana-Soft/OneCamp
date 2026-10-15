@@ -7,16 +7,15 @@ import (
 	"strings"
 	"time"
 
-	calendarAdapter "github.com/akashc777/OneCamp/adapter/Calendar"
 	chatAdapter "github.com/akashc777/OneCamp/adapter/Chat"
 	docAdapter "github.com/akashc777/OneCamp/adapter/Doc"
 	postAdapter "github.com/akashc777/OneCamp/adapter/Post"
 	taskAdapter "github.com/akashc777/OneCamp/adapter/Task"
-	calendarBusiness "github.com/akashc777/OneCamp/business/Calendar"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	postBusiness "github.com/akashc777/OneCamp/business/Post"
 	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
+	savedItemBusiness "github.com/akashc777/OneCamp/business/SavedItem"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
@@ -181,7 +180,7 @@ func executeSendDM(ctx context.Context, action ai.ProposedAction, userUUID strin
 		if uErr != nil || len(foundUsers) == 0 {
 			return "", nil, fmt.Errorf("could not find user '%s' in workspace", toUUIDStr)
 		}
-		to := personNamed(foundUsers, cleanUname)
+		to := personNamed(foundUsers, cleanUname, false)
 		if to == nil {
 			return "", nil, fmt.Errorf("more than one person matches %q: %s. Ask which one is meant, or send to their @handle",
 				toUUIDStr, peopleByNameAndHandle(foundUsers))
@@ -360,7 +359,7 @@ func executeCreateTask(ctx context.Context, action ai.ProposedAction, userUUID s
 	// Optional assignee. The model may pass a uuid or (when it couldn't recall
 	// one) a name; resolve either, mirroring assign_task / send_dm. A nil
 	// result means "leave unassigned".
-	assigneeDgraph, err := resolveAssigneeRef(ctx, userUUID, action.Params["assignee_uuid"])
+	assigneeDgraph, err := resolveAssigneeRef(ctx, userUUID, action.Params["assignee_uuid"], false)
 	if err != nil {
 		return "", nil, err
 	}
@@ -411,8 +410,9 @@ func normalizeTaskPriority(p string) string {
 // user. An empty ref means "no assignee" (nil, nil). A name is resolved as a
 // direct message's recipient is (personNamed), so "assign it to John" works
 // even when the model passes a name instead of a UUID. Shared by create_task
-// and assign_task.
-func resolveAssigneeRef(ctx context.Context, actingUserUUID, ref string) (*dgraphStruct.DgraphUser, error) {
+// and assign_task. strict is for an invitation, which shows someone the event:
+// only a name that is exactly theirs counts (personNamed).
+func resolveAssigneeRef(ctx context.Context, actingUserUUID, ref string, strict bool) (*dgraphStruct.DgraphUser, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return nil, nil
@@ -430,36 +430,57 @@ func resolveAssigneeRef(ctx context.Context, actingUserUUID, ref string) (*dgrap
 	if err != nil || len(found) == 0 {
 		return nil, fmt.Errorf("could not find a user matching %q to assign", ref)
 	}
-	if u := personNamed(found, cleanName); u != nil {
+	if u := personNamed(found, strings.TrimSpace(cleanName), strict); u != nil {
 		return u, nil
 	}
 	return nil, fmt.Errorf("more than one user matches %q - please be more specific", ref)
 }
 
 // personNamed is the one of found, the people a search for name turned up,
-// whom name plainly means: the only one; else the one whose handle it is;
-// else the only one whose display name it is, ignoring case. nil when it
-// could be more than one of them. Pure.
-func personNamed(found []*dgraphStruct.DgraphUser, name string) *dgraphStruct.DgraphUser {
-	if len(found) == 1 {
+// whom name plainly means, ignoring case: the only one; else the one whose
+// handle it is; else the only one whose display name it is. strict (an
+// invitation: "Sam" never invites Samantha) never takes a lone hit, and
+// after the handle takes a whole name, display or full, then a first name.
+// nil when it could be more than one of them. Pure.
+func personNamed(found []*dgraphStruct.DgraphUser, name string, strict bool) *dgraphStruct.DgraphUser {
+	if !strict && len(found) == 1 {
 		return found[0]
 	}
-	// A handle is one person's: an exact one settles it.
-	for _, u := range found {
-		if u != nil && u.Handle != "" && strings.EqualFold(u.Handle, name) {
-			return u
+	handle := func(u *dgraphStruct.DgraphUser) bool { return u.Handle != "" && strings.EqualFold(u.Handle, name) }
+	displayName := func(u *dgraphStruct.DgraphUser) bool { return strings.EqualFold(strings.TrimSpace(u.UserName), name) }
+	rules := []func(u *dgraphStruct.DgraphUser) bool{handle, displayName}
+	if strict {
+		rules = []func(u *dgraphStruct.DgraphUser) bool{
+			handle,
+			func(u *dgraphStruct.DgraphUser) bool {
+				return displayName(u) || strings.EqualFold(strings.TrimSpace(u.UserFullName), name)
+			},
+			func(u *dgraphStruct.DgraphUser) bool {
+				for _, n := range []string{u.UserName, u.UserFullName} {
+					if f := strings.Fields(n); len(f) > 0 && strings.EqualFold(f[0], name) {
+						return true
+					}
+				}
+				return false
+			},
 		}
 	}
-	var exact *dgraphStruct.DgraphUser
-	for _, u := range found {
-		if u != nil && strings.EqualFold(strings.TrimSpace(u.UserName), name) {
-			if exact != nil {
-				return nil
+	for _, rule := range rules {
+		var match *dgraphStruct.DgraphUser
+		for _, u := range found {
+			if u == nil || !rule(u) {
+				continue
 			}
-			exact = u
+			if match != nil && match.Uuid != u.Uuid {
+				return nil // two people answer to it
+			}
+			match = u
+		}
+		if match != nil {
+			return match
 		}
 	}
-	return exact
+	return nil
 }
 
 // ambiguousPeopleShown bounds the people an ambiguous name lists.
@@ -566,7 +587,7 @@ func executeAssignTask(ctx context.Context, action ai.ProposedAction, userUUID s
 	taskUUID, _ := uuid.Parse(taskUUIDStr)
 
 	// Resolve the assignee from a uuid or a name (empty clears the assignee).
-	newAssignee, err := resolveAssigneeRef(ctx, userUUID, action.Params["assignee_uuid"])
+	newAssignee, err := resolveAssigneeRef(ctx, userUUID, action.Params["assignee_uuid"], false)
 	if err != nil {
 		return "", nil, err
 	}
@@ -696,17 +717,23 @@ func executeCreateDoc(ctx context.Context, action ai.ProposedAction, userUUID st
 	return fmt.Sprintf("✅ Document \"%s\" created successfully", title), nil, nil
 }
 
-// executeSetReminder creates a calendar event as a reminder.
+// saveLater keeps a Later item (business/SavedItem.Save); a seam for tests.
+var saveLater = savedItemBusiness.Save
+
+// executeSetReminder sets a reminder: a Later item due at the time, which
+// comes back by itself then (it moves to the top of Later, an open app shows
+// it, and a push reaches a closed one). It made a one-hour calendar event,
+// which reminded nobody and showed the hour as busy to everyone booking it.
 func executeSetReminder(ctx context.Context, action ai.ProposedAction, userUUID string) (string, map[string]string, error) {
-	title := action.Params["title"]
-	startTimeStr := action.Params["start_time"]
+	title := strings.TrimSpace(action.Params["title"])
+	startTimeStr := strings.TrimSpace(action.Params["start_time"])
 
 	// Backward compatibility: accept old params from cached LLM
 	if title == "" {
-		title = action.Params["task_name"]
+		title = strings.TrimSpace(action.Params["task_name"])
 	}
 	if startTimeStr == "" {
-		startTimeStr = action.Params["due_date"]
+		startTimeStr = strings.TrimSpace(action.Params["due_date"])
 	}
 
 	if title == "" {
@@ -716,47 +743,54 @@ func executeSetReminder(ctx context.Context, action ai.ProposedAction, userUUID 
 		return "", nil, fmt.Errorf("start_time is required (RFC3339 format)")
 	}
 
-	startTime, err := time.Parse(time.RFC3339, startTimeStr)
+	at, err := time.Parse(time.RFC3339, startTimeStr)
 	if err != nil {
 		return "", nil, fmt.Errorf("invalid start_time format, expected RFC3339 (e.g. 2026-03-25T18:00:00Z): %w", err)
 	}
-
-	// Default: 1-hour event
-	endTime := startTime.Add(1 * time.Hour)
-
-	// Look up full user info (postgres + dgraph needed for CreateEvent)
-	userInfo, err := getUserInfoForExecutor(ctx, userUUID)
+	userID, err := uuid.Parse(userUUID)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to look up user: %w", err)
+		return "", nil, fmt.Errorf("invalid user")
 	}
 
-	description := action.Params["description"]
-	if description == "" {
-		description = "Created by AI Assistant"
+	item, err := saveLater(ctx, userID, savedItemBusiness.SaveInput{
+		ItemType: "reminder",
+		ItemID:   uuid.NewString(),
+		Link:     "/app/later",
+		Title:    title,
+		Context:  strings.TrimSpace(action.Params["description"]),
+		RemindAt: &at,
+	})
+	switch {
+	case errors.Is(err, savedItemBusiness.ErrInvalid):
+		return "That time has passed or is more than a year away, so there's nothing to remind you of then. Pick another time.", nil, nil
+	case errors.Is(err, savedItemBusiness.ErrTooMany):
+		return "Your Later list is full. Finish or remove a few items there, then ask again.", nil, nil
+	case err != nil:
+		return "", nil, fmt.Errorf("failed to set the reminder: %w", err)
 	}
 
-	eventInput := calendarAdapter.CreateOrUpdateEventInput{
-		Title:                title,
-		Description:          description,
-		StartTime:            startTime.Format(time.RFC3339),
-		EndTime:              endTime.Format(time.RFC3339),
-		SyncToGoogleCalendar: true,
-	}
-
-	createdEvent, err := calendarBusiness.CreateEvent(ctx, userInfo, eventInput)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to create calendar event: %w", err)
-	}
-
+	when := reminderWhen(ctx, at)
 	actionData := map[string]string{
-		"tool":       "set_reminder",
-		"event_uuid": createdEvent.EventUuid,
-		"title":      title,
-		"start_time": startTime.Format(time.RFC3339),
-		"end_time":   endTime.Format(time.RFC3339),
+		"tool":          "set_reminder",
+		"saved_item_id": item.ID.String(),
+		"title":         title,
+		"remind_at":     at.UTC().Format(time.RFC3339),
 	}
+	return fmt.Sprintf("✅ I'll remind you: \"%s\", %s. It's in Later until then.", title, when), actionData, nil
+}
 
-	return fmt.Sprintf("✅ Reminder \"%s\" created for %s", title, startTime.Format("Jan 2, 2006 3:04 PM")), actionData, nil
+// reminderWhen is a reminder's time as its person reads it: on their clock
+// when the request says their zone ("13 Oct, 15:00"), else as the time was
+// given, with its offset. It printed the model's offset, often UTC, in a US
+// date format.
+func reminderWhen(ctx context.Context, at time.Time) string {
+	if loc, ok := helpers.FirstLocation(ai.GetLocalization(ctx)["timezone"]); ok {
+		return at.In(loc).Format("2 Jan, 15:04")
+	}
+	if at.Location() == time.UTC {
+		return at.Format("2 Jan, 15:04") + " UTC"
+	}
+	return at.Format("2 Jan, 15:04 (UTC-07:00)")
 }
 
 // executeSummarizeChannel fetches and summarizes recent messages in a channel.

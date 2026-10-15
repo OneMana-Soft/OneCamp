@@ -138,7 +138,20 @@ services:
   minio:
     logging: *default-logging
     restart: unless-stopped
-    image: minio/minio:RELEASE.2025-01-18T00-31-37Z
+    # CHAINGUARD'S BUILD, PINNED BY DIGEST. This was minio/minio:RELEASE.2025-01-18T00-31-37Z,
+    # which can no longer be pulled: Docker Hub dropped the minio/minio repository (404 on
+    # 14 Oct 2026) and Quay's copy needs a login. So the stack couldn't start on any server
+    # without it cached: every new install, and any server whose images had been pruned.
+    # Upstream MinIO is archived; this is Chainguard's image of its maintained fork
+    # (github.com/chainguard-forks/minio), RELEASE.2026-09-22T19-25-18Z, which reads the data
+    # the old release wrote. Its free tier publishes only `latest`, so a digest, as for
+    # tinyproxy and whisper. This manifest-list digest covers amd64 and arm64: the `latest`
+    # built 2026-10-11, the one the integration tests pin. Bump the two together, deliberately.
+    image: cgr.dev/chainguard/minio@sha256:dc455cdd4db6e390b1b26514f15ff37681a777bf8dab41aac445a0259f751e56
+    # ROOT, AS BEFORE. The old image ran as root, so ./data/minio is root's on every
+    # install. This image would run as uid 65532, which can't write there, and MinIO
+    # refuses to start. Root keeps the files exactly as they are, with nothing to migrate.
+    user: "0:0"
     volumes:
       - ./data/minio:/data
     environment:
@@ -150,6 +163,16 @@ services:
       # Unset, MinIO uses the request's own host, which is what a tunnel needs.
       CONSOLE_SECURE_TLS_REDIRECT: off
     command: server --console-address ":8080" /data
+    # Ready means MinIO answers its own cluster health check (`mc ready`, shipped in the
+    # image). mc retries for ever, so `timeout` bounds each run. The API still waits only
+    # for this to START: it serves without files, and a slow MinIO start shouldn't hold
+    # the whole workspace back.
+    healthcheck:
+      test: ["CMD", "timeout", "5", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     labels:
       - traefik.enable=true
       - traefik.docker.network=traefik-public
@@ -173,6 +196,43 @@ services:
       - traefik-public
     depends_on:
       - traefik
+
+  # ---------------------------------------------------------------------------
+  # minio-init — the upload bucket and the API's access key, made once.
+  #
+  # Nothing used to make either. .env names an access key and a bucket, MinIO
+  # starts knowing only its root user, and so on every fresh install each
+  # upload, call recording and import failed until someone made both by hand.
+  #
+  # This runs other-services/minio/init.sh once MinIO is healthy. Nothing waits
+  # for it: the API starts without files and picks the bucket and key up as
+  # soon as they exist. It is safe on every start: a bucket or access key
+  # that exists is left as it is (a key's secret is never changed or printed),
+  # and with files in an attached bucket (make storage-attach) it does nothing.
+  # It fails only when it can't sign in to MinIO as root; a bucket or key MinIO
+  # refuses is logged here, the API still starts, and make verify says why.
+  # ---------------------------------------------------------------------------
+  minio-init:
+    logging: *default-logging
+    # The MinIO image, for the mc it ships. Its own user, not root: this only
+    # talks to MinIO over the network.
+    image: cgr.dev/chainguard/minio@sha256:dc455cdd4db6e390b1b26514f15ff37681a777bf8dab41aac445a0259f751e56
+    restart: "no"
+    entrypoint: ["/bin/bash", "/minio-init.sh"]
+    volumes:
+      - ./other-services/minio/init.sh:/minio-init.sh:ro
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD}
+      API_ACCESS_KEY: ${MINIO_ACCESS_KEY_ID:-}
+      API_SECRET_KEY: ${MINIO_SECRET_ACCESS_KEY:-}
+      UPLOAD_BUCKET: ${USER_UPLOAD_BUCKET_NAME:-}
+      STORAGE_ATTACHED_BUCKET: ${STORAGE_ATTACHED_BUCKET:-}
+    networks:
+      - onecamp-shared-net
+    depends_on:
+      minio:
+        condition: service_healthy
 
   opensearch-node1: # This is also the hostname of the container within the Docker network (i.e. https://opensearch-node1/)
     logging: *default-logging
@@ -242,9 +302,15 @@ services:
       start_period: 20s
     image: redis:8.6.2
     restart: always
+    # /data IS WHERE REDIS KEEPS ITS DATA, and it holds every signed-in session
+    # (the refresh tokens). The mount was ./data/redis_data/data spelt with a
+    # Cyrillic "a", at /root/redis, which Redis never reads, plus a redis.conf that nothing
+    # wrote, so Docker made it a directory. So /data lived in the container, and
+    # every update and rebuild, which recreate it, signed everyone out (seen on a
+    # test server going from v2.72.1). The image's entrypoint gives /data to the
+    # redis user, so the directory needs no owner of its own.
     volumes:
-      - ./data/redis_data/dаta:/root/redis
-      - ./data/redis_data/redis.conf:/usr/local/etc/redis/redis.conf
+      - ./data/redis_data/data:/data
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - REDIS_PORT=6379
@@ -327,10 +393,17 @@ services:
     # had worked, for seventeen nights, and a warning that is wrong every night is
     # one nobody reads on the night it is right.
     #
-    # healthy where there is a healthcheck to wait for, started where there is not:
+    # healthy where there is a healthcheck to wait for, started where there is not
+    # (and for MinIO, whose healthcheck isn't waited on: the API serves without files):
     # ordering the start is worth having even without a readiness signal, and
     # inventing healthchecks for services whose readiness we have not verified
     # would replace a noisy loop with a stack that refuses to start.
+    #
+    # NOT minio-init. The API starts without it and uses the bucket and key as
+    # soon as they exist: on a test server (14 Oct) MinIO was stopped and the API
+    # started and served everything but files; once MinIO was back, uploads worked
+    # with no restart. Waiting on minio-init meant a MinIO that never got healthy,
+    # or a root password it refused, kept the whole workspace down.
     depends_on:
       traefik:
         condition: service_started
@@ -592,6 +665,53 @@ services:
     networks:
       - onecamp-shared-net
 
+  # ---------------------------------------------------------------------------
+  # Transcription agent — joins calls and transcribes them on this server
+  # (profile: transcription, with Whisper above).
+  #
+  # WHY THIS IS HERE. Admin › Transcription offers "Server" mode, including
+  # "Self-hosted (runs on this server)", and the thing that does it is this
+  # agent: it joins a call and feeds each speaker's audio to the speech service.
+  # It was missing from the stack every customer installs, so choosing Server
+  # mode silently stopped every caption, transcript and recap. `make stt_up`
+  # starts it with Whisper; the admin card says when it is not running.
+  #
+  # It transcribes a call only while somebody in that call has turned its
+  # transcription on, and everybody in the call is told. With the bundled
+  # Whisper the audio never leaves this server.
+  #
+  # Built from ./livekit-agent, which ships in the archive. No published ports:
+  # LiveKit reaches its webhook on this network (make stt_up adds the URL to
+  # livekit.yaml), and it reaches LiveKit and the API the same way.
+  # ---------------------------------------------------------------------------
+  agent:
+    profiles: ["transcription"]
+    logging: *default-logging
+    build:
+      context: ./livekit-agent
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - LIVEKIT_URL=ws://livekit:7880
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY_NAME}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_PASS}
+      # Internal service-to-service, never the public hostname: the transcript
+      # posts and the runtime config fetch carry INTERNAL_SECRET.
+      - BACKEND_URL=http://go-service:3000/livekit/transcript
+      - INTERNAL_SECRET=${INTERNAL_SECRET}
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+    networks:
+      - onecamp-shared-net
+
   ollama:
     profiles: ["local-ai"]
     # PINNED, like every other image here. An engine upgrade changes model
@@ -844,7 +964,15 @@ services:
 
   traefik:
     logging: *default-logging
-    image: "traefik:v3.0"
+    # AN EXACT PATCH, NEVER BELOW v3.6.7. This was traefik:v3.0 (3.0.4), whose
+    # Docker provider asks the daemon for API 1.24. Docker Engine 29 refuses
+    # anything older than 1.40, so on a server with current Docker (what
+    # get.docker.com installs) Traefik logged "client version 1.24 is too old" in
+    # a loop, built no routers, and every hostname answered 404. v3.6.1 is the
+    # first that negotiates the version; v3.6.4 to v3.6.6 also refused paths with
+    # an encoded slash or percent, which file names carry. Change it deliberately:
+    # helpers/imagePinGuard_test.go holds the floor.
+    image: "traefik:v3.7.13"
     restart: unless-stopped
     labels:
       # Enable Traefik for this service, to make it available in the public network

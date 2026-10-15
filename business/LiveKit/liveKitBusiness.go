@@ -26,12 +26,14 @@ func createLiveKitRoom(ctx context.Context, roomId string) (err error) {
 	return
 }
 
-func GenerateToken(ctx context.Context, roomId string, userUUID string, userName string, isAdmin bool, audioEnabled bool, videoEnabled bool) (token string, err error) {
-	token, err = livekitInit.LiveKitService.GenerateToken(roomId, userUUID, userName, isAdmin, audioEnabled, videoEnabled)
+// GenerateToken mints a member's call token. language is what the person
+// speaks (their browser's), for the server's transcriber; "" when unknown.
+func GenerateToken(ctx context.Context, roomId string, identity string, userName string, isAdmin bool, language string) (token string, err error) {
+	token, err = livekitInit.LiveKitService.GenerateToken(roomId, identity, userName, isAdmin, language)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"business/GetMqttConfig Failed generate token err: %+v",
+			"business/GenerateToken Failed generate token err: %+v",
 			err,
 		)
 		return
@@ -118,7 +120,21 @@ func IsAgentIdentity(identity string) bool {
 	return livekitInit.IsAgentIdentity(identity)
 }
 
-func CreateRoomAndGetToken(ctx context.Context, roomId string, userDgraphInfo *dgraphStruct.DgraphUser, isAdmin bool, audioEnabled bool, videoEnabled bool) (token string, alreadyExisted bool, err error) {
+// CreateRoomAndGetToken makes the call room when there is none and mints the
+// member's token for it. Refused with ErrRemovedFromCall for someone a host put
+// out of the call that is still going on there.
+//
+// What the person chose in the green room (microphone, camera) is not asked:
+// it is the client's state, and the token always lets them change their mind
+// (see livekitInit.callPublishSources).
+func CreateRoomAndGetToken(ctx context.Context, roomId string, userDgraphInfo *dgraphStruct.DgraphUser, isAdmin bool, language string) (token string, alreadyExisted bool, err error) {
+
+	if userDgraphInfo == nil || userDgraphInfo.Uid == "" {
+		return "", false, ErrNotInCall
+	}
+	if IsRemovedFromCall(ctx, roomId, userDgraphInfo.Uid) {
+		return "", false, ErrRemovedFromCall
+	}
 
 	alreadyExisted, err = CheckRoomExists(ctx, roomId)
 
@@ -142,7 +158,7 @@ func CreateRoomAndGetToken(ctx context.Context, roomId string, userDgraphInfo *d
 		}
 	}
 
-	token, err = GenerateToken(ctx, roomId, userDgraphInfo.Uid, callName(roomId, userDgraphInfo), isAdmin, audioEnabled, videoEnabled)
+	token, err = GenerateToken(ctx, roomId, userDgraphInfo.Uid, callName(roomId, userDgraphInfo), isAdmin, language)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -191,6 +207,8 @@ func StartRecording(ctx context.Context, roomName string, userDgraphInfo *dgraph
 		return
 	}
 
+	// While it runs, the call's transcript lines are filed under it.
+	NoteRecording(ctx, roomName, egresssInfo.EgressId)
 	return
 }
 
@@ -205,5 +223,6 @@ func StopRecording(ctx context.Context, roomName string) (err error) {
 		return
 	}
 
+	ForgetRecording(ctx, roomName, "")
 	return
 }

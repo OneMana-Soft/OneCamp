@@ -71,6 +71,7 @@ func all() []Spec {
 	return []Spec{
 		UserRefreshToken,
 		LoginRate,
+		PublicReadRate,
 		SSOState,
 		UserProfile,
 		UserDgraphProfile,
@@ -127,5 +128,11 @@ func all() []Spec {
 		PasskeyCeremony,
 		ConnectorBriefingDay,
 		CollabStateSize,
+		CallAttendees,
+		CallUntranscribed,
+		CallTranscriptGrant,
+		CallState,
+		CallRemoved,
+		TranscriptionAgentHeartbeat,
 	}
 }

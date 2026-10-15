@@ -190,7 +190,7 @@ func makeExecutor(server *model.McpServer, rawTool string, types map[string]stri
 				"refusing to write directly to the protected branch %q: create a new branch (create_branch) and open a pull request (create_pull_request) instead of committing to the default branch",
 				branch)
 		}
-		client, cerr := NewClient(&srv)
+		client, cerr := NewClient(ctx, &srv)
 		if cerr != nil {
 			// Refused before any request leaves the process: an unreadable secret would
 			// otherwise be sent as an empty auth header to an external endpoint.

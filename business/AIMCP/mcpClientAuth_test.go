@@ -1,6 +1,7 @@
 package business
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -30,7 +31,7 @@ func TestAServerWithAnUnreadableSecretYieldsNoClient(t *testing.T) {
 		AuthSecretUnreadable: true,
 	}
 
-	client, err := NewClient(unusable)
+	client, err := NewClient(context.Background(), unusable)
 	if err == nil {
 		t.Fatal("NewClient returned no error for a server whose auth secret cannot be decrypted; " +
 			"the next call would go out with an empty auth header")
@@ -59,7 +60,7 @@ func TestAServerWithAReadableSecretStillYieldsAClient(t *testing.T) {
 		HasAuthSecret:  true,
 	}
 
-	client, err := NewClient(usable)
+	client, err := NewClient(context.Background(), usable)
 	if err != nil {
 		t.Fatalf("NewClient refused a server with a readable secret: %v", err)
 	}

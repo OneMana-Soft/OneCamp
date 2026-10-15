@@ -72,6 +72,26 @@ type McpServer struct {
 	DeletedAt            *time.Time `json:"deleted_at,omitempty"`
 }
 
+// ManageableBy reports whether a person may change, switch, test or remove
+// this server: whoever added it, or a workspace admin. Its tools act with its
+// own credential, so another member's edit could point that credential
+// anywhere.
+func (m *McpServer) ManageableBy(userID uuid.UUID, isAdmin bool) bool {
+	return m != nil && helpers.OwnerOrAdmin(m.CreatedBy, userID, isAdmin)
+}
+
+// SecretDestination is where this server's stored secret goes and how it is
+// attached: its URL, its auth type and its header name.
+func (m *McpServer) SecretDestination() helpers.SecretDestination {
+	// Only header auth names a header: a name left on a bearer row from an
+	// earlier setting isn't where anything is sent.
+	header := ""
+	if m.AuthType == AuthHeader && m.AuthHeaderName != nil {
+		header = *m.AuthHeaderName
+	}
+	return helpers.SecretDestination{URL: m.URL, How: []string{m.AuthType, header}}
+}
+
 type scanner interface {
 	Scan(dest ...any) error
 }

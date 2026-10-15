@@ -324,16 +324,14 @@ func gatherMemoryAttentionItems(ctx context.Context, userInfo *userModels.UserIn
 	return out
 }
 
-// gatherCalendarAttentionItems reuses the briefing's cross-connector "day"
-// assembler and keeps only the calendar entries (upcoming events the member
-// should be ready for). Returns nothing when no calendar connector is linked.
+// gatherCalendarAttentionItems is the rest of the member's day on their
+// calendar (calendarDay: OneCamp's events, with Google Calendar when linked),
+// the events they should be ready for. It read the Google connector alone, so
+// without Google it never named a meeting.
 func gatherCalendarAttentionItems(ctx context.Context, userInfo *userModels.UserInfo) []adapter.AttentionItem {
-	day := gatherConnectorDay(ctx, userInfo)
+	day := calendarDay(ctx, userInfo, time.Now())
 	out := make([]adapter.AttentionItem, 0, attentionMaxCalendar)
 	for _, d := range day {
-		if d.Source != "calendar" {
-			continue
-		}
 		if len(out) >= attentionMaxCalendar {
 			break
 		}

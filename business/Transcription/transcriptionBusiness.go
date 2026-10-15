@@ -29,6 +29,7 @@
 package business
 
 import (
+	"context"
 	"os"
 	"sort"
 	"strings"
@@ -56,7 +57,7 @@ const (
 
 // Modes.
 const (
-	ModeFrontend = "frontend" // browser Web Speech API; zero cost, no key
+	ModeFrontend = "frontend" // the browser's Web Speech API: Chrome sends the audio to Google, Edge to Microsoft
 	ModeBackend  = "backend"  // server-side STT via the Python agent
 	ModeOff      = "off"      // transcription disabled entirely
 )
@@ -406,10 +407,16 @@ type Status struct {
 	STTAPIKeySource      string `json:"stt_api_key_source"` // db | env | none
 	HasGoogleCredentials bool   `json:"has_google_credentials"`
 	GoogleSource         string `json:"google_source"` // db | env | none
+	// Where is where call audio goes in this configuration (Where). The card
+	// and the call's notice put it in words (one place: the web's copy).
+	Where string `json:"where"`
+	// Agent is whether the server's transcriber is running, which server
+	// mode needs and nothing else provides.
+	Agent AgentStatus `json:"agent"`
 }
 
 // GetStatus returns the redacted settings view for the admin UI.
-func GetStatus() Status {
+func GetStatus(ctx context.Context) Status {
 	all := loadAll()
 
 	hasKey, keySrc := hasSTTAPIKey(all)
@@ -434,6 +441,8 @@ func GetStatus() Status {
 		STTAPIKeySource:      keySrc,
 		HasGoogleCredentials: hasGoogle,
 		GoogleSource:         googleSrc,
+		Where:                Where(),
+		Agent:                Agent(ctx),
 	}
 }
 
@@ -487,10 +496,43 @@ type SaveInput struct {
 	GoogleCredentials *string
 }
 
+// checkSTTKeyStays is helpers.CheckKeptSecret for the speech-to-text key, for
+// a save of in over the current address and provider. Only the providers whose
+// key this form manages send it to an address that can move: an OpenAI-
+// compatible endpoint (its base URL) and Deepgram. A save that sets the key,
+// or clears it (the controller clears it for a provider that uses none), keeps
+// nothing, so nothing can move. Pure but for reading STT_BASE_URL, which a
+// blank address falls back to as STTBaseURL reads it.
+func checkSTTKeyStays(stored bool, curURL, curProvider string, in SaveInput) error {
+	next := curProvider
+	if in.STTProvider != nil {
+		next = normalizeSTT(*in.STTProvider)
+	}
+	if next != STTOpenAI && next != STTDeepgram {
+		return nil
+	}
+	from := helpers.SecretDestination{URL: curURL, How: []string{curProvider}}
+	to := helpers.SecretDestination{URL: curURL, How: []string{next}}
+	if in.STTBaseURL != nil {
+		if to.URL = strings.TrimSpace(*in.STTBaseURL); to.URL == "" {
+			to.URL = strings.TrimSpace(os.Getenv("STT_BASE_URL"))
+		}
+	}
+	return helpers.CheckKeptSecret(stored, in.STTAPIKey != nil, from, to, "API key")
+}
+
 // Save persists admin-entered transcription settings (encrypting secrets) and
 // busts the cache so the next read (FE client-config, agent, admin view) sees
 // the new values.
 func Save(in SaveInput) error {
+	// The stored speech-to-text key stays with its provider and address
+	// (checkSTTKeyStays): a new address needs the key entered again.
+	if in.STTBaseURL != nil || in.STTProvider != nil {
+		stored, _ := hasSTTAPIKey(loadAll())
+		if err := checkSTTKeyStays(stored, STTBaseURL(), STTProvider(), in); err != nil {
+			return err
+		}
+	}
 	if in.Mode != nil {
 		if err := configModel.UpsertConfig(keyMode, normalizeMode(*in.Mode)); err != nil {
 			return err

@@ -19,6 +19,7 @@ import (
 	aiBusiness "github.com/akashc777/OneCamp/business/AI"
 	agentbusiness "github.com/akashc777/OneCamp/business/AIAgent"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
+	fileAccessBusiness "github.com/akashc777/OneCamp/business/FileAccess"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -53,7 +54,7 @@ func handleAgentDM(ctx context.Context, receiverID, senderID, groupID, text, mes
 	// Multimodal grounding: if the DM message (or its thread) carries images and
 	// a vision model is configured, describe them so the agent can "see" the
 	// screenshot a teammate shared. Best-effort; "" when unavailable.
-	imageContext := chatImageContext(ctx, messageID)
+	imageContext := chatImageContext(ctx, groupID, messageID)
 
 	// Durable async opt-in: an agent flagged run_in_background answers the DM as
 	// a DURABLE job (evolving in-thread status comment, survives restarts,
@@ -89,10 +90,9 @@ func handleAgentDM(ctx context.Context, receiverID, senderID, groupID, text, mes
 // attachments on a chat message (a DM or group message) and its thread
 // comments, or "" when there is no vision model or no images. Best-effort;
 // never blocks a run. Cheap-gated: when no vision model is configured it skips
-// the Dgraph read entirely. The object keys come from a chat message the asker
-// legitimately received (the triggering message), fetched server-side and
-// re-validated as real images, mirroring the channel path.
-func chatImageContext(ctx context.Context, messageID string) string {
+// the Dgraph read entirely. Its images are read through the conversation
+// (groupID) the message is in, as on the channel path (PlaceImageRefs).
+func chatImageContext(ctx context.Context, groupID, messageID string) string {
 	messageID = strings.TrimSpace(messageID)
 	if messageID == "" {
 		return ""
@@ -108,7 +108,8 @@ func chatImageContext(ctx context.Context, messageID string) string {
 	if err != nil || dgc == nil {
 		return ""
 	}
-	return agentbusiness.BuildImageContextFromRefs(ctx, agentbusiness.CollectImageRefs(dgc.MediaObj, dgc.Comments))
+	refs := agentbusiness.CollectImageRefs(dgc.MediaObj, dgc.Comments)
+	return agentbusiness.BuildImageContextFromRefs(ctx, agentbusiness.PlaceImageRefs(ctx, fileAccessBusiness.ConversationOf(groupID), refs))
 }
 
 // handleChatCommentThread continues an agent's work when a human comments in a
@@ -182,7 +183,7 @@ func runGroupChatAgent(ctx context.Context, m agentbusiness.MentionedAgent, mess
 	// Multimodal grounding for the group message + its thread (best-effort, ""
 	// when no vision model / no images), computed once and reused by both the
 	// durable and synchronous paths.
-	imageContext := chatImageContext(ctx, messageID)
+	imageContext := chatImageContext(ctx, groupID, messageID)
 
 	// Durable async opt-in: an agent flagged run_in_background answers the group
 	// @mention as a DURABLE job (evolving in-thread status comment, survives

@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"errors"
 	"net/http"
 
 	recordingBusiness "github.com/akashc777/OneCamp/business/Recording"
@@ -9,6 +10,10 @@ import (
 	userModel "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
 )
+
+// recordingUnreadable is what people see when a recording couldn't be read to
+// delete it: a failed read is not "not found" (the recording is still there).
+const recordingUnreadable = "The recording couldn't be read just now."
 
 // HandleDeleteChannelRecording deletes a channel recording for good: its file,
 // then the recording and its transcript. Only the channel's moderators and
@@ -29,7 +34,11 @@ func HandleDeleteChannelRecording(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dgraphRecording, err := recordingDomain.GetDgraphChannelRecordingInfoByEgressId(ctx, egressId, userInfo.UserDgraphInfo.Uid)
-	if err != nil || dgraphRecording == nil || dgraphRecording.Channel == nil {
+	if err != nil && !errors.Is(err, recordingDomain.ErrNotFound) {
+		helpers.WriteRetryLater(w, recordingUnreadable)
+		return
+	}
+	if dgraphRecording == nil || dgraphRecording.Channel == nil {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "Recording not found"})
 		return
 	}
@@ -68,7 +77,11 @@ func HandleDeleteChatRecording(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dgraphRecording, err := recordingDomain.GetDgraphDmRecordingInfoByEgressId(ctx, egressId, userInfo.UserDgraphInfo.Uid)
-	if err != nil || dgraphRecording == nil || dgraphRecording.Dm == nil {
+	if err != nil && !errors.Is(err, recordingDomain.ErrNotFound) {
+		helpers.WriteRetryLater(w, recordingUnreadable)
+		return
+	}
+	if dgraphRecording == nil || dgraphRecording.Dm == nil {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "Recording not found"})
 		return
 	}

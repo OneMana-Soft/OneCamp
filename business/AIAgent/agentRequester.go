@@ -57,15 +57,17 @@ import (
 // account they connected, on their own calendar, or in their own direct
 // messages. The value is how the refusal names what is theirs.
 var personalTools = map[string]string{
-	"gmail_search":          "connected accounts",
-	"gmail_send":            "connected accounts",
-	"calendar_list_events":  "connected accounts",
-	"calendar_create_event": "connected accounts",
-	"github_list_prs":       "connected accounts",
-	"github_list_issues":    "connected accounts",
-	"github_comment":        "connected accounts",
-	// set_reminder writes an event to the sponsor's calendar, synced to Google.
-	"set_reminder": "calendar",
+	"gmail_search":       "connected accounts",
+	"gmail_send":         "connected accounts",
+	"github_list_prs":    "connected accounts",
+	"github_list_issues": "connected accounts",
+	"github_comment":     "connected accounts",
+	// The calendar tools read and write the sponsor's own calendar, and their
+	// Google Calendar with it.
+	"calendar_list_events":  "calendar",
+	"calendar_create_event": "calendar",
+	// set_reminder writes a reminder to the sponsor's Later list.
+	"set_reminder": "Later list",
 	// Both name the OTHER person, and the conversation they mean is the sponsor's
 	// own DM with them: a DM has no id of its own, so there is no way for the
 	// asker to name a DM that is theirs instead.

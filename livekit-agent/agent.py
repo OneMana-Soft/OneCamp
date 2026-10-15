@@ -2,6 +2,7 @@ import asyncio
 import logging
 import json
 import os
+import re
 import signal
 import time
 import aiohttp
@@ -235,6 +236,63 @@ def _build_stt(provider, model, base_url, language):
         logger.error(f"Failed to build STT for provider '{p}': {e}")
         return None
 
+_LANGUAGE_TAG = re.compile(r"^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8}){0,4}$")
+
+
+def _stt_language(provider, workspace_language, person_language):
+    """The language to transcribe one person in.
+
+    The workspace's language when the admin set one; otherwise the language the
+    person's browser speaks (the "oc.lang" attribute their call token carries);
+    otherwise none, and the provider detects it or uses its own default. Never
+    a hard-coded English. Whisper-style providers take a bare ISO-639-1 code
+    ("en"), so a regional tag ("en-US") is cut down for them.
+    """
+    lang = (workspace_language or "").strip()
+    if not lang:
+        tag = (person_language or "").strip()
+        lang = tag if _LANGUAGE_TAG.match(tag) else ""
+    if not lang:
+        return ""
+    if (provider or "").lower() in ("openai", "local"):
+        return lang.split("-")[0].lower()
+    return lang
+
+
+def _transcription_on(metadata):
+    """Whether somebody in the call turned its transcription on.
+
+    The server writes the call's switch into the room's metadata, under
+    "transcription", and shows every participant who turned it on and where the
+    audio goes. Nothing is transcribed while it is off: the agent used to
+    transcribe every call in server mode, with nobody told.
+    """
+    try:
+        meta = json.loads(metadata or "{}")
+    except Exception:
+        return False
+    switch = meta.get("transcription") if isinstance(meta, dict) else None
+    return isinstance(switch, dict) and bool(switch.get("on"))
+
+
+def _transcript_kept(metadata):
+    """Whether the call keeps a transcript (a channel's, a DM's or a group's
+    call does; an instant meeting is captioned only). Lines of a call that
+    keeps none are not posted: the backend would refuse every one."""
+    try:
+        meta = json.loads(metadata or "{}")
+    except Exception:
+        return False
+    switch = meta.get("transcription") if isinstance(meta, dict) else None
+    return isinstance(switch, dict) and bool(switch.get("on")) and bool(switch.get("kept"))
+
+
+def _server_mode(cfg):
+    """Whether this workspace transcribes on the server (the agent's job)."""
+    mode = (cfg or {}).get("mode") or os.getenv("TRANSCRIPTION_MODE", "backend")
+    return mode == "backend"
+
+
 def _otlp_endpoint(raw):
     """Return an absolute OTLP/HTTP base URL, or "" if none is configured.
 
@@ -347,6 +405,10 @@ class TranscriptionService:
             
             # Initial Scan for existing rooms (in case agent restarted mid-session)
             asyncio.create_task(self.check_existing_rooms())
+            # Tell the backend we are running, so the admin's Transcription
+            # card and Test can say when server-side transcription has nothing
+            # to do it.
+            asyncio.create_task(self.heartbeat_loop())
             
             try:
                 # Wait for shutdown
@@ -362,6 +424,37 @@ class TranscriptionService:
                 # But we should close LKAPI if it has internal resources other than session
                 # (Standard practice is harmless)
                 await self.lkapi.aclose() 
+                pass
+
+    async def heartbeat_loop(self):
+        """Post a heartbeat to the backend every 30 seconds, with whether
+        LiveKit answers (the agent joins calls through it)."""
+        base = _config_base_url()
+        if not base:
+            return
+        secret = os.getenv("INTERNAL_SECRET", "")
+        headers = {"X-Internal-Secret": secret} if secret else {}
+        while not self.shutdown_event.is_set():
+            livekit_ok = False
+            try:
+                await self.lkapi.room.list_rooms(api.ListRoomsRequest())
+                livekit_ok = True
+            except Exception as e:
+                logger.warning(f"LiveKit is not answering: {e}")
+            try:
+                async with self.http_session.post(
+                    f"{base}/agent-heartbeat",
+                    json={"livekit": livekit_ok},
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"heartbeat refused: {resp.status}")
+            except Exception as e:
+                logger.warning(f"heartbeat failed: {e}")
+            try:
+                await asyncio.wait_for(self.shutdown_event.wait(), timeout=30)
+            except asyncio.TimeoutError:
                 pass
 
     async def check_existing_rooms(self):
@@ -424,6 +517,14 @@ class TranscriptionService:
         if room_name in self.running_rooms:
             logger.info(f"Already in room {room_name}")
             return
+        # Only where this workspace transcribes on the server. In browser mode
+        # the agent has nothing to do in a call (it used to relay every
+        # browser's lines, under a speaker named inside the packet), and in
+        # "off" there is nothing to do at all.
+        cfg = await fetch_transcription_config(self.http_session)
+        if not _server_mode(cfg):
+            logger.info(f"Transcription is not server-side here; not joining {room_name}")
+            return
             
         if len(self.running_rooms) >= MAX_CONCURRENT_ROOMS:
             logger.warning(f"Max rooms reached, ignoring {room_name}")
@@ -465,6 +566,10 @@ class RoomManager:
         # agent-vs-egress-server clock skew. None until a recording is seen.
         self._recording_start_s = None
         self._recording_egress = ""
+        # Audio tracks in the call, and the transcription running on each.
+        # Transcription runs only while the call's switch is on.
+        self.audio_tracks = {}
+        self.stt_tasks = {}
 
     def _recording_anchor_s(self):
         """Return (start_seconds, egress_id), refreshing from room metadata.
@@ -508,73 +613,30 @@ class RoomManager:
             @self.room.on("track_subscribed")
             def on_track_subscribed(track, publication, participant):
                 if track.kind == rtc.TrackKind.KIND_AUDIO:
-                    # Mode is resolved at runtime inside _handle_audio_track
-                    # (admin config, env fallback). We always spawn the handler
-                    # and let it decide whether to run backend STT, so a mode
-                    # change mid-session is honored on the next subscribed track.
                     logger.info(f"Subscribed to audio track from {participant.identity}")
-                    asyncio.create_task(self._handle_audio_track(track, participant))
+                    self.audio_tracks[participant.identity] = (track, participant)
+                    asyncio.create_task(self._sync_transcription())
 
-            @self.room.on("data_received")
-            def on_data_received(event):
-                # LiveKit Python SDK passes a DataPacketReceivedEvent object
-                data = event.data
-                participant = event.participant
-                topic = event.topic
-                
-                logger.debug(f"Data received: topic={topic}, len={len(data)}")
-                
-                if topic == "lk.transcription":
-                    try:
-                        payload = json.loads(data.decode('utf-8'))
-                        # Support both backend and frontend generated transcripts
-                        # Frontend sends 'isFinal', Backend logic below sends 'isFinal' too.
-                        is_final = payload.get("isFinal")
-                        text = payload.get("text", "")
-                        
-                        # Avoid double saving if we (the agent) sent it?
-                        # If agent sends it, participant is None or Agent?
-                        # When agent publishes, it comes from Agent participant.
-                        # But we want to save it associated with the ORIGINAL speaker.
-                        # The payload should contain original speaker info if possible, or we rely on 'participant' arg.
-                        
-                        # If generic agent published it, 'participant' is the agent.
-                        # We need to extract real speaker identity from payload if possible.
-                        real_participant_identity = payload.get("participantIdentity")
-                        
-                        if is_final and text:
-                             # Use payload identity if available (from backend logic), else sender (frontend logic)
-                             identity_to_log = real_participant_identity if real_participant_identity else (participant.identity if participant else "Unknown")
-                             
-                             logger.debug(f"TRANSCRIPT [{identity_to_log}]: {text}")
-                             
-                             # Extract timestamp or duration
-                             # Ideally use DURATION to rebase to Server Clock (avoids client clock skew)
-                             ts_val = payload.get("timestamp")
-                             duration_val = payload.get("duration")
-                             
-                             ts_ms_val = None
-                             
-                             if duration_val is not None:
-                                 # Rebase to Server Clock: ServerNow - Duration
-                                 # time.time() is UTC.
-                                 server_now_ms = int(time.time() * 1000)
-                                 ts_ms_val = int(server_now_ms - float(duration_val))
-                                 logger.debug(f"Rebased Timestamp (Server Clock): {ts_ms_val} (Duration: {duration_val}ms)")
-                             elif ts_val:
-                                 # Fallback to Client Clock (might be skewed)
-                                 ts_ms_val = int(ts_val)
-                                 logger.debug(f"Client Timestamp (Potential Skew): {ts_ms_val}")
-                                 
-                             # Pass Milliseconds directly (int64)
-                             # Forward the producer's skew-free offset (ms from
-                             # recording start, browser clock) when present so
-                             # playback seeks accurately regardless of clock skew.
-                             offset_val = payload.get("offsetMs")
-                             offset_ms = int(offset_val) if offset_val is not None else None
-                             asyncio.create_task(self.save_to_backend(identity_to_log, text, timestamp=ts_ms_val, offset_ms=offset_ms))
-                    except Exception as e:
-                        logger.error(f"Error handling transcript data: {e}")
+            @self.room.on("track_unsubscribed")
+            def on_track_unsubscribed(track, publication, participant):
+                if track.kind == rtc.TrackKind.KIND_AUDIO:
+                    self._forget_participant(participant.identity)
+
+            @self.room.on("participant_disconnected")
+            def on_participant_disconnected(participant):
+                self._forget_participant(participant.identity)
+
+            @self.room.on("room_metadata_changed")
+            def on_room_metadata_changed(*_args):
+                # Somebody turned the call's transcription on or off.
+                asyncio.create_task(self._sync_transcription())
+
+            # No data_received handler, on purpose. The agent used to store every
+            # final "lk.transcription" packet any participant published, taking
+            # the speaker from a field inside the packet, so anyone in a call (a
+            # guest included) could put words in someone else's mouth in the
+            # transcript, the recap and the notes; and in browser mode every line
+            # was stored twice. The agent stores only what it transcribed itself.
 
             await self.room.connect(os.getenv("LIVEKIT_URL"), token)
             logger.info(f"Connected to {self.room_name}")
@@ -595,6 +657,28 @@ class RoomManager:
         finally:
             await self.stop()
 
+    def _forget_participant(self, identity):
+        self.audio_tracks.pop(identity, None)
+        task = self.stt_tasks.pop(identity, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def _sync_transcription(self):
+        """Run transcription on every audio track while the call's switch is
+        on (and the workspace transcribes on the server); stop it when off."""
+        cfg = await fetch_transcription_config(self.http_session)
+        want = _transcription_on(self.room.metadata) and _server_mode(cfg)
+        if not want:
+            for identity in list(self.stt_tasks):
+                task = self.stt_tasks.pop(identity)
+                if not task.done():
+                    task.cancel()
+            return
+        for identity, (track, participant) in list(self.audio_tracks.items()):
+            task = self.stt_tasks.get(identity)
+            if task is None or task.done():
+                self.stt_tasks[identity] = asyncio.create_task(self._handle_audio_track(track, participant))
+
     async def _handle_audio_track(self, track: rtc.Track, participant: rtc.RemoteParticipant):
         # Resolve runtime config (admin-managed, env fallback). Only run
         # server-side STT in backend mode; in frontend/off mode the browser
@@ -608,7 +692,12 @@ class RoomManager:
         stt_provider = (cfg or {}).get("stt_provider") or os.getenv("STT_PROVIDER", "deepgram")
         stt_model = (cfg or {}).get("stt_model") or os.getenv("STT_MODEL", "")
         stt_base_url = (cfg or {}).get("stt_base_url") or os.getenv("STT_BASE_URL", "")
-        stt_language = (cfg or {}).get("stt_language") or os.getenv("STT_LANGUAGE", "")
+        person_language = (getattr(participant, "attributes", None) or {}).get("oc.lang", "")
+        stt_language = _stt_language(
+            stt_provider,
+            (cfg or {}).get("stt_language") or os.getenv("STT_LANGUAGE", ""),
+            person_language,
+        )
         # Inject admin-managed secrets into the process env the LiveKit plugins
         # read, when provided by the BE. Env stays the fallback for callers that
         # still configure keys the old way.
@@ -654,6 +743,8 @@ class RoomManager:
                         alt = event.alternatives[0]
                         text = alt.text
                         if not text: continue
+                        # Switched off while this was being heard: drop it.
+                        if not _transcription_on(self.room.metadata): continue
                         
                         logger.debug(f"STT Result ({participant.identity}): {text}")
                         
@@ -724,7 +815,8 @@ class RoomManager:
                         offset_ms = None
                         if rec_start_s is not None:
                             offset_ms = int(max(0, final_timestamp_ms - int(rec_start_s * 1000)))
-                        asyncio.create_task(self.save_to_backend(participant.identity, text, timestamp=int(final_timestamp_ms), offset_ms=offset_ms))
+                        if _transcript_kept(self.room.metadata):
+                            asyncio.create_task(self.save_to_backend(participant.identity, text, timestamp=int(final_timestamp_ms), offset_ms=offset_ms))
                         
             await asyncio.gather(push_audio(), receive_results())
             
@@ -735,79 +827,43 @@ class RoomManager:
         finally:
             if stt_stream:
                 await stt_stream.aclose()
+            try:
+                await audio_stream.aclose()
+            except Exception:
+                pass
             logger.info(f"Stopped transcription for {participant.identity}")
 
-    def _call_session_key(self):
-        """Name this call, for a transcript that has no recording to hang off.
-
-        LiveKit issues a room sid per call rather than per room, so this names
-        exactly the call in progress and the next call in the same channel gets
-        a different one. Must stay in step with helpers.CallSessionKey on the
-        backend, which is what decides that a key like this has no media behind
-        it and must never appear in a list of recordings.
-        """
-        sid = getattr(self.room, "sid", "") or ""
-        # room.sid is a coroutine property on some client versions; only a
-        # plain string is usable here, and guessing wrong would produce a key
-        # like "call-<coroutine object ...>" that differs on every line.
-        if not isinstance(sid, str) or not sid.strip():
-            return ""
-        return "call-" + sid.strip()
-
     async def save_to_backend(self, identity, text, timestamp=None, offset_ms=None):
+        """Post a line the agent transcribed itself.
+
+        The backend decides which call it belongs to (the room's session, or the
+        recording running in it) and keeps it only while the call's
+        transcription is on, for a speaker who is in the call. "source": "stt"
+        says the agent heard it: lines without it, which older agents relayed
+        from data packets, are refused.
+        """
         backend_url = os.getenv("BACKEND_URL")
-        # Internal-service auth: the BE requires X-Internal-Secret
-        # matching its INTERNAL_SECRET env var. Without it the request
-        # is rejected with 401. Inject it on every transcript post.
+        if not backend_url:
+            return
         internal_secret = os.getenv("INTERNAL_SECRET", "")
-        
-        if backend_url:
-            try:
-                # Egress ID from metadata
-                egress_id = ""
-                if self.room.metadata:
-                     try:
-                        meta = json.loads(self.room.metadata)
-                        egress_id = meta.get("egressID", "")
-                     except: pass
-
-                # A call nobody recorded still produces a transcript worth
-                # keeping. This used to `return` here, which is the whole reason
-                # meeting recaps only ever appeared for recorded calls: the
-                # words were transcribed for the live captions and then thrown
-                # away. The backend keys transcript lines by this id, so an
-                # unrecorded call sends its SESSION key instead of a recording's.
-                transcript_key = egress_id or self._call_session_key()
-                if not transcript_key:
-                    # No recording and no session id to stand in for one. Better
-                    # to drop the line than to file it under a key shared with
-                    # every other call in the workspace.
-                    logger.warning("No egress id and no room session id; dropping a transcript line")
-                    return
-
-                # Use shared session
-                payload = {
-                    "room_name": self.room.name,
-                    "participant_identity": identity,
-                    "text": text,
-                    "timestamp": timestamp if timestamp is not None else int(time.time()),
-                    "egress_id": transcript_key
-                }
-                # offset_ms is the skew-free seek anchor (ms from recording
-                # start, in the producer's own clock). Only include it when
-                # known so older/legacy rows fall back to timestamp math.
-                if offset_ms is not None:
-                    payload["offset_ms"] = int(max(0, offset_ms))
-                headers = {}
-                if internal_secret:
-                    headers["X-Internal-Secret"] = internal_secret
-                async with self.http_session.post(backend_url, json=payload, headers=headers) as resp:
-                    if resp.status != 200:
-                        logger.warning(f"Backend save failed: {resp.status}")
-                    else:
-                        logger.debug(f"Saved transcript for {identity}: {text[:20]}...")
-            except Exception as e:
-                logger.error(f"Save error: {e}")
+        payload = {
+            "room_name": self.room.name,
+            "participant_identity": identity,
+            "text": text,
+            "timestamp": timestamp if timestamp is not None else int(time.time() * 1000),
+            "source": "stt",
+        }
+        # offset_ms is the skew-free seek anchor (ms from recording start, in
+        # the agent's own clock). Only included when known.
+        if offset_ms is not None:
+            payload["offset_ms"] = int(max(0, offset_ms))
+        headers = {"X-Internal-Secret": internal_secret} if internal_secret else {}
+        try:
+            async with self.http_session.post(backend_url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Backend refused a line: {resp.status}")
+        except Exception as e:
+            logger.error(f"Save error: {e}")
 
     async def stop(self):
         self.shutdown_flag.set()

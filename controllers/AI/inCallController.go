@@ -24,15 +24,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
 	business "github.com/akashc777/OneCamp/business/AI"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
+	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	transcriptDomain "github.com/akashc777/OneCamp/domain/LiveKit"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/livekitInit"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/google/uuid"
@@ -49,6 +52,63 @@ type inCallAskRequest struct {
 	// already formatted as "Name: text" lines (newest last). Optional; when
 	// empty we fall back to the persisted transcript.
 	RecentTranscript string `json:"recent_transcript"`
+	// QuestionID is the asker's id for the question, which everyone's panel
+	// shows. When given, the server sends the finished answer to the whole
+	// call itself (inCallAnswerPacket).
+	QuestionID string `json:"question_id"`
+}
+
+// questionID is the shape of a question's id: the client's own, short.
+var questionID = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// inCallAnswerTopic is the call's data topic for the in-call assistant.
+const inCallAnswerTopic = "oc.ai"
+
+// inCallAnswerMaxBytes keeps an answer inside one reliable data packet.
+const inCallAnswerMaxBytes = 12 * 1024
+
+// inCallAnswerPacket is the finished answer to a question, as the server sends
+// it to everyone in the call.
+//
+// Answers used to be sent by the asker's browser and accepted from anyone for
+// any question id, so any participant could replace the assistant's answer
+// to someone else's question in everybody's panel, and the asker could put any
+// words in the assistant's mouth. Sent by the server, with no sending
+// participant and the asker's identity in it, an answer can only be the
+// assistant's, to the question that person asked. Pure.
+func inCallAnswerPacket(id, answer, errMsg, askedBy string) []byte {
+	if len(answer) > inCallAnswerMaxBytes {
+		answer = strings.ToValidUTF8(answer[:inCallAnswerMaxBytes], "")
+	}
+	b, _ := json.Marshal(struct {
+		V         int    `json:"v"`
+		T         string `json:"t"`
+		ID        string `json:"id"`
+		Answer    string `json:"answer"`
+		Error     string `json:"error,omitempty"`
+		AskedByID string `json:"askedById"`
+	}{1, "a", id, answer, errMsg, askedBy})
+	return b
+}
+
+// broadcastInCallAnswer sends the finished answer to everyone in the call, on
+// behalf of an asker who is in it. Best-effort: the asker has it already.
+func broadcastInCallAnswer(ctx context.Context, req inCallAskRequest, asker, answer, errMsg string) {
+	if req.QuestionID == "" {
+		return
+	}
+	if !livekitInit.LiveKitService.Ready() {
+		return
+	}
+	// Only into a call the asker is in.
+	present, err := livekitInit.LiveKitService.RoomHasParticipant(ctx, req.RoomID, asker)
+	if err != nil || !present {
+		return
+	}
+	if err := livekitInit.LiveKitService.SendData(ctx, req.RoomID, inCallAnswerTopic,
+		inCallAnswerPacket(req.QuestionID, answer, errMsg, asker)); err != nil {
+		helpers.LogInfoWithContext(ctx, "controllers/AI in-call answer not broadcast: %v", err)
+	}
 }
 
 const (
@@ -98,21 +158,27 @@ func InCallAskStream(w http.ResponseWriter, r *http.Request) {
 	req.RoomID = strings.TrimSpace(req.RoomID)
 	req.Question = strings.TrimSpace(req.Question)
 	if req.RoomID == "" {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "room_id is required"})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Say which call."})
 		return
 	}
 	if req.Question == "" {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "question is required"})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Ask a question first."})
 		return
 	}
 	if len(req.Question) > inCallMaxQuestion {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "question is too long"})
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That question is too long."})
 		return
 	}
+	req.QuestionID = strings.TrimSpace(req.QuestionID)
+	if req.QuestionID != "" && !questionID.MatchString(req.QuestionID) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That question can't be answered: its id isn't valid."})
+		return
+	}
+	asker := userInfo.UserDgraphInfo.Uid
 
 	// Permission: the caller must belong to the call's surface.
 	if !callerCanAccessRoom(ctx, &userInfo, req.RoomID) {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "you are not a participant of this call"})
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You're not in this call."})
 		return
 	}
 
@@ -164,12 +230,14 @@ func InCallAskStream(w http.ResponseWriter, r *http.Request) {
 
 	if err := svc.Resiliency.CB.Allow(); err != nil {
 		writeSSEError(w, flusher, "AI is busy, try again in a moment")
+		broadcastInCallAnswer(ctx, req, asker, "", "AI is busy, try again in a moment")
 		return
 	}
 	stream, err := svc.StreamChat(ctx, messages, ai.ChatOptions{Temperature: 0.3, MaxTokens: 600})
 	if err != nil {
 		svc.Resiliency.CB.RecordResult(err)
 		writeSSEError(w, flusher, err.Error())
+		broadcastInCallAnswer(ctx, req, asker, "", "The answer couldn't be generated.")
 		return
 	}
 
@@ -178,6 +246,7 @@ func InCallAskStream(w http.ResponseWriter, r *http.Request) {
 		if chunk.Error != nil {
 			svc.Resiliency.CB.RecordResult(chunk.Error)
 			writeSSEError(w, flusher, chunk.Error.Error())
+			broadcastInCallAnswer(ctx, req, asker, "", "The answer couldn't be generated.")
 			return
 		}
 		if chunk.Content != "" {
@@ -201,7 +270,8 @@ func InCallAskStream(w http.ResponseWriter, r *http.Request) {
 	// If the model returned nothing usable (empty stream, or sanitize removed
 	// everything), send a graceful fallback so the bubble never hangs blank.
 	if strings.TrimSpace(sanitized) == "" {
-		if b, mErr := json.Marshal(map[string]string{"replace": "I couldn't generate an answer for that. Try rephrasing, or ask once more people have spoken."}); mErr == nil {
+		sanitized = "I couldn't generate an answer for that. Try rephrasing, or ask once more people have spoken."
+		if b, mErr := json.Marshal(map[string]string{"replace": sanitized}); mErr == nil {
 			fmt.Fprintf(w, "data: %s\n\n", string(b))
 			flusher.Flush()
 		}
@@ -215,6 +285,7 @@ func InCallAskStream(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "data: {\"done\": true}\n\n")
 	flusher.Flush()
 	svc.Resiliency.CB.RecordSuccess()
+	broadcastInCallAnswer(ctx, req, asker, sanitized, "")
 }
 
 // writeSSEError emits a single SSE error frame.
@@ -282,6 +353,13 @@ func fetchPersistedTranscript(ctx context.Context, roomID string) string {
 //   - group chat    → 32-char hex hash  → caller must be a group member
 func callerCanAccessRoom(ctx context.Context, userInfo *userModels.UserInfo, roomID string) bool {
 	switch {
+	case strings.HasPrefix(roomID, "meet-"):
+		// An instant meeting: its host, the one member in it (everyone else
+		// is a guest, who has no session). It was parsed as a channel uuid,
+		// which failed, so the host's every question answered 403.
+		ok, err := liveKitBusiness.MemberMayBeInCall(ctx, roomID, userInfo.UserDgraphInfo.Uid)
+		return err == nil && ok
+
 	case strings.Contains(roomID, " "):
 		// DM: caller must be one of the participant UUIDs in the grouping id.
 		self := userInfo.UserDgraphInfo.Uuid

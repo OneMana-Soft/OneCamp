@@ -517,6 +517,13 @@ func UpdateProvider(ctx context.Context, id uuid.UUID, req adapter.UpdateProvide
 		if err != nil {
 			return nil, err
 		}
+		// The stored key stays with the address it was given for: a new
+		// address needs the key entered again (helpers.CheckKeptSecret).
+		given := req.APIKey != nil && strings.TrimSpace(*req.APIKey) != ""
+		from := helpers.SecretDestination{URL: existing.BaseURL}
+		if err := helpers.CheckKeptSecret(existing.HasAPIKey || existing.KeyUnreadable, given, from, helpers.SecretDestination{URL: b}, "API key"); err != nil {
+			return nil, err
+		}
 		in.BaseURL = &b
 	}
 	if req.APIKey != nil {
@@ -1044,6 +1051,15 @@ func SetWebSearch(ctx context.Context, req adapter.SetWebSearchRequest) error {
 		updateKey = true
 	}
 
+	// The stored key stays with its provider and address (helpers.CheckKeptSecret);
+	// with no provider it goes nowhere.
+	if cur, err := aiModels.GetSettings(ctx); err != nil {
+		return err
+	} else if err := helpers.CheckKeptSecret(cur.HasWebSearchKey && provider != "", updateKey,
+		helpers.SecretDestination{URL: cur.WebSearchBaseURL, How: []string{cur.WebSearchProvider}},
+		helpers.SecretDestination{URL: baseURL, How: []string{provider}}, "API key"); err != nil {
+		return err
+	}
 	if err := aiModels.SetWebSearch(ctx, provider, baseURL, req.Enabled, encKey, updateKey); err != nil {
 		return err
 	}
@@ -1110,6 +1126,12 @@ func SetSandboxConfig(ctx context.Context, req adapter.SetSandboxConfigRequest) 
 		updateToken = true
 	}
 
+	if cur, err := aiModels.GetSettings(ctx); err != nil {
+		return err
+	} else if err := helpers.CheckKeptSecret(cur.HasSandboxRunnerToken && runnerURL != "", updateToken,
+		helpers.SecretDestination{URL: cur.SandboxRunnerURL}, helpers.SecretDestination{URL: runnerURL}, "runner token"); err != nil {
+		return err
+	}
 	if err := aiModels.SetSandboxConfig(ctx, req.Enabled, runnerURL, imageDigest,
 		wsSeconds, wsRuns, chSeconds, chRuns, encToken, updateToken); err != nil {
 		return err
@@ -1269,6 +1291,12 @@ func SetCodePRConfig(ctx context.Context, req adapter.SetCodePRConfigRequest) er
 		updateToken = true
 	}
 
+	if cur, err := aiModels.GetSettings(ctx); err != nil {
+		return err
+	} else if err := helpers.CheckKeptSecret(cur.HasCodePRRunnerToken && runnerURL != "", updateToken,
+		helpers.SecretDestination{URL: cur.CodePRRunnerURL}, helpers.SecretDestination{URL: runnerURL}, "runner token"); err != nil {
+		return err
+	}
 	if err := aiModels.SetCodePRConfig(ctx, req.Enabled, runnerURL, egressJSON, policy, req.DraftOnRed, req.AllowUnlinked,
 		codepr.ClampCodingWallMinutes(wallMinutes), wsMinutes, wsRuns, chMinutes, chRuns, encToken, updateToken); err != nil {
 		return err

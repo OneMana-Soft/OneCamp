@@ -13,9 +13,12 @@ package business
 // Properties:
 //   - Additive + best-effort: no vision model, no images, or a vision failure
 //     all degrade to "no image context"; a run is never blocked.
-//   - Trusted keys: object keys come from the Dgraph post record (a read the
-//     agent already performs for the transcript), fetched server-side and
-//     re-validated as real raster images — never a client-supplied path.
+//   - Trusted keys: an image is read through the conversation the message is
+//     in (PlaceImageRefs), so its object key is the one its upload stored for
+//     that conversation, and an image of any other place is left out. The keys
+//     a message lists are written as its sender sent them, so one could name
+//     anyone's file. Each is fetched server-side and re-validated as a real
+//     raster image.
 //   - Generic: the actual fetch+describe is business/AI.DescribeImagesByObjectKey,
 //     reusable by any caller; this file only collects the refs for a post.
 
@@ -26,8 +29,11 @@ import (
 	"time"
 
 	aiBusiness "github.com/akashc777/OneCamp/business/AI"
+	fileAccessBusiness "github.com/akashc777/OneCamp/business/FileAccess"
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	postgresStruct "github.com/akashc777/OneCamp/models/postgres"
 	ai "github.com/akashc777/OneCamp/services/AI"
 )
 
@@ -51,10 +57,11 @@ func buildImageContext(ctx context.Context, postID string) string {
 	}
 
 	dgp, err := postDomain.GetDgraphPostByUUIDWithAllComments(ctx, postID, "")
-	if err != nil || dgp == nil {
+	if err != nil || dgp == nil || dgp.Channel == nil {
 		return ""
 	}
-	return BuildImageContextFromRefs(ctx, CollectImageRefs(dgp.MediaObj, dgp.Comments))
+	channel := fileAccessBusiness.Place{Kind: postgresStruct.ATTACHMENT_SRC_CHANNEL, ID: dgp.Channel.Uuid}
+	return BuildImageContextFromRefs(ctx, PlaceImageRefs(ctx, channel, CollectImageRefs(dgp.MediaObj, dgp.Comments)))
 }
 
 // visionAvailable reports whether an optional vision model is configured, so a
@@ -85,8 +92,8 @@ func BuildImageContextFromRefs(ctx context.Context, refs []aiBusiness.ImageRef) 
 }
 
 // CollectImageRefs gathers de-duplicated image attachments from a message's own
-// attachments plus its thread comments' attachments, as trusted object-key
-// refs, ordered MOST-RECENT FIRST (newest thread comments, then the root
+// attachments plus its thread comments' attachments, by their ids (the object
+// keys come from PlaceImageRefs), ordered MOST-RECENT FIRST (newest thread comments, then the root
 // message). Recency-first matters because the caller caps how many images it
 // describes: when a teammate shares a NEW screenshot in a follow-up, it must be
 // described even if older messages already carried several images. Pure +
@@ -102,19 +109,12 @@ func CollectImageRefs(media []*dgraphStruct.DgraphAttachment, comments []*dgraph
 		if att == nil {
 			return
 		}
-		key := strings.TrimSpace(att.ObjectKey)
-		if key == "" || !isImageAttachment(att) {
+		id := strings.TrimSpace(att.Uuid)
+		if id == "" || seen[id] || !isImageAttachment(att) {
 			return
 		}
-		dedup := att.Uuid
-		if dedup == "" {
-			dedup = key
-		}
-		if seen[dedup] {
-			return
-		}
-		seen[dedup] = true
-		refs = append(refs, aiBusiness.ImageRef{ObjKey: key, FileName: strings.TrimSpace(att.FileName)})
+		seen[id] = true
+		refs = append(refs, aiBusiness.ImageRef{ID: id, FileName: strings.TrimSpace(att.FileName)})
 	}
 
 	// Comments newest-first (the latest activity in the thread), so a just-shared
@@ -137,6 +137,30 @@ func CollectImageRefs(media []*dgraphStruct.DgraphAttachment, comments []*dgraph
 		add(att)
 	}
 	return refs
+}
+
+// PlaceImageRefs are refs (CollectImageRefs, in its order) that are files of
+// place, the conversation their message is in, at most
+// agentImageContextMaxImages of them, each with the object key its upload
+// stored (fileAccessBusiness.FileOf); any other is left out. Only someone who
+// may read the conversation sees what the agent says of them.
+func PlaceImageRefs(ctx context.Context, place fileAccessBusiness.Place, refs []aiBusiness.ImageRef) []aiBusiness.ImageRef {
+	var out []aiBusiness.ImageRef
+	for _, ref := range refs {
+		if len(out) == agentImageContextMaxImages {
+			break
+		}
+		att, err := fileAccessBusiness.FileOf(ctx, place, ref.ID)
+		if err != nil {
+			if !fileAccessBusiness.IsRefusal(err) {
+				helpers.LogErrorWithContext(ctx, "business/AIAgent PlaceImageRefs %q %q %s err: %+v", place.Kind, place.ID, ref.ID, err)
+			}
+			continue
+		}
+		ref.ObjKey = att.ObjKey
+		out = append(out, ref)
+	}
+	return out
 }
 
 // commentTime returns a comment's creation time (zero when unknown), so the

@@ -54,18 +54,39 @@ func TestConfig(ctx context.Context) (*TestResult, error) {
 	}
 
 	provider := STTProvider()
+	var res *TestResult
 	switch provider {
 	case STTDeepgram:
-		return testDeepgram(ctx, provider), nil
+		res = testDeepgram(ctx, provider)
 	case STTOpenAI:
-		return testOpenAICompatible(ctx, provider), nil
+		res = testOpenAICompatible(ctx, provider)
 	case STTLocal:
-		return testLocalWhisper(ctx, provider), nil
+		res = testLocalWhisper(ctx, provider)
 	case STTGoogle:
-		return testGoogle(provider), nil
+		res = testGoogle(provider)
 	default:
 		return &TestResult{OK: false, Provider: provider, Message: "Unknown STT provider."}, nil
 	}
+	return withAgent(res, Agent(ctx)), nil
+}
+
+// withAgent adds the transcriber to a provider's result. A speech model that
+// answers is half of server mode: the agent that joins calls and feeds it is
+// the other half, and without it every call has no captions and no
+// transcript. The Test used to pass on the model alone. Pure.
+func withAgent(res *TestResult, agent AgentStatus) *TestResult {
+	if res == nil || !res.OK {
+		return res
+	}
+	switch {
+	case !agent.Running:
+		return &TestResult{OK: false, Provider: res.Provider, Message: res.Message +
+			" But the transcription agent isn't running, so calls won't be transcribed. Start it with make stt_up."}
+	case !agent.LiveKit:
+		return &TestResult{OK: false, Provider: res.Provider, Message: res.Message +
+			" But the transcription agent can't reach the call server, so it can't join calls. Check make logs SERVICE=agent."}
+	}
+	return &TestResult{OK: true, Provider: res.Provider, Message: res.Message + " The transcription agent is running."}
 }
 
 // testLocalWhisper probes the bundled Whisper server.

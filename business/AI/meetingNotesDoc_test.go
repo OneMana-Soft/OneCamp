@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	transcriptDomain "github.com/akashc777/OneCamp/domain/LiveKit"
 )
 
@@ -80,34 +81,39 @@ func TestMeetingNotesTitle(t *testing.T) {
 	}
 }
 
-// notesAudience decides who can open a meeting document, so its degradation
-// behaviour matters as much as its happy path: with Redis unavailable,
-// GetSetMembers returns an empty set and no error, and the audience must fall
-// back to the speakers rather than to nobody.
-func TestNotesAudienceFallsBackToSpeakers(t *testing.T) {
-	// No Redis in a unit test, which is exactly the degraded case.
-	got := notesAudience(context.Background(), "room-1", []string{"0x1", "0x2"})
-	if len(got) != 2 || got[0] != "0x1" || got[1] != "0x2" {
-		t.Errorf("audience = %v, want the speakers in order", got)
+// mergeAudience puts speakers first (the owner is picked from the head of the
+// list, and a speaker is the likeliest to still be a live user), then the
+// call's other attendees, without blanks or repeats.
+func TestMergeAudienceKeepsSpeakersFirstAndDeduplicates(t *testing.T) {
+	got := mergeAudience([]string{"0x1", "", "0x1", "  0x2  "}, []string{"0x3", "0x2", " "})
+	if want := []string{"0x1", "0x2", "0x3"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("audience = %v, want %v", got, want)
 	}
-}
-
-func TestNotesAudienceKeepsSpeakersFirstAndDeduplicates(t *testing.T) {
-	// The owner is picked from the head of this list, and a speaker is the
-	// likeliest to still be a live user, so speakers must lead.
-	got := notesAudience(context.Background(), "room-1", []string{"0x1", "", "0x1", "  0x2  "})
-	if len(got) != 2 {
-		t.Fatalf("audience = %v, want 2 after trimming and deduplication", got)
-	}
-	if got[0] != "0x1" || got[1] != "0x2" {
-		t.Errorf("audience = %v, want [0x1 0x2]", got)
-	}
-}
-
-func TestNotesAudienceIsEmptyWhenNobodySpokeAndNothingWasRecorded(t *testing.T) {
-	// Empty in, empty out. createMeetingNotesDoc treats this as "do not
-	// create", because a document with no editors is one nobody can open.
-	if got := notesAudience(context.Background(), "room-1", nil); len(got) != 0 {
+	if got := mergeAudience(nil, nil); len(got) != 0 {
 		t.Errorf("audience = %v, want none", got)
+	}
+}
+
+// CALL-BUG-7. The notes reach only people who can still open the
+// conversation when the document is written: someone removed from a private
+// channel after the call is not given its notes, whether they spoke or only
+// attended. Redis is absent here, which is also the degraded case: the
+// audience falls back to the speakers, still checked.
+func TestNotesAudienceLeavesOutWhoCanNoLongerOpenTheConversation(t *testing.T) {
+	keep := mayOpenConversation
+	t.Cleanup(func() { mayOpenConversation = keep })
+	var asked []string
+	mayOpenConversation = func(_ context.Context, room, uid string) bool {
+		asked = append(asked, room+"/"+uid)
+		return uid != "0x2" // 0x2 was removed from the channel after the call
+	}
+
+	call := liveKitBusiness.FinishedCall{Room: "4f0c2a1e-3b7d-4c55-9a51-0d8b1f6a2c33", SessionKey: "call-RM_abc"}
+	got := notesAudience(context.Background(), call, []string{"0x1", "0x2", "0x3"})
+	if want := "0x1,0x3"; strings.Join(got, ",") != want {
+		t.Errorf("audience = %v, want %s", got, want)
+	}
+	if len(asked) != 3 || !strings.HasPrefix(asked[0], call.Room+"/") {
+		t.Errorf("every candidate must be checked against the call's conversation, asked %v", asked)
 	}
 }

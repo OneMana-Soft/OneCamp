@@ -13,7 +13,8 @@ import (
 // the token's owner. enabled is false when AI is off.
 func Attention(w http.ResponseWriter, r *http.Request) {
 	userInfo, _ := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-	resp, err := aiBusiness.GetWhatNeedsMe(r.Context(), &userInfo)
+	// ?tz= is the reader's zone: today's meetings are the day their calendar shows.
+	resp, err := aiBusiness.GetWhatNeedsMe(aiBusiness.WithReaderZone(r.Context(), r.URL.Query().Get("tz")), &userInfo)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "failed to read what needs you"})
 		return

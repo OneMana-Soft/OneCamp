@@ -7,6 +7,7 @@ package business
 // test logs readable.
 
 import (
+	"context"
 	"io"
 	"log"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/google/uuid"
 )
 
 func TestMain(m *testing.M) {
@@ -24,5 +26,9 @@ func TestMain(m *testing.M) {
 		discard := log.New(io.Discard, "", 0)
 		helpers.MessageLogs = &helpers.Message{InfoLog: discard, ErrorLog: discard}
 	}
+	// Remote-agent tests answer from httptest servers on loopback, which only
+	// an agent an admin added may reach: these tests' agents are an admin's
+	// unless a test says otherwise.
+	creatorIsAdmin = func(context.Context, *uuid.UUID) bool { return true }
 	os.Exit(m.Run())
 }

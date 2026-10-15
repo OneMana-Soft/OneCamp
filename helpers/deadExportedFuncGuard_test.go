@@ -228,6 +228,12 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"path is unexported and sits behind a live tool call, and signing is only worth having if " +
 		"that round trip is checked.",
 
+	"LetRemotesReachThisNetworkForTest": "lets an integration test about what an agent may read " +
+		"for whoever asked it serve its scripted remote brain on loopback, though the agent's " +
+		"sponsor is a member and a member's remote may not reach this server's network. It is " +
+		"built only with the integration tag, so the shipped binary never has it; the address " +
+		"rule itself is tested where it is the subject.",
+
 	"AgentBudgetLimit": "reads the per-agent cap off a context so business/MCPServer's tests can " +
 		"assert SpendContext actually carries it. services/AI keeps budgetDimensions unexported, " +
 		"so no other package can see the limit. The invariant is production behaviour — a metered " +

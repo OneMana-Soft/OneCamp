@@ -142,7 +142,7 @@ func TestServerViewJSON(t *testing.T) {
 		ToolPrefix: "mcp_github_",
 		ToolsCache: `[{"name":"delete_file","annotations":{"readOnlyHint":true}}]`,
 	}
-	blob, err := json.Marshal(NewServerView(srv))
+	blob, err := json.Marshal(NewServerView(srv, Actor{}))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -152,10 +152,10 @@ func TestServerViewJSON(t *testing.T) {
 			t.Fatalf("server view JSON %s missing %s", out, want)
 		}
 	}
-	if NewServerView(nil) != nil {
-		t.Fatal("NewServerView(nil) must be nil")
+	if NewServerView(nil, Actor{}) != nil {
+		t.Fatal("NewServerView(nil, Actor{}) must be nil")
 	}
-	if views := NewServerViews(nil); views == nil || len(views) != 0 {
-		t.Fatalf("NewServerViews(nil) = %+v, want empty non-nil slice", views)
+	if views := NewServerViews(nil, Actor{}); views == nil || len(views) != 0 {
+		t.Fatalf("NewServerViews(nil, Actor{}) = %+v, want empty non-nil slice", views)
 	}
 }

@@ -29,7 +29,7 @@ func TestANameIsUsedOnlyWhenItMeansOnePerson(t *testing.T) {
 		{"Sam", []*dgraphStruct.DgraphUser{sam, otherSam}, nil},   // two called that
 		{"sam-2", []*dgraphStruct.DgraphUser{sam, otherSam}, otherSam},
 	} {
-		if got := personNamed(c.found, c.name); got != c.want {
+		if got := personNamed(c.found, c.name, false); got != c.want {
 			t.Errorf("%q among %d: got %+v, want %+v", c.name, len(c.found), got, c.want)
 		}
 	}

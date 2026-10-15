@@ -29,7 +29,6 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/minioInit"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -71,14 +70,9 @@ func AnalyzeAttachmentDocument(ctx context.Context, userInfo *userModels.UserInf
 		return "", fmt.Errorf("missing attachment reference")
 	}
 
-	// Resolve + authorize the source, reusing the exact image-analyze logic.
-	srcValue, err := resolveAndAuthorizeSource(ctx, userInfo, srcKey, srcRef)
+	att, err := attachmentFor(ctx, userInfo, srcKey, srcRef, objUUID)
 	if err != nil {
 		return "", err
-	}
-	att, err := attachmentBusiness.GetAttachmentByObjUUID(ctx, objUUID, srcKey)
-	if err != nil || att == nil || att.SrcValue != srcValue || att.ObjKey == "" {
-		return "", fmt.Errorf("attachment not found or you don't have access")
 	}
 
 	data, err := fetchDocumentObject(ctx, att.ObjKey)

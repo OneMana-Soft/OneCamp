@@ -73,15 +73,15 @@ const remoteCardTimeout = 15 * time.Second
 // resolveRemoteCard reads an A2A agent's card when the agent is saved, so an
 // address that is not an A2A agent is refused now, with the reason, rather than
 // at its first run in front of the team. Nothing for AG-UI or a local agent.
-func resolveRemoteCard(ctx context.Context, protocol, endpoint, header, secret string) (json.RawMessage, error) {
+func resolveRemoteCard(ctx context.Context, protocol, endpoint, header, secret string, addedByAdmin bool) (json.RawMessage, error) {
 	if protocol != model.RemoteA2A || strings.TrimSpace(endpoint) == "" {
 		return nil, nil
 	}
 	cctx, cancel := context.WithTimeout(ctx, remoteCardTimeout)
 	defer cancel()
-	card, err := fetchA2ACardFn(cctx, endpoint, header, secret)
+	card, err := fetchA2ACardFn(cctx, endpoint, header, secret, helpers.EndpointPolicyFor(addedByAdmin))
 	if err != nil {
-		return nil, fmt.Errorf("%s", unwrapDialError(err.Error()))
+		return nil, fmt.Errorf("%s", remoteCheckError(err, addedByAdmin))
 	}
 	return json.Marshal(card)
 }
@@ -157,39 +157,58 @@ func CheckRemoteBrain(ctx context.Context, in RemoteBrainCheck, actor Actor) (*R
 		return nil, fmt.Errorf("an endpoint is required")
 	}
 
+	protocol, err := validateRemoteProtocol(in.Protocol)
+	if err != nil {
+		return nil, err
+	}
+
+	// What the address may reach follows whoever set the agent up: the
+	// agent's creator when it exists, the person checking otherwise.
+	addedByAdmin := actor.IsAdmin
 	secret := strings.TrimSpace(in.AuthSecret)
-	if secret == "" && strings.TrimSpace(in.AgentID) != "" {
-		stored, serr := storedRemoteSecret(ctx, in.AgentID, actor)
-		if serr != nil {
+	if strings.TrimSpace(in.AgentID) != "" {
+		agent, serr := storedRemoteSecret(ctx, in.AgentID, actor)
+		switch {
+		case serr != nil && secret == "":
 			return nil, serr
+		case agent != nil:
+			addedByAdmin = creatorIsAdmin(ctx, &agent.CreatedBy)
+			if secret == "" {
+				// The stored secret is used only where it was given for: a
+				// check of another address, protocol or header asks for it
+				// again rather than sending it there.
+				to := model.RemoteSecretDestinationOf(endpoint, protocol, header)
+				if err := helpers.CheckKeptSecret(agent.HasRemoteSecret(), false, agent.RemoteSecretDestination(), to, "secret"); err != nil {
+					return nil, err
+				}
+				secret = agent.AGUIAuthSecret
+			}
 		}
-		secret = stored
+	}
+	if msg := remoteReachRefusal(endpoint, addedByAdmin); msg != "" {
+		return &RemoteBrainResult{OK: false, Error: msg}, nil
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, remoteCheckTimeout)
 	defer cancel()
 
-	protocol, err := validateRemoteProtocol(in.Protocol)
-	if err != nil {
-		return nil, err
-	}
 	var p ai.RemoteBrain
 	var card *ai.A2ACard
 	if protocol == model.RemoteA2A {
-		card, err = fetchA2ACardFn(runCtx, endpoint, header, secret)
+		card, err = fetchA2ACardFn(runCtx, endpoint, header, secret, helpers.EndpointPolicyFor(addedByAdmin))
 		if err != nil {
-			return &RemoteBrainResult{OK: false, Error: remoteCheckError(err)}, nil
+			return &RemoteBrainResult{OK: false, Error: remoteCheckError(err, addedByAdmin)}, nil
 		}
-		p = ai.NewA2AProvider(card.Endpoint, header, secret, "check-"+uuid.NewString(), card.ProtocolVersion)
+		p = ai.NewA2AProvider(card.Endpoint, header, secret, "check-"+uuid.NewString(), card.ProtocolVersion, helpers.EndpointPolicyFor(addedByAdmin))
 	} else {
-		p = ai.NewAGUIProvider(endpoint, header, secret, "check-"+uuid.NewString())
+		p = ai.NewAGUIProvider(endpoint, header, secret, "check-"+uuid.NewString(), helpers.EndpointPolicyFor(addedByAdmin))
 	}
 	// ChatWithTools with nothing on offer, rather than Chat: this run offers no
 	// tools either way, and the structured form gives back what the remote
 	// asked for instead of a sentence about it.
 	reply, calls, err := p.ChatWithTools(runCtx, []ai.ChatMessage{{Role: "user", Content: remoteCheckPrompt}}, nil, ai.ChatOptions{})
 	if err != nil {
-		return &RemoteBrainResult{OK: false, Error: remoteCheckError(err), Card: card}, nil
+		return &RemoteBrainResult{OK: false, Error: remoteCheckError(err, addedByAdmin), Card: card}, nil
 	}
 	res := &RemoteBrainResult{OK: true, Reply: helpers.TruncateRunes(strings.TrimSpace(reply), 400), Card: card}
 	seen := map[string]bool{}
@@ -202,24 +221,42 @@ func CheckRemoteBrain(ctx context.Context, in RemoteBrainCheck, actor Actor) (*R
 	return res, nil
 }
 
-// storedRemoteSecret reads an agent's secret for a check, for an actor allowed
-// to manage that agent. It never leaves this package.
-func storedRemoteSecret(ctx context.Context, agentID string, actor Actor) (string, error) {
+// remoteReachRefusal is why an agent may not be pointed at endpoint under the
+// one address rule (helpers.EndpointPolicyFor), in words, or "" when it may.
+// Checked on save and before a check, so a refused address is a sentence then;
+// the client checks again as it connects.
+func remoteReachRefusal(endpoint string, addedByAdmin bool) string {
+	if strings.TrimSpace(endpoint) == "" {
+		return ""
+	}
+	err := helpers.CheckEndpoint(endpoint, helpers.EndpointPolicyFor(addedByAdmin))
+	if err == nil {
+		return ""
+	}
+	if msg := helpers.EndpointRefusal(err, addedByAdmin); msg != "" {
+		return msg
+	}
+	return err.Error()
+}
+
+// storedRemoteSecret loads an agent whose stored secret a check may use, for
+// an actor allowed to manage it. The secret never leaves this package.
+func storedRemoteSecret(ctx context.Context, agentID string, actor Actor) (*model.AiAgent, error) {
 	id, err := uuid.Parse(strings.TrimSpace(agentID))
 	if err != nil {
-		return "", fmt.Errorf("invalid agent id")
+		return nil, fmt.Errorf("invalid agent id")
 	}
 	a, err := model.GetAgentByID(ctx, id)
 	if err != nil || a == nil {
-		return "", errNotFound
+		return nil, errNotFound
 	}
 	if !canManage(actor, a) {
-		return "", errForbidden
+		return nil, errForbidden
 	}
 	if a.AGUIAuthUnreadable {
-		return "", fmt.Errorf("the stored secret cannot be read; enter it again")
+		return nil, fmt.Errorf("the stored secret cannot be read; enter it again")
 	}
-	return a.AGUIAuthSecret, nil
+	return a, nil
 }
 
 // unwrapDialError peels the layers off a transport failure until the reason is
@@ -248,13 +285,18 @@ func unwrapDialError(msg string) string {
 // The provider's own errors already name the status or the refusal; this adds
 // the two cases where the reason is ours rather than the remote's, because
 // "connection refused" does not tell anybody that local-only mode is on.
-func remoteCheckError(err error) string {
+//
+// addedByAdmin is the address rule the call was made under.
+func remoteCheckError(err error, addedByAdmin bool) string {
 	msg := unwrapDialError(err.Error())
 	switch {
 	case strings.Contains(msg, "local-only"):
 		return "Local-only AI mode is on, so only endpoints on your own network can be reached. " + msg
 	case strings.Contains(msg, "blocked for security"):
 		return "That address is blocked: it is a cloud metadata or link-local address, which no model or agent endpoint should be on."
+	}
+	if plain := helpers.EndpointRefusal(err, addedByAdmin); plain != "" {
+		return plain
 	}
 	return msg
 }

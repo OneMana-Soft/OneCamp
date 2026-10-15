@@ -39,9 +39,9 @@ var linkedSessions sync.Map
 // somewhere to live, and that readers can find it.
 //
 // A no-op for a real recording, which already has a node created and linked
-// when recording started, and for a room that belongs to no channel or DM (an
-// instant meeting), which has no surface to attach a transcript to and never
-// had one.
+// when recording started. Refused for a room that belongs to no channel or DM
+// (an instant meeting): its lines once landed on a node linked to nothing,
+// which no list showed, nobody could delete and retention never reached.
 func EnsureCallSessionNode(ctx context.Context, sessionKey, roomName string) error {
 	if !helpers.IsCallSessionKey(sessionKey) {
 		return nil
@@ -52,28 +52,42 @@ func EnsureCallSessionNode(ctx context.Context, sessionKey, roomName string) err
 
 	channelUUID, chatGroupID := helpers.ClassifyRoom(roomName)
 	if channelUUID == "" && chatGroupID == "" {
-		// An instant meeting: no channel, no DM, nothing that lists calls. Mark
-		// it handled so the classification is not redone per utterance.
-		linkedSessions.Store(sessionKey, struct{}{})
-		return nil
+		return ErrTranscriptNotKept
 	}
 
-	now := time.Now()
-	// StartedAt is not decoration: the transcript read orders recordings by it
-	// and takes the newest, and Dgraph drops nodes that lack the sort predicate.
-	// A session node without it is a node the recap can never see.
-	recordingUID, err := recordingDomain.CreateOrUpdateDgraphRecording(ctx, &dgraphStruct.DgraphRecording{
-		Uid:            "uid(recording)",
-		EgressId:       sessionKey,
-		StartedAt:      &now,
-		TranscriptOnly: true,
-	})
+	recordingUID, linked, err := recordingDomain.FindCallSessionNode(ctx, sessionKey)
 	if err != nil {
 		return err
 	}
-	if recordingUID == "" {
+	if linked {
+		linkedSessions.Store(sessionKey, struct{}{})
 		return nil
 	}
+	if recordingUID == "" {
+		now := time.Now()
+		// StartedAt is not decoration: lists order recordings by it, and Dgraph
+		// drops nodes that lack the sort predicate. The room's end replaces it
+		// with when the call began (EndCallSession).
+		recordingUID, err = recordingDomain.CreateOrUpdateDgraphRecording(ctx, &dgraphStruct.DgraphRecording{
+			Uid:            "uid(recording)",
+			EgressId:       sessionKey,
+			StartedAt:      &now,
+			TranscriptOnly: true,
+		})
+		if err != nil {
+			return err
+		}
+		if recordingUID == "" {
+			// Made by a racing writer between the read and this write: link
+			// whatever is there now.
+			if recordingUID, _, err = recordingDomain.FindCallSessionNode(ctx, sessionKey); err != nil || recordingUID == "" {
+				return err
+			}
+		}
+	}
+	// A node that exists unlinked (an earlier link failed) is linked now. The
+	// old code only ever linked a node it had just made, so one failed link left
+	// a transcript nobody could find, for ever.
 
 	if channelUUID != "" {
 		_, err = channelDomain.CreateOrUpdateDgraphChannel(ctx, &dgraphStruct.DgraphChannel{
@@ -99,4 +113,18 @@ func EnsureCallSessionNode(ctx context.Context, sessionKey, roomName string) err
 
 	linkedSessions.Store(sessionKey, struct{}{})
 	return nil
+}
+
+// EndCallSession stamps a finished call's transcript (when it has one) as
+// over, from when the room began to now, so it is listed with the
+// conversation's recordings, its people can delete it, and the retention
+// policy reaches it.
+func EndCallSession(ctx context.Context, sessionKey string, began time.Time) {
+	if !helpers.IsCallSessionKey(sessionKey) {
+		return
+	}
+	if err := recordingDomain.EndCallSessionNode(ctx, sessionKey, began, time.Now()); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/EndCallSession could not end the call's transcript: %+v", err)
+	}
+	linkedSessions.Delete(sessionKey)
 }

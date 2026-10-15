@@ -92,21 +92,25 @@ func ServerTools(s *model.McpServer) []ToolView {
 type ServerView struct {
 	*model.McpServer
 	Tools []ToolView `json:"tools"`
+	// CanManage says whether the person reading may change, switch, test or
+	// remove this server (its creator, or an admin), so the web shows those
+	// controls only to them. The server enforces it either way.
+	CanManage bool `json:"can_manage"`
 }
 
-// NewServerView wraps one server row; nil in, nil out.
-func NewServerView(s *model.McpServer) *ServerView {
+// NewServerView wraps one server row as the actor sees it; nil in, nil out.
+func NewServerView(s *model.McpServer, actor Actor) *ServerView {
 	if s == nil {
 		return nil
 	}
-	return &ServerView{McpServer: s, Tools: ServerTools(s)}
+	return &ServerView{McpServer: s, Tools: ServerTools(s), CanManage: s.ManageableBy(actor.UserID, actor.IsAdmin)}
 }
 
 // NewServerViews wraps a list of server rows. Never nil.
-func NewServerViews(servers []*model.McpServer) []*ServerView {
+func NewServerViews(servers []*model.McpServer, actor Actor) []*ServerView {
 	out := make([]*ServerView, 0, len(servers))
 	for _, s := range servers {
-		if v := NewServerView(s); v != nil {
+		if v := NewServerView(s, actor); v != nil {
 			out = append(out, v)
 		}
 	}

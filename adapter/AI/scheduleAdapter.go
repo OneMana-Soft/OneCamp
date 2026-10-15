@@ -16,7 +16,8 @@ type ScheduleProposeRequest struct {
 	Participants  []string `json:"participants"`    // names or user UUIDs (requester is always included)
 	DurationMins  int      `json:"duration_mins"`   // meeting length; default 30, max 480
 	WindowDays    int      `json:"window_days"`     // how far ahead to search; default 7, max 30
-	UTCOffsetMins int      `json:"utc_offset_mins"` // requester's local offset (local = UTC + offset)
+	UTCOffsetMins int      `json:"utc_offset_mins"` // requester's local offset (local = UTC + offset); only when timezone is missing
+	Timezone      string   `json:"timezone"`        // requester's IANA zone ("Asia/Kolkata"): business hours are its wall clock, across daylight saving too
 	BusinessStart int      `json:"business_start"`  // local start hour [0-23]; default 9
 	BusinessEnd   int      `json:"business_end"`    // local end hour (exclusive) [1-24]; default 18
 }
@@ -74,6 +75,7 @@ type ScheduleRescheduleRequest struct {
 	EventUUID     string `json:"event_uuid"`
 	WindowDays    int    `json:"window_days"`
 	UTCOffsetMins int    `json:"utc_offset_mins"`
+	Timezone      string `json:"timezone"` // as ScheduleProposeRequest's
 	BusinessStart int    `json:"business_start"`
 	BusinessEnd   int    `json:"business_end"`
 }

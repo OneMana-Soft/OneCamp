@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -89,74 +91,87 @@ func ConnectLiveKit(config *LiveKitConfigStruct) (err error) {
 
 }
 
-func (s *LiveKitServiceStruct) GenerateToken(room, identity, name string, isAdmin bool, audioEnabled bool, videoEnabled bool) (string, error) {
-	at := lka.NewAccessToken(s.Config.ApiKey, s.Config.ApiSecret)
+// callPublishSources is what everyone in a call may publish: their own
+// microphone and camera, and their screen.
+//
+// It used to follow the green room's toggles. Someone who joined muted got a
+// token without "microphone", so Unmute was refused by the server ("failed to
+// publish track, insufficient permissions") for the rest of the call, and the
+// same for the camera. A token says what a person is ALLOWED to do in the
+// call, not what they chose to do at the door: the toggles are the client's
+// state, and a later role (a webinar attendee) will narrow this on purpose.
+var callPublishSources = []string{"camera", "microphone", "screen_share", "screen_share_audio"}
 
+// CallTokenTTL is how long a minted call token can be used to connect.
+//
+// Short on purpose. LiveKit refreshes the token of a CONNECTED participant
+// itself (every five minutes, each refresh valid for ten), so this bounds only
+// the window to connect and how long a token outlives the person's right to
+// it: removed from the channel, a guest link revoked, put out of the call.
+// It was 24 hours for members and 4 for guests. Clients mint at Join and mint
+// again from the same endpoint after a full disconnect.
+const CallTokenTTL = 10 * time.Minute
+
+// LanguageAttribute is the participant attribute that carries the language a
+// person speaks (from their browser), so the server's transcriber can use it.
+const LanguageAttribute = "oc.lang"
+
+// languageTag is the shape of a BCP-47 tag as browsers report it ("en",
+// "en-US", "zh-Hant-TW"), and nothing else: the value is copied into a token
+// and on to a speech provider.
+var languageTag = regexp.MustCompile(`^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8}){0,4}$`)
+
+// CleanLanguage returns a usable language tag, or "" for anything that is not
+// one. Pure.
+func CleanLanguage(raw string) string {
+	tag := strings.TrimSpace(raw)
+	if len(tag) > 35 || !languageTag.MatchString(tag) {
+		return ""
+	}
+	return tag
+}
+
+// callGrant is the grant every call token carries. Pure.
+func callGrant(room string, roomAdmin bool) *lka.VideoGrant {
 	grant := &lka.VideoGrant{
-		RoomJoin:     true,
-		Room:         room,
-		CanPublish:   &[]bool{true}[0],
-		CanSubscribe: &[]bool{true}[0],
+		RoomJoin:  true,
+		Room:      room,
+		RoomAdmin: roomAdmin,
 	}
+	grant.SetCanPublish(true)
+	grant.SetCanSubscribe(true)
+	grant.SetCanPublishData(true)
+	grant.CanPublishSources = append([]string(nil), callPublishSources...)
+	return grant
+}
 
-	if isAdmin {
-		grant.RoomAdmin = []bool{true}[0]
-	}
-
-	sources := []string{"screen_share", "screen_share_audio"}
-
-	if audioEnabled {
-		sources = append(sources, "microphone")
-	}
-
-	if videoEnabled {
-		sources = append(sources, "camera")
-	}
-
-	if len(sources) > 0 {
-		grant.CanPublishSources = sources
-	} else {
-		grant.CanPublishSources = nil
-	}
-
-	at.SetVideoGrant(grant).
+// mintCallToken signs a token for one room, with the person's language when
+// they gave a usable one.
+func (s *LiveKitServiceStruct) mintCallToken(room, identity, name string, roomAdmin bool, language string) (string, error) {
+	at := lka.NewAccessToken(s.Config.ApiKey, s.Config.ApiSecret)
+	at.SetVideoGrant(callGrant(room, roomAdmin)).
 		SetIdentity(identity).
 		SetName(name).
-		SetValidFor(24 * time.Hour)
-
+		SetValidFor(CallTokenTTL)
+	if lang := CleanLanguage(language); lang != "" {
+		at.SetAttributes(map[string]string{LanguageAttribute: lang})
+	}
 	return at.ToJWT()
 }
 
+// GenerateToken mints a member's token for a call room. RoomAdmin only for the
+// host of an instant meeting.
+func (s *LiveKitServiceStruct) GenerateToken(room, identity, name string, isAdmin bool, language string) (string, error) {
+	return s.mintCallToken(room, identity, name, isAdmin, language)
+}
+
 // GenerateGuestToken mints a single-room LiveKit token for an unauthenticated
-// guest. Unlike GenerateToken it NEVER grants RoomAdmin, is scoped to exactly
-// one room, and uses a short, caller-supplied validity window. The identity is
-// supplied by the caller in the reserved `guest-` namespace so it can never
-// collide with a member's UUID identity or the transcription agent.
-func (s *LiveKitServiceStruct) GenerateGuestToken(room, identity, name string, ttl time.Duration, audioEnabled, videoEnabled bool) (string, error) {
-	at := lka.NewAccessToken(s.Config.ApiKey, s.Config.ApiSecret)
-
-	grant := &lka.VideoGrant{
-		RoomJoin:     true,
-		Room:         room,
-		CanPublish:   &[]bool{true}[0],
-		CanSubscribe: &[]bool{true}[0],
-	}
-
-	sources := []string{"screen_share", "screen_share_audio"}
-	if audioEnabled {
-		sources = append(sources, "microphone")
-	}
-	if videoEnabled {
-		sources = append(sources, "camera")
-	}
-	grant.CanPublishSources = sources
-
-	at.SetVideoGrant(grant).
-		SetIdentity(identity).
-		SetName(name).
-		SetValidFor(ttl)
-
-	return at.ToJWT()
+// guest. Unlike GenerateToken it NEVER grants RoomAdmin and is scoped to exactly
+// one room. The identity is supplied by the caller in the reserved `guest-`
+// namespace so it can never collide with a member's identity or the
+// transcription agent.
+func (s *LiveKitServiceStruct) GenerateGuestToken(room, identity, name, language string) (string, error) {
+	return s.mintCallToken(room, identity, name, false, language)
 }
 
 func (s *LiveKitServiceStruct) StartRecording(ctx context.Context, roomName string, userName string) (*livekit.EgressInfo, string, error) {
@@ -201,15 +216,8 @@ func (s *LiveKitServiceStruct) StartRecording(ctx context.Context, roomName stri
 
 	// 3. Start Recording
 	// Initial metadata before we have the ID
-	metadata := recordingMetadata(userName, "")
-
-	_, err = s.LiveKitClient.UpdateRoomMetadata(ctx, &livekit.UpdateRoomMetadataRequest{
-		Room:     roomName,
-		Metadata: metadata,
-	})
-
-	if err != nil {
-		fmt.Printf("Error updating room metadata for %s: %v\n", roomName, err)
+	if _, err = s.UpdateRoomMetadata(ctx, roomName, recordingKeys(true, userName, "")); err != nil {
+		helpers.LogErrorWithContext(ctx, "liveKitInit/StartRecording could not update the metadata of %s: %v", roomName, err)
 		return nil, "", fmt.Errorf("failed to update room metadata: %w", err)
 	}
 
@@ -243,14 +251,9 @@ func (s *LiveKitServiceStruct) StartRecording(ctx context.Context, roomName stri
 
 	// 4. Update Metadata with EgressID
 	// We append the egressId to the metadata so agents can find it
-	metadataWithID := recordingMetadata(userName, egressInfo.EgressId)
-	_, err = s.LiveKitClient.UpdateRoomMetadata(ctx, &livekit.UpdateRoomMetadataRequest{
-		Room:     roomName,
-		Metadata: metadataWithID,
-	})
-	if err != nil {
+	if _, err = s.UpdateRoomMetadata(ctx, roomName, recordingKeys(true, userName, egressInfo.EgressId)); err != nil {
 		// Just log error, don't fail the request as recording started successfully
-		fmt.Printf("Error updating room metadata with EgressID for %s: %v\n", roomName, err)
+		helpers.LogErrorWithContext(ctx, "liveKitInit/StartRecording could not add the egress to the metadata of %s: %v", roomName, err)
 	}
 
 	return egressInfo, filename, nil
@@ -289,16 +292,147 @@ func (s *LiveKitServiceStruct) StopRecording(ctx context.Context, roomName strin
 		return nil, lastErr
 	}
 
-	// Update metadata
-	_, err = s.LiveKitClient.UpdateRoomMetadata(ctx, &livekit.UpdateRoomMetadataRequest{
-		Room:     roomName,
-		Metadata: "{\"isRecording\": false}",
-	})
-	if err != nil {
-		fmt.Printf("Error updating room metadata for %s: %v\n", roomName, err)
+	// Update metadata. Only the recording's keys: this wrote the whole
+	// metadata as {"isRecording": false}, which also switched off everything
+	// else a call keeps there (the transcription switch and its notice).
+	if _, err = s.UpdateRoomMetadata(ctx, roomName, recordingKeys(false, "", "")); err != nil {
+		helpers.LogErrorWithContext(ctx, "liveKitInit/StopRecording could not update the metadata of %s: %v", roomName, err)
 	}
 
 	return lastEgress, nil
+}
+
+// Ready reports whether calls are configured on this server at all. They are
+// an optional subsystem: a server without LiveKit has no clients.
+func (s *LiveKitServiceStruct) Ready() bool {
+	return s != nil && s.LiveKitClient != nil && s.Config != nil
+}
+
+// ErrRoomNotFound is a call room that does not exist (nobody is in a call
+// there, or it has just ended).
+var ErrRoomNotFound = errors.New("no such call room")
+
+// roomMetadataLocks serialises metadata edits per room in this process.
+var roomMetadataLocks helpers.KeyedLock
+
+// UpdateRoomMetadata changes some keys of a room's metadata and keeps the rest.
+//
+// The metadata is one JSON object that several features write: the recording
+// state, and the transcription switch with its notice. Each write used to
+// replace the whole object, so stopping a recording erased the switch. Keys in
+// set are written, and a nil value removes its key. Edits to one room run one
+// at a time here, so two features changing it at once can't lose each other's
+// keys. Answers the metadata written.
+func (s *LiveKitServiceStruct) UpdateRoomMetadata(ctx context.Context, room string, set map[string]any) (string, error) {
+	roomMetadataLocks.Acquire(room, 0)
+	defer roomMetadataLocks.Release(room)
+
+	current, err := s.GetRoom(ctx, room)
+	if err != nil {
+		return "", err
+	}
+	next, err := mergeRoomMetadata(current.Metadata, set)
+	if err != nil {
+		return "", err
+	}
+	if _, err = s.LiveKitClient.UpdateRoomMetadata(ctx, &livekit.UpdateRoomMetadataRequest{
+		Room:     room,
+		Metadata: next,
+	}); err != nil {
+		return "", err
+	}
+	return next, nil
+}
+
+// mergeRoomMetadata writes set's keys into a room's metadata, keeping every
+// other key. Metadata that is empty or not a JSON object counts as no keys,
+// rather than as a reason to refuse: it is what an older server wrote. Pure.
+func mergeRoomMetadata(current string, set map[string]any) (string, error) {
+	keys := map[string]json.RawMessage{}
+	if strings.TrimSpace(current) != "" {
+		if err := json.Unmarshal([]byte(current), &keys); err != nil {
+			keys = map[string]json.RawMessage{}
+		}
+	}
+	for k, v := range set {
+		if v == nil {
+			delete(keys, k)
+			continue
+		}
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return "", err
+		}
+		keys[k] = raw
+	}
+	out, err := json.Marshal(keys)
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
+// GetRoom answers the room of that name, or ErrRoomNotFound.
+func (s *LiveKitServiceStruct) GetRoom(ctx context.Context, room string) (*livekit.Room, error) {
+	rooms, err := s.ListRooms(ctx, room)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rooms {
+		if r != nil && r.Name == room {
+			return r, nil
+		}
+	}
+	return nil, ErrRoomNotFound
+}
+
+// ConnectedParticipants answers who is in a room now: connected people (and
+// the transcription agent, which callers drop with IsAgentIdentity). Someone
+// LiveKit still lists as DISCONNECTED has left. An unknown room has nobody.
+func (s *LiveKitServiceStruct) ConnectedParticipants(ctx context.Context, room string) ([]*livekit.ParticipantInfo, error) {
+	resp, err := s.LiveKitClient.ListParticipants(ctx, &livekit.ListParticipantsRequest{Room: room})
+	if err != nil {
+		if isRoomNotFoundErr(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := make([]*livekit.ParticipantInfo, 0, len(resp.Participants))
+	for _, p := range resp.Participants {
+		if p == nil || p.State == livekit.ParticipantInfo_DISCONNECTED {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// SendData sends a data packet from the server (no sending participant, which
+// is how a client tells it apart from anything a participant could send) to
+// the given identities, or to everyone in the room when there are none.
+func (s *LiveKitServiceStruct) SendData(ctx context.Context, room, topic string, payload []byte, identities ...string) error {
+	t := topic
+	_, err := s.LiveKitClient.SendData(ctx, &livekit.SendDataRequest{
+		Room:                  room,
+		Data:                  payload,
+		Kind:                  livekit.DataPacket_RELIABLE,
+		Topic:                 &t,
+		DestinationIdentities: identities,
+	})
+	return err
+}
+
+// RemoveParticipant puts someone out of a room now. Someone already gone is
+// not an error: the point, "not in the call", holds.
+func (s *LiveKitServiceStruct) RemoveParticipant(ctx context.Context, room, identity string) error {
+	_, err := s.LiveKitClient.RemoveParticipant(ctx, &livekit.RoomParticipantIdentity{
+		Room:     room,
+		Identity: identity,
+	})
+	if err != nil && isRoomNotFoundErr(err) {
+		return nil
+	}
+	return err
 }
 
 func (s *LiveKitServiceStruct) ListRooms(ctx context.Context, roomName string) (rooms []*livekit.Room, err error) {
@@ -379,24 +513,11 @@ func (s *LiveKitServiceStruct) RoomHasHumanParticipantsExcluding(ctx context.Con
 // An unknown room is "not present" rather than an error, matching how the other
 // checks here treat it.
 func (s *LiveKitServiceStruct) RoomHasParticipant(ctx context.Context, roomName, identity string) (bool, error) {
-	resp, err := s.LiveKitClient.ListParticipants(ctx, &livekit.ListParticipantsRequest{
-		Room: roomName,
-	})
+	people, err := s.ConnectedParticipants(ctx, roomName)
 	if err != nil {
-		if isRoomNotFoundErr(err) {
-			return false, nil
-		}
 		return false, err
 	}
-	for _, p := range resp.Participants {
-		if p.State == livekit.ParticipantInfo_DISCONNECTED {
-			continue
-		}
-		if p.Identity == identity {
-			return true, nil
-		}
-	}
-	return false, nil
+	return slices.ContainsFunc(people, func(p *livekit.ParticipantInfo) bool { return p.Identity == identity }), nil
 }
 
 func (s *LiveKitServiceStruct) roomHasHumanParticipantsExcluding(ctx context.Context, roomName, excludeIdentity string) (active bool, err error) {
@@ -501,17 +622,36 @@ func (s *LiveKitServiceStruct) DeleteRoom(ctx context.Context, roomName string) 
 	return nil
 }
 
+// How long a call room waits for people.
+//
+// The room is made when the first token is minted, before anyone connects. It
+// closed after 5 seconds with nobody in it (measured on v1.11.0: there at 4 s,
+// gone at 6 s), so a first person whose browser took longer to connect (a
+// phone, a slow network, a TURN relay) had the call end before it began: the
+// call-stopped broadcast, the recap, the "meeting ended" workflows, and then a
+// fresh room with no live dot when they did connect.
+const (
+	// roomJoinGrace is how long a room with nobody in it waits for its first
+	// person, and for the last to come back (LiveKit's empty timeout).
+	roomJoinGrace = 120
+	// roomDepartureGrace keeps a room for a moment after its last person leaves,
+	// so a reconnect after a dropped network is the same call.
+	roomDepartureGrace = 20
+)
+
 func (s *LiveKitServiceStruct) CreateRoom(ctx context.Context, roomName string) (lr *livekit.Room, err error) {
-	roomReq := &livekit.CreateRoomRequest{
+	lr, err = s.LiveKitClient.CreateRoom(ctx, callRoomRequest(roomName))
+	return
+}
+
+// callRoomRequest is how a call room is made. Pure.
+func callRoomRequest(roomName string) *livekit.CreateRoomRequest {
+	return &livekit.CreateRoomRequest{
 		Name:             roomName,
 		MaxParticipants:  100,
-		EmptyTimeout:     5,
-		DepartureTimeout: 0,
+		EmptyTimeout:     roomJoinGrace,
+		DepartureTimeout: roomDepartureGrace,
 	}
-
-	lr, err = s.LiveKitClient.CreateRoom(ctx, roomReq)
-
-	return
 }
 
 // EgressPreset is the recording quality, from EGRESS_PRESET. Recording a call
@@ -531,15 +671,18 @@ func EgressPreset(name string) livekit.EncodingOptionsPreset {
 	return livekit.EncodingOptionsPreset_H264_1080P_30
 }
 
-// recordingMetadata is the room metadata while a recording runs: who started
-// it, by the name people see, and the egress once there is one. Encoded as
-// JSON rather than pasted into a string, so a name with a quote or a
-// backslash in it can't break the metadata every client parses. Pure.
-func recordingMetadata(startedBy, egressID string) string {
-	b, _ := json.Marshal(struct {
-		IsRecording bool   `json:"isRecording"`
-		StartedBy   string `json:"recordingStartedBy"`
-		EgressID    string `json:"egressID,omitempty"`
-	}{true, startedBy, egressID})
-	return string(b)
+// recordingKeys are the room metadata's recording keys: whether a recording
+// runs, who started it (by the name people see) and its egress once there is
+// one. Stopping removes the last two. Values, not text pasted into a string,
+// so a name with a quote or a backslash in it can't break the metadata every
+// client parses. Pure.
+func recordingKeys(on bool, startedBy, egressID string) map[string]any {
+	keys := map[string]any{"isRecording": on, "recordingStartedBy": nil, "egressID": nil}
+	if on {
+		keys["recordingStartedBy"] = startedBy
+		if egressID != "" {
+			keys["egressID"] = egressID
+		}
+	}
+	return keys
 }

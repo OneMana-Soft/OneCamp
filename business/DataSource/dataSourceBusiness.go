@@ -25,6 +25,8 @@ package business
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -303,6 +305,15 @@ func Create(ctx context.Context, in Input, actor Actor) (*View, error) {
 	return &v, nil
 }
 
+// dataSourceDestination is where a source's password is sent: the server, as
+// an address, and the SSL mode it is sent under.
+func dataSourceDestination(engine, host string, port int, sslMode string) helpers.SecretDestination {
+	return helpers.SecretDestination{
+		URL: engine + "://" + net.JoinHostPort(strings.TrimSpace(host), strconv.Itoa(port)),
+		How: []string{sslMode},
+	}
+}
+
 // Update edits a source the actor manages. The password is only changed when a
 // non-nil value is supplied (nil = leave unchanged; "" = clear).
 func Update(ctx context.Context, id uuid.UUID, in Input, actor Actor) (*View, error) {
@@ -311,6 +322,13 @@ func Update(ctx context.Context, id uuid.UUID, in Input, actor Actor) (*View, er
 		return nil, err
 	}
 	if err := validate(&in); err != nil {
+		return nil, err
+	}
+	// A kept password stays with its server (helpers.CheckKeptSecret): another
+	// engine, host or port, or a different SSL mode, needs it entered again.
+	given := in.Password != nil
+	if err := helpers.CheckKeptSecret(d.PasswordEnc != nil, given, dataSourceDestination(d.Engine, d.Host, d.Port, d.SSLMode),
+		dataSourceDestination(in.Engine, in.Host, in.Port, in.SSLMode), "password"); err != nil {
 		return nil, err
 	}
 	d.Name, d.Engine, d.Host, d.Port = in.Name, in.Engine, in.Host, in.Port

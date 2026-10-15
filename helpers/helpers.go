@@ -340,6 +340,21 @@ func LogWarnWithContext(ctx context.Context, message string, args ...interface{}
 // express two levels, silently folding WARN and DEBUG into the info log. MessageLogs itself
 // stays — direct *log.Logger users remain — but nothing should route by level through it.
 
+// dgraphUIDPattern is a node uid as Dgraph writes one: lower-case hex, at most
+// 64 bits.
+var dgraphUIDPattern = regexp.MustCompile(`^0x[0-9a-f]{1,16}$`)
+
+// IsDgraphUID reports whether s is a Dgraph node uid, so it can be written into
+// a query or taken as an edge's target.
+func IsDgraphUID(s string) bool { return dgraphUIDPattern.MatchString(s) }
+
+// WriteRetryLater answers 503 with what failed, in a sentence people can read,
+// and the advice to try again: WriteRetryLater(w, "The call server couldn't
+// answer just now.").
+func WriteRetryLater(w http.ResponseWriter, what string) {
+	WriteJSON(w, http.StatusServiceUnavailable, Envolope{"msg": what + " Try again in a moment."})
+}
+
 func WriteJSON(w http.ResponseWriter, status int, data interface{}, headers ...http.Header) {
 	// Strip error values before they reach the wire. See RedactErrorsInResponse: ~790 handlers
 	// build bodies as {"msg": ..., "err": err}, and a *pq.Error marshals its exported fields —

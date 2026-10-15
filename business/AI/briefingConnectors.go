@@ -1,10 +1,11 @@
 package business
 
-// briefingConnectors.go — the cross-connector "Your day" section of the
-// personal briefing. This is the daily-habit payoff of the connector layer:
-// the moment a user opens OneCamp, the briefing answers "what's my day" across
-// every tool they've linked — today's meetings, pull requests waiting on them,
-// and important unread email — alongside their workspace open items.
+// briefingConnectors.go — the "Your day" section of the personal briefing:
+// the moment a user opens OneCamp, the briefing answers "what's my day":
+// today's meetings from their calendar (calendarDay.go, OneCamp's with Google
+// Calendar when linked), and from every tool they've linked, pull requests
+// waiting on them and important unread email, alongside their workspace open
+// items.
 //
 // Production properties (mirrors briefing.go):
 //   - Each connector is queried in PARALLEL under one shared, tight deadline,
@@ -40,29 +41,61 @@ const (
 	// home screen stays snappy.
 	connectorBriefingTimeout = 2500 * time.Millisecond
 
-	briefingMaxCalendar = 4
-	briefingMaxPRs      = 5
-	briefingMaxEmails   = 5
+	briefingMaxPRs    = 5
+	briefingMaxEmails = 5
 )
 
-// gatherConnectorDay assembles the merged "Your day" agenda for a user across
-// their linked connectors. Cached per-user for a few minutes so repeated home
-// loads don't re-hit external APIs. Never errors — returns whatever it could
-// gather.
+// gatherConnectorDay assembles the merged "Your day" agenda for a user:
+// today's calendar (calendarDay), then what their linked connectors hold.
+// Never errors — returns whatever it could gather within the budget.
+//
+// The calendar is read fresh on every load, so an event made a moment ago is
+// on it; it runs beside the connectors under the same deadline. The
+// connectors' part is cached per user for a few minutes so repeated home
+// loads don't re-hit external APIs.
 func gatherConnectorDay(ctx context.Context, userInfo *userModels.UserInfo) []adapter.BriefingDayItem {
+	calendarCh := make(chan []adapter.BriefingDayItem, 1)
+	helpers.GoSafeSend("briefing.calendar", calendarCh, func() []adapter.BriefingDayItem {
+		cctx, cancel := context.WithTimeout(ctx, connectorBriefingTimeout)
+		defer cancel()
+		return calendarDay(cctx, userInfo, time.Now())
+	})
+	others := cachedConnectorItems(ctx, userInfo)
+
+	var day []adapter.BriefingDayItem
+	select {
+	case items := <-calendarCh:
+		day = append(day, items...)
+	case <-time.After(connectorBriefingTimeout + 100*time.Millisecond):
+		// The calendar is too slow this load: ship the rest.
+	}
+	return append(day, others...)
+}
+
+// cachedConnectorItems is what the linked connectors hold (pull requests,
+// email), cached per user.
+func cachedConnectorItems(ctx context.Context, userInfo *userModels.UserInfo) []adapter.BriefingDayItem {
 	uid := userInfo.UserPostgresInfo.Id
 
 	// Serve from cache when warm.
 	cacheArgs := []string{uid.String()}
 	var cached []adapter.BriefingDayItem
 	if found, _ := redisStore.GetJSON(ctx, registry.ConnectorBriefingDay, cacheArgs, &cached); found {
-		return cached
+		// A cached Google calendar entry predates calendarDay, which now
+		// lists the calendar: never show it twice.
+		out := cached[:0]
+		for _, it := range cached {
+			if it.Source != "calendar" {
+				out = append(out, it)
+			}
+		}
+		return out
 	}
 
 	day := computeConnectorDay(ctx, userInfo)
 
-	// Cache even an empty result so a user with no connectors (or a quiet day)
-	// doesn't trigger the IsConnected probes + external calls every load.
+	// Cache even an empty result so a user with no connectors doesn't trigger
+	// the IsConnected probes + external calls every load.
 	_ = redisStore.SetJSON(ctx, registry.ConnectorBriefingDay, cacheArgs, day)
 	return day
 }
@@ -73,9 +106,8 @@ func computeConnectorDay(ctx context.Context, userInfo *userModels.UserInfo) []a
 
 	// Fast exit: if the user has linked nothing, skip the whole fan-out.
 	gmailOn := connectorBusiness.IsConnected(ctx, uid, connectorBusiness.ProviderGmail)
-	calOn := connectorBusiness.IsConnected(ctx, uid, connectorBusiness.ProviderCalendar)
 	ghOn := connectorBusiness.IsConnected(ctx, uid, connectorBusiness.ProviderGitHub)
-	if !gmailOn && !calOn && !ghOn {
+	if !gmailOn && !ghOn {
 		return nil
 	}
 
@@ -85,15 +117,9 @@ func computeConnectorDay(ctx context.Context, userInfo *userModels.UserInfo) []a
 	type partial struct {
 		items []adapter.BriefingDayItem
 	}
-	results := make(chan partial, 3)
+	results := make(chan partial, 2)
 	pending := 0
 
-	if calOn {
-		pending++
-		helpers.GoSafeSend("briefing.calendar", results, func() partial {
-			return partial{items: briefingCalendar(bctx, uid)}
-		})
-	}
 	if ghOn {
 		pending++
 		helpers.GoSafeSend("briefing.github", results, func() partial {
@@ -117,32 +143,13 @@ func computeConnectorDay(ctx context.Context, userInfo *userModels.UserInfo) []a
 		}
 	}
 
-	// Order: today's calendar first (time-sensitive), then PRs/issues, then
-	// email. Stable so equal-source items keep their provider order.
-	sourceRank := map[string]int{"calendar": 0, "github": 1, "gmail": 2}
+	// Order: PRs/issues, then email. Stable so equal-source items keep their
+	// provider order. (Today's calendar leads, from calendarDay.)
+	sourceRank := map[string]int{"github": 1, "gmail": 2}
 	sort.SliceStable(day, func(i, j int) bool {
 		return sourceRank[day[i].Source] < sourceRank[day[j].Source]
 	})
 	return day
-}
-
-func briefingCalendar(ctx context.Context, uid uuid.UUID) []adapter.BriefingDayItem {
-	events, err := connectorBusiness.CalendarList(ctx, uid, 1, briefingMaxCalendar)
-	if err != nil {
-		logConnectorBriefingErr(ctx, "calendar", err)
-		return nil
-	}
-	out := make([]adapter.BriefingDayItem, 0, len(events))
-	for _, e := range events {
-		out = append(out, adapter.BriefingDayItem{
-			Source:   "calendar",
-			Kind:     "event",
-			Title:    strings.TrimSpace(e.Title),
-			Subtitle: friendlyEventTime(e.Start),
-			URL:      e.Link,
-		})
-	}
-	return out
 }
 
 func briefingGitHub(ctx context.Context, uid uuid.UUID) []adapter.BriefingDayItem {
@@ -284,22 +291,6 @@ func logConnectorBriefingErr(ctx context.Context, source string, err error) {
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "briefing connector %s failed: %v", source, err)
-}
-
-// friendlyEventTime renders an RFC3339 (or date-only) start into a compact
-// "3:04 PM" / "All day" label for the agenda row.
-func friendlyEventTime(start string) string {
-	if start == "" {
-		return ""
-	}
-	if t, err := time.Parse(time.RFC3339, start); err == nil {
-		return t.Local().Format("Mon 3:04 PM")
-	}
-	// Date-only (all-day event).
-	if _, err := time.Parse("2006-01-02", start); err == nil {
-		return "All day"
-	}
-	return start
 }
 
 // senderName extracts a display name from an RFC5322 From header

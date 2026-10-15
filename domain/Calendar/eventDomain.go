@@ -2,6 +2,7 @@ package Calendar
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -91,6 +92,61 @@ func CreateOrUpdateDgraphEvent(ctx context.Context, dgraphEvent *dgraphStruct.Dg
 		return "", err
 	}
 	return eventUid, nil
+}
+
+// ErrEventNotFound is no event with that id (see GetDgraphEventInfoByUUID).
+var ErrEventNotFound = dgraphModels.ErrEventNotFound
+
+// UpdateDgraphEvent writes an event's new values and, in the same request,
+// deletes what the update takes away: the guests taken off it and, when its
+// notes were cleared, its notes. A set mutation can't do either. It only adds
+// to a list such as event_participants, and the empty notes never reach it
+// (omitempty), so a removed guest kept the event and cleared notes came back.
+// event.Uid must be the event's uid.
+func UpdateDgraphEvent(ctx context.Context, event *dgraphStruct.DgraphEvent, removedParticipantUids []string, clearDescription bool) error {
+	if event.Uid == "" || event.Uid == "uid(event)" {
+		return fmt.Errorf("domain/UpdateDgraphEvent: the event's uid is required")
+	}
+	event.DType = []string{"Event"}
+	del := eventDeletions(event.Uid, removedParticipantUids, clearDescription)
+	if _, err := dgraphModels.CreateOrUpdateDgraphEvent(ctx, event, "", del); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/UpdateDgraphEvent Failed to update event in dgraph err: %+v", err)
+		return err
+	}
+	return nil
+}
+
+// eventDeletions is the delete mutation for UpdateDgraphEvent, or "" when it
+// deletes nothing. A null value deletes every value of a predicate. Pure.
+func eventDeletions(eventUid string, removedParticipantUids []string, clearDescription bool) string {
+	del := map[string]any{"uid": eventUid}
+	if len(removedParticipantUids) > 0 {
+		edges := make([]map[string]string, 0, len(removedParticipantUids))
+		for _, uid := range removedParticipantUids {
+			edges = append(edges, map[string]string{"uid": uid})
+		}
+		del["event_participants"] = edges
+	}
+	if clearDescription {
+		del["event_description"] = nil
+	}
+	if len(del) == 1 {
+		return ""
+	}
+	b, _ := json.Marshal(del)
+	return string(b)
+}
+
+// ClearDgraphEventGoogleId forgets the Google Calendar copy of an event, when
+// Google says it is gone. Writing a nil id did nothing (omitempty), so the
+// stale id stayed and every later edit failed against it again.
+func ClearDgraphEventGoogleId(ctx context.Context, eventUid string) error {
+	del := fmt.Sprintf(`{"uid": %q, "event_google_calendar_id": null}`, eventUid)
+	if _, err := dgraphModels.CreateOrUpdateDgraphEvent(ctx, &dgraphStruct.DgraphEvent{Uid: eventUid}, "", del); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/ClearDgraphEventGoogleId err: %+v", err)
+		return err
+	}
+	return nil
 }
 
 func DeleteDgraphEvent(ctx context.Context, eventUuid string) error {

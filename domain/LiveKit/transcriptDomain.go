@@ -9,9 +9,13 @@ package domain
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"github.com/akashc777/OneCamp/helpers"
+	"sort"
+	"time"
 
+	"github.com/akashc777/OneCamp/helpers"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	recordingDgraph "github.com/akashc777/OneCamp/models/dgraph/Recording"
 )
 
@@ -118,4 +122,131 @@ func GetTranscriptLinesByRoom(ctx context.Context, roomName string, limit int) (
 		out = append(out, line)
 	}
 	return out, egressID, nil
+}
+
+// buildCallTranscriptQuery reads ONE call's transcript: the lines on its
+// session node, and the lines on recordings made during it in the same
+// conversation (lines go to the recording while one runs, so the player's
+// transcript lines up). Pure.
+//
+// The recap used to read "the newest recording of the conversation", which
+// nothing tied to the call that had just ended: a call with no transcript
+// summarised the previous call again.
+func buildCallTranscriptQuery(limit int) string {
+	transcriptSel := fmt.Sprintf(`
+			recording_transcript (orderasc: transcript_timestamp, first: %d) {
+				transcript_text
+				transcript_timestamp
+				transcript_offset_ms
+				transcript_from { uid }
+			}`, limit)
+
+	const live = `not gt(recording_deleted_at, "1970-01-01T00:00:00Z")`
+	const during = live + ` AND NOT eq(recording_transcript_only, true) AND ge(recording_stared_at, $from) AND le(recording_stared_at, $to)`
+
+	return fmt.Sprintf(`query CallTranscript($key: string, $room: string, $from: string, $to: string){
+		session(func: eq(recording_egress_id, $key)) @filter(%s) {
+			recording_egress_id
+			%s
+		}
+		channelRec(func: eq(ch_uuid, $room)) {
+			ch_recording @filter(%s) {
+				recording_egress_id
+				recording_stared_at
+				%s
+			}
+		}
+		dmRec(func: eq(dm_grouping_id, $room)) {
+			dm_recording @filter(%s) {
+				recording_egress_id
+				recording_stared_at
+				%s
+			}
+		}
+	}`, live, transcriptSel, during, transcriptSel, during, transcriptSel)
+}
+
+// GetCallTranscriptLines returns one call's transcript in order, and the
+// egress of the last recording made during it ("" for none), for the recap's
+// "play recording". The call is its session key and room, and the window it
+// ran in. Empty, not an error, for a call with no transcript.
+func GetCallTranscriptLines(ctx context.Context, roomName, sessionKey string, from, to time.Time, limit int) ([]TranscriptLine, string, error) {
+	if roomName == "" || !helpers.IsCallSessionKey(sessionKey) {
+		return nil, "", nil
+	}
+	if limit <= 0 || limit > defaultTranscriptLineCap {
+		limit = defaultTranscriptLineCap
+	}
+	raw, err := recordingDgraph.QueryRecordingsJSON(ctx, buildCallTranscriptQuery(limit), map[string]string{
+		"$key":  sessionKey,
+		"$room": roomName,
+		"$from": from.UTC().Format(time.RFC3339),
+		"$to":   to.UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return parseCallTranscript(raw, limit)
+}
+
+// parseCallTranscript merges the session's lines and its recordings' into one
+// timeline. Pure.
+func parseCallTranscript(raw []byte, limit int) ([]TranscriptLine, string, error) {
+	var parsed struct {
+		Session    []*dgraphStruct.DgraphRecording `json:"session"`
+		ChannelRec []struct {
+			Recording []*dgraphStruct.DgraphRecording `json:"ch_recording"`
+		} `json:"channelRec"`
+		DMRec []struct {
+			Recording []*dgraphStruct.DgraphRecording `json:"dm_recording"`
+		} `json:"dmRec"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, "", err
+	}
+	recs := append([]*dgraphStruct.DgraphRecording{}, parsed.Session...)
+	var egress string
+	var egressAt time.Time
+	during := func(list []*dgraphStruct.DgraphRecording) {
+		for _, r := range list {
+			if r == nil {
+				continue
+			}
+			recs = append(recs, r)
+			if r.StartedAt != nil && !r.StartedAt.Before(egressAt) {
+				egress, egressAt = r.EgressId, *r.StartedAt
+			}
+		}
+	}
+	for _, c := range parsed.ChannelRec {
+		during(c.Recording)
+	}
+	for _, d := range parsed.DMRec {
+		during(d.Recording)
+	}
+
+	var out []TranscriptLine
+	for _, r := range recs {
+		for _, n := range r.Transcript {
+			if n == nil {
+				continue
+			}
+			line := TranscriptLine{Text: n.Text}
+			if n.From != nil {
+				line.ParticipantIdentity = n.From.Uid
+			}
+			if n.TimeStamp != nil {
+				line.Timestamp = *n.TimeStamp
+			}
+			if n.OffsetMs != nil {
+				line.OffsetMs = *n.OffsetMs
+			}
+			out = append(out, line)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Timestamp < out[j].Timestamp })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, egress, nil
 }

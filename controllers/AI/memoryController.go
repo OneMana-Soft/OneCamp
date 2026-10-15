@@ -229,7 +229,8 @@ func GetBriefing(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
-	resp, err := business.GetBriefing(ctx, &userInfo)
+	// ?tz= is the reader's zone: today's meetings are the day their calendar shows.
+	resp, err := business.GetBriefing(business.WithReaderZone(ctx, r.URL.Query().Get("tz")), &userInfo)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetBriefing failed: %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "failed to load briefing"})
@@ -245,7 +246,8 @@ func GetWhatNeedsMe(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
-	resp, err := business.GetWhatNeedsMe(ctx, &userInfo)
+	// ?tz= is the reader's zone: today's meetings are the day their calendar shows.
+	resp, err := business.GetWhatNeedsMe(business.WithReaderZone(ctx, r.URL.Query().Get("tz")), &userInfo)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetWhatNeedsMe failed: %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "failed to load your attention queue"})

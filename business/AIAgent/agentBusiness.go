@@ -374,7 +374,12 @@ func CreateAgent(ctx context.Context, in AgentInput, createdBy uuid.UUID) (*mode
 		RemoteProtocol:  v.remoteProtocol,
 		CreatedBy:       createdBy,
 	}
-	if a.RemoteCard, err = resolveRemoteCard(ctx, v.remoteProtocol, a.AGUIEndpoint, a.AGUIAuthHeader, a.AGUIAuthSecret); err != nil {
+	// What its remote may reach follows whoever adds it.
+	addedByAdmin := creatorIsAdmin(ctx, &createdBy)
+	if msg := remoteReachRefusal(a.AGUIEndpoint, addedByAdmin); msg != "" {
+		return nil, fmt.Errorf("%s", msg)
+	}
+	if a.RemoteCard, err = resolveRemoteCard(ctx, v.remoteProtocol, a.AGUIEndpoint, a.AGUIAuthHeader, a.AGUIAuthSecret, addedByAdmin); err != nil {
 		return nil, err
 	}
 	id, err := model.CreateAgent(ctx, a)
@@ -435,11 +440,26 @@ func UpdateAgent(ctx context.Context, id uuid.UUID, in AgentInput, actor Actor) 
 	existing.RunInBackground = in.RunInBackground
 	existing.Ambient = in.Ambient
 	existing.AmbientKeywords = strings.TrimSpace(in.AmbientKeywords)
+	// A kept secret stays with the address it was given for: moving the
+	// address, the protocol or the header without entering it again is
+	// refused (helpers.CheckKeptSecret), and nothing is sent anywhere.
+	if v.aguiEndpoint != "" {
+		to := model.RemoteSecretDestinationOf(v.aguiEndpoint, v.remoteProtocol, v.aguiAuthHeader)
+		given := strings.TrimSpace(in.AGUIAuthSecret) != ""
+		if err := helpers.CheckKeptSecret(existing.HasRemoteSecret(), given, existing.RemoteSecretDestination(), to, "secret"); err != nil {
+			return nil, err
+		}
+	}
 	existing.AGUIAuthSecret = remoteSecretToStore(v.aguiEndpoint, in.AGUIAuthSecret, existing.AGUIAuthSecret)
 	existing.AGUIEndpoint = v.aguiEndpoint
 	existing.AGUIAuthHeader = v.aguiAuthHeader
 	existing.RemoteProtocol = v.remoteProtocol
-	if existing.RemoteCard, err = resolveRemoteCard(ctx, v.remoteProtocol, existing.AGUIEndpoint, existing.AGUIAuthHeader, existing.AGUIAuthSecret); err != nil {
+	// What its remote may reach follows whoever added it, not whoever edits it.
+	addedByAdmin := creatorIsAdmin(ctx, &existing.CreatedBy)
+	if msg := remoteReachRefusal(existing.AGUIEndpoint, addedByAdmin); msg != "" {
+		return nil, fmt.Errorf("%s", msg)
+	}
+	if existing.RemoteCard, err = resolveRemoteCard(ctx, v.remoteProtocol, existing.AGUIEndpoint, existing.AGUIAuthHeader, existing.AGUIAuthSecret, addedByAdmin); err != nil {
 		return nil, err
 	}
 	if err := model.UpdateAgent(ctx, existing); err != nil {

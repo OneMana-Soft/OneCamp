@@ -15,3 +15,17 @@ func TestLocation(t *testing.T) {
 		}
 	}
 }
+
+// FirstLocation is the one "first of these names that is a zone": the
+// assistant wrote it three times, each accepting "Local", the server's zone.
+func TestFirstLocation(t *testing.T) {
+	if loc, ok := FirstLocation("", " ", "Local", "Mars/Olympus", "Asia/Kolkata", "Europe/London"); !ok || loc.String() != "Asia/Kolkata" {
+		t.Errorf("got %s %v, want the first known zone", loc, ok)
+	}
+	if loc, ok := FirstLocation("Local", "nope"); ok || loc != time.UTC {
+		t.Errorf("got %s %v, want UTC and unknown", loc, ok)
+	}
+	if _, ok := FirstLocation(); ok {
+		t.Error("no names is a zone")
+	}
+}

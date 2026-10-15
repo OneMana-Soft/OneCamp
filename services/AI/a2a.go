@@ -172,15 +172,10 @@ func isV1(v string) bool {
 	return err == nil && n >= 1
 }
 
-// newA2AClient is the same guarded client every remote gets: the dial-time
-// address guard, and the refusal to send workspace content off the customer's
-// network in the clear or without a credential.
-func newA2AClient(endpoint, secret string) *http.Client {
-	return newProviderHTTPClient(httpClientConfig{
-		timeout:         0,
-		guardSSRF:       true,
-		offLocalRefusal: strings.Replace(OffLocalRefusal(endpoint, secret), "agui:", "a2a:", 1),
-	})
+// newA2AClient is the same guarded client every remote gets
+// (newRemoteHTTPClient), with the refusal worded for A2A.
+func newA2AClient(endpoint, secret string, policy helpers.EndpointPolicy) *http.Client {
+	return newRemoteHTTPClient(strings.Replace(OffLocalRefusal(endpoint, secret), "agui:", "a2a:", 1), policy)
 }
 
 func applyRemoteAuth(req *http.Request, header, secret string) {
@@ -197,12 +192,12 @@ func applyRemoteAuth(req *http.Request, header, secret string) {
 // FetchA2ACard finds and reads an agent card. given is the card's own address
 // or the agent's; given must already have passed ValidateHTTPEndpoint, and the
 // endpoint the card names is checked the same way before it is returned.
-func FetchA2ACard(ctx context.Context, given, authHeader, secret string) (*A2ACard, error) {
+func FetchA2ACard(ctx context.Context, given, authHeader, secret string, policy helpers.EndpointPolicy) (*A2ACard, error) {
 	candidates := cardCandidates(given)
 	if len(candidates) == 0 {
 		return nil, errors.New("a2a: not an address")
 	}
-	client := newA2AClient(given, secret)
+	client := newA2AClient(given, secret, policy)
 	var lastErr error
 	for _, cu := range candidates {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cu, nil)
@@ -227,12 +222,35 @@ func FetchA2ACard(ctx context.Context, given, authHeader, secret string) (*A2ACa
 			lastErr = fmt.Errorf("a2a: %s is not an agent card", cu)
 			continue
 		}
-		return cardFromRaw(rc)
+		card, err := cardFromRaw(rc)
+		if err != nil {
+			return nil, err
+		}
+		if err := CardKeepsSecretHome(given, card.Endpoint, secret); err != nil {
+			return nil, err
+		}
+		return card, nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("a2a: no agent card found")
 	}
 	return nil, fmt.Errorf("a2a: could not read the agent card: %w", lastErr)
+}
+
+// CardKeepsSecretHome refuses a card whose endpoint is on another origin than
+// the address its agent was entered with, when a secret goes with the calls:
+// the secret is bound to the address it was given for (helpers.SecretMoves),
+// and a card is the remote's own say. Without a secret there is nothing to
+// carry.
+func CardKeepsSecretHome(given, cardEndpoint, secret string) error {
+	if strings.TrimSpace(secret) == "" || helpers.SameOrigin(given, cardEndpoint) {
+		return nil
+	}
+	host := cardEndpoint
+	if u, err := url.Parse(cardEndpoint); err == nil && u.Host != "" {
+		host = u.Host
+	}
+	return fmt.Errorf("a2a: the agent card sends requests to %s, another address than the one entered, so its secret isn't sent there. Enter that address as the agent's address", host)
 }
 
 func cardFromRaw(rc rawCard) (*A2ACard, error) {
@@ -279,12 +297,12 @@ type A2AProvider struct {
 // NewA2AProvider builds a provider for one agent. endpoint is the card's
 // JSON-RPC endpoint; contextID is the A2A conversation, the run id so runs
 // never share a history on the remote; protocolVersion comes from the card.
-func NewA2AProvider(endpoint, authHeader, secret, contextID, protocolVersion string) *A2AProvider {
+func NewA2AProvider(endpoint, authHeader, secret, contextID, protocolVersion string, policy helpers.EndpointPolicy) *A2AProvider {
 	endpoint = strings.TrimSpace(endpoint)
 	return &A2AProvider{
 		endpoint: endpoint, authHeader: strings.TrimSpace(authHeader), secret: secret,
 		contextID: strings.TrimSpace(contextID), v1: isV1(protocolVersion),
-		client: newA2AClient(endpoint, secret), breaker: aguiBreakerFor("a2a " + endpoint),
+		client: newA2AClient(endpoint, secret, policy), breaker: aguiBreakerFor("a2a " + endpoint),
 	}
 }
 

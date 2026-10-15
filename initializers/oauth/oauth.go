@@ -69,7 +69,7 @@ func ReloadOAuth() error {
 		googleCalConfig = &oauth2.Config{
 			ClientID:     creds.GoogleClientID,
 			ClientSecret: creds.GoogleClientSecret,
-			RedirectURL:  protocol + backendDomain + "/user/integration/google-calendar/callback", // Matches router
+			RedirectURL:  protocol + backendDomain + "/connector/oauth/callback", // token refresh only: linking is the connectors flow's (business/Connector)
 			Endpoint:     p.Endpoint(),
 			Scopes:       []string{oidc.ScopeOpenID, "profile", "email", "https://www.googleapis.com/auth/calendar"},
 		}

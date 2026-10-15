@@ -41,3 +41,13 @@ func CallSessionKeyFor(sessionID string) string {
 func IsCallSessionKey(key string) bool {
 	return strings.HasPrefix(strings.TrimSpace(key), callSessionPrefix)
 }
+
+// CallSessionID is the room session id a call session key was made from, or ""
+// for anything that is not a call session key. Pure.
+func CallSessionID(key string) string {
+	key = strings.TrimSpace(key)
+	if !strings.HasPrefix(key, callSessionPrefix) {
+		return ""
+	}
+	return strings.TrimPrefix(key, callSessionPrefix)
+}

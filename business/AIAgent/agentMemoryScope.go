@@ -20,6 +20,7 @@ import (
 	aiBusiness "github.com/akashc777/OneCamp/business/AI"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 	ai "github.com/akashc777/OneCamp/services/AI"
+	"github.com/google/uuid"
 )
 
 type agentRunScopeKey struct{}
@@ -72,32 +73,8 @@ func handleMemoryTool(ctx context.Context, agent *model.AiAgent, a ai.ProposedAc
 	}
 	switch a.ToolName {
 	case rememberToolName:
-		content := strings.TrimSpace(a.Params["content"])
-		if content == "" {
-			rec.Error = "nothing to remember (no content given)"
-			return
-		}
-		// Provenance, not content. See humanAskedToRemember: a standing
-		// instruction may only come from a person, because tool results carry
-		// text anybody can author and memory outlives the run.
-		if !humanAskedToRemember(ctx) {
-			rec.Skipped = "not remembering that: nobody in this conversation asked me to keep anything"
-			return
-		}
-		// And what is kept is their instruction, not someone else's line they
-		// pointed at ("remember that"): their own words, or put to them first.
-		if !fromAskerWords(ctx, content) {
-			askToKeep(ctx, rec, "Shall I remember: "+content+"?", "not remembering that")
-			return
-		}
-		// Kept as the instruction of the person who asked for this run, which
-		// decides whose runs follow it (aiBusiness.AgentScopedMemoryBlock). It
-		// used to be kept as the sponsor's whoever asked, so a teammate's
-		// instruction was then followed by every run the agent made for its
-		// sponsor, with the sponsor's whole reach.
-		author, known := askerOf(ctx, agent)
-		if !known {
-			rec.Skipped = "not remembering that: I couldn't tell who asked me to"
+		author, content, ok := mayRemember(ctx, agent, a, rec)
+		if !ok {
 			return
 		}
 		if _, err := aiBusiness.RememberFact(ctx, sc.ChannelID, sc.GroupID, author.String(), content); err != nil {
@@ -128,6 +105,43 @@ func handleMemoryTool(ctx context.Context, agent *model.AiAgent, a ai.ProposedAc
 		}
 		rec.Result = fmt.Sprintf("forgot %d remembered instruction(s)", n)
 	}
+}
+
+// mayRemember decides a remember call in a run that has a conversation to keep
+// it for, and keeps nothing: what is kept and for whom, or false with the
+// reason on rec. The reason may be a question to put to the person who asked
+// first (rec.Confirm), which the run asks before any of its turn runs
+// (pauseFirst).
+func mayRemember(ctx context.Context, agent *model.AiAgent, a ai.ProposedAction, rec *toolCallRecord) (author uuid.UUID, content string, ok bool) {
+	content = strings.TrimSpace(a.Params["content"])
+	if content == "" {
+		rec.Error = "nothing to remember (no content given)"
+		return uuid.Nil, "", false
+	}
+	// Provenance, not content. See humanAskedToRemember: a standing
+	// instruction may only come from a person, because tool results carry
+	// text anybody can author and memory outlives the run.
+	if !humanAskedToRemember(ctx) {
+		rec.Skipped = "not remembering that: nobody in this conversation asked me to keep anything"
+		return uuid.Nil, "", false
+	}
+	// And what is kept is their instruction, not someone else's line they
+	// pointed at ("remember that"): their own words, or put to them first.
+	if !fromAskerWords(ctx, content) {
+		askToKeep(ctx, rec, "Shall I remember: "+content+"?", "not remembering that")
+		return uuid.Nil, "", false
+	}
+	// Kept as the instruction of the person who asked for this run, which
+	// decides whose runs follow it (aiBusiness.AgentScopedMemoryBlock). It
+	// used to be kept as the sponsor's whoever asked, so a teammate's
+	// instruction was then followed by every run the agent made for its
+	// sponsor, with the sponsor's whole reach.
+	author, known := askerOf(ctx, agent)
+	if !known {
+		rec.Skipped = "not remembering that: I couldn't tell who asked me to"
+		return uuid.Nil, "", false
+	}
+	return author, content, true
 }
 
 // --- Memory provenance -------------------------------------------------------

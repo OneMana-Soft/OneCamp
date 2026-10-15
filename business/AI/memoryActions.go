@@ -109,16 +109,16 @@ func CreateTaskFromMemory(ctx context.Context, userInfo *userModels.UserInfo, in
 	return resp, nil
 }
 
-// RemindAboutMemoryInput requests a calendar reminder for a memory item.
+// RemindAboutMemoryInput requests a reminder for a memory item.
 type RemindAboutMemoryInput struct {
 	MemoryID  uuid.UUID
 	StartTime string // RFC3339
 }
 
-// RemindAboutMemory creates a calendar reminder for the caller about a
-// memory item (e.g. "follow up on this open question"). Reuses the
-// set_reminder executor. Does NOT change the memory status — a reminder is
-// a nudge, not a resolution.
+// RemindAboutMemory sets a reminder for the caller about a memory item (e.g.
+// "follow up on this open question"): a Later item that comes back at the
+// time. Reuses the set_reminder executor. Does NOT change the memory status —
+// a reminder is a nudge, not a resolution.
 func RemindAboutMemory(ctx context.Context, userInfo *userModels.UserInfo, in RemindAboutMemoryInput) (*adapter.ExecuteActionResponse, error) {
 	svc := ai.GetService()
 	if svc == nil || !svc.IsEnabled() {

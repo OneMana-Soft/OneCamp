@@ -12,6 +12,7 @@ import (
 	business "github.com/akashc777/OneCamp/business/Chat"
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
 	lastSeenChatBusiness "github.com/akashc777/OneCamp/business/LastSeenChat"
+	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	reactionBusiness "github.com/akashc777/OneCamp/business/Reaction"
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
@@ -2034,9 +2035,14 @@ func MakeVideoCallForGroup(w http.ResponseWriter, r *http.Request) {
 
 	var uerToken adapter.UserTokenOutput
 
-	uerToken.TokenString, uerToken.AlreadyExisted, err = business.MakeVideoCall(ctx, makeVideoCallInfo.GrpUuid, &userInfo.UserDgraphInfo, false, makeVideoCallInfo.AudioEnabled, makeVideoCallInfo.VideoEnabled, true)
+	uerToken.TokenString, uerToken.AlreadyExisted, err = business.MakeVideoCall(ctx, makeVideoCallInfo.GrpUuid, &userInfo.UserDgraphInfo, false, makeVideoCallInfo.Language, true)
 
 	if err != nil {
+
+		if errors.Is(err, liveKitBusiness.ErrRemovedFromCall) {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "removed_from_call", "msg": liveKitBusiness.RemovedFromCallMsg})
+			return
+		}
 
 		helpers.LogErrorWithContext(ctx,
 			"controllers/MakeVideoCallForGroup Failed to make video call err: %+v",
@@ -2261,9 +2267,14 @@ func MakeVideoCallForChat(w http.ResponseWriter, r *http.Request) {
 
 	var uerToken adapter.UserTokenOutput
 
-	uerToken.TokenString, uerToken.AlreadyExisted, err = business.MakeVideoCall(ctx, grpId, &userInfo.UserDgraphInfo, false, makeVideoCallInfo.AudioEnabled, makeVideoCallInfo.VideoEnabled, false)
+	uerToken.TokenString, uerToken.AlreadyExisted, err = business.MakeVideoCall(ctx, grpId, &userInfo.UserDgraphInfo, false, makeVideoCallInfo.Language, false)
 
 	if err != nil {
+
+		if errors.Is(err, liveKitBusiness.ErrRemovedFromCall) {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "removed_from_call", "msg": liveKitBusiness.RemovedFromCallMsg})
+			return
+		}
 
 		helpers.LogErrorWithContext(ctx,
 			"controllers/MakeVideoCallForChat Failed to make video call err: %+v",

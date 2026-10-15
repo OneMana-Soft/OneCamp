@@ -17,7 +17,7 @@ func TestComputeCandidateSlots_BusinessHoursAndWeekday(t *testing.T) {
 	users := []string{"u1"}
 	busy := map[string][]busyInterval{"u1": nil}
 
-	got := computeCandidateSlots(now, 1, 60, 0, 9, 18, 50, busy, users)
+	got := computeCandidateSlots(now, 1, 60, time.UTC, 9, 18, 50, busy, nil, users)
 
 	if len(got) == 0 {
 		t.Fatal("expected some candidate slots")
@@ -53,7 +53,7 @@ func TestComputeCandidateSlots_BusyBlocksOverlap(t *testing.T) {
 		"u1": {{start: now.Add(9 * time.Hour), end: now.Add(12 * time.Hour)}},
 		"u2": nil,
 	}
-	got := computeCandidateSlots(now, 1, 60, 0, 9, 18, 100, busy, users)
+	got := computeCandidateSlots(now, 1, 60, time.UTC, 9, 18, 100, busy, nil, users)
 
 	// A 10:00 slot overlaps u1's busy block → not all-free (only u2 free).
 	// A 13:00 slot is after the block → all-free.
@@ -96,7 +96,7 @@ func TestComputeCandidateSlots_RankingAllFreeFirst(t *testing.T) {
 		"u1": {{start: now.Add(9 * time.Hour), end: now.Add(18 * time.Hour)}},
 		"u2": nil,
 	}
-	got := computeCandidateSlots(now, 3, 60, 0, 9, 18, 5, busy, users)
+	got := computeCandidateSlots(now, 3, 60, time.UTC, 9, 18, 5, busy, nil, users)
 	if len(got) == 0 {
 		t.Fatal("expected candidates")
 	}
@@ -110,7 +110,7 @@ func TestComputeCandidateSlots_RespectsMaxCandidates(t *testing.T) {
 	now := mondayUTC()
 	users := []string{"u1"}
 	busy := map[string][]busyInterval{"u1": nil}
-	got := computeCandidateSlots(now, 5, 30, 0, 9, 18, 4, busy, users)
+	got := computeCandidateSlots(now, 5, 30, time.UTC, 9, 18, 4, busy, nil, users)
 	if len(got) != 4 {
 		t.Fatalf("expected exactly 4 candidates (cap), got %d", len(got))
 	}

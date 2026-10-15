@@ -3,10 +3,13 @@ package business
 // How a run gets its remote brain, and how the remote's own work is recorded.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
+	userDomain "github.com/akashc777/OneCamp/domain/User"
+	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 	ai "github.com/akashc777/OneCamp/services/AI"
 )
@@ -17,7 +20,10 @@ import (
 // Fails, rather than going out with no credential, when a secret is stored
 // but cannot be read: the endpoint would refuse, or worse, accept, and either
 // way the operator needs the real reason.
-func remoteProvider(agent *model.AiAgent, runID string) (ai.RemoteBrain, error) {
+//
+// What it may reach is decided now: this server's own network only when the
+// person who set the agent up is an admin (helpers.EndpointPolicyFor).
+func remoteProvider(ctx context.Context, agent *model.AiAgent, runID string) (ai.RemoteBrain, error) {
 	if agent.AGUIAuthUnreadable {
 		return nil, fmt.Errorf("the remote agent's secret cannot be read (usually an AI_CONFIG_KEK change); re-enter it in the agent's settings")
 	}
@@ -26,9 +32,23 @@ func remoteProvider(agent *model.AiAgent, runID string) (ai.RemoteBrain, error) 
 		if err := json.Unmarshal(agent.RemoteCard, &card); err != nil || strings.TrimSpace(card.Endpoint) == "" {
 			return nil, fmt.Errorf("this A2A agent's card has not been read; open the agent and save it again")
 		}
-		return ai.NewA2AProvider(card.Endpoint, agent.AGUIAuthHeader, agent.AGUIAuthSecret, runID, card.ProtocolVersion), nil
+		// A card saved before the secret was bound to its address may name
+		// another origin; its secret isn't sent there.
+		if err := ai.CardKeepsSecretHome(agent.AGUIEndpoint, card.Endpoint, agent.AGUIAuthSecret); err != nil {
+			return nil, fmt.Errorf("%s", unwrapDialError(err.Error()))
+		}
+		return ai.NewA2AProvider(card.Endpoint, agent.AGUIAuthHeader, agent.AGUIAuthSecret, runID, card.ProtocolVersion, remotePolicy(ctx, agent)), nil
 	}
-	return ai.NewAGUIProvider(agent.AGUIEndpoint, agent.AGUIAuthHeader, agent.AGUIAuthSecret, runID), nil
+	return ai.NewAGUIProvider(agent.AGUIEndpoint, agent.AGUIAuthHeader, agent.AGUIAuthSecret, runID, remotePolicy(ctx, agent)), nil
+}
+
+// creatorIsAdmin reports whether the person who set an agent up is an admin
+// now. A seam.
+var creatorIsAdmin = userDomain.IsActiveAdmin
+
+// remotePolicy is what an agent's remote may reach (helpers.EndpointPolicyFor).
+func remotePolicy(ctx context.Context, agent *model.AiAgent) helpers.EndpointPolicy {
+	return helpers.EndpointPolicyFor(creatorIsAdmin(ctx, &agent.CreatedBy))
 }
 
 // remoteLabel is how a run and the audit log name a remote brain: the protocol

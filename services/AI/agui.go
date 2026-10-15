@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -113,20 +114,37 @@ func aguiBreakerFor(endpoint string) *CircuitBreaker {
 // threadID is the AG-UI conversation the remote sees; the runner passes the
 // run id so each run is its own thread and no remote can confuse two runs'
 // histories.
-func NewAGUIProvider(endpoint, authHeader, secret, threadID string) *AGUIProvider {
+//
+// policy is what the endpoint may reach: helpers.EndpointPolicyFor for whether
+// an admin added the agent.
+func NewAGUIProvider(endpoint, authHeader, secret, threadID string, policy helpers.EndpointPolicy) *AGUIProvider {
 	endpoint = strings.TrimSpace(endpoint)
 	return &AGUIProvider{
 		endpoint:   endpoint,
 		authHeader: strings.TrimSpace(authHeader),
 		secret:     secret,
 		threadID:   strings.TrimSpace(threadID),
-		client: newProviderHTTPClient(httpClientConfig{
-			timeout:         0,
-			guardSSRF:       true,
-			offLocalRefusal: OffLocalRefusal(endpoint, secret),
-		}),
-		breaker: aguiBreakerFor(endpoint),
+		client:     newRemoteHTTPClient(OffLocalRefusal(endpoint, secret), policy),
+		breaker:    aguiBreakerFor(endpoint),
 	}
+}
+
+// newRemoteHTTPClient is the client for a remote agent, AG-UI or A2A. Its
+// address was typed by whoever set the agent up and every call carries the
+// agent's secret, so it is held to policy, the one address rule for such
+// endpoints (helpers.EndpointPolicyFor): this server's own network only for an
+// agent an admin added, never a metadata or link-local address, and a redirect
+// off the agent's origin is never followed. On top, for every address it
+// connects to: local-only AI mode, and offLocal, the refusal (OffLocalRefusal)
+// for content that may only stay on the local network. No overall timeout:
+// answers stream, and the run's context ends them. A seam, so tests can reach
+// a local test server.
+var newRemoteHTTPClient = func(offLocal string, policy helpers.EndpointPolicy) *http.Client {
+	cfg := httpClientConfig{offLocalRefusal: offLocal}
+	policy.Also = func(ip net.IP) error {
+		return dialAllowed(cfg, localOnlyEnabled.Load(), ip.String(), ip)
+	}
+	return helpers.EndpointClient(policy, 0)
 }
 
 // OffLocalRefusal says whether this endpoint may be dialled outside the

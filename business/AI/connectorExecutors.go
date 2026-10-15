@@ -8,13 +8,16 @@ import (
 	"strings"
 	"time"
 
+	calendarAdapter "github.com/akashc777/OneCamp/adapter/Calendar"
 	connectorBusiness "github.com/akashc777/OneCamp/business/Connector"
+	"github.com/akashc777/OneCamp/helpers"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/google/uuid"
 )
 
 // connectorExecutors.go — AI tool executors for per-user connectors (Gmail,
-// Google Calendar, GitHub). Each executor resolves the connector strictly from
+// GitHub) and the person's calendar. Each executor resolves the connector strictly from
 // the REQUESTING user's UUID, so the AI can only ever read/act on the caller's
 // own external accounts. When the user hasn't connected the relevant account,
 // the executor returns a friendly, actionable message instead of an error.
@@ -124,63 +127,176 @@ func executeGmailSend(ctx context.Context, action ai.ProposedAction, userUUID st
 }
 
 // --- Calendar ---
+//
+// The calendar tools read and write the person's OneCamp calendar, which
+// carries their Google Calendar when linked (calendarDay.go). They need no
+// connector.
 
+// calendarListMax bounds the events one answer lists.
+const calendarListMax = 50
+
+// executeCalendarList lists the person's calendar from the start of their
+// today, for days days: OneCamp events they made or were invited to, and their
+// Google Calendar when it is linked.
 func executeCalendarList(ctx context.Context, action ai.ProposedAction, userUUID string) (string, map[string]string, error) {
-	uid, err := parseUserUUID(userUUID)
-	if err != nil {
-		return "", nil, fmt.Errorf("invalid user")
-	}
 	days := parseIntDefault(action.Params["days"], 7)
-
-	events, err := connectorBusiness.CalendarList(ctx, uid, days, 20)
-	if isNotConnected(err) {
-		return notConnectedMsg("Google Calendar"), nil, nil
+	if days < 1 {
+		days = 1
 	}
+	if days > 31 {
+		days = 31
+	}
+	userInfo, err := getUserInfoForExecutor(ctx, userUUID)
 	if err != nil {
-		return friendlyAPIError("Google Calendar", err), nil, nil
+		return "", nil, fmt.Errorf("failed to look up user: %w", err)
 	}
-	if len(events) == 0 {
-		return fmt.Sprintf("You have no events in the next %d day(s).", days), nil, nil
+	loc, _ := readerZone(ctx)
+	from := helpers.DayStart(time.Now(), loc)
+	to := from.AddDate(0, 0, days)
+	events, err := calendarEventsOf(ctx, userInfo, &from, &to)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read your calendar: %w", err)
 	}
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Your upcoming events (next %d day(s)):\n", days))
+	var listed []*dgraphStruct.DgraphEvent
 	for _, e := range events {
-		sb.WriteString(fmt.Sprintf("• %s — %s\n", strings.TrimSpace(e.Title), strings.TrimSpace(e.Start)))
+		if e != nil && e.StartTime != nil && e.EndTime != nil {
+			listed = append(listed, e)
+		}
+	}
+	if len(listed) == 0 {
+		return fmt.Sprintf("Your calendar has nothing in the next %d day(s).", days), nil, nil
+	}
+	sortEvents(listed)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Your calendar for the next %d day(s), times in %s:\n", days, loc.String()))
+	for i, e := range listed {
+		if i == calendarListMax {
+			sb.WriteString(fmt.Sprintf("…and %d more.\n", len(listed)-calendarListMax))
+			break
+		}
+		var tags []string
+		if strings.HasPrefix(e.Uuid, "gcal-") {
+			tags = append(tags, "Google Calendar")
+		}
+		if e.IsFocus != nil && *e.IsFocus {
+			tags = append(tags, "focus time")
+		}
+		if e.IsAway != nil && *e.IsAway {
+			tags = append(tags, "time off")
+		}
+		if n := len(e.Participants); n > 0 && !strings.HasPrefix(e.Uuid, "gcal-") {
+			tags = append(tags, fmt.Sprintf("%d guest(s)", n))
+		}
+		line := fmt.Sprintf("• %s · %s", eventSpan(e, loc), eventTitle(e))
+		if len(tags) > 0 {
+			line += " (" + strings.Join(tags, ", ") + ")"
+		}
+		sb.WriteString(line + "\n")
 	}
 	return sb.String(), nil, nil
 }
 
+// executeCalendarCreate puts an event on the person's OneCamp calendar, the
+// calendar's own way (business/Calendar.CreateEvent), with the teammates it
+// names as guests. It goes to their Google Calendar too when that is linked.
 func executeCalendarCreate(ctx context.Context, action ai.ProposedAction, userUUID string) (string, map[string]string, error) {
-	uid, err := parseUserUUID(userUUID)
-	if err != nil {
-		return "", nil, fmt.Errorf("invalid user")
-	}
 	title := strings.TrimSpace(action.Params["title"])
-	start := action.Params["start_time"]
-	end := action.Params["end_time"]
-	desc := action.Params["description"]
+	start := strings.TrimSpace(action.Params["start_time"])
+	end := strings.TrimSpace(action.Params["end_time"])
+	desc := strings.TrimSpace(action.Params["description"])
 	if title == "" || start == "" {
 		return "", nil, fmt.Errorf("title and start_time are required")
 	}
-	// Validate datetimes up front (mirrors set_reminder) so a malformed value
-	// the model produced fails clearly here instead of deep in the Google API.
-	if _, perr := time.Parse(time.RFC3339, strings.TrimSpace(start)); perr != nil {
+	// Validate datetimes up front so a malformed value the model produced
+	// fails clearly here.
+	st, perr := time.Parse(time.RFC3339, start)
+	if perr != nil {
 		return "", nil, fmt.Errorf("invalid start_time, expected RFC3339 (e.g. 2026-03-25T18:00:00Z)")
 	}
-	if s := strings.TrimSpace(end); s != "" {
-		if _, perr := time.Parse(time.RFC3339, s); perr != nil {
+	et := st.Add(30 * time.Minute)
+	if end != "" {
+		if et, perr = time.Parse(time.RFC3339, end); perr != nil {
 			return "", nil, fmt.Errorf("invalid end_time, expected RFC3339 (e.g. 2026-03-25T19:00:00Z)")
 		}
 	}
+	if !et.After(st) {
+		return "", nil, fmt.Errorf("end_time must be after start_time")
+	}
 
-	link, err := connectorBusiness.CalendarCreate(ctx, uid, title, start, end, desc)
-	if isNotConnected(err) {
-		return notConnectedMsg("Google Calendar"), nil, nil
-	}
+	userInfo, err := getUserInfoForExecutor(ctx, userUUID)
 	if err != nil {
-		return friendlyAPIError("Google Calendar", err), nil, nil
+		return "", nil, fmt.Errorf("failed to look up user: %w", err)
 	}
-	return fmt.Sprintf("✅ Event \"%s\" created.", title), map[string]string{"tool": "calendar_create_event", "link": link}, nil
+	var guestIDs, guestNames []string
+	seen := map[string]bool{userUUID: true}
+	for _, ref := range splitPeople(action.Params["attendees"]) {
+		if isAskerRef(ref) {
+			continue
+		}
+		u, rerr := resolveAssigneeRef(ctx, userUUID, ref, true) // an invitation: exactly theirs
+		if rerr != nil || u == nil {
+			return "", nil, fmt.Errorf("couldn't tell which teammate %q is, so nothing was made. Name them by their @handle, then try again", ref)
+		}
+		if seen[u.Uuid] {
+			continue
+		}
+		seen[u.Uuid] = true
+		guestIDs = append(guestIDs, u.Uuid)
+		guestNames = append(guestNames, helpers.PersonDisplayName(u.UserName, u.UserFullName, ""))
+	}
+
+	out, err := createCalendarEvent(ctx, userInfo, calendarAdapter.CreateOrUpdateEventInput{
+		Title:                title,
+		Description:          desc,
+		StartTime:            st.Format(time.RFC3339),
+		EndTime:              et.Format(time.RFC3339),
+		Participants:         guestIDs,
+		SyncToGoogleCalendar: true,
+	})
+	if err != nil || out == nil {
+		return "", nil, fmt.Errorf("failed to create the event: %w", err)
+	}
+
+	loc, _ := readerZone(ctx)
+	msg := fmt.Sprintf("✅ \"%s\" is on your calendar, %s", title, eventSpan(&dgraphStruct.DgraphEvent{StartTime: &st, EndTime: &et}, loc))
+	if len(guestNames) > 0 {
+		msg += ", with " + joinNames(guestNames)
+	}
+	return msg + ".", map[string]string{"tool": "calendar_create_event", "event_uuid": out.EventUuid}, nil
+}
+
+// isAskerRef is a guest named as the asker themself ("me").
+func isAskerRef(ref string) bool {
+	switch strings.ToLower(strings.TrimSpace(ref)) {
+	case "me", "myself", "i", "you":
+		return true
+	}
+	return false
+}
+
+// splitPeople reads a list of people the model gave: names, @handles or user
+// ids, separated by commas, semicolons or "and". Pure.
+func splitPeople(s string) []string {
+	s = strings.NewReplacer(";", ",", " and ", ",", "\n", ",").Replace(s)
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// joinNames lists names as a sentence does: "Maya", "Maya and Jonas", "Maya,
+// Jonas and Ana". Pure.
+func joinNames(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
 }
 
 // --- GitHub ---

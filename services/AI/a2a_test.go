@@ -45,14 +45,14 @@ func a2aAgent(t *testing.T, protocol string, reply func(method string, params ma
 
 func dial(t *testing.T, srv *httptest.Server) *A2AProvider {
 	t.Helper()
-	card, err := FetchA2ACard(context.Background(), srv.URL, "", "s3cret")
+	card, err := FetchA2ACard(context.Background(), srv.URL, "", "s3cret", adminAdded)
 	if err != nil {
 		t.Fatalf("card: %v", err)
 	}
 	if card.Name != "Release Notes Writer" || card.Provider != "Acme" || len(card.Skills) != 1 || !strings.HasSuffix(card.Endpoint, "/rpc") {
 		t.Fatalf("card read wrong: %+v", card)
 	}
-	return NewA2AProvider(card.Endpoint, "", "s3cret", "run-1", card.ProtocolVersion)
+	return NewA2AProvider(card.Endpoint, "", "s3cret", "run-1", card.ProtocolVersion, adminAdded)
 }
 
 func TestA2A03AnswersWithAMessage(t *testing.T) {
@@ -115,7 +115,7 @@ func TestA2AFailuresQuestionsAndErrorsAreSaidPlainly(t *testing.T) {
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":"1","error":{"code":-32601,"message":"Method not found"}}`))
 	}))
 	defer rpcErr.Close()
-	_, err := NewA2AProvider(rpcErr.URL, "", "", "c", "0.3").Chat(context.Background(), []ChatMessage{{Role: "user", Content: "x"}}, ChatOptions{})
+	_, err := NewA2AProvider(rpcErr.URL, "", "", "c", "0.3", adminAdded).Chat(context.Background(), []ChatMessage{{Role: "user", Content: "x"}}, ChatOptions{})
 	if err == nil || !strings.Contains(err.Error(), "Method not found") {
 		t.Fatalf("want the remote's JSON-RPC error, got %v", err)
 	}
@@ -154,5 +154,20 @@ func TestA2APromptCarriesTheRecentConversationWithoutSystemText(t *testing.T) {
 	}
 	if a2aPrompt([]ChatMessage{{Role: "user", Content: "just this"}}) != "just this" {
 		t.Fatal("a single request is sent as it is")
+	}
+}
+
+// An A2A card can't send the agent's secret to another origin than the
+// address it was entered with.
+func TestACardCannotCarryTheSecretElsewhere(t *testing.T) {
+	if err := CardKeepsSecretHome("https://agent.example.com/a2a", "https://agent.example.com/rpc", "s3cret"); err != nil {
+		t.Errorf("same origin: %v", err)
+	}
+	if err := CardKeepsSecretHome("https://agent.example.com/a2a", "https://evil.example.net/rpc", ""); err != nil {
+		t.Errorf("no secret, nothing carried: %v", err)
+	}
+	err := CardKeepsSecretHome("https://agent.example.com/a2a", "https://evil.example.net/rpc", "s3cret")
+	if err == nil || !strings.Contains(err.Error(), "evil.example.net") {
+		t.Errorf("another origin with a secret: %v", err)
 	}
 }

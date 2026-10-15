@@ -69,7 +69,7 @@ func TestAGUIRunCarriesOurToolsAndReturnsTheCalls(t *testing.T) {
 		sse(w, map[string]interface{}{"type": "TOOL_CALL_END", "toolCallId": "c1"})
 		finish(w, in)
 	})
-	p := NewAGUIProvider(srv.URL+"/ag-ui", "", "s3cret", "run-1")
+	p := NewAGUIProvider(srv.URL+"/ag-ui", "", "s3cret", "run-1", adminAdded)
 
 	msgs := []ChatMessage{
 		{Role: "system", Content: "Be brief."},
@@ -113,7 +113,7 @@ func TestAGUIToolResultsGoBackKeyedByCall(t *testing.T) {
 		sse(w, map[string]interface{}{"type": "TEXT_MESSAGE_CONTENT", "messageId": "a", "delta": "Done."})
 		finish(w, in)
 	})
-	p := NewAGUIProvider(srv.URL, "", "", "t")
+	p := NewAGUIProvider(srv.URL, "", "", "t", adminAdded)
 	msgs := []ChatMessage{
 		{Role: "user", Content: "search"},
 		{Role: "assistant", Content: "", ToolCalls: []ToolCall{{ID: "c1", Name: "web_search", Arguments: ""}}},
@@ -152,7 +152,7 @@ func TestAGUIAToolTheRemoteRanItselfIsReportedNotReturned(t *testing.T) {
 		sse(w, map[string]interface{}{"type": "TEXT_MESSAGE_CONTENT", "messageId": "a", "delta": "Posted."})
 		finish(w, in)
 	})
-	p := NewAGUIProvider(srv.URL, "", "", "t")
+	p := NewAGUIProvider(srv.URL, "", "", "t", adminAdded)
 	text, calls, err := p.ChatWithTools(context.Background(), []ChatMessage{{Role: "user", Content: "go"}}, nil, ChatOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -178,14 +178,14 @@ func TestAGUIAStreamThatStopsOrFailsIsAnError(t *testing.T) {
 	_, quiet := newRemote(t, func(w io.Writer, in aguiRunInput) {
 		sse(w, map[string]interface{}{"type": "TEXT_MESSAGE_CONTENT", "messageId": "a", "delta": "half"})
 	})
-	if _, _, err := NewAGUIProvider(quiet.URL, "", "", "t").ChatWithTools(context.Background(), nil, nil, ChatOptions{}); err == nil || !strings.Contains(err.Error(), "without finishing") {
+	if _, _, err := NewAGUIProvider(quiet.URL, "", "", "t", adminAdded).ChatWithTools(context.Background(), nil, nil, ChatOptions{}); err == nil || !strings.Contains(err.Error(), "without finishing") {
 		t.Errorf("a stream that started and stopped must fail, got %v", err)
 	}
 
 	_, failing := newRemote(t, func(w io.Writer, in aguiRunInput) {
 		sse(w, map[string]interface{}{"type": "RUN_ERROR", "message": "model quota exhausted", "code": "quota"})
 	})
-	if _, _, err := NewAGUIProvider(failing.URL, "", "", "t").ChatWithTools(context.Background(), nil, nil, ChatOptions{}); err == nil || !strings.Contains(err.Error(), "model quota exhausted (quota)") {
+	if _, _, err := NewAGUIProvider(failing.URL, "", "", "t", adminAdded).ChatWithTools(context.Background(), nil, nil, ChatOptions{}); err == nil || !strings.Contains(err.Error(), "model quota exhausted (quota)") {
 		t.Errorf("RUN_ERROR must surface its message, got %v", err)
 	}
 
@@ -193,7 +193,7 @@ func TestAGUIAStreamThatStopsOrFailsIsAnError(t *testing.T) {
 		http.Error(w, `{"error":"Unauthorized."}`, http.StatusUnauthorized)
 	}))
 	t.Cleanup(denied.Close)
-	if _, _, err := NewAGUIProvider(denied.URL, "", "wrong", "t").ChatWithTools(context.Background(), nil, nil, ChatOptions{}); err == nil || !strings.Contains(err.Error(), "401") {
+	if _, _, err := NewAGUIProvider(denied.URL, "", "wrong", "t", adminAdded).ChatWithTools(context.Background(), nil, nil, ChatOptions{}); err == nil || !strings.Contains(err.Error(), "401") {
 		t.Errorf("a refused request must name the status, got %v", err)
 	}
 }
@@ -202,7 +202,7 @@ func TestAGUIAStreamThatStopsOrFailsIsAnError(t *testing.T) {
 // secret, which is how the OpenBot bots and similar peers authenticate.
 func TestAGUINamedHeaderCarriesTheSecret(t *testing.T) {
 	f, srv := newRemote(t, func(w io.Writer, in aguiRunInput) { finish(w, in) })
-	p := NewAGUIProvider(srv.URL, "x-openbot-agent-token", "tok", "t")
+	p := NewAGUIProvider(srv.URL, "x-openbot-agent-token", "tok", "t", adminAdded)
 	if _, _, err := p.ChatWithTools(context.Background(), nil, nil, ChatOptions{}); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func TestAGUIStateRoundTrips(t *testing.T) {
 		sse(w, map[string]interface{}{"type": "STATE_SNAPSHOT", "snapshot": map[string]interface{}{"step": 2}})
 		finish(w, in)
 	})
-	p := NewAGUIProvider(srv.URL, "", "", "t")
+	p := NewAGUIProvider(srv.URL, "", "", "t", adminAdded)
 	for i := 0; i < 2; i++ {
 		if _, _, err := p.ChatWithTools(context.Background(), nil, nil, ChatOptions{}); err != nil {
 			t.Fatal(err)
@@ -247,7 +247,7 @@ func TestAGUIChatWithoutToolsNeverReturnsACall(t *testing.T) {
 		sse(w, map[string]interface{}{"type": "TOOL_CALL_END", "toolCallId": "c1"})
 		finish(w, in)
 	})
-	got, err := NewAGUIProvider(srv.URL, "", "", "t").Chat(context.Background(), []ChatMessage{{Role: "user", Content: "hi"}}, ChatOptions{})
+	got, err := NewAGUIProvider(srv.URL, "", "", "t", adminAdded).Chat(context.Background(), []ChatMessage{{Role: "user", Content: "hi"}}, ChatOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,12 +526,17 @@ func TestTheProviderInstallsTheOffNetworkRule(t *testing.T) {
 		t.Fatal("cannot find the end of NewAGUIProvider")
 	}
 	ctor := body[start : start+end]
-	if !strings.Contains(ctor, "offLocalRefusal: OffLocalRefusal(endpoint, secret)") {
+	if !strings.Contains(ctor, "newRemoteHTTPClient(OffLocalRefusal(endpoint, secret), policy)") {
 		t.Error("the provider's HTTP client no longer carries the off-network refusal, so a " +
 			"remote agent could be sent workspace content over plain http or with no credential")
 	}
-	if !strings.Contains(ctor, "guardSSRF:       true") && !strings.Contains(ctor, "guardSSRF: true") {
-		t.Error("the provider's HTTP client no longer has the SSRF guard")
+	// The address rule is helpers' endpoint rule, on main's one address table.
+	clientSrc := body[strings.Index(body, "var newRemoteHTTPClient"):]
+	clientSrc = clientSrc[:strings.Index(clientSrc, "\n}")]
+	for _, want := range []string{"helpers.EndpointClient(policy", "dialAllowed(cfg, localOnlyEnabled.Load()"} {
+		if !strings.Contains(clientSrc, want) {
+			t.Errorf("the remote agents' HTTP client no longer has %s", want)
+		}
 	}
 }
 
@@ -549,7 +554,7 @@ func TestAStreamThatNeverStartedIsNotAStreamThatStopped(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(silent.Close)
-	_, _, err := NewAGUIProvider(silent.URL, "", "", "t").ChatWithTools(context.Background(), nil, nil, ChatOptions{})
+	_, _, err := NewAGUIProvider(silent.URL, "", "", "t", adminAdded).ChatWithTools(context.Background(), nil, nil, ChatOptions{})
 	if err == nil {
 		t.Fatal("a 200 with no events must not read as a successful run")
 	}

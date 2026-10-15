@@ -252,11 +252,11 @@ var ToolRegistry = []ToolDef{
 	},
 	{
 		Name:        "set_reminder",
-		Description: "Create a reminder or calendar event. Use when the user asks to remind, set a reminder, schedule something, or create an event.",
+		Description: "Set a reminder for the user: at the time, it comes back to them (it tops their Later list, shows in an open app and is pushed to their phone). Use when the user asks to be reminded of something ('remind me at 3pm to call the bank'). It puts nothing on the calendar: to schedule a meeting or event, use calendar_create_event.",
 		Parameters: []ToolParam{
-			{Name: "title", Type: "string", Required: true, Description: "Title of the reminder/event"},
-			{Name: "start_time", Type: "string", Required: true, Description: "Start time in RFC3339 format (e.g. 2026-03-25T18:00:00Z)"},
-			{Name: "description", Type: "string", Required: false, Description: "Description or notes for the reminder"},
+			{Name: "title", Type: "string", Required: true, Description: "What to remind them of"},
+			{Name: "start_time", Type: "string", Required: true, Description: "When to remind them, RFC3339 with the user's UTC offset (e.g. 2026-03-25T18:00:00+05:30)"},
+			{Name: "description", Type: "string", Required: false, Description: "Notes to keep with the reminder"},
 		},
 	},
 	{
@@ -286,10 +286,12 @@ var ToolRegistry = []ToolDef{
 			{Name: "count", Type: "string", Required: false, Description: "Number of recent messages to summarize (default: 50, max: 200)"},
 		},
 	},
-	// --- Connector tools (per-user external accounts: Gmail, Calendar, GitHub).
-	// These only work when the user has connected the relevant account; the
-	// executor returns a friendly "connect first" message otherwise. Write
-	// tools (gmail_send, calendar_create_event, github_comment) always run
+	// --- Connector tools (per-user external accounts: Gmail, GitHub), and the
+	// user's calendar. The connector tools only work when the user has
+	// connected the relevant account; the executor returns a friendly "connect
+	// first" message otherwise. The calendar tools need no connector: they read
+	// and write the OneCamp calendar, which carries Google Calendar when linked.
+	// Write tools (gmail_send, calendar_create_event, github_comment) always run
 	// behind the user-confirmation gate. ---
 	{
 		Name:        "gmail_search",
@@ -314,23 +316,24 @@ var ToolRegistry = []ToolDef{
 	},
 	{
 		Name:        "calendar_list_events",
-		Description: "List the user's upcoming Google Calendar events. Use when the user asks about their schedule/calendar/meetings ('what's on my calendar', 'am I free tomorrow'). Read-only.",
+		Description: "List what's on the user's calendar from the start of today: their OneCamp events (ones they made and ones they were invited to, focus time and time off included) and their Google Calendar when it's linked. Use when the user asks about their schedule, calendar or meetings ('what's on my calendar', 'am I free tomorrow'). Read-only.",
 		ReadOnly:    true,
 		Parameters: []ToolParam{
-			{Name: "days", Type: "string", Required: false, Description: "How many days ahead to look (default 7)"},
+			{Name: "days", Type: "string", Required: false, Description: "How many days to list, starting today (default 7, at most 31)"},
 		},
 	},
 	{
 		Name:        "calendar_create_event",
-		Description: "Create an event on the user's Google Calendar. Use when the user asks to schedule/add a meeting or event. Requires confirmation.",
-		// Invitations reach attendees the moment it succeeds; deleting the event
-		// afterwards does not unsend them.
+		Description: "Put an event on the user's calendar in OneCamp and invite teammates to it; it goes to their Google Calendar too when that's linked. Use when the user asks to schedule, add or book a meeting or event. Requires confirmation.",
+		// The teammates it names are invited the moment it succeeds, and a
+		// linked Google Calendar gets a copy.
 		ExternalEffect: true,
 		Parameters: []ToolParam{
 			{Name: "title", Type: "string", Required: true, Description: "Event title"},
-			{Name: "start_time", Type: "string", Required: true, Description: "Start time in RFC3339 (e.g. 2026-06-10T15:00:00Z)"},
+			{Name: "start_time", Type: "string", Required: true, Description: "Start time in RFC3339 with the user's UTC offset (e.g. 2026-06-10T15:00:00+05:30)"},
 			{Name: "end_time", Type: "string", Required: false, Description: "End time in RFC3339 (defaults to 30 min after start)"},
 			{Name: "description", Type: "string", Required: false, Description: "Event description"},
+			{Name: "attendees", Type: "string", Required: false, Description: "Teammates to invite, comma-separated: their names, @handles or user ids"},
 		},
 	},
 	{

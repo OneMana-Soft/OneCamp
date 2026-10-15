@@ -200,7 +200,7 @@ func UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	v, err := business.UpdateProvider(ctx, id, req)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteSecretAwareBadRequest(w, err)
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": v})
@@ -856,7 +856,7 @@ func SetWebSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetWebSearch(ctx, req); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteSecretAwareBadRequest(w, err)
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set web_search provider=%q enabled=%v", aiAdminUserUUID(r), req.Provider, req.Enabled)
@@ -873,7 +873,7 @@ func SetSandboxConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetSandboxConfig(ctx, req); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteSecretAwareBadRequest(w, err)
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set sandbox enabled=%v runner=%q", aiAdminUserUUID(r), req.Enabled, req.RunnerURL)
@@ -908,7 +908,7 @@ func SetCodePRConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := business.SetCodePRConfig(ctx, req); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteSecretAwareBadRequest(w, err)
 		return
 	}
 	helpers.LogInfoWithContext(ctx, "AI audit: admin=%s set code-pr enabled=%v runner=%q", aiAdminUserUUID(r), req.Enabled, req.RunnerURL)

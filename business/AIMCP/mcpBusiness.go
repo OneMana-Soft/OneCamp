@@ -1,8 +1,9 @@
 package business
 
-// Management layer for MCP servers: validation, tool-prefix generation,
-// ownership-agnostic CRUD (admin-gated at the controller), live connection
-// testing/introspection, and registry rebuilds after every change.
+// Management layer for MCP servers: validation, tool-prefix generation, CRUD
+// for the server's creator or an admin (agent.manage-gated at the router),
+// live connection testing/introspection, and registry rebuilds after every
+// change.
 
 import (
 	"context"
@@ -10,7 +11,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -36,15 +36,42 @@ type ServerInput struct {
 	Enabled        bool   `json:"enabled"`
 }
 
-var errNotFound = fmt.Errorf("MCP server not found")
+// Actor is who is asking: their account and whether they are an admin.
+type Actor struct {
+	UserID  uuid.UUID
+	IsAdmin bool
+}
+
+var (
+	errNotFound  = fmt.Errorf("MCP server not found")
+	errForbidden = fmt.Errorf("Only the person who added this server, or an admin, can change it.")
+)
 
 // IsNotFound lets the controller map to HTTP 404.
 func IsNotFound(err error) bool { return err == errNotFound }
 
+// IsForbidden lets the controller map to HTTP 403.
+func IsForbidden(err error) bool { return err == errForbidden }
+
+// manageable loads a server the actor may change: its creator, or an admin.
+func manageable(ctx context.Context, id uuid.UUID, actor Actor) (*model.McpServer, error) {
+	s, err := model.GetServerByID(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load MCP server")
+	}
+	if s == nil {
+		return nil, errNotFound
+	}
+	if !s.ManageableBy(actor.UserID, actor.IsAdmin) {
+		return nil, errForbidden
+	}
+	return s, nil
+}
+
 // validate cleans and checks an input, returning the secret-update intent
 // (whether AuthSecret was provided) so the model can leave a stored secret
 // unchanged on edit.
-func validate(in *ServerInput) error {
+func validate(in *ServerInput, addedByAdmin bool) error {
 	in.Name = strings.TrimSpace(in.Name)
 	if in.Name == "" {
 		return fmt.Errorf("name is required")
@@ -59,8 +86,13 @@ func validate(in *ServerInput) error {
 	if in.URL == "" || len(in.URL) > maxURLLen {
 		return fmt.Errorf("a valid url is required")
 	}
-	u, err := url.Parse(in.URL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	// The one address rule, checked now so a refused address is a sentence
+	// on save rather than a failed introspection later. The client checks
+	// again as it connects, which is the check that counts.
+	if err := helpers.CheckEndpoint(in.URL, helpers.EndpointPolicyFor(addedByAdmin)); err != nil {
+		if msg := helpers.EndpointRefusal(err, addedByAdmin); msg != "" {
+			return fmt.Errorf("%s", msg)
+		}
 		return fmt.Errorf("url must be a valid http(s) endpoint")
 	}
 
@@ -80,6 +112,11 @@ func validate(in *ServerInput) error {
 	in.AuthHeaderName = strings.TrimSpace(in.AuthHeaderName)
 	if in.AuthType == model.AuthHeader && in.AuthHeaderName == "" {
 		return fmt.Errorf("a header name is required for header auth")
+	}
+	if in.AuthType != model.AuthHeader {
+		// Only header auth names a header; a stale name must not count as a
+		// different destination for the secret.
+		in.AuthHeaderName = ""
 	}
 	return nil
 }
@@ -131,10 +168,13 @@ func uniqueToolPrefix(ctx context.Context, name string, excludeID uuid.UUID) str
 }
 
 // CreateServer validates, persists, then introspects + rebuilds the registry.
-func CreateServer(ctx context.Context, in ServerInput, createdBy uuid.UUID) (*model.McpServer, error) {
-	if err := validate(&in); err != nil {
+// The actor is its creator: an admin's server may be on this server's own
+// network, a member's may not.
+func CreateServer(ctx context.Context, in ServerInput, actor Actor) (*model.McpServer, error) {
+	if err := validate(&in, actor.IsAdmin); err != nil {
 		return nil, err
 	}
+	createdBy := actor.UserID
 	m := &model.McpServer{
 		Name:           in.Name,
 		Description:    optStr(in.Description),
@@ -160,17 +200,31 @@ func CreateServer(ctx context.Context, in ServerInput, createdBy uuid.UUID) (*mo
 	return created, nil
 }
 
-// UpdateServer validates and persists changes; updateSecret controls whether the
-// stored secret is replaced (so the UI can omit it on edit).
-func UpdateServer(ctx context.Context, id uuid.UUID, in ServerInput, updateSecret bool) (*model.McpServer, error) {
-	existing, err := model.GetServerByID(ctx, id)
+// UpdateServer validates and persists changes to a server the actor may
+// manage; updateSecret controls whether the stored secret is replaced (so the
+// UI can omit it on edit).
+//
+// A kept secret stays with its destination (helpers.CheckKeptSecret): moving
+// the address, the auth type or the header name without entering the secret
+// again is refused, and nothing is sent anywhere. Turning auth off drops the
+// stored secret, since nothing would use it.
+func UpdateServer(ctx context.Context, id uuid.UUID, in ServerInput, updateSecret bool, actor Actor) (*model.McpServer, error) {
+	existing, err := manageable(ctx, id, actor)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load MCP server")
+		return nil, err
 	}
-	if existing == nil {
-		return nil, errNotFound
+	// What it may reach follows whoever added it, not whoever edits it.
+	if err := validate(&in, creatorIsAdmin(ctx, existing.CreatedBy)); err != nil {
+		return nil, err
 	}
-	if err := validate(&in); err != nil {
+	if in.AuthType == model.AuthNone {
+		updateSecret, in.AuthSecret = true, ""
+	}
+	// Replacing or clearing the secret keeps nothing, so only a kept one is
+	// held to its destination.
+	to := (&model.McpServer{URL: in.URL, AuthType: in.AuthType, AuthHeaderName: optStr(in.AuthHeaderName)}).SecretDestination()
+	stored := existing.HasAuthSecret || existing.AuthSecretUnreadable
+	if err := helpers.CheckKeptSecret(stored, updateSecret, existing.SecretDestination(), to, "token"); err != nil {
 		return nil, err
 	}
 	existing.Name = in.Name
@@ -199,8 +253,11 @@ func UpdateServer(ctx context.Context, id uuid.UUID, in ServerInput, updateSecre
 	return updated, nil
 }
 
-// SetEnabled toggles a server and rebuilds the registry.
-func SetEnabled(ctx context.Context, id uuid.UUID, enabled bool) error {
+// SetEnabled toggles a server the actor may manage and rebuilds the registry.
+func SetEnabled(ctx context.Context, id uuid.UUID, enabled bool, actor Actor) error {
+	if _, err := manageable(ctx, id, actor); err != nil {
+		return err
+	}
 	if err := model.SetEnabled(ctx, id, enabled); err != nil {
 		return err
 	}
@@ -217,8 +274,12 @@ func SetEnabled(ctx context.Context, id uuid.UUID, enabled bool) error {
 	return nil
 }
 
-// DeleteServer soft-deletes a server and rebuilds the registry.
-func DeleteServer(ctx context.Context, id uuid.UUID) error {
+// DeleteServer soft-deletes a server the actor may manage and rebuilds the
+// registry.
+func DeleteServer(ctx context.Context, id uuid.UUID, actor Actor) error {
+	if _, err := manageable(ctx, id, actor); err != nil {
+		return err
+	}
 	if err := model.SoftDeleteServer(ctx, id); err != nil {
 		return err
 	}
@@ -243,13 +304,13 @@ func GetServer(ctx context.Context, id uuid.UUID) (*model.McpServer, error) {
 // TestConnection introspects a server live (initialize + tools/list), saves the
 // result (tool cache or error), rebuilds the registry, and returns the tools so
 // the admin sees them immediately.
-func TestConnection(ctx context.Context, id uuid.UUID) ([]McpTool, error) {
-	s, err := model.GetServerByID(ctx, id)
+//
+// Only for the server's creator or an admin: a test sends the server's stored
+// credential, and its answer lists what that credential can do.
+func TestConnection(ctx context.Context, id uuid.UUID, actor Actor) ([]McpTool, error) {
+	s, err := manageable(ctx, id, actor)
 	if err != nil {
-		return nil, fmt.Errorf("failed to load MCP server")
-	}
-	if s == nil {
-		return nil, errNotFound
+		return nil, err
 	}
 	tools, terr := introspect(ctx, s)
 	if terr != nil {
@@ -263,7 +324,7 @@ func TestConnection(ctx context.Context, id uuid.UUID) ([]McpTool, error) {
 
 // introspect runs the live tools/list against a server.
 func introspect(ctx context.Context, s *model.McpServer) ([]McpTool, error) {
-	client, err := NewClient(s)
+	client, err := NewClient(ctx, s)
 	if err != nil {
 		// Not "could not connect": nothing was attempted, and wrapping it as a connection
 		// failure would send an admin to check the remote instead of re-entering the secret.
@@ -271,6 +332,9 @@ func introspect(ctx context.Context, s *model.McpServer) ([]McpTool, error) {
 	}
 	tools, err := client.ListTools(ctx)
 	if err != nil {
+		if msg := helpers.EndpointRefusal(err, creatorIsAdmin(ctx, s.CreatedBy)); msg != "" {
+			return nil, fmt.Errorf("could not connect: %s", msg)
+		}
 		return nil, fmt.Errorf("could not connect: %w", err)
 	}
 	return tools, nil

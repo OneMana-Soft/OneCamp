@@ -56,11 +56,11 @@ func TestTheStoredSecretSurvivesAnEditThatDidNotTouchIt(t *testing.T) {
 // reason instead of going out with an empty credential.
 func TestAnUnreadableSecretStopsTheRun(t *testing.T) {
 	a := &model.AiAgent{Id: uuid.New(), AGUIEndpoint: "https://r", AGUIAuthUnreadable: true}
-	if _, err := remoteProvider(a, "run"); err == nil || !strings.Contains(err.Error(), "AI_CONFIG_KEK") {
+	if _, err := remoteProvider(context.Background(), a, "run"); err == nil || !strings.Contains(err.Error(), "AI_CONFIG_KEK") {
 		t.Errorf("want the KEK explanation, got %v", err)
 	}
 	a.AGUIAuthUnreadable = false
-	p, err := remoteProvider(a, "run")
+	p, err := remoteProvider(context.Background(), a, "run")
 	if err != nil || p == nil || p.Label() != "agui:r" {
 		t.Errorf("a readable agent must get a provider: %v %v", p, err)
 	}
@@ -176,9 +176,10 @@ func TestCheckingARemoteEndpointReportsWhatCameBack(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// An admin's check: the test server is on loopback.
 	res, err := CheckRemoteBrain(context.Background(), RemoteBrainCheck{
 		Endpoint: srv.URL, AuthHeader: "x-token", AuthSecret: "s3cret",
-	}, Actor{})
+	}, Actor{IsAdmin: true})
 	if err != nil {
 		t.Fatalf("check: %v", err)
 	}
@@ -191,7 +192,7 @@ func TestCheckingARemoteEndpointReportsWhatCameBack(t *testing.T) {
 
 	bad, err := CheckRemoteBrain(context.Background(), RemoteBrainCheck{
 		Endpoint: srv.URL, AuthHeader: "x-token", AuthSecret: "wrong",
-	}, Actor{})
+	}, Actor{IsAdmin: true})
 	if err != nil {
 		t.Fatalf("a refused check must be an answer, not an error: %v", err)
 	}
@@ -220,13 +221,13 @@ func TestCheckingRefusesAnEndpointItWouldNeverDial(t *testing.T) {
 // The reason is translated when it is ours rather than the remote's: a dial
 // the guard refused says which rule refused it.
 func TestACheckSaysWhenTheRefusalWasOurs(t *testing.T) {
-	if got := remoteCheckError(errors.New("agui: ai: local-only mode is on — refusing to send content to a non-local model endpoint: 1.2.3.4")); !strings.HasPrefix(got, "Local-only AI mode is on") {
+	if got := remoteCheckError(errors.New("agui: ai: local-only mode is on — refusing to send content to a non-local model endpoint: 1.2.3.4"), true); !strings.HasPrefix(got, "Local-only AI mode is on") {
 		t.Errorf("local-only = %q", got)
 	}
-	if got := remoteCheckError(errors.New("agui: ai: connection to this address is blocked for security (cloud metadata / link-local)")); !strings.Contains(got, "cloud metadata") {
+	if got := remoteCheckError(errors.New("agui: ai: connection to this address is blocked for security (cloud metadata / link-local)"), true); !strings.Contains(got, "cloud metadata") {
 		t.Errorf("blocked = %q", got)
 	}
-	if got := remoteCheckError(errors.New("agui: remote answered 500: boom")); got != "remote answered 500: boom" {
+	if got := remoteCheckError(errors.New("agui: remote answered 500: boom"), true); got != "remote answered 500: boom" {
 		t.Errorf("an ordinary failure must be passed through: %q", got)
 	}
 }
@@ -237,16 +238,56 @@ func TestACheckLeadsWithTheReasonNotTheUrl(t *testing.T) {
 	// The REAL shape, copied from a live refusal: this package wraps, Go's HTTP
 	// client wraps, and the dialer wrapped. My first version of this test
 	// invented a one-layer string, passed, and shipped a trim that never fired.
-	got := remoteCheckError(errors.New(`agui: Post "http://example.com/ag-ui": agui: refusing to send workspace content to a remote agent outside your own network over plain http; use https (example.com resolves to 93.184.216.34)`))
+	got := remoteCheckError(errors.New(`agui: Post "http://example.com/ag-ui": agui: refusing to send workspace content to a remote agent outside your own network over plain http; use https (example.com resolves to 93.184.216.34)`), true)
 	if !strings.HasPrefix(got, "refusing to send workspace content") {
 		t.Errorf("message = %q", got)
 	}
 	// An error that is not wrapped that way is left alone.
-	if got := remoteCheckError(errors.New("agui: remote answered 500: boom")); got != "remote answered 500: boom" {
+	if got := remoteCheckError(errors.New("agui: remote answered 500: boom"), true); got != "remote answered 500: boom" {
 		t.Errorf("unwrapped message = %q", got)
 	}
 	// And a url containing the marker inside it does not confuse the trim.
-	if got := remoteCheckError(errors.New(`Post "https://x.example.com/a": dial tcp: lookup failed`)); got != "dial tcp: lookup failed" {
+	if got := remoteCheckError(errors.New(`Post "https://x.example.com/a": dial tcp: lookup failed`), true); got != "dial tcp: lookup failed" {
 		t.Errorf("message = %q", got)
+	}
+}
+
+// A remote agent a member adds may be on public addresses only; one an admin
+// adds may also be on this server's own network; metadata and link-local
+// addresses are refused for everyone. Nothing refused is ever reached.
+func TestOnlyAnAdminsRemoteMayBeOnThisServersNetwork(t *testing.T) {
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true }))
+	defer srv.Close()
+	check := func(endpoint string, admin bool) *RemoteBrainResult {
+		t.Helper()
+		res, err := CheckRemoteBrain(context.Background(), RemoteBrainCheck{
+			Endpoint: endpoint, AuthHeader: "x-token", AuthSecret: "s3cret",
+		}, Actor{IsAdmin: admin})
+		if err != nil {
+			t.Fatalf("%s: %v", endpoint, err)
+		}
+		return res
+	}
+	// A name is checked when it is dialled, after it resolves.
+	for _, endpoint := range []string{srv.URL, "https://10.0.0.5/agent"} {
+		if res := check(endpoint, false); res.OK || !strings.Contains(res.Error, "Only an admin can add") {
+			t.Errorf("a member's %s: %+v; want the own-network refusal", endpoint, res)
+		}
+	}
+	if reached {
+		t.Fatal("a member's check reached this server's network")
+	}
+	for _, endpoint := range []string{"https://169.254.169.254/latest", "http://[fd00:ec2::254]/", "http://metadata.google.internal/"} {
+		for _, admin := range []bool{false, true} {
+			if res := check(endpoint, admin); res.OK || res.Error == "" {
+				t.Errorf("%s (admin %v): %+v; a metadata address is refused for everyone", endpoint, admin, res)
+			}
+		}
+	}
+	// An admin's agent on loopback is reached (here it answers nothing useful).
+	check(srv.URL, true)
+	if !reached {
+		t.Error("an admin's remote on this server's network was not reached")
 	}
 }

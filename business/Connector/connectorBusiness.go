@@ -126,8 +126,9 @@ type storedToken struct {
 
 // saveUserToken encrypts and upserts a user's connector token. The
 // (entity_type, entity_id, provider) unique key guarantees one row per
-// user+provider.
-func saveUserToken(ctx context.Context, userUUID uuid.UUID, provider string, tok storedToken) error {
+// user+provider. metadata, when not nil, replaces what the row keeps about the
+// account (a refresh passes nil and keeps it).
+func saveUserToken(ctx context.Context, userUUID uuid.UUID, provider string, tok storedToken, metadata *string) error {
 	encAccess, err := helpers.EncryptSecret(tok.AccessToken)
 	if err != nil {
 		return fmt.Errorf("encrypt access token: %w", err)
@@ -141,7 +142,7 @@ func saveUserToken(ctx context.Context, userUUID uuid.UUID, provider string, tok
 		encRefresh = &r
 	}
 	return integrationDomain.UpsertIntegration(ctx, entityTypeUser, userUUID, provider,
-		&encAccess, encRefresh, nil, nil, tok.ExpiresAt)
+		&encAccess, encRefresh, nil, metadata, tok.ExpiresAt)
 }
 
 // loadUserToken fetches and decrypts a user's connector token. Returns

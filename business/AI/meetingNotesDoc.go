@@ -29,13 +29,12 @@ import (
 
 	docAdapter "github.com/akashc777/OneCamp/adapter/Doc"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
+	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	transcriptDomain "github.com/akashc777/OneCamp/domain/LiveKit"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
-	"github.com/akashc777/OneCamp/models/redis/registry"
-	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 )
 
 // maxDocTranscriptLines bounds what goes into the document body.
@@ -95,48 +94,65 @@ func meetingNotesTitle(surfaceName string, at time.Time) string {
 	return "Meeting notes: " + when
 }
 
-// notesAudience is everyone the document should reach: the people who were in
-// the call, falling back to the people who spoke.
+// notesAudience is everyone the document should reach: the people who joined
+// THIS call, and its speakers, each of whom can still open the conversation.
 //
-// Speakers alone was the safe answer while nothing recorded attendance, and it
-// was wrong in a way people notice: sit through an hour, say nothing, and the
-// notes are not yours. participant_left now records everyone, so the ordinary
-// case is the right set.
+// Attendance is kept per call (liveKitBusiness.CallAttendees). It was kept per
+// room for 12 hours, and a channel's room is the same for every call in it, so
+// an afternoon call's notes, and its full transcript, were shared with edit
+// access with everyone from the morning's calls, including somebody removed
+// from the channel in between. So each candidate is also checked against the
+// conversation as it is now, when the document is written.
 //
-// Speakers are ALWAYS included even when attendance is known, because the two
-// are recorded by different mechanisms and only one of them is proof. A speaker
-// is in the transcript because they talked; if Redis dropped the set, or the
-// room was renamed, or the webhook never arrived, the transcript is still
+// Speakers are always candidates even when attendance is known, because the
+// two are recorded by different mechanisms and only one of them is proof: if
+// Redis dropped the set or a webhook never arrived, the transcript is still
 // evidence they were there.
-func notesAudience(ctx context.Context, roomName string, speakerUIDs []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(speakerUIDs)+4)
-	add := func(uid string) {
-		uid = strings.TrimSpace(uid)
-		if uid == "" || seen[uid] {
-			return
-		}
-		seen[uid] = true
-		out = append(out, uid)
-	}
-
-	// Speakers first: the owner is picked from the head of this list, and an
-	// owner who spoke is the likeliest to still be a live user.
-	for _, uid := range speakerUIDs {
-		add(uid)
-	}
-
-	attendees, err := redisStore.GetSetMembers(ctx, registry.CallParticipants, []string{roomName})
+func notesAudience(ctx context.Context, call liveKitBusiness.FinishedCall, speakerUIDs []string) []string {
+	attendees, err := liveKitBusiness.CallAttendees(ctx, call.SessionKey)
 	if err != nil {
 		// Degrade to speakers rather than failing: fewer people on the document
 		// is recoverable, no document is not.
-		helpers.LogErrorWithContext(ctx, "AI meeting notes: could not read call participants for %q: %+v", roomName, err)
-		return out
+		helpers.LogErrorWithContext(ctx, "AI meeting notes: could not read the call's attendees: %+v", err)
 	}
-	for _, uid := range attendees {
-		add(uid)
+	var out []string
+	for _, uid := range mergeAudience(speakerUIDs, attendees) {
+		if mayOpenConversation(ctx, call.Room, uid) {
+			out = append(out, uid)
+		}
 	}
 	return out
+}
+
+// mergeAudience is speakers first (the owner is picked from the head of this
+// list, and a speaker is the likeliest to still be a live user), then the
+// other attendees, without blanks or repeats. Pure.
+func mergeAudience(speakerUIDs, attendees []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(speakerUIDs)+len(attendees))
+	for _, list := range [][]string{speakerUIDs, attendees} {
+		for _, uid := range list {
+			uid = strings.TrimSpace(uid)
+			if uid == "" || seen[uid] {
+				continue
+			}
+			seen[uid] = true
+			out = append(out, uid)
+		}
+	}
+	return out
+}
+
+// mayOpenConversation reports whether someone, by their graph uid, can open
+// the conversation a call was in, now. A store that doesn't answer leaves
+// them out: being too narrow is recoverable by a human (whoever owns the
+// document can share it), being too wide is not. A seam for tests.
+var mayOpenConversation = func(ctx context.Context, roomName, uid string) bool {
+	ok, err := liveKitBusiness.MayOpenConversation(ctx, roomName, uid)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "AI meeting notes: could not check who may open the conversation: %+v", err)
+	}
+	return err == nil && ok
 }
 
 // resolveNotesOwner picks the document's owner: the first speaker who still
@@ -194,13 +210,14 @@ func meetingSurfaceName(ctx context.Context, roomName, viewerUID string) string 
 // whose editing set is empty is one nobody can ever open.
 func createMeetingNotesDoc(
 	ctx context.Context,
-	surfaceName, roomName string,
+	surfaceName string,
+	call liveKitBusiness.FinishedCall,
 	speakerUIDs []string,
 	recap, gapNote string,
 	lines []transcriptDomain.TranscriptLine,
 	nameByUID map[string]string,
 ) (string, error) {
-	audience := notesAudience(ctx, roomName, speakerUIDs)
+	audience := notesAudience(ctx, call, speakerUIDs)
 	author := resolveNotesOwner(ctx, audience)
 	if author == nil {
 		// Nobody on the call resolves to a live user, so there is no one to own

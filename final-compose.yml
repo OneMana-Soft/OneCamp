@@ -92,7 +92,13 @@ services:
   minio:
     logging: *default-logging
     restart: unless-stopped
-    image: minio/minio:RELEASE.2025-01-18T00-31-37Z
+    # CHAINGUARD'S BUILD, PINNED BY DIGEST, the same as distribute-compose.yml; the reasons
+    # are written there. minio/minio can no longer be pulled, and this host ran only
+    # because the old image was cached.
+    image: cgr.dev/chainguard/minio@sha256:dc455cdd4db6e390b1b26514f15ff37681a777bf8dab41aac445a0259f751e56
+    # ROOT, AS BEFORE: ./data/minio was written as root, and the image's own uid 65532
+    # can't write there.
+    user: "0:0"
     volumes:
       - ./data/minio:/data
     environment:
@@ -104,6 +110,14 @@ services:
       # Unset, MinIO uses the request's own host, which is what a tunnel needs.
       CONSOLE_SECURE_TLS_REDIRECT: off
     command: server --console-address ":8080" /data
+    # `mc ready` asks MinIO's own cluster health check; `timeout` bounds it, since mc
+    # retries for ever. go-service still waits only for this to start.
+    healthcheck:
+      test: ["CMD", "timeout", "5", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     labels:
       - traefik.enable=true
       - traefik.docker.network=traefik-public
@@ -125,6 +139,30 @@ services:
     networks:
       - onecamp-shared-net
       - traefik-public
+
+  # The upload bucket and the API's access key, made once MinIO is healthy; the
+  # API waits for it. The same as distribute-compose.yml, where the reasons are
+  # written. A bucket or key that exists is left as it is, so on this host, whose
+  # bucket and key were made by hand, it changes nothing.
+  minio-init:
+    logging: *default-logging
+    image: cgr.dev/chainguard/minio@sha256:dc455cdd4db6e390b1b26514f15ff37681a777bf8dab41aac445a0259f751e56
+    restart: "no"
+    entrypoint: ["/bin/bash", "/minio-init.sh"]
+    volumes:
+      - ./other-services/minio/init.sh:/minio-init.sh:ro
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD}
+      API_ACCESS_KEY: ${MINIO_ACCESS_KEY_ID:-}
+      API_SECRET_KEY: ${MINIO_SECRET_ACCESS_KEY:-}
+      UPLOAD_BUCKET: ${USER_UPLOAD_BUCKET_NAME:-}
+      STORAGE_ATTACHED_BUCKET: ${STORAGE_ATTACHED_BUCKET:-}
+    networks:
+      - onecamp-shared-net
+    depends_on:
+      minio:
+        condition: service_healthy
 
   # OpenSearch. See the notes on http.max_content_length and restart below: this
   # node was once stopped by a single oversized index request, and both settings
@@ -842,10 +880,15 @@ services:
     # whole-stack `compose restart` takes the broker down underneath a running
     # application and the next start races it. Nine restarts after one restore.
     #
-    # service_started, not healthy: none of these three defines a healthcheck, and
+    # service_started, not healthy: Dgraph and the broker define no healthcheck, and
     # inventing one for a readiness signal nobody has verified would trade a noisy
-    # loop for a stack that refuses to start. Ordering the start is worth having on
-    # its own.
+    # loop for a stack that refuses to start. MinIO's isn't waited on either: the API
+    # serves without files. Ordering the start is worth having on its own.
+    # NOT minio-init. The API starts without it and uses the bucket and key as
+    # soon as they exist: on a test server (14 Oct) MinIO was stopped and the API
+    # started and served everything but files; once MinIO was back, uploads worked
+    # with no restart. Waiting on minio-init meant a MinIO that never got healthy,
+    # or a root password it refused, kept the whole workspace down.
     depends_on:
       redis:
         condition: service_healthy

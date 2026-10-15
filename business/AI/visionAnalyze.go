@@ -5,12 +5,12 @@ package business
 // attachment's object uuid plus its source (src_key + src_value), all values it
 // already holds from the rendered message. The USER never types or sees a uuid.
 //
-// Access is enforced here, per source, exactly as the attachment-serving
-// endpoints do: the user must be a member of the channel / a participant of the
-// DM or group / able to read the doc the image belongs to. The image bytes are
-// fetched from MinIO server-side (never trusting a client-supplied object key
-// path), capped in size, and required to be a real raster image. The model's
-// description is treated as untrusted output.
+// Access is the attachment-serving endpoints' own (fileAccessBusiness.ReadFile):
+// the user must be allowed to have the files of the place the image belongs to,
+// and the image must be that place's. The image bytes are fetched from MinIO
+// server-side (never trusting a client-supplied object key path), capped in
+// size, and required to be a real raster image. The model's description is
+// treated as untrusted output.
 
 import (
 	"context"
@@ -18,13 +18,11 @@ import (
 	"io"
 	"strings"
 
-	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
-	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
-	docBusiness "github.com/akashc777/OneCamp/business/Doc"
-	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
+	fileAccessBusiness "github.com/akashc777/OneCamp/business/FileAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/minioInit"
 	postgresStruct "github.com/akashc777/OneCamp/models/postgres"
+	attachmentModels "github.com/akashc777/OneCamp/models/postgres/Attachment"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/minio/minio-go/v7"
@@ -38,9 +36,8 @@ const visionMaxImageBytes = 8 << 20 // 8 MB
 // attachment the user can access. srcKey + srcRef + objUUID come from the FE
 // (the rendered message), not the user. srcRef is the same identifier the FE
 // uses to fetch the media (channel uuid, the OTHER user's uuid for a DM, the
-// group id for a group chat, or the doc uuid) - this function resolves it to
-// the attachment's real src_value and authorizes it exactly like the
-// matching media-serving endpoint.
+// group id for a group chat, or the doc uuid); attachmentFor reads the file
+// through it as the media-serving endpoints do.
 func AnalyzeAttachmentImage(ctx context.Context, userInfo *userModels.UserInfo, srcKey, srcRef, objUUID, prompt string) (string, error) {
 	svc := ai.GetService()
 	if svc == nil || !svc.IsEnabled() {
@@ -63,17 +60,9 @@ func AnalyzeAttachmentImage(ctx context.Context, userInfo *userModels.UserInfo, 
 		return "", err
 	}
 
-	// Resolve the source reference to the attachment's real src_value and
-	// authorize access, mirroring the corresponding media-serving endpoint.
-	srcValue, err := resolveAndAuthorizeSource(ctx, userInfo, srcKey, srcRef)
+	att, err := attachmentFor(ctx, userInfo, srcKey, srcRef, objUUID)
 	if err != nil {
 		return "", err
-	}
-
-	// Load the attachment row and confirm it belongs to the resolved source.
-	att, err := attachmentBusiness.GetAttachmentByObjUUID(ctx, objUUID, srcKey)
-	if err != nil || att == nil || att.SrcValue != srcValue || att.ObjKey == "" {
-		return "", fmt.Errorf("attachment not found or you don't have access")
 	}
 
 	data, mime, err := fetchImageObject(ctx, att.ObjKey)
@@ -106,42 +95,25 @@ func AnalyzeAttachmentImage(ctx context.Context, userInfo *userModels.UserInfo, 
 	return clean, nil
 }
 
-// resolveAndAuthorizeSource maps the FE's source reference to the attachment's
-// real src_value and enforces access, mirroring each media-serving endpoint:
-//   - channel  : ref = channel uuid; src_value = ref; require channel member.
-//   - chat (DM): ref = the OTHER user's uuid; src_value = GetGroupingId(ref,
-//     self) - the match itself proves the caller is one of the two participants
-//     (exactly what /dm/getFile relies on).
-//   - grpChat  : ref = group id; src_value = ref; require group participant.
-//   - doc      : ref = doc uuid; src_value = ref; require doc read access.
-func resolveAndAuthorizeSource(ctx context.Context, userInfo *userModels.UserInfo, srcKey, srcRef string) (string, error) {
-	denied := fmt.Errorf("attachment not found or you don't have access")
-	switch srcKey {
-	case postgresStruct.ATTACHMENT_SRC_CHANNEL:
-		ch, err := channelDomain.GetBasicDgraphChannelInfoByUUID(ctx, srcRef, userInfo.UserDgraphInfo.Uid)
-		if err != nil || ch == nil || ch.IsMember == 0 {
-			return "", denied
-		}
-		return srcRef, nil
-	case postgresStruct.ATTACHMENT_SRC_CHAT:
-		// DM: the grouping id derived from both user uuids is the src_value;
-		// being able to form it (and matching the stored value) proves access.
-		return helpers.GetGroupingId(srcRef, userInfo.UserDgraphInfo.Uuid), nil
-	case postgresStruct.ATTACHMENT_SRC_GRP_CHAT:
-		dm, err := chatBusiness.GetDgraphDmBasicInfoFromDgraph(ctx, userInfo.UserDgraphInfo.Uid, srcRef)
-		if err != nil || dm == nil || dm.ParticipantIsMember == 0 {
-			return "", denied
-		}
-		return srcRef, nil
-	case postgresStruct.ATTACHMENT_SRC_DOC:
-		doc, err := docBusiness.GetBasicDgraphDocByUUID(ctx, srcRef, userInfo.UserDgraphInfo.Uid)
-		if err != nil || !docBusiness.CanRead(doc, userInfo.UserDgraphInfo.Uuid) {
-			return "", denied
-		}
-		return srcRef, nil
-	default:
-		return "", fmt.Errorf("image analysis isn't available for this attachment")
+// attachmentFor is the file the user asked to be read, through its place
+// (fileAccessBusiness.ReadFile): they must be allowed to have the place's
+// files, and the file must be the place's. srcRef names the place as the FE
+// fetches its files: a DM by the OTHER user's uuid, which with the user's own
+// makes its grouping id (GetGroupingId); any other place by its own id. A file
+// they can't have, and one that isn't there, answer alike.
+func attachmentFor(ctx context.Context, userInfo *userModels.UserInfo, srcKey, srcRef, objUUID string) (*attachmentModels.Attachment, error) {
+	place := fileAccessBusiness.Place{Kind: srcKey, ID: srcRef}
+	if srcKey == postgresStruct.ATTACHMENT_SRC_CHAT {
+		place.ID = helpers.GetGroupingId(srcRef, userInfo.UserDgraphInfo.Uuid)
 	}
+	att, err := fileAccessBusiness.ReadFile(ctx, userInfo.UserDgraphInfo.Uuid, place, objUUID)
+	if err != nil {
+		if !fileAccessBusiness.IsRefusal(err) {
+			helpers.LogErrorWithContext(ctx, "business/AI attachmentFor %q %q %s err: %+v", place.Kind, place.ID, objUUID, err)
+		}
+		return nil, fmt.Errorf("attachment not found or you don't have access")
+	}
+	return att, nil
 }
 
 // fetchImageObject downloads the attachment bytes from MinIO and returns them
@@ -187,11 +159,13 @@ func fetchImageObject(ctx context.Context, objKey string) ([]byte, string, error
 }
 
 // ImageRef is a TRUSTED reference to an image object in storage. The caller
-// MUST have already authorized the requester's access to it (e.g. it was read
-// from a record the requester can see). ObjKey is the storage object key as
-// stored on the attachment row / Dgraph node (without the userFileUpload/
-// prefix, which fetchImageObject adds).
+// MUST have already authorized the requester's access to it, and read ObjKey
+// from the image's attachments row through its place
+// (fileAccessBusiness.FileOf), never from a message's list of files, which is
+// written as its sender sent it. ObjKey is without the userFileUpload/ prefix,
+// which fetchImageObject adds. ID is the attachment's id.
 type ImageRef struct {
+	ID       string
 	ObjKey   string
 	FileName string
 }

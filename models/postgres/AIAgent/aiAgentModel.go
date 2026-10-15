@@ -177,7 +177,7 @@ func (a *AiAgent) ManageableBy(userID uuid.UUID, isAdmin bool) bool {
 	if a == nil {
 		return false
 	}
-	return isAdmin || a.CreatedBy == userID
+	return helpers.OwnerOrAdmin(&a.CreatedBy, userID, isAdmin)
 }
 
 // parsed/validated in the business layer.

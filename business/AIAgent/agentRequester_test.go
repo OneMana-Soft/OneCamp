@@ -28,12 +28,12 @@ func TestTheSponsorsOwnReachIsNeverLent(t *testing.T) {
 	want := map[string]string{
 		"gmail_search":          "only Sana can ask me to use their connected accounts",
 		"gmail_send":            "only Sana can ask me to use their connected accounts",
-		"calendar_list_events":  "only Sana can ask me to use their connected accounts",
-		"calendar_create_event": "only Sana can ask me to use their connected accounts",
+		"calendar_list_events":  "only Sana can ask me to use their calendar",
+		"calendar_create_event": "only Sana can ask me to use their calendar",
 		"github_list_prs":       "only Sana can ask me to use their connected accounts",
 		"github_list_issues":    "only Sana can ask me to use their connected accounts",
 		"github_comment":        "only Sana can ask me to use their connected accounts",
-		"set_reminder":          "only Sana can ask me to use their calendar",
+		"set_reminder":          "only Sana can ask me to use their Later list",
 		"summarize_dm":          "only Sana can ask me to use their direct messages",
 		"send_dm":               "only Sana can ask me to use their direct messages",
 	}

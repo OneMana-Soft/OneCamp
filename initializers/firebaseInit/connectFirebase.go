@@ -72,6 +72,9 @@ const (
 	// An agent is waiting for a decision; the click opens Home, where
 	// "Needs your approval" leads the list.
 	FIREBASE_PUSH_DATA_TYPE_APPROVAL = "approval"
+	// A guest booked or cancelled time through a booking page; type_id is the
+	// event's id, and the click opens the calendar.
+	FIREBASE_PUSH_DATA_TYPE_CALENDAR = "calendar"
 	// The notification tag; one per approval so two do not replace each other.
 	FIREBASE_PUSH_DATA_TAG         = "tag"
 	FIREBASE_PUSH_DATA_TITLE       = "title"

@@ -67,23 +67,26 @@ func IPRateLimit(kind string, max int, msg string) func(http.Handler) http.Handl
 			rctx, cancel := contextWithRedisTimeout(ctx)
 			defer cancel()
 
-			res := redisStore.AllowFixedWindowOrLocal(rctx, registry.LoginRate, []string{kind, ip}, max)
+			res := redisStore.AllowFixedWindowOrLocal(rctx, registry.LoginRate, []string{kind, helpers.RateKeyIP(ip)}, max)
 			if !res.Allowed {
-				retryAfter := res.RetryAfterSeconds()
-				if retryAfter <= 0 {
-					retryAfter = int(registry.LoginRate.TTL.Seconds())
-				}
-				w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-				helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{
-					"msg":    msg,
-					"status": "rate_limited",
-				})
+				WriteRateLimited(w, res, registry.LoginRate, msg)
 				return
 			}
 
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// WriteRateLimited answers 429 with msg and when to come back: the limiter's
+// own wait, else spec's whole window. Every limiter answers through it.
+func WriteRateLimited(w http.ResponseWriter, res redisStore.RateLimitResult, spec registry.Spec, msg string) {
+	retryAfter := res.RetryAfterSeconds()
+	if retryAfter <= 0 {
+		retryAfter = int(spec.TTL.Seconds())
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": msg, "status": "rate_limited"})
 }
 
 // contextWithRedisTimeout wraps the request ctx in a 500ms-bounded timeout

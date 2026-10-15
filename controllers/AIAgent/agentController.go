@@ -41,7 +41,7 @@ func writeManageErr(w http.ResponseWriter, err error) {
 	case business.IsNotFound(err):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "agent not found"})
 	default:
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteSecretAwareBadRequest(w, err)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -389,5 +390,63 @@ func TestPairedImagesShareAVersion(t *testing.T) {
 					pair[1], rv+" @ "+strings.Join(rsites, ", "))
 			}
 		}
+	}
+}
+
+// Traefik must be able to read the Docker daemon it routes for.
+//
+// WHAT WENT WRONG. distribute-compose.yml pinned traefik:v3.0, which resolves to 3.0.4, and that
+// release's Docker provider asks the daemon for API 1.24. Docker Engine 29 raised the daemon's minimum
+// to 1.40, and Docker 29 is what get.docker.com installs (the licence installer and the Cloud
+// provisioner both run it) and what Ubuntu 24.04 now packages. Traefik then logs "client version 1.24
+// is too old" in a loop and builds no routers, so every hostname on the server answers 404: the API,
+// files, calls, live updates and the web app at once. Setting DOCKER_API_VERSION on the container does
+// not help. Nothing above caught it, because v3.0 is a tag rather than `latest`.
+//
+// THE FLOOR IS v3.6.7. v3.6.1 is the first release that negotiates the API version with the daemon.
+// v3.6.4 to v3.6.6 then rejected request paths holding encoded characters (%2F, %25 and others) by
+// default, and file names carry them; v3.6.7 allows them again.
+//
+// AN EXACT PATCH, NOT A MINOR. `v3.0` moved from 3.0.0 to 3.0.4 under the installs that pulled it, so
+// it named whichever build a server happened to fetch. A version here names one build.
+var (
+	traefikMinimum    = [3]int{3, 6, 7}
+	traefikExactPatch = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)$`)
+)
+
+func TestTraefikCanReadTheDockerDaemon(t *testing.T) {
+	floor := fmt.Sprintf("v%d.%d.%d", traefikMinimum[0], traefikMinimum[1], traefikMinimum[2])
+	found := 0
+	for _, s := range imageSites(t) {
+		repo := s.repository()
+		if repo != "traefik" && !strings.HasSuffix(repo, "/traefik") {
+			continue
+		}
+		found++
+		v, _ := s.version()
+		if m := varWithDefault.FindStringSubmatch(v); m != nil {
+			v = m[1] // the default is what runs when nobody sets the variable
+		}
+		m := traefikExactPatch.FindStringSubmatch(v)
+		if m == nil {
+			t.Errorf("%s:%d (%s) names %s. Pin Traefik to an exact release at or above %s, such as "+
+				"traefik:v3.7.13: a minor tag like v3.0 moves between builds, and a digest or a variable with no "+
+				"default names no version this can check", s.file, s.line, s.service, s.ref, floor)
+			continue
+		}
+		var got [3]int
+		for i := range got {
+			got[i] = atoi(t, []byte(m[i+1]))
+		}
+		if slices.Compare(got[:], traefikMinimum[:]) < 0 {
+			t.Errorf("%s:%d (%s) names %s, below %s. Docker Engine 29 refuses the API version Traefik "+
+				"before v3.6.1 asks for, so on a server with current Docker it builds no routers and every "+
+				"hostname answers 404; v3.6.4 to v3.6.6 also reject encoded characters in paths",
+				s.file, s.line, s.service, s.ref, floor)
+		}
+	}
+	if found == 0 {
+		t.Fatal("no compose file names a traefik image, so this guard checks nothing. If the proxy moved " +
+			"elsewhere, move the floor with it")
 	}
 }

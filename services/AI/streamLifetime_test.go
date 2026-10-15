@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -82,8 +83,18 @@ func TestTheOwnersStopEndsTheAnswerEvenWhenItArrivesLate(t *testing.T) {
 	time.Sleep(600 * time.Millisecond)
 	stops.set("alice")
 	waitFor(t, "the owner's stop to take effect", l.Stopped)
-	if l.Gen.Err() == nil {
+	// The watcher marks the stop, then cancels: in that order, so whoever sees
+	// generation end also sees why. Reading Gen.Err the moment Stopped turns
+	// true raced that second step and failed once under a loaded suite, so the
+	// test waits for the cancellation itself. The bound only catches a stop
+	// that never cancels: Gen's own timeout is a minute away.
+	select {
+	case <-l.Gen.Done():
+	case <-time.After(10 * time.Second):
 		t.Fatal("a deliberate stop must cancel generation")
+	}
+	if !errors.Is(l.Gen.Err(), context.Canceled) {
+		t.Fatalf("a deliberate stop cancels generation, it doesn't time it out: %v", l.Gen.Err())
 	}
 }
 

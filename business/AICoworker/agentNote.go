@@ -98,6 +98,8 @@ func LeaveDailyNote(ctx context.Context, userInfo *userModels.UserInfo, clientDa
 		return &NoteResult{}, nil
 	}
 	day := noteDay(clientDay, noteNow())
+	// The member's day, on their clock: today's meetings are theirs.
+	ctx = aiBusiness.WithReaderZone(ctx, clientZone)
 	claimed, err := noteClaimDay(ctx, userInfo.UserPostgresInfo.Id, day)
 	if err != nil {
 		return &NoteResult{BotUUID: bot.UUID}, err

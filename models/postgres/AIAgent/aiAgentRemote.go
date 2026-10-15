@@ -70,3 +70,30 @@ func readAGUISecret(agentID uuid.UUID, enc []byte) (secret string, set, unreadab
 	}
 	return "", false, true
 }
+
+// RemoteSecretDestination is where this agent's stored secret goes and how:
+// its address, its protocol (an A2A agent's calls go where its card says) and
+// the header the secret rides in, an empty header and Authorization being the
+// same bearer token.
+func (a *AiAgent) RemoteSecretDestination() helpers.SecretDestination {
+	return RemoteSecretDestinationOf(a.AGUIEndpoint, a.RemoteProtocol, a.AGUIAuthHeader)
+}
+
+// RemoteSecretDestinationOf is RemoteSecretDestination for values not yet saved.
+func RemoteSecretDestinationOf(endpoint, protocol, header string) helpers.SecretDestination {
+	header = strings.TrimSpace(header)
+	if strings.EqualFold(header, "Authorization") {
+		header = ""
+	}
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol == "" {
+		protocol = RemoteAGUI
+	}
+	return helpers.SecretDestination{URL: endpoint, How: []string{protocol, header}}
+}
+
+// HasRemoteSecret reports whether a secret is stored for the remote, readable
+// or not.
+func (a *AiAgent) HasRemoteSecret() bool {
+	return a != nil && (a.AGUIAuthSecret != "" || a.AGUIAuthSet || a.AGUIAuthUnreadable)
+}

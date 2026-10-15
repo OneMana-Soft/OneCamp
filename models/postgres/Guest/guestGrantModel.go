@@ -174,6 +174,25 @@ func ResourceExists(ctx context.Context, resourceID string) (bool, error) {
 	return exists, nil
 }
 
+// ResourceCreator is who made the first grant to a resource, live or not: for
+// an instant meeting, its host. ok is false when there is none.
+func ResourceCreator(ctx context.Context, resourceType, resourceID string) (uuid.UUID, bool, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	const q = `SELECT created_by FROM guest_grants
+		WHERE resource_type = $1 AND resource_id = $2 ORDER BY created_at ASC LIMIT 1`
+	var by uuid.UUID
+	err := postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, resourceType, resourceID).Scan(&by)
+	if errors.Is(err, sql.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/Guest/ResourceCreator err: %+v", err)
+		return uuid.Nil, false, err
+	}
+	return by, true, nil
+}
+
 // Used by the admin guest-grants view.
 func ListActive(ctx context.Context) ([]*GuestGrant, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)

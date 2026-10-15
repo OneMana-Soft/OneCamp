@@ -53,6 +53,12 @@ type DgraphRecording struct {
 	//
 	// Absence means a real recording, so nothing existing needs backfilling.
 	TranscriptOnly bool `json:"recording_transcript_only,omitempty"`
+
+	// Status is how the recording ended, from LiveKit's egress status:
+	// "ready", or "failed" for one whose file was never written (failed or
+	// aborted), which is listed as failed rather than played. Empty on
+	// everything recorded before it was kept, which counts as ready.
+	Status string `json:"recording_status,omitempty"`
 }
 
 type DgraphComment struct {
@@ -504,6 +510,9 @@ type DgraphEvent struct {
 	Description           string        `json:"event_description,omitempty"`
 	StartTime             *time.Time    `json:"event_start_time,omitempty"`
 	EndTime               *time.Time    `json:"event_end_time,omitempty"`
+	AllDay                bool          `json:"event_all_day,omitempty"`    // answers only, never saved: a Google all-day event, placed by its dates
+	StartDate             string        `json:"event_start_date,omitempty"` // with AllDay: its first day, YYYY-MM-DD
+	EndDate               string        `json:"event_end_date,omitempty"`   // with AllDay: the day after its last, as Google gives it
 	CreatedBy             *DgraphUser   `json:"event_created_by,omitempty"`
 	GoogleCalendarEventId *string       `json:"event_google_calendar_id,omitempty"`
 	Participants          []*DgraphUser `json:"event_participants,omitempty"`
@@ -515,6 +524,18 @@ type DgraphEvent struct {
 	// IsAway marks time off: the creator is away, and the workload counts
 	// those working days out of their capacity.
 	IsAway *bool `json:"event_is_away,omitempty"`
+	// Booking is set, on an answer to its creator only, when a guest booked
+	// this event through one of their booking pages. Never stored.
+	Booking *EventBooking `json:"event_booking,omitempty"`
+}
+
+// EventBooking is what a booked event's creator sees of its booking: who
+// booked it, through which page, and whether the guest is told (by email)
+// when the event is moved or deleted.
+type EventBooking struct {
+	GuestName string `json:"guest_name"`
+	PageTitle string `json:"page_title"`
+	GuestTold bool   `json:"guest_told"`
 }
 
 // const TASK_STATUS_TODO = "todo"

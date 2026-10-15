@@ -39,7 +39,7 @@ func TestCollectImageRefs(t *testing.T) {
 	media := []*dgraphStruct.DgraphAttachment{
 		{Uuid: "p1", ObjectKey: "u/1_shot.png", FileName: "shot.png", RawType: "image/png"},
 		{Uuid: "p2", ObjectKey: "u/2_doc.pdf", FileName: "doc.pdf", RawType: "application/pdf"}, // skipped (not image)
-		{Uuid: "p3", ObjectKey: "", RawType: "image/png"},                                       // skipped (no key)
+		{ObjectKey: "u/3_shot.png", RawType: "image/png"},                                       // skipped (no id to read it through its place by)
 	}
 	comments := []*dgraphStruct.DgraphComment{
 		{CreatedAt: &t1, Attachments: []*dgraphStruct.DgraphAttachment{
@@ -54,14 +54,16 @@ func TestCollectImageRefs(t *testing.T) {
 
 	refs := CollectImageRefs(media, comments)
 	// Expect 3 image refs (deduped, image-only), MOST-RECENT FIRST:
-	// newest comment (c_new) → older comment (c_old) → root message (p1).
+	// newest comment (c_new) → older comment (c_old) → root message (p1). They
+	// carry no object key: the key a message lists is its sender's to write,
+	// so PlaceImageRefs reads each one's from its upload.
 	if len(refs) != 3 {
 		t.Fatalf("expected 3 image refs, got %d: %+v", len(refs), refs)
 	}
-	wantOrder := []string{"u/new.jpg", "u/old.jpg", "u/1_shot.png"}
+	wantOrder := []string{"c_new", "c_old", "p1"}
 	for i, want := range wantOrder {
-		if refs[i].ObjKey != want {
-			t.Errorf("ref[%d].ObjKey = %q, want %q (full: %+v)", i, refs[i].ObjKey, want, refs)
+		if refs[i].ID != want || refs[i].ObjKey != "" {
+			t.Errorf("ref[%d] = %+v, want id %q and no key (full: %+v)", i, refs[i], want, refs)
 		}
 	}
 	if refs[0].FileName != "new.jpg" {

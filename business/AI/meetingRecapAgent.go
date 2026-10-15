@@ -100,23 +100,35 @@ func composeRecapPrompt(customInstructions string) string {
 }
 
 // MaybeRunMeetingRecap is the entry point called from the LiveKit
-// room_finished webhook. It is safe to call unconditionally and on every
-// finished room; it self-gates on settings, idempotency, and content.
-// Fire-and-forget: callers should invoke it in a goroutine.
-func MaybeRunMeetingRecap(roomName string) {
+// room_finished webhook, for the call that just ended there. It is safe to
+// call unconditionally; it self-gates on settings, idempotency, and content.
+// Fire-and-forget: it runs in its own goroutine.
+func MaybeRunMeetingRecap(call liveKitBusiness.FinishedCall) {
 	go func() {
 		// Generous standalone context — call teardown must not be coupled
 		// to recap latency, and local LLMs can be slow.
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
 
-		if err := runMeetingRecap(ctx, roomName); err != nil {
-			helpers.LogErrorWithContext(ctx, "AI meeting recap for room %q: %v", roomName, err)
+		if err := runMeetingRecap(ctx, call); err != nil {
+			helpers.LogErrorWithContext(ctx, "AI meeting recap for room %q: %v", call.Room, err)
 		}
 	}()
 }
 
-func runMeetingRecap(ctx context.Context, roomName string) error {
+// recapWindowSlack widens the call's window when picking the recordings made
+// during it: the room's start comes from LiveKit's clock and a recording's
+// from this server's, which can disagree by a few seconds.
+const recapWindowSlack = time.Minute
+
+func runMeetingRecap(ctx context.Context, call liveKitBusiness.FinishedCall) error {
+	roomName := call.Room
+	if !helpers.IsCallSessionKey(call.SessionKey) {
+		// No session, no way to say which call this was: summarising "the
+		// newest recording" instead re-posted an earlier call's recap.
+		return nil
+	}
+
 	// 1. Gate on settings.
 	settings, err := aiModels.GetSettings(ctx)
 	if err != nil {
@@ -131,27 +143,33 @@ func runMeetingRecap(ctx context.Context, roomName string) error {
 		return nil
 	}
 
-	// 2. Idempotency lock: first finisher wins for this room. The webhook
-	//    can fire from both room_finished and participant_left paths.
-	if !acquireRecapLock(ctx, roomName) {
-		helpers.LogInfoWithContext(ctx, "AI meeting recap already handled for room %q; skipping", roomName)
+	// 2. Idempotency lock: one recap per CALL. Keyed by the room it locked
+	//    every later call in the same channel out for 30 minutes.
+	if !acquireRecapLock(ctx, call.SessionKey) {
+		helpers.LogInfoWithContext(ctx, "AI meeting recap already handled for call %q; skipping", call.SessionKey)
 		return nil
 	}
 
-	// 3. Gather transcript (and the recording's egress id, so the recap can
-	//    link to the playable recording).
-	lines, egressID, err := transcriptDomain.GetTranscriptLinesByRoom(ctx, roomName, maxRecapLines)
+	// 3. Gather THIS call's transcript (and the recording made during it, so
+	//    the recap can link to it). Nothing else: a call with no transcript
+	//    used to summarise the conversation's previous call again.
+	began := call.Began
+	if began.IsZero() {
+		// Without the call's start, no recording can be placed inside it:
+		// read its own session only, never the conversation's history.
+		began = call.Ended
+	}
+	lines, egressID, err := transcriptDomain.GetCallTranscriptLines(ctx, roomName, call.SessionKey,
+		began.Add(-recapWindowSlack), call.Ended.Add(recapWindowSlack), maxRecapLines)
 	if err != nil {
 		return fmt.Errorf("fetch transcript: %w", err)
 	}
 	// No transcript at all is a different event from a short one, and worth
 	// saying so separately.
 	//
-	// This used to say "the call was not recorded", which was the right answer
-	// when lines were only written while a recording ran. They are not any more:
-	// an unrecorded call files its transcript under a call session key. So an
-	// empty transcript now means nobody spoke, or transcription is off, or the
-	// agent never joined, and claiming to know which would be guessing.
+	// An empty transcript means nobody spoke, or nobody turned transcription
+	// on in the call, or the transcriber never joined, and claiming to know
+	// which would be guessing.
 	if len(lines) == 0 {
 		helpers.LogInfoWithContext(ctx, "AI meeting recap: room %q produced no transcript (nobody spoke, or transcription is off); skipping", roomName)
 		return nil
@@ -210,11 +228,11 @@ func runMeetingRecap(ctx context.Context, roomName string) error {
 	//    happen is the document becoming a reason the message does not arrive.
 	// What the transcript could not hear, said once, in both places it is
 	// written down.
-	gapNote := transcriptGapNote(ctx, roomName)
+	gapNote := transcriptGapNote(ctx, call.SessionKey)
 
 	notesDocUUID := ""
 	if settings.MeetingNotesDocEnabled {
-		docUUID, derr := createMeetingNotesDoc(ctx, meetingSurfaceName(ctx, roomName, helpers.FirstNonBlank(speakerUIDs...)), roomName, speakerUIDs, recap, gapNote, lines, nameByUID)
+		docUUID, derr := createMeetingNotesDoc(ctx, meetingSurfaceName(ctx, roomName, helpers.FirstNonBlank(speakerUIDs...)), call, speakerUIDs, recap, gapNote, lines, nameByUID)
 		if derr != nil {
 			helpers.LogErrorWithContext(ctx, "AI meeting recap: notes document for room %q failed: %+v", roomName, derr)
 		} else if docUUID != "" {
@@ -278,14 +296,14 @@ func memoryRoomSourceID(roomName string) string {
 	return "recap:" + roomName
 }
 
-// acquireRecapLock sets a one-shot marker; returns true only for the first
-// caller. TTL bounds the lock so a crash mid-recap doesn't permanently
-// suppress a retry on a later (manual) trigger.
-func acquireRecapLock(ctx context.Context, roomName string) bool {
+// acquireRecapLock sets a one-shot marker for one call; returns true only for
+// the first caller. TTL bounds the lock so a crash mid-recap doesn't
+// permanently suppress a retry on a later (manual) trigger.
+func acquireRecapLock(ctx context.Context, sessionKey string) bool {
 	// Reuse the AIAdminRate fixed-window primitive as a 1-permit lock:
 	// allow exactly 1 in the window. A dedicated SETNX would be cleaner;
 	// this stays within the existing store helpers.
-	res := redisStore.AllowFixedWindow(ctx, registry.AIRecapLock, []string{roomName}, 1)
+	res := redisStore.AllowFixedWindow(ctx, registry.AIRecapLock, []string{sessionKey}, 1)
 	return res.Allowed
 }
 
@@ -572,8 +590,8 @@ func recordingPlayAttrs(roomName, egressID string) string {
 // Only reports what is KNOWN missing, from participants whose browser told the
 // server it has no speech recognizer. Someone who simply said nothing is not a
 // gap, and treating them as one would put this note on most meetings.
-func transcriptGapNote(ctx context.Context, roomName string) string {
-	uids, err := redisStore.GetSetMembers(ctx, registry.CallUntranscribed, []string{roomName})
+func transcriptGapNote(ctx context.Context, sessionKey string) string {
+	uids, err := redisStore.GetSetMembers(ctx, registry.CallUntranscribed, []string{sessionKey})
 	if err != nil || len(uids) == 0 {
 		return ""
 	}

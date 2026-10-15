@@ -1,6 +1,7 @@
 package helpers
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -226,4 +227,160 @@ func SSRFSafeClient(allowHTTPInDev bool) *http.Client {
 			return nil
 		},
 	}
+}
+
+// The rule for an endpoint this server sends a credential to: an MCP server, a
+// remote agent. It is the one address rule above (isBlockedAddr), checked as
+// each connection is made, on any port, because an API's port is part of its
+// address, with one widening: an endpoint an admin added may also be on this
+// server's own network (loopback, the private ranges, and the shared address
+// space Tailscale uses), where self-hosters run such services beside OneCamp. One a member added reaches public
+// addresses only, so a member can't use one to look inside. Metadata and
+// link-local addresses are refused for everyone.
+
+// EndpointPolicy is what one endpoint may reach.
+type EndpointPolicy struct {
+	// AddedByAdmin says an admin added the endpoint, so it may be on this
+	// server's own network.
+	AddedByAdmin bool
+	// Also is a further rule a caller adds for every address the client
+	// connects to. It can only refuse.
+	Also func(ip net.IP) error
+}
+
+// EndpointPolicyFor is the rule for an endpoint added by an admin or not.
+func EndpointPolicyFor(addedByAdmin bool) EndpointPolicy {
+	return EndpointPolicy{AddedByAdmin: addedByAdmin}
+}
+
+var (
+	// ErrEndpointScheme is an endpoint that isn't http or https.
+	ErrEndpointScheme = errors.New("only http and https endpoints are reached")
+	// ErrEndpointUserInfo is an endpoint carrying a user name or password.
+	ErrEndpointUserInfo = errors.New("an endpoint with a user name or password in it is not reached")
+	// ErrEndpointBlocked is an address the endpoint may not reach.
+	ErrEndpointBlocked = errors.New("that address is not reached for this endpoint")
+	// ErrOffOrigin is a redirect to another scheme, host or port, which a
+	// client carrying a credential never follows.
+	ErrOffOrigin = errors.New("the server redirected to another address, which isn't followed")
+)
+
+// The metadata services that sit inside ranges an admin's endpoint may reach,
+// refused by name: AWS's IPv6 one inside fc00::/7, and Alibaba's inside the
+// shared address space.
+var (
+	awsMetadataV6     = netip.MustParsePrefix("fd00:ec2::/32")
+	alibabaMetadataV4 = netip.MustParsePrefix("100.100.100.200/32")
+)
+
+// sharedAddressSpace is 100.64.0.0/10 (RFC 6598), carrier-grade NAT's range,
+// where Tailscale and similar private networks put their machines.
+var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
+
+// privateNetworkAddr reports whether a is on this server's own network in the
+// sense an admin's endpoint may reach: loopback, a private range, or the
+// shared address space a Tailscale network uses; never a metadata address.
+func privateNetworkAddr(a netip.Addr) bool {
+	a = a.WithZone("").Unmap()
+	if !a.IsValid() || awsMetadataV6.Contains(a) || alibabaMetadataV4.Contains(a) {
+		return false
+	}
+	return a.IsLoopback() || a.IsPrivate() || sharedAddressSpace.Contains(a)
+}
+
+// allows reports whether p lets a client connect to a.
+func (p EndpointPolicy) allows(a netip.Addr) bool {
+	return !isBlockedAddr(a) || (p.AddedByAdmin && privateNetworkAddr(a))
+}
+
+// CheckEndpoint applies p to an endpoint without resolving anything: http or
+// https, no user name or password, a host, and a literal address p allows. A
+// name is checked as it is dialled.
+func CheckEndpoint(raw string, p EndpointPolicy) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrEndpointBlocked, err)
+	}
+	if s := strings.ToLower(u.Scheme); s != "http" && s != "https" {
+		return ErrEndpointScheme
+	}
+	if u.User != nil {
+		return ErrEndpointUserInfo
+	}
+	host := u.Hostname()
+	if host == "" {
+		return ErrEndpointBlocked
+	}
+	if a, err := netip.ParseAddr(host); err == nil && !p.allows(a) {
+		return ErrEndpointBlocked
+	}
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "metadata") {
+		return ErrEndpointBlocked
+	}
+	return nil
+}
+
+// EndpointClient is an HTTP client that connects only where p allows, checked
+// as each connection is made (so a name that changes its answer is covered),
+// through no proxy. It carries a credential, so it follows a redirect only on
+// the origin of the request it came from; a timeout of 0 means none, for an
+// answer that streams.
+func EndpointClient(p EndpointPolicy, timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, Control: func(_, address string, _ syscall.RawConn) error {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return err
+		}
+		a, err := netip.ParseAddr(host)
+		if err != nil || !p.allows(a) {
+			return fmt.Errorf("%w: %s", ErrEndpointBlocked, host)
+		}
+		if p.Also != nil {
+			return p.Also(net.IP(a.WithZone("").AsSlice()))
+		}
+		return nil
+	}}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy:                  nil,
+			DialContext:            dialer.DialContext,
+			ForceAttemptHTTP2:      true,
+			TLSHandshakeTimeout:    10 * time.Second,
+			MaxIdleConns:           20,
+			IdleConnTimeout:        90 * time.Second,
+			MaxResponseHeaderBytes: 64 << 10,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) > 5 {
+				return fmt.Errorf("too many redirects")
+			}
+			if !SameOrigin(via[0].URL.String(), req.URL.String()) {
+				return ErrOffOrigin
+			}
+			return CheckEndpoint(req.URL.String(), p)
+		},
+	}
+}
+
+// EndpointRefusal words why an endpoint was refused by its EndpointPolicy, for
+// the person who typed it, or "" when err is not such a refusal. addedByAdmin
+// is the policy it was checked under.
+func EndpointRefusal(err error, addedByAdmin bool) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrEndpointScheme):
+		return "Use an address that starts with https:// or http://."
+	case errors.Is(err, ErrEndpointUserInfo):
+		return "Take the user name and password out of the address, and put the secret in its own field."
+	case errors.Is(err, ErrOffOrigin):
+		return "The server sent us to another address, so nothing was sent there. Enter the address it moved to."
+	case errors.Is(err, ErrEndpointBlocked):
+		if addedByAdmin {
+			return "That address can't be reached from here: it is a cloud metadata, link-local or other special address."
+		}
+		return "That address is on this server's own network. Only an admin can add a server or agent there."
+	}
+	return ""
 }

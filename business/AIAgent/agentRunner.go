@@ -24,7 +24,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -599,7 +598,7 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 	}
 
 	if remote {
-		p, perr := remoteProvider(agent, runID.String())
+		p, perr := remoteProvider(ctx, agent, runID.String())
 		if perr != nil {
 			return finalize(model.RunFailed, "", perr.Error())
 		}
@@ -1268,6 +1267,19 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 			out.BlockOptions = elic.Options
 			return finalizeStopped(StopReasonBlocked, elic.Render(), "")
 		}
+		// askAPerson pauses the run on a needs_human call's question.
+		askAPerson := func(rec toolCallRecord, elic Elicitation) *RunOutcome {
+			rec.Result = "paused — waiting for a human"
+			step.ToolCalls = append(step.ToolCalls, rec)
+			steps = append(steps, step)
+			out.Blocked = true
+			out.BlockReason = elic.Question
+			out.BlockOptions = elic.Options
+			// Result carries the RENDERED question, so every surface that
+			// shows a stopped run's result shows the options too without
+			// each one re-deriving them.
+			return finalizeStopped(StopReasonBlocked, elic.Render(), "")
+		}
 		pendingSteering, pendingCompaction = nil, nil
 		// What the remote did on its own machine during this turn. Recorded
 		// as its own account, never executed and never governed here, so the
@@ -1376,6 +1388,22 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 			return finalize(model.RunSucceeded, finalText, "")
 		}
 
+		// A turn that has to ask someone something asks before any of it runs:
+		// the run that resumes on the answer starts from before this turn and
+		// makes its calls again, so a call run ahead of the pause would be made
+		// twice (agentPauseFirst.go). The loop below still pauses on whatever
+		// this missed.
+		if p, ok := pauseFirst(loopCtx, agent, actions); ok {
+			if !toolNameSeen[p.rec.Tool] {
+				toolNameSeen[p.rec.Tool] = true
+				toolsUsed = append(toolsUsed, p.rec.Tool)
+			}
+			if p.elic != nil {
+				return askAPerson(p.rec, *p.elic)
+			}
+			return confirmFirst(p.rec)
+		}
+
 		// What the person this run acts for may not have done, when that is not
 		// the sponsor. Decided once per call, before anything runs, so the
 		// concurrent pre-pass and the sequential path below cannot disagree.
@@ -1410,14 +1438,15 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 			return ok
 		})
 
-		var resultLines []string
-		var obsList []string // per-action observation, parallel to actions (native tool-result threading)
+		// What each call showed the model, by its place in the turn, so each
+		// result goes back under its own call's id (agentTurnResults.go).
+		results := newTurnResults(len(actions))
 		// A terminal tool (e.g. code_pr) can end the turn with its own ack as the
 		// final reply; tracked across this turn's actions and applied after all
 		// of them have executed + been recorded.
 		var terminalReply string
 		terminalFired := false
-		for _, a := range actions {
+		for idx, a := range actions {
 			rec := toolCallRecord{Tool: a.ToolName, Params: a.Params}
 			repeatOf := "" // set when this call repeats one that already returned
 			if !toolNameSeen[a.ToolName] {
@@ -1440,6 +1469,7 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 				if internalIDElicitation(elic.Question) {
 					rec.Error = internalIDElicitationRefusal
 					step.ToolCalls = append(step.ToolCalls, rec)
+					results.set(idx, a.ToolName, controlObservation(rec))
 					helpers.LogInfoWithContext(ctx,
 						"agentRunner: agent %s asked a person for an internal id; told to look it up", agent.Id)
 					continue
@@ -1447,20 +1477,12 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 				if sensitiveElicitation(elic.Question) {
 					rec.Error = sensitiveElicitationRefusal
 					step.ToolCalls = append(step.ToolCalls, rec)
+					results.set(idx, a.ToolName, controlObservation(rec))
 					helpers.LogInfoWithContext(ctx,
 						"agentRunner: agent %s asked a person for a credential; refused", agent.Id)
 					continue
 				}
-				rec.Result = "paused — waiting for a human"
-				step.ToolCalls = append(step.ToolCalls, rec)
-				steps = append(steps, step)
-				out.Blocked = true
-				out.BlockReason = elic.Question
-				out.BlockOptions = elic.Options
-				// Result carries the RENDERED question, so every surface that
-				// shows a stopped run's result shows the options too without
-				// each one re-deriving them.
-				return finalizeStopped(StopReasonBlocked, elic.Render(), "")
+				return askAPerson(rec, elic)
 			}
 			// Continue-the-work: persist the agent's durable state blob and keep
 			// going. Self-state (not an external write), so it is never
@@ -1477,14 +1499,7 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 					rec.Result = "progress saved"
 				}
 				step.ToolCalls = append(step.ToolCalls, rec)
-				obs := rec.Result
-				if rec.Error != "" {
-					obs = "error: " + rec.Error
-				} else if rec.Skipped != "" {
-					obs = "skipped: " + rec.Skipped
-				}
-				resultLines = append(resultLines, fmt.Sprintf("%s -> %s", a.ToolName, obs))
-				obsList = append(obsList, obs)
+				results.set(idx, a.ToolName, controlObservation(rec))
 				continue
 			}
 			// Conversational memory (remember/forget): a person can give the
@@ -1500,14 +1515,7 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 					return confirmFirst(rec)
 				}
 				step.ToolCalls = append(step.ToolCalls, rec)
-				obs := rec.Result
-				if rec.Error != "" {
-					obs = "error: " + rec.Error
-				} else if rec.Skipped != "" {
-					obs = "skipped: " + rec.Skipped
-				}
-				resultLines = append(resultLines, fmt.Sprintf("%s -> %s", a.ToolName, obs))
-				obsList = append(obsList, obs)
+				results.set(idx, a.ToolName, controlObservation(rec))
 				continue
 			}
 			// Conversational routines (create/list/cancel): a person can hand the
@@ -1520,14 +1528,7 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 					return confirmFirst(rec)
 				}
 				step.ToolCalls = append(step.ToolCalls, rec)
-				obs := rec.Result
-				if rec.Error != "" {
-					obs = "error: " + rec.Error
-				} else if rec.Skipped != "" {
-					obs = "skipped: " + rec.Skipped
-				}
-				resultLines = append(resultLines, fmt.Sprintf("%s -> %s", a.ToolName, obs))
-				obsList = append(obsList, obs)
+				results.set(idx, a.ToolName, controlObservation(rec))
 				continue
 			}
 			switch {
@@ -1724,8 +1725,7 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 			} else if rec.Skipped != "" {
 				obs = "skipped: " + rec.Skipped
 			}
-			resultLines = append(resultLines, fmt.Sprintf("%s -> %s", a.ToolName, obs))
-			obsList = append(obsList, obs)
+			results.set(idx, a.ToolName, obs)
 		}
 		steps = append(steps, step)
 
@@ -1742,27 +1742,7 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 		// structured tool_calls followed by one tool-role message per call (keyed
 		// by tool_call_id), so the provider accepts the follow-up; on the text
 		// path it is the assistant text + a single user "Tool results:" turn.
-		if useNative {
-			messages = append(messages, ai.ChatMessage{Role: "assistant", Content: answer, ToolCalls: nativeCalls})
-			for idx, a := range actions {
-				id := ""
-				if idx < len(nativeCalls) {
-					id = nativeCalls[idx].ID
-				}
-				obs := ""
-				if idx < len(obsList) {
-					obs = obsList[idx]
-				}
-				messages = append(messages, ai.ChatMessage{Role: "tool", ToolCallID: id, Name: a.ToolName, Content: obs})
-			}
-		} else {
-			messages = append(messages, ai.ChatMessage{Role: "assistant", Content: answer})
-			messages = append(messages, ai.ChatMessage{
-				Role: "user",
-				Content: ai.ToolResultsTurn(strings.Join(resultLines, "\n"),
-					"Continue if more steps are needed, otherwise reply with a short final summary and no tool call."),
-			})
-		}
+		messages = append(messages, results.followUp(useNative, answer, nativeCalls, actions)...)
 		finalText = cleanText
 
 		// Checkpoint the conversation so a pause/crash resumes mid-conversation.

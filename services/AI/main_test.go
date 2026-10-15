@@ -23,3 +23,8 @@ func TestMain(m *testing.M) {
 	}
 	os.Exit(m.Run())
 }
+
+// adminAdded is the address rule for a remote agent an admin added, which may
+// be on this server's own network: the tests' remote agents answer from
+// httptest servers on loopback.
+var adminAdded = helpers.EndpointPolicyFor(true)

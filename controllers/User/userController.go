@@ -15,13 +15,13 @@ import (
 	"time"
 
 	recordingBusiness "github.com/akashc777/OneCamp/business/Recording"
+	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 
 	adapter "github.com/akashc777/OneCamp/adapter/User"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
-	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
-	docBusiness "github.com/akashc777/OneCamp/business/Doc"
+	fileAccessBusiness "github.com/akashc777/OneCamp/business/FileAccess"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
@@ -1100,18 +1100,13 @@ func UploadFile(w http.ResponseWriter, r *http.Request) {
 
 	var objUUID uuid.UUID
 
+	// A file is the file of the places it goes to, and is served to whoever
+	// may see them: only someone who may write in every one of them may
+	// upload it, decided before anything is stored.
+	user, _ := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
 	if len(uploadData.ChannelUuids) == 0 && len(uploadData.ChatUuids) == 0 {
-		if uploadData.SrcKey != postgressStruct.ATTACHMENT_SRC_CHANNEL &&
-			uploadData.SrcKey != postgressStruct.ATTACHMENT_SRC_CHAT &&
-			uploadData.SrcKey != postgressStruct.ATTACHMENT_SRC_PROJECT &&
-			uploadData.SrcKey != postgressStruct.ATTACHMENT_SRC_GRP_CHAT &&
-			uploadData.SrcKey != postgressStruct.ATTACHMENT_SRC_DOC &&
-			uploadData.SrcKey != postgressStruct.ATTACHMENT_SRC_BOARD &&
-			uploadData.SrcKey != postgressStruct.ATTACHMENT_SRC_PUBLIC {
-
-			er := errors.New("Invalid src key")
-			helpers.ErrorJSON(w, er, http.StatusBadRequest)
-
+		place := fileAccessBusiness.Place{Kind: uploadData.SrcKey, ID: uploadData.SrcValue, People: uploadData.Participants}
+		if !mayAddFileTo(ctx, w, user, place) {
 			return
 		}
 
@@ -1119,6 +1114,11 @@ func UploadFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(uploadData.ChannelUuids) > 0 || len(uploadData.ChatUuids) > 0 {
+		for _, place := range placesSentTo(uploadData.ChannelUuids, uploadData.ChatUuids) {
+			if !mayAddFileTo(ctx, w, user, place) {
+				return
+			}
+		}
 
 		objUUID, err = business.UploadUserFileToChannelsAndChats(ctx, file, fHeader.Size, fHeader.Filename, uploadData.ChannelUuids, uploadData.ChatUuids)
 
@@ -1746,446 +1746,37 @@ func GetPublicFile(w http.ResponseWriter, r *http.Request) {
 
 }
 
+// GetGroupChatFile answers the address of a group conversation's file, for
+// the people in it.
 func GetGroupChatFile(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
-
-	objectUUIDString := chi.URLParam(r, "obj_uuid")
-	if objectUUIDString == "" {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Received empty object uuid in the req",
-		})
-		return
-
-	}
-
-	grpIDString := chi.URLParam(r, "grp_id")
-	if grpIDString == "" {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Received empty chat uuid in the req",
-		})
-		return
-
-	}
-
-	dgraphDm, err := chatBusiness.GetDgraphDmBasicInfoFromDgraph(ctx, userInfo.UserDgraphInfo.Uid, grpIDString)
-
-	if err != nil || dgraphDm == nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetGroupChatFile Failed to get chat dm info err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dm info",
-			"err": err,
-		})
-		return
-	}
-
-	if dgraphDm.ParticipantIsMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
-		return
-	}
-
-	attachmentPostgresInfo, err := attachmentBusiness.GetAttachmentByObjUUID(ctx, objectUUIDString, postgressStruct.ATTACHMENT_SRC_GRP_CHAT)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetGroupChatFile Failed to get attachmentInfo from postgres err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get attachmentInfo",
-			"err": err,
-		})
-		return
-	}
-
-	if attachmentPostgresInfo.SrcKey != postgressStruct.ATTACHMENT_SRC_GRP_CHAT || attachmentPostgresInfo.SrcValue != grpIDString {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
-		return
-	}
-
-	url, err := business.GetFileURLByObjectName(ctx, attachmentPostgresInfo.ObjKey)
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetGroupChatFile Failed to get url err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get url",
-			"err": err,
-		})
-		return
-
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-		"msg": "Got the url!",
-		"url": url,
-	})
-
+	serveFileOf(w, r, fileAccessBusiness.Place{Kind: postgressStruct.ATTACHMENT_SRC_GRP_CHAT, ID: chi.URLParam(r, "grp_id")}, false)
 }
 
+// GetDocFile answers the address of a doc's file, for whoever may read the
+// doc. A deleted doc's files go with it: 410 to someone it was shared with,
+// 404 to anyone else.
 func GetDocFile(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
-
-	objectUUIDString := chi.URLParam(r, "obj_uuid")
-	if objectUUIDString == "" {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDocFile Received empty object uuid in the req")
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Received empty object uuid in the req",
-		})
-		return
-
-	}
-
-	doclUUIDString := chi.URLParam(r, "doc_uuid")
-	if doclUUIDString == "" {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDocFile Received empty doc uuid in the req")
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Received empty doc uuid in the req",
-		})
-		return
-
-	}
-
-	attachmentPostgresInfo, err := attachmentBusiness.GetAttachmentByObjUUID(ctx, objectUUIDString, postgressStruct.ATTACHMENT_SRC_DOC)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDocFile Failed to get attachmentInfo from postgres err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get attachmentInfo",
-			"err": err,
-		})
-		return
-	}
-
-	if attachmentPostgresInfo.SrcKey != postgressStruct.ATTACHMENT_SRC_DOC || attachmentPostgresInfo.SrcValue != doclUUIDString {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
-		return
-	}
-
-	dgraphDoc, err := docBusiness.GetBasicDgraphDocByUUID(ctx, doclUUIDString, userInfo.UserDgraphInfo.Uid)
-
-	if errors.Is(err, docBusiness.ErrNotFound) {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such doc."})
-		return
-	}
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDocFile Failed to get docInfo err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": " Failed to get docInfo",
-			"err": err,
-		})
-		return
-	}
-
-	// A deleted doc's files go with it: 410 to someone it was shared with,
-	// 404 to anyone else.
-	if docBusiness.IsDeleted(dgraphDoc) {
-		if docBusiness.CouldRead(dgraphDoc, userInfo.UserDgraphInfo.Uuid) {
-			helpers.WriteJSON(w, http.StatusGone, helpers.Envolope{"msg": "This doc was deleted.", "deleted": true})
-		} else {
-			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such doc."})
-		}
-		return
-	}
-
-	if !docBusiness.CanRead(dgraphDoc, userInfo.UserDgraphInfo.Uuid) {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
-		return
-	}
-
-	url, err := business.GetFileURLByObjectName(ctx, attachmentPostgresInfo.ObjKey)
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDocFile Failed to get url err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get url",
-			"err": err,
-		})
-		return
-
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-		"msg": "Got the url!",
-		"url": url,
-	})
-
+	serveFileOf(w, r, fileAccessBusiness.Place{Kind: postgressStruct.ATTACHMENT_SRC_DOC, ID: chi.URLParam(r, "doc_uuid")}, false)
 }
 
+// GetDocAttachment is GetDocFile for a picture in a doc: a redirect to it.
 func GetDocAttachment(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
-
-	objectUUIDString := chi.URLParam(r, "obj_uuid")
-	if objectUUIDString == "" {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDocAttachment Received empty object uuid in the req")
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Received empty object uuid in the req",
-		})
-		return
-
-	}
-
-	doclUUIDString := chi.URLParam(r, "doc_uuid")
-	if doclUUIDString == "" {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDocAttachment Received empty doc uuid in the req")
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Received empty doc uuid in the req",
-		})
-		return
-
-	}
-
-	attachmentPostgresInfo, err := attachmentBusiness.GetAttachmentByObjUUID(ctx, objectUUIDString, postgressStruct.ATTACHMENT_SRC_DOC)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDocAttachment Failed to get attachmentInfo from postgres err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get attachmentInfo",
-			"err": err,
-		})
-		return
-	}
-
-	if attachmentPostgresInfo.SrcKey != postgressStruct.ATTACHMENT_SRC_DOC || attachmentPostgresInfo.SrcValue != doclUUIDString {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
-		return
-	}
-
-	dgraphDoc, err := docBusiness.GetBasicDgraphDocByUUID(ctx, doclUUIDString, userInfo.UserDgraphInfo.Uid)
-
-	if errors.Is(err, docBusiness.ErrNotFound) {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such doc."})
-		return
-	}
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDocAttachment Failed to get docInfo err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": " Failed to get docInfo",
-			"err": err,
-		})
-		return
-	}
-
-	// A deleted doc's files go with it: 410 to someone it was shared with,
-	// 404 to anyone else.
-	if docBusiness.IsDeleted(dgraphDoc) {
-		if docBusiness.CouldRead(dgraphDoc, userInfo.UserDgraphInfo.Uuid) {
-			helpers.WriteJSON(w, http.StatusGone, helpers.Envolope{"msg": "This doc was deleted.", "deleted": true})
-		} else {
-			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such doc."})
-		}
-		return
-	}
-
-	if !docBusiness.CanRead(dgraphDoc, userInfo.UserDgraphInfo.Uuid) {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
-		return
-	}
-
-	url, err := business.GetFileURLByObjectName(ctx, attachmentPostgresInfo.ObjKey)
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDocAttachment Failed to get url err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get url",
-			"err": err,
-		})
-		return
-
-	}
-
-	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+	serveFileOf(w, r, fileAccessBusiness.Place{Kind: postgressStruct.ATTACHMENT_SRC_DOC, ID: chi.URLParam(r, "doc_uuid")}, true)
 }
 
-// GetBoardAttachment serves a board image from MinIO (presigned redirect),
-// enforcing board access. Mirrors GetDocAttachment.
+// GetBoardAttachment serves a picture on a board to whoever may read the
+// board: a redirect to it.
 func GetBoardAttachment(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
-
-	objectUUIDString := chi.URLParam(r, "obj_uuid")
-	if objectUUIDString == "" {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Received empty object uuid in the req"})
-		return
-	}
-	boardUUIDString := chi.URLParam(r, "board_uuid")
-	if boardUUIDString == "" {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Received empty board uuid in the req"})
-		return
-	}
-
-	attachmentPostgresInfo, err := attachmentBusiness.GetAttachmentByObjUUID(ctx, objectUUIDString, postgressStruct.ATTACHMENT_SRC_BOARD)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/GetBoardAttachment Failed to get attachmentInfo err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to get attachmentInfo", "err": err})
-		return
-	}
-
-	if attachmentPostgresInfo.SrcKey != postgressStruct.ATTACHMENT_SRC_BOARD || attachmentPostgresInfo.SrcValue != boardUUIDString {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
-		return
-	}
-
-	dgraphBoard, err := boardBusiness.GetBasicBoardByUUID(ctx, boardUUIDString, userInfo.UserDgraphInfo.Uid)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/GetBoardAttachment Failed to get boardInfo err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to get boardInfo", "err": err})
-		return
-	}
-
-	isPrivate := dgraphBoard.IsPrivate != nil && *dgraphBoard.IsPrivate
-	isOwner := dgraphBoard.CreatedBy != nil && dgraphBoard.CreatedBy.Uuid == userInfo.UserDgraphInfo.Uuid
-	if isPrivate && dgraphBoard.HasEditAccess == 0 && dgraphBoard.HasReadAccess == 0 && dgraphBoard.HasCommentAccess == 0 && !isOwner {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
-		return
-	}
-
-	url, err := business.GetFileURLByObjectName(ctx, attachmentPostgresInfo.ObjKey)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/GetBoardAttachment Failed to get url err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to get url", "err": err})
-		return
-	}
-
-	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+	serveFileOf(w, r, fileAccessBusiness.Place{Kind: postgressStruct.ATTACHMENT_SRC_BOARD, ID: chi.URLParam(r, "board_uuid")}, true)
 }
 
+// GetChatFile answers the address of a direct conversation's file, for the two
+// people in it. The route names the other person; the conversation is named
+// by both (GetGroupingId).
 func GetChatFile(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
-
-	objectUUIDString := chi.URLParam(r, "obj_uuid")
-	if objectUUIDString == "" {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChatFile Received empty object uuid in the req")
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Received empty object uuid in the req",
-		})
-		return
-
-	}
-
-	chatUUIDString := chi.URLParam(r, "chat_uuid")
-	if chatUUIDString == "" {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChatFile Received empty chat uuid in the req")
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Received empty chat uuid in the req",
-		})
-		return
-
-	}
-
-	_, err := uuid.Parse(chatUUIDString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChatFile Failed to parse chat string to uuid err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse chat string to uuid",
-			"err": err,
-		})
-		return
-	}
-
-	attachmentPostgresInfo, err := attachmentBusiness.GetAttachmentByObjUUID(ctx, objectUUIDString, postgressStruct.ATTACHMENT_SRC_CHAT)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChatFile Failed to get attachmentInfo from postgres err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get attachmentInfo",
-			"err": err,
-		})
-		return
-	}
-
-	grpString := helpers.GetGroupingId(chatUUIDString, userInfo.UserDgraphInfo.Uuid)
-
-	if attachmentPostgresInfo.SrcKey != postgressStruct.ATTACHMENT_SRC_CHAT || attachmentPostgresInfo.SrcValue != grpString {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
-		return
-	}
-
-	url, err := business.GetFileURLByObjectName(ctx, attachmentPostgresInfo.ObjKey)
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChatFile Failed to get url err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get url",
-			"err": err,
-		})
-		return
-
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-		"msg": "Got the url!",
-		"url": url,
-	})
-
+	userInfo := r.Context().Value(helpers.UserInfoContextKey).(models.UserInfo)
+	grpID := helpers.GetGroupingId(chi.URLParam(r, "chat_uuid"), userInfo.UserDgraphInfo.Uuid)
+	serveFileOf(w, r, fileAccessBusiness.Place{Kind: postgressStruct.ATTACHMENT_SRC_CHAT, ID: grpID}, false)
 }
 
 func GetAllUserEmojiStatusList(w http.ResponseWriter, r *http.Request) {
@@ -2311,49 +1902,20 @@ func GetGrpChatRecordingURL(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	dgraphRecording, err := recordingBusiness.GetDgraphDmRecordingInfoByEgressId(ctx, egressIdString, userInfo.UserDgraphInfo.Uid)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetGrpChatRecordingURL Failed to recording info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to recording info",
-			"err": err,
-		})
+	dgraphRecording, err := recordingDomain.GetDmRecordingForPlay(ctx, egressIdString, userInfo.UserDgraphInfo.Uid)
+	if errors.Is(err, recordingDomain.ErrNotFound) {
+		dgraphRecording = nil
+	} else if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/GetDmRecordingForPlay err: %+v", err)
+		helpers.WriteRetryLater(w, recordingUnavailable)
 		return
-
 	}
-
-	if dgraphRecording.Dm.ParticipantIsMember == 0 || dgraphRecording.Dm.GroupingId != grpIdString {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if code := chatRecordingAccess(dgraphRecording, grpIdString); code != 0 {
+		writeRecordingRefusal(w, code)
 		return
 	}
 
-	url, err := business.GetRecordingURLByObjectName(ctx, dgraphRecording.ObjectKey)
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetGrpChatRecordingURL Failed to get url err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get url",
-			"err": err,
-		})
-		return
-
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-		"msg": "Got the url!",
-		"url": url,
-	})
+	writeRecordingURL(w, r, dgraphRecording)
 }
 
 func GetChatRecordingURL(w http.ResponseWriter, r *http.Request) {
@@ -2389,49 +1951,20 @@ func GetChatRecordingURL(w http.ResponseWriter, r *http.Request) {
 
 	grpId := helpers.GetGroupingId(chatUUIDString, userInfo.UserDgraphInfo.Uuid)
 
-	dgraphRecording, err := recordingBusiness.GetDgraphDmRecordingInfoByEgressId(ctx, egressIdString, userInfo.UserDgraphInfo.Uid)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChatRecordingURL Failed to recording info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to recording info",
-			"err": err,
-		})
+	dgraphRecording, err := recordingDomain.GetDmRecordingForPlay(ctx, egressIdString, userInfo.UserDgraphInfo.Uid)
+	if errors.Is(err, recordingDomain.ErrNotFound) {
+		dgraphRecording = nil
+	} else if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/GetDmRecordingForPlay err: %+v", err)
+		helpers.WriteRetryLater(w, recordingUnavailable)
 		return
-
 	}
-
-	if dgraphRecording.Dm.ParticipantIsMember == 0 || dgraphRecording.Dm.GroupingId != grpId {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if code := chatRecordingAccess(dgraphRecording, grpId); code != 0 {
+		writeRecordingRefusal(w, code)
 		return
 	}
 
-	url, err := business.GetRecordingURLByObjectName(ctx, dgraphRecording.ObjectKey)
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChatRecordingURL Failed to get url err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get url",
-			"err": err,
-		})
-		return
-
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-		"msg": "Got the url!",
-		"url": url,
-	})
+	writeRecordingURL(w, r, dgraphRecording)
 }
 
 func GetChannelRecordingURL(w http.ResponseWriter, r *http.Request) {
@@ -2465,156 +1998,98 @@ func GetChannelRecordingURL(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	dgraphRecording, err := recordingBusiness.GetDgraphChannelRecordingInfoByEgressId(ctx, egressIdString, userInfo.UserDgraphInfo.Uid)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChannelRecordingURL Failed to recording info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to recording info",
-			"err": err,
-		})
+	dgraphRecording, err := recordingDomain.GetChannelRecordingForPlay(ctx, egressIdString, userInfo.UserDgraphInfo.Uid)
+	if errors.Is(err, recordingDomain.ErrNotFound) {
+		dgraphRecording = nil
+	} else if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/GetChannelRecordingForPlay err: %+v", err)
+		helpers.WriteRetryLater(w, recordingUnavailable)
 		return
-
 	}
-
-	if dgraphRecording.Channel.IsMember == 0 || dgraphRecording.Channel.Uuid != channelUUIDString {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if code := channelRecordingAccess(dgraphRecording, channelUUIDString); code != 0 {
+		writeRecordingRefusal(w, code)
 		return
 	}
 
-	url, err := business.GetRecordingURLByObjectName(ctx, dgraphRecording.ObjectKey)
-	if err != nil {
+	writeRecordingURL(w, r, dgraphRecording)
+}
 
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChannelRecordingURL Failed to get url err: %+v",
-			err)
+// channelRecordingAccess is whether a recording opened by a channel's route
+// may be played: 404 when there is none, or it is a DM's or a group's (that
+// used to dereference a nil channel and answer 500), 403 when the asker isn't
+// in the channel or it is another channel's, 0 when it may. Pure.
+func channelRecordingAccess(rec *dgraphStruct.DgraphRecording, channelUUID string) int {
+	switch {
+	case rec == nil || rec.Channel == nil:
+		return http.StatusNotFound
+	case rec.Channel.IsMember == 0 || rec.Channel.Uuid != channelUUID:
+		return http.StatusForbidden
+	}
+	return 0
+}
 
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get url",
-			"err": err,
-		})
+// chatRecordingAccess is channelRecordingAccess for a DM's or a group's
+// route. Pure.
+func chatRecordingAccess(rec *dgraphStruct.DgraphRecording, groupingID string) int {
+	switch {
+	case rec == nil || rec.Dm == nil:
+		return http.StatusNotFound
+	case rec.Dm.ParticipantIsMember == 0 || rec.Dm.GroupingId != groupingID:
+		return http.StatusForbidden
+	}
+	return 0
+}
+
+// writeRecordingRefusal answers a recording that may not be played.
+func writeRecordingRefusal(w http.ResponseWriter, code int) {
+	msg := "Recording not found"
+	if code == http.StatusForbidden {
+		msg = "Not authorised"
+	}
+	helpers.WriteJSON(w, code, helpers.Envolope{"msg": msg})
+}
+
+// recordingUnavailable is what people see when a recording can't be read.
+const recordingUnavailable = "The recording couldn't be opened just now."
+
+// writeRecordingURL answers a recording's playback link, or why there is
+// none to play: still being saved, failed (nothing was written), or a call's
+// transcript with no recording. The link lives for the recording's length and
+// half an hour (business.RecordingURLTTL), and expires_at says when, so the
+// player fetches a new one before or after it runs out, keeping its place.
+func writeRecordingURL(w http.ResponseWriter, r *http.Request, rec *dgraphStruct.DgraphRecording) {
+	switch {
+	case rec.TranscriptOnly:
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "transcript_only"})
 		return
+	case rec.EndedAt == nil || !rec.EndedAt.After(time.Unix(0, 0)):
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "recording"})
+		return
+	case recordingBusiness.Failed(rec.Status):
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "failed"})
+		return
+	}
 
+	ttl := business.RecordingURLTTL(rec.Duration)
+	url, err := business.GetRecordingURLByObjectName(r.Context(), rec.ObjectKey, ttl)
+	if err != nil {
+		helpers.LogErrorWithContext(r.Context(), "controllers/writeRecordingURL Failed to get url err: %+v", err)
+		helpers.WriteRetryLater(w, recordingUnavailable)
+		return
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-		"msg": "Got the url!",
-		"url": url,
+		"msg":        "Got the url!",
+		"url":        url,
+		"expires_at": time.Now().Add(ttl).UnixMilli(),
+		"status":     "ready",
 	})
 }
 
+// GetChannelFile answers the address of a channel's file, for whoever may
+// read the channel.
 func GetChannelFile(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
-
-	objectUUIDString := chi.URLParam(r, "obj_uuid")
-	if objectUUIDString == "" {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChannelFile Received empty object uuid in the req")
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Received empty object uuid in the req",
-		})
-		return
-
-	}
-
-	channelUUIDString := chi.URLParam(r, "channel_uuid")
-	if channelUUIDString == "" {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChannelFile Received empty project uuid in the req")
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Received empty project uuid in the req",
-		})
-		return
-
-	}
-
-	channelUUID, err := uuid.Parse(channelUUIDString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChannelFile Failed to parse project string to uuid err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse project string to uuid",
-			"err": err,
-		})
-		return
-	}
-
-	attachmentPostgresInfo, err := attachmentBusiness.GetAttachmentByObjUUID(ctx, objectUUIDString, postgressStruct.ATTACHMENT_SRC_CHANNEL)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChannelFile Failed to get attachmentInfo from postgres err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get attachmentInfo",
-			"err": err,
-		})
-		return
-	}
-
-	if attachmentPostgresInfo.SrcKey != postgressStruct.ATTACHMENT_SRC_CHANNEL || attachmentPostgresInfo.SrcValue != channelUUIDString {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
-		return
-	}
-
-	dgraphChannel, err := channelBusiness.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChannelFile Failed to get projectInfo err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": " Failed to get projectInfo",
-			"err": err,
-		})
-		return
-	}
-
-	if dgraphChannel.IsMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": " Not authorised",
-			"err": err,
-		})
-		return
-	}
-
-	url, err := business.GetFileURLByObjectName(ctx, attachmentPostgresInfo.ObjKey)
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChannelFile Failed to get url err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get url",
-			"err": err,
-		})
-		return
-
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-		"msg": "Got the url!",
-		"url": url,
-	})
-
+	serveFileOf(w, r, fileAccessBusiness.Place{Kind: postgressStruct.ATTACHMENT_SRC_CHANNEL, ID: chi.URLParam(r, "channel_uuid")}, false)
 }
 
 func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
@@ -2858,111 +2333,10 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 
 }
 
+// GetProjectFile answers the address of a project's file, for its members and
+// admins.
 func GetProjectFile(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
-
-	objectUUIDString := chi.URLParam(r, "obj_uuid")
-	if objectUUIDString == "" {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProjectFile Received empty object uuid in the req")
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Received empty object uuid in the req",
-		})
-		return
-
-	}
-
-	projectUUIDString := chi.URLParam(r, "project_uuid")
-	if projectUUIDString == "" {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProjectFile Received empty project uuid in the req")
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Received empty project uuid in the req",
-		})
-		return
-
-	}
-
-	_, err := uuid.Parse(projectUUIDString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProjectFile Failed to parse project string to uuid err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse project string to uuid",
-			"err": err,
-		})
-		return
-	}
-
-	attachmentPostgresInfo, err := attachmentBusiness.GetAttachmentByObjUUID(ctx, objectUUIDString, postgressStruct.ATTACHMENT_SRC_PROJECT)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProjectFile Failed to get attachmentInfo from postgres err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get attachmentInfo",
-			"err": err,
-		})
-		return
-	}
-
-	if attachmentPostgresInfo.SrcKey != postgressStruct.ATTACHMENT_SRC_PROJECT || attachmentPostgresInfo.SrcValue != projectUUIDString {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
-		return
-	}
-
-	dgraphProject, err := projectBusiness.GetBasicDgraphProjectInfo(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProjectFile Failed to get projectInfo err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": " Failed to get projectInfo",
-			"err": err,
-		})
-		return
-	}
-
-	if dgraphProject.IsProjectMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": " Not authorised",
-			"err": err,
-		})
-		return
-	}
-
-	url, err := business.GetFileURLByObjectName(ctx, attachmentPostgresInfo.ObjKey)
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetFile Failed to login err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get url",
-			"err": err,
-		})
-		return
-
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-		"msg": "Got the url!",
-		"url": url,
-	})
-
+	serveFileOf(w, r, fileAccessBusiness.Place{Kind: postgressStruct.ATTACHMENT_SRC_PROJECT, ID: chi.URLParam(r, "project_uuid")}, false)
 }
 
 func GetAllUsersList(w http.ResponseWriter, r *http.Request) {

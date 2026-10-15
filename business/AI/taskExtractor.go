@@ -162,7 +162,7 @@ func ExtractActionItems(ctx context.Context, userInfo *userModels.UserInfo, sour
 		}
 		if name := strings.TrimSpace(rt.Assignee); name != "" {
 			pt.AssigneeName = name
-			if u, rerr := resolveAssigneeRef(ctx, userUUID, name); rerr == nil && u != nil {
+			if u, rerr := resolveAssigneeRef(ctx, userUUID, name, false); rerr == nil && u != nil {
 				pt.AssigneeUUID = u.Uuid
 				if u.UserName != "" {
 					pt.AssigneeName = u.UserName
@@ -398,7 +398,7 @@ func CreateTasksFromProposals(ctx context.Context, userInfo *userModels.UserInfo
 		if ref == "" {
 			ref = strings.TrimSpace(t.AssigneeName)
 		}
-		assigneeDgraph, rerr := resolveAssigneeRef(ctx, userInfo.UserDgraphInfo.Uuid, ref)
+		assigneeDgraph, rerr := resolveAssigneeRef(ctx, userInfo.UserDgraphInfo.Uuid, ref, false)
 		if rerr != nil {
 			assigneeDgraph = nil // unresolved assignee → create unassigned rather than fail
 		}

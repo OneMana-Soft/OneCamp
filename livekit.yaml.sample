@@ -57,6 +57,9 @@ webhook:
     # YOUR backend only. Every URL listed here receives room and participant
     # events for every room on this server, so a foreign URL is a data leak and
     # not merely a stray line.
+    #
+    # The transcription agent's URL (http://agent:8080/webhook) is NOT here: it
+    # was, and on an install without the agent every room event was posted to a
+    # host that does not exist. `make stt_up` adds it when it starts the agent,
+    # and `make stt_down` takes it out (make configure-livekit does both).
     - https://__CHANGE_ME_YOUR_BACKEND_DOMAIN__/livekit/webhook
-    # The transcription agent, on the internal network.
-    - http://agent:8080/webhook

@@ -25,11 +25,20 @@ import (
 )
 
 func writeErr(w http.ResponseWriter, err error) {
-	if business.IsNotFound(err) {
+	switch {
+	case business.IsNotFound(err):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "MCP server not found"})
-		return
+	case business.IsForbidden(err):
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "not_yours", "msg": err.Error()})
+	default:
+		helpers.WriteSecretAwareBadRequest(w, err)
 	}
-	helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+}
+
+// actorFrom is who is asking, as the business layer's ownership rule needs it.
+func actorFrom(r *http.Request) business.Actor {
+	userInfo, _ := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	return business.Actor{UserID: userInfo.UserPostgresInfo.Id, IsAdmin: userInfo.UserPostgresInfo.IsAdmin}
 }
 
 // ListServers GET /mcp/servers
@@ -41,7 +50,7 @@ func ListServers(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "failed to load MCP servers"})
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.NewServerViews(items)})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.NewServerViews(items, actorFrom(r))})
 }
 
 // GetCatalog GET /mcp/catalog — the curated connector catalog, each entry
@@ -72,7 +81,7 @@ func GetServer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.NewServerView(s)})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.NewServerView(s, actorFrom(r))})
 }
 
 // CreateServer POST /mcp/servers
@@ -84,14 +93,14 @@ func CreateServer(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
 		return
 	}
-	s, err := business.CreateServer(ctx, in, userInfo.UserPostgresInfo.Id)
+	s, err := business.CreateServer(ctx, in, business.Actor{UserID: userInfo.UserPostgresInfo.Id, IsAdmin: userInfo.UserPostgresInfo.IsAdmin})
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	auditBusiness.Record(r, "mcp.create", auditBusiness.CategorySettings,
 		"Registered MCP server: "+s.Name, map[string]interface{}{"server_id": s.Id.String()})
-	helpers.WriteJSON(w, http.StatusCreated, helpers.Envolope{"data": business.NewServerView(s)})
+	helpers.WriteJSON(w, http.StatusCreated, helpers.Envolope{"data": business.NewServerView(s, actorFrom(r))})
 }
 
 // UpdateServer PUT /mcp/servers/{id}. The body's update_secret flag controls
@@ -111,14 +120,14 @@ func UpdateServer(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
 		return
 	}
-	s, err := business.UpdateServer(ctx, id, body.ServerInput, body.UpdateSecret)
+	s, err := business.UpdateServer(ctx, id, body.ServerInput, body.UpdateSecret, actorFrom(r))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
 	auditBusiness.Record(r, "mcp.update", auditBusiness.CategorySettings,
 		"Updated MCP server: "+s.Name, map[string]interface{}{"server_id": s.Id.String()})
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.NewServerView(s)})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.NewServerView(s, actorFrom(r))})
 }
 
 // SetEnabled POST /mcp/servers/{id}/enabled
@@ -136,7 +145,7 @@ func SetEnabled(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
 		return
 	}
-	if err := business.SetEnabled(ctx, id, body.Enabled); err != nil {
+	if err := business.SetEnabled(ctx, id, body.Enabled, actorFrom(r)); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -153,7 +162,7 @@ func DeleteServer(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid server id"})
 		return
 	}
-	if err := business.DeleteServer(ctx, id); err != nil {
+	if err := business.DeleteServer(ctx, id, actorFrom(r)); err != nil {
 		writeErr(w, err)
 		return
 	}
@@ -171,10 +180,10 @@ func TestConnection(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid server id"})
 		return
 	}
-	tools, err := business.TestConnection(ctx, id)
+	tools, err := business.TestConnection(ctx, id, actorFrom(r))
 	if err != nil {
-		if business.IsNotFound(err) {
-			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "MCP server not found"})
+		if business.IsNotFound(err) || business.IsForbidden(err) {
+			writeErr(w, err)
 			return
 		}
 		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"ok": false, "msg": err.Error()})

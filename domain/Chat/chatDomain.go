@@ -765,7 +765,7 @@ func GetDMRecordingTranscript(ctx context.Context, groupingId string, userId str
 			dmInfo(func: eq(dm_grouping_id, $grpId)) {
 				uid
 				dm_is_member: count(dm_participants @filter(uid($userId)))
-				dm_recording @filter( uid(recUID) AND gt(recording_ended_at, "1970-01-01T00:00:00Z") AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z") AND NOT eq(recording_transcript_only, true)) {
+				dm_recording @filter( uid(recUID) AND gt(recording_ended_at, "1970-01-01T00:00:00Z") AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z")) {
 					recording_egress_id
 					recording_stared_at
 					recording_ended_at
@@ -784,6 +784,8 @@ func GetDMRecordingTranscript(ctx context.Context, groupingId string, userId str
 						}
 					}
 					recording_size
+					recording_transcript_only
+					recording_status
 					recording_started_by {
 						user_name
 					}
@@ -817,7 +819,7 @@ func GetDgraphDmRecordingListFromDgraph(ctx context.Context, userId string, grou
 	variables["$first"] = firstVal
 	variables["$offset"] = offsetVal
 
-	recFilter := `gt(recording_ended_at, "1970-01-01T00:00:00Z") AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z") AND NOT eq(recording_transcript_only, true)`
+	recFilter := `gt(recording_ended_at, "1970-01-01T00:00:00Z") AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z")`
 	dataVars := `$grpId: string, $userId: string, $first: int, $offset: int`
 
 	if startDate != "" && endDate != "" {
@@ -839,6 +841,8 @@ func GetDgraphDmRecordingListFromDgraph(ctx context.Context, userId string, grou
 						recording_obj_key
 						recording_transcript
 						recording_size
+						recording_transcript_only
+						recording_status
 						recording_started_by {
 							user_name
 						}
