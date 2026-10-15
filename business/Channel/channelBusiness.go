@@ -2,6 +2,7 @@ package business
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -929,6 +930,15 @@ func DeleteChannelMemberEdge(ctx context.Context, channelDgraphUID string, userD
 
 	NotifyChannelUpdated(channelUUID, ChannelUpdateActionMemberLeft)
 
+	// Out of the channel is out of its call. Their call token opens the room
+	// named after the channel, and nothing used to put them out of it.
+	helpers.GoSafeNamed("channel.leave-call", func() {
+		err := LiveKitBusiness.RemoveFromCall(context.WithoutCancel(ctx), channelUUID, userDgraphUID, "", LiveKitBusiness.RemovedNotAMember)
+		if err != nil && !errors.Is(err, LiveKitBusiness.ErrNotInCall) {
+			helpers.LogErrorWithContext(ctx, "business/DeleteChannelMemberEdge could not put them out of the channel's call: %+v", err)
+		}
+	})
+
 	return
 }
 
@@ -1019,9 +1029,9 @@ func PublishTypingInChannel(userInfo *dgraphStruct.DgraphUser, channelId string)
 	go mqttBusiness.PublishChannelTyping(&mqttChannelTyping, channelId)
 }
 
-func MakeVideoChannelCall(ctx context.Context, channelDraphInfo *dgraphStruct.DgraphChannel, userDraphInfo *dgraphStruct.DgraphUser, isAdmin bool, audioEnabled bool, videoEnabled bool) (token string, alreadyExisted bool, err error) {
+func MakeVideoChannelCall(ctx context.Context, channelDraphInfo *dgraphStruct.DgraphChannel, userDraphInfo *dgraphStruct.DgraphUser, isAdmin bool, language string) (token string, alreadyExisted bool, err error) {
 
-	token, alreadyExisted, err = LiveKitBusiness.CreateRoomAndGetToken(ctx, channelDraphInfo.Uuid, userDraphInfo, isAdmin, audioEnabled, videoEnabled)
+	token, alreadyExisted, err = LiveKitBusiness.CreateRoomAndGetToken(ctx, channelDraphInfo.Uuid, userDraphInfo, isAdmin, language)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

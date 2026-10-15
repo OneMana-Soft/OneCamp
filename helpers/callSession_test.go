@@ -1,9 +1,6 @@
 package helpers
 
 import (
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -22,21 +19,18 @@ func TestIsCallSessionKey(t *testing.T) {
 	}
 }
 
-// The key is built in the Python transcription agent and recognised here, so
-// the prefix lives in two languages and nothing but this connects them.
-//
-// Getting it wrong is silent in the worst way. If the agent's prefix stops
-// matching, every unrecorded call's transcript is filed under a key this side
-// reads as a real recording: it appears in lists of playable recordings that
-// have nothing to play, and a recap offers a "play recording" button that opens
-// nothing. Nothing errors. So the two are pinned together here.
-func TestCallSessionPrefixMatchesTheAgent(t *testing.T) {
-	agent, err := os.ReadFile(filepath.Join("..", "livekit-agent", "agent.py"))
-	if err != nil {
-		t.Skipf("transcription agent not present in this checkout: %v", err)
+func TestCallSessionID(t *testing.T) {
+	for key, want := range map[string]string{
+		"call-RM_abc": "RM_abc",
+		" call-RM_x ": "RM_x",
+		"EG_xyz":      "",
+		"":            "",
+	} {
+		if got := CallSessionID(key); got != want {
+			t.Errorf("CallSessionID(%q) = %q, want %q", key, got, want)
+		}
 	}
-	want := `"` + callSessionPrefix + `"`
-	if !strings.Contains(string(agent), want) {
-		t.Errorf("livekit-agent/agent.py does not build keys with %s; the agent and this package have drifted", want)
+	if CallSessionID(CallSessionKeyFor("RM_round")) != "RM_round" {
+		t.Error("a session key does not give back its session")
 	}
 }

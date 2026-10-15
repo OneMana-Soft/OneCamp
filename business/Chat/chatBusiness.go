@@ -2026,9 +2026,9 @@ func PublishChatTyping(userDgraph *dgraphStruct.DgraphUser, grpId string) {
 	go mqttBusiness.PublishChatTyping(&mqttChatTyping, grpId)
 }
 
-func MakeVideoCall(ctx context.Context, grpId string, userDraphInfo *dgraphStruct.DgraphUser, isAdmin bool, audioEnabled bool, videoEnabled bool, isGroup bool) (token string, alreadyExisted bool, err error) {
+func MakeVideoCall(ctx context.Context, grpId string, userDraphInfo *dgraphStruct.DgraphUser, isAdmin bool, language string, isGroup bool) (token string, alreadyExisted bool, err error) {
 
-	token, alreadyExisted, err = LiveKitBusiness.CreateRoomAndGetToken(ctx, grpId, userDraphInfo, isAdmin, audioEnabled, videoEnabled)
+	token, alreadyExisted, err = LiveKitBusiness.CreateRoomAndGetToken(ctx, grpId, userDraphInfo, isAdmin, language)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -2210,18 +2210,26 @@ func GetDgraphDmBasicByGrpId(ctx context.Context, grpId string, userDgraphUID st
 // distinguish "no such conversation" from "not yours" — which would otherwise be a
 // way to enumerate groupings.
 func ParticipatesInGrouping(ctx context.Context, groupingId string, userDgraphUID string) (bool, error) {
+	_, participates, err := GroupingParticipation(ctx, groupingId, userDgraphUID)
+	return participates, err
+}
+
+// GroupingParticipation is ParticipatesInGrouping that also says whether the
+// grouping has started: a group is written at its first message, and its id is
+// made from its people before then (helpers.GenerateGroupID). It is for a
+// caller that must hold a group not started yet to another rule (an upload to
+// one names its people); what it tells the person must not say which, for the
+// reason above.
+func GroupingParticipation(ctx context.Context, groupingId string, userDgraphUID string) (started, participates bool, err error) {
 	groupingId = strings.TrimSpace(groupingId)
 	userDgraphUID = strings.TrimSpace(userDgraphUID)
 	if groupingId == "" || userDgraphUID == "" {
-		return false, nil
+		return false, false, nil
 	}
 
 	dm, err := domain.GetDmParticipation(ctx, groupingId, userDgraphUID)
-	if err != nil {
-		return false, err
+	if err != nil || dm == nil {
+		return false, false, err
 	}
-	if dm == nil {
-		return false, nil
-	}
-	return dm.ParticipantIsMember > 0, nil
+	return true, dm.ParticipantIsMember > 0, nil
 }

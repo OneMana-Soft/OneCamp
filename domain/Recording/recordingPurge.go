@@ -94,7 +94,7 @@ var (
 		"recording_egress_id", "recording_stared_at", "recording_ended_at", "recording_duration",
 		"recording_obj_key", "recording_transcript", "recording_started_by", "recording_channel",
 		"recording_dm", "recording_size", "recording_deleted_at", "recording_transcript_only",
-		"dgraph.type",
+		"recording_status", "dgraph.type",
 	}
 	transcriptPredicates = []string{
 		"transcript_from", "transcript_text", "transcript_timestamp", "transcript_offset_ms",

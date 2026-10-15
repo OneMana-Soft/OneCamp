@@ -9,8 +9,8 @@ package Calendar
 //     way, with buffers around meetings and a minimum notice.
 //
 // Busy is every OneCamp event a person created or was invited to, plus their
-// Google Calendar when connected (only timed events not marked "free"). Only
-// start and end leave this file: never a title.
+// Google calendars when connected (busy.go). Only start and end leave this
+// file: never a title.
 
 import (
 	"context"
@@ -21,10 +21,6 @@ import (
 	"strings"
 	"time"
 
-	integrationBusiness "github.com/akashc777/OneCamp/business/Integration"
-	domain "github.com/akashc777/OneCamp/domain/Calendar"
-	"github.com/akashc777/OneCamp/helpers"
-	model "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
 
@@ -197,40 +193,11 @@ func FreeSlots(busy []Interval, from, to time.Time, hours WorkingHours, r SlotRu
 	return out
 }
 
-// BusyFor is when a person is busy between from and to.
-func BusyFor(ctx context.Context, userUUID string, from, to time.Time) ([]Interval, error) {
-	events, err := domain.GetDgraphEventsByUserId(ctx, userUUID, &from, &to)
-	if err != nil {
-		return nil, err
-	}
-	var busy []Interval
-	for _, e := range events {
-		if e == nil || e.StartTime == nil || e.EndTime == nil {
-			continue
-		}
-		if e.DeletedAt != nil && e.DeletedAt.Year() > 1970 {
-			continue
-		}
-		busy = append(busy, Interval{Start: *e.StartTime, End: *e.EndTime})
-	}
-	if id, err := uuid.Parse(userUUID); err == nil {
-		gcal, err := integrationBusiness.FetchUserGoogleCalendarEvents(ctx, &model.UserInfo{UserPostgresInfo: model.User{Id: id}}, &from, &to)
-		if err != nil {
-			// A broken Google link must not hide OneCamp's own events.
-			helpers.LogErrorWithContext(ctx, "business/Calendar/BusyFor google err: %+v", err)
-		}
-		for _, g := range gcal {
-			if g == nil || g.Transparency == "transparent" || g.Start == nil || g.End == nil || g.Start.DateTime == "" {
-				continue
-			}
-			s, err1 := time.Parse(time.RFC3339, g.Start.DateTime)
-			e, err2 := time.Parse(time.RFC3339, g.End.DateTime)
-			if err1 == nil && err2 == nil {
-				busy = append(busy, Interval{Start: s, End: e})
-			}
-		}
-	}
-	return MergeBusy(busy), nil
+// BusyFor is when a person is busy between from and to (ReadBusy), and
+// whether a Google calendar of theirs couldn't be read: that time is unknown,
+// not free, and every caller says so or keeps nothing of it.
+func BusyFor(ctx context.Context, userUUID string, from, to time.Time) (Busy, error) {
+	return ReadBusy(ctx, userUUID, from, to, BusyOptions{})
 }
 
 // FindTimeInput asks for the first times a group is free.
@@ -243,9 +210,12 @@ type FindTimeInput struct {
 }
 
 // FindTimeResult is the suggested slots and, per person, when they're busy.
+// Unread is the people whose Google calendar couldn't be read: the slots
+// count only what could be, so they may clash there.
 type FindTimeResult struct {
-	Slots []Interval            `json:"slots"`
-	Busy  map[string][]Interval `json:"busy"`
+	Slots  []Interval            `json:"slots"`
+	Busy   map[string][]Interval `json:"busy"`
+	Unread []string              `json:"unread,omitempty"`
 }
 
 const (
@@ -294,8 +264,11 @@ func FindTime(ctx context.Context, requesterUUID string, in FindTimeInput, now t
 		if err != nil {
 			return nil, errors.New("couldn't read calendars")
 		}
-		res.Busy[p] = b
-		all = append(all, b...)
+		res.Busy[p] = b.Intervals
+		all = append(all, b.Intervals...)
+		if b.GoogleUnread {
+			res.Unread = append(res.Unread, p)
+		}
 	}
 	// Starts on the quarter hour after now, so the first suggestion isn't 10:07.
 	earliest := now.Truncate(15 * time.Minute).Add(15 * time.Minute)

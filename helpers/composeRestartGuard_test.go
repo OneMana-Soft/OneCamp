@@ -54,6 +54,7 @@ var deployedComposeFiles = []string{
 // it forever is not resilience, it is a loop.
 var oneShotServices = map[string]string{
 	"ollama-init": "one-shot model pull; `no` is correct and restarting a completed job would loop",
+	"minio-init":  "one-shot bucket and access key setup; it runs again on the next start, and nothing waits for it",
 }
 
 var (
@@ -224,6 +225,28 @@ func TestOneShotExemptionsStillExistAndStillOptOut(t *testing.T) {
 		if rebootSurviving[policy] {
 			t.Errorf("%q now has restart: %s, so it is no longer a one-shot service. Remove it from "+
 				"oneShotServices.", svc, policy)
+		}
+	}
+}
+
+// The Makefile's list of one-shot jobs, which verify and wait-ready leave out of
+// the services that must be running, is the same as this one. Out of step, a new
+// one-shot job would be reported "not running" by every verify on a healthy
+// install, or a service that ought to run would be excused.
+func TestOneShotServicesMatchTheMakefile(t *testing.T) {
+	got := map[string]bool{}
+	for _, s := range makeVar(t, "ONE_SHOT_SERVICES") {
+		got[s] = true
+	}
+	for svc := range oneShotServices {
+		if !got[svc] {
+			t.Errorf("%s is a one-shot job in the compose file, but ONE_SHOT_SERVICES in Makefile-distribute leaves it out, "+
+				"so verify and wait-ready would wait for it to be running", svc)
+		}
+	}
+	for svc := range got {
+		if _, ok := oneShotServices[svc]; !ok {
+			t.Errorf("ONE_SHOT_SERVICES in Makefile-distribute names %s, which is not a one-shot job here", svc)
 		}
 	}
 }

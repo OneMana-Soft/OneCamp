@@ -45,6 +45,11 @@ func SetupOpenSearch(t *testing.T) *OpenSearchEnv {
 				"DISABLE_SECURITY_PLUGIN":     "true",
 				"DISABLE_INSTALL_DEMO_CONFIG": "true",
 				"OPENSEARCH_JAVA_OPTS":        "-Xms512m -Xmx512m",
+				// A node for one test run, on the host's disk: past 95% full
+				// it would refuse to create an index ("cluster create-index
+				// blocked"), and every test that makes one failed on a full
+				// workstation, whatever it tested.
+				"cluster.routing.allocation.disk.threshold_enabled": "false",
 			},
 			WaitingFor: wait.ForHTTP("/_cluster/health").WithPort("9200/tcp").WithStartupTimeout(240 * time.Second),
 		},

@@ -18,11 +18,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
-	"strconv"
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 )
@@ -96,12 +94,7 @@ func guestLinkLimit(kind GuestWrite, next http.Handler) http.Handler {
 		res := redisStore.AllowFixedWindowOrLocal(rctx, registry.LoginRate,
 			[]string{"guest-link-" + string(kind), hex.EncodeToString(sum[:12])}, guestLinkCaps[kind])
 		if !res.Allowed {
-			retryAfter := res.RetryAfterSeconds()
-			if retryAfter <= 0 {
-				retryAfter = int(registry.LoginRate.TTL.Seconds())
-			}
-			w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
-			helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": guestLinkRateMsg, "status": "rate_limited"})
+			WriteRateLimited(w, res, registry.LoginRate, guestLinkRateMsg)
 			return
 		}
 		next.ServeHTTP(w, r)

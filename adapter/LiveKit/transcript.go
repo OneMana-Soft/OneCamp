@@ -12,4 +12,11 @@ type TranscriptInput struct {
 	// Nil (field absent) means "unknown — fall back to absolute-timestamp
 	// subtraction" for older agents that don't send it.
 	OffsetMs *int64 `json:"offset_ms,omitempty"`
+	// Source is "stt" for a line the agent transcribed itself. The agent used
+	// to relay lines from data packets, with the speaker named inside the
+	// packet; an agent still doing that sends none and is refused.
+	Source string `json:"source,omitempty"`
 }
+
+// TranscriptSourceSTT marks a line the server's transcriber heard itself.
+const TranscriptSourceSTT = "stt"

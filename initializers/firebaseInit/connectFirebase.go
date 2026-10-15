@@ -69,11 +69,16 @@ const (
 	FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT           = "doc_comment"
 	FIREBASE_PUSH_DATA_TYPE_REMINDER              = "reminder"
 	FIREBASE_PUSH_DATA_TYPE_LATER                 = "later"
-	FIREBASE_PUSH_DATA_TITLE                      = "title"
-	FIREBASE_PUSH_DATA_BODY                       = "body"
-	FIREBASE_PUSH_DATA_USERNAME                   = "username"
-	FIREBASE_PUSH_DATA_REACTION_ID                = "reaction_id"
-	FIREBASE_PUSH_DATA_ICON                       = "icon"
+	// A guest booked or cancelled time through a booking page; type_id is the
+	// event's id, and the click opens the calendar.
+	FIREBASE_PUSH_DATA_TYPE_CALENDAR = "calendar"
+	// The notification tag: a later push with the same one replaces it.
+	FIREBASE_PUSH_DATA_TAG         = "tag"
+	FIREBASE_PUSH_DATA_TITLE       = "title"
+	FIREBASE_PUSH_DATA_BODY        = "body"
+	FIREBASE_PUSH_DATA_USERNAME    = "username"
+	FIREBASE_PUSH_DATA_REACTION_ID = "reaction_id"
+	FIREBASE_PUSH_DATA_ICON        = "icon"
 )
 
 var FirebaseApp firebaseAppStruct

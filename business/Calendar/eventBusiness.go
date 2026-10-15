@@ -3,6 +3,7 @@ package Calendar
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Calendar"
@@ -14,6 +15,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
+	"google.golang.org/api/calendar/v3"
 )
 
 func CreateEvent(ctx context.Context, userInfo *model.UserInfo, eventInfo adapter.CreateOrUpdateEventInput) (*adapter.OutputEvent, error) {
@@ -115,40 +117,122 @@ func CreateEvent(ctx context.Context, userInfo *model.UserInfo, eventInfo adapte
 	}, nil
 }
 
+// Errors the calendar's handlers answer with their own status. Their text is
+// written for the person.
+var (
+	// ErrEventNotFound is an event that isn't there, or that the person asking
+	// isn't on. Both answer the same, so nobody learns that someone else's
+	// event exists.
+	ErrEventNotFound = errors.New("This event isn't available.")
+	// ErrOnlyCreatorChanges is a guest trying to edit an event.
+	ErrOnlyCreatorChanges = errors.New("Only the person who made this event can change it.")
+	// ErrCreatorCannotLeave is an event's creator trying to leave it: they
+	// delete it instead.
+	ErrCreatorCannotLeave = errors.New("You made this event, so you can delete it but not leave it.")
+)
+
+// EventInputError is an event request that can't be read as sent.
+type EventInputError struct{ msg string }
+
+func (e *EventInputError) Error() string { return e.msg }
+
+// parseEventTime reads an event's start or end as the app sends it (RFC 3339).
+func parseEventTime(value, which string) (time.Time, error) {
+	t, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		t, err = time.Parse(time.RFC3339, value)
+	}
+	if err != nil {
+		return time.Time{}, &EventInputError{"The " + which + " time isn't a time."}
+	}
+	return t, nil
+}
+
+// isEventCreator and isEventParticipant say how someone is on an event.
+func isEventCreator(e *dgraphStruct.DgraphEvent, userUUID string) bool {
+	return e != nil && e.CreatedBy != nil && userUUID != "" && e.CreatedBy.Uuid == userUUID
+}
+
+func isEventParticipant(e *dgraphStruct.DgraphEvent, userUUID string) bool {
+	if e == nil || userUUID == "" {
+		return false
+	}
+	for _, p := range e.Participants {
+		if p != nil && p.Uuid == userUUID {
+			return true
+		}
+	}
+	return false
+}
+
+// diffParticipants compares an event's guests with the whole new list an
+// update sends. It answers who to add (ids not on the event yet, in the list's
+// order) and who was taken off (guests the list no longer names). The creator
+// is never a guest of their own event: their id in the list adds nothing, and
+// a guest entry of theirs is taken off. Pure.
+func diffParticipants(existing *dgraphStruct.DgraphEvent, wanted []string) (add []string, removed []*dgraphStruct.DgraphUser) {
+	creator := ""
+	if existing != nil && existing.CreatedBy != nil {
+		creator = existing.CreatedBy.Uuid
+	}
+	keep := make(map[string]bool, len(wanted))
+	for _, id := range wanted {
+		if id = strings.TrimSpace(id); id != "" && id != creator {
+			keep[id] = true
+		}
+	}
+	current := map[string]bool{}
+	if existing != nil {
+		for _, p := range existing.Participants {
+			if p == nil || p.Uuid == "" {
+				continue
+			}
+			current[p.Uuid] = true
+			if !keep[p.Uuid] && p.Uid != "" {
+				removed = append(removed, p)
+			}
+		}
+	}
+	for _, id := range wanted {
+		if id = strings.TrimSpace(id); keep[id] && !current[id] {
+			add = append(add, id)
+			current[id] = true
+		}
+	}
+	return add, removed
+}
+
+// UpdateEvent changes an event, for its creator. Participants, when the
+// request names them, are the whole new guest list, an empty one included,
+// and whoever it no longer names is taken off. A request without
+// participants leaves the guests as they are.
 func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.CreateOrUpdateEventInput, userInfo *model.UserInfo) error {
 	currentTime := time.Now()
 
 	existingEvent, err := domain.GetDgraphEventInfoByUUID(ctx, eventUUID.String())
+	if errors.Is(err, domain.ErrEventNotFound) {
+		return ErrEventNotFound
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/UpdateEvent failed to get existing event err: %+v", err)
 		return err
 	}
-	if existingEvent == nil {
-		helpers.LogErrorWithContext(ctx, "business/UpdateEvent existing event not found")
-		return errors.New("event not found")
-	}
 
-	if existingEvent.CreatedBy == nil || existingEvent.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
-		helpers.LogErrorWithContext(ctx, "business/UpdateEvent user is not the creator")
-		return errors.New("only the creator can edit this event")
-	}
-
-	startTime, err := time.Parse(time.RFC3339Nano, eventInfo.StartTime)
-	if err != nil {
-		startTime, err = time.Parse(time.RFC3339, eventInfo.StartTime)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/UpdateEvent failed to parse start time err: %+v, val: %s", err, eventInfo.StartTime)
-			return err
+	me := userInfo.UserDgraphInfo.Uuid
+	if !isEventCreator(existingEvent, me) {
+		if isEventParticipant(existingEvent, me) {
+			return ErrOnlyCreatorChanges
 		}
+		return ErrEventNotFound
 	}
 
-	endTime, err := time.Parse(time.RFC3339Nano, eventInfo.EndTime)
+	startTime, err := parseEventTime(eventInfo.StartTime, "start")
 	if err != nil {
-		endTime, err = time.Parse(time.RFC3339, eventInfo.EndTime)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/UpdateEvent failed to parse end time err: %+v, val: %s", err, eventInfo.EndTime)
-			return err
-		}
+		return err
+	}
+	endTime, err := parseEventTime(eventInfo.EndTime, "end")
+	if err != nil {
+		return err
 	}
 
 	err = domain.UpdateCalendarEvent(ctx, eventUUID, eventInfo.Title, eventInfo.Description, startTime, endTime, existingEvent.GoogleCalendarEventId, currentTime)
@@ -170,20 +254,32 @@ func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.Cre
 		}
 	}
 
-	var participants []*dgraphStruct.DgraphUser
-	if len(eventInfo.Participants) > 0 {
-		users, _ := userDomain.GetActiveDgraphUsersByUUIDsLight(ctx, eventInfo.Participants)
-		byUUID := make(map[string]*dgraphStruct.DgraphUser, len(users))
-		for _, u := range users {
-			if u != nil {
-				byUUID[u.Uuid] = u
+	// Guests. A set mutation only ever adds to the list, so a guest taken off
+	// stayed on the event, kept reading it and stayed busy. The ones taken off
+	// are deleted in the same request that writes the rest.
+	var added []*dgraphStruct.DgraphUser
+	var removed []*dgraphStruct.DgraphUser
+	if eventInfo.Participants != nil {
+		var addUUIDs []string
+		addUUIDs, removed = diffParticipants(existingEvent, eventInfo.Participants)
+		if len(addUUIDs) > 0 {
+			users, _ := userDomain.GetActiveDgraphUsersByUUIDsLight(ctx, addUUIDs)
+			byUUID := make(map[string]*dgraphStruct.DgraphUser, len(users))
+			for _, u := range users {
+				if u != nil {
+					byUUID[u.Uuid] = u
+				}
+			}
+			for _, id := range addUUIDs {
+				if u, ok := byUUID[id]; ok && u.Uid != "" {
+					added = append(added, &dgraphStruct.DgraphUser{Uid: u.Uid})
+				}
 			}
 		}
-		for _, pUuid := range eventInfo.Participants {
-			if u, ok := byUUID[pUuid]; ok {
-				participants = append(participants, &dgraphStruct.DgraphUser{Uid: u.Uid})
-			}
-		}
+	}
+	removedUids := make([]string, 0, len(removed))
+	for _, p := range removed {
+		removedUids = append(removedUids, p.Uid)
 	}
 
 	dgraphEvent := &dgraphStruct.DgraphEvent{
@@ -193,40 +289,37 @@ func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.Cre
 		Description:  eventInfo.Description,
 		StartTime:    &startTime,
 		EndTime:      &endTime,
-		Participants: participants,
+		Participants: added,
 		IsFocus:      eventInfo.IsFocus,
 		IsAway:       eventInfo.IsAway,
 		UpdatedAt:    &currentTime,
 	}
-
-	_, err = domain.CreateOrUpdateDgraphEvent(ctx, dgraphEvent)
-	if err != nil {
+	// Cleared notes are deleted, not written: an empty string never reaches
+	// the store (omitempty), so the old notes came back after a save.
+	if err := domain.UpdateDgraphEvent(ctx, dgraphEvent, removedUids, eventInfo.Description == ""); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/UpdateEvent failed to update event in dgraph err: %+v", err)
 		return err
 	}
 
-	// Trigger Google Calendar Sync Update
-	if existingEvent.GoogleCalendarEventId != nil {
+	// Google's copy. The guest list goes only when the request named one, and
+	// then as a whole, an empty one included.
+	if existingEvent.GoogleCalendarEventId != nil && *existingEvent.GoogleCalendarEventId != "" {
+		googleEventID, syncGuests := *existingEvent.GoogleCalendarEventId, eventInfo.Participants != nil
 		go func() {
 			bgCtx := context.Background()
-			updateErr := integrationBusiness.UpdateGoogleCalendarEvent(bgCtx, *existingEvent.GoogleCalendarEventId, eventInfo, userInfo)
-			if updateErr != nil {
-				var goneErr *integrationBusiness.GCalEventGoneError
-				if errors.As(updateErr, &goneErr) {
-					// GCal event was deleted externally — clear stale reference
-					helpers.MessageLogs.InfoLog.Printf("UpdateEvent: clearing stale GCal ID %s for event %s", goneErr.GoogleEventId, eventUUID.String())
-					_ = domain.UpdateCalendarEvent(bgCtx, eventUUID, eventInfo.Title, eventInfo.Description, startTime, endTime, nil, time.Now())
-					dgraphClear := &dgraphStruct.DgraphEvent{
-						Uid:                   existingEvent.Uid,
-						Uuid:                  eventUUID.String(),
-						GoogleCalendarEventId: nil,
-					}
-					_, _ = domain.CreateOrUpdateDgraphEvent(bgCtx, dgraphClear)
-				}
+			updateErr := integrationBusiness.UpdateGoogleCalendarEvent(bgCtx, googleEventID, eventInfo, userInfo, syncGuests)
+			var goneErr *integrationBusiness.GCalEventGoneError
+			if errors.As(updateErr, &goneErr) {
+				// Deleted on Google: forget the copy in both stores, so later
+				// edits stop failing against it.
+				helpers.MessageLogs.InfoLog.Printf("UpdateEvent: clearing stale GCal ID %s for event %s", goneErr.GoogleEventId, eventUUID.String())
+				_ = domain.UpdateCalendarEvent(bgCtx, eventUUID, eventInfo.Title, eventInfo.Description, startTime, endTime, nil, time.Now())
+				_ = domain.ClearDgraphEventGoogleId(bgCtx, existingEvent.Uid)
 			}
 		}()
 	}
 
+	bookingEventUpdated(ctx, existingEvent, startTime, endTime)
 	return nil
 }
 
@@ -238,14 +331,21 @@ func DeleteEvent(ctx context.Context, eventUUID uuid.UUID, userInfo *model.UserI
 	currentTime := time.Now()
 
 	existingEvent, err := domain.GetDgraphEventInfoByUUID(ctx, eventUUID.String())
+	if errors.Is(err, domain.ErrEventNotFound) {
+		return ErrEventNotFound
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/DeleteEvent failed to get existing event err: %+v", err)
 		return err
 	}
 	// As UpdateEvent: the creator only. This checked nothing, so anyone could
-	// delete anyone's meeting or booking.
-	if existingEvent == nil || existingEvent.CreatedBy == nil || existingEvent.CreatedBy.Uuid != userInfo.UserDgraphInfo.Uuid {
-		return ErrNotEventCreator
+	// delete anyone's meeting or booking. Someone not on it at all hears it
+	// isn't there.
+	if !isEventCreator(existingEvent, userInfo.UserDgraphInfo.Uuid) {
+		if isEventParticipant(existingEvent, userInfo.UserDgraphInfo.Uuid) {
+			return ErrNotEventCreator
+		}
+		return ErrEventNotFound
 	}
 
 	err = domain.DeleteCalendarEvent(ctx, eventUUID, currentTime)
@@ -265,13 +365,17 @@ func DeleteEvent(ctx context.Context, eventUUID uuid.UUID, userInfo *model.UserI
 		go integrationBusiness.DeleteGoogleCalendarEvent(context.Background(), *existingEvent.GoogleCalendarEventId, userInfo)
 	}
 
+	bookingEventDeleted(ctx, existingEvent)
 	return nil
 }
 
 func LeaveEvent(ctx context.Context, eventUUID uuid.UUID, userInfo *model.UserInfo) error {
 
 	existingEvent, err := domain.GetDgraphEventInfoByUUID(ctx, eventUUID.String())
-	if err != nil || existingEvent == nil {
+	if errors.Is(err, domain.ErrEventNotFound) {
+		return ErrEventNotFound
+	}
+	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/LeaveEvent failed to get existing event err: %+v", err)
 		return err
 	}
@@ -279,14 +383,17 @@ func LeaveEvent(ctx context.Context, eventUUID uuid.UUID, userInfo *model.UserIn
 	var participantUidToRemove string
 	isParticipant := false
 	for _, p := range existingEvent.Participants {
-		if p.Uuid == userInfo.UserDgraphInfo.Uuid {
+		if p != nil && p.Uuid == userInfo.UserDgraphInfo.Uuid {
 			isParticipant = true
 			participantUidToRemove = p.Uid
 		}
 	}
 
 	if !isParticipant {
-		return errors.New("you are not a participant in this event")
+		if isEventCreator(existingEvent, userInfo.UserDgraphInfo.Uuid) {
+			return ErrCreatorCannotLeave
+		}
+		return ErrEventNotFound
 	}
 
 	err = domain.RemoveParticipantFromDgraphEvent(ctx, existingEvent.Uid, participantUidToRemove)
@@ -374,71 +481,111 @@ func GetEventsList(ctx context.Context, user *model.UserInfo, startDate *time.Ti
 
 		for _, item := range gcalEvents {
 			// Skip if this event is already tracked in OneCamp
-			if existingGCalIds[item.Id] {
+			if item == nil || existingGCalIds[item.Id] {
 				continue
 			}
-			startTime := item.Start.DateTime
-			if startTime == "" {
-				startTime = item.Start.Date // All-day event
+			if e := googleEventItem(item, user); e != nil {
+				events = append(events, e)
 			}
-
-			endTime := item.End.DateTime
-			if endTime == "" {
-				endTime = item.End.Date
-			}
-
-			ptStart, errStart := time.Parse(time.RFC3339, startTime)
-			// Handle date-only parsing for all day events
-			if errStart != nil {
-				ptStart, _ = time.Parse("2006-01-02", startTime)
-			}
-
-			ptEnd, errEnd := time.Parse(time.RFC3339, endTime)
-			if errEnd != nil {
-				ptEnd, _ = time.Parse("2006-01-02", endTime)
-			}
-
-			// Fallback deduplication: skip Google events that match an existing OneCamp event by Title + Time.
-			// This handles the brief window before the sync goroutine persists the GCal ID.
-			// isDuplicate := false
-			// for _, e := range events {
-			// 	if e.Title == item.Summary &&
-			// 		e.StartTime != nil && e.StartTime.Equal(ptStart) &&
-			// 		e.EndTime != nil && e.EndTime.Equal(ptEnd) {
-			// 		isDuplicate = true
-			// 		break
-			// 	}
-			// }
-			// if isDuplicate {
-			// 	continue
-			// }
-
-			desc := item.Description
-			googleEventId := item.Id
-
-			var createdBy *dgraphStruct.DgraphUser
-			var participants []*dgraphStruct.DgraphUser
-
-			if item.Creator != nil && (item.Creator.Self || item.Creator.Email == user.UserPostgresInfo.EmailID) {
-				createdBy = &dgraphStruct.DgraphUser{Uid: user.UserDgraphInfo.Uid, Uuid: user.UserDgraphInfo.Uuid}
-			} else {
-				createdBy = nil
-				participants = append(participants, &dgraphStruct.DgraphUser{Uid: user.UserDgraphInfo.Uid, Uuid: user.UserDgraphInfo.Uuid})
-			}
-
-			events = append(events, &dgraphStruct.DgraphEvent{
-				Uid:                   "gcal-" + item.Id,
-				Uuid:                  "gcal-" + item.Id, // We use a pseudo UUID for google events
-				Title:                 item.Summary,
-				Description:           desc,
-				StartTime:             &ptStart,
-				EndTime:               &ptEnd,
-				CreatedBy:             createdBy,
-				Participants:          participants,
-				GoogleCalendarEventId: &googleEventId,
-			})
 		}
 	}
 
+	markBookedEvents(ctx, user, events)
 	return events, nil
+}
+
+// googleDay is how Google writes an all-day event's dates.
+const googleDay = "2006-01-02"
+
+// googleEventItem is a Google Calendar event as the calendar lists it: the
+// id "gcal-<google id>", and the reader as its creator or as its guest.
+//
+// An all-day event is its dates. Google gives the first day and the day after
+// the last; read as midnight UTC they put "Offsite, Wednesday" on Tuesday and
+// Wednesday in New York and on Wednesday and Thursday in India. So the item
+// carries the dates (AllDay, StartDate, EndDate), and the web places it by
+// them. Its times stay what they were, midnight UTC on the first day and the
+// day after the last, so an app from before the dates draws it as it did.
+// nil for an event whose times can't be read. Pure.
+func googleEventItem(item *calendar.Event, user *model.UserInfo) *dgraphStruct.DgraphEvent {
+	if item == nil || item.Start == nil || item.End == nil || item.Id == "" {
+		return nil
+	}
+	googleEventId := item.Id
+	ev := &dgraphStruct.DgraphEvent{
+		Uid:                   "gcal-" + item.Id,
+		Uuid:                  "gcal-" + item.Id, // a pseudo id: the event lives on Google
+		Title:                 item.Summary,
+		Description:           item.Description,
+		GoogleCalendarEventId: &googleEventId,
+	}
+	if item.Start.Date != "" {
+		first, err := time.Parse(googleDay, item.Start.Date)
+		if err != nil {
+			return nil
+		}
+		after, err := time.Parse(googleDay, item.End.Date)
+		if err != nil || !after.After(first) {
+			after = first.AddDate(0, 0, 1)
+		}
+		ev.StartTime, ev.EndTime = &first, &after
+		ev.AllDay, ev.StartDate, ev.EndDate = true, first.Format(googleDay), after.Format(googleDay)
+	} else {
+		start, err1 := time.Parse(time.RFC3339, item.Start.DateTime)
+		end, err2 := time.Parse(time.RFC3339, item.End.DateTime)
+		if err1 != nil || err2 != nil {
+			return nil
+		}
+		ev.StartTime, ev.EndTime = &start, &end
+	}
+	if user != nil {
+		me := &dgraphStruct.DgraphUser{Uid: user.UserDgraphInfo.Uid, Uuid: user.UserDgraphInfo.Uuid}
+		if item.Creator != nil && (item.Creator.Self || (item.Creator.Email != "" && item.Creator.Email == user.UserPostgresInfo.EmailID)) {
+			ev.CreatedBy = me
+		} else {
+			ev.Participants = []*dgraphStruct.DgraphUser{me}
+		}
+	}
+	return ev
+}
+
+// GetEvent is one event, for someone on it. A OneCamp event answers its
+// creator and its participants; "gcal-<google id>", as GetEventsList gives a
+// Google event, is read from the asker's own Google calendar. Anyone else gets
+// ErrEventNotFound, as for no event at all, so nobody learns that someone
+// else's event exists.
+func GetEvent(ctx context.Context, userInfo *model.UserInfo, eventID string) (*dgraphStruct.DgraphEvent, error) {
+	var ev *dgraphStruct.DgraphEvent
+	if googleID, ok := strings.CutPrefix(eventID, "gcal-"); ok {
+		if strings.TrimSpace(googleID) == "" {
+			return nil, &EventInputError{"That isn't an event id."}
+		}
+		item, err := integrationBusiness.FetchUserGoogleCalendarEvent(ctx, userInfo, googleID)
+		if err != nil {
+			return nil, err
+		}
+		if ev = googleEventItem(item, userInfo); ev == nil {
+			return nil, ErrEventNotFound
+		}
+	} else {
+		id, err := uuid.Parse(eventID)
+		if err != nil {
+			return nil, &EventInputError{"That isn't an event id."}
+		}
+		found, err := domain.GetDgraphEventInfoByUUID(ctx, id.String())
+		if errors.Is(err, domain.ErrEventNotFound) {
+			return nil, ErrEventNotFound
+		}
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "business/GetEvent err: %+v", err)
+			return nil, err
+		}
+		me := userInfo.UserDgraphInfo.Uuid
+		if !isEventCreator(found, me) && !isEventParticipant(found, me) {
+			return nil, ErrEventNotFound
+		}
+		ev = found
+	}
+	markBookedEvents(ctx, userInfo, []*dgraphStruct.DgraphEvent{ev})
+	return ev, nil
 }

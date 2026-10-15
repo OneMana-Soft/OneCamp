@@ -65,6 +65,7 @@ const (
 	CategoryGitHub    Category = "github"
 	CategoryCommand   Category = "command"
 	CategoryCollab    Category = "collab"
+	CategoryCall      Category = "call"
 )
 
 // Spec describes a single Redis key namespace.
@@ -223,6 +224,18 @@ var LoginRate = withArity(Spec{
 	Category:    CategoryRateLimit,
 	Description: "Login attempts per (surface, IP). Window-locked counter; trips after 20 hits.",
 }, 2) // (surface, ip)
+
+// PublicReadRate counts reads of a page anyone may open (a booking page's free
+// times, a guest's booking link), per address and per page, in a one-minute
+// window. LoginRate counts only writes; these reads cost the server, and a
+// booking page's cost its owner's Google quota, so every GET is counted.
+var PublicReadRate = withArity(Spec{
+	Namespace:   "public:read:rate",
+	TTL:         1 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Public page reads per (surface, address or page). Fixed one-minute window.",
+}, 2) // (surface, ip or a hash of the page)
 
 // SSO ------------------------------------------------------------------------
 
@@ -427,34 +440,81 @@ var AIUnifiedSearch = withArity(Spec{
 	Category:    CategoryAI,
 	Description: "JSON unified-search response per (user, query hash). Short TTL.",
 }, 2) // (userUUID, queryHash)
-// posts exactly one recap per finished call, even though room teardown
-// can fire from both the room_finished and participant_left webhook paths.
+// AIRecapLock posts exactly one recap per finished call, even when the
+// room_finished webhook is delivered twice.
+//
+// Keyed by the CALL (its session key), not the room. A channel's room is the
+// same for every call in it, so a room lock held for 30 minutes meant a second
+// call ending within 30 minutes of the first got no recap at all.
 var AIRecapLock = withArity(Spec{
 	Namespace:   "ai:recap:lock",
 	TTL:         30 * time.Minute,
 	Datatype:    DatatypeCounter,
 	Category:    CategoryAI,
-	Description: "Per-room one-shot lock for the meeting recap agent (idempotency).",
-}, 1) // (roomName)
+	Description: "Per-call one-shot lock for the meeting recap agent (idempotency).",
+}, 1) // (callSessionKey)
 
-// CallParticipants accumulates everyone who was in a call, so a post-call
-// artifact can reach the people who attended rather than only the ones who
-// spoke.
+// CallAttendees is everyone who joined ONE call, so its notes reach the people
+// who attended rather than only the ones who spoke.
 //
-// Built from participant_left, which is the one event that fires for EVERY
-// participant: a room cannot finish until they have all gone. room_finished
-// carries the room and not its people, so without this the only record of who
-// attended is the transcript, and the transcript only knows who talked.
-//
-// The TTL outlives a long meeting comfortably and is refreshed on every add, so
-// it is measured from the last person to leave rather than the first.
-var CallParticipants = withArity(Spec{
-	Namespace:   "call:participants",
+// Keyed by the call's session key, never the room. It was keyed by the room
+// with a 12-hour TTL refreshed on every leave, and a channel's room is the
+// same for every call in it, so the set gathered everyone from every call in
+// the channel that day: an afternoon call's notes were shared, with edit
+// access, with the morning's attendees, including someone removed from the
+// channel in between. Built from participant_joined (and participant_left as
+// a backstop). Read at write time and re-checked against who can still open
+// the conversation.
+var CallAttendees = withArity(Spec{
+	Namespace:   "call:attendees",
 	TTL:         12 * time.Hour,
 	Datatype:    DatatypeSet,
-	Category:    CategoryAI,
-	Description: "Dgraph uids of everyone who was in a call, keyed by room; read by the meeting recap.",
+	Category:    CategoryCall,
+	Description: "Dgraph uids of everyone who joined one call (by session key); read by the meeting notes.",
+}, 1) // (callSessionKey)
+
+// CallState is what a call has switched on, kept by the server: the
+// transcription switch (who turned it on, when, and where the audio goes) and
+// the recording running in it.
+//
+// The room's LiveKit metadata carries the same thing to every client, but
+// the server needs an answer it can read on every transcript line without a
+// LiveKit round trip, and one that a stale call can't leak into the next: the
+// state names the room session it belongs to, and a newer session ignores it.
+// Deleted when the room finishes; the TTL is the backstop for a lost webhook.
+var CallState = withArity(Spec{
+	Namespace:   "call:state",
+	TTL:         12 * time.Hour,
+	Datatype:    DatatypeString,
+	Category:    CategoryCall,
+	Description: "JSON switches of the call in a room (transcription, recording), with the room session they belong to.",
 }, 1) // (roomName)
+
+// CallRemoved is who a host put out of the call in a room, so they can't mint
+// a new token and walk straight back in, and a still-valid token is thrown out
+// again when it connects. Deleted when the room finishes.
+var CallRemoved = withArity(Spec{
+	Namespace:   "call:removed",
+	TTL:         12 * time.Hour,
+	Datatype:    DatatypeSet,
+	Category:    CategoryCall,
+	Description: "Identities removed from the call in a room, until the call ends.",
+}, 1) // (roomName)
+
+// TranscriptionAgentHeartbeat is the server transcriber saying it is running.
+//
+// Server-mode transcription is done by the Python agent, and a workspace can
+// choose it, including "audio never leaves this server", on an install where
+// no agent runs: every call then had no captions and no transcript, and the
+// admin's Test passed, because it probed the speech model and not the agent.
+// The agent posts this every 30 seconds; the admin card and Test read it.
+var TranscriptionAgentHeartbeat = withArity(Spec{
+	Namespace:   "transcription:agent:heartbeat",
+	TTL:         90 * time.Second,
+	Datatype:    DatatypeString,
+	Category:    CategoryCall,
+	Description: "JSON last heartbeat of the transcription agent (time, LiveKit reachable).",
+}, 0)
 
 // CallUntranscribed records participants whose browser cannot transcribe them,
 // so a transcript built from browser speech can say that it is incomplete.
@@ -469,13 +529,16 @@ var CallParticipants = withArity(Spec{
 // server can see that someone spoke no lines, but cannot tell "said nothing"
 // from "could not be heard", and guessing would put a caveat on every meeting
 // with a quiet attendee.
+//
+// Keyed by the call's session key: keyed by the room, a caveat from a morning
+// call reached the recap of every later call in the channel that day.
 var CallUntranscribed = withArity(Spec{
 	Namespace:   "call:untranscribed",
 	TTL:         12 * time.Hour,
 	Datatype:    DatatypeSet,
 	Category:    CategoryAI,
-	Description: "Dgraph uids of call participants whose browser has no speech recognizer.",
-}, 1) // (roomName)
+	Description: "Dgraph uids of call participants whose browser has no speech recognizer (by call session key).",
+}, 1) // (callSessionKey)
 
 // CallTranscriptGrant caches "this person is in this call, and here is the key
 // their transcript lines belong under".
@@ -955,6 +1018,7 @@ func All() []Spec {
 	return []Spec{
 		UserRefreshToken,
 		LoginRate,
+		PublicReadRate,
 		SSOState,
 		UserProfile,
 		UserDgraphProfile,
@@ -1008,5 +1072,11 @@ func All() []Spec {
 		PasskeyCeremony,
 		ConnectorBriefingDay,
 		CollabStateSize,
+		CallAttendees,
+		CallUntranscribed,
+		CallTranscriptGrant,
+		CallState,
+		CallRemoved,
+		TranscriptionAgentHeartbeat,
 	}
 }

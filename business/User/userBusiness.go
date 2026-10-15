@@ -294,10 +294,29 @@ func UploadUserFileToChannelsAndChats(ctx context.Context, reader io.Reader, obj
 	return
 }
 
-func GetRecordingURLByObjectName(ctx context.Context, objName string) (objURL string, err error) {
+// RecordingURLTTL is how long a recording's playback link lives: its length
+// and half an hour, at least half an hour, at most twelve hours.
+//
+// It was five minutes, fetched once when the player opened, so a long
+// recording stopped when the browser asked for its next range after that, and
+// every seek (a click on a transcript line too) failed. The player also
+// fetches a new link on a media error, keeping its place. Pure.
+func RecordingURLTTL(durationSec float64) time.Duration {
+	const minTTL, maxTTL = 30 * time.Minute, 12 * time.Hour
+	ttl := time.Duration(durationSec*float64(time.Second)) + minTTL
+	if ttl < minTTL {
+		return minTTL
+	}
+	if ttl > maxTTL {
+		return maxTTL
+	}
+	return ttl
+}
+
+func GetRecordingURLByObjectName(ctx context.Context, objName string, ttl time.Duration) (objURL string, err error) {
 	bucketName := helpers.UserUploadBucket()
 	// Get a pre-signed URL for the object.
-	url, err := minioInit.MinioClient.PresignedGetObject(ctx, bucketName, objName, time.Duration(5*time.Minute), nil)
+	url, err := minioInit.MinioClient.PresignedGetObject(ctx, bucketName, objName, ttl, nil)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/GetRecordingURLByObjectName Invalid obj key",

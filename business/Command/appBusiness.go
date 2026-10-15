@@ -135,6 +135,20 @@ func UpdateApp(ctx context.Context, appID uuid.UUID, req commandAdapter.UpdateAp
 	if existing == nil {
 		return nil, fmt.Errorf("app not found")
 	}
+	// The stored OAuth client secret stays with the token address it was given
+	// for (helpers.CheckKeptSecret): a new token URL needs it entered again.
+	if req.OAuthConfig != nil && strings.TrimSpace(req.OAuthConfig.ClientSecret) == "" {
+		if bag, _ := loadAppSecrets(ctx, appID); bag != nil && bag.OAuthClientSecret != "" {
+			var prev commandAdapter.AppOAuthConfig
+			if existing.OAuthConfig != nil {
+				_ = json.Unmarshal([]byte(*existing.OAuthConfig), &prev)
+			}
+			if err := helpers.CheckKeptSecret(true, false, helpers.SecretDestination{URL: prev.TokenURL},
+				helpers.SecretDestination{URL: req.OAuthConfig.TokenURL}, "client secret"); err != nil {
+				return nil, err
+			}
+		}
+	}
 
 	fields := map[string]interface{}{}
 	if req.Name != nil {

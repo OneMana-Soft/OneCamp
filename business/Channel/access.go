@@ -45,6 +45,19 @@ func ReadableBy(ctx context.Context, userUUID, channelID string) (bool, error) {
 	return CanRead(ch), nil
 }
 
+// WritableBy reports whether the person with userUUID may write in the
+// channel, as a thread reply or a file does: they are one of its members and
+// it isn't archived. Writing at its top level also takes the announcement
+// rule (business/Send MayPostIn). A lookup that fails, and a channel that
+// isn't there (ErrNotFound), are errors, as for ReadableBy.
+func WritableBy(ctx context.Context, userUUID, channelID string) (bool, error) {
+	ch, err := readAs(ctx, userUUID, channelID)
+	if err != nil || ch == nil {
+		return false, err
+	}
+	return ch.IsMember > 0 && !helpers.IsSoftDeleted(ch.DeletedAt), nil
+}
+
 // IsPublic reports whether everyone signed in can read the channel, asked as
 // the person with userUUID. A channel whose privacy didn't load is private.
 func IsPublic(ctx context.Context, userUUID, channelID string) (bool, error) {

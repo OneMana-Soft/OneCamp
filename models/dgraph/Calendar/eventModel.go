@@ -55,6 +55,10 @@ func CreateOrUpdateDgraphEvent(ctx context.Context, dgraphEvent *dgraphStruct.Dg
 	return
 }
 
+// ErrEventNotFound is no event with that id: never made, or deleted (a delete
+// removes the node). Not a fault, so it isn't logged as one.
+var ErrEventNotFound = errors.New("event not found")
+
 func GetDgraphEventInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphEvent *dgraphStruct.DgraphEvent, err error) {
 	txn := dgraphInit.DgraphClient.NewTxn()
 
@@ -76,8 +80,7 @@ func GetDgraphEventInfoByUUID(ctx context.Context, query string, variables map[s
 	}
 
 	if len(eventsInfo.EventInfo) == 0 {
-		err = errors.New("failed to get dgraph event")
-		helpers.LogErrorWithContext(ctx, "models/GetDgraphEventInfoByUUID failed to get dgraph event")
+		err = ErrEventNotFound
 		return
 	}
 	dgraphEvent = &eventsInfo.EventInfo[0]

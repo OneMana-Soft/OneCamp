@@ -62,8 +62,13 @@ func RedirectURI() string {
 // never a URL, travels in the state, so the callback cannot be turned into an
 // open redirect. Anything else lands on the connectors settings page.
 var ReturnPages = map[string]string{
-	"inbox": "/app/inbox",
+	"inbox":            "/app/inbox",
+	ReturnPageCalendar: "/app/calendar",
 }
+
+// ReturnPageCalendar brings someone who linked Google Calendar from the
+// calendar back to it.
+const ReturnPageCalendar = "calendar"
 
 // BuildAuthURL returns the provider authorize URL for a user to connect.
 // returnPage names where the person lands afterwards (see ReturnPages); an
@@ -170,7 +175,13 @@ func HandleCallback(ctx context.Context, state, code string) (CallbackResult, er
 		t := time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
 		st.ExpiresAt = &t
 	}
-	if err := saveUserToken(ctx, userUUID, providerID, st); err != nil {
+	// The calendar shows which Google account it is linked to.
+	var metadata *string
+	if providerID == ProviderCalendar {
+		m := calendarAccountMetadata(ctx, tok.AccessToken)
+		metadata = &m
+	}
+	if err := saveUserToken(ctx, userUUID, providerID, st, metadata); err != nil {
 		return res, fmt.Errorf("persist token: %w", err)
 	}
 	// Bust the briefing "Your day" cache so the newly-connected account shows
@@ -221,7 +232,7 @@ func validAccessToken(ctx context.Context, userUUID uuid.UUID, providerID string
 		t := time.Now().Add(time.Duration(refreshed.ExpiresIn) * time.Second)
 		newTok.ExpiresAt = &t
 	}
-	if err := saveUserToken(ctx, userUUID, providerID, newTok); err != nil {
+	if err := saveUserToken(ctx, userUUID, providerID, newTok, nil); err != nil {
 		helpers.LogErrorWithContext(ctx, "connector/validAccessToken persist refreshed token err: %+v", err)
 	}
 	return newTok.AccessToken, nil

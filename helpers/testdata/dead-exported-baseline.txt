@@ -22,8 +22,6 @@ BuildInlineDisposition
 BulkArchiveChats
 BulkArchivePosts
 BulkArchiveTasks
-CalendarCreate
-CalendarList
 CanQuery
 CancelByUser
 ChartsAsText
@@ -32,6 +30,10 @@ CheckUserIsDocOwner
 ClaimIdempotencyKey
 ClearOwner
 ConnectedProviderNames
+# Edition-only, not debt: the place a conversation's files belong to, for the AI's agents
+# reading a message's pictures, which this edition leaves out. Kept so business/FileAccess
+# stays the same in both editions.
+ConversationOf
 CountByScope
 CountOpenForUser
 CountRows
@@ -73,12 +75,10 @@ GetDgraphProjectInfo
 GetDgraphProjectMemberInfoForComment
 GetDgraphRecentPostsForAI
 GetDgraphTaskList
-GetDgraphUserInfoByDgraphUID
 GetHashTags
 GetPostIdsOlderThan
 GetPostgresChatByUUID
 GetProvider
-GetSetMembers
 GetSystemBotUser
 GetTaskIdsOlderThan
 GetTeamPostgresInfo

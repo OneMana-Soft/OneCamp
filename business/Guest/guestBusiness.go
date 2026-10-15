@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"errors"
 	"strings"
@@ -35,9 +36,6 @@ import (
 const (
 	// How long a guest meeting link stays usable.
 	meetingGrantTTL = 12 * time.Hour
-	// LiveKit join-window for a guest token (the call session persists once
-	// connected; this only bounds the connect window and re-joins).
-	guestTokenTTL = 4 * time.Hour
 	// Instant-meeting room names use this prefix so the call webhook router
 	// can distinguish them from channel/DM/group rooms. Keep in sync with the
 	// LiveKit webhook handler (roomBelongsToThisInstance / broadcastCallStop).
@@ -80,17 +78,22 @@ func readFailed(err, notFound error) bool {
 // InstantMeeting is the result of starting a guest-shareable meeting.
 type InstantMeeting struct {
 	Room       string    // LiveKit room name ("meet-<uuid>")
+	MeetingID  string    // the <uuid>: the meeting's stable page and endpoints
 	HostToken  string    // member LiveKit token (room admin)
 	GuestToken string    // raw link token (shown once; not stored raw)
 	GrantID    uuid.UUID // grant row id (for revoke / display)
 	ExpiresAt  time.Time
 }
 
+// ErrNotHost is a member asking for an instant meeting that someone else
+// started.
+var ErrNotHost = errors.New("only the person who started this meeting can do that")
+
 // CreateInstantMeeting starts a fresh meeting room, mints the host's member
 // token (room admin), and creates a guest grant whose raw link token is
 // returned once. The caller (controller) builds the shareable URL from the
 // raw token and records the audit entry.
-func CreateInstantMeeting(ctx context.Context, host *dgraphStruct.DgraphUser, audioEnabled, videoEnabled bool) (*InstantMeeting, error) {
+func CreateInstantMeeting(ctx context.Context, host *dgraphStruct.DgraphUser, language string) (*InstantMeeting, error) {
 	if host == nil {
 		return nil, errors.New("missing host info")
 	}
@@ -99,11 +102,12 @@ func CreateInstantMeeting(ctx context.Context, host *dgraphStruct.DgraphUser, au
 		return nil, errors.New("invalid host id")
 	}
 
-	room := MeetingRoomPrefix + uuid.NewString()
+	meetingID := uuid.NewString()
+	room := MeetingRoomPrefix + meetingID
 
 	// Create the room and mint the host token (room admin so the host can
 	// manage the call). Reuses the same path members use for channel/DM calls.
-	hostToken, _, err := liveKitBusiness.CreateRoomAndGetToken(ctx, room, host, true, audioEnabled, videoEnabled)
+	hostToken, _, err := liveKitBusiness.CreateRoomAndGetToken(ctx, room, host, true, language)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Guest/CreateInstantMeeting host token err: %+v", err)
 		return nil, err
@@ -123,6 +127,7 @@ func CreateInstantMeeting(ctx context.Context, host *dgraphStruct.DgraphUser, au
 
 	return &InstantMeeting{
 		Room:       room,
+		MeetingID:  meetingID,
 		HostToken:  hostToken,
 		GuestToken: raw,
 		GrantID:    grantID,
@@ -157,7 +162,7 @@ func ValidateMeetingGrant(ctx context.Context, rawToken string) (*guestModel.Gue
 // namespace so it can never collide with a member UUID identity or the
 // transcription agent. The display name is sanitized and rendered with a
 // "Guest:" prefix so the UI badges it unambiguously.
-func IssueGuestMeetingToken(ctx context.Context, grant *guestModel.GuestGrant, displayName string, audioEnabled, videoEnabled bool) (token string, room string, err error) {
+func IssueGuestMeetingToken(ctx context.Context, grant *guestModel.GuestGrant, displayName, language string) (token string, room string, err error) {
 	name := sanitizeGuestName(displayName)
 	if name == "" {
 		return "", "", ErrInvalidName
@@ -172,9 +177,9 @@ func IssueGuestMeetingToken(ctx context.Context, grant *guestModel.GuestGrant, d
 	if err != nil {
 		return "", "", err
 	}
-	identity := "guest-" + grant.Id.String() + "-" + suffix
+	identity := guestIdentityPrefix(grant.Id.String()) + suffix
 
-	token, err = livekitInit.LiveKitService.GenerateGuestToken(grant.ResourceID, identity, "Guest: "+name, guestTokenTTL, audioEnabled, videoEnabled)
+	token, err = livekitInit.LiveKitService.GenerateGuestToken(grant.ResourceID, identity, "Guest: "+name, language)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Guest/IssueGuestMeetingToken err: %+v", err)
 		return "", "", err
@@ -187,9 +192,197 @@ func ListActiveGrants(ctx context.Context) ([]*guestModel.GuestGrant, error) {
 	return guestModel.ListActive(ctx)
 }
 
-// RevokeGrant revokes a grant by id (admin-gated upstream).
+// RevokeGrant revokes a grant by id (admin-gated upstream). A meeting link's
+// guests still in the meeting are put out of it: revoking used to mark the
+// link revoked and nothing else, and their tokens kept connecting.
 func RevokeGrant(ctx context.Context, id uuid.UUID) error {
-	return guestModel.Revoke(ctx, id)
+	if err := guestModel.Revoke(ctx, id); err != nil {
+		return err
+	}
+	if g, err := guestModel.GetByID(ctx, id); err == nil && g != nil && g.ResourceType == guestModel.ResourceMeeting {
+		removeGuestsOf(ctx, g.ResourceID, map[string]bool{id.String(): true})
+	}
+	return nil
+}
+
+// guestIdentityPrefix starts the call identity of every guest who joins from
+// one grant: "guest-<grant id>-<random>". Pure.
+func guestIdentityPrefix(grantID string) string {
+	return "guest-" + grantID + "-"
+}
+
+// grantOfGuest answers which grant a guest's call identity came from, "" for
+// anything that is not a guest's identity. Pure.
+func grantOfGuest(identity string) string {
+	rest, ok := strings.CutPrefix(identity, "guest-")
+	if !ok || len(rest) < 37 || rest[36] != '-' {
+		return ""
+	}
+	if _, err := uuid.Parse(rest[:36]); err != nil {
+		return ""
+	}
+	return rest[:36]
+}
+
+// removeGuestsOf puts out of a meeting's call every guest who joined from one
+// of these grants (all of its guests when grants is nil).
+func removeGuestsOf(ctx context.Context, room string, grants map[string]bool) {
+	liveKitBusiness.RemoveGuestsWhere(ctx, room, liveKitBusiness.RemovedLinkRevoked, func(identity string) bool {
+		return grants == nil || grants[grantOfGuest(identity)]
+	})
+}
+
+// GuestMayJoin reports whether a guest's call identity still has a live link
+// to this meeting: guest access on, the link neither revoked nor expired, and
+// for this room. A guest token only ever names a meeting room.
+func GuestMayJoin(ctx context.Context, room, identity string) (bool, error) {
+	if !IsMeetingRoom(room) || !settingsBusiness.GuestAccessEnabled() {
+		return false, nil
+	}
+	id, err := uuid.Parse(grantOfGuest(identity))
+	if err != nil {
+		return false, nil
+	}
+	g, err := guestModel.GetByID(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	live := g != nil && g.ResourceType == guestModel.ResourceMeeting && g.ResourceID == room &&
+		g.RevokedAt == nil && (g.ExpiresAt == nil || time.Now().Before(*g.ExpiresAt))
+	return live, nil
+}
+
+// RemoveAllMeetingGuests puts every guest out of every instant meeting, for
+// guest access being turned off: the policy is re-read when a guest joins, and
+// nothing put out the ones already in.
+func RemoveAllMeetingGuests(ctx context.Context) {
+	rooms, err := liveKitBusiness.CallRoomsWithPrefix(ctx, MeetingRoomPrefix)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Guest/RemoveAllMeetingGuests could not list meetings: %+v", err)
+		return
+	}
+	for _, room := range rooms {
+		removeGuestsOf(ctx, room, nil)
+	}
+}
+
+// MeetingRoom is an instant meeting's room, from its id. ok is false for
+// anything that is not a meeting id. Pure.
+func MeetingRoom(meetingID string) (string, bool) {
+	id, err := uuid.Parse(strings.TrimSpace(meetingID))
+	if err != nil {
+		return "", false
+	}
+	return MeetingRoomPrefix + id.String(), true
+}
+
+// MeetingHost answers who started an instant meeting (the creator of its
+// first link), whether or not the meeting is still on.
+func MeetingHost(ctx context.Context, room string) (uuid.UUID, bool, error) {
+	return guestModel.ResourceCreator(ctx, guestModel.ResourceMeeting, room)
+}
+
+// HostedMeeting answers when an instant meeting's link stops working, for
+// its host only. ErrNotFound once no link to it is live (the meeting is
+// over); ErrNotHost for anyone but the person who started it.
+func HostedMeeting(ctx context.Context, room string, host *dgraphStruct.DgraphUser) (time.Time, error) {
+	if host == nil {
+		return time.Time{}, ErrNotHost
+	}
+	creator, ok, err := MeetingHost(ctx, room)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !ok {
+		return time.Time{}, ErrNotFound
+	}
+	if creator.String() != host.Uuid {
+		return time.Time{}, ErrNotHost
+	}
+	live, err := guestModel.ListActiveForResource(ctx, guestModel.ResourceMeeting, room)
+	if err != nil {
+		return time.Time{}, err
+	}
+	var until time.Time
+	for _, g := range live {
+		if g.ExpiresAt != nil && g.ExpiresAt.After(until) {
+			until = *g.ExpiresAt
+		}
+	}
+	if len(live) == 0 {
+		return time.Time{}, ErrNotFound
+	}
+	return until, nil
+}
+
+// RejoinMeeting mints the host's token again for an instant meeting they
+// started. Its token and link lived only in the page that started it, so
+// leaving or reloading that page lost both for good, and the guests stayed in
+// a meeting nobody could host.
+func RejoinMeeting(ctx context.Context, room string, host *dgraphStruct.DgraphUser, language string) (string, error) {
+	if _, err := HostedMeeting(ctx, room, host); err != nil {
+		return "", err
+	}
+	token, _, err := liveKitBusiness.CreateRoomAndGetToken(ctx, room, host, true, language)
+	return token, err
+}
+
+// NewMeetingLink makes another guest link to an instant meeting, for its host:
+// a link is shown once and only its hash is kept, so a host who lost the page
+// lost the link. With revokePrevious the links before it stop working and the
+// guests who came in by them are put out of the call: how a host keeps out
+// someone they removed.
+func NewMeetingLink(ctx context.Context, room string, host *dgraphStruct.DgraphUser, revokePrevious bool) (*InstantMeeting, error) {
+	if _, err := HostedMeeting(ctx, room, host); err != nil {
+		return nil, err
+	}
+	hostUUID, err := uuid.Parse(host.Uuid)
+	if err != nil {
+		return nil, ErrNotHost
+	}
+	// The links to revoke are read first, and revoked only once the new one
+	// exists: a failure in between must not leave the meeting with no live
+	// link, which ends it for the host too (CALL-BUG-17).
+	var old []*guestModel.GuestGrant
+	if revokePrevious {
+		if old, err = guestModel.ListActiveForResource(ctx, guestModel.ResourceMeeting, room); err != nil {
+			return nil, err
+		}
+	}
+	raw, err := randomToken()
+	if err != nil {
+		return nil, err
+	}
+	expiresAt := time.Now().Add(meetingGrantTTL)
+	grantID, err := guestModel.CreateGrant(ctx, hashToken(raw), guestModel.ResourceMeeting, room, guestModel.CapabilityJoin, hostUUID, &expiresAt)
+	if err != nil {
+		return nil, err
+	}
+	if len(old) > 0 {
+		// A link that stopped working puts its guests out even when a later
+		// one fails to stop: the host is told it failed and tries again, and
+		// those links aren't live any more for that retry to find.
+		revoked := map[string]bool{}
+		var failed error
+		for _, g := range old {
+			if err := guestModel.Revoke(ctx, g.Id); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				failed = err
+				break
+			}
+			revoked[g.Id.String()] = true
+		}
+		removeGuestsOf(ctx, room, revoked)
+		if failed != nil {
+			return nil, failed
+		}
+	}
+	return &InstantMeeting{
+		Room:       room,
+		MeetingID:  strings.TrimPrefix(room, MeetingRoomPrefix),
+		GuestToken: raw,
+		GrantID:    grantID,
+		ExpiresAt:  expiresAt,
+	}, nil
 }
 
 // IsMeetingRoom reports whether a LiveKit room name is an instant-meeting room

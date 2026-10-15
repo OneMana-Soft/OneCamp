@@ -29,6 +29,8 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	bookingModel "github.com/akashc777/OneCamp/models/postgres/Booking"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/akashc777/OneCamp/models/redis/registry"
+	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 	authService "github.com/akashc777/OneCamp/services/Auth"
 	emailService "github.com/akashc777/OneCamp/services/Email"
 	"github.com/google/uuid"
@@ -127,7 +129,41 @@ func SaveBookingPage(ctx context.Context, owner uuid.UUID, in PageInput) (*booki
 	if err == nil && saved == nil {
 		return nil, &AvailabilityError{"That isn't one of your pages."}
 	}
+	if err == nil {
+		pageCache.forgetOwner(owner.String())
+	}
 	return saved, err
+}
+
+// PageHasBookingsError is a page that can't be deleted while bookings made
+// through it are still to come: on this edition deleting a page deletes its
+// bookings, and their guests' links with them (CAL-BUG-3). Switching it off
+// stops new bookings and keeps them. Its text is written for the owner.
+type PageHasBookingsError struct{ Upcoming int }
+
+func (e *PageHasBookingsError) Error() string {
+	n := "1 upcoming booking"
+	if e.Upcoming != 1 {
+		n = fmt.Sprintf("%d upcoming bookings", e.Upcoming)
+	}
+	return "This page has " + n + ". Switch it off instead: its link stops working, and its guests can still cancel."
+}
+
+// DeleteBookingPage deletes one of the person's pages; false when it isn't
+// theirs, and a PageHasBookingsError while bookings made through it are
+// still to come.
+func DeleteBookingPage(ctx context.Context, owner, id uuid.UUID) (bool, error) {
+	ok, upcoming, err := bookingModel.DeletePage(owner, id)
+	if err != nil {
+		return false, err
+	}
+	if upcoming > 0 {
+		return false, &PageHasBookingsError{Upcoming: upcoming}
+	}
+	if ok {
+		pageCache.forgetOwner(owner.String())
+	}
+	return ok, nil
 }
 
 // PublicPage is what a visitor sees: never the owner's events, only free slots.
@@ -151,6 +187,7 @@ var ErrNoPage = errors.New("no such booking page")
 type livePage struct {
 	page  *bookingModel.Page
 	hours WorkingHours
+	loc   *time.Location // the hours' zone
 	owner *model.UserInfo
 	name  string
 }
@@ -167,12 +204,16 @@ func loadPage(ctx context.Context, slug string) (*livePage, error) {
 	if json.Unmarshal(p.Hours, &hours) != nil {
 		return nil, ErrNoPage
 	}
+	loc, err := hours.Check()
+	if err != nil {
+		return nil, ErrNoPage
+	}
 	du, err := userDomain.GetDgraphUserInfoByUUID(ctx, p.UserId.String())
 	// Someone who has left the workspace takes no more bookings.
 	if err != nil || du == nil || helpers.IsSoftDeleted(du.DeletedAt) {
 		return nil, ErrNoPage
 	}
-	return &livePage{page: p, hours: hours, name: bookingOwnerName(du),
+	return &livePage{page: p, hours: hours, loc: loc, name: bookingOwnerName(du),
 		owner: &model.UserInfo{UserPostgresInfo: model.User{Id: p.UserId}, UserDgraphInfo: *du}}, nil
 }
 
@@ -188,45 +229,109 @@ func (l *livePage) horizon(now time.Time) time.Time {
 	return now.Add(time.Duration(l.page.MaxDaysAhead) * 24 * time.Hour)
 }
 
+// ErrCalendarUnread is a booking refused because the owner's calendars
+// couldn't all be read: a linked Google calendar didn't answer, so the time
+// may already be taken there. The visitor is asked to try again.
+var ErrCalendarUnread = errors.New("the calendar couldn't be checked")
+
+// slots are the free slots between from and to, the calendars read now: what
+// a booking checks, never the cache. Time a calendar couldn't be read for is
+// never free: a booking would land on top of whatever is there.
 func (l *livePage) slots(ctx context.Context, from, to, now time.Time) ([]Interval, error) {
-	busy, err := BusyFor(ctx, l.page.UserId.String(), from.Add(-24*time.Hour), to.Add(24*time.Hour))
+	busy, err := busyFor(ctx, l.page.UserId.String(), from.Add(-24*time.Hour), to.Add(24*time.Hour))
 	if err != nil {
 		return nil, err
 	}
-	return FreeSlots(busy, from, to, l.hours, l.rules(now)), nil
+	if busy.GoogleUnread {
+		return nil, ErrCalendarUnread
+	}
+	return FreeSlots(busy.Intervals, from, to, l.hours, l.rules(now)), nil
 }
 
-// GetPublicPage is a page and its free slots between from and to (clamped
-// to now, the page's horizon and a month).
-func GetPublicPage(ctx context.Context, slug string, from, to, now time.Time) (*PublicPage, error) {
-	l, err := loadPage(ctx, slug)
-	if err != nil {
-		return nil, err
-	}
+// publicWindow is the window a look at a page from `from` is answered with:
+// from the start of from's day in the owner's zone (from kept between now
+// and the page's horizon), for 31 days or to the horizon. So a page has one
+// window a day it can book, whatever anyone asks for. Pure.
+func publicWindow(from, now, until time.Time, loc *time.Location) (time.Time, time.Time) {
 	if from.Before(now) {
 		from = now
 	}
-	until := l.horizon(now)
+	if from.After(until) {
+		from = until
+	}
+	day := helpers.DayStart(from, loc)
+	to := day.AddDate(0, 0, int(maxPublicRange/(24*time.Hour)))
 	if to.After(until) {
 		to = until
 	}
-	if to.Sub(from) > maxPublicRange {
-		to = from.Add(maxPublicRange)
+	return day, to
+}
+
+// bookingPageMissesPerMinute bounds how often one booking page's answer is
+// worked out afresh, for everyone together: ten times what one address may
+// ask (middleware.BookingPageReadLimit), so a flood from many addresses is
+// held back while a busy page's visitors, served from the cache, never meet
+// it.
+const bookingPageMissesPerMinute = 600
+
+// PageBusyError is a page worked out afresh too often this minute: 429, with
+// Limit's wait.
+type PageBusyError struct{ Limit redisStore.RateLimitResult }
+
+func (e *PageBusyError) Error() string { return "booking page busy" }
+
+// pageMissAllowed counts one fresh answer of page id, in a one-minute window,
+// in this process when Redis can't be asked. Only real pages are counted.
+func pageMissAllowed(ctx context.Context, id string) redisStore.RateLimitResult {
+	rctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	return redisStore.AllowFixedWindowOrLocal(rctx, registry.PublicReadRate, []string{"booking-page-miss", id}, bookingPageMissesPerMinute)
+}
+
+// GetPublicPage is a page and its free slots from the start of from's day in
+// the owner's zone, for 31 days or to the page's horizon. Answers are kept a
+// minute (bookingCache.go), so looking again, or at another week, reads the
+// owner's calendars at most once a minute.
+func GetPublicPage(ctx context.Context, slug string, from, now time.Time) (*PublicPage, error) {
+	slug = NormaliseSlug(slug)
+	l, err := pageCache.live(ctx, slug, now)
+	if err != nil {
+		return nil, err
 	}
+	until := l.horizon(now)
+	day, to := publicWindow(from, now, until, l.loc)
+	key := slug + "|" + day.Format("2006-01-02")
+	if p := pageCache.answer(key, now); p != nil {
+		return p, nil
+	}
+	if res := pageMissAllowed(ctx, l.page.Id.String()); !res.Allowed {
+		return nil, &PageBusyError{Limit: res}
+	}
+	owner := l.page.UserId.String()
+	gen := pageCache.generation(owner)
 	out := &PublicPage{
 		Slug: l.page.Slug, Title: l.page.Title, Description: l.page.Description,
 		DurationMinutes: l.page.DurationMinutes, OwnerName: l.name, OwnerTZ: l.hours.TZ,
 		Slots: []Interval{}, BookableUntil: until,
 	}
-	if to.After(from) {
-		slots, err := l.slots(ctx, from, to, now)
+	if to.After(day) {
+		// Everything the page can offer, so every window comes from one read:
+		// whole days, from the day before today to the day after the
+		// horizon's, so a look a moment later asks the same range.
+		lo := helpers.DayStart(now, l.loc).Add(-24 * time.Hour)
+		hi := helpers.DayStart(until, l.loc).AddDate(0, 0, 2)
+		busy, err := pageCache.busyOf(ctx, owner, lo, hi, now)
 		if err != nil {
 			return nil, err
 		}
-		if slots != nil {
+		if slots := FreeSlots(busy.Intervals, day, to, l.hours, l.rules(now)); slots != nil {
 			out.Slots = slots
 		}
+		if busy.GoogleUnread {
+			return out, nil // read in part: no answer is kept from it
+		}
 	}
+	pageCache.putAnswer(key, owner, gen, out, now)
 	return out, nil
 }
 
@@ -242,6 +347,9 @@ type BookInput struct {
 
 // Booked is what the visitor gets back.
 type Booked struct {
+	// BookingID names the booking's calendar invite (UID <id>@onecamp): the
+	// emailed one and the page's own .ics are one event.
+	BookingID   string    `json:"booking_id"`
 	Title       string    `json:"title"`
 	OwnerName   string    `json:"owner_name"`
 	Start       time.Time `json:"start"`
@@ -250,6 +358,9 @@ type Booked struct {
 	// Emailed is whether a confirmation went to the visitor; when not, the
 	// page offers the calendar file and the cancel link itself.
 	Emailed bool `json:"emailed"`
+	// OwnerTold is whether the owner was told: an inbox item, or an email
+	// queued. The page says they were only when they were.
+	OwnerTold bool `json:"owner_told"`
 }
 
 // CheckGuest tidies and validates a visitor's details. Pure.
@@ -364,43 +475,85 @@ func Book(ctx context.Context, slug string, in BookInput, now time.Time) (*Booke
 			helpers.LogErrorWithContext(ctx, "business/Calendar/Book link event err: %+v", err)
 		}
 	}
+	pageCache.forgetOwner(l.page.UserId.String())
 
-	notificationBusiness.DispatchCalendarBooking(l.page.UserId.String(), in.Name, l.page.Title,
-		FormatWhen(start, end, l.hours.TZ), b.Id.String(), false)
-	emailed := sendGuestEmail(ctx, in, l, start, end, token, false)
-	return &Booked{Title: l.page.Title, OwnerName: l.name, Start: start, End: end, CancelToken: token, Emailed: emailed}, nil
+	told := notificationBusiness.TellBookingOwner(ctx, notificationBusiness.BookingNotice{
+		OwnerUUID: l.page.UserId.String(), EventUUID: ev.EventUuid, BookingID: b.Id.String(),
+		GuestName: in.Name, PageTitle: l.page.Title, Start: start, End: end,
+		TZ: l.hours.TZ, When: FormatWhen(start, end, l.hours.TZ),
+	})
+	emailed := mailGuest(ctx, guestMail{
+		to: in.Email, name: in.Name,
+		subject:  fmt.Sprintf("Booked: %s with %s", l.page.Title, l.name),
+		title:    fmt.Sprintf("You're booked with %s", l.name),
+		subtitle: l.page.Title,
+		body:     FormatWhen(start, end, in.TZ),
+		ctaText:  "Cancel this booking", ctaURL: cancelURL(token),
+		footer: "You booked this time through a OneCamp booking page. Its calendar invite is attached.",
+		invite: bookingInvite(inviteRequest, b, l.page.Title, l.name, true, now),
+	})
+	return &Booked{Title: l.page.Title, OwnerName: l.name, Start: start, End: end, CancelToken: token,
+		BookingID: b.Id.String(), Emailed: emailed, OwnerTold: told}, nil
 }
 
 // BookingView is what a cancel link shows.
 type BookingView struct {
+	// BookingID names the booking's calendar invite (UID <id>@onecamp), the
+	// one the page's own .ics uses too.
+	BookingID string    `json:"booking_id"`
 	Title     string    `json:"title"`
 	OwnerName string    `json:"owner_name"`
 	Start     time.Time `json:"start"`
 	End       time.Time `json:"end"`
 	Cancelled bool      `json:"cancelled"`
 	Slug      string    `json:"slug"`
+	// PageLive is whether the page still takes bookings: the page offers
+	// "Book another time" only then.
+	PageLive bool `json:"page_live"`
+	// OwnerTold, on a cancel's answer, is whether the owner was told of it:
+	// an inbox item, or an email queued.
+	OwnerTold bool `json:"owner_told,omitempty"`
 }
 
-func bookingForToken(ctx context.Context, token string) (*bookingModel.Booking, *bookingModel.Page, string, error) {
+// tokenBooking is a booking found by its guest's link: the booking, its page,
+// the owner's name, and whether the page still takes bookings.
+type tokenBooking struct {
+	b     *bookingModel.Booking
+	p     *bookingModel.Page
+	owner string
+	live  bool
+}
+
+func (t *tokenBooking) view() *BookingView {
+	return &BookingView{BookingID: t.b.Id.String(), Title: t.p.Title, OwnerName: t.owner, Start: t.b.StartsAt,
+		End: t.b.EndsAt, Cancelled: t.b.CancelledAt != nil, Slug: t.p.Slug, PageLive: t.live}
+}
+
+func bookingForToken(ctx context.Context, token string) (*tokenBooking, error) {
 	if len(token) != 48 {
-		return nil, nil, "", ErrNoPage
+		return nil, ErrNoPage
 	}
 	b, err := bookingModel.BookingByToken(token)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, err
 	}
 	if b == nil {
-		return nil, nil, "", ErrNoPage
+		return nil, ErrNoPage
 	}
 	p, err := bookingModel.PageById(b.PageId)
 	if err != nil || p == nil {
-		return nil, nil, "", ErrNoPage
+		return nil, ErrNoPage
 	}
-	name := ""
-	if du, err := userDomain.GetDgraphUserInfoByUUID(ctx, p.UserId.String()); err == nil && du != nil {
-		name = bookingOwnerName(du)
+	t := &tokenBooking{b: b, p: p, live: p.Active}
+	du, err := userDomain.GetDgraphUserInfoByUUID(ctx, p.UserId.String())
+	if err == nil && du != nil {
+		t.owner = bookingOwnerName(du)
 	}
-	return b, p, name, nil
+	// Someone who has left the workspace takes no more bookings (loadPage).
+	if err != nil || du == nil || helpers.IsSoftDeleted(du.DeletedAt) {
+		t.live = false
+	}
+	return t, nil
 }
 
 // bookingOwnerName is the name a booking page shows for its owner: the one
@@ -412,21 +565,24 @@ func bookingOwnerName(u *dgraphStruct.DgraphUser) string {
 
 // GetBooking is the booking behind a cancel link.
 func GetBooking(ctx context.Context, token string) (*BookingView, error) {
-	b, p, name, err := bookingForToken(ctx, token)
+	t, err := bookingForToken(ctx, token)
 	if err != nil {
 		return nil, err
 	}
-	return &BookingView{Title: p.Title, OwnerName: name, Start: b.StartsAt, End: b.EndsAt, Cancelled: b.CancelledAt != nil, Slug: p.Slug}, nil
+	return t.view(), nil
 }
 
 // CancelBooking cancels through the guest's link: the event comes off the
-// owner's calendar and they hear about it. Cancelling twice is not an error.
+// owner's calendar, they hear about it, and so does the guest's calendar.
+// Cancelling twice is not an error.
 func CancelBooking(ctx context.Context, token string) (*BookingView, error) {
-	b, p, name, err := bookingForToken(ctx, token)
+	t, err := bookingForToken(ctx, token)
 	if err != nil {
 		return nil, err
 	}
-	view := &BookingView{Title: p.Title, OwnerName: name, Start: b.StartsAt, End: b.EndsAt, Cancelled: true, Slug: p.Slug}
+	b, p, name := t.b, t.p, t.owner
+	view := t.view()
+	view.Cancelled = true
 	changed, err := bookingModel.Cancel(b.Id)
 	if err != nil || !changed {
 		return view, err
@@ -440,46 +596,91 @@ func CancelBooking(ctx context.Context, token string) (*BookingView, error) {
 			}
 		}
 	}
+	pageCache.forgetOwner(p.UserId.String())
 	var hours WorkingHours
 	_ = json.Unmarshal(p.Hours, &hours)
-	notificationBusiness.DispatchCalendarBooking(p.UserId.String(), b.GuestName, p.Title,
-		FormatWhen(b.StartsAt, b.EndsAt, hours.TZ), b.Id.String(), true)
+	event := ""
+	if b.EventUUID != nil {
+		event = b.EventUUID.String()
+	}
+	view.OwnerTold = notificationBusiness.TellBookingOwner(ctx, notificationBusiness.BookingNotice{
+		OwnerUUID: p.UserId.String(), EventUUID: event, BookingID: b.Id.String(),
+		GuestName: b.GuestName, PageTitle: p.Title, Start: b.StartsAt, End: b.EndsAt,
+		TZ: hours.TZ, When: FormatWhen(b.StartsAt, b.EndsAt, hours.TZ), Cancelled: true,
+	})
+	// The guest added the invite, so the cancel takes it off their calendar.
+	mailGuest(ctx, guestMail{
+		to: b.GuestEmail, name: b.GuestName,
+		subject:  fmt.Sprintf("Cancelled: %s with %s", p.Title, name),
+		title:    "Your booking is cancelled",
+		subtitle: p.Title,
+		body:     FormatWhen(b.StartsAt, b.EndsAt, hours.TZ),
+		ctaText:  "Book another time", ctaURL: bookAgainURL(p, t.live),
+		footer: "You cancelled this through your booking's link. If it's in your calendar, the update attached takes it off.",
+		invite: bookingInvite(inviteCancel, b, p.Title, name, false, time.Now()),
+	})
 	return view, nil
 }
 
-// sendGuestEmail confirms a booking to the visitor where the workspace sends
-// notification email; workspaces on the essentials-only tier don't, and the
-// page shows the same details instead.
-func sendGuestEmail(ctx context.Context, in BookInput, l *livePage, start, end time.Time, token string, cancelled bool) bool {
+// guestMail is an email to a booking's guest. Every one carries the booking's
+// calendar invite (invite.go), so the guest's calendar follows the booking.
+type guestMail struct {
+	to, name                 string
+	subject, title, subtitle string
+	body                     string // plain text
+	ctaText, ctaURL          string // no URL, no button
+	footer                   string
+	invite                   invite
+}
+
+// mailGuest sends it where the workspace sends notification email (OneCamp
+// Cloud's essentials-only tier doesn't, and the page then shows the same
+// details), and says whether it went.
+func mailGuest(ctx context.Context, m guestMail) bool {
 	if !emailService.NotificationEmailEnabled() {
 		return false
 	}
-	cancelURL := authService.FrontendBaseURL() + "/booking/" + token
 	htmlBody, text, err := emailService.Render(emailService.TemplateData{
-		RecipientName: in.Name,
-		ActorName:     l.name,
-		Title:         fmt.Sprintf("You're booked with %s", l.name),
-		Subtitle:      l.page.Title,
-		Body:          html.EscapeString(FormatWhen(start, end, in.TZ)),
-		CTAText:       "Cancel this booking",
-		CTAURL:        cancelURL,
+		RecipientName: m.name,
+		ActorName:     m.invite.Organizer.Name,
+		Title:         m.title,
+		Subtitle:      m.subtitle,
+		Body:          html.EscapeString(m.body),
+		CTAText:       m.ctaText,
+		CTAURL:        m.ctaURL,
 		BrandName:     "OneCamp",
-		FooterNote:    "You booked this time through a OneCamp booking page.",
+		FooterNote:    m.footer,
 	})
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/Calendar/sendGuestEmail render err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "business/Calendar/mailGuest render err: %+v", err)
 		return false
 	}
 	_, err = emailService.SendEmailWithOptions(ctx, emailService.SendOptions{
-		From:    emailService.SenderAddress(),
-		To:      in.Email,
-		Subject: fmt.Sprintf("Booked: %s with %s", l.page.Title, l.name),
-		HTML:    htmlBody,
-		Text:    text,
+		From:        emailService.SenderAddress(),
+		To:          m.to,
+		Subject:     m.subject,
+		HTML:        htmlBody,
+		Text:        text,
+		Attachments: []emailService.Attachment{m.invite.attachment()},
 	})
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/Calendar/sendGuestEmail send err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "business/Calendar/mailGuest send err: %+v", err)
 		return false
 	}
 	return true
+}
+
+// cancelURL is a booking's link for its guest: it shows the booking and
+// cancels it.
+func cancelURL(token string) string {
+	return authService.FrontendBaseURL() + "/booking/" + token
+}
+
+// bookAgainURL is where a guest books another time: the page, while it takes
+// bookings; "" when it doesn't.
+func bookAgainURL(p *bookingModel.Page, live bool) string {
+	if !live {
+		return ""
+	}
+	return authService.FrontendBaseURL() + "/book/" + p.Slug
 }

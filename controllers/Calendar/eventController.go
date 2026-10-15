@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Calendar"
@@ -67,7 +68,9 @@ func UpdateEventController(w http.ResponseWriter, r *http.Request) {
 
 	if len(eventUUIdString) > 5 && eventUUIdString[:5] == "gcal-" {
 		googleEventId := eventUUIdString[5:]
-		err = integrationBusiness.UpdateGoogleCalendarEvent(ctx, googleEventId, input, &userInfo)
+		// OneCamp doesn't hold a Google-only event's guest list (the panel
+		// sends none for one), so only a list naming someone replaces it.
+		err = integrationBusiness.UpdateGoogleCalendarEvent(ctx, googleEventId, input, &userInfo, len(input.Participants) > 0)
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "controllers/UpdateEventController Google Sync failed err: %+v", err)
 			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to update Google Calendar event", "err": err})
@@ -83,7 +86,7 @@ func UpdateEventController(w http.ResponseWriter, r *http.Request) {
 
 		err = business.UpdateEvent(ctx, eventUUID, input, &userInfo)
 		if err != nil {
-			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Internal Error", "err": err})
+			writeEventError(w, err)
 			return
 		}
 	}
@@ -120,12 +123,8 @@ func DeleteEventController(w http.ResponseWriter, r *http.Request) {
 		}
 
 		err = business.DeleteEvent(ctx, eventUUID, &userInfo)
-		if errors.Is(err, business.ErrNotEventCreator) {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": err.Error()})
-			return
-		}
 		if err != nil {
-			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Internal Error", "err": err})
+			writeEventError(w, err)
 			return
 		}
 	}
@@ -178,6 +177,49 @@ func GetEventsListController(w http.ResponseWriter, r *http.Request) {
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got events list", "data": events})
 }
+
+// GetEventController answers GET /event/getEvent/{eventId}: one event, for
+// its creator or a participant, by its id or the "gcal-" id the list gives a
+// Google event. The panel and the phone's event page read it, so an event in
+// any month opens; they could only look it up in the month on screen.
+func GetEventController(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(model.UserInfo)
+	if !ok {
+		helpers.LogErrorWithContext(ctx, "controllers/GetEventController Failed getting user from context")
+		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		return
+	}
+	eventID := chi.URLParam(r, "eventId")
+	if unescaped, err := url.PathUnescape(eventID); err == nil {
+		eventID = unescaped
+	}
+	event, err := business.GetEvent(ctx, &userInfo, eventID)
+	if err != nil {
+		writeEventError(w, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got event", "data": event})
+}
+
+// writeEventError answers an event request that failed: 404 for an event that
+// isn't there or isn't the asker's to see, 403 for one they may see but not do
+// that to, 400 for a request that can't be read, and 500 for the rest. Every
+// failure was a 500 "Internal Error", even a guest trying to edit.
+func writeEventError(w http.ResponseWriter, err error) {
+	var input *business.EventInputError
+	switch {
+	case errors.Is(err, business.ErrEventNotFound):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": err.Error()})
+	case errors.Is(err, business.ErrOnlyCreatorChanges), errors.Is(err, business.ErrNotEventCreator), errors.Is(err, business.ErrCreatorCannotLeave):
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": err.Error()})
+	case errors.As(err, &input):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": input.Error()})
+	default:
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Internal Error"})
+	}
+}
+
 func LeaveEventController(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -209,7 +251,7 @@ func LeaveEventController(w http.ResponseWriter, r *http.Request) {
 
 		err = business.LeaveEvent(ctx, eventUUID, &userInfo)
 		if err != nil {
-			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Internal Error", "err": err})
+			writeEventError(w, err)
 			return
 		}
 	}

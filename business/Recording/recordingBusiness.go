@@ -4,93 +4,64 @@ import (
 	"context"
 	"time"
 
+	"github.com/livekit/protocol/livekit"
+
 	archiveBusiness "github.com/akashc777/OneCamp/business/Archive"
 	domain "github.com/akashc777/OneCamp/domain/Recording"
 	"github.com/akashc777/OneCamp/helpers"
-	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
-func AddTranscriptToRecording(ctx context.Context, transScriptInfo *dgraphStruct.DgraphTranscript, egressId string) (err error) {
+// Recording statuses, from LiveKit's egress status when it ended, in the words
+// the lists and the player answer with ("recording_status").
+const (
+	StatusReady  = "ready"
+	StatusFailed = "failed"
+)
 
-	dgraphRecordingInfo := &dgraphStruct.DgraphRecording{
-		Uid:        "uid(recording)",
-		EgressId:   egressId,
-		Transcript: []*dgraphStruct.DgraphTranscript{transScriptInfo},
+// StatusFromEgress is how a recording ended, from its egress: a failed or
+// aborted egress wrote no usable file (out of memory on a small box, the room
+// closed under it, storage refused the upload), and neither did one that says
+// complete with nothing written. Pure.
+func StatusFromEgress(status livekit.EgressStatus, size int64) string {
+	switch status {
+	case livekit.EgressStatus_EGRESS_FAILED, livekit.EgressStatus_EGRESS_ABORTED:
+		return StatusFailed
 	}
-
-	_, err = domain.CreateOrUpdateDgraphRecording(ctx, dgraphRecordingInfo)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"business/AddTranscriptToRecording Failed to add transcript to recording err: %+v",
-			err)
-		return
-
+	if size <= 0 {
+		return StatusFailed
 	}
-
-	return
+	return StatusReady
 }
 
-func GetDgraphChannelRecordingInfoByEgressId(ctx context.Context, egressId string, userDgraphUID string) (dgraphRecording *dgraphStruct.DgraphRecording, err error) {
-
-	dgraphRecording, err = domain.GetDgraphChannelRecordingInfoByEgressId(ctx, egressId, userDgraphUID)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"business/GetDgraphChannelRecordingInfoByEgressId Failed to get recording dgraph info err: %+v",
-			err)
-		return
-
-	}
-
-	return
+// Failed reports whether a recording status means there is nothing to play.
+// Empty (recorded before the status was kept) is not failed. Pure.
+func Failed(status string) bool {
+	return status == StatusFailed
 }
 
-func GetDgraphDmRecordingInfoByEgressId(ctx context.Context, egressId string, userDgraphUID string) (dgraphRecording *dgraphStruct.DgraphRecording, err error) {
-
-	dgraphRecording, err = domain.GetDgraphDmRecordingInfoByEgressId(ctx, egressId, userDgraphUID)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"business/GetDgraphDmRecordingInfoByEgressId Failed to get recording dgraph info err: %+v",
-			err)
-		return
-
+// UpdateStopRecordingTime stamps a recording's end, its length and size, and
+// how it ended.
+//
+// It names the recording by its egress id and writes nothing when there is
+// none here: it used to upsert, and an egress this server never started (a
+// shared call server sends every backend every room's events) became a stray
+// node holding only an egress id and times.
+func UpdateStopRecordingTime(ctx context.Context, egressId string, duration float64, size int64, startedAt int64, status string) (err error) {
+	fields := map[string]interface{}{
+		"recording_ended_at": time.Now(),
+		"recording_duration": duration,
+		"recording_size":     size,
+		"recording_status":   status,
 	}
-
-	return
-}
-
-func UpdateStopRecordingTime(ctx context.Context, egressId string, duration float64, size int64, startedAt int64) (err error) {
-
-	currentTime := time.Now()
-
-	// Create time from epoch (nanoseconds)
-	startedAtTime := time.Unix(0, startedAt)
-
-	dgraphRecordingInfo := &dgraphStruct.DgraphRecording{
-		Uid:           "uid(recording)",
-		EgressId:      egressId,
-		EndedAt:       &currentTime,
-		StartedAt:     &startedAtTime,
-		Duration:      duration,
-		RecordingSize: size,
+	if startedAt > 0 {
+		fields["recording_stared_at"] = time.Unix(0, startedAt)
 	}
-
-	_, err = domain.CreateOrUpdateDgraphRecording(ctx, dgraphRecordingInfo)
-
-	if err != nil {
-
+	if err = domain.EndRecording(ctx, egressId, fields); err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/UpdateStopRecordingTime Failed to update recording end time err: %+v",
 			err)
 		return
-
 	}
-
 	return
 }
 

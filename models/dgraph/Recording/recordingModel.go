@@ -54,6 +54,9 @@ func CreateOrUpdateDgraphRecording(ctx context.Context, dgraphRecording *dgraphS
 	return
 }
 
+// ErrNotFound: no recording matched. Any other error means the read failed.
+var ErrNotFound = errors.New("failed to get dgraph recording")
+
 func GetDgraphRecordingInfo(ctx context.Context, query string, variables map[string]string) (dgraphRecoridng *dgraphStruct.DgraphRecording, err error) {
 	txn := dgraphInit.DgraphClient.NewTxn()
 
@@ -79,10 +82,7 @@ func GetDgraphRecordingInfo(ctx context.Context, query string, variables map[str
 	}
 
 	if len(recordingsInfo.RecordingInfo) == 0 {
-		err = errors.New("failed to get dgraph recording")
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphRecordingInfo failed to get dgraph recording")
-
+		err = ErrNotFound
 		return
 	}
 	dgraphRecoridng = &recordingsInfo.RecordingInfo[0]
@@ -159,13 +159,21 @@ func GetDgraphRecordingsWithCount(ctx context.Context, query string, variables m
 // collects none, nothing is written: uid() of an empty variable in a mutation
 // would make a new node.
 func SetDgraphRecordingsDeletedAt(ctx context.Context, query string, variables map[string]string, found string, at time.Time) error {
+	return SetFoundRecordingsFields(ctx, query, variables, found, map[string]interface{}{"recording_deleted_at": at})
+}
+
+// SetFoundRecordingsFields writes fields onto the nodes query collects into
+// the variable named found, in one upsert. When it collects none, nothing is
+// written: uid() of an empty variable in a mutation would make a new node.
+func SetFoundRecordingsFields(ctx context.Context, query string, variables map[string]string, found string, fields map[string]interface{}) error {
 	txn := dgraphInit.DgraphClient.NewTxn()
 	defer func() { _ = txn.Discard(ctx) }()
 
-	pb, err := json.Marshal(map[string]interface{}{
-		"uid":                  "uid(" + found + ")",
-		"recording_deleted_at": at,
-	})
+	set := map[string]interface{}{"uid": "uid(" + found + ")"}
+	for k, v := range fields {
+		set[k] = v
+	}
+	pb, err := json.Marshal(set)
 	if err != nil {
 		return err
 	}
@@ -180,8 +188,55 @@ func SetDgraphRecordingsDeletedAt(ctx context.Context, query string, variables m
 		CommitNow: true,
 	}
 	if _, err = txn.Do(ctx, req); err != nil {
-		helpers.LogErrorWithContext(ctx, "models/SetDgraphRecordingsDeletedAt failed: %v", err)
+		helpers.LogErrorWithContext(ctx, "models/SetFoundRecordingsFields failed: %v", err)
 		return err
 	}
 	return nil
+}
+
+// AddTranscriptToFound adds a transcript line to the one recording that query
+// collects into the variable named found, and answers whether it did. When it
+// collects none, nothing is written: uid() of an empty variable in a mutation
+// would make a new node.
+func AddTranscriptToFound(ctx context.Context, query string, variables map[string]string, found string, line *dgraphStruct.DgraphTranscript) (bool, error) {
+	txn := dgraphInit.DgraphClient.NewTxn()
+	defer func() { _ = txn.Discard(ctx) }()
+
+	named := *line
+	named.Uid = "_:line"
+	pb, err := json.Marshal(map[string]interface{}{
+		"uid":                  "uid(" + found + ")",
+		"recording_transcript": []*dgraphStruct.DgraphTranscript{&named},
+	})
+	if err != nil {
+		return false, err
+	}
+	resp, err := txn.Do(ctx, &api.Request{
+		Query: query,
+		Vars:  variables,
+		Mutations: []*api.Mutation{{
+			SetJson: pb,
+			Cond:    "@if(eq(len(" + found + "), 1))",
+		}},
+		CommitNow: true,
+	})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/AddTranscriptToFound failed: %v", err)
+		return false, err
+	}
+	_, added := resp.GetUids()["line"]
+	return added, nil
+}
+
+// QueryRecordingsJSON runs a read-only recordings query and answers its JSON,
+// for reads whose shape is the caller's own.
+func QueryRecordingsJSON(ctx context.Context, query string, variables map[string]string) ([]byte, error) {
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
+	resp, err := txn.QueryWithVars(ctx, query, variables)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/QueryRecordingsJSON failed: %v", err)
+		return nil, err
+	}
+	return resp.Json, nil
 }

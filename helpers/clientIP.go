@@ -55,6 +55,26 @@ func ClientIP(r *http.Request) string {
 	return hop.String()
 }
 
+// RateKeyIP is the address a per-address rate limit counts a request under:
+// an IPv4 address as it is, an IPv6 address by its /64. A host is handed a
+// whole /64, so counting each IPv6 address apart let one host be as many
+// addresses as it liked, each with a fresh bucket. Every limiter keys by it;
+// the audit log keeps the address itself. Pure.
+func RateKeyIP(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	if a = a.Unmap(); a.Is4() {
+		return a.String()
+	}
+	p, err := a.WithZone("").Prefix(64)
+	if err != nil {
+		return a.String()
+	}
+	return p.String()
+}
+
 func hostOf(remoteAddr string) string {
 	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		return host

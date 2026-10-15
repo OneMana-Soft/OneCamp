@@ -118,34 +118,8 @@ func DispatchMemoryDigest(recipientUUID, subject, body string) {
 	}()
 }
 
-// DispatchCalendarBooking tells a booking page's owner that someone booked
-// (or cancelled) time with them. Email is the channel: a booking lands while
-// the owner is away from OneCamp more often than not.
-func DispatchCalendarBooking(ownerUUID, guestName, pageTitle, when, bookingID string, cancelled bool) {
-	if ownerUUID == "" {
-		return
-	}
-	go func() {
-		defer recoverDispatch("DispatchCalendarBooking")
-		subject, title, kind := guestName+" booked "+pageTitle, "New booking", "booked"
-		if cancelled {
-			subject, title, kind = guestName+" cancelled "+pageTitle, "Booking cancelled", "cancelled"
-		}
-		Dispatch(context.Background(), Event{
-			Type:            EventCalendarBooking,
-			ActorName:       guestName,
-			SubjectLine:     subject,
-			Title:           title,
-			Subtitle:        pageTitle,
-			Body:            when,
-			CTAURL:          frontendBaseURL() + "/app/calendar",
-			CTAText:         "Open your calendar",
-			DedupKeyParts:   []string{"calendar.booking", bookingID, kind},
-			Recipients:      recipientsFromStrings([]string{ownerUUID}),
-			SkipOnlineCheck: true,
-		})
-	}()
-}
+// A booking page's owner is told of a booking in booking.go (TellBookingOwner):
+// in the inbox and by push as well as by email.
 
 // DispatchProjectUpdate tells a project's members that one of its admins
 // posted an update: where the project stands, and the note. The author is

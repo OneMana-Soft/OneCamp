@@ -177,9 +177,8 @@ func BoardCollabAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	// canEdit drives server-side read-only enforcement in the collaboration
 	// service: viewers (no edit access, not owner) join the live session but
-	// their document writes are rejected.
-	isOwner := boardDgraph.CreatedBy != nil && boardDgraph.CreatedBy.Uuid == userInfo.UserDgraphInfo.Uuid
-	canEdit := isOwner || boardDgraph.HasEditAccess > 0
+	// their document writes are rejected. Adding a picture asks the same rule.
+	canEdit := business.CanEdit(boardDgraph, userInfo.UserDgraphInfo.Uuid)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Authorised", "canEdit": canEdit})
 }

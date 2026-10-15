@@ -72,6 +72,22 @@ func ReadableBoardsFor(ctx context.Context, boardUUIDs []string, userUUID string
 	return out, nil
 }
 
+// EditableBy reports whether the person (by uuid) may change the board's
+// canvas now, by CanEdit: a board that is deleted, or isn't there, is
+// changed by nobody. An error is the graph not answering.
+func EditableBy(ctx context.Context, boardUUID, userUUID string) (bool, error) {
+	boards, err := readBoardsAccess(ctx, []string{boardUUID}, userUUID)
+	if err != nil {
+		return false, err
+	}
+	for _, b := range boards {
+		if b != nil && strings.EqualFold(b.Uuid, boardUUID) {
+			return CanEdit(b, userUUID), nil
+		}
+	}
+	return false, nil
+}
+
 // writeBoardCommentSearch is opensearchModels.SetBoardCommentAccess. A seam
 // for tests.
 var writeBoardCommentSearch = opensearchModels.SetBoardCommentAccess

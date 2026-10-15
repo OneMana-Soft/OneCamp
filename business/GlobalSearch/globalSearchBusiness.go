@@ -111,6 +111,7 @@ func GetUnifiedGlobalSearchPage(ctx context.Context, userUUID string, userEmail 
 	// After the page is cut: whether there is more is what the index said.
 	searchPage.Page = keepReadableDocHits(ctx, userUUID, searchPage.Page)
 	searchPage.Page = keepReadableBoardHits(ctx, userUUID, searchPage.Page)
+	searchPage.Page = keepReadableProjectFileHits(ctx, userUUID, userProjects, searchPage.Page)
 
 	return
 }

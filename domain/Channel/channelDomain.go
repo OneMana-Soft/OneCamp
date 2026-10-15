@@ -449,7 +449,7 @@ func GetChannelRecordingTranscript(ctx context.Context, channelUUID string, user
 			ch_uuid
 			ch_handle
 			ch_is_member: count(ch_members @filter(uid($userId)))
-			ch_recording @filter( uid(recUID) AND gt(recording_ended_at, "1970-01-01T00:00:00Z") AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z") AND NOT eq(recording_transcript_only, true)) {
+			ch_recording @filter( uid(recUID) AND gt(recording_ended_at, "1970-01-01T00:00:00Z") AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z")) {
 				recording_egress_id
 				recording_stared_at
 				recording_ended_at
@@ -467,6 +467,8 @@ func GetChannelRecordingTranscript(ctx context.Context, channelUUID string, user
 					}
 				}
 				recording_size
+				recording_transcript_only
+				recording_status
 				recording_started_by {
 					user_name
 				}
@@ -500,7 +502,7 @@ func GetChannelAllRecordingList(ctx context.Context, channelUUID string, userDgr
 	variables["$first"] = firstVal
 	variables["$offset"] = offsetVal
 
-	recFilter := `gt(recording_ended_at, "1970-01-01T00:00:00Z") AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z") AND NOT eq(recording_transcript_only, true)`
+	recFilter := `gt(recording_ended_at, "1970-01-01T00:00:00Z") AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z")`
 	dataVars := `$id: string, $userId: string, $first: int, $offset: int`
 
 	if startDate != "" && endDate != "" {
@@ -524,6 +526,8 @@ func GetChannelAllRecordingList(ctx context.Context, channelUUID string, userDgr
 				recording_obj_key
 				recording_transcript
 				recording_size
+				recording_transcript_only
+				recording_status
 				recording_started_by {
 					user_name
 				}

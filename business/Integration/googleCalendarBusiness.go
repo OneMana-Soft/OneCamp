@@ -2,9 +2,10 @@ package Integration
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -44,6 +45,30 @@ func isGoogleNotFoundError(err error) bool {
 		strings.Contains(errStr, "notFound") || strings.Contains(errStr, "deleted")
 }
 
+// storedToken reads a token as the integrations row holds it. A link made
+// through the connectors flow, the only way to link Google Calendar now, keeps
+// its tokens sealed (helpers.EncryptSecret). A link made before that holds them
+// in the clear and keeps working: a value that isn't sealed under this
+// install's key is used as it is.
+func storedToken(stored *string) string {
+	if stored == nil || *stored == "" {
+		return ""
+	}
+	if plain, err := helpers.DecryptSecret(*stored); err == nil && plain != "" {
+		return plain
+	}
+	return *stored
+}
+
+// sealToken is a token as the integrations row keeps it (storedToken reads it).
+func sealToken(plain string) (*string, error) {
+	sealed, err := helpers.EncryptSecret(plain)
+	if err != nil {
+		return nil, err
+	}
+	return &sealed, nil
+}
+
 type persistingTokenSource struct {
 	base         oauth2.TokenSource
 	initialToken *oauth2.Token
@@ -58,16 +83,27 @@ func (s *persistingTokenSource) Token() (*oauth2.Token, error) {
 	}
 
 	if s.initialToken == nil || t.AccessToken != s.initialToken.AccessToken {
-		// Token has been refreshed. Store it.
+		// Refreshed: store it sealed, as the connectors flow does, so the
+		// assistant's connector can read the same row.
+		refresh := t.RefreshToken
+		if refresh == "" && s.initialToken != nil {
+			refresh = s.initialToken.RefreshToken
+		}
 		s.initialToken = t
-		domain.UpdateIntegrationToken(s.ctx, "user", s.userId, "google_calendar", &t.AccessToken, &t.RefreshToken, &t.Expiry)
+		access, aerr := sealToken(t.AccessToken)
+		sealedRefresh, rerr := sealToken(refresh)
+		if aerr != nil || rerr != nil {
+			helpers.MessageLogs.ErrorLog.Printf("Google Calendar token for user %s refreshed but not stored: it couldn't be sealed", s.userId)
+			return t, nil
+		}
+		domain.UpdateIntegrationToken(s.ctx, "user", s.userId, "google_calendar", access, sealedRefresh, &t.Expiry)
 		helpers.MessageLogs.InfoLog.Printf("Refreshed Google Calendar token for user %s", s.userId)
 	}
 	return t, nil
 }
 
 func getGoogleCalendarService(ctx context.Context, integration *integrationModel.Integration) (*calendar.Service, error) {
-	if integration == nil || integration.RefreshToken == nil || *integration.RefreshToken == "" {
+	if integration == nil || storedToken(integration.RefreshToken) == "" {
 		return nil, fmt.Errorf("google calendar not connected")
 	}
 
@@ -76,8 +112,8 @@ func getGoogleCalendarService(ctx context.Context, integration *integrationModel
 		return nil, fmt.Errorf("google calendar is not configured")
 	}
 	token := &oauth2.Token{
-		AccessToken:  *integration.AccessToken,
-		RefreshToken: *integration.RefreshToken,
+		AccessToken:  storedToken(integration.AccessToken),
+		RefreshToken: storedToken(integration.RefreshToken),
 	}
 	if integration.ExpiresAt != nil {
 		token.Expiry = *integration.ExpiresAt
@@ -94,50 +130,41 @@ func getGoogleCalendarService(ctx context.Context, integration *integrationModel
 	return calendar.NewService(ctx, option.WithHTTPClient(client))
 }
 
-func GenerateGoogleCalendarAuthURL(ctx context.Context, userInfo *model.UserInfo) string {
-	config := oauth.GoogleCalendarConfig()
-	if config == nil {
-		return ""
-	}
-	// State could be a CSRF token or user ID to verify later.
-	state := userInfo.UserDgraphInfo.Uuid
+// integrationOf reads a person's link to an app; swapped in tests.
+var integrationOf = domain.GetIntegration
 
-	// Offline access gives us a refresh token. Approval force ensures we actually get it.
-	url := config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
-	return url
+// googleServiceFor is a person's Google Calendar, its calls bound to ctx.
+// (nil, nil) when they haven't linked Google. A link is its refresh token,
+// sealed or plain (storedToken): a link whose access token is empty or sealed
+// is still a link.
+func googleServiceFor(ctx context.Context, userID uuid.UUID) (*calendar.Service, error) {
+	integration, err := integrationOf(ctx, "user", userID, "google_calendar")
+	if err != nil {
+		return nil, err
+	}
+	if integration == nil || storedToken(integration.RefreshToken) == "" {
+		return nil, nil
+	}
+	return getGoogleCalendarService(ctx, integration)
 }
 
-func ExchangeGoogleCalendarCodeAndSave(ctx context.Context, code string, userInfo *model.UserInfo) error {
-	config := oauth.GoogleCalendarConfig()
-	if config == nil {
-		return fmt.Errorf("google calendar is not configured")
+// errGoogleNotLinked is a change to a Google copy for someone who hasn't
+// linked Google.
+var errGoogleNotLinked = fmt.Errorf("google calendar not connected")
+
+// GoogleCalendarAccount is the address of the Google account a person linked,
+// or "" when it isn't known (a link made before it was kept).
+func GoogleCalendarAccount(integration *integrationModel.Integration) string {
+	if integration == nil || integration.Metadata == nil || *integration.Metadata == "" {
+		return ""
 	}
-
-	token, err := config.Exchange(ctx, code)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/ExchangeGoogleCalendarCodeAndSave Failed to exchange code for token err: %+v", err)
-		return err
+	var meta struct {
+		AccountEmail string `json:"account_email"`
 	}
-
-	var refreshToken *string
-	if token.RefreshToken != "" {
-		refreshToken = &token.RefreshToken
+	if err := json.Unmarshal([]byte(*integration.Metadata), &meta); err != nil {
+		return ""
 	}
-
-	userId := userInfo.UserPostgresInfo.Id // assuming uuid.UUID
-
-	var expiresAt *time.Time
-	if !token.Expiry.IsZero() {
-		expiresAt = &token.Expiry
-	}
-
-	err = domain.UpsertIntegration(ctx, "user", userId, "google_calendar", &token.AccessToken, refreshToken, nil, nil, expiresAt)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/ExchangeGoogleCalendarCodeAndSave Failed to save token err: %+v", err)
-		return err
-	}
-
-	return nil
+	return meta.AccountEmail
 }
 
 func GetGoogleCalendarIntegration(ctx context.Context, userInfo *model.UserInfo) (*integrationModel.Integration, error) {
@@ -330,43 +357,184 @@ func syncTaskInternal(ctx context.Context, taskUUIDStr string, integration *inte
 }
 
 func FetchUserGoogleCalendarEvents(ctx context.Context, userInfo *model.UserInfo, startDate *time.Time, endDate *time.Time) ([]*calendar.Event, error) {
-	userId := userInfo.UserPostgresInfo.Id
-	integration, err := domain.GetIntegration(ctx, "user", userId, "google_calendar")
-	if err != nil || integration == nil || integration.AccessToken == nil || *integration.AccessToken == "" {
-		return nil, nil // Not connected or no token
-	}
-
-	// Use a bounded context so stale-token refresh can't block the entire events response
-	fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	// Use a bounded context so stale-token refresh can't block the entire
+	// events response; a busy range takes a few pages.
+	fetchCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 
-	srv, err := getGoogleCalendarService(fetchCtx, integration)
-	if err != nil {
+	srv, err := googleServiceFor(fetchCtx, userInfo.UserPostgresInfo.Id)
+	if err != nil || srv == nil {
 		return nil, err
 	}
 
-	query := srv.Events.List("primary").ShowDeleted(false).SingleEvents(true).OrderBy("startTime")
+	// Without a range: a month back and three ahead.
+	from, to := time.Now().AddDate(0, -1, 0), time.Now().AddDate(0, 3, 0)
 	if startDate != nil {
-		query = query.TimeMin(startDate.Format(time.RFC3339))
-	} else {
-		// Default to 1 month ago if no start date provided
-		oneMonthAgo := time.Now().AddDate(0, -1, 0)
-		query = query.TimeMin(oneMonthAgo.Format(time.RFC3339))
+		from = *startDate
 	}
 	if endDate != nil {
-		query = query.TimeMax(endDate.Format(time.RFC3339))
-	} else {
-		// Default to +3 months if no end date provided
-		threeMonthsLater := time.Now().AddDate(0, 3, 0)
-		query = query.TimeMax(threeMonthsLater.Format(time.RFC3339))
+		to = *endDate
 	}
+	return listGoogleEvents(fetchCtx, srv, from, to)
+}
 
-	eventsData, err := query.Do()
-	if err != nil {
+// maxGoogleEvents caps the Google events one range lists: ten of Google's
+// pages. A busier range shows its first 2,500, and the log says so.
+const maxGoogleEvents = 2500
+
+// listGoogleEvents lists the events on a primary calendar between from and
+// to, page after page. It read one page, Google's first 250, so in a busy
+// month (repeating meetings each count) the rest were missing.
+func listGoogleEvents(ctx context.Context, srv *calendar.Service, from, to time.Time) ([]*calendar.Event, error) {
+	call := srv.Events.List("primary").ShowDeleted(false).SingleEvents(true).OrderBy("startTime").
+		TimeMin(from.Format(time.RFC3339)).TimeMax(to.Format(time.RFC3339)).Context(ctx)
+	var out []*calendar.Event
+	for {
+		page, err := call.Do()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, page.Items...)
+		if len(out) >= maxGoogleEvents {
+			if len(out) > maxGoogleEvents || page.NextPageToken != "" {
+				helpers.LogInfoWithContext(ctx, "business/Integration listGoogleEvents: more than %d Google events between %s and %s; the first %d are listed",
+					maxGoogleEvents, from.Format(time.RFC3339), to.Format(time.RFC3339), maxGoogleEvents)
+			}
+			return out[:maxGoogleEvents], nil
+		}
+		if page.NextPageToken == "" {
+			return out, nil
+		}
+		call.PageToken(page.NextPageToken)
+	}
+}
+
+// FetchUserGoogleCalendarEvent reads one event from the person's own primary
+// Google calendar. (nil, nil) when they haven't linked Google, or when Google
+// has no such event for them: deleted, or never on their calendar.
+func FetchUserGoogleCalendarEvent(ctx context.Context, userInfo *model.UserInfo, googleEventId string) (*calendar.Event, error) {
+	fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	srv, err := googleServiceFor(fetchCtx, userInfo.UserPostgresInfo.Id)
+	if err != nil || srv == nil {
 		return nil, err
 	}
+	item, err := srv.Events.Get("primary", googleEventId).Context(fetchCtx).Do()
+	if err != nil {
+		if isGoogleNotFoundError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if item == nil || item.Status == "cancelled" {
+		return nil, nil
+	}
+	return item, nil
+}
 
-	return eventsData.Items, nil
+// BusySpan is a stretch of time a Google calendar shows someone busy.
+type BusySpan struct {
+	Start time.Time
+	End   time.Time
+}
+
+// ErrGoogleBusyUnread is busy times read in part: Google couldn't answer for
+// at least one of the person's calendars. Its time is unknown, never free.
+var ErrGoogleBusyUnread = errors.New("a Google calendar couldn't be read")
+
+// FetchUserGoogleBusy is when a person's Google calendars show them busy
+// between from and to: their primary calendar and every other one they have
+// selected in Google, read with FreeBusy (one call for all of them, and no
+// event's title). Only the primary calendar counted, so a team calendar or a
+// second work calendar never blocked anything. (nil, nil) when they haven't
+// linked Google. An error means some or all of it couldn't be read; the spans
+// that could be are still returned.
+func FetchUserGoogleBusy(ctx context.Context, userID uuid.UUID, from, to time.Time) ([]BusySpan, error) {
+	fetchCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	srv, err := googleServiceFor(fetchCtx, userID)
+	if err != nil || srv == nil {
+		return nil, err
+	}
+	return googleBusy(fetchCtx, srv, from, to)
+}
+
+const (
+	// busyQueryDays bounds one FreeBusy query's range; a longer one is asked in parts.
+	busyQueryDays = 30
+	// maxBusyCalendars is the most calendars one FreeBusy query takes.
+	maxBusyCalendars = 50
+)
+
+// googleBusy reads busy times from FreeBusy, over the calendars busyCalendars
+// names.
+func googleBusy(ctx context.Context, srv *calendar.Service, from, to time.Time) ([]BusySpan, error) {
+	if !to.After(from) {
+		return nil, nil
+	}
+	ids := busyCalendars(ctx, srv)
+	items := make([]*calendar.FreeBusyRequestItem, 0, len(ids))
+	for _, id := range ids {
+		items = append(items, &calendar.FreeBusyRequestItem{Id: id})
+	}
+	var spans []BusySpan
+	unread := false
+	for start := from; start.Before(to); {
+		end := start.AddDate(0, 0, busyQueryDays)
+		if end.After(to) {
+			end = to
+		}
+		res, err := srv.Freebusy.Query(&calendar.FreeBusyRequest{
+			TimeMin: start.UTC().Format(time.RFC3339),
+			TimeMax: end.UTC().Format(time.RFC3339),
+			Items:   items,
+		}).Context(ctx).Do()
+		if err != nil {
+			return spans, err
+		}
+		for _, cal := range res.Calendars {
+			if len(cal.Errors) > 0 {
+				unread = true
+				continue
+			}
+			for _, p := range cal.Busy {
+				if p == nil {
+					continue
+				}
+				s, err1 := time.Parse(time.RFC3339, p.Start)
+				e, err2 := time.Parse(time.RFC3339, p.End)
+				if err1 == nil && err2 == nil && e.After(s) {
+					spans = append(spans, BusySpan{Start: s, End: e})
+				}
+			}
+		}
+		start = end
+	}
+	if unread {
+		return spans, ErrGoogleBusyUnread
+	}
+	return spans, nil
+}
+
+// busyCalendars are the calendars whose events make someone busy: their
+// primary calendar and every other one they have selected (shown) in Google
+// Calendar. When the list can't be read, the primary calendar alone.
+func busyCalendars(ctx context.Context, srv *calendar.Service) []string {
+	ids := []string{"primary"}
+	err := srv.CalendarList.List().MinAccessRole("freeBusyReader").Pages(ctx, func(page *calendar.CalendarList) error {
+		for _, c := range page.Items {
+			if c == nil || c.Id == "" || c.Primary || !c.Selected || c.Deleted || len(ids) >= maxBusyCalendars {
+				continue
+			}
+			ids = append(ids, c.Id)
+		}
+		return nil
+	})
+	if err != nil {
+		helpers.LogInfoWithContext(ctx, "business/Integration busyCalendars: the calendar list couldn't be read, so only the primary calendar counts: %v", err)
+		return []string{"primary"}
+	}
+	return ids
 }
 
 func SyncEventToGoogleCalendar(ctx context.Context, eventId uuid.UUID, input adapter.CreateOrUpdateEventInput, userInfo *model.UserInfo, syncFlag bool) error {
@@ -447,45 +615,32 @@ func SyncEventToGoogleCalendar(ctx context.Context, eventId uuid.UUID, input ada
 	return nil
 }
 
-func UpdateGoogleCalendarEvent(ctx context.Context, googleEventId string, input adapter.CreateOrUpdateEventInput, userInfo *model.UserInfo) error {
-	userId := userInfo.UserPostgresInfo.Id
-	integration, err := domain.GetIntegration(ctx, "user", userId, "google_calendar")
-	if err != nil || integration == nil || integration.AccessToken == nil || *integration.AccessToken == "" {
-		return fmt.Errorf("google calendar not connected")
-	}
-
-	srv, err := getGoogleCalendarService(ctx, integration)
+// UpdateGoogleCalendarEvent writes an edit to the Google copy of an event.
+// With syncGuests, input.Participants is the whole guest list, an empty one
+// included; without it the guests on Google are left alone.
+func UpdateGoogleCalendarEvent(ctx context.Context, googleEventId string, input adapter.CreateOrUpdateEventInput, userInfo *model.UserInfo, syncGuests bool) error {
+	srv, err := googleServiceFor(ctx, userInfo.UserPostgresInfo.Id)
 	if err != nil {
 		return err
 	}
-
-	event := &calendar.Event{
-		Summary:     input.Title,
-		Description: input.Description,
-		Start: &calendar.EventDateTime{
-			DateTime: input.StartTime,
-		},
-		End: &calendar.EventDateTime{
-			DateTime: input.EndTime,
-		},
+	if srv == nil {
+		return errGoogleNotLinked
 	}
 
-	// Resolve participants to emails
-	if len(input.Participants) > 0 {
-		var attendees []*calendar.EventAttendee
+	var guestEmails []string
+	if syncGuests && len(input.Participants) > 0 {
 		// Batched lookup: one Dgraph round-trip for all participant
 		// emails. Replaces a per-participant loop that was the worst
 		// N+1 in the calendar sync path for large meetings.
 		users, _ := userDomain.GetActiveDgraphUsersByUUIDsLight(ctx, input.Participants)
 		for _, pInfo := range users {
 			if pInfo != nil && pInfo.EmailID != "" {
-				attendees = append(attendees, &calendar.EventAttendee{Email: pInfo.EmailID})
+				guestEmails = append(guestEmails, pInfo.EmailID)
 			}
 		}
-		event.Attendees = attendees
 	}
 
-	_, err = srv.Events.Patch("primary", googleEventId, event).Do()
+	err = patchGoogleEvent(ctx, srv, googleEventId, googleEventPatch(input, guestEmails, syncGuests))
 	if err != nil {
 		if isGoogleNotFoundError(err) {
 			// The GCal event was deleted externally (e.g., user disconnected and deleted on Google).
@@ -498,16 +653,41 @@ func UpdateGoogleCalendarEvent(ctx context.Context, googleEventId string, input 
 	return err
 }
 
-func DeleteGoogleCalendarEvent(ctx context.Context, googleEventId string, userInfo *model.UserInfo) error {
-	userId := userInfo.UserPostgresInfo.Id
-	integration, err := domain.GetIntegration(ctx, "user", userId, "google_calendar")
-	if err != nil || integration == nil || integration.AccessToken == nil || *integration.AccessToken == "" {
-		return fmt.Errorf("google calendar not connected")
+// googleEventPatch is what an edit sends to the Google copy of an event. A
+// patch leaves out every empty value unless told to send it, so notes cleared
+// in OneCamp stayed on Google, and so did the last guest taken off. The notes
+// always go, and the guest list goes whole when syncGuests. Pure.
+func googleEventPatch(input adapter.CreateOrUpdateEventInput, guestEmails []string, syncGuests bool) *calendar.Event {
+	ev := &calendar.Event{
+		Summary:         input.Title,
+		Description:     input.Description,
+		Start:           &calendar.EventDateTime{DateTime: input.StartTime},
+		End:             &calendar.EventDateTime{DateTime: input.EndTime},
+		ForceSendFields: []string{"Description"},
 	}
+	if syncGuests {
+		ev.Attendees = make([]*calendar.EventAttendee, 0, len(guestEmails))
+		for _, email := range guestEmails {
+			ev.Attendees = append(ev.Attendees, &calendar.EventAttendee{Email: email})
+		}
+		ev.ForceSendFields = append(ev.ForceSendFields, "Attendees")
+	}
+	return ev
+}
 
-	srv, err := getGoogleCalendarService(ctx, integration)
+// patchGoogleEvent sends a patch to an event on the primary calendar.
+func patchGoogleEvent(ctx context.Context, srv *calendar.Service, googleEventId string, patch *calendar.Event) error {
+	_, err := srv.Events.Patch("primary", googleEventId, patch).Context(ctx).Do()
+	return err
+}
+
+func DeleteGoogleCalendarEvent(ctx context.Context, googleEventId string, userInfo *model.UserInfo) error {
+	srv, err := googleServiceFor(ctx, userInfo.UserPostgresInfo.Id)
 	if err != nil {
 		return err
+	}
+	if srv == nil {
+		return errGoogleNotLinked
 	}
 
 	err = srv.Events.Delete("primary", googleEventId).Do()
@@ -525,40 +705,26 @@ func DeleteGoogleCalendarEvent(ctx context.Context, googleEventId string, userIn
 // RemoveAttendeeFromGoogleCalendarEvent removes a specific attendee from a Google Calendar event
 // by patching the attendee list on the event creator's calendar.
 func RemoveAttendeeFromGoogleCalendarEvent(ctx context.Context, googleEventId string, leavingUserEmail string, creatorUserInfo *model.UserInfo) error {
-	userId := creatorUserInfo.UserPostgresInfo.Id
-	integration, err := domain.GetIntegration(ctx, "user", userId, "google_calendar")
-	if err != nil || integration == nil || integration.RefreshToken == nil || *integration.RefreshToken == "" {
-		return nil // Creator not connected to GCal, nothing to do
-	}
-
-	srv, err := getGoogleCalendarService(ctx, integration)
-	if err != nil {
-		return err
+	srv, err := googleServiceFor(ctx, creatorUserInfo.UserPostgresInfo.Id)
+	if err != nil || srv == nil {
+		return err // nil when the creator hasn't linked Google: nothing to do
 	}
 
 	// Fetch the existing event to get the current attendee list
 	existingEvent, err := srv.Events.Get("primary", googleEventId).Do()
 	if err != nil {
-		os.WriteFile("/tmp/gcal_leave_debug.log", []byte(fmt.Sprintf("Failed to Get event %s: %v\n", googleEventId, err)), 0644)
 		helpers.LogErrorWithContext(ctx, "business/RemoveAttendeeFromGoogleCalendarEvent failed to get event %s err: %+v", googleEventId, err)
 		return err
 	}
 
-	debugLog := fmt.Sprintf("Trying to remove user: %s from event %s\n", leavingUserEmail, googleEventId)
-	debugLog += fmt.Sprintf("Original attendees count: %d\n", len(existingEvent.Attendees))
-
-	// Filter out the leaving user's email (case-insensitive)
+	// Filter out the leaving user's email (case-insensitive). Addresses are
+	// never logged: this once wrote every guest's to a file in /tmp.
 	var updatedAttendees []*calendar.EventAttendee
 	for _, a := range existingEvent.Attendees {
-		debugLog += fmt.Sprintf(" - Seeing attendee: %s\n", a.Email)
-		if strings.ToLower(a.Email) != strings.ToLower(leavingUserEmail) {
+		if !strings.EqualFold(a.Email, leavingUserEmail) {
 			updatedAttendees = append(updatedAttendees, a)
-		} else {
-			debugLog += fmt.Sprintf("   -> MATCH! Removing %s\n", a.Email)
 		}
 	}
-
-	debugLog += fmt.Sprintf("Updated attendees count: %d\n", len(updatedAttendees))
 
 	// Patch with updated attendee list.
 	// ForceSendFields ensures we send the empty array if updatedAttendees is empty,
@@ -568,21 +734,10 @@ func RemoveAttendeeFromGoogleCalendarEvent(ctx context.Context, googleEventId st
 		ForceSendFields: []string{"Attendees"},
 	}
 	// ForceSendUpdates sends cancellation notifications to the removed attendee
-	responseEvent, err := srv.Events.Patch("primary", googleEventId, patch).SendUpdates("all").Do()
+	_, err = srv.Events.Patch("primary", googleEventId, patch).SendUpdates("all").Do()
 	if err != nil {
-		debugLog += fmt.Sprintf("PATCH FAILED: %v\n", err)
 		helpers.LogErrorWithContext(ctx, "business/RemoveAttendeeFromGoogleCalendarEvent failed to patch event %s err: %+v", googleEventId, err)
-	} else {
-		debugLog += fmt.Sprintf("PATCH SUCCESS! New attendee count returned by Google: %d\n", len(responseEvent.Attendees))
 	}
-
-	// Write log file
-	f, _ := os.OpenFile("/tmp/gcal_leave_debug.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if f != nil {
-		f.WriteString("-----------------------\n" + time.Now().String() + "\n" + debugLog)
-		f.Close()
-	}
-
 	return err
 }
 

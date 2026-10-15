@@ -63,6 +63,9 @@ type AddOrRemoveAttachmentInput struct {
 	SrcValue     string   `json:"src_value,omitempty"`
 	ChannelUuids []string `json:"channel_uuids,omitempty"`
 	ChatUuids    []string `json:"chat_uuids,omitempty"`
+	// Participants are a group conversation's people, for a file added to a
+	// group before its first message (fileAccessBusiness.MayAdd).
+	Participants []string `json:"participants,omitempty"`
 }
 
 type UserAndChannelFwdMessage struct {

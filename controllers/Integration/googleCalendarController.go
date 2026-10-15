@@ -7,14 +7,19 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
+	connectorBusiness "github.com/akashc777/OneCamp/business/Connector"
 	business "github.com/akashc777/OneCamp/business/Integration"
 	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 )
 
+// GetGoogleCalendarAuthUrl starts linking Google Calendar, through the
+// connectors flow: a one-shot state bound to this person and to Google
+// Calendar, which the connectors callback consumes. The state was the person's
+// own user id, which anyone can read off a profile, so one link could tie a
+// teammate's account to the sender's Google.
 func GetGoogleCalendarAuthUrl(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(model.UserInfo)
@@ -24,7 +29,12 @@ func GetGoogleCalendarAuthUrl(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url := business.GenerateGoogleCalendarAuthURL(ctx, &userInfo)
+	url, err := connectorBusiness.BuildAuthURL(ctx, userInfo.UserPostgresInfo.Id, connectorBusiness.ProviderCalendar, connectorBusiness.ReturnPageCalendar)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/GetGoogleCalendarAuthUrl err: %+v", err)
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Google Calendar can't be connected on this workspace yet."})
+		return
+	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg": "Generated Google Calendar Auth URL",
@@ -32,82 +42,6 @@ func GetGoogleCalendarAuthUrl(w http.ResponseWriter, r *http.Request) {
 			"url": url,
 		},
 	})
-}
-
-func GoogleCalendarCallback(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	var input struct {
-		Code  string `json:"code"`
-		State string `json:"state"`
-	}
-
-	err := json.NewDecoder(r.Body).Decode(&input)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/GoogleCalendarCallback Failed to parse the body of the req err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to parse the body of the req", "err": err})
-		return
-	}
-
-	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(model.UserInfo)
-	if !ok {
-		helpers.LogErrorWithContext(ctx, "controllers/GoogleCalendarCallback Failed getting user from context")
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
-		return
-	}
-
-	// Verify state matches user UUID
-	if input.State != userInfo.UserDgraphInfo.Uuid {
-		helpers.LogErrorWithContext(ctx, "controllers/GoogleCalendarCallback Invalid state parameter")
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid state"})
-		return
-	}
-
-	err = business.ExchangeGoogleCalendarCodeAndSave(ctx, input.Code, &userInfo)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to authenticate Google Calendar", "err": err})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Successfully linked Google Calendar!"})
-}
-
-func GoogleCalendarCallbackGet(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	code := r.URL.Query().Get("code")
-	state := r.URL.Query().Get("state")
-
-	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(model.UserInfo)
-	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
-		return
-	}
-
-	if state != userInfo.UserDgraphInfo.Uuid {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid state"})
-		return
-	}
-
-	err := business.ExchangeGoogleCalendarCodeAndSave(ctx, code, &userInfo)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to authenticate Google Calendar", "err": err})
-		return
-	}
-
-	frontendDomain := os.Getenv("FRONTEND_DOMAIN")
-	if frontendDomain == "" {
-		frontendDomain = os.Getenv("FE_HOST_DOMAIN")
-	}
-	if frontendDomain == "" {
-		frontendDomain = "localhost:3001"
-	}
-
-	protocol := "https://"
-	if strings.Contains(frontendDomain, "localhost") || strings.Contains(frontendDomain, "127.0.0.1") || strings.ToLower(os.Getenv("COOKIE_SECURE")) == "false" {
-		protocol = "http://"
-	}
-
-	redirectUrl := protocol + frontendDomain + "/app/calendar"
-	http.Redirect(w, r, redirectUrl, http.StatusFound)
 }
 
 func GetGoogleCalendarStatus(w http.ResponseWriter, r *http.Request) {
@@ -130,9 +64,14 @@ func GetGoogleCalendarStatus(w http.ResponseWriter, r *http.Request) {
 	// For now, I'll fetch it from the domain directly or assume business has it.
 
 	taskSyncEnabled := false
+	accountEmail := ""
 	integration, err := business.GetGoogleCalendarIntegration(ctx, &userInfo)
 	if err == nil && integration != nil {
 		taskSyncEnabled = integration.TaskSyncEnabled
+		if isConnected {
+			// "Connected as maya@outlook.com": which Google account it is.
+			accountEmail = business.GoogleCalendarAccount(integration)
+		}
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
@@ -140,6 +79,7 @@ func GetGoogleCalendarStatus(w http.ResponseWriter, r *http.Request) {
 		"data": map[string]interface{}{
 			"isConnected":     isConnected,
 			"taskSyncEnabled": taskSyncEnabled,
+			"accountEmail":    accountEmail,
 		},
 	})
 }

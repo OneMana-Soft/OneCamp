@@ -105,6 +105,13 @@ func GetClientConfig(w http.ResponseWriter, r *http.Request) {
 			// FrontendTranscriber reads this instead of a build-time env var,
 			// so an admin can switch transcription on/off without a rebuild.
 			"transcription_mode": transcriptionBusiness.Mode(),
+			// Where call audio goes while a call is transcribed (browser: each
+			// person's browser sends it to its speech service), so the notice in
+			// every call, and the green room, can say so before anyone turns it
+			// on; and the workspace's language for the browser's recogniser, ""
+			// when the admin set none (then each browser uses its person's).
+			"transcription_where":    transcriptionBusiness.Where(),
+			"transcription_language": transcriptionBusiness.STTLanguage(),
 			// Which OPTIONAL subsystems this server actually has, so the client can
 			// hide what it cannot reach. A button that calls an endpoint which is not
 			// there is worse than no button, and two situations produce exactly that:

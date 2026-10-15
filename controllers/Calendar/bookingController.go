@@ -5,26 +5,33 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 
 	business "github.com/akashc777/OneCamp/business/Calendar"
 	"github.com/akashc777/OneCamp/helpers"
+	customMiddleware "github.com/akashc777/OneCamp/middleware"
 	bookingModel "github.com/akashc777/OneCamp/models/postgres/Booking"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/akashc777/OneCamp/models/redis/registry"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
 // writeAvailabilityError answers a request the person can fix with its text,
-// a missing page with 404, and anything else with a retry.
+// a missing page with 404, a calendar that couldn't be checked with a retry
+// that says so, and anything else with a retry.
 func writeAvailabilityError(w http.ResponseWriter, r *http.Request, where string, err error) {
 	var ae *business.AvailabilityError
+	var busy *business.PageBusyError
 	switch {
+	case errors.As(err, &busy):
+		customMiddleware.WriteRateLimited(w, busy.Limit, registry.PublicReadRate, "This page is very busy right now. Wait a minute and try again.")
 	case errors.As(err, &ae):
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": ae.Error()})
 	case errors.Is(err, business.ErrNoPage):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "This booking page isn't available."})
+	case errors.Is(err, business.ErrCalendarUnread):
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't check the calendar. Try again in a moment."})
 	default:
 		helpers.LogErrorWithContext(r.Context(), "controllers/Calendar/%s err: %+v", where, err)
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Something went wrong. Try again in a moment."})
@@ -81,12 +88,13 @@ func SaveMyBookingPage(w http.ResponseWriter, r *http.Request) {
 		writeAvailabilityError(w, r, "SaveMyBookingPage", err)
 		return
 	}
-	publicCache.forget(page.Slug)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": page})
 }
 
-// DeleteMyBookingPage deletes one of the person's booking pages; bookings
-// already made stay on the calendar. POST /event/bookingPages/delete {id}
+// DeleteMyBookingPage deletes one of the person's booking pages. While
+// bookings made through it are still to come it answers 409 and keeps it:
+// switching it off keeps them and their guests' links.
+// POST /event/bookingPages/delete {id}
 func DeleteMyBookingPage(w http.ResponseWriter, r *http.Request) {
 	userInfo := r.Context().Value(helpers.UserInfoContextKey).(model.UserInfo)
 	var in struct {
@@ -101,7 +109,12 @@ func DeleteMyBookingPage(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't one of your pages."})
 		return
 	}
-	ok, err := bookingModel.DeletePage(userInfo.UserPostgresInfo.Id, id)
+	ok, err := business.DeleteBookingPage(r.Context(), userInfo.UserPostgresInfo.Id, id)
+	var held *business.PageHasBookingsError
+	if errors.As(err, &held) {
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": held.Error()})
+		return
+	}
 	if err != nil {
 		writeAvailabilityError(w, r, "DeleteMyBookingPage", err)
 		return
@@ -110,79 +123,22 @@ func DeleteMyBookingPage(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That isn't one of your pages."})
 		return
 	}
-	publicCache.clear()
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Deleted"})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Deleted", "data": map[string]int{"upcoming_bookings": 0}})
 }
 
-// publicCache keeps a page's slots for a minute. Every public look reads the
-// owner's calendars (Google's too), and a visitor flicking between weeks, or
-// someone hammering the page, shouldn't cost a Google call each time. A
-// booking or an edit to the page drops its entries.
-var publicCache = &slotCache{entries: map[string]slotEntry{}}
-
-type slotEntry struct {
-	slug    string
-	page    *business.PublicPage
-	expires time.Time
-}
-
-type slotCache struct {
-	mu      sync.Mutex
-	entries map[string]slotEntry
-}
-
-func (c *slotCache) get(key string, now time.Time) *business.PublicPage {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if e, ok := c.entries[key]; ok && now.Before(e.expires) {
-		return e.page
-	}
-	return nil
-}
-
-func (c *slotCache) put(key, slug string, p *business.PublicPage, now time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(c.entries) > 2000 {
-		c.entries = map[string]slotEntry{}
-	}
-	c.entries[key] = slotEntry{slug: slug, page: p, expires: now.Add(time.Minute)}
-}
-
-func (c *slotCache) forget(slug string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for k, e := range c.entries {
-		if e.slug == slug {
-			delete(c.entries, k)
-		}
-	}
-}
-
-func (c *slotCache) clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.entries = map[string]slotEntry{}
-}
-
-// GetPublicBookingPage is a booking page and its free slots, for anyone.
-// GET /public/book/{slug}?from=&to=
+// GetPublicBookingPage is a booking page and its free slots, for anyone: from
+// the start of the day `from` falls on, in the owner's zone, for 31 days or to
+// the page's horizon (`to` is no longer read). Limited per address and per
+// page (business, when an answer is worked out afresh), and kept a minute per
+// page and day (business).
+// GET /public/book/{slug}?from=
 func GetPublicBookingPage(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
-	slug := business.NormaliseSlug(chi.URLParam(r, "slug"))
-	from := timeParam(r, "from", now).Truncate(time.Hour)
-	to := timeParam(r, "to", from.Add(14*24*time.Hour)).Truncate(time.Hour)
-	key := slug + "|" + from.Format(time.RFC3339) + "|" + to.Format(time.RFC3339)
-	if p := publicCache.get(key, now); p != nil {
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": p})
-		return
-	}
-	page, err := business.GetPublicPage(r.Context(), slug, from, to, now)
+	page, err := business.GetPublicPage(r.Context(), chi.URLParam(r, "slug"), timeParam(r, "from", now), now)
 	if err != nil {
 		writeAvailabilityError(w, r, "GetPublicBookingPage", err)
 		return
 	}
-	publicCache.put(key, slug, page, now)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": page})
 }
 
@@ -204,13 +160,11 @@ func BookPublicSlot(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't book that time."})
 		return
 	}
-	slug := business.NormaliseSlug(chi.URLParam(r, "slug"))
-	booked, err := business.Book(r.Context(), slug, in.BookInput, time.Now())
+	booked, err := business.Book(r.Context(), chi.URLParam(r, "slug"), in.BookInput, time.Now())
 	if err != nil {
 		writeAvailabilityError(w, r, "BookPublicSlot", err)
 		return
 	}
-	publicCache.forget(slug)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": booked})
 }
 
@@ -233,6 +187,5 @@ func CancelPublicBooking(w http.ResponseWriter, r *http.Request) {
 		writeAvailabilityError(w, r, "CancelPublicBooking", err)
 		return
 	}
-	publicCache.forget(view.Slug)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": view})
 }

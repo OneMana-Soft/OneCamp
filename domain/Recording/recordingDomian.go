@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -55,7 +56,7 @@ func GetDgraphChannelRecordingInfoByEgressId(ctx context.Context, egressId strin
 
 	dgraphRecording, err = dgraphModels.GetDgraphRecordingInfo(ctx, query, variables)
 
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrNotFound) {
 		helpers.LogErrorWithContext(ctx,
 			"domain/GetDgraphChannelRecordingInfoByEgressId Failed to get recording in dgraph err: %+v",
 			err,
@@ -85,7 +86,7 @@ func GetDgraphDmRecordingInfoByEgressId(ctx context.Context, egressId string, us
 
 	dgraphRecording, err = dgraphModels.GetDgraphRecordingInfo(ctx, query, variables)
 
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrNotFound) {
 		helpers.LogErrorWithContext(ctx,
 			"domain/GetDgraphDmRecordingInfoByEgressId Failed to get recording in dgraph err: %+v",
 			err,
@@ -96,6 +97,60 @@ func GetDgraphDmRecordingInfoByEgressId(ctx context.Context, egressId string, us
 
 	return
 
+}
+
+// EndRecording writes the end of the recording with this egress id: when it
+// ended, its length, size and status. Nothing is written for an egress id no
+// recording here has (its webhook was for another server's call).
+func EndRecording(ctx context.Context, egressID string, fields map[string]interface{}) error {
+	query := `query Recording($id: string) {
+		recording as var(func: eq(recording_egress_id, $id)) @filter(has(recording_stared_at) AND has(recording_obj_key))
+	}`
+	return dgraphModels.SetFoundRecordingsFields(ctx, query, map[string]string{"$id": egressID}, "recording", fields)
+}
+
+// playFields is what the player needs to know about a recording: whether it
+// has ended, how long it is, how it ended, and whether it is a transcript with
+// no media. Not filtered by ending, so the player can say "still recording"
+// rather than "not found".
+const playFields = `
+						recording_egress_id
+						recording_obj_key
+						recording_ended_at
+						recording_duration
+						recording_transcript_only
+						recording_status`
+
+// ErrNotFound: no recording matched (any other error means the read failed).
+var ErrNotFound = dgraphModels.ErrNotFound
+
+// GetChannelRecordingForPlay answers a channel's recording by egress id for
+// the player, with the asker's membership of the channel. A recording that is
+// deleted or archived is not found.
+func GetChannelRecordingForPlay(ctx context.Context, egressId string, userDgraphUID string) (*dgraphStruct.DgraphRecording, error) {
+	query := `query RecordingInfo($id: string, $userUid: string){
+				recordingInfo(func: eq(recording_egress_id, $id)) @filter(not gt(recording_deleted_at, "1970-01-01T00:00:00Z")) {` + playFields + `
+						recording_channel {
+							ch_uuid
+							ch_is_member: count(ch_members @filter(uid($userUid)))
+						}
+				}
+			}`
+	return dgraphModels.GetDgraphRecordingInfo(ctx, query, map[string]string{"$id": egressId, "$userUid": userDgraphUID})
+}
+
+// GetDmRecordingForPlay is GetChannelRecordingForPlay for a DM's or a group's
+// recording.
+func GetDmRecordingForPlay(ctx context.Context, egressId string, userDgraphUID string) (*dgraphStruct.DgraphRecording, error) {
+	query := `query RecordingInfo($id: string, $userUid: string){
+				recordingInfo(func: eq(recording_egress_id, $id)) @filter(not gt(recording_deleted_at, "1970-01-01T00:00:00Z")) {` + playFields + `
+						recording_dm {
+							dm_grouping_id
+							dm_is_member: count(dm_participants @filter(uid($userUid)))
+						}
+				}
+			}`
+	return dgraphModels.GetDgraphRecordingInfo(ctx, query, map[string]string{"$id": egressId, "$userUid": userDgraphUID})
 }
 
 // GetRecordingEgressIdsOlderThan returns egress IDs of completed recordings older than cutoff.

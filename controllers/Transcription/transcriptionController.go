@@ -28,7 +28,7 @@ import (
 
 // GetConfig handles GET /admin/transcription/config.
 func GetConfig(w http.ResponseWriter, r *http.Request) {
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.GetStatus()})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.GetStatus(r.Context())})
 }
 
 // UpdateConfig handles POST /admin/transcription/config. Partial: omitted
@@ -105,6 +105,10 @@ func UpdateConfig(w http.ResponseWriter, r *http.Request) {
 		STTAPIKey:         body.STTAPIKey,
 		GoogleCredentials: body.GoogleCredentials,
 	}); err != nil {
+		if helpers.IsSecretReentry(err) {
+			helpers.WriteSecretAwareBadRequest(w, err)
+			return
+		}
 		helpers.LogErrorWithContext(ctx, "controllers/Transcription/UpdateConfig err: %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to save transcription config"})
 		return
@@ -140,7 +144,7 @@ func UpdateConfig(w http.ResponseWriter, r *http.Request) {
 			auditBusiness.SecretChangeSummary("Google credentials", body.GoogleCredentials), nil)
 	}
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.GetStatus()})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.GetStatus(r.Context())})
 }
 
 // GetAgentConfig handles GET /livekit/transcription-config — read by the Python
@@ -149,6 +153,26 @@ func UpdateConfig(w http.ResponseWriter, r *http.Request) {
 // surface allowed to return decrypted STT secrets.
 func GetAgentConfig(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, business.GetAgentConfig())
+}
+
+// AgentHeartbeat handles POST /livekit/agent-heartbeat — the transcription
+// agent saying it is running, every 30 seconds (internal-secret gated). The
+// admin card and Test read it, because a workspace could choose server-side
+// transcription on an install where no agent ran, and nothing said so.
+func AgentHeartbeat(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		LiveKit bool `json:"livekit"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
+		return
+	}
+	if err := business.RecordAgentHeartbeat(r.Context(), body.LiveKit); err != nil {
+		helpers.LogErrorWithContext(r.Context(), "controllers/AgentHeartbeat could not record: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "could not record the heartbeat"})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "ok"})
 }
 
 // TestConfig handles POST /admin/transcription/test — runs a live

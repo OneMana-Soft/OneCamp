@@ -62,3 +62,16 @@ func TestFormatWhen(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// CAL-BUG-3 on this edition: deleting a page deletes its bookings, so a page
+// with bookings still to come is kept, and the owner is told what to do.
+func TestAPageWithBookingsSaysToSwitchItOff(t *testing.T) {
+	for n, want := range map[int]string{
+		1: "This page has 1 upcoming booking. Switch it off instead: its link stops working, and its guests can still cancel.",
+		2: "This page has 2 upcoming bookings. Switch it off instead: its link stops working, and its guests can still cancel.",
+	} {
+		if got := (&PageHasBookingsError{Upcoming: n}).Error(); got != want {
+			t.Errorf("%d: %q", n, got)
+		}
+	}
+}

@@ -72,10 +72,12 @@ type UserTokenOutput struct {
 }
 
 type InputMakeVideoChatCall struct {
-	UserUuid     string `json:"user_uuid,omitempty"`
-	GrpUuid      string `json:"grp_id,omitempty"`
-	AudioEnabled bool   `json:"audio_enabled,omitempty"`
-	VideoEnabled bool   `json:"video_enabled,omitempty"`
+	UserUuid string `json:"user_uuid,omitempty"`
+	GrpUuid  string `json:"grp_id,omitempty"`
+	// Language is what the person speaks (their browser's, BCP-47), for the
+	// server's transcriber. audio_enabled and video_enabled are still sent and
+	// no longer read (see InputMakeVideoChannelCall).
+	Language string `json:"language,omitempty"`
 }
 
 type InputStartVideoChatCallRecording struct {

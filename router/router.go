@@ -271,14 +271,15 @@ func Routes() http.Handler {
 	// reason (disabled / invalid / expired / revoked) returns a uniform 404 so
 	// there is no oracle. The 32-byte link token makes brute force infeasible.
 	// Booking pages: anyone may look at free slots and book one. Booking and
-	// cancelling are limited per address; looking is cached per page.
+	// cancelling are limited per address. Looking is limited per address and
+	// per page, every GET counted, and its answer is cached per page and day.
 	// Intake forms: anyone with the link fills one in; each answer set
 	// becomes a task. Sending is limited per address.
 	router.Get("/public/form/{token}", formController.GetPublicForm)
 	router.With(customMiddleware.IPRateLimit("form", 20, "Too many forms sent from here. Try again later.")).With(customMiddleware.BodyLimit(64<<10)).Post("/public/form/{token}", formController.SubmitPublicForm)
-	router.Get("/public/book/{slug}", eventController.GetPublicBookingPage)
+	router.With(customMiddleware.BookingPageReadLimit()).Get("/public/book/{slug}", eventController.GetPublicBookingPage)
 	router.With(customMiddleware.IPRateLimit("booking", 10, "Too many bookings from here. Try again later.")).With(customMiddleware.BodyLimit(8<<10)).Post("/public/book/{slug}", eventController.BookPublicSlot)
-	router.With(customMiddleware.LoginRateLimit("booking-cancel")).Get("/public/booking/{token}", eventController.GetPublicBooking)
+	router.With(customMiddleware.BookingLinkReadLimit()).Get("/public/booking/{token}", eventController.GetPublicBooking)
 	router.With(customMiddleware.LoginRateLimit("booking-cancel")).Post("/public/booking/{token}/cancel", eventController.CancelPublicBooking)
 	router.With(customMiddleware.LoginRateLimit("guest")).Get("/guest/meet/{token}", guestController.GetGuestMeeting)
 	router.With(customMiddleware.GuestRateLimit(customMiddleware.GuestJoin)).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/meet/{token}/join", guestController.JoinGuestMeeting)
@@ -874,6 +875,13 @@ func Routes() http.Handler {
 		// so the host's dgraph info is loaded for the host token). The guest
 		// JOIN side is public and lives in the unauthenticated group above.
 		r.Post("/meet/instant", guestController.CreateInstantMeeting)
+		// The meeting's stable page, for the person who started it and nobody
+		// else: what it has on, the host's token again (leaving or reloading
+		// the page that started it lost the token for good), and another guest
+		// link (optionally turning off the earlier ones).
+		r.Get("/meet/instant/{meeting_id}", guestController.GetInstantMeeting)
+		r.Post("/meet/instant/{meeting_id}/join", guestController.RejoinInstantMeeting)
+		r.Post("/meet/instant/{meeting_id}/link", guestController.NewInstantMeetingLink)
 		// Mint a scoped, read-only external share link for a doc/board the
 		// member can edit (Phase 2).
 		r.Post("/guest/links", guestController.CreateResourceGuestLink)
@@ -1293,10 +1301,26 @@ func Routes() http.Handler {
 	// The livekit router is mounted UNAUTHENTICATED, because the webhook and the
 	// agent endpoints are server to server. This route is the exception, so it
 	// carries the session middleware explicitly rather than inheriting it.
-	livekitRouter.With(customMiddleware.CSRFMiddleware, customMiddleware.VerifyAuthOnlyPostgres).
+	//
+	// The FULL session (VerifyAuth), not VerifyAuthOnlyPostgres: that one never
+	// loads the caller's graph id, which these use as their call identity, so
+	// every request answered 401 and browser transcripts were never kept.
+	livekitRouter.With(customMiddleware.CSRFMiddleware, customMiddleware.VerifyAuth).
 		Post("/my-transcript", livekitController.SaveMyTranscript)
-	livekitRouter.With(customMiddleware.CSRFMiddleware, customMiddleware.VerifyAuthOnlyPostgres).
+	livekitRouter.With(customMiddleware.CSRFMiddleware, customMiddleware.VerifyAuth).
 		Post("/my-capability", livekitController.ReportTranscriptionCapability)
+	// A member in a call turns its transcription on or off, for everyone in
+	// it (the one switch behind captions and the kept transcript), and a host
+	// puts someone out of a call. Session-authenticated like the above.
+	livekitRouter.With(customMiddleware.CSRFMiddleware, customMiddleware.VerifyAuth).
+		Post("/transcription", livekitController.SetCallTranscription)
+	livekitRouter.With(customMiddleware.CSRFMiddleware, customMiddleware.VerifyAuth).
+		Post("/remove-participant", livekitController.RemoveCallParticipant)
+	// The transcription agent says it is running, every 30 seconds, so the
+	// admin card and Test can tell server-side transcription has nothing to
+	// do it. Internal-secret gated.
+	livekitRouter.With(customMiddleware.VerifyInternalServiceRequest).
+		Post("/agent-heartbeat", transcriptionController.AgentHeartbeat)
 	// The Python transcription agent fetches its runtime config (mode, STT
 	// provider, decrypted keys) here at room-join. Internal-secret gated:
 	// this is the only surface that returns decrypted STT secret material,
@@ -1306,7 +1330,6 @@ func Routes() http.Handler {
 	router.Mount("/livekit", livekitRouter)
 
 	userRouter.Group(func(r chi.Router) {
-		r.Get("/integration/google-calendar/callback", integrationController.GoogleCalendarCallbackGet)
 		r.Get("/profile", userController.GetLoggedInUserProfile)
 		r.Get("/sidebarNav", userController.GetDgraphUserInfoByUUIDForSidebarNav)
 		r.Get("/profile/{user_id}", userController.GetProfileByUserId)
@@ -1496,6 +1519,9 @@ func Routes() http.Handler {
 		r.Post("/stopCallRecording", channelController.StopVideoChannelCallRecording)
 		r.Get("/getRecordingList/{channel_uuid}", channelController.GetAllChannelRecordingList)
 		r.Get("/getRecordingURL/{channel_uuid}/{egress_id}", userController.GetChannelRecordingURL)
+		// The green room's read of the channel's call: on or not, recorded or
+		// transcribed and by whom, who is in it.
+		r.Get("/callState/{channel_uuid}", livekitController.GetChannelCallState)
 		r.Get("/getRecordingTranscript/{channel_uuid}/{egress_id}", channelController.GetChannelRecordingTranscript)
 		r.Post("/deleteRecording/{egressId}", recordingController.HandleDeleteChannelRecording)
 
@@ -1603,6 +1629,7 @@ func Routes() http.Handler {
 		r.Post("/stopCallRecording", chatController.StopVideoCallRecordingForGroup)
 		r.Get("/getRecordingList/{grp_id}", chatController.GetGrpChatRecordingList)
 		r.Get("/getRecordingURL/{grp_id}/{egress_id}", userController.GetGrpChatRecordingURL)
+		r.Get("/callState/{grp_id}", livekitController.GetGroupCallState)
 		r.Get("/getRecordingTranscript/{grp_id}/{egress_id}", chatController.GetGrpChatRecordingTranscript)
 		r.Post("/deleteRecording/{egressId}", recordingController.HandleDeleteChatRecording)
 
@@ -1637,6 +1664,7 @@ func Routes() http.Handler {
 		r.Post("/stopCallRecording", chatController.StopVideoCallRecordingForChat)
 		r.Get("/getRecordingList/{chat_uuid}", chatController.GetChatRecordingList)
 		r.Get("/getRecordingURL/{chat_uuid}/{egress_id}", userController.GetChatRecordingURL)
+		r.Get("/callState/{user_uuid}", livekitController.GetDMCallState)
 		r.Get("/getRecordingTranscript/{chat_uuid}/{egress_id}", chatController.GetChatRecordingTranscript)
 		r.Post("/deleteRecording/{egressId}", recordingController.HandleDeleteChatRecording)
 	})
@@ -1697,6 +1725,7 @@ func Routes() http.Handler {
 
 	eventRouter.Group(func(r chi.Router) {
 		r.Get("/getEvents", eventController.GetEventsListController)
+		r.Get("/getEvent/{eventId}", eventController.GetEventController)
 		r.Post("/createEvent", eventController.CreateEventController)
 		r.Post("/updateEvent/{eventId}", eventController.UpdateEventController)
 		r.Delete("/deleteEvent/{eventId}", eventController.DeleteEventController)
@@ -1708,8 +1737,10 @@ func Routes() http.Handler {
 	})
 
 	integrationRouter.Group(func(r chi.Router) {
+		// Google Calendar links through the connectors flow, whose one-shot state
+		// is bound to the person and the provider (GET /connector/oauth/callback).
+		// Its own callbacks took the person's user id as the state.
 		r.With(customMiddleware.NoPersonalAccountsInDemo).Get("/google-calendar/auth-url", integrationController.GetGoogleCalendarAuthUrl)
-		r.With(customMiddleware.NoPersonalAccountsInDemo).Post("/google-calendar/callback", integrationController.GoogleCalendarCallback) // Using POST instead of GET if body contains code
 		r.Get("/google-calendar/status", integrationController.GetGoogleCalendarStatus)
 		r.Post("/google-calendar/unlink", integrationController.UnlinkGoogleCalendar)
 		r.Post("/google-calendar/sync-task", integrationController.UpdateGoogleCalendarSyncTask)
