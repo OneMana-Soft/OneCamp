@@ -71,15 +71,12 @@ func GetUnifiedGlobalSearchPage(ctx context.Context, userUUID string, userEmail 
 		channelUUIDs = append(channelUUIDs, ch.Uuid)
 	}
 
+	// The person's own projects only. A project of a team they're in isn't
+	// theirs to read unless they're in it too, and its tasks, comments, files
+	// and name were found through the team.
 	projectUUIDMap := make(map[string]bool)
 	for _, proj := range userProjects {
 		projectUUIDMap[proj.Uuid] = true
-	}
-
-	for _, team := range userTeams {
-		for _, proj := range team.Projects {
-			projectUUIDMap[proj.Uuid] = true
-		}
 	}
 
 	var projectUUIDs []string

@@ -516,6 +516,7 @@ func GetBasicDgraphProjectInfoWithGivenMemberUUID(ctx context.Context, projectUU
 				projectInfo(func: eq(project_uuid, $id)) {
 					uid
 					project_uuid
+					project_is_member: count(project_members @filter(uid($userUid)))
 					project_is_admin: count(project_admins @filter(uid($userUid)))
 					project_members @filter(eq(user_uuid, $memberUuid)){
 						uid

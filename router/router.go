@@ -174,6 +174,9 @@ func Routes() http.Handler {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
+	// Whether every service the server depends on answers right now; for make
+	// verify and wait-ready, through docker compose exec. Loopback only.
+	router.Get("/health/ready", helpers.ServeReadiness)
 
 	// Public email auth routes (no middleware, but rate-limited per IP to
 	// blunt brute-force and bcrypt-CPU DoS — emails and LDAP each get their
@@ -914,10 +917,12 @@ func Routes() http.Handler {
 		r.Post("/{id}/query-plan", dataTableController.QueryPlan)
 		r.Post("/{id}/rows", dataTableController.CreateRow)
 		r.Post("/{id}/rows/{rowId}/update", dataTableController.UpdateRow)
+		r.Post("/{id}/rows/{rowId}/patch", dataTableController.PatchRow)
 		r.Post("/{id}/rows/{rowId}/links", dataTableController.ChangeLinks)
 		r.Post("/{id}/rows/{rowId}/delete", dataTableController.DeleteRow)
 		r.Post("/{id}/fields", dataTableController.CreateField)
 		r.Post("/{id}/fields/{fieldId}/update", dataTableController.UpdateField)
+		r.Post("/{id}/fields/{fieldId}/convert-preview", dataTableController.PreviewConversion)
 		r.Post("/{id}/fields/{fieldId}/delete", dataTableController.DeleteField)
 		r.Post("/{id}/fields/{fieldId}/ai-fill", dataTableController.FillAIColumn)
 		r.Post("/{id}/formula/preview", dataTableController.PreviewFormula)

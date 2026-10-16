@@ -65,10 +65,13 @@ type computed struct {
 	own     uuid.UUID
 	fields  []*model.Field
 	types   map[string]string
+	live    map[string]bool // the table's fields, by id: a read keeps their cells alone
 	budget  *formula.Budget
 	program *formula.Program
 	links   []tableLink
 	rollups []*rollupField
+	// items is the relation fields linking to OneCamp items (itemLinks.go).
+	items   []itemField
 	targets map[uuid.UUID]*target
 	// order is the targets in the order the fields name them.
 	order    []uuid.UUID
@@ -151,6 +154,7 @@ func planComputedFor(ctx context.Context, fields []*model.Field, keep map[string
 	c := &computed{
 		fields:   fields,
 		types:    make(map[string]string, len(fields)),
+		live:     make(map[string]bool, len(fields)),
 		budget:   formula.NewBudget(),
 		targets:  map[uuid.UUID]*target{},
 		problems: map[string]string{},
@@ -161,6 +165,7 @@ func planComputedFor(ctx context.Context, fields []*model.Field, keep map[string
 	for _, f := range fields {
 		c.own = f.TableId
 		c.types[f.Id.String()] = f.Type
+		c.live[f.Id.String()] = true
 		byID[f.Id.String()] = f
 	}
 	kept := func(f *model.Field) bool { return keep == nil || keep[f.Id.String()] }
@@ -168,6 +173,9 @@ func planComputedFor(ctx context.Context, fields []*model.Field, keep map[string
 		if l, ok := linkOf(f); ok && kept(f) {
 			c.links = append(c.links, l)
 			c.target(ctx, l.table)
+		}
+		if target, ok := itemsOf(f); ok && kept(f) {
+			c.items = append(c.items, itemField{field: f, target: target})
 		}
 	}
 	for _, f := range fields {
@@ -190,8 +198,8 @@ func planComputedFor(ctx context.Context, fields []*model.Field, keep map[string
 }
 
 // computedNeeds is the computed fields that reading the fields ids takes, by
-// id: those of them that are computed, the formulas, links and rollups those
-// read, and the relations the rollups add up.
+// id: those of them that are computed, the formulas, links (to tables' rows
+// and to items) and rollups those read, and the relations the rollups add up.
 func computedNeeds(fields []*model.Field, ids []string) map[string]bool {
 	byID := make(map[string]*model.Field, len(fields))
 	for _, f := range fields {
@@ -212,7 +220,7 @@ func computedNeeds(fields []*model.Field, ids []string) map[string]bool {
 			for _, ref := range formula.Refs(storedFormula(f)) {
 				need(strings.TrimPrefix(ref, "#"))
 			}
-		} else if _, isLink := linkOf(f); isLink {
+		} else if readsLinks(f) {
 			keep[id] = true
 		}
 	}
@@ -226,7 +234,7 @@ func computedNeeds(fields []*model.Field, ids []string) map[string]bool {
 // a value of its own, or a formula that doesn't read links or rollups.
 func labelField(fields []*model.Field) *model.Field {
 	for _, f := range fields {
-		if _, isLink := linkOf(f); isLink || f.Type == model.FieldRollup {
+		if readsLinks(f) || f.Type == model.FieldRollup {
 			continue
 		}
 		if f.Type == model.FieldFormula && readsComputed(f, fields) {
@@ -309,6 +317,9 @@ func rollupProblem(how string, of *model.Field, fields []*model.Field) string {
 	if _, isLink := linkOf(of); isLink {
 		return "A rollup can't add up links to another table"
 	}
+	if _, isItems := itemsOf(of); isItems {
+		return "A rollup can't add up links to docs, tasks, boards, projects or people"
+	}
 	if of.Type == model.FieldFormula && readsComputed(of, fields) {
 		return "A rollup can't add up a formula that reads links or rollups"
 	}
@@ -323,8 +334,8 @@ func rollupProblem(how string, of *model.Field, fields []*model.Field) string {
 }
 
 // readsComputed is whether a formula reads, itself or through other
-// formulas, a field linking to a table or a rollup: values a rollup's read of
-// another table doesn't work out.
+// formulas, a field linking to a table or to items, or a rollup: values a
+// rollup's read of another table doesn't work out.
 func readsComputed(f *model.Field, fields []*model.Field) bool {
 	byID := make(map[string]*model.Field, len(fields))
 	for _, g := range fields {
@@ -337,7 +348,7 @@ func readsComputed(f *model.Field, fields []*model.Field) bool {
 			return false
 		}
 		seen[g.Id.String()] = true
-		if _, isLink := linkOf(g); isLink || g.Type == model.FieldRollup {
+		if readsLinks(g) || g.Type == model.FieldRollup {
 			return true
 		}
 		if g.Type != model.FieldFormula {
@@ -353,9 +364,20 @@ func readsComputed(f *model.Field, fields []*model.Field) bool {
 	return reads(f)
 }
 
-// apply works out a page of rows' computed cells and splices them in.
+// apply works out a page of rows' computed cells and splices them in. Each
+// row keeps the cells of the table's fields alone: a deleted field's stay
+// stored (DeleteField only marks the field), and went to every reader, guests
+// and the AI among them.
 func (c *computed) apply(ctx context.Context, rows []*model.Row) {
-	if (c.program.Empty() && len(c.links) == 0 && len(c.rollups) == 0) || len(rows) == 0 {
+	if c.program.Empty() && len(c.links) == 0 && len(c.rollups) == 0 && len(c.items) == 0 {
+		for _, r := range rows {
+			if r != nil {
+				r.Values = keepCells(r.Values, c.live)
+			}
+		}
+		return
+	}
+	if len(rows) == 0 {
 		return
 	}
 	page := make([]*pageRow, 0, len(rows))
@@ -369,13 +391,37 @@ func (c *computed) apply(ctx context.Context, rows []*model.Row) {
 	now, loc := time.Now(), zoneFrom(ctx)
 	c.readLinks(ctx, ids)
 	c.loadLinked(ctx, ids, now, loc)
-	for _, pr := range page {
+	// Each row's links to items, by field, as stored; then named, all at once.
+	stored := make([][]itemRef, len(page)*len(c.items))
+	var wanted []itemRef
+	for i, pr := range page {
+		for j, it := range c.items {
+			refs, _ := parseItems(pr.raw(it.field.Id.String()), it.target)
+			stored[i*len(c.items)+j] = refs
+			wanted = append(wanted, refs...)
+		}
+	}
+	var names itemNames
+	if len(wanted) > 0 {
+		names = nameItems(ctx, wanted)
+	}
+	for i, pr := range page {
 		row := pr.row.Id
 		out := map[string]interface{}{}
 		values := map[string]formula.Value{}
 		for _, l := range c.links {
 			fid := l.field.Id.String()
 			refs, v := c.linkCell(l, row)
+			if len(refs) > 0 {
+				out[fid] = refs
+			} else {
+				out[fid] = nil
+			}
+			values[fid] = v
+		}
+		for j, it := range c.items {
+			fid := it.field.Id.String()
+			refs, v := names.cell(stored[i*len(c.items)+j])
 			if len(refs) > 0 {
 				out[fid] = refs
 			} else {
@@ -399,7 +445,7 @@ func (c *computed) apply(ctx context.Context, rows []*model.Row) {
 				out[id] = v.JSON()
 			}
 		}
-		pr.row.Values = withValues(pr.row.Values, pr.cells, out)
+		pr.row.Values = withValues(pr.row.Values, pr.cells, out, c.live)
 	}
 }
 
@@ -898,6 +944,17 @@ func newPageRow(r *model.Row) *pageRow {
 		at[m.key] = i // a key given twice reads as its last, as in encoding/json
 	}
 	return &pageRow{row: r, cells: cells, at: at}
+}
+
+// raw is a stored cell decoded, or nil when the row has none.
+func (p *pageRow) raw(id string) interface{} {
+	i, ok := p.at[id]
+	if !ok {
+		return nil
+	}
+	var v interface{}
+	_ = json.Unmarshal([]byte(p.row.Values[p.cells[i].value:p.cells[i].end]), &v)
+	return v
 }
 
 // cell is a stored cell as a formula reads it, and what reading it cost.

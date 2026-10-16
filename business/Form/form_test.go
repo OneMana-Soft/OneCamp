@@ -69,12 +69,25 @@ func TestCheckAnswers(t *testing.T) {
 		{"what": "x", "email": "a@b.co", "team": "Ops"},
 		{"what": "x", "email": "a@b.co", "when": "20/10/2026"},
 		{"what": "x", "email": "a@b.co", "n": "many"},
+		// Read as tables read numbers: neither of these is one.
+		{"what": "x", "email": "a@b.co", "n": "NaN"},
+		{"what": "x", "email": "a@b.co", "n": "Infinity"},
 		{"what": strings.Repeat("x", 301), "email": "a@b.co"},
 		{"what": []any{"x"}, "email": "a@b.co"},
 	}
 	for i, raw := range bad {
 		if _, err := CheckAnswers(fields(), raw); err == nil {
 			t.Errorf("case %d accepted", i)
+		}
+	}
+}
+
+// A number answer is read as tables read numbers people write: "1,200" and
+// "€40" are numbers, which ParseFloat refused, and NaN isn't.
+func TestNumberAnswersAsPeopleWriteThem(t *testing.T) {
+	for _, n := range []string{"1,200", "€40", " 12.5 "} {
+		if _, err := CheckAnswers(fields(), map[string]any{"what": "x", "email": "a@b.co", "n": n}); err != nil {
+			t.Errorf("%q: %v", n, err)
 		}
 	}
 }

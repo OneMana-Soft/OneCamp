@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -305,6 +306,46 @@ func AttachHandles(ctx context.Context, users []*dgraphStruct.DgraphUser) {
 	}
 }
 
+// profileSettle is how long after a change forgetProfile forgets a person's
+// cached profile a second time. A request that read the database just before
+// the change, and wrote what it read to the cache just after the first forget,
+// would otherwise serve the old row for the cache's whole hour: an admin's flag
+// after a demotion, an active account after a deactivation. That read takes
+// milliseconds; this is far longer.
+var profileSettle = 2 * time.Second
+
+// forgetProfile drops what is cached about each person: their account row,
+// which carries whether they are an admin and whether the account is active
+// (GetActiveUserWithAdminFlagByUserUUID, read on every authenticated request),
+// and their graph profile. It is the one way a change to either reaches the
+// next request at once, on whichever server takes it (the cache is shared), so
+// every write that changes who someone is or what they may do ends here. It
+// forgets once more after profileSettle, for a read that was in flight. That
+// second forget runs on the timer's own goroutine, where a panic would end the
+// server, so it goes through GoSafeNamed, which recovers and logs one.
+func forgetProfile(ctx context.Context, userUUIDs ...string) {
+	var ids []string
+	for _, id := range userUUIDs {
+		if id = strings.TrimSpace(id); id != "" && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	forget := func(ctx context.Context) {
+		for _, id := range ids {
+			_ = redisStore.Delete(ctx, registry.UserProfile, []string{id})
+			_ = redisStore.Delete(ctx, registry.UserDgraphProfile, []string{id})
+		}
+	}
+	forget(ctx)
+	later := context.WithoutCancel(ctx)
+	time.AfterFunc(profileSettle, func() {
+		helpers.GoSafeNamed("forgetProfile", func() { forget(later) })
+	})
+}
+
 func GetActiveUserWithAdminFlagByUserUUID(ctx context.Context, userUUID uuid.UUID) (user *models.User, err error) {
 	found, _ := redisStore.GetJSON(ctx, registry.UserProfile, []string{userUUID.String()}, &user)
 	if found {
@@ -465,21 +506,7 @@ func HardDeleteAdminUserByEmailId(ctx context.Context, emailId string, userUUID 
 		return
 	}
 
-	// Invalidate the cache for the demoted user
-	var targetUUID string
-	if len(userUUID) > 0 && userUUID[0] != "" {
-		targetUUID = userUUID[0]
-	} else {
-		if user, getErr := GetUserByEmailId(ctx, &emailId); getErr == nil && user != nil {
-			targetUUID = user.Id.String()
-		}
-	}
-
-	if targetUUID != "" {
-		_ = redisStore.Delete(ctx, registry.UserProfile, []string{targetUUID})
-		_ = redisStore.Delete(ctx, registry.UserDgraphProfile, []string{targetUUID})
-	}
-
+	adminRoleChanged(ctx, emailId, userUUID...)
 	return
 }
 
@@ -500,22 +527,20 @@ func CreateAdminUser(ctx context.Context, emailId string, userUUID ...string) (e
 		return
 	}
 
-	// Invalidate the cache for the promoted user
-	var targetUUID string
-	if len(userUUID) > 0 && userUUID[0] != "" {
-		targetUUID = userUUID[0]
-	} else {
-		if user, getErr := GetUserByEmailId(ctx, &emailId); getErr == nil && user != nil {
-			targetUUID = user.Id.String()
-		}
-	}
-
-	if targetUUID != "" {
-		_ = redisStore.Delete(ctx, registry.UserProfile, []string{targetUUID})
-		_ = redisStore.Delete(ctx, registry.UserDgraphProfile, []string{targetUUID})
-	}
-
+	adminRoleChanged(ctx, emailId, userUUID...)
 	return
+}
+
+// adminRoleChanged forgets the cached profile of every account a change to
+// emailID's admin role reaches. admin_users is keyed by address, so that is
+// whoever holds the address, and the account the caller already has in hand
+// (knownUUID) besides.
+func adminRoleChanged(ctx context.Context, emailID string, knownUUID ...string) {
+	ids := append([]string(nil), knownUUID...)
+	if user, err := GetUserByEmailId(ctx, &emailID); err == nil && user != nil {
+		ids = append(ids, user.Id.String())
+	}
+	forgetProfile(ctx, ids...)
 }
 
 // sameAddressFirst picks one account when a lookup by address finds more
@@ -910,22 +935,112 @@ func GetUsersListWhoDontBelongToTheProjectButBelongToTheTeam(ctx context.Context
 	return
 }
 
-func UpdateDgraphUserStatus(ctx context.Context, dgraphUserStatus *dgraphStruct.DgraphUserStatusEmoji, userUUID string) (err error) {
-	dgraphUserStatus.DType = []string{"Status"}
-	err = dgraphModels.UpdateUserEmojiStatus(ctx, dgraphUserStatus)
+// EmojiStatusesKept is how many statuses a person keeps: the one in force and
+// the last few before it, which the status menu offers again. Setting one
+// deletes the oldest beyond it.
+const EmojiStatusesKept = 5
 
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/UpdateDgraphUserStatus Failed to update status in dgraph err: %+v",
-			err,
-		)
-		return
+// emojiStatusOrder puts the status set last first. One set before set times
+// were kept (16 Oct 2026) has none and comes after every one that has. One
+// key only: Dgraph refuses a second key where the first ties beside a status
+// without one ("Arguments of different type can not be compared").
+const emojiStatusOrder = `orderdesc: status_user_emoji_set_at`
+
+// CurrentEmojiStatus is the edge every read takes a person's status by, with
+// $time as now: of their statuses that haven't ended, the one set last. A
+// status that ended later than a newer one once stood in its place, so a new
+// "30 min" status gave way to last week's on the next load. Setting or
+// clearing a status now ends every other one (SetUserEmojiStatus,
+// EndUserEmojiStatuses), so this is also the only one in force; the order
+// decides only where an older server left two.
+const CurrentEmojiStatus = `user_emoji_statuses @filter(gt(status_user_emoji_expiry_at, $time)) (` + emojiStatusOrder + `, first: 1) {
+						uid
+						status_user_emoji_id
+						status_user_emoji_desc
+						status_user_emoji_expiry_at
+						status_user_emoji_expiry_in
+					}`
+
+// statusOwner is the query block naming a person's node as `user`, or an
+// error for an id that isn't a person's (it is written into the query).
+func statusOwner(userUUID string) (string, error) {
+	if _, err := uuid.Parse(userUUID); err != nil {
+		return "", fmt.Errorf("not a person's id %q: %w", userUUID, err)
 	}
+	return fmt.Sprintf(`user as var(func: eq(user_uuid, %q))`, userUUID), nil
+}
 
-	// Invalidate cache
-	_ = redisStore.Delete(ctx, registry.UserDgraphProfile, []string{userUUID})
+// SetUserEmojiStatus makes status the person's status, in one transaction:
+// every status of theirs still in force ends at now, the new one is added,
+// set at now, and the oldest beyond EmojiStatusesKept are deleted.
+func SetUserEmojiStatus(ctx context.Context, userUUID string, status *dgraphStruct.DgraphUserStatusEmoji, now time.Time) error {
+	owner, err := statusOwner(userUUID)
+	if err != nil {
+		return err
+	}
+	at := now.UTC().Format(time.RFC3339Nano)
+	// The new one isn't in the graph yet, so the newest EmojiStatusesKept-1
+	// stay beside it.
+	query := fmt.Sprintf(`query {
+		%s
+		var(func: uid(user)) {
+			beyond as user_emoji_statuses (%s, offset: %d)
+		}
+		var(func: uid(user)) {
+			inForce as user_emoji_statuses @filter(gt(status_user_emoji_expiry_at, %q) AND NOT uid(beyond))
+		}
+	}`, owner, emojiStatusOrder, EmojiStatusesKept-1, at)
 
-	return
+	added := *status
+	added.Uid = "_:status"
+	added.DType = []string{"Status"}
+	setAt := now
+	added.SetAt = &setAt
+	set, err := json.Marshal([]any{
+		map[string]any{"uid": "uid(inForce)", "status_user_emoji_expiry_at": at},
+		map[string]any{"uid": "uid(user)", "user_emoji_statuses": []any{&added}},
+	})
+	if err != nil {
+		return err
+	}
+	del, err := json.Marshal([]any{
+		map[string]any{"uid": "uid(user)", "user_emoji_statuses": []any{map[string]string{"uid": "uid(beyond)"}}},
+		map[string]string{"uid": "uid(beyond)"},
+	})
+	if err != nil {
+		return err
+	}
+	if err = dgraphModels.UpsertEmojiStatuses(ctx, query, set, del); err != nil {
+		return err
+	}
+	forgetProfile(ctx, userUUID)
+	return nil
+}
+
+// EndUserEmojiStatuses clears a person's status: every status of theirs still
+// in force ends at now, in one transaction. Clear once ended only the status
+// that would end last, and an earlier one still in force took its place.
+func EndUserEmojiStatuses(ctx context.Context, userUUID string, now time.Time) error {
+	owner, err := statusOwner(userUUID)
+	if err != nil {
+		return err
+	}
+	at := now.UTC().Format(time.RFC3339Nano)
+	query := fmt.Sprintf(`query {
+		%s
+		var(func: uid(user)) {
+			inForce as user_emoji_statuses @filter(gt(status_user_emoji_expiry_at, %q))
+		}
+	}`, owner, at)
+	set, err := json.Marshal([]any{map[string]any{"uid": "uid(inForce)", "status_user_emoji_expiry_at": at}})
+	if err != nil {
+		return err
+	}
+	if err = dgraphModels.UpsertEmojiStatuses(ctx, query, set, nil); err != nil {
+		return err
+	}
+	forgetProfile(ctx, userUUID)
+	return nil
 }
 
 func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.DgraphUser) (newUserUid string, err error) {
@@ -947,9 +1062,7 @@ func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.Dgra
 		return
 	}
 
-	// Invalidate cache
-	_ = redisStore.Delete(ctx, registry.UserProfile, []string{dgraphUser.Uuid})
-	_ = redisStore.Delete(ctx, registry.UserDgraphProfile, []string{dgraphUser.Uuid})
+	forgetProfile(ctx, dgraphUser.Uuid)
 
 	return
 }
@@ -1034,13 +1147,7 @@ func GetActiveDgraphUserInfoByUUID(ctx context.Context, userUUID string) (dgraph
 					user_hobbies
 					user_device_connected
 					user_status
-					user_emoji_statuses @filter(gt(status_user_emoji_expiry_at, $time)) (orderdesc: status_user_emoji_expiry_at, first: 1) {
-						uid
-						status_user_emoji_id
-						status_user_emoji_desc
-						status_user_emoji_expiry_at
-						status_user_emoji_expiry_in
-					}
+					` + CurrentEmojiStatus + `
 					user_projects {
 						project_uuid
 						project_name
@@ -1110,10 +1217,7 @@ func GetActiveDgraphUserInfoByUUID(ctx context.Context, userUUID string) (dgraph
 // command delivery are scoped by it. Until it's dropped, someone removed from
 // a private channel keeps finding what's posted there.
 func InvalidateUserMemberships(ctx context.Context, userUUID string) {
-	if userUUID == "" {
-		return
-	}
-	_ = redisStore.Delete(ctx, registry.UserDgraphProfile, []string{userUUID})
+	forgetProfile(ctx, userUUID)
 }
 
 func GetAllUserEmojiStatusList(ctx context.Context, userUUID string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
@@ -1128,7 +1232,7 @@ func GetAllUserEmojiStatusList(ctx context.Context, userUUID string) (dgraphUser
 				userInfo(func: eq(user_uuid, $id)) {
 					uid
 					user_uuid
-					user_emoji_statuses @filter(gt(status_user_emoji_expiry_at, $time)) (orderdesc: status_user_emoji_expiry_at) {
+					user_emoji_statuses @filter(gt(status_user_emoji_expiry_at, $time)) (` + emojiStatusOrder + `) {
 						status_user_emoji_id
 						status_user_emoji_desc
 						status_user_emoji_expiry_at
@@ -1499,13 +1603,7 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID string) 
 						team_name
 						team_uuid
 					}
-					user_emoji_statuses @filter(gt(status_user_emoji_expiry_at, $time)) (orderdesc: status_user_emoji_expiry_at, first: 1) {
-						uid
-						status_user_emoji_id
-						status_user_emoji_desc
-						status_user_emoji_expiry_at
-						status_user_emoji_expiry_in
-					}
+					` + CurrentEmojiStatus + `
 					user_dms {
 						dm_grouping_id
 						dm_participants {
@@ -1516,13 +1614,7 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID string) 
 							user_profile_object_key
 							user_device_connected
 							user_status
-							user_emoji_statuses @filter(gt(status_user_emoji_expiry_at, $time)) (orderdesc: status_user_emoji_expiry_at, first: 1) {
-								uid
-								status_user_emoji_id
-								status_user_emoji_desc
-								status_user_emoji_expiry_at
-								status_user_emoji_expiry_in
-							}
+							` + CurrentEmojiStatus + `
 						}
 						dm_chats (orderdesc:chat_created_at, first: 1) {
 							chat_created_at
@@ -1625,12 +1717,7 @@ func GetDgraphUserInfoByUUID(ctx context.Context, userUUID string) (dgraphUser *
 						uid
 						ch_uuid
 					}
-					user_emoji_statuses @filter(gt(status_user_emoji_expiry_at, $time)) (orderdesc: status_user_emoji_expiry_at, first: 1) {
-						status_user_emoji_id
-						status_user_emoji_desc
-						status_user_emoji_expiry_at
-						status_user_emoji_expiry_in
-					}
+					` + CurrentEmojiStatus + `
 					user_created_at
 					user_updated_at
 					user_deleted_at
@@ -2180,8 +2267,7 @@ func AdoptExternalUser(ctx context.Context, emailID string, passwordHash *string
 			func(undoCtx context.Context) error { return setDgraphExternal(undoCtx, userID.String(), true) })
 		return uuid.Nil, false, err
 	}
-	_ = redisStore.Delete(ctx, registry.UserProfile, []string{userID.String()})
-	_ = redisStore.Delete(ctx, registry.UserDgraphProfile, []string{userID.String()})
+	forgetProfile(ctx, userID.String())
 	return userID, true, nil
 }
 

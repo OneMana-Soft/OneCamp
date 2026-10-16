@@ -84,6 +84,41 @@ jobs:
                    ./initializers/... \
                    ./services/...
 
+  # Both editions ship the same migrations, file for file and byte for byte.
+  #
+  # A workspace can move between the AI edition (main) and the AI-free one
+  # (without-ai), and sqlx refuses a database that holds a migration the build
+  # lacks, or one whose bytes changed after it ran: the move fails at
+  # make migrate_up. The lines drifted twice (9 Oct 2026: four missing;
+  # 15 Oct: 214), found by hand both times. scripts/migration-parity.sh
+  # compares the files and their SHA-384, the checksum sqlx records.
+  #
+  # A release pushes main, then without-ai straight after, so for a moment main
+  # may be ahead: main must carry everything without-ai has, and without-ai must
+  # match main exactly. beta carries migrations before they ship, so it must
+  # carry every one main has, unchanged. The release also checks the exact pair
+  # it is about to push, before it pushes anything.
+  editions:
+    name: Editions share migrations
+    runs-on: ubuntu-latest
+    if: contains(fromJSON('["main", "without-ai", "beta"]'), github.base_ref || github.ref_name)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare with the other line
+        env:
+          LINE: ${{ github.base_ref || github.ref_name }}
+        run: |
+          case "$LINE" in
+            main) other=without-ai; mode=--allow-ahead ;;
+            without-ai) other=main; mode= ;;
+            beta) other=main; mode=--allow-ahead ;;
+          esac
+          # A local run (act) has no way to reach origin: it compares with the
+          # clone's own origin/<line>, which the script names by its commit.
+          git fetch --no-tags --depth=1 origin "+refs/heads/$other:refs/remotes/origin/$other" ||
+            echo "Could not fetch $other; comparing with this clone's origin/$other."
+          bash scripts/migration-parity.sh $mode HEAD "origin/$other"
+
   test:
     name: Unit tests
     runs-on: ubuntu-latest
@@ -124,7 +159,8 @@ jobs:
             ./middleware/... \
             ./router/... \
             ./adapter/... \
-            ./initializers/...
+            ./initializers/... \
+            .
         env:
           IMPORT_TOKEN_KEK: "ci-test-kek-with-enough-entropy-1234567890"
           AI_CONFIG_KEK: "ci-test-ai-kek-with-enough-entropy-1234567890"

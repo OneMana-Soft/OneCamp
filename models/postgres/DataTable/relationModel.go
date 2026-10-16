@@ -292,9 +292,11 @@ func ChangeLinks(ctx context.Context, change FieldLinks, maxPerRow int) (added, 
 	return added, removed, tx.Commit()
 }
 
-// CreateRowWithLinks inserts a row (with r.Id, when it's set) and adds links
-// to and from it, in one transaction.
-func CreateRowWithLinks(ctx context.Context, r *Row, changes []FieldLinks, maxPerRow int) (*Row, error) {
+// CreateRowWithLinks inserts a row (with r.Id, when it's set) at position, or
+// after the table's last row when position is nil, and adds links to and from
+// it, in one transaction. The last place is found in the insert itself: one a
+// client works out from the rows it holds is wrong past the rows it holds.
+func CreateRowWithLinks(ctx context.Context, r *Row, position *float64, changes []FieldLinks, maxPerRow int) (*Row, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	tx, err := postgresInit.DBConn.SqlDB.BeginTx(dbctx, nil)
@@ -307,8 +309,10 @@ func CreateRowWithLinks(ctx context.Context, r *Row, changes []FieldLinks, maxPe
 		id = uuid.New()
 	}
 	const q = `INSERT INTO data_table_rows (id, table_id, values, position, created_by)
-		VALUES ($1,$2,$3,$4,$5) RETURNING ` + rowColumns
-	out, err := scanRow(tx.QueryRowContext(dbctx, q, id, r.TableId, emptyIfBlank(r.Values), r.Position, r.CreatedBy))
+		VALUES ($1, $2, $3, COALESCE($4::double precision, (SELECT COALESCE(MAX(position), 0) + 1
+			FROM data_table_rows WHERE table_id = $2 AND deleted_at IS NULL)), $5)
+		RETURNING ` + rowColumns
+	out, err := scanRow(tx.QueryRowContext(dbctx, q, id, r.TableId, emptyIfBlank(r.Values), position, r.CreatedBy))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CreateRowWithLinks err: %+v", err)
 		return nil, err
@@ -370,7 +374,7 @@ func ListRowIDs(ctx context.Context, tableId uuid.UUID, limit, offset int) ([]uu
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, `SELECT id FROM data_table_rows
-		WHERE table_id=$1 AND deleted_at IS NULL ORDER BY position ASC, created_at ASC LIMIT $2 OFFSET $3`, tableId, limit, offset)
+		WHERE table_id=$1 AND deleted_at IS NULL `+rowOrder+` LIMIT $2 OFFSET $3`, tableId, limit, offset)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/ListRowIDs err: %+v", err)
 		return nil, err
@@ -395,7 +399,7 @@ func SearchRowsByCell(ctx context.Context, tableId uuid.UUID, fieldId, q string,
 	defer cancel()
 	const sq = `SELECT ` + rowColumns + ` FROM data_table_rows
 		WHERE table_id=$1 AND deleted_at IS NULL AND values->>$2 ILIKE $3 ESCAPE '\'
-		ORDER BY position ASC, created_at ASC LIMIT $4`
+		` + rowOrder + ` LIMIT $4`
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, sq, tableId, fieldId, "%"+escapeLikePattern(q)+"%", limit)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SearchRowsByCell err: %+v", err)

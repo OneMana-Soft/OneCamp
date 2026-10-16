@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/business/DataTable/formula"
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/topo"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
@@ -266,9 +267,9 @@ func skipValue(s string, i int) (int, bool) {
 }
 
 // withValues is a row's stored text with its computed values (out, by field
-// id, as JSON values; nil for none): the stored cells as they were, less any
-// under a computed field's id, then the values.
-func withValues(s string, cells []member, out map[string]interface{}) string {
+// id, as JSON values; nil for none): the stored cells of the fields keep
+// names as they were, less any under a computed field's id, then the values.
+func withValues(s string, cells []member, out map[string]interface{}, keep map[string]bool) string {
 	ids := make([]string, 0, len(out))
 	for id := range out {
 		ids = append(ids, id)
@@ -285,7 +286,7 @@ func withValues(s string, cells []member, out map[string]interface{}) string {
 		n++
 	}
 	for _, m := range cells {
-		if _, computed := out[m.key]; !computed {
+		if _, computed := out[m.key]; !computed && keep[m.key] {
 			next()
 			b.WriteString(s[m.start:m.end])
 		}
@@ -309,17 +310,36 @@ func withValues(s string, cells []member, out map[string]interface{}) string {
 	return b.String()
 }
 
+// keepCells is a row's stored text with the cells of the fields keep names
+// (by id) alone: the text itself when it has no others.
+func keepCells(s string, keep map[string]bool) string {
+	cells, ok := rowMembers(s)
+	if !ok {
+		cells, s = canonicalMembers(s)
+	}
+	for _, m := range cells {
+		if !keep[m.key] {
+			return withValues(s, cells, nil, keep)
+		}
+	}
+	return s
+}
+
 // readWithComputed loads a table's fields and works out its computed cells
-// for rows: the rows API, totals and AI columns, which load rows on their own.
-func readWithComputed(ctx context.Context, tableID uuid.UUID, rows []*model.Row) []*model.Row {
+// for rows, which the rows API loads on its own. Without the fields no row
+// goes out: it would go as stored, its deleted fields' cells and all
+// (errRowsUnavailable).
+func readWithComputed(ctx context.Context, tableID uuid.UUID, rows []*model.Row) ([]*model.Row, error) {
 	if len(rows) == 0 {
-		return rows
+		return rows, nil
 	}
 	fields, err := model.ListFields(ctx, tableID)
-	if err == nil {
-		withComputed(ctx, fields, rows)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/DataTable readWithComputed: %v", err)
+		return nil, errRowsUnavailable
 	}
-	return rows
+	withComputed(ctx, fields, rows)
+	return rows, nil
 }
 
 // stripComputed takes what each read works out out of a row being written,

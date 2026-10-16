@@ -126,10 +126,25 @@ func RegisterSystemCheck(c SystemCheck) {
 // learning about the other eighteen, which is precisely the situation they are
 // most likely to be in when they press this.
 func RunSystemChecks(ctx context.Context, perCheckTimeout time.Duration) []SystemCheckResult {
+	return runSystemChecks(ctx, perCheckTimeout, "")
+}
+
+// RunDependencyChecks runs only the dependency checks: whether each service
+// the server needs (database, graph, cache, storage, broker, search) answers
+// right now. It is what /health/ready reports.
+func RunDependencyChecks(ctx context.Context, perCheckTimeout time.Duration) []SystemCheckResult {
+	return runSystemChecks(ctx, perCheckTimeout, CheckKindDependency)
+}
+
+// runSystemChecks runs the registered checks of kind, or every check when kind
+// is empty.
+func runSystemChecks(ctx context.Context, perCheckTimeout time.Duration, kind string) []SystemCheckResult {
 	systemCheckMu.RLock()
 	names := make([]string, 0, len(systemChecks))
-	for name := range systemChecks {
-		names = append(names, name)
+	for name, c := range systemChecks {
+		if kind == "" || c.Kind == kind {
+			names = append(names, name)
+		}
 	}
 	checks := make([]SystemCheck, 0, len(names))
 	sort.Strings(names)

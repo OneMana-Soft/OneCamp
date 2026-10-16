@@ -21,8 +21,11 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 )
 
-func init() {
-	helpers.RegisterSystemCheck(helpers.SystemCheck{
+func init() { helpers.RegisterSystemCheck(realtimeCheck()) }
+
+// realtimeCheck is whether the server's broker client is connected right now.
+func realtimeCheck() helpers.SystemCheck {
+	return helpers.SystemCheck{
 		Name: "realtime",
 		Kind: helpers.CheckKindDependency,
 		Describe: "The MQTT broker is connected right now, so messages, typing and presence reach people " +
@@ -31,11 +34,16 @@ func init() {
 			if MqttClient == nil {
 				return fmt.Errorf("no MQTT client: realtime was never initialised, so messages will only appear on reload")
 			}
-			if !MqttClient.IsConnected() {
+			// Whether the connection is open now. IsConnected also answers
+			// true while the library is reconnecting ("connected, or will
+			// be"), so after a lost connection, a restarted broker or a
+			// sleep, readiness said realtime was ok while nothing reached
+			// anyone.
+			if !MqttClient.IsConnectionOpen() {
 				return fmt.Errorf("not connected to the MQTT broker; messages will save but will not appear " +
 					"until the page is reloaded, and presence and typing will be dead")
 			}
 			return nil
 		},
-	})
+	}
 }

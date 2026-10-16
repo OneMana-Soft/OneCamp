@@ -292,7 +292,7 @@ func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, 
 									"should": [
 										{ "terms": { "task_project_id": %s } },
 										{ "term": { "task_assignee_user_id": %s } },
-										{ "term": { "task_created_by_user_id": %s } }
+										{ "bool": { "must": [ { "term": { "task_created_by_user_id": %s } } ], "must_not": [ { "exists": { "field": "task_project_id" } } ] } }
 									],
 									"minimum_should_match": 1
 								}
@@ -315,15 +315,7 @@ func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, 
 						"boost": 50.0,
 						"must": [
 							{ "term": { "_index": "projects" } },
-							{ 
-								"bool": {
-									"should": [
-										{ "terms": { "project_id": %s } },
-										{ "terms": { "project_team_id": %s } }
-									],
-									"minimum_should_match": 1
-								}
-							},
+							{ "terms": { "project_id": %s } },
 							{ 
 								"bool": {
 									"should": [
@@ -427,7 +419,7 @@ func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, 
 		userUUIDEscaped, userUUIDEscaped, userUUIDEscaped, userUUIDEscaped, searchTextEscaped, searchTextEscaped,
 		userUUIDEscaped, userUUIDEscaped, userUUIDEscaped, userUUIDEscaped, searchTextEscaped, searchTextEscaped,
 		projectUUIDString, userUUIDEscaped, userUUIDEscaped, searchTextEscaped, searchTextEscaped,
-		projectUUIDString, teamUUIDString, searchTextEscaped, searchTextEscaped,
+		projectUUIDString, searchTextEscaped, searchTextEscaped,
 		channelUUIDString, searchTextEscaped, searchTextEscaped,
 		teamUUIDString, searchTextEscaped, searchTextEscaped,
 		searchTextEscaped, userFields, searchTextEscaped, searchTextEscaped)

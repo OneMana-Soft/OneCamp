@@ -351,7 +351,8 @@ func LinkRepositoryToProject(ctx context.Context, input LinkRepoInput, createdBy
 	return link, nil
 }
 
-// UnlinkRepository soft-deletes a link and cleans up task metadata in both PG and Dgraph.
+// UnlinkRepository soft-deletes a link and unlinks the project's tasks from
+// that repository.
 func UnlinkRepository(ctx context.Context, linkId uuid.UUID) error {
 	// Get the link first
 	getQuery := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1 AND deleted_at IS NULL`
@@ -372,20 +373,14 @@ func UnlinkRepository(ctx context.Context, linkId uuid.UUID) error {
 		return fmt.Errorf("failed to delete link: %v", err)
 	}
 
-	// 2. Batch-clear GitHub metadata from tasks in this project (PostgreSQL)
-	clearQuery := `
-		UPDATE tasks SET
-			github_issue_number = NULL,
-			github_issue_url = NULL,
-			github_pr_number = NULL,
-			github_pr_url = NULL,
-			github_branch = NULL,
-			updated_at = NOW()
-		WHERE project_id = $1 AND github_issue_url IS NOT NULL
-	`
-	err = githubLinkModel.BatchClearGitHubFieldsByProject(clearQuery, link.ProjectId)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/UnlinkRepository Failed to clear PG task fields err: %+v", err)
+	// 2. Unlink the project's tasks from the repository by the rule every start
+	// applies (RepairTaskLinks): a task keeps a link only into a repository its
+	// own project links. A task linked by its pull request alone is unlinked
+	// too, and one linked to another of the project's repositories keeps its
+	// link. One that can't be unlinked now is never synced (syncAllowed) and is
+	// unlinked at the next start.
+	if _, err := RepairTaskLinks(ctx); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/UnlinkRepository couldn't unlink every task from %s/%s, the next start tries again: %+v", link.RepoOwner, link.RepoName, err)
 	}
 
 	// Delete webhook synchronously before returning so the operation is durable.
@@ -524,12 +519,21 @@ func applyAutomationRules(ctx context.Context, link *githubLinkModel.GitHubLink,
 	if link == nil || taskUUIDStr == "" {
 		return
 	}
-	targetStatus := ruleTarget(parseAutomationRules(link), trigger)
-	if targetStatus == "" {
-		return
-	}
 	taskUUID, err := uuid.Parse(taskUUIDStr)
 	if err != nil {
+		return
+	}
+	// A rule moves a task only in a project that linked the repository, by that
+	// project's own link and rules, whoever calls (taskRepoLink.go).
+	own, err := TaskRepoLink(ctx, taskUUID, link.RepoOwner, link.RepoName)
+	if err != nil || own == nil {
+		helpers.MessageLogs.InfoLog.Printf("github: a %s rule on %s/%s named task %s, which isn't in a project linked to it; left alone (err %v)",
+			trigger, link.RepoOwner, link.RepoName, taskUUIDStr, err)
+		return
+	}
+	link = own
+	targetStatus := ruleTarget(parseAutomationRules(link), trigger)
+	if targetStatus == "" {
 		return
 	}
 	// The rule may name one of the project's own statuses. One that was
@@ -638,6 +642,20 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 		}
 	}
 
+	// issueTask is the task linked to this issue and its own project's link to
+	// the repository, which decides what the event does to the task and who is
+	// told: several projects may link one repository, and the link looked up
+	// above is whichever came first.
+	issueTask := func() (string, uuid.UUID, *githubLinkModel.GitHubLink, bool) {
+		taskUUIDStr, err := taskDomain.FindTaskUUIDByGitHubIssueURL(ctx, event.Issue.HTMLURL)
+		if err != nil || taskUUIDStr == "" {
+			helpers.MessageLogs.InfoLog.Printf("No task found for issue URL: %s", event.Issue.HTMLURL)
+			return "", uuid.Nil, nil, false
+		}
+		taskUUID, own, ok := eventTask(ctx, taskUUIDStr, event.Repository.Owner.Login, event.Repository.Name, syncsIssues)
+		return taskUUIDStr, taskUUID, own, ok
+	}
+
 	switch event.Action {
 	case "opened":
 		if !link.AutoCreateTasks {
@@ -729,29 +747,23 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 			defaultStatus = dgraphStruct.TASK_STATUS_TODO
 		}
 
-		taskUUIDStr, err := taskDomain.FindTaskUUIDByGitHubIssueURL(ctx, event.Issue.HTMLURL)
-		if err != nil || taskUUIDStr == "" {
-			helpers.MessageLogs.InfoLog.Printf("No task found for issue URL: %s", event.Issue.HTMLURL)
-			return nil
-		}
-		taskUUID, parseErr := uuid.Parse(taskUUIDStr)
-		if parseErr != nil {
-			helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Invalid task UUID %s: %v", taskUUIDStr, parseErr)
+		taskUUIDStr, taskUUID, own, ok := issueTask()
+		if !ok {
 			return nil
 		}
 
 		// Try automation rule first, fall back to hardcoded default
-		if link.AutomationRules != nil {
+		if own.AutomationRules != nil {
 			var rules map[string]string
-			if err := json.Unmarshal([]byte(*link.AutomationRules), &rules); err == nil {
+			if err := json.Unmarshal([]byte(*own.AutomationRules), &rules); err == nil {
 				if s, ok := rules[trigger]; ok && s != "" && s != "_none" {
-					applyAutomationRules(ctx, link, taskUUIDStr, trigger)
+					applyAutomationRules(ctx, own, taskUUIDStr, trigger)
 					return nil
 				}
 			}
 		}
 
-		userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, link.CreatedBy.String())
+		userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, own.CreatedBy.String())
 		if err != nil || userDgraphInfo == nil {
 			helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Failed to get user info: %v", err)
 			return nil
@@ -774,21 +786,16 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 		}
 		go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, activityType,
 			&event.Sender.Login, nil, nil, &event.Issue.Title, nil, nil)
-		publishGitHubSyncMqtt(taskUUIDStr, link.ProjectId.String(), activityType, map[string]interface{}{
+		publishGitHubSyncMqtt(taskUUIDStr, own.ProjectId.String(), activityType, map[string]interface{}{
 			"status": defaultStatus,
 		})
 
 	case "edited":
-		taskUUIDStr, err := taskDomain.FindTaskUUIDByGitHubIssueURL(ctx, event.Issue.HTMLURL)
-		if err != nil || taskUUIDStr == "" {
+		taskUUIDStr, taskUUID, own, ok := issueTask()
+		if !ok {
 			return nil
 		}
-		taskUUID, parseErr := uuid.Parse(taskUUIDStr)
-		if parseErr != nil {
-			helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Invalid task UUID %s: %v", taskUUIDStr, parseErr)
-			return nil
-		}
-		userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, link.CreatedBy.String())
+		userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, own.CreatedBy.String())
 		if err != nil || userDgraphInfo == nil {
 			return nil
 		}
@@ -808,7 +815,7 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 				markInboundSyncFailed(ctx, taskUUID, "GitHub issue description sync failed")
 			}
 		}
-		publishGitHubSyncMqtt(taskUUIDStr, link.ProjectId.String(), "issue_edited", map[string]interface{}{
+		publishGitHubSyncMqtt(taskUUIDStr, own.ProjectId.String(), "issue_edited", map[string]interface{}{
 			"name":        event.Issue.Title,
 			"description": event.Issue.Body,
 		})
@@ -821,20 +828,15 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 		if assignedUUID == "" {
 			break
 		}
-		taskUUIDStr2, err := taskDomain.FindTaskUUIDByGitHubIssueURL(ctx, event.Issue.HTMLURL)
-		if err != nil || taskUUIDStr2 == "" {
-			break
-		}
-		taskUUID, parseErr := uuid.Parse(taskUUIDStr2)
-		if parseErr != nil {
-			helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Invalid task UUID %s: %v", taskUUIDStr2, parseErr)
+		taskUUIDStr, taskUUID, own, ok := issueTask()
+		if !ok {
 			break
 		}
 		userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, assignedUUID)
 		if err != nil || userDgraphInfo == nil {
 			break
 		}
-		dgraphTaskInfo, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskUUIDStr2, userDgraphInfo.Uid)
+		dgraphTaskInfo, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskUUIDStr, userDgraphInfo.Uid)
 		if err != nil || dgraphTaskInfo == nil {
 			break
 		}
@@ -845,27 +847,22 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 		if err := taskBusiness.UpdateTaskAssigneeByTaskUUID(ctx, taskUUID, userDgraphInfo, oldAssigneeUID, dgraphTaskInfo.Uid, dgraphTaskInfo, userDgraphInfo); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Failed to update assignee: %v", err)
 		}
-		publishGitHubSyncMqtt(taskUUIDStr2, link.ProjectId.String(), "assignee_synced", map[string]interface{}{
+		publishGitHubSyncMqtt(taskUUIDStr, own.ProjectId.String(), "assignee_synced", map[string]interface{}{
 			"assignee_uuid":  userDgraphInfo.Uuid,
 			"assignee_name":  userDgraphInfo.DisplayName(),
 			"assignee_login": event.Issue.Assignee.Login,
 		})
 
 	case "unassigned":
-		taskUUIDStr3, err := taskDomain.FindTaskUUIDByGitHubIssueURL(ctx, event.Issue.HTMLURL)
-		if err != nil || taskUUIDStr3 == "" {
+		taskUUIDStr, taskUUID, own, ok := issueTask()
+		if !ok {
 			break
 		}
-		taskUUID, parseErr := uuid.Parse(taskUUIDStr3)
-		if parseErr != nil {
-			helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Invalid task UUID %s: %v", taskUUIDStr3, parseErr)
-			break
-		}
-		userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, link.CreatedBy.String())
+		userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, own.CreatedBy.String())
 		if err != nil || userDgraphInfo == nil {
 			break
 		}
-		dgraphTaskInfo, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskUUIDStr3, userDgraphInfo.Uid)
+		dgraphTaskInfo, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskUUIDStr, userDgraphInfo.Uid)
 		if err != nil || dgraphTaskInfo == nil {
 			break
 		}
@@ -876,7 +873,7 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 		if err := taskBusiness.UpdateTaskAssigneeByTaskUUID(ctx, taskUUID, nil, oldAssigneeUID, dgraphTaskInfo.Uid, dgraphTaskInfo, userDgraphInfo); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Failed to unassign: %v", err)
 		}
-		publishGitHubSyncMqtt(taskUUIDStr3, link.ProjectId.String(), "assignee_synced", map[string]interface{}{
+		publishGitHubSyncMqtt(taskUUIDStr, own.ProjectId.String(), "assignee_synced", map[string]interface{}{
 			"assignee_uuid": "",
 			"assignee_name": "",
 		})
@@ -885,20 +882,15 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 		if event.Label == nil || event.Label.Name == "" {
 			break
 		}
-		taskUUIDStr4, err := taskDomain.FindTaskUUIDByGitHubIssueURL(ctx, event.Issue.HTMLURL)
-		if err != nil || taskUUIDStr4 == "" {
+		taskUUIDStr, taskUUID, own, ok := issueTask()
+		if !ok {
 			break
 		}
-		taskUUID, parseErr := uuid.Parse(taskUUIDStr4)
-		if parseErr != nil {
-			helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Invalid task UUID %s: %v", taskUUIDStr4, parseErr)
-			break
-		}
-		userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, link.CreatedBy.String())
+		userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, own.CreatedBy.String())
 		if err != nil || userDgraphInfo == nil {
 			break
 		}
-		dgraphTaskInfo, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskUUIDStr4, userDgraphInfo.Uid)
+		dgraphTaskInfo, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskUUIDStr, userDgraphInfo.Uid)
 		if err != nil || dgraphTaskInfo == nil {
 			break
 		}
@@ -908,7 +900,7 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 			if err := taskBusiness.UpdateTaskLabelByTaskUUID(ctx, taskUUID, next, dgraphTaskInfo, userDgraphInfo); err != nil {
 				helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Failed to update label: %v", err)
 			} else {
-				publishGitHubSyncMqtt(taskUUIDStr4, link.ProjectId.String(), "label_synced", map[string]interface{}{
+				publishGitHubSyncMqtt(taskUUIDStr, own.ProjectId.String(), "label_synced", map[string]interface{}{
 					"label": next,
 				})
 			}
@@ -918,20 +910,15 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 		if event.Label == nil || event.Label.Name == "" {
 			break
 		}
-		taskUUIDStr5, err := taskDomain.FindTaskUUIDByGitHubIssueURL(ctx, event.Issue.HTMLURL)
-		if err != nil || taskUUIDStr5 == "" {
+		taskUUIDStr, taskUUID, own, ok := issueTask()
+		if !ok {
 			break
 		}
-		taskUUID, parseErr := uuid.Parse(taskUUIDStr5)
-		if parseErr != nil {
-			helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Invalid task UUID %s: %v", taskUUIDStr5, parseErr)
-			break
-		}
-		userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, link.CreatedBy.String())
+		userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, own.CreatedBy.String())
 		if err != nil || userDgraphInfo == nil {
 			break
 		}
-		dgraphTaskInfo, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskUUIDStr5, userDgraphInfo.Uid)
+		dgraphTaskInfo, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskUUIDStr, userDgraphInfo.Uid)
 		if err != nil || dgraphTaskInfo == nil {
 			break
 		}
@@ -941,7 +928,7 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 			if err := taskBusiness.UpdateTaskLabelByTaskUUID(ctx, taskUUID, next, dgraphTaskInfo, userDgraphInfo); err != nil {
 				helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Failed to remove label: %v", err)
 			} else {
-				publishGitHubSyncMqtt(taskUUIDStr5, link.ProjectId.String(), "label_synced", map[string]interface{}{
+				publishGitHubSyncMqtt(taskUUIDStr, own.ProjectId.String(), "label_synced", map[string]interface{}{
 					"label": next,
 				})
 			}
@@ -1024,13 +1011,13 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 		taskUUIDStr = findTaskUUIDInText(ctx, event.PullRequest.Body)
 	}
 
-	// Validate taskUUIDStr is a valid UUID before proceeding
+	// Only a task in a project that linked this repository, through that
+	// project's own link: the branch and the body are the author's words.
 	var taskUUID uuid.UUID
 	if taskUUIDStr != "" {
-		var parseErr error
-		taskUUID, parseErr = uuid.Parse(taskUUIDStr)
-		if parseErr != nil {
-			helpers.LogErrorWithContext(ctx, "business/handlePullRequestEvent Invalid task UUID %s: %v", taskUUIDStr, parseErr)
+		if id, own, ok := eventTask(ctx, taskUUIDStr, event.Repository.Owner.Login, event.Repository.Name, syncsPRs); ok {
+			taskUUID, link = id, own
+		} else {
 			taskUUIDStr = ""
 		}
 	}
@@ -1434,15 +1421,16 @@ func handleIssueCommentEvent(ctx context.Context, body []byte) error {
 		}
 	}
 
-	taskUUID, err := uuid.Parse(taskUUIDStr)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/handleIssueCommentEvent Invalid task UUID %s: %v", taskUUIDStr, err)
+	// The task's own project's link decides whether its comments sync, not
+	// whichever project's link to the repository was looked up above.
+	taskUUID, _, ok := eventTask(ctx, taskUUIDStr, event.Repository.Owner.Login, event.Repository.Name, syncsIssuesOrPRs)
+	if !ok {
 		return nil
 	}
 
 	switch event.Action {
 	case "created":
-		return handleIssueCommentCreated(ctx, event, taskUUID, taskUUIDStr, link)
+		return handleIssueCommentCreated(ctx, event, taskUUID, taskUUIDStr)
 	case "edited":
 		return handleIssueCommentEdited(ctx, event, taskUUID, taskUUIDStr)
 	case "deleted":
@@ -1473,7 +1461,7 @@ func handleIssueCommentCreated(ctx context.Context, event struct {
 		} `json:"owner"`
 		Name string `json:"name"`
 	} `json:"repository"`
-}, taskUUID uuid.UUID, taskUUIDStr string, link *githubLinkModel.GitHubLink) error {
+}, taskUUID uuid.UUID, taskUUIDStr string) error {
 	// Dedup: skip if this GitHub comment was already synced
 	existingCommentUUID, _ := githubCommentMappingDomain.GetGitHubCommentUUID(ctx, event.Repository.Owner.Login, event.Repository.Name, int64(event.Comment.ID))
 	if existingCommentUUID != "" {
@@ -1736,15 +1724,12 @@ func handleCreateEvent(ctx context.Context, body []byte) error {
 	}
 
 	if taskUUIDStr != "" {
-		taskUUID, parseErr := uuid.Parse(taskUUIDStr)
-		if parseErr != nil {
-			helpers.LogErrorWithContext(ctx, "business/handleCreateEvent Invalid task UUID %s: %v", taskUUIDStr, parseErr)
-		} else {
+		if taskUUID, own, ok := eventTask(ctx, taskUUIDStr, event.Repository.Owner.Login, event.Repository.Name, syncsPRs); ok {
 			if err := taskDomain.SetGitHubBranchOnTaskByTaskID(ctx, branchName, taskUUID); err != nil {
 				helpers.LogErrorWithContext(ctx, "business/handleCreateEvent Failed to set branch on task %s: %v", taskUUIDStr, err)
 			} else {
-				helpers.MessageLogs.InfoLog.Printf("Linked new branch %s to task %s in project %s", branchName, taskUUIDStr, link.ProjectId.String())
-				publishGitHubSyncMqtt(taskUUIDStr, link.ProjectId.String(), "branch_created", map[string]interface{}{
+				helpers.MessageLogs.InfoLog.Printf("Linked new branch %s to task %s in project %s", branchName, taskUUIDStr, own.ProjectId.String())
+				publishGitHubSyncMqtt(taskUUIDStr, own.ProjectId.String(), "branch_created", map[string]interface{}{
 					"branch": branchName,
 				})
 			}
@@ -2141,30 +2126,26 @@ func handlePushEvent(ctx context.Context, body []byte) error {
 			if ref.TaskUUID == "" {
 				continue
 			}
-			refTaskUUID, parseErr := uuid.Parse(ref.TaskUUID)
-			if parseErr != nil {
-				helpers.LogErrorWithContext(ctx, "business/handlePushEvent Invalid ref UUID %s: %v", ref.TaskUUID, parseErr)
+			refTaskUUID, own, ok := eventTask(ctx, ref.TaskUUID, event.Repository.Owner.Login, event.Repository.Name, syncsPRs)
+			if !ok {
 				continue
 			}
 			go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, refTaskUUID, "commit_linked",
 				&event.Sender.Login, nil, nil, &commit.Message, &commit.URL, nil)
 			if ref.Action == "close" || ref.Action == "fix" {
-				applyAutomationRules(ctx, link, ref.TaskUUID, "commit_linked")
+				applyAutomationRules(ctx, own, ref.TaskUUID, "commit_linked")
 			}
-			publishGitHubSyncMqtt(ref.TaskUUID, link.ProjectId.String(), "commit_linked", nil)
+			publishGitHubSyncMqtt(ref.TaskUUID, own.ProjectId.String(), "commit_linked", nil)
 		}
 	}
 
 	if taskUUIDStr != "" {
-		taskUUID, parseErr := uuid.Parse(taskUUIDStr)
-		if parseErr != nil {
-			helpers.LogErrorWithContext(ctx, "business/handlePushEvent Invalid task UUID %s: %v", taskUUIDStr, parseErr)
-		} else {
+		if taskUUID, own, ok := eventTask(ctx, taskUUIDStr, event.Repository.Owner.Login, event.Repository.Name, syncsPRs); ok {
 			for _, commit := range event.Commits {
 				go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "commit_pushed",
 					&event.Sender.Login, nil, nil, &commit.Message, &commit.URL, nil)
 			}
-			publishGitHubSyncMqtt(taskUUIDStr, link.ProjectId.String(), "commit_pushed", nil)
+			publishGitHubSyncMqtt(taskUUIDStr, own.ProjectId.String(), "commit_pushed", nil)
 		}
 	}
 
@@ -2279,8 +2260,11 @@ func handlePullRequestReviewEvent(ctx context.Context, body []byte) error {
 	if taskUUIDStr == "" {
 		return nil
 	}
-
-	taskUUID, _ := uuid.Parse(taskUUIDStr)
+	taskUUID, own, ok := eventTask(ctx, taskUUIDStr, event.Repository.Owner.Login, event.Repository.Name, syncsPRs)
+	if !ok {
+		return nil
+	}
+	link = own
 
 	// Upsert the review record
 	if err := githubPRReviewDomain.UpsertGitHubPRReview(ctx, taskUUID, event.Review.User.Login, event.Review.User.AvatarURL, event.Review.User.HTMLURL, strings.ToUpper(event.Review.State), time.Now()); err != nil {
@@ -2408,16 +2392,15 @@ func handleCheckRunEvent(ctx context.Context, body []byte) error {
 				continue
 			}
 		}
-		taskUUID, parseErr := uuid.Parse(taskUUIDStr)
-		if parseErr != nil {
-			helpers.LogErrorWithContext(ctx, "business/handleCheckRunEvent Invalid task UUID %s: %v", taskUUIDStr, parseErr)
+		taskUUID, own, ok := eventTask(ctx, taskUUIDStr, event.Repository.Owner.Login, event.Repository.Name, syncsPRs)
+		if !ok {
 			continue
 		}
 		if err := taskDomain.UpdateTaskPRState(ctx, taskUUID, "", checkStatus, "", nil); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/handleCheckRunEvent Failed to update task PR state: %v", err)
 			markInboundSyncFailed(ctx, taskUUID, "GitHub check run sync failed")
 		}
-		publishGitHubSyncMqtt(taskUUIDStr, link.ProjectId.String(), "check_run", map[string]interface{}{
+		publishGitHubSyncMqtt(taskUUIDStr, own.ProjectId.String(), "check_run", map[string]interface{}{
 			"check_status": checkStatus,
 		})
 		helpers.MessageLogs.InfoLog.Printf("Updated check status '%s' for task %s from check_run on PR #%d", checkStatus, taskUUIDStr, pr.Number)

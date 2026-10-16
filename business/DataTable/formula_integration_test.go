@@ -109,7 +109,7 @@ func TestFormulaFields(t *testing.T) {
 	}
 
 	// Renamed: shown under the new name, and still worked out.
-	if err := UpdateField(ctx, table.Id, price.Id, FieldInput{Name: "Unit price", Type: model.FieldNumber}, actor); err != nil {
+	if _, err := UpdateField(ctx, table.Id, price.Id, FieldPatch{Name: optStr("Unit price"), Type: optStr(model.FieldNumber)}, actor); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 	bundle, _ = GetBundle(ctx, table.Id, actor)
@@ -290,7 +290,7 @@ func TestFormulaFieldsHaveALimit(t *testing.T) {
 	if p, err := PreviewFormula(ctx, table.Id, uuid.Nil, "1", actor); err != nil || p.Error != want {
 		t.Errorf("its preview: %+v, %v", p, err)
 	}
-	if err := UpdateField(ctx, table.Id, first.Id, FieldInput{Name: "F0", Type: model.FieldFormula, Config: map[string]interface{}{"formula": "3"}}, actor); err != nil {
+	if _, err := UpdateField(ctx, table.Id, first.Id, FieldPatch{Name: optStr("F0"), Type: optStr(model.FieldFormula), Config: map[string]interface{}{"formula": "3"}}, actor); err != nil {
 		t.Errorf("changing one it has: %v", err)
 	}
 }

@@ -2,6 +2,9 @@ package onecamp
 
 import (
 	"os"
+	"slices"
+	"sort"
+	"strconv"
 	"testing"
 )
 
@@ -65,8 +68,45 @@ func TestEmbeddedMigrationsMatchTheDirectory(t *testing.T) {
 	if embeddedHighest != diskHighest {
 		t.Errorf("embedded ceiling is %d but the directory's is %d", embeddedHighest, diskHighest)
 	}
-	if HighestMigration() != diskHighest {
-		t.Errorf("HighestMigration() reports %d, the directory says %d", HighestMigration(), diskHighest)
+	if got := Migrations(); len(got) == 0 || got[len(got)-1] != diskHighest {
+		t.Errorf("Migrations() ends at %v, the directory's highest is %d", got, diskHighest)
+	}
+
+	// The set itself, which is what the startup check compares a database against: every version on
+	// disk, once, in order.
+	var want []int64
+	for _, e := range onDisk {
+		if groups := migrationFileRe.FindStringSubmatch(e.Name()); groups != nil {
+			v, _ := strconv.ParseInt(groups[1], 10, 64)
+			want = append(want, v)
+		}
+	}
+	sort.Slice(want, func(i, j int) bool { return want[i] < want[j] })
+	if got := Migrations(); !slices.Equal(got, slices.Compact(want)) {
+		t.Errorf("Migrations() is not the directory's versions in order:\n got %v\nwant %v", got, slices.Compact(want))
+	}
+}
+
+// Two up-migrations may not share a version. Branches number their migrations independently and an
+// integration can land two of the same number; sqlx then refuses to run either, so it has to fail here,
+// where the fix is a rename, rather than on a server mid-update.
+func TestNoTwoMigrationsShareAVersion(t *testing.T) {
+	onDisk, err := os.ReadDir("migrations")
+	if err != nil {
+		t.Fatalf("cannot read the migrations directory: %v", err)
+	}
+	byVersion := map[string][]string{}
+	for _, e := range onDisk {
+		if groups := migrationFileRe.FindStringSubmatch(e.Name()); groups != nil {
+			v, _ := strconv.ParseInt(groups[1], 10, 64)
+			key := strconv.FormatInt(v, 10)
+			byVersion[key] = append(byVersion[key], e.Name())
+		}
+	}
+	for v, names := range byVersion {
+		if len(names) > 1 {
+			t.Errorf("migration %s is claimed by more than one file: %v; renumber all but one", v, names)
+		}
 	}
 }
 

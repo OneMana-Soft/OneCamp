@@ -22,6 +22,7 @@ import (
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 
 	githubPRReviewDomain "github.com/akashc777/OneCamp/domain/GitHubPRReview"
 	githubTaskActivityDomain "github.com/akashc777/OneCamp/domain/GitHubTaskActivity"
@@ -180,6 +181,17 @@ func UpdateTaskCommentBody(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The comment's own task, not the one the request names, and the editor
+	// must still be able to read it: someone taken off its project no longer
+	// edits what they wrote there.
+	if dgraphCommentInfo.Task == nil || dgraphCommentInfo.Task.Uuid == "" {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Comment not found"})
+		return
+	}
+	if _, _, ok := projectaccess.RequireTask(w, r, dgraphCommentInfo.Task.Uuid); !ok {
+		return
+	}
+
 	isComentOwner := false
 
 	if dgraphCommentInfo.CommentBy.Uuid == userInfo.UserDgraphInfo.Uuid {
@@ -216,6 +228,9 @@ func UpdateTaskCommentBody(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if !mentionsAllowed(w, r, dgraphCommentInfo.Task.Uuid, mentionsDgraphUsersList) {
+		return
+	}
 
 	err = business.UpdateTaskCommentBody(ctx, commentUUID, &createTaskCommentInfoInput, dgraphCommentInfo, mentionsDgraphUsersList)
 
@@ -232,6 +247,24 @@ func UpdateTaskCommentBody(w http.ResponseWriter, r *http.Request) {
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "updated comment!"})
 
+}
+
+// mentionsAllowed is whether a comment on the task, new or edited, may
+// mention these people: only people who can see the task (MentionRefusal),
+// since a mention tells its person of the comment. Otherwise it writes the
+// refusal, or that it couldn't tell, and answers false.
+func mentionsAllowed(w http.ResponseWriter, r *http.Request, taskUUID string, mentioned []*dgraphStruct.DgraphUser) bool {
+	refusal, err := business.MentionRefusal(r.Context(), taskUUID, mentioned)
+	if err != nil {
+		helpers.LogErrorWithContext(r.Context(), "controllers/mentionsAllowed couldn't tell who may read task %s err: %+v", taskUUID, err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't save the comment. Try again."})
+		return false
+	}
+	if refusal != "" {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": refusal})
+		return false
+	}
+	return true
 }
 
 func CreateTaskComment(w http.ResponseWriter, r *http.Request) {
@@ -318,6 +351,10 @@ func CreateTaskComment(w http.ResponseWriter, r *http.Request) {
 			"msg": "Got unregistered users in mentions",
 			"err": err,
 		})
+		return
+	}
+
+	if !mentionsAllowed(w, r, dgraphTaskInfo.Uuid, mentionsDgraphUsersList) {
 		return
 	}
 
@@ -721,14 +758,11 @@ func GetTaskInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// No task by that id is the same 404; a read that failed is a 503 the app
+	// offers Try again for (it answered 400, which the app could only call a
+	// connection problem, about a task that was never there: PTC-4).
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetTaskInfo Failed to get dgraph task info err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph task info err",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "task", "controllers/GetTaskInfo")
 		return
 	}
 
@@ -2085,12 +2119,10 @@ func UnArchiveTask(w http.ResponseWriter, r *http.Request) {
 // LinkTaskToGitHub links an existing task to a GitHub issue or PR.
 func LinkTaskToGitHub(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	taskUUID, err := uuid.Parse(taskUUIDStr)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid task UUID"})
+	taskUUID, _, ok := projectaccess.RequireTaskAdmin(w, r, taskUUIDStr)
+	if !ok {
 		return
 	}
 
@@ -2108,26 +2140,13 @@ func LinkTaskToGitHub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate that the repo is linked to the task's project
-	dgraphTaskInfo, err := business.GetDgraphBasicTaskInfo(ctx, taskUUIDStr, userInfo.UserDgraphInfo.Uid)
-	if err != nil || dgraphTaskInfo == nil || dgraphTaskInfo.Project == nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Task or project not found"})
+	// Only an issue or PR in a repository linked to the task's own project.
+	repoLink, err := githubBusiness.TaskRepoLink(ctx, taskUUID, owner, repo)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't check the project's repositories. Try again."})
 		return
 	}
-	projectUUID, _ := uuid.Parse(dgraphTaskInfo.Project.Uuid)
-	links, err := githubBusiness.GetLinkedRepos(ctx, projectUUID)
-	if err != nil || len(links) == 0 {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "No GitHub repo linked to this project"})
-		return
-	}
-	var repoLinked bool
-	for _, link := range links {
-		if strings.EqualFold(link.RepoOwner, owner) && strings.EqualFold(link.RepoName, repo) {
-			repoLinked = true
-			break
-		}
-	}
-	if !repoLinked {
+	if repoLink == nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "This repository is not linked to the task's project"})
 		return
 	}
@@ -2159,38 +2178,58 @@ func LinkTaskToGitHub(w http.ResponseWriter, r *http.Request) {
 
 	var ghIssue struct {
 		HTMLURL string `json:"html_url"`
-		Number  int    `json:"number"`
 	}
-	json.NewDecoder(resp.Body).Decode(&ghIssue)
+	if err := json.NewDecoder(resp.Body).Decode(&ghIssue); err != nil || ghIssue.HTMLURL == "" {
+		helpers.LogErrorWithContext(ctx, "controllers/LinkTaskToGitHub couldn't read GitHub's answer for %s err: %v", ghURL, err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't read GitHub's answer. Try again."})
+		return
+	}
+	// What is stored is where GitHub says the issue or pull request is now,
+	// which for one moved to another repository isn't where it was asked for:
+	// that repository must be the project's too.
+	landedOwner, landedRepo, number, err := githubBusiness.ExtractGitHubIssueInfo(ghIssue.HTMLURL)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/LinkTaskToGitHub GitHub answered %q for %s err: %v", ghIssue.HTMLURL, ghURL, err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't read GitHub's answer. Try again."})
+		return
+	}
+	landed, err := githubBusiness.TaskRepoLink(ctx, taskUUID, landedOwner, landedRepo)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't check the project's repositories. Try again."})
+		return
+	}
+	if landed == nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That issue is now in a repository the task's project isn't linked to"})
+		return
+	}
 
 	// Prevent duplicate linking to another task
-	isPR := strings.Contains(req.URL, "/pull/")
+	isPR := strings.Contains(ghIssue.HTMLURL, "/pull/")
 	var existingTaskUUID string
 	if isPR {
-		existingTaskUUID, _ = taskDomain.FindTaskUUIDByPRURL(ctx, ghIssue.HTMLURL)
+		existingTaskUUID, err = taskDomain.FindTaskUUIDByPRURL(ctx, ghIssue.HTMLURL)
 	} else {
-		existingTaskUUID, _ = taskDomain.FindTaskUUIDByGitHubIssueURL(ctx, ghIssue.HTMLURL)
+		existingTaskUUID, err = taskDomain.FindTaskUUIDByGitHubIssueURL(ctx, ghIssue.HTMLURL)
+	}
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't link the task. Try again."})
+		return
 	}
 	if existingTaskUUID != "" && existingTaskUUID != taskUUIDStr {
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "This issue or PR is already linked to another task"})
 		return
 	}
 
+	// Every read of a task lays these Postgres fields over its graph copy
+	// (MergeGitHubMetaIntoTask), so this is the one store to write.
 	if isPR {
-		taskDomain.SetGitHubPRFieldsOnTask(ctx, taskUUID, number, ghIssue.HTMLURL, "")
+		err = taskDomain.SetGitHubPRFieldsOnTask(ctx, taskUUID, number, ghIssue.HTMLURL, "")
 	} else {
-		taskDomain.SetGitHubIssueFieldsOnTask(ctx, taskUUID, number, ghIssue.HTMLURL)
+		err = taskDomain.SetGitHubIssueFieldsOnTask(ctx, taskUUID, number, ghIssue.HTMLURL)
 	}
-
-	// Sync to Dgraph
-	if dgraphTaskInfo != nil {
-		var dgTask *dgraphStruct.DgraphTask
-		if isPR {
-			dgTask = &dgraphStruct.DgraphTask{Uid: "uid(task)", Uuid: taskUUIDStr, GitHubPRNumber: &number, GitHubPRURL: &ghIssue.HTMLURL}
-		} else {
-			dgTask = &dgraphStruct.DgraphTask{Uid: "uid(task)", Uuid: taskUUIDStr, GitHubIssueNumber: &number, GitHubIssueURL: &ghIssue.HTMLURL}
-		}
-		taskDomain.CreateOrUpdateDgraphTask(ctx, dgTask)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't link the task. Try again."})
+		return
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Linked to GitHub successfully"})
@@ -2200,25 +2239,17 @@ func LinkTaskToGitHub(w http.ResponseWriter, r *http.Request) {
 func UnlinkTaskFromGitHub(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	taskUUID, err := uuid.Parse(taskUUIDStr)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid task UUID"})
+	taskUUID, _, ok := projectaccess.RequireTaskAdmin(w, r, taskUUIDStr)
+	if !ok {
 		return
 	}
 
-	taskDomain.ClearGitHubIssueFieldsFromTask(ctx, taskUUID)
-
-	// Also clear Dgraph fields
-	dgTask := &dgraphStruct.DgraphTask{
-		Uid:               "uid(task)",
-		Uuid:              taskUUIDStr,
-		GitHubIssueNumber: nil,
-		GitHubIssueURL:    nil,
-		GitHubPRNumber:    nil,
-		GitHubPRURL:       nil,
-		GitHubBranch:      nil,
+	// Postgres holds the link; every read of the task lays it over the graph's
+	// copy, so clearing it here unlinks the task everywhere it is shown.
+	if err := taskDomain.ClearGitHubLinkFromTask(ctx, taskUUID); err != nil {
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't unlink the task. Try again."})
+		return
 	}
-	taskDomain.CreateOrUpdateDgraphTask(ctx, dgTask)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Unlinked from GitHub"})
 }
@@ -2226,12 +2257,10 @@ func UnlinkTaskFromGitHub(w http.ResponseWriter, r *http.Request) {
 // CreateGitHubBranchForTask creates a branch on the linked repo and associates it with the task.
 func CreateGitHubBranchForTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	_, err := uuid.Parse(taskUUIDStr)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid task UUID"})
+	taskUUID, taskInfo, ok := projectaccess.RequireTaskAdmin(w, r, taskUUIDStr)
+	if !ok {
 		return
 	}
 
@@ -2256,11 +2285,6 @@ func CreateGitHubBranchForTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Find the linked repo for this task's project
-	taskInfo, err := business.GetDgraphBasicTaskInfo(ctx, taskUUIDStr, userInfo.UserDgraphInfo.Uid)
-	if err != nil || taskInfo == nil || taskInfo.Project == nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Task or project not found"})
-		return
-	}
 	projectUUID, _ := uuid.Parse(taskInfo.Project.Uuid)
 	links, err := githubBusiness.GetLinkedRepos(ctx, projectUUID)
 	if err != nil || len(links) == 0 {
@@ -2311,7 +2335,6 @@ func CreateGitHubBranchForTask(w http.ResponseWriter, r *http.Request) {
 	defer createResp.Body.Close()
 
 	// Update task with branch
-	taskUUID, _ := uuid.Parse(taskUUIDStr)
 	taskDomain.SetGitHubBranchOnTaskByTaskID(ctx, req.BranchName, taskUUID)
 	dgTask := &dgraphStruct.DgraphTask{
 		Uid:          "uid(task)",
@@ -2327,10 +2350,8 @@ func CreateGitHubBranchForTask(w http.ResponseWriter, r *http.Request) {
 func GetGitHubTaskActivity(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	taskUUID, err := uuid.Parse(taskUUIDStr)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "Invalid task UUID"})
+	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"))
+	if !ok {
 		return
 	}
 
@@ -2347,22 +2368,8 @@ func GetGitHubTaskActivity(w http.ResponseWriter, r *http.Request) {
 func GetGitHubPRReviews(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	taskUUID, err := uuid.Parse(taskUUIDStr)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "Invalid task UUID"})
-		return
-	}
-
-	// Verify user has access to the task's project
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-	dgraphTaskInfo, err := business.GetDgraphBasicTaskInfo(ctx, taskUUIDStr, userInfo.UserDgraphInfo.Uid)
-	if err != nil || dgraphTaskInfo == nil || dgraphTaskInfo.Project == nil {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "Task not found"})
-		return
-	}
-	if dgraphTaskInfo.Project.IsProjectMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"error": "Not authorized"})
+	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"))
+	if !ok {
 		return
 	}
 
@@ -2379,12 +2386,8 @@ func GetGitHubPRReviews(w http.ResponseWriter, r *http.Request) {
 func GetGitHubSyncStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	taskUUID, err := uuid.Parse(taskUUIDStr)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Invalid task UUID",
-		})
+	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"))
+	if !ok {
 		return
 	}
 
@@ -2411,10 +2414,8 @@ func GetGitHubSyncStatus(w http.ResponseWriter, r *http.Request) {
 func SearchGitHubIssues(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	taskUUID, err := uuid.Parse(taskUUIDStr)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid task UUID"})
+	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"))
+	if !ok {
 		return
 	}
 
@@ -2492,10 +2493,8 @@ func SearchGitHubIssues(w http.ResponseWriter, r *http.Request) {
 func SearchGitHubPRs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	taskUUID, err := uuid.Parse(taskUUIDStr)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid task UUID"})
+	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"))
+	if !ok {
 		return
 	}
 
@@ -2569,9 +2568,11 @@ func SearchGitHubPRs(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"prs": result.Items})
 }
 
-// BulkUnlinkTasksFromGitHub removes GitHub metadata from multiple tasks.
+// BulkUnlinkTasksFromGitHub removes GitHub metadata from multiple tasks, each
+// one for its project's admins only.
 func BulkUnlinkTasksFromGitHub(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	var input struct {
 		TaskUUIDs []string `json:"task_uuids"`
@@ -2600,24 +2601,14 @@ func BulkUnlinkTasksFromGitHub(w http.ResponseWriter, r *http.Request) {
 			errors = append(errors, fmt.Sprintf("Invalid task UUID: %s", taskUUIDStr))
 			continue
 		}
-
-		if err := taskDomain.ClearGitHubIssueFieldsFromTask(ctx, taskUUID); err != nil {
-			errors = append(errors, fmt.Sprintf("Failed to clear Postgres fields for %s: %v", taskUUIDStr, err))
+		if refusal := changeRefusal(ctx, taskUUID, userInfo.UserDgraphInfo.Uid); refusal != "" {
+			errors = append(errors, refusal)
 			continue
 		}
 
-		dgTask := &dgraphStruct.DgraphTask{
-			Uid:               "uid(task)",
-			Uuid:              taskUUIDStr,
-			GitHubIssueNumber: nil,
-			GitHubIssueURL:    nil,
-			GitHubPRNumber:    nil,
-			GitHubPRURL:       nil,
-			GitHubBranch:      nil,
-		}
-		_, err = taskDomain.CreateOrUpdateDgraphTask(ctx, dgTask)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("Failed to clear Dgraph fields for %s: %v", taskUUIDStr, err))
+		// Postgres holds the link, laid over the graph's copy on every read.
+		if err := taskDomain.ClearGitHubLinkFromTask(ctx, taskUUID); err != nil {
+			errors = append(errors, fmt.Sprintf("Couldn't unlink task %s. Try again.", taskUUIDStr))
 			continue
 		}
 		successCount++
@@ -2631,9 +2622,12 @@ func BulkUnlinkTasksFromGitHub(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// BulkLinkTasksToGitHub links multiple tasks to GitHub issues.
+// BulkLinkTasksToGitHub links multiple tasks to GitHub issues: each one for
+// its project's admins only, and only to an issue in a repository linked to
+// its project.
 func BulkLinkTasksToGitHub(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	var input struct {
 		Links []struct {
@@ -2671,10 +2665,28 @@ func BulkLinkTasksToGitHub(w http.ResponseWriter, r *http.Request) {
 			errors = append(errors, fmt.Sprintf("Invalid issue data for task %s", link.TaskUUID))
 			continue
 		}
-
-		err = taskDomain.SetGitHubIssueFieldsOnTask(ctx, taskUUID, link.IssueNumber, link.IssueURL)
+		if refusal := changeRefusal(ctx, taskUUID, userInfo.UserDgraphInfo.Uid); refusal != "" {
+			errors = append(errors, refusal)
+			continue
+		}
+		owner, repo, number, err := githubBusiness.ExtractGitHubIssueInfo(link.IssueURL)
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("Failed to link task %s: %v", link.TaskUUID, err))
+			errors = append(errors, fmt.Sprintf("Invalid issue data for task %s", link.TaskUUID))
+			continue
+		}
+		repoLink, err := githubBusiness.TaskRepoLink(ctx, taskUUID, owner, repo)
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("Couldn't check the repositories of task %s's project. Try again.", link.TaskUUID))
+			continue
+		}
+		if repoLink == nil {
+			errors = append(errors, fmt.Sprintf("The issue for task %s isn't in a repository linked to its project", link.TaskUUID))
+			continue
+		}
+
+		// The number stored is the address's own, so the two always agree.
+		if err := taskDomain.SetGitHubIssueFieldsOnTask(ctx, taskUUID, number, link.IssueURL); err != nil {
+			errors = append(errors, fmt.Sprintf("Couldn't link task %s. Try again.", link.TaskUUID))
 			continue
 		}
 		successCount++
@@ -2688,16 +2700,30 @@ func BulkLinkTasksToGitHub(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// changeRefusal is why the person (by graph uid) may not change the task, as a
+// bulk answer lists it, or "" when they may: one of its project's admins.
+func changeRefusal(ctx context.Context, taskID uuid.UUID, viewerUID string) string {
+	_, err := business.TaskFor(ctx, taskID, viewerUID, true)
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, business.ErrNotProjectAdmin):
+		return fmt.Sprintf("Only the project's admins can change task %s", taskID)
+	case errors.Is(err, business.ErrTaskNotVisible):
+		return fmt.Sprintf("Task not found: %s", taskID)
+	default:
+		helpers.LogErrorWithContext(ctx, "controllers/changeRefusal couldn't read task %s err: %+v", taskID, err)
+		return fmt.Sprintf("Couldn't check task %s. Try again.", taskID)
+	}
+}
+
 // CreateGitHubPRForTask creates a draft PR on GitHub for a task.
 func CreateGitHubPRForTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	taskUUID, err := uuid.Parse(taskUUIDStr)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Invalid task UUID",
-		})
+	taskUUID, _, ok := projectaccess.RequireTaskAdmin(w, r, taskUUIDStr)
+	if !ok {
 		return
 	}
 
@@ -2749,11 +2775,8 @@ func RetryGitHubSync(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	taskUUID, err := uuid.Parse(taskUUIDStr)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Invalid task UUID",
-		})
+	taskUUID, _, ok := projectaccess.RequireTaskAdmin(w, r, taskUUIDStr)
+	if !ok {
 		return
 	}
 
@@ -2816,12 +2839,8 @@ func RetryGitHubSync(w http.ResponseWriter, r *http.Request) {
 
 // RefreshFromGitHub pulls the latest state from GitHub and overwrites the OneCamp task.
 func RefreshFromGitHub(w http.ResponseWriter, r *http.Request) {
-	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	taskUUID, err := uuid.Parse(taskUUIDStr)
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Invalid task UUID",
-		})
+	taskUUID, _, ok := projectaccess.RequireTaskAdmin(w, r, chi.URLParam(r, "task_uuid"))
+	if !ok {
 		return
 	}
 

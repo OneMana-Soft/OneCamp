@@ -602,6 +602,9 @@ type DgraphUserStatusEmoji struct {
 	EmojiDesc string     `json:"status_user_emoji_desc,omitempty"`
 	ExpiryAt  *time.Time `json:"status_user_emoji_expiry_at,omitempty"`
 	ExpiryIn  string     `json:"status_user_emoji_expiry_in,omitempty"`
+	// When it was set: of a person's statuses in force, the one set last is
+	// their status (domain/User CurrentEmojiStatus).
+	SetAt *time.Time `json:"status_user_emoji_set_at,omitempty"`
 }
 
 // status_user_emoji_id

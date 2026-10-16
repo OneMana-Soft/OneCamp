@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Task"
+	"github.com/akashc777/OneCamp/business/DataTable/formula"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
@@ -250,7 +251,7 @@ func CheckAnswers(fields []Field, raw map[string]any) ([]Answer, error) {
 				}
 				s = a.Address
 			case Number:
-				if _, err := strconv.ParseFloat(s, 64); err != nil {
+				if _, ok := formula.ParseNumber(s, formula.PlainSigns); !ok {
 					return nil, &FormError{fmt.Sprintf("“%s” needs a number.", f.Label)}
 				}
 			case Date:

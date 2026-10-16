@@ -570,19 +570,18 @@ func showLinksIn(ctx context.Context, f *model.Field, from, to *model.DataTable)
 	return nil
 }
 
-// computedFieldConfig checks the config of a field being saved in table t
-// (self, or uuid.Nil for a new one) when its values are worked out on reads
-// or link to a table, and sets the config to store. For a relation that
-// should show its links in the other table too, it returns that table.
-func computedFieldConfig(ctx context.Context, actor Actor, t *model.DataTable, self uuid.UUID, in *FieldInput) (*model.DataTable, error) {
+// computedFieldConfig checks the config of a field being saved in table t,
+// whose fields are fields (self, or uuid.Nil for a new one), when its values
+// are worked out on reads or link to a table, and sets the config to store.
+// For a relation that should show its links in the other table too, it
+// returns that table.
+func computedFieldConfig(ctx context.Context, actor Actor, t *model.DataTable, fields []*model.Field, self uuid.UUID, in *FieldInput) (*model.DataTable, error) {
 	typ := strings.TrimSpace(in.Type)
-	fields, err := model.ListFields(ctx, t.Id)
-	if err != nil {
-		return nil, fmt.Errorf("failed to load fields")
-	}
 	for _, f := range fields {
-		if _, isLink := linkOf(f); isLink && f.Id == self && typ != model.FieldRelation {
-			return nil, fmt.Errorf("A link to another table can't become another kind of field; delete it instead")
+		if f.Id == self {
+			if err := typeChangeProblem(f, typ); err != nil {
+				return nil, err
+			}
 		}
 	}
 	switch typ {

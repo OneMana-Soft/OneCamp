@@ -7,6 +7,7 @@ package models
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -85,7 +86,7 @@ type DataTable struct {
 	Description *string    `json:"description,omitempty"`
 	Icon        *string    `json:"icon,omitempty"`
 	Visibility  string     `json:"visibility"`
-	CreatedBy   uuid.UUID  `json:"created_by"`
+	CreatedBy   uuid.UUID  `json:"created_by,omitzero"` // zero for a guest (GetGuestBundle)
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
@@ -133,6 +134,15 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
+// thenScan is a scanner of a statement's columns followed by more, which it
+// reads into more.
+type thenScan struct {
+	s    scanner
+	more []any
+}
+
+func (t thenScan) Scan(dest ...any) error { return t.s.Scan(append(dest, t.more...)...) }
+
 // ───────────────────────── data_tables ─────────────────────────
 
 const tableColumns = `id, name, description, icon, visibility, created_by, created_at, updated_at, deleted_at`
@@ -172,22 +182,38 @@ func CreateTable(ctx context.Context, t *DataTable) (uuid.UUID, error) {
 	return id, nil
 }
 
-// UpdateTable updates the editable header fields of a table.
-func UpdateTable(ctx context.Context, t *DataTable) error {
+// TableChange is a change to a table's header: a name or visibility left nil
+// stays as it is, as does a description or icon not set (SetDescription,
+// SetIcon); one set to nil is cleared.
+type TableChange struct {
+	Name, Visibility        *string
+	SetDescription, SetIcon bool
+	Description, Icon       *string
+}
+
+// UpdateTable changes the header fields a change names, and only those, in
+// one statement: a field written from a copy read earlier can't undo another
+// changed since. It returns the table, and its visibility as it was.
+func UpdateTable(ctx context.Context, id uuid.UUID, c TableChange) (*DataTable, string, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
-	const q = `UPDATE data_tables SET name=$2, description=$3, icon=$4, visibility=$5, updated_at=NOW()
-		WHERE id=$1 AND deleted_at IS NULL`
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, t.Id, t.Name, t.Description, t.Icon, t.Visibility)
+	const q = `WITH was AS (SELECT id, visibility FROM data_tables WHERE id = $1 AND deleted_at IS NULL FOR UPDATE)
+		UPDATE data_tables t SET name = COALESCE($2, t.name),
+			description = CASE WHEN $3 THEN $4 ELSE t.description END,
+			icon = CASE WHEN $5 THEN $6 ELSE t.icon END,
+			visibility = COALESCE($7, t.visibility), updated_at = NOW()
+		FROM was WHERE t.id = was.id
+		RETURNING t.id, t.name, t.description, t.icon, t.visibility, t.created_by, t.created_at, t.updated_at, t.deleted_at, was.visibility`
+	var before string
+	out, err := scanTable(thenScan{postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, id, c.Name, c.SetDescription, c.Description, c.SetIcon, c.Icon, c.Visibility), []any{&before}})
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", sql.ErrNoRows
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/UpdateTable err: %+v", err)
-		return err
+		return nil, "", err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
+	return out, before, nil
 }
 
 // SoftDeleteTable marks a table deleted (its children cascade logically via the
@@ -295,16 +321,25 @@ func CreateField(ctx context.Context, f *Field) (uuid.UUID, error) {
 	return id, nil
 }
 
+// execer is the database, or a transaction on it.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // UpdateField updates a column's editable attributes.
 func UpdateField(ctx context.Context, f *Field) error {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
+	return updateField(dbctx, postgresInit.DBConn.SqlDB, f)
+}
+
+func updateField(ctx context.Context, db execer, f *Field) error {
 	if strings.TrimSpace(f.Config) == "" {
 		f.Config = "{}"
 	}
 	const q = `UPDATE data_table_fields SET name=$2, type=$3, config=$4, position=$5, updated_at=NOW()
 		WHERE id=$1 AND table_id=$6 AND deleted_at IS NULL`
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, f.Id, f.Name, f.Type, f.Config, f.Position, f.TableId)
+	res, err := db.ExecContext(ctx, q, f.Id, f.Name, f.Type, f.Config, f.Position, f.TableId)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/UpdateField err: %+v", err)
 		return err
@@ -314,6 +349,178 @@ func UpdateField(ctx context.Context, f *Field) error {
 		return sql.ErrNoRows
 	}
 	return nil
+}
+
+// CellRewrite is a change to the cells of the field being updated, made in
+// the field update's transaction (UpdateFieldAndCells): a statement over the
+// table's live rows, with $1 the table, $2 the field id and its args after,
+// that returns the id of each row it changes.
+type CellRewrite struct {
+	query string
+	args  []any
+}
+
+// relabelSelectCells and relabelMultiCells rewrite a field's cells by a map
+// of labels ($3, {"old": "new"}, "" to take one out), a row at a time in one
+// statement, so the map applies to every label at once (two options swapping
+// names swap in their cells too). A select cell is a label; a multi-select
+// cell is a list of them, which keeps its order and each label once.
+const relabelSelectCells = `UPDATE data_table_rows
+	SET values = jsonb_set(values, ARRAY[$2::text], to_jsonb($3::jsonb ->> (values ->> $2::text))), updated_at = NOW()
+	WHERE table_id = $1 AND deleted_at IS NULL
+	  AND jsonb_typeof(values -> $2::text) = 'string' AND $3::jsonb ? (values ->> $2::text)
+	RETURNING id`
+
+const relabelMultiCells = `UPDATE data_table_rows r
+	SET values = jsonb_set(r.values, ARRAY[$2::text], COALESCE((
+		SELECT jsonb_agg(x.v ORDER BY x.n) FROM (
+			SELECT DISTINCT ON (m.v) m.v, m.n FROM (
+				SELECT CASE WHEN jsonb_typeof(e.j) = 'string' AND $3::jsonb ? (e.j #>> '{}')
+					THEN to_jsonb($3::jsonb ->> (e.j #>> '{}')) ELSE e.j END AS v, e.n
+				FROM jsonb_array_elements(r.values -> $2::text) WITH ORDINALITY AS e(j, n)
+			) m WHERE m.v <> '""'::jsonb ORDER BY m.v, m.n
+		) x), '[]'::jsonb)), updated_at = NOW()
+	WHERE r.table_id = $1 AND r.deleted_at IS NULL AND jsonb_typeof(r.values -> $2::text) = 'array'
+	  AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(r.values -> $2::text) t WHERE $3::jsonb ? t)
+	RETURNING r.id`
+
+// Relabel is the rewrite of a select or multi-select field's cells by
+// relabel: each option's old label to its new one, or to "" for one taken
+// out, so no cell is left holding a label the field no longer offers.
+func Relabel(relabel map[string]string) []CellRewrite {
+	if len(relabel) == 0 {
+		return nil
+	}
+	labels, _ := json.Marshal(relabel)
+	return []CellRewrite{{relabelSelectCells, []any{string(labels)}}, {relabelMultiCells, []any{string(labels)}}}
+}
+
+// Convert is a field's cells converted as its type changes, in the field
+// update's transaction: given each live row's cell (by row id) as it is, it
+// gives those that change, and may change the field (its options) before it
+// is written.
+type Convert func(cells map[uuid.UUID]json.RawMessage) (map[uuid.UUID]json.RawMessage, error)
+
+// fieldCellsSQL reads a field's ($2) cells in a table's ($1) live rows.
+const fieldCellsSQL = `SELECT id, values -> $2::text FROM data_table_rows
+	WHERE table_id = $1 AND deleted_at IS NULL AND values ? $2::text`
+
+// FieldCells is a field's cells in a table's live rows, by row.
+func FieldCells(ctx context.Context, tableId, fieldId uuid.UUID) (map[uuid.UUID]json.RawMessage, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	return fieldCells(dbctx, postgresInit.DBConn.SqlDB, fieldCellsSQL, tableId, fieldId)
+}
+
+// querier is the database, or a transaction on it.
+type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func fieldCells(ctx context.Context, db querier, q string, tableId, fieldId uuid.UUID) (map[uuid.UUID]json.RawMessage, error) {
+	rows, err := db.QueryContext(ctx, q, tableId, fieldId.String())
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/fieldCells err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[uuid.UUID]json.RawMessage{}
+	for rows.Next() {
+		var id uuid.UUID
+		var cell []byte
+		if err := rows.Scan(&id, &cell); err != nil {
+			return nil, err
+		}
+		out[id] = cell
+	}
+	return out, rows.Err()
+}
+
+// setCellsSQL writes a field's ($2) cells in a table ($1): each row ($3) its
+// cell ($4, JSON).
+const setCellsSQL = `UPDATE data_table_rows r SET values = jsonb_set(r.values, ARRAY[$2::text], u.cell::jsonb), updated_at = NOW()
+	FROM unnest($3::uuid[], $4::text[]) AS u(id, cell)
+	WHERE r.id = u.id AND r.table_id = $1 AND r.deleted_at IS NULL
+	RETURNING r.id`
+
+// FieldPlan works out a field update from the field as the update finds it,
+// locked: the field to write, how its cells convert as its type changes (nil
+// for none), and the rewrites to its cells after that.
+type FieldPlan func(current *Field) (*Field, Convert, []CellRewrite, error)
+
+// UpdateFieldAndCells updates a field and its cells in one transaction, so no
+// reader finds the field changed and its cells not. The update is planned
+// from the field as the transaction finds it, locked: two saves planned from
+// one copy (an option renamed twice in quick succession) would each rewrite
+// the cells as the field was before the other. It has BulkTimeout, as the
+// cells of every row may change. It returns how many rows' cells changed; a
+// field that's gone is sql.ErrNoRows.
+func UpdateFieldAndCells(ctx context.Context, tableID, fieldID uuid.UUID, plan FieldPlan) (int, error) {
+	changed := map[uuid.UUID]bool{}
+	err := postgresInit.InTx(ctx, postgresInit.BulkTimeout, func(ctx context.Context, tx *sql.Tx) error {
+		current, err := scanField(tx.QueryRowContext(ctx, `SELECT `+fieldColumns+` FROM data_table_fields
+			WHERE id = $1 AND table_id = $2 AND deleted_at IS NULL FOR UPDATE`, fieldID, tableID))
+		if err != nil {
+			return err
+		}
+		f, convert, rewrites, err := plan(current)
+		if err != nil {
+			return err
+		}
+		var converted map[uuid.UUID]json.RawMessage
+		if convert != nil {
+			cells, err := fieldCells(ctx, tx, fieldCellsSQL+` FOR UPDATE`, f.TableId, f.Id)
+			if err != nil {
+				return err
+			}
+			if converted, err = convert(cells); err != nil {
+				return err
+			}
+		}
+		if err := updateField(ctx, tx, f); err != nil {
+			return err
+		}
+		if len(converted) > 0 {
+			ids, cells := make([]uuid.UUID, 0, len(converted)), make([]string, 0, len(converted))
+			for id, cell := range converted {
+				ids, cells = append(ids, id), append(cells, string(cell))
+			}
+			// A list a row long goes to pgx as it is, as in CellsOf: through
+			// pq.Array, pgx writes out the whole list in an error before taking it.
+			if err := collectIDs(ctx, tx, changed, setCellsSQL, f.TableId, f.Id.String(), ids, cells); err != nil {
+				helpers.LogErrorWithContext(ctx, "models/UpdateFieldAndCells convert err: %+v", err)
+				return err
+			}
+		}
+		for _, rw := range rewrites {
+			if err := collectIDs(ctx, tx, changed, rw.query, append([]any{f.TableId, f.Id.String()}, rw.args...)...); err != nil {
+				helpers.LogErrorWithContext(ctx, "models/UpdateFieldAndCells cells err: %+v", err)
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return len(changed), nil
+}
+
+// collectIDs runs a statement returning row ids, and adds them to into.
+func collectIDs(ctx context.Context, tx *sql.Tx, into map[uuid.UUID]bool, query string, args ...any) error {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		into[id] = true
+	}
+	return rows.Err()
 }
 
 // DeleteField soft-deletes a column.
@@ -400,16 +607,17 @@ func CreateRow(ctx context.Context, r *Row) (*Row, error) {
 	return out, nil
 }
 
-// UpdateRowValues replaces a row's values blob and position, returning the
-// updated row (via RETURNING) so the caller avoids a follow-up read. Returns
-// sql.ErrNoRows when the row does not exist (or is deleted).
-func UpdateRowValues(ctx context.Context, tableId, rowId uuid.UUID, valuesJSON string, position float64) (*Row, error) {
+// UpdateRowValues replaces a row's values blob, and its position unless
+// position is nil, returning the updated row (via RETURNING) so the caller
+// avoids a follow-up read. Returns sql.ErrNoRows when the row does not exist
+// (or is deleted).
+func UpdateRowValues(ctx context.Context, tableId, rowId uuid.UUID, valuesJSON string, position *float64) (*Row, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	if strings.TrimSpace(valuesJSON) == "" {
 		valuesJSON = "{}"
 	}
-	const q = `UPDATE data_table_rows SET values=$3, position=$4, updated_at=NOW()
+	const q = `UPDATE data_table_rows SET values=$3, position=COALESCE($4::double precision, position), updated_at=NOW()
 		WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL RETURNING ` + rowColumns
 	out, err := scanRow(postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, rowId, tableId, valuesJSON, position))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -499,6 +707,12 @@ func GetRowByID(ctx context.Context, tableId, rowId uuid.UUID) (*Row, error) {
 	return r, nil
 }
 
+// rowOrder is the order rows are read in, page after page: by place, then
+// age, then id, so rows tying on both (made in one statement) come in one
+// order on every read, and a page's edge never falls between them two ways
+// (a row skipped on one page and repeated on the next).
+const rowOrder = `ORDER BY position ASC, created_at ASC, id ASC`
+
 // ListRows returns a table's rows in position order, bounded by limit/offset.
 func ListRows(ctx context.Context, tableId uuid.UUID, limit, offset int) ([]*Row, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
@@ -510,7 +724,7 @@ func ListRows(ctx context.Context, tableId uuid.UUID, limit, offset int) ([]*Row
 		offset = 0
 	}
 	q := `SELECT ` + rowColumns + ` FROM data_table_rows
-		WHERE table_id=$1 AND deleted_at IS NULL ORDER BY position ASC, created_at ASC
+		WHERE table_id=$1 AND deleted_at IS NULL ` + rowOrder + `
 		LIMIT $2 OFFSET $3`
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q, tableId, limit, offset)
 	if err != nil {
@@ -527,6 +741,64 @@ func ListRows(ctx context.Context, tableId uuid.UUID, limit, offset int) ([]*Row
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// CountRows returns the number of non-deleted rows in a table.
+func CountRows(ctx context.Context, tableId uuid.UUID) (int, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	const q = `SELECT COUNT(*) FROM data_table_rows WHERE table_id=$1 AND deleted_at IS NULL`
+	var n int
+	if err := postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, tableId).Scan(&n); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/CountRows err: %+v", err)
+		return 0, err
+	}
+	return n, nil
+}
+
+// stripItemLinksSQL reduces each link to an item (an object whose type is
+// among $3) in a page of rows, $2 of them in id order after $1, deleted rows
+// and every cell among them, to its {id, type}: whatever else was stored with
+// one, the item's title among it, goes. It answers the page's last id (none
+// past the end) and how many rows it changed. A row keeps its updated_at, as
+// no reader sees a change: each read names a row's links for its reader.
+const stripItemLinksSQL = `WITH page AS (
+		SELECT id, CASE WHEN jsonb_typeof(values) = 'object' THEN values ELSE '{}'::jsonb END AS cells
+		FROM data_table_rows WHERE id > $1 ORDER BY id LIMIT $2
+	), fixed AS (
+		UPDATE data_table_rows r SET values = (
+			SELECT jsonb_object_agg(c.k, CASE
+				WHEN jsonb_typeof(c.v) = 'array' THEN COALESCE((
+					SELECT jsonb_agg(CASE WHEN jsonb_typeof(a.e) = 'object' AND a.e ->> 'type' = ANY($3)
+						THEN jsonb_build_object('id', a.e -> 'id', 'type', a.e -> 'type') ELSE a.e END ORDER BY a.n)
+					FROM jsonb_array_elements(c.v) WITH ORDINALITY AS a(e, n)), '[]'::jsonb)
+				WHEN jsonb_typeof(c.v) = 'object' AND c.v ->> 'type' = ANY($3)
+					THEN jsonb_build_object('id', c.v -> 'id', 'type', c.v -> 'type')
+				ELSE c.v END)
+			FROM jsonb_each(r.values) AS c(k, v))
+		FROM page p
+		WHERE r.id = p.id AND EXISTS (
+			SELECT 1 FROM jsonb_each(p.cells) AS c(k, v),
+				jsonb_array_elements(CASE WHEN jsonb_typeof(c.v) = 'array' THEN c.v ELSE jsonb_build_array(c.v) END) AS a(e)
+			WHERE jsonb_typeof(a.e) = 'object' AND a.e ->> 'type' = ANY($3) AND a.e - 'id' - 'type' <> '{}'::jsonb)
+		RETURNING r.id
+	)
+	SELECT (SELECT id FROM page ORDER BY id DESC LIMIT 1), (SELECT COUNT(*) FROM fixed)`
+
+// StripItemLinks reduces the links to items of the kinds given, in a page of
+// rows after the row after (in id order, limit of them), to their {id, type}
+// (stripItemLinksSQL). It answers the page's last row, uuid.Nil past the end,
+// and how many rows it changed.
+func StripItemLinks(ctx context.Context, kinds []string, after uuid.UUID, limit int) (uuid.UUID, int, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	var last uuid.NullUUID
+	var n int
+	if err := postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, stripItemLinksSQL, after, limit, kinds).Scan(&last, &n); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/StripItemLinks err: %+v", err)
+		return uuid.Nil, 0, err
+	}
+	return last.UUID, n, nil
 }
 
 // escapeLikePattern escapes the LIKE/ILIKE wildcard metacharacters in a raw
@@ -569,7 +841,7 @@ func ListRowsFiltered(ctx context.Context, tableId uuid.UUID, likeSubstrings []s
 		args = append(args, "%"+escapeLikePattern(sub)+"%")
 		n++
 	}
-	sb.WriteString(fmt.Sprintf(` ORDER BY position ASC, created_at ASC LIMIT $%d OFFSET $%d`, n, n+1))
+	sb.WriteString(fmt.Sprintf(` %s LIMIT $%d OFFSET $%d`, rowOrder, n, n+1))
 	args = append(args, limit, offset)
 
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, sb.String(), args...)
@@ -687,18 +959,6 @@ func ListViews(ctx context.Context, tableId uuid.UUID) ([]*View, error) {
 		out = append(out, v)
 	}
 	return out, rows.Err()
-}
-
-// CountRows returns the number of non-deleted rows in a table.
-func CountRows(ctx context.Context, tableId uuid.UUID) (int, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	const q = `SELECT COUNT(*) FROM data_table_rows WHERE table_id=$1 AND deleted_at IS NULL`
-	var n int
-	if err := postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, tableId).Scan(&n); err != nil {
-		return 0, err
-	}
-	return n, nil
 }
 
 // GetViewByID returns a single non-deleted view, or (nil, nil) if absent.

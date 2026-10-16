@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -212,7 +213,7 @@ func (v Value) number() (float64, bool) {
 		}
 		return 0, true
 	case KindText:
-		return ParseNumber(v.Str)
+		return ParseNumber(v.Str, PlainSigns)
 	default:
 		return 0, false
 	}
@@ -223,26 +224,158 @@ func (v Value) number() (float64, bool) {
 // to read a long cell as one copies it, and trimming some spaces is slow.
 const maxReadLen = 64
 
-// ParseNumber reads a number written as people write them: "1,200",
-// " 3.5 ", "$40", "₹ 1,999". ok is false when it isn't one.
-func ParseNumber(s string) (float64, bool) {
+// NumberSigns are the signs a person writes numbers with: the decimal sign,
+// and the sign between groups of digits. "1,234.5" is {".", ","} (en-US),
+// "1.234,5" is {",", "."} (de-DE), and "1 234,5" {",", " "}, a narrow
+// no-break space (fr-FR). The web sends its reader's (lib/format/number.ts).
+type NumberSigns struct {
+	Decimal string `json:"decimal,omitempty"`
+	Group   string `json:"group,omitempty"`
+}
+
+// PlainSigns are how programs write numbers, and people in the US, the UK
+// and India: a point, and commas between groups.
+var PlainSigns = NumberSigns{Decimal: ".", Group: ","}
+
+// Checked is the signs to read numbers with: PlainSigns when none are given.
+// ok is false for signs no number is written with: a decimal sign that isn't
+// one character, a group sign of more than one, either a digit, a letter, a
+// currency sign, a plus, a minus or "_", a space as the decimal sign, or one
+// sign for both.
+func (s NumberSigns) Checked() (NumberSigns, bool) {
+	if s == (NumberSigns{}) {
+		return PlainSigns, true
+	}
+	sign := func(t string, space bool) bool {
+		r, n := utf8.DecodeRuneInString(t)
+		return n > 0 && n == len(t) && r != utf8.RuneError && !unicode.IsDigit(r) && !unicode.IsLetter(r) &&
+			!unicode.Is(unicode.Sc, r) && !strings.ContainsRune("+-−_", r) && (space || !unicode.IsSpace(r))
+	}
+	return s, sign(s.Decimal, false) && (s.Group == "" || sign(s.Group, true)) && s.Group != s.Decimal
+}
+
+// ParseNumber reads a number as a person writes it with signs (the zero
+// NumberSigns are PlainSigns): "1,200.50", "1.234,5" with de-DE's signs,
+// "€12", "12 €", "−1 234" and India's "1,00,000". Digits are grouped only in
+// threes, or in India's twos then a three, by the group sign, a space, an
+// apostrophe, or whichever of "." and "," isn't the decimal sign. A sign and
+// one currency sign may come first, a currency sign last instead, and an
+// exponent ("1e3") at the end. ok is false for anything else, so no text is
+// read two ways: "12 kg", "TBD", "1,5" where a comma groups digits, NaN and
+// Inf, and a number too big to hold. The web reads what a person types the
+// same way (lib/format/number.ts parseTypedNumber).
+func ParseNumber(s string, signs NumberSigns) (float64, bool) {
 	if len(s) > 4*maxReadLen {
 		return 0, false
 	}
 	s = strings.TrimSpace(s)
-	if len(s) > maxReadLen {
+	if len(s) > maxReadLen || strings.ContainsRune(s, '_') {
 		return 0, false
 	}
-	s = strings.TrimLeft(s, "$€£₹¥ ")
-	s = strings.ReplaceAll(s, ",", "")
-	if s == "" {
+	if signs.Decimal == "" {
+		signs = PlainSigns
+	}
+	s = strings.ReplaceAll(s, "−", "-")
+	minus, signed, currency := false, false, false
+lead:
+	for {
+		s = strings.TrimLeftFunc(s, unicode.IsSpace)
+		r, n := utf8.DecodeRuneInString(s)
+		switch {
+		case (r == '-' || r == '+') && !signed:
+			signed, minus = true, r == '-'
+		case unicode.Is(unicode.Sc, r) && !currency:
+			currency = true
+		default:
+			break lead
+		}
+		s = s[n:]
+	}
+	if r, n := utf8.DecodeLastRuneInString(s); unicode.Is(unicode.Sc, r) {
+		if currency {
+			return 0, false
+		}
+		s = strings.TrimRightFunc(s[:len(s)-n], unicode.IsSpace)
+	}
+	decimal, _ := utf8.DecodeRuneInString(signs.Decimal)
+	group, _ := utf8.DecodeRuneInString(signs.Group)
+	other := ','
+	if decimal == ',' {
+		other = '.'
+	}
+	// Each sign grouping digits becomes "_".
+	s = strings.Map(func(r rune) rune {
+		if r != decimal && (r == other || (signs.Group != "" && r == group) || r == '\'' || r == '’' || unicode.IsSpace(r)) {
+			return '_'
+		}
+		return r
+	}, s)
+	whole, fraction, _ := strings.Cut(s, string(decimal))
+	last := &whole
+	if strings.ContainsRune(s, decimal) {
+		last = &fraction
+	}
+	var exponent string
+	*last, exponent = cutExponent(*last)
+	if !allDigits(fraction) || !(allDigits(whole) || grouped(whole)) {
 		return 0, false
 	}
-	f, err := strconv.ParseFloat(s, 64)
-	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+	digits := strings.ReplaceAll(whole, "_", "")
+	if digits == "" && fraction == "" {
 		return 0, false
+	}
+	f, err := strconv.ParseFloat("0"+digits+"."+fraction+"0"+exponent, 64)
+	if err != nil || math.IsInf(f, 0) {
+		return 0, false
+	}
+	if minus && f != 0 {
+		f = -f
 	}
 	return f, true
+}
+
+// cutExponent cuts an exponent ("e3", "E-7") off the end of s.
+func cutExponent(s string) (string, string) {
+	i := strings.LastIndexAny(s, "eE")
+	if i < 0 {
+		return s, ""
+	}
+	digits := s[i+1:]
+	if digits != "" && (digits[0] == '+' || digits[0] == '-') {
+		digits = digits[1:]
+	}
+	if digits == "" || !allDigits(digits) {
+		return s, ""
+	}
+	return s[:i], s[i:]
+}
+
+// allDigits is whether s is digits alone ("" is).
+func allDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// grouped is whether s is digits in groups split by "_": threes after the
+// first ("1_234_567"), or India's twos and then a three ("12_34_567").
+func grouped(s string) bool {
+	groups := strings.Split(s, "_")
+	first, last := groups[0], groups[len(groups)-1]
+	if len(groups) < 2 || len(first) < 1 || len(first) > 3 || len(last) != 3 || !allDigits(first) || !allDigits(last) {
+		return false
+	}
+	threes, twos := true, len(first) <= 2
+	for _, g := range groups[1 : len(groups)-1] {
+		if !allDigits(g) {
+			return false
+		}
+		threes, twos = threes && len(g) == 3, twos && len(g) == 2
+	}
+	return threes || twos
 }
 
 // ParseDate reads a date cell: a day ("2026-10-08") or a moment (RFC 3339).

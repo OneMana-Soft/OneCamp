@@ -215,6 +215,9 @@ func startBackgroundLoops(ctx context.Context) {
 	// retention); ones linked to no conversation are counted in the log and
 	// kept, since deleting them is the owner's decision (calls O3).
 	liveKitBusiness.StartCallTranscriptRepair(ctx)
+	// Every start: unlink any task whose GitHub issue or pull request is in a
+	// repository its own project hasn't linked, and log each one.
+	githubBusiness.StartTaskLinkRepair(ctx)
 	githubBusiness.StartGitHubSyncWorker(business.SyncSignal, ctx)
 	githubBusiness.StartGitHubImportWorker(ctx)
 
@@ -241,6 +244,11 @@ func startBackgroundLoops(ctx context.Context) {
 	// Vacuum the links between tables' rows as they change, which Postgres 12
 	// doesn't for a table that's mostly added to, so they stay quick to count.
 	dataTableBusiness.StartLinkUpkeep(ctx)
+	// Once per install: every link from a table's cell to a doc, task, board,
+	// project or person reduced to its id and kind. Links kept the item's title
+	// as it was when linked, and a cell no read names for its reader (a deleted
+	// field's) still gave it out.
+	dataTableBusiness.StartItemLinkRepair(ctx)
 
 	// Start the Workflow Builder engine. It subscribes to the workspace event
 	// bus and runs admin-defined "when a message matches X → reply / create

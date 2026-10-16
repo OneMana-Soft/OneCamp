@@ -11,42 +11,18 @@ import (
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
 
-func UpdateUserEmojiStatus(ctx context.Context, dgraphStatus *dgraphStruct.DgraphUserStatusEmoji) (err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-	pb, err := json.Marshal(dgraphStatus)
+// UpsertEmojiStatuses writes a person's statuses in one transaction: query
+// names them (by var), set and del say what to write and what to remove (del
+// may be nil). A conflicting concurrent write is retried (DoCommitNow).
+func UpsertEmojiStatuses(ctx context.Context, query string, set, del []byte) error {
+	_, err := dgraphInit.DoCommitNow(ctx, &api.Request{
+		Query:     query,
+		Mutations: []*api.Mutation{{SetJson: set, DeleteJson: del}},
+	})
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/UpdateUserEmojiStatus failed to marshal dgraphUser struct err: %+v",
-			err)
-		return
+		helpers.LogErrorWithContext(ctx, "models/UpsertEmojiStatuses failed to write the statuses err: %+v", err)
 	}
-
-	mu := &api.Mutation{
-		SetJson: pb,
-	}
-	req := &api.Request{
-		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
-	}
-
-	_, err = txn.Do(ctx, req)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/UpdateUserEmojiStatus failed to create or update dgraph status err: %+v",
-			err)
-		return
-	}
-
-	defer func() {
-		err = txn.Discard(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/UpdateUserEmojiStatus failed to discard dgraph txn err: %+v",
-				err)
-		}
-	}()
-
-	return
+	return err
 }
 
 func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.DgraphUser, query string, deleteJson string) (userUid string, err error) {

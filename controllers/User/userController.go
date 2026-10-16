@@ -1125,8 +1125,7 @@ func UploadFile(w http.ResponseWriter, r *http.Request) {
 			"controllers/UploadMedia Failed to upload the file err: %+v",
 			err)
 
-		er := errors.New("Failed to upload the file")
-		helpers.ErrorJSON(w, er, http.StatusBadRequest)
+		helpers.WriteUploadFailure(ctx, w, err, "The file couldn't be saved. Try again, and tell your admin if it keeps happening.")
 		return
 	}
 
@@ -1797,33 +1796,26 @@ func GetAllUserEmojiStatusList(w http.ResponseWriter, r *http.Request) {
 
 }
 
+// ClearUserEmojiStatus ends every status of the caller's in force. It read the
+// status from the profile cached at sign-in, so it said "No status to clear"
+// beside a status set since, and it answered success with no body.
 func ClearUserEmojiStatus(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
 
-	if len(userInfo.UserDgraphInfo.StatusEmoji) == 0 {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "No status to clear",
-		})
-		return
-	}
-
-	err := business.ClearUserEmojiStatus(ctx, userInfo.UserDgraphInfo.StatusEmoji[0].Uid, userInfo.UserDgraphInfo.Uuid)
-
-	if err != nil {
-
+	if err := business.ClearUserEmojiStatus(ctx, userInfo.UserDgraphInfo.Uuid); err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"controllers/GetAllUserEmojiStatusList Failed to clear user's status err: %+v",
+			"controllers/ClearUserEmojiStatus Failed to clear user's status err: %+v",
 			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to clear user's status",
-			"err": err,
-		})
+		helpers.WriteRetryLater(w, "Your status couldn't be cleared.")
 		return
-
 	}
+
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
+		"msg":    "status cleared",
+		"status": "success",
+	})
 }
 
 func UpdateUserEmojiStatus(w http.ResponseWriter, r *http.Request) {
@@ -1846,14 +1838,18 @@ func UpdateUserEmojiStatus(w http.ResponseWriter, r *http.Request) {
 
 	err = business.UpdateUserEmojiStatus(ctx, &userInfo.UserDgraphInfo, &userInputStatus)
 
+	// What the rule refuses says why (a 400); a store that didn't answer is a
+	// 503 the app offers to try again.
+	var refused *business.StatusRefused
+	if errors.As(err, &refused) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": refused.Error()})
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/UpdateUserEmojiStatus Failed to update user status err: %+v",
 			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to update user status",
-			"err": err,
-		})
+		helpers.WriteRetryLater(w, "Your status couldn't be saved.")
 		return
 	}
 

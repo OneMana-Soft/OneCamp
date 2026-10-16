@@ -175,9 +175,7 @@ func UploadEmailLogo(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/UploadEmailLogo Failed to upload the file err: %+v", err)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
-			"msg": "Failed to upload the logo",
-		})
+		helpers.WriteStorageFailure(ctx, w, "The logo couldn't be saved. Try again.")
 		return
 	}
 

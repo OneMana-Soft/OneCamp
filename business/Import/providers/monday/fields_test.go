@@ -156,6 +156,9 @@ func TestFieldValueEdges(t *testing.T) {
 		cv("signed", "checkbox", "Signed off", "", `{"checked":true}`),
 		cv("brief", "link", "Brief", "docs.example.com/c", ""),
 		cv("budget", "numbers", "Budget", "lots", `"lots"`),
+		// Shown in a German board's own signs: dropping its commas read it
+		// as 1.2345.
+		cv("hours", "numbers", "Hours", "1.234,5", ""),
 	}}, fields)
 	byName := map[string]importProvider.SourceFieldValue{}
 	for _, v := range values {
@@ -170,6 +173,9 @@ func TestFieldValueEdges(t *testing.T) {
 	}
 	if _, ok := byName["Budget"]; ok {
 		t.Error("a number that isn't one has no value")
+	}
+	if v, ok := byName["Hours"]; ok {
+		t.Errorf("a number written two ways reads as %v", v.Value)
 	}
 }
 

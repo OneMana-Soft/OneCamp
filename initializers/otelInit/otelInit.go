@@ -5,6 +5,8 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -19,8 +21,8 @@ import (
 )
 
 // collectorEndpoint says how the configured collector address should be
-// applied. Exactly one of the two results is set, and both being empty is not
-// possible: an unset variable falls back to the local collector.
+// applied: as a URL, or as a bare host and port. Both empty means no collector
+// is configured, and telemetry is off.
 //
 // OTEL_EXPORTER_OTLP_ENDPOINT is defined by the OTLP specification as a URL,
 // "https://collector.example.com:4318", scheme included. This code read the
@@ -28,27 +30,57 @@ import (
 // and port ONLY, and then forced WithInsecure on top of it. That is three
 // faults at once: passing the option suppresses the variable the SDK would
 // otherwise have parsed correctly, a whole URL is used as a hostname, and a
-// TLS collector is silently downgraded to plaintext. Nothing reports it,
-// because a batch exporter sends its failures to the OTel error handler and
-// nothing installs one, so the symptom is simply that no telemetry ever
-// arrives.
+// TLS collector is silently downgraded to plaintext.
 //
 // Both spellings appear in this repository's own compose files, so both keep
 // working: "otel-collector:4318" as a bare host and port, and
 // "http://otel-collector:4318" as a URL.
+//
+// UNSET IS OFF. It used to mean localhost:4318, where nothing listens on a
+// customer's server: every batch failed, each failure was logged, and the log
+// line was itself exported, so the API logged "connection refused" every
+// second, for ever. That buried its own startup lines within minutes.
 func collectorEndpoint() (endpointURL, hostPort string) {
 	raw := strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
 	switch {
 	case raw == "":
-		// Unset is the shipped default. Nothing listens there unless the
-		// operator runs the bundled collector, and an exporter with nowhere to
-		// send costs a dropped batch rather than anything a user notices.
-		return "", "localhost:4318"
+		return "", ""
 	case strings.Contains(raw, "://"):
 		return raw, ""
 	default:
 		return "", raw
 	}
+}
+
+// exportFailureEvery is how often a failing collector is reported at most.
+const exportFailureEvery = 10 * time.Minute
+
+// throttledErrors reports export failures at most once per period, saying how
+// many it held back since. A configured collector that is down fails every
+// batch; one line per period says so, instead of one per second.
+type throttledErrors struct {
+	mu     sync.Mutex
+	every  time.Duration
+	now    func() time.Time
+	last   time.Time
+	held   int
+	report func(format string, args ...any)
+}
+
+func (h *throttledErrors) Handle(err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := h.now()
+	if !h.last.IsZero() && now.Sub(h.last) < h.every {
+		h.held++
+		return
+	}
+	if h.held > 0 {
+		h.report("otel: export failing: %v (%d more like it in the last %s)", err, h.held, now.Sub(h.last).Round(time.Second))
+	} else {
+		h.report("otel: export failing: %v (reported at most once every %s)", err, h.every)
+	}
+	h.last, h.held = now, 0
 }
 
 // exportHeaders carries the collector's credential, when there is one.
@@ -76,6 +108,11 @@ func InitTracer() func() {
 	noop := func() {}
 
 	endpointURL, hostPort := collectorEndpoint()
+	if endpointURL == "" && hostPort == "" {
+		log.Printf("otel: telemetry is off: no collector is configured (OTEL_EXPORTER_OTLP_ENDPOINT)")
+		return noop
+	}
+	otel.SetErrorHandler(&throttledErrors{every: exportFailureEvery, now: time.Now, report: log.Printf})
 	headers := exportHeaders()
 
 	// --- Trace Exporter ---

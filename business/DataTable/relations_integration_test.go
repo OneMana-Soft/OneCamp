@@ -226,7 +226,7 @@ func TestRelationsBetweenTables(t *testing.T) {
 
 	// Once Vendors is private: a member sees the links to it as private rows
 	// and can't change them, and a guest link sees private rows too.
-	if _, err := UpdateTable(ctx, vendors.Id, TableInput{Name: "Vendors", Visibility: "private"}, w.me); err != nil {
+	if _, _, err := UpdateTable(ctx, vendors.Id, TablePatch{Visibility: optStr(model.VisibilityPrivate)}, w.me); err != nil {
 		t.Fatalf("make private: %v", err)
 	}
 	if got := labels(w.cells(budget, &w.member)[booth][vendor.Id.String()]); got != "Private row" {
@@ -241,7 +241,7 @@ func TestRelationsBetweenTables(t *testing.T) {
 	if _, _, err := ChangeLinks(ctx, budget.Id, booth, vendor.Id, nil, []uuid.UUID{acme}, w.member); !IsForbidden(err) {
 		t.Errorf("the member unlinked a private table's row: %v", err)
 	}
-	if _, err := UpdateTable(ctx, vendors.Id, TableInput{Name: "Vendors", Visibility: "workspace"}, w.me); err != nil {
+	if _, _, err := UpdateTable(ctx, vendors.Id, TablePatch{Visibility: optStr(model.VisibilityWorkspace)}, w.me); err != nil {
 		t.Fatalf("make public: %v", err)
 	}
 	if got := labels(w.cells(budget, &w.me)[booth][vendor.Id.String()]); got != "Acme Inc" {
@@ -250,17 +250,17 @@ func TestRelationsBetweenTables(t *testing.T) {
 
 	// A relation keeps its table and its kind; a one-way one can be shown in
 	// its table later, links and all.
-	if err := UpdateField(ctx, budget.Id, vendor.Id, FieldInput{Name: "Vendor", Type: model.FieldRelation, Config: map[string]interface{}{"relation_target": "table", "table_id": budget.Id.String()}}, w.me); err == nil {
+	if _, err := UpdateField(ctx, budget.Id, vendor.Id, FieldPatch{Name: optStr("Vendor"), Type: optStr(model.FieldRelation), Config: map[string]interface{}{"relation_target": "table", "table_id": budget.Id.String()}}, w.me); err == nil {
 		t.Error("a relation's table changed")
 	}
-	if err := UpdateField(ctx, budget.Id, vendor.Id, FieldInput{Name: "Vendor", Type: model.FieldText}, w.me); err == nil {
+	if _, err := UpdateField(ctx, budget.Id, vendor.Id, FieldPatch{Name: optStr("Vendor"), Type: optStr(model.FieldText)}, w.me); err == nil {
 		t.Error("a relation became text")
 	}
 	backup := w.field(budget, "Backup", model.FieldRelation, map[string]interface{}{"relation_target": "table", "table_id": vendors.Id.String()})
 	if _, _, err := ChangeLinks(ctx, budget.Id, ads, backup.Id, []uuid.UUID{acme}, nil, w.me); err != nil {
 		t.Fatalf("link a backup: %v", err)
 	}
-	if err := UpdateField(ctx, budget.Id, backup.Id, FieldInput{Name: "Backup", Type: model.FieldRelation, Config: map[string]interface{}{"relation_target": "table", "table_id": vendors.Id.String(), "two_way": true}}, w.me); err != nil {
+	if _, err := UpdateField(ctx, budget.Id, backup.Id, FieldPatch{Name: optStr("Backup"), Type: optStr(model.FieldRelation), Config: map[string]interface{}{"relation_target": "table", "table_id": vendors.Id.String(), "two_way": true}}, w.me); err != nil {
 		t.Fatalf("show a one-way relation in its table: %v", err)
 	}
 	backedBy := w.otherSide(vendors, backup)

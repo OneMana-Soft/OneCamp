@@ -250,18 +250,6 @@ func SoftDeleteAllGitHubLinks(query string, deletedAt time.Time) error {
 	return nil
 }
 
-func BatchClearGitHubFieldsByProject(query string, projectId uuid.UUID) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, projectId)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/BatchClearGitHubFieldsByProject Failed err: %+v", err)
-		return err
-	}
-	return nil
-}
-
 func BatchClearAllGitHubFields(query string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()

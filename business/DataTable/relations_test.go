@@ -303,19 +303,23 @@ func TestRollupProblems(t *testing.T) {
 		return &model.Field{Id: uuid.New(), Name: name, Type: typ, Config: cfg}
 	}
 	vendor := field("Vendor", model.FieldRelation, fmt.Sprintf(`{"relation_target":"table","table_id":%q}`, uuid.New()))
+	docs := field("Docs", model.FieldRelation, `{"relation_target":"doc"}`)
 	cost := field("Cost", model.FieldNumber, "{}")
 	spend := field("Spend", model.FieldRollup, `{"aggregate":"count"}`)
 	direct := field("Direct", model.FieldFormula, fmt.Sprintf(`{"formula":"{#%s} & \"\""}`, vendor.Id))
 	through := field("Through", model.FieldFormula, fmt.Sprintf(`{"formula":"LEN({#%s})"}`, direct.Id))
+	docNames := field("Doc names", model.FieldFormula, fmt.Sprintf(`{"formula":"UPPER({#%s})"}`, docs.Id))
 	plain := field("Double", model.FieldFormula, fmt.Sprintf(`{"formula":"{#%s} * 2"}`, cost.Id))
-	fields := []*model.Field{vendor, cost, spend, direct, through, plain}
+	fields := []*model.Field{vendor, docs, cost, spend, direct, through, docNames, plain}
 	for f, want := range map[*model.Field]string{
-		vendor:  "A rollup can't add up links to another table",
-		spend:   "A rollup can't add up another rollup",
-		direct:  "A rollup can't add up a formula that reads links or rollups",
-		through: "A rollup can't add up a formula that reads links or rollups",
-		plain:   "",
-		cost:    "",
+		vendor:   "A rollup can't add up links to another table",
+		docs:     "A rollup can't add up links to docs, tasks, boards, projects or people",
+		spend:    "A rollup can't add up another rollup",
+		direct:   "A rollup can't add up a formula that reads links or rollups",
+		through:  "A rollup can't add up a formula that reads links or rollups",
+		docNames: "A rollup can't add up a formula that reads links or rollups",
+		plain:    "",
+		cost:     "",
 	} {
 		if got := rollupProblem("sum", f, fields); got != want {
 			t.Errorf("%s: %q, want %q", f.Name, got, want)
@@ -323,6 +327,11 @@ func TestRollupProblems(t *testing.T) {
 	}
 	if got := rollupProblem("earliest", cost, fields); got != "That way of adding up doesn't fit this field" {
 		t.Errorf("the earliest of numbers: %q", got)
+	}
+	// A row is named by its first field with a value of its own: never by
+	// links, which are named for each reader, nor by a formula reading them.
+	if got := labelField([]*model.Field{docs, vendor, docNames, cost}); got != cost {
+		t.Errorf("rows are named by %v, want Cost", got)
 	}
 }
 

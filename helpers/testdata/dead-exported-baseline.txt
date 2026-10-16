@@ -36,7 +36,6 @@ ConnectedProviderNames
 ConversationOf
 CountByScope
 CountOpenForUser
-CountRows
 CreateGitHubPRReview
 CreateGoogleCalendarEvent
 CreatePendingAction
@@ -169,4 +168,3 @@ RevokeAny
 RotateSecret
 MCPResourceMetadataURL
 IsPublic
-PatchRow

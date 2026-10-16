@@ -7,9 +7,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
+	"github.com/akashc777/OneCamp/tests/timing"
 	"github.com/google/uuid"
 )
 
@@ -60,7 +60,11 @@ func rowsOf(n int, values map[string]interface{}) []*model.Row {
 
 // A cell named many times in a formula is read once a row: each name read
 // it again, so a number cell holding 100 KB of "1,1,1…" named 500 times took
-// 0.5 s a row, and a list of 34,000 empty items joined 250 times 0.4 s.
+// 0.5 s a row, and a list of 34,000 empty items joined 250 times 0.4 s. A
+// read is charged to the row's budget as the work it is (formula.ReadCost),
+// so a cell read for each of its names runs the row out of working out, and
+// the formula says so: counted, which a loaded machine can't stretch, where
+// the time it took was (named once 238 ms, 499 times 1.07 s at a load of 100).
 func TestLongCellsAreReadOnce(t *testing.T) {
 	empty := make([]interface{}, 34000)
 	for i := range empty {
@@ -74,18 +78,14 @@ func TestLongCellsAreReadOnce(t *testing.T) {
 		{"a long list", "00000000-0000-0000-0000-0000000000ad", "{Notes}", "&", empty},
 	}
 	for _, tc := range cases {
-		took := func(names int) time.Duration {
-			src := strings.TrimSuffix(strings.Repeat(tc.ref+tc.join, names), tc.join)
-			rows := rowsOf(5, map[string]interface{}{tc.cell: tc.value})
-			start := time.Now()
-			withComputed(context.Background(), table(1, src), rows)
-			return time.Since(start)
-		}
 		// As many names as a formula has room for.
 		most := (2000 - 1) / len(tc.ref+tc.join)
-		once, many := took(1), took(most)
-		if many > 3*once+100*time.Millisecond {
-			t.Errorf("%s: named once %v, %d times %v", tc.name, once, most, many)
+		rows := rowsOf(5, map[string]interface{}{tc.cell: tc.value})
+		withComputed(context.Background(), table(1, strings.TrimSuffix(strings.Repeat(tc.ref+tc.join, most), tc.join)), rows)
+		for _, r := range rows {
+			if i := strings.Index(r.Values, `"error"`); i >= 0 {
+				t.Errorf("%s named %d times: %.120s", tc.name, most, r.Values[i:])
+			}
 		}
 	}
 }
@@ -150,11 +150,13 @@ func TestTotalsOfALongTableAreRight(t *testing.T) {
 // one formula, against 50 µs with none.
 func TestRowsPassThroughAsStored(t *testing.T) {
 	notes := "00000000-0000-0000-0000-0000000000ad"
-	fields := table(1, "1")
+	x, y := uuid.NewString(), uuid.NewString()
+	fields := append(table(1, "1"), &model.Field{Id: uuid.MustParse(x), Name: "X", Type: model.FieldNumber, Config: "{}"},
+		&model.Field{Id: uuid.MustParse(y), Name: "Y", Type: model.FieldMultiSelect, Config: "{}"})
 	f0 := fields[2].Id.String()
 	// As Postgres hands a row back: spaced, with its own forms of numbers,
 	// and a value left behind for the formula.
-	stored := `{"` + notes + `": "<b>Café</b>  ", "x": 1.50, "y": [1e2, {"label": "A"}], "` + f0 + `": "stale"}`
+	stored := `{"` + notes + `": "<b>Café</b>  ", "` + x + `": 1.50, "` + y + `": [1e2, {"label": "A"}], "` + f0 + `": "stale"}`
 	rows := []*model.Row{{Id: uuid.New(), Values: stored}, {Id: uuid.New(), Values: "not json"}}
 	withComputed(context.Background(), fields, rows)
 	var got map[string]interface{}
@@ -162,8 +164,8 @@ func TestRowsPassThroughAsStored(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]interface{}{
-		notes: "<b>Café</b>  ", "x": 1.5, f0: float64(1),
-		"y": []interface{}{float64(100), map[string]interface{}{"label": "A"}},
+		notes: "<b>Café</b>  ", x: 1.5, f0: float64(1),
+		y: []interface{}{float64(100), map[string]interface{}{"label": "A"}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("the row: %s", rows[0].Values)
@@ -177,14 +179,13 @@ func TestRowsPassThroughAsStored(t *testing.T) {
 		empty[i] = map[string]interface{}{}
 	}
 	long := rowsOf(30, map[string]interface{}{notes: empty})
-	start := time.Now()
-	for _, r := range long {
-		_, _ = json.Marshal(parseRowValues(r.Values))
-	}
-	rewrite := time.Since(start)
-	start = time.Now()
-	withComputed(context.Background(), table(1, "1"), long)
-	if took := time.Since(start); took > rewrite {
+	// Each the fastest of five runs: the work's own time, not the load's.
+	rewrite := timing.Fastest(5, func() {
+		for _, r := range long {
+			_, _ = json.Marshal(parseRowValues(r.Values))
+		}
+	})
+	if took := timing.Fastest(5, func() { withComputed(context.Background(), table(1, "1"), long) }); took > rewrite {
 		t.Errorf("adding a formula to 30 rows took %v; decoding and writing them again takes %v", took, rewrite)
 	}
 }
@@ -311,10 +312,10 @@ func TestRowMembers(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Errorf("%q read as %v", s, got)
 		}
-		// Written again with nothing to add, it's the same object.
+		// Written again with nothing to add, every cell kept, it's the same object.
 		var again map[string]interface{}
-		if err := json.Unmarshal([]byte(withValues(s, ms, nil)), &again); err != nil || !reflect.DeepEqual(again, want) {
-			t.Errorf("%q written again as %q", s, withValues(s, ms, nil))
+		if err := json.Unmarshal([]byte(withValues(s, ms, nil, keysOf(ms))), &again); err != nil || !reflect.DeepEqual(again, want) {
+			t.Errorf("%q written again as %q", s, withValues(s, ms, nil, keysOf(ms)))
 		}
 	}
 	for _, s := range []string{``, `[]`, `"a"`, `{"a"}`, `{"a":}`, `{"a":1,}`, `{"a":1} x`, `{"a":"1}`} {
@@ -340,10 +341,54 @@ func FuzzRowMembers(f *testing.F) {
 			return
 		}
 		var got map[string]interface{}
-		if err := json.Unmarshal([]byte(withValues(s, ms, nil)), &got); err != nil || !reflect.DeepEqual(got, want) {
-			t.Fatalf("%q written again as %q", s, withValues(s, ms, nil))
+		if err := json.Unmarshal([]byte(withValues(s, ms, nil, keysOf(ms))), &got); err != nil || !reflect.DeepEqual(got, want) {
+			t.Fatalf("%q written again as %q", s, withValues(s, ms, nil, keysOf(ms)))
 		}
 	})
+}
+
+// keysOf is every key among a row's cells.
+func keysOf(ms []member) map[string]bool {
+	keys := make(map[string]bool, len(ms))
+	for _, m := range ms {
+		keys[m.key] = true
+	}
+	return keys
+}
+
+// A read keeps the cells of the table's fields alone: a deleted field's stay
+// stored, and go to no reader (the audit's B2).
+func TestReadsKeepOnlyTheTablesFields(t *testing.T) {
+	keep := map[string]bool{"name": true, "notes": true}
+	for in, want := range map[string]string{
+		`{"name": "Acme", "fee": "£120"}`:                  `{"name": "Acme"}`,
+		`{"fee": [1, 2], "name": "Acme", "notes": "Call"}`: `{"name": "Acme", "notes": "Call"}`,
+		`{"fee": 120}`:                      `{}`,
+		`{}`:                                `{}`,
+		`{"name": "Acme", "notes": "Call"}`: `{"name": "Acme", "notes": "Call"}`,
+	} {
+		var got, wanted map[string]interface{}
+		out := keepCells(in, keep)
+		if err := json.Unmarshal([]byte(out), &got); err != nil || json.Unmarshal([]byte(want), &wanted) != nil || !reflect.DeepEqual(got, wanted) {
+			t.Errorf("%s read as %s, want %s", in, out, want)
+		}
+	}
+	// A row with no other cells is left as it is, not written again.
+	if in := `{"name": "Acme",  "notes": "Call"}`; keepCells(in, keep) != in {
+		t.Errorf("%s was written again as %s", in, keepCells(in, keep))
+	}
+	// So is every cell a table's computed cells are worked out into.
+	fields := []*model.Field{{Id: uuid.New(), Name: "Name", Type: model.FieldText, Config: "{}"}}
+	fields = append(fields, &model.Field{Id: uuid.New(), Name: "Shout", Type: model.FieldFormula,
+		Config: fmt.Sprintf(`{"formula":"UPPER({#%s})"}`, fields[0].Id)})
+	gone := uuid.NewString()
+	for _, of := range [][]*model.Field{fields[:1], fields} {
+		row := &model.Row{Values: fmt.Sprintf(`{%q: "acme", %q: "£120"}`, fields[0].Id, gone)}
+		withComputed(asViewer(context.Background(), Actor{UserID: uuid.New()}), of, []*model.Row{row})
+		if strings.Contains(row.Values, gone) || !strings.Contains(row.Values, "acme") {
+			t.Errorf("a read of %d fields gave %s", len(of), row.Values)
+		}
+	}
 }
 
 // Only formula fields can run out of working out: a plain field holding text

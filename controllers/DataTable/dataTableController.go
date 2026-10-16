@@ -7,10 +7,12 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 
+	adminAuditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	business "github.com/akashc777/OneCamp/business/DataTable"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -38,6 +40,10 @@ func writeErr(w http.ResponseWriter, err error) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "you don't have access to this table"})
 	case business.IsNotFound(err):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "table not found"})
+	case business.IsRowNotFound(err):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "row not found"})
+	case business.IsUnavailable(err):
+		helpers.WriteRetryLater(w, "Couldn't load the rows.")
 	default:
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
 	}
@@ -98,7 +104,9 @@ func GenerateTable(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusNotImplemented, helpers.Envolope{"msg": "AI features are not supported on this build"})
 }
 
-// UpdateTable PUT /tables/{id}
+// UpdateTable POST /tables/{id}/update {name?, description?, icon?,
+// visibility?}: changes the fields it names, and no others. A change of who
+// can see the table is recorded in the audit log.
 func UpdateTable(w http.ResponseWriter, r *http.Request) {
 	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
@@ -106,15 +114,20 @@ func UpdateTable(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
 		return
 	}
-	var in business.TableInput
+	var in business.TablePatch
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
 		return
 	}
-	t, err := business.UpdateTable(ctx, id, in, actorFrom(r))
+	t, was, err := business.UpdateTable(ctx, id, in, actorFrom(r))
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	if t.Visibility != was {
+		adminAuditBusiness.Record(r, "table.visibility", adminAuditBusiness.CategorySecurity,
+			fmt.Sprintf("Changed who can see table %q from %s to %s", t.Name, was, t.Visibility),
+			map[string]interface{}{"table_id": t.Id.String(), "from": was, "to": t.Visibility})
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": t})
 }
@@ -249,6 +262,31 @@ func UpdateRow(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": row})
 }
 
+// PatchRow POST /tables/{id}/rows/{rowId}/patch {values: {fieldId: value|null}}
+// sets the cells it names and leaves the rest of the row as it is now.
+func PatchRow(w http.ResponseWriter, r *http.Request) {
+	ctx := readerCtx(r)
+	id, ok := idParam(r, "id")
+	rowId, ok2 := idParam(r, "rowId")
+	if !ok || !ok2 {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid id"})
+		return
+	}
+	var in struct {
+		Values map[string]interface{} `json:"values"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
+		return
+	}
+	row, err := business.PatchRow(ctx, id, rowId, in.Values, actorFrom(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": row})
+}
+
 // DeleteRow DELETE /tables/{id}/rows/{rowId}
 func DeleteRow(w http.ResponseWriter, r *http.Request) {
 	ctx := readerCtx(r)
@@ -293,7 +331,9 @@ func CreateField(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusCreated, helpers.Envolope{"data": f})
 }
 
-// UpdateField PUT /tables/{id}/fields/{fieldId}
+// UpdateField POST /tables/{id}/fields/{fieldId}/update {name?, type?,
+// config?, position?, decimal?, group?} changes what it names; the rest keeps
+// its stored value.
 func UpdateField(w http.ResponseWriter, r *http.Request) {
 	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
@@ -302,16 +342,46 @@ func UpdateField(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid id"})
 		return
 	}
-	var in business.FieldInput
+	var in business.FieldPatch
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
 		return
 	}
-	if err := business.UpdateField(ctx, id, fieldId, in, actorFrom(r)); err != nil {
+	changed, err := business.UpdateField(ctx, id, fieldId, in, actorFrom(r))
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "updated"})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "updated", "cells_changed": changed})
+}
+
+// PreviewConversion POST /tables/{id}/fields/{fieldId}/convert-preview {type,
+// decimal?, group?} counts what changing the field to type would do to its
+// cells, over every row, reading numbers in the asker's decimal and group
+// signs, without changing anything: {kept, converted, cleared}.
+func PreviewConversion(w http.ResponseWriter, r *http.Request) {
+	ctx := readerCtx(r)
+	id, ok := idParam(r, "id")
+	fieldId, ok2 := idParam(r, "fieldId")
+	if !ok || !ok2 {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid id"})
+		return
+	}
+	var in business.FieldPatch
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
+		return
+	}
+	to := ""
+	if in.Type != nil {
+		to = *in.Type
+	}
+	counts, err := business.PreviewConversion(ctx, id, fieldId, to, in.NumberSigns, actorFrom(r))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": counts})
 }
 
 // DeleteField DELETE /tables/{id}/fields/{fieldId}
