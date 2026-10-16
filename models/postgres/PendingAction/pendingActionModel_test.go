@@ -39,12 +39,15 @@ type fakeScanner struct {
 	resolvedBy  uuid.NullUUID
 	agentID     uuid.NullUUID
 	runID       uuid.NullUUID
+	askedBy     uuid.NullUUID
+	toolBinding sql.NullString
 }
 
 func (f *fakeScanner) Scan(dest ...any) error {
 	vals := []any{f.id, f.requestedBy, f.surfaceType, f.surfaceID, f.toolName,
 		f.params, f.description, f.status, f.idem, f.result, f.errStr,
-		f.expiresAt, f.createdAt, f.resolvedAt, f.resolvedBy, f.agentID, f.runID}
+		f.expiresAt, f.createdAt, f.resolvedAt, f.resolvedBy, f.agentID, f.runID,
+		f.askedBy, f.toolBinding}
 	for i := range dest {
 		switch d := dest[i].(type) {
 		case *uuid.UUID:
@@ -151,5 +154,33 @@ func TestScanActionCarriesAgentAttribution(t *testing.T) {
 	}
 	if p.AgentID != nil || p.RunID != nil {
 		t.Errorf("unattributed action got AgentID=%v RunID=%v, want both nil", p.AgentID, p.RunID)
+	}
+}
+
+// What an approval is bound to has to survive the read path too, or an approval
+// would run a call for nobody in particular, to wherever its tool now points.
+func TestScanActionCarriesWhatTheApprovalIsBoundTo(t *testing.T) {
+	asker := uuid.New()
+	fs := &fakeScanner{
+		id: uuid.New(), requestedBy: uuid.New(),
+		surfaceType: "agent", toolName: "tracker_create_issue", params: []byte(`{}`), status: StatusPending,
+		askedBy:     uuid.NullUUID{UUID: asker, Valid: true},
+		toolBinding: sql.NullString{String: "f00d", Valid: true},
+	}
+	p, err := scanAction(fs)
+	if err != nil {
+		t.Fatalf("scanAction err: %v", err)
+	}
+	if p.AskedBy == nil || *p.AskedBy != asker || p.ToolBinding != "f00d" {
+		t.Fatalf("the binding was not carried: asked by %v, tool binding %q", p.AskedBy, p.ToolBinding)
+	}
+
+	// And a row with neither binds nothing.
+	p, err = scanAction(&fakeScanner{id: uuid.New(), requestedBy: uuid.New(), toolName: "create_task", status: StatusPending})
+	if err != nil {
+		t.Fatalf("scanAction err: %v", err)
+	}
+	if p.AskedBy != nil || p.ToolBinding != "" {
+		t.Fatalf("an unbound row must read as unbound: asked by %v, tool binding %q", p.AskedBy, p.ToolBinding)
 	}
 }

@@ -177,7 +177,7 @@ func labelsWith(v interface{}, format func(float64) string) []string {
 					out = append(out, el)
 				}
 			case map[string]interface{}:
-				if lbl := refLabel(el); lbl != "" && !moreRef(el) {
+				if lbl := refLabel(el); lbl != "" && !moreRef(el) && !hiddenRef(el) {
 					out = append(out, lbl)
 				}
 			case float64:
@@ -188,7 +188,7 @@ func labelsWith(v interface{}, format func(float64) string) []string {
 		}
 		return out
 	case map[string]interface{}:
-		if lbl := refLabel(t); lbl != "" && !moreRef(t) {
+		if lbl := refLabel(t); lbl != "" && !moreRef(t) && !hiddenRef(t) {
 			return []string{lbl}
 		}
 		return nil
@@ -208,11 +208,10 @@ func refLabel(m map[string]interface{}) string {
 	return ""
 }
 
-// maxNumberText is the longest text cellNumber reads as a number.
-const maxNumberText = 64
-
 // cellNumber attempts to read a numeric value from a cell (number column, or a
-// numeric string). Returns (value, true) only on success.
+// numeric string, read as formula.ParseNumber reads one in en-US's signs).
+// Returns (value, true) only on success. Text was read by dropping its
+// commas, so "1,5" summed as 15, and "NaN" as a number no answer could hold.
 func cellNumber(v interface{}) (float64, bool) {
 	switch t := v.(type) {
 	case float64:
@@ -227,18 +226,7 @@ func cellNumber(v interface{}) (float64, bool) {
 		}
 		return 0, true
 	case string:
-		// No number people write is longer, and a long cell is copied to
-		// find that out.
-		if len(t) > maxNumberText {
-			return 0, false
-		}
-		s := strings.TrimSpace(strings.ReplaceAll(t, ",", ""))
-		if s == "" {
-			return 0, false
-		}
-		if f, err := strconv.ParseFloat(s, 64); err == nil {
-			return f, true
-		}
+		return formula.ParseNumber(t, formula.PlainSigns)
 	}
 	return 0, false
 }
@@ -273,11 +261,11 @@ func matchFilter(values map[string]interface{}, fields []*model.Field, f Filter)
 	op := FilterOp(strings.ToLower(strings.TrimSpace(f.Op)))
 
 	switch op {
-	// A link cell counting links it doesn't name has links.
+	// A link cell with links it doesn't name has links.
 	case FilterEmpty:
-		return firstLabel(cell) == "" && !hasMoreRef(cell)
+		return firstLabel(cell) == "" && !linksUnnamed(cell)
 	case FilterNotEmpty:
-		return firstLabel(cell) != "" || hasMoreRef(cell)
+		return firstLabel(cell) != "" || linksUnnamed(cell)
 	case FilterGt, FilterGte, FilterLt, FilterLte:
 		cv, ok1 := cellNumber(cell)
 		fv, ok2 := cellNumber(f.Value)
@@ -320,7 +308,7 @@ func labelEquals(cell interface{}, value string) bool {
 		}
 	}
 	// An empty cell equals an empty target.
-	if want == "" && firstLabel(cell) == "" && !hasMoreRef(cell) {
+	if want == "" && firstLabel(cell) == "" && !linksUnnamed(cell) {
 		return true
 	}
 	return false
@@ -541,14 +529,14 @@ func sortBuckets(b []AggBucket, ascending bool, byLabel bool) {
 
 // computedReads is the fields a query reads in each row (filters it, groups
 // by or adds up) whose cells each read works out: formulas, rollups and
-// links to tables, the cells that can leave something out.
+// links to tables' rows or to items, named for the reader.
 func computedReads(fields []*model.Field, filters []Filter, read ...*model.Field) []string {
 	var ids []string
 	add := func(fld *model.Field) {
 		if fld == nil {
 			return
 		}
-		if _, isLink := linkOf(fld); isLink || fld.Type == model.FieldFormula || fld.Type == model.FieldRollup {
+		if readsLinks(fld) || fld.Type == model.FieldFormula || fld.Type == model.FieldRollup {
 			ids = append(ids, fld.Id.String())
 		}
 	}
@@ -585,6 +573,25 @@ func hasMoreRef(cell interface{}) bool {
 	items, _ := cell.([]interface{})
 	for _, it := range items {
 		if moreRef(it) {
+			return true
+		}
+	}
+	return false
+}
+
+// hiddenRef is whether a cell's item is a link to an item its reader can't
+// open ({"hidden": true}): a link, with no name to read.
+func hiddenRef(item interface{}) bool {
+	m, ok := item.(map[string]interface{})
+	return ok && m["hidden"] == true
+}
+
+// linksUnnamed is whether a link cell, as read, has links it doesn't name:
+// past those it shows, or to items its reader can't open.
+func linksUnnamed(cell interface{}) bool {
+	items, _ := cell.([]interface{})
+	for _, it := range items {
+		if moreRef(it) || hiddenRef(it) {
 			return true
 		}
 	}
@@ -635,7 +642,7 @@ func pushableLikeTerms(fields []*model.Field, filters []Filter) []string {
 		if rf == nil {
 			continue // unknown field is a no-op in matchFilter; must not narrow
 		}
-		if _, isLink := linkOf(rf); isLink || rf.Type == model.FieldFormula || rf.Type == model.FieldRollup {
+		if readsLinks(rf) || rf.Type == model.FieldFormula || rf.Type == model.FieldRollup {
 			continue // worked out on read (links store ids, not names), so not in the stored values to match
 		}
 		terms = append(terms, v)

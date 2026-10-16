@@ -13,10 +13,10 @@ package trello
 //	{"idCustomField":"f5","value":{"text":"Acme"}}
 
 import (
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/akashc777/OneCamp/business/DataTable/formula"
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 )
 
@@ -106,7 +106,7 @@ func cardFieldValues(items []trelloCustomFieldItem, byID map[string]importProvid
 			}
 		case importProvider.FieldNumber:
 			if it.Value != nil {
-				if n, err := strconv.ParseFloat(strings.TrimSpace(it.Value.Number), 64); err == nil {
+				if n, ok := formula.ParseNumber(it.Value.Number, formula.PlainSigns); ok {
 					v = n
 				}
 			}

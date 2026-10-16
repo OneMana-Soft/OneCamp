@@ -304,6 +304,30 @@ func Refs(src string) []string {
 	return out
 }
 
+// TextRefs is the fields a text names the way a formula does ({Notes}), in
+// order, each once: an AI column's prompt, which is words rather than a
+// formula, and so isn't lexed as one. A brace left open names nothing.
+func TextRefs(src string) []string {
+	rs := []rune(src)
+	var out []string
+	seen := map[string]bool{}
+	for i := 0; i < len(rs); i++ {
+		if rs[i] != '{' {
+			continue
+		}
+		s, next, ok := quoted(rs, i, '}')
+		if !ok {
+			break
+		}
+		if name := strings.TrimSpace(s); name != "" && !seen[name] {
+			seen[name] = true
+			out = append(out, name)
+		}
+		i = next - 1
+	}
+	return out
+}
+
 // Check reads a formula about to be saved for field self, without running
 // it: what it gives, or why it can't be read (a *SyntaxError says where).
 func Check(src string, fields []Field, self string) (Kind, error) {

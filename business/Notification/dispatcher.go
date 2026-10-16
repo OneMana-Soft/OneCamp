@@ -99,6 +99,15 @@ type Event struct {
 	// applies all eligibility gates per-recipient.
 	Recipients []Recipient
 
+	// MayRead, when set, is which of the recipients (by user id, answered as
+	// given) may read what the event is about now: anyone it leaves out
+	// isn't emailed, and when it can't answer nobody is. An event about
+	// something only some people may read sets it from that thing's read rule,
+	// as a task's events do (taskReaders), so its email never reaches someone
+	// the app would refuse it to, such as a commenter since taken off the
+	// task's project.
+	MayRead func(ctx context.Context, userIDs []string) (map[string]bool, error)
+
 	// SkipOnlineCheck overrides the per-user "only when offline" policy.
 	// Used for events where email is the primary channel (digest, calendar
 	// reminders) and where online-status is irrelevant.
@@ -144,7 +153,8 @@ func Dispatch(ctx context.Context, evt Event) int {
 		seen[r.UserUUID] = struct{}{}
 		candidates = append(candidates, r.UserUUID)
 	}
-	if len(candidates) == 0 {
+	// Step 1b: only those who may read what it is about (Event.MayRead).
+	if candidates = keepReaders(ctx, evt, candidates); len(candidates) == 0 {
 		return 0
 	}
 
@@ -209,6 +219,30 @@ func Dispatch(ctx context.Context, evt Event) int {
 		}
 	}
 	return enqueued
+}
+
+// keepReaders is the candidates evt.MayRead lets read what the event is about:
+// all of them when the event has no gate, none when the gate can't answer.
+func keepReaders(ctx context.Context, evt Event, candidates []uuid.UUID) []uuid.UUID {
+	if evt.MayRead == nil || len(candidates) == 0 {
+		return candidates
+	}
+	ids := make([]string, len(candidates))
+	for i, c := range candidates {
+		ids[i] = c.String()
+	}
+	readers, err := evt.MayRead(ctx, ids)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "notification/Dispatch could not check who may read a %s, emailing nobody: %+v", evt.Type, err)
+		return nil
+	}
+	kept := make([]uuid.UUID, 0, len(candidates))
+	for _, c := range candidates {
+		if readers[c.String()] {
+			kept = append(kept, c)
+		}
+	}
+	return kept
 }
 
 // dispatchPrepared is the per-recipient enqueue step run after Dispatch

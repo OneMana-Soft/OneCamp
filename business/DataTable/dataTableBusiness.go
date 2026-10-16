@@ -13,12 +13,14 @@ package business
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
 
+	"github.com/akashc777/OneCamp/business/DataTable/formula"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	"github.com/akashc777/OneCamp/helpers"
@@ -40,13 +42,31 @@ type Actor struct {
 }
 
 var (
-	errForbidden = fmt.Errorf("not authorized for this table")
-	errNotFound  = fmt.Errorf("table not found")
+	errForbidden   = fmt.Errorf("not authorized for this table")
+	errNotFound    = fmt.Errorf("table not found")
+	errRowNotFound = fmt.Errorf("row not found")
+	// errFieldNotFound is a field that isn't in the table, or no longer is.
+	errFieldNotFound = fmt.Errorf("that field isn't in this table")
+	// errFieldChanged is a field whose type changed while a save was planned
+	// against the type it had.
+	errFieldChanged = fmt.Errorf("this field changed while you were saving it; try again")
+	// errNoCells is a patch naming no cell a row stores: it would touch the
+	// row, and tell its readers, webhooks and AI columns, for nothing.
+	errNoCells = fmt.Errorf("name the cells to change")
+	// errNumberSigns is number signs no number is written with
+	// (NumberSigns.Checked).
+	errNumberSigns = fmt.Errorf("invalid number signs: a decimal sign and a group sign are one character each, and differ")
+	// errRowsUnavailable is a page of rows that couldn't be read, or worked
+	// out for its reader, just now: no row goes out as it's stored.
+	errRowsUnavailable = fmt.Errorf("couldn't load the rows")
 )
 
-// IsForbidden / IsNotFound let controllers map to HTTP codes.
-func IsForbidden(err error) bool { return err == errForbidden }
-func IsNotFound(err error) bool  { return err == errNotFound }
+// IsForbidden / IsNotFound / IsRowNotFound / IsUnavailable let controllers map
+// to HTTP codes.
+func IsForbidden(err error) bool   { return err == errForbidden }
+func IsNotFound(err error) bool    { return err == errNotFound }
+func IsRowNotFound(err error) bool { return err == errRowNotFound }
+func IsUnavailable(err error) bool { return err == errRowsUnavailable }
 
 func canView(t *model.DataTable, a Actor) bool {
 	return a.IsAdmin || t.CreatedBy == a.UserID || t.Visibility == model.VisibilityWorkspace
@@ -71,9 +91,55 @@ type FieldInput struct {
 	Position float64                `json:"position"`
 }
 
+// FieldPatch is a change to a field: what it names changes, and what it
+// leaves out keeps its stored value (onto). A save sent its page's copy of
+// the field whole, so a rename put back the options, settings and place the
+// copy held, and one that sent no place moved the column to the front.
+type FieldPatch struct {
+	Name *string `json:"name"`
+	Type *string `json:"type"`
+	// Config is left out by a nil map: JSON null, or no "config" at all.
+	Config   map[string]interface{} `json:"config"`
+	Position *float64               `json:"position"`
+	// NumberSigns are how whoever changes the field's type writes numbers
+	// ("decimal" and "group"): text in a column made numbers is read by them.
+	formula.NumberSigns
+}
+
+// onto is field f as a save of p leaves it: what p names, and f's stored
+// value of the rest. An empty type is one left out.
+func (p FieldPatch) onto(f *model.Field) FieldInput {
+	in := FieldInput{Name: f.Name, Type: f.Type, Config: p.Config, Position: f.Position}
+	if p.Name != nil {
+		in.Name = *p.Name
+	}
+	if p.Type != nil && strings.TrimSpace(*p.Type) != "" {
+		in.Type = *p.Type
+	}
+	if p.Position != nil {
+		in.Position = *p.Position
+	}
+	if in.Config == nil {
+		in.Config = map[string]interface{}{}
+		_ = json.Unmarshal([]byte(f.Config), &in.Config)
+	}
+	return in
+}
+
+// whole is whether p is a save of a whole field: its name, type and place
+// all named. The web released before patches (v2.72.2's) sends every save of
+// a field that way, from its page's copy, and the web since never does (it
+// names what changed). Such a save is read as v2.72.2 read it, so a page
+// still running that web changes no cell it didn't: the options it lists are
+// the field's (planOptions), and a change of type leaves the cells as they
+// are.
+func (p FieldPatch) whole() bool { return p.Name != nil && p.Type != nil && p.Position != nil }
+
 type RowInput struct {
-	Values   map[string]interface{} `json:"values"`
-	Position float64                `json:"position"`
+	Values map[string]interface{} `json:"values"`
+	// Position is the row's place; left out, a new row goes after the last
+	// one and an updated row stays where it is.
+	Position *float64 `json:"position"`
 }
 
 type ViewInput struct {
@@ -96,6 +162,9 @@ type TableBundle struct {
 	// first page (bundleRowPage). The FE/AI should page the rest via the rows
 	// endpoint rather than assume Rows is the whole table.
 	RowsTruncated bool `json:"rows_truncated"`
+	// RowCount is how many rows the table has, not deleted: what a reader
+	// holding the first page says it holds of, and pages towards.
+	RowCount int `json:"row_count"`
 }
 
 func optStr(s string) *string {
@@ -148,7 +217,7 @@ func CreateTableFromTemplate(ctx context.Context, in TableInput, fields []FieldI
 			helpers.LogErrorWithContext(ctx, "CreateTableFromTemplate skips %q: it links to another table", fi.Name)
 			return nil
 		}
-		f, ferr := buildField(id, fi)
+		f, _, ferr := buildField(id, fi, nil, false)
 		if ferr != nil {
 			helpers.LogErrorWithContext(ctx, "CreateTableFromTemplate field err: %v", ferr)
 			return nil
@@ -361,34 +430,118 @@ func loadViewable(ctx context.Context, id uuid.UUID, actor Actor) (*model.DataTa
 	return t, nil
 }
 
-// UpdateTable updates a table's header (manage only).
-func UpdateTable(ctx context.Context, id uuid.UUID, in TableInput, actor Actor) (*model.DataTable, error) {
+// TablePatch is a change to a table's header: only the fields it names
+// change.
+type TablePatch struct {
+	Name        *string `json:"name"`
+	Description *string `json:"description"`
+	Icon        *string `json:"icon"`
+	Visibility  *string `json:"visibility"`
+}
+
+// UpdateTable changes the header fields a patch names, and only those (manage
+// only), and has the table's open views read it again. The header used to be
+// written whole from the page's copy, so a rename from a copy read before the
+// table was made private made it visible to the workspace again (TAB-BUG-12).
+// Who can see a table changes on its own; a whole header, as the web released
+// before patches sends every header save, is read for the one change it makes
+// (wholeHeader). It returns the table, and its visibility as it was.
+func UpdateTable(ctx context.Context, id uuid.UUID, in TablePatch, actor Actor) (*model.DataTable, string, error) {
 	t, err := loadManageable(ctx, id, actor)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	name := strings.TrimSpace(in.Name)
-	if name == "" {
-		return nil, fmt.Errorf("name is required")
+	if in.Name == nil && in.Description == nil && in.Icon == nil && in.Visibility == nil {
+		return nil, "", fmt.Errorf("name what to change: name, description, icon or visibility")
 	}
-	if len(name) > maxNameLen || len(in.Description) > maxDescriptionLen || len(in.Icon) > maxIconLen {
-		return nil, fmt.Errorf("a field is too long")
+	if in.Name != nil && in.Visibility != nil {
+		if in, err = wholeHeader(t, in); err != nil {
+			return nil, "", err
+		}
 	}
-	visibility := strings.TrimSpace(in.Visibility)
-	if visibility == "" {
-		visibility = t.Visibility
+	if in.Visibility != nil && (in.Name != nil || in.Description != nil || in.Icon != nil) {
+		return nil, "", fmt.Errorf("change who can see a table on its own")
 	}
-	if !model.ValidVisibility(visibility) {
-		return nil, fmt.Errorf("invalid visibility")
+	change := model.TableChange{SetDescription: in.Description != nil, SetIcon: in.Icon != nil}
+	if in.Name != nil {
+		name := strings.TrimSpace(*in.Name)
+		if name == "" {
+			return nil, "", fmt.Errorf("name is required")
+		}
+		if len(name) > maxNameLen {
+			return nil, "", fmt.Errorf("name is too long")
+		}
+		change.Name = &name
 	}
-	t.Name = name
-	t.Description = optStr(in.Description)
-	t.Icon = optStr(in.Icon)
-	t.Visibility = visibility
-	if err := model.UpdateTable(ctx, t); err != nil {
-		return nil, fmt.Errorf("failed to update table")
+	if in.Description != nil {
+		if len(*in.Description) > maxDescriptionLen {
+			return nil, "", fmt.Errorf("description is too long")
+		}
+		change.Description = optStr(*in.Description)
 	}
-	return model.GetTableByID(ctx, id)
+	if in.Icon != nil {
+		if len(*in.Icon) > maxIconLen {
+			return nil, "", fmt.Errorf("icon is too long")
+		}
+		change.Icon = optStr(*in.Icon)
+	}
+	if in.Visibility != nil {
+		visibility := strings.TrimSpace(*in.Visibility)
+		if !model.ValidVisibility(visibility) {
+			return nil, "", fmt.Errorf("invalid visibility")
+		}
+		change.Visibility = &visibility
+	}
+	t, was, err := model.UpdateTable(ctx, id, change)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", errNotFound
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to update table")
+	}
+	mqttBusiness.PublishTableRow(id.String(), map[string]interface{}{"action": "table"})
+	return t, was, nil
+}
+
+// errStaleHeader is a whole header (wholeHeader) that differs from the table
+// in more than one way: a page's copy read before the table changed.
+var errStaleHeader = fmt.Errorf("this table changed since the page was opened; reload it and try again")
+
+// wholeHeader reads a header patch naming both the name and who can see the
+// table, as the web released before patches (v2.72.2's) sends every header
+// save, and the web since never does: the page's copy of the name, of the
+// description and icon when it has them, and of the visibility, with one of
+// them changed. That one is the save, found against the table as stored (t):
+//   - a rename, or a description, which that page leaves out when it's empty,
+//     so one left out is cleared;
+//   - who can see the table (Make private, Show to the workspace), alone;
+//   - nothing, when the copy matches the table.
+//
+// The icon is the copy's, as that page never changes it. A copy that differs
+// in more than one way was read before the table changed, and would put back
+// what changed since, a private table shown to the workspace among it
+// (TAB-BUG-12): it's refused.
+func wholeHeader(t *model.DataTable, in TablePatch) (TablePatch, error) {
+	description := ""
+	if in.Description != nil {
+		description = strings.TrimSpace(*in.Description)
+	}
+	stored := ""
+	if t.Description != nil {
+		stored = strings.TrimSpace(*t.Description)
+	}
+	renamed := strings.TrimSpace(*in.Name) != t.Name
+	described := description != stored
+	shown := strings.TrimSpace(*in.Visibility) != t.Visibility
+	switch {
+	case (renamed && described) || (renamed && shown) || (described && shown):
+		return TablePatch{}, errStaleHeader
+	case described:
+		return TablePatch{Description: &description}, nil
+	case shown:
+		return TablePatch{Visibility: in.Visibility}, nil
+	}
+	return TablePatch{Name: in.Name}, nil
 }
 
 // DeleteTable soft-deletes a table (manage only).
@@ -423,26 +576,29 @@ const bundleRowPage = 500
 // formulas worked out: the one loader behind the member's and the guest's
 // bundle.
 func loadBundle(ctx context.Context, t *model.DataTable, manage bool, topic string) (*TableBundle, error) {
-	// Fields, views, and rows are mutually independent (each only scopes by
-	// table_id) and back the single most-hit table read (the app's table view,
-	// GET /v1/tables/{id}, and the AI read_table tool). Fetch them concurrently
-	// so the bundle is one round-trip's wall-clock latency instead of three
-	// serial ones. database/sql's pool is safe for concurrent use.
+	// Fields, views, rows and the row count are mutually independent (each only
+	// scopes by table_id) and back the single most-hit table read (the app's
+	// table view, GET /v1/tables/{id}, and the AI read_table tool). Fetch them
+	// concurrently so the bundle is one round-trip's wall-clock latency instead
+	// of four serial ones. database/sql's pool is safe for concurrent use.
 	var (
 		fields []*model.Field
 		views  []*model.View
 		rows   []*model.Row
+		count  int
 		fErr   error
 		vErr   error
 		rErr   error
+		cErr   error
 		wg     sync.WaitGroup
 	)
 	// Fetch one more than the page size so we can tell the FE/AI whether the
-	// table has more rows than this bundle carries, without a separate COUNT.
-	wg.Add(3)
+	// table has more rows than this bundle carries, by the page itself.
+	wg.Add(4)
 	go func() { defer wg.Done(); fields, fErr = model.ListFields(ctx, t.Id) }()
 	go func() { defer wg.Done(); views, vErr = model.ListViews(ctx, t.Id) }()
 	go func() { defer wg.Done(); rows, rErr = model.ListRows(ctx, t.Id, bundleRowPage+1, 0) }()
+	go func() { defer wg.Done(); count, cErr = model.CountRows(ctx, t.Id) }()
 	wg.Wait()
 
 	if fErr != nil {
@@ -451,7 +607,7 @@ func loadBundle(ctx context.Context, t *model.DataTable, manage bool, topic stri
 	if vErr != nil {
 		return nil, fmt.Errorf("failed to load views")
 	}
-	if rErr != nil {
+	if rErr != nil || cErr != nil {
 		return nil, fmt.Errorf("failed to load rows")
 	}
 	truncated := false
@@ -460,7 +616,8 @@ func loadBundle(ctx context.Context, t *model.DataTable, manage bool, topic stri
 		truncated = true
 	}
 	presentComputedFields(fields, withComputed(ctx, fields, rows))
-	return &TableBundle{Table: t, Fields: fields, Views: views, Rows: rows, CanManage: manage, MqttTopic: topic, RowsTruncated: truncated}, nil
+	return &TableBundle{Table: t, Fields: fields, Views: views, Rows: rows, CanManage: manage, MqttTopic: topic,
+		RowsTruncated: truncated, RowCount: count}, nil
 }
 
 // GetGuestBundle returns the open-payload for a table for an EXTERNAL guest,
@@ -478,7 +635,57 @@ func GetGuestBundle(ctx context.Context, id uuid.UUID) (*TableBundle, error) {
 		return nil, errNotFound // gone, unlike a load that failed (IsNotFound)
 	}
 
-	return loadBundle(ctx, t, false, "")
+	b, err := loadBundle(ctx, t, false, "")
+	if err != nil {
+		return nil, err
+	}
+	forGuests(b)
+	return b, nil
+}
+
+// forGuests takes out of a bundle what a guest has no use for, and members
+// do: who made the table and each row, which are member ids; the saved views,
+// whose filters name what members look for; and every field setting a
+// guest's view doesn't read (guestConfig).
+func forGuests(b *TableBundle) {
+	b.Table.CreatedBy = uuid.Nil
+	b.Views = []*model.View{}
+	for _, r := range b.Rows {
+		r.CreatedBy = nil
+	}
+	for _, f := range b.Fields {
+		f.Config = guestConfig(f.Config)
+	}
+}
+
+// guestConfigKeys are the field settings a guest's view reads (the web's
+// GuestTableViewer): how options and numbers show, and what a formula or a
+// rollup gives.
+var guestConfigKeys = []string{"options", "tinted", "format", "result"}
+
+// guestConfig is a field's config as a guest gets it: guestConfigKeys alone,
+// and ai_filled for an AI column instead of its prompt. The rest is how
+// members set the field up: another table's id and name, a rollup's fields
+// there, a formula's text.
+func guestConfig(config string) string {
+	var cfg map[string]json.RawMessage
+	if json.Unmarshal([]byte(config), &cfg) != nil {
+		return "{}"
+	}
+	out := make(map[string]json.RawMessage, len(guestConfigKeys)+1)
+	for _, k := range guestConfigKeys {
+		if v, ok := cfg[k]; ok {
+			out[k] = v
+		}
+	}
+	if v, ok := cfg["ai"]; ok && string(v) != "null" {
+		out["ai_filled"] = json.RawMessage("true")
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }
 
 // ───────────────────────── fields ─────────────────────────
@@ -489,11 +696,15 @@ func CreateField(ctx context.Context, tableId uuid.UUID, in FieldInput, actor Ac
 	if err != nil {
 		return nil, err
 	}
-	other, err := computedFieldConfig(ctx, actor, t, uuid.Nil, &in)
+	fields, err := model.ListFields(ctx, tableId)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load fields")
+	}
+	other, err := computedFieldConfig(ctx, actor, t, fields, uuid.Nil, &in)
 	if err != nil {
 		return nil, err
 	}
-	f, err := buildField(tableId, in)
+	f, _, err := buildField(tableId, in, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -509,31 +720,96 @@ func CreateField(ctx context.Context, tableId uuid.UUID, in FieldInput, actor Ac
 	return f, nil
 }
 
-// UpdateField edits a column (manage only).
-func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, in FieldInput, actor Actor) error {
+// UpdateField edits a column (manage only): what the patch names changes,
+// and the rest keeps its stored value (FieldPatch.onto). Its cells change
+// with it, in the same transaction: converted to a new type
+// (convertCells.go), and with its options (selectOptions.go), as planned
+// against the field as that transaction finds it; a save of a whole field is
+// read as v2.72.2 read it (FieldPatch.whole). It returns how many rows' cells
+// changed, and has the table's open views read it again.
+func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, p FieldPatch, actor Actor) (int, error) {
 	t, err := loadManageable(ctx, tableId, actor)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	other, err := computedFieldConfig(ctx, actor, t, fieldId, &in)
+	fields, err := model.ListFields(ctx, tableId)
 	if err != nil {
-		return err
+		return 0, fmt.Errorf("failed to load fields")
 	}
-	f, err := buildField(tableId, in)
+	var was *model.Field
+	for _, f := range fields {
+		if f.Id == fieldId {
+			was = f
+		}
+	}
+	if was == nil {
+		return 0, errFieldNotFound
+	}
+	signs, ok := p.NumberSigns.Checked()
+	if !ok {
+		return 0, errNumberSigns
+	}
+	in := p.onto(was)
+	other, err := computedFieldConfig(ctx, actor, t, fields, fieldId, &in)
 	if err != nil {
-		return err
+		return 0, err
+	}
+	if p.Config != nil {
+		p.Config = in.Config // as checked: a formula's fields named by id
+	}
+	whole := p.whole()
+	f, _, err := buildField(tableId, in, was, whole)
+	if err != nil {
+		return 0, err
 	}
 	f.Id = fieldId
+	changed := 0
 	if other != nil {
 		err = showLinksIn(ctx, f, t, other)
-	} else if model.UpdateField(ctx, f) != nil {
-		err = fmt.Errorf("failed to update field")
+	} else {
+		var planErr error
+		changed, err = model.UpdateFieldAndCells(ctx, tableId, fieldId, func(current *model.Field) (*model.Field, model.Convert, []model.CellRewrite, error) {
+			if current.Type != was.Type {
+				planErr = errFieldChanged
+				return nil, nil, nil, planErr
+			}
+			f, relabel, err := buildField(tableId, p.onto(current), current, whole)
+			if err != nil {
+				planErr = err
+				return nil, nil, nil, err
+			}
+			f.Id = fieldId
+			var convert model.Convert
+			if converts(current.Type, f.Type) && !whole {
+				convert = func(cells map[uuid.UUID]json.RawMessage) (map[uuid.UUID]json.RawMessage, error) {
+					out, _, err := conversion(f, cells, signs)
+					return out, err
+				}
+			}
+			return f, convert, model.Relabel(relabel), nil
+		})
+		switch {
+		case planErr != nil:
+			err = planErr
+		case errors.Is(err, sql.ErrNoRows):
+			err = errFieldNotFound
+		case err != nil:
+			err = fmt.Errorf("failed to update field")
+		}
 	}
 	if err != nil {
-		return err
+		return 0, err
 	}
+	tellFieldsChanged(tableId)
 	go tellTablesLinkedWith(context.WithoutCancel(ctx), tableId)
-	return nil
+	return changed, nil
+}
+
+// tellFieldsChanged has a table's open views read it again: a field changed,
+// and perhaps its cells, and a view going on with the field as it was (an
+// option's old label) would write what the field no longer offers.
+func tellFieldsChanged(tableID uuid.UUID) {
+	mqttBusiness.PublishTableRow(tableID.String(), map[string]interface{}{"action": "fields"})
 }
 
 // DeleteField removes a column (manage only).
@@ -566,31 +842,59 @@ func DeleteField(ctx context.Context, tableId, fieldId uuid.UUID, actor Actor) e
 	return err
 }
 
-func buildField(tableId uuid.UUID, in FieldInput) (*model.Field, error) {
+// buildField checks a field being saved, and gives a select field's options
+// their ids against those of the field as it is (was; nil for a new one), the
+// options listed being all it has when the save is of a whole field (whole).
+// It returns the field, and how its cells change with its options
+// (planOptions). It plans on a copy of in's config, so it gives the same
+// answer however often it's asked: once to check a save, and again in its
+// transaction.
+func buildField(tableId uuid.UUID, in FieldInput, was *model.Field, whole bool) (*model.Field, map[string]string, error) {
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
-		return nil, fmt.Errorf("field name is required")
+		return nil, nil, fmt.Errorf("field name is required")
 	}
 	if len(name) > maxNameLen {
-		return nil, fmt.Errorf("field name is too long")
+		return nil, nil, fmt.Errorf("field name is too long")
 	}
 	ftype := strings.TrimSpace(in.Type)
 	if ftype == "" {
 		ftype = model.FieldText
 	}
 	if !model.ValidFieldType(ftype) {
-		return nil, fmt.Errorf("invalid field type")
+		return nil, nil, fmt.Errorf("invalid field type")
 	}
-	cfg, err := jsonObject(in.Config)
+	sent, err := jsonObject(in.Config)
 	if err != nil {
-		return nil, fmt.Errorf("invalid field config")
+		return nil, nil, fmt.Errorf("invalid field config")
 	}
-	return &model.Field{TableId: tableId, Name: name, Type: ftype, Config: cfg, Position: in.Position}, nil
+	cfg := map[string]interface{}{}
+	_ = json.Unmarshal([]byte(sent), &cfg)
+	removed := removedOptions(cfg)
+	delete(cfg, removedOptionsKey)
+	var relabel map[string]string
+	if hasOptions(ftype) {
+		var stored []map[string]interface{}
+		if was != nil && hasOptions(was.Type) {
+			var old map[string]interface{}
+			_ = json.Unmarshal([]byte(was.Config), &old)
+			stored = optionsIn(old)
+		}
+		relabel = planOptions(stored, cfg, removed, whole)
+	}
+	out, err := jsonObject(cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid field config")
+	}
+	return &model.Field{TableId: tableId, Name: name, Type: ftype, Config: out, Position: in.Position}, relabel, nil
 }
 
 // ───────────────────────── rows ─────────────────────────
 
-// CreateRow inserts a row (view/edit access) and broadcasts it.
+// CreateRow inserts a row (view/edit access) and broadcasts it. A row with no
+// position goes after the table's last row, wherever that is; the web put a
+// new row after the last one it held, which on a table past one page sorted it
+// outside every page it held, and it never appeared.
 func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor) (*model.Row, error) {
 	ctx = asViewer(ctx, actor)
 	t, err := loadViewable(ctx, tableId, actor)
@@ -610,25 +914,27 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 	if lerr != nil {
 		return nil, lerr
 	}
-	valuesJSON, verr := validateValues(stripComputed(fields, values))
+	valuesJSON, verr := storedCells(fields, values)
 	if verr != nil {
 		return nil, verr
 	}
-	r := &model.Row{Id: id, TableId: tableId, Values: valuesJSON, Position: in.Position, CreatedBy: &actor.UserID}
-	created, cerr := model.CreateRowWithLinks(ctx, r, links, maxLinks)
+	r := &model.Row{Id: id, TableId: tableId, Values: valuesJSON, CreatedBy: &actor.UserID}
+	created, cerr := model.CreateRowWithLinks(ctx, r, in.Position, links, maxLinks)
 	if errors.Is(cerr, model.ErrTooManyLinks) {
 		return nil, errTooManyLinks
 	}
 	if cerr != nil {
 		return nil, fmt.Errorf("failed to create row")
 	}
+	written := changedCells("{}", created.Values)
+	stored := *created // as written: what its AI columns read
 	withComputed(ctx, fields, []*model.Row{created})
 	broadcastRow(t.Id.String(), "created", created)
 	tellTables(linkedTables...)
-	// Continuous AI autofill: recompute any auto AI columns for the new row,
-	// as the creator, off the request path. Loop-safe (writes via the model
-	// layer, not CreateRow/UpdateRow).
-	go AutofillRowOnWrite(context.WithoutCancel(ctx), t, created, actor)
+	// Continuous AI autofill: fill the new row's auto AI columns it wasn't
+	// given, as the creator, off the request path. Loop-safe (writes via the
+	// model layer, not CreateRow/UpdateRow).
+	go AutofillRowOnWrite(context.WithoutCancel(ctx), t, &stored, written, actor)
 	// Reactive triggers: let agents react to new table rows (Notion-DB-style
 	// automation). Loop-safe — DispatchEvent skips in-process listeners for
 	// automation-generated writes, so an agent's own row write can't re-trigger.
@@ -640,7 +946,9 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 	return created, nil
 }
 
-// UpdateRow replaces a row's values (view/edit access) and broadcasts it.
+// UpdateRow replaces a row's values (view/edit access) and broadcasts it. A
+// row given no position stays where it is; a row that's gone is
+// errRowNotFound.
 func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor Actor) (*model.Row, error) {
 	ctx = asViewer(ctx, actor)
 	t, err := loadViewable(ctx, tableId, actor)
@@ -658,21 +966,30 @@ func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor
 	// Its links stay as they are: a row written back as an earlier read gave
 	// it would otherwise put back links removed since, or take away those
 	// added. They change through ChangeLinks.
-	valuesJSON, verr := validateValues(stripComputed(fields, values))
+	valuesJSON, verr := storedCells(fields, values)
 	if verr != nil {
 		return nil, verr
 	}
-	r, uerr := model.UpdateRowValues(ctx, tableId, rowId, valuesJSON, in.Position)
+	r, old, uerr := model.UpdateRowValues(ctx, tableId, rowId, valuesJSON, in.Position, aiColumns(fields), maxValuesBytes)
+	if errors.Is(uerr, model.ErrRowTooLarge) {
+		return nil, fmt.Errorf("row is too large")
+	}
+	if errors.Is(uerr, sql.ErrNoRows) {
+		return nil, errRowNotFound
+	}
 	if uerr != nil {
 		return nil, fmt.Errorf("failed to update row")
 	}
-	return rowUpdated(ctx, t, fields, r, actor), nil
+	return rowUpdated(ctx, t, fields, r, changedCells(old, r.Values), actor), nil
 }
 
 // PatchRow changes only the cells it is given, leaving the row's other cells
-// and its place as they are when it's written: what an agent asking to set a
-// field means. update_table_row used to replace the row with the cells it
-// named, erasing the rest and moving the row to the top.
+// and its place as they are when it's written: what a cell edit, a card moved
+// on the board and an agent asking to set a field mean. A whole row sent from
+// a copy read earlier put back every cell changed since, and update_table_row
+// used to move the row to the top too. A nil value clears its cell; a row
+// that's gone is errRowNotFound; a patch naming no cell the row stores
+// (computed cells and links aren't) is errNoCells.
 func PatchRow(ctx context.Context, tableId, rowId uuid.UUID, values map[string]interface{}, actor Actor) (*model.Row, error) {
 	ctx = asViewer(ctx, actor)
 	t, err := loadViewable(ctx, tableId, actor)
@@ -687,30 +1004,40 @@ func PatchRow(ctx context.Context, tableId, rowId uuid.UUID, values map[string]i
 		values = map[string]interface{}{}
 	}
 	// Links change through ChangeLinks, as for UpdateRow.
-	patchJSON, verr := validateValues(stripComputed(fields, values))
+	patchJSON, verr := storedCells(fields, values)
 	if verr != nil {
 		return nil, verr
 	}
-	r, uerr := model.MergeRowValues(ctx, tableId, rowId, patchJSON, maxValuesBytes)
+	if len(values) == 0 {
+		return nil, errNoCells
+	}
+	r, old, uerr := model.MergeRowValues(ctx, tableId, rowId, patchJSON, aiColumns(fields), maxValuesBytes)
 	if errors.Is(uerr, model.ErrRowTooLarge) {
 		return nil, fmt.Errorf("row is too large")
+	}
+	if errors.Is(uerr, sql.ErrNoRows) {
+		return nil, errRowNotFound
 	}
 	if uerr != nil {
 		return nil, fmt.Errorf("failed to update row")
 	}
-	return rowUpdated(ctx, t, fields, r, actor), nil
+	return rowUpdated(ctx, t, fields, r, changedCells(old, r.Values), actor), nil
 }
 
-// rowUpdated is what follows a change to a row's cells: tables linking to it
-// recount, its computed cells are worked out, open views hear of it, its AI
-// columns refill, and webhooks fire.
-func rowUpdated(ctx context.Context, t *model.DataTable, fields []*model.Field, r *model.Row, actor Actor) *model.Row {
+// rowUpdated is what follows a change to a row's cells (changed, by field
+// id): tables linking to it recount, its computed cells are worked out, open
+// views hear of it, its AI columns that read a changed cell refill, and
+// webhooks fire.
+func rowUpdated(ctx context.Context, t *model.DataTable, fields []*model.Field, r *model.Row, changed map[string]bool, actor Actor) *model.Row {
 	go tellLinkedTables(context.WithoutCancel(ctx), t.Id, r.Id, false)
+	// The row as written, before its cells are worked out for this reader:
+	// what its AI columns read, and write only while it's so.
+	stored := *r
 	withComputed(ctx, fields, []*model.Row{r})
 	broadcastRow(t.Id.String(), "updated", r)
-	// Continuous AI autofill: recompute any auto AI columns so derived cells
-	// track the row's latest inputs. Loop-safe (model-layer write, no event).
-	go AutofillRowOnWrite(context.WithoutCancel(ctx), t, r, actor)
+	// Continuous AI autofill: refill the auto AI columns that read a changed
+	// cell. Loop-safe (model-layer write, no event).
+	go AutofillRowOnWrite(context.WithoutCancel(ctx), t, &stored, changed, actor)
 	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "table.row.updated", map[string]interface{}{
 		"table_id":   t.Id.String(),
 		"table_name": t.Name,
@@ -719,13 +1046,17 @@ func rowUpdated(ctx context.Context, t *model.DataTable, fields []*model.Field, 
 	return r
 }
 
-// DeleteRow soft-deletes a row (view/edit access) and broadcasts it.
+// DeleteRow soft-deletes a row (view/edit access) and broadcasts it; a row
+// that's gone is errRowNotFound.
 func DeleteRow(ctx context.Context, tableId, rowId uuid.UUID, actor Actor) error {
 	t, err := loadViewable(ctx, tableId, actor)
 	if err != nil {
 		return err
 	}
 	linked, err := model.DeleteRow(ctx, tableId, rowId)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errRowNotFound
+	}
 	if err != nil {
 		return fmt.Errorf("failed to delete row")
 	}
@@ -744,9 +1075,21 @@ func ListRows(ctx context.Context, tableId uuid.UUID, actor Actor, limit, offset
 	}
 	rows, err := model.ListRows(ctx, tableId, limit, offset)
 	if err != nil {
-		return nil, err
+		helpers.LogErrorWithContext(ctx, "business/DataTable ListRows: %v", err)
+		return nil, errRowsUnavailable
 	}
-	return readWithComputed(ctx, tableId, rows), nil
+	return readWithComputed(ctx, tableId, rows)
+}
+
+// storedCells is a row's values as a write stores them, encoded: without what
+// each read works out (stripComputed), each link to an item as its {id, type}
+// alone (keepItemIDs), within the size cap.
+func storedCells(fields []*model.Field, values map[string]interface{}) (string, error) {
+	if err := keepItemIDs(fields, values); err != nil {
+		return "", err
+	}
+	delete(values, model.AIKeptKey) // set by the server alone
+	return validateValues(stripComputed(fields, values))
 }
 
 // validateValues ensures the row values are a JSON object within the size cap

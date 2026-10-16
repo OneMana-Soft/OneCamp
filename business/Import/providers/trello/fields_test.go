@@ -55,3 +55,20 @@ func TestBoardFields(t *testing.T) {
 		t.Errorf("an unticked box has no value: %+v", vals)
 	}
 }
+
+// A number field's value is read as tables read numbers: never NaN, which no
+// answer can hold.
+func TestNumberValuesAreNumbers(t *testing.T) {
+	var b trelloBoard
+	if err := json.Unmarshal([]byte(boardWithFields), &b); err != nil {
+		t.Fatal(err)
+	}
+	_, byID := boardFields(b.CustomFields)
+	var items []trelloCustomFieldItem
+	if err := json.Unmarshal([]byte(`[{"idCustomField":"f4","value":{"number":"NaN"}}]`), &items); err != nil {
+		t.Fatal(err)
+	}
+	if vals := cardFieldValues(items, byID); len(vals) != 0 {
+		t.Errorf("NaN came across as %+v", vals)
+	}
+}

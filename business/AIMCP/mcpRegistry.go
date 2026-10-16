@@ -105,6 +105,7 @@ func RebuildRegistry(ctx context.Context) error {
 				continue
 			}
 		}
+		dest := toolDestination(s)
 		for _, t := range tools {
 			fullName := s.ToolPrefix + t.Name
 			params, types := schemaToParams(t.InputSchema)
@@ -120,6 +121,7 @@ func RebuildRegistry(ctx context.Context) error {
 				Parameters:  params,
 				ReadOnly:    risk.ReadOnly,
 				Destructive: risk.Destructive,
+				Destination: dest,
 			})
 			execs[fullName] = makeExecutor(s, t.Name, types, risk)
 		}
@@ -134,6 +136,14 @@ func RebuildRegistry(ctx context.Context) error {
 	setUnreachableServers(unreachable)
 
 	return nil
+}
+
+// toolDestination is where a server's tool calls go, for ai.CallBinding: the
+// server, its address, and how its secret is attached to them. A call approved
+// for one of these is sent only while it is unchanged.
+func toolDestination(s *model.McpServer) string {
+	d := s.SecretDestination()
+	return strings.Join(append([]string{s.Id.String(), d.URL}, d.How...), "\x00")
 }
 
 // cachedToolNames reads the tool names out of a server's cached catalogue. A

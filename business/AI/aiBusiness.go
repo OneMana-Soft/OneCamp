@@ -1061,27 +1061,29 @@ func askAIWithStream(ctx context.Context, userInfo *userModels.UserInfo, questio
 	}, nil
 }
 
-// ExecuteAction runs a confirmed workspace action.
+// ExecuteAction runs a confirmed workspace action: one of OneCamp's own tools,
+// chosen by the person confirming it. A tool from an MCP server never runs this
+// way; it runs for an agent that was given it, in the agent's run or from a
+// proposal of its that a person approved (executeApproved).
 // Returns a result message and any created entity UUID.
 func ExecuteAction(ctx context.Context, userInfo *userModels.UserInfo, toolName string, params map[string]string, localization map[string]string) (*adapter.ExecuteActionResponse, error) {
+	executor, ok := ai.Executors[toolName]
+	return runConfirmedAction(ctx, userInfo, ai.ProposedAction{ToolName: toolName, Params: params}, executor, ok, localization)
+}
+
+// runConfirmedAction runs a call a person confirmed, as that person, with the
+// executor it resolved to (found is false when there is none): the one place a
+// confirmed call is validated, executed, and its failure worded for them.
+func runConfirmedAction(ctx context.Context, userInfo *userModels.UserInfo, action ai.ProposedAction, executor ai.ToolExecutor, found bool, localization map[string]string) (*adapter.ExecuteActionResponse, error) {
 	svc := ai.GetService()
 	if !svc.IsEnabled() {
 		return nil, fmt.Errorf("AI service is not enabled")
 	}
-
-	// Validate the action
-	action := ai.ProposedAction{
-		ToolName: toolName,
-		Params:   params,
-	}
 	if err := ai.ValidateAction(action); err != nil {
 		return nil, fmt.Errorf("invalid action: %w", err)
 	}
-
-	// Look up the executor
-	executor, ok := ai.Executors[toolName]
-	if !ok {
-		return nil, fmt.Errorf("no executor registered for tool: %s", toolName)
+	if !found {
+		return nil, fmt.Errorf("no executor registered for tool: %s", action.ToolName)
 	}
 
 	// Inject localization into context for executors

@@ -134,6 +134,7 @@ func createSchema() (err error) {
 		status_user_emoji_desc: string .
 		status_user_emoji_expiry_at: dateTime .
 		status_user_emoji_expiry_in: string .
+		status_user_emoji_set_at: dateTime .
 
 		post_text: string .
 		post_by: uid .
@@ -412,6 +413,7 @@ func createSchema() (err error) {
 			status_user_emoji_desc
 			status_user_emoji_expiry_at
 			status_user_emoji_expiry_in
+			status_user_emoji_set_at
 		}
 
 		type Comment {

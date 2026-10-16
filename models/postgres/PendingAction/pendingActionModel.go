@@ -84,6 +84,12 @@ type PendingAction struct {
 	// coworker, an MCP server), which is most of them.
 	AgentID *uuid.UUID `json:"agent_id,omitempty"`
 	RunID   *uuid.UUID `json:"run_id,omitempty"`
+
+	// AskedBy and ToolBinding are what the approval is bound to beyond the call
+	// itself (Binding). Server-side only: the approval decides with them, and no
+	// client has a use for either.
+	AskedBy     *uuid.UUID `json:"-"`
+	ToolBinding string     `json:"-"`
 }
 
 // Attribution links a proposal to the agent and run that produced it, so the
@@ -96,6 +102,20 @@ type Attribution struct {
 	RunID   *uuid.UUID
 }
 
+// Binding is what an approval is bound to beyond the tool and its arguments,
+// decided where the proposal is made and held to when it is approved (business/AI
+// bindingFor and approveExecute). Its zero value binds nothing, which is right for
+// a proposal of OneCamp's own tools that no agent made for someone else.
+type Binding struct {
+	// AskedBy is the person the proposing run was for, when that was someone
+	// other than its sponsor: the approved call runs for them, bounded by what
+	// they may do. Nil for a run that acted for its sponsor alone.
+	AskedBy *uuid.UUID
+	// ToolBinding fingerprints where the call's tools send it (services/AI
+	// CallBinding); empty when they are all OneCamp's own.
+	ToolBinding string
+}
+
 // Expired reports whether the action's TTL has passed (pure helper; does not
 // touch the DB).
 func (p *PendingAction) Expired() bool {
@@ -106,7 +126,7 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
-const columns = `id, requested_by, surface_type, surface_id, tool_name, params, description, status, idempotency_key, result, error, expires_at, created_at, resolved_at, resolved_by, agent_id, run_id`
+const columns = `id, requested_by, surface_type, surface_id, tool_name, params, description, status, idempotency_key, result, error, expires_at, created_at, resolved_at, resolved_by, agent_id, run_id, asked_by, tool_binding`
 
 func scanAction(s scanner) (*PendingAction, error) {
 	var p PendingAction
@@ -114,12 +134,19 @@ func scanAction(s scanner) (*PendingAction, error) {
 	var idem, result, errStr sql.NullString
 	var resolvedAt sql.NullTime
 	var resolvedBy uuid.NullUUID
-	var agentID, runID uuid.NullUUID
+	var agentID, runID, askedBy uuid.NullUUID
+	var toolBinding sql.NullString
 	if err := s.Scan(&p.Id, &p.RequestedBy, &p.SurfaceType, &p.SurfaceID, &p.ToolName,
 		&paramsRaw, &p.Description, &p.Status, &idem, &result, &errStr,
-		&p.ExpiresAt, &p.CreatedAt, &resolvedAt, &resolvedBy, &agentID, &runID); err != nil {
+		&p.ExpiresAt, &p.CreatedAt, &resolvedAt, &resolvedBy, &agentID, &runID,
+		&askedBy, &toolBinding); err != nil {
 		return nil, err
 	}
+	if askedBy.Valid {
+		id := askedBy.UUID
+		p.AskedBy = &id
+	}
+	p.ToolBinding = toolBinding.String
 	if agentID.Valid {
 		id := agentID.UUID
 		p.AgentID = &id
@@ -158,7 +185,7 @@ func scanAction(s scanner) (*PendingAction, error) {
 // idempotencyKey is non-empty and a row with that key already exists, the
 // existing row is returned instead of creating a duplicate (so a retried
 // generation does not stack two cards for the same proposed write).
-func CreatePendingAction(ctx context.Context, requestedBy uuid.UUID, surfaceType, surfaceID, toolName string, params map[string]string, description, idempotencyKey string, expiresAt time.Time, attr Attribution) (*PendingAction, error) {
+func CreatePendingAction(ctx context.Context, requestedBy uuid.UUID, surfaceType, surfaceID, toolName string, params map[string]string, description, idempotencyKey string, expiresAt time.Time, attr Attribution, bind Binding) (*PendingAction, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
@@ -177,12 +204,16 @@ func CreatePendingAction(ctx context.Context, requestedBy uuid.UUID, surfaceType
 	}
 
 	id := uuid.New()
+	var toolBinding *string
+	if bind.ToolBinding != "" {
+		toolBinding = &bind.ToolBinding
+	}
 	const q = `INSERT INTO ai_pending_actions
-		(id, requested_by, surface_type, surface_id, tool_name, params, description, idempotency_key, expires_at, agent_id, run_id)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		(id, requested_by, surface_type, surface_id, tool_name, params, description, idempotency_key, expires_at, agent_id, run_id, asked_by, tool_binding)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
 		RETURNING ` + columns
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, id, requestedBy, surfaceType, surfaceID, toolName, paramsRaw, description, idem, expiresAt, attr.AgentID, attr.RunID)
+	row := postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, id, requestedBy, surfaceType, surfaceID, toolName, paramsRaw, description, idem, expiresAt, attr.AgentID, attr.RunID, bind.AskedBy, toolBinding)
 	p, err := scanAction(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		// A row with this idempotency key already exists (the INSERT was a

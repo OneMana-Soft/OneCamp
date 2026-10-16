@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	userDomain "github.com/akashc777/OneCamp/domain/User"
-	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/safefetch"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 	ai "github.com/akashc777/OneCamp/services/AI"
 )
@@ -22,7 +22,7 @@ import (
 // way the operator needs the real reason.
 //
 // What it may reach is decided now: this server's own network only when the
-// person who set the agent up is an admin (helpers.EndpointPolicyFor).
+// person who set the agent up is an admin (safefetch.EndpointPolicy).
 func remoteProvider(ctx context.Context, agent *model.AiAgent, runID string) (ai.RemoteBrain, error) {
 	if agent.AGUIAuthUnreadable {
 		return nil, fmt.Errorf("the remote agent's secret cannot be read (usually an AI_CONFIG_KEK change); re-enter it in the agent's settings")
@@ -46,9 +46,9 @@ func remoteProvider(ctx context.Context, agent *model.AiAgent, runID string) (ai
 // now. A seam.
 var creatorIsAdmin = userDomain.IsActiveAdmin
 
-// remotePolicy is what an agent's remote may reach (helpers.EndpointPolicyFor).
-func remotePolicy(ctx context.Context, agent *model.AiAgent) helpers.EndpointPolicy {
-	return helpers.EndpointPolicyFor(creatorIsAdmin(ctx, &agent.CreatedBy))
+// remotePolicy is what an agent's remote may reach (safefetch.EndpointPolicy).
+func remotePolicy(ctx context.Context, agent *model.AiAgent) safefetch.Policy {
+	return safefetch.EndpointPolicy(creatorIsAdmin(ctx, &agent.CreatedBy))
 }
 
 // remoteLabel is how a run and the audit log name a remote brain: the protocol

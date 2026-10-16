@@ -187,3 +187,23 @@ func TestTableToolsChangeOnlyTheirTablesLinks(t *testing.T) {
 		t.Errorf("a field it doesn't have is left to the business to refuse: %v", err)
 	}
 }
+
+// read_table says how many rows the table has, not how many its first page
+// holds, and that the rows it lists are a sample (TAB-BUG-2).
+func TestReadTableSaysTheTablesRowCount(t *testing.T) {
+	rows := make([]*tableModel.Row, 500)
+	for i := range rows {
+		rows[i] = &tableModel.Row{Id: uuid.New(), Values: `{}`}
+	}
+	out := rowSample(&dataTableBusiness.TableBundle{Rows: rows, RowCount: 10000, RowsTruncated: true})
+	if !strings.Contains(out, "Rows: 10000 in the table. The first 25 follow, as a sample") {
+		t.Errorf("read_table's rows don't say the table's size and that they're a sample:\n%s", out)
+	}
+	if n := strings.Count(out, "- row id: "); n != sampleRows {
+		t.Errorf("read_table lists %d rows, want %d", n, sampleRows)
+	}
+	if out := rowSample(&dataTableBusiness.TableBundle{Rows: rows[:3], RowCount: 3}); !strings.Contains(out, "Rows: 3 in the table. The first 3 follow") ||
+		strings.Count(out, "- row id: ") != 3 {
+		t.Errorf("a small table's rows:\n%s", out)
+	}
+}

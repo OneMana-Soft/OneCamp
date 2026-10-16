@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -37,6 +39,60 @@ func getUserLock(userID string) *sync.Mutex {
 	return lock.(*sync.Mutex)
 }
 
+// How the broker connection is made and kept. Variables so tests can shorten
+// them; nothing else changes them.
+var (
+	// connectAttemptTimeout bounds one CONNECT: dialling, TLS and the CONNACK.
+	connectAttemptTimeout = 10 * time.Second
+	// connectBackoffBase and connectBackoffMax are the pauses between tries of
+	// the first connection (helpers.Backoff: doubling, with jitter), and the
+	// most the library waits between tries of any later reconnection.
+	connectBackoffBase = time.Second
+	connectBackoffMax  = 30 * time.Second
+	// bootConnectWait is how long start-up waits for the first connection
+	// before it carries on and leaves it to the background.
+	bootConnectWait = 20 * time.Second
+	// backgroundConnect bounds the background tries: for the life of the
+	// process, so they end only when they succeed.
+	backgroundConnect = context.Background()
+	// keepAlive is how long the client stays quiet before it pings the
+	// broker, and pingTimeout how long it waits for the answer before it
+	// takes the connection for lost and reconnects. A connection can die
+	// without a word: the machine sleeps, or the broker stops answering, and
+	// nothing closes the socket. The ping is how the client finds out.
+	keepAlive   = 30 * time.Second
+	pingTimeout = 10 * time.Second
+)
+
+// connectTimings are the timings one effort to connect runs with, read from
+// the variables above once, when it starts. An effort left trying in the
+// background then reads nothing that a test puts back afterwards, so nothing
+// in the server has to exist only for a test to wait on it.
+type connectTimings struct {
+	attempt   time.Duration // connectAttemptTimeout
+	base, max time.Duration // connectBackoffBase, connectBackoffMax
+}
+
+func currentConnectTimings() connectTimings {
+	return connectTimings{attempt: connectAttemptTimeout, base: connectBackoffBase, max: connectBackoffMax}
+}
+
+// ConnectMqtt connects the server's broker client, and keeps it connected.
+//
+// WHAT WENT WRONG. A failed first CONNECT was logged and then returned as
+// success: the error was never assigned to the result. The library reconnects
+// on its own only after a connection has once been made, so nothing ever
+// tried again. On a busy machine EMQX takes minutes to start after an update,
+// so the API came up healthy and stayed deaf to the broker, and nothing
+// updated live (messages, typing, presence, notifications) until someone
+// restarted it. Seen on a test server, 15 Oct 2026.
+//
+// Now MqttClient is set before anything is tried, so it is never nil, and the
+// first connection is tried with backoff: for bootConnectWait at start-up,
+// then in the background until it succeeds. After that the library reconnects
+// on any loss, at most connectBackoffMax apart, and onConnect subscribes again
+// each time (a clean session keeps no subscriptions). Whether it is connected
+// right now is the "realtime" system check, which /health/ready reports.
 func ConnectMqtt(mqttConfig *MqttConfig) (err error) {
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
@@ -54,26 +110,96 @@ func ConnectMqtt(mqttConfig *MqttConfig) (err error) {
 		return
 	}
 
-	opts := MQTT.NewClientOptions()
+	client := MQTT.NewClient(clientOptions(mqttConfig, tokenString))
+	if helpers.DemoMode() {
+		client = demoClient{client}
+	}
+	MqttClient = client
 
+	timings := currentConnectTimings()
+	boot, cancel := context.WithTimeout(context.Background(), bootConnectWait)
+	defer cancel()
+	if err := connectWithBackoff(boot, client, timings); err == nil {
+		return nil
+	}
+	helpers.MessageLogs.ErrorLog.Printf("mqttInit/ConnectMqtt the broker at %s isn't answering yet: starting without live updates, and connecting in the background", mqttConfig.Broker)
+	background := backgroundConnect
+	helpers.GoSafeNamed("mqtt:connect", func() { _ = connectWithBackoff(background, client, timings) })
+	return nil
+}
+
+// clientOptions are the server client's options: who it is, and how it keeps
+// its connection once it has one.
+func clientOptions(mqttConfig *MqttConfig, password string) *MQTT.ClientOptions {
+	opts := MQTT.NewClientOptions()
 	opts.AddBroker(mqttConfig.Broker)
 	opts.SetClientID(mqttConfig.ClientID)
 	opts.SetUsername(mqttConfig.Username)
-	opts.SetPassword(tokenString)
+	opts.SetPassword(password)
 	opts.SetCleanSession(mqttConfig.CleanSession)
-	opts.SetOnConnectHandler(subscribeClientEvents)
+	opts.SetConnectTimeout(connectAttemptTimeout)
+	opts.SetKeepAlive(keepAlive)
+	opts.SetPingTimeout(pingTimeout)
+	opts.SetAutoReconnect(true)
+	opts.SetMaxReconnectInterval(connectBackoffMax)
+	opts.SetOnConnectHandler(onConnect)
+	opts.SetConnectionLostHandler(func(_ MQTT.Client, err error) {
+		helpers.MessageLogs.ErrorLog.Printf("mqttInit lost the broker (%v); reconnecting", err)
+	})
+	return opts
+}
 
-	MqttClient = MQTT.NewClient(opts)
-	if helpers.DemoMode() {
-		MqttClient = demoClient{MqttClient}
-	}
-	if token := MqttClient.Connect(); token.Wait() && token.Error() != nil {
-		helpers.MessageLogs.ErrorLog.Printf("mqttInit/ConnectMqtt Failed to connect to mqtt broker err: %+v", token.Error())
-		return
-	}
+// onConnect runs on the first connection and on every reconnection.
+func onConnect(client MQTT.Client) {
 	helpers.MessageLogs.InfoLog.Println("Successfully connected mqtt broker !")
+	subscribeClientEvents(client)
+}
 
-	return
+// ConnectWithBackoff makes client's first connection. It tries, and after
+// each failure waits helpers.Backoff (connectBackoffBase doubling to
+// connectBackoffMax, with jitter) and tries again, until a CONNECT is accepted
+// or ctx ends, which bounds the whole wait. It returns as soon as one connect
+// succeeds. The caller builds the client, so it chooses the broker and the
+// client id: the server through ConnectMqtt, the integration kit with its own.
+// Each failure is logged once, with the pause before the next try.
+func ConnectWithBackoff(ctx context.Context, client MQTT.Client) error {
+	return connectWithBackoff(ctx, client, currentConnectTimings())
+}
+
+// connectWithBackoff is ConnectWithBackoff with the timings it was started with.
+func connectWithBackoff(ctx context.Context, client MQTT.Client, tm connectTimings) error {
+	var err error
+	for attempt := 1; ; attempt++ {
+		if err = connectOnce(client, tm.attempt); err == nil {
+			return nil
+		}
+		pause := helpers.Backoff(attempt, tm.base, tm.max)
+		helpers.MessageLogs.ErrorLog.Printf("mqttInit/ConnectMqtt Failed to connect to mqtt broker (try %d) err: %v; trying again in %s", attempt, err, pause.Round(100*time.Millisecond))
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("no connection to the broker after %d tries: %w", attempt, err)
+		case <-time.After(pause):
+		}
+	}
+}
+
+// connectOnce is one CONNECT, answered or timed out after timeout.
+func connectOnce(client MQTT.Client, timeout time.Duration) error {
+	tok := client.Connect()
+	// The library bounds the attempt itself (SetConnectTimeout); the margin
+	// is for a client built without that option.
+	if !tok.WaitTimeout(timeout + 5*time.Second) {
+		return fmt.Errorf("no answer from the broker within %s", timeout)
+	}
+	if err := tok.Error(); err != nil {
+		return err
+	}
+	// An attempt made while an earlier one is still in flight is answered as
+	// accepted without connecting anything; only the client knows.
+	if !client.IsConnected() {
+		return errors.New("the broker accepted, but the client isn't connected")
+	}
+	return nil
 }
 
 // ProcessClientID is the MQTT client id this process connects as: the

@@ -150,6 +150,28 @@ func TestOnlyThoseWhoMayAddToADocUploadItsFiles(t *testing.T) {
 			}
 		})
 	}
+
+	// With file storage down, someone who may add the file is told storage
+	// isn't answering and to try again in a moment: a 503 in words the web
+	// shows as they are. It used to be a 400 the web read as "Something in the
+	// request wasn't accepted", which sent people looking at their file.
+	t.Run("with storage down the uploader is told so", func(t *testing.T) {
+		down, err := minio.New("127.0.0.1:1", &minio.Options{Creds: credentials.NewStaticV4("onecamp", "onecamp-secret", "")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		up := minioInit.MinioClient
+		minioInit.MinioClient = down
+		defer func() { minioInit.MinioClient = up }()
+
+		code, body := upload("editor", doc)
+		if code != http.StatusServiceUnavailable || body["msg"] != "File storage isn't answering right now. Try again in a moment." {
+			t.Fatalf("storage down: %d %v", code, body)
+		}
+		if n := stored("editor", doc); n != 1 {
+			t.Fatalf("a file that was never saved is listed as the doc's (%d)", n)
+		}
+	})
 }
 
 // uploadMinioImage is the S3 server the test stores files in. MinIO no longer

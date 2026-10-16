@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -69,6 +70,20 @@ func UpsertConfig(key string, value string) (err error) {
 	}
 
 	return
+}
+
+// IsDone is whether key records a one-off job as done on this install: a
+// value starting "done", as such a job writes with UpsertConfig once it has
+// finished.
+func IsDone(key string) (bool, error) {
+	cfg, err := GetConfigByKey(key)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return strings.HasPrefix(cfg.Value, "done"), nil
 }
 
 func GetMultipleConfigsByKeys(keys []string) (configs []*SystemConfig, err error) {

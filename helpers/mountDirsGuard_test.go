@@ -181,6 +181,7 @@ case " $* " in
 *" pull "*)
 	[ -n "$DOCKER_PULL_FAILS" ] && { echo "pull access denied for minio/minio" >&2; exit 1; } ;;
 *" redis-cli ping "*) echo PONG ;;
+*" /health/ready"*) echo "ok    database" ;;
 *" redis-cli EVAL "*) echo 0 ;;
 esac
 exit 0
@@ -636,5 +637,53 @@ func TestBuildRestartAllKeepsOnlySignInsInRedis(t *testing.T) {
 	}
 	if down < 0 || eval < 0 || upAll < 0 || !(down < eval && eval < upAll) {
 		t.Errorf("want down, then Redis cleared but for the sign-ins, then up; got down #%d, clear #%d, up #%d in %q", down, eval, upAll, calls)
+	}
+}
+
+// An older install's world-writable data is tightened, once, and an install
+// without any starts nothing for it.
+//
+// WHAT WENT WRONG. build_restart_all ran `sudo chmod 777 -R ./data` on every
+// rebuild until 14 Oct 2026, so every datastore stayed writable by every
+// account on the machine; making directories with their owners fixed new
+// installs, not old ones.
+func TestMountDirsTakesOtherAccountsWriteOffOldData(t *testing.T) {
+	self := owner(os.Getuid(), os.Getgid())
+	list := "MOUNT_DIRS=data/plain:- data/mine:" + self
+	dir := scratchInstall(t)
+	if err := os.MkdirAll(filepath.Join(dir, "data", "plain"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(dir, "data", "plain"), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	env, dockerCalls, _ := stubs(t)
+	out, err := runMake(t, dir, env, "mount-dirs", list)
+	if err != nil {
+		t.Fatalf("mount-dirs: %v\n%s", err, out)
+	}
+	want := "run --rm --network none -v " + filepath.Join(dir, "data") + ":/install/data alpine:3.22 chmod -R o-w /install/data"
+	found := false
+	for _, c := range dockerRuns(t, dockerCalls) {
+		if strings.Join(c, " ") == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("world-writable ./data/plain was left as it was; want docker %s\n%s", want, out)
+	}
+
+	// Nothing world-writable: no container, nothing said about it.
+	if err := os.Chmod(filepath.Join(dir, "data", "plain"), 0o775); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Remove(dockerCalls)
+	if out, err := runMake(t, dir, env, "mount-dirs", list); err != nil {
+		t.Fatalf("mount-dirs: %v\n%s", err, out)
+	}
+	for _, c := range dockerRuns(t, dockerCalls) {
+		if strings.Contains(strings.Join(c, " "), "chmod -R o-w") {
+			t.Errorf("mount-dirs tightened ./data with nothing world-writable in it (group write is the operator's umask)")
+		}
 	}
 }

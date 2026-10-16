@@ -12,6 +12,10 @@ func TestIsBlockedIP(t *testing.T) {
 		"fe80::1",         // IPv6 link-local
 		"0.0.0.0",         // unspecified
 		"::",              // IPv6 unspecified
+		"100.100.100.200", // Alibaba metadata, inside the shared address space
+		"192.0.0.192",     // Oracle metadata
+		"fd00:ec2::254",   // AWS metadata over IPv6, inside the private range
+		"224.0.0.1",       // multicast
 	}
 	for _, s := range blocked {
 		ip := net.ParseIP(s)
@@ -26,13 +30,14 @@ func TestIsBlockedIP(t *testing.T) {
 	// Allowed: public AND private (self-hosted model servers live on
 	// private/cluster networks, so those must NOT be blocked).
 	allowed := []string{
-		"8.8.8.8",      // public
-		"104.18.0.1",   // public
-		"10.0.0.5",     // private (k8s pod / LAN)
-		"172.16.3.4",   // private
-		"192.168.1.10", // private LAN (Ollama box)
-		"127.0.0.1",    // loopback (local Ollama) — allowed by design
-		"fd12:3456::1", // IPv6 ULA (private)
+		"8.8.8.8",         // public
+		"104.18.0.1",      // public
+		"10.0.0.5",        // private (k8s pod / LAN)
+		"172.16.3.4",      // private
+		"192.168.1.10",    // private LAN (Ollama box)
+		"127.0.0.1",       // loopback (local Ollama) — allowed by design
+		"fd12:3456::1",    // IPv6 ULA (private)
+		"100.101.102.103", // Tailscale (shared address space)
 	}
 	for _, s := range allowed {
 		ip := net.ParseIP(s)
@@ -56,6 +61,7 @@ func TestIsBlockedIP_StrictPolicy(t *testing.T) {
 		"127.0.0.1",
 		"fd12:3456::1", // IPv6 ULA
 		"169.254.169.254",
+		"100.101.102.103", // Tailscale is this server's network too
 	}
 	for _, s := range strictBlocked {
 		ip := net.ParseIP(s)
@@ -69,6 +75,21 @@ func TestIsBlockedIP_StrictPolicy(t *testing.T) {
 		ip := net.ParseIP(s)
 		if isBlockedIP(ip) {
 			t.Errorf("strict policy: public %s must remain allowed", s)
+		}
+	}
+}
+
+// Local-only mode's "local" is the one own-network set: a Tailscale machine is
+// local, the metadata service on link-local is not.
+func TestLocalOnlyMeansThisServersOwnNetwork(t *testing.T) {
+	for _, s := range []string{"127.0.0.1", "10.0.0.5", "192.168.1.10", "fd12::1", "100.101.102.103"} {
+		if !isLocalAIDialIP(net.ParseIP(s)) {
+			t.Errorf("%s is on this server's own network", s)
+		}
+	}
+	for _, s := range []string{"169.254.169.254", "fe80::1", "100.100.100.200", "8.8.8.8"} {
+		if isLocalAIDialIP(net.ParseIP(s)) {
+			t.Errorf("%s must not count as local", s)
 		}
 	}
 }

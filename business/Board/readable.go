@@ -72,6 +72,27 @@ func ReadableBoardsFor(ctx context.Context, boardUUIDs []string, userUUID string
 	return out, nil
 }
 
+// ReadableBoardTitles names the boards, of those named, the person (by uuid)
+// may read now, by CanRead: each one's title, keyed by lower-case uuid. A
+// board they may not read, deleted, or not there is left out. One graph query
+// for the lot; an error is the graph not answering.
+func ReadableBoardTitles(ctx context.Context, boardUUIDs []string, userUUID string) (map[string]string, error) {
+	out := make(map[string]string, len(boardUUIDs))
+	if len(boardUUIDs) == 0 {
+		return out, nil
+	}
+	boards, err := readBoardsAccess(ctx, boardUUIDs, userUUID)
+	if err != nil {
+		return nil, err
+	}
+	for _, b := range boards {
+		if b != nil && b.Uuid != "" && CanRead(b, userUUID) {
+			out[strings.ToLower(b.Uuid)] = b.Title
+		}
+	}
+	return out, nil
+}
+
 // EditableBy reports whether the person (by uuid) may change the board's
 // canvas now, by CanEdit: a board that is deleted, or isn't there, is
 // changed by nobody. An error is the graph not answering.

@@ -184,6 +184,16 @@ func publishTaskCommentActivity(commentBody string, currentTime *time.Time, ment
 	if recipient == "" {
 		return
 	}
+	// Only someone who may still read the task: the creator of an unassigned
+	// task may have been taken off its project since.
+	readers, err := domain.Readers(ctx, rawTaskDgraph.Uuid, []string{recipient})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/publishTaskCommentActivity could not check who may read the task, telling nobody: %+v", err)
+		return
+	}
+	if !readers[recipient] {
+		return
+	}
 
 	activityItem := &dgraphModels.UnifiedActivityItem{
 		ActivityType: mqttStruct.MESSAGE_ACTIVITY_COMMENT,
@@ -1669,34 +1679,60 @@ func UnArchiveTaskByTaskUUID(ctx context.Context, taskUUID uuid.UUID, dgraphTask
 // Shaped as "not found" rather than "forbidden" ON PURPOSE. This endpoint is
 // addressed by task UUID, so a distinct "forbidden" would confirm that a given
 // UUID names a real task, and a caller could walk the space learning which ids
-// exist. A viewer with no claim to the task learns nothing either way.
-var ErrTaskNotVisible = errors.New("task not found")
+// exist. A viewer with no claim to the task learns nothing either way. It is
+// also helpers.ErrNotFound, which helpers.WriteReadFailure answers as a 404.
+var ErrTaskNotVisible = helpers.NotFound("task not found")
 
-// CanViewTask reports whether this viewer may read this task.
+// CanViewTask reports whether this viewer may read this task, by the task read
+// rule (domain/Task TaskReader.MayRead), which Readers asks of many people at
+// once for a task's notices and mentions.
 //
-// FOUR WAYS IN, because the product genuinely has four. Project membership is
-// the common one, project admin is not implied by it (an admin need not sit in
-// project_members), and the two that matter most are assignee and creator: a
+// Project membership is the common way in, and project admin is not implied by
+// it (an admin need not sit in project_members). The assignee is the other: a
 // task can be assigned to somebody outside its project, and locking those people
 // out of their own work is the failure mode that made the entity-link refusal so
-// confusing to debug.
-//
-// A task with no project resolves to creator or assignee only, which is correct
-// rather than a hole: an unparented task belongs to whoever made it.
+// confusing to debug. The creator of a task in a project reads it only as one of
+// its people (the task panel's own read never carried the creator, so it already
+// answered someone taken off the project "not found"; search, the task's other
+// routes and its emails let them in).
 func CanViewTask(task *dgraphStruct.DgraphTask, userDgraphUID string) bool {
 	if task == nil || userDgraphUID == "" {
 		return false
 	}
-	if p := task.Project; p != nil && (p.IsProjectMember > 0 || p.IsProjectAdmin > 0) {
-		return true
+	p := task.Project
+	return domain.TaskReader{
+		Member:   p != nil && p.IsProjectMember > 0,
+		Admin:    p != nil && p.IsProjectAdmin > 0,
+		Assignee: task.Assignee != nil && task.Assignee.Uid == userDgraphUID,
+		Creator:  task.CreatedBy != nil && task.CreatedBy.Uid == userDgraphUID,
+	}.MayRead(p != nil)
+}
+
+// TaskFor reads a task for a person and checks they may read it (CanViewTask)
+// or, with change, change it: one of its project's admins, as every task write
+// requires. A task they may not read is ErrTaskNotVisible whether or not it
+// exists; one they may read but not change is ErrNotProjectAdmin; a read that
+// failed is that failure, never "not found". The one check for a task named by
+// id, whether a request names one task or many.
+func TaskFor(ctx context.Context, taskID uuid.UUID, viewerUID string, change bool) (*dgraphStruct.DgraphTask, error) {
+	task, err := GetDgraphBasicTaskInfo(ctx, taskID.String(), viewerUID)
+	return taskAccess(task, err, viewerUID, change)
+}
+
+// taskAccess is TaskFor's answer for a task read for viewerUID (readErr is
+// the read's error). Pure.
+func taskAccess(task *dgraphStruct.DgraphTask, readErr error, viewerUID string, change bool) (*dgraphStruct.DgraphTask, error) {
+	switch {
+	case errors.Is(readErr, helpers.ErrNotFound):
+		return nil, ErrTaskNotVisible
+	case readErr != nil:
+		return nil, readErr
+	case task == nil || task.Uuid == "" || !CanViewTask(task, viewerUID):
+		return nil, ErrTaskNotVisible
+	case change && (task.Project == nil || task.Project.IsProjectAdmin == 0):
+		return nil, ErrNotProjectAdmin
 	}
-	if a := task.Assignee; a != nil && a.Uid == userDgraphUID {
-		return true
-	}
-	if c := task.CreatedBy; c != nil && c.Uid == userDgraphUID {
-		return true
-	}
-	return false
+	return task, nil
 }
 
 // GetDgraphTaskInfo reads a task AND enforces who may see it.

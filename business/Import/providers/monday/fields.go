@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/akashc777/OneCamp/business/DataTable/formula"
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 )
 
@@ -388,7 +389,7 @@ func fieldValue(cv mondayColumnValue, f importProvider.SourceField) (v any, whol
 		return people[0], len(people) == 1
 	case importProvider.FieldNumber, importProvider.FieldMoney:
 		for _, s := range []string{str("rating"), unquote(cv.valueJSON()), text} {
-			if n, err := strconv.ParseFloat(strings.ReplaceAll(strings.TrimSpace(s), ",", ""), 64); err == nil {
+			if n, ok := formula.ParseNumber(s, formula.PlainSigns); ok {
 				return n, true
 			}
 		}

@@ -63,3 +63,22 @@ func TestBuildPermissionFilterCommentDocGrantConstrained(t *testing.T) {
 		t.Errorf("comment clause must gate the public-doc grant on doc_uuid existence; not found:\n%s", filter)
 	}
 }
+
+// A task's creator finds it by that alone only when it is in no project, as
+// business/Task CanViewTask decides: a creator outside the task's project was
+// taken off it, and the assistant found the task for them anyway (PROJ-BUG-7).
+func TestBuildPermissionFilterTaskCreatorOnlyOutsideProjects(t *testing.T) {
+	filter := buildPermissionFilter("user-123", nil, []string{"proj-1"}, nil)
+
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(filter), &parsed); err != nil {
+		t.Fatalf("permission filter is not valid JSON: %v\n%s", err, filter)
+	}
+	want := `{"bool": {"must": [{"term": {"task_created_by_user_id": "user-123"}}], "must_not": [{"exists": {"field": "project_uuid"}}]}}`
+	if !strings.Contains(filter, want) {
+		t.Errorf("task clause must grant the creator only for a task in no project; not found:\n%s", filter)
+	}
+	if strings.Count(filter, `"task_created_by_user_id"`) != 1 {
+		t.Errorf("the creator is granted a task some other way too:\n%s", filter)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -213,14 +214,22 @@ func TestAPlainErrorStillFails(t *testing.T) {
 func TestProbesRunConcurrently(t *testing.T) {
 	withCleanCheckRegistry(t)
 
+	// Each probe waits until every probe has started. Run together, they all
+	// finish at once; run one after another, the first can never finish, and
+	// its timeout says so. Counted, not timed: a probe's time on a loaded
+	// machine is the machine's, and a time bound failed under load.
 	const n = 8
-	const each = 150 * time.Millisecond
+	var started sync.WaitGroup
+	started.Add(n)
+	all := make(chan struct{})
+	go func() { started.Wait(); close(all) }()
 	for i := 0; i < n; i++ {
 		RegisterSystemCheck(SystemCheck{
 			Name: fmt.Sprintf("slow-%02d", i), Describe: "d",
 			Probe: func(ctx context.Context) error {
+				started.Done()
 				select {
-				case <-time.After(each):
+				case <-all:
 					return nil
 				case <-ctx.Done():
 					return ctx.Err()
@@ -229,24 +238,13 @@ func TestProbesRunConcurrently(t *testing.T) {
 		})
 	}
 
-	started := time.Now()
 	res := RunSystemChecks(context.Background(), 5*time.Second)
-	elapsed := time.Since(started)
-
 	if len(res) != n {
 		t.Fatalf("expected %d results, got %d", n, len(res))
 	}
 	for _, r := range res {
 		if !r.Healthy {
-			t.Errorf("%s should have completed well inside its timeout: %s", r.Name, r.Detail)
+			t.Errorf("%s never saw the other probes start, so checks run one after another: %s", r.Name, r.Detail)
 		}
-	}
-
-	// Sequential would be n*each. Half of that is comfortably above one probe's
-	// time and comfortably below the sum, so this is not timing-flaky while
-	// still failing outright if the loop goes back to being serial.
-	if limit := (n * each) / 2; elapsed > limit {
-		t.Errorf("checks appear to run one after another: %d probes of %s took %s (limit %s)",
-			n, each, elapsed, limit)
 	}
 }

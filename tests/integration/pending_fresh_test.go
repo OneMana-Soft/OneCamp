@@ -30,7 +30,7 @@ func TestPendingActionIsFreshOnlyWhenInserted(t *testing.T) {
 	create := func(k string) *pendingModels.PendingAction {
 		t.Helper()
 		a, err := pendingModels.CreatePendingAction(ctx, owner, "mcp", "", "update_task_status",
-			map[string]string{"task_uuid": uuid.NewString()}, "Mark it done", k, time.Now().Add(time.Hour), pendingModels.Attribution{})
+			map[string]string{"task_uuid": uuid.NewString()}, "Mark it done", k, time.Now().Add(time.Hour), pendingModels.Attribution{}, pendingModels.Binding{})
 		if err != nil || a == nil {
 			t.Fatalf("create: %v", err)
 		}

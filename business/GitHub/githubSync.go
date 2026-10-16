@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -227,7 +228,8 @@ func processSyncQueue() {
 			}
 		} else {
 			errStr := syncErr.Error()
-			if item.Attempts+1 >= githubSyncMaxRetries {
+			// A task linked outside its project's repositories stays refused.
+			if errors.Is(syncErr, errOutsideProject) || item.Attempts+1 >= githubSyncMaxRetries {
 				if err := githubSyncQueueDomain.MarkGitHubSyncQueueFailed(ctx, item.ID, errStr, nil); err != nil {
 					helpers.LogErrorWithContext(ctx, "GitHub sync worker failed to mark failed: %v", err)
 				}
@@ -270,6 +272,9 @@ func executeGitHubSync(taskID uuid.UUID, syncType string, payloadJSON string) er
 	if err != nil {
 		_ = taskDomain.SetGitHubSyncStatus(ctx, taskID, "failed", strPtr("invalid GitHub URL"), 1)
 		return fmt.Errorf("invalid GitHub URL: %w", err)
+	}
+	if err := syncAllowed(ctx, taskID, owner, repo); err != nil {
+		return err
 	}
 
 	integration, err := integrationDomain.GetIntegration(context.Background(), "org", uuid.Nil, "github")
@@ -905,6 +910,9 @@ func RefreshFromGitHub(ctx context.Context, taskUUID uuid.UUID, backfillComments
 	if err != nil {
 		_ = taskDomain.SetGitHubSyncStatus(ctx, taskUUID, "failed", strPtr("invalid GitHub URL"), 1)
 		return fmt.Errorf("invalid GitHub URL: %w", err)
+	}
+	if err := syncAllowed(ctx, taskUUID, owner, repo); err != nil {
+		return err
 	}
 
 	integration, err := integrationDomain.GetIntegration(ctx, "org", uuid.Nil, "github")

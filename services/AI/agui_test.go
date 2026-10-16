@@ -530,10 +530,10 @@ func TestTheProviderInstallsTheOffNetworkRule(t *testing.T) {
 		t.Error("the provider's HTTP client no longer carries the off-network refusal, so a " +
 			"remote agent could be sent workspace content over plain http or with no credential")
 	}
-	// The address rule is helpers' endpoint rule, on main's one address table.
+	// The address rule is safefetch's, through the operator's endpoint policy.
 	clientSrc := body[strings.Index(body, "var newRemoteHTTPClient"):]
 	clientSrc = clientSrc[:strings.Index(clientSrc, "\n}")]
-	for _, want := range []string{"helpers.EndpointClient(policy", "dialAllowed(cfg, localOnlyEnabled.Load()"} {
+	for _, want := range []string{"safefetch.NewClient(policy", "dialAllowed(cfg, localOnlyEnabled.Load()"} {
 		if !strings.Contains(clientSrc, want) {
 			t.Errorf("the remote agents' HTTP client no longer has %s", want)
 		}

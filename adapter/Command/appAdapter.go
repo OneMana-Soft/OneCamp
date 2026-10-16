@@ -7,22 +7,28 @@ package adapter
 
 // AppView is an installed app as shown to the admin (no secrets).
 type AppView struct {
-	ID               string           `json:"id"`
-	Slug             string           `json:"slug"`
-	Name             string           `json:"name"`
-	Description      string           `json:"description,omitempty"`
-	IconURL          string           `json:"icon_url,omitempty"`
-	Kind             string           `json:"kind"` // builtin | external | oauth
-	HandlerURL       string           `json:"handler_url,omitempty"`
-	HasSigningSecret bool             `json:"has_signing_secret"`
-	HasOAuthConfig   bool             `json:"has_oauth_config"`
-	HasAPIKey        bool             `json:"has_api_key"`           // an api_key secret is stored
-	SecretKeys       []string         `json:"secret_keys,omitempty"` // names of stored secrets (values never returned)
-	IsEnabled        bool             `json:"is_enabled"`
-	IsConnected      bool             `json:"is_connected"` // OAuth token present (kind=oauth)
-	Commands         []AppCommandView `json:"commands"`
-	CreatedAt        string           `json:"created_at,omitempty"`
-	UpdatedAt        string           `json:"updated_at,omitempty"`
+	ID               string `json:"id"`
+	Slug             string `json:"slug"`
+	Name             string `json:"name"`
+	Description      string `json:"description,omitempty"`
+	IconURL          string `json:"icon_url,omitempty"`
+	Kind             string `json:"kind"` // builtin | external | oauth
+	HandlerURL       string `json:"handler_url,omitempty"`
+	HasSigningSecret bool   `json:"has_signing_secret"`
+	HasOAuthConfig   bool   `json:"has_oauth_config"`
+	HasAPIKey        bool   `json:"has_api_key"` // an api_key secret is stored
+	// OAuth is an OAuth app's saved settings without its client secret, so the
+	// admin form edits what is saved instead of empty fields that would replace
+	// it. HasClientSecret says a client secret is stored (never its value): the
+	// form asks for it again when the token address moves, as the server would.
+	OAuth           *AppOAuthSettings `json:"oauth,omitempty"`
+	HasClientSecret bool              `json:"has_client_secret"`
+	SecretKeys      []string          `json:"secret_keys,omitempty"` // names of stored secrets (values never returned)
+	IsEnabled       bool              `json:"is_enabled"`
+	IsConnected     bool              `json:"is_connected"` // OAuth token present (kind=oauth)
+	Commands        []AppCommandView  `json:"commands"`
+	CreatedAt       string            `json:"created_at,omitempty"`
+	UpdatedAt       string            `json:"updated_at,omitempty"`
 }
 
 // AppCommandView is a command provided by an app, shown in the admin UI.
@@ -65,6 +71,16 @@ type UpdateAppRequest struct {
 	Config        map[string]string `json:"config,omitempty"`
 	Secrets       map[string]string `json:"secrets,omitempty"`
 	Commands      []AppCommandInput `json:"commands,omitempty"` // full replace when present
+}
+
+// AppOAuthSettings is an OAuth app's configuration without its client secret:
+// what is stored beside the app (the secret is kept encrypted elsewhere), and
+// what the admin form is shown to edit.
+type AppOAuthSettings struct {
+	ClientID string   `json:"client_id"`
+	AuthURL  string   `json:"auth_url"`
+	TokenURL string   `json:"token_url"`
+	Scopes   []string `json:"scopes"`
 }
 
 // AppOAuthConfig is the OAuth client config for an oauth-kind app. ClientSecret

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -47,9 +48,16 @@ var row = map[string]Value{
 // eval works out one formula over row, as a field called "f".
 func eval(t *testing.T, src string) Value {
 	t.Helper()
-	fields := append(append([]Field{}, tracker...), Field{ID: "f", Name: "F", IsFormula: true, Formula: src})
-	out := Compile(fields).Run(func(id string) (Value, int) { return row[id], 0 }, now, ist)
-	return out["f"]
+	v, _ := evalSpent(t, src)
+	return v
+}
+
+// evalSpent is eval, and the steps the work took as the budget counts them:
+// the work itself, which a loaded machine can't stretch as it does the time.
+func evalSpent(t *testing.T, src string) (Value, int) {
+	t.Helper()
+	p := Compile(append(append([]Field{}, tracker...), Field{ID: "f", Name: "F", IsFormula: true, Formula: src}))
+	return runOn(p, row)["f"], p.budget.spent
 }
 
 func TestNumbersAndPrecedence(t *testing.T) {
@@ -182,6 +190,8 @@ func TestErrorsInARow(t *testing.T) {
 		`IF(1 / 0, "a", "b")`:            "Divided by zero", // an error in the test is the answer
 		`MID({Name}, 0, 2)`:              "MID counts from 1",
 		`REPT("x", 20000)`:               "REPT would make more than 10000 characters",
+		// Text that reads two ways isn't read either: "1,5" was 15.
+		`VALUE("1,5")`: `VALUE needs a number, and "1,5" isn't one`,
 	}
 	for src, want := range cases {
 		got := eval(t, src)
@@ -376,13 +386,13 @@ func TestTextHasALimit(t *testing.T) {
 		`UPPER(REPT("x",5000) & REPT("y",5001))`,
 	}
 	for _, src := range cases {
-		start := time.Now()
-		got := eval(t, src)
+		got, steps := evalSpent(t, src)
 		if got.Kind != KindError || got.Str != "The text would be longer than 10000 characters" {
 			t.Errorf("%s = %.80v", src, got)
 		}
-		if d := time.Since(start); d > 200*time.Millisecond {
-			t.Errorf("%s took %v", src, d)
+		// Refused before it's made: making 100 MB would be 3 million steps.
+		if steps > maxSteps/20 {
+			t.Errorf("%s took %d steps", src, steps)
 		}
 	}
 	if got := eval(t, `LEN(REPT("é", 10000))`); got.JSON() != float64(10000) {
@@ -486,10 +496,12 @@ func TestLongCellsAreCheap(t *testing.T) {
 	// 120 formulas each searching the cell took 18 s a row; the row's
 	// budget now stops them partway, in milliseconds.
 	for _, src := range []string{`FIND("b", {Notes}) + LEN({Notes})`, `LEN(UPPER({Notes})) + LEN(LOWER({Notes}))`} {
-		start := time.Now()
-		out := runOn(many(120, src), long)
-		if d := time.Since(start); d > time.Second {
-			t.Errorf("%s 120 times took %v", src, d)
+		p := many(120, src)
+		out := runOn(p, long)
+		// Counted, not timed: the time is the machine's load as much as the
+		// work. The row's budget stops them at a million steps.
+		if p.budget.spent > 2*maxSteps {
+			t.Errorf("%s 120 times took %d steps", src, p.budget.spent)
 		}
 		if out["f0"].Kind != KindNumber || out["f119"] != tooMuch {
 			t.Errorf("%s: the first %#v, the last %#v", src, out["f0"], out["f119"])
@@ -526,15 +538,14 @@ func TestLongCellsAreCheap(t *testing.T) {
 func TestAReadHasABudget(t *testing.T) {
 	cells := map[string]Value{"notes": Text(strings.Repeat("x", 64<<10))}
 	p := many(1, `LEN(UPPER({Notes}))`)
-	start := time.Now()
 	var got []Value
 	for i := 0; i < 2500; i++ {
 		got = append(got, runOn(p, cells)["f0"])
 	}
-	// Generous: it takes a tenth of this alone, and the suite runs packages
-	// side by side.
-	if d := time.Since(start); d > 5*time.Second {
-		t.Errorf("2500 rows took %v", d)
+	// Counted, not timed: 2500 rows took 6.7 s at a load of 80, a tenth of
+	// that alone. Without the read's budget they'd be four times it in steps.
+	if p.budget.spent > 2*maxReadSteps {
+		t.Errorf("2500 rows took %d steps", p.budget.spent)
 	}
 	if got[0].JSON() != float64(64<<10) || got[2499] != tooMuchRead {
 		t.Errorf("the first row %#v, the last %#v", got[0], got[2499])
@@ -648,10 +659,10 @@ func TestCompareFold(t *testing.T) {
 }
 
 func TestLongValuesArentNumbersOrDates(t *testing.T) {
-	if _, ok := ParseNumber(strings.Repeat("1", maxReadLen+1)); ok {
+	if _, ok := ParseNumber(strings.Repeat("1", maxReadLen+1), PlainSigns); ok {
 		t.Error("a long run of digits read as a number")
 	}
-	if _, ok := ParseNumber(" ₹ 1,00,00,000.50 "); !ok {
+	if _, ok := ParseNumber(" ₹ 1,00,00,000.50 ", PlainSigns); !ok {
 		t.Error("a rupee amount wasn't read")
 	}
 	if _, ok := ParseDate("2026-10-08" + strings.Repeat(" ", maxReadLen) + "x"); ok {
@@ -737,10 +748,10 @@ func TestHiddenWorkIsCharged(t *testing.T) {
 	}
 	// Numbers and dates aren't looked for in long text, spaces and all.
 	padded := strings.Repeat(" ", 4*maxReadLen) + "5"
-	if _, ok := ParseNumber(padded); ok {
+	if _, ok := ParseNumber(padded, PlainSigns); ok {
 		t.Error("a number padded with 256 spaces was read")
 	}
-	if _, ok := ParseNumber("  5  "); !ok {
+	if _, ok := ParseNumber("  5  ", PlainSigns); !ok {
 		t.Error("a number with a few spaces wasn't read")
 	}
 }
@@ -749,6 +760,93 @@ func TestHugeNumbersAsText(t *testing.T) {
 	for f, want := range map[float64]string{1e21: "1e+21", -1.5e300: "-1.5e+300", 1e20: "100000000000000000000", 0.1 + 0.2: "0.3", 1500000: "1500000"} {
 		if got := FormatNumber(f); got != want {
 			t.Errorf("FormatNumber(%g) = %q, want %q", f, got, want)
+		}
+	}
+}
+
+// A prompt is words, which a formula's lexer refuses; the fields it names
+// are read as a formula names them.
+func TestTextRefs(t *testing.T) {
+	cases := map[string][]string{
+		`Summarise {Notes} for {Owner}'s review; it's "urgent" & short`: {"Notes", "Owner"},
+		`Compare { Notes } with {Notes} and {Next \} step}`:             {"Notes", "Next } step"},
+		`Nothing named here, just words.`:                               nil,
+		`An empty {} and an open {Notes`:                                nil,
+	}
+	for src, want := range cases {
+		if got := TextRefs(src); !reflect.DeepEqual(got, want) {
+			t.Errorf("TextRefs(%q) = %q, want %q", src, got, want)
+		}
+	}
+	if Refs(`Summarise {Notes} for {Owner}'s review`) != nil {
+		t.Error("Refs read words as a formula")
+	}
+}
+
+// A number as a person writes it in their signs (the tables audit's B3):
+// each locale's decimal sign and groups, a currency sign before or after,
+// and nothing that reads two ways, isn't finite, or isn't a number at all.
+func TestNumbersInTheirWritersSigns(t *testing.T) {
+	de := NumberSigns{Decimal: ",", Group: "."}
+	fr := NumberSigns{Decimal: ",", Group: "\u202f"}
+	ch := NumberSigns{Decimal: ".", Group: "\u2019"}
+	cases := []struct {
+		in    string
+		signs NumberSigns
+		want  float64
+		ok    bool
+	}{
+		{"1,5", de, 1.5, true},
+		{"1.234,56", de, 1234.56, true},
+		{"1.500", de, 1500, true},
+		{"1,5e3", de, 1500, true},
+		{"1,234.56", PlainSigns, 1234.56, true},
+		{"1 234,5", fr, 1234.5, true},
+		{"1\u202f234,5", fr, 1234.5, true},
+		{"1\u2019234.5", ch, 1234.5, true},
+		{"1,00,000", PlainSigns, 100000, true},
+		{"€12", de, 12, true},
+		{"12 €", de, 12, true},
+		{"-€12", PlainSigns, -12, true},
+		{"€-12", PlainSigns, -12, true},
+		{"\u221212", PlainSigns, -12, true},
+		{"+12", PlainSigns, 12, true},
+		{"1e3", PlainSigns, 1000, true},
+		{".5", PlainSigns, 0.5, true},
+		{"-0", PlainSigns, 0, true},
+		{"12", NumberSigns{}, 12, true},
+		{"1,5", PlainSigns, 0, false},
+		{"1.5", de, 0, false},
+		{"1,234.56", de, 0, false},
+		{"12,34", PlainSigns, 0, false},
+		{"12,345,67", PlainSigns, 0, false},
+		{"NaN", PlainSigns, 0, false},
+		{"Inf", PlainSigns, 0, false},
+		{"Infinity", de, 0, false},
+		{"1e400", PlainSigns, 0, false},
+		{"0x10", PlainSigns, 0, false},
+		{"1_000", PlainSigns, 0, false},
+		{"12 kg", PlainSigns, 0, false},
+		{"TBD", PlainSigns, 0, false},
+		{"€12€", PlainSigns, 0, false},
+		{"--12", PlainSigns, 0, false},
+		{"12-", PlainSigns, 0, false},
+		{"", PlainSigns, 0, false},
+		{".", PlainSigns, 0, false},
+	}
+	for _, c := range cases {
+		got, ok := ParseNumber(c.in, c.signs)
+		if ok != c.ok || got != c.want || math.Signbit(got) != math.Signbit(c.want) {
+			t.Errorf("%q in %+v reads %v (%v), want %v (%v)", c.in, c.signs, got, ok, c.want, c.ok)
+		}
+	}
+	for signs, ok := range map[NumberSigns]bool{
+		{}: true, PlainSigns: true, de: true, fr: true, {Decimal: ","}: true,
+		{Decimal: ".", Group: "."}: false, {Decimal: "1"}: false, {Decimal: ". "}: false, {Decimal: " "}: false,
+		{Decimal: "e"}: false, {Decimal: "-"}: false, {Decimal: "$"}: false, {Group: ","}: false,
+	} {
+		if _, got := signs.Checked(); got != ok {
+			t.Errorf("%+v checked %v, want %v", signs, got, ok)
 		}
 	}
 }

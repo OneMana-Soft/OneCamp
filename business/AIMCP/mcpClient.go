@@ -21,7 +21,7 @@ import (
 	"time"
 
 	userDomain "github.com/akashc777/OneCamp/domain/User"
-	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/safefetch"
 	model "github.com/akashc777/OneCamp/models/postgres/AIMCP"
 	ai "github.com/akashc777/OneCamp/services/AI"
 )
@@ -106,7 +106,7 @@ var ErrAuthSecretUnreadable = errors.New(
 // wrong cause; if the remote does not refuse it, the auth was never enforced.
 //
 // What it may reach is decided as it connects: this server's own network only
-// when the server's creator is an admin now (helpers.EndpointPolicyFor).
+// when the server's creator is an admin now (safefetch.EndpointPolicy).
 func NewClient(ctx context.Context, s *model.McpServer) (*Client, error) {
 	if s.AuthSecretUnreadable {
 		return nil, ErrAuthSecretUnreadable
@@ -120,20 +120,20 @@ func NewClient(ctx context.Context, s *model.McpServer) (*Client, error) {
 		authType:   s.AuthType,
 		authHeader: authHeader,
 		authSecret: s.AuthSecret,
-		http:       newMCPHTTPClient(helpers.EndpointPolicyFor(creatorIsAdmin(ctx, s.CreatedBy))),
+		http:       newMCPHTTPClient(safefetch.EndpointPolicy(creatorIsAdmin(ctx, s.CreatedBy))),
 	}, nil
 }
 
 // newMCPHTTPClient builds the outbound HTTP client for every MCP call. An MCP
 // server's address is typed by whoever added it, and every call carries its
 // credential, so it is held to the one address rule for such endpoints
-// (helpers.EndpointPolicyFor): this server's own network only for a server an
+// (safefetch.EndpointPolicy): this server's own network only for a server an
 // admin added, never a metadata or link-local address, checked as each
 // connection is made. A redirect off the server's own origin is never
 // followed, so the credential stays with the address it was given for. A
 // seam, so tests can reach a local test server.
-var newMCPHTTPClient = func(p helpers.EndpointPolicy) *http.Client {
-	return helpers.EndpointClient(p, requestTimeout)
+var newMCPHTTPClient = func(p safefetch.Policy) *http.Client {
+	return safefetch.NewClient(p, requestTimeout)
 }
 
 // creatorIsAdmin reports whether a server's creator is an admin now. A seam.

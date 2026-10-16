@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/safefetch"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/google/uuid"
@@ -79,7 +80,7 @@ func resolveRemoteCard(ctx context.Context, protocol, endpoint, header, secret s
 	}
 	cctx, cancel := context.WithTimeout(ctx, remoteCardTimeout)
 	defer cancel()
-	card, err := fetchA2ACardFn(cctx, endpoint, header, secret, helpers.EndpointPolicyFor(addedByAdmin))
+	card, err := fetchA2ACardFn(cctx, endpoint, header, secret, safefetch.EndpointPolicy(addedByAdmin))
 	if err != nil {
 		return nil, fmt.Errorf("%s", remoteCheckError(err, addedByAdmin))
 	}
@@ -195,13 +196,13 @@ func CheckRemoteBrain(ctx context.Context, in RemoteBrainCheck, actor Actor) (*R
 	var p ai.RemoteBrain
 	var card *ai.A2ACard
 	if protocol == model.RemoteA2A {
-		card, err = fetchA2ACardFn(runCtx, endpoint, header, secret, helpers.EndpointPolicyFor(addedByAdmin))
+		card, err = fetchA2ACardFn(runCtx, endpoint, header, secret, safefetch.EndpointPolicy(addedByAdmin))
 		if err != nil {
 			return &RemoteBrainResult{OK: false, Error: remoteCheckError(err, addedByAdmin)}, nil
 		}
-		p = ai.NewA2AProvider(card.Endpoint, header, secret, "check-"+uuid.NewString(), card.ProtocolVersion, helpers.EndpointPolicyFor(addedByAdmin))
+		p = ai.NewA2AProvider(card.Endpoint, header, secret, "check-"+uuid.NewString(), card.ProtocolVersion, safefetch.EndpointPolicy(addedByAdmin))
 	} else {
-		p = ai.NewAGUIProvider(endpoint, header, secret, "check-"+uuid.NewString(), helpers.EndpointPolicyFor(addedByAdmin))
+		p = ai.NewAGUIProvider(endpoint, header, secret, "check-"+uuid.NewString(), safefetch.EndpointPolicy(addedByAdmin))
 	}
 	// ChatWithTools with nothing on offer, rather than Chat: this run offers no
 	// tools either way, and the structured form gives back what the remote
@@ -222,14 +223,14 @@ func CheckRemoteBrain(ctx context.Context, in RemoteBrainCheck, actor Actor) (*R
 }
 
 // remoteReachRefusal is why an agent may not be pointed at endpoint under the
-// one address rule (helpers.EndpointPolicyFor), in words, or "" when it may.
+// one address rule (safefetch.EndpointPolicy), in words, or "" when it may.
 // Checked on save and before a check, so a refused address is a sentence then;
 // the client checks again as it connects.
 func remoteReachRefusal(endpoint string, addedByAdmin bool) string {
 	if strings.TrimSpace(endpoint) == "" {
 		return ""
 	}
-	err := helpers.CheckEndpoint(endpoint, helpers.EndpointPolicyFor(addedByAdmin))
+	_, err := safefetch.CheckEndpoint(endpoint, safefetch.EndpointPolicy(addedByAdmin))
 	if err == nil {
 		return ""
 	}

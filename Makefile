@@ -34,7 +34,11 @@ test:
 	go test -count=1 -race -timeout=20m -p=4 \
 		./business/... ./models/... ./domain/... ./controllers/... ./services/... \
 		./helpers/... ./middleware/... ./router/... ./adapter/... ./initializers/... \
-		./docs/...
+		./docs/... .
+# . (the module root, that one package only, so data/ is never walked) is in that
+# list for schema_test.go: it checks the migrations the binary embeds are the
+# directory's, each version once. Two branches can land the same number, and sqlx
+# then refuses to run either; that has to fail here, not on a server mid-update.
 # ./docs is in that list because the guard living there checks that every file
 # path the compliance documents cite actually exists, and a guard the gate does
 # not run is a guard that does not exist. It was written, it passed when invoked
@@ -230,11 +234,22 @@ stop_coturn_containers:
 create_server_db:
 	docker compose --env-file .env --project-name $(ONECAMP_PROJECT) -f final-compose.yml exec postgres createdb --username=${DB_USER} --owner=${DB_USER} ${DB_NAME}
 
+# THE PASSWORD IS ON NO COMMAND LINE, AND SQLX NEVER SEES .env. These four
+# targets gave sqlx the database URL as an argument, so the password sat in ps,
+# and make, echoing each recipe line, printed it into every deploy's output. The
+# server pair also mounted the whole checkout, .env included, where sqlx loads
+# it and quotes a line it can't parse in its warning (LIVEKIT_API_KEY's "name:
+# secret" form). Now the URL is DATABASE_URL, exported to the recipe and passed
+# by name; the containers get migrations/ alone, read-only, and the local pair
+# runs sqlx from an empty directory, reading migrations/ by path.
+# Makefile-distribute's migrate_up is the customer copy (16 Oct 2026).
+migrate_up: export DATABASE_URL = postgres://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)?sslmode=disable
 migrate_up:
-	sqlx migrate run --database-url "postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=disable"
+	@t=$$(mktemp -d) && cd "$$t" && sqlx migrate run --source "$(CURDIR)/migrations"; rc=$$?; rmdir "$$t" 2>/dev/null; exit $$rc
 
+migrate_down: export DATABASE_URL = postgres://$(DB_USER):$(DB_PASSWORD)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)?sslmode=disable
 migrate_down:
-	sqlx migrate revert --database-url "postgres://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=disable"
+	@t=$$(mktemp -d) && cd "$$t" && sqlx migrate revert --source "$(CURDIR)/migrations"; rc=$$?; rmdir "$$t" 2>/dev/null; exit $$rc
 
 # Migrations on a SERVER. The docker network is RESOLVED, not hardcoded.
 #
@@ -313,17 +328,41 @@ endef
 #   make migrate_server_status ONECAMP_PROJECT=onecamp-acme
 ONECAMP_PROJECT ?= onecamp-beta
 
+# Only migrations/ goes in, and the URL by name: see migrate_up above.
+migrate_server_up: export DATABASE_URL = postgres://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)?sslmode=disable
 migrate_server_up:
 	$(require_onecamp_net)
-	docker run --rm -v $(shell pwd):/app -w /app --network $(ONECAMP_NET) rust:alpine sh -c "cargo install sqlx-cli --no-default-features --features postgres && sqlx migrate run --database-url postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}?sslmode=disable"
+	docker run --rm -e DATABASE_URL -v "$(CURDIR)/migrations":/app/migrations:ro -w /app --network $(ONECAMP_NET) rust:alpine sh -c "cargo install sqlx-cli --no-default-features --features postgres && sqlx migrate run"
 
+migrate_server_down: export DATABASE_URL = postgres://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)?sslmode=disable
 migrate_server_down:
 	$(require_onecamp_net)
-	docker run --rm -v $(shell pwd):/app -w /app --network $(ONECAMP_NET) rust:alpine sh -c "cargo install sqlx-cli --no-default-features --features postgres && sqlx migrate revert --database-url postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}?sslmode=disable"
+	docker run --rm -e DATABASE_URL -v "$(CURDIR)/migrations":/app/migrations:ro -w /app --network $(ONECAMP_NET) rust:alpine sh -c "cargo install sqlx-cli --no-default-features --features postgres && sqlx migrate revert"
 
-# migrate_server_status shows what the DATABASE believes is applied, so a schema
-# mismatch is diagnosable without reading application logs or guessing.
+# migrate_server_status shows what the DATABASE believes is applied, against the
+# migrations on disk, so a schema mismatch is diagnosable without reading
+# application logs or guessing: what is not applied first, then the latest rows.
+#
+# By set, never by the highest version alone. sqlx applies whatever is missing,
+# lower versions included, so a database can hold the newest migration and still
+# lack one below it: a hotfix numbered above unreleased work, or a programme's
+# reserved range (the 300s), lands first, and the newest twelve rows then look
+# complete. Makefile-distribute's migration_sets is the customer copy.
 migrate_server_status:
+	@q() { docker compose --env-file .env --project-name $(ONECAMP_PROJECT) -f final-compose.yml exec -T postgres \
+		psql -U ${DB_USER} -d ${DB_NAME} -v ON_ERROR_STOP=1 -qtA -c "$$1"; }; \
+	applied=$$(q "SELECT version FROM _sqlx_migrations WHERE success ORDER BY version;") || exit 1; \
+	failed=$$(q "SELECT version FROM _sqlx_migrations WHERE NOT success ORDER BY version;") || exit 1; \
+	ondisk=$$(ls migrations | sed -n 's/^\([0-9][0-9]*\)_.*\.up\.sql$$/\1/p' | sort -n -u); \
+	setdiff() { printf '%s\n' "$$1" "--" "$$2" | awk '/^--$$/ { d = 1; next } !d { if ($$0 != "") a[$$0] = 1; next } $$0 != "" && !($$0 in a)'; }; \
+	missing=$$(setdiff "$$applied" "$$ondisk" | tr '\n' ' ' | sed 's/ $$//'); \
+	unknown=$$(setdiff "$$ondisk" "$$applied" | tr '\n' ' ' | sed 's/ $$//'); \
+	failed=$$(echo $$failed); \
+	echo "Applied:     $$(echo $$applied | wc -w) migrations"; \
+	echo "Not applied: $${missing:-none}"; \
+	if [ -n "$$failed" ]; then echo "Failed:      $$failed"; fi; \
+	if [ -n "$$unknown" ]; then echo "Not on disk: $$unknown"; fi; \
+	echo ""
 	docker compose --env-file .env --project-name $(ONECAMP_PROJECT) -f final-compose.yml exec -T postgres \
 		psql -U ${DB_USER} -d ${DB_NAME} -c "SELECT version, success, installed_on FROM _sqlx_migrations ORDER BY version DESC LIMIT 12;"
 

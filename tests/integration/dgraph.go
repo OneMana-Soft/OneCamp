@@ -35,9 +35,12 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
+	"github.com/dgraph-io/dgo/v230"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // ensureLoggers points the package globals at discard sinks.
@@ -152,6 +155,23 @@ func (e *DgraphEnv) Mutate(t *testing.T, setJSON any) map[string]string {
 		t.Fatalf("dgraph mutate: %v\npayload: %s", err, raw)
 	}
 	return resp.GetUids()
+}
+
+// Break points the project's graph client at an address that takes no
+// connections until t ends, so a test can see what a handler answers when a
+// read fails rather than finds nothing. The live client comes back after.
+func (e *DgraphEnv) Break(t *testing.T) {
+	t.Helper()
+	conn, err := grpc.NewClient("127.0.0.1:1", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("a graph client with nowhere to go: %v", err)
+	}
+	live := dgraphInit.DgraphClient
+	dgraphInit.DgraphClient = dgo.NewDgraphClient(api.NewDgraphClient(conn))
+	t.Cleanup(func() {
+		dgraphInit.DgraphClient = live
+		_ = conn.Close()
+	})
 }
 
 // Query runs a read-only query and returns its JSON, so a test can read back

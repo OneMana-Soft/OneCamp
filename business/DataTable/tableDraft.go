@@ -89,39 +89,10 @@ func GenerateTable(ctx context.Context, actor Actor, prompt string, workspaceCon
 		return nil, fmt.Errorf("could not understand that; try describing it differently")
 	}
 
-	// Build the table input and typed columns.
-	tableIn := TableInput{
-		Name:        gen.Name,
-		Description: gen.Description,
-		Icon:        gen.Icon,
-		Visibility:  model.VisibilityWorkspace,
+	tableIn, fields, err := draftInputs(gen)
+	if err != nil {
+		return nil, err
 	}
-	fields := make([]FieldInput, 0, len(gen.Fields))
-	for i, f := range gen.Fields {
-		name := strings.TrimSpace(f.Name)
-		if name == "" {
-			continue
-		}
-		ftype := strings.TrimSpace(f.Type)
-		if !model.ValidFieldType(ftype) {
-			ftype = model.FieldText
-		}
-		cfg := map[string]interface{}{}
-		if (ftype == model.FieldSelect || ftype == model.FieldMultiSelect) && len(f.Options) > 0 {
-			opts := make([]map[string]interface{}, 0, len(f.Options))
-			for _, o := range f.Options {
-				if o = strings.TrimSpace(o); o != "" {
-					opts = append(opts, map[string]interface{}{"label": o})
-				}
-			}
-			cfg["options"] = opts
-		}
-		fields = append(fields, FieldInput{Name: name, Type: ftype, Config: cfg, Position: float64(i)})
-	}
-	if len(fields) == 0 {
-		return nil, fmt.Errorf("could not derive any columns; try describing it differently")
-	}
-
 	tbl, err := CreateTableFromTemplate(ctx, tableIn, fields, nil, actor)
 	if err != nil {
 		return nil, err
@@ -149,7 +120,7 @@ func GenerateTable(ctx context.Context, actor Actor, prompt string, workspaceCon
 			if len(values) == 0 {
 				continue
 			}
-			if _, rerr := CreateRow(ctx, tbl.Id, RowInput{Values: values, Position: float64(rowCount)}, actor); rerr != nil {
+			if _, rerr := CreateRow(ctx, tbl.Id, RowInput{Values: values}, actor); rerr != nil {
 				helpers.LogErrorWithContext(ctx, "GenerateTable seed row err: %v", rerr)
 				continue
 			}
@@ -157,6 +128,46 @@ func GenerateTable(ctx context.Context, actor Actor, prompt string, workspaceCon
 		}
 	}
 	return tbl, nil
+}
+
+// draftInputs is the table a model's draft makes, and its columns. The table
+// is private to the person who asked: the draft can quote what only they can
+// read (their DMs, private channels and docs, from the workspace context), and
+// it was made visible to the whole workspace at once (TAB-BUG-6). Showing it
+// to the workspace is theirs to choose.
+func draftInputs(gen *generatedTable) (TableInput, []FieldInput, error) {
+	tableIn := TableInput{
+		Name:        gen.Name,
+		Description: gen.Description,
+		Icon:        gen.Icon,
+		Visibility:  model.VisibilityPrivate,
+	}
+	fields := make([]FieldInput, 0, len(gen.Fields))
+	for i, f := range gen.Fields {
+		name := strings.TrimSpace(f.Name)
+		if name == "" {
+			continue
+		}
+		ftype := strings.TrimSpace(f.Type)
+		if !model.ValidFieldType(ftype) {
+			ftype = model.FieldText
+		}
+		cfg := map[string]interface{}{}
+		if (ftype == model.FieldSelect || ftype == model.FieldMultiSelect) && len(f.Options) > 0 {
+			opts := make([]map[string]interface{}, 0, len(f.Options))
+			for _, o := range f.Options {
+				if o = strings.TrimSpace(o); o != "" {
+					opts = append(opts, map[string]interface{}{"label": o})
+				}
+			}
+			cfg["options"] = opts
+		}
+		fields = append(fields, FieldInput{Name: name, Type: ftype, Config: cfg, Position: float64(i)})
+	}
+	if len(fields) == 0 {
+		return TableInput{}, nil, fmt.Errorf("could not derive any columns; try describing it differently")
+	}
+	return tableIn, fields, nil
 }
 
 func parseGeneratedTable(raw string) (*generatedTable, error) {

@@ -33,6 +33,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -69,6 +70,12 @@ type Result struct {
 	Signature string // populated when Verdict == VerdictInfected
 	Bytes     int64  // bytes scanned
 }
+
+// ErrInfected is wrapped into the error an upload path returns when it refuses
+// a file because the scanner found a virus signature in it, so the handler can
+// tell a refused file (the uploader's to deal with) from a failed write with
+// errors.Is.
+var ErrInfected = errors.New("the file carries a virus signature")
 
 // Scanner is the interface upload paths consume. Implementations must
 // be safe for concurrent use.

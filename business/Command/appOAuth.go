@@ -28,13 +28,6 @@ import (
 // Client secret is read from the encrypted app secret bag; tokens are encrypted
 // at rest with the same AES-256-GCM helper.
 
-type publicOAuth struct {
-	ClientID string   `json:"client_id"`
-	AuthURL  string   `json:"auth_url"`
-	TokenURL string   `json:"token_url"`
-	Scopes   []string `json:"scopes"`
-}
-
 // BuildOAuthInstallURL returns the provider authorize URL for an oauth app.
 func BuildOAuthInstallURL(ctx context.Context, appID uuid.UUID, redirectURI string) (string, error) {
 	app, err := slashModel.GetAppByID(ctx, appID)
@@ -48,9 +41,9 @@ func BuildOAuthInstallURL(ctx context.Context, appID uuid.UUID, redirectURI stri
 		return "", fmt.Errorf("app is not an OAuth app")
 	}
 
-	var cfg publicOAuth
-	if err := json.Unmarshal([]byte(*app.OAuthConfig), &cfg); err != nil {
-		return "", fmt.Errorf("invalid oauth config: %w", err)
+	cfg := storedOAuthSettings(app)
+	if cfg == nil {
+		return "", fmt.Errorf("invalid oauth config")
 	}
 	if cfg.ClientID == "" || cfg.AuthURL == "" {
 		return "", fmt.Errorf("oauth config incomplete")
@@ -95,8 +88,8 @@ func HandleOAuthCallback(ctx context.Context, state, code, redirectURI string) (
 	if err != nil || app == nil || app.OAuthConfig == nil {
 		return appID, fmt.Errorf("app not found or not oauth")
 	}
-	var cfg publicOAuth
-	if err := json.Unmarshal([]byte(*app.OAuthConfig), &cfg); err != nil {
+	cfg := storedOAuthSettings(app)
+	if cfg == nil {
 		return appID, fmt.Errorf("invalid oauth config")
 	}
 

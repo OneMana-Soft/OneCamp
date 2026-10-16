@@ -11,7 +11,7 @@ import (
 )
 
 // The addresses a webhook, an import's download or an app's handler must never
-// reach, and some it must. Every range in blockedPrefixes has a case here, and
+// reach, and some it must. Every range isBlockedAddr refuses has a case here, and
 // so does each way of writing an address that a plain prefix check would miss.
 func TestBlockedAddresses(t *testing.T) {
 	for _, c := range []struct {
@@ -75,6 +75,14 @@ func TestBlockedAddresses(t *testing.T) {
 		{"2002:7f00:1::1", true},    // 127.0.0.1
 		{"2002:a00:1::", true},      // 10.0.0.1
 		{"2002:a9fe:a9fe::1", true}, // 169.254.169.254
+		// One table with safefetch's, the stricter: all of 6to4, Teredo and the
+		// rest of 2001::/23, the new documentation range, and any IPv6 address
+		// outside global unicast.
+		{"2002:808:808::1", true}, // 6to4 even of 8.8.8.8
+		{"2001::1", true},         // Teredo
+		{"2001:0:4136:e378::1", true},
+		{"3fff::1", true},
+		{"4000::1", true},
 
 		// The public internet, including the edges of the ranges above.
 		{"1.1.1.1", false},
@@ -91,7 +99,7 @@ func TestBlockedAddresses(t *testing.T) {
 		{"2001:4860:4860::8888", false},
 		{"::ffff:8.8.8.8", false},
 		{"64:ff9b::808:808", false}, // NAT64 of 8.8.8.8: how an IPv6-only host reaches it
-		{"2002:808:808::1", false},  // 6to4 of 8.8.8.8
+
 	} {
 		a, err := netip.ParseAddr(c.addr)
 		if err != nil {

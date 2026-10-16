@@ -69,6 +69,19 @@ services:
     logging: *default-logging
     restart: unless-stopped
     image: emqx/emqx:6.0.0
+    # HEALTHY ONCE THE NODE HAS STARTED. make's wait-ready (install, update,
+    # restore) waits for every health check, so it now waits for the broker
+    # too, instead of judging a stack whose broker is still booting: on a busy
+    # machine EMQX takes minutes after an update. It reads the node's own
+    # /status page (200 once it runs, 503 until then) with the image's curl.
+    # `emqx ctl status` says the same, but boots a second Erlang node to ask:
+    # about 5 s of CPU each time, half a core all day at this interval.
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "-o", "/dev/null", "http://127.0.0.1:18083/status"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
     environment:
       EMQX_DASHBOARD__DEFAULT_USERNAME: ${EMQX_DASHBOARD_DEFAULT_USERNAME}
       EMQX_DASHBOARD__DEFAULT_PASSWORD: ${EMQX_DASHBOARD_DEFAULT_PASSWORD}
@@ -311,8 +324,22 @@ services:
     # redis user, so the directory needs no owner of its own.
     volumes:
       - ./data/redis_data/data:/data
+    # THE PASSWORD IS APPLIED. The official image ignores REDIS_PASSWORD, so
+    # Redis ran with no password at all, open to every container on its
+    # network, while the API, collab, LiveKit and egress all sent one. Now
+    # redis-server is told it, from the same .env value every client reads, so
+    # both sides change together. REDISCLI_AUTH lets redis-cli inside the
+    # container (the health check, make's clean-up) sign in.
+    #
+    # NO APPEND-ONLY FILE. Redis keeps its data in snapshots (dump.rdb), as it
+    # always has here. Started with --appendonly yes on a /data that holds only
+    # a snapshot, Redis starts EMPTY: it makes a new append-only file and never
+    # reads dump.rdb (Redis 7 and 8.6.2 both, checked 15 Oct 2026), so the
+    # update that turned it on would sign everyone out.
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
     environment:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDISCLI_AUTH=${REDIS_PASSWORD}
       - REDIS_PORT=6379
       - REDIS_DATABASES=16
     # NOT PUBLISHED. This service used to carry a Traefik TCP router on a dedicated
@@ -373,6 +400,13 @@ services:
       - traefik.http.routers.go-service-https.tls=true
       - traefik.http.routers.go-service-https.service=go-service
       - traefik.http.routers.go-service-https.tls.certresolver=le
+      # The API's answers are compressed, in whichever way the browser asks: a
+      # table opened with about 600 KB of JSON on the wire, about 30 KB once
+      # compressed. Event streams (the assistant writing its reply) go out as
+      # they're written, uncompressed: Traefik 3.0 held a compressed stream's
+      # first words back.
+      - traefik.http.middlewares.api-compress.compress.excludedcontenttypes=text/event-stream
+      - traefik.http.routers.go-service-https.middlewares=api-compress
     networks:
       - onecamp-shared-net
       - traefik-public

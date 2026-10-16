@@ -3,7 +3,6 @@ package models
 import (
 	"context"
 	"encoding/json"
-	"errors"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -12,8 +11,9 @@ import (
 )
 
 // ErrNotFound is a task read that found nothing: an answer, unlike a query
-// that failed. Its text is the one this read always gave.
-var ErrNotFound = errors.New("failed to get dgraph task")
+// that failed. Its text is the one this read always gave, and it is also
+// helpers.ErrNotFound, which helpers.WriteReadFailure answers as a 404.
+var ErrNotFound = helpers.NotFound("failed to get dgraph task")
 
 // forDgraph is a task as Dgraph stores it: its custom field values live in
 // Postgres and are only laid over a task read for the app, so a task read

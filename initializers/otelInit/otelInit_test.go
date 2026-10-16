@@ -9,7 +9,11 @@ package otelInit
 // "every export has been failing since you configured it".
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestCollectorEndpoint(t *testing.T) {
@@ -38,8 +42,10 @@ func TestCollectorEndpoint(t *testing.T) {
 			name: "bare host and port still works", env: "otel-collector:4318",
 			wantHost: "otel-collector:4318",
 		},
-		{name: "unset falls back to the local collector", env: "", wantHost: "localhost:4318"},
-		{name: "whitespace is not configuration", env: "   ", wantHost: "localhost:4318"},
+		// Unset is off: there is no collector on a customer's server, and
+		// exporting to localhost:4318 logged a refusal every second.
+		{name: "unset is off", env: ""},
+		{name: "whitespace is not configuration", env: "   "},
 		{name: "surrounding whitespace is trimmed", env: "  https://c:4318 ", wantURL: "https://c:4318"},
 	}
 
@@ -51,10 +57,10 @@ func TestCollectorEndpoint(t *testing.T) {
 				t.Fatalf("collectorEndpoint() = (url=%q, host=%q), want (url=%q, host=%q)",
 					gotURL, gotHost, c.wantURL, c.wantHost)
 			}
-			// Exactly one, always. Both set would apply two conflicting options
+			// At most one, always. Both set would apply two conflicting options
 			// to the same exporter and the last one would quietly win.
-			if (gotURL == "") == (gotHost == "") {
-				t.Fatalf("expected exactly one of url/host to be set, got url=%q host=%q", gotURL, gotHost)
+			if gotURL != "" && gotHost != "" {
+				t.Fatalf("expected at most one of url/host to be set, got url=%q host=%q", gotURL, gotHost)
 			}
 		})
 	}
@@ -71,5 +77,40 @@ func TestExportHeadersOmittedWhenThereIsNoCredential(t *testing.T) {
 	t.Setenv("HYPERDX_INGESTION_API_KEY", "sekret")
 	if got := exportHeaders()["authorization"]; got != "sekret" {
 		t.Errorf("authorization = %q, want the configured key", got)
+	}
+}
+
+// No collector configured: no exporter, nothing logged per batch.
+func TestTelemetryIsOffWithoutACollector(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+	shutdown := InitTracer()
+	shutdown() // the no-op: nothing was started
+	if u, h := collectorEndpoint(); u != "" || h != "" {
+		t.Fatalf("with no collector the endpoint is (%q, %q)", u, h)
+	}
+}
+
+// A collector that is down fails every batch; that is reported once per
+// period, with a count of what was held back, never once per second.
+func TestExportFailuresAreReportedAtMostOncePerPeriod(t *testing.T) {
+	clock := time.Date(2026, 10, 15, 8, 0, 0, 0, time.UTC)
+	var lines []string
+	h := &throttledErrors{
+		every:  10 * time.Minute,
+		now:    func() time.Time { return clock },
+		report: func(f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) },
+	}
+	refused := errors.New("dial tcp 127.0.0.1:4318: connect: connection refused")
+	for i := 0; i < 600; i++ { // ten minutes of one failure a second
+		h.Handle(refused)
+		clock = clock.Add(time.Second)
+	}
+	if len(lines) != 1 {
+		t.Fatalf("600 failures in ten minutes logged %d lines; want 1:\n%v", len(lines), lines)
+	}
+	clock = clock.Add(time.Second)
+	h.Handle(refused)
+	if len(lines) != 2 || !strings.Contains(lines[1], "599 more like it") {
+		t.Errorf("after the period the next line should count what was held back: %v", lines)
 	}
 }

@@ -162,7 +162,7 @@ func HandleUpload(w http.ResponseWriter, r *http.Request) {
 	if _, err := minioInit.MinioClient.PutObject(ctx, bucket, objectKey, body, hdr.Size,
 		minio.PutObjectOptions{ContentType: "application/zip"}); err != nil {
 		helpers.LogErrorWithContext(ctx, "SlackImport upload failed: %+v", err)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": "minio upload failed"})
+		helpers.WriteStorageFailure(ctx, w, "Couldn't save the uploaded file. Try again.")
 		return
 	}
 

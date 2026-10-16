@@ -122,14 +122,7 @@ func executeReadTable(ctx context.Context, action ai.ProposedAction, userUUID st
 		b.WriteString(fmt.Sprintf("- %s [%s] id: %s\n", f.Name, f.Type, f.Id))
 	}
 
-	const sample = 25
-	b.WriteString(fmt.Sprintf("\nRows (%d total, showing up to %d):\n", len(bundle.Rows), sample))
-	for i, r := range bundle.Rows {
-		if i >= sample {
-			break
-		}
-		b.WriteString(fmt.Sprintf("- row id: %s values: %s\n", r.Id, compactValues(r.Values)))
-	}
+	b.WriteString(rowSample(bundle))
 
 	// Attach the workspace's agreed definitions/conventions (glossary memory)
 	// the user may see, so the model applies corrected, "make it stick" meanings
@@ -140,6 +133,22 @@ func executeReadTable(ctx context.Context, action ai.ProposedAction, userUUID st
 		b.WriteString(defs)
 	}
 	return strings.TrimSpace(b.String()), nil, nil
+}
+
+// sampleRows is how many rows read_table lists.
+const sampleRows = 25
+
+// rowSample is read_table's rows: how many the table has, and that the ones
+// listed are a sample. The bundle carries a page of rows, and the model was
+// told the page's size as the table's ("500 total" for 10,000 rows).
+func rowSample(bundle *dataTableBusiness.TableBundle) string {
+	shown := min(len(bundle.Rows), sampleRows)
+	var b strings.Builder
+	fmt.Fprintf(&b, "\nRows: %d in the table. The first %d follow, as a sample; count or total them with query_table or query_plan:\n", bundle.RowCount, shown)
+	for _, r := range bundle.Rows[:shown] {
+		fmt.Fprintf(&b, "- row id: %s values: %s\n", r.Id, compactValues(r.Values))
+	}
+	return b.String()
 }
 
 // maxTableDefinitions bounds how many workspace definitions we attach to a

@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/akashc777/OneCamp/business/DataTable/formula"
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 )
 
@@ -222,9 +223,7 @@ func number(raw json.RawMessage) (float64, bool) {
 	}
 	var s string
 	if json.Unmarshal(raw, &s) == nil {
-		if n, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
-			return n, true
-		}
+		return formula.ParseNumber(s, formula.PlainSigns)
 	}
 	return 0, false
 }

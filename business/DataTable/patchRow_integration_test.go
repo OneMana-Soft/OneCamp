@@ -44,7 +44,8 @@ func TestChangingSomeCellsLeavesTheRest(t *testing.T) {
 		return f.Id.String()
 	}
 	name, stage, notes := field("Name"), field("Stage"), field("Notes")
-	row, err := CreateRow(ctx, table.Id, RowInput{Values: map[string]interface{}{name: "Acme", stage: "Lead"}, Position: 5}, actor)
+	at := func(p float64) *float64 { return &p }
+	row, err := CreateRow(ctx, table.Id, RowInput{Values: map[string]interface{}{name: "Acme", stage: "Lead"}, Position: at(5)}, actor)
 	if err != nil {
 		t.Fatalf("create row: %v", err)
 	}
@@ -71,10 +72,10 @@ func TestChangingSomeCellsLeavesTheRest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := UpdateRow(ctx, table.Id, row.Id, RowInput{Values: map[string]interface{}{name: "Acme Ltd", stage: "Won"}, Position: 9}, actor); err != nil {
+	if _, err := UpdateRow(ctx, table.Id, row.Id, RowInput{Values: map[string]interface{}{name: "Acme Ltd", stage: "Won"}, Position: at(9)}, actor); err != nil {
 		t.Fatalf("a person's edit: %v", err)
 	}
-	if err := writeCell(ctx, table, stale, notes, "Big account"); err != nil {
+	if err := writeCell(ctx, table, stale, notes, "Big account", "", false); err != nil {
 		t.Fatalf("the fill: %v", err)
 	}
 	if v, pos := stored(); v[name] != "Acme Ltd" || v[stage] != "Won" || v[notes] != "Big account" || pos != 9 {

@@ -3,20 +3,20 @@ package ai
 // Hardened HTTP client construction for AI providers.
 //
 // Threat model (single-tenant, self-hosted): an admin can point a custom
-// "OpenAI-compatible" provider at an arbitrary base URL. The Go service
-// then makes server-side requests to it. That is a classic SSRF surface.
+// "OpenAI-compatible" provider, the web-search tool or model discovery at an
+// arbitrary base URL, and the Go service then makes server-side requests to
+// it. That is a classic SSRF surface.
 //
-// We deliberately do NOT block all private/internal addresses, because
-// the PRIMARY use case is reaching internal model servers (Ollama at
-// http://ollama:11434, a vLLM pod on the cluster network, etc.). Blanket
-// private-IP blocking would defeat the product.
-//
-// What we DO block, at dial time (so DNS-rebinding can't bypass it), is
-// the cloud instance-metadata service and link-local ranges — the only
-// "private" targets that are pure attack value with no legitimate model
-// use. This is enforced only for admin-supplied custom endpoints; the
-// built-in providers (Ollama via OLLAMA_HOST, api.openai.com,
-// api.anthropic.com) are trusted and skip the guard.
+// THE ONE ADDRESS RULE (safefetch.EndpointPolicy) decides what such a client
+// may reach, as it does for MCP servers and remote agents: these endpoints are
+// set by an admin, so this server's own network (Ollama at
+// http://ollama:11434, a vLLM pod on the cluster network, a box on Tailscale)
+// is reachable, while link-local, the clouds' metadata services and every
+// other special range are not. AI_BLOCK_PRIVATE_IPS narrows it to public
+// addresses only, for an operator who wants no custom endpoint inside. It is
+// enforced at dial time, on the address actually connected to, so DNS
+// rebinding can't bypass it. The built-in providers (Ollama via OLLAMA_HOST,
+// api.openai.com, api.anthropic.com) are trusted and skip the guard.
 
 import (
 	"context"
@@ -25,10 +25,13 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/akashc777/OneCamp/helpers/safefetch"
 )
 
 // httpClientConfig configures a provider's HTTP client.
@@ -66,15 +69,18 @@ func SetLocalOnlyMode(on bool) { localOnlyEnabled.Store(on) }
 // errLocalOnly is returned by the dialer when local-only mode blocks a non-local target.
 var errLocalOnly = errors.New("ai: local-only mode is on — refusing to send content to a non-local model endpoint")
 
-// isLocalAIDialIP reports whether an IP is on the customer's own infrastructure
-// (loopback / private / link-local) — the only targets permitted under
-// local-only AI mode.
+// isLocalAIDialIP reports whether an IP is on the customer's own network in the
+// one sense this server uses (safefetch.PrivateNetworkAddr): loopback, the
+// private ranges and the shared address space Tailscale uses, never a cloud's
+// metadata or link-local address. The only targets local-only AI mode permits,
+// and where content that may not leave the network may go.
 func isLocalAIDialIP(ip net.IP) bool {
-	return ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast())
+	a, ok := netip.AddrFromSlice(ip)
+	return ok && safefetch.PrivateNetworkAddr(a.Unmap())
 }
 
 // errBlockedAddress is returned by the guarded dialer for denied targets.
-var errBlockedAddress = errors.New("ai: connection to this address is blocked for security (cloud metadata / link-local)")
+var errBlockedAddress = errors.New("ai: connection to this address is blocked for security (cloud metadata, link-local or another special address)")
 
 // newProviderHTTPClient builds an *http.Client per the config. It is the
 // single chokepoint for provider networking so timeouts, TLS, and the
@@ -166,53 +172,20 @@ func dialAllowed(cfg httpClientConfig, localOnly bool, host string, ip net.IP) e
 	return nil
 }
 
-// blockedCIDRs are ranges with no legitimate model-server use but high
-// SSRF value. We block link-local (which contains the cloud metadata
-// IPs) for both IPv4 and IPv6. Private/ULA ranges are intentionally NOT
-// here — self-hosted model servers live there.
-var blockedCIDRs = func() []*net.IPNet {
-	cidrs := []string{
-		"169.254.0.0/16", // IPv4 link-local — includes 169.254.169.254 (AWS/GCP/Azure metadata)
-		"fe80::/10",      // IPv6 link-local
-		"fd00:ec2::/32",  // AWS IMDS over IPv6 (fd00:ec2::254)
-	}
-	out := make([]*net.IPNet, 0, len(cidrs))
-	for _, c := range cidrs {
-		if _, n, err := net.ParseCIDR(c); err == nil {
-			out = append(out, n)
-		}
-	}
-	return out
-}()
-
-// isBlockedIP reports whether an IP must never be dialed by a custom
-// endpoint. It always blocks link-local/metadata ranges and the
-// unspecified address.
+// isBlockedIP reports whether an IP must never be dialled by a custom endpoint:
+// anything the one address rule refuses for an endpoint an admin added
+// (safefetch.EndpointPolicy). Public addresses and this server's own network
+// pass; link-local, the clouds' metadata services, the unspecified address and
+// every other special range don't.
 //
-// When AI_BLOCK_PRIVATE_IPS is enabled, it additionally blocks loopback,
-// RFC1918 private ranges, and IPv6 ULA — i.e. anything not globally
-// routable. Use this when you want to prevent a workspace admin from
-// probing the host's private network via a custom endpoint. The
-// self-hosted default leaves those reachable so internal model servers
-// (Ollama, vLLM on the same host/VPC) work.
+// When AI_BLOCK_PRIVATE_IPS is enabled, this server's own network is refused
+// too, for an operator who wants no custom endpoint inside it.
 func isBlockedIP(ip net.IP) bool {
-	if ip == nil || ip.IsUnspecified() {
+	a, ok := netip.AddrFromSlice(ip)
+	if !ok {
 		return true
 	}
-	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		return true
-	}
-	for _, n := range blockedCIDRs {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	if blockPrivateIPs() {
-		if ip.IsLoopback() || ip.IsPrivate() {
-			return true
-		}
-	}
-	return false
+	return !safefetch.EndpointPolicy(!blockPrivateIPs()).Allows(a.Unmap())
 }
 
 // blockPrivateIPs reports whether the strict policy (block all

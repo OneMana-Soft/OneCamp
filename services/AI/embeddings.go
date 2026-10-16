@@ -404,10 +404,12 @@ func buildPermissionFilter(userUUID string, channelUUIDs []string, projectUUIDs 
 		}
 	}`, string(userUUIDJSON), string(userUUIDJSON), string(userUUIDJSON), string(userUUIDJSON))
 
-	// Task permission: project member OR assignee OR creator
+	// Task permission, as business/Task CanViewTask decides it: project member
+	// OR assignee, OR creator of a task in no project (a creator outside the
+	// task's project was taken off it).
 	taskShouldClauses := []string{
 		fmt.Sprintf(`{"term": {"task_assignee_user_id": %s}}`, string(userUUIDJSON)),
-		fmt.Sprintf(`{"term": {"task_created_by_user_id": %s}}`, string(userUUIDJSON)),
+		fmt.Sprintf(`{"bool": {"must": [{"term": {"task_created_by_user_id": %s}}], "must_not": [{"exists": {"field": "project_uuid"}}]}}`, string(userUUIDJSON)),
 	}
 	if len(projectUUIDs) > 0 {
 		taskShouldClauses = append([]string{fmt.Sprintf(`{"terms": {"project_uuid": %s}}`, string(projectJSON))}, taskShouldClauses...)

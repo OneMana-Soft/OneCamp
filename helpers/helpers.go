@@ -403,26 +403,27 @@ func ErrorJSON(w http.ResponseWriter, err error, status ...int) {
 	WriteJSON(w, statusCode, payload)
 }
 
-func GetUserEmojiExipryTime(expiryAt string, loc *time.Location) (finalExpiryTime time.Time) {
+// GetUserEmojiExipryTime is when a status set to clear after expiryIn ("30m",
+// "1h", "4h", "today", "this_week") clears, counted from now as it is where
+// the person is (now in their time zone). Any other code gives the zero time.
+func GetUserEmojiExipryTime(expiryIn string, now time.Time) (finalExpiryTime time.Time) {
 
-	currentTime := time.Now().In(loc)
-
-	switch expiryAt {
+	switch expiryIn {
 
 	case UserEmojiStatusExpiryIn30M:
-		finalExpiryTime = currentTime.Add(30 * time.Minute)
+		finalExpiryTime = now.Add(30 * time.Minute)
 
 	case UserEmojiStatusExpiryIn1H:
-		finalExpiryTime = currentTime.Add(1 * time.Hour)
+		finalExpiryTime = now.Add(1 * time.Hour)
 
 	case UserEmojiStatusExpiryIn4H:
-		finalExpiryTime = currentTime.Add(4 * time.Hour)
+		finalExpiryTime = now.Add(4 * time.Hour)
 
 	case UserEmojiStatusExpiryInToday:
-		finalExpiryTime = endOfDay(currentTime)
+		finalExpiryTime = endOfDay(now)
 
 	case UserEmojiStatusExpiryInWeek:
-		finalExpiryTime = endOfWeek(currentTime)
+		finalExpiryTime = endOfWeek(now)
 	}
 
 	return
@@ -434,10 +435,11 @@ func endOfDay(t time.Time) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, t.Location())
 }
 
+// endOfWeek is the end of the Sunday that closes t's week (weeks start on
+// Monday): on a Sunday, that night. It ran on to the next Sunday, a week
+// late.
 func endOfWeek(t time.Time) time.Time {
-	// Move to Sunday of the current week
-	weekday := t.Weekday()
-	daysUntilSunday := 7 - int(weekday)
+	daysUntilSunday := (7 - int(t.Weekday())) % 7
 	endOfWeek := t.AddDate(0, 0, daysUntilSunday)
 	// Set to end of day (23:59:59)
 	return time.Date(endOfWeek.Year(), endOfWeek.Month(), endOfWeek.Day(), 23, 59, 59, 0, t.Location())

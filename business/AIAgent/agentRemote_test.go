@@ -291,3 +291,14 @@ func TestOnlyAnAdminsRemoteMayBeOnThisServersNetwork(t *testing.T) {
 		t.Error("an admin's remote on this server's network was not reached")
 	}
 }
+
+// The same for a remote agent: a single-word name is refused when a member
+// saves it, and allowed for an admin.
+func TestASingleWordHostIsCheckedWhenTheRemoteIsSaved(t *testing.T) {
+	if why := remoteReachRefusal("http://go-service:8080/agui", false); why == "" {
+		t.Error("a member's remote at a single-word name must be refused on save")
+	}
+	if why := remoteReachRefusal("http://go-service:8080/agui", true); why != "" {
+		t.Errorf("an admin's remote at a single-word name: %q", why)
+	}
+}

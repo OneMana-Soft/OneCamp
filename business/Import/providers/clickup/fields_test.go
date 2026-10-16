@@ -129,3 +129,18 @@ func TestCurrencyKeptAsNamed(t *testing.T) {
 		t.Errorf("a currency ClickUp names is the field's, however rare: %+v", f)
 	}
 }
+
+// A number in a string is read as tables read numbers: never NaN or Inf,
+// which no answer can hold.
+func TestNumbersInStrings(t *testing.T) {
+	for raw, want := range map[string]float64{`12.5`: 12.5, `"12.5"`: 12.5, `"1,200"`: 1200} {
+		if n, ok := number(json.RawMessage(raw)); !ok || n != want {
+			t.Errorf("%s reads %v (%v)", raw, n, ok)
+		}
+	}
+	for _, raw := range []string{`"NaN"`, `"Inf"`, `"twelve"`} {
+		if n, ok := number(json.RawMessage(raw)); ok {
+			t.Errorf("%s reads %v", raw, n)
+		}
+	}
+}

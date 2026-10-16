@@ -104,8 +104,9 @@ func GetBasicDgraphBoardByUUID(ctx context.Context, boardUUID string, userUID st
 
 // GetBoardsReadAccessFor reads, for one person (by uuid), what CanRead decides
 // each of the named boards by: its privacy, its deletion time, its creator,
-// and whether it is shared with them. One query for the lot; ids that aren't
-// uuids are left out, and so is any board that doesn't exist.
+// and whether it is shared with them; and its title, for a caller naming those
+// they may read. One query for the lot; ids that aren't uuids are left out,
+// and so is any board that doesn't exist.
 func GetBoardsReadAccessFor(ctx context.Context, boardUUIDs []string, userUUID string) ([]*dgraphStruct.DgraphBoard, error) {
 	quoted := make([]string, 0, len(boardUUIDs))
 	for _, id := range boardUUIDs {
@@ -119,6 +120,7 @@ func GetBoardsReadAccessFor(ctx context.Context, boardUUIDs []string, userUUID s
 	query := `query Readable($user: string) {
 				boardInfo(func: eq(board_uuid, [` + strings.Join(quoted, ", ") + `])) {
 					board_uuid
+					board_title
 					board_private
 					board_deleted_at
 					board_created_by {

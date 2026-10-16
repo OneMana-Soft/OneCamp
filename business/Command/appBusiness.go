@@ -139,11 +139,11 @@ func UpdateApp(ctx context.Context, appID uuid.UUID, req commandAdapter.UpdateAp
 	// for (helpers.CheckKeptSecret): a new token URL needs it entered again.
 	if req.OAuthConfig != nil && strings.TrimSpace(req.OAuthConfig.ClientSecret) == "" {
 		if bag, _ := loadAppSecrets(ctx, appID); bag != nil && bag.OAuthClientSecret != "" {
-			var prev commandAdapter.AppOAuthConfig
-			if existing.OAuthConfig != nil {
-				_ = json.Unmarshal([]byte(*existing.OAuthConfig), &prev)
+			prevTokenURL := ""
+			if prev := storedOAuthSettings(existing); prev != nil {
+				prevTokenURL = prev.TokenURL
 			}
-			if err := helpers.CheckKeptSecret(true, false, helpers.SecretDestination{URL: prev.TokenURL},
+			if err := helpers.CheckKeptSecret(true, false, helpers.SecretDestination{URL: prevTokenURL},
 				helpers.SecretDestination{URL: req.OAuthConfig.TokenURL}, "client secret"); err != nil {
 				return nil, err
 			}
@@ -409,6 +409,7 @@ func buildAppViewFrom(ctx context.Context, app *slashModel.App) (*commandAdapter
 		IsEnabled:        app.IsEnabled,
 		HasSigningSecret: app.SigningSecret != nil && *app.SigningSecret != "",
 		HasOAuthConfig:   app.OAuthConfig != nil && *app.OAuthConfig != "",
+		OAuth:            storedOAuthSettings(app),
 		CreatedAt:        app.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:        app.UpdatedAt.Format(time.RFC3339),
 	}
@@ -432,6 +433,7 @@ func buildAppViewFrom(ctx context.Context, app *slashModel.App) (*commandAdapter
 	// admin UI can show "API key set" instead of an always-empty password field
 	// that looks unsaved.
 	if bag, _ := loadAppSecrets(ctx, app.Id); bag != nil {
+		view.HasClientSecret = bag.OAuthClientSecret != ""
 		for k, v := range bag.Secrets {
 			if v == "" {
 				continue
@@ -493,13 +495,21 @@ func appOAuthConnected(ctx context.Context, appID uuid.UUID) bool {
 	return err == nil && rec != nil && rec.AccessToken != nil && *rec.AccessToken != ""
 }
 
-func publicOAuthConfig(c *commandAdapter.AppOAuthConfig) map[string]interface{} {
-	return map[string]interface{}{
-		"client_id": c.ClientID,
-		"auth_url":  c.AuthURL,
-		"token_url": c.TokenURL,
-		"scopes":    c.Scopes,
+func publicOAuthConfig(c *commandAdapter.AppOAuthConfig) commandAdapter.AppOAuthSettings {
+	return commandAdapter.AppOAuthSettings{ClientID: c.ClientID, AuthURL: c.AuthURL, TokenURL: c.TokenURL, Scopes: c.Scopes}
+}
+
+// storedOAuthSettings reads the OAuth settings saved beside an app (what
+// publicOAuthConfig stored), or nil when it has none that can be read.
+func storedOAuthSettings(app *slashModel.App) *commandAdapter.AppOAuthSettings {
+	if app == nil || app.OAuthConfig == nil || strings.TrimSpace(*app.OAuthConfig) == "" {
+		return nil
 	}
+	var settings commandAdapter.AppOAuthSettings
+	if err := json.Unmarshal([]byte(*app.OAuthConfig), &settings); err != nil {
+		return nil
+	}
+	return &settings
 }
 
 func nullableString(s string) interface{} {

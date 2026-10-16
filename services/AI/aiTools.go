@@ -44,6 +44,10 @@ type ToolDef struct {
 	// not). A run whose only write was such a tool has not completed anything
 	// yet, and must not say it has.
 	DefersResult bool `json:"defers_result,omitempty"`
+	// Destination is where a tool from outside this workspace sends its calls: the
+	// MCP server it belongs to and that server's address, as the registry built it.
+	// Empty for OneCamp's own tools. Never shown to a model; CallBinding reads it.
+	Destination string `json:"-"`
 }
 
 type contextKey string

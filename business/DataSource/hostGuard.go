@@ -10,16 +10,22 @@ package business
 // instance-metadata endpoint are all reachable from the server.
 //
 // The policy is engine-generic on purpose — it only reasons about host, IP and
-// port — so Postgres, MySQL and any engine added later get it for free:
+// port — so Postgres, MySQL and any engine added later get it for free. What
+// an address IS comes from the one address rule the whole server uses
+// (helpers/safefetch): a public address, this server's own network
+// (safefetch.PrivateNetworkAddr), or neither. A data source adds its own
+// allowlist on top:
 //
-//  1. HARD DENY, not overridable by configuration: link-local (which contains
-//     169.254.169.254, the AWS/GCP/Azure metadata endpoint), the known
-//     non-link-local cloud metadata addresses, multicast, the unspecified
-//     address and the IPv4 broadcast address. Nothing legitimate listens there;
+//  1. HARD DENY, not overridable by configuration: everything that is neither
+//     public nor this server's own network — link-local (which contains
+//     169.254.169.254, the AWS/GCP/Azure metadata endpoint), the other clouds'
+//     metadata addresses, multicast, the unspecified and broadcast addresses,
+//     and the other special-purpose ranges. Nothing legitimate listens there;
 //     credential theft does.
-//  2. INTERNAL (loopback, RFC1918 / IPv6-ULA private, CGNAT shared space):
-//     denied UNLESS explicitly allowlisted. A self-hosted install that really
-//     does keep its database on the LAN keeps working — through configuration
+//  2. INTERNAL (loopback, RFC1918 / IPv6-ULA private, the shared address space
+//     Tailscale and k8s node networks use): denied UNLESS explicitly
+//     allowlisted. A self-hosted install that really does keep its database on
+//     the LAN keeps working — through configuration
 //     (AI_DATASOURCE_HOST_ALLOWLIST), instead of leaving the whole private
 //     network open to everyone holding agent.manage.
 //  3. PUBLIC: allowed when no allowlist is configured; once an allowlist IS
@@ -37,9 +43,12 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/akashc777/OneCamp/helpers/safefetch"
 )
 
 const (
@@ -53,31 +62,6 @@ const (
 	// connect timeouts do not apply to a custom dialer).
 	guardedDialTimeout = connectTimeoutSecs * time.Second
 )
-
-// hardDenyCIDRs are destinations no configuration may enable.
-var hardDenyCIDRs = mustCIDRs(
-	"169.254.0.0/16",     // IPv4 link-local — includes 169.254.169.254 (AWS/GCP/Azure IMDS)
-	"fe80::/10",          // IPv6 link-local
-	"fd00:ec2::/32",      // AWS IMDS over IPv6
-	"192.0.0.192/32",     // Oracle Cloud metadata
-	"100.100.100.200/32", // Alibaba Cloud metadata
-)
-
-// internalCIDRs are on-infrastructure ranges that net.IP's own predicates do not
-// cover; like loopback and private they need an explicit allowlist entry.
-var internalCIDRs = mustCIDRs(
-	"100.64.0.0/10", // CGNAT / shared address space (carrier + k8s node networks)
-)
-
-func mustCIDRs(list ...string) []*net.IPNet {
-	out := make([]*net.IPNet, 0, len(list))
-	for _, c := range list {
-		if _, n, err := net.ParseCIDR(c); err == nil {
-			out = append(out, n)
-		}
-	}
-	return out
-}
 
 // ───────────────────────── allowlist ─────────────────────────
 
@@ -162,39 +146,49 @@ func denyf(format string, a ...interface{}) error {
 
 // ───────────────────────── IP classification ─────────────────────────
 
-// hardDeniedIP reports whether an address is refused regardless of allowlist,
-// plus a human reason for the refusal message.
-func hardDeniedIP(ip net.IP) (string, bool) {
-	switch {
-	case ip.IsUnspecified():
-		return "the unspecified address", true
-	case ip.IsMulticast(), ip.IsInterfaceLocalMulticast(), ip.IsLinkLocalMulticast():
-		return "a multicast address", true
-	case ip.IsLinkLocalUnicast():
-		return "a link-local address (cloud instance metadata lives there)", true
-	case ip.Equal(net.IPv4bcast):
-		return "the broadcast address", true
-	}
-	for _, n := range hardDenyCIDRs {
-		if n.Contains(ip) {
-			return "a cloud instance-metadata address", true
-		}
-	}
-	return "", false
+// addrOf is ip as a netip.Addr, an IPv4 address written as IPv6 unwrapped.
+func addrOf(ip net.IP) (netip.Addr, bool) {
+	a, ok := netip.AddrFromSlice(ip)
+	return a.Unmap(), ok
 }
 
+// hardDeniedIP reports whether an address is refused regardless of allowlist,
+// plus a human reason for the refusal message: anything the one address rule
+// counts as neither public nor this server's own network.
+func hardDeniedIP(ip net.IP) (string, bool) {
+	a, ok := addrOf(ip)
+	if !ok {
+		return "something that isn't an address", true
+	}
+	if safefetch.PublicAddr(a) || safefetch.PrivateNetworkAddr(a) {
+		return "", false
+	}
+	switch {
+	case a.IsUnspecified():
+		return "the unspecified address", true
+	case a.IsMulticast():
+		return "a multicast address", true
+	case a.IsLinkLocalUnicast():
+		return "a link-local address (cloud instance metadata lives there)", true
+	case a == netip.AddrFrom4([4]byte{255, 255, 255, 255}):
+		return "the broadcast address", true
+	case a.IsPrivate() || sharedAddressSpace.Contains(a):
+		// Inside a private range, yet not this server's network: a metadata
+		// service (AWS's fd00:ec2::254, Alibaba's 100.100.100.200).
+		return "a cloud instance-metadata address", true
+	}
+	return "a special-purpose address (metadata, documentation or reserved)", true
+}
+
+// sharedAddressSpace is 100.64.0.0/10, here only to word a refusal.
+var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
+
 // internalIP reports whether an address is on the install's own infrastructure
-// and therefore needs an explicit allowlist entry.
+// (safefetch.PrivateNetworkAddr) and therefore needs an explicit allowlist
+// entry.
 func internalIP(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsPrivate() {
-		return true
-	}
-	for _, n := range internalCIDRs {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
+	a, ok := addrOf(ip)
+	return ok && safefetch.PrivateNetworkAddr(a)
 }
 
 // ───────────────────────── checks ─────────────────────────

@@ -103,15 +103,12 @@ func CreateRow(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
 		return
 	}
-	var body struct {
-		Values   map[string]interface{} `json:"values"`
-		Position float64                `json:"position"`
-	}
+	var body dataTableBusiness.RowInput
 	if derr := json.NewDecoder(r.Body).Decode(&body); derr != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
 		return
 	}
-	row, rerr := dataTableBusiness.CreateRow(r.Context(), id, dataTableBusiness.RowInput{Values: body.Values, Position: body.Position}, actor(r))
+	row, rerr := dataTableBusiness.CreateRow(r.Context(), id, body, actor(r))
 	if rerr != nil {
 		tableErr(w, rerr)
 		return

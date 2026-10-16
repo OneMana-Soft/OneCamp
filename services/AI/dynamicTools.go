@@ -9,7 +9,13 @@ package ai
 // transparently consult both, so a dynamic tool behaves exactly like a native
 // one for an agent.
 
-import "sync"
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"sort"
+	"strings"
+	"sync"
+)
 
 var (
 	dynMu        sync.RWMutex
@@ -66,4 +72,42 @@ func appendDynamicAllowed(dst []ToolDef, allow map[string]bool) []ToolDef {
 		}
 	}
 	return dst
+}
+
+// IsOutsideTool reports whether name is a tool from outside this workspace
+// (an MCP server's), rather than one of OneCamp's own.
+func IsOutsideTool(name string) bool {
+	if _, ok := Executors[name]; ok {
+		return false
+	}
+	_, ok := dynamicToolDef(name)
+	return ok
+}
+
+// CallBinding fingerprints where calls to the named tools would go, so a call a
+// person approves now and that runs later can be held to it: "" when every tool
+// is one of OneCamp's own, which send nothing elsewhere, and otherwise a digest of
+// each outside tool's Destination. Re-pointing a tool's server, or registering its
+// name under another server, changes the answer; so does a name that is no tool
+// now. Order and repeats don't matter, so a plan's steps can be passed as they are.
+func CallBinding(names ...string) string {
+	seen := map[string]bool{}
+	var parts []string
+	for _, n := range names {
+		if _, own := Executors[n]; own || seen[n] {
+			continue
+		}
+		seen[n] = true
+		dest := "\x00no such tool"
+		if d, ok := dynamicToolDef(n); ok {
+			dest = d.Destination
+		}
+		parts = append(parts, n+"\x00"+dest)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	sort.Strings(parts)
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
+	return hex.EncodeToString(sum[:])
 }

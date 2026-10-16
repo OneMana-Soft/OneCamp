@@ -125,7 +125,8 @@ var publicRoutes = map[string]string{
 	"/public/app-icon/{obj_uuid}": "app icon by opaque uuid",
 
 	// Operational.
-	"/health": "liveness probe",
+	"/health":       "liveness probe",
+	"/health/ready": "dependency readiness for make verify and wait-ready; answers only a loopback caller (helpers.ServeReadiness), 404 to anyone else",
 
 	// Internal service-to-service. Not admin-gated because the caller is not a
 	// user; authenticated by a shared runner token compared with

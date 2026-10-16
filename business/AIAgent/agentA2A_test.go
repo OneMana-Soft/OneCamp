@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/safefetch"
 	"strings"
 	"testing"
 
@@ -29,7 +29,7 @@ func TestRemoteProtocolDefaultsToAGUIAndRefusesTheUnknown(t *testing.T) {
 func TestSavingAnA2AAgentReadsItsCard(t *testing.T) {
 	old := fetchA2ACardFn
 	t.Cleanup(func() { fetchA2ACardFn = old })
-	fetchA2ACardFn = func(_ context.Context, given, header, secret string, _ helpers.EndpointPolicy) (*ai.A2ACard, error) {
+	fetchA2ACardFn = func(_ context.Context, given, header, secret string, _ safefetch.Policy) (*ai.A2ACard, error) {
 		if given == "https://bad.example" {
 			return nil, errors.New("a2a: could not read the agent card: a2a: https://bad.example/.well-known/agent-card.json answered 404")
 		}

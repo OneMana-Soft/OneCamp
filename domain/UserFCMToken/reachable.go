@@ -19,13 +19,13 @@ import (
 // those it lets through beside them: one read for both deliveries
 // (business/Notification Deliver).
 
-// reachableQuery is who of $1 the gate lets through now, each with their
-// devices' tokens (none for someone with no device, who is still told).
+// reachableQuery is who of $1 the gate (pushGate) lets through now, each with
+// their devices' tokens (none for someone with no device, who is still told).
 var reachableQuery = `
 	SELECT u.id::text, t.fcm_token
 	FROM unnest($1::uuid[]) AS u(id)
 	LEFT JOIN users_fcm_token t ON t.user_id = u.id
-	WHERE` + stillActive("u.id") + ` AND` + notPaused("u.id")
+	WHERE` + pushGate("u.id")
 
 // reachableThroughPauseQuery is reachableQuery without the push gate, for
 // the one notice that goes through a pause (Notify anyway, one a day per

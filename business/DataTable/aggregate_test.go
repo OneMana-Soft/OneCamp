@@ -1,6 +1,7 @@
 package business
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -157,6 +158,32 @@ func TestAggregate_NumericFilter(t *testing.T) {
 	}
 	if b, _ := bucketByLabel(res, "Total"); b.Value != 2 { // 200 and 300
 		t.Errorf("count >=200 = %v, want 2", b.Value)
+	}
+}
+
+// Text in a number column is read as formula.ParseNumber reads it: "1,5" was
+// 15, by dropping its comma, and "NaN" a number no answer could hold.
+func TestAggregate_NumbersWrittenAsText(t *testing.T) {
+	amount := fld("Amount", model.FieldNumber)
+	var rows []*model.Row
+	for _, v := range []string{`"1,200"`, `"$40"`, `2`, `"1,5"`, `"NaN"`, `"1_000"`} {
+		rows = append(rows, row(`{"`+amount.Id.String()+`":`+v+`}`))
+	}
+	res, err := Aggregate([]*model.Field{amount}, rows, QuerySpec{Op: OpSum, ValueField: "Amount"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := bucketByLabel(res, "Total"); b.Value != 1242 {
+		t.Errorf("the sum is %v, want 1,242 (1,200 + 40 + 2)", b.Value)
+	}
+	if _, err := json.Marshal(res); err != nil {
+		t.Errorf("the answer can't be sent: %v", err)
+	}
+	for value, want := range map[string]float64{"1,000": 1, "1,5": 0} {
+		res, err := Aggregate([]*model.Field{amount}, rows, QuerySpec{Op: OpCount, Filters: []Filter{{Field: "Amount", Op: "gte", Value: value}}})
+		if b, _ := bucketByLabel(res, "Total"); err != nil || b.Value != want {
+			t.Errorf("rows at least %q: %v (%v), want %v", value, b.Value, err, want)
+		}
 	}
 }
 

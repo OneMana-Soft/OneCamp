@@ -974,6 +974,35 @@ func ClearGitHubIssueFieldsFromTask(ctx context.Context, taskUUID uuid.UUID) err
 	return nil
 }
 
+// ClearGitHubLinkFromTask unlinks a task from GitHub: its issue, and its pull
+// request with that pull request's branch and state. Clearing only the issue
+// left a pull request linked, which the sync went on posting the task to.
+func ClearGitHubLinkFromTask(ctx context.Context, taskUUID uuid.UUID) error {
+	query := `UPDATE tasks SET github_issue_number = NULL, github_issue_url = NULL,
+		github_pr_number = NULL, github_pr_url = NULL, github_branch = NULL, github_pr_state = NULL,
+		github_pr_check_status = NULL, github_pr_review_state = NULL, github_pr_is_draft = false,
+		github_last_synced_at = NULL, updated_at = NOW() WHERE id = $1`
+	err := models.ClearGitHubIssueFieldsFromTask(query, taskUUID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/ClearGitHubLinkFromTask Failed err: %+v", err)
+		return err
+	}
+	return nil
+}
+
+// GetTaskGitHubLinks lists every task with a GitHub issue or pull request
+// stored, deleted ones too (a restored task brings its link back).
+func GetTaskGitHubLinks(ctx context.Context) ([]models.TaskGitHubLink, error) {
+	query := `SELECT id, project_id, github_issue_url, github_pr_url FROM tasks
+		WHERE COALESCE(github_issue_url, '') <> '' OR COALESCE(github_pr_url, '') <> ''`
+	links, err := models.GetTaskGitHubLinks(query)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetTaskGitHubLinks Failed err: %+v", err)
+		return nil, err
+	}
+	return links, nil
+}
+
 // GetTaskGitHubURLs returns the GitHub issue and PR URLs for a task.
 func GetTaskGitHubURLs(ctx context.Context, taskUUID uuid.UUID) (issueURL, prURL *string, err error) {
 	query := `SELECT github_issue_url, github_pr_url FROM tasks WHERE id = $1`
@@ -1040,9 +1069,20 @@ func UpdateTaskPRState(ctx context.Context, taskUUID uuid.UUID, prState string, 
 
 // GetTaskProjectID returns the project UUID for a task.
 func GetTaskProjectID(ctx context.Context, taskUUID uuid.UUID) (uuid.UUID, error) {
-	projectID, err := models.GetTaskProjectID(taskUUID)
+	projectID, err := models.GetTaskProjectID(taskUUID, false)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetTaskProjectID Failed err: %+v", err)
+		return uuid.Nil, err
+	}
+	return projectID, nil
+}
+
+// GetTaskProjectIDDeletedToo is GetTaskProjectID for a task that may have
+// been deleted: the project it is, or was, in.
+func GetTaskProjectIDDeletedToo(ctx context.Context, taskUUID uuid.UUID) (uuid.UUID, error) {
+	projectID, err := models.GetTaskProjectID(taskUUID, true)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetTaskProjectIDDeletedToo Failed err: %+v", err)
 		return uuid.Nil, err
 	}
 	return projectID, nil

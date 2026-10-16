@@ -381,6 +381,41 @@ func GetTaskGitHubURLs(query string, taskUUID uuid.UUID) (issueURL, prURL *strin
 	return issueURL, prURL, nil
 }
 
+// TaskGitHubLink is a task's stored GitHub issue and pull request addresses
+// ("" for none), with the project it is in (uuid.Nil for none).
+type TaskGitHubLink struct {
+	TaskID    uuid.UUID
+	ProjectID uuid.UUID
+	IssueURL  string
+	PRURL     string
+}
+
+// GetTaskGitHubLinks returns every task the query finds as a TaskGitHubLink:
+// its id, project id, issue address and pull request address, in that order.
+func GetTaskGitHubLinks(query string) ([]TaskGitHubLink, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout*5)
+	defer cancel()
+
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []TaskGitHubLink
+	for rows.Next() {
+		var l TaskGitHubLink
+		var project uuid.NullUUID
+		var issue, pr sql.NullString
+		if err := rows.Scan(&l.TaskID, &project, &issue, &pr); err != nil {
+			return nil, err
+		}
+		l.ProjectID, l.IssueURL, l.PRURL = project.UUID, issue.String, pr.String
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
 // SetGitHubLastSyncedAt updates the github_last_synced_at timestamp for a task.
 func SetGitHubLastSyncedAt(query string, taskUUID uuid.UUID, t time.Time) error {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
@@ -439,14 +474,14 @@ func UpdateTaskPRInfo(query string, taskUUID uuid.UUID, prNumber int, prURL stri
 }
 
 // GetTaskProjectID returns the project_id for a given task UUID.
-func GetTaskProjectID(taskUUID uuid.UUID) (uuid.UUID, error) {
+func GetTaskProjectID(taskUUID uuid.UUID, deletedToo bool) (uuid.UUID, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
 	var projectID uuid.UUID
 	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `
-		SELECT project_id FROM tasks WHERE id = $1 AND deleted_at IS NULL
-	`, taskUUID).Scan(&projectID)
+		SELECT project_id FROM tasks WHERE id = $1 AND ($2 OR deleted_at IS NULL)
+	`, taskUUID, deletedToo).Scan(&projectID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return uuid.Nil, nil

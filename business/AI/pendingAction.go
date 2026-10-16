@@ -11,8 +11,9 @@ package business
 // Security model (no confused-deputy):
 //   - The bot holds NO standalone write privilege.
 //   - An action executes ONLY after a human approves it, and executes AS that
-//     human (ExecuteAction runs the executor as approverInfo's Dgraph uuid, so
-//     the user's permissions are re-checked at execution time).
+//     human (runConfirmedAction runs the executor as approverInfo's Dgraph uuid,
+//     so the user's permissions are re-checked at execution time), held to what
+//     the proposal was bound to when it was made (approvalBinding.go).
 //   - v1: requester == approver. The approve handler enforces this.
 //
 // At-most-once execution: ApprovePendingAction claims the row with a guarded
@@ -28,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	adapter "github.com/akashc777/OneCamp/adapter/AI"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	"github.com/akashc777/OneCamp/helpers"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
@@ -77,8 +79,12 @@ func CreatePendingAction(ctx context.Context, requestedBy uuid.UUID, surfaceType
 	if err := ai.ValidateAction(ai.ProposedAction{ToolName: toolName, Params: params}); err != nil {
 		return nil, fmt.Errorf("invalid action: %w", err)
 	}
+	bind, err := bindingFor(ctx, toolName)
+	if err != nil {
+		return nil, err
+	}
 
-	action, err := pendingModels.CreatePendingAction(ctx, requestedBy, surfaceType, surfaceID, toolName, params, description, idempotencyKey, time.Now().Add(pendingActionTTL), attr)
+	action, err := pendingModels.CreatePendingAction(ctx, requestedBy, surfaceType, surfaceID, toolName, params, description, idempotencyKey, time.Now().Add(pendingActionTTL), attr, bind)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +146,8 @@ func ListOpenPendingActions(ctx context.Context, userUUID uuid.UUID) ([]*pending
 // Flow:
 //  1. Load + authorize (only the requester may approve; v1 requester==approver).
 //  2. Guarded claim (pending->executing) — the idempotency + TTL gate.
-//  3. Execute via ExecuteAction AS the approver (permissions re-checked there).
+//  3. Execute AS the approver (permissions re-checked there), held to what the
+//     proposal is bound to (approvalBinding.go).
 //  4. Finalize (executed|failed) with the outcome + notify live.
 func ApprovePendingAction(ctx context.Context, approverInfo *userModels.UserInfo, id uuid.UUID) (*pendingModels.PendingAction, error) {
 	if approverInfo == nil {
@@ -189,10 +196,10 @@ func ApprovePendingAction(ctx context.Context, approverInfo *userModels.UserInfo
 		return action, ErrPendingActionResolved
 	}
 
-	// Execute AS the approver. ExecuteAction (or the plan executor for a
-	// multi-step plan) re-validates and runs as the approver's Dgraph uuid
-	// (permissions re-checked), sanitizing any error.
-	resp, execErr := approveExecute(ctx, approverInfo, action)
+	// Execute AS the approver, held to what the proposal is bound to. Each call
+	// (one, or each step of a plan) is re-validated and run as the approver's
+	// Dgraph uuid (permissions re-checked), its error sanitized.
+	resp, execErr := approveExecuteOnce(ctx, approverInfo, action)
 
 	status := pendingModels.StatusExecuted
 	var resultText, errText string
@@ -236,6 +243,21 @@ func ApprovePendingAction(ctx context.Context, approverInfo *userModels.UserInfo
 	enrichRisk(final)
 	publishPendingAction(final.RequestedBy.String(), resolvedMsg(final))
 	return final, nil
+}
+
+// approveExecuteOnce is approveExecute for a claimed row, which must reach a
+// final state whatever happens inside: a panic in an executor would otherwise
+// leave the row executing for good, never re-run (it was claimed once) and never
+// resolved for the person waiting on it. Whether a panicking call took effect
+// can't be known, so the outcome says so rather than guessing.
+func approveExecuteOnce(ctx context.Context, approverInfo *userModels.UserInfo, action *pendingModels.PendingAction) (resp *adapter.ExecuteActionResponse, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			helpers.LogErrorWithContext(ctx, "business/ApprovePendingAction: approved action %s panicked: %v", action.Id, r)
+			resp, err = nil, errors.New("it stopped partway, so it may or may not have taken effect; check before asking again")
+		}
+	}()
+	return approveExecute(ctx, approverInfo, action)
 }
 
 // RejectPendingAction denies a proposed write (human said no). Only the

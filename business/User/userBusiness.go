@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -47,8 +46,6 @@ const GithubUserEmailsURL = "https://api.github.com/user/emails"
 
 const FwdMessageTypeChannel = "channel"
 const FwdMessageTypeUser = "user"
-
-const UserEmojiStatusLimit = 5
 
 type RawFileInfo struct {
 	FileName string `json:"file_name"`
@@ -226,7 +223,7 @@ func UploadUserFile(ctx context.Context, reader io.Reader, objectSize int64, fil
 			minio.RemoveObjectOptions{})
 		helpers.LogWarnWithContext(ctx,
 			"business/UploadFile rejected by AV: %s (%s)", safe.SafeName, scanResult.Signature)
-		return uuid.Nil, fmt.Errorf("upload blocked: virus signature %s", scanResult.Signature)
+		return uuid.Nil, fmt.Errorf("upload blocked: %w (%s)", avscan.ErrInfected, scanResult.Signature)
 	}
 
 	err = attachmentBusiness.CreateAttachment(ctx, u, objName, userInfo.UserPostgresInfo.Id, srcKey, srcValue)
@@ -278,7 +275,7 @@ func UploadUserFileToChannelsAndChats(ctx context.Context, reader io.Reader, obj
 		helpers.LogWarnWithContext(ctx,
 			"business/UploadUserFileToChannelsAndChats rejected by AV: %s (%s)",
 			safe.SafeName, scanResult.Signature)
-		return uuid.Nil, fmt.Errorf("upload blocked: virus signature %s", scanResult.Signature)
+		return uuid.Nil, fmt.Errorf("upload blocked: %w (%s)", avscan.ErrInfected, scanResult.Signature)
 	}
 
 	err = attachmentBusiness.CreateAttachmentForChannelsAndChats(ctx, u, objName, userInfo.UserPostgresInfo.Id, channelUUIDs, chatUUIDs)
@@ -1151,35 +1148,24 @@ func GetDgraphAllUsersList(ctx context.Context) (dgraphUsers []*dgraphStruct.Dgr
 	return
 }
 
-func ClearUserEmojiStatus(ctx context.Context, statusDgraphUID string, userUUID string) (err error) {
-
-	currentTime := time.Now()
-
-	dgraphUserEmojiStatus := &dgraphStruct.DgraphUserStatusEmoji{
-		Uid:      statusDgraphUID,
-		ExpiryAt: &currentTime,
-	}
-
-	err = domain.UpdateDgraphUserStatus(ctx, dgraphUserEmojiStatus, userUUID)
-
-	if err != nil {
+// ClearUserEmojiStatus clears the person's status: every status of theirs in
+// force ends now, and everyone showing it is told. Nothing in force is
+// already clear, so it succeeds too.
+func ClearUserEmojiStatus(ctx context.Context, userUUID string) (err error) {
+	if err = domain.EndUserEmojiStatuses(ctx, userUUID, time.Now()); err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/ClearUserEmojiStatus Failed to clear user's emoji status from dgraph err: %+v",
 			err,
 		)
-		err = errors.New("failed to clear user's emoji status from dgraph")
-		return
+		return errors.New("failed to clear user's emoji status from dgraph")
 	}
 
 	mqttEmojiStatus := mqttStruct.MqttUserEmojiStatus{
 		Type:     mqttStruct.TYPE_DELETE,
 		UserUuid: userUUID,
 	}
-
-	go mqttBusiness.PublishUserEmojiStatus(&mqttEmojiStatus)
-
-	return
-
+	helpers.GoSafeNamed("status-cleared", func() { mqttBusiness.PublishUserEmojiStatus(&mqttEmojiStatus) })
+	return nil
 }
 
 func GetAllUserEmojiStatusList(ctx context.Context, userUUID string) (dgraphUserStatusesInfo *dgraphStruct.DgraphUser, err error) {
@@ -1198,87 +1184,30 @@ func GetAllUserEmojiStatusList(ctx context.Context, userUUID string) (dgraphUser
 	return
 }
 
+// UpdateUserEmojiStatus sets the person's status: checked by the one rule
+// (CheckEmojiStatus, a *StatusRefused for what it refuses), made their status
+// in force (every other one ends), and sent to everyone showing it.
 func UpdateUserEmojiStatus(ctx context.Context, userDgraphInfo *dgraphStruct.DgraphUser, userEmojiStatusEmoji *adapterUser.UserEmojiStatusInput) (err error) {
-
-	if userEmojiStatusEmoji == nil {
-		return
-	}
-
-	dgraphUserStatusesInfo, err := domain.GetAllUserEmojiStatusList(ctx, userDgraphInfo.Uuid)
-
+	now := time.Now()
+	status, err := CheckEmojiStatus(userEmojiStatusEmoji, now)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/UpdateUserEmojiStatus Failed to get user emoji status from dgraph err: %+v",
-			err,
-		)
-		err = errors.New("failed to get user emoji status from dgraph")
-		return
+		return err
 	}
 
-	var expiryTime time.Time
-
-	if userEmojiStatusEmoji.ExpiryTimeAt != "" {
-		var epochInt int64
-		epochInt, err = strconv.ParseInt(userEmojiStatusEmoji.ExpiryTimeAt, 10, 64)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/UpdateUserEmojiStatus Error parsing expiry string to int64 err: %+v", err)
-			return
-		}
-
-		expiryTime = time.Unix(epochInt, 0)
-	}
-
-	if userEmojiStatusEmoji.ExpiryTimeAt == "" {
-
-		var loc *time.Location
-
-		loc, err = time.LoadLocation(userEmojiStatusEmoji.TimeZone)
-
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/UpdateUserEmojiStatus Error get timezone err: %+v", err)
-			return
-		}
-
-		expiryTime = helpers.GetUserEmojiExipryTime(userEmojiStatusEmoji.ExpiryTimeIn, loc)
-	}
-
-	if expiryTime.IsZero() {
-		err = errors.New("expiry time is not set")
-		helpers.LogErrorWithContext(ctx, "business/UpdateUserEmojiStatus failed to get expiry time")
-		return
-	}
-
-	dgraphUserUpdate := &dgraphStruct.DgraphUser{
-		Uuid: userDgraphInfo.Uuid,
-		StatusEmoji: []*dgraphStruct.DgraphUserStatusEmoji{{
-			DType:     []string{"Status"},
-			EmojiUuid: userEmojiStatusEmoji.EmojiUuid,
-			EmojiDesc: userEmojiStatusEmoji.StatusDesc,
-			ExpiryAt:  &expiryTime,
-			ExpiryIn:  userEmojiStatusEmoji.ExpiryTimeIn,
-		}},
-	}
-
-	if len(dgraphUserStatusesInfo.StatusEmoji) == UserEmojiStatusLimit {
-		dgraphUserUpdate.StatusEmoji[0].Uid = dgraphUserStatusesInfo.StatusEmoji[UserEmojiStatusLimit-1].Uid
-	}
-
-	_, err = domain.CreateOrUpdateDgraphUser(ctx, dgraphUserUpdate)
-
-	if err != nil {
+	if err = domain.SetUserEmojiStatus(ctx, userDgraphInfo.Uuid, status, now); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/UpdateUserEmojiStatus Error updating emoji statuses err: %+v", err)
-		return
+		return fmt.Errorf("failed to save the status: %w", err)
 	}
 
+	set := *status
+	set.SetAt = &now
 	mqttEmojiStatus := mqttStruct.MqttUserEmojiStatus{
 		Type:        mqttStruct.TYPE_UPDATE,
 		UserUuid:    userDgraphInfo.Uuid,
-		EmojiStatus: dgraphUserUpdate.StatusEmoji[0],
+		EmojiStatus: &set,
 	}
-
-	go mqttBusiness.PublishUserEmojiStatus(&mqttEmojiStatus)
-
-	return
+	helpers.GoSafeNamed("status-set", func() { mqttBusiness.PublishUserEmojiStatus(&mqttEmojiStatus) })
+	return nil
 }
 
 func GetUserByUUID(ctx context.Context, userUUID uuid.UUID) (userInfo *userModels.User, err error) {

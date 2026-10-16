@@ -77,7 +77,7 @@ IMAGE   = go_service_onecamp_onemana:1.0
         create-traefik-password update-traefik-email update-allowed-domains \
         create-swap configure-livekit create_postgres_db migrate_up migrate_status \
         build_restart_all build_restart_service console-tunnel doctor verify logs \
-        set-flat-domains secrets install mount-dirs wait-ready redis-keep-sign-ins \
+        set-flat-domains secrets rotate-livekit-key install mount-dirs wait-ready redis-keep-sign-ins api-ready \
         reset-link reset-password clear-2fa change-email update \
         ollama_up ollama_down ollama_update use_local_ai saml-cert \
         stt_up stt_down stt_logs
@@ -114,6 +114,7 @@ help:
 	@echo ""
 	@echo "Operations:"
 	@echo "  make doctor                 check .env for unset placeholders"
+	@echo "  make rotate-livekit-key     give LiveKit a new API secret (calls in progress end)"
 	@echo "  make migrate_status         what the database believes is applied"
 	@echo "  make console-tunnel         reach the admin consoles safely"
 	@echo "  make verify                 check a finished install is actually working"
@@ -274,9 +275,11 @@ install:
 	if [ -z "$$pw" ]; then \
 		pw=$$(openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | cut -c1-20); gen=1; \
 	fi; \
+	: "THE PASSWORD GOES IN THE ENVIRONMENT, not on install_run's command line,"; \
+	: "where every account on the machine could read it in ps for the whole run."; \
 	export OC_DOMAIN="$$domain" OC_AUTO="$$auto" OC_PW="$$pw" OC_GEN="$$gen"; \
 	$(docker_group); \
-	exec $$run '$(MAKE) -f $(SELF) --no-print-directory install_run DOMAIN="$$OC_DOMAIN" AUTO_DOMAIN="$$OC_AUTO" PASSWORD="$$OC_PW" PASSWORD_GENERATED="$$OC_GEN"'
+	exec $$run '$(MAKE) -f $(SELF) --no-print-directory install_run DOMAIN="$$OC_DOMAIN" AUTO_DOMAIN="$$OC_AUTO" PASSWORD_GENERATED="$$OC_GEN"'
 
 # docker_group sets $$run to the way to run the rest of install or update so that
 # Docker answers: `sg docker -c` for an account that is not root and that Docker
@@ -323,7 +326,8 @@ install_run:
 		$(MAKE) -f $(SELF) --no-print-directory replace-domain DOMAIN=$(DOMAIN); \
 		$(MAKE) -f $(SELF) --no-print-directory update-allowed-domains DOMAINS=$(DOMAIN); \
 	fi
-	@$(MAKE) -f $(SELF) --no-print-directory create-traefik-password PASSWORD='$(PASSWORD)'
+	@: "The password is in the environment (OC_PW, from install), never on a command line."
+	@PASSWORD="$${OC_PW:-$$PASSWORD}" $(MAKE) -f $(SELF) --no-print-directory create-traefik-password
 	@$(MAKE) -f $(SELF) --no-print-directory update-traefik-email EMAIL=$(EMAIL)
 	@$(MAKE) -f $(SELF) --no-print-directory configure-livekit
 	@$(MAKE) -f $(SELF) --no-print-directory create-swap
@@ -374,7 +378,7 @@ install_run:
 	@echo "  Everything else, sign-in providers, email and AI, is configured in the admin panel."
 	@if [ -n "$(PASSWORD_GENERATED)" ]; then \
 		echo ""; \
-		echo "  Traefik dashboard password (shown once, keep it): $(PASSWORD)"; \
+		echo "  Traefik dashboard password (shown once, keep it): $${OC_PW:-$$PASSWORD}"; \
 	fi
 	@if [ -n "$(AUTO_DOMAIN)" ]; then \
 		echo ""; \
@@ -428,7 +432,7 @@ web_down:
 	@echo "  stopped; this server no longer serves the web app"
 
 setup:
-	@if [ -z "$(EMAIL)" ] || [ -z "$(DOMAIN)" ] || [ -z "$(PASSWORD)" ]; then \
+	@if [ -z "$(EMAIL)" ] || [ -z "$(DOMAIN)" ] || [ -z "$$PASSWORD" ]; then \
 		echo "make setup needs all three:"; \
 		echo "  make setup EMAIL=you@example.com DOMAIN=example.com PASSWORD=<traefik-admin-pw>"; \
 		echo ""; \
@@ -440,7 +444,7 @@ setup:
 	@$(MAKE) -f $(SELF) --no-print-directory update-admin-email EMAIL=$(EMAIL)
 	@$(MAKE) -f $(SELF) --no-print-directory update-server-ip
 	@$(MAKE) -f $(SELF) --no-print-directory replace-domain DOMAIN=$(DOMAIN)
-	@$(MAKE) -f $(SELF) --no-print-directory create-traefik-password PASSWORD='$(PASSWORD)'
+	@$(MAKE) -f $(SELF) --no-print-directory create-traefik-password
 	@$(MAKE) -f $(SELF) --no-print-directory update-traefik-email EMAIL=$(EMAIL)
 	@$(MAKE) -f $(SELF) --no-print-directory update-allowed-domains DOMAINS=$(DOMAIN)
 	@$(MAKE) -f $(SELF) --no-print-directory configure-livekit
@@ -577,10 +581,11 @@ endef
 # to it rather than sending the operator to apt: httpd:alpine carries the same
 # binary. Only if BOTH are missing is this a real dead end.
 #
-# The password travels in the ENVIRONMENT, never as an argument. An argument is
-# visible in `ps` to every user on the box for as long as the process runs, and the
-# docker fallback would additionally write it into the daemon's record of how the
-# container was created.
+# The password is never an argument. An argument is visible in `ps` to every user
+# on the box for as long as the process runs, and the docker fallback would
+# additionally write it into the daemon's record of how the container was
+# created. htpasswd reads it on stdin (-i), from the shell's built-in printf; it
+# used to be htpasswd's own argument (-b), which put it in ps while bcrypt ran.
 #
 # -C 10 pins the cost to bcrypt.DefaultCost in the Go code. htpasswd's own default
 # for -B is 5, which would make a hash written here measurably cheaper to attack
@@ -588,9 +593,9 @@ endef
 define bcrypt_hash
 	export PW; \
 	if command -v htpasswd >/dev/null 2>&1; then \
-	  hash=$$(htpasswd -nbBC 10 x "$$PW" | cut -d: -f2 | tr -d '\r\n'); \
+	  hash=$$(printf '%s\n' "$$PW" | htpasswd -niBC 10 x | cut -d: -f2 | tr -d '\r\n'); \
 	elif command -v docker >/dev/null 2>&1; then \
-	  hash=$$(docker run --rm -e PW httpd:alpine sh -c 'htpasswd -nbBC 10 x "$$PW"' 2>/dev/null | cut -d: -f2 | tr -d '\r\n'); \
+	  hash=$$(printf '%s\n' "$$PW" | docker run --rm -i httpd:alpine htpasswd -niBC 10 x 2>/dev/null | cut -d: -f2 | tr -d '\r\n'); \
 	else \
 	  echo "ERROR: neither htpasswd nor docker is available."; \
 	  echo "  Install one: sudo apt -y install apache2-utils"; \
@@ -906,6 +911,24 @@ secrets:
 	    echo "  generated $$var"; changed=$$((changed+1)); \
 	  fi; \
 	done; \
+	: "THE API'S STORAGE ACCESS KEY is made here too. The template named the same"; \
+	: "key on every install (dfasd); minio-init creates whichever key .env names"; \
+	: "and leaves an existing one alone, so an install that has dfasd keeps it."; \
+	if grep -qE "^MINIO_ACCESS_KEY_ID=__[A-Za-z0-9_-]+__$$" .env; then \
+	  val=$$(gen 20); \
+	  tmp=$$(mktemp) && awk -v k=MINIO_ACCESS_KEY_ID -v v="$$val" -F= 'BEGIN{OFS="="} $$1==k{print k, v; next} {print}' .env > "$$tmp" && mv "$$tmp" .env; \
+	  echo "  generated MINIO_ACCESS_KEY_ID"; changed=$$((changed+1)); \
+	fi; \
+	: "A REDIS PASSWORD THAT IS EMPTY IS GENERATED. Redis took no password at all"; \
+	: "before 15 Oct 2026 (the image ignored REDIS_PASSWORD), so an install whose"; \
+	: "value was emptied ran an open Redis without noticing; now an empty value"; \
+	: "would really mean no password. Generated, never printed, and redis-server"; \
+	: "and every client read it from .env at the next start, together."; \
+	if grep -qE "^REDIS_PASSWORD=$$" .env; then \
+	  val=$$(gen 40); \
+	  tmp=$$(mktemp) && awk -v k=REDIS_PASSWORD -v v="$$val" -F= 'BEGIN{OFS="="} $$1==k{print k, v; next} {print}' .env > "$$tmp" && mv "$$tmp" .env; \
+	  echo "  generated REDIS_PASSWORD (it was empty)"; changed=$$((changed+1)); \
+	fi; \
 	: "LIVEKIT_API_KEY IS THE NAME:SECRET PAIR LiveKit reads as LIVEKIT_KEYS, the"; \
 	: "same name and secret the API signs call tokens with. Filled like the other"; \
 	: "placeholders it became a bare random token, which LiveKit refuses to parse,"; \
@@ -936,6 +959,93 @@ secrets:
 	done; \
 	if [ $$changed -eq 0 ]; then echo "  nothing to generate — no generatable placeholders left"; \
 	else echo "  filled $$changed value(s)"; fi
+
+# ROTATE_SUBMAKE is how rotate-livekit-key runs wait-ready and api-ready. It
+# is expanded once, as the Makefile is read, so that recipe never references
+# $(MAKE): make runs any line that does even under `make -n`, and a dry run
+# of the rotation must change nothing.
+ROTATE_SUBMAKE := $(MAKE) -f $(SELF) --no-print-directory
+
+# ROTATE_LIVEKIT_AWK writes .env with the new secret in both lines, and adds
+# a line that is missing. The secret and the name come from awk's
+# environment (LK_NEW, LK_NAME), never from its command line.
+ROTATE_LIVEKIT_AWK = BEGIN { OFS = "=" } $$1 == "LIVEKIT_API_PASS" { print "LIVEKIT_API_PASS", ENVIRON["LK_NEW"]; p = 1; next } $$1 == "LIVEKIT_API_KEY" { print "LIVEKIT_API_KEY", ENVIRON["LK_NAME"] ": " ENVIRON["LK_NEW"]; k = 1; next } { print } END { if (!p) print "LIVEKIT_API_PASS=" ENVIRON["LK_NEW"]; if (!k) print "LIVEKIT_API_KEY=" ENVIRON["LK_NAME"] ": " ENVIRON["LK_NEW"] }
+
+# rotate-livekit-key gives LiveKit a new API secret, for when the old one was
+# seen: before 16 Oct 2026 every install and update printed it in a warning on
+# the terminal (migrate_up handed sqlx the install's .env), so any saved or
+# shared output of one holds it, and with it anyone can sign a call token.
+#
+# WHAT CHANGES. The secret is LIVEKIT_API_PASS. LIVEKIT_API_KEY is the
+# "name: secret" pair LiveKit reads as LIVEKIT_KEYS, so it changes with it, and
+# the name (LIVEKIT_API_KEY_NAME) stays. .env is backed up first, beside
+# itself, timestamped and mode 600; then both lines are written in ONE atomic
+# replace: a copy is made beside .env, given its mode and owner, and renamed
+# over it, so nothing ever reads half of the change.
+#
+# WHO READS IT, recreated so they do: livekit, egress and the API, and the
+# worker and the transcription agent when their profile is on (compose config
+# --services lists what this install runs). Through $(COMPOSE), so the
+# install's profiles follow, and with the LiveKit variables unset in this
+# shell first: compose takes a variable from the environment before the env
+# file, so a value exported earlier would have been given to the containers
+# instead of the new one. Then it waits as an update does (wait-ready, then
+# api-ready). Calls in progress end.
+#
+# THE VALUE IS NEVER PRINTED AND NEVER AN ARGUMENT. It is made on this
+# machine, the way `make secrets` makes values, held in a shell variable, and
+# reaches awk through awk's environment: an argument is in ps for every
+# account on the machine while the process runs. No set -x, no output of
+# docker or compose is shown, and no error path names it.
+#
+# IF THE STACK DOESN'T COME BACK, .env is put back from the backup, the same
+# services are recreated with the old key, and it says how to retry.
+#
+# helpers/rotateLivekitKeyGuard_test.go runs it against a stand-in docker.
+rotate-livekit-key:
+	@if [ ! -f .env ]; then echo "ERROR: .env not found. Run this in the install directory."; exit 1; fi
+	@unset LIVEKIT_API_KEY LIVEKIT_API_PASS LIVEKIT_API_KEY_NAME LIVEKIT_KEYS; \
+	name=$$(grep -E '^LIVEKIT_API_KEY_NAME=' .env | tail -n 1 | cut -d= -f2- | tr -d '\r'); \
+	case "$$name" in ""|*[!A-Za-z0-9_.-]*) \
+		echo "ERROR: LIVEKIT_API_KEY_NAME in .env is empty or not a plain name; nothing was changed."; exit 1;; esac; \
+	all=$$($(COMPOSE) config --services 2>/dev/null); svcs=""; \
+	for s in livekit egress go-service go-worker agent; do \
+		if printf '%s\n' "$$all" | grep -qx "$$s"; then svcs="$$svcs $$s"; fi; \
+	done; \
+	case " $$svcs " in *" livekit "*) ;; *) \
+		echo "ERROR: docker compose doesn't list this install's services (is Docker running here?); nothing was changed."; exit 1;; esac; \
+	backup=".env.livekit-rotate-$$(date +%Y%m%d-%H%M%S)-$$$$"; \
+	if ! ( umask 077; cp .env "$$backup" ) || ! chmod 600 "$$backup"; then \
+		echo "ERROR: could not back up .env; nothing was changed."; exit 1; fi; \
+	echo "  .env backed up to $$backup (mode 600)"; \
+	new=$$(openssl rand -base64 64 | tr -dc 'A-Za-z0-9' | head -c 64); \
+	if [ $${#new} -ne 64 ]; then echo "ERROR: could not make a new secret (openssl); nothing was changed."; exit 1; fi; \
+	tmp=$$(mktemp .env.rotate.XXXXXX) || { echo "ERROR: could not write beside .env; nothing was changed."; exit 1; }; \
+	if ! LK_NAME="$$name" LK_NEW="$$new" awk -F= '$(ROTATE_LIVEKIT_AWK)' .env > "$$tmp" \
+		|| ! chmod --reference=.env "$$tmp" || ! { chown --reference=.env "$$tmp" 2>/dev/null || true; } \
+		|| ! mv -f "$$tmp" .env; then \
+		rm -f "$$tmp"; echo "ERROR: could not write .env; it is as it was."; exit 1; fi; \
+	new=""; \
+	echo "  recreating$$svcs"; \
+	ok=1; \
+	$(COMPOSE) up -d --force-recreate --no-deps $$svcs > /dev/null 2>&1 || ok=0; \
+	if [ $$ok = 1 ]; then \
+		$(ROTATE_SUBMAKE) wait-ready; \
+		running=$$($(COMPOSE) ps --status running --services 2>/dev/null); \
+		for s in $$svcs; do printf '%s\n' "$$running" | grep -qx "$$s" || ok=0; done; \
+		$(ROTATE_SUBMAKE) api-ready > /dev/null 2>&1 || ok=0; \
+	fi; \
+	if [ $$ok = 1 ]; then echo "LiveKit key changed; calls in progress will end"; exit 0; fi; \
+	echo "  the services didn't come back with the new key; putting .env back"; \
+	tmp=$$(mktemp .env.rotate.XXXXXX) && cat "$$backup" > "$$tmp" && chmod --reference=.env "$$tmp" \
+		&& { chown --reference=.env "$$tmp" 2>/dev/null || true; } && mv -f "$$tmp" .env || { \
+		rm -f "$$tmp"; \
+		echo "ERROR: .env could not be put back. Copy the backup over it (cp $$backup .env), then run: make build_restart_all"; exit 1; }; \
+	$(COMPOSE) up -d --force-recreate --no-deps $$svcs > /dev/null 2>&1; \
+	$(ROTATE_SUBMAKE) wait-ready; \
+	echo "ERROR: the LiveKit key was not changed. .env is as it was (from $$backup), and$$svcs run with the old key."; \
+	echo "  See what is wrong with: make verify  (and: make logs SERVICE=livekit), then run make rotate-livekit-key again."; \
+	exit 1
 
 # ─── Preflight ────────────────────────────────────────────────────────────────
 #
@@ -983,10 +1093,9 @@ journey:
 		echo "  ONECAMP_JOURNEY_TOKEN=oc_... ONECAMP_JOURNEY_PROJECT=<uuid> make journey"; \
 		exit 1; \
 	fi; \
-	$(COMPOSE) exec \
-		-e ONECAMP_BASE_URL="$${ONECAMP_BASE_URL:-http://localhost:3000}" \
-		-e ONECAMP_JOURNEY_TOKEN="$$ONECAMP_JOURNEY_TOKEN" \
-		-e ONECAMP_JOURNEY_PROJECT="$$ONECAMP_JOURNEY_PROJECT" \
+	: "The token is passed by name (-e NAME), so it is never on docker's command line."; \
+	ONECAMP_BASE_URL="$${ONECAMP_BASE_URL:-http://localhost:3000}" $(COMPOSE) exec \
+		-e ONECAMP_BASE_URL -e ONECAMP_JOURNEY_TOKEN -e ONECAMP_JOURNEY_PROJECT \
 		go-service ./app journey
 
 # verify answers "is this install actually working", after everything is up.
@@ -1114,24 +1223,23 @@ verify:
 	fi; \
 	\
 	echo "  database"; \
-	applied=$$(echo "SELECT count(*) FROM _sqlx_migrations WHERE success;" | q 2>/dev/null); \
-	if [ -z "$$applied" ] || [ "$$applied" = "0" ]; then \
+	$(migration_sets); \
+	if [ -z "$$applied" ]; then \
 		echo "    FAIL  no migrations applied — run: make migrate_up"; fail=1; \
-	else echo "    ok    $$applied migrations applied"; fi; \
-	failed=$$(echo "SELECT count(*) FROM _sqlx_migrations WHERE NOT success;" | q 2>/dev/null); \
-	if [ -n "$$failed" ] && [ "$$failed" != "0" ]; then \
-		echo "    FAIL  $$failed migration(s) recorded as failed"; fail=1; \
+	elif [ -n "$$missing" ]; then \
+		echo "    FAIL  migrations not applied: $$missing — run: make migrate_up"; fail=1; \
+	else echo "    ok    all $$(echo $$applied | wc -w) migrations applied"; fi; \
+	if [ -n "$$failed" ]; then \
+		echo "    FAIL  migrations recorded as failed: $$failed"; fail=1; \
+	fi; \
+	if [ -n "$$unknown" ]; then \
+		echo "    warn  applied migrations this install does not have: $$unknown (a newer build's?)"; warn=$$((warn+1)); \
 	fi; \
 	\
-	echo "  backing services (from the backend's own startup log)"; \
-	logs=$$($(COMPOSE) logs go-service 2>/dev/null | tail -400); \
-	for svc in postgres minio Dgraph redis mqtt openSearch; do \
-		if echo "$$logs" | grep -qi "Successfully connected.*$$svc"; then \
-			echo "    ok    $$svc"; \
-		else \
-			echo "    FAIL  backend never reported connecting to $$svc"; fail=1; \
-		fi; \
-	done; \
+	echo "  backing services (asked of the running API: make api-ready)"; \
+	out=$$($(MAKE) -f $(SELF) --no-print-directory api-ready 2>/dev/null); \
+	printf '%s\n' "$$out" | sed 's/^/    /'; \
+	case "$$out" in *FAIL*) fail=1;; esac; \
 	\
 	echo "  public endpoints"; \
 	: "THE API ITSELF, NOT JUST THE PROXY IN FRONT OF IT. Any answer from the"; \
@@ -1780,17 +1888,24 @@ storage-attach:
 	@if [ -z "$$STORAGE_ENDPOINT" ] || [ -z "$$STORAGE_BUCKET" ] || [ -z "$$STORAGE_ACCESS" ] || [ -z "$$STORAGE_SECRET" ]; then \
 		echo "ERROR: set STORAGE_ENDPOINT, STORAGE_BUCKET, STORAGE_ACCESS and STORAGE_SECRET in the environment"; exit 1; fi
 	@set -e; \
-	. ./.env; \
+	: "READ, NOT SOURCED. .env is not shell: sourced, LIVEKIT_API_KEY's value"; \
+	: "(name: secret) ran its second word as a command, so the shell printed the"; \
+	: "LiveKit API secret in a 'not found' error and set -e stopped the target."; \
+	envget() { grep -E "^$$1=" .env | tail -n 1 | cut -d= -f2- | sed -E "s/^['\"]//; s/['\"]$$//"; }; \
+	USER_UPLOAD_BUCKET_NAME=$$(envget USER_UPLOAD_BUCKET_NAME); MINIO_USER=$$(envget MINIO_USER); \
+	MINIO_PASSWORD=$$(envget MINIO_PASSWORD); MINIO_HOST=$$(envget MINIO_HOST); MINIO_SSL=$$(envget MINIO_SSL); \
+	MINIO_ACCESS_KEY_ID=$$(envget MINIO_ACCESS_KEY_ID); MINIO_SECRET_ACCESS_KEY=$$(envget MINIO_SECRET_ACCESS_KEY); \
 	local_bucket="$$USER_UPLOAD_BUCKET_NAME"; \
 	if grep -qE '^STORAGE_ATTACHED_BUCKET=' .env; then \
 		: "Already attached: the local bucket is the saved one, not the current."; \
 		local_bucket=$$(grep -E '^LOCAL_USER_UPLOAD_BUCKET_NAME=' .env | cut -d= -f2-); \
 		echo "  storage: already attached to $$(grep -E '^STORAGE_ATTACHED_BUCKET=' .env | cut -d= -f2-); copying anything new and keeping it so"; \
 	fi; \
-	mc_run() { $(COMPOSE) exec -T \
-		-e MC_HOST_local="http://$$MINIO_USER:$$MINIO_PASSWORD@minio:9000" \
-		-e MC_HOST_remote="https://$$STORAGE_ACCESS:$$STORAGE_SECRET@$$STORAGE_ENDPOINT" \
-		minio mc "$$@"; }; \
+	: "The credentials go to mc by name (-e NAME), never on docker's command line,"; \
+	: "where ps showed them for as long as a copy ran."; \
+	mc_run() { MC_HOST_local="http://$$MINIO_USER:$$MINIO_PASSWORD@minio:9000" \
+		MC_HOST_remote="https://$$STORAGE_ACCESS:$$STORAGE_SECRET@$$STORAGE_ENDPOINT" \
+		$(COMPOSE) exec -T -e MC_HOST_local -e MC_HOST_remote minio mc "$$@"; }; \
 	echo "  storage: checking $$STORAGE_BUCKET at $$STORAGE_ENDPOINT"; \
 	mc_run ls "remote/$$STORAGE_BUCKET" >/dev/null; \
 	echo "  storage: copying files to the bucket (first pass)"; \
@@ -1825,12 +1940,18 @@ storage-detach:
 	@if [ ! -f .env ]; then echo "ERROR: .env not found."; exit 1; fi
 	@if ! grep -qE '^STORAGE_ATTACHED_BUCKET=' .env; then echo "  storage: files already live on this machine; nothing to detach"; exit 0; fi
 	@set -e; \
-	. ./.env; \
+	: "READ, NOT SOURCED: see storage-attach."; \
+	envget() { grep -E "^$$1=" .env | tail -n 1 | cut -d= -f2- | sed -E "s/^['\"]//; s/['\"]$$//"; }; \
+	STORAGE_ATTACHED_BUCKET=$$(envget STORAGE_ATTACHED_BUCKET); MINIO_USER=$$(envget MINIO_USER); \
+	MINIO_PASSWORD=$$(envget MINIO_PASSWORD); MINIO_HOST=$$(envget MINIO_HOST); \
+	MINIO_ACCESS_KEY_ID=$$(envget MINIO_ACCESS_KEY_ID); MINIO_SECRET_ACCESS_KEY=$$(envget MINIO_SECRET_ACCESS_KEY); \
+	LOCAL_MINIO_HOST=$$(envget LOCAL_MINIO_HOST); LOCAL_MINIO_SSL=$$(envget LOCAL_MINIO_SSL); \
+	LOCAL_MINIO_ACCESS_KEY_ID=$$(envget LOCAL_MINIO_ACCESS_KEY_ID); LOCAL_MINIO_SECRET_ACCESS_KEY=$$(envget LOCAL_MINIO_SECRET_ACCESS_KEY); \
+	LOCAL_USER_UPLOAD_BUCKET_NAME=$$(envget LOCAL_USER_UPLOAD_BUCKET_NAME); \
 	remote_bucket="$$STORAGE_ATTACHED_BUCKET"; \
-	mc_run() { $(COMPOSE) exec -T \
-		-e MC_HOST_local="http://$$MINIO_USER:$$MINIO_PASSWORD@minio:9000" \
-		-e MC_HOST_remote="https://$$MINIO_ACCESS_KEY_ID:$$MINIO_SECRET_ACCESS_KEY@$$MINIO_HOST" \
-		minio mc "$$@"; }; \
+	mc_run() { MC_HOST_local="http://$$MINIO_USER:$$MINIO_PASSWORD@minio:9000" \
+		MC_HOST_remote="https://$$MINIO_ACCESS_KEY_ID:$$MINIO_SECRET_ACCESS_KEY@$$MINIO_HOST" \
+		$(COMPOSE) exec -T -e MC_HOST_local -e MC_HOST_remote minio mc "$$@"; }; \
 	need_kb=$$(mc_run du --json "remote/$$remote_bucket" 2>/dev/null | sed -n 's/.*"size":\([0-9]*\).*/\1/p' | tail -1); \
 	need_kb=$$(( $${need_kb:-0} / 1024 )); \
 	free_kb=$$(df -Pk . | awk 'NR==2 {print $$4}'); total_kb=$$(df -Pk . | awk 'NR==2 {print $$2}'); \
@@ -1975,6 +2096,19 @@ create_postgres_db:
 # Asking the running postgres container which network it is on works under any
 # project name and honours any override, because it reads the live stack instead
 # of predicting it.
+#
+# ONLY THE MIGRATIONS GO IN, AND THE PASSWORD IS ON NO COMMAND LINE. The
+# container was given the whole install directory, .env included, and sqlx
+# loads a .env it finds. It can't parse LIVEKIT_API_KEY's "name: secret" value,
+# and its warning quotes the value, so every install and every update printed
+# the LiveKit API secret, the key that signs every call token, on the terminal
+# (seen on a test server, 16 Oct 2026), and from there into whatever keeps the
+# output: a provisioning log, a CI job, a paste into a support email. The
+# database URL was an argument too, so the database password sat in the process
+# list and in the container's recorded command. Now only ./migrations is
+# mounted, read-only, and the URL reaches sqlx as DATABASE_URL, exported to this
+# recipe's environment and passed on by name (docker run -e DATABASE_URL).
+migrate_up: export DATABASE_URL = postgres://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)?sslmode=disable
 migrate_up:
 	@net=$$($(COMPOSE) ps -q postgres 2>/dev/null | head -1 \
 		| xargs -r docker inspect -f '{{range $$k, $$v := .NetworkSettings.Networks}}{{$$k}} {{end}}' 2>/dev/null \
@@ -1983,18 +2117,24 @@ migrate_up:
 		echo "    FAIL  cannot find the network postgres is on. Is the stack up? (make up)"; \
 		exit 1; \
 	fi; \
-	docker run --rm -v "$$(pwd)":/app -w /app \
+	docker run --rm -e DATABASE_URL -v "$$(pwd)/migrations":/app/migrations:ro -w /app \
 		--network "$$net" \
-		rust:alpine sh -c "cargo install sqlx-cli --no-default-features --features postgres --quiet && \
-		sqlx migrate run --database-url postgres://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}?sslmode=disable"
+		rust:alpine sh -c "cargo install sqlx-cli --no-default-features --features postgres --quiet && sqlx migrate run"
 
-# migrate_status reports what the DATABASE believes, so a schema mismatch is
-# diagnosable without reading application logs or guessing.
+# migrate_status reports what the DATABASE believes, against the migrations in
+# this install, so a schema mismatch is diagnosable without reading application
+# logs or guessing: what is missing first (migration_sets), then the latest rows.
 #
-# The one query that does NOT go through db_fn's q(): this output is a table for a
+# The table is the one query that does NOT go through db_fn's q(): it is for a
 # person to read, and q() is -qtA — unaligned, tuples only, no header — which is
 # right for a value a script consumes and wrong for a column of dates.
 migrate_status:
+	@$(db_fn); $(migration_sets); \
+	echo "Applied:     $$(echo $$applied | wc -w) migrations"; \
+	echo "Not applied: $${missing:-none}"; \
+	if [ -n "$$failed" ]; then echo "Failed:      $$failed"; fi; \
+	if [ -n "$$unknown" ]; then echo "Not in this install: $$unknown"; fi; \
+	echo ""
 	$(COMPOSE) exec -T postgres psql -U ${DB_USER} -d ${DB_NAME} \
 		-c "SELECT version, success, installed_on FROM _sqlx_migrations ORDER BY version DESC LIMIT 12;"
 
@@ -2053,6 +2193,20 @@ MOUNT_FIX = op=$$1; shift; for e; do d=$${e%%:*}; own=$${e\#*:}; case "$$d" in d
 
 mount-dirs:
 	@for e in $(MOUNT_DIRS); do mkdir -p "$${e%%:*}" 2>/dev/null; done; \
+	: "WORLD-WRITABLE DATA FROM OLDER RELEASES IS TIGHTENED. build_restart_all ran"; \
+	: "sudo chmod 777 -R ./data on every rebuild until 14 Oct 2026, so on an older"; \
+	: "install every datastore (database, files, sessions, search) is writable by"; \
+	: "every account on the machine. Each service writes as the owner of its own"; \
+	: "directory (MOUNT_DIRS below, or its image's entrypoint: Postgres, Redis and"; \
+	: "ClamAV take theirs at start), so nothing needs other accounts' write: it is"; \
+	: "taken off, as root in a throwaway container with no network, and only when"; \
+	: "something is world-writable, so an install without that starts nothing."; \
+	: "Group write is left: the operator's own group, as their umask makes it."; \
+	if [ -n "$$(find data -perm -o+w ! -type l -print 2>/dev/null | head -n 1)" ]; then \
+		if docker run --rm --network none -v "$(CURDIR)/data:/install/data" alpine:3.22 chmod -R o-w /install/data > /dev/null 2>&1; then \
+			echo "  ./data is no longer writable by every account on this machine (older releases made it so)"; \
+		else echo "  WARN  could not take other accounts' write off ./data; run: sudo chmod -R o-w ./data"; fi; \
+	fi; \
 	wrong() { d=$${1%%:*}; own=$${1#*:}; [ ! -d "$$d" ] || { [ "$$own" != "-" ] && [ "$$(stat -c %u:%g "$$d")" != "$$own" ]; }; }; \
 	todo=""; for e in $(MOUNT_DIRS); do wrong "$$e" && todo="$$todo $$e"; done; \
 	[ -n "$$todo" ] || { echo "  mount directories: all present, with their owners"; exit 0; }; \
@@ -2113,14 +2267,36 @@ wait-ready:
 		: "between crashes. Anything unhealthy or still starting counts as not ready,"; \
 		: "and the condition must hold twice, so a flap is not taken for ready."; \
 		sick=$$(docker ps --filter health=unhealthy --filter health=starting --format '{{.Names}}' 2>/dev/null | grep '^onecamp' | tr '\n' ' '); \
-		if [ -z "$$missing" ] && [ -z "$$sick" ]; then \
+		: "THEN THE API'S OWN ANSWER, the one verify prints (make api-ready): every"; \
+		: "service it depends on, the broker among them, answering now."; \
+		if [ -z "$$missing" ] && [ -z "$$sick" ] && $(MAKE) -f $(SELF) --no-print-directory api-ready > /dev/null 2>&1; then \
 			good=$$((good + 1)); \
 			[ $$good -ge 2 ] && break; \
 		else good=0; fi; \
 		sleep 3; waited=$$((waited + 3)); \
 	done; \
 	[ -n "$$missing" ] && echo "    warn  still starting after $$waited""s:$$missing" || true; \
-	[ -n "$$sick" ] && echo "    warn  not healthy yet after $$waited""s: $$sick" || true
+	[ -n "$$sick" ] && echo "    warn  not healthy yet after $$waited""s: $$sick" || true; \
+	[ $$good -ge 2 ] || $(MAKE) -f $(SELF) --no-print-directory api-ready 2>/dev/null | grep '^FAIL' | sed "s/^FAIL  /    warn  not ready after $$waited""s: /" || true
+
+# api-ready asks the API, inside its container, whether every service it
+# depends on answers right now (helpers.ServeReadiness: the dependency checks
+# behind Admin > System checks), prints one line each, and succeeds only when
+# every one passes. verify prints it and wait-ready waits on it, so the two
+# have ONE answer to "is it ready": verify can no longer say FAIL where
+# wait-ready said ready. It replaces grepping the API's startup log, which a
+# lost connection never contradicted and a busy log soon pushed out of reach.
+#
+# An answer is any "ok" or "FAIL" line. One where every check fails is still an
+# answer, and its lines name what is down: it used to be taken for no answer at
+# all, so with every service down verify and wait-ready said only "no readiness
+# answer" and hid which ones. "No readiness answer" now means the API didn't
+# answer in that form: not running, or a build without /health/ready.
+api-ready:
+	@out=$$($(COMPOSE) exec -T go-service curl -sS --max-time 30 http://localhost:3000/health/ready 2>/dev/null); \
+	if ! printf '%s\n' "$$out" | grep -qE '^(ok|FAIL) '; then echo "FAIL  api: no readiness answer from the API (make logs SERVICE=go-service)"; exit 1; fi; \
+	printf '%s\n' "$$out"; \
+	! printf '%s\n' "$$out" | grep -q '^FAIL'
 
 # REDIS_KEEP is the Lua that redis-keep-sign-ins runs: it deletes every key but
 # the sign-ins (auth:refresh and auth:refresh-prev) and returns how many went.
@@ -2354,6 +2530,25 @@ update_apply:
 define db_fn
 	q() { $(COMPOSE) exec -T postgres psql -U $(DB_USER) -d $(DB_NAME) \
 	        -v ON_ERROR_STOP=1 -qtA "$$@"; }
+endef
+
+# migration_sets — what the database has applied against the migrations in this
+# install, BY SET. Sets $$missing (in migrations/, not applied), $$unknown
+# (applied, not in migrations/: a newer build's, as after a rollback), $$failed
+# and $$applied, each a space-separated list of versions. Needs $(db_fn).
+#
+# Never by the highest version alone. sqlx applies whatever is missing, lower
+# versions included, so a database can hold the newest migration and still lack
+# one below it: a hotfix numbered above work not yet released lands first.
+# Counting or taking the maximum reads that gap as applied.
+define migration_sets
+	applied=$$(echo "SELECT version FROM _sqlx_migrations WHERE success ORDER BY version;" | q 2>/dev/null); \
+	failed=$$(echo "SELECT version FROM _sqlx_migrations WHERE NOT success ORDER BY version;" | q 2>/dev/null); \
+	ondisk=$$(ls migrations 2>/dev/null | sed -n 's/^\([0-9][0-9]*\)_.*\.up\.sql$$/\1/p' | sort -n -u); \
+	setdiff() { printf '%s\n' "$$1" "--" "$$2" | awk '/^--$$/ { d = 1; next } !d { if ($$0 != "") a[$$0] = 1; next } $$0 != "" && !($$0 in a)'; }; \
+	missing=$$(setdiff "$$applied" "$$ondisk" | tr '\n' ' ' | sed 's/ $$//'); \
+	unknown=$$(setdiff "$$ondisk" "$$applied" | tr '\n' ' ' | sed 's/ $$//'); \
+	applied=$$(echo $$applied); failed=$$(echo $$failed)
 endef
 
 # find_user — resolve EMAIL to $$uid, or fail with the real accounts.

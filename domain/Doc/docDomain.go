@@ -803,8 +803,9 @@ func GetDocUUIDPage(ctx context.Context, offset, first int) ([]string, error) {
 
 // GetDocsReadAccessFor reads, for one person (by uuid), what CanRead decides
 // each of the named docs by: its privacy, its deletion time, its creator, and
-// whether it is shared with them. One query for the lot; ids that aren't
-// uuids are left out, and so is any doc that doesn't exist.
+// whether it is shared with them; and its title, for a caller naming those
+// they may read. One query for the lot; ids that aren't uuids are left out,
+// and so is any doc that doesn't exist.
 func GetDocsReadAccessFor(ctx context.Context, docUUIDs []string, userUUID string) ([]*dgraphStruct.DgraphDoc, error) {
 	quoted := make([]string, 0, len(docUUIDs))
 	for _, id := range docUUIDs {
@@ -818,6 +819,7 @@ func GetDocsReadAccessFor(ctx context.Context, docUUIDs []string, userUUID strin
 	query := `query Readable($user: string) {
 				docInfo(func: eq(doc_uuid, [` + strings.Join(quoted, ", ") + `])) {
 					doc_uuid
+					doc_title
 					doc_private
 					doc_deleted_at
 					doc_created_by {

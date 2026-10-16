@@ -1,6 +1,9 @@
 package business
 
 import (
+	"encoding/json"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -138,5 +141,132 @@ func TestBuildCellPromptBudget(t *testing.T) {
 	out := buildCellPrompt(long, nil, "", uuid.New().String())
 	if len(out) > aiCellPromptBudget {
 		t.Fatalf("prompt exceeds budget: %d > %d", len(out), aiCellPromptBudget)
+	}
+}
+
+// An auto AI column is asked again only when a cell its prompt reads changed,
+// never when the write set its own cell, and never for a cell a person wrote
+// (TAB-BUG-4).
+func TestAutofillAsksOnlyWhenWhatItReadsChanged(t *testing.T) {
+	field := func(name, typ, cfg string) *model.Field {
+		return &model.Field{Id: uuid.New(), Name: name, Type: typ, Config: cfg}
+	}
+	notes := field("Notes", model.FieldText, `{}`)
+	status := field("Status", model.FieldSelect, `{}`)
+	length := field("Notes length", model.FieldFormula, fmt.Sprintf(`{"formula":"LEN({#%s})"}`, notes.Id))
+	summary := field("Summary", model.FieldText, `{"ai":{"prompt":"Summarise {Notes} in a line","auto":true}}`)
+	rating := field("Rating", model.FieldText, `{"ai":{"prompt":"Rate how long {notes length} is","auto":true}}`)
+	tagline := field("Tagline", model.FieldText, `{"ai":{"prompt":"Write a tagline for this row","auto":true}}`)
+	draft := field("Draft", model.FieldText, `{"ai":{"prompt":"Draft a reply to {Notes}"}}`)
+	fields := []*model.Field{notes, status, length, summary, rating, tagline, draft}
+	due := func(row *model.Row, changed ...*model.Field) string {
+		set := map[string]bool{}
+		for _, f := range changed {
+			set[f.Id.String()] = true
+		}
+		var names []string
+		for _, f := range autofillDue(fields, row, set) {
+			names = append(names, f.Name)
+		}
+		return strings.Join(names, ", ")
+	}
+	row := &model.Row{}
+	cases := []struct {
+		name    string
+		row     *model.Row
+		changed []*model.Field
+		want    string
+	}{
+		{"a cell every prompt reads", row, []*model.Field{notes}, "Summary, Rating, Tagline"},
+		{"a cell only the prompt naming no field reads", row, []*model.Field{status}, "Tagline"},
+		{"a person's write to an AI cell asks nothing", row, []*model.Field{summary}, ""},
+		{"a cell a person wrote stays theirs", &model.Row{AIKept: []string{summary.Id.String()}}, []*model.Field{notes}, "Rating, Tagline"},
+		{"the write that set an AI cell doesn't fill it", row, []*model.Field{notes, summary}, "Rating, Tagline"},
+		{"a write that changed nothing", row, nil, ""},
+	}
+	for _, c := range cases {
+		if got := due(c.row, c.changed...); got != c.want {
+			t.Errorf("%s: asks %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestChangedCells(t *testing.T) {
+	was := `{"a": "x", "b": [1, 2], "c": {"k": 1}, "gone": true, "_ai_kept": ["z"]}`
+	is := `{"a":"x","b":[1,2],"c":{"k":2},"new":null}`
+	got := changedCells(was, is)
+	want := map[string]bool{"c": true, "gone": true, "new": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("changed %v, want %v", got, want)
+	}
+	if got := changedCells("{}", `{"a": "x"}`); !reflect.DeepEqual(got, map[string]bool{"a": true}) {
+		t.Errorf("a new row's cells: %v", got)
+	}
+	// A row with a person's AI cell is written again as its mark is lifted
+	// out, with "&" escaped: the same cells, not changed ones.
+	if got := changedCells(`{"url": "https://x.io/?a=1&b=2", "n": 1.50, "_ai_kept": ["f"]}`, `{"n":1.50,"url":"https://x.io/?a=1\u0026b=2"}`); len(got) != 0 {
+		t.Errorf("the same cells written again read as changed: %v", got)
+	}
+}
+
+// An AI column's answer is written only while the cells it's worked out from
+// are as the fill read them: those its prompt names, or, naming none, every
+// cell but the AI columns', as the row stores them (null where it had none).
+func TestReadCells(t *testing.T) {
+	field := func(name, typ, config string) *model.Field {
+		return &model.Field{Id: uuid.New(), Name: name, Type: typ, Config: config}
+	}
+	notes := field("Notes", model.FieldText, "{}")
+	stage := field("Stage", model.FieldSelect, "{}")
+	price := field("Price", model.FieldNumber, "{}")
+	twice := field("Twice", model.FieldFormula, `{"formula":"{#`+price.Id.String()+`} * 2"}`)
+	summary := field("Summary", model.FieldText, `{"ai":{"prompt":"Summarise {Notes}","auto":true}}`)
+	fields := []*model.Field{notes, stage, price, twice, summary}
+	rw := &model.Row{Values: `{"` + notes.Id.String() + `": "Renewal due in July", "` + price.Id.String() + `": 12, "` +
+		twice.Id.String() + `": 24, "` + summary.Id.String() + `": "Renews in July"}`}
+	cells := func(prompt string) map[string]interface{} {
+		var got map[string]interface{}
+		if err := json.Unmarshal([]byte(readCells(fields, rw, prompt)), &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if got := cells("Summarise {Notes}"); !reflect.DeepEqual(got, map[string]interface{}{notes.Id.String(): "Renewal due in July"}) {
+		t.Errorf("a prompt naming Notes read %v", got)
+	}
+	if got := cells("Double check {Twice}"); !reflect.DeepEqual(got, map[string]interface{}{price.Id.String(): 12.0}) {
+		t.Errorf("a prompt naming a formula read %v, want the cell the formula reads", got)
+	}
+	want := map[string]interface{}{notes.Id.String(): "Renewal due in July", stage.Id.String(): nil, price.Id.String(): 12.0}
+	if got := cells("Summarise the row"); !reflect.DeepEqual(got, want) {
+		t.Errorf("a prompt naming nothing read %v, want %v", got, want)
+	}
+}
+
+// A table drafted by the AI is private to the person who asked: its rows can
+// quote what only they can read (TAB-BUG-6).
+func TestADraftedTableIsPrivate(t *testing.T) {
+	gen, err := parseGeneratedTable(`{"name":"Plans","fields":[{"name":"Plan","type":"text"},{"name":"Stage","type":"select","options":["Now","Later"]}],
+		"rows":[{"Plan":"Cut the Pune office in Q4","Stage":"Now"}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in, fields, err := draftInputs(gen)
+	if err != nil || in.Visibility != model.VisibilityPrivate || len(fields) != 2 {
+		t.Errorf("the draft makes %+v with %d columns (%v)", in, len(fields), err)
+	}
+}
+
+// A fill of every row leaves a person's cells as they are, and counts them;
+// "Fill again" names its rows, and fills them all. The skip had no test:
+// without it the write dropped the answer anyway, after the model was paid.
+func TestFillTargets(t *testing.T) {
+	field := uuid.NewString()
+	rows := []*model.Row{{Id: uuid.New()}, {Id: uuid.New(), AIKept: []string{field}}, {Id: uuid.New(), AIKept: []string{uuid.NewString()}}}
+	if todo, skipped := fillTargets(rows, field, false); len(todo) != 2 || skipped != 1 || todo[0] != rows[0] || todo[1] != rows[2] {
+		t.Errorf("a fill of every row takes %v and skips %d", todo, skipped)
+	}
+	if todo, skipped := fillTargets(rows, field, true); len(todo) != 3 || skipped != 0 {
+		t.Errorf("filling again takes %v and skips %d", todo, skipped)
 	}
 }

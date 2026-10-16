@@ -11,6 +11,7 @@ import (
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Project"
+	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	cycleBusiness "github.com/akashc777/OneCamp/business/Cycle"
 	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
@@ -24,6 +25,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	dgraphProjectModel "github.com/akashc777/OneCamp/models/dgraph/Project"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
@@ -401,7 +403,7 @@ func RemoveAdminRoleFromMember(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if (dgraphProject.IsProjectAdmin == 0 && dgraphProject.Team.IsAdmin == 0) || len(dgraphProject.Members) == 0 || dgraphProject.CreatedBy.Uuid == addProjectMemberInputInfo.UserUuid {
+	if !managesMembers(dgraphProject) || len(dgraphProject.Members) == 0 || dgraphProject.CreatedBy.Uuid == addProjectMemberInputInfo.UserUuid {
 
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
@@ -436,85 +438,49 @@ func RemoveMemberFromProject(w http.ResponseWriter, r *http.Request) {
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	var addProjectMemberInputInfo adapter.AddOrRemoveProjectMemberInput
-	err := json.NewDecoder(r.Body).Decode(&addProjectMemberInputInfo)
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/RemoveMemberFromProject Failed to parse the body of the req err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse the body of the req",
-			"err": err,
-		})
-		return
-
-	}
-
-	_, err = uuid.Parse(addProjectMemberInputInfo.ProjectUuid)
-
-	if err != nil {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse projectUUID string to uuid err",
-			"err": err,
-		})
+	if err := json.NewDecoder(r.Body).Decode(&addProjectMemberInputInfo); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That request couldn't be read."})
 		return
 	}
-
-	_, err = uuid.Parse(addProjectMemberInputInfo.UserUuid)
-
-	if err != nil {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse userUUID string to uuid err",
-			"err": err,
-		})
+	if _, err := uuid.Parse(addProjectMemberInputInfo.ProjectUuid); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a project."})
+		return
+	}
+	if _, err := uuid.Parse(addProjectMemberInputInfo.UserUuid); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a person."})
 		return
 	}
 
 	dgraphProject, err := business.GetBasicDgraphProjectInfoWithGivenMemberUUID(ctx, addProjectMemberInputInfo.ProjectUuid, userInfo.UserDgraphInfo.Uid, addProjectMemberInputInfo.UserUuid)
-
+	if errors.Is(err, dgraphProjectModel.ErrNotFound) {
+		// No such project: memberRemovalRefusal answers it as not found.
+		dgraphProject, err = nil, nil
+	}
 	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/RemoveMemberFromProject Failed to get basic dgraph project info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get basic dgraph project info",
-			"err": err,
-		})
+		helpers.LogErrorWithContext(ctx, "controllers/RemoveMemberFromProject Failed to get basic dgraph project info err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't take them off the project. Try again."})
 		return
-
 	}
 
-	if (len(dgraphProject.Members) == 0 && dgraphProject.Team.IsAdmin == 0) || dgraphProject.CreatedBy.Uid == dgraphProject.Members[0].Uid {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+	if status, msg := memberRemovalRefusal(dgraphProject, userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid); status != 0 {
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
-
 	}
 
-	err = business.RemoveMemberFromProject(ctx, dgraphProject.Members[0].Uid, dgraphProject.Members[0].Uuid, dgraphProject.Uid, dgraphProject.Uuid)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/RemoveMemberFromProject Failed to remove member from project err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to remove member from project",
-			"err": err,
-		})
+	if err := business.RemoveMemberFromProject(ctx, dgraphProject.Members[0].Uid, dgraphProject.Members[0].Uuid, dgraphProject.Uid, dgraphProject.Uuid); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/RemoveMemberFromProject Failed to remove member from project err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't take them off the project. Try again."})
 		return
-
 	}
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "member removed from project!"})
+	summary := "Took someone off a project"
+	if strings.EqualFold(userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid) {
+		summary = "Left a project"
+	}
+	auditBusiness.Record(r, "project.member.remove", auditBusiness.CategorySecurity, summary,
+		map[string]interface{}{"project_uuid": dgraphProject.Uuid, "user_uuid": dgraphProject.Members[0].Uuid})
+
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Taken off the project."})
 
 }
 
@@ -821,7 +787,7 @@ func AddMemberToProject(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if (dgraphProject.IsProjectAdmin == 0 && dgraphProject.Team.IsAdmin == 0) || len(dgraphProject.Team.Members) == 0 {
+	if !managesMembers(dgraphProject) || dgraphProject.Team == nil || len(dgraphProject.Team.Members) == 0 {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
@@ -922,7 +888,7 @@ func AddAdminMemberToProject(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if (dgraphProject.IsProjectAdmin == 0 && dgraphProject.Team.IsAdmin == 0) || len(dgraphProject.Members) == 0 {
+	if !managesMembers(dgraphProject) || len(dgraphProject.Members) == 0 {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})

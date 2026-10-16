@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/safefetch"
 )
 
 // TestMain initializes the minimal helpers logging globals so unit tests that
@@ -27,4 +28,4 @@ func TestMain(m *testing.M) {
 // adminAdded is the address rule for a remote agent an admin added, which may
 // be on this server's own network: the tests' remote agents answer from
 // httptest servers on loopback.
-var adminAdded = helpers.EndpointPolicyFor(true)
+var adminAdded = safefetch.EndpointPolicy(true)

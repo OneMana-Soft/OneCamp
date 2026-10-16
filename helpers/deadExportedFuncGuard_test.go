@@ -234,6 +234,11 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"built only with the integration tag, so the shipped binary never has it; the address " +
 		"rule itself is tested where it is the subject.",
 
+	"Fetch": "safefetch is one package on every line, so a fix to its address rule is one " +
+		"change everywhere. Main uses its endpoint half (MCP servers, remote agents, the shared " +
+		"address table); the link previews that call Fetch are on beta and ship later. Fetch is " +
+		"the same checks the endpoint half runs, so deleting it here would only fork the package.",
+
 	"AgentBudgetLimit": "reads the per-agent cap off a context so business/MCPServer's tests can " +
 		"assert SpendContext actually carries it. services/AI keeps budgetDimensions unexported, " +
 		"so no other package can see the limit. The invariant is production behaviour — a metered " +

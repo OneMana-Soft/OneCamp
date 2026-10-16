@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/safefetch"
 	"github.com/google/uuid"
 )
 
@@ -174,7 +175,7 @@ func isV1(v string) bool {
 
 // newA2AClient is the same guarded client every remote gets
 // (newRemoteHTTPClient), with the refusal worded for A2A.
-func newA2AClient(endpoint, secret string, policy helpers.EndpointPolicy) *http.Client {
+func newA2AClient(endpoint, secret string, policy safefetch.Policy) *http.Client {
 	return newRemoteHTTPClient(strings.Replace(OffLocalRefusal(endpoint, secret), "agui:", "a2a:", 1), policy)
 }
 
@@ -192,7 +193,7 @@ func applyRemoteAuth(req *http.Request, header, secret string) {
 // FetchA2ACard finds and reads an agent card. given is the card's own address
 // or the agent's; given must already have passed ValidateHTTPEndpoint, and the
 // endpoint the card names is checked the same way before it is returned.
-func FetchA2ACard(ctx context.Context, given, authHeader, secret string, policy helpers.EndpointPolicy) (*A2ACard, error) {
+func FetchA2ACard(ctx context.Context, given, authHeader, secret string, policy safefetch.Policy) (*A2ACard, error) {
 	candidates := cardCandidates(given)
 	if len(candidates) == 0 {
 		return nil, errors.New("a2a: not an address")
@@ -297,7 +298,7 @@ type A2AProvider struct {
 // NewA2AProvider builds a provider for one agent. endpoint is the card's
 // JSON-RPC endpoint; contextID is the A2A conversation, the run id so runs
 // never share a history on the remote; protocolVersion comes from the card.
-func NewA2AProvider(endpoint, authHeader, secret, contextID, protocolVersion string, policy helpers.EndpointPolicy) *A2AProvider {
+func NewA2AProvider(endpoint, authHeader, secret, contextID, protocolVersion string, policy safefetch.Policy) *A2AProvider {
 	endpoint = strings.TrimSpace(endpoint)
 	return &A2AProvider{
 		endpoint: endpoint, authHeader: strings.TrimSpace(authHeader), secret: secret,

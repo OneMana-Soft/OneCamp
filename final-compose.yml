@@ -925,6 +925,13 @@ services:
       - traefik.http.routers.go-service-https.tls=true
       - traefik.http.routers.go-service-https.service=go-service
       - traefik.http.routers.go-service-https.tls.certresolver=le
+      # The API's answers are compressed, in whichever way the browser asks: a
+      # table opened with about 600 KB of JSON on the wire, about 30 KB once
+      # compressed. Event streams (the assistant writing its reply) go out as
+      # they're written, uncompressed: Traefik 3.0 held a compressed stream's
+      # first words back.
+      - traefik.http.middlewares.api-compress.compress.excludedcontenttypes=text/event-stream
+      - traefik.http.routers.go-service-https.middlewares=api-compress
     networks:
       - onecamp-shared-net
       - traefik-public

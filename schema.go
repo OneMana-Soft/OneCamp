@@ -24,6 +24,7 @@ import (
 	"embed"
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 )
 
@@ -44,32 +45,39 @@ var migrationFiles embed.FS
 // files on disk — a check that survives precisely because the two halves are computed independently.
 var migrationFileRe = regexp.MustCompile(`^(\d+)_.*\.up\.sql$`)
 
-// highestMigration is resolved once, at init.
-var highestMigration = mustComputeHighestMigration()
+// migrationVersions are the embedded up-migrations' versions, ascending, resolved once at init.
+var migrationVersions = mustListMigrations()
 
-// HighestMigration returns the highest migration version this binary was built with.
+// Migrations returns every migration version this binary was built with, ascending: what a database
+// must have applied, each one of them, for this build to run against it. A copy, so no caller can
+// change what the next one sees.
 //
-// This is what the server compares the database against. It is derived rather than hand-maintained
-// because the previous constant had to be bumped by hand on every migration, and the only thing
-// standing between forgetting and a silently-disabled schema check was a test remembering to fail.
-func HighestMigration() int64 { return highestMigration }
+// It is what the server compares the database against, derived rather than hand-maintained because
+// the constant before it had to be bumped by hand on every migration, and the only thing standing
+// between forgetting and a silently-disabled schema check was a test remembering to fail.
+//
+// A set, where it used to be a ceiling (HighestMigration), because versions are not applied in order.
+// A hotfix numbered above work that has not shipped yet, and the ranges the programmes reserve (the
+// 300s), both put a version in the ledger above others still to come, and a check by maximum then
+// read every gap below it as applied.
+func Migrations() []int64 { return append([]int64(nil), migrationVersions...) }
 
-// mustComputeHighestMigration scans the embedded set, and PANICS if it cannot find a version.
+// mustListMigrations scans the embedded set, and PANICS if it cannot find a version.
 //
 // Panicking in an init path is a deliberate choice, and the direction of the failure is the reason.
-// Returning 0 would leave the server comparing its schema against version zero, so `applied < required`
-// would be false for every database and the drift guard would be off — silently, on a process that
-// reports itself healthy. That is the exact failure the guard was written to end. A build whose
-// embedded migrations cannot be parsed is broken in a way no deployment should paper over, so it fails
-// at startup with the reason instead.
-func mustComputeHighestMigration() int64 {
+// An empty set would leave the server comparing its schema against nothing, so every database would
+// look ready and the drift guard would be off — silently, on a process that reports itself healthy.
+// That is the exact failure the guard was written to end. A build whose embedded migrations cannot be
+// parsed is broken in a way no deployment should paper over, so it fails at startup with the reason
+// instead.
+func mustListMigrations() []int64 {
 	entries, err := migrationFiles.ReadDir("migrations")
 	if err != nil {
 		panic(fmt.Sprintf("onecamp: cannot read embedded migrations: %v", err))
 	}
 
-	var highest int64
-	matched := 0
+	seen := map[int64]bool{}
+	var versions []int64
 	for _, entry := range entries {
 		groups := migrationFileRe.FindStringSubmatch(entry.Name())
 		if groups == nil {
@@ -78,18 +86,19 @@ func mustComputeHighestMigration() int64 {
 		version, parseErr := strconv.ParseInt(groups[1], 10, 64)
 		if parseErr != nil {
 			// Unreachable while the regexp requires \d+, and asserted rather than ignored: a silent
-			// skip here would lower the ceiling and weaken the guard by exactly one migration.
+			// skip here would drop a migration from the set and weaken the guard by exactly one.
 			panic(fmt.Sprintf("onecamp: unparseable migration version in %q: %v", entry.Name(), parseErr))
 		}
-		matched++
-		if version > highest {
-			highest = version
+		if !seen[version] {
+			seen[version] = true
+			versions = append(versions, version)
 		}
 	}
 
-	if matched == 0 || highest == 0 {
+	if len(versions) == 0 {
 		panic(fmt.Sprintf("onecamp: embedded %d file(s) but found no usable migration version; "+
 			"the go:embed pattern or the filename convention has changed", len(entries)))
 	}
-	return highest
+	sort.Slice(versions, func(i, j int) bool { return versions[i] < versions[j] })
+	return versions
 }

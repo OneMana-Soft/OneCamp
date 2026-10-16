@@ -88,17 +88,23 @@ func CreatePlanAction(ctx context.Context, requestedBy uuid.UUID, surfaceType, s
 	if len(steps) == 0 {
 		return nil, fmt.Errorf("a plan needs at least one step")
 	}
+	names := make([]string, 0, len(steps))
 	for _, s := range steps {
 		if err := ai.ValidateAction(ai.ProposedAction{ToolName: s.ToolName, Params: s.Params}); err != nil {
 			return nil, fmt.Errorf("invalid plan step %q: %w", s.ToolName, err)
 		}
+		names = append(names, s.ToolName)
+	}
+	bind, err := bindingFor(ctx, names...)
+	if err != nil {
+		return nil, err
 	}
 	enc, err := encodePlanSteps(steps)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode plan")
 	}
 	action, err := pendingModels.CreatePendingAction(ctx, requestedBy, surfaceType, surfaceID,
-		planSentinelTool, map[string]string{"steps": enc}, summary, "", time.Now().Add(pendingActionTTL), attr)
+		planSentinelTool, map[string]string{"steps": enc}, summary, "", time.Now().Add(pendingActionTTL), attr, bind)
 	if err != nil {
 		return nil, err
 	}
@@ -120,8 +126,9 @@ func CreatePlanAction(ctx context.Context, requestedBy uuid.UUID, surfaceType, s
 
 // approveExecute runs an approved pending action: a normal single tool, or a
 // multi-step agent plan (sentinel tool). Both execute AS the approver with
-// per-step permission re-checks. Used by ApprovePendingAction so the
-// security-critical approve flow has one execution entry point.
+// per-step permission re-checks, held to what the proposal is bound to
+// (approvalBinding.go). Used by ApprovePendingAction so the security-critical
+// approve flow has one execution entry point.
 func approveExecute(ctx context.Context, approverInfo *userModels.UserInfo, action *pendingModels.PendingAction) (*adapter.ExecuteActionResponse, error) {
 	// Which agent proposed this, from the stored row: a tool that reports back
 	// where its run was asked (code_pr) needs it, and the approval request has
@@ -129,24 +136,29 @@ func approveExecute(ctx context.Context, approverInfo *userModels.UserInfo, acti
 	if action.AgentID != nil {
 		ctx = ai.WithApprovedAgentProposal(ctx, action.AgentID.String())
 	}
-	if action.ToolName == planSentinelTool {
-		return executePlanSteps(ctx, approverInfo, action.Params)
+	calls, ok := approvedCalls(action)
+	if !ok {
+		return &adapter.ExecuteActionResponse{Success: false, Message: "This plan could not be read."}, nil
 	}
-	return ExecuteAction(ctx, approverInfo, action.ToolName, action.Params, nil)
+	// Where the tools send the call, as it was when the person was asked: the
+	// whole proposal or none of it.
+	if ai.CallBinding(callToolNames(calls)...) != action.ToolBinding {
+		return &adapter.ExecuteActionResponse{Success: false, Message: destinationMovedMsg}, nil
+	}
+	if action.ToolName != planSentinelTool {
+		return executeApproved(ctx, approverInfo, action, calls[0])
+	}
+	return executePlanSteps(ctx, approverInfo, action, calls)
 }
 
 // executePlanSteps runs an approved plan's steps in order AS the approver,
 // stopping at the first failure (and reporting how many earlier steps applied,
-// so a partial outcome is honest). Each step goes through ExecuteAction, so its
-// permissions are re-checked exactly as a standalone approval.
-func executePlanSteps(ctx context.Context, approverInfo *userModels.UserInfo, params map[string]string) (*adapter.ExecuteActionResponse, error) {
-	steps, err := decodePlanSteps(params["steps"])
-	if err != nil || len(steps) == 0 {
-		return &adapter.ExecuteActionResponse{Success: false, Message: "This plan could not be read."}, nil
-	}
+// so a partial outcome is honest). Each step goes through executeApproved, so
+// it is decided exactly as a standalone approval would be.
+func executePlanSteps(ctx context.Context, approverInfo *userModels.UserInfo, action *pendingModels.PendingAction, steps []ai.ProposedAction) (*adapter.ExecuteActionResponse, error) {
 	done := 0
 	for i, s := range steps {
-		resp, eerr := ExecuteAction(ctx, approverInfo, s.ToolName, s.Params, nil)
+		resp, eerr := executeApproved(ctx, approverInfo, action, s)
 		if eerr != nil {
 			return &adapter.ExecuteActionResponse{
 				Success: false,

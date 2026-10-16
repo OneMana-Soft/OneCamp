@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 )
 
@@ -283,6 +284,14 @@ func DispatchChannelMention(actorUUID, actorName, actorAvatar string,
 	}()
 }
 
+// taskReaders is the gate for an email about a task: the people who may read
+// it now (domain/Task Readers, the task read rule).
+func taskReaders(taskUUID string) func(context.Context, []string) (map[string]bool, error) {
+	return func(ctx context.Context, userIDs []string) (map[string]bool, error) {
+		return taskDomain.Readers(ctx, taskUUID, userIDs)
+	}
+}
+
 // DispatchTaskAssignment is the integration point for task assignee changes.
 // Triggered every time UpdateTaskAssignee assigns a task to someone other
 // than the actor.
@@ -315,6 +324,7 @@ func DispatchTaskAssignment(actorUUID, actorName, actorAvatar string,
 			CTAText:       "Open task",
 			DedupKeyParts: []string{"assigned", taskUUID, assigneeUUID},
 			Recipients:    recipientsFromStrings([]string{assigneeUUID}),
+			MayRead:       taskReaders(taskUUID),
 		})
 	}()
 }
@@ -356,6 +366,7 @@ func DispatchTaskStatusChange(actorUUID, actorName, actorAvatar string,
 			CTAText:       "Open task",
 			DedupKeyParts: []string{"status", taskUUID, changeID},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
+			MayRead:       taskReaders(taskUUID),
 		})
 	}()
 }
@@ -387,6 +398,7 @@ func DispatchTaskComment(actorUUID, actorName, actorAvatar string,
 			CTAText:       "Open task",
 			DedupKeyParts: []string{"task_comment", taskUUID, commentUUID},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
+			MayRead:       taskReaders(taskUUID),
 		})
 	}()
 }

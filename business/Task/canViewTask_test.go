@@ -35,8 +35,15 @@ func TestCanViewTask(t *testing.T) {
 		{"assignee outside the project", task(func(x *dgraphStruct.DgraphTask) {
 			x.Assignee = &dgraphStruct.DgraphUser{Uid: viewer}
 		}), true},
+		// Only a project's admins create its tasks, so a creator outside the
+		// project was taken off it: leaving a project leaves its work, and its
+		// emails and search results with it (PROJ-BUG-7).
 		{"creator outside the project", task(func(x *dgraphStruct.DgraphTask) {
 			x.CreatedBy = &dgraphStruct.DgraphUser{Uid: viewer}
+		}), false},
+		{"creator in the project", task(func(x *dgraphStruct.DgraphTask) {
+			x.CreatedBy = &dgraphStruct.DgraphUser{Uid: viewer}
+			x.Project.IsProjectMember = 1
 		}), true},
 		// The hole this closes.
 		{"stranger", task(nil), false},

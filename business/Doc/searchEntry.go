@@ -55,3 +55,24 @@ func ReadableDocsFor(ctx context.Context, docUUIDs []string, userUUID string) (m
 	}
 	return out, nil
 }
+
+// ReadableDocTitles names the docs, of those named, the person (by uuid) may
+// read now, by CanRead: each one's title, keyed by lower-case uuid. A doc they
+// may not read, deleted, or not there is left out. One graph query for the
+// lot; an error is the graph not answering.
+func ReadableDocTitles(ctx context.Context, docUUIDs []string, userUUID string) (map[string]string, error) {
+	out := make(map[string]string, len(docUUIDs))
+	if len(docUUIDs) == 0 {
+		return out, nil
+	}
+	docs, err := domain.GetDocsReadAccessFor(ctx, docUUIDs, userUUID)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range docs {
+		if d != nil && d.Uuid != "" && CanRead(d, userUUID) {
+			out[strings.ToLower(d.Uuid)] = d.Title
+		}
+	}
+	return out, nil
+}

@@ -14,6 +14,7 @@ import (
 	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/safefetch"
 	model "github.com/akashc777/OneCamp/models/postgres/AIMCP"
 	"github.com/google/uuid"
 )
@@ -89,7 +90,7 @@ func validate(in *ServerInput, addedByAdmin bool) error {
 	// The one address rule, checked now so a refused address is a sentence
 	// on save rather than a failed introspection later. The client checks
 	// again as it connects, which is the check that counts.
-	if err := helpers.CheckEndpoint(in.URL, helpers.EndpointPolicyFor(addedByAdmin)); err != nil {
+	if _, err := safefetch.CheckEndpoint(in.URL, safefetch.EndpointPolicy(addedByAdmin)); err != nil {
 		if msg := helpers.EndpointRefusal(err, addedByAdmin); msg != "" {
 			return fmt.Errorf("%s", msg)
 		}
