@@ -12,6 +12,8 @@ import (
 	domain "github.com/akashc777/OneCamp/domain/Comment"
 	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
+	taskDomain "github.com/akashc777/OneCamp/domain/Task"
+	userProjectNotificationDomain "github.com/akashc777/OneCamp/domain/UserProjectNotification"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -74,90 +76,96 @@ func CreateCommentInTask(ctx context.Context, dgraphTask *dgraphStruct.DgraphTas
 
 }
 
+// Seams for tests: a task's thread, who hears of its comments by their
+// setting, who may read it, and how they're told.
+var (
+	taskCommentThread   = domain.GetDgraphTaskCommentUUIDsInfo
+	taskCommentAudience = userProjectNotificationDomain.GetTaskCommentAudience
+	taskCommentReaders  = taskDomain.Readers
+	taskCommentDeliver  = notificationBusiness.Deliver
+	taskCommentEmail    = notificationBusiness.DispatchTaskComment
+	taskCommentIcon     = userBusiness.GetSignedProfileURL
+)
+
+// sendNewTaskCommentNotification tells of a comment on a task: a push, with the
+// desktop app's notice beside it, and an email.
 func sendNewTaskCommentNotification(title string, body string, commentUUID string, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphTask *dgraphStruct.DgraphTask, userDgraph *dgraphStruct.DgraphUser) {
-
-	mentionsUUIDList := []string{}
-	membersUUIDList := []string{}
-
 	ctx := context.Background()
-
-	for _, mention := range mentionsDgraphUsersList {
-		mentionsUUIDList = append(mentionsUUIDList, mention.Uuid)
+	if dgraphTask == nil || dgraphTask.Project == nil || userDgraph == nil {
+		return
 	}
 
-	dgraphTaskComment, err := domain.GetDgraphTaskCommentUUIDsInfo(ctx, dgraphTask.Uuid)
+	// Whom it's for: whom it mentions, and whom the task is given to.
+	forThem := []string{}
+	for _, mention := range mentionsDgraphUsersList {
+		if mention != nil && mention.Uuid != "" {
+			forThem = append(forThem, mention.Uuid)
+		}
+	}
+	if dgraphTask.Assignee != nil && dgraphTask.Assignee.Uuid != "" && userDgraph.Uuid != dgraphTask.Assignee.Uuid {
+		forThem = append(forThem, dgraphTask.Assignee.Uuid)
+	}
 
-	if err != nil {
+	// The thread: whoever commented on the task before, but its writer.
+	dgraphTaskComment, err := taskCommentThread(ctx, dgraphTask.Uuid)
+	if err != nil || dgraphTaskComment == nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/sendNewTaskCommentNotification Failed to get task comment err: %+v",
 			err)
 		return
 	}
-
+	thread := []string{}
 	for _, comment := range dgraphTaskComment.Comments {
-		if comment.CommentBy.Uuid == userDgraph.Uuid {
+		if comment == nil || comment.CommentBy == nil || comment.CommentBy.Uuid == "" || comment.CommentBy.Uuid == userDgraph.Uuid {
 			continue
 		}
-		membersUUIDList = append(membersUUIDList, comment.CommentBy.Uuid)
+		thread = append(thread, comment.CommentBy.Uuid)
+	}
+	icon := taskCommentIcon(ctx, userDgraph.ProfileKey)
+
+	// The push, as every push goes (Deliver): through the push gate, with the
+	// desktop app's notice beside it. It looked devices up for itself, so a
+	// desktop-only reader heard of no task comment.
+	if told := taskCommentPushedTo(ctx, dgraphTask, userDgraph.Uuid, thread, forThem); len(told) > 0 {
+		taskCommentDeliver(ctx, told, map[string]string{
+			firebaseInit.FIREBASE_PUSH_DATA_TYPE:      firebaseInit.FIREBASE_PUSH_DATA_TYPE_TASK_COMMENT,
+			firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:   dgraphTask.Project.Uuid,
+			firebaseInit.FIREBASE_PUSH_DATA_TITLE:     title,
+			firebaseInit.FIREBASE_PUSH_DATA_BODY:      body,
+			firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID: dgraphTask.Uuid,
+			firebaseInit.FIREBASE_PUSH_DATA_USERNAME:  userDgraph.DisplayName(),
+			firebaseInit.FIREBASE_PUSH_DATA_ICON:      icon,
+		}, firebaseInit.FIREBASE_PUSH_DATA_TYPE_TASK_COMMENT+":"+dgraphTask.Uuid+":"+commentUUID)
 	}
 
-	if dgraphTask.Assignee != nil && userDgraph.Uuid != dgraphTask.Assignee.Uuid {
-		mentionsUUIDList = append(mentionsUUIDList, dgraphTask.Assignee.Uuid)
+	// Email, whatever became of the push, to the thread and whom it's for: the
+	// dispatcher keeps it to who may read the task, by their email settings.
+	emailRecipients := append(append([]string{}, thread...), forThem...)
+	taskCommentEmail(userDgraph.Uuid, userDgraph.DisplayName(), icon, dgraphTask.Uuid, dgraphTask.Name, body, commentUUID, emailRecipients)
+}
+
+// taskCommentPushedTo is who is pushed a comment on the task: those of its
+// project's people who hear of it by their setting (GetTaskCommentAudience)
+// and may read the task now. A setting outlives someone's place in the
+// project (taking someone off a team takes them off its projects and leaves
+// their settings), so with no answer of who may read it, nobody is pushed.
+func taskCommentPushedTo(ctx context.Context, task *dgraphStruct.DgraphTask, writerUUID string, thread, forThem []string) []string {
+	audience, err := taskCommentAudience(ctx, task.Project.Uuid, writerUUID, thread, forThem)
+	if err != nil || len(audience) == 0 {
+		return nil
 	}
-
-	tokens, err := userFCMtokenBusiness.GetFCMTokensForNewProjectActivityExcludingUserId(ctx, userDgraph.Uuid, dgraphTask.Project.Uuid, membersUUIDList, mentionsUUIDList)
-
+	readers, err := taskCommentReaders(ctx, task.Uuid, audience)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/sendNewTaskCommentNotification Failed to gets user's fcm token err: %+v",
-			err)
-		return
+		helpers.LogErrorWithContext(ctx, "business/sendNewTaskCommentNotification could not check who may read task %s, pushing nobody: %+v", task.Uuid, err)
+		return nil
 	}
-
-	pushData := make(map[string]string)
-
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_TASK_COMMENT
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] = dgraphTask.Project.Uuid
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = title
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] = dgraphTask.Uuid
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
-
-	// Send notifications in batches of 500 tokens
-	batchSize := 500
-	for i := 0; i < len(tokens); i += batchSize {
-		end := i + batchSize
-		if end > len(tokens) {
-			end = len(tokens)
-		}
-		tokenBatch := tokens[i:end]
-
-		err = firebaseInit.FirebaseApp.MultiCastPush(ctx, pushData, tokenBatch)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/sendNewPostCommentNotification Failed to send push notification err: %+v",
-				err)
-			return
+	told := make([]string, 0, len(audience))
+	for _, id := range audience {
+		if readers[id] {
+			told = append(told, id)
 		}
 	}
-
-	// Email fan-out for task comments. Recipients: previous commenters
-	// (membersUUIDList), mentions, and the task assignee (already merged
-	// into mentionsUUIDList above).
-	emailRecipients := append([]string{}, membersUUIDList...)
-	emailRecipients = append(emailRecipients, mentionsUUIDList...)
-	taskName := dgraphTask.Name
-	notificationBusiness.DispatchTaskComment(
-		userDgraph.Uuid,
-		userDgraph.DisplayName(),
-		userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey),
-		dgraphTask.Uuid,
-		taskName,
-		body,
-		commentUUID,
-		emailRecipients,
-	)
+	return told
 }
 
 func CreateCommentInADoc(ctx context.Context, dgraphDoc *dgraphStruct.DgraphDoc, userInfo *userModels.UserInfo, commentUUID uuid.UUID, createdTime time.Time, rawDgraphDocInfo *dgraphStruct.DgraphDoc, mentionList []*dgraphStruct.DgraphUser) (commentUid string, err error) {

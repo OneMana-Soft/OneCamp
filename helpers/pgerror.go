@@ -33,25 +33,44 @@ func IsUniqueViolation(err error) bool { return pgErrorCodeIs(err, pgUniqueViola
 // were removed rather than kept "for later": each had a passing test, which is what made them
 // look used, and an untouched predicate is a claim about behaviour nobody is checking against
 // reality. Add one back at the point a caller exists.
+
+// IsRowRejected reports whether Postgres refused a row for what it holds: a value it can't
+// store (class 22, data exception, such as invalid UTF-8) or a rule the row breaks (class 23,
+// integrity constraint violation, such as a foreign key to a person since deleted).
+//
+// For a writer that sends several rows in one transaction and has to tell "this row can't be
+// written" from "nothing can be written just now" (a lost connection, a timeout, a database
+// shutting down): the first is the row's alone and the others can go without it, the second is
+// everyone's (models/AdminAudit chainWriter.go).
+func IsRowRejected(err error) bool {
+	code := pgErrorCode(err)
+	return len(code) == 5 && (code[:2] == "22" || code[:2] == "23")
+}
+
 // pgErrorCodeIs unwraps err looking for a driver error carrying code.
+func pgErrorCodeIs(err error, code string) bool {
+	return err != nil && pgErrorCode(err) == code
+}
+
+// pgErrorCode is the condition code of the driver error err carries, or "" for none.
 //
 // errors.As, not a type assertion: errors reach handlers through several layers here and some of
 // them wrap. A plain assertion would silently report false for a wrapped driver error, which is
 // the failure mode where a duplicate name shows up as a 500.
-func pgErrorCodeIs(err error, code string) bool {
+func pgErrorCode(err error) string {
 	if err == nil {
-		return false
+		return ""
 	}
 	// The server talks to Postgres through pgx; lib/pq errors still come from
 	// the tools that use it. Checking only pq's type made every duplicate look
 	// like a server error ("something went wrong" for a taken channel name).
 	var pgxErr *pgconn.PgError
 	if errors.As(err, &pgxErr) {
-		return pgxErr.Code == code
+		return pgxErr.Code
 	}
 	var pqErr *pq.Error
 	if errors.As(err, &pqErr) {
-		return string(pqErr.Code) == code
+		return string(pqErr.Code)
 	}
-	return false
+	return ""
 }

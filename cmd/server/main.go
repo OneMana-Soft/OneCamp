@@ -704,6 +704,13 @@ func main() {
 	defer func() {
 		helpers.MessageLogs.InfoLog.Println("Cleaning up resources...")
 
+		// Work handed off by requests and not done yet finishes before any
+		// store it uses closes (the broker, the graph, Postgres, Redis), or it
+		// would be lost with them (helpers.SettleBackground).
+		if busy := helpers.SettleBackground(15 * time.Second); len(busy) > 0 {
+			helpers.LogErrorWithContext(ctx, "Still running at shutdown, and cut off: %v", busy)
+		}
+
 		// Close MQTT connection
 		if mqttInit.MqttClient != nil {
 			mqttInit.MqttClient.Disconnect(250)

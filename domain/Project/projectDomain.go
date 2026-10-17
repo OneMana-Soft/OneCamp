@@ -3,20 +3,24 @@ package Domain
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"strconv"
+	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Project"
+	dgraphTaskModels "github.com/akashc777/OneCamp/models/dgraph/Task"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	OpenSearchBulkModels "github.com/akashc777/OneCamp/models/openSearch/Bulk"
 	OpenSearchModels "github.com/akashc777/OneCamp/models/openSearch/Project"
 	models "github.com/akashc777/OneCamp/models/postgres/Project"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
+	"github.com/dgraph-io/dgo/v230"
 	"github.com/google/uuid"
 )
 
@@ -208,89 +212,91 @@ func GetDgraphProjectListByAdminDgraphUID(ctx context.Context, userDgraphUID str
 	return
 }
 
-func GetDgraphProjectTaskListForKanban(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, closedLimit int) (dgraphProject *dgraphStruct.DgraphProject, err error) {
+// GetDgraphProjectBoardPlaces reads a project's board without its cards, in
+// txn: the project, the viewer's standing in it, its members (by name) and
+// its columns' places (dgraphStruct.BoardPlacesQuery). The cards come from
+// GetDgraphProjectBoardCards, in the same snapshot.
+func GetDgraphProjectBoardPlaces(ctx context.Context, txn *dgo.Txn, projectUUID string, userDgraphUID string, filterQuery string, closedLimit int) (*dgraphStruct.DgraphProject, map[string]*dgraphStruct.BoardPlaces, error) {
+	filter := dgraphStruct.TASK_LIVE_FILTER
 	if len(filterQuery) > 0 {
-		filterQuery = "AND " + filterQuery
+		filter += " AND " + filterQuery
 	}
-	variables := make(map[string]string)
-	variables["$id"] = projectUUID
-	variables["$userDgraphUID"] = userDgraphUID
-
-	query := fmt.Sprintf(`query ProjectInfo($id: string, $userDgraphUID: string){
+	// Members are sorted here, not by Dgraph: a sorted block stops at 1,000.
+	query := `query ProjectInfo($id: string, $userDgraphUID: string){
 			projectInfo(func: eq(project_uuid, $id)) {
 				project_uuid
 				project_name
 				project_is_member: count(project_members @filter(uid($userDgraphUID)))
 				project_is_admin: count(project_admins @filter(uid($userDgraphUID)))
-				project_members @filter(NOT eq(is_external, true)) (orderasc: user_name){
+				project_members @filter(NOT eq(is_external, true)) {
 					uid
 					user_uuid
 					user_name
 					user_profile_object_key
-				}
-				project_tasks_todo: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "todo") %s) (orderdesc: task_created_at) {
-					%s
-				}
-				project_tasks_in_progress: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "inProgress") %s) (orderdesc: task_created_at) {
-					%s
-				}
-				project_tasks_backlog: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "backlog") %s) (orderdesc: task_created_at) {
-					%s
-				}
-				project_tasks_in_review: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "inReview") %s) (orderdesc: task_created_at) {
-					%s
-				}
-				project_tasks_canceled: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "canceled") %s) (orderdesc: task_created_at%s) {
-					%s
-				}
-				project_tasks_canceled_count: count(project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "canceled") %s))
-				project_tasks_done: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "done") %s) (orderdesc: task_created_at%s) {
-					%s
-				}
-				project_tasks_done_count: count(project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, "done") %s))
+				}` + dgraphStruct.BoardPlacesQuery("project_tasks", filter, closedLimit) + `
 			}
-		}`, filterQuery, projectTaskFields, filterQuery, projectTaskFields, filterQuery, projectTaskFields, filterQuery, projectTaskFields,
-		filterQuery, dgraphStruct.ClosedFirst(closedLimit), projectTaskFields, filterQuery,
-		filterQuery, dgraphStruct.ClosedFirst(closedLimit), projectTaskFields, filterQuery)
-
-	dgraphProject, err = dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, variables)
-
+		}`
+	resp, err := txn.QueryWithVars(ctx, query, map[string]string{"$id": projectUUID, "$userDgraphUID": userDgraphUID})
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"Domain/GetDgraphProjectTaskListForKanban Failed to get project task list in dgraph err: %+v",
-			err,
-		)
-		return
+		helpers.LogErrorWithContext(ctx, "Domain/GetDgraphProjectBoardPlaces Failed to get the project's board in dgraph err: %+v", err)
+		return nil, nil, err
 	}
+	var out struct {
+		ProjectInfo []json.RawMessage `json:"projectInfo"`
+	}
+	if err := json.Unmarshal(resp.Json, &out); err != nil {
+		return nil, nil, err
+	}
+	if len(out.ProjectInfo) == 0 {
+		return nil, nil, dgraphModels.ErrNotFound
+	}
+	var project dgraphStruct.DgraphProject
+	if err := json.Unmarshal(out.ProjectInfo[0], &project); err != nil {
+		return nil, nil, err
+	}
+	places, err := dgraphStruct.ParseBoardPlaces(out.ProjectInfo[0])
+	if err != nil {
+		return nil, nil, err
+	}
+	dgraphStruct.SortUsersByName(project.Members)
+	return &project, places, nil
+}
 
-	return
-
+// GetDgraphProjectBoardCards reads the cards of a project's board by uid, in
+// txn, in no particular order.
+func GetDgraphProjectBoardCards(ctx context.Context, txn *dgo.Txn, uids []string) ([]*dgraphStruct.DgraphTask, error) {
+	if len(uids) == 0 {
+		return nil, nil
+	}
+	if !dgraphquery.AllUIDs(uids) {
+		return nil, errors.New("domain/GetDgraphProjectBoardCards: not a list of task ids")
+	}
+	query := fmt.Sprintf(`{
+			cards(func: uid(%s)) {
+				%s
+			}
+		}`, strings.Join(uids, ", "), projectTaskFields)
+	return dgraphTaskModels.QueryDgraphTasksInTxn(ctx, txn, query, nil)
 }
 
 func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, sortQuery string, pageSize int, pageIndex int, getAll bool) (dgraphProject *dgraphStruct.DgraphProject, err error) {
-	offset := pageIndex * pageSize
-
 	if len(filterQuery) > 0 {
 		filterQuery = "AND " + filterQuery
 	}
 	variables := make(map[string]string)
 	variables["$id"] = projectUUID
 	variables["$userDgraphUID"] = userDgraphUID
-	firstVal := strconv.Itoa(pageSize)
-	offsetVal := strconv.Itoa(offset)
+	order := dgraphquery.TotalOrder(sortQuery, "task_uuid")
 
-	if !getAll {
-		sortQuery = fmt.Sprintf("first: %v, offset: %v, ", firstVal, offsetVal) + sortQuery
-	}
-
-	query := fmt.Sprintf(`query ProjectInfo($id: string, $userDgraphUID: string){
+	query := func(page dgraphquery.Page) string {
+		return fmt.Sprintf(`query ProjectInfo($id: string, $userDgraphUID: string){
 				projectInfo(func: eq(project_uuid, $id)) {
 					project_uuid
 					project_name
 					project_is_member: count(project_members @filter(uid($userDgraphUID)))
 					project_is_admin: count(project_admins @filter(uid($userDgraphUID)))
 					project_task_count: count(project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") %s))
-					project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") %s) ( %s) {
+					project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") %s) (%s, %s) {
 						task_uuid
 						task_name
 						task_status
@@ -326,16 +332,38 @@ func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgrap
 						task_created_at
 					}
 				}
-			}`, filterQuery, filterQuery, sortQuery)
+			}`, filterQuery, filterQuery, order, page.Args())
+	}
 
-	dgraphProject, err = dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, variables)
+	if !getAll && pageSize > 0 {
+		dgraphProject, err = dgraphModels.GetDgraphProjectInfoByUUID(ctx, query(dgraphquery.Page{First: pageSize, Offset: pageIndex * pageSize}), variables)
+	} else {
+		// Everything: one sorted block stops at 1,000, so page through it, in
+		// one snapshot so the pages meet.
+		err = dgraphInit.InSnapshot(ctx, func(txn *dgo.Txn) error {
+			tasks, err := dgraphquery.ReadAll(dgraphquery.ReadAllPage, func(page dgraphquery.Page) ([]*dgraphStruct.DgraphTask, error) {
+				got, err := dgraphModels.GetDgraphProjectInfoInTxn(ctx, txn, query(page), variables)
+				if err != nil {
+					return nil, err
+				}
+				if dgraphProject == nil {
+					dgraphProject = got
+				}
+				return got.Tasks, nil
+			})
+			if err == nil {
+				dgraphProject.Tasks = tasks
+			}
+			return err
+		})
+	}
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/GetDgraphProjectTaskList Failed to get project task list from dgraph err: %+v",
 			err,
 		)
-		return
+		return nil, err
 	}
 	return
 
@@ -396,11 +424,11 @@ func GetDgraphProjectMemberInfo(ctx context.Context, projectUUID string, userDgr
 					project_name
 					project_is_member: count(project_members @filter(uid($userUid)))
 					project_is_admin: count(project_admins @filter(uid($userUid)))
-					project_admins (orderasc: user_name){
+					project_admins {
 						user_uuid
-						
+						user_name
 					}
-					project_members @filter(NOT eq(is_external, true)) (orderasc: user_name){
+					project_members @filter(NOT eq(is_external, true)) {
 						uid
 						user_uuid
 						user_name
@@ -418,6 +446,12 @@ func GetDgraphProjectMemberInfo(ctx context.Context, projectUUID string, userDgr
 			}`
 
 	dgraphProject, err = dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, variables)
+	if err == nil && dgraphProject != nil {
+		// By name, sorted here: Dgraph stops a sorted block at 1,000. Callers
+		// walk the two lists side by side, so both are sorted alike.
+		dgraphStruct.SortUsersByName(dgraphProject.Admins)
+		dgraphStruct.SortUsersByName(dgraphProject.Members)
+	}
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

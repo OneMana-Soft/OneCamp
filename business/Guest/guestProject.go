@@ -175,7 +175,8 @@ func GetGuestProject(ctx context.Context, grant *guestModel.GuestGrant) (*GuestP
 	if err != nil {
 		return nil, err
 	}
-	p, err := projectBusiness.GetDgraphProjectTaskListForKanban(helpers.WithSystemRead(ctx), projectID.String(), bot.DgraphUID, "", dgraphStruct.BoardClosedLimit)
+	// Every open card (openLimit 0): the client view has no "show more".
+	p, err := projectBusiness.GetDgraphProjectTaskListForKanban(helpers.WithSystemRead(ctx), projectID.String(), bot.DgraphUID, "", 0, dgraphStruct.BoardClosedLimit)
 	if readFailed(err, projectModels.ErrNotFound) {
 		return nil, err
 	}

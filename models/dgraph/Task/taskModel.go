@@ -7,6 +7,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/dgraph-io/dgo/v230"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
 
@@ -121,6 +122,12 @@ func BulkSoftDeleteDgraphTasks(ctx context.Context, tasks []*dgraphStruct.Dgraph
 func QueryDgraphTasks(ctx context.Context, query string, variables map[string]string) ([]*dgraphStruct.DgraphTask, error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 	defer txn.Discard(ctx)
+	return QueryDgraphTasksInTxn(ctx, txn, query, variables)
+}
+
+// QueryDgraphTasksInTxn is QueryDgraphTasks in txn, for a read made of several
+// queries that must see one snapshot (dgraphInit.InSnapshot).
+func QueryDgraphTasksInTxn(ctx context.Context, txn *dgo.Txn, query string, variables map[string]string) ([]*dgraphStruct.DgraphTask, error) {
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/QueryDgraphTasks failed: %v", err)

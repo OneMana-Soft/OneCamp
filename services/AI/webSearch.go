@@ -370,5 +370,5 @@ func AuditWebSearch(ctx context.Context, provider string, resultCount int) {
 		e.ActorID = &id
 		e.ActorEmail = ui.UserPostgresInfo.EmailID
 	}
-	_ = auditModel.Insert(ctx, e)
+	auditModel.Append(e)
 }

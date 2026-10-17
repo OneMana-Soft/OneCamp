@@ -26,6 +26,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/extension"
@@ -103,10 +104,17 @@ var blockNewline = regexp.MustCompile(`(<br/>|</p>|</li>|</ul>|</ol>|</blockquot
 
 // renderMarkdown turns a model's markdown into chat HTML, with the typing
 // cursor at the end of the last block while a reply is still streaming.
+// Markdown nested deeper than a parser should be asked to read
+// (helpers.MarkdownTooDeep) is shown as its words, escaped, as a reply that
+// can't be rendered is: 50,000 nested list items took goldmark 12 s and
+// 7.5 GB of heap.
 func renderMarkdown(text string, typing bool) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
+	}
+	if helpers.MarkdownTooDeep(text) {
+		return renderEscapedParagraphs(text, typing)
 	}
 	var buf bytes.Buffer
 	if err := chatMarkdown.Convert([]byte(text), &buf); err != nil {

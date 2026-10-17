@@ -99,3 +99,38 @@ func GetEligibleUsersForProjectActivity(ctx context.Context, projectId string, e
 	}
 	return
 }
+
+// taskCommentAudienceQuery is who of a project's ($1) people, other than a
+// comment's writer ($2), hears of a comment on one of its tasks by their
+// setting for the project: everything, if they are in the task's thread ($3)
+// or the comment is for them ($4: whom it mentions, whom the task is given
+// to); mentions only, if it is for them; nothing, if they muted the project.
+// Someone with no setting for the project hears nothing.
+//
+// Someone who asked to hear of everything used to be told only of the threads
+// they had commented in, so less than someone who asked for mentions only: a
+// mention, or a comment on a task given to them, never reached them.
+const taskCommentAudienceQuery = `
+	SELECT user_id
+	FROM users_project_notification
+	WHERE project_id = $1
+		AND user_id != $2
+		AND (
+			(notification_type = 'all' AND (user_id = ANY($3) OR user_id = ANY($4))) OR
+			(notification_type = 'mention' AND user_id = ANY($4))
+		)
+`
+
+// GetTaskCommentAudience is who of a project's people hears of a comment on
+// one of its tasks by their setting for the project (taskCommentAudienceQuery).
+// A setting is no proof someone is still in the project: whoever tells them
+// asks who may read the task too.
+func GetTaskCommentAudience(ctx context.Context, projectID string, writerID string, thread []string, forThem []string) (userIDs []string, err error) {
+	userIDs, err = models.GetTaskCommentAudience(taskCommentAudienceQuery, projectID, writerID, thread, forThem)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetTaskCommentAudience Failed to read who hears of a comment on a task of project %s err: %+v",
+			projectID, err)
+	}
+	return
+}

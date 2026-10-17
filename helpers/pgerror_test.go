@@ -104,3 +104,30 @@ func TestUniqueViolationFromPgx(t *testing.T) {
 		t.Fatal("foreign-key violation taken for a duplicate")
 	}
 }
+
+// A row the database refuses for what it holds (classes 22 and 23) is told apart from a failure
+// that isn't the row's: the audit writer drops the one row and writes the rest of its batch, and
+// must not drop a row because the connection went or the database was busy.
+func TestRowRejectedIsTheRowsFault(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"invalid UTF-8 (pgx)", &pgconn.PgError{Code: "22021"}, true},
+		{"foreign key violation (pgx, wrapped)", fmt.Errorf("insert: %w", &pgconn.PgError{Code: "23503"}), true},
+		{"not null violation (pq)", &pq.Error{Code: "23502"}, true},
+		{"unique violation (pq)", uniqueViolation(), true},
+		{"query cancelled", &pgconn.PgError{Code: "57014"}, false},
+		{"admin shutdown", &pgconn.PgError{Code: "57P01"}, false},
+		{"connection failure", &pgconn.PgError{Code: "08006"}, false},
+		{"deadlock", &pgconn.PgError{Code: "40P01"}, false},
+		{"a plain error", errors.New("boom"), false},
+		{"nil", nil, false},
+	}
+	for _, c := range cases {
+		if got := IsRowRejected(c.err); got != c.want {
+			t.Errorf("%s: IsRowRejected = %v, want %v", c.name, got, c.want)
+		}
+	}
+}

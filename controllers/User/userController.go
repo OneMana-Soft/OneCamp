@@ -194,49 +194,7 @@ func GetDgraphUserTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 
 	filterQuery := strings.Join(filterStrings, " AND ")
 
-	sortParamString := queryParams["sorting"]
-
-	var sortParam []adapter.SortingParam
-
-	if len(sortParamString) != 0 {
-		err := json.Unmarshal([]byte(sortParamString[0]), &sortParam)
-		if err != nil {
-
-			helpers.LogErrorWithContext(ctx,
-				"controllers/GetDgraphUserTaskListForKanban Failed to parse sorting query param err: %+v",
-				err)
-
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "Failed to parse sorting query param",
-				"err": err,
-			})
-			return
-
-		}
-
-	}
-
-	sortingQuery := ""
-	for _, param := range sortParam {
-		if !dgraphquery.IsAllowedColumnName(param.Id) {
-			continue
-		}
-		switch param.Desc {
-		case true:
-			sortingQuery = fmt.Sprintf("orderdesc: %s", param.Id)
-		case false:
-
-			sortingQuery = fmt.Sprintf("orderasc: %s", param.Id)
-
-		}
-
-	}
-
-	if len(sortingQuery) == 0 {
-		sortingQuery = "orderdesc: task_created_at"
-	}
-
-	dgraphUser, err := business.GetDgraphUserTaskListForKanban(ctx, userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.Uid, filterQuery, helpers.ClosedLimit(r.URL.Query()))
+	dgraphUser, err := business.GetDgraphUserTaskListForKanban(ctx, userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.Uid, filterQuery, helpers.OpenLimit(r.URL.Query()), helpers.ClosedLimit(r.URL.Query()))
 
 	if err != nil {
 
@@ -415,46 +373,18 @@ func GetDgraphUserTaskList(w http.ResponseWriter, r *http.Request) {
 
 	filterQuery := strings.Join(filterStrings, " AND ")
 
-	sortParamString := queryParams["sorting"]
-
-	var sortParam []adapter.SortingParam
-
-	if len(sortParamString) != 0 {
-		err := json.Unmarshal([]byte(sortParamString[0]), &sortParam)
-		if err != nil {
-
-			helpers.LogErrorWithContext(ctx,
-				"controllers/GetDgraphUserTaskList Failed to parse sorting query param err: %+v",
-				err)
-
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "Failed to parse sorting query param",
-				"err": err,
-			})
-			return
-
-		}
-
-	}
-
-	sortingQuery := ""
-	for _, param := range sortParam {
-		if !dgraphquery.IsAllowedColumnName(param.Id) {
-			continue
-		}
-		switch param.Desc {
-		case true:
-			sortingQuery = fmt.Sprintf("orderdesc: %s", param.Id)
-		case false:
-
-			sortingQuery = fmt.Sprintf("orderasc: %s", param.Id)
-
-		}
-
-	}
-
-	if len(sortingQuery) == 0 {
-		sortingQuery = "orderdesc: task_created_at"
+	// One mapping from the sorts the list offers to the graph's: no key a
+	// request names is passed to the graph as it came.
+	sortingQuery, err := dgraphquery.TaskListOrder(queryParams.Get("sorting"))
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"controllers/GetDgraphUserTaskList Failed to parse sorting query param err: %+v",
+			err)
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+			"msg": "Failed to parse sorting query param",
+			"err": err,
+		})
+		return
 	}
 
 	dgraphUser, err := business.GetDgraphUserTaskList(ctx, userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.Uid, filterQuery, sortingQuery, pageSize, pageIndex, getAll)

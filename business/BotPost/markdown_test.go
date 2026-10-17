@@ -3,6 +3,8 @@ package botpost
 import (
 	"strings"
 	"testing"
+
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // What a model actually writes, and what a reader must see.
@@ -52,5 +54,29 @@ func TestRenderMarkdownIsSafe(t *testing.T) {
 		if strings.Contains(got, "<script") || strings.Contains(got, "javascript:") || strings.Contains(got, "<img") {
 			t.Errorf("renderMarkdown(%q) let something executable or remote through: %q", in, got)
 		}
+	}
+}
+
+// A reply nested deeper than the parser should be asked to read
+// (helpers.MarkdownTooDeep) is shown as its words, escaped, and never parsed:
+// 50,000 list items nested on one line (100 KB, a model's reply steered by
+// what it read) took goldmark 12 s and 7.5 GB of heap. At the limit it is
+// still Markdown.
+func TestARepliesMarkdownNestedPastTheLimitIsShownAsItsWords(t *testing.T) {
+	for _, deep := range []string{
+		strings.Repeat("- ", helpers.MaxMarkdownNesting+1) + "deepest <b>item</b>",
+		strings.Repeat(">", helpers.MaxMarkdownNesting+1) + " deepest <b>item</b>",
+	} {
+		got := renderMarkdown(deep, true)
+		if strings.Contains(got, "<ul>") || strings.Contains(got, "<blockquote>") || strings.Contains(got, "<b>") {
+			t.Fatalf("%.20q… was parsed: %.200s", deep, got)
+		}
+		if !strings.Contains(got, "deepest &lt;b&gt;item&lt;/b&gt;") || !strings.Contains(got, streamCursor) {
+			t.Fatalf("%.20q… lost its words or its cursor: %.200s", deep, got)
+		}
+	}
+	at := strings.Repeat("- ", helpers.MaxMarkdownNesting) + "deepest"
+	if got := renderMarkdown(at, false); strings.Count(got, "<ul>") != helpers.MaxMarkdownNesting {
+		t.Fatalf("%d levels should still be lists: %d", helpers.MaxMarkdownNesting, strings.Count(got, "<ul>"))
 	}
 }

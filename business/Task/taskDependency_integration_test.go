@@ -19,6 +19,7 @@ import (
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/akashc777/OneCamp/tests/integration"
+	"github.com/dgraph-io/dgo/v230"
 	"github.com/google/uuid"
 )
 
@@ -190,12 +191,24 @@ func TestTaskDependencies(t *testing.T) {
 	}
 
 	// A board marks a task still waiting on open work as blocked.
-	board, err := projectDomain.GetDgraphProjectTaskListForKanban(ctx, project, uids["admin"], "", dgraphStruct.BoardClosedLimit)
+	var todo []*dgraphStruct.DgraphTask
+	err := dgraphInit.InSnapshot(ctx, func(txn *dgo.Txn) error {
+		_, places, err := projectDomain.GetDgraphProjectBoardPlaces(ctx, txn, project, uids["admin"], "", dgraphStruct.BoardClosedLimit)
+		if err != nil {
+			return err
+		}
+		var ids []string
+		for _, p := range places["todo"].Places {
+			ids = append(ids, p.Uid)
+		}
+		todo, err = projectDomain.GetDgraphProjectBoardCards(ctx, txn, ids)
+		return err
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	blocked := map[string]uint32{}
-	for _, tk := range board.TasksTodo {
+	for _, tk := range todo {
 		blocked[tk.Uuid] = tk.BlockedOpen
 	}
 	if blocked[id["b"]] != 1 || blocked[id["c"]] != 1 || blocked[id["a"]] != 0 {

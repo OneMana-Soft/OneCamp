@@ -118,3 +118,30 @@ func GetEligibleUsersForProjectActivity(query string, projectId string, excludeU
 
 	return
 }
+
+// GetTaskCommentAudience runs query (domain/UserProjectNotification's
+// taskCommentAudienceQuery) for a project, the comment's writer, the task's
+// thread and whom the comment is for, and answers the user ids it finds.
+func GetTaskCommentAudience(query string, projectID string, writerID string, thread []string, forThem []string) (userIDs []string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
+	defer cancel()
+
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query, projectID, writerID, thread, forThem)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		userIDs = append(userIDs, id)
+	}
+	// A read cut off part way would be a short list with no error.
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return userIDs, nil
+}

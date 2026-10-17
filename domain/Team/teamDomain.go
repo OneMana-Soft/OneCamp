@@ -456,15 +456,15 @@ func GetDgraphTeamMemberListByTeamUUID(ctx context.Context, teamUUID string, use
 					team_name
 					team_is_admin: count(team_admins @filter(uid($userUid)))
 					team_is_member: count(team_members @filter(uid($userUid)))
-					team_members @filter(NOT eq(is_external, true)) (orderasc: user_name) {
+					team_members @filter(NOT eq(is_external, true)) {
 						user_uuid
 						user_name
 						user_email
 						user_profile_object_key
 					}
-					team_admins (orderasc: user_name) {
+					team_admins {
 						user_uuid
-						
+						user_name
 					}
 					team_created_by {
 						user_uuid
@@ -476,6 +476,12 @@ func GetDgraphTeamMemberListByTeamUUID(ctx context.Context, teamUUID string, use
 				}
 			}`
 	dgraphTeamInfo, err = dgraphModels.GetDgraphTeamInfoByUUID(ctx, query, variables)
+	if err == nil && dgraphTeamInfo != nil {
+		// By name, sorted here: Dgraph stops a sorted block at 1,000. Callers
+		// walk the two lists side by side, so both are sorted alike.
+		dgraphStruct.SortUsersByName(dgraphTeamInfo.Admins)
+		dgraphStruct.SortUsersByName(dgraphTeamInfo.Members)
+	}
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

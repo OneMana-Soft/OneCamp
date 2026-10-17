@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -298,6 +299,39 @@ func TestTaskGitHubRoutesBelongToTheProject(t *testing.T) {
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
+
+		// The close is the one thing that reads a deleted task's project. A
+		// refresh applies GitHub's copy, the issue's title, state and
+		// comments, onto the task and tells its people of them: a deleted
+		// task is gone to it, refused before it asks GitHub anything or
+		// touches the task's sync state. Since the guard read a deleted
+		// task's project, it let the refresh through.
+		syncState := func() (status string) {
+			_ = env.PG.QueryRow(`SELECT COALESCE(github_sync_status, '') FROM tasks WHERE id = $1`, w.task).Scan(&status)
+			return status
+		}
+		for settle := time.Now().Add(20 * time.Second); syncState() != "synced" && time.Now().Before(settle); {
+			time.Sleep(100 * time.Millisecond) // the close's own write after GitHub answered
+		}
+		synced := syncState()
+		gh.reset()
+		rc := chi.NewRouteContext()
+		rc.URLParams.Add("task_uuid", w.task)
+		rec := httptest.NewRecorder()
+		taskController.RefreshFromGitHub(rec, httptest.NewRequest(http.MethodPost, "/", nil).WithContext(context.WithValue(w.as("ana"), chi.RouteCtxKey, rc)))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("refreshing a deleted task: %d %s, want 404", rec.Code, rec.Body.String())
+		}
+		if err := githubBusiness.RefreshFromGitHub(ctx, uuid.MustParse(w.task), true, nil); !errors.Is(err, helpers.ErrNotFound) {
+			t.Errorf("a deleted task's refresh answered %v, want it gone (not found)", err)
+		}
+		time.Sleep(time.Second) // a refresh the route started has had its time
+		if n := gh.count("/repos/acme/docs/issues/4"); n != 0 {
+			t.Errorf("refreshing a deleted task asked GitHub for its issue %d times: %v", n, gh.calls())
+		}
+		if status := syncState(); status != synced {
+			t.Errorf("refreshing a deleted task left its sync %q, want %q as the close left it", status, synced)
+		}
 	})
 
 	// Last: it takes the graph away. A failed read was answered as "not
@@ -342,11 +376,12 @@ func seedGitHubWorkspace(t *testing.T, env *integration.Env, dg *integration.Dgr
 	t.Helper()
 	w := &githubWorkspace{t: t, db: env, people: map[string]uuid.UUID{}}
 	nodes := []map[string]any{}
+	live := "0001-01-01T00:00:00Z"
 	for _, name := range []string{"ana", "ben", "cy"} {
 		id := uuid.New()
 		w.people[name] = id
 		w.exec(`INSERT INTO users (id, email_id, username, display_name, created_at, updated_at) VALUES ($1, $2 || '@acme.test', $2, $2, NOW(), NOW())`, id, name)
-		nodes = append(nodes, map[string]any{"uid": "_:" + name, "dgraph.type": "User", "user_uuid": id.String(), "user_name": name})
+		nodes = append(nodes, map[string]any{"uid": "_:" + name, "dgraph.type": "User", "user_uuid": id.String(), "user_name": name, "user_deleted_at": live})
 	}
 	w.project, w.billing = uuid.NewString(), uuid.NewString()
 	w.task, w.other, w.third = uuid.NewString(), uuid.NewString(), uuid.NewString()
@@ -358,7 +393,6 @@ func seedGitHubWorkspace(t *testing.T, env *integration.Env, dg *integration.Dgr
 		VALUES ($1, 'acme', 'web', true, true, $3), ($2, 'acme', 'billing', true, true, $3)`, w.project, w.billing, w.people["ana"])
 	w.exec(`INSERT INTO integrations (entity_type, entity_id, provider, access_token) VALUES ('org', $1, 'github', 'test-token')`, uuid.Nil)
 
-	live := "0001-01-01T00:00:00Z"
 	tasks := []map[string]any{}
 	for i, task := range []string{w.task, w.other, w.third} {
 		tasks = append(tasks, map[string]any{"dgraph.type": "Task", "task_uuid": task, "task_name": []string{"Fix login", "Severance letters", "Billing export"}[i],

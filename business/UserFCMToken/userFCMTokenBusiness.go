@@ -67,17 +67,6 @@ func GetFCMTokenByListOfUserId(ctx context.Context, userIds []string) (tokens []
 	return
 }
 
-func GetFCMTokensForNewProjectActivityExcludingUserId(ctx context.Context, userId string, projectId string, membersList []string, mentionsList []string) (tokens []string, err error) {
-	tokens, err = domain.GetFCMTokensForNewProjectActivityExcludingUserId(ctx, userId, projectId, membersList, mentionsList)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetFCMTokensForNewProjectActivityExcludingUserId Failed to fcm tokens from list of userId err: %+v",
-			err)
-		return
-	}
-	return
-}
-
 func DeleteFromListOfFCMToken(ctx context.Context, tokens []string) (err error) {
 	err = domain.DeleteFromListOfFCMToken(ctx, tokens)
 	if err != nil {

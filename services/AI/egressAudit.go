@@ -28,5 +28,5 @@ func auditEgressBlocked(ctx context.Context, op string, kind ProviderType) {
 		e.ActorID = &id
 		e.ActorEmail = ui.UserPostgresInfo.EmailID
 	}
-	_ = auditModel.Insert(ctx, e)
+	auditModel.Append(e)
 }

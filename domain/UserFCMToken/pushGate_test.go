@@ -17,7 +17,6 @@ func TestEveryDeviceLookupAppliesThePushGate(t *testing.T) {
 	}{
 		{"GetFCMTokenByUserId", tokensOfPersonQuery, "users_fcm_token.user_id"},
 		{"GetFCMTokenByListOfUserId", tokensOfPeopleQuery(3), "users_fcm_token.user_id"},
-		{"GetFCMTokensForNewProjectActivityExcludingUserId", projectActivityTokensQuery, "uft.user_id"},
 		{"ReachableNow", reachableQuery, "u.id"},
 	} {
 		if !strings.Contains(c.query, stillActive(c.userCol)) {

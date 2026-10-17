@@ -32,3 +32,12 @@ func TestClosedLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenLimit(t *testing.T) {
+	q := func(s string) url.Values { v, _ := url.ParseQuery(s); return v }
+	for in, want := range map[string]int{"": 1000, "openLimit=x": 1000, "openLimit=0": 1000, "openLimit=-5": 1000, "openLimit=500": 500, "openLimit=2000": 2000, "openLimit=99999": 5000} {
+		if got := OpenLimit(q(in)); got != want {
+			t.Errorf("%q: got %d, want %d", in, got, want)
+		}
+	}
+}

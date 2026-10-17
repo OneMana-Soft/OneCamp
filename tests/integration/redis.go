@@ -106,3 +106,18 @@ func StubMqttClient(t *testing.T) {
 	mqttInit.MqttClient = MQTT.NewClient(MQTT.NewClientOptions().AddBroker("tcp://127.0.0.1:1"))
 	t.Cleanup(func() { mqttInit.MqttClient = nil })
 }
+
+// UseMqttClient gives the test c as the server's broker client until it ends:
+// a stand-in that records what is published, for a test about what reaches the
+// broker. Afterwards the client is an unconnected one, as StubMqttClient's,
+// so a publish from work still finishing can't dereference nil. (Beta's kit
+// has it in mqtt.go, where it also waits for background work before teardown;
+// this line has no such wait.)
+func UseMqttClient(t *testing.T, c MQTT.Client) {
+	t.Helper()
+	ensureLoggers()
+	mqttInit.MqttClient = c
+	t.Cleanup(func() {
+		mqttInit.MqttClient = MQTT.NewClient(MQTT.NewClientOptions().AddBroker("tcp://127.0.0.1:1"))
+	})
+}

@@ -113,11 +113,6 @@ type FilterParam struct {
 	Value interface{} `json:"value"`
 }
 
-type SortingParam struct {
-	Id   string      `json:"id"`
-	Desc interface{} `json:"desc"`
-}
-
 type TaskSearchString struct {
 	SearchString string `json:"taskSearchString"`
 }

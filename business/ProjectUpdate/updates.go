@@ -145,8 +145,8 @@ func MakeDraft(ctx context.Context, projectID uuid.UUID, userDgraphUID string, n
 	}
 	from := Window(last, now)
 	// Every task: a draft must see work finished long after it was created,
-	// which the board's newest-200 cap on Done would hide.
-	p, err := projectBusiness.GetDgraphProjectTaskListForKanban(ctx, projectID.String(), userDgraphUID, "", 0)
+	// which the board's newest-200 cap on Done would hide, and every open one.
+	p, err := projectBusiness.GetDgraphProjectTaskListForKanban(ctx, projectID.String(), userDgraphUID, "", 0, 0)
 	if err != nil || p == nil {
 		return nil, fmt.Errorf("read the project's tasks: %w", err)
 	}

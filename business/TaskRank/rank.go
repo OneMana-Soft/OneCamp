@@ -41,10 +41,49 @@ func Effective(t *dgraphStruct.DgraphTask) float64 {
 	return 0
 }
 
-// Sort orders a column in place. Ties keep the order they came in, which is
-// newest first from the queries that feed it.
+// Sort orders a column in place: by rank, then newest first, then by uuid, so
+// the order is the same however the tasks came in. A board pages a column by
+// this order (Window), and a page must be the start of the next, bigger one.
 func Sort(tasks []*dgraphStruct.DgraphTask) {
-	sort.SliceStable(tasks, func(i, j int) bool { return Effective(tasks[i]) < Effective(tasks[j]) })
+	sort.SliceStable(tasks, func(i, j int) bool { return less(tasks[i], tasks[j]) })
+}
+
+func less(a, b *dgraphStruct.DgraphTask) bool {
+	if ra, rb := Effective(a), Effective(b); ra != rb {
+		return ra < rb
+	}
+	if ca, cb := createdMilli(a), createdMilli(b); ca != cb {
+		return ca > cb
+	}
+	return a.Uuid < b.Uuid
+}
+
+func createdMilli(t *dgraphStruct.DgraphTask) int64 {
+	if t == nil || t.CreatedAt == nil {
+		return 0
+	}
+	return t.CreatedAt.UnixMilli()
+}
+
+// Window sorts a board column and keeps, of each part of it, the first n: a
+// part is what partOf names, one of the columns the board draws for this one
+// (its own status, or a project's custom status that counts as it), so a
+// part's first n come whole whatever the other parts hold. n of 0 or less
+// keeps every task.
+func Window(column []*dgraphStruct.DgraphTask, n int, partOf func(*dgraphStruct.DgraphTask) string) []*dgraphStruct.DgraphTask {
+	Sort(column)
+	if n <= 0 {
+		return column
+	}
+	kept := make([]*dgraphStruct.DgraphTask, 0, min(len(column), n))
+	taken := map[string]int{}
+	for _, t := range column {
+		if part := partOf(t); taken[part] < n {
+			taken[part]++
+			kept = append(kept, t)
+		}
+	}
+	return kept
 }
 
 // Between is the rank for a card dropped between before (the card above it)

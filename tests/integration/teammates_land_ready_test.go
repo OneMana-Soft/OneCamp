@@ -1111,24 +1111,19 @@ func TestAnAllowListedDomainJoins(t *testing.T) {
 		t.Errorf("a listed address through GitHub: %v", err)
 	}
 
-	// The audit log names what the second save added and removed.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		var metadata string
-		var change struct {
-			Added   []string `json:"added"`
-			Removed []string `json:"removed"`
-		}
-		err := lr.env.PG.QueryRow(`SELECT COALESCE(metadata::text, '{}') FROM admin_audit_log WHERE action = 'settings.allowed_users'
-			ORDER BY created_at DESC LIMIT 1`).Scan(&metadata)
-		if err == nil && json.Unmarshal([]byte(metadata), &change) == nil &&
-			strings.Join(change.Added, ",") == "@acme.example" && strings.Join(change.Removed, ",") == "@old.example" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the audit log says %q (%v), want the entries added and removed", metadata, err)
-		}
-		time.Sleep(100 * time.Millisecond)
+	// The audit log names what the second save added and removed, as its
+	// latest row: the log keeps the order the saves were made in.
+	integration.Settle(t)
+	var metadata string
+	var change struct {
+		Added   []string `json:"added"`
+		Removed []string `json:"removed"`
+	}
+	err = lr.env.PG.QueryRow(`SELECT COALESCE(metadata::text, '{}') FROM admin_audit_log WHERE action = 'settings.allowed_users'
+		ORDER BY seq DESC LIMIT 1`).Scan(&metadata)
+	if err != nil || json.Unmarshal([]byte(metadata), &change) != nil ||
+		strings.Join(change.Added, ",") != "@acme.example" || strings.Join(change.Removed, ",") != "@old.example" {
+		t.Fatalf("the audit log says %q (%v), want the entries added and removed", metadata, err)
 	}
 }
 
