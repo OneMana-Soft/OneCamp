@@ -212,6 +212,10 @@ func CreateAgent(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
 		return
 	}
+	// The demo's shared visitor never points an agent outside the demo.
+	if strings.TrimSpace(in.AGUIEndpoint) != "" && helpers.RefuseDemoVisitor(w, userInfo.UserPostgresInfo.EmailID, helpers.DemoOutsideMsg) {
+		return
+	}
 	a, err := business.CreateAgent(ctx, in, userInfo.UserPostgresInfo.Id)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
@@ -257,6 +261,10 @@ func UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	var in business.AgentInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
+		return
+	}
+	if userInfo, _ := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo); strings.TrimSpace(in.AGUIEndpoint) != "" &&
+		helpers.RefuseDemoVisitor(w, userInfo.UserPostgresInfo.EmailID, helpers.DemoOutsideMsg) {
 		return
 	}
 	a, err := business.UpdateAgent(ctx, id, in, actorFrom(r))

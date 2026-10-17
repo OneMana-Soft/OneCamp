@@ -100,7 +100,7 @@ func TestSavedItems(t *testing.T) {
 		if err := runReminder(ctx, job(me, c)); err != nil {
 			t.Fatal(err)
 		}
-		got, _ := model.Get(ctx, me, c.ID)
+		got, _ := model.GetByID(ctx, c.ID)
 		if got.RemindedAt == nil {
 			t.Fatal("the due reminder was not marked sent")
 		}
@@ -119,7 +119,7 @@ func TestSavedItems(t *testing.T) {
 		if err := runReminder(ctx, old); err != nil {
 			t.Fatal(err)
 		}
-		got, _ := model.Get(ctx, me, b.ID)
+		got, _ := model.GetByID(ctx, b.ID)
 		if got.RemindedAt != nil {
 			t.Fatal("the stale job delivered a reminder that had been moved")
 		}
@@ -131,7 +131,7 @@ func TestSavedItems(t *testing.T) {
 		if err := runReminder(ctx, job(other, d)); err != nil {
 			t.Fatal(err)
 		}
-		got, _ := model.Get(ctx, me, d.ID)
+		got, _ := model.GetByID(ctx, d.ID)
 		if got.RemindedAt != nil {
 			t.Fatal("a job owned by another member delivered this member's reminder")
 		}
@@ -166,7 +166,7 @@ func TestSavedItems(t *testing.T) {
 		if err := Delete(ctx, me, a.ID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := model.Get(ctx, me, a.ID); !errors.Is(err, ErrNotFound) {
+		if _, err := model.GetByID(ctx, a.ID); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("still there: %v", err)
 		}
 	})

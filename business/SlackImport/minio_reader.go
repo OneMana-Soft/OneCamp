@@ -11,6 +11,7 @@ import (
 	"archive/zip"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/zipsafe"
 	minioInit "github.com/akashc777/OneCamp/initializers/minioInit"
 	"github.com/minio/minio-go/v7"
 )
@@ -176,7 +177,7 @@ func openMinioZip(ctx context.Context, objectKey string) (*Archive, func(), erro
 	if err != nil {
 		return nil, nil, err
 	}
-	zr, err := zip.NewReader(rdr, rdr.Size())
+	zr, err := zipsafe.Open(rdr, rdr.Size(), slackZipLimits())
 	if err != nil {
 		return nil, nil, fmt.Errorf("zip parse: %w", err)
 	}

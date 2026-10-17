@@ -42,19 +42,6 @@ var (
 	held chan struct{}
 )
 
-// Start moves the job to running from one of from and calls run in its own
-// goroutine, only while no earlier run of the job is alive; the job's lease is
-// released when run returns. It reports whether it started the job: false with
-// no error when the job is in none of from, ErrRunAlive while a run is still
-// ending, and the model's error (ErrConflictActiveJob among them) otherwise.
-func Start(ctx context.Context, jobId uuid.UUID, from []string, run func()) (bool, error) {
-	l, err := Take(jobId)
-	if err != nil {
-		return false, err
-	}
-	return l.Start(ctx, from, run)
-}
-
 // Lease is a job's run lease, taken before its run starts, for work that has
 // to happen with no run alive (retrying failed chunks resets them to pending,
 // which a worker still running would claim).

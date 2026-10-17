@@ -59,6 +59,17 @@ func Add(projectID, authorID uuid.UUID, health, body string, shared bool) (*Upda
 		RETURNING `+columns, projectID, authorID, health, body, shared))
 }
 
+// AddAt stores an update written at the given time: the demo's, which tell
+// a project's story over the days before the visitor arrives.
+func AddAt(projectID, authorID uuid.UUID, health, body string, shared bool, at time.Time) (*Update, error) {
+	ctx, cancel := withTimeout()
+	defer cancel()
+	return scan(postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `
+		INSERT INTO project_updates (project_uuid, author_uuid, health, body, shared_with_client, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $6)
+		RETURNING `+columns, projectID, authorID, health, body, shared, at))
+}
+
 // Edit changes an update's health, text and sharing; nil when it is gone.
 func Edit(id, projectID uuid.UUID, health, body string, shared bool) (*Update, error) {
 	ctx, cancel := withTimeout()

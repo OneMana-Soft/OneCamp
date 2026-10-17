@@ -28,13 +28,13 @@ import (
 	"time"
 
 	docAdapter "github.com/akashc777/OneCamp/adapter/Doc"
-	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	transcriptDomain "github.com/akashc777/OneCamp/domain/LiveKit"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/services/collab"
 )
 
 // maxDocTranscriptLines bounds what goes into the document body.
@@ -226,7 +226,7 @@ func createMeetingNotesDoc(
 		return "", nil
 	}
 
-	doc, err := docBusiness.CreateDoc(ctx, author, &docAdapter.InputCreateDoc{
+	doc, err := createDocAs(ctx, author, &docAdapter.InputCreateDoc{
 		DocTitle:   meetingNotesTitle(surfaceName, time.Now()),
 		DocPrivate: true,
 	}, audience...)
@@ -238,7 +238,11 @@ func createMeetingNotesDoc(
 	}
 
 	body := buildMeetingNotesHTML(recap, gapNote, lines, nameByUID)
-	if err := docBusiness.UpdateDoc(ctx, &docAdapter.InputUpdateDoc{DocId: doc.Uuid, Body: &body}); err != nil {
+	// The first body of a doc made a moment ago, seeded into its live copy
+	// (business/Doc SeedBodyLive): someone the notes are shared with may open
+	// it at once, and a body written under their copy would be undone or
+	// doubled.
+	if _, err := seedDocBody(ctx, doc.Uuid, body, collab.By{UserUUID: author.Uuid}); err != nil {
 		// The document exists but is empty. Reported rather than swallowed,
 		// because an empty "Meeting notes" document is a worse outcome than
 		// none and somebody should see it in the log.

@@ -64,17 +64,20 @@ var (
 	pingTimeout = 10 * time.Second
 )
 
-// connectTimings are the timings one effort to connect runs with, read from
-// the variables above once, when it starts. An effort left trying in the
-// background then reads nothing that a test puts back afterwards, so nothing
-// in the server has to exist only for a test to wait on it.
-type connectTimings struct {
+// ConnectTimings are the timings one effort to connect runs with, read from
+// the variables above once, when it starts (CurrentConnectTimings). An effort
+// left trying in the background then reads nothing that a test puts back
+// afterwards, so nothing in the server has to exist only for a test to wait
+// on it.
+type ConnectTimings struct {
 	attempt   time.Duration // connectAttemptTimeout
 	base, max time.Duration // connectBackoffBase, connectBackoffMax
 }
 
-func currentConnectTimings() connectTimings {
-	return connectTimings{attempt: connectAttemptTimeout, base: connectBackoffBase, max: connectBackoffMax}
+// CurrentConnectTimings reads the timings as they are now, for one effort to
+// connect: read it once, before the effort starts, and hand that value on.
+func CurrentConnectTimings() ConnectTimings {
+	return ConnectTimings{attempt: connectAttemptTimeout, base: connectBackoffBase, max: connectBackoffMax}
 }
 
 // ConnectMqtt connects the server's broker client, and keeps it connected.
@@ -116,15 +119,17 @@ func ConnectMqtt(mqttConfig *MqttConfig) (err error) {
 	}
 	MqttClient = client
 
-	timings := currentConnectTimings()
+	// One reading of the timings for both tries, the boot's and the
+	// background's: see ConnectWithBackoff.
+	timings := CurrentConnectTimings()
 	boot, cancel := context.WithTimeout(context.Background(), bootConnectWait)
 	defer cancel()
-	if err := connectWithBackoff(boot, client, timings); err == nil {
+	if err := ConnectWithBackoff(boot, client, timings); err == nil {
 		return nil
 	}
 	helpers.MessageLogs.ErrorLog.Printf("mqttInit/ConnectMqtt the broker at %s isn't answering yet: starting without live updates, and connecting in the background", mqttConfig.Broker)
 	background := backgroundConnect
-	helpers.GoSafeNamed("mqtt:connect", func() { _ = connectWithBackoff(background, client, timings) })
+	helpers.GoSafeNamed("mqtt:connect", func() { _ = ConnectWithBackoff(background, client, timings) })
 	return nil
 }
 
@@ -156,18 +161,21 @@ func onConnect(client MQTT.Client) {
 }
 
 // ConnectWithBackoff makes client's first connection. It tries, and after
-// each failure waits helpers.Backoff (connectBackoffBase doubling to
-// connectBackoffMax, with jitter) and tries again, until a CONNECT is accepted
-// or ctx ends, which bounds the whole wait. It returns as soon as one connect
-// succeeds. The caller builds the client, so it chooses the broker and the
-// client id: the server through ConnectMqtt, the integration kit with its own.
-// Each failure is logged once, with the pause before the next try.
-func ConnectWithBackoff(ctx context.Context, client MQTT.Client) error {
-	return connectWithBackoff(ctx, client, currentConnectTimings())
-}
-
-// connectWithBackoff is ConnectWithBackoff with the timings it was started with.
-func connectWithBackoff(ctx context.Context, client MQTT.Client, tm connectTimings) error {
+// each failure waits helpers.Backoff (tm's base doubling to its max, with
+// jitter) and tries again, until a CONNECT is accepted or ctx ends, which
+// bounds the whole wait. It returns as soon as one connect succeeds. The
+// caller builds the client, so it chooses the broker and the client id: the
+// server through ConnectMqtt, the integration kit with its own. Each failure
+// is logged once, with the pause before the next try.
+//
+// The timings come in as a value, read once by the caller
+// (CurrentConnectTimings) before the effort starts, and never from the
+// package's variables while it runs. ConnectMqtt hands the same value to its
+// boot try and to the loop it leaves in the background, so that loop reads
+// nothing a test puts back after ConnectMqtt returns: reading the variables
+// inside it raced with TestTheServerStartsWithoutTheBrokerAndKeepsTrying's
+// clean-up (d0545591). Don't fold the reading back in here.
+func ConnectWithBackoff(ctx context.Context, client MQTT.Client, tm ConnectTimings) error {
 	var err error
 	for attempt := 1; ; attempt++ {
 		if err = connectOnce(client, tm.attempt); err == nil {

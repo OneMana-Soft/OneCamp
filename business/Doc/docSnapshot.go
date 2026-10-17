@@ -1,14 +1,11 @@
 package businness
 
-// Document version history: a recoverable history of a doc's body that protects
-// against accidental mass-deletion (select-all-delete, bad paste, bad import).
-//
-// Mirrors the board snapshot system: the index lives in Postgres (doc_snapshots)
-// while the blob (gzipped HTML body) lives in MinIO. Retention is bounded by a
-// per-doc cap (pruned on write) and a daily age sweep. Snapshots are captured on
-// the collab persist path: periodically while editing, and the PRIOR body when
-// the incoming body shrinks sharply. Each version is attributed to the set of
-// users who edited it (see the collaboration service's contributor tracking).
+// Document version history, as business/Doc reads it: the index lives in
+// Postgres (doc_snapshots) and each version's body, gzipped HTML, in object
+// storage. Versions are taken, kept, named and pruned by the Snapshot Service
+// (business/Snapshot), which registers its save hook here; this file keeps the
+// reads the doc handlers still serve, the live restore, and the rules the save
+// path shares (the body hash, the unsafe-body check, a mass deletion).
 
 import (
 	"bytes"
@@ -17,51 +14,27 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
-	adapter "github.com/akashc777/OneCamp/adapter/Doc"
-	resourceViewBusiness "github.com/akashc777/OneCamp/business/ResourceView"
 	domain "github.com/akashc777/OneCamp/domain/Doc"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	minioInit "github.com/akashc777/OneCamp/initializers/minioInit"
 	snapshotModels "github.com/akashc777/OneCamp/models/postgres/DocSnapshot"
+	"github.com/akashc777/OneCamp/services/collab"
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 )
 
 const (
-	docSnapshotMinInterval       = 10 * time.Minute
-	docSnapshotKeepPerDoc        = 15
 	docSnapshotMassDeleteRatio   = 0.4
 	docSnapshotMassDeleteMinByte = 512
-	defaultDocSnapshotRetention  = 30
 )
 
 func docSnapshotBucket() string {
 	return helpers.UserUploadBucket()
-}
-
-func docSnapshotObjectKey(docUUID string) string {
-	return fmt.Sprintf("docSnapshot/%s/%s.gz", docUUID, uuid.New().String())
-}
-
-func docGzip(data []byte) ([]byte, error) {
-	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
-	if _, err := zw.Write(data); err != nil {
-		_ = zw.Close()
-		return nil, err
-	}
-	if err := zw.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
 }
 
 func docGunzip(data []byte) ([]byte, error) {
@@ -73,11 +46,13 @@ func docGunzip(data []byte) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(zr, 64<<20))
 }
 
-func putDocSnapshotObject(ctx context.Context, key string, body []byte) error {
-	_, err := minioInit.MinioClient.PutObject(ctx, docSnapshotBucket(), key,
-		bytes.NewReader(body), int64(len(body)),
-		minio.PutObjectOptions{ContentType: "application/gzip"})
-	return err
+// removeDocSnapshotObject deletes a version's body from object storage, for a
+// purge that removes a doc's versions with it (A3's trash, docTrash.go).
+func removeDocSnapshotObject(ctx context.Context, key string) {
+	if key == "" {
+		return
+	}
+	_ = minioInit.MinioClient.RemoveObject(ctx, docSnapshotBucket(), key, minio.RemoveObjectOptions{})
 }
 
 func getDocSnapshotObject(ctx context.Context, key string) ([]byte, error) {
@@ -87,94 +62,6 @@ func getDocSnapshotObject(ctx context.Context, key string) ([]byte, error) {
 	}
 	defer obj.Close()
 	return io.ReadAll(io.LimitReader(obj, 64<<20))
-}
-
-func removeDocSnapshotObject(ctx context.Context, key string) {
-	if key == "" {
-		return
-	}
-	_ = minioInit.MinioClient.RemoveObject(ctx, docSnapshotBucket(), key, minio.RemoveObjectOptions{})
-}
-
-func docDedupeNonEmpty(in []string) []string {
-	out := make([]string, 0, len(in))
-	seen := make(map[string]bool, len(in))
-	for _, v := range in {
-		if v == "" || seen[v] {
-			continue
-		}
-		seen[v] = true
-		out = append(out, v)
-	}
-	return out
-}
-
-// storeDocSnapshot gzips+uploads the body, records the index row, then prunes.
-func storeDocSnapshot(ctx context.Context, docUUID, body, reason string, contributors []string) error {
-	if strings.TrimSpace(body) == "" {
-		return nil
-	}
-	gz, err := docGzip([]byte(body))
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/storeDocSnapshot gzip failed err: %+v", err)
-		return err
-	}
-	key := docSnapshotObjectKey(docUUID)
-	if err := putDocSnapshotObject(ctx, key, gz); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/storeDocSnapshot upload failed err: %+v", err)
-		return err
-	}
-	if _, err := snapshotModels.CreateSnapshot(ctx, &snapshotModels.DocSnapshot{
-		DocUUID:          docUUID,
-		ObjectKey:        key,
-		BodyBytes:        len(body),
-		Reason:           reason,
-		ContributorUUIDs: docDedupeNonEmpty(contributors),
-	}); err != nil {
-		removeDocSnapshotObject(context.Background(), key)
-		return err
-	}
-	if keys, perr := snapshotModels.PruneDocSnapshots(ctx, docUUID, docSnapshotKeepPerDoc); perr == nil {
-		for _, k := range keys {
-			removeDocSnapshotObject(context.Background(), k)
-		}
-	}
-	return nil
-}
-
-// MaybeSnapshotDoc decides whether to capture a snapshot for a persist event.
-// Mirrors the board logic: prior body on a sharp shrink (mass-delete), else the
-// current body at most once per interval.
-func MaybeSnapshotDoc(ctx context.Context, docUUID, oldBody, newBody string, contributors []string) {
-	defer func() {
-		if r := recover(); r != nil {
-			helpers.LogErrorWithContext(ctx, "business/MaybeSnapshotDoc recovered from panic: %v", r)
-		}
-	}()
-
-	oldBytes := len(oldBody)
-	newBytes := len(newBody)
-
-	if oldBytes >= docSnapshotMassDeleteMinByte && float64(newBytes) < float64(oldBytes)*docSnapshotMassDeleteRatio {
-		if err := storeDocSnapshot(ctx, docUUID, oldBody, snapshotModels.ReasonMassDelete, contributors); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/MaybeSnapshotDoc mass-delete snapshot failed err: %+v", err)
-		}
-		return
-	}
-
-	if newBytes == 0 {
-		return
-	}
-
-	latest, err := snapshotModels.GetLatestSnapshot(ctx, docUUID)
-	if err != nil {
-		return
-	}
-	if latest == nil || time.Since(latest.CreatedAt) >= docSnapshotMinInterval {
-		if err := storeDocSnapshot(ctx, docUUID, newBody, snapshotModels.ReasonInterval, contributors); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/MaybeSnapshotDoc interval snapshot failed err: %+v", err)
-		}
-	}
 }
 
 // DocSnapshotContributor / DocSnapshotView mirror the board version-history
@@ -248,10 +135,16 @@ func ListDocSnapshots(ctx context.Context, docUUID string, userUID string) ([]*D
 	return views, nil
 }
 
-// RestoreDocSnapshot restores a doc's body to a chosen snapshot. The current
-// body is first snapshotted (attributed to the restoring user) so the restore
-// is reversible. Requires edit access or ownership. Takes effect on the next
-// fresh load (no connected collaborators).
+// RestoreDocSnapshot makes a version the doc's body, live: one transaction on
+// the copy the collaboration service holds, so everyone with the doc open sees it
+// at once and the next save keeps it (it used to write the body underneath the
+// live copy, and the next save undid it). The body as it was is kept first, as a
+// version credited to the restorer ("manual": before a restore), so the restore
+// can itself be undone. Requires edit access or ownership.
+//
+// The Snapshot Service's Restore does the same through the Access Resolver
+// (business/Snapshot); this serves /doc/restoreDocSnapshot until the history
+// UI moves to /doc/versions.
 func RestoreDocSnapshot(ctx context.Context, docUUID string, snapshotID uuid.UUID, userUID string, userUUID string) error {
 	doc, err := domain.GetBasicDgraphDocByUUID(ctx, docUUID, userUID)
 	if err != nil {
@@ -266,92 +159,47 @@ func RestoreDocSnapshot(ctx context.Context, docUUID string, snapshotID uuid.UUI
 	if !CanEdit(doc, userUID) {
 		return errors.New("unauthorized: edit access required to restore")
 	}
-
-	snap, err := snapshotModels.GetSnapshotByID(ctx, snapshotID, docUUID)
+	body, err := ReadDocVersionBody(ctx, docUUID, snapshotID)
 	if err != nil {
 		return err
 	}
-	if snap == nil {
-		return errors.New("snapshot not found")
-	}
-
-	gz, err := getDocSnapshotObject(ctx, snap.ObjectKey)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/RestoreDocSnapshot fetch blob failed err: %+v", err)
-		return errors.New("could not load the snapshot")
-	}
-	bodyBytes, err := docGunzip(gz)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/RestoreDocSnapshot decompress failed err: %+v", err)
-		return errors.New("the snapshot is corrupted")
-	}
-	body := string(bodyBytes)
-	if strings.TrimSpace(body) == "" {
-		return errors.New("the snapshot is empty")
-	}
-
-	// Snapshot the current body (pre-restore) so the restore can be undone.
-	if cur, cerr := domain.GetSystemDocByUUID(ctx, docUUID); cerr == nil && cur != nil && cur.Body != "" {
-		if serr := storeDocSnapshot(ctx, docUUID, cur.Body, snapshotModels.ReasonManual, []string{userUUID}); serr != nil {
-			helpers.LogErrorWithContext(ctx, "business/RestoreDocSnapshot pre-restore snapshot failed err: %+v", serr)
+	if _, err := ReplaceBodyLive(ctx, docUUID, body, collab.By{UserUUID: userUUID}, snapshotModels.ReasonManual); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/RestoreDocSnapshot live write failed err: %+v", err)
+		if errors.Is(err, collab.ErrUnavailable) {
+			return errors.New("the document can't be restored just now; try again in a moment")
 		}
-	}
-
-	// Persist the restored body (reuses UpdateDoc: recomputes snippet, syncs
-	// OpenSearch, re-embeds). Effective on next fresh collab load.
-	if err := UpdateDoc(ctx, &adapter.InputUpdateDoc{DocId: docUUID, Body: &body}); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/RestoreDocSnapshot persist failed err: %+v", err)
-		if errors.Is(err, ErrDocDeleted) {
-			return err // deleted while the version was being read
+		if errors.Is(err, collab.ErrDocInTrash) {
+			return ErrDocDeleted // deleted while the version was being read
 		}
 		return errors.New("could not restore the document")
 	}
 	return nil
 }
 
-func docSnapshotRetentionDays() int {
-	if v := os.Getenv("DOC_SNAPSHOT_RETENTION_DAYS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
+// ReadDocVersionBody is one version's body (gzipped HTML in object storage).
+func ReadDocVersionBody(ctx context.Context, docUUID string, snapshotID uuid.UUID) (string, error) {
+	snap, err := snapshotModels.GetSnapshotByID(ctx, snapshotID, docUUID)
+	if err != nil {
+		return "", err
 	}
-	return defaultDocSnapshotRetention
-}
-
-// StartDocSnapshotCleanupLoop runs daily and age-prunes doc snapshots.
-func StartDocSnapshotCleanupLoop() {
-	go func() {
-		time.Sleep(25 * time.Minute)
-		t := time.NewTicker(24 * time.Hour)
-		defer t.Stop()
-		for {
-			runDocSnapshotCleanupTick()
-			<-t.C
-		}
-	}()
-}
-
-func runDocSnapshotCleanupTick() {
-	ctx := context.Background()
-	defer func() {
-		if r := recover(); r != nil {
-			helpers.LogErrorWithContext(ctx, "business/doc snapshot cleanup recovered from panic: %v", r)
-		}
-	}()
-
-	cutoff := time.Now().AddDate(0, 0, -docSnapshotRetentionDays())
-	expired, err := snapshotModels.ListExpiredSnapshots(ctx, cutoff, 200)
-	if err != nil || len(expired) == 0 {
-		return
+	if snap == nil {
+		return "", errors.New("snapshot not found")
 	}
-	ids := make([]uuid.UUID, 0, len(expired))
-	for _, e := range expired {
-		removeDocSnapshotObject(ctx, e.ObjectKey)
-		ids = append(ids, e.ID)
+	gz, err := getDocSnapshotObject(ctx, snap.ObjectKey)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/ReadDocVersionBody fetch blob failed err: %+v", err)
+		return "", errors.New("could not load the snapshot")
 	}
-	if err := snapshotModels.DeleteByIDs(ctx, ids); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/doc snapshot cleanup delete rows failed err: %+v", err)
+	raw, err := docGunzip(gz)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/ReadDocVersionBody decompress failed err: %+v", err)
+		return "", errors.New("the snapshot is corrupted")
 	}
+	body := string(raw)
+	if strings.TrimSpace(body) == "" {
+		return "", errors.New("the snapshot is empty")
+	}
+	return body, nil
 }
 
 // collabBodyHash is the hash a saved Yjs state is stored with: SHA-256 of the
@@ -375,87 +223,4 @@ var ErrUnsafeCollabBody = errors.New("refusing to replace the document with an e
 func unsafeCollabBody(body string) bool {
 	b := strings.TrimSpace(body)
 	return b == "" || b == collabErrorBody
-}
-
-// UpdateDocFromCollab persists the doc body from the collaboration service and
-// evaluates a version snapshot off the persist path. Reads the prior body first
-// so a mass-deletion can preserve it. Best-effort snapshotting never blocks the
-// save.
-//
-// yjsState is the service's Yjs state for that body. It is saved with the
-// body's hash, in the same mutation as the body, and the service opens the doc
-// from it while the stored body is still this one
-// (collaboration-service/docState.js): rebuilding it from the body made a new
-// Yjs document, and a browser still holding the old one doubled every
-// paragraph.
-//
-// keepBody stores only the state, against the stored body's hash, and leaves
-// the body as it is. The service sends it in two cases:
-//   - it could not write this doc's HTML at all (collaboration-service/
-//     storeDoc.js): the state still holds every edit, so the next open has them;
-//   - it has just rebuilt the doc from its body (collaboration-service/
-//     lineage.js), with expectBodyHash, the hash of the body it rebuilt from:
-//     the state is stored only while that is still the body, so later opens use
-//     it instead of rebuilding (each rebuild was a new copy of the doc).
-//
-// A blank or placeholder body is refused outright.
-func UpdateDocFromCollab(ctx context.Context, docUUID, htmlBody, yjsState string, contributors []string, keepBody bool, expectBodyHash string) error {
-	if keepBody {
-		if yjsState == "" {
-			return errors.New("keepBody needs the document's Yjs state")
-		}
-		prev, err := domain.GetSystemDocByUUID(ctx, docUUID)
-		if err != nil {
-			return err
-		}
-		if prev == nil {
-			return ErrNotFound
-		}
-		// A deleted doc takes no saves, its state included (410). This read
-		// only spares a deleted doc the hashing: one deleted after it is
-		// refused by the write, which stores the state only on a live doc, in
-		// one transaction, as a full save does.
-		if IsDeleted(prev) {
-			return ErrDocDeleted
-		}
-		hash := collabBodyHash(prev.Body)
-		if expectBodyHash != "" {
-			if expectBodyHash != hash {
-				// The body changed since the rebuild: that state is not its state.
-				return nil
-			}
-		} else {
-			helpers.LogErrorWithContext(ctx, "business/UpdateDocFromCollab doc %s: the collaboration service could not write its HTML; kept the stored body, saved the Yjs state only", docUUID)
-		}
-		return domain.SetDocCollabState(ctx, docUUID, yjsState, hash)
-	}
-	if unsafeCollabBody(htmlBody) {
-		helpers.LogErrorWithContext(ctx, "business/UpdateDocFromCollab doc %s: refused a blank or placeholder body (%d bytes)", docUUID, len(htmlBody))
-		return ErrUnsafeCollabBody
-	}
-	newBytes := len(htmlBody)
-
-	// Only read the prior body when a mass-deletion is plausible (cheap cached
-	// size check); a normal edit skips the read. Cache miss / Redis-down falls
-	// back to reading so detection is never silently lost.
-	needOld := true
-	if cached, ok := resourceViewBusiness.CachedStateSize(ctx, resourceViewBusiness.ResourceDoc, docUUID); ok {
-		needOld = cached >= docSnapshotMassDeleteMinByte && float64(newBytes) < float64(cached)*docSnapshotMassDeleteRatio
-	}
-
-	var oldBody string
-	if needOld {
-		if prev, perr := domain.GetSystemDocByUUID(ctx, docUUID); perr == nil && prev != nil {
-			oldBody = prev.Body
-		}
-	}
-
-	if err := updateDoc(ctx, &adapter.InputUpdateDoc{DocId: docUUID, Body: &htmlBody}, yjsState, false); err != nil {
-		return err
-	}
-
-	resourceViewBusiness.SetCachedStateSize(ctx, resourceViewBusiness.ResourceDoc, docUUID, newBytes)
-
-	go MaybeSnapshotDoc(context.Background(), docUUID, oldBody, htmlBody, contributors)
-	return nil
 }

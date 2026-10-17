@@ -132,7 +132,7 @@ down; they never widen it. A token with `docs:read` held by someone who cannot o
 |---|---|
 | `tasks:read` / `tasks:write` | read tasks; change status, assignee, due date |
 | `projects:read` / `projects:write` | read projects and teams; create projects |
-| `docs:read` / `docs:write` | read documents; create documents |
+| `docs:read` / `docs:write` | list documents and read one as Markdown (`GET /v1/docs`, `GET /v1/docs/{id}`); create documents and add to the end of one (`POST /v1/docs`, `POST /v1/docs/{id}/append`) |
 | `messages:read` / `messages:write` | summarise conversations; post messages and DMs |
 | `tables:read` / `tables:write` | read and query tables; create and update rows |
 | `calendar:write` | create reminders and events |
@@ -147,7 +147,7 @@ scopes — that alone makes the whole write path unreachable for it.
 
 ## Governed tools
 
-All 31 of the 31 public tools are **governed**: before the tool runs, the server resolves
+All 33 of the 33 public tools are **governed**: before the tool runs, the server resolves
 exactly what the call will touch and checks the authorising person's live permission on
 it.
 
@@ -155,7 +155,7 @@ it.
 |---|---|---|
 | `tasks` | `list_tasks`, `list_project_tasks` | `update_task_status`, `assign_task`, `set_task_due_date`, `create_task` |
 | `projects` | `list_projects`, `read_project`, `list_teams` | `create_project` |
-| `docs` | `read_doc` | `create_doc` |
+| `docs` | `list_docs`, `read_doc` | `create_doc`, `append_to_doc` |
 | `messages` | `summarize_channel`, `summarize_dm`, `summarize_group_chat` | `send_message`, `send_dm`, `send_group_chat` |
 | `tables` | `list_tables`, `read_table`, `query_table`, `query_plan` | `create_table_row`, `update_table_row`, `link_table_rows` |
 | `search` | `search_workspace` | — |

@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/akashc777/OneCamp/business/DataTable/formula"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	formModel "github.com/akashc777/OneCamp/models/postgres/Form"
@@ -62,7 +63,9 @@ func TestAFormClosesWhenItsOwnerLeaves(t *testing.T) {
 	if _, err := GetPublic(ctx, f.Token); !errors.Is(err, ErrNoForm) {
 		t.Errorf("the form after its owner left the project: %v, want ErrNoForm", err)
 	}
-	if err := Submit(ctx, f.Token, map[string]any{"f1": "It broke"}, time.Now()); !errors.Is(err, ErrNoForm) {
+	// The signs a visitor who sends none is read in, as SubmitPublicForm
+	// passes them: the answer here is words.
+	if err := Submit(ctx, f.Token, map[string]any{"f1": "It broke"}, formula.NumberSigns{}, time.Now()); !errors.Is(err, ErrNoForm) {
 		t.Errorf("an answer after its owner left: %v, want ErrNoForm", err)
 	}
 

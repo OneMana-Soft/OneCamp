@@ -7,6 +7,7 @@ import (
 
 	adapter "github.com/akashc777/OneCamp/adapter/AI"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	ai "github.com/akashc777/OneCamp/services/AI"
 )
 
 // sortAttention must order by urgency tier first, then earliest due date within
@@ -114,6 +115,31 @@ func TestATaskHighlightSeparatesItsNameFromItsDescription(t *testing.T) {
 		t.Fatalf("a task with no description: %q", got)
 	}
 	if got := highlightText("post", "first\n\nsecond"); strings.Contains(got, "·") {
-		t.Fatalf("only tasks are split: %q", got)
+		t.Fatalf("only tasks and docs are split: %q", got)
+	}
+}
+
+// QA SH-09 (14 Oct 2026): a doc's title and body ran together in the
+// briefing, "Launch sync notes Attendees: Sam, Maya, Jonas". A highlight with a
+// name of its own sends it apart from the text under it.
+func TestADocHighlightSendsItsTitleApartFromItsBody(t *testing.T) {
+	if got := highlightText("doc", "Launch sync notes\n\nAttendees: Sam, Maya, Jonas"); got != "Launch sync notes · Attendees: Sam, Maya, Jonas" {
+		t.Fatalf("snippet: %q", got)
+	}
+	h := toBriefingHighlight(ai.SimilarResult{ContentType: "doc", ContentUUID: "d1", ContentText: "Launch sync notes\n\n<p>Attendees: Sam, Maya, Jonas</p>"})
+	if h.Title != "Launch sync notes" || h.Excerpt != "Attendees: Sam, Maya, Jonas" {
+		t.Fatalf("title %q, excerpt %q", h.Title, h.Excerpt)
+	}
+	for _, r := range []ai.SimilarResult{
+		{ContentType: "post", ContentText: "first\n\nsecond"},
+		{ContentType: "doc", ContentText: "A title alone"},
+	} {
+		if h := toBriefingHighlight(r); h.Title != "" || h.Excerpt != "" {
+			t.Fatalf("%s %q: title %q, excerpt %q", r.ContentType, r.ContentText, h.Title, h.Excerpt)
+		}
+	}
+	long := strings.Repeat("x", 300)
+	if h := toBriefingHighlight(ai.SimilarResult{ContentType: "task", ContentText: "Name\n\n" + long}); len([]rune(h.Excerpt)) > 161 {
+		t.Fatalf("excerpt not cut: %d runes", len([]rune(h.Excerpt)))
 	}
 }

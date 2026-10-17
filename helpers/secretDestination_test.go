@@ -12,8 +12,9 @@ import (
 )
 
 // The cases the web runs too (lib/utils/secretDestination.test.ts reads its
-// copy of this file), so the form asks for the secret exactly when the
-// server would refuse to keep it.
+// copy, testdata/secret_destination.json in the web repo, which must stay
+// byte-identical to this one), so the form asks for the secret exactly when
+// the server would refuse to keep it.
 type secretDestinationCase struct {
 	Why     string   `json:"why"`
 	From    string   `json:"from"`
@@ -28,10 +29,17 @@ func TestAStoredSecretStaysWithItsDestination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cases []secretDestinationCase
-	if err := json.Unmarshal(raw, &cases); err != nil {
+	var shared struct {
+		About string                  `json:"about"`
+		Cases []secretDestinationCase `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &shared); err != nil {
 		t.Fatal(err)
 	}
+	if !strings.Contains(shared.About, "byte-identical") {
+		t.Error("the case list no longer says it is shared with the web, byte for byte")
+	}
+	cases := shared.Cases
 	if len(cases) < 10 {
 		t.Fatalf("only %d cases", len(cases))
 	}

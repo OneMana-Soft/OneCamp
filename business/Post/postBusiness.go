@@ -1043,6 +1043,10 @@ func GetNewPosts(ctx context.Context, channelId string, edge helpers.PageEdge) (
 	return
 }
 
+// GetLatestPosts is a channel's newest page. The query reads one post past
+// the page, so whether there is more is what the graph holds: the page always
+// said there was none, and a long channel looked as if it began at its tenth
+// newest post.
 func GetLatestPosts(ctx context.Context, channelId string) (posts PostPagination, err error) {
 	dgraphPosts, err := domain.GetDgraphLatestPostFromDgraph(ctx, channelId)
 
@@ -1060,7 +1064,7 @@ func GetLatestPosts(ctx context.Context, channelId string) (posts PostPagination
 		posts.Posts = dgraphPosts
 	}
 
-	posts.HasMore = false
+	posts.HasMore = len(dgraphPosts) > domain.POST_COUNT
 
 	return
 }

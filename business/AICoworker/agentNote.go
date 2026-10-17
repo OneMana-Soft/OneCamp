@@ -134,8 +134,8 @@ func firstName(u *userModels.UserInfo) string {
 }
 
 // duePhrase says when something is due, in the member's zone: "due today at
-// 5:00 PM", "due tomorrow at 9:00 AM", "overdue since Thu, Sep 25". Empty when
-// the item has no exact time, so the caller falls back to its label.
+// 17:00", "due tomorrow at 09:00", "overdue since Thu 25 Sep". Empty when the
+// item has no exact time, so the caller falls back to its label.
 func duePhrase(dueTime string, loc *time.Location, now time.Time) string {
 	t, err := time.Parse(time.RFC3339, strings.TrimSpace(dueTime))
 	if err != nil {
@@ -145,15 +145,15 @@ func duePhrase(dueTime string, loc *time.Location, now time.Time) string {
 	day := func(x time.Time) time.Time { return time.Date(x.Year(), x.Month(), x.Day(), 0, 0, 0, 0, loc) }
 	switch days := int(day(t).Sub(day(now)).Hours() / 24); {
 	case t.Before(now) && days < 0:
-		return "overdue since " + t.Format("Mon, Jan 2")
+		return "overdue since " + t.Format(helpers.DayLayout)
 	case t.Before(now):
-		return "overdue since " + t.Format("3:04 PM")
+		return "overdue since " + t.Format(helpers.ClockLayout)
 	case days == 0:
-		return "due today at " + t.Format("3:04 PM")
+		return "due today at " + t.Format(helpers.ClockLayout)
 	case days == 1:
-		return "due tomorrow at " + t.Format("3:04 PM")
+		return "due tomorrow at " + t.Format(helpers.ClockLayout)
 	default:
-		return "due " + t.Format("Mon, Jan 2")
+		return "due " + t.Format(helpers.DayLayout)
 	}
 }
 

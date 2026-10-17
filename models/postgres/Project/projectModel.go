@@ -2,6 +2,7 @@ package models
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -139,4 +140,34 @@ func HardDeleteProject(query string, projectUUID uuid.UUID) (err error) {
 		return
 	}
 	return
+}
+
+// ArchivedProject is an archived project's id and when it was archived.
+type ArchivedProject struct {
+	Id         uuid.UUID
+	ArchivedAt time.Time
+}
+
+// ArchivedProjectsWithNamePrefix returns the archived projects whose name
+// starts with prefix, read literally (% and _ in it match only themselves).
+func ArchivedProjectsWithNamePrefix(ctx context.Context, prefix string) ([]ArchivedProject, error) {
+	ctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	escaped := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(prefix)
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx,
+		`SELECT id, deleted_at FROM projects WHERE project_name LIKE $1 ESCAPE '\' AND deleted_at IS NOT NULL`, escaped+"%")
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/ArchivedProjectsWithNamePrefix err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ArchivedProject
+	for rows.Next() {
+		var p ArchivedProject
+		if err := rows.Scan(&p.Id, &p.ArchivedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }

@@ -97,7 +97,7 @@ func TestPeopleSearchByEveryName(t *testing.T) {
 	}
 
 	// The forwarding and people-picker search, as its controller calls it.
-	list, err := userBusiness.GetChannelsAndUsers(ctx, uids["me"], searcher.String(), "priya.raman")
+	list, err := userBusiness.GetChannelsAndUsers(ctx, uids["me"], searcher.String(), "", "priya.raman")
 	if err != nil {
 		t.Fatal(err)
 	}

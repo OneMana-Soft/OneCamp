@@ -233,4 +233,9 @@ type AIStatusResponse struct {
 	// shows/hides the code_pr tool. Without this the tool exists on the server
 	// but can never be granted to an agent from the UI.
 	CodePREnabled bool `json:"code_pr_enabled"`
+	// DocActionNeeds is the least level on a doc each Doc AI action needs
+	// ("summarize": "view", "rewrite": "edit"): business/AI DocActionNeeds,
+	// which the server refuses by too, so the web offers a reader exactly the
+	// actions the server will run for them.
+	DocActionNeeds map[string]string `json:"doc_action_needs,omitempty"`
 }

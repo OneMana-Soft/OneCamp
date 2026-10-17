@@ -40,18 +40,18 @@ import (
 
 func TestTheServerComesBackAfterTheBrokerGoes(t *testing.T) {
 	broker := integration.SetupOwnBroker(t)
-	before := mqttInit.MqttClient
-	t.Cleanup(func() {
-		if mqttInit.MqttClient != nil {
-			mqttInit.MqttClient.Disconnect(100)
-		}
-		mqttInit.MqttClient = before
-	})
 
 	clientID := "backend-reconnect-" + uuid.NewString()[:8]
 	if err := mqttInit.ConnectMqtt(&mqttInit.MqttConfig{Broker: broker.MQTT, ClientID: clientID, Username: "backend", CleanSession: true}); err != nil {
 		t.Fatalf("connect the server's client: %v", err)
 	}
+	// ConnectMqtt installs the server's client, as main does. Cleanups run
+	// last first: the work the test handed off settles while that client is
+	// connected (UseMqttClient), the server gets an unconnected client again,
+	// and only then is this one disconnected, before the broker goes.
+	server := mqttInit.MqttClient
+	t.Cleanup(func() { server.Disconnect(100) })
+	integration.UseMqttClient(t, server)
 	since, _ := broker.Connection(t, clientID)
 	// The client subscribes once it is connected, a moment after ConnectMqtt
 	// returns.

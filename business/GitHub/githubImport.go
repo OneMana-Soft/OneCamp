@@ -580,7 +580,7 @@ func createTaskFromIssue(ctx context.Context, link *githubLinkModel.GitHubLink, 
 	if _, dgErr := taskDomain.CreateOrUpdateDgraphTask(ctx, dgraphTask); dgErr != nil {
 		helpers.LogErrorWithContext(ctx, "github/createTaskFromIssue Dgraph fields update failed for task=%s: %v", taskUUID.String(), dgErr)
 	}
-	go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "issue_opened",
+	_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "issue_opened",
 		nil, nil, nil, &issue.Title, &issue.Body, nil)
 	return nil
 }
@@ -612,7 +612,7 @@ func createTaskFromPR(ctx context.Context, link *githubLinkModel.GitHubLink, use
 	if _, dgErr := taskDomain.CreateOrUpdateDgraphTask(ctx, dgraphTask); dgErr != nil {
 		helpers.LogErrorWithContext(ctx, "github/createTaskFromPR Dgraph fields update failed for task=%s: %v", taskUUID.String(), dgErr)
 	}
-	go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "pr_opened",
+	_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "pr_opened",
 		nil, nil, nil, &pr.Title, &pr.Body, nil)
 	return nil
 }

@@ -233,9 +233,9 @@ func taskToAttentionItem(t *dgraphStruct.DgraphTask, now time.Time) adapter.Atte
 		due = t.DueDate.Format("2006-01-02")
 		dueTime = t.DueDate.UTC().Format(time.RFC3339)
 		if overdue {
-			sub = "Was due " + t.DueDate.Format("Jan 2")
+			sub = "Was due " + t.DueDate.Format(helpers.DateLayout)
 		} else {
-			sub = "Due " + t.DueDate.Format("Jan 2, 3:04 PM")
+			sub = "Due " + t.DueDate.Format(helpers.DateLayout+", "+helpers.ClockLayout)
 		}
 	}
 	project := ""

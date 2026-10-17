@@ -559,6 +559,11 @@ func (s *LiveKitServiceStruct) roomHasHumanParticipantsExcluding(ctx context.Con
 // NumParticipants > 0 (rooms with zero participants can't have a human).
 // Rooms whose only participant is the agent are excluded from the result.
 func (s *LiveKitServiceStruct) HumanActiveRoomNames(ctx context.Context) (map[string]bool, error) {
+	// No calls server connected: no call is active. The sidebar asks on every
+	// read, and a nil client took the whole read down with it.
+	if s.LiveKitClient == nil {
+		return nil, errors.New("livekit isn't connected")
+	}
 	rooms, err := s.ListAllRooms(ctx)
 	if err != nil {
 		return nil, err

@@ -1,6 +1,7 @@
 package helpers
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -41,8 +42,23 @@ func WriteReadFailure(w http.ResponseWriter, r *http.Request, err error, what, w
 		WriteJSON(w, http.StatusNotFound, Envolope{"msg": upperFirst(what) + " not found"})
 		return
 	}
-	LogErrorWithContext(r.Context(), "%s couldn't read the %s: %+v", where, what, err)
+	LogReadFailure(r.Context(), err, where+" couldn't read the "+what)
 	WriteRetryLater(w, "Couldn't load the "+what+".")
+}
+
+// LogReadFailure logs a read of one thing that failed, under where: the store
+// didn't answer, or its answer couldn't be read. A read that found nothing
+// (ErrNotFound) is an answer, not a failure, and isn't logged: a doc deleted
+// for good a moment ago is an ordinary find for a sweep that still had work
+// for it, or for a link opened after it went, and only the caller can say
+// whether it was expected (WriteReadFailure answers it with a 404). It says
+// whether it logged.
+func LogReadFailure(ctx context.Context, err error, where string) bool {
+	if err == nil || errors.Is(err, ErrNotFound) {
+		return false
+	}
+	LogErrorWithContext(ctx, "%s: %+v", where, err)
+	return true
 }
 
 // upperFirst is s with its first letter in capitals ("task" -> "Task").

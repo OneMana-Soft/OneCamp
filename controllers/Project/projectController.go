@@ -2,6 +2,7 @@ package controllers
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,7 +26,6 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
-	dgraphProjectModel "github.com/akashc777/OneCamp/models/dgraph/Project"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
@@ -68,7 +68,7 @@ func CreateProject(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to team dgraph info",
+			"msg": "Couldn't create the project. Try again.",
 			"err": err,
 		})
 		return
@@ -99,7 +99,7 @@ func CreateProject(w http.ResponseWriter, r *http.Request) {
 		}
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "controllers/CreateProject template err: %+v", err)
-			helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Templates couldn't be read just now. Try again in a moment."})
+			helpers.WriteRetryLater(w, "Templates couldn't be read just now.")
 			return
 		}
 		template = &t
@@ -237,7 +237,7 @@ func RemoveAttachmentFromProject(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get project dgraph info",
+			"msg": "Couldn't remove the file. Try again.",
 			"err": err,
 		})
 		return
@@ -260,7 +260,7 @@ func RemoveAttachmentFromProject(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get project dgraph info",
+			"msg": "Couldn't remove the file. Try again.",
 			"err": err,
 		})
 		return
@@ -388,47 +388,22 @@ func RemoveAdminRoleFromMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dgraphProject, err := business.GetBasicDgraphProjectInfoWithGivenMemberUUID(ctx, addProjectMemberInputInfo.ProjectUuid, userInfo.UserDgraphInfo.Uid, addProjectMemberInputInfo.UserUuid)
-
 	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/RemoveAdminRoleFromMember Failed to get basic dgraph project info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get basic dgraph project info",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "project", "controllers/RemoveAdminRoleFromMember")
 		return
-
+	}
+	if status, msg := memberChangeRefusal(dgraphProject, removeAdmin, userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid); status != 0 {
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
+		return
 	}
 
-	if !managesMembers(dgraphProject) || len(dgraphProject.Members) == 0 || dgraphProject.CreatedBy.Uuid == addProjectMemberInputInfo.UserUuid {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+	if err := business.RemoveAdminMemberFromProject(ctx, dgraphProject.Members[0].Uid, dgraphProject.Uid); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/RemoveAdminRoleFromMember Failed to remove admin role err: %+v", err)
+		helpers.WriteRetryLater(w, "Couldn't change their role.")
 		return
-
 	}
 
-	err = business.RemoveAdminMemberFromProject(ctx, dgraphProject.Members[0].Uid, dgraphProject.Uid)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/RemoveAdminRoleFromMember Failed to remove admin role err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to remove admin role",
-			"err": err,
-		})
-		return
-
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "member removed from project!"})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": doneWords[removeAdmin]})
 
 }
 
@@ -452,17 +427,12 @@ func RemoveMemberFromProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dgraphProject, err := business.GetBasicDgraphProjectInfoWithGivenMemberUUID(ctx, addProjectMemberInputInfo.ProjectUuid, userInfo.UserDgraphInfo.Uid, addProjectMemberInputInfo.UserUuid)
-	if errors.Is(err, dgraphProjectModel.ErrNotFound) {
-		// No such project: memberRemovalRefusal answers it as not found.
-		dgraphProject, err = nil, nil
-	}
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/RemoveMemberFromProject Failed to get basic dgraph project info err: %+v", err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't take them off the project. Try again."})
+		helpers.WriteReadFailure(w, r, err, "project", "controllers/RemoveMemberFromProject")
 		return
 	}
 
-	if status, msg := memberRemovalRefusal(dgraphProject, userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid); status != 0 {
+	if status, msg := memberChangeRefusal(dgraphProject, takeOff, userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid); status != 0 {
 		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
@@ -480,7 +450,7 @@ func RemoveMemberFromProject(w http.ResponseWriter, r *http.Request) {
 	auditBusiness.Record(r, "project.member.remove", auditBusiness.CategorySecurity, summary,
 		map[string]interface{}{"project_uuid": dgraphProject.Uuid, "user_uuid": dgraphProject.Members[0].Uuid})
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Taken off the project."})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": doneWords[takeOff]})
 
 }
 
@@ -505,17 +475,8 @@ func GetDgraphProjectAttachmentList(w http.ResponseWriter, r *http.Request) {
 	dgraphProject, err := business.GetDgraphProjectAttachmentsInfo(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid)
 
 	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDgraphProjectAttachmentList Failed to get basic dgraph attachment list info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get basic dgraph attachment list",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "project", "controllers/GetDgraphProjectAttachmentList")
 		return
-
 	}
 
 	if dgraphProject.IsProjectMember == 0 {
@@ -537,22 +498,16 @@ func GetDgraphProjectCombinedMemberInfo(w http.ResponseWriter, r *http.Request) 
 	projectUUIDString := chi.URLParam(r, "project_uuid")
 
 	dgraphProject, err := business.GetDgraphProjectCombinedMemberInfo(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDgraphProjectCombinedMemberInfo Failed to get dgraph member info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph member info",
-			"err": err,
-		})
-		return
-
+	if err == nil && dgraphProject == nil {
+		err = helpers.ErrNotFound
 	}
 
-	if dgraphProject.IsProjectMember == 0 && dgraphProject.Team.IsAdmin == 0 {
+	if err != nil {
+		helpers.WriteReadFailure(w, r, err, "project", "controllers/GetDgraphProjectCombinedMemberInfo")
+		return
+	}
+
+	if dgraphProject.IsProjectMember == 0 && (dgraphProject.Team == nil || dgraphProject.Team.IsAdmin == 0) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not authorised",
 		})
@@ -584,17 +539,8 @@ func GetDgraphProjectMemberList(w http.ResponseWriter, r *http.Request) {
 	dgraphProject, err := business.GetDgraphProjectMemberInfo(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid)
 
 	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDgraphProjectMemberList Failed to get basic dgraoh project info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get project info",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "project", "controllers/GetDgraphProjectMemberList")
 		return
-
 	}
 
 	if dgraphProject.IsProjectMember == 0 {
@@ -619,18 +565,13 @@ func ProjectInfo(w http.ResponseWriter, r *http.Request) {
 
 	dgraphProject, err := business.GetBasicDgraphProjectInfo(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid)
 
+	// No project by that id is a 404 and a failed read a 503 (it answered
+	// 400 for both, which the app could only call a connection problem:
+	// PTC-1). Someone outside the project is refused below, 403: the app says
+	// "You can't see this project".
 	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/ProjectInfo Failed to get basic dgraoh project info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get project info",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "project", "controllers/ProjectInfo")
 		return
-
 	}
 
 	if dgraphProject.IsProjectMember == 0 {
@@ -645,16 +586,16 @@ func ProjectInfo(w http.ResponseWriter, r *http.Request) {
 	var notificationType string
 	notificationType, err = userProjectNotificationBusiness.GetNotificationTypeByUserIdAndProjectId(userInfo.UserDgraphInfo.Uuid, projectUUIDString)
 
+	// A member with no choice saved hears about everything, the level a new
+	// member gets; only a read that failed fails the page.
+	if errors.Is(err, sql.ErrNoRows) {
+		notificationType, err = "all", nil
+	}
 	if err != nil {
-
 		helpers.LogErrorWithContext(ctx,
 			"controllers/ProjectInfo Failed to get users notificationType err: %+v",
 			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get users notificationType",
-			"err": err,
-		})
+		helpers.WriteRetryLater(w, "Couldn't load the project.")
 		return
 	}
 	dgraphProject.NotificationType = notificationType
@@ -694,7 +635,7 @@ func UpdateProjectName(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph project",
+			"msg": "Couldn't rename the project. Try again.",
 			"err": err,
 		})
 		return
@@ -772,49 +713,22 @@ func AddMemberToProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dgraphProject, err := business.GetBasicDgraphProjectInfoWithGivenMemberAndTeamUUID(ctx, addProjectMemberInputInfo.ProjectUuid, userInfo.UserDgraphInfo.Uid, addProjectMemberInputInfo.UserUuid)
-
 	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/AddMemberToProject Failed to get project info from dgraph err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get project info from dgraph",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "project", "controllers/AddMemberToProject")
 		return
-
 	}
-
-	if !managesMembers(dgraphProject) || dgraphProject.Team == nil || len(dgraphProject.Team.Members) == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+	if status, msg := memberChangeRefusal(dgraphProject, addMember, userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid); status != 0 {
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
 
-	if len(dgraphProject.Team.Members) > 0 && dgraphProject.Team.Members[0].IsExternal {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Cannot add external users to projects",
-		})
+	if err := business.AddMemberToProject(ctx, projectUUID, dgraphProject.Team.Members[0].Uid, dgraphProject.Team.Members[0].Uuid); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/AddMemberToProject Failed to add member to project err: %+v", err)
+		helpers.WriteRetryLater(w, "Couldn't add them to the project.")
 		return
 	}
 
-	err = business.AddMemberToProject(ctx, projectUUID, dgraphProject.Team.Members[0].Uid, dgraphProject.Team.Members[0].Uuid)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/AddMemberToProject Failed to add member to project err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to add member to project",
-			"err": err,
-		})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Added member to project!"})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": doneWords[addMember]})
 
 }
 
@@ -837,13 +751,6 @@ func AddAdminMemberToProject(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 
-	}
-
-	if len(addProjectMemberInputInfo.UserUuid) == 0 || len(addProjectMemberInputInfo.ProjectUuid) == 0 {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
-		return
 	}
 
 	projectUUID, err := uuid.Parse(addProjectMemberInputInfo.ProjectUuid)
@@ -873,42 +780,22 @@ func AddAdminMemberToProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	dgraphProject, err := business.GetBasicDgraphProjectInfoWithGivenMemberUUID(ctx, addProjectMemberInputInfo.ProjectUuid, userInfo.UserDgraphInfo.Uid, addProjectMemberInputInfo.UserUuid)
-
 	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/AddAdminMemberToProject Failed to get project info from dgraph err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get project info from dgraph",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "project", "controllers/AddAdminMemberToProject")
 		return
-
 	}
-
-	if !managesMembers(dgraphProject) || len(dgraphProject.Members) == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+	if status, msg := memberChangeRefusal(dgraphProject, makeAdmin, userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid); status != 0 {
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
 
-	err = business.AddAdminMemberToProject(ctx, projectUUID, dgraphProject.Members[0].Uid)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/AddAdminMemberToProject Failed to add admin member to project err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to add admin member to project",
-			"err": err,
-		})
+	if err := business.AddAdminMemberToProject(ctx, projectUUID, dgraphProject.Members[0].Uid); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/AddAdminMemberToProject Failed to add admin member to project err: %+v", err)
+		helpers.WriteRetryLater(w, "Couldn't make them an admin.")
 		return
 	}
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Added member admin to project!"})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": doneWords[makeAdmin]})
 
 }
 
@@ -953,7 +840,7 @@ func ArchiveProject(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph project info",
+			"msg": "Couldn't archive the project. Try again.",
 			"err": err,
 		})
 		return
@@ -1030,7 +917,7 @@ func UnArchiveProject(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph project info",
+			"msg": "Couldn't restore the project. Try again.",
 			"err": err,
 		})
 		return
@@ -1081,15 +968,7 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 	dgraphProject, err := business.GetBasicDgraphProjectInfo(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid)
 
 	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProjectTaskList Failed to get dgraph project err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph project",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "project", "controllers/GetProjectTaskList")
 		return
 	}
 
@@ -1225,7 +1104,7 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph user task",
+			"msg": "Couldn't load the project's tasks.",
 			"err": err,
 		})
 		return
@@ -1272,15 +1151,7 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 	dgraphProject, err := business.GetBasicDgraphProjectInfo(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid)
 
 	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProjectTaskListForKanban Failed to get dgraph project err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph project",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "project", "controllers/GetProjectTaskListForKanban")
 		return
 	}
 
@@ -1379,7 +1250,7 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph user task",
+			"msg": "Couldn't load the project's board.",
 			"err": err,
 		})
 		return

@@ -80,6 +80,8 @@ type DgraphComment struct {
 	DeletedAt      *time.Time          `json:"comment_deleted_at,omitempty"`
 	ContentAddedBy *DgraphUser         `json:"comment_on_content_added_by,omitempty"`
 	DType          []string            `json:"dgraph.type,omitempty"`
+	// ThreadID is the anchored thread a doc comment belongs to (business/Thread).
+	ThreadID string `json:"comment_thread_id,omitempty"`
 }
 
 type ReactionCount struct {
@@ -140,7 +142,16 @@ type DgraphChannel struct {
 	UnreadPostCount  uint64             `json:"unread_post_count,omitempty"`
 	CallActive       bool               `json:"ch_call_active"`
 	NotificationType string             `json:"notification_type,omitempty"` // not used in dgraph or postgres (Only used in returning for FE)
-	DType            []string           `json:"dgraph.type,omitempty"`
+	// HasGuestAccess says people outside the workspace can read the channel
+	// now (a live guest link, with guest access on), for the marker members
+	// see beside its name. Set on the channel reads (business/Channel
+	// MarkGuestAccess), never stored: omitempty keeps it out of every write
+	// of this struct, so absent reads as false.
+	HasGuestAccess bool     `json:"has_guest_access,omitempty"`
+	DType          []string `json:"dgraph.type,omitempty"`
+	// UnreadMentionCount is how many of its unread posts mention the reader:
+	// the sidebar's "@2". Set on the sidebar's read, never stored.
+	UnreadMentionCount uint64 `json:"unread_mention_count,omitempty"`
 }
 
 type DgraphUser struct {
@@ -177,6 +188,7 @@ type DgraphUser struct {
 	Channels    []*DgraphChannel `json:"user_channels,omitempty"`
 	FavChannels []*DgraphChannel `json:"user_fav_channels,omitempty"`
 	IsAdmin     bool             `json:"user_is_admin,omitempty"`
+	DemoVisitor bool             `json:"user_demo_visitor,omitempty"` // on your own profile only: you are the public demo's shared visitor (helpers.IsDemoVisitor). Never stored.
 	IsExternal  bool             `json:"is_external,omitempty"`
 	IsBot       bool             `json:"is_bot,omitempty"`
 	// BotKind says WHICH kind of bot this principal is. Computed at response
@@ -330,6 +342,73 @@ type DgraphDoc struct {
 	ArchivedAt     *time.Time       `json:"doc_archived_at,omitempty"`
 	LinkedTasks    []*DgraphTask    `json:"linked_tasks,omitempty"`    // query-only: tasks linking this doc
 	LinkedProjects []*DgraphProject `json:"linked_projects,omitempty"` // query-only: projects linking this doc
+
+	// The page tree (business/Tree): the doc's parent, and its place among its
+	// siblings, a fractional key (business/Tree/position).
+	Parent   *DgraphDoc `json:"doc_parent,omitempty"`
+	Position string     `json:"doc_position,omitempty"`
+	// The project's or team's space the doc is in. None: its owner's own, or
+	// the workspace's, by its privacy.
+	SpaceKind string `json:"doc_space_kind,omitempty"`
+	SpaceUUID string `json:"doc_space_uuid,omitempty"`
+
+	// How it looks.
+	Icon        string `json:"doc_icon,omitempty"`
+	CoverKey    string `json:"doc_cover_key,omitempty"`
+	CoverOffset *int   `json:"doc_cover_offset,omitempty"`
+	FullWidth   *bool  `json:"doc_full_width,omitempty"`
+	Font        string `json:"doc_font,omitempty"`
+	SmallText   *bool  `json:"doc_small_text,omitempty"`
+
+	// Owner is who owns the doc now: its maker until it is handed on. Nil on a
+	// doc made before owners were recorded, which its maker owns.
+	Owner *DgraphUser `json:"doc_owner,omitempty"`
+	// OwnerNamed is the owner with their name, as a doc's page reads it
+	// (query-only, GetDgraphDocByUUID); the page answers it as doc_owner.
+	OwnerNamed *DgraphUser `json:"doc_owner_named,omitempty"`
+	// BacklinkCount is how many live docs link to it (query-only): the page
+	// keeps "Linked from"'s row for it from the first paint.
+	BacklinkCount   int           `json:"doc_backlink_count,omitempty"`
+	FullAccessUsers []*DgraphUser `json:"doc_full_access_users,omitempty"`
+	TeamEditors     []*DgraphTeam `json:"doc_team_editors,omitempty"`
+	TeamCommenters  []*DgraphTeam `json:"doc_team_commenters,omitempty"`
+	TeamViewers     []*DgraphTeam `json:"doc_team_viewers,omitempty"`
+	PublicEdit      *bool         `json:"doc_public_edit,omitempty"`
+	UpdatedBy       *DgraphUser   `json:"doc_updated_by,omitempty"`
+	YjsLineage      string        `json:"doc_yjs_lineage,omitempty"`
+
+	// The trash: the delete it went with (restored together), and who did it.
+	DeletedBatch string      `json:"doc_deleted_batch,omitempty"`
+	DeletedBy    *DgraphUser `json:"doc_deleted_by,omitempty"`
+
+	// The docs it links to.
+	Mentions []*DgraphDoc `json:"doc_mentions,omitempty"`
+
+	// A lock, and who verified it until when.
+	LockLevel     string      `json:"doc_lock_level,omitempty"`
+	LockedBy      *DgraphUser `json:"doc_locked_by,omitempty"`
+	LockedAt      *time.Time  `json:"doc_locked_at,omitempty"`
+	VerifiedBy    *DgraphUser `json:"doc_verified_by,omitempty"`
+	VerifiedUntil *time.Time  `json:"doc_verified_until,omitempty"`
+	IsWiki        *bool       `json:"doc_is_wiki,omitempty"`
+
+	// Query-only: whether the person asking has full access; how many live
+	// pages are under it, and those pages (one level); and, in Recent, when
+	// the person last opened it (resource_views).
+	HasFullAccess uint8 `json:"doc_full_access,omitempty"`
+	// Query-only, for the Access Resolver (domain/Doc docAccess.go reads them,
+	// business/Doc docAccessDecide.go decides by them): how many teams the
+	// person is in that the doc is shared with, at each level; and when the
+	// doc is in the space of a project or a team the person is in, that
+	// space's uuid.
+	HasTeamViewAccess    uint8        `json:"doc_team_view_access,omitempty"`
+	HasTeamCommentAccess uint8        `json:"doc_team_comment_access,omitempty"`
+	HasTeamEditAccess    uint8        `json:"doc_team_edit_access,omitempty"`
+	InProjectSpace       string       `json:"doc_in_project_space,omitempty"`
+	InTeamSpace          string       `json:"doc_in_team_space,omitempty"`
+	ChildCount           uint64       `json:"doc_child_count,omitempty"`
+	Children             []*DgraphDoc `json:"doc_children,omitempty"`
+	ViewedAt             *time.Time   `json:"doc_viewed_at,omitempty"`
 }
 
 type DgraphDocList struct {

@@ -60,7 +60,7 @@ func InboxFail(w http.ResponseWriter, r *http.Request, err error, what string) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That conversation is no longer in your Gmail."})
 	default:
 		helpers.LogErrorWithContext(r.Context(), "controllers/inbox %s: %v", what, err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Gmail did not answer. Try again in a moment."})
+		helpers.WriteRetryLater(w, "Gmail did not answer.")
 	}
 }
 

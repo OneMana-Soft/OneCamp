@@ -135,13 +135,13 @@ func eventTitle(e *dgraphStruct.DgraphEvent) string {
 	return "Untitled event"
 }
 
-// eventStarts is when an event starts, on the reader's clock: "Tue 3:00 PM",
+// eventStarts is when an event starts, on the reader's clock: "Tue 15:00",
 // or "All day". Without their zone the time is UTC, and says so.
 func eventStarts(e *dgraphStruct.DgraphEvent, loc *time.Location, known bool) string {
 	if e.AllDay {
 		return "All day"
 	}
-	s := e.StartTime.In(loc).Format("Mon 3:04 PM")
+	s := e.StartTime.In(loc).Format("Mon " + helpers.ClockLayout)
 	if !known {
 		s += " UTC"
 	}

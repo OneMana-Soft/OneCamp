@@ -19,6 +19,7 @@ package business
 
 import (
 	"encoding/json"
+	"net/url"
 	"strings"
 
 	model "github.com/akashc777/OneCamp/models/postgres/AIMCP"
@@ -99,11 +100,36 @@ type ServerView struct {
 }
 
 // NewServerView wraps one server row as the actor sees it; nil in, nil out.
+//
+// Someone who may not manage the server sees only its host: the rest of an
+// address can carry what isn't theirs to read (a key in its query, a private
+// path), and so can its last connection error, which quotes the address.
 func NewServerView(s *model.McpServer, actor Actor) *ServerView {
 	if s == nil {
 		return nil
 	}
-	return &ServerView{McpServer: s, Tools: ServerTools(s), CanManage: s.ManageableBy(actor.UserID, actor.IsAdmin)}
+	canManage := s.ManageableBy(actor.UserID, actor.IsAdmin)
+	shown := s
+	if !canManage {
+		c := *s
+		c.URL = hostOnly(s.URL)
+		if c.LastError != nil {
+			msg := "It can't connect right now."
+			c.LastError = &msg
+		}
+		shown = &c
+	}
+	return &ServerView{McpServer: shown, Tools: ServerTools(s), CanManage: canManage}
+}
+
+// hostOnly is an address's scheme and host (with its port), or "" when it
+// doesn't parse.
+func hostOnly(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // NewServerViews wraps a list of server rows. Never nil.

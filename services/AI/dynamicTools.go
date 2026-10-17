@@ -10,6 +10,7 @@ package ai
 // one for an agent.
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"sort"
@@ -32,9 +33,11 @@ func SetDynamicTools(defs []ToolDef, execs map[string]ToolExecutor) {
 	for _, d := range defs {
 		nd[d.Name] = d
 	}
-	if execs == nil {
-		execs = map[string]ToolExecutor{}
+	guarded := make(map[string]ToolExecutor, len(execs))
+	for name, exec := range execs {
+		guarded[name] = guardOutside(exec)
 	}
+	execs = guarded
 	dynMu.Lock()
 	dynamicDefs = nd
 	dynamicExecs = execs
@@ -74,6 +77,27 @@ func appendDynamicAllowed(dst []ToolDef, allow map[string]bool) []ToolDef {
 	return dst
 }
 
+// Every dynamic tool reaches outside this workspace: it calls another
+// server, with that server's credential. outsideReachGuard decides, for the
+// run a call belongs to, whether it may (business/AI installs the demo's
+// rule); nil allows everything.
+var outsideReachGuard func(ctx context.Context, actingUUID string) error
+
+// RegisterOutsideReachGuard installs the rule. Called once at init.
+func RegisterOutsideReachGuard(fn func(ctx context.Context, actingUUID string) error) {
+	outsideReachGuard = fn
+}
+
+// OutsideReachRefused is the rule's answer for a run acting as actingUUID:
+// nil when it may use outside tools and remote agents, or the refusal to
+// relay. For the tool list a run is offered, and its remote brain.
+func OutsideReachRefused(ctx context.Context, actingUUID string) error {
+	if outsideReachGuard == nil {
+		return nil
+	}
+	return outsideReachGuard(ctx, actingUUID)
+}
+
 // IsOutsideTool reports whether name is a tool from outside this workspace
 // (an MCP server's), rather than one of OneCamp's own.
 func IsOutsideTool(name string) bool {
@@ -110,4 +134,15 @@ func CallBinding(names ...string) string {
 	sort.Strings(parts)
 	sum := sha256.Sum256([]byte(strings.Join(parts, "\n")))
 	return hex.EncodeToString(sum[:])
+}
+
+// guardOutside refuses a call the rule refuses, before anything is sent, so
+// the guard holds on every path that reaches a dynamic tool.
+func guardOutside(exec ToolExecutor) ToolExecutor {
+	return func(ctx context.Context, action ProposedAction, userUUID string) (string, map[string]string, error) {
+		if err := OutsideReachRefused(ctx, userUUID); err != nil {
+			return "", nil, err
+		}
+		return exec(ctx, action, userUUID)
+	}
 }

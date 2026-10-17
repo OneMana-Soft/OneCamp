@@ -13,7 +13,7 @@ import "strings"
 // One rule for every link the server writes: email, the AI's citations, the
 // unread summary. A link built from the grouping id itself opened a
 // conversation "with" nobody. The web app's copy of this rule is chatPath in
-// lib/chat/chatPath.ts.
+// lib/routes/conversationRoute.ts.
 func ChatPath(groupingID, viewerUUID, messageUUID string) string {
 	grp := strings.TrimSpace(groupingID)
 	if grp == "" {

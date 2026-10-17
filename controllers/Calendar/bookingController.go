@@ -31,10 +31,10 @@ func writeAvailabilityError(w http.ResponseWriter, r *http.Request, where string
 	case errors.Is(err, business.ErrNoPage):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "This booking page isn't available."})
 	case errors.Is(err, business.ErrCalendarUnread):
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't check the calendar. Try again in a moment."})
+		helpers.WriteRetryLater(w, "Couldn't check the calendar.")
 	default:
 		helpers.LogErrorWithContext(r.Context(), "controllers/Calendar/%s err: %+v", where, err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Something went wrong. Try again in a moment."})
+		helpers.WriteRetryLater(w, "Something went wrong.")
 	}
 }
 
@@ -91,10 +91,9 @@ func SaveMyBookingPage(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": page})
 }
 
-// DeleteMyBookingPage deletes one of the person's booking pages. While
-// bookings made through it are still to come it answers 409 and keeps it:
-// switching it off keeps them and their guests' links.
-// POST /event/bookingPages/delete {id}
+// DeleteMyBookingPage deletes one of the person's booking pages; bookings
+// already made stay on the calendar, and their guests' links keep working. It
+// answers how many are still to come. POST /event/bookingPages/delete {id}
 func DeleteMyBookingPage(w http.ResponseWriter, r *http.Request) {
 	userInfo := r.Context().Value(helpers.UserInfoContextKey).(model.UserInfo)
 	var in struct {
@@ -109,12 +108,7 @@ func DeleteMyBookingPage(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't one of your pages."})
 		return
 	}
-	ok, err := business.DeleteBookingPage(r.Context(), userInfo.UserPostgresInfo.Id, id)
-	var held *business.PageHasBookingsError
-	if errors.As(err, &held) {
-		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": held.Error()})
-		return
-	}
+	ok, upcoming, err := business.DeleteBookingPage(r.Context(), userInfo.UserPostgresInfo.Id, id)
 	if err != nil {
 		writeAvailabilityError(w, r, "DeleteMyBookingPage", err)
 		return
@@ -123,7 +117,7 @@ func DeleteMyBookingPage(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That isn't one of your pages."})
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Deleted", "data": map[string]int{"upcoming_bookings": 0}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Deleted", "data": map[string]int{"upcoming_bookings": upcoming}})
 }
 
 // GetPublicBookingPage is a booking page and its free slots, for anyone: from

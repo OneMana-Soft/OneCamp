@@ -595,10 +595,15 @@ func extractJSONObject(s string) string {
 	return s[start : end+1]
 }
 
-// sanitizeLabel trims, collapses whitespace, strips control characters, and
-// caps the length so a hostile or sloppy model output can't break rendering.
-func sanitizeLabel(s string) string {
-	s = strings.TrimSpace(s)
+// sanitizeLabel is a board label as cleanLabel makes one.
+func sanitizeLabel(s string) string { return cleanLabel(s, boardMaxLabelLen) }
+
+// cleanLabel is text a model wrote, made safe to show on one line: control
+// characters gone, white space one space, trimmed, and at most limit
+// characters, never cutting one in half, so a hostile or sloppy answer can't
+// break rendering. It cleans every label, title and name a model proposes: a
+// board's, and a task's from any source (proposedTaskFrom).
+func cleanLabel(s string, limit int) string {
 	s = strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\t' || r == '\r' {
 			return ' '
@@ -608,11 +613,7 @@ func sanitizeLabel(s string) string {
 		}
 		return r
 	}, s)
-	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > boardMaxLabelLen {
-		s = s[:boardMaxLabelLen]
-	}
-	return s
+	return strings.TrimRight(helpers.TruncateRunes(strings.Join(strings.Fields(s), " "), limit), " ")
 }
 
 func normalizeShape(s string) string {

@@ -305,6 +305,14 @@ func PublishTaskDates(msg *mqttStruct.MqttTaskDates) {
 	publishToProject(context.Background(), msg.ProjectUuid, mqttStruct.MESSAGE_TASK_DATES, msg, "PublishTaskDates")
 }
 
+// PublishTaskChanged tells a task's project that the task changed.
+func PublishTaskChanged(msg *mqttStruct.MqttTaskChanged) {
+	if msg == nil || msg.ProjectUuid == "" {
+		return
+	}
+	publishToProject(context.Background(), msg.ProjectUuid, mqttStruct.MESSAGE_TASK_CHANGED, msg, "PublishTaskChanged")
+}
+
 // PublishTaskField tells a task's project that one of its field values changed.
 func PublishTaskField(msg *mqttStruct.MqttTaskField) {
 	if msg == nil || msg.ProjectUuid == "" {
@@ -340,6 +348,13 @@ func PublishTaskCommentReaction(mqttTaskCommentReaction *mqttStruct.MqttTaskComm
 		}
 	}()
 }
+
+// TypingRepublishInterval is how often a bot still at work says it is typing
+// again. The app drops a typing line 6 s after the last message about it
+// (onecamp-fe lib/typingTiming.ts), so repeating it every 3 s keeps the line
+// up even when one message arrives late. At 4 s each way, the line blinked
+// out between messages.
+const TypingRepublishInterval = 3 * time.Second
 
 func PublishChannelTyping(mqttChannelTyping *mqttStruct.MqttChannelTyping, channelId string) {
 	ctx := context.Background()

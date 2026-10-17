@@ -42,3 +42,20 @@ func DayStart(t time.Time, loc *time.Location) time.Time {
 	y, m, d := t.In(loc).Date()
 	return time.Date(y, m, d, 0, 0, 0, 0, loc)
 }
+
+// PlaceName is a time zone as people say it: its city, "New York" for
+// America/New_York, "Kolkata" for Asia/Kolkata, and UTC for UTC or none. For
+// saying whose day a date is ("13 October, New York time").
+func PlaceName(loc *time.Location) string {
+	if loc == nil {
+		return "UTC"
+	}
+	name := loc.String()
+	if name == "" || name == "Local" || name == "UTC" {
+		return "UTC"
+	}
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	return strings.ReplaceAll(name, "_", " ")
+}

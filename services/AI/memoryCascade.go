@@ -30,7 +30,7 @@ func DeleteMemoryProjectionsAsync(memID string) {
 	if memID == "" {
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("ai.memory-forget-item", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if derr := DeleteEmbedding(ctx, "memory", memID); derr != nil {
@@ -39,7 +39,7 @@ func DeleteMemoryProjectionsAsync(memID string) {
 		if derr := memDgraph.DeleteMemoryItem(ctx, memID); derr != nil {
 			helpers.LogErrorWithContext(ctx, "memory projection: drop graph node %s failed: %v", memID, derr)
 		}
-	}()
+	})
 }
 
 // InvalidateMemoryForEditedSourceAsync reconciles the workspace-memory
@@ -66,7 +66,7 @@ func InvalidateMemoryForEditedSourceAsync(sourceType, sourceUUID, newPlainText s
 		DeleteMemoryBySourceAsync(sourceType, sourceUUID)
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("ai.memory-refresh-source", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
@@ -81,7 +81,7 @@ func InvalidateMemoryForEditedSourceAsync(sourceType, sourceUUID, newPlainText s
 		if len(refreshed) > 0 {
 			helpers.LogInfoWithContext(ctx, "memory edit: refreshed %d item(s) for %s:%s", len(refreshed), sourceType, sourceUUID)
 		}
-	}()
+	})
 }
 
 // reprojectMemoryItem re-projects a memory item into OpenSearch (semantic
@@ -145,7 +145,7 @@ func memoryEmbedText(kind, content string) string {
 // with its own bounded context so it never blocks the deletion request.
 // No-op when nothing was extracted from the source.
 func DeleteMemoryBySourceAsync(sourceType, sourceUUID string) {
-	go func() {
+	helpers.GoSafeNamed("ai.memory-forget-source", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
@@ -168,7 +168,7 @@ func DeleteMemoryBySourceAsync(sourceType, sourceUUID string) {
 		if len(ids) > 0 {
 			helpers.LogInfoWithContext(ctx, "memory cascade: removed %d item(s) for %s:%s", len(ids), sourceType, sourceUUID)
 		}
-	}()
+	})
 }
 
 // ArchiveMemoryByScope reversibly soft-deletes (reason='archive') every

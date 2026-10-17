@@ -475,13 +475,15 @@ func GetDgraphPostByUUIDWithAllComments(ctx context.Context, postUUID string, us
 	variables["$id"] = postUUID
 	variables["$userId"] = dgraphUIDOrNone(userDgraphUID)
 	// post_deleted_at: a deleted post keeps its text in the graph, so every
-	// reader of this one (a member's thread, a guest's) needs to know.
+	// reader of this one (a member's thread, a guest's) needs to know. The
+	// update times say the post or a reply was edited ("(edited)").
 	query := `query PostInfo($id: string, $userId: string){
 				postInfo(func: eq(post_uuid, $id)) {
 					uid
 					post_uuid
 					post_text
 					post_created_at
+					post_updated_at
 					post_deleted_at
 					post_by {
 						uid
@@ -567,6 +569,7 @@ func GetDgraphPostByUUIDWithAllComments(ctx context.Context, postUUID string, us
 							user_full_name
 						}
 						comment_created_at
+						comment_updated_at
 					}
 				}
 			}`

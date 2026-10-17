@@ -27,6 +27,7 @@ import (
 	"time"
 
 	mcpBusiness "github.com/akashc777/OneCamp/business/MCPServer"
+	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/akashc777/OneCamp/tests/integration"
 	"github.com/google/uuid"
 )
@@ -101,7 +102,22 @@ func TestPrincipalCanReachProjectsAgainstRealGraph(t *testing.T) {
 	})
 }
 
+// ownDatabase gives a test that asks the doc resolver a live database of its
+// own. The resolver reads the grants that end (business/Doc withEndedGrants)
+// and fails closed when it can't, so with no database of its own a test
+// reads through the pool an earlier test left pointing at its closed
+// container, and every doc is refused. Each such test needs its own: the
+// one before it closes its database when it ends.
+func ownDatabase(t *testing.T) {
+	t.Helper()
+	env := integration.SetupEnv(t)
+	if err := postgresInit.ConnectPostgres(context.Background(), env.DSN); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPrincipalCanReachDocsAgainstRealGraph(t *testing.T) {
+	ownDatabase(t)
 	dg := integration.SetupDgraph(t)
 
 	author := uuid.NewString()
@@ -303,6 +319,7 @@ func TestPrincipalCanReachConversationsAgainstRealGraph(t *testing.T) {
 //
 // Run: go test -tags=integration ./tests/integration/ -run TestReadDoesNotImplyWrite -v
 func TestReadDoesNotImplyWriteAgainstRealGraph(t *testing.T) {
+	ownDatabase(t) // its doc case asks the resolver
 	dg := integration.SetupDgraph(t)
 
 	plainMember := uuid.NewString()

@@ -17,6 +17,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // Resource types and capabilities.
@@ -215,6 +216,33 @@ func ListActive(ctx context.Context) ([]*GuestGrant, error) {
 		out = append(out, g)
 	}
 	return out, rows.Err()
+}
+
+// WithActiveGrants is which of ids, resources of one type, have a live grant:
+// not revoked, not expired. One query for a page of a list (the active-grants
+// index covers it); none for no ids.
+func WithActiveGrants(ctx context.Context, resourceType string, ids []string) (map[string]bool, error) {
+	live := map[string]bool{}
+	if len(ids) == 0 {
+		return live, nil
+	}
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	const q = `SELECT DISTINCT resource_id FROM guest_grants
+		WHERE resource_type = $1 AND resource_id = ANY($2) AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())`
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q, resourceType, pq.Array(ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		live[id] = true
+	}
+	return live, rows.Err()
 }
 
 // ListActiveForResource is the live grants to one resource, newest first.

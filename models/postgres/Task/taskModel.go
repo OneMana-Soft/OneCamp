@@ -390,32 +390,6 @@ type TaskGitHubLink struct {
 	PRURL     string
 }
 
-// GetTaskGitHubLinks returns every task the query finds as a TaskGitHubLink:
-// its id, project id, issue address and pull request address, in that order.
-func GetTaskGitHubLinks(query string) ([]TaskGitHubLink, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout*5)
-	defer cancel()
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []TaskGitHubLink
-	for rows.Next() {
-		var l TaskGitHubLink
-		var project uuid.NullUUID
-		var issue, pr sql.NullString
-		if err := rows.Scan(&l.TaskID, &project, &issue, &pr); err != nil {
-			return nil, err
-		}
-		l.ProjectID, l.IssueURL, l.PRURL = project.UUID, issue.String, pr.String
-		out = append(out, l)
-	}
-	return out, rows.Err()
-}
-
 // SetGitHubLastSyncedAt updates the github_last_synced_at timestamp for a task.
 func SetGitHubLastSyncedAt(query string, taskUUID uuid.UUID, t time.Time) error {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
@@ -437,12 +411,14 @@ func SetGitHubBranchOnTaskByTaskID(query string, branchName string, taskUUID uui
 	return err
 }
 
-// FindTaskUUIDByGitHubBranch finds a task UUID by its linked GitHub branch.
-func FindTaskUUIDByGitHubBranch(query string, branch string) (taskUUID string, err error) {
+// FindTaskUUIDByGitHubBranch finds a task UUID by its linked GitHub branch in
+// a project linking the repository owner/name: query takes owner, name and
+// branch, in that order.
+func FindTaskUUIDByGitHubBranch(query string, owner, name, branch string) (taskUUID string, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, branch).Scan(&taskUUID)
+	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, owner, name, branch).Scan(&taskUUID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", err
 	}

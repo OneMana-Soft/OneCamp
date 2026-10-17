@@ -357,8 +357,9 @@ func eventEnabledForPref(t EventType, p *prefModels.UserNotificationPreference) 
 	switch t {
 	case EventChatDM:
 		return p.EmailDMs
-	case EventChannelMention, EventGroupChatMention, EventCheckIn:
-		// A check-in asks each of its people directly, as a mention does.
+	case EventChannelMention, EventGroupChatMention, EventCheckIn, EventDocMention:
+		// A check-in asks each of its people directly, as a mention does, and
+		// so does an @ in a doc's body.
 		return p.EmailMentions
 	case EventTaskAssigned:
 		return p.EmailTaskAssigned
@@ -366,7 +367,9 @@ func eventEnabledForPref(t EventType, p *prefModels.UserNotificationPreference) 
 		// A project's update is news about its tasks, wanted (or not) by
 		// the same people who want to hear when tasks change status.
 		return p.EmailTaskStatus
-	case EventTaskComment, EventPostComment, EventDocComment, EventChatComment:
+	case EventTaskComment, EventPostComment, EventDocComment, EventChatComment, EventDocProposal:
+		// A proposed change to a doc, and what became of it, is talk about
+		// the doc, wanted by whoever wants its comments.
 		return p.EmailComments
 	case EventChannelCall, EventChatCall:
 		return p.EmailCalls

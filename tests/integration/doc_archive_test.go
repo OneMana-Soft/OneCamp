@@ -382,7 +382,7 @@ func TestArchivingAndRestoringADoc(t *testing.T) {
 	rctx := chi.NewRouteContext()
 	rctx.URLParams.Add("doc_uuid", ids["Old plan"])
 	rec := httptest.NewRecorder()
-	docController.GetDocInfo(rec, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(
+	docController.GetDocPage(rec, httptest.NewRequest(http.MethodGet, "/", nil).WithContext(
 		context.WithValue(context.WithValue(ctx, chi.RouteCtxKey, rctx), helpers.UserInfoContextKey, who)))
 	if rec.Code != http.StatusOK {
 		t.Errorf("opening the restored doc: %d", rec.Code)

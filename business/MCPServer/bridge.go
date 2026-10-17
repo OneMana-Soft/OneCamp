@@ -153,6 +153,11 @@ var bridgedTools = []binding{
 		Behaviour: ToolBehaviour{ReadOnly: true, Idempotent: true}},
 	{Tool: "list_tables", Kind: ResourceWorkspace,
 		Behaviour: ToolBehaviour{ReadOnly: true, Idempotent: true}},
+	// list_docs answers the docs the person can open: its executor lists them
+	// through the Access Resolver (business/ContentIO ListDocs), as GET
+	// /v1/docs does.
+	{Tool: "list_docs", Kind: ResourceWorkspace,
+		Behaviour: ToolBehaviour{ReadOnly: true, Idempotent: true}},
 
 	// THE FIRST GOVERNED WRITE.
 	//
@@ -245,6 +250,16 @@ var bridgedTools = []binding{
 	// everything else the ladder applies. The only check they do not get is the one that
 	// has no meaning for them.
 	{Tool: "create_doc", Kind: ResourceSelfOwned,
+		Behaviour: ToolBehaviour{ReadOnly: false, Destructive: false, Idempotent: false}},
+
+	// ADDING TO A DOC. append_to_doc names the doc it writes into, so the doc's
+	// own edit rule decides (ResourceDoc's write branch: editing, never mere
+	// reading). It only adds at the end, as a live edit through the Live Doc
+	// Writer, so it destroys nothing; it is not idempotent (an addition sent twice
+	// is there twice), so it gets the generated key and a retried call is
+	// recognised. An agent's addition is marked as its own and can be reverted
+	// from the doc (business/AI docEdit.go).
+	{Tool: "append_to_doc", Kind: ResourceDoc, IDArg: "doc_uuid",
 		Behaviour: ToolBehaviour{ReadOnly: false, Destructive: false, Idempotent: false}},
 	{Tool: "set_reminder", Kind: ResourceSelfOwned,
 		Behaviour: ToolBehaviour{ReadOnly: false, Destructive: false, Idempotent: false}},

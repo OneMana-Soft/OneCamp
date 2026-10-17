@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -160,16 +161,23 @@ func Create(ctx context.Context, f *Field, createdBy uuid.UUID) (*Field, error) 
 	return out, err
 }
 
-// Update changes a field's name, options, currency and whether cards show it,
-// and takes options it no longer has off its tasks, in one transaction with the
-// field locked, so no option is ever gone from the field and left on a task. Its
-// type never changes: values of one type mean nothing as another. It returns
-// the tasks whose values changed.
-func Update(ctx context.Context, f *Field) (*Field, []string, error) {
-	options, err := json.Marshal(f.Options)
-	if err != nil {
-		return nil, nil, err
-	}
+// OptionTakenError is a save listing an option by the name of a stored option
+// it doesn't list, which the field keeps: the two would share a name.
+type OptionTakenError struct{ Label string }
+
+func (e *OptionTakenError) Error() string {
+	return "an option of this field is already called " + e.Label
+}
+
+// Update changes a field's name, options, currency and whether cards show it.
+// Its options are those f lists, then every stored option f doesn't list
+// (mergeOptions): only options named in removed are taken out, and they come
+// off its tasks in the same transaction, with the field locked, so no option
+// is ever gone from the field and left on a task, and a save from a copy read
+// before an option was added keeps that option and its values. Its type never
+// changes: values of one type mean nothing as another. It returns the tasks
+// whose values changed.
+func Update(ctx context.Context, f *Field, removed []string) (*Field, []string, error) {
 	c, cancel := withTimeout(ctx)
 	defer cancel()
 	tx, err := postgresInit.DBConn.SqlDB.BeginTx(c, nil)
@@ -185,7 +193,19 @@ func Update(ctx context.Context, f *Field) (*Field, []string, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	out, err := scan(tx.QueryRowContext(c, `
+	var stored []Option
+	if err := json.Unmarshal(before, &stored); err != nil {
+		return nil, nil, err
+	}
+	all, out, err := mergeOptions(f.Options, stored, removed)
+	if err != nil {
+		return nil, nil, err
+	}
+	options, err := json.Marshal(all)
+	if err != nil {
+		return nil, nil, err
+	}
+	saved, err := scan(tx.QueryRowContext(c, `
 		UPDATE task_fields SET name = $3, options = $4, currency = $5, on_card = $6, updated_at = NOW()
 		WHERE id = $1 AND project_id = $2 RETURNING `+columns, f.ID, f.ProjectID, f.Name, options, nullCurrency(f.Currency), f.OnCard))
 	if isUniqueViolation(err) {
@@ -195,25 +215,34 @@ func Update(ctx context.Context, f *Field) (*Field, []string, error) {
 		helpers.LogErrorWithContext(ctx, "models/TaskField Update err: %+v", err)
 		return nil, nil, err
 	}
-	var old []Option
-	if err := json.Unmarshal(before, &old); err != nil {
-		return nil, nil, err
-	}
-	kept := map[string]bool{}
-	for _, o := range f.Options {
-		kept[o.ID] = true
-	}
-	var removed []string
-	for _, o := range old {
-		if !kept[o.ID] {
-			removed = append(removed, o.ID)
-		}
-	}
-	changed, err := dropOptionValues(c, tx, f.ID, removed)
+	changed, err := dropOptionValues(c, tx, f.ID, out)
 	if err != nil {
 		return nil, nil, err
 	}
-	return out, changed, tx.Commit()
+	return saved, changed, tx.Commit()
+}
+
+// mergeOptions is the options a field saved with sent keeps, against stored,
+// those it has: sent, then every stored option sent doesn't list and removed
+// doesn't name (helpers.KeptOptions, the rule a table's select column follows
+// too), with the ids it takes out. A kept option with the name of one sent is
+// OptionTakenError: values hold an option's id, so the two can't be one. Pure.
+func mergeOptions(sent, stored []Option, removed []string) ([]Option, []string, error) {
+	listed, names := map[string]bool{}, map[string]bool{}
+	for _, o := range sent {
+		listed[o.ID], names[strings.ToLower(o.Label)] = true, true
+	}
+	drop := make(map[string]bool, len(removed))
+	for _, id := range removed {
+		drop[id] = true
+	}
+	kept, out := helpers.KeptOptions(stored, func(o Option) string { return o.ID }, func(o Option) bool { return listed[o.ID] }, drop)
+	for _, o := range kept {
+		if names[strings.ToLower(o.Label)] {
+			return nil, nil, &OptionTakenError{Label: o.Label}
+		}
+	}
+	return append(append(make([]Option, 0, len(sent)+len(kept)), sent...), kept...), out, nil
 }
 
 // AddOptions gives a field the options more returns for the ones it has. The

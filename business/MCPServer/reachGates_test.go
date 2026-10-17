@@ -109,6 +109,10 @@ func TestEveryResourceBranchChecksLiveness(t *testing.T) {
 			"one that never existed, so the refusal happens at the lookup. The same shape as " +
 			"ResourceTable, and collapsing the two cases is deliberate: telling them apart " +
 			"would let a caller probe which warehouses a workspace has connected",
+		"ResourceDoc": "delegates to the Access Resolver (business/Access), whose decision " +
+			"carries the doc's deletion (invariant I9): a doc in the trash answers Deleted and " +
+			"level none to everyone, and the branch refuses it on Deleted. The resolver reads " +
+			"the deletion with the grants, so it is never a second lookup that could disagree",
 		"ResourceDirectMessage": "the only object here is the RECIPIENT, and their liveness " +
 			"is checked — inside principalBusiness.CanReceiveDirectMessage, which calls " +
 			"helpers.IsSoftDeleted on them. The conversation itself has no deleted_at: a DM's " +

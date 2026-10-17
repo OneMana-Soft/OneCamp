@@ -138,7 +138,7 @@ func TestTodaysCalendarIsOneCampsWithoutGoogle(t *testing.T) {
 	if len(day) != 2 || day[0].Title != "Offsite" || day[1].Title != "Launch review" {
 		t.Fatalf("today %+v, want the offsite then the review", day)
 	}
-	if day[0].Subtitle != "All day" || day[1].Subtitle != "Tue 3:30 PM" || day[1].URL != "/app/calendar/event/review" || day[1].Source != "calendar" {
+	if day[0].Subtitle != "All day" || day[1].Subtitle != "Tue 15:30" || day[1].URL != "/app/calendar/event/review" || day[1].Source != "calendar" {
 		t.Fatalf("items %+v", day)
 	}
 
@@ -147,7 +147,7 @@ func TestTodaysCalendarIsOneCampsWithoutGoogle(t *testing.T) {
 	if !asked[1].Equal(now.Add(24 * time.Hour)) {
 		t.Errorf("read to %v, want a day from now", asked[1])
 	}
-	if len(day) != 3 || day[1].Subtitle != "Tue 10:00 AM UTC" {
+	if len(day) != 3 || day[1].Subtitle != "Tue 10:00 UTC" {
 		t.Fatalf("today %+v", day)
 	}
 }

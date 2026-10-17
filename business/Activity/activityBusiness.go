@@ -267,6 +267,65 @@ func mergeActivities(mentions []*dgraphStruct.DgraphMentions, comments []*dgraph
 	return out
 }
 
+// NoticeSource reads a person's inbox notices, newest first: items with no
+// graph record of their own (a mention in a doc's body, "shared with you", a
+// proposal), from before `before`, at most limit of them, each with its time
+// set. business/Follow sets it from its init; until then there are none.
+var NoticeSource func(ctx context.Context, userUUID string, before time.Time, limit int) ([]dgraphModels.UnifiedActivityItem, error)
+
+// WithNotices is a page of the feed with the person's notices merged in, by
+// time. A source that had more than it gave can only be merged down to its
+// oldest item given: anything past that it hasn't shown yet, and the next page
+// (before the last item here) asks both sources again.
+func WithNotices(ctx context.Context, page dgraphModels.UnifiedActivityPagination, userUUID string, before time.Time, limit int) dgraphModels.UnifiedActivityPagination {
+	if NoticeSource == nil || limit <= 0 {
+		return page
+	}
+	notices, err := NoticeSource(ctx, userUUID, before, limit+1)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/WithNotices Failed to read the notices err: %+v", err)
+		return page
+	}
+	return mergeNotices(page, notices, limit)
+}
+
+// mergeNotices merges notices (up to limit+1 of them, newest first) into a page
+// of at most limit items. Pure.
+func mergeNotices(page dgraphModels.UnifiedActivityPagination, notices []dgraphModels.UnifiedActivityItem, limit int) dgraphModels.UnifiedActivityPagination {
+	if len(notices) == 0 {
+		return page
+	}
+	at := func(item dgraphModels.UnifiedActivityItem) time.Time {
+		t, _ := time.Parse(activityTimeLayout, item.Time)
+		return t
+	}
+	noticesMore := len(notices) > limit
+	if noticesMore {
+		notices = notices[:limit]
+	}
+	// The newest time below which a source may hold items it hasn't given.
+	var floor time.Time
+	if page.HasMore && len(page.Activities) > 0 {
+		floor = at(page.Activities[len(page.Activities)-1])
+	}
+	if noticesMore {
+		if last := at(notices[len(notices)-1]); last.After(floor) {
+			floor = last
+		}
+	}
+	all := append(append([]dgraphModels.UnifiedActivityItem{}, page.Activities...), notices...)
+	sort.SliceStable(all, func(i, j int) bool { return at(all[i]).After(at(all[j])) })
+	out := dgraphModels.UnifiedActivityPagination{HasMore: page.HasMore || noticesMore, Activities: []dgraphModels.UnifiedActivityItem{}}
+	for _, item := range all {
+		if len(out.Activities) == limit || (!floor.IsZero() && at(item).Before(floor)) {
+			out.HasMore = true
+			break
+		}
+		out.Activities = append(out.Activities, item)
+	}
+	return out
+}
+
 func PublishActivityToUser(recipientUserUUID string, activityItem *dgraphModels.UnifiedActivityItem) {
 	// Score priority on the realtime path too so live notifications carry
 	// the same triage signal as the fetched feed.

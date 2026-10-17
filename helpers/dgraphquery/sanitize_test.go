@@ -4,7 +4,19 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/akashc777/OneCamp/helpers"
 )
+
+// A list of uids is checked by the one uid check, item by item: the two
+// copies of the rule once differed on case (release audit S4).
+func TestAListOfUIDsIsCheckedByTheOneUIDCheck(t *testing.T) {
+	for _, s := range []string{"0x1", "0xab", "0xAB", "0xaB12", "0XAB", "0x", "0xG1", "0x1 ", "0x12345678901234567", "", "0x1) OR has(x"} {
+		if got, want := AllUIDs([]string{s}), helpers.IsDgraphUID(s); got != want {
+			t.Errorf("AllUIDs(%q) = %v, but IsDgraphUID says %v", s, got, want)
+		}
+	}
+}
 
 func TestEscapeRegexLiteral(t *testing.T) {
 	cases := []struct {

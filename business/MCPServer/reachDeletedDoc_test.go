@@ -2,7 +2,10 @@ package business
 
 import (
 	"testing"
+	"time"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
+	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
@@ -12,6 +15,10 @@ import (
 // who could never read a private doc learned that it existed and had been
 // deleted. To anyone else a deleted doc now answers exactly as it did live,
 // and the grants themselves are unchanged.
+//
+// The decisions are the Access Resolver's rule (business/Doc DecideDoc), on a
+// doc as a read of it for each person carries it: what docReach gets in
+// production from Rules.Resolve.
 func TestADeletedDocIsDeletedOnlyToThoseItWasThereFor(t *testing.T) {
 	const (
 		author   = "11111111-1111-1111-1111-111111111111"
@@ -21,39 +28,56 @@ func TestADeletedDocIsDeletedOnlyToThoseItWasThereFor(t *testing.T) {
 		uid      = "0x2a"
 	)
 	private, public := true, false
-	doc := func(isPrivate *bool) *dgraphStruct.DgraphDoc {
-		return &dgraphStruct.DgraphDoc{IsPrivate: isPrivate, CreatedBy: user(author),
-			ReadingUser: []*dgraphStruct.DgraphUser{user(reader)},
-			EditingUser: []*dgraphStruct.DgraphUser{user(editor)}}
+	// The doc as read for who: its privacy, its author, and their grant.
+	decide := func(isPrivate *bool, who string, deleted bool) accessBusiness.Decision {
+		doc := &dgraphStruct.DgraphDoc{IsPrivate: isPrivate, CreatedBy: &dgraphStruct.DgraphUser{Uuid: author}}
+		switch who {
+		case reader:
+			doc.HasReadAccess = 1
+		case editor:
+			doc.HasEditAccess = 1
+		}
+		if deleted {
+			at := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+			doc.DeletedAt = &at
+		}
+		d := docBusiness.DecideDoc(doc, docBusiness.Viewer{UUID: who})
+		out := accessBusiness.Decision{Level: d.Level, Was: d.Was, Deleted: d.Deleted, Owner: d.Owner}
+		for _, r := range d.Reasons {
+			out.Reasons = append(out.Reasons, string(r))
+		}
+		return out
 	}
 	const (
 		noGrant = "the originating person has no grant on this private doc"
 		noEdit  = "the originating person may not edit this doc"
 	)
-
 	for _, c := range []struct {
 		name       string
-		doc        *dgraphStruct.DgraphDoc
+		isPrivate  *bool
 		who        string
 		read       bool
 		liveAllows bool   // what they ask is theirs while the doc is live
 		liveWhy    string // and why, or why not
 	}{
-		{"an outsider reading a private doc", doc(&private), outsider, true, false, noGrant},
-		{"an outsider reading a doc whose privacy is unknown", doc(nil), outsider, true, false, noGrant},
-		{"its reader", doc(&private), reader, true, true, "explicit grant on private doc"},
-		{"its author", doc(&private), author, true, true, "explicit grant on private doc"},
-		{"anyone reading a workspace-visible doc", doc(&public), outsider, true, true, "workspace-visible doc"},
-		{"its reader changing it", doc(&private), reader, false, false, noEdit},
-		{"an outsider changing a workspace-visible doc", doc(&public), outsider, false, false, noEdit},
-		{"its editor changing it", doc(&private), editor, false, true, "doc editor"},
+		{"an outsider reading a private doc", &private, outsider, true, false, noGrant},
+		// A doc whose privacy was never set reads as the workspace's, for
+		// people and agents alike: one rule (opening it, commenting on it and
+		// search read it so too).
+		{"an outsider reading a doc whose privacy is unknown", nil, outsider, true, true, "workspace-visible doc"},
+		{"its reader", &private, reader, true, true, "explicit grant on private doc"},
+		{"its author", &private, author, true, true, "explicit grant on private doc"},
+		{"anyone reading a workspace-visible doc", &public, outsider, true, true, "workspace-visible doc"},
+		{"its reader changing it", &private, reader, false, false, noEdit},
+		{"an outsider changing a workspace-visible doc", &public, outsider, false, false, noEdit},
+		{"its editor changing it", &private, editor, false, true, "doc editor"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			live := docReach(c.doc, c.who, uid, c.read, false)
+			live := docReach(decide(c.isPrivate, c.who, false), uid, c.read)
 			if live.Allow != c.liveAllows || live.Reason != c.liveWhy || (live.Allow && live.PrincipalDgraphUID != uid) {
 				t.Fatalf("the live doc: %+v, want allowed=%v because %q", live, c.liveAllows, c.liveWhy)
 			}
-			gone := docReach(c.doc, c.who, uid, c.read, true)
+			gone := docReach(decide(c.isPrivate, c.who, true), uid, c.read)
 			if gone.Allow {
 				t.Fatalf("a deleted doc let them through: %+v", gone)
 			}

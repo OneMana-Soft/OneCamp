@@ -38,8 +38,11 @@ package business
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
+	"github.com/akashc777/OneCamp/business/Access/level"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 	dataSourceBusiness "github.com/akashc777/OneCamp/business/DataSource"
@@ -48,10 +51,8 @@ import (
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	teamBusiness "github.com/akashc777/OneCamp/business/Team"
-	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
-	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/google/uuid"
 )
 
@@ -422,14 +423,18 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 		return ReachDecision{Allow: true, Reason: "project member", PrincipalDgraphUID: uid}
 
 	case ResourceDoc:
-		doc, derr := docDomain.GetDocPermissions(ctx, strings.TrimSpace(ref.ID))
-		if derr != nil || doc == nil {
+		// The Access Resolver's decision, the one every doc check uses (I9):
+		// the person's own grants, their teams', the doc's space and general
+		// access, a hard lock, and the doc's deletion, which leaves its grants
+		// in place and so is part of the decision rather than a grant check.
+		d, derr := accessBusiness.Rules.Resolve(ctx, accessBusiness.Subject{UserUID: uid, UserUUID: principal},
+			accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: strings.TrimSpace(ref.ID)})
+		if derr != nil {
 			return ReachDecision{Reason: "doc could not be read"}
 		}
-		// The grant is decided with the doc's deletion set aside, and the
-		// deletion after it (docReach): only someone the doc was there for is
-		// told it was deleted.
-		return docReach(doc, principal, uid, ref.Access.IsRead(), helpers.IsSoftDeleted(doc.DeletedAt))
+		// The grant with the deletion set aside, and the deletion after it
+		// (docReach): only someone the doc was there for is told it was deleted.
+		return docReach(d, uid, ref.Access.IsRead())
 
 	default:
 		// A kind nobody has written an authority rule for. Refusing here is what
@@ -442,126 +447,39 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 // who could have read it (or, for a write, changed it) while it was live.
 const ReasonDocDeleted = "this doc has been deleted"
 
-// docReach decides whether principal (whose graph uid is uid) may act on a doc
-// already read: read, or change it when read is false. deleted is whether the
-// doc is in the trash. Pure.
+// docReach decides whether the originating person (whose graph uid is uid) may
+// act on a doc, from the Access Resolver's decision for them: read it, or
+// change it when read is false. Pure.
 //
-// The grant comes first, as if the doc were live, and the deletion after it. A
-// deleted doc keeps its reader/editor/commenter grants, so the grant alone
-// would still let a removed doc through, which is why deletion is asked at
-// all. But asked first, it told anyone at all, an MCP client or an agent's
-// asker who could never read a private doc, that the doc existed and had been
-// deleted. Now only someone it was there for hears that; to anyone else a
-// deleted doc answers as it did live.
-func docReach(doc *dgraphStruct.DgraphDoc, principal, uid string, read, deleted bool) ReachDecision {
+// The grant comes first, with the doc's deletion set aside (Was: the level the
+// rule gave them before it was deleted), and the deletion after it. A deleted
+// doc keeps its grants, so the grant alone would still let a removed doc
+// through, which is why deletion is asked at all. But asked first, it told
+// anyone at all, an MCP client or an agent's asker who could never read a
+// private doc, that the doc existed and had been deleted. Now only someone it
+// was there for hears that; to anyone else a deleted doc answers as it did live.
+func docReach(d accessBusiness.Decision, uid string, read bool) ReachDecision {
 	var granted ReachDecision
 	switch {
-	// WRITE is decided first and on its own terms, because it does NOT follow from
-	// visibility. A non-private doc is readable workspace-wide, and that says
-	// nothing about who may edit it — so falling through to the privacy check
-	// below would let anyone rewrite any public document.
+	// WRITE is decided on its own terms, because it does NOT follow from
+	// visibility: a doc everyone in the workspace may read is not one everyone
+	// may rewrite, and a hard lock holds editors at comment.
 	case !read:
-		if !docGrantsEdit(doc, principal) {
+		if d.Was < accessBusiness.LevelEdit {
 			return ReachDecision{Reason: "the originating person may not edit this doc"}
 		}
 		granted = ReachDecision{Allow: true, Reason: "doc editor", PrincipalDgraphUID: uid}
-	// A non-private doc is visible workspace-wide; a private one requires an
-	// explicit grant. IsPrivate is a pointer, and a nil value is indeterminate —
-	// treated as private, because guessing "public" on a doc whose privacy is
-	// unknown is the one wrong direction to guess.
-	case doc.IsPrivate == nil || *doc.IsPrivate:
-		if !docGrantsAccess(doc, principal) {
-			return ReachDecision{Reason: "the originating person has no grant on this private doc"}
-		}
-		granted = ReachDecision{Allow: true, Reason: "explicit grant on private doc", PrincipalDgraphUID: uid}
-	default:
+	case d.Was < accessBusiness.LevelView:
+		return ReachDecision{Reason: "the originating person has no grant on this private doc"}
+	case slices.Contains(d.Reasons, string(level.Workspace)):
 		granted = ReachDecision{Allow: true, Reason: "workspace-visible doc", PrincipalDgraphUID: uid}
+	default:
+		granted = ReachDecision{Allow: true, Reason: "explicit grant on private doc", PrincipalDgraphUID: uid}
 	}
-	if deleted {
+	if d.Deleted {
 		return ReachDecision{Reason: ReasonDocDeleted}
 	}
 	return granted
-}
-
-// docGrantsEdit reports whether principalUUID may CHANGE a doc.
-//
-// Only the editing list and the creator. Deliberately NOT the reading or commenting
-// lists — being able to read something, or to comment on it, is exactly the case
-// where "may see" must not imply "may change" — and deliberately not affected by the
-// doc being non-private, because a workspace-visible doc is readable by everyone and
-// that is not a licence for everyone to rewrite it.
-//
-// A commenter is a real edge case worth naming: they can add to the conversation
-// around a doc without being able to alter the doc, so they belong in
-// docGrantsAccess and not here.
-func docGrantsEdit(doc *dgraphStruct.DgraphDoc, principalUUID string) bool {
-	if doc == nil {
-		return false
-	}
-	principalUUID = strings.TrimSpace(principalUUID)
-	if principalUUID == "" {
-		return false
-	}
-	if doc.CreatedBy != nil && strings.EqualFold(strings.TrimSpace(doc.CreatedBy.Uuid), principalUUID) {
-		return true
-	}
-	for _, u := range doc.EditingUser {
-		if u == nil {
-			continue
-		}
-		if candidate := strings.TrimSpace(u.Uuid); candidate != "" && strings.EqualFold(candidate, principalUUID) {
-			return true
-		}
-	}
-	return false
-}
-
-// docGrantsAccess reports whether principalUUID may see a doc.
-//
-// THE CREATOR COUNTS, and leaving them out was a bug. Reader, editor and commenter
-// all imply "may see it", which is the question a read tool asks — but so does
-// having created the thing. Nothing guarantees a doc's author also appears in its
-// own reading list, so checking only the three grant lists refuses an author access
-// to their own private document.
-//
-// Found by comparing this against the permission gate in executeReadDoc, which the
-// in-app path has always applied:
-//
-//	hasAccess := !isPrivate || isCreator || HasReadAccess > 0 || HasEditAccess > 0 || HasCommentAccess > 0
-//
-// Two rules for one question is how they end up disagreeing, and here they did. The
-// in-app one was right.
-//
-// A write tool must additionally check the editing list; "may see" is not "may
-// change", and this function answers only the first.
-func docGrantsAccess(doc *dgraphStruct.DgraphDoc, principalUUID string) bool {
-	if doc == nil {
-		return false
-	}
-	principalUUID = strings.TrimSpace(principalUUID)
-	// TWO UNKNOWNS ARE NOT A MATCH. Every comparison below is string equality, and
-	// an empty principal would equal an empty uuid on a partially populated doc —
-	// so an unresolved caller would inherit access to any doc whose creator or grant
-	// entry came back blank. PrincipalCanReach already refuses an empty principal
-	// before reaching here, but an authorization primitive should not be safe only
-	// because of what currently calls it.
-	if principalUUID == "" {
-		return false
-	}
-	if doc.CreatedBy != nil && strings.EqualFold(strings.TrimSpace(doc.CreatedBy.Uuid), principalUUID) {
-		return true
-	}
-	for _, group := range [][]*dgraphStruct.DgraphUser{doc.ReadingUser, doc.EditingUser, doc.CommentingUser} {
-		for _, u := range group {
-			if u == nil {
-				continue
-			}
-			if candidate := strings.TrimSpace(u.Uuid); candidate != "" && strings.EqualFold(candidate, principalUUID) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // tableActorFor builds the Postgres-side actor a table's visibility rule needs.

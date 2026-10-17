@@ -1,6 +1,7 @@
 package helpers
 
 import (
+	"bufio"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -26,10 +28,15 @@ import (
 // That is the exact pattern the unexported check was written for in 83fca2d, so the rule already
 // existed and the enforcement simply did not reach this far.
 //
-// WHAT COUNTS AS A REFERENCE. Any mention of the identifier in a non-test .go file anywhere in
-// the module, other than the declaration itself. That is deliberately generous: identifiers are
-// matched by name without resolving packages, so an unrelated function with the same name in
-// another package will keep this quiet. The check therefore under-reports and never invents work.
+// WHAT COUNTS AS A REFERENCE. A mention of the function, in a non-test .go file anywhere in the
+// module, other than the declaration itself: pkg.Name where pkg is an import of its package, or
+// a bare Name in a file of its own package. Matching a bare name anywhere, as this did until
+// October 2026, let a name used elsewhere hide a dead function: ten that no binary reached
+// passed, among them three called Get, two ExecQueryRow, a business function whose only
+// "reference" was its own call to the domain function of the same name, and that domain
+// function. Selections (x.Name), declared names, struct fields and composite-literal keys are
+// not references; anything else in the package that spells the name still counts, so the check
+// still under-reports rather than invents work.
 //
 // Exemptions are narrow and each is a real reason, not a way to silence a finding:
 //   - cmd and other-services are entry points; nothing in-module calls main.
@@ -47,6 +54,8 @@ func TestNoDeadExportedFunctions(t *testing.T) {
 		"../models",
 		"../services",
 		"../adapter",
+		"../router",
+		"../initializers",
 	}
 	// Where references are looked for: everything, so a caller outside the declaration roots
 	// still counts.
@@ -55,18 +64,20 @@ func TestNoDeadExportedFunctions(t *testing.T) {
 		"../models", "../services", "../adapter", "../router", "../initializers",
 		"../cmd", "../sdk", "../other-services",
 	}
+	module := goModulePath(t, "../go.mod")
 
-	type decl struct {
-		file string
-		line int
+	// A package is its directory, relative to the module root ("business/Doc"): what an import
+	// path names after the module, and what a file's own references name.
+	type fn struct{ dir, name string }
+	type parsed struct {
+		dir    string
+		isTest bool
+		file   *ast.File
+		fset   *token.FileSet
 	}
-	declared := map[string]decl{}          // exported func name -> where
-	refsProd := map[string]int{}           // name -> mentions in non-test files, excl. declaration
-	refsTest := map[string]int{}           // name -> mentions in _test.go files
-	declPos := map[string]token.Position{} // to exclude the declaration's own identifier
-
-	collect := func(root string, wantDecls bool) error {
-		return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	var files []parsed
+	for _, root := range refRoots {
+		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				if os.IsNotExist(err) {
 					return nil
@@ -88,88 +99,169 @@ func TestNoDeadExportedFunctions(t *testing.T) {
 			if parseErr != nil {
 				return nil // not our job to police unparseable generated files
 			}
-			isTest := strings.HasSuffix(path, "_test.go")
-
-			if wantDecls && !isTest {
-				for _, d := range file.Decls {
-					fn, ok := d.(*ast.FuncDecl)
-					// Plain exported functions only. Methods are excluded because they may
-					// satisfy an interface and be called through it, which no name-based scan
-					// can see.
-					if !ok || fn.Recv != nil || fn.Name == nil || !fn.Name.IsExported() {
-						continue
-					}
-					if fn.Name.Name == "Main" || strings.HasPrefix(fn.Name.Name, "Test") {
-						continue
-					}
-					pos := fset.Position(fn.Name.Pos())
-					declared[fn.Name.Name] = decl{file: path, line: pos.Line}
-					declPos[fn.Name.Name] = pos
-				}
-			}
-
-			ast.Inspect(file, func(n ast.Node) bool {
-				ident, ok := n.(*ast.Ident)
-				if !ok {
-					return true
-				}
-				pos := fset.Position(ident.Pos())
-				if isTest {
-					refsTest[ident.Name]++
-					return true
-				}
-				// Skip the declaration's own name token.
-				if d, seen := declPos[ident.Name]; seen &&
-					d.Filename == pos.Filename && d.Line == pos.Line && d.Column == pos.Column {
-					return true
-				}
-				refsProd[ident.Name]++
-				return true
-			})
+			dir := strings.TrimPrefix(filepath.ToSlash(filepath.Dir(path)), "../")
+			files = append(files, parsed{dir: dir, isTest: strings.HasSuffix(path, "_test.go"), file: file, fset: fset})
 			return nil
 		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+	// The name each package declares, which an import without an alias is used by.
+	pkgName := map[string]string{}
+	for _, f := range files {
+		if !f.isTest {
+			pkgName[f.dir] = f.file.Name.Name
+		}
 	}
 
+	type decl struct {
+		file string
+		line int
+	}
+	declared := map[fn]decl{}          // exported func -> where
+	declIdent := map[*ast.Ident]bool{} // the declarations' own names, which reference nothing
 	for _, root := range declRoots {
 		if _, err := os.Stat(root); err != nil {
 			t.Fatalf("declaration root %s missing — this check would silently pass: %v", root, err)
 		}
-		if err := collect(root, true); err != nil {
-			t.Fatalf("walk %s: %v", root, err)
+	}
+	inDeclRoots := func(dir string) bool {
+		for _, root := range declRoots {
+			r := strings.TrimPrefix(root, "../")
+			if dir == r || strings.HasPrefix(dir, r+"/") {
+				return true
+			}
+		}
+		return false
+	}
+	for _, f := range files {
+		if f.isTest || !inDeclRoots(f.dir) {
+			continue
+		}
+		for _, d := range f.file.Decls {
+			fd, ok := d.(*ast.FuncDecl)
+			// Plain exported functions only. Methods are excluded because they may satisfy an
+			// interface and be called through it, which no reading of names can see.
+			if !ok || fd.Recv != nil || fd.Name == nil || !fd.Name.IsExported() {
+				continue
+			}
+			if fd.Name.Name == "Main" || strings.HasPrefix(fd.Name.Name, "Test") {
+				continue
+			}
+			pos := f.fset.Position(fd.Name.Pos())
+			declared[fn{f.dir, fd.Name.Name}] = decl{file: pos.Filename, line: pos.Line}
+			declIdent[fd.Name] = true
 		}
 	}
 	if len(declared) == 0 {
 		t.Fatal("no exported functions found — this check stopped enforcing anything")
 	}
-	for _, root := range refRoots {
-		if err := collect(root, false); err != nil {
-			t.Fatalf("walk %s: %v", root, err)
+
+	refsProd := map[fn]int{} // mentions in non-test files, excluding the declaration
+	refsTest := map[fn]int{} // mentions in _test.go files
+	for _, f := range files {
+		alias := map[string]string{} // the name an import is used by -> its package's dir
+		for _, im := range f.file.Imports {
+			path, err := strconv.Unquote(im.Path.Value)
+			if err != nil || !strings.HasPrefix(path, module+"/") {
+				continue
+			}
+			dir := strings.TrimPrefix(path, module+"/")
+			name := pkgName[dir]
+			if im.Name != nil {
+				name = im.Name.Name
+			}
+			if name != "" && name != "_" && name != "." {
+				alias[name] = dir
+			}
 		}
+		refs := refsProd
+		if f.isTest {
+			refs = refsTest
+		}
+		// Idents that name something other than a function of this file's package.
+		notRef := map[*ast.Ident]bool{}
+		ast.Inspect(f.file, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.SelectorExpr:
+				notRef[x.Sel] = true
+				if id, ok := x.X.(*ast.Ident); ok {
+					if dir, ok := alias[id.Name]; ok {
+						refs[fn{dir, x.Sel.Name}]++
+						notRef[id] = true
+					}
+				}
+			case *ast.FuncDecl:
+				notRef[x.Name] = true
+			case *ast.Field:
+				for _, id := range x.Names {
+					notRef[id] = true
+				}
+			case *ast.TypeSpec:
+				notRef[x.Name] = true
+			case *ast.ValueSpec:
+				for _, id := range x.Names {
+					notRef[id] = true
+				}
+			case *ast.CompositeLit:
+				for _, e := range x.Elts {
+					if kv, ok := e.(*ast.KeyValueExpr); ok {
+						if id, ok := kv.Key.(*ast.Ident); ok {
+							notRef[id] = true
+						}
+					}
+				}
+			case *ast.Ident:
+				if !notRef[x] && !declIdent[x] {
+					refs[fn{f.dir, x.Name}]++
+				}
+			}
+			return true
+		})
 	}
 
-	dead := map[string]string{} // name -> where, for everything currently unreachable
-	for name, where := range declared {
-		if refsProd[name] > 0 || exemptFromDeadExportedCheck[name] != "" {
+	dead := map[string]string{} // "dir.Name" -> where, for everything currently unreachable
+	for k, where := range declared {
+		if refsProd[k] > 0 || exemptFromDeadExportedCheck[k.name] != "" {
 			continue
 		}
 		suffix := ""
-		if refsTest[name] > 0 {
-			suffix = fmt.Sprintf(" (only its own tests, %d refs)", refsTest[name])
+		if refsTest[k] > 0 {
+			suffix = fmt.Sprintf(" (only its own tests, %d refs)", refsTest[k])
 		}
-		dead[name] = fmt.Sprintf("%s:%d%s", where.file, where.line, suffix)
+		dead[k.dir+"."+k.name] = fmt.Sprintf("%s:%d%s", where.file, where.line, suffix)
 	}
 
 	// No backlog: the recorded list of pre-existing dead functions was paid off
 	// in full (September 2026), so every dead exported function now fails.
 	var found []string
 	for name, where := range dead {
-		found = append(found, fmt.Sprintf("%s: %s", where, name))
+		found = append(found, fmt.Sprintf("%s: %s", where, name[strings.LastIndex(name, ".")+1:]))
 	}
 	sort.Strings(found)
 	if len(found) > 0 {
 		t.Errorf("exported functions that nothing calls (%d) — call them, or delete them:\n  %s",
 			len(found), strings.Join(found, "\n  "))
 	}
+}
+
+// goModulePath is the module go.mod declares: what this module's import paths start with.
+func goModulePath(t *testing.T, gomod string) string {
+	t.Helper()
+	f, err := os.Open(gomod)
+	if err != nil {
+		t.Fatalf("read %s: %v", gomod, err)
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if line := strings.TrimSpace(sc.Text()); strings.HasPrefix(line, "module ") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "module "))
+		}
+	}
+	t.Fatalf("%s declares no module", gomod)
+	return ""
 }
 
 // exemptFromDeadExportedCheck lists exported functions that only tests call, WITH the reason.
@@ -194,6 +286,27 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"is the inversion working: linking the drill is what gives the demo seeder a drill fixture, " +
 		"and not linking it is what makes the seeder skip it, with no edit on either side. Deleting " +
 		"it would force DemoSeed to import the drill, which the AI-free build cannot do.",
+
+	// RELEASE-LINE ONLY (main and without-ai, from v2.73.0). Beta's demo seed
+	// (business/DemoSeed there) calls these seven; the release lines carry the
+	// old seeder instead, since the demo's own code never ships to customers.
+	// They stay in their shared packages, identical to beta's, so later ports
+	// apply as they are; deleting them here would fork those packages.
+	"MarkProjectArchivedInOpenSearch": "called only by beta's demo seed (a refresh takes every " +
+		"retired copy of a curated project out of search); the release lines don't carry it.",
+	"ChannelIDsWithNamePrefix": "called only by beta's demo seed (the visitor leaves every " +
+		"retired copy of the curated channels); the release lines don't carry it.",
+	"ArchivedProjectsWithNamePrefix": "called only by beta's demo seed (retired copies of the " +
+		"curated projects); the release lines don't carry it.",
+	"AddAt": "called only by beta's demo seed (project updates backdated to the run); the " +
+		"release lines don't carry it.",
+	"ClearForPersonInProject": "called only by beta's demo seed (its showcase time entries); " +
+		"the release lines don't carry it.",
+	"UpdateDocPermissions": "business/Doc's is called only by beta's demo seed (the docs home's " +
+		"shared and team docs); the share routes don't call it; the release lines don't carry the seed.",
+	"CreateRow": "models/postgres/DataTable's is called only by beta's demo seed (the vendors and " +
+		"formula tables' rows); every other row goes through business/DataTable's CreateRow, which " +
+		"checks access; the release lines don't carry the seed.",
 
 	"PointAtSlackForTest": "sends the Slack bridge's Web API calls to a local fake, so the " +
 		"integration test can run the whole bridge (both directions, threads, edits, deletions, " +
@@ -234,14 +347,14 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"built only with the integration tag, so the shipped binary never has it; the address " +
 		"rule itself is tested where it is the subject.",
 
-	"Fetch": "safefetch is one package on every line, so a fix to its address rule is one " +
-		"change everywhere. Main uses its endpoint half (MCP servers, remote agents, the shared " +
-		"address table); the link previews that call Fetch are on beta and ship later. Fetch is " +
-		"the same checks the endpoint half runs, so deleting it here would only fork the package.",
-
 	"AgentBudgetLimit": "reads the per-agent cap off a context so business/MCPServer's tests can " +
 		"assert SpendContext actually carries it. services/AI keeps budgetDimensions unexported, " +
 		"so no other package can see the limit. The invariant is production behaviour — a metered " +
 		"dimension with no cap would meter and never refuse — and the accessor is the only way to " +
 		"check it from where the context is built.",
+
+	"ActorID": "reads off a context who its AI spend is billed to, resolved as the meters resolve " +
+		"it, so business/MCPServer's tests can assert SpendContext attributes an MCP call's spend " +
+		"to the token's person. services/AI keeps actorFromContext unexported. Until October 2026 " +
+		"a field named ActorID elsewhere hid it from this check.",
 }

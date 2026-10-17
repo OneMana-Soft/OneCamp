@@ -2,11 +2,42 @@ package ai
 
 import (
 	"encoding/json"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
+
+// A doc's privacy and sharing, as its entries carry them: the people as user
+// uuids, a person the graph returned as nothing skipped, an empty list rather
+// than nil (nil would tell the index nothing, not "nobody"), and a doc with no
+// privacy recorded not private. The save hook, the doc's own updates and the
+// backfill all read a doc this one way.
+func TestDocAccessOfReadsTheDocOneWay(t *testing.T) {
+	yes, no := true, false
+	got := DocAccessOf("d1", &dgraphStruct.DgraphDoc{
+		IsPrivate:   &yes,
+		CreatedBy:   &dgraphStruct.DgraphUser{Uuid: "ana"},
+		EditingUser: []*dgraphStruct.DgraphUser{{Uuid: "ana"}, nil, {Uuid: "ben"}},
+		ReadingUser: []*dgraphStruct.DgraphUser{nil},
+	})
+	want := DocAccess{DocUUID: "d1", Private: true, CreatedBy: "ana",
+		Reading: []string{}, Editing: []string{"ana", "ben"}, Commenting: []string{}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+	if got.Reading == nil || got.Commenting == nil {
+		t.Error("an empty list is nil, so the index would be told nothing rather than nobody")
+	}
+	for _, private := range []*bool{nil, &no} {
+		if a := DocAccessOf("d2", &dgraphStruct.DgraphDoc{IsPrivate: private}); a.Private || a.CreatedBy != "" {
+			t.Errorf("IsPrivate %v: %+v", private, a)
+		}
+	}
+}
 
 // What a write tells the index about a doc's privacy. An entry that exists is
 // updated with only the fields a write sends, so a doc's entry and a doc

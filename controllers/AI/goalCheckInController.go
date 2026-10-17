@@ -56,7 +56,7 @@ func DraftGoalCheckIn(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/AI/DraftGoalCheckIn err: %+v", err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't draft the check-in. Try again in a moment."})
+		helpers.WriteRetryLater(w, "Couldn't draft the check-in.")
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": d})

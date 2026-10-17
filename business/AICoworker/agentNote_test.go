@@ -153,10 +153,10 @@ func TestDueTimesAreSaidInTheMembersZone(t *testing.T) {
 	now := time.Date(2026, 9, 27, 3, 0, 0, 0, time.UTC) // 08:30 in Kolkata
 	kolkata, _ := time.LoadLocation("Asia/Kolkata")
 	for due, want := range map[string]string{
-		"2026-09-27T17:00:00Z": "due today at 10:30 PM",
-		"2026-09-28T04:00:00Z": "due tomorrow at 9:30 AM",
-		"2026-09-25T10:00:00Z": "overdue since Fri, Sep 25",
-		"2026-10-03T10:00:00Z": "due Sat, Oct 3",
+		"2026-09-27T17:00:00Z": "due today at 22:30",
+		"2026-09-28T04:00:00Z": "due tomorrow at 09:30",
+		"2026-09-25T10:00:00Z": "overdue since Fri 25 Sep",
+		"2026-10-03T10:00:00Z": "due Sat 3 Oct",
 		"not a time":           "",
 	} {
 		if got := duePhrase(due, kolkata, now); got != want {
@@ -166,10 +166,10 @@ func TestDueTimesAreSaidInTheMembersZone(t *testing.T) {
 	if helpers.Location("Not/AZone") != time.UTC || helpers.Location("") != time.UTC {
 		t.Fatal("an unknown zone must fall back to UTC")
 	}
-	item := aiAdapter.AttentionItem{Kind: "Due soon", Title: "Write the launch announcement", Subtitle: "Due Sep 27, 5:00 PM · Q4 launch",
+	item := aiAdapter.AttentionItem{Kind: "Due soon", Title: "Write the launch announcement", Subtitle: "Due 27 Sep, 17:00 · Q4 launch",
 		DueTime: "2026-09-27T17:00:00Z", Context: "Q4 launch", URL: "/app/task/t"}
 	h := composeNote("Sam", []aiAdapter.AttentionItem{item}, kolkata, now)
-	if !strings.Contains(h, "Write the launch announcement</a> · due today at 10:30 PM · Q4 launch") || strings.Contains(h, "5:00 PM") {
+	if !strings.Contains(h, "Write the launch announcement</a> · due today at 22:30 · Q4 launch") || strings.Contains(h, "17:00") {
 		t.Fatalf("the note must say the member's time once, not the server's:\n%s", h)
 	}
 }

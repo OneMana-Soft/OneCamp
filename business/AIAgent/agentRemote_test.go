@@ -252,6 +252,28 @@ func TestACheckLeadsWithTheReasonNotTheUrl(t *testing.T) {
 	}
 }
 
+// A run the outside-reach rule refuses is offered no outside tool and never
+// calls a remote agent; the executors refuse one anyway (services/AI).
+func TestARefusedRunIsOfferedNothingFromOutside(t *testing.T) {
+	src, err := os.ReadFile("agentRunner.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)
+	for _, want := range []string{
+		"outsideRefused := ai.OutsideReachRefused(ctx, userUUID)",
+		"if ai.IsOutsideTool(t) {\n\t\t\t\tdelete(allow, t)",
+		"if outsideRefused != nil {\n\t\t\treturn finalize(model.RunFailed, outsideRefused.Error(), outsideRefused.Error())",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("agentRunner.go lost %q", want)
+		}
+	}
+	if strings.Index(body, "outsideRefused := ai.OutsideReachRefused") > strings.Index(body, "toolSpecs = ai.ToolSpecsForRun(enabledTools, prompt)") {
+		t.Error("the tools must be filtered before they are offered")
+	}
+}
+
 // A remote agent a member adds may be on public addresses only; one an admin
 // adds may also be on this server's own network; metadata and link-local
 // addresses are refused for everyone. Nothing refused is ever reached.
@@ -269,8 +291,7 @@ func TestOnlyAnAdminsRemoteMayBeOnThisServersNetwork(t *testing.T) {
 		}
 		return res
 	}
-	// A name is checked when it is dialled, after it resolves.
-	for _, endpoint := range []string{srv.URL, "https://10.0.0.5/agent"} {
+	for _, endpoint := range []string{srv.URL, "https://10.0.0.5/agent", "http://go-service:8000/"} {
 		if res := check(endpoint, false); res.OK || !strings.Contains(res.Error, "Only an admin can add") {
 			t.Errorf("a member's %s: %+v; want the own-network refusal", endpoint, res)
 		}

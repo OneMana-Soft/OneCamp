@@ -30,6 +30,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/zipsafe"
 	"github.com/akashc777/OneCamp/initializers/minioInit"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -191,12 +192,17 @@ func extractPDF(data []byte) (text string, err error) {
 	return out, nil
 }
 
+// docxZipLimits is how a Word file is opened as the zip it is
+// (zipsafe.Open): a document holds a few dozen parts, a few hundred with its
+// pictures.
+var docxZipLimits = zipsafe.Limits{MaxEntries: 10_000, MaxDirectoryBytes: 4 << 20}
+
 // extractDocx pulls the visible text out of a .docx (Office Open XML) file:
 // the word/document.xml part's <w:t> runs, with a newline per paragraph
 // (</w:p>) and a tab per tab element. Stdlib only. Returns errUnsupportedDoc
 // when the zip isn't a Word document.
 func extractDocx(data []byte) (string, error) {
-	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	zr, err := zipsafe.Open(bytes.NewReader(data), int64(len(data)), docxZipLimits)
 	if err != nil {
 		return "", errUnsupportedDoc
 	}

@@ -160,7 +160,7 @@ func TestADeletedDocIsGoneEverywhere(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := code(docController.GetDocInfo, call{who: "viewer", params: map[string]string{"doc_uuid": doc}}); got != http.StatusOK {
+	if got := code(docController.GetDocPage, call{who: "viewer", params: map[string]string{"doc_uuid": doc}}); got != http.StatusOK {
 		t.Fatalf("the viewer opening the doc before the delete: %d", got)
 	}
 	if got := code(guestController.GuestDocColabAuthorize, call{body: map[string]string{"doc_uuid": doc},
@@ -175,6 +175,18 @@ func TestADeletedDocIsGoneEverywhere(t *testing.T) {
 	}
 	if got := mint("editor"); got != http.StatusForbidden {
 		t.Errorf("an editor minting a link to share the doc outside: %d, want 403 (only its owner may share it)", got)
+	}
+	// Someone it was never shared with hears nothing of it: the answer, word
+	// for word, to a doc that doesn't exist (it was "only its owner may share
+	// it", which said it was there).
+	mintFor := func(who, id string) *httptest.ResponseRecorder {
+		t.Helper()
+		return do(guestController.CreateResourceGuestLink, call{who: who, body: map[string]any{"resource_type": "doc", "resource_id": id, "capability": "view"}})
+	}
+	missing, stranger := mintFor("stranger", uuid.NewString()), mintFor("stranger", doc)
+	if missing.Code != http.StatusNotFound || stranger.Code != missing.Code || stranger.Body.String() != missing.Body.String() {
+		t.Errorf("someone it was never shared with minting a link: %d %s, where a doc that doesn't exist answers %d %s",
+			stranger.Code, stranger.Body, missing.Code, missing.Body)
 	}
 	if got := mint("owner"); got != http.StatusOK {
 		t.Errorf("its owner minting a link: %d, want 200", got)
@@ -217,7 +229,7 @@ func TestADeletedDocIsGoneEverywhere(t *testing.T) {
 	onlyTheirs("before it was deleted")
 
 	// Its owner deletes it.
-	if got := code(docController.DeleteDoc, call{who: "owner", body: docAdapter.InputUpdateDoc{DocId: doc}}); got != http.StatusOK {
+	if got := code(docController.DeleteDocTree, call{who: "owner", body: docAdapter.InputUpdateDoc{DocId: doc}}); got != http.StatusOK {
 		t.Fatalf("deleting the doc: %d", got)
 	}
 
@@ -228,16 +240,18 @@ func TestADeletedDocIsGoneEverywhere(t *testing.T) {
 		c       call
 		want    int
 	}{
-		{"opening it", docController.GetDocInfo, call{who: "viewer", params: map[string]string{"doc_uuid": doc}}, http.StatusGone},
-		{"opening it, someone it was never shared with", docController.GetDocInfo, call{who: "stranger", params: map[string]string{"doc_uuid": doc}}, http.StatusNotFound},
+		{"opening it", docController.GetDocPage, call{who: "viewer", params: map[string]string{"doc_uuid": doc}}, http.StatusGone},
+		{"opening it, someone it was never shared with", docController.GetDocPage, call{who: "stranger", params: map[string]string{"doc_uuid": doc}}, http.StatusNotFound},
 		{"its comments", docController.GetAllCommentList, call{who: "viewer", params: map[string]string{"doc_uuid": doc}}, http.StatusGone},
 		{"its comments, someone it was never shared with", docController.GetAllCommentList, call{who: "stranger", params: map[string]string{"doc_uuid": doc}}, http.StatusNotFound},
-		{"renaming it", docController.UpdateDocBody, call{who: "editor", body: docAdapter.InputUpdateDoc{DocId: doc, Title: &title}}, http.StatusGone},
-		{"rewriting it", docController.UpdateDocBody, call{who: "owner", body: docAdapter.InputUpdateDoc{DocId: doc, Body: &body}}, http.StatusGone},
-		{"rewriting it, someone it was never shared with", docController.UpdateDocBody, call{who: "stranger", body: docAdapter.InputUpdateDoc{DocId: doc, Body: &body}}, http.StatusNotFound},
+		{"renaming it", docController.UpdateDocBodyLive, call{who: "editor", body: docAdapter.InputUpdateDoc{DocId: doc, Title: &title}}, http.StatusGone},
+		{"rewriting it through its live copy", docController.UpdateDocBodyLive, call{who: "owner", body: docAdapter.InputUpdateDoc{DocId: doc, Body: &body}}, http.StatusGone},
+		{"rewriting it through its live copy, someone it was never shared with", docController.UpdateDocBodyLive, call{who: "stranger", body: docAdapter.InputUpdateDoc{DocId: doc, Body: &body}}, http.StatusNotFound},
+		{"its versions", docController.ListDocVersions, call{who: "owner", query: "doc_uuid=" + doc}, http.StatusGone},
+		{"its versions, someone it was never shared with", docController.ListDocVersions, call{who: "stranger", query: "doc_uuid=" + doc}, http.StatusNotFound},
+		{"saving it through the new save route", docController.SaveDocFromCollab, call{body: docBusiness.CollabSave{DocUUID: doc, HTML: body, YjsState: "c3RhdGU="}}, http.StatusGone},
+		{"saving only its live state through the new save route", docController.SaveDocFromCollab, call{body: docBusiness.CollabSave{DocUUID: doc, YjsState: "c3RhdGU=", KeepBody: true}}, http.StatusGone},
 		{"joining it live", docController.DocCollabAuthorize, call{who: "editor", body: docAdapter.InputUpdateDoc{DocId: doc}}, http.StatusGone},
-		{"saving it from an editor still open", docController.UpdateDocFromCollab, call{body: docAdapter.InputDocCollabUpdate{DocUuid: doc, HtmlContent: body}}, http.StatusGone},
-		{"saving only its live state", docController.UpdateDocFromCollab, call{body: docAdapter.InputDocCollabUpdate{DocUuid: doc, YjsState: "c3RhdGU=", KeepBody: true}}, http.StatusGone},
 		{"the collaboration service opening it", docController.GetDocForCollab, call{params: map[string]string{"doc_uuid": doc}}, http.StatusGone},
 		{"commenting on it", docController.CreateDocComment, call{who: "editor", body: docAdapter.CreateOrUpdateDocCommentInput{DocUuid: doc, CommentBody: "<p>still here?</p>"}}, http.StatusGone},
 		{"editing a comment on it", docController.UpdateDocComment, call{who: "editor", body: docAdapter.CreateOrUpdateDocCommentInput{UUID: comment, DocUuid: doc, CommentBody: "<p>edited</p>"}}, http.StatusGone},
@@ -245,7 +259,7 @@ func TestADeletedDocIsGoneEverywhere(t *testing.T) {
 		{"reacting to a comment on it", docController.CreateOrUpdateDocCommentReaction, call{who: "viewer", body: docAdapter.InputUpdateReactionForCommentInDoc{CommentId: comment, EmojiReactionUuid: uuid.NewString()}}, http.StatusGone},
 		{"who it's shared with", docController.GetDocPermissions, call{who: "owner", query: "doc_uuid=" + doc}, http.StatusGone},
 		{"sharing it", docController.UpdateDocPermissions, call{who: "owner", body: docAdapter.InputUpdateDocPermissions{DocId: doc, AddViewers: []string{people["stranger"].String()}}}, http.StatusGone},
-		{"deleting it again", docController.DeleteDoc, call{who: "owner", body: docAdapter.InputUpdateDoc{DocId: doc}}, http.StatusGone},
+		{"deleting it again", docController.DeleteDocTree, call{who: "owner", body: docAdapter.InputUpdateDoc{DocId: doc}}, http.StatusGone},
 		{"its history", docController.GetDocSnapshots, call{who: "editor", query: "doc_uuid=" + doc}, http.StatusGone},
 		{"restoring a version", docController.RestoreDocSnapshot, call{who: "editor", body: docAdapter.InputRestoreDocSnapshot{DocId: doc, SnapshotId: uuid.NewString()}}, http.StatusGone},
 		{"recording a view", docController.RecordDocView, call{who: "viewer", body: docAdapter.InputRecordDocView{DocId: doc}}, http.StatusGone},
@@ -264,10 +278,10 @@ func TestADeletedDocIsGoneEverywhere(t *testing.T) {
 		}
 	}
 
-	// Saving only its live state reads the doc and then writes the state. The
-	// write landing after the delete, as it does when the delete comes between
-	// the two, is refused too, not stored on the trashed doc.
-	if err := docDomain.SetDocCollabState(ctx, doc, "c3RhdGU=", "hash-of-the-body"); !errors.Is(err, docDomain.ErrDocDeleted) {
+	// Saving only its live state is one upsert, conditional on the doc being
+	// live (domain/Doc WriteCollabSave): one landing after the delete is
+	// refused too, not stored on the trashed doc.
+	if _, err := docDomain.WriteCollabSave(ctx, docDomain.CollabWrite{DocUUID: doc, StateOnly: true, State: "c3RhdGU=", Hash: "hash-of-the-body"}); !errors.Is(err, docDomain.ErrDocDeleted) {
 		t.Errorf("the live state's write landing after the delete: %v, want it refused as deleted", err)
 	}
 
@@ -337,7 +351,9 @@ func TestRepairDocsMendsADeletedDocAndLeavesItDeleted(t *testing.T) {
 	}))
 	defer collab.Close()
 	t.Setenv("INTERNAL_SECRET", "repair-integration-secret")
-	t.Setenv("COLLAB_INTERNAL_URL", collab.URL)
+	// The render op is on the collaboration service's internal port, which
+	// the API finds at COLLAB_LIVE_URL (services/collab).
+	t.Setenv("COLLAB_LIVE_URL", collab.URL)
 
 	doc := uuid.NewString()
 	deletedAt := "2026-10-01T10:00:00Z"

@@ -121,6 +121,7 @@ func ensureBotPrincipal(ctx context.Context, userID uuid.UUID, email, name, avat
 		UUID:       userID.String(),
 		Name:       name,
 		ProfileKey: profileKey,
+		Kind:       domain.ClassifyBot(email),
 	}
 }
 

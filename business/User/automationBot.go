@@ -29,6 +29,10 @@ type BotIdentity struct {
 	UUID       string    // user uuid string (== UserID.String())
 	Name       string    // display name ("OneCamp AI")
 	ProfileKey string    // user_profile_object_key (avatar); empty until set
+
+	// Kind is which kind of bot this is (assistant, agent, bridge, …),
+	// classified from its email, for a message that says so.
+	Kind domain.BotKind
 }
 
 var (
@@ -101,6 +105,7 @@ func EnsureAutomationBot(ctx context.Context) (*BotIdentity, error) {
 		UUID:       userID.String(),
 		Name:       domain.SystemBotDisplayName(),
 		ProfileKey: profileKey,
+		Kind:       domain.ClassifyBot(domain.SystemBotEmail),
 	}
 
 	botMu.Lock()

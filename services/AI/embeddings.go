@@ -280,7 +280,7 @@ func entryJSON(stored embeddingDocWithVector) ([]byte, error) {
 // it, and the doc's text was gone from AI search until its next save.
 func StoreEmbeddingAsync(doc EmbeddingDoc) {
 	prev, done := entryWrites.queue(doc.ContentType + ":" + doc.ContentUUID)
-	go func() {
+	helpers.GoSafeNamed("ai.embedding-write", func() {
 		defer done()
 		if prev != nil {
 			// Bounded: the write before has its own deadline (below), and one
@@ -300,7 +300,7 @@ func StoreEmbeddingAsync(doc EmbeddingDoc) {
 				"AI/embeddings StoreEmbeddingAsync failed for %s:%s err: %+v",
 				doc.ContentType, doc.ContentUUID, err)
 		}
-	}()
+	})
 }
 
 // storeEmbeddingFn is StoreEmbedding. A seam for tests.
@@ -836,7 +836,7 @@ func MigrateEmbeddingsGroupID(ctx context.Context, oldGrpID string, newGrpID str
 
 // MigrateEmbeddingsGroupIDAsync fires a goroutine to migrate AI embeddings — fire-and-forget.
 func MigrateEmbeddingsGroupIDAsync(oldGrpID string, newGrpID string, newParticipantUUID string) {
-	go func() {
+	helpers.GoSafeNamed("ai.embedding-group-move", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
@@ -845,7 +845,7 @@ func MigrateEmbeddingsGroupIDAsync(oldGrpID string, newGrpID string, newParticip
 				"AI/embeddings MigrateEmbeddingsGroupIDAsync failed for %s -> %s err: %+v",
 				oldGrpID, newGrpID, err)
 		}
-	}()
+	})
 }
 
 // --- Convenience wrappers ---

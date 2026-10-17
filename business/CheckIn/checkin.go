@@ -352,10 +352,12 @@ func AskNow(ctx context.Context, r Reader, id uuid.UUID, now time.Time) (string,
 }
 
 // QuestionHTML is the post a check-in asks with: the question, the day it is
-// for in the check-in's zone, and where to answer. Pure.
+// for in the check-in's zone, said as that zone's day, and where to answer.
+// Someone elsewhere read "Check-in for Tuesday 13 October" under a post their
+// clock put on the 14th (QA F-43). Pure.
 func QuestionHTML(question string, at time.Time) string {
-	return fmt.Sprintf("<p><strong>%s</strong></p><p>Check-in for %s. Answer in this thread; everyone's answers are together here.</p>",
-		html.EscapeString(question), at.Format("Monday 2 January"))
+	return fmt.Sprintf("<p><strong>%s</strong></p><p>Check-in for %s, %s time. Answer in this thread; everyone's answers are together here.</p>",
+		html.EscapeString(question), at.Format("Monday 2 January"), helpers.PlaceName(at.Location()))
 }
 
 // ask posts the question for the time at in the channel as the check-in bot,
@@ -432,7 +434,7 @@ func Sweep(ctx context.Context, now time.Time) {
 // StartWorker sweeps for due check-ins every sweepEvery until ctx ends. Called
 // where the other background workers start.
 func StartWorker(ctx context.Context) {
-	helpers.GoSafeNamed("checkin-sweeper", func() {
+	helpers.GoSafeLoop("checkin-sweeper", func() {
 		t := time.NewTicker(sweepEvery)
 		defer t.Stop()
 		for {

@@ -19,6 +19,13 @@ import (
 // on this network, is tested where that rule is the subject
 // (mcp_secret_binding_test, agentRemote_test), so turning it off here hides
 // nothing that test is about.
+//
+// Why a hook rather than a setting: there is no setting for this. Who added a
+// remote decides where it may connect (creatorIsAdmin), and the operator-wide
+// switch that once let every remote reach this network was removed on purpose,
+// so nothing in the environment can stand in for that decision. This package's
+// own tests set creatorIsAdmin directly (main_test.go); a test in another
+// package can reach it only through here.
 func LetRemotesReachThisNetworkForTest() (restore func()) {
 	old := creatorIsAdmin
 	creatorIsAdmin = func(context.Context, *uuid.UUID) bool { return true }

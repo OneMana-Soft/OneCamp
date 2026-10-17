@@ -17,6 +17,9 @@ type ChatInfo struct {
 	// chat_uuid of a message in the SAME conversation this message replies to.
 	// One level deep; validated server-side (same grouping id, not deleted).
 	ReplyToUuid string `json:"reply_to_uuid,omitempty"`
+	// ClientMsgID is the id the app gave the message when it showed it: a
+	// send tried again with it is the same send (business/Send Once).
+	ClientMsgID string `json:"client_msg_id,omitempty"`
 }
 
 type SearchUserName struct {

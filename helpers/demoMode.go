@@ -1,6 +1,7 @@
 package helpers
 
 import (
+	"net/http"
 	"os"
 	"strings"
 )
@@ -33,3 +34,21 @@ const DemoPersonalAccountMsg = "The demo is shared by everyone who opens it, so 
 // docs from the shared visitor (business/DemoGuard).
 const DemoSeededMsg = "Everyone who opens the demo shares this, so it can't be archived or deleted here. " +
 	"Anything you make yourself, you can archive or delete."
+
+// DemoOutsideMsg is why the demo connects to nothing outside itself: no MCP
+// server, no remote agent. Their tools act with whoever set them up's
+// credentials, and everyone who opens the demo shares it.
+const DemoOutsideMsg = "The demo is shared by everyone who opens it, so its agents don't connect to outside tools " +
+	"or agents here. Install OneCamp free to connect your own."
+
+// RefuseDemoVisitor answers 403 with code "demo" and msg when email is the
+// demo's shared visitor, and reports whether it did. The one refusal behind
+// every route the visitor may not use (middleware.notForDemoVisitor) and the
+// handlers that refuse only part of a request.
+func RefuseDemoVisitor(w http.ResponseWriter, email, msg string) bool {
+	if !IsDemoVisitor(email) {
+		return false
+	}
+	WriteJSON(w, http.StatusForbidden, Envolope{"code": "demo", "msg": msg})
+	return true
+}

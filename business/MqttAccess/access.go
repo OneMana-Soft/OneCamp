@@ -59,17 +59,9 @@ type sources struct {
 var live = sources{
 	activeUser:  userDomain.GetActiveUserWithAdminFlagByUserUUID,
 	memberTopic: mqttBusiness.IsMemberTopic,
-	readsDoc: func(ctx context.Context, userUUID, docID string) (bool, error) {
-		user, err := userDomain.GetActiveDgraphUserInfoByUUID(ctx, userUUID)
-		if err != nil || user == nil {
-			return false, err
-		}
-		doc, err := docBusiness.GetBasicDgraphDocByUUID(ctx, docID, user.Uid)
-		if err != nil {
-			return false, err
-		}
-		return doc != nil && doc.Uuid == docID && docBusiness.CanRead(doc, userUUID), nil
-	},
+	// The doc rule a recheck at the broker asks too, when a change takes a doc
+	// from people (business/Doc AccessChanged): one answer for both.
+	readsDoc: docBusiness.ReadsDoc,
 	readsBoard: func(ctx context.Context, userUUID, boardID string) (bool, error) {
 		user, err := userDomain.GetActiveDgraphUserInfoByUUID(ctx, userUUID)
 		if err != nil || user == nil {

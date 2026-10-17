@@ -151,7 +151,7 @@ func TestAPrivateDocStaysPrivateAfterItsFirstEdit(t *testing.T) {
 	waitFor("created", func(e map[string]any) bool { return e["content_text"] != nil })
 
 	// The first edit, as the collaboration service saves it: the body alone.
-	if err := docBusiness.UpdateDocFromCollab(ctx, doc, "<p>zebra-quartz plan</p>", "", []string{a.String()}, false, ""); err != nil {
+	if _, err := docBusiness.SaveFromCollab(ctx, docBusiness.CollabSave{DocUUID: doc, HTML: "<p>zebra-quartz plan</p>", Contributors: []string{a.String()}}); err != nil {
 		t.Fatal(err)
 	}
 	waitFor("saved", func(e map[string]any) bool {
@@ -208,7 +208,7 @@ func TestAPrivateDocStaysPrivateAfterItsFirstEdit(t *testing.T) {
 	waitFinds("made private again", b, false)
 
 	// And another body-only save of the now-private doc keeps it private.
-	if err := docBusiness.UpdateDocFromCollab(ctx, doc, "<p>zebra-quartz plan, v2</p>", "", []string{a.String()}, false, ""); err != nil {
+	if _, err := docBusiness.SaveFromCollab(ctx, docBusiness.CollabSave{DocUUID: doc, HTML: "<p>zebra-quartz plan, v2</p>", Contributors: []string{a.String()}}); err != nil {
 		t.Fatal(err)
 	}
 	waitFor("saved again", func(e map[string]any) bool {

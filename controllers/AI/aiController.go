@@ -1028,7 +1028,8 @@ func GetAIStatus(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 			"msg": "AI service status",
 			"data": adapter.AIStatusResponse{
-				Enabled: false,
+				Enabled:        false,
+				DocActionNeeds: business.DocActionNeedsByName(),
 			},
 		})
 		return
@@ -1044,6 +1045,7 @@ func GetAIStatus(w http.ResponseWriter, r *http.Request) {
 		WebSearchEnabled:   ai.WebSearchEnabled(),
 		SandboxEnabled:     ai.SandboxEnabled(),
 		CodePREnabled:      ai.CodePREnabled(),
+		DocActionNeeds:     business.DocActionNeedsByName(),
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{

@@ -3,7 +3,6 @@ package models
 import (
 	"context"
 	"encoding/json"
-	"errors"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -11,6 +10,10 @@ import (
 	"github.com/dgraph-io/dgo/v230"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
+
+// ErrNotFound is a person the graph has no node for, as opposed to a graph
+// that didn't answer: a read of them answers 404 (helpers.WriteReadFailure).
+var ErrNotFound = helpers.NotFound("failed to get dgraph user")
 
 // UpsertEmojiStatuses writes a person's statuses in one transaction: query
 // names them (by var), set and del say what to write and what to remove (del
@@ -85,7 +88,7 @@ func GetDgraphUserInfoInTxn(ctx context.Context, txn *dgo.Txn, query string, var
 	}
 
 	if len(usersInfo.UserInfo) == 0 {
-		err = errors.New("failed to get dgraph user")
+		err = ErrNotFound
 		helpers.LogErrorWithContext(ctx,
 			"models/GetDgraphUserInfoByUUID failed to get dgraph user")
 

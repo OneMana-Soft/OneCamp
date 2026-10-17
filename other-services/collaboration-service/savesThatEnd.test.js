@@ -47,6 +47,16 @@ test('a doc deleted while open is let go once: its tab is told, its edits are ke
     backend.doc(ID, BODY)
     const collab = await startServer({ redis, backend })
     const tab = await open(collab, ID)
+    // The doc's blocks get ids as it loads (transforms/blockIds.js), an edit
+    // saved like any other. That save lands first, so the delete below finds
+    // the doc quiet and the 410 answers the save of what is typed after it;
+    // the copy stored then is the one the delete leaves. It is the save whose
+    // body carries the ids: the first save of all is the rebuilt state's
+    // (saveRebuilt, body kept), made as the doc loads, and waiting for any
+    // save let the ids' save, 20 ms later, take the 410 before the typed line
+    // reached the server, now and then.
+    await until(() => backend.docs.get(ID).doc_body.includes('data-block-id'), 3000, 'the block ids to be saved')
+    const stored = backend.docs.get(ID).doc_body
 
     // Deleted (or archived) while the tab is open: saves answer 410.
     backend.saveStatus = 410
@@ -63,11 +73,11 @@ test('a doc deleted while open is let go once: its tab is told, its edits are ke
     Y.applyUpdate(copy, Buffer.from(kept.bytes, 'base64'))
     assert.match(text(copy), /Typed after the delete\./, 'what was typed after the delete is kept')
 
-    // Opening it again is refused as unavailable: the web app says it couldn't
-    // open the doc, with Retry.
+    // Opening it again is refused for good: the Doc Session (session.js) says
+    // the doc is gone, and the web app stops trying.
     const again = new TestClient({ url: collab.url, name: ID })
     assert.equal(await again.connect(), 'denied')
-    assert.equal(again.denied, 'document-unavailable')
+    assert.equal(again.denied, 'gone')
     await again.close()
     again.destroy()
 
@@ -80,7 +90,7 @@ test('a doc deleted while open is let go once: its tab is told, its edits are ke
     assert.equal(count(collab, 'IS GONE'), 1, 'it is let go once')
     assert.equal(collab.failures.pending(ID), false)
     assert.equal(collab.server.hocuspocus.documents.has(ID), false, 'and it stays unloaded')
-    assert.equal(backend.docs.get(ID).doc_body, BODY, 'the stored copy is unchanged')
+    assert.equal(backend.docs.get(ID).doc_body, stored, 'the stored copy is unchanged')
     await collab.stop()
     assert.deepEqual(rejections, [])
 })
@@ -161,14 +171,30 @@ test('a retry that cannot open a gone doc quarantines the state its failed save 
     assert.deepEqual(rejections, [])
 })
 
-test('joining a doc that is gone is refused as unavailable; one refused for access is not', async () => {
+test('joining a doc that is gone is refused for good, with the reason the Doc Session gives', async () => {
     const redis = new FakeRedis()
     const backend = new FakeBackend()
     backend.doc(ID, BODY)
     const collab = await startServer({ redis, backend })
-    for (const [status, reason] of [[410, 'document-unavailable'], [404, 'document-unavailable'], [403, 'permission-denied']]) {
+    for (const [status, reason] of [[410, 'gone'], [404, 'not-found'], [403, 'forbidden']]) {
         backend.authStatus = status
         const tab = new TestClient({ url: collab.url, name: ID })
+        assert.equal(await tab.connect(), 'denied')
+        assert.equal(tab.denied, reason, `HTTP ${status}`)
+        await tab.close()
+        tab.destroy()
+    }
+    await collab.stop()
+    assert.deepEqual(rejections, [])
+})
+
+test('joining a board that is gone is refused as unavailable; one refused for access is not', async () => {
+    const redis = new FakeRedis()
+    const backend = new FakeBackend()
+    const collab = await startServer({ redis, backend })
+    for (const [status, reason] of [[410, 'document-unavailable'], [404, 'document-unavailable'], [403, 'permission-denied']]) {
+        backend.authStatus = status
+        const tab = new TestClient({ url: collab.url, name: `board:${ID}` })
         assert.equal(await tab.connect(), 'denied')
         assert.equal(tab.denied, reason, `HTTP ${status}`)
         await tab.close()

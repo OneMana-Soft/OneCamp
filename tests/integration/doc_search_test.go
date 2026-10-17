@@ -214,7 +214,9 @@ func TestGlobalSearchFindsDocsByWhoMayReadThemNow(t *testing.T) {
 	})
 
 	t.Run("a deleted doc is found by nobody", func(t *testing.T) {
-		if err := docBusiness.DeleteDoc(ctx, handbook.Uuid); err != nil {
+		// Deleting is putting in the trash (A3), as the app's delete does.
+		owner := info("owner")
+		if _, err := docBusiness.TrashSubtree(ctx, handbook.Uuid, owner.UserDgraphInfo.Uid, owner.UserDgraphInfo.Uuid, owner.UserPostgresInfo.EmailID); err != nil {
 			t.Fatal(err)
 		}
 		eventually("the handbook's entry says it is deleted", func() bool { return entry("docs", handbook.Uuid)["deleted_date"] != nil })

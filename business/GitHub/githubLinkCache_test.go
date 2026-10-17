@@ -25,7 +25,7 @@ func TestLinkCacheGenerationFencing(t *testing.T) {
 
 	key := linkCacheKey("acme", "repo")
 	githubLinkCache.Set(key, githubLinkCacheEntry{
-		link:       &githubLinkModel.GitHubLink{RepoOwner: "acme", RepoName: "repo"},
+		links:      []*githubLinkModel.GitHubLink{{RepoOwner: "acme", RepoName: "repo"}},
 		generation: startGen,
 	})
 

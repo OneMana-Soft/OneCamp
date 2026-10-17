@@ -375,6 +375,7 @@ var workspaceWideTools = map[string]string{
 	"list_tasks":        "only tasks in projects the asker is in (askerView)",
 	"list_tables":       "only tables the asker may view (askerTables), and each table read opens for both (dataTableBusiness.AlsoFor)",
 	"list_data_sources": "only data sources the asker may query (askerDataSources)",
+	"list_docs":         "only docs the asker can open too, by the Access Resolver (business/AI docList.go)",
 	"find_people":       "not narrowed: the people directory, which every member sees",
 	"web_search":        "not narrowed: reads nothing of the workspace's",
 	// The code tools read through the workspace's GitHub integration: the

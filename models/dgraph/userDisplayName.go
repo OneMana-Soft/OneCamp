@@ -16,6 +16,17 @@ func (u *DgraphUser) DisplayName() string {
 	return helpers.PersonDisplayName(u.UserName, u.UserFullName, u.EmailID)
 }
 
+// Public is what anyone may be shown of a member, as an inbox item or a feed
+// shows them: their id, names, picture and whether they're a bot. Never their
+// email, nor anything else the graph holds of them. nil for a nil user, or one
+// with no id.
+func (u *DgraphUser) Public() *DgraphUser {
+	if u == nil || u.Uuid == "" {
+		return nil
+	}
+	return &DgraphUser{Uuid: u.Uuid, UserName: u.UserName, UserFullName: u.UserFullName, ProfileKey: u.ProfileKey, IsBot: u.IsBot}
+}
+
 // SortUsersByName orders people by user_name as Dgraph's orderasc does (byte
 // by byte, anyone without one last), then by uuid. Member lists are sorted
 // here rather than in the query: Dgraph stops a sorted block at 1,000

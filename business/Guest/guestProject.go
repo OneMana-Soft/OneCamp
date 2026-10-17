@@ -58,7 +58,13 @@ type GuestColumn struct {
 
 // GuestProjectView is the whole project as its guest sees it.
 type GuestProjectView struct {
-	Project     string        `json:"project"`
+	Project string `json:"project"`
+	// ProjectUUID is the project's id, which the client's page colours its
+	// tile by, as the team's pages do (by its name, two projects of the same
+	// name looked alike and a renamed one changed colour). It opens nothing:
+	// every route that takes a project's id wants a member's session, and the
+	// link's token is what opens this page.
+	ProjectUUID string        `json:"project_uuid"`
 	CanComment  bool          `json:"can_comment"`
 	Columns     []GuestColumn `json:"columns"`
 	TotalTasks  int           `json:"total_tasks"`
@@ -192,6 +198,7 @@ func GetGuestProject(ctx context.Context, grant *guestModel.GuestGrant) (*GuestP
 	}
 	view := &GuestProjectView{
 		Project:     p.Name,
+		ProjectUUID: projectID.String(),
 		CanComment:  grant.Capability == guestModel.CapabilityComment,
 		Columns:     make([]GuestColumn, 0, len(guestStatuses)),
 		GeneratedAt: time.Now().UTC(),

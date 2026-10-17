@@ -184,7 +184,7 @@ func UpdateTeamName(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph team info",
+			"msg": "Couldn't rename the team. Try again.",
 			"err": err,
 		})
 		return
@@ -269,7 +269,7 @@ func AddMemberToTeam(w http.ResponseWriter, r *http.Request) {
 			"controllers/AddMemberToTeam Failed to get dgraph team info err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph team info",
+			"msg": "Couldn't add them to the team. Try again.",
 			"err": err,
 		})
 		return
@@ -453,7 +453,7 @@ func RemoveMemberFromTeam(w http.ResponseWriter, r *http.Request) {
 			"controllers/RemoveMemberFromTeam Failed to get dgraph team info err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph team info",
+			"msg": "Couldn't remove them from the team. Try again.",
 			"err": err,
 		})
 		return
@@ -597,7 +597,7 @@ func GetDgraphTeamProjectListByTeamUUID(w http.ResponseWriter, r *http.Request) 
 			"controllers/GetDgraphTeamProjectListByTeamUUID Failed to get dgraph team info err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph team info",
+			"msg": "Couldn't load the team's projects.",
 			"err": err,
 		})
 		return
@@ -674,7 +674,7 @@ func GetDgraphTeamMemberListByTeamUUID(w http.ResponseWriter, r *http.Request) {
 			"controllers/GetDgraphTeamMemberListByTeamUUID Failed to get dgraph team member list err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph team member list",
+			"msg": "Couldn't load the team's members.",
 			"err": err,
 		})
 		return
@@ -704,7 +704,7 @@ func GetDgraphTeamListByUserDgraphUID(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph team list",
+			"msg": "Couldn't load your teams.",
 			"err": err,
 		})
 		return
@@ -727,7 +727,7 @@ func GetDgraphTeamListByAdminDgraphUID(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph team list",
+			"msg": "Couldn't load the teams you manage.",
 			"err": err,
 		})
 		return
@@ -784,7 +784,7 @@ func ArchiveTeam(w http.ResponseWriter, r *http.Request) {
 			"controllers/ArchiveTeam Failed to get team dgraph info err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get team dgraph info",
+			"msg": "Couldn't archive the team. Try again.",
 			"err": err,
 		})
 		return
@@ -904,7 +904,7 @@ func UnArchiveTeam(w http.ResponseWriter, r *http.Request) {
 			"controllers/UnArchiveTeam Failed to get team dgraph info err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get team dgraph info",
+			"msg": "Couldn't restore the team. Try again.",
 			"err": err,
 		})
 		return

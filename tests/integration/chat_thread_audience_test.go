@@ -37,7 +37,6 @@ import (
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
-	"github.com/akashc777/OneCamp/initializers/mqttInit"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -55,8 +54,7 @@ func TestAGroupThreadReplyIsToldToOneAudience(t *testing.T) {
 	integration.SetupRedis(t)
 	dg := integration.SetupDgraph(t)
 	broker := &noticeBroker{}
-	mqttInit.MqttClient = broker
-	t.Cleanup(func() { mqttInit.MqttClient = nil })
+	integration.UseMqttClient(t, broker)
 	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"took":1,"errors":false,"items":[],"updated":0,"failures":[]}`)
 	}))

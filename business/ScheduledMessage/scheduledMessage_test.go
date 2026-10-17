@@ -26,6 +26,14 @@ func TestValidateSendAt(t *testing.T) {
 	if _, isInvalid := ValidateSendAt(now, now).(*Invalid); !isInvalid {
 		t.Error("a bad time must be an Invalid, so the person sees why")
 	}
+	// What it says is the rule it applies: 31 seconds out passes, so it never
+	// says "a minute" (MC-41).
+	if err := ValidateSendAt(now.Add(31*time.Second), now); err != nil {
+		t.Errorf("31 seconds out was refused: %v", err)
+	}
+	if err := ValidateSendAt(now.Add(10*time.Second), now); err == nil || err.Error() != "Pick a time at least 30 seconds from now." {
+		t.Errorf("too soon says %v", err)
+	}
 }
 
 func TestPreview(t *testing.T) {

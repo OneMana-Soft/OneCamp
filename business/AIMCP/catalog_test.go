@@ -1,6 +1,7 @@
 package business
 
 import (
+	"strings"
 	"testing"
 
 	model "github.com/akashc777/OneCamp/models/postgres/AIMCP"
@@ -65,6 +66,18 @@ func TestConnectorCatalogWellFormed(t *testing.T) {
 		}
 		if e.SecretRequired && e.AuthType == model.AuthNone {
 			t.Fatalf("entry %q requires a secret but uses no auth", e.Name)
+		}
+	}
+}
+
+// The catalogue's words are shown to people as they are (Settings, Agents and
+// skills): plain, with no em dashes (QA SH-13, 14 Oct 2026).
+func TestConnectorCatalogCopyHasNoEmDashes(t *testing.T) {
+	for _, e := range connectorCatalog {
+		for _, text := range []string{e.Name, e.Description} {
+			if strings.ContainsRune(text, '—') {
+				t.Errorf("%s: %q", e.Slug, text)
+			}
 		}
 	}
 }

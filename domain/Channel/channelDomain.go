@@ -94,7 +94,7 @@ func GetChannelInfoByUUID(ctx context.Context, channelUUID uuid.UUID) (channelIn
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"domain/GetChannelByName Failed to channel by ch_handle err: %+v",
+			"domain/GetChannelInfoByUUID Failed to get channel by uuid err: %+v",
 			err)
 		return
 	}
@@ -248,7 +248,6 @@ func GetDgraphChannelInfoByUUIDAndModeratorInfo(ctx context.Context, channelUUID
 				channelInfo(func: eq(ch_uuid, $id)) {
 					uid
 					ch_uuid
-					ch_handle
 					ch_is_member: count(ch_members @filter(uid($userId)))
 					ch_is_admin: count(ch_moderators @filter(uid($userId)))
 					ch_moderators @filter(eq(user_uuid, $moderatorId)){
@@ -292,7 +291,6 @@ func GetDgraphChannelInfoByUUIDAndMemberInfo(ctx context.Context, channelUUID st
 				channelInfo(func: eq(ch_uuid, $id)) {
 					uid
 					ch_uuid
-					ch_handle
 					ch_deleted_at
 					ch_post_policy
 					ch_is_member: count(ch_members @filter(uid($userId)))
@@ -334,7 +332,6 @@ func GetBasicChannelAndPostInfoByUUID(ctx context.Context, channelUUID string, p
 				channelInfo(func: eq(ch_uuid, $id)) {
 					uid
 					ch_uuid
-					ch_handle
 					ch_is_member: count(ch_members @filter(uid($userId)))
 					ch_is_admin: count(ch_moderators @filter(uid($userId)))
 					ch_posts @filter(eq(post_uuid, $postId)) {
@@ -342,10 +339,6 @@ func GetBasicChannelAndPostInfoByUUID(ctx context.Context, channelUUID string, p
 						post_uuid
 						post_created_at
 						post_deleted_at
-						post_created_by {
-							user_uuid
-							user_deleted_at
-						}
 					}
 					ch_private
 					ch_created_at
@@ -399,7 +392,6 @@ func GetBasicDgraphChannelInfoByUUID(ctx context.Context, channelUUID string, us
 					ch_created_by {
 						user_uuid
 						user_name
-						user_enail_id
 					}
 					ch_icon
 					ch_name
@@ -447,7 +439,6 @@ func GetChannelRecordingTranscript(ctx context.Context, channelUUID string, user
 		channelInfo(func: eq(ch_uuid, $id)) {
 			uid
 			ch_uuid
-			ch_handle
 			ch_is_member: count(ch_members @filter(uid($userId)))
 			ch_recording @filter( uid(recUID) AND gt(recording_ended_at, "1970-01-01T00:00:00Z") AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z")) {
 				recording_egress_id
@@ -516,7 +507,6 @@ func GetChannelAllRecordingList(ctx context.Context, channelUUID string, userDgr
 		channelInfo(func: eq(ch_uuid, $id)) {
 			uid
 			ch_uuid
-			ch_handle
 			ch_is_member: count(ch_members @filter(uid($userId)))
 			ch_recording @filter( %s) (orderdesc: recording_stared_at, first: $first, offset: $offset) {
 				recording_egress_id
@@ -565,7 +555,6 @@ func GetDgraphChannelInfoByUUID(ctx context.Context, channelUUID string, userDgr
 				channelInfo(func: eq(ch_uuid, $id)) {
 					uid
 					ch_uuid
-					ch_handle
 					ch_is_member: count(ch_members @filter(uid($userId)))
 					ch_is_admin: count(ch_moderators @filter(uid($userId)))
 					ch_moderators {
@@ -628,38 +617,6 @@ func dgraphUIDOrNone(uid string) string {
 	return uid
 }
 
-func GetUsersChannelListWithPublicChannel(ctx context.Context, userDgraphId string) (dgraphChannels []*dgraphStruct.DgraphChannel, err error) {
-
-	variables := make(map[string]string)
-	variables["$user_id"] = userDgraphId
-	query := `query ChannelInfo($user_id: string){
-			    var(func: uid($user_id)) {
-					user_channels {
-						ch as uid
-					}
-				}
-				var(func: has(ch_uuid)) @filter(not eq(ch_private, true)) {
-					p_ch as uid
-				}
-				channelInfo(func: uid(ch, p_ch)) {
-					ch_uuid
-					ch_name
-			  	}
-			}`
-
-	dgraphChannels, err = dgraphModels.GetDgraphChannelsInfoByUserUUID(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetUsersChannelListWithPublicChannel Failed to get channel fron dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
-}
-
 func GetChannelListWithSearchText(ctx context.Context, userUUID string, searchText string) (dgraphChannels []*dgraphStruct.DgraphChannel, err error) {
 
 	variables := make(map[string]string)
@@ -668,7 +625,6 @@ func GetChannelListWithSearchText(ctx context.Context, userUUID string, searchTe
 				channelInfo(func: has(ch_name)) @filter((uid_in(~user_channels, $user_id) OR not eq(ch_private, true)) AND regexp(ch_name,  /.*%s.*/i)) {
 					uid
 					ch_uuid
-					ch_handle
 					ch_icon
 					ch_name
 					ch_created_at
@@ -742,13 +698,14 @@ func GetArchivedChannelListWithLatestPostWithUserIdAndSearchText(ctx context.Con
                 }
 				channelInfo(func: has(ch_name), first: %v, offset: %v) @filter(%s) {
 					ch_uuid
-					ch_handle
 					ch_icon
 					ch_name
 					ch_created_at
 					ch_updated_at
 					ch_deleted_at
 					ch_private
+					# Whether the reader may restore it: its admins (and workspace admins) can.
+					ch_is_admin: count(ch_moderators @filter(uid($user_id)))
 					ch_created_by {
 						user_name
 						user_uuid
@@ -800,7 +757,6 @@ func GetAllActiveChannelListWithLatestPost(ctx context.Context, userDgraphId str
                 }
 				channelInfo(func: has(ch_name), first: %v, offset: %v) @filter(%s) {
 					ch_uuid
-					ch_handle
 					ch_icon
 					ch_name
 					ch_created_at
@@ -857,7 +813,6 @@ func GetActiveChannelListWithLatestPostWithUserIdAndSearchText(ctx context.Conte
                 }
 				channelInfo(func: has(ch_name), first: %v, offset: %v) @filter(%s) {
 					ch_uuid
-					ch_handle
 					ch_icon
 					ch_name
 					ch_created_at
@@ -915,7 +870,6 @@ func GetChannelListWithLatestPostWithUserIdAndSearchText(ctx context.Context, us
                 }
 				channelInfo(func: has(ch_name), first: %v, offset: %v) @filter(%s) {
 					ch_uuid
-					ch_handle
 					ch_icon
 					ch_name
 					ch_created_at
@@ -973,13 +927,14 @@ func GetUserArchivedChannelListWithLatestPost(ctx context.Context, userDgraphId 
                 }
 				channelInfo(func: has(ch_uuid), first: %v, offset: %v) @filter(uid_in(~user_channels, $user_id) AND gt(ch_deleted_at, "1970-01-01T00:00:00Z")) {
 					ch_uuid
-					ch_handle
 					ch_icon
 					ch_name
 					ch_created_at
 					ch_updated_at
 					ch_deleted_at
 					ch_private
+					# Whether the reader may restore it: its admins (and workspace admins) can.
+					ch_is_admin: count(ch_moderators @filter(uid($user_id)))
 					ch_created_by {
 						user_name
 						user_uuid
@@ -1030,7 +985,6 @@ func GetUserActiveChannelListWithLatestPost(ctx context.Context, userDgraphId st
                 }
 				channelInfo(func: has(ch_uuid), first: %v, offset: %v) @filter(uid_in(~user_channels, $user_id) AND not gt(ch_deleted_at, "1970-01-01T00:00:00Z")) {
 					ch_uuid
-					ch_handle
 					ch_icon
 					ch_name
 					ch_created_at
@@ -1235,5 +1189,61 @@ func RestoreChannelRow(ctx context.Context, channelUUID uuid.UUID, channelName s
 		return
 	}
 	_ = redisStore.DeletePattern(ctx, registry.ChannelBasicInfo.Pattern(channelUUID.String()))
+	return
+}
+
+// GetDiscoverableChannels is a page of the channels the person could join and
+// isn't in: public, live, not one of theirs, by name, and with searchText
+// (sanitised, regex-escaped), only those whose name holds it. The channel
+// browser's Discover tab read one page of 20 of /allActiveChannels, in graph
+// order with the person's own channels among them, and searched only that
+// page, so in a workspace with more than 20 channels the rest never showed.
+func GetDiscoverableChannels(ctx context.Context, userDgraphId string, searchText string, pageIndex int, pageSize int) (dgraphChannels []*dgraphStruct.DgraphChannel, totalCount int64, err error) {
+	variables := map[string]string{"$user_id": userDgraphId}
+	filter := `NOT uid_in(~user_channels, $user_id) AND NOT eq(ch_private, true) AND NOT gt(ch_deleted_at, "1970-01-01T00:00:00Z")`
+	if searchText != "" {
+		filter += fmt.Sprintf(` AND regexp(ch_name, /.*%s.*/i)`, searchText)
+	}
+	query := fmt.Sprintf(`query ChannelInfo($user_id: string){
+				var(func: has(ch_name)) @filter(%s) {
+					totalCountVar as count(uid)
+				}
+				channelInfo(func: has(ch_name), orderasc: ch_name, first: %d, offset: %d) @filter(%s) {
+					ch_uuid
+					ch_icon
+					ch_name
+					ch_about
+					ch_created_at
+					ch_updated_at
+					ch_deleted_at
+					ch_private
+					ch_member_count: count(ch_members)
+					ch_created_by {
+						user_name
+						user_uuid
+					}
+					ch_posts @filter(not gt(post_deleted_at, "1970-01-01T00:00:00Z")) (orderdesc: post_created_at, first: 1) {
+						post_text
+						post_created_at
+						post_by {
+							user_uuid
+							user_name
+							user_full_name
+							is_bot
+						}
+						post_attachments {
+							attachment_file_name
+						}
+					}
+				}
+				totalCount() {
+					count: sum(val(totalCountVar))
+				}
+			}`, filter, pageSize, pageIndex*pageSize, filter)
+
+	dgraphChannels, totalCount, err = dgraphModels.GetDgraphChannelsInfoAndCount(ctx, query, variables)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetDiscoverableChannels Failed to get channels from dgraph err: %+v", err)
+	}
 	return
 }

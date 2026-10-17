@@ -29,7 +29,8 @@ func TestOnlyTheSharedDemoVisitorIsRefused(t *testing.T) {
 	for _, guard := range []struct {
 		name string
 		mw   func(http.Handler) http.Handler
-	}{{"connecting an account", NoPersonalAccountsInDemo}, {"changing how it signs in", DemoSignInStays}} {
+	}{{"connecting an account", NoPersonalAccountsInDemo}, {"changing how it signs in", DemoSignInStays},
+		{"reaching outside the demo", NoOutsideConnectionsInDemo}} {
 		for _, c := range cases {
 			t.Setenv("DEMO_MODE", c.demoMode)
 			reached := false

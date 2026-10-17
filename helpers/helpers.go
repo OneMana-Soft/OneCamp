@@ -45,6 +45,11 @@ const (
 	// the current request, so the rate limiter and audit log can attribute
 	// per-token. Absent for normal cookie/session requests.
 	ApiTokenIDContextKey ContextKey = "apiTokenId"
+	// ApiAgentIDContextKey carries the agent identity the request's API token
+	// is bound to, when it is one: what a write through the API credits beside
+	// the token's owner (I11). Absent for an unbound token and for
+	// cookie/session requests.
+	ApiAgentIDContextKey ContextKey = "apiAgentId"
 	// SystemReadContextKey marks a read performed BY THE SERVER ITSELF rather than
 	// on behalf of the person who made the request.
 	//
@@ -117,6 +122,16 @@ func GetApiTokenID(ctx context.Context) string {
 		return ""
 	}
 	v, _ := ctx.Value(ApiTokenIDContextKey).(string)
+	return v
+}
+
+// GetApiAgentID returns the agent the request's API token is bound to, or ""
+// for an unbound token and for non-token requests.
+func GetApiAgentID(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(ApiAgentIDContextKey).(string)
 	return v
 }
 
@@ -340,12 +355,14 @@ func LogWarnWithContext(ctx context.Context, message string, args ...interface{}
 // express two levels, silently folding WARN and DEBUG into the info log. MessageLogs itself
 // stays — direct *log.Logger users remain — but nothing should route by level through it.
 
-// dgraphUIDPattern is a node uid as Dgraph writes one: lower-case hex, at most
-// 64 bits.
-var dgraphUIDPattern = regexp.MustCompile(`^0x[0-9a-f]{1,16}$`)
+// dgraphUIDPattern is a node uid: "0x" and at most 16 hex digits (64 bits).
+// Dgraph writes the digits lower-case and reads them in either case, so either
+// is a uid.
+var dgraphUIDPattern = regexp.MustCompile(`^0x[0-9a-fA-F]{1,16}$`)
 
 // IsDgraphUID reports whether s is a Dgraph node uid, so it can be written into
-// a query or taken as an edge's target.
+// a query or taken as an edge's target. It is the one uid check:
+// dgraphquery.AllUIDs is this over a list.
 func IsDgraphUID(s string) bool { return dgraphUIDPattern.MatchString(s) }
 
 // WriteRetryLater answers 503 with what failed, in a sentence people can read,

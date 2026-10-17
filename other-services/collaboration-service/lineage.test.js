@@ -12,7 +12,10 @@ import { FakeBackend, FakeRedis, TestClient, startServer, until, sleep } from '.
 // "Q4 launch plan" went from 7 blocks to 77 in six minutes, one full copy per
 // reconnect, because every rebuild was a new Yjs history).
 
-const BODY = '<h1>Q4 launch plan</h1><p>We launch on the last Tuesday.</p><ul><li><p>Ship the beta</p></li></ul><p>Owners: Sam, Priya.</p>'
+// Its blocks carry their ids, as a doc's do once it has been opened since
+// block ids (transforms/blockIds.test.js has a doc without them).
+const BODY = '<h1 data-block-id="b1">Q4 launch plan</h1><p data-block-id="b2">We launch on the last Tuesday.</p>' +
+    '<ul data-block-id="b3"><li data-block-id="b4"><p data-block-id="b5">Ship the beta</p></li></ul><p data-block-id="b6">Owners: Sam, Priya.</p>'
 const ID = '4b0c4b1e-3f63-4a3a-9f0e-6b1f0a7c2d11'
 const times = (doc, text) => JSON.stringify(TiptapTransformer.fromYdoc(doc, 'default')).split(text).length - 1
 const blocks = (doc) => doc.getXmlFragment('default').length
@@ -116,12 +119,19 @@ test('a tab holding an earlier copy cannot add it: its edits are dropped and it 
     await until(() => !collab.server.hocuspocus.documents.has(ID), 3000, 'unload')
 
     // The body changes underneath (a restore, an API write, demoseed).
-    const restored = '<h1>Q4 launch plan</h1><p>Restored: we launch in March.</p>'
+    const restored = '<h1 data-block-id="b1">Q4 launch plan</h1><p data-block-id="b7">Restored: we launch in March.</p>'
     backend.doc(ID, restored)
 
     assert.equal(await tab.connect(), 'synced')
-    await until(() => tab.stateless.length > 0, 2000, 'the reload message')
-    assert.deepEqual(tab.stateless.map((m) => JSON.parse(m).type), ['epoch-changed'])
+    const told = () => tab.stateless.map((m) => JSON.parse(m))
+    await until(() => told().some((m) => m.type === 'epoch-changed'), 2000, 'the reload message')
+    // Besides its session and what is stored (persisted.js), the one notice.
+    assert.deepEqual(told().filter((m) => m.type !== 'session' && m.type !== 'persisted').map((m) => m.type), ['epoch-changed'])
+    // Each connection was told the doc's lineage (session.js): the second is
+    // another copy, which a tab that waits for it never syncs into.
+    const lineages = told().filter((m) => m.type === 'session').map((m) => m.lineage)
+    assert.equal(lineages.length, 2)
+    assert.ok(lineages[0] && lineages[1] && lineages[0] !== lineages[1], `lineages ${lineages}`)
     const live = collab.server.hocuspocus.documents.get(ID)
     assert.equal(times(live, 'We launch on the last Tuesday'), 0, 'the old copy never reached the server')
     assert.equal(times(live, 'Restored: we launch in March.'), 1)

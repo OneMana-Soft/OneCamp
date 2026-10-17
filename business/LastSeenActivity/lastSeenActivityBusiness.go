@@ -23,6 +23,10 @@ func CreateOrUpdateLastSeenActivity(ctx context.Context, userID uuid.UUID) (err 
 	return
 }
 
+// UnreadNotices counts a person's inbox notices since a time (business/Follow
+// sets it from its init; until then there are none to count).
+var UnreadNotices func(ctx context.Context, userUUID string, since time.Time) (uint64, error)
+
 func GetTotalUnreadActivityCount(ctx context.Context, userDgraphId string, userID uuid.UUID) (totalCount uint64, err error) {
 
 	totalCount, err = domain.GetTotalUnreadActivityCount(ctx, userDgraphId, userID)
@@ -32,6 +36,15 @@ func GetTotalUnreadActivityCount(ctx context.Context, userDgraphId string, userI
 			"business/GetTotalUnreadActivityCount Failed to get total unread count err: %+v",
 			err)
 		return
+	}
+
+	// The inbox's notices count as unread too, since the person last looked.
+	if UnreadNotices != nil {
+		if seen, serr := domain.GetLastSeenActivityByUserId(ctx, userID); serr == nil {
+			if n, nerr := UnreadNotices(ctx, userID.String(), seen); nerr == nil {
+				totalCount += n
+			}
+		}
 	}
 
 	return

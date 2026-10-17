@@ -354,14 +354,16 @@ func GetBoardPermissions(ctx context.Context, boardUUID string, userUID string) 
 	return domain.GetBoardPermissions(ctx, boardUUID)
 }
 
-// SearchUsersForBoard finds users to invite (reuses the shared user search).
-func SearchUsersForBoard(ctx context.Context, userDgraphUUID string, searchText string) (usersList []*dgraphStruct.DgraphUser, err error) {
+// SearchUsersForBoard finds the people a board can be shared with (the shared
+// user search). On the public
+// demo its shared visitor (viewerEmail) finds only the demo's own people.
+func SearchUsersForBoard(ctx context.Context, userDgraphUUID string, viewerEmail string, searchText string) (usersList []*dgraphStruct.DgraphUser, err error) {
 	dgraphUsers, err := userDomain.GetUserListWithSearchText(ctx, userDgraphUUID, searchText)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/SearchUsersForBoard Failed to get users list err: %+v", err)
 		return nil, err
 	}
-	return dgraphUsers, nil
+	return userDomain.DemoVisibleUsers(viewerEmail, dgraphUsers), nil
 }
 
 // GetBoardList returns the boards the user can access (owned or shared), with

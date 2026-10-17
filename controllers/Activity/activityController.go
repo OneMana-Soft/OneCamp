@@ -142,24 +142,26 @@ func GetLatestReactions(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got reactions successfully!", "data": reactionsPage})
 }
 
+// A page of the feed: 20 items when the app doesn't say, and never more than
+// maxActivityPage.
+const activityPageSize, maxActivityPage = 20, 50
+
+// unifiedActivity is the feed's read, a seam for tests.
+var unifiedActivity = business.GetUnifiedActivity
+
 func GetUnifiedActivity(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	timeValue := r.URL.Query()["beforeTime"]
-	limitValue := r.URL.Query()["limit"]
 
-	limit := 20
+	// The client's page size, within a page: the limit drives the notices
+	// too (limit+1 of them, each a Postgres read, an access check and a
+	// title read), and an uncapped one read as many as it asked for.
+	limit := helpers.LimitParam(r.URL.Query(), activityPageSize, maxActivityPage)
 	// Default to current time if not provided
 	beforeTime := time.Now()
-
-	if len(limitValue) > 0 {
-		limitInt, err := strconv.Atoi(limitValue[0])
-		if err == nil {
-			limit = limitInt
-		}
-	}
 
 	if len(timeValue) > 0 && timeValue[0] != "" {
 		// To the nanosecond, as the feed writes times; whole seconds from an
@@ -170,7 +172,7 @@ func GetUnifiedActivity(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	unifiedPage, err := business.GetUnifiedActivity(ctx, userInfo.UserPostgresInfo.Id, userInfo.UserDgraphInfo.Uid, beforeTime, limit)
+	unifiedPage, err := unifiedActivity(ctx, userInfo.UserPostgresInfo.Id, userInfo.UserDgraphInfo.Uid, beforeTime, limit)
 
 	if err != nil {
 
@@ -184,6 +186,13 @@ func GetUnifiedActivity(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 
+	}
+
+	// Notices ("NOTICE" items: a mention in a doc's body, "shared with you", a
+	// proposal) only for an app that says it draws them: an older app meets an
+	// activity type it has no badge for and stops drawing the feed.
+	if r.URL.Query().Get("notices") == "1" {
+		unifiedPage = business.WithNotices(ctx, unifiedPage, userInfo.UserPostgresInfo.Id.String(), beforeTime, limit)
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got unified activity successfully!", "data": unifiedPage})

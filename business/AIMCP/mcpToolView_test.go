@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	model "github.com/akashc777/OneCamp/models/postgres/AIMCP"
+	"github.com/google/uuid"
 )
 
 // The exported view must report exactly what the host enforces — same rules, no
@@ -157,5 +158,28 @@ func TestServerViewJSON(t *testing.T) {
 	}
 	if views := NewServerViews(nil, Actor{}); views == nil || len(views) != 0 {
 		t.Fatalf("NewServerViews(nil, Actor{}) = %+v, want empty non-nil slice", views)
+	}
+}
+
+// Someone who may not manage a server sees its host, not the rest of its
+// address or the error that quotes it; whoever may manage it sees all of it.
+func TestOnlyAManagerSeesAServersFullAddress(t *testing.T) {
+	owner, other := uuid.New(), uuid.New()
+	lastErr := `could not connect: Post "https://mcp.example.com/mcp?key=s3cret": refused`
+	srv := &model.McpServer{URL: "https://mcp.example.com/mcp?key=s3cret", CreatedBy: &owner, LastError: &lastErr, ToolsCache: "[]"}
+	member := NewServerView(srv, Actor{UserID: other})
+	if member.URL != "https://mcp.example.com" || member.CanManage {
+		t.Errorf("a member sees %q (can manage %v)", member.URL, member.CanManage)
+	}
+	if member.LastError == nil || strings.Contains(*member.LastError, "s3cret") {
+		t.Errorf("a member reads the error %v", member.LastError)
+	}
+	if srv.URL != "https://mcp.example.com/mcp?key=s3cret" {
+		t.Error("the row itself was changed")
+	}
+	for _, a := range []Actor{{UserID: owner}, {UserID: other, IsAdmin: true}} {
+		if v := NewServerView(srv, a); v.URL != srv.URL || !v.CanManage || *v.LastError != lastErr {
+			t.Errorf("%+v sees %q", a, v.URL)
+		}
 	}
 }

@@ -55,7 +55,19 @@ type CommandResponse struct {
 	// (e.g. the full Giphy result set), so an interactive shuffle swaps to an
 	// already-downloaded image instantly instead of fetching on each click.
 	PreloadURLs []string `json:"preload_urls,omitempty"`
+	// Kind says what an answer that arrives later, over MQTT, is (KindReminder,
+	// KindApp), so the app titles it by what it is: every one was titled
+	// "Reminder", an app's answer too (MC-BUG-8).
+	Kind string `json:"kind,omitempty"`
 }
+
+// What a late answer is (CommandResponse.Kind).
+const (
+	// KindReminder is a /remind that came due.
+	KindReminder = "reminder"
+	// KindApp is an installed app's answer to its command, after the request returned.
+	KindApp = "app"
+)
 
 // ClientAction is a front-end directive carried on a CommandResponse.
 type ClientAction struct {

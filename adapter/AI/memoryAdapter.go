@@ -89,6 +89,11 @@ type BriefingHighlight struct {
 	ChannelName string `json:"channel_name,omitempty"`
 	AuthorName  string `json:"author_name,omitempty"`
 	Snippet     string `json:"snippet"`
+	// A doc's or a task's name, and the text under it, apart: the snippet
+	// runs them together ("Launch sync notes Attendees: Sam…", QA SH-09).
+	// Empty for what has no name of its own (a message, a comment).
+	Title   string `json:"title,omitempty"`
+	Excerpt string `json:"excerpt,omitempty"`
 
 	// Chat routing fields — let the FE deep-link a chat/DM highlight to the
 	// right conversation. ChatGrpID is a 32-char id for group chats; for DMs

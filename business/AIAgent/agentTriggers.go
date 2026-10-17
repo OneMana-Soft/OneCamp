@@ -1349,28 +1349,27 @@ func mentionPromptWithContext(ctx context.Context, a *model.AiAgent, replyChanne
 // principal (uuid + avatar) when resolved, falling back to the shared bot's
 // identity so the indicator still renders if per-agent provisioning failed.
 // Mirrors the AI coworker's typing behavior so an @mentioned agent shows it is
-// working.
+// working. Each message says a bot is typing and which kind, so the app reads
+// "Release Captain is working" rather than "is typing".
 func runAgentTyping(ctx context.Context, agentName string, agentBot *userBusiness.BotIdentity, channelID string, stop <-chan struct{}) {
-	var botUUID, profileKey string
-	if agentBot != nil {
-		botUUID = agentBot.UUID
-		profileKey = agentBot.ProfileKey
-	} else if bot := userBusiness.GetAutomationBot(ctx); bot != nil {
-		botUUID = bot.UUID
-		profileKey = bot.ProfileKey
-	} else {
-		return
+	bot := agentBot
+	if bot == nil {
+		if bot = userBusiness.GetAutomationBot(ctx); bot == nil {
+			return
+		}
 	}
 	publish := func() {
 		mqttBusiness.PublishChannelTyping(&mqttStruct.MqttChannelTyping{
 			UserName:    agentName,
-			UserUUID:    botUUID,
-			UserProfile: profileKey,
+			UserUUID:    bot.UUID,
+			UserProfile: bot.ProfileKey,
 			ChannelUuid: channelID,
+			IsBot:       true,
+			BotKind:     string(bot.Kind),
 		}, channelID)
 	}
 	publish()
-	t := time.NewTicker(4 * time.Second)
+	t := time.NewTicker(mqttBusiness.TypingRepublishInterval)
 	defer t.Stop()
 	for {
 		select {

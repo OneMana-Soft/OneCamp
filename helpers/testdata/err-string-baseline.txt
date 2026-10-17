@@ -45,7 +45,6 @@
 
 controllers/AI/aiConfigController.go 4
 controllers/AI/aiController.go 13
-controllers/AI/aiDocController.go 3
 controllers/AI/memoryController.go 1
 controllers/Archive/archiveController.go 12
 controllers/Board/boardController.go 9

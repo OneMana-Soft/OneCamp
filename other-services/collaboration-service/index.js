@@ -8,6 +8,7 @@ import jwt from 'jsonwebtoken'
 import dotenv from 'dotenv'
 import { createCollabServer } from './collabServer.js'
 import { guardRedisExtension } from './guardRedis.js'
+import { createLiveServer } from './live/server.js'
 
 dotenv.config()
 
@@ -81,6 +82,14 @@ const collab = createCollabServer({
     serverExtensions: [guardRedisExtension(new RedisExtension({ redis: redisClient }))],
 })
 
+// The Live Doc Writer (live/): server-side writes into open docs, on a port of
+// its own that the compose files never route through Traefik, so only the API
+// on the services' network reaches it, and only with INTERNAL_SECRET.
+const LIVE_PORT = process.env.LIVE_PORT ? parseInt(process.env.LIVE_PORT) : 1235
+const live = createLiveServer({ getSecret: internalSecret, hocuspocus: collab.server.hocuspocus, deps: collab.live })
+live.on('error', (e) => console.error('[Live] Internal server error:', e?.message || e))
+live.listen(LIVE_PORT, () => console.log(`[Live] Live Doc Writer listening on internal port ${LIVE_PORT}`))
+
 collab.server.listen().then(() => {
     console.log(`[Collab] Server listening on port ${process.env.PORT || 1234}`);
     // Docs whose saves were failing when the service last stopped: their whole
@@ -142,6 +151,8 @@ const stop = async (signal) => {
         exitAfterFlush(0)
     }, 8000).unref()
     try {
+        // No more server-side writes while the docs are saved and unloaded.
+        live.close()
         await collab.stop()
         console.log('[Collab] Shutdown complete')
     } catch (e) {

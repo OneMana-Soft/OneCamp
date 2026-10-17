@@ -2,8 +2,10 @@ package helpers
 
 // Work that runs on after the call that started it, and how to wait for it.
 //
-// A save hands work off and returns, such as an audit row to the chain's
-// writer. Two kinds of caller need to know when that work is done. A server shutting down, so what it queued isn't lost with the
+// A save hands work off and returns: an audit row to the chain's writer, an
+// event to its sinks, a doc's search entry to be written again, a goroutine
+// started with GoSafe. Two kinds of caller need to know when that work is
+// done. A server shutting down, so what it queued isn't lost with the
 // process. And the integration tests, so one test's work can't land in the
 // next test's database or run after the clients it uses were taken down: a
 // goroutine that did once panicked and took the whole test binary with it.

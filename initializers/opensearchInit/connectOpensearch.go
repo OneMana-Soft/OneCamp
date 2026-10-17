@@ -100,6 +100,7 @@ func ConnectOpenSearch(config *OpenSearchConfig) (err error) {
 						}
 					},
 					"chat_id": { "type": "keyword", "index": true },
+					"chat_grp_id": { "type": "text", "index": true, "fields": { "keyword": { "type": "keyword", "ignore_above": 256 } } },
 					"chat_to_user_id": { "type": "keyword", "index": true },
 					"chat_to_user_full_name": { "type": "text", "index": true },
 					"chat_to_profile": { "type": "keyword", "index": false },
@@ -243,7 +244,7 @@ func ConnectOpenSearch(config *OpenSearchConfig) (err error) {
 					"doc_private": { "type": "boolean", "index": true },
 					"doc_reading_users": { "type": "keyword", "index": true },
 					"doc_editing_users": { "type": "keyword", "index": true },
-					"doc_commenting_users": { "type": "keyword", "index": true },
+					"doc_commenting_users": { "type": "keyword", "index": true },` + docAccessProperties + `,
 					"created_date": { "type": "date", "format": "epoch_second", "index": true },
 					"updated_date": { "type": "date", "format": "epoch_second", "index": false },
 					"deleted_date": { "type": "date", "format": "epoch_second", "index": true }
@@ -367,6 +368,8 @@ func ConnectOpenSearch(config *OpenSearchConfig) (err error) {
 			return err
 		}
 	}
+
+	ensureDocAccessMapping(ctx)
 
 	go ensureAuditLogRetention(context.Background())
 

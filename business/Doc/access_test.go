@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	domain "github.com/akashc777/OneCamp/domain/Doc"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
@@ -120,50 +119,6 @@ func TestADeletedDocIsReadAndChangedByNobody(t *testing.T) {
 	}
 	if IsDeleted(nil) {
 		t.Error("no doc is a deleted doc")
-	}
-}
-
-// domain.ReadableBy decides from a doc's sharing lists what CanRead decides
-// from the counts a doc query reads for one person: who else may be told
-// about it (a new comment's notifications).
-func TestReadableByAgreesWithCanRead(t *testing.T) {
-	yes, no := true, false
-	deleted := time.Now().Add(-time.Minute)
-	owner := &dgraphStruct.DgraphUser{Uid: "0x1", Uuid: "owner"}
-	reader := &dgraphStruct.DgraphUser{Uid: "0x2", Uuid: "reader"}
-	editor := &dgraphStruct.DgraphUser{Uid: "0x3", Uuid: "editor"}
-	commenter := &dgraphStruct.DgraphUser{Uid: "0x4", Uuid: "commenter"}
-	stranger := &dgraphStruct.DgraphUser{Uid: "0x5", Uuid: "stranger"}
-	people := []*dgraphStruct.DgraphUser{owner, reader, editor, commenter, stranger}
-
-	shared := func(private *bool, deletedAt *time.Time) *dgraphStruct.DgraphDoc {
-		return &dgraphStruct.DgraphDoc{IsPrivate: private, CreatedBy: owner, DeletedAt: deletedAt,
-			ReadingUser: []*dgraphStruct.DgraphUser{reader}, EditingUser: []*dgraphStruct.DgraphUser{owner, editor},
-			CommentingUser: []*dgraphStruct.DgraphUser{commenter}}
-	}
-	// The same doc as a query reads it for one person: their own counts.
-	readFor := func(d *dgraphStruct.DgraphDoc, p *dgraphStruct.DgraphUser) *dgraphStruct.DgraphDoc {
-		cp := *d
-		count := func(list []*dgraphStruct.DgraphUser) uint8 {
-			for _, u := range list {
-				if u.Uuid == p.Uuid {
-					return 1
-				}
-			}
-			return 0
-		}
-		cp.HasReadAccess, cp.HasEditAccess, cp.HasCommentAccess = count(d.ReadingUser), count(d.EditingUser), count(d.CommentingUser)
-		return &cp
-	}
-	for _, d := range []*dgraphStruct.DgraphDoc{shared(&yes, nil), shared(&no, nil), shared(nil, nil), shared(&yes, &deleted), shared(&no, &deleted)} {
-		for _, p := range people {
-			if got, want := domain.ReadableBy(d, p.Uuid), CanRead(readFor(d, p), p.Uuid); got != want {
-				t.Errorf("private=%v deleted=%v, %s: ReadableBy = %v, CanRead = %v", d.IsPrivate, d.DeletedAt != nil, p.Uuid, got, want)
-			}
-		}
-	}
-	if domain.ReadableBy(shared(&no, nil), "") {
-		t.Error("nobody (an empty id) may be told about a doc")
 	}
 }
 

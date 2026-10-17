@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/akashc777/OneCamp/business/DataTable/formula"
 	formBusiness "github.com/akashc777/OneCamp/business/Form"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
@@ -30,7 +31,7 @@ func write(w http.ResponseWriter, r *http.Request, where string, err error) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "This form isn't available."})
 	default:
 		helpers.LogErrorWithContext(r.Context(), "controllers/Form/%s err: %+v", where, err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Something went wrong. Try again in a moment."})
+		helpers.WriteRetryLater(w, "Something went wrong.")
 	}
 }
 
@@ -108,6 +109,9 @@ func SubmitPublicForm(w http.ResponseWriter, r *http.Request) {
 		Answers map[string]any `json:"answers"`
 		// Website is a field people never see: a form that fills it is a bot.
 		Website string `json:"website"`
+		// How the visitor writes numbers ("decimal", "group"), as the tables'
+		// requests send them: a number answer is read in them.
+		formula.NumberSigns
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&in); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that request."})
@@ -117,7 +121,7 @@ func SubmitPublicForm(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't send that."})
 		return
 	}
-	if err := formBusiness.Submit(r.Context(), chi.URLParam(r, "token"), in.Answers, time.Now()); err != nil {
+	if err := formBusiness.Submit(r.Context(), chi.URLParam(r, "token"), in.Answers, in.NumberSigns, time.Now()); err != nil {
 		write(w, r, "SubmitPublicForm", err)
 		return
 	}

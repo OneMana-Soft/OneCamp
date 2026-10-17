@@ -1,6 +1,6 @@
 // Package business (Marketplace) is the management + install layer for
-// shareable templates (agents, workflows, tables) (migration 93, simplified in
-// 95).
+// shareable templates (agents, workflows, tables, and docs: docTemplates.go)
+// (migration 93, simplified in 95).
 //
 // A template stores the create-input for its kind as a stable JSON payload.
 // Install instantiates a fresh copy in the installer's workspace by replaying
@@ -70,7 +70,7 @@ func optStr(s string) *string {
 // Publish validates and stores a new template owned by the user.
 func Publish(ctx context.Context, in PublishInput, createdBy uuid.UUID) (*model.Template, error) {
 	kind := strings.TrimSpace(in.Kind)
-	if !model.ValidKind(kind) {
+	if !validKind(kind) {
 		return nil, fmt.Errorf("invalid template kind")
 	}
 	name := strings.TrimSpace(in.Name)
@@ -98,24 +98,57 @@ func Publish(ctx context.Context, in PublishInput, createdBy uuid.UUID) (*model.
 	if _, err := decodeForKind(kind, json.RawMessage(payload)); err != nil {
 		return nil, fmt.Errorf("template payload is not valid for kind %s: %w", kind, err)
 	}
+	// A doc template is stored in its own form: a body with something in it
+	// and no block ids, a title and a tile.
+	if kind == KindDoc {
+		p, err := readDocPayload(payload)
+		if err != nil {
+			return nil, fmt.Errorf("template payload is not valid for kind %s: %w", kind, err)
+		}
+		if p, err = normalDocPayload(p, uuid.NewString()); err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(p)
+		if err != nil {
+			return nil, err
+		}
+		payload = string(raw)
+	}
 
 	id, err := model.CreateTemplate(ctx, kind, name, optStr(in.Description), optStr(in.Icon), payload, createdBy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to publish template")
 	}
-	return model.GetTemplate(ctx, id)
+	t, err := model.GetTemplate(ctx, id)
+	return asListed(t), err
 }
 
-// List returns listed templates, optionally filtered by kind.
+// List returns listed templates, optionally filtered by kind. OneCamp's own
+// doc templates come first, wherever doc templates are listed; a doc
+// template carries its preview, never its body.
 func List(ctx context.Context, kind string) ([]*model.Template, error) {
-	if kind != "" && !model.ValidKind(kind) {
+	if kind != "" && !validKind(kind) {
 		return nil, fmt.Errorf("invalid kind")
 	}
-	return marketplaceDomain.ListTemplates(ctx, kind)
+	items, err := marketplaceDomain.ListTemplates(ctx, kind)
+	if err != nil {
+		return nil, err
+	}
+	var out []*model.Template
+	if kind == "" || kind == KindDoc {
+		out = builtinsListed()
+	}
+	for _, t := range items {
+		out = append(out, asListed(t))
+	}
+	return out, nil
 }
 
-// Get returns a single listed template.
+// Get returns a single listed template; a doc template with its body.
 func Get(ctx context.Context, id uuid.UUID) (*model.Template, error) {
+	if b, ok := builtinByID(id); ok {
+		return builtinTemplate(b, true), nil
+	}
 	t, err := model.GetTemplate(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load template")
@@ -123,11 +156,20 @@ func Get(ctx context.Context, id uuid.UUID) (*model.Template, error) {
 	if t == nil {
 		return nil, errNotFound
 	}
+	if t.Kind == KindDoc {
+		if p, perr := readDocPayload(t.Payload); perr == nil {
+			t.Payload = fullPayload(p)
+		}
+	}
 	return t, nil
 }
 
 // Unpublish unlists a template the user owns (admins may unlist any).
+// OneCamp's own doc templates are never removed.
 func Unpublish(ctx context.Context, id uuid.UUID, userInfo *userModels.UserInfo) error {
+	if _, ok := builtinByID(id); ok {
+		return errBuiltinTemplate
+	}
 	if err := model.SoftDeleteTemplate(ctx, id, userInfo.UserPostgresInfo.Id, userInfo.UserPostgresInfo.IsAdmin); err != nil {
 		return errNotFound
 	}
@@ -137,6 +179,9 @@ func Unpublish(ctx context.Context, id uuid.UUID, userInfo *userModels.UserInfo)
 // Install instantiates a template in the installer's workspace and returns a
 // reference to the new entity. Capability-gated kinds re-check the capability.
 func Install(ctx context.Context, id uuid.UUID, userInfo *userModels.UserInfo) (*InstallResult, error) {
+	if _, ok := builtinByID(id); ok {
+		return installDoc(ctx, id, userInfo)
+	}
 	t, err := model.GetTemplate(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load template")
@@ -161,6 +206,8 @@ func Install(ctx context.Context, id uuid.UUID, userInfo *userModels.UserInfo) (
 		res, err = installWorkflow(ctx, t.Payload, userID)
 	case model.KindTable:
 		res, err = installTable(ctx, t.Payload, userInfo)
+	case KindDoc:
+		res, err = installDoc(ctx, t.Id, userInfo)
 	default:
 		return nil, fmt.Errorf("unsupported template kind")
 	}
@@ -182,6 +229,9 @@ func decodeForKind(kind string, payload json.RawMessage) (interface{}, error) {
 		return in, json.Unmarshal(payload, &in)
 	case model.KindTable:
 		var in tablePayload
+		return in, json.Unmarshal(payload, &in)
+	case KindDoc:
+		var in DocPayload
 		return in, json.Unmarshal(payload, &in)
 	default:
 		return nil, fmt.Errorf("unsupported kind")

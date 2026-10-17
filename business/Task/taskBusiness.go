@@ -1035,6 +1035,9 @@ func UpdateTaskNameByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskName 
 
 	go domain.UpdateTaskInOpenSearch(taskOpenSearch)
 
+	// Chips and task lists in docs read the new name (taskDocSync.go).
+	go taskRenamed(taskUUID, dgraphTaskInfo.Project)
+
 	assigneeUUID := ""
 	if dgraphTaskInfo.Assignee != nil {
 		assigneeUUID = dgraphTaskInfo.Assignee.Uuid

@@ -96,6 +96,9 @@ func SetupOwnBroker(t *testing.T) *BrokerEnv {
 		defer cancel()
 		_ = c.Terminate(stop)
 	})
+	// As every Setup does: the work the test handed off settles before the
+	// broker it may still be using goes (settle.go).
+	settleBeforeTeardown(t)
 	env := &BrokerEnv{container: c, password: password}
 	env.MQTT = "tcp://127.0.0.1:" + mqttPort
 	env.API = "http://127.0.0.1:" + apiPort

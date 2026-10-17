@@ -11,7 +11,6 @@ import (
 	businessComment "github.com/akashc777/OneCamp/business/Comment"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	domain "github.com/akashc777/OneCamp/domain/Doc"
-	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Activity"
@@ -111,79 +110,24 @@ func docEditors(creatorUID string, extra []string) []*dgraphStruct.DgraphUser {
 	return out
 }
 
-func DeleteDoc(ctx context.Context, docUUID string) (err error) {
-
-	currentTime := time.Now()
-
-	// By its uuid, and only a live doc: a doc already deleted, or none, is an
-	// error, never a new node (found by the daily journey, 6 Oct 2026: the
-	// uuid was once missing, and every delete answered 200 while the doc
-	// stayed).
-	err = domain.MarkDocDeleted(ctx, docUUID, currentTime)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/DeleteDoc Failed to delete doc in dgraph err: %+v", err)
-		return
-	}
-
-	syncDocSearch(docUUID, false)
-	go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
-		[]string{"comment_doc_id", "attachment_doc_id"},
-		docUUID,
-		currentTime.Unix(),
-		[]string{"comments", "attachments"},
-		"cascade",
-	)
-	// Cascade soft-delete to AI embeddings (doc + its comments)
-	go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
-		[]string{"content_uuid", "doc_uuid"},
-		docUUID,
-		currentTime.Unix(),
-		[]string{"ai_embeddings"},
-		"cascade",
-	)
-
-	return
-}
-
 // ErrNotFound is the error a doc lookup gives for a doc that doesn't exist, as
 // opposed to one the graph couldn't be asked about.
 var ErrNotFound = docModels.ErrNotFound
 
-func GetDgraphDocByUUIDOnlyEditingInfo(ctx context.Context, docUUID string, userUID string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
-
-	dgraphDoc, err = domain.GetDgraphDocByUUIDOnlyEditingInfo(ctx, docUUID, userUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetDgraphDocByUUIDOnlyEditingInfo Failed to get doc in dgraph err: %+v", err)
-		return
-	}
-
-	return
+// GetDgraphDocByUUIDOnlyEditingInfo, GetBasicDgraphDocByUUID, GetDocByDocUUID,
+// GetDocCommentList and GetSystemDocByUUID read one doc. A read that failed is
+// logged where it is made (domain/Doc, helpers.LogReadFailure); one that found
+// nothing comes back as ErrNotFound, unlogged, for the caller to answer.
+func GetDgraphDocByUUIDOnlyEditingInfo(ctx context.Context, docUUID string, userUID string) (*dgraphStruct.DgraphDoc, error) {
+	return domain.GetDgraphDocByUUIDOnlyEditingInfo(ctx, docUUID, userUID)
 }
 
-func GetBasicDgraphDocByUUID(ctx context.Context, docUUID string, userDgraphUID string) (docDgraph *dgraphStruct.DgraphDoc, err error) {
-
-	docDgraph, err = domain.GetBasicDgraphDocByUUID(ctx, docUUID, userDgraphUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetBasicDgraphDocByUUID Failed to get doc in dgraph err: %+v", err)
-		return
-	}
-
-	return
+func GetBasicDgraphDocByUUID(ctx context.Context, docUUID string, userDgraphUID string) (*dgraphStruct.DgraphDoc, error) {
+	return domain.GetBasicDgraphDocByUUID(ctx, docUUID, userDgraphUID)
 }
 
-func GetDocByDocUUID(ctx context.Context, docUUID string, userDgraphUID string) (docDgraph *dgraphStruct.DgraphDoc, err error) {
-
-	docDgraph, err = domain.GetDgraphDocByUUID(ctx, docUUID, userDgraphUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetDoc Failed to get doc in dgraph err: %+v", err)
-		return
-	}
-
-	return
+func GetDocByDocUUID(ctx context.Context, docUUID string, userDgraphUID string) (*dgraphStruct.DgraphDoc, error) {
+	return domain.GetDgraphDocByUUID(ctx, docUUID, userDgraphUID)
 }
 
 func GetPublicDoc(ctx context.Context, pageIndex int, pageSize int) (dgraphDocList *dgraphStruct.DgraphDocList, err error) {
@@ -236,19 +180,18 @@ func GetPrivateDoc(ctx context.Context, userDrgaphUID string, pageIndex int, pag
 
 }
 
-func GetDocCommentList(ctx context.Context, docUUID string, userUID string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
-	dgraphDoc, err = domain.GetDgraphDocAllCommentList(ctx, docUUID, userUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetDocCommentList Failed to get doc comment list from dgraph err: %+v", err)
-		return
-	}
-
-	return
+func GetDocCommentList(ctx context.Context, docUUID string, userUID string) (*dgraphStruct.DgraphDoc, error) {
+	return domain.GetDgraphDocAllCommentList(ctx, docUUID, userUID)
 }
 
 func UpdateDoc(ctx context.Context, updateInput *adapter.InputUpdateDoc) (err error) {
-	return updateDoc(ctx, updateInput, "", false)
+	// A rename or a change to who may open or comment on it is a Resource
+	// Event (docEvents.go), told against the doc as it was.
+	before := headBeforeUpdate(ctx, updateInput)
+	if err = updateDoc(ctx, updateInput, "", false); err == nil {
+		emitUpdated(ctx, before, updateInput)
+	}
+	return err
 }
 
 // updateDoc is UpdateDoc, and with a Yjs state also saves it beside the body,
@@ -324,7 +267,7 @@ func updateDoc(ctx context.Context, updateInput *adapter.InputUpdateDoc, yjsStat
 	// the editor.
 	syncDocSearch(updateInput.DocId, updateInput.Title != nil || updateInput.IsPrivate != nil)
 
-	go func() {
+	helpers.GoSafeNamed("doc.update-ai-entries", func() {
 		// The doc as it is now: who may see it and who it's shared with. The
 		// AI index's entries are filtered by these, so they come from the
 		// doc, not from the update, which carries privacy only when the
@@ -341,7 +284,7 @@ func updateDoc(ctx context.Context, updateInput *adapter.InputUpdateDoc, yjsStat
 			helpers.LogErrorWithContext(ctx, "business/UpdateDoc Failed to get updated doc for OpenSearch sync: doc is nil")
 			return
 		}
-		access := docAccessOf(updateInput.DocId, updatedDoc)
+		access := ai.DocAccessOf(updateInput.DocId, updatedDoc)
 
 		// Re-embed for AI Second Brain if content changed. The text is the doc's
 		// title and body as stored after the save, not the update's: a save from
@@ -371,44 +314,9 @@ func updateDoc(ctx context.Context, updateInput *adapter.InputUpdateDoc, yjsStat
 				helpers.LogErrorWithContext(ctx, "business/UpdateDoc Failed to write the doc's privacy to the AI index err: %+v", err)
 			}
 		}
-	}()
+	})
 
 	return
-}
-
-// docAccessOf is a doc's privacy and sharing, from the doc as GetDocPermissions
-// reads it, in the form the search indices carry them (user uuids; empty lists,
-// not nil, so an index is told "nobody" rather than nothing). A doc with no
-// privacy recorded is read as CanRead reads it: not private.
-func docAccessOf(docUUID string, doc *dgraphStruct.DgraphDoc) ai.DocAccess {
-	uuids := func(users []*dgraphStruct.DgraphUser) []string {
-		out := []string{}
-		for _, u := range users {
-			if u != nil {
-				out = append(out, u.Uuid)
-			}
-		}
-		return out
-	}
-	a := ai.DocAccess{
-		DocUUID:    docUUID,
-		Private:    doc.IsPrivate != nil && *doc.IsPrivate,
-		Reading:    uuids(doc.ReadingUser),
-		Editing:    uuids(doc.EditingUser),
-		Commenting: uuids(doc.CommentingUser),
-	}
-	if doc.CreatedBy != nil {
-		a.CreatedBy = doc.CreatedBy.Uuid
-	}
-	return a
-}
-
-func CheckUserDocEditAccess(ctx context.Context, docUUID string, userUID string) (bool, error) {
-	checkDoc, err := domain.GetDgraphDocByUUIDOnlyEditingInfo(ctx, docUUID, userUID)
-	if err != nil {
-		return false, err
-	}
-	return CanEdit(checkDoc, userUID), nil
 }
 
 func UpdateDocPermissions(ctx context.Context, input adapter.InputUpdateDocPermissions, userUID string) (err error) {
@@ -419,12 +327,17 @@ func UpdateDocPermissions(ctx context.Context, input adapter.InputUpdateDocPermi
 		return err
 	}
 	if checkDoc == nil {
-		return errors.New("document not found")
+		return ErrNotFound
 	}
 
 	if !IsOwner(checkDoc, userUID) {
 		return errors.New("unauthorized: only document owner can manage permissions")
 	}
+	// Who could open it before, so the change is told as what it did
+	// (docEvents.go): the people it's now shared with, and those whose access
+	// changed. input as the owner sent it, before the single-role rule below.
+	sharedBefore, _ := domain.GetDocPermissions(ctx, input.DocId)
+	asked := input
 
 	// 2. Enforce Single Role Policy (Auto-remove from other roles)
 	// Helpers to manage lists
@@ -462,12 +375,13 @@ func UpdateDocPermissions(ctx context.Context, input adapter.InputUpdateDocPermi
 	if err != nil {
 		return err
 	}
+	emitShared(ctx, sharedBefore, asked, checkDoc.CreatedBy.Uuid)
 
 	// Its search entries, its own and its comments' and files', written from
 	// who it is shared with now: someone taken off it stops finding it.
 	syncDocSearch(input.DocId, true)
 
-	go func() {
+	helpers.GoSafeNamed("doc.sharing-ai-entries", func() {
 		updatedDoc, err := domain.GetDocPermissions(context.Background(), input.DocId)
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "business/UpdateDocPermissions Failed to get updated doc for OpenSearch sync err: %+v", err)
@@ -481,42 +395,58 @@ func UpdateDocPermissions(ctx context.Context, input adapter.InputUpdateDocPermi
 
 		// And for its AI search entries, the doc's and its comments': a
 		// person it's no longer shared with stops finding it there too.
-		if _, err := ai.SetDocAccess(context.Background(), []ai.DocAccess{docAccessOf(input.DocId, updatedDoc)}); err != nil {
+		if _, err := ai.SetDocAccess(context.Background(), []ai.DocAccess{ai.DocAccessOf(input.DocId, updatedDoc)}); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/UpdateDocPermissions Failed to write the doc's sharing to the AI index err: %+v", err)
 		}
-	}()
+	})
 
 	return nil
 }
 
-func SearchUsersForDoc(ctx context.Context, userDgraphUUID string, searchText string) (usersList []*dgraphStruct.DgraphUser, err error) {
+// SearchUsersForDoc is the people a doc can be shared with. On the public demo
+// its shared visitor (viewerEmail) finds only the demo's own people.
+func SearchUsersForDoc(ctx context.Context, userDgraphUUID string, viewerEmail string, searchText string) (usersList []*dgraphStruct.DgraphUser, err error) {
 	dgraphUsers, err := userDomain.GetUserListWithSearchText(ctx, userDgraphUUID, searchText)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/SearchUsersForDoc Failed to get users list err: %+v", err)
 		return nil, err
 	}
 
-	return dgraphUsers, nil
+	return userDomain.DemoVisibleUsers(viewerEmail, dgraphUsers), nil
 }
 
-func GetDocPermissions(ctx context.Context, docUUID string, userUID string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
-	// 1. Verify user has edit access
-	hasEditAccess, err := CheckUserDocEditAccess(ctx, docUUID, userUID)
-	if err != nil {
-		return
-	}
-	if !hasEditAccess {
-		err = errors.New("user does not have permission to manage this document")
-		return
-	}
-
+// GetDocPermissions reads who a doc is shared with, for the share dialog. The
+// caller has decided already that the person may manage it (the controller's
+// CanEdit, on the doc it read for its deletion): this read the doc a second
+// time for the same check.
+func GetDocPermissions(ctx context.Context, docUUID string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
 	return domain.GetDocPermissions(ctx, docUUID)
+}
+
+// contentAddedBy is the doc's creator as a comment records it, or none when
+// the doc has no creator any more (a removed person's doc): that was a nil
+// dereference, and the comment answered 500.
+func contentAddedBy(doc *dgraphStruct.DgraphDoc) *dgraphStruct.DgraphUser {
+	if doc == nil || doc.CreatedBy == nil || doc.CreatedBy.Uid == "" {
+		return nil
+	}
+	return &dgraphStruct.DgraphUser{Uid: doc.CreatedBy.Uid}
 }
 
 func CreateDocComment(ctx context.Context, rawDocDgraph *dgraphStruct.DgraphDoc, createdByUser *model.UserInfo, createTaskCommentInfoInput *adapter.CreateOrUpdateDocCommentInput, mentionsDgraphUsersList []*dgraphStruct.DgraphUser) (commentInfoRes *adapter.OutputCreateCommentForDoc, err error) {
 
 	commentUUID := uuid.New()
 	currentTime := time.Now()
+	zeroUnixTime := time.Time{}
+
+	var commentMentions []*dgraphStruct.DgraphUser
+
+	for _, mention := range mentionsDgraphUsersList {
+		commentMentions = append(commentMentions, &dgraphStruct.DgraphUser{
+			DType: []string{"User"},
+			Uid:   mention.Uid,
+		})
+	}
 
 	for _, mediaObj := range createTaskCommentInfoInput.Attachments {
 		mediaObj.DType = []string{"Attachment"}
@@ -530,7 +460,31 @@ func CreateDocComment(ctx context.Context, rawDocDgraph *dgraphStruct.DgraphDoc,
 		Uid:  "uid(doc)",
 		Uuid: rawDocDgraph.Uuid,
 		Comments: []*dgraphStruct.DgraphComment{
-			newDocComment(rawDocDgraph, createdByUser.UserDgraphInfo.Uid, createTaskCommentInfoInput, mentionsDgraphUsersList, commentUUID, currentTime),
+			{
+				DType: []string{"Comment"},
+				Uid:   "uid(co)",
+				Uuid:  commentUUID.String(),
+				Text:  createTaskCommentInfoInput.CommentBody,
+				Doc: &dgraphStruct.DgraphDoc{
+					Uid: "uid(doc)",
+				},
+				ContentAddedBy: contentAddedBy(rawDocDgraph),
+				Attachments:    createTaskCommentInfoInput.Attachments,
+				CreatedAt:      &currentTime,
+				DeletedAt:      &zeroUnixTime,
+				Mentions: &dgraphStruct.DgraphMentions{
+					CreatedAt:   &currentTime,
+					Mentions:    commentMentions,
+					CommentUuid: commentUUID.String(),
+					Comment: &dgraphStruct.DgraphComment{
+						Uid: "uid(co)",
+					},
+					DType: []string{"Mention"},
+				},
+				CommentBy: &dgraphStruct.DgraphUser{
+					Uid: createdByUser.UserDgraphInfo.Uid,
+				},
+			},
 		},
 	}
 
@@ -565,59 +519,40 @@ func CreateDocComment(ctx context.Context, rawDocDgraph *dgraphStruct.DgraphDoc,
 	return
 }
 
-// newDocComment is the comment node CreateDocComment adds to doc: written by
-// authorUID at at, mentioning mentions, with the input's body and files. It is
-// on the content of the doc's creator (comment_on_content_added_by), and of
-// nobody's on a doc with no creator, which everyone may comment on when it is
-// public and takes everyone's comments: reading that doc's creator took the
-// request down. Pure.
-func newDocComment(doc *dgraphStruct.DgraphDoc, authorUID string, input *adapter.CreateOrUpdateDocCommentInput, mentions []*dgraphStruct.DgraphUser, commentUUID uuid.UUID, at time.Time) *dgraphStruct.DgraphComment {
-	var mentioned []*dgraphStruct.DgraphUser
-	for _, mention := range mentions {
-		mentioned = append(mentioned, &dgraphStruct.DgraphUser{
-			DType: []string{"User"},
-			Uid:   mention.Uid,
-		})
-	}
-	zeroUnixTime := time.Time{}
-	comment := &dgraphStruct.DgraphComment{
-		DType: []string{"Comment"},
-		Uid:   "uid(co)",
-		Uuid:  commentUUID.String(),
-		Text:  input.CommentBody,
-		Doc: &dgraphStruct.DgraphDoc{
-			Uid: "uid(doc)",
-		},
-		Attachments: input.Attachments,
-		CreatedAt:   &at,
-		DeletedAt:   &zeroUnixTime,
-		Mentions: &dgraphStruct.DgraphMentions{
-			CreatedAt:   &at,
-			Mentions:    mentioned,
-			CommentUuid: commentUUID.String(),
-			Comment: &dgraphStruct.DgraphComment{
-				Uid: "uid(co)",
-			},
-			DType: []string{"Mention"},
-		},
-		CommentBy: &dgraphStruct.DgraphUser{
-			Uid: authorUID,
-		},
-	}
-	if doc != nil && doc.CreatedBy != nil && doc.CreatedBy.Uid != "" {
-		comment.ContentAddedBy = &dgraphStruct.DgraphUser{Uid: doc.CreatedBy.Uid}
-	}
-	return comment
-}
+// Seams for tests: who of the people named may read a doc now (the Access
+// Resolver's rule from the doc's side, docReaders.go), and where a live
+// activity item goes.
+var (
+	commentActivityReaders = Readers
+	commentActivityPublish = activityBusiness.PublishActivityToUser
+)
 
 // PublishDocCommentActivity puts a new comment in the activity of whoever it
-// is for, live, as their feed lists it when it loads: the doc's owner, as a
-// comment on what they made, unless they wrote it; and anyone it mentions who
-// may read the doc, as a mention. The owner was read without a check (a doc
-// with no maker took the goroutine down), and a mention reached nobody live.
-// Push and email are business/Comment's (sendNewDocCommentNotification).
+// is for, live, as their feed lists it when it loads: the doc's maker, as a
+// comment on what they made, unless they wrote it; and anyone it mentions, as
+// a mention. Each only while they may read the doc, by the Access Resolver's
+// rule, asked once (the feed keeps only those items too, business/Activity
+// keepReadable): a maker it was taken from, or someone mentioned who can't
+// open it, hears nothing, and with no answer nobody does. The maker was read
+// without a check (a doc with no maker took the goroutine down), and a
+// mention reached nobody live. Push and email are business/Comment's
+// (sendNewDocCommentNotification).
 func PublishDocCommentActivity(commentUUID string, commentBody string, currentTime time.Time, rawDocDgraph *dgraphStruct.DgraphDoc, author dgraphStruct.DgraphUser, mentions []*dgraphStruct.DgraphUser) {
 	if rawDocDgraph == nil {
+		return
+	}
+	ask := []string{}
+	if rawDocDgraph.CreatedBy != nil {
+		ask = append(ask, rawDocDgraph.CreatedBy.Uuid)
+	}
+	for _, m := range mentions {
+		if m != nil {
+			ask = append(ask, m.Uuid)
+		}
+	}
+	can, err := commentActivityReaders(context.Background(), rawDocDgraph.Uuid, ask)
+	if err != nil {
+		helpers.LogErrorWithContext(context.Background(), "business/PublishDocCommentActivity: who may read doc %s couldn't be decided, so nobody hears of comment %s live: %+v", rawDocDgraph.Uuid, commentUUID, err)
 		return
 	}
 	comment := func() *dgraphStruct.DgraphComment {
@@ -639,8 +574,8 @@ func PublishDocCommentActivity(commentUUID string, commentBody string, currentTi
 	if rawDocDgraph.CreatedBy != nil {
 		owner = rawDocDgraph.CreatedBy.Uuid
 	}
-	if owner != "" && owner != author.Uuid {
-		activityBusiness.PublishActivityToUser(owner, &dgraphModels.UnifiedActivityItem{
+	if owner != "" && owner != author.Uuid && can[owner] {
+		commentActivityPublish(owner, &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_COMMENT,
 			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Comment:      comment(),
@@ -648,11 +583,11 @@ func PublishDocCommentActivity(commentUUID string, commentBody string, currentTi
 	}
 	told := map[string]bool{author.Uuid: true, owner: true, "": true}
 	for _, m := range mentions {
-		if m == nil || told[m.Uuid] || !domain.ReadableBy(rawDocDgraph, m.Uuid) {
+		if m == nil || told[m.Uuid] || !can[m.Uuid] {
 			continue
 		}
 		told[m.Uuid] = true
-		activityBusiness.PublishActivityToUser(m.Uuid, &dgraphModels.UnifiedActivityItem{
+		commentActivityPublish(m.Uuid, &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
 			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Mention: &dgraphStruct.DgraphMentions{
@@ -872,18 +807,8 @@ func GetPublicDocListWithSearchText(ctx context.Context, inputDocName *adapter.I
 	return
 }
 
-func GetSystemDocByUUID(ctx context.Context, docUUID string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
-
-	// As the collaboration service opens it: with its saved Yjs state.
-	dgraphDoc, err = domain.GetCollabDocByUUID(ctx, docUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetSystemDocByUUID Failed to get doc from dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
+// GetSystemDocByUUID is a doc as the collaboration service opens it: with its
+// saved Yjs state, read for no one in particular.
+func GetSystemDocByUUID(ctx context.Context, docUUID string) (*dgraphStruct.DgraphDoc, error) {
+	return domain.GetCollabDocByUUID(ctx, docUUID)
 }

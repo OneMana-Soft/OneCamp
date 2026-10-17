@@ -84,7 +84,8 @@ func (p *Provider) Capabilities() importProvider.Capability {
 		importProvider.CapProjects |
 		importProvider.CapTasks |
 		importProvider.CapTaskComments |
-		importProvider.CapAttachments
+		importProvider.CapAttachments |
+		importProvider.CapPages
 }
 
 func (p *Provider) DefaultStatusMap() map[string]string {
@@ -143,12 +144,35 @@ func (p *Provider) Plan(ctx context.Context, j *importModels.Job, opts importPro
 	if err != nil {
 		return nil, nil, err
 	}
-	if len(dbIDs) == 0 {
+	pages := pagesOn(opts)
+	if len(dbIDs) == 0 && !pages {
 		return nil, nil, errors.New("notion: no task databases found; share at least one database with the integration or set opts.databases")
 	}
 
 	plan := &importProvider.Plan{
 		ProjectCount: len(dbIDs),
+	}
+	// Pages (pages.go): a chunk for each tree of them.
+	var chunks []*importModels.Chunk
+	if pages {
+		roots, count, more, err := p.planPages(ctx, tok)
+		if err != nil {
+			return nil, nil, err
+		}
+		plan.PageCount = count
+		plan.Warnings = append(plan.Warnings, pagesWarnings...)
+		if more {
+			plan.Warnings = append(plan.Warnings, fmt.Sprintf("The connection shares more than %d pages; the first %d Notion lists come across. Import the rest from a connection that shares only them.", count, count))
+		}
+		for _, root := range roots {
+			chunks = append(chunks, &importModels.Chunk{
+				Id: uuid.New(), ImportId: j.Id, ChunkType: importModels.ChunkDocPages,
+				ParentSourceId: &root, Status: importModels.ChunkStatusPending, MaxAttempts: 5,
+			})
+		}
+	}
+	if len(dbIDs) == 0 {
+		return plan, chunks, nil
 	}
 
 	// Users (all members of the workspace the integration sees).
@@ -191,7 +215,7 @@ func (p *Provider) Plan(ctx context.Context, j *importModels.Job, opts importPro
 	plan.Warnings = append(plan.Warnings,
 		"Notion: only page-level comments are imported; inline-block discussions on individual paragraphs/lists are not surfaced by the public API")
 
-	return plan, nil, nil
+	return plan, chunks, nil
 }
 
 // IterUsers streams /v1/users.
@@ -588,6 +612,9 @@ type notionPage struct {
 		ID string `json:"id"`
 	} `json:"last_edited_by"`
 	Properties map[string]notionPageProperty `json:"properties"`
+	InTrash    bool                          `json:"in_trash"`
+	Icon       *notionIcon                   `json:"icon"`
+	Parent     *notionParent                 `json:"parent"`
 }
 
 type notionPageProperty struct {
@@ -610,6 +637,36 @@ type notionPageProperty struct {
 	URL      *string  `json:"url,omitempty"`
 	Email    *string  `json:"email,omitempty"`
 	Phone    *string  `json:"phone_number,omitempty"`
+	Formula  *struct {
+		Type    string   `json:"type"`
+		String  *string  `json:"string"`
+		Number  *float64 `json:"number"`
+		Boolean *bool    `json:"boolean"`
+		Date    *struct {
+			Start string `json:"start"`
+		} `json:"date"`
+	} `json:"formula,omitempty"`
+	CreatedTime    string `json:"created_time,omitempty"`
+	LastEditedTime string `json:"last_edited_time,omitempty"`
+	UniqueID       *struct {
+		Prefix *string `json:"prefix"`
+		Number *int    `json:"number"`
+	} `json:"unique_id,omitempty"`
+}
+
+// notionIcon is a page's, a database's or a callout's icon.
+type notionIcon struct {
+	Type  string `json:"type"`
+	Emoji string `json:"emoji"`
+}
+
+// notionParent is what a page or a block sits under.
+type notionParent struct {
+	Type         string `json:"type"`
+	PageID       string `json:"page_id"`
+	BlockID      string `json:"block_id"`
+	DataSourceID string `json:"data_source_id"`
+	DatabaseID   string `json:"database_id"`
 }
 
 type notionQueryResp struct {
@@ -637,7 +694,14 @@ type notionRichText struct {
 	} `json:"text,omitempty"`
 	Mention *struct {
 		Type string `json:"type"`
+		Page *struct {
+			ID string `json:"id"`
+		} `json:"page,omitempty"`
 	} `json:"mention,omitempty"`
+	Equation *struct {
+		Expression string `json:"expression"`
+	} `json:"equation,omitempty"`
+	Href *string `json:"href,omitempty"`
 }
 
 // notionBlock covers the union of block types we render. Unknown types
@@ -646,12 +710,16 @@ type notionBlock struct {
 	ID          string        `json:"id"`
 	Type        string        `json:"type"`
 	HasChildren bool          `json:"has_children"`
+	InTrash     bool          `json:"in_trash"`
+	Parent      *notionParent `json:"parent,omitempty"`
 	Children    []notionBlock `json:"-"` // populated by recursive fetch
 
 	Paragraph        *notionRichTextBox `json:"paragraph,omitempty"`
 	Heading1         *notionRichTextBox `json:"heading_1,omitempty"`
 	Heading2         *notionRichTextBox `json:"heading_2,omitempty"`
 	Heading3         *notionRichTextBox `json:"heading_3,omitempty"`
+	Heading4         *notionRichTextBox `json:"heading_4,omitempty"`
+	Toggle           *notionRichTextBox `json:"toggle,omitempty"`
 	BulletedListItem *notionRichTextBox `json:"bulleted_list_item,omitempty"`
 	NumberedListItem *notionRichTextBox `json:"numbered_list_item,omitempty"`
 	ToDo             *notionToDoBox     `json:"to_do,omitempty"`
@@ -668,14 +736,44 @@ type notionBlock struct {
 	TableRow *struct {
 		Cells [][]notionRichText `json:"cells"`
 	} `json:"table_row,omitempty"`
+	Table *struct {
+		HasColumnHeader bool `json:"has_column_header"`
+		HasRowHeader    bool `json:"has_row_header"`
+	} `json:"table,omitempty"`
+	ChildPage     *notionTitleBox `json:"child_page,omitempty"`
+	ChildDatabase *notionTitleBox `json:"child_database,omitempty"`
+	SyncedBlock   *struct {
+		SyncedFrom *struct {
+			BlockID string `json:"block_id"`
+		} `json:"synced_from"`
+	} `json:"synced_block,omitempty"`
+	LinkToPage *struct {
+		PageID string `json:"page_id"`
+	} `json:"link_to_page,omitempty"`
+	Embed       *notionURLBox  `json:"embed,omitempty"`
+	LinkPreview *notionURLBox  `json:"link_preview,omitempty"`
+	Video       *notionFileBox `json:"video,omitempty"`
+	Audio       *notionFileBox `json:"audio,omitempty"`
+}
+
+// notionTitleBox is a child page's or a child database's block: its title.
+type notionTitleBox struct {
+	Title string `json:"title"`
 }
 
 type notionRichTextBox struct {
 	RichText []notionRichText `json:"rich_text"`
+	// Color is the block's colour: "blue", "blue_background", "default".
+	Color string `json:"color,omitempty"`
+	// IsToggleable is a heading that opens like a toggle.
+	IsToggleable bool `json:"is_toggleable,omitempty"`
+	// Icon is a callout's.
+	Icon *notionIcon `json:"icon,omitempty"`
 }
 type notionToDoBox struct {
 	RichText []notionRichText `json:"rich_text"`
 	Checked  bool             `json:"checked"`
+	Color    string           `json:"color,omitempty"`
 }
 type notionCodeBox struct {
 	RichText []notionRichText `json:"rich_text"`
@@ -730,34 +828,45 @@ type notionCommentsResp struct {
 // ─── HTTP helpers ─────────────────────────────────────────────────
 
 func (p *Provider) getJSON(ctx context.Context, tok, path string, out any) error {
+	return p.call(ctx, tok, notionVersion, http.MethodGet, path, nil, out)
+}
+
+func (p *Provider) postJSON(ctx context.Context, tok, path string, body, out any) error {
+	return p.call(ctx, tok, notionVersion, http.MethodPost, path, body, out)
+}
+
+// call makes one API request at a Notion-Version, sending body as JSON when
+// there is one.
+func (p *Provider) call(ctx context.Context, tok, version, method, path string, body, out any) error {
 	if err := p.rl.Wait(ctx); err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiBase+path, nil)
+	var rd io.Reader
+	if body != nil {
+		raw, _ := json.Marshal(body)
+		rd = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, apiBase+path, rd)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("Notion-Version", notionVersion)
+	req.Header.Set("Notion-Version", version)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("Accept", "application/json")
 	return p.do(ctx, req, out)
 }
 
-func (p *Provider) postJSON(ctx context.Context, tok, path string, body, out any) error {
-	if err := p.rl.Wait(ctx); err != nil {
-		return err
-	}
-	raw, _ := json.Marshal(body)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiBase+path, bytes.NewReader(raw))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("Notion-Version", notionVersion)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json")
-	return p.do(ctx, req, out)
+// apiError is an answer of 400 or above that isn't about the token or the
+// rate: a page that isn't shared with the connection answers 404.
+type apiError struct {
+	Status int
+	Body   string
 }
+
+func (e *apiError) Error() string { return fmt.Sprintf("notion HTTP %d: %s", e.Status, e.Body) }
 
 func (p *Provider) do(ctx context.Context, req *http.Request, out any) error {
 	resp, err := importProvider.SharedAPIClient.Do(req)
@@ -778,7 +887,7 @@ func (p *Provider) do(ctx context.Context, req *http.Request, out any) error {
 		return &importProvider.TokenRejected{Msg: fmt.Sprintf("notion auth failed (HTTP %d); reconnect token", resp.StatusCode)}
 	case resp.StatusCode >= 400:
 		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("notion HTTP %d: %s", resp.StatusCode, string(raw))
+		return &apiError{Status: resp.StatusCode, Body: string(raw)}
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
@@ -933,7 +1042,9 @@ func (p *Provider) resolveDatabases(ctx context.Context, j *importModels.Job, op
 			ids = append(ids, t...)
 		}
 	}
-	if len(ids) > 0 {
+	// With pages, a database becomes a project only when it is picked: the
+	// rest come across as tables, in the pages they sit in.
+	if len(ids) > 0 || pagesOn(opts) {
 		p.mu.Lock()
 		p.dbCache[j.Id] = ids
 		p.mu.Unlock()

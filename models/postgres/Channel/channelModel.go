@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -388,4 +389,29 @@ func PublicLiveChannels(ctx context.Context, ids []string, limit int) ([]Channel
 		out = append(out, ch)
 	}
 	return out, rows.Err()
+}
+
+// ChannelIDsWithNamePrefix returns the ids of live channels whose name starts
+// with prefix, read literally (% and _ in it match only themselves). With
+// archivedToo, archived channels (deleted_at set) are returned as well.
+func ChannelIDsWithNamePrefix(ctx context.Context, prefix string, archivedToo bool) ([]uuid.UUID, error) {
+	ctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	escaped := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(prefix)
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx,
+		`SELECT id FROM channels WHERE ch_name LIKE $1 ESCAPE '\' AND ($2::boolean OR deleted_at IS NULL)`, escaped+"%", archivedToo)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/ChannelIDsWithNamePrefix err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

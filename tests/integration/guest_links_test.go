@@ -23,6 +23,13 @@ package integration_test
 // its link was made takes no message or reply from it, and tells nobody. A
 // project's page names who wrote an update without part of their address.
 //
+// Every guest read (meeting, live doc, doc comments, table, channel, thread,
+// project, task) names whose workspace it is, and the project's carries the
+// project's id; a revoked or expired link, or any link while guest access is
+// off, gets the bare "not available" with neither. Members see a channel
+// marked as one guests can read (has_guest_access) exactly while a link
+// opens it.
+//
 // And a guest's page is told "This link is no longer available" (or that a
 // message or task isn't there) only when that is true: when the server can't
 // answer (Dgraph or Postgres down, a restart), every guest read, the channel,
@@ -40,8 +47,11 @@ package integration_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -55,6 +65,7 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
+	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
 	updateBusiness "github.com/akashc777/OneCamp/business/ProjectUpdate"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
@@ -62,6 +73,7 @@ import (
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
 	"github.com/akashc777/OneCamp/tests/integration"
 )
@@ -343,6 +355,188 @@ func TestGuestLinks(t *testing.T) {
 		members, err := updateBusiness.List(ctx, project, 10, false)
 		if err != nil || len(members) != 1 || members[0].AuthorName != "mia.k" {
 			t.Errorf("members read the update as by %+v (%v), want mia.k", members, err)
+		}
+	})
+
+	t.Run("a guest's page names whose workspace it is, and a dead link names nothing", func(t *testing.T) {
+		t.Setenv("ORG_NAME", "Acme Studio")
+		t.Setenv("JWT_SECRET", "guest-workspace-name-integration-secret")
+		answer := func(t *testing.T, handler http.HandlerFunc, method string, params ...string) (int, string, map[string]any) {
+			t.Helper()
+			rc := chi.NewRouteContext()
+			for i := 0; i+1 < len(params); i += 2 {
+				rc.URLParams.Add(params[i], params[i+1])
+			}
+			var body io.Reader
+			if method == http.MethodPost {
+				body = strings.NewReader(`{}`)
+			}
+			rec := httptest.NewRecorder()
+			handler(rec, httptest.NewRequest(method, "/", body).WithContext(context.WithValue(ctx, chi.RouteCtxKey, rc)))
+			var decoded struct {
+				Data map[string]any `json:"data"`
+			}
+			_ = json.Unmarshal(rec.Body.Bytes(), &decoded)
+			return rec.Code, rec.Body.String(), decoded.Data
+		}
+		// A meeting link as CreateInstantMeeting makes one, without a call
+		// server to make the room on.
+		meetingLink := func(t *testing.T, expires time.Time) (string, uuid.UUID) {
+			t.Helper()
+			raw := "meeting-" + uuid.NewString()
+			sum := sha256.Sum256([]byte(raw))
+			id, err := guestModel.CreateGrant(ctx, sum[:], guestModel.ResourceMeeting, "meet-"+uuid.NewString(), guestModel.CapabilityJoin, people["olu"], &expires)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return raw, id
+		}
+		expire := func(t *testing.T, grantID uuid.UUID) {
+			t.Helper()
+			exec(`UPDATE guest_grants SET expires_at = NOW() - interval '1 minute' WHERE id = $1`, grantID)
+		}
+		table := uuid.New()
+		exec(`INSERT INTO data_tables (id, name, visibility, created_by) VALUES ($1, 'Launch budget', 'private', $2)`, table, people["olu"])
+		tableRaw, _ := link(t, guestModel.ResourceTable, table.String(), guestModel.CapabilityView)
+		docRaw, _ := link(t, guestModel.ResourceDoc, doc.String(), guestModel.CapabilityComment)
+		projectRaw, _ := link(t, guestModel.ResourceProject, project.String(), guestModel.CapabilityComment)
+		meetingRaw, _ := meetingLink(t, time.Now().Add(time.Hour))
+
+		reads := []struct {
+			name    string
+			handler http.HandlerFunc
+			method  string
+			params  []string
+		}{
+			{"the meeting", guestController.GetGuestMeeting, http.MethodGet, []string{"token", meetingRaw}},
+			{"a doc's live session", guestController.GuestCollabToken, http.MethodPost, []string{"token", docRaw.Token}},
+			{"the doc's guest comments", guestController.GuestDocComments, http.MethodGet, []string{"token", docRaw.Token}},
+			{"the table", guestController.GuestTable, http.MethodGet, []string{"token", tableRaw.Token}},
+			{"the channel", guestController.GuestChannel, http.MethodGet, []string{"token", channelRaw.Token}},
+			{"a thread", guestController.GuestChannelThread, http.MethodGet, []string{"token", channelRaw.Token, "post_id", post.String()}},
+			{"the project", guestController.GuestProject, http.MethodGet, []string{"token", projectRaw.Token}},
+			{"a project task", guestController.GuestProjectTask, http.MethodGet, []string{"token", projectRaw.Token, "task_id", task.String()}},
+		}
+		for _, read := range reads {
+			code, body, data := answer(t, read.handler, read.method, read.params...)
+			if code != http.StatusOK || data["workspace_name"] != "Acme Studio" {
+				t.Errorf("%s: %d, workspace_name %v, want 200 and \"Acme Studio\": %s", read.name, code, data["workspace_name"], body)
+			}
+		}
+		if _, body, data := answer(t, guestController.GuestProject, http.MethodGet, "token", projectRaw.Token); data["project_uuid"] != project.String() || data["project"] != "Website" {
+			t.Errorf("the project's page has project_uuid %v, want %s: %s", data["project_uuid"], project, body)
+		}
+
+		// Revoked, expired, or with guest access off: the uniform "not
+		// available", with nothing of the workspace or what the link opened.
+		revokedChannel, _ := link(t, guestModel.ResourceChannel, channel.String(), guestModel.CapabilityView)
+		revokedDoc, _ := link(t, guestModel.ResourceDoc, doc.String(), guestModel.CapabilityView)
+		expiredTable, _ := link(t, guestModel.ResourceTable, table.String(), guestModel.CapabilityView)
+		expiredProject, _ := link(t, guestModel.ResourceProject, project.String(), guestModel.CapabilityView)
+		expiredMeeting, expiredMeetingID := meetingLink(t, time.Now().Add(time.Hour))
+		for _, id := range []uuid.UUID{revokedChannel.GrantID, revokedDoc.GrantID} {
+			if err := guestModel.Revoke(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, id := range []uuid.UUID{expiredTable.GrantID, expiredProject.GrantID, expiredMeetingID} {
+			expire(t, id)
+		}
+		dead := []struct {
+			name    string
+			handler http.HandlerFunc
+			method  string
+			params  []string
+		}{
+			{"a revoked channel link", guestController.GuestChannel, http.MethodGet, []string{"token", revokedChannel.Token}},
+			{"a revoked channel link's thread", guestController.GuestChannelThread, http.MethodGet, []string{"token", revokedChannel.Token, "post_id", post.String()}},
+			{"a revoked doc link's live session", guestController.GuestCollabToken, http.MethodPost, []string{"token", revokedDoc.Token}},
+			{"a revoked doc link's comments", guestController.GuestDocComments, http.MethodGet, []string{"token", revokedDoc.Token}},
+			{"an expired table link", guestController.GuestTable, http.MethodGet, []string{"token", expiredTable.Token}},
+			{"an expired project link", guestController.GuestProject, http.MethodGet, []string{"token", expiredProject.Token}},
+			{"an expired project link's task", guestController.GuestProjectTask, http.MethodGet, []string{"token", expiredProject.Token, "task_id", task.String()}},
+			{"an expired meeting link", guestController.GetGuestMeeting, http.MethodGet, []string{"token", expiredMeeting}},
+			{"no link at all", guestController.GuestProject, http.MethodGet, []string{"token", "not-a-link"}},
+		}
+		nothingOf := func(t *testing.T, why string) {
+			t.Helper()
+			for _, read := range dead {
+				code, body, data := answer(t, read.handler, read.method, read.params...)
+				if code != http.StatusNotFound || data != nil ||
+					strings.Contains(body, "workspace_name") || strings.Contains(body, "Acme Studio") ||
+					strings.Contains(body, "Website") || strings.Contains(body, project.String()) {
+					t.Errorf("%s%s: %d %s, want the bare 404", read.name, why, code, body)
+				}
+			}
+		}
+		nothingOf(t, "")
+
+		// Guest access switched off: every link, live ones too, is dead.
+		if err := settingsBusiness.SetGuestAccessEnabled(false); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := settingsBusiness.SetGuestAccessEnabled(true); err != nil {
+				t.Errorf("turning guest access back on: %v", err)
+			}
+		})
+		dead = append(dead, reads...)
+		nothingOf(t, " with guest access off")
+		if err := settingsBusiness.SetGuestAccessEnabled(true); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("a channel is marked while a guest's link opens it", func(t *testing.T) {
+		// Ids only: the marker reads the links, not the graph.
+		live, alsoLive, none, revoked, expired, docOnly, archived :=
+			uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+		link(t, guestModel.ResourceChannel, live, guestModel.CapabilityView)
+		link(t, guestModel.ResourceChannel, alsoLive, guestModel.CapabilityPost)
+		link(t, guestModel.ResourceChannel, alsoLive, guestModel.CapabilityView) // two links, one marker
+		gone, _ := link(t, guestModel.ResourceChannel, revoked, guestModel.CapabilityPost)
+		if err := guestModel.Revoke(ctx, gone.GrantID); err != nil {
+			t.Fatal(err)
+		}
+		old, _ := link(t, guestModel.ResourceChannel, expired, guestModel.CapabilityView)
+		exec(`UPDATE guest_grants SET expires_at = NOW() - interval '1 minute' WHERE id = $1`, old.GrantID)
+		link(t, guestModel.ResourceDoc, docOnly, guestModel.CapabilityView) // a doc's link with the same id opens no channel
+		link(t, guestModel.ResourceChannel, archived, guestModel.CapabilityView)
+		archivedAt := time.Now().Add(-time.Hour)
+
+		read := func() []*dgraphStruct.DgraphChannel {
+			return []*dgraphStruct.DgraphChannel{
+				{Uuid: live}, {Uuid: alsoLive}, {Uuid: none}, {Uuid: revoked}, {Uuid: expired}, {Uuid: docOnly},
+				{Uuid: archived, DeletedAt: &archivedAt}, {Uuid: channel.String()},
+			}
+		}
+		want := map[string]bool{live: true, alsoLive: true, channel.String(): true}
+		chs := read()
+		channelBusiness.MarkGuestAccess(ctx, chs...)
+		for _, ch := range chs {
+			if ch.HasGuestAccess != want[ch.Uuid] {
+				t.Errorf("channel %s: has_guest_access %v, want %v", ch.Uuid, ch.HasGuestAccess, want[ch.Uuid])
+			}
+		}
+
+		// Guest access off: no link opens anything, so nothing is marked.
+		if err := settingsBusiness.SetGuestAccessEnabled(false); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := settingsBusiness.SetGuestAccessEnabled(true); err != nil {
+				t.Errorf("turning guest access back on: %v", err)
+			}
+		})
+		chs = read()
+		channelBusiness.MarkGuestAccess(ctx, chs...)
+		for _, ch := range chs {
+			if ch.HasGuestAccess {
+				t.Errorf("channel %s marked with guest access off", ch.Uuid)
+			}
+		}
+		if err := settingsBusiness.SetGuestAccessEnabled(true); err != nil {
+			t.Fatal(err)
 		}
 	})
 

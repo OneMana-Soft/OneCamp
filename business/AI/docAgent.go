@@ -33,13 +33,16 @@ package business
 // Checking "is it open right now" does not fix it either, only narrows the race.
 // The real fix is an endpoint on the collaboration service that applies the
 // change AS a Yjs update, so it merges like any other edit. That endpoint now
-// exists (other-services/collaboration-service/appendToDoc.js, Sep 2026), and
-// append_to_doc (docAppend.go) uses it: additions only, as a live edit. Writing
-// doc_body for an existing doc is still the data-loss bug described above, and
-// replacing or deleting existing content is still not offered.
+// exists (Sep 2026; since Oct the Live Doc Writer, services/collab), and every
+// agent write goes through it (docEdit.go): append_to_doc, doc_insert_after,
+// doc_replace_section, each one live transaction marked as the agent's, with the
+// doc kept first so Revert puts back exactly what was there, and doc_suggest,
+// which writes nothing until someone accepts it. Writing doc_body for an
+// existing doc is still the data-loss bug described above.
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -76,7 +79,7 @@ func executeReadDoc(ctx context.Context, action ai.ProposedAction, userUUID stri
 
 	doc, err := docBusiness.GetDocByDocUUID(ctx, docUUID, dgraphUser.Uid)
 	if err != nil || doc == nil || doc.Uuid == "" {
-		return "", nil, fmt.Errorf("document not found or you don't have access")
+		return "", nil, errors.New(helpers.DocNotFound)
 	}
 
 	// A deleted doc is read by nobody (CanRead), the assistant and the agents
@@ -89,14 +92,21 @@ func executeReadDoc(ctx context.Context, action ai.ProposedAction, userUUID stri
 	// Permission gate. The dgraph query returns the node regardless of access
 	// (it carries access counts), so the app's own read rule decides here.
 	if !docBusiness.CanRead(doc, dgraphUser.Uuid) {
-		return "", nil, fmt.Errorf("document not found or you don't have access")
+		return "", nil, errors.New(helpers.DocNotFound)
 	}
 
 	title := strings.TrimSpace(doc.Title)
 	if title == "" {
 		title = "(untitled)"
 	}
-	plain := strings.TrimSpace(helpers.RemoveHTMLTags(doc.Body))
+	// The live copy, typing included (the stored body can be a save behind),
+	// as Markdown, so the model sees the headings doc_insert_after and
+	// doc_replace_section name sections by.
+	body := doc.Body
+	if live, lerr := liveDocHTML(ctx, docUUID); lerr == nil {
+		body = live
+	}
+	plain := strings.TrimSpace(DocMarkdown(body))
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Document: %s\n\n", title))

@@ -66,7 +66,7 @@ var connectorCatalog = []CatalogEntry{
 	{
 		Slug:           "github",
 		Name:           "GitHub",
-		Description:    "Repository questions, issues, and pull requests — including opening a PR (the vendor-neutral path for code writes). Answers in-thread and drives the fix-to-PR loop.",
+		Description:    "Repository questions, issues and pull requests, including opening a PR (the vendor-neutral path for code writes). Answers in the thread and drives the loop from fix to PR.",
 		Category:       CategoryCode,
 		DocsURL:        "https://github.com/github/github-mcp-server",
 		Transport:      model.TransportHTTP,
@@ -114,7 +114,7 @@ var connectorCatalog = []CatalogEntry{
 	{
 		Slug:           "sentry",
 		Name:           "Sentry",
-		Description:    "Investigate errors and monitor issues — check a project on a schedule and post a first-pass diagnosis before anyone asks.",
+		Description:    "Investigate errors and monitor issues: check a project on a schedule and post a first diagnosis before anyone asks.",
 		Category:       CategoryMonitor,
 		DocsURL:        "https://github.com/modelcontextprotocol/servers",
 		Transport:      model.TransportHTTP,
@@ -149,7 +149,7 @@ var connectorCatalog = []CatalogEntry{
 	{
 		Slug:           "slack",
 		Name:           "Slack",
-		Description:    "Read and post in a connected Slack workspace — bridge conversations and cross-post updates.",
+		Description:    "Read and post in a connected Slack workspace: bridge conversations and cross-post updates.",
 		Category:       CategoryMessaging,
 		DocsURL:        "https://github.com/modelcontextprotocol/servers",
 		Transport:      model.TransportHTTP,

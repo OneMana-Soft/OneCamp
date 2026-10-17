@@ -599,6 +599,29 @@ func ForgotPassword(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, successResponse)
 }
 
+// validResetToken is the reset token lookup, a seam for tests.
+var validResetToken = passwordResetModels.GetValidResetToken
+
+// CheckResetLink handles POST /auth/reset-password/check {token}: whether a
+// mailed reset link can still be used, asked as the page opens, so a used or
+// expired link says so at once instead of after a new password is typed (QA
+// SH-20, 14 Oct 2026). It tells nothing a submit wouldn't: the token is the
+// secret, and the route has ResetPassword's rate limit.
+func CheckResetLink(w http.ResponseWriter, r *http.Request) {
+	var requestBody struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil || strings.TrimSpace(requestBody.Token) == "" {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"code": "reset_link_invalid", "msg": "This reset link is missing or used. Ask for a new one."})
+		return
+	}
+	if resetToken, err := validResetToken(requestBody.Token); err != nil || resetToken == nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"code": "reset_link_invalid", "msg": "This reset link is missing or used. Ask for a new one."})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "ok", "data": helpers.Envolope{"valid": true}})
+}
+
 // ResetPassword handles POST /auth/reset-password
 func ResetPassword(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -632,7 +655,7 @@ func ResetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate token
-	resetToken, err := passwordResetModels.GetValidResetToken(requestBody.Token)
+	resetToken, err := validResetToken(requestBody.Token)
 	if err != nil || resetToken == nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg":    "invalid or expired reset token",
@@ -953,9 +976,12 @@ func issueAuthCookies(w http.ResponseWriter, r *http.Request, ctx context.Contex
 // where a new member lands, say.
 func issueAuthCookiesWith(w http.ResponseWriter, r *http.Request, ctx context.Context, userUUID string, extra helpers.Envolope) {
 	if err := emitAuthCookiesNoBody(w, r, ctx, userUUID); err != nil {
+		// The error says which store didn't answer ("failed to set
+		// refreshToken in redis"): the log keeps it, the person is told
+		// what happened to them.
 		helpers.LogErrorWithContext(ctx, "controllers/issueAuthCookies %v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
-			"msg":    err.Error(),
+			"msg":    "Couldn't sign you in just now. Try again in a moment.",
 			"status": "failed",
 		})
 		return
@@ -1291,23 +1317,31 @@ func HasPassword(w http.ResponseWriter, r *http.Request) {
 // Response shape:
 //
 //	{
-//	  "email":  true,
-//	  "google": true,
-//	  "github": false,
-//	  "oidc":   false,
-//	  "saml":   false,
-//	  "ldap":   false,
-//	  "demo":   false
+//	  "status": "success",
+//	  "providers": {"email": true, "google": true, "github": false,
+//	                "oidc": false, "saml": false, "ldap": false, "demo": false},
+//	  "email_configured": true,
+//	  "email_sender": "OneCamp <hello@example.com>",
+//	  "workspace_name": "Kestrel Studio"
 //	}
 //
 // We expose only enable/disable, not credentials. Issuer URLs, tenant IDs,
-// etc. are server-side only.
+// etc. are server-side only. Anyone may read this answer, signed in or not,
+// so every field in it is on signInAnswerFields' list (signInAnswer_test.go)
+// with why a stranger may read it.
+//
+// workspace_name is the workspace's name (ORG_NAME; "" when nobody has named
+// it), for every page of the web app: the sign-in page and the boot screen,
+// which have no session, as well as the app's own (design review PG1-01). A
+// self-hosted workspace renamed on its server reads its new name without a
+// rebuild of the web app.
 func GetEnabledProviders(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"status":           "success",
 		"providers":        signInMethods(r.Context()),
 		"email_configured": emailService.IsEmailEnabled(),
 		"email_sender":     emailService.SenderAddress(),
+		"workspace_name":   settingsBusiness.WorkspaceName(),
 	})
 }
 

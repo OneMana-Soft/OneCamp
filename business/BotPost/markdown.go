@@ -102,18 +102,27 @@ func renderImageAsLink(w util.BufWriter, src []byte, n ast.Node, entering bool) 
 
 var blockNewline = regexp.MustCompile(`(<br/>|</p>|</li>|</ul>|</ol>|</blockquote>|</pre>|<ul>|<ol>|<li>|<blockquote>)\n`)
 
+// maxChatMarkdown is the longest reply rendered as Markdown; a longer one is
+// shown as its words, escaped. A model's reply is a few kilobytes (its token
+// limits); a remote agent's can be megabytes, and a stream renders the whole
+// reply again every 200 ms. At 16 KB the slowest Markdown the guard lets
+// through (helpers.MarkdownTooCostly) renders in under about a tenth of a
+// second at load.
+const maxChatMarkdown = 16 << 10
+
 // renderMarkdown turns a model's markdown into chat HTML, with the typing
-// cursor at the end of the last block while a reply is still streaming.
-// Markdown nested deeper than a parser should be asked to read
-// (helpers.MarkdownTooDeep) is shown as its words, escaped, as a reply that
-// can't be rendered is: 50,000 nested list items took goldmark 12 s and
-// 7.5 GB of heap.
+// cursor at the end of the last block while a reply is still streaming. A
+// reply goldmark should not be asked to read is shown as its words, escaped,
+// as a reply that can't be rendered is: one past maxChatMarkdown, or one the
+// Markdown guard refuses (helpers.MarkdownTooCostly: 50,000 nested list items
+// took goldmark 12 s and 7.5 GB of heap, and "*a_ " repeated over 64 KB took
+// a second).
 func renderMarkdown(text string, typing bool) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
 	}
-	if helpers.MarkdownTooDeep(text) {
+	if len(text) > maxChatMarkdown || helpers.MarkdownTooCostly(text, helpers.ChatMarkdown) {
 		return renderEscapedParagraphs(text, typing)
 	}
 	var buf bytes.Buffer

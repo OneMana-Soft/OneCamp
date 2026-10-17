@@ -80,8 +80,9 @@ var ToolScope = map[string]string{
 	"list_teams":     ScopeProjectsRead,
 	"create_project": ScopeProjectsWrite,
 	// Docs
-	"read_doc":   ScopeDocsRead,
-	"create_doc": ScopeDocsWrite,
+	"read_doc":      ScopeDocsRead,
+	"create_doc":    ScopeDocsWrite,
+	"append_to_doc": ScopeDocsWrite,
 	// Messages
 	"summarize_channel":    ScopeMessagesRead,
 	"summarize_dm":         ScopeMessagesRead,
@@ -106,6 +107,8 @@ var ToolScope = map[string]string{
 	"query_data_source_plan": ScopeDataSourcesRead,
 	// Search (cross-source recall: workspace + Memory + connected apps)
 	"search_workspace": ScopeSearchRead,
+	// The docs a person can open, as GET /v1/docs lists them.
+	"list_docs": ScopeDocsRead,
 }
 
 // ScopeForTool returns the scope required to call a tool and whether the tool

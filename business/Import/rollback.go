@@ -3,9 +3,12 @@ package business
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
+	docBusiness "github.com/akashc777/OneCamp/business/Doc"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 	"github.com/google/uuid"
@@ -67,10 +70,20 @@ func RollbackImport(ctx context.Context, jobId uuid.UUID) error {
 		if err := softDeleteEmptyTeams(ctx, tx, jobId); err != nil {
 			return err
 		}
+		if err := softDelete(ctx, tx, jobId, importModels.EntityTable, "data_tables"); err != nil {
+			return err
+		}
 		return softDeleteExternalUsers(ctx, tx, jobId)
 	})
 	if err != nil {
 		return fmt.Errorf("the rollback stopped and took nothing away: %w", err)
+	}
+	// The docs live in the graph, outside the transaction: they go to the
+	// trash once the rest is done, where their owner can still restore them.
+	// What can't be moved stays, and rolling back again tries it again.
+	if left, err := trashImportedDocs(ctx, job); err != nil || left > 0 {
+		helpers.LogErrorWithContext(ctx, "Import rollback of %s left %d docs out of the trash: %+v", jobId, left, err)
+		return fmt.Errorf("the import was rolled back, but %d of its docs could not be moved to the trash; roll it back again to try them again", left)
 	}
 
 	if err := DeleteStagedZip(ctx, jobId); err != nil {
@@ -295,11 +308,42 @@ func markDeleted(table string) string {
 func tableNameWhitelist(t string) string {
 	switch t {
 	case "tasks", "comments", "attachments", "projects", "teams",
-		"posts", "chats", "channels", "users":
+		"posts", "chats", "channels", "users", "data_tables":
 		return t
 	default:
 		// This should never trigger; if it does, the caller has a bug.
 		// Returning a safe sentinel makes the resulting query fail loud.
 		return "__INVALID_TABLE__"
 	}
+}
+
+// trashDoc puts a doc and the pages under it in the trash as one delete; a
+// seam for tests.
+var trashDoc = docBusiness.TrashSubtree
+
+// trashImportedDocs puts the docs the import made in the trash, a tree as one
+// delete (roots come first, so a page goes with the page above it), by whoever
+// ran the import, and says how many it couldn't move. A doc already in the
+// trash, or gone, is done.
+func trashImportedDocs(ctx context.Context, job *importModels.Job) (int, error) {
+	entries, err := importModels.IdMappingsByTypeOwned(ctx, job.Id, importModels.EntityDoc)
+	if err != nil || len(entries) == 0 {
+		return len(entries), err
+	}
+	if job.TriggeredBy == nil {
+		return len(entries), errors.New("the import names nobody who ran it")
+	}
+	by, err := userDomain.GetDgraphUserInfoByUUID(ctx, job.TriggeredBy.String())
+	if err != nil || by == nil {
+		return len(entries), fmt.Errorf("whoever ran it could not be read: %w", err)
+	}
+	left := 0
+	for _, e := range entries {
+		_, err := trashDoc(ctx, e.OnecampUUID.String(), by.Uid, job.TriggeredBy.String(), by.EmailID)
+		if err != nil && !errors.Is(err, docBusiness.ErrDocDeleted) && !errors.Is(err, docBusiness.ErrNotFound) {
+			helpers.LogWarnWithContext(ctx, "Import rollback could not move doc %s to the trash: %+v", e.OnecampUUID, err)
+			left++
+		}
+	}
+	return left, nil
 }

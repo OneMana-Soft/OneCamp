@@ -34,26 +34,6 @@ import (
 
 const BEFORE_THIRTY_DAYS = -30 * 24 * time.Hour
 
-func CreateUser(ctx context.Context, emailID string, userUUID uuid.UUID) (err error) {
-	if err = EnsureSeatAvailable(ctx); err != nil {
-		return err
-	}
-	query := `
-		INSERT INTO users (id, email_id)
-		VALUES ($1, $2)
-	`
-	err = models.CreateUser(query, emailID, userUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/CreateUser Failed to create new user err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 // CREATE TABLE IF NOT EXISTS attachments(
 //     "id" uuid PRIMARY KEY NOT NULL DEFAULT uuid_generate_v4(),
 //     "obj_key" varchar NOT NULL,
@@ -1325,15 +1305,11 @@ func GetDgraphUserBoardPlaces(ctx context.Context, txn *dgo.Txn, userUUID string
 					user_uuid` + dgraphStruct.BoardPlacesQuery("user_tasks", filter, closedLimit) + `
 				}
 			}`
-	resp, err := txn.QueryWithVars(ctx, query, map[string]string{"$id": userUUID})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/GetDgraphUserBoardPlaces Failed to get the user's board from dgraph err: %+v", err)
-		return nil, nil, err
-	}
 	var out struct {
 		UserInfo []json.RawMessage `json:"userInfo"`
 	}
-	if err := json.Unmarshal(resp.Json, &out); err != nil {
+	if err := dgraphInit.ReadIntoTxn(ctx, txn, query, map[string]string{"$id": userUUID}, &out); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetDgraphUserBoardPlaces Failed to get the user's board from dgraph err: %+v", err)
 		return nil, nil, err
 	}
 	if len(out.UserInfo) == 0 {
@@ -1459,6 +1435,8 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID string) 
 	variables["$time"] = time.Now().Format(time.RFC3339Nano)
 
 	query := `query UserInfo($id: string, $time: string){
+				# A doc they made and handed on is the new owner's to name.
+				sidebarMe as var(func: eq(user_uuid, $id))
 				# Tasks of archived projects are not the user's work any more.
 				var(func: eq(user_uuid, $id)) {
 					user_projects @filter(gt(project_deleted_at, "1970-01-01T00:00:00Z")) { archivedProjects as uid }
@@ -1470,19 +1448,20 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID string) 
 					user_email_id
 					user_status
 					user_profile_object_key
+				# ch_private for the lock beside a private channel's name. The
+				# sidebar lists channels by name, so it reads no channel's newest
+				# post: that read sorted every post of every channel, and counted
+				# deleted ones (F-33).
 				user_channels @filter( not gt(ch_deleted_at, "1970-01-01T00:00:00Z")){
 					ch_uuid
 					ch_name
-					ch_posts (orderdesc: post_created_at, first: 1) {
-						post_created_at
-					}
+					ch_private
 				}
-				user_fav_channels {
+				# An archived channel leaves Starred as it leaves Channels.
+				user_fav_channels @filter( not gt(ch_deleted_at, "1970-01-01T00:00:00Z")){
 					ch_uuid
 					ch_name
-					ch_posts (orderdesc: post_created_at, first: 1) {
-						post_created_at
-					}
+					ch_private
 				}
 					user_teams {
 						team_name
@@ -1501,15 +1480,16 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID string) 
 							user_status
 							` + CurrentEmojiStatus + `
 						}
-						dm_chats (orderdesc:chat_created_at, first: 1) {
+						# The newest live message: a deleted one moved its
+						# conversation up as if someone had just written (F-33).
+						dm_chats @filter(not gt(chat_deleted_at, "1970-01-01T00:00:00Z")) (orderdesc: chat_created_at, first: 1) {
 							chat_created_at
-							
 						}
 					}
 				user_task_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects))))
 				user_incomplete_task_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND ` + dgraphStruct.TASK_OPEN_FILTER + ` AND not eq(task_status, "canceled")))
 				user_overdue_task_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND ` + dgraphStruct.TASK_OPEN_FILTER + ` AND not eq(task_status, "canceled") AND lt(task_due_date, $time) AND gt(task_due_date, "1970-01-01T00:00:00Z")))
-				user_docs: ~doc_created_by(orderdesc: doc_updated_at, first: 8) @filter(not gt(doc_deleted_at, "1970-01-01T00:00:00Z")) {
+				user_docs: ~doc_created_by(orderdesc: doc_updated_at, first: 8) @filter(not gt(doc_deleted_at, "1970-01-01T00:00:00Z") AND (NOT has(doc_owner) OR uid_in(doc_owner, uid(sidebarMe)))) {
 					doc_uuid
 					doc_title
 				}

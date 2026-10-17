@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Channel"
@@ -147,15 +148,6 @@ func CreateChannel(ctx context.Context, channelInfo *adapter.InputCreateChannel,
 
 }
 
-// recoverChannelMemoryCascade guards a fire-and-forget channel memory
-// cascade goroutine so a panic in the best-effort AI projection layer can
-// never crash the server. phase is "archive" or "restore" for the log.
-func recoverChannelMemoryCascade(phase string) {
-	if r := recover(); r != nil {
-		helpers.MessageLogs.ErrorLog.Printf("panic in channel memory %s cascade: %v", phase, r)
-	}
-}
-
 // channelDeletedAtOrNil turns a stored deleted_at into the pointer a restore needs.
 //
 // The Postgres column is nullable but the model carries a plain time.Time, so "never archived"
@@ -167,6 +159,30 @@ func channelDeletedAtOrNil(deletedAt time.Time) *time.Time {
 		return nil
 	}
 	return &deletedAt
+}
+
+// channelSearchMarks and channelMemoryCascades run each channel's search marks,
+// and its memory's archive and restore, one at a time in the order the channel
+// was archived and restored. Each started on a goroutine of its own, so an
+// archive and a restore close together raced, and a restore whose unmark
+// finished before the archive's mark left a live channel's whole history
+// marked Archived (and its memory archived).
+var channelSearchMarks, channelMemoryCascades helpers.InOrder
+
+// markInSearch marks a channel's posts, replies and files in search as in an
+// archived channel or, archived false, clears the mark and brings back the
+// history an archive made before the mark existed had marked deleted. A seam
+// for tests.
+var markInSearch = func(channelUUID string, archived bool) {
+	globalSearchDomain.MarkChannelArchivedInOpenSearch(channelUUID, archived)
+	if !archived {
+		_ = globalSearchDomain.SyncCascadingUnarchiveInOpenSearch(
+			[]string{"post_ch_id", "comment_channel_id", "attachment_channel_id"},
+			channelUUID,
+			[]string{"posts", "comments", "attachments"},
+			"cascade",
+		)
+	}
 }
 
 func UpdateChannelInfo(ctx context.Context, channelUpdateInfo *adapter.UpdateChannelInfo, channelUUID uuid.UUID) (err error) {
@@ -257,43 +273,47 @@ func UpdateChannelInfo(ctx context.Context, channelUpdateInfo *adapter.UpdateCha
 		mqttBusiness.RecheckTopicSubscribers(helpers.GetMqttTopicForChannel(channelUUID.String()))
 	}
 
+	// Whether this update brings the channel back from the archive, by
+	// whichever route (the restore button, or an edit that clears the
+	// archive). Any other update (a rename, a privacy change) leaves its
+	// history's marks as they are: each of those cleared the mark over the
+	// channel's whole history, a settled update-by-query a time, though there
+	// was nothing to clear. A channel whose snapshot didn't load counts as
+	// archived, so a restore never leaves its history marked: that costs a
+	// clear that changes nothing.
+	restored := !channelUpdateInfo.ChannelArchived &&
+		(priorChannel == nil || helpers.IsSoftDeleted(&priorChannel.DeletedAt))
+
+	// The marks and the memory cascades run in the background, each channel's
+	// in the order it was archived and restored (channelSearchMarks).
+	chID := channelUUID.String()
 	var deletedAt *int64 = nil
-	if channelUpdateInfo.ChannelArchived {
+	switch {
+	case channelUpdateInfo.ChannelArchived:
 		deletedAt = helpers.Int64Pointer(currentTime.Unix())
-		go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
-			[]string{"post_ch_id", "comment_channel_id", "attachment_channel_id"},
-			channelUpdateInfo.ChannelUuid,
-			*deletedAt,
-			[]string{"posts", "comments", "attachments"},
-			"cascade",
-		)
+		// The history stays searchable for the people in the channel, marked
+		// Archived; it was marked deleted, out of everyone's search.
+		channelSearchMarks.Go(chID, "channel.search-mark", func() { markInSearch(chID, true) })
 		// Cascade the archive into the memory layer by SCOPE so every fact
 		// derived from this channel (worker-extracted scope-keyed items AND
 		// manual captures) stops surfacing as AI-queryable memory. Reversible
-		// via the unarchive branch below. Own goroutine so a slow memory
-		// store never extends the archive request.
-		go func(chUUID string) {
-			defer recoverChannelMemoryCascade("archive")
-			ai.ArchiveMemoryByScope(context.Background(), memoryModels.ScopeRef{ChannelUUID: chUUID})
-		}(channelUpdateInfo.ChannelUuid)
+		// by the restore below.
+		channelMemoryCascades.Go(chID, "channel.memory-archive", func() {
+			ai.ArchiveMemoryByScope(context.Background(), memoryModels.ScopeRef{ChannelUUID: chID})
+		})
 		go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "channel.archived", map[string]interface{}{
 			"channel_id":   channelUpdateInfo.ChannelUuid,
 			"channel_name": channelUpdateInfo.ChannelName,
 		})
-	} else {
-		go globalSearchDomain.SyncCascadingUnarchiveInOpenSearch(
-			[]string{"post_ch_id", "comment_channel_id", "attachment_channel_id"},
-			channelUpdateInfo.ChannelUuid,
-			[]string{"posts", "comments", "attachments"},
-			"cascade",
-		)
+	case restored:
+		// Back from the archive: the mark goes, and history an archive made
+		// before the mark existed (marked deleted by the cascade) comes back.
+		channelSearchMarks.Go(chID, "channel.search-unmark", func() { markInSearch(chID, false) })
 		// Revive the memory items the archive cascade removed for this channel
-		// (never items a user independently deleted). Mirrors the OpenSearch
-		// unarchive above.
-		go func(chUUID string) {
-			defer recoverChannelMemoryCascade("restore")
-			ai.RestoreMemoryByScope(context.Background(), memoryModels.ScopeRef{ChannelUUID: chUUID})
-		}(channelUpdateInfo.ChannelUuid)
+		// (never items a user independently deleted).
+		channelMemoryCascades.Go(chID, "channel.memory-restore", func() {
+			ai.RestoreMemoryByScope(context.Background(), memoryModels.ScopeRef{ChannelUUID: chID})
+		})
 	}
 
 	go domain.UpdateChannelInOpenSearch(&openSearchStruct.OpenSearchChannel{
@@ -463,11 +483,15 @@ const (
 	ChannelPostPolicyAdminsOnly = "admins_only"
 )
 
+// ErrInvalidPostPolicy is a posting policy that is neither of the two: the
+// caller's to fix, unlike a write that failed.
+var ErrInvalidPostPolicy = errors.New("invalid post policy")
+
 // SetChannelPostPolicy sets a channel's posting policy (announcement mode).
 // Validates the value; persists to Postgres + Dgraph + cache via the domain.
 func SetChannelPostPolicy(ctx context.Context, channelUUID uuid.UUID, policy string) error {
 	if policy != ChannelPostPolicyEveryone && policy != ChannelPostPolicyAdminsOnly {
-		return fmt.Errorf("invalid post policy")
+		return ErrInvalidPostPolicy
 	}
 	if err := domain.SetChannelPostPolicy(ctx, channelUUID, policy); err != nil {
 		return err
@@ -583,37 +607,22 @@ func GetDgraphChannelInfoByUUIDWithMemberAdminFlag(ctx context.Context, channelU
 		return
 	}
 
-	adminIndex := 0
-	adminLength := len(channelInfo.Moderators)
-
-	if adminLength > 0 {
-
-		for _, member := range channelInfo.Members {
-			if member.Uuid == channelInfo.Moderators[adminIndex].Uuid {
-				member.IsAdmin = true
-				adminIndex = adminIndex + 1
-			}
-
-			if adminIndex == adminLength {
-				break
-			}
+	// Each member is an admin when they are among the moderators, by id. The
+	// two lists were walked side by side, which held only while both came
+	// back in the same order with nobody in one and not the other.
+	admins := make(map[string]bool, len(channelInfo.Moderators))
+	for _, moderator := range channelInfo.Moderators {
+		if moderator != nil {
+			admins[moderator.Uuid] = true
 		}
-
+	}
+	for _, member := range channelInfo.Members {
+		if member != nil {
+			member.IsAdmin = admins[member.Uuid]
+		}
 	}
 
 	channelInfo.Moderators = nil
-
-	return
-}
-
-func GetUsersChannelListWithPublicChannel(ctx context.Context, userDgraphId string) (channelsInfo []*dgraphStruct.DgraphChannel, err error) {
-	channelsInfo, err = domain.GetUsersChannelListWithPublicChannel(ctx, userDgraphId)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetUsersChannelListWithPublicChannel Failed to get users channels list err: %+v",
-			err)
-		return
-	}
 
 	return
 }
@@ -741,6 +750,32 @@ func CreateOrUpdateDgraphChannel(ctx context.Context, dgraphChannel *dgraphStruc
 	}
 
 	return
+}
+
+// KeepsAnAdmin is whether the channel would still have an admin if who (by
+// uuid) were no longer one: they leave it, are removed, or step down. It
+// mustn't be left with none, or nobody could add its members, or make anyone
+// an admin, again; since its creator may leave, any admin can be its last.
+// readerUID is the person asking, as the channel is read for them.
+//
+// It's read before the change, as the rest of the change's rules are: two
+// admins stepping down in the same moment could still both pass.
+func KeepsAnAdmin(ctx context.Context, channelUUID uuid.UUID, readerUID, who string) (bool, error) {
+	ch, err := domain.GetDgraphChannelInfoByUUID(ctx, channelUUID.String(), readerUID)
+	if err != nil {
+		return false, err
+	}
+	isAdmin := false
+	for _, m := range ch.Moderators {
+		switch {
+		case m == nil || m.Uuid == "":
+		case strings.EqualFold(m.Uuid, who):
+			isAdmin = true
+		default:
+			return true, nil
+		}
+	}
+	return !isAdmin, nil
 }
 
 // DeleteChannelModeratorEdge demotes a channel admin. channelUUID is required
@@ -1124,4 +1159,10 @@ func StopRecordingChannelCall(ctx context.Context, channelId string) (err error)
 	}
 
 	return
+}
+
+// GetDiscoverableChannels is a page of the public channels the person could
+// join and isn't in, by name, searched on the server (domain).
+func GetDiscoverableChannels(ctx context.Context, userDgraphId string, searchText string, pageIndex int, pageSize int) ([]*dgraphStruct.DgraphChannel, int64, error) {
+	return domain.GetDiscoverableChannels(ctx, userDgraphId, searchText, pageIndex, pageSize)
 }

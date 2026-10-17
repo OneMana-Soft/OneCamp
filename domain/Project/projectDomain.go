@@ -236,15 +236,11 @@ func GetDgraphProjectBoardPlaces(ctx context.Context, txn *dgo.Txn, projectUUID 
 				}` + dgraphStruct.BoardPlacesQuery("project_tasks", filter, closedLimit) + `
 			}
 		}`
-	resp, err := txn.QueryWithVars(ctx, query, map[string]string{"$id": projectUUID, "$userDgraphUID": userDgraphUID})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "Domain/GetDgraphProjectBoardPlaces Failed to get the project's board in dgraph err: %+v", err)
-		return nil, nil, err
-	}
 	var out struct {
 		ProjectInfo []json.RawMessage `json:"projectInfo"`
 	}
-	if err := json.Unmarshal(resp.Json, &out); err != nil {
+	if err := dgraphInit.ReadIntoTxn(ctx, txn, query, map[string]string{"$id": projectUUID, "$userDgraphUID": userDgraphUID}, &out); err != nil {
+		helpers.LogErrorWithContext(ctx, "Domain/GetDgraphProjectBoardPlaces Failed to get the project's board in dgraph err: %+v", err)
 		return nil, nil, err
 	}
 	if len(out.ProjectInfo) == 0 {
@@ -432,7 +428,6 @@ func GetDgraphProjectMemberInfo(ctx context.Context, projectUUID string, userDgr
 						uid
 						user_uuid
 						user_name
-						user_email
 						user_profile_object_key
 					}
 					project_created_by {
@@ -513,6 +508,7 @@ func GetBasicDgraphProjectInfoWithGivenMemberAndTeamUUID(ctx context.Context, pr
 				projectInfo(func: eq(project_uuid, $id)) {
 					uid
 					project_uuid
+					project_is_member: count(project_members @filter(uid($userUid)))
 					project_is_admin: count(project_admins @filter(uid($userUid)))
 					project_created_by {
 						uid
@@ -522,6 +518,7 @@ func GetBasicDgraphProjectInfoWithGivenMemberAndTeamUUID(ctx context.Context, pr
 						team_members @filter(eq(user_uuid, $memberUuid)){
 							uid
 							user_uuid
+							is_external
 						}
 						team_is_admin: count(team_admins @filter(uid($userUid)))
 					}
@@ -757,6 +754,13 @@ func RenameProjectInOpenSearch(projectUUID, projectName string, updatedAt int64)
 // deleted_date, so whether the project is archived is left as it was. Pure.
 func projectRenameFields(projectName string, updatedAt int64) map[string]interface{} {
 	return map[string]interface{}{"project_name": projectName, "updated_date": updatedAt}
+}
+
+// MarkProjectArchivedInOpenSearch takes an archived project out of search
+// again (deleted_date set), for a project whose search document says
+// otherwise.
+func MarkProjectArchivedInOpenSearch(ctx context.Context, projectUUID string, deletedAt int64) error {
+	return OpenSearchModels.UpdateProjectFieldsInOpenSearch(ctx, projectUUID, map[string]interface{}{"deleted_date": deletedAt})
 }
 
 func getUpdateProjectWithTaskCommentAndAttachmentBulkOperationStringForOpenSearch(ctx context.Context, openSearchProject *openSearchStruct.OpenSearchProject, openSearchAttachments []*openSearchStruct.OpenSearchAttachment, openSearchTasks []*openSearchStruct.OpenSearchTask, openSearchComments []*openSearchStruct.OpenSearchComment) (bulkActionString string, err error) {

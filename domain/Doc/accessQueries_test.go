@@ -52,8 +52,22 @@ func TestDocAccessQueriesReadTheDeletionTime(t *testing.T) {
 				t.Errorf("%s: no func %s (renamed? update this list)", file, name)
 				continue
 			}
-			if !strings.Contains(body, "doc_deleted_at") {
+			// The deletion time itself, or the access facts (docAccess.go),
+			// which carry it with everything else the rule decides by.
+			if !strings.Contains(body, "doc_deleted_at") && !strings.Contains(body, "ccessFacts") {
 				t.Errorf("%s reads a doc for an access rule without its deletion time: a deleted doc reads as live", name)
+			}
+		}
+	}
+}
+
+// The access facts carry the deletion time (and the archive's), so a read
+// through them can't read a deleted doc as live.
+func TestTheAccessFactsReadTheDeletionTime(t *testing.T) {
+	for name, facts := range map[string]string{"accessFacts": accessFacts, "accessFactsBut": accessFactsBut, "DocAccessFacts": DocAccessFacts} {
+		for _, field := range []string{"doc_deleted_at", "doc_archived_at", "doc_lock_level", "doc_owner"} {
+			if !strings.Contains(facts, field) {
+				t.Errorf("%s doesn't read %s", name, field)
 			}
 		}
 	}

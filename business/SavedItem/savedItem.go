@@ -39,10 +39,10 @@ var ItemTypes = map[string]bool{
 	"doc":     true,
 	"project": true,
 	"board":   true,
-	// A reminder with nothing saved behind it: a /remind that fired
-	// (SaveFired), waiting in Later from the moment it fired for whoever
-	// missed its toast and push, or one the assistant set (set_reminder),
-	// due when it should come back.
+	// A reminder: a /remind that fired (SaveFired) waits in Later, due the
+	// moment it fired, for whoever missed its toast and push; one the
+	// assistant set (set_reminder) has nothing saved behind it and is due
+	// when it should come back.
 	"reminder": true,
 }
 

@@ -189,12 +189,13 @@ func StartEmbeddingReindexAsync(dimension int) bool {
 		return false
 	}
 
-	// GoSafeNamed, not a bare goroutine: this runs unattended for up to six
+	// GoSafeLoop, not a bare goroutine: this runs unattended for up to six
 	// hours over OpenSearch responses, and an unrecovered panic in any goroutine
-	// takes the whole server down. It also arms write-buffering, so a crash here
+	// takes the whole server down. (A loop, not work in flight: its state is
+	// watched through GetReindexState, and nothing settles on a six-hour job.) It also arms write-buffering, so a crash here
 	// used to skip the teardown below and leave live writes buffered until a
 	// restart. The recover keeps both defers on the normal unwind path.
-	helpers.GoSafeNamed("ai.embedding-reindex", func() {
+	helpers.GoSafeLoop("ai.embedding-reindex", func() {
 		defer reindexRunning.Store(false)
 		// Generous deadline: re-embedding tens of thousands of items on a
 		// CPU-bound local model is slow. The job streams in batches so a
@@ -283,7 +284,7 @@ func runEmbeddingReindex(ctx context.Context, dimension int) error {
 		// Guarded for the same reason as the job above, and because wg.Done()
 		// must still fire: a panicking worker that skipped it would leave the
 		// parent blocked on wg.Wait() forever instead of finishing the rebuild.
-		helpers.GoSafeNamed("ai.embedding-reindex.worker", func() {
+		helpers.GoSafeLoop("ai.embedding-reindex.worker", func() {
 			defer wg.Done()
 			for d := range jobs {
 				// storeEmbeddingDirect regenerates the vector from

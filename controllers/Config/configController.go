@@ -21,11 +21,11 @@ func GetMqttConfig(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get user mqtt config",
+			"msg": "Couldn't start live updates. Reload the page to try again.",
 			"err": err,
 		})
 		return
 	}
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "got mqtt config successfully!", "data": mqttConfig})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got the live update settings.", "data": mqttConfig})
 }

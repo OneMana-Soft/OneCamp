@@ -3,6 +3,8 @@ package entityLinkBusiness
 import (
 	"context"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
+
 	domain "github.com/akashc777/OneCamp/domain/EntityLink"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
@@ -24,22 +26,20 @@ func RemoveLink(ctx context.Context, sourceType, sourceUUID, refType, refUUID st
 }
 
 // CanReadRef reports whether the viewer may see the doc/board being linked or
-// inspected (used to gate add and the reverse read).
+// inspected (used to gate add and the reverse read). A doc is named to them
+// only when they may open it (business/Access ReadableTitles, read as its
+// chip is, by the Access Resolver's rule); a board, by its own rule.
 func CanReadRef(ctx context.Context, refType, refUUID, userDgraphUID, userUUID string) (bool, error) {
-	return domain.CanReadRef(ctx, refType, refUUID, userDgraphUID, userUUID)
-}
-
-func docVisible(d *dgraphStruct.DgraphDoc, userUUID string) bool {
-	if d == nil {
-		return false
+	if refType != RefDoc {
+		return domain.CanReadRef(ctx, refType, refUUID, userDgraphUID, userUUID)
 	}
-	if d.IsPrivate == nil || !*d.IsPrivate {
-		return true
+	ref := accessBusiness.ItemRef{Kind: accessBusiness.KindDoc, ID: refUUID}
+	named, err := accessBusiness.ReadableTitles(ctx, []accessBusiness.Subject{{UserUID: userDgraphUID, UserUUID: userUUID}}, []accessBusiness.ItemRef{ref})
+	if err != nil {
+		return false, err
 	}
-	if d.HasReadAccess > 0 {
-		return true
-	}
-	return d.CreatedBy != nil && d.CreatedBy.Uuid == userUUID
+	_, ok := named[ref]
+	return ok, nil
 }
 
 func boardVisible(b *dgraphStruct.DgraphBoard, userUUID string) bool {
@@ -64,8 +64,26 @@ func GetLinksForSource(ctx context.Context, sourceType, sourceUUID, userDgraphUI
 	if err != nil {
 		return nil, nil, false, err
 	}
+	// Which linked docs the viewer may open: the Access Resolver, in one read.
+	res := make([]accessBusiness.Resource, 0, len(rawDocs))
 	for _, d := range rawDocs {
-		if docVisible(d, userUUID) {
+		if d != nil && d.Uuid != "" {
+			res = append(res, accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: d.Uuid})
+		}
+	}
+	open, err := accessBusiness.Rules.Filter(ctx, accessBusiness.Subject{UserUID: userDgraphUID, UserUUID: userUUID}, res, accessBusiness.LevelView)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	readable := make(map[string]bool, len(open))
+	for _, r := range open {
+		readable[r.UUID] = true
+	}
+	for _, d := range rawDocs {
+		if d != nil && readable[d.Uuid] {
+			// The app marks a private link it can't open by this count:
+			// every link kept here opens.
+			d.HasReadAccess = 1
 			docs = append(docs, d)
 		}
 	}

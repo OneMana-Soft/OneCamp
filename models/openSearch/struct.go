@@ -11,6 +11,9 @@ type OpenSearchPost struct {
 	PostUpdatedAt      int64   `json:"updated_date,omitempty"`
 	PostDeletedAt      *int64  `json:"deleted_date"`
 	PostChannelName    string  `json:"post_ch_name,omitempty"`
+	// ChannelArchived is set while the post's channel is archived
+	// (MarkChannelArchivedInOpenSearch), never by a writer of the entry.
+	ChannelArchived *bool `json:"channel_archived,omitempty"`
 }
 
 type OpenSearchChatParticipants struct {
@@ -74,6 +77,8 @@ type OpenSearchComment struct {
 	CommentCreatedAt              int64    `json:"created_date,omitempty"`
 	CommentUpdatedAt              int64    `json:"updated_date,omitempty"`
 	CommentDeletedAt              *int64   `json:"deleted_date"`
+	// ChannelArchived: as OpenSearchPost's, for a reply in a channel.
+	ChannelArchived *bool `json:"channel_archived,omitempty"`
 }
 
 type OpenSearchAttachment struct {
@@ -105,6 +110,8 @@ type OpenSearchAttachment struct {
 	AttachmentDocCreatedByUserUuid string   `json:"attachment_doc_created_by_user_id,omitempty"`
 	AttachmentCreatedAt            int64    `json:"created_date,omitempty"`
 	AttachmentDeletedAt            *int64   `json:"deleted_date"`
+	// ChannelArchived: as OpenSearchPost's, for a file in a channel.
+	ChannelArchived *bool `json:"channel_archived,omitempty"`
 }
 
 type OpenSearchTask struct {
@@ -137,6 +144,11 @@ type OpenSearchDoc struct {
 	DocReadingUsers      []string `json:"doc_reading_users,omitempty"`
 	DocEditingUsers      []string `json:"doc_editing_users,omitempty"`
 	DocCommentingUsers   []string `json:"doc_commenting_users,omitempty"`
+	DocOwnerUserUuid     string   `json:"doc_owner_user_id,omitempty"`
+	DocFullAccessUsers   []string `json:"doc_full_access_users,omitempty"`
+	DocTeamUUIDs         []string `json:"doc_team_uuids,omitempty"`
+	DocSpaceKind         string   `json:"doc_space_kind,omitempty"`
+	DocSpaceUUID         string   `json:"doc_space_uuid,omitempty"`
 	DocCreatedAt         int64    `json:"created_date,omitempty"`
 	DocUpdatedAt         int64    `json:"updated_date,omitempty"`
 	DocDeletedAt         *int64   `json:"deleted_date"`
@@ -163,9 +175,17 @@ type OpenSearchDocEntry struct {
 	DocReadingUsers      []string `json:"doc_reading_users"`
 	DocEditingUsers      []string `json:"doc_editing_users"`
 	DocCommentingUsers   []string `json:"doc_commenting_users"`
-	DocCreatedAt         int64    `json:"created_date,omitempty"`
-	DocUpdatedAt         int64    `json:"updated_date,omitempty"`
-	DocDeletedAt         *int64   `json:"deleted_date,omitempty"`
+	// Who else reaches the doc (the Access Resolver's sources, I13): its
+	// owner, its full-access people, the teams it is shared with at any level,
+	// and the space whose members may open it. Written whole, empty included.
+	DocOwnerUserUuid   string   `json:"doc_owner_user_id"`
+	DocFullAccessUsers []string `json:"doc_full_access_users"`
+	DocTeamUUIDs       []string `json:"doc_team_uuids"`
+	DocSpaceKind       string   `json:"doc_space_kind"`
+	DocSpaceUUID       string   `json:"doc_space_uuid"`
+	DocCreatedAt       int64    `json:"created_date,omitempty"`
+	DocUpdatedAt       int64    `json:"updated_date,omitempty"`
+	DocDeletedAt       *int64   `json:"deleted_date,omitempty"`
 }
 
 type OpenSearchBoard struct {

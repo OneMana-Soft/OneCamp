@@ -69,6 +69,10 @@ func DocSearchEntryOf(doc *dgraphStruct.DgraphDoc) *openSearchStruct.OpenSearchD
 		DocReadingUsers:    uuids(doc.ReadingUser),
 		DocEditingUsers:    uuids(doc.EditingUser),
 		DocCommentingUsers: uuids(doc.CommentingUser),
+		DocFullAccessUsers: uuids(doc.FullAccessUsers),
+		DocTeamUUIDs:       []string{},
+		DocSpaceKind:       doc.SpaceKind,
+		DocSpaceUUID:       doc.SpaceUUID,
 		DocCreatedAt:       unix(doc.CreatedAt),
 		DocUpdatedAt:       unix(doc.UpdatedAt),
 	}
@@ -82,6 +86,23 @@ func DocSearchEntryOf(doc *dgraphStruct.DgraphDoc) *openSearchStruct.OpenSearchD
 	}
 	if e.DocUpdatedAt == 0 {
 		e.DocUpdatedAt = e.DocCreatedAt
+	}
+	seenTeam := map[string]bool{}
+	for _, list := range [][]*dgraphStruct.DgraphTeam{doc.TeamEditors, doc.TeamCommenters, doc.TeamViewers} {
+		for _, t := range list {
+			if t != nil && t.Uuid != "" && !seenTeam[t.Uuid] {
+				seenTeam[t.Uuid] = true
+				e.DocTeamUUIDs = append(e.DocTeamUUIDs, t.Uuid)
+			}
+		}
+	}
+	// Its owner: whoever it was handed to last, or for a doc never handed on,
+	// its maker.
+	switch {
+	case doc.Owner != nil && doc.Owner.Uuid != "":
+		e.DocOwnerUserUuid = doc.Owner.Uuid
+	case doc.CreatedBy != nil:
+		e.DocOwnerUserUuid = doc.CreatedBy.Uuid
 	}
 	if doc.CreatedBy != nil {
 		e.DocCreatedByUserUuid = doc.CreatedBy.Uuid

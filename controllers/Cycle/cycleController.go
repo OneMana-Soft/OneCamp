@@ -27,7 +27,7 @@ func write(w http.ResponseWriter, r *http.Request, where string, err error) {
 		return
 	}
 	helpers.LogErrorWithContext(r.Context(), "controllers/Cycle/%s err: %+v", where, err)
-	helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Something went wrong. Try again in a moment."})
+	helpers.WriteRetryLater(w, "Something went wrong.")
 }
 
 // project checks the caller may see (or, for needAdmin, change) the project.

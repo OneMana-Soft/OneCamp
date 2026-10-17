@@ -26,6 +26,12 @@ var updateByQuery = func(ctx context.Context, req opensearchapi.UpdateByQueryReq
 	return opensearchInit.OpenSearchClient.UpdateByQuery(ctx, req)
 }
 
+// UpdateByQuerySettled is updateByQuerySettled for the other search models:
+// every update-by-query goes through it.
+func UpdateByQuerySettled(ctx context.Context, indices []string, body string) (updated int, err error) {
+	return updateByQuerySettled(ctx, indices, body)
+}
+
 // updateByQuerySettled runs an update-by-query (refreshed, waited for) whose
 // script leaves an entry already right as it is, and runs it again while some
 // of the entries it matched were being written by something else at the same

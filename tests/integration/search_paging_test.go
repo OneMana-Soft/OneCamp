@@ -83,7 +83,7 @@ func TestSearchPagesThroughEveryHit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the page's cursor: %v", err)
 	}
-	second, err := globalSearchBusiness.GetUnifiedGlobalSearchPage(ctx, me, me+"@example.test", mine, nil, nil, "rollout", after)
+	second, err := globalSearchBusiness.GetUnifiedGlobalSearchPage(ctx, me, me+"@example.test", mine, nil, nil, "rollout", after, globalSearchBusiness.Within{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strings"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
@@ -34,7 +35,6 @@ import (
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
-	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	projectModels "github.com/akashc777/OneCamp/models/dgraph/Project"
 	postgresStruct "github.com/akashc777/OneCamp/models/postgres"
 	attachmentModels "github.com/akashc777/OneCamp/models/postgres/Attachment"
@@ -289,8 +289,18 @@ func inGroup(ctx context.Context, userUUID, groupID string) (started, in bool, e
 // read rule (docBusiness.CanRead): someone it was there for is told it is
 // deleted, and nobody else learns it was there.
 func readsDoc(ctx context.Context, userUUID, docID string) error {
-	doc, err := docFor(ctx, userUUID, docID)
+	person, err := userDomain.GetActiveDgraphUserInfoByUUID(ctx, userUUID)
+	if err != nil {
+		return err
+	}
+	if person == nil || person.Uid == "" {
+		return docBusiness.ErrNotFound
+	}
+	doc, err := docBusiness.GetBasicDgraphDocByUUID(ctx, docID, person.Uid)
 	switch {
+	case errors.Is(err, docBusiness.ErrNotFound), errors.Is(err, docBusiness.ErrDocDeleted),
+		err == nil && (doc == nil || doc.Uuid == ""):
+		return docBusiness.ErrNotFound
 	case err != nil:
 		return err
 	case docBusiness.IsDeleted(doc) && docBusiness.CouldRead(doc, userUUID):
@@ -303,45 +313,26 @@ func readsDoc(ctx context.Context, userUUID, docID string) error {
 	return nil
 }
 
-// addsToDoc is the doc's own answer to someone adding a file to it: the
-// access a comment needs (docBusiness.CanComment; a doc's comments take files
+// addsToDoc is the doc's own answer to someone adding a file to it, from the
+// Access Resolver: the access a comment needs (a doc's comments take files
 // this way; putting one in its body is an edit, which saving the body asks
 // for). Someone it isn't shared with learns nothing, as for a doc that isn't
-// there, and someone it was there for is told it is deleted.
+// there, and someone it was there for is told it is deleted. /uploadFile
+// signs people in from Postgres alone, so the person is their account id.
 func addsToDoc(ctx context.Context, userUUID, docID string) error {
-	doc, err := docFor(ctx, userUUID, docID)
+	who := accessBusiness.Subject{UserUUID: userUUID}
+	d, err := accessBusiness.Rules.Resolve(ctx, who, accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: docID})
 	switch {
+	case errors.Is(err, accessBusiness.ErrNotFound):
+		return docBusiness.ErrNotFound
 	case err != nil:
 		return err
-	case docBusiness.IsDeleted(doc) && docBusiness.CouldRead(doc, userUUID):
+	case d.Deleted && (d.Owner || d.Was >= accessBusiness.LevelView):
 		return docBusiness.ErrDocDeleted
-	case docBusiness.IsDeleted(doc), !docBusiness.CanRead(doc, userUUID):
+	case d.Deleted, d.Level == accessBusiness.LevelNone:
 		return docBusiness.ErrNotFound
-	case !docBusiness.CanComment(doc, userUUID):
+	case d.Level < accessBusiness.LevelComment:
 		return ErrRefused
 	}
 	return nil
-}
-
-// docFor is the doc as read for the person with userUUID, through their
-// graph node (/uploadFile signs people in from Postgres alone, so their
-// account id is all a caller may have), or docBusiness.ErrNotFound when it
-// isn't there.
-func docFor(ctx context.Context, userUUID, docID string) (*dgraphStruct.DgraphDoc, error) {
-	person, err := userDomain.GetActiveDgraphUserInfoByUUID(ctx, userUUID)
-	if err != nil {
-		return nil, err
-	}
-	if person == nil || person.Uid == "" {
-		return nil, docBusiness.ErrNotFound
-	}
-	doc, err := docBusiness.GetBasicDgraphDocByUUID(ctx, docID, person.Uid)
-	switch {
-	case errors.Is(err, docBusiness.ErrNotFound), errors.Is(err, docBusiness.ErrDocDeleted),
-		err == nil && (doc == nil || doc.Uuid == ""):
-		return nil, docBusiness.ErrNotFound
-	case err != nil:
-		return nil, err
-	}
-	return doc, nil
 }

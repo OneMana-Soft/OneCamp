@@ -30,24 +30,13 @@ const chatSettingsRepairTries = 8
 // until a run finishes, ctx ends, or the tries run out. It never delays or
 // fails a start.
 func StartChatSettingsRepair(ctx context.Context) {
-	helpers.GoSafeNamed("chat.settings-repair", func() {
-		wait := 5 * time.Second
-		for try := 0; try < chatSettingsRepairTries; try++ {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(wait):
-			}
+	helpers.RetryInBackground(ctx, "chat.settings-repair",
+		helpers.Retries{First: 5 * time.Second, Cap: 10 * time.Minute, Tries: chatSettingsRepairTries},
+		func(ctx context.Context) error {
 			given, err := domain.GiveMissingChatSettings(ctx)
 			if given > 0 {
 				helpers.MessageLogs.InfoLog.Printf("chat settings: gave %d people in a conversation without a notification setting the default", given)
 			}
-			if err == nil {
-				return
-			}
-			if wait < 10*time.Minute {
-				wait *= 2
-			}
-		}
-	})
+			return err
+		})
 }

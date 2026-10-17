@@ -207,16 +207,29 @@ func briefingHighlights(results []ai.SimilarResult, bot *userBusiness.BotIdentit
 // a blank line, then its description (EmbedTaskContent), and flattening that to
 // plain text ran the two together: "Write the launch announcement Draft for the
 // blog". So a task keeps its name and description apart with a separator.
+//
+// A doc is indexed the same way, its title, a blank line, then its body
+// (EmbedDocContent), and ran together too: "Launch sync notes Attendees: Sam,
+// Maya, Jonas" (QA SH-09).
 func highlightText(contentType, text string) string {
-	if contentType == "task" {
-		if name, desc, ok := strings.Cut(text, "\n\n"); ok {
-			name, desc = helpers.HTMLToPlainText(name), helpers.HTMLToPlainText(desc)
-			if name != "" && desc != "" {
-				return name + " · " + desc
-			}
-		}
+	if name, rest := highlightParts(contentType, text); name != "" && rest != "" {
+		return name + " · " + rest
 	}
 	return helpers.HTMLToPlainText(text)
+}
+
+// highlightParts is a named highlight's name and the text under it, apart, as
+// plain text: a doc's title and body, a task's name and description. Empty
+// for anything else, and for a name with nothing under it.
+func highlightParts(contentType, text string) (name, rest string) {
+	if contentType != "task" && contentType != "doc" {
+		return "", ""
+	}
+	n, r, ok := strings.Cut(text, "\n\n")
+	if !ok {
+		return "", ""
+	}
+	return helpers.HTMLToPlainText(n), helpers.HTMLToPlainText(r)
 }
 
 func toBriefingHighlight(r ai.SimilarResult) adapter.BriefingHighlight {
@@ -227,7 +240,15 @@ func toBriefingHighlight(r ai.SimilarResult) adapter.BriefingHighlight {
 	if len([]rune(snippet)) > 160 {
 		snippet = string([]rune(snippet)[:160]) + "…"
 	}
+	title, excerpt := highlightParts(r.ContentType, r.ContentText)
+	if title == "" || excerpt == "" {
+		title, excerpt = "", ""
+	} else if len([]rune(excerpt)) > 160 {
+		excerpt = string([]rune(excerpt)[:160]) + "…"
+	}
 	return adapter.BriefingHighlight{
+		Title:        title,
+		Excerpt:      excerpt,
 		ContentType:  r.ContentType,
 		ContentUUID:  r.ContentUUID,
 		ChannelUUID:  r.ChannelUUID,

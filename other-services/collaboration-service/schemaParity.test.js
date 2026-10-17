@@ -11,10 +11,11 @@ import { EVERY_BLOCK, typesIn } from './everyBlock.fixture.js'
 // The server must know every node and mark the web editor writes, with the
 // same attributes, or saving a doc that holds one fails (11 Oct 2026: `/table`,
 // `+doc`, `#channel`, polls, charts, diffs and recordings, and image captions
-// were dropped). schema-manifest.json is the web editor's schema; the web repo
-// keeps a byte-equal copy (components/minimal-tiptap/schema-manifest.json) and
-// fails its own test when its editor drifts from it. A block added on either
-// side alone fails one of the two.
+// were dropped). schema-manifest.json is the web editor's schema, generated
+// from its block registry; the web repo keeps a byte-equal copy
+// (components/minimal-tiptap/schema-manifest.json) and fails its own test when
+// its editor drifts from it. A block added on either side alone fails one of
+// the two. scripts/schemaManifest.js adopts a new one from the web.
 const here = path.dirname(fileURLToPath(import.meta.url))
 const MANIFEST = path.join(here, 'schema-manifest.json')
 const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'))

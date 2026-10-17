@@ -215,6 +215,14 @@ var ToolRegistry = []ToolDef{
 		},
 	},
 	{
+		Name:        "list_docs",
+		Description: "List the documents the user can open, newest edit first, with each one's doc_uuid. Use to find a doc by its title before reading it or adding to it; search_workspace finds a doc by what it says. Read-only.",
+		ReadOnly:    true,
+		Parameters: []ToolParam{
+			{Name: "scope", Type: "string", Required: false, Description: "workspace (docs everyone can open, the default), mine (docs the user owns) or shared (docs shared with the user)"},
+		},
+	},
+	{
 		Name:        "read_doc",
 		Description: "Read the text content of a document so you can summarize it, answer questions about it, or draft from it. Use when the user references a specific doc (by UUID). Read-only.",
 		ReadOnly:    true,
@@ -228,6 +236,38 @@ var ToolRegistry = []ToolDef{
 		Parameters: []ToolParam{
 			{Name: "doc_uuid", Type: "string", Required: true, Description: "UUID of the document to add to"},
 			{Name: "content", Type: "string", Required: true, Description: "What to add, as Markdown. Supports # headings, - and 1. lists, **bold**, *italic*, `code`, > quotes, and links."},
+		},
+	},
+	{
+		Name:        "doc_insert_after",
+		Description: "Add content to an existing document at the end of one section, or right after one block, as a live edit that everyone with the doc open sees at once. Use when asked to add something to a particular part of a doc (\"add a risk to the Risks section\"). Name the section by its heading's text, as read_doc shows it: the content goes at the end of that section, before the next heading of the same or a higher level. Nothing else in the doc changes, and the person can revert it with one click. Write the content as Markdown.",
+		Parameters: []ToolParam{
+			{Name: "doc_uuid", Type: "string", Required: true, Description: "UUID of the document to add to"},
+			{Name: "content", Type: "string", Required: true, Description: "What to add, as Markdown. Supports # headings, - and 1. lists, **bold**, *italic*, `code`, > quotes, and links."},
+			{Name: "heading", Type: "string", Required: false, Description: "The text of the heading whose section gets the content at its end"},
+			{Name: "block_id", Type: "string", Required: false, Description: "Instead of a heading, the id of the block to add after (when the doc has two headings with the same text)"},
+		},
+	},
+	{
+		Name:        "doc_replace_section",
+		Description: "Replace what is under one heading of an existing document, as a live edit: the heading stays, and everything outside that section is unchanged. Use when asked to rewrite, update or replace a section (\"replace the Risks section with these three risks\"). The person can revert it with one click. Write the new content as Markdown, without the heading itself.",
+		Parameters: []ToolParam{
+			{Name: "doc_uuid", Type: "string", Required: true, Description: "UUID of the document"},
+			{Name: "heading", Type: "string", Required: true, Description: "The text of the heading whose section to replace, as read_doc shows it"},
+			{Name: "content", Type: "string", Required: true, Description: "The section's new content, as Markdown, without the heading"},
+			{Name: "block_id", Type: "string", Required: false, Description: "The heading's block id, when the doc has two headings with the same text"},
+		},
+	},
+	{
+		Name:        "doc_suggest",
+		Description: "Suggest a change to an existing document for its people to review instead of writing it: they see it as a diff in the doc and accept or decline it. Use when asked to suggest or propose an edit, or when a change should be reviewed first. Name a section by its heading (mode replace replaces what is under it; insert_after adds at its end), or a block_id, or neither to suggest an addition at the end of the doc. Write the content as Markdown.",
+		Parameters: []ToolParam{
+			{Name: "doc_uuid", Type: "string", Required: true, Description: "UUID of the document"},
+			{Name: "content", Type: "string", Required: true, Description: "The suggested content, as Markdown"},
+			{Name: "heading", Type: "string", Required: false, Description: "The text of the heading whose section the suggestion is for"},
+			{Name: "block_id", Type: "string", Required: false, Description: "Instead of a heading, the id of the block the suggestion is for"},
+			{Name: "mode", Type: "string", Required: false, Description: "replace (the default) or insert_after"},
+			{Name: "note", Type: "string", Required: false, Description: "One short line saying what the suggestion changes, for the people reviewing it"},
 		},
 	},
 	{
@@ -1152,7 +1192,7 @@ var toolGroups = []toolGroup{
 	},
 	{
 		keywords: []string{"doc", "docs", "document", "documents", "note", "notes", "page", "prd", "spec", "draft", "write up", "write-up"},
-		tools:    []string{"read_doc", "create_doc"},
+		tools:    []string{"list_docs", "read_doc", "create_doc"},
 	},
 	{
 		keywords: []string{"message", "send", "post", "dm", "channel", "channels", "notify", "tell", "ping", "announce", "reply"},

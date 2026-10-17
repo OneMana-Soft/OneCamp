@@ -19,6 +19,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 	"unicode"
@@ -88,6 +89,12 @@ type InstantMeeting struct {
 // ErrNotHost is a member asking for an instant meeting that someone else
 // started.
 var ErrNotHost = errors.New("only the person who started this meeting can do that")
+
+// ErrNoMeeting is an id no instant meeting ever had. It is also ErrNotFound,
+// so a caller that only knows "not there" still answers it; the meeting's own
+// page tells it apart from one that has ended (F-54), which said "This
+// meeting has ended" about a meeting that never was.
+var ErrNoMeeting = fmt.Errorf("no meeting has this id: %w", ErrNotFound)
 
 // CreateInstantMeeting starts a fresh meeting room, mints the host's member
 // token (room admin), and creates a guest grant whose raw link token is
@@ -283,8 +290,10 @@ func MeetingHost(ctx context.Context, room string) (uuid.UUID, bool, error) {
 }
 
 // HostedMeeting answers when an instant meeting's link stops working, for
-// its host only. ErrNotFound once no link to it is live (the meeting is
-// over); ErrNotHost for anyone but the person who started it.
+// its host only. ErrNoMeeting for a room no meeting ever had (every meeting
+// starts with a link, and links are kept after they stop working);
+// ErrNotFound once no link to it is live (the meeting is over); ErrNotHost
+// for anyone but the person who started it.
 func HostedMeeting(ctx context.Context, room string, host *dgraphStruct.DgraphUser) (time.Time, error) {
 	if host == nil {
 		return time.Time{}, ErrNotHost
@@ -294,7 +303,7 @@ func HostedMeeting(ctx context.Context, room string, host *dgraphStruct.DgraphUs
 		return time.Time{}, err
 	}
 	if !ok {
-		return time.Time{}, ErrNotFound
+		return time.Time{}, ErrNoMeeting
 	}
 	if creator.String() != host.Uuid {
 		return time.Time{}, ErrNotHost

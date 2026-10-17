@@ -152,6 +152,7 @@ func runReminderJob(ctx context.Context, job *jobModel.ScheduledJob) error {
 	resp := &commandAdapter.CommandResponse{
 		ResponseType: "ephemeral",
 		Ephemeral:    true,
+		Kind:         commandAdapter.KindReminder,
 		Text:         "⏰ Reminder: " + p.Text,
 	}
 

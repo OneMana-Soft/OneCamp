@@ -72,10 +72,6 @@ func coworkerGreetingReply() string {
 	return "Hi there! How can I help you today?"
 }
 
-// typingRepublishInterval re-asserts the bot's "typing…" indicator so it does
-// not expire on clients before a slow local model finishes generating.
-const typingRepublishInterval = 4 * time.Second
-
 var (
 	startMu sync.Mutex
 	started bool
@@ -692,7 +688,7 @@ func toChatHTML(text string) string {
 // alive until stop is closed (or ctx is cancelled).
 func runBotChatTyping(ctx context.Context, bot *userBusiness.BotIdentity, grpID string, stop <-chan struct{}) {
 	publishBotChatTyping(bot, grpID)
-	t := time.NewTicker(typingRepublishInterval)
+	t := time.NewTicker(mqttBusiness.TypingRepublishInterval)
 	defer t.Stop()
 	for {
 		select {
@@ -712,6 +708,8 @@ func publishBotChatTyping(bot *userBusiness.BotIdentity, grpID string) {
 		UserUUID:    bot.UUID,
 		UserProfile: bot.ProfileKey,
 		ChatGrpId:   grpID,
+		IsBot:       true,
+		BotKind:     string(bot.Kind),
 	}, grpID)
 }
 
@@ -719,7 +717,7 @@ func publishBotChatTyping(bot *userBusiness.BotIdentity, grpID string) {
 // alive until stop is closed (or ctx is cancelled).
 func runBotTyping(ctx context.Context, bot *userBusiness.BotIdentity, channelID string, stop <-chan struct{}) {
 	publishBotTyping(bot, channelID)
-	t := time.NewTicker(typingRepublishInterval)
+	t := time.NewTicker(mqttBusiness.TypingRepublishInterval)
 	defer t.Stop()
 	for {
 		select {
@@ -739,6 +737,8 @@ func publishBotTyping(bot *userBusiness.BotIdentity, channelID string) {
 		UserUUID:    bot.UUID,
 		UserProfile: bot.ProfileKey,
 		ChannelUuid: channelID,
+		IsBot:       true,
+		BotKind:     string(bot.Kind),
 	}, channelID)
 }
 

@@ -3,7 +3,6 @@ package models
 import (
 	"context"
 	"encoding/json"
-	"errors"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -97,8 +96,9 @@ func UpdateChat(ctx context.Context, query string, dgraphChat *dgraphStruct.Dgra
 }
 
 // ErrNotFound is a message that isn't in the graph: an answer about the
-// message, where any other error is the graph not answering.
-var ErrNotFound = errors.New("failed to get dgraph chats")
+// message, where any other error is the graph not answering. It is also
+// helpers.ErrNotFound, which helpers.WriteReadFailure answers as a 404.
+var ErrNotFound = helpers.NotFound("failed to get dgraph chats")
 
 func GetDgraphChatInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphChats *dgraphStruct.DgraphChat, err error) {
 	txn := dgraphInit.DgraphClient.NewTxn()

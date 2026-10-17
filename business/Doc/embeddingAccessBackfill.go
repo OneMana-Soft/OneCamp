@@ -24,7 +24,6 @@ package businness
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"time"
 
@@ -45,27 +44,19 @@ const (
 // StartEmbeddingAccessBackfill runs RunEmbeddingAccessBackfill in the
 // background until it succeeds, ctx ends, or the tries run out.
 func StartEmbeddingAccessBackfill(ctx context.Context) {
-	helpers.GoSafeNamed("doc.embedding-access-backfill", func() {
-		wait := 30 * time.Second
-		for try := 0; try < embeddingAccessBackfillTries; try++ {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(wait):
-			}
+	helpers.RetryInBackground(ctx, "doc.embedding-access-backfill",
+		helpers.Retries{First: 30 * time.Second, Cap: 30 * time.Minute, Tries: embeddingAccessBackfillTries},
+		func(ctx context.Context) error {
 			docs, corrected, err := RunEmbeddingAccessBackfill(ctx)
-			if err == nil {
-				if docs > 0 {
-					helpers.MessageLogs.InfoLog.Printf("AI search: checked the privacy and sharing of %d docs on their entries and corrected %d entries", docs, corrected)
-				}
-				return
+			if err != nil {
+				helpers.MessageLogs.ErrorLog.Printf("AI search: writing docs' privacy onto their entries failed (will retry): %v", err)
+				return err
 			}
-			helpers.MessageLogs.ErrorLog.Printf("AI search: writing docs' privacy onto their entries failed (will retry): %v", err)
-			if wait < 30*time.Minute {
-				wait *= 2
+			if docs > 0 {
+				helpers.MessageLogs.InfoLog.Printf("AI search: checked the privacy and sharing of %d docs on their entries and corrected %d entries", docs, corrected)
 			}
-		}
-	})
+			return nil
+		})
 }
 
 // RunEmbeddingAccessBackfill writes every doc's privacy and sharing onto its
@@ -73,7 +64,7 @@ func StartEmbeddingAccessBackfill(ctx context.Context) {
 // records that it has. It answers how many docs it checked and how many
 // entries said something else and were corrected.
 func RunEmbeddingAccessBackfill(ctx context.Context) (docs, corrected int, err error) {
-	if done, err := embeddingAccessBackfillDone(); err != nil || done {
+	if done, err := configModel.IsDone(embeddingAccessBackfillKey); err != nil || done {
 		return 0, 0, err
 	}
 	if ai.IsReindexRunning() {
@@ -87,7 +78,7 @@ func RunEmbeddingAccessBackfill(ctx context.Context) (docs, corrected int, err e
 		access := make([]ai.DocAccess, 0, len(page))
 		for _, d := range page {
 			if d != nil && d.Uuid != "" {
-				access = append(access, docAccessOf(d.Uuid, d))
+				access = append(access, ai.DocAccessOf(d.Uuid, d))
 			}
 		}
 		n, err := ai.SetDocAccess(ctx, access)
@@ -106,15 +97,4 @@ func RunEmbeddingAccessBackfill(ctx context.Context) (docs, corrected int, err e
 		return docs, corrected, errors.New("the AI search index is being rebuilt")
 	}
 	return docs, corrected, configModel.UpsertConfig(embeddingAccessBackfillKey, "done")
-}
-
-func embeddingAccessBackfillDone() (bool, error) {
-	cfg, err := configModel.GetConfigByKey(embeddingAccessBackfillKey)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return cfg != nil && cfg.Value == "done", nil
 }

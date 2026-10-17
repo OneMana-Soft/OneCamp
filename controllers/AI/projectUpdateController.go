@@ -49,7 +49,7 @@ func DraftProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	d, err := business.DraftProjectUpdate(ctx, projectID, user.UserDgraphInfo.Uid, time.Now().In(helpers.Location(in.TZ)))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/AI/DraftProjectUpdate err: %+v", err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't draft the update. Try again in a moment."})
+		helpers.WriteRetryLater(w, "Couldn't draft the update.")
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": d})

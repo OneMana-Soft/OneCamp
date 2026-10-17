@@ -533,6 +533,22 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 		enabledTools = append(enabledTools, codePRToolName)
 	}
 
+	// Outside reach (business/AI DemoRefusesOutside): on the demo, a run for
+	// or asked for by the demo's own people is offered no outside tool, and
+	// its executors refuse one anyway (services/AI guardOutside).
+	outsideRefused := ai.OutsideReachRefused(ctx, userUUID)
+	if outsideRefused != nil {
+		kept := make([]string, 0, len(enabledTools))
+		for _, t := range enabledTools {
+			if ai.IsOutsideTool(t) {
+				delete(allow, t)
+				continue
+			}
+			kept = append(kept, t)
+		}
+		enabledTools = kept
+	}
+
 	// Optional scope: further restricts WHERE the agent may act (channels /
 	// projects), on top of the owner's permissions. Empty = the owner's full
 	// accessible scope.
@@ -598,6 +614,11 @@ func RunAgent(ctx context.Context, agent *model.AiAgent, triggerSource, prompt s
 	}
 
 	if remote {
+		// A remote agent is sent the conversation: the same rule as outside
+		// tools, said in the reply rather than failed silently.
+		if outsideRefused != nil {
+			return finalize(model.RunFailed, outsideRefused.Error(), outsideRefused.Error())
+		}
 		p, perr := remoteProvider(ctx, agent, runID.String())
 		if perr != nil {
 			return finalize(model.RunFailed, "", perr.Error())

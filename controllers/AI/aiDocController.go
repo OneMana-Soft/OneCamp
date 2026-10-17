@@ -1,325 +1,596 @@
 package controllers
 
+// Doc AI (docs programme B9): the doc's AI bar runs its actions here.
+//
+// POST /ai/doc/complete/stream streams the answer as Server-Sent Events, one
+// JSON object a frame, in this order:
+//
+//	{"model": {...}}     which model writes, before anything else: the bar
+//	                     says "Runs on your server · qwen3 4B", or names the
+//	                     provider a remote model is at, before the first word
+//	{"progress": {...}}  a long doc's summary reading it part by part
+//	{"content": "..."}   the answer as it is written
+//	{"replace": "..."}   the whole answer, cleaned, when the cleaning at the end
+//	                     changed what was streamed
+//	{"notice": "..."}    the input was shortened to fit the model
+//	{"error": "..."} | {"done": true}
+//
+// and a ": ping" comment every 10 seconds, so a proxy never closes a stream
+// while a local model is still working on its first word.
+//
+// POST /ai/doc/complete answers the same request in one piece, and GET
+// /doc/ai/model names the model before anything is asked.
+//
+// The actions, what each reads and the prompts are business/AI docAI.go. A doc
+// named by doc_id must be one the person can read; a refusal is recorded.
+
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	business "github.com/akashc777/OneCamp/business/AI"
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
 )
 
-// DocAIRequest represents an inline AI doc completion request.
+// DocAIRequest is one doc AI action.
 type DocAIRequest struct {
-	Action  string `json:"action"`  // "write", "expand", "summarize", "fix_grammar", "shorten", "rewrite"
-	Text    string `json:"text"`    // selected text or context
-	Prompt  string `json:"prompt"`  // optional custom instruction
-	DocID   string `json:"doc_id"`  // document UUID for context
-	Context string `json:"context"` // surrounding document text for tone/style matching
+	// Action is improve | fix | shorter | longer | tone | translate | simplify |
+	// explain | summarize | continue | write | draft | draft_from_tasks | ask
+	// (the old panel's rewrite, fix_grammar, shorten and expand still work).
+	Action string `json:"action"`
+	// Text is the selection, as Markdown.
+	Text string `json:"text"`
+	// Prompt is the person's instruction, refinement or question.
+	Prompt string `json:"prompt"`
+	// DocID is the doc the action is in.
+	DocID string `json:"doc_id"`
+	// Context is the text around the selection, or before the caret.
+	Context string `json:"context"`
+	// Tone is the tone for "tone": professional | casual | direct | confident | friendly.
+	Tone string `json:"tone"`
+	// Language is the language for "translate", as a person names it.
+	Language string `json:"language"`
+	// Scope "doc" runs the action on the whole doc (summarise it, translate it).
+	Scope string `json:"scope"`
+	// DocText is the doc as Markdown from the live editor, typing included;
+	// without it the collaboration service's live copy is read.
+	DocText string `json:"doc_text"`
+	// Previous is the answer being refined.
+	Previous string `json:"previous"`
+	// ProjectUUID is the project for draft_from_tasks (the doc's own when empty).
+	ProjectUUID string `json:"project_uuid"`
 }
 
-// buildUserContent constructs the user message incorporating optional context and prompt.
-func buildUserContent(req DocAIRequest) string {
-	var parts []string
-
-	if req.Prompt != "" {
-		parts = append(parts, fmt.Sprintf("Instruction: %s", req.Prompt))
-	}
-
-	if req.Context != "" {
-		parts = append(parts, fmt.Sprintf("Surrounding document context (for tone and style reference):\n%s", req.Context))
-	}
-
-	parts = append(parts, fmt.Sprintf("Text:\n%s", req.Text))
-
-	return strings.Join(parts, "\n\n")
-}
-
-// DocAIResponse represents the AI doc assistant response.
+// DocAIResponse is the answer of POST /ai/doc/complete.
 type DocAIResponse struct {
-	Result   string `json:"result"`
-	Action   string `json:"action"`
-	Provider string `json:"provider"`
-	// Notice is set when the input was shortened to fit the model's context window,
-	// so the editor can say the result was produced from part of the selection rather
-	// than all of it. Omitted when everything fitted — a note on every action is one
-	// nobody reads.
+	Result   string      `json:"result"`
+	Action   string      `json:"action"`
+	Provider string      `json:"provider"`
+	Model    ai.DocModel `json:"model"`
+	// Notice is set when the input was shortened to fit the model's window.
 	Notice string `json:"notice,omitempty"`
 }
 
-// Action-specific system prompts
-var docActionPrompts = map[string]string{
-	"write": `You are an AI writing assistant inside a document editor.
-Generate content based on the user's instruction. Write in a professional, clear style.
-Output ONLY the generated text — no explanations, no markdown code fences.`,
-
-	"expand": `You are an AI writing assistant. Expand the given text with more detail, examples, and depth.
-Keep the same tone and style. Output ONLY the expanded text.`,
-
-	"summarize": `You are an AI writing assistant. Summarize the given text concisely.
-Keep key points and maintain clarity. Output ONLY the summary.`,
-
-	"fix_grammar": `You are an AI writing assistant. Fix grammar, spelling, and punctuation errors in the text.
-Do NOT change the meaning or style. Output ONLY the corrected text.`,
-
-	"shorten": `You are an AI writing assistant. Make the text more concise while preserving meaning.
-Remove redundancy and wordiness. Output ONLY the shortened text.`,
-
-	"rewrite": `You are an AI writing assistant. Rewrite the text to improve clarity and readability.
-Maintain the original meaning but improve the flow. Output ONLY the rewritten text.`,
+// docAIRuntime is what doc AI asks of the AI service: a seam, so the stream
+// is tested with a fake model.
+type docAIRuntime interface {
+	Enabled() bool
+	CheckRateLimit(ctx context.Context, userUUID string) error
+	// Resolve is the member's model, its breaker and limits, and its name.
+	Resolve(ctx context.Context, userUUID string) (ai.LLMProvider, *ai.CircuitBreaker, ai.ModelLimits, ai.DocModel)
 }
 
-// DocAIComplete handles POST /ai/doc/complete
-// Synchronous AI doc completion with 6 action types.
-func DocAIComplete(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
+type serviceRuntime struct{}
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+func (serviceRuntime) Enabled() bool { return ai.GetService().IsEnabled() }
 
+func (serviceRuntime) CheckRateLimit(ctx context.Context, userUUID string) error {
 	svc := ai.GetService()
-	if !svc.IsEnabled() {
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{
-			"msg": "AI service is not enabled",
-		})
-		return
+	if svc == nil || svc.Resiliency == nil {
+		return nil
 	}
+	return svc.Resiliency.CheckRateLimit(ctx, userUUID)
+}
 
-	var req DocAIRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse body",
-			"err": err.Error(),
-		})
-		return
-	}
-
-	req.Action = strings.TrimSpace(req.Action)
-	if len(req.Action) == 0 {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "action is required",
-		})
-		return
-	}
-
-	systemPrompt, exists := docActionPrompts[req.Action]
-	if !exists {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": fmt.Sprintf("unknown action: %s. Valid: write, expand, summarize, fix_grammar, shorten, rewrite", req.Action),
-		})
-		return
-	}
-
-	// Resolve the member's admin-authorized model pick (per-model breaker),
-	// then gate on that breaker + the per-user rate limit — same governance as
-	// AskAI, so doc/composer AI honors each member's chosen model and residency
-	// instead of always using the workspace default.
-	userUUID := userInfo.UserDgraphInfo.Uuid
+func (serviceRuntime) Resolve(ctx context.Context, userUUID string) (ai.LLMProvider, *ai.CircuitBreaker, ai.ModelLimits, ai.DocModel) {
+	svc := ai.GetService()
 	llm, cb, limits := svc.ResolveUserModelWithLimits(ctx, userUUID)
+	return llm, cb, limits, svc.DescribeModel(ctx, userUUID, llm)
+}
+
+var docAIRun docAIRuntime = serviceRuntime{}
+
+// docAIPingEvery keeps a slow stream open through proxies.
+var docAIPingEvery = 10 * time.Second
+
+// maxDocAIInputRunes bounds what the client may send as text, context or doc.
+const maxDocAIInputRunes = 200_000
+
+// preparedDocAI is a validated action, ready to run.
+type preparedDocAI struct {
+	action business.DocAction
+	in     business.DocAIInput
+	llm    ai.LLMProvider
+	cb     *ai.CircuitBreaker
+	limits ai.ModelLimits
+	model  ai.DocModel
+	// parts are a long doc's parts for the map step of its summary.
+	parts  []string
+	cut    bool
+	budget int
+	opts   ai.ChatOptions
+	// source is the text the answer is cleaned against (CleanDocAnswer).
+	source string
+	// trimmed: the selection or the doc was shortened to fit the model.
+	trimmed bool
+}
+
+// docAIError is a refusal with its status, said to the person.
+type docAIError struct {
+	status int
+	msg    string
+}
+
+func (e *docAIError) Error() string { return e.msg }
+
+func badDocAI(msg string) error { return &docAIError{status: http.StatusBadRequest, msg: msg} }
+
+func clipRunes(s string) string {
+	r := []rune(strings.TrimSpace(s))
+	if len(r) > maxDocAIInputRunes {
+		r = r[:maxDocAIInputRunes]
+	}
+	return string(r)
+}
+
+// prepareDocAI validates a request and gathers what the action reads.
+func prepareDocAI(ctx context.Context, userInfo *userModels.UserInfo, req DocAIRequest) (context.Context, *preparedDocAI, error) {
+	action, ok := business.LookupDocAction(req.Action)
+	if !ok {
+		return ctx, nil, badDocAI("That isn't an action the AI bar knows.")
+	}
+	in := business.DocAIInput{
+		Action: action, Text: clipRunes(req.Text), Prompt: clipRunes(req.Prompt), Context: clipRunes(req.Context),
+		Tone: strings.ToLower(strings.TrimSpace(req.Tone)), Language: strings.TrimSpace(req.Language),
+		Previous: clipRunes(req.Previous),
+	}
+	wholeDoc := strings.EqualFold(strings.TrimSpace(req.Scope), "doc")
+	switch {
+	case action.Name == "tone" && business.DocTones[in.Tone] == "":
+		return ctx, nil, badDocAI("Pick a tone: professional, casual, direct, confident or friendly.")
+	case action.Name == "translate" && !business.ValidDocLanguage(in.Language):
+		return ctx, nil, badDocAI("Name the language to translate into, like French or Japanese.")
+	case action.NeedsText && in.Text == "" && !wholeDoc:
+		return ctx, nil, badDocAI("Select some text first, then ask again.")
+	case action.NeedsPrompt && in.Prompt == "":
+		switch action.Name {
+		case "ask":
+			return ctx, nil, badDocAI("Type a question about the doc.")
+		case "edit":
+			return ctx, nil, badDocAI("Say what to change.")
+		}
+		return ctx, nil, badDocAI("Say what to write.")
+	}
+
+	docID := strings.TrimSpace(req.DocID)
+	readsDoc := action.ReadsDoc || (wholeDoc && in.Text == "") ||
+		(action.Name == "summarize" && in.Text == "") ||
+		(action.Name == "continue" && in.Text == "" && in.Context == "") ||
+		(action.Name == "translate" && in.Text == "")
+	if docID != "" {
+		// What the action needs on the doc (business/AI DocActionNeeds, the
+		// list /ai/status gives the web): reading needs view, changing edit
+		// (docs incident, 14 Oct 2026, D1).
+		d, err := business.CheckDocForAI(ctx, userInfo, docID, business.DocActionNeeds(action.Name))
+		if err != nil {
+			if errors.Is(err, business.ErrDocAINotFound) {
+				return ctx, nil, &docAIError{status: http.StatusNotFound, msg: helpers.DocNotFound}
+			}
+			if errors.Is(err, business.ErrDocAICantEdit) {
+				verb := "view"
+				if d.Level == accessBusiness.LevelComment {
+					verb = "comment on"
+				}
+				return ctx, nil, &docAIError{status: http.StatusForbidden, msg: "You can " + verb + " this doc, so Ask AI can read it with you but not change it."}
+			}
+			return ctx, nil, err
+		}
+	} else if readsDoc && strings.TrimSpace(req.DocText) == "" {
+		return ctx, nil, badDocAI("Open a doc first: this action reads the doc.")
+	}
+
+	userUUID := userInfo.UserDgraphInfo.Uuid
+	llm, cb, limits, model := docAIRun.Resolve(ctx, userUUID)
+	if llm == nil || cb == nil {
+		return ctx, nil, &docAIError{status: http.StatusServiceUnavailable, msg: "AI is switched off in this workspace."}
+	}
 	ctx = ai.WithModelLimits(ctx, limits)
 	ctx = ai.WithContextNoticeSink(ctx)
-	// The instruction and the text it acts on, so an unreachable connector is
-	// named where it would have mattered. A rewrite of somebody's paragraph
-	// rarely needed one.
-	ai.NoteQuestion(ctx, strings.TrimSpace(req.Prompt+" "+req.Text))
-	if err := cb.Allow(); err != nil {
-		statusCode := http.StatusServiceUnavailable
-		if err != ai.ErrCircuitOpen {
-			statusCode = http.StatusTooManyRequests
+	ai.NoteQuestion(ctx, strings.TrimSpace(in.Prompt+" "+in.Text))
+
+	p := &preparedDocAI{action: action, llm: llm, cb: cb, limits: limits, model: model, opts: docAIOptions(action)}
+	p.budget = limits.DocInputBudget(p.opts.MaxTokens)
+
+	if docID != "" && (readsDoc || action.Name == "write" || action.Name == "draft" || action.Name == "summarize") {
+		in.DocTitle = business.DocTitleFor(ctx, docID, userInfo.UserDgraphInfo.Uid)
+	}
+	if readsDoc {
+		md := clipRunes(req.DocText)
+		if md == "" {
+			html, err := business.ReadLiveDocHTML(ctx, docID)
+			if err != nil {
+				return ctx, nil, &docAIError{status: http.StatusServiceUnavailable, msg: "The doc's text couldn't be read just now. Try again in a moment."}
+			}
+			md = business.DocMarkdown(html)
 		}
-		helpers.WriteJSON(w, statusCode, helpers.Envolope{"msg": err.Error()})
+		if strings.TrimSpace(md) == "" && action.Name != "continue" {
+			return ctx, nil, badDocAI("This doc is empty, so there's nothing to read yet.")
+		}
+		if action.Name == "summarize" {
+			if parts, mapped, cut := business.PlanDocSummary(md, limits, p.budget); mapped {
+				p.parts, p.cut = parts, cut
+				md = ""
+			}
+		}
+		if md != "" {
+			whole := md
+			md = limits.TruncateForPrompt(ctx, md, p.budget)
+			p.trimmed = p.trimmed || md != whole
+		}
+		in.DocMarkdown = md
+	}
+	if action.Name == "draft_from_tasks" {
+		project := strings.TrimSpace(req.ProjectUUID)
+		if project == "" && docID != "" {
+			if s, err := business.DocAIStarters(ctx, userInfo, docID); err == nil && s.Project != nil {
+				project = s.Project.UUID
+			}
+		}
+		if project == "" {
+			return ctx, nil, badDocAI("Pick a project to draft from.")
+		}
+		name, tasks, n, err := business.ProjectOpenTasksText(ctx, userInfo, project)
+		if errors.Is(err, business.ErrNotInProject) {
+			business.RecordDocAIRefusal(ctx, userInfo, docID, business.ActionDocAIReadRefused, err.Error())
+			return ctx, nil, &docAIError{status: http.StatusForbidden, msg: "You aren't in that project, so its tasks can't be read."}
+		}
+		if err != nil {
+			return ctx, nil, err
+		}
+		if n == 0 {
+			return ctx, nil, badDocAI("That project has no open tasks to draft from.")
+		}
+		in.Tasks = limits.TruncateForPrompt(ctx, "Project: "+name+"\n"+tasks, p.budget)
+	}
+	// What the person sent is bounded too, after the doc: the selection
+	// visibly (a notice says so), and the text around it by keeping what is
+	// nearest the caret.
+	before := in.Text
+	in.Text = limits.TruncateForPrompt(ctx, in.Text, p.budget)
+	p.trimmed = p.trimmed || in.Text != before
+	in.Context = keepTail(limits, in.Context, p.budget/4)
+	p.source = helpers.FirstNonBlank(in.Text, in.Previous, in.Context, in.DocMarkdown)
+	p.in = in
+	return ctx, p, nil
+}
+
+// docAIOptions is how a model is asked for an action's answer. Thinking stays
+// at OneCamp's default (off): qwen3:4b-instruct refuses a request that asks for
+// it.
+func docAIOptions(a business.DocAction) ai.ChatOptions {
+	switch a.Name {
+	case "fix":
+		return ai.ChatOptions{Temperature: 0.1, MaxTokens: 2048}
+	case "continue":
+		return ai.ChatOptions{Temperature: 0.7, MaxTokens: 700}
+	case "write", "draft", "draft_from_tasks":
+		return ai.ChatOptions{Temperature: 0.6, MaxTokens: 2048}
+	case "explain", "ask":
+		return ai.ChatOptions{Temperature: 0.3, MaxTokens: 1024}
+	}
+	return ai.ChatOptions{Temperature: 0.4, MaxTokens: 2048}
+}
+
+// gateDocAI decodes a request and checks the service and the rate limit,
+// answering a refusal itself. ok is false when it answered.
+func gateDocAI(w http.ResponseWriter, r *http.Request, ctx context.Context) (DocAIRequest, *userModels.UserInfo, bool) {
+	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	if !docAIRun.Enabled() {
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "AI is switched off in this workspace."})
+		return DocAIRequest{}, nil, false
+	}
+	var req DocAIRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "The request couldn't be read."})
+		return req, nil, false
+	}
+	if err := docAIRun.CheckRateLimit(ctx, userInfo.UserDgraphInfo.Uuid); err != nil {
+		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": "You've asked AI a lot in the last minute. Try again in a moment."})
+		return req, nil, false
+	}
+	return req, &userInfo, true
+}
+
+func writeDocAIError(w http.ResponseWriter, ctx context.Context, err error) {
+	var de *docAIError
+	if errors.As(err, &de) {
+		helpers.WriteJSON(w, de.status, helpers.Envolope{"msg": de.msg})
 		return
 	}
-	if err := svc.Resiliency.CheckRateLimit(ctx, userUUID); err != nil {
-		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": err.Error()})
+	helpers.LogErrorWithContext(ctx, "controllers/DocAI prepare failed: %v", err)
+	helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Doc AI couldn't start. Try again in a moment."})
+}
+
+// breakerRefusal answers a closed circuit or a full queue for the model.
+func breakerRefusal(w http.ResponseWriter, err error) {
+	status := http.StatusServiceUnavailable
+	if !errors.Is(err, ai.ErrCircuitOpen) {
+		status = http.StatusTooManyRequests
+	}
+	helpers.WriteJSON(w, status, helpers.Envolope{"msg": ai.FriendlyProviderError(err)})
+}
+
+// DocAIModel handles GET /doc/ai/model: the model the person's doc AI runs on,
+// for the bar to name before anything is sent.
+func DocAIModel(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	if !docAIRun.Enabled() {
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "ok", "data": map[string]any{"enabled": false}})
 		return
 	}
+	_, _, _, model := docAIRun.Resolve(ctx, userInfo.UserDgraphInfo.Uuid)
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "ok", "data": map[string]any{"enabled": true, "model": model}})
+}
 
-	userContent := buildUserContent(req)
-	// Bound the input so a very long thread/selection can't overflow the
-	// model's context window (silent front-truncation drops the system
-	// prompt). Reserve room for the action prompt + the 2048-token output.
-	userContent = limits.TruncateForPrompt(ctx, userContent, limits.DocInputBudget(2048))
-
-	messages := []ai.ChatMessage{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: userContent},
+// DocAIComplete handles POST /ai/doc/complete: one answer, in one piece.
+func DocAIComplete(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	req, userInfo, ok := gateDocAI(w, r, ctx)
+	if !ok {
+		return
 	}
-
-	opts := ai.ChatOptions{
-		Temperature: 0.4,
-		MaxTokens:   2048,
-	}
-
-	result, err := ai.ChatWithRescue(ctx, llm, messages, opts)
+	ctx, p, err := prepareDocAI(ctx, userInfo, req)
 	if err != nil {
-		cb.RecordResult(err)
-		helpers.LogErrorWithContext(ctx, "controllers/DocAIComplete AI completion failed: %+v", err)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
-			"msg": "AI doc completion failed",
-			"err": err.Error(),
-		})
+		writeDocAIError(w, ctx, err)
 		return
 	}
-
-	cb.RecordSuccess()
-	// Drop any reasoning-model chain-of-thought so it never lands in the doc.
-	result = business.StripReasoning(result)
-
+	if err := p.cb.Allow(); err != nil {
+		breakerRefusal(w, err)
+		return
+	}
+	if len(p.parts) > 0 {
+		partials, err := business.SummariseDocParts(ctx, p.llm, p.in.DocTitle, p.parts, p.limits, p.budget, nil)
+		if err != nil {
+			p.cb.RecordResult(err)
+			helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": ai.FriendlyProviderError(err)})
+			return
+		}
+		p.in.DocMarkdown, p.in.Parts = p.limits.TruncateForPrompt(ctx, partials, p.budget), true
+	}
+	result, err := ai.ChatWithRescue(ctx, p.llm, docMessages(p.in), p.opts)
+	if err != nil {
+		p.cb.RecordResult(err)
+		helpers.LogErrorWithContext(ctx, "controllers/DocAIComplete AI completion failed: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": ai.FriendlyProviderError(err)})
+		return
+	}
+	p.cb.RecordSuccess()
+	clean := business.CleanDocAnswer(result, p.source)
+	if clean == "" {
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The model sent back nothing. Try again, or pick another model."})
+		return
+	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-		"msg": "AI doc completion successful!",
+		"msg": "ok",
 		"data": DocAIResponse{
-			Result:   result,
-			Action:   req.Action,
-			Provider: string(svc.Config.Provider()),
-			Notice:   ai.TakeContextNotice(ctx).Message(),
+			Result: clean, Action: p.action.Name, Provider: p.model.Provider,
+			Model: p.model, Notice: docAINotice(ctx, p),
 		},
 	})
 }
 
-// DocAICompleteStream handles POST /ai/doc/complete/stream
-// Streams AI doc completion via Server-Sent Events (SSE).
+func docMessages(in business.DocAIInput) []ai.ChatMessage {
+	return []ai.ChatMessage{
+		{Role: "system", Content: business.DocSystemPrompt(in)},
+		{Role: "user", Content: business.DocUserContent(in)},
+	}
+}
+
+// docAINotice is what the bar says about how much was read, in a doc's words
+// (the service's own notice speaks of a conversation).
+func docAINotice(ctx context.Context, p *preparedDocAI) string {
+	n := ai.TakeContextNotice(ctx)
+	switch {
+	case len(n.Degraded) > 0:
+		return n.Message()
+	case p.cut:
+		return "This doc is very long, so the summary covers its first part."
+	case p.trimmed || n.Trimmed || n.Rescued:
+		if p.in.Text != "" {
+			return "The selection is longer than the model can read at once, so this answer used its first part."
+		}
+		return "The doc is longer than the model can read at once, so this answer used its first part."
+	}
+	return ""
+}
+
+// keepTail is the end of s that fits budget tokens, from the start of a line
+// where one is near: the text nearest the caret. It bounds the text around
+// what an action works on (read for tone, and for where to carry on from), not
+// the text itself, which is shortened visibly. Pure.
+func keepTail(limits ai.ModelLimits, s string, budget int) string {
+	if budget <= 0 {
+		return ""
+	}
+	if limits.EstimateTokens(s) <= budget {
+		return s
+	}
+	r := []rune(s)
+	keep := int(float64(budget) * limits.CharsPerToken())
+	if keep <= 0 {
+		return ""
+	}
+	if keep >= len(r) {
+		return s
+	}
+	tail := string(r[len(r)-keep:])
+	if i := strings.Index(tail, "\n"); i >= 0 && i < len(tail)/4 {
+		tail = tail[i+1:]
+	}
+	return strings.TrimLeft(tail, " \n")
+}
+
+// sseWriter writes the stream's frames and pings, one at a time.
+type sseWriter struct {
+	mu      sync.Mutex
+	w       http.ResponseWriter
+	flusher http.Flusher
+}
+
+func (s *sseWriter) send(v any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	writeSSE(s.w, v)
+	s.flusher.Flush()
+}
+
+func (s *sseWriter) ping() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, _ = s.w.Write([]byte(": ping\n\n"))
+	s.flusher.Flush()
+}
+
+// DocAICompleteStream handles POST /ai/doc/complete/stream.
 func DocAICompleteStream(w http.ResponseWriter, r *http.Request) {
-	// Enforce a streaming deadline to prevent zombie SSE connections (tunable).
 	ctx, cancel := context.WithTimeout(r.Context(), ai.StreamTimeout())
 	defer cancel()
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	svc := ai.GetService()
-	if !svc.IsEnabled() {
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{
-			"msg": "AI service is not enabled",
-		})
+	req, userInfo, ok := gateDocAI(w, r, ctx)
+	if !ok {
 		return
 	}
-
-	var req DocAIRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse body",
-			"err": err.Error(),
-		})
+	ctx, p, err := prepareDocAI(ctx, userInfo, req)
+	if err != nil {
+		writeDocAIError(w, ctx, err)
 		return
 	}
-
-	req.Action = strings.TrimSpace(req.Action)
-	if len(req.Action) == 0 {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "action is required",
-		})
+	if err := p.cb.Allow(); err != nil {
+		breakerRefusal(w, err)
 		return
 	}
-
-	systemPrompt, exists := docActionPrompts[req.Action]
-	if !exists {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": fmt.Sprintf("unknown action: %s", req.Action),
-		})
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Streaming isn't available here."})
 		return
 	}
-
-	// Resolve the member's model pick (per-model breaker) + gate on it and the
-	// per-user rate limit — same governance as AskAI.
-	userUUID := userInfo.UserDgraphInfo.Uuid
-	llm, cb, limits := svc.ResolveUserModelWithLimits(ctx, userUUID)
-	ctx = ai.WithModelLimits(ctx, limits)
-	ctx = ai.WithContextNoticeSink(ctx)
-	// The instruction and the text it acts on, so an unreachable connector is
-	// named where it would have mattered. A rewrite of somebody's paragraph
-	// rarely needed one.
-	ai.NoteQuestion(ctx, strings.TrimSpace(req.Prompt+" "+req.Text))
-	if err := cb.Allow(); err != nil {
-		statusCode := http.StatusServiceUnavailable
-		if err != ai.ErrCircuitOpen {
-			statusCode = http.StatusTooManyRequests
-		}
-		helpers.WriteJSON(w, statusCode, helpers.Envolope{"msg": err.Error()})
-		return
-	}
-	if err := svc.Resiliency.CheckRateLimit(ctx, userUUID); err != nil {
-		helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": err.Error()})
-		return
-	}
-
-	userContent := buildUserContent(req)
-	// Bound the input so a very long thread/selection can't overflow the
-	// model's context window (silent front-truncation drops the system
-	// prompt). Reserve room for the action prompt + the 2048-token output.
-	userContent = limits.TruncateForPrompt(ctx, userContent, limits.DocInputBudget(2048))
-
-	messages := []ai.ChatMessage{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: userContent},
-	}
-
-	opts := ai.ChatOptions{
-		Temperature: 0.4,
-		MaxTokens:   2048,
-	}
-
-	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
+	out := &sseWriter{w: w, flusher: flusher}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
-			"msg": "Streaming not supported",
+	// The model is named before anything else is said.
+	out.send(map[string]any{"model": p.model})
+
+	// Pings until the handler returns, and the handler waits for the last one:
+	// nothing is written to the response after it has ended.
+	stop, pinged := make(chan struct{}), make(chan struct{})
+	every := docAIPingEvery
+	helpers.GoSafeLoop("ai.doc-stream.ping", func() {
+		defer close(pinged)
+		t := time.NewTicker(every)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				out.ping()
+			}
+		}
+	})
+	defer func() {
+		close(stop)
+		<-pinged
+	}()
+
+	if len(p.parts) > 0 {
+		out.send(map[string]any{"progress": map[string]any{"step": "reading", "done": 0, "of": len(p.parts)}})
+		partials, err := business.SummariseDocParts(ctx, p.llm, p.in.DocTitle, p.parts, p.limits, p.budget, func(done, of int) {
+			out.send(map[string]any{"progress": map[string]any{"step": "reading", "done": done, "of": of}})
 		})
-		return
+		if err != nil {
+			p.cb.RecordResult(err)
+			out.send(map[string]string{"error": ai.FriendlyProviderError(err)})
+			return
+		}
+		p.in.DocMarkdown, p.in.Parts = p.limits.TruncateForPrompt(ctx, partials, p.budget), true
+		out.send(map[string]any{"progress": map[string]any{"step": "writing", "done": len(p.parts), "of": len(p.parts)}})
 	}
 
-	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	chunks, err := ai.ChatStreamWithRescue(streamCtx, llm, messages, opts)
+	chunks, err := ai.ChatStreamWithRescue(ctx, p.llm, docMessages(p.in), p.opts)
 	if err != nil {
-		cb.RecordResult(err)
-		writeSSE(w, map[string]string{"error": ai.FriendlyProviderError(err)})
-		flusher.Flush()
+		p.cb.RecordResult(err)
+		out.send(map[string]string{"error": ai.FriendlyProviderError(err)})
 		return
 	}
-
-	thinkFilter := &business.StreamThinkFilter{}
+	think := &business.StreamThinkFilter{}
+	pre := &business.DocPreambleFilter{Input: p.source}
+	var raw, sent strings.Builder
+	emit := func(s string) {
+		if s == "" {
+			return
+		}
+		sent.WriteString(s)
+		out.send(map[string]string{"content": s})
+	}
+	finish := func() {
+		emit(pre.Feed(think.Flush()))
+		emit(pre.Flush())
+		clean := business.CleanDocAnswer(raw.String(), p.source)
+		if clean == "" {
+			out.send(map[string]string{"error": "The model sent back nothing. Try again, or pick another model."})
+			return
+		}
+		if clean != strings.TrimSpace(sent.String()) {
+			out.send(map[string]string{"replace": clean})
+		}
+		if notice := docAINotice(ctx, p); notice != "" {
+			out.send(map[string]string{"notice": notice})
+		}
+		out.send(map[string]bool{"done": true})
+	}
 	for chunk := range chunks {
 		if chunk.Error != nil {
-			cb.RecordResult(chunk.Error)
-			writeSSE(w, map[string]string{"error": ai.FriendlyProviderError(chunk.Error)})
-			flusher.Flush()
+			p.cb.RecordResult(chunk.Error)
+			out.send(map[string]string{"error": ai.FriendlyProviderError(chunk.Error)})
 			return
 		}
-
 		if chunk.Content != "" {
-			visible := thinkFilter.Feed(chunk.Content)
-			if visible != "" {
-				writeSSE(w, map[string]string{"content": visible})
-				flusher.Flush()
-			}
+			raw.WriteString(chunk.Content)
+			emit(pre.Feed(think.Feed(chunk.Content)))
 		}
-
 		if chunk.Done {
-			cb.RecordSuccess()
-			// Emitted before "done" so the client has it when it finalises, and only
-			// when something was actually shortened. streamCtx descends from ctx, so
-			// this picks up both the pre-emptive trim and any rescue.
-			if notice := ai.TakeContextNotice(streamCtx).Message(); notice != "" {
-				writeSSE(w, map[string]string{"notice": notice})
-				flusher.Flush()
-			}
-			writeSSE(w, map[string]bool{"done": true})
-			flusher.Flush()
+			p.cb.RecordSuccess()
+			finish()
 			return
 		}
 	}
-
-	// Stream ended
-	writeSSE(w, map[string]bool{"done": true})
-	flusher.Flush()
-	cb.RecordSuccess()
+	if ctx.Err() != nil {
+		out.send(map[string]string{"error": "The model took too long to answer. Try again, or ask for less."})
+		return
+	}
+	p.cb.RecordSuccess()
+	finish()
 }

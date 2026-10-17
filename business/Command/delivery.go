@@ -44,11 +44,14 @@ func channelScopeIDs(user userModels.UserInfo) []uuid.UUID {
 // trimSpace is a tiny indirection so dispatcher.go reads cleanly.
 func trimSpace(s string) string { return strings.TrimSpace(s) }
 
-// deliverAsync pushes a command response to the invoker over MQTT. Used for
-// deferred (/remind firing) and external (app callback) results that arrive
-// after the synchronous request has already returned. The payload rides the
-// user's existing activity topic, so it needs no new EMQX ACL rule.
+// deliverAsync pushes an app's answer to its command to the invoker over
+// MQTT: an external app's callback, which arrives after the synchronous request
+// has already returned. It says it is an app's (KindApp). The payload rides
+// the user's existing activity topic, so it needs no new EMQX ACL rule.
 func deliverAsync(_ context.Context, cc CommandContext, resp *commandAdapter.CommandResponse) {
+	if resp != nil {
+		resp.Kind = commandAdapter.KindApp
+	}
 	PublishEphemeralToUser(cc.User.UserDgraphInfo.Uuid, resp)
 }
 

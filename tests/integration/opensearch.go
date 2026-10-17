@@ -76,6 +76,7 @@ func SetupOpenSearch(t *testing.T) *OpenSearchEnv {
 
 	env := &OpenSearchEnv{container: c, URL: url}
 	t.Cleanup(env.Close)
+	settleBeforeTeardown(t)
 	return env
 }
 

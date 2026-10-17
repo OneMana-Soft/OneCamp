@@ -31,7 +31,7 @@ func TestFreeLicenceSeatLimit(t *testing.T) {
 	// Unlimited: anything goes.
 	helpers.SeatLimit = ""
 	first := uuid.New()
-	if err := userDomain.CreateUser(ctx, "a@example.test", first); err != nil {
+	if err := userDomain.CreateUserWithMethod(ctx, "a@example.test", "a", nil, first, "", false); err != nil {
 		t.Fatalf("unlimited: %v", err)
 	}
 
@@ -48,12 +48,10 @@ func TestFreeLicenceSeatLimit(t *testing.T) {
 		t.Fatalf("usage = %d/%d (%v), want 2/2", used, limit, err)
 	}
 
-	// Full: both member inserts refuse, with the seat-limit error.
-	if err := userDomain.CreateUser(ctx, "c@example.test", uuid.New()); !helpers.IsSeatLimit(err) {
-		t.Fatalf("a third member must be refused, got %v", err)
-	}
+	// Full: the member insert, which sign-up, SSO, SCIM and the demo's own
+	// people all go through, refuses with the seat-limit error.
 	if err := userDomain.CreateUserWithMethod(ctx, "d@example.test", "d", nil, uuid.New(), "", false); !helpers.IsSeatLimit(err) {
-		t.Fatalf("SSO/SCIM/sign-up path must be refused too, got %v", err)
+		t.Fatalf("a third member must be refused, got %v", err)
 	}
 
 	// Someone leaves: their seat is free again.
@@ -62,7 +60,7 @@ func TestFreeLicenceSeatLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 	third := uuid.New()
-	if err := userDomain.CreateUser(ctx, "e@example.test", third); err != nil {
+	if err := userDomain.CreateUserWithMethod(ctx, "e@example.test", "e", nil, third, "", false); err != nil {
 		t.Fatalf("a freed seat can be taken: %v", err)
 	}
 	// And the one who left cannot come back while the plan is full.

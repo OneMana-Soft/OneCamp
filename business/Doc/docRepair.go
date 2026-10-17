@@ -27,13 +27,9 @@ package businness
 // so, and a later run picks it up.
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
-	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -42,6 +38,7 @@ import (
 	domain "github.com/akashc777/OneCamp/domain/Doc"
 	"github.com/akashc777/OneCamp/helpers"
 	snapshotModels "github.com/akashc777/OneCamp/models/postgres/DocSnapshot"
+	"github.com/akashc777/OneCamp/services/collab"
 )
 
 const (
@@ -50,7 +47,6 @@ const (
 	// more, is a candidate (repairWantsState).
 	repairShortRunes    = 40
 	collabRenderTimeout = 20 * time.Second
-	defaultCollabBase   = "http://collaboration-service:1234"
 )
 
 // RepairReport is what a run found and did.
@@ -71,8 +67,8 @@ func (r RepairReport) String() string {
 }
 
 // collabRender is the collaboration service writing a saved Yjs state as HTML
-// (POST /internal/docs/<id>/render). With no state it only says whether the
-// doc is open there.
+// (the Live Doc Writer's render op, services/collab Render). With no state it
+// only says whether the doc is open there.
 type collabRender func(ctx context.Context, docUUID, stateB64 string) (html string, open bool, err error)
 
 func runeLen(html string) int {
@@ -217,7 +213,7 @@ func repairDocs(ctx context.Context, apply bool, out io.Writer, render collabRen
 // latestGoodSnapshotBody is the newest version in a doc's history that is a
 // real body, not the placeholder.
 func latestGoodSnapshotBody(ctx context.Context, docUUID string) (string, error) {
-	snaps, err := snapshotModels.ListSnapshots(ctx, docUUID, docSnapshotKeepPerDoc*2)
+	snaps, err := snapshotModels.ListSnapshots(ctx, docUUID, 30)
 	if err != nil {
 		return "", err
 	}
@@ -238,44 +234,13 @@ func latestGoodSnapshotBody(ctx context.Context, docUUID string) (string, error)
 }
 
 // postCollabRender asks the collaboration service to write a saved state as
-// HTML, with the same schema it saves with.
+// HTML, with the same schema it saves with (its Live Doc Writer's render op).
 func postCollabRender(ctx context.Context, docUUID, stateB64 string) (string, bool, error) {
-	secret := strings.TrimSpace(os.Getenv("INTERNAL_SECRET"))
-	if secret == "" {
-		return "", false, fmt.Errorf("INTERNAL_SECRET is not set")
-	}
-	base := strings.TrimRight(strings.TrimSpace(os.Getenv("COLLAB_INTERNAL_URL")), "/")
-	if base == "" {
-		base = defaultCollabBase
-	}
-	payload, _ := json.Marshal(map[string]string{"state": stateB64})
 	cctx, cancel := context.WithTimeout(ctx, collabRenderTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(cctx, http.MethodPost, base+"/internal/docs/"+docUUID+"/render", bytes.NewReader(payload))
+	html, open, err := collab.Render(cctx, docUUID, stateB64)
 	if err != nil {
-		return "", false, err
+		return "", false, fmt.Errorf("render: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Secret", secret)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", false, fmt.Errorf("the collaboration service could not be reached: %w", err)
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
-	var res struct {
-		Msg  string `json:"msg"`
-		Data struct {
-			HTML string `json:"html"`
-			Open bool   `json:"open"`
-		} `json:"data"`
-	}
-	_ = json.Unmarshal(raw, &res)
-	if resp.StatusCode != http.StatusOK {
-		if res.Msg == "" {
-			res.Msg = resp.Status
-		}
-		return "", false, fmt.Errorf("render refused: %s", res.Msg)
-	}
-	return res.Data.HTML, res.Data.Open, nil
+	return html, open, nil
 }

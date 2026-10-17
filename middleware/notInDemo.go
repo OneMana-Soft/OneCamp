@@ -18,8 +18,7 @@ func notForDemoVisitor(msg string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if info, ok := r.Context().Value(helpers.UserInfoContextKey).(models.UserInfo); ok &&
-				helpers.IsDemoVisitor(info.UserPostgresInfo.EmailID) {
-				helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "demo", "msg": msg})
+				helpers.RefuseDemoVisitor(w, info.UserPostgresInfo.EmailID, msg) {
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -38,3 +37,10 @@ var NoPersonalAccountsInDemo = notForDemoVisitor(helpers.DemoPersonalAccountMsg)
 // other sessions), as often as they liked; turning on two-step sign-in would
 // leave the next visitor facing a code they don't have.
 var DemoSignInStays = notForDemoVisitor(helpers.DemoSignInMsg)
+
+// NoOutsideConnectionsInDemo refuses the shared visitor every change to what
+// the demo's agents reach outside it: adding, changing, switching, testing or
+// removing an MCP server, and trying a remote agent's address. A server an
+// admin added carries their credential, so one visitor repointing it would
+// send that credential anywhere.
+var NoOutsideConnectionsInDemo = notForDemoVisitor(helpers.DemoOutsideMsg)

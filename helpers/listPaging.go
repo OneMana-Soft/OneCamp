@@ -1,6 +1,7 @@
 package helpers
 
 import (
+	"encoding/base64"
 	"errors"
 	"net/url"
 	"strconv"
@@ -55,13 +56,56 @@ func ClosedLimit(q url.Values) int {
 	return n
 }
 
-// OpenLimit reads a board request's openLimit: how many cards of each open
-// column to send, first in board order. Missing, bad or below 1 means the
-// default; it is held to at most the maximum.
-func OpenLimit(q url.Values) int {
-	n, err := strconv.Atoi(q.Get("openLimit"))
-	if err != nil || n < 1 {
-		return boardOpenDefault
+// OffsetCursor is the cursor for the page of a list that starts at offset: an
+// opaque string a list hands out as its next page's, and the app sends back as
+// it is. CursorOffset reads it.
+func OffsetCursor(offset int) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
+}
+
+// CursorOffset is where a cursor OffsetCursor made says the next page starts:
+// 0 for no cursor, and for anything that isn't one.
+func CursorOffset(cursor string) int {
+	n, _ := ReadCursor(cursor)
+	return n
+}
+
+// ReadCursor is CursorOffset for a list that refuses a cursor it didn't hand
+// out, as the public API's do: ok is false for anything OffsetCursor can't
+// have made. No cursor is the first page.
+func ReadCursor(cursor string) (offset int, ok bool) {
+	if cursor == "" {
+		return 0, true
 	}
-	return min(n, boardOpenMax)
+	b, err := base64.RawURLEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(string(b))
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+// LimitParam reads a list request's limit: def when it is missing, not a
+// whole number, or below one, and never more than max.
+func LimitParam(q url.Values, def, max int) int {
+	return boundedParam(q, "limit", def, max)
+}
+
+// OpenLimit reads a board request's openLimit, by LimitParam's rule: how many
+// cards of each open column to send, first in board order.
+func OpenLimit(q url.Values) int {
+	return boundedParam(q, "openLimit", boardOpenDefault, boardOpenMax)
+}
+
+// boundedParam reads the whole number a request holds under key: def when it
+// is missing, not a whole number, or below one, and never more than max.
+func boundedParam(q url.Values, key string, def, max int) int {
+	n, err := strconv.Atoi(q.Get(key))
+	if err != nil || n < 1 {
+		return def
+	}
+	return min(n, max)
 }

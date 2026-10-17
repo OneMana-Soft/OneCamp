@@ -52,7 +52,15 @@ func CreateChat(w http.ResponseWriter, r *http.Request) {
 		writeSendError(w, err)
 		return
 	}
-	createdChatInfo, err := dm.Commit(ctx)
+	// Once per id the app gave it: Try again after a lost answer is the same
+	// message, not a second one.
+	createdChatInfo, err := sendBusiness.Once(ctx, userInfo.UserDgraphInfo.Uuid, "dm:"+chatInfo.ToUuid, chatInfo.ClientMsgID, func() (*adapter.OutputCreateChatForChat, error) {
+		return dm.Commit(ctx)
+	})
+	if rj, ok := sendBusiness.AsRejection(err); ok {
+		writeSendError(w, rj)
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/CreateChat Failed to create chat err: %+v",
@@ -85,15 +93,12 @@ func GetGroupDMParticipants(w http.ResponseWriter, r *http.Request) {
 
 	dgraphDm, err := business.GetDgraphDmBasicInfoFromDgraph(ctx, userInfo.UserDgraphInfo.Uid, grpIDString)
 
+	// A failed read is a 503 the app offers Try again for; a 400 read as a
+	// group that isn't there (QA F-10). A group that isn't there answers with
+	// nothing in it, as a group made on a phone and not yet sent does.
+	const where = "controllers/GetGroupDMParticipants"
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateGroupChat Failed to get dm info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to group chat info",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "conversation", where)
 		return
 	}
 
@@ -114,14 +119,7 @@ func GetGroupDMParticipants(w http.ResponseWriter, r *http.Request) {
 
 	notificationType, err := userChatNotificationBusiness.GetNotificationTypeByUserIdAndToUserId(ctx, userInfo.UserDgraphInfo.Uuid, grpIDString)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProfileByUserId Failed to get user's notification type err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get user's notification type err",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "conversation", where)
 		return
 	}
 
@@ -132,14 +130,7 @@ func GetGroupDMParticipants(w http.ResponseWriter, r *http.Request) {
 	dgraphDm.CallActive, err = business.GetChatCallStatus(ctx, grpIDString)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProfileByUserId Failed to get dm call status err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dm call status err",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "conversation", where)
 		return
 	}
 
@@ -302,7 +293,13 @@ func CreateGroupChat(w http.ResponseWriter, r *http.Request) {
 		writeSendError(w, err)
 		return
 	}
-	createdChatInfo, err := group.Commit(ctx)
+	createdChatInfo, err := sendBusiness.Once(ctx, userInfo.UserDgraphInfo.Uuid, "grp:"+chatInfo.GrpUuid, chatInfo.ClientMsgID, func() (*adapter.OutputCreateChatForChat, error) {
+		return group.Commit(ctx)
+	})
+	if rj, ok := sendBusiness.AsRejection(err); ok {
+		writeSendError(w, rj)
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/CreateGroupChat Failed to create chat err: %+v",
@@ -1476,38 +1473,30 @@ func GetDgraphChatByUUIDWithAllComments(w http.ResponseWriter, r *http.Request) 
 
 	dgraphChat, err := business.GetDgraphChatBasicByUUID(ctx, chatId, userInfo.UserDgraphInfo.Uid)
 
-	// A message that isn't there is a 404, as a deleted one is; a graph that
-	// doesn't answer is a 503 the page can try again.
-	if errors.Is(err, chatDgraphModels.ErrNotFound) || (err == nil && dgraphChat == nil) {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "This thread isn't available."})
-		return
+	// A message that isn't there, or isn't in a conversation, is a 404, as a
+	// deleted one is; a graph that doesn't answer is a 503 the page can try
+	// again (helpers.WriteReadFailure).
+	if err == nil && (dgraphChat == nil || dgraphChat.DM == nil) {
+		err = chatDgraphModels.ErrNotFound
 	}
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDgraphChatByUUIDWithAllComments Failed to get chat info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't load the thread. Try again."})
+		helpers.WriteReadFailure(w, r, err, "thread", "controllers/GetDgraphChatByUUIDWithAllComments")
 		return
 	}
 
 	if dgraphChat.DM.ParticipantIsMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorized",
-		})
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You're not in this conversation."})
 		return
 	}
 
+	// The thread itself, answered the same way: a failed read was a 400 that
+	// said the request was wrong.
 	dgraphChatWithAllComments, err := business.GetDgraphChatByUUIDWithAllComments(ctx, chatId)
-	if err != nil || dgraphChatWithAllComments == nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDgraphChatByUUIDWithAllComments Failed to get chat and all comments err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chat and comments",
-			"err": err,
-		})
+	if err == nil && dgraphChatWithAllComments == nil {
+		err = chatDgraphModels.ErrNotFound
+	}
+	if err != nil {
+		helpers.WriteReadFailure(w, r, err, "thread", "controllers/GetDgraphChatByUUIDWithAllComments")
 		return
 	}
 
@@ -1544,22 +1533,23 @@ func CreateChatComment(w http.ResponseWriter, r *http.Request) {
 
 	dgraphChat, err := business.GetDgraphChatBasicByUUID(ctx, commentInfo.ChatUuid, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || (dgraphChat.From.DeletedAt != nil && !dgraphChat.From.DeletedAt.IsZero()) || (dgraphChat.To != nil && dgraphChat.To.DeletedAt != nil && !dgraphChat.To.DeletedAt.IsZero()) {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateChatComment Failed to get dgraph chat info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph chat info",
-			"err": err,
-		})
+	// A message that isn't there, or isn't in a conversation, takes no reply:
+	// 404, never a panic on what the lookup didn't find (F-15).
+	if err == nil && (dgraphChat == nil || dgraphChat.DM == nil || dgraphChat.From == nil) {
+		err = chatDgraphModels.ErrNotFound
+	}
+	if err != nil {
+		helpers.WriteReadFailure(w, r, err, "message", "controllers/CreateChatComment")
+		return
+	}
+	// Someone in it has left: trying again won't help, so it never says to.
+	if helpers.IsSoftDeleted(dgraphChat.From.DeletedAt) || (dgraphChat.To != nil && helpers.IsSoftDeleted(dgraphChat.To.DeletedAt)) {
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "Someone in this conversation has left the workspace, so it takes no new replies."})
 		return
 	}
 
 	if dgraphChat.DM.ParticipantIsMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorized",
-		})
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You're not in this conversation."})
 		return
 	}
 
@@ -1696,7 +1686,7 @@ func UpdateChatComment(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph chat info",
+			"msg": "Couldn't save your edit. Try again.",
 			"err": err,
 		})
 		return
@@ -1734,7 +1724,7 @@ func UpdateChatComment(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to update comment in dgraph",
+			"msg": "Couldn't save your edit. Try again.",
 			"err": err,
 		})
 		return
@@ -1915,7 +1905,7 @@ func DeleteReactionOnCommentChat(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get comment dgraph info",
+			"msg": "Couldn't remove the reaction. Try again.",
 			"err": err,
 		})
 		return
@@ -2026,9 +2016,10 @@ func MakeVideoCallForGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Said in the person's words, as a channel's huddle says it (QA F-22).
 	if dgraphDm == nil || dgraphDm.ParticipantIsMember == 0 {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
+			"msg": "Only people in the group can join its call.",
 		})
 		return
 	}
@@ -2498,7 +2489,7 @@ func GetChatRecordingList(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dm dgraph info",
+			"msg": "Couldn't load the conversation's recordings.",
 			"err": err,
 		})
 		return
@@ -2563,7 +2554,7 @@ func GetGrpChatRecordingList(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dm dgraph info",
+			"msg": "Couldn't load the group's recordings.",
 			"err": err,
 		})
 		return
@@ -2654,7 +2645,7 @@ func GetChatRecordingTranscript(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dm dgraph info",
+			"msg": "Couldn't load the recording's transcript.",
 			"err": err,
 		})
 		return
@@ -2753,7 +2744,7 @@ func GetGrpChatRecordingTranscript(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dm dgraph info",
+			"msg": "Couldn't load the recording's transcript.",
 			"err": err,
 		})
 		return

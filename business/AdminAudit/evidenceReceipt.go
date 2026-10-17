@@ -54,7 +54,7 @@ const receiptBackfillMonths = 12
 
 // StartEvidenceReceipts runs the monthly fingerprint on a timer.
 func StartEvidenceReceipts(ctx context.Context) {
-	helpers.GoSafeNamed("evidence-receipts", func() {
+	helpers.GoSafeLoop("evidence-receipts", func() {
 		timer := time.NewTimer(receiptStartupDelay)
 		defer timer.Stop()
 		select {

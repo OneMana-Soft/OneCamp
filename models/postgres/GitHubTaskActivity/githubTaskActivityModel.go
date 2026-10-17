@@ -8,6 +8,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 type GitHubTaskActivity struct {
@@ -31,6 +32,46 @@ func CreateGitHubTaskActivity(query string, id uuid.UUID, taskID uuid.UUID, acti
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CreateGitHubTaskActivity Failed err: %+v", err)
 		return err
+	}
+	return nil
+}
+
+// activitiesPerStatement bounds one insert of CreateGitHubTaskActivities.
+const activitiesPerStatement = 1000
+
+// CreateGitHubTaskActivities inserts the activities, a statement per
+// thousand, each with its own id and time; a payload of none is {}.
+func CreateGitHubTaskActivities(ctx context.Context, activities []GitHubTaskActivity) error {
+	for start := 0; start < len(activities); start += activitiesPerStatement {
+		chunk := activities[start:min(start+activitiesPerStatement, len(activities))]
+		ids, tasks := make([]uuid.UUID, len(chunk)), make([]uuid.UUID, len(chunk))
+		kinds, at := make([]string, len(chunk)), make([]string, len(chunk))
+		logins, avatars, addresses := make([]sql.NullString, len(chunk)), make([]sql.NullString, len(chunk)), make([]sql.NullString, len(chunk))
+		titles, bodies, payloads := make([]sql.NullString, len(chunk)), make([]sql.NullString, len(chunk)), make([]sql.NullString, len(chunk))
+		text := func(s *string) sql.NullString {
+			if s == nil {
+				return sql.NullString{}
+			}
+			return sql.NullString{String: *s, Valid: true}
+		}
+		for i, a := range chunk {
+			ids[i], tasks[i], kinds[i], at[i] = a.ID, a.TaskID, a.ActivityType, a.CreatedAt.UTC().Format(time.RFC3339Nano)
+			logins[i], avatars[i], addresses[i] = text(a.GitHubLogin), text(a.GitHubAvatarURL), text(a.GitHubHTMLURL)
+			titles[i], bodies[i], payloads[i] = text(a.Title), text(a.Body), text(a.Payload)
+		}
+		dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+		_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
+			INSERT INTO github_task_activities (id, task_id, activity_type, github_login, github_avatar_url, github_html_url, title, body, payload, created_at)
+			SELECT id, task_id, activity_type, github_login, github_avatar_url, github_html_url, title, body, COALESCE(payload::jsonb, '{}'::jsonb), created_at
+			FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::timestamptz[])
+				AS u(id, task_id, activity_type, github_login, github_avatar_url, github_html_url, title, body, payload, created_at)`,
+			pq.Array(ids), pq.Array(tasks), pq.Array(kinds), pq.Array(logins), pq.Array(avatars), pq.Array(addresses),
+			pq.Array(titles), pq.Array(bodies), pq.Array(payloads), pq.Array(at))
+		cancel()
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "models/CreateGitHubTaskActivities Failed err: %+v", err)
+			return err
+		}
 	}
 	return nil
 }

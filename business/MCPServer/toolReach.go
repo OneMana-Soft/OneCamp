@@ -28,8 +28,16 @@ var inAppTools = []binding{
 	// A poll is a post: the channel's posting rule decides, admins-only included.
 	{Tool: "create_poll", Kind: ResourceChannel, IDArg: "channel_uuid",
 		Behaviour: ToolBehaviour{ReadOnly: false}},
-	// Adding to a doc is changing it: its editing list decides, not its visibility.
-	{Tool: "append_to_doc", Kind: ResourceDoc, IDArg: "doc_uuid",
+	// Changing a doc in place: its editing rule decides, not its visibility. A
+	// suggestion changes nothing until someone accepts it, but it is held to the
+	// same rule here, the stricter one, so an agent asked by someone who may only
+	// comment does not write suggestions for them. (append_to_doc is published
+	// on MCP, so it is declared in bridgedTools.)
+	{Tool: "doc_insert_after", Kind: ResourceDoc, IDArg: "doc_uuid",
+		Behaviour: ToolBehaviour{ReadOnly: false}},
+	{Tool: "doc_replace_section", Kind: ResourceDoc, IDArg: "doc_uuid",
+		Behaviour: ToolBehaviour{ReadOnly: false}},
+	{Tool: "doc_suggest", Kind: ResourceDoc, IDArg: "doc_uuid",
 		Behaviour: ToolBehaviour{ReadOnly: false}},
 
 	// Workspace-wide reads, the same for every member. The people directory is

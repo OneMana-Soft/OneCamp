@@ -16,16 +16,19 @@
 
 import { Server } from '@hocuspocus/server'
 import * as Y from 'yjs'
-import { createAppendHandler } from './appendToDoc.js'
 import { createUpdateBuffer } from './buffer.js'
+import { createContributors, splitContributors } from './contributors.js'
 import { bodyHash, encodeState, savedStateFor } from './docState.js'
 import { COLLAB_EXTENSIONS } from './extensions.js'
-import { createRenderHandler } from './renderDoc.js'
+import { createPersistence, persistedMessage } from './persisted.js'
 import { createSaveFailures } from './saveFailures.js'
-import { EPOCH_CHANGED_MESSAGE, bringsSecondCopy, rebuildFromBody, syncUpdateOf } from './lineage.js'
-import { SCHEMA_OUTDATED_MESSAGE, schemaVerdict } from './schemaGate.js'
+import { EPOCH_CHANGED_MESSAGE, bringsSecondCopy, epochIn, rebuildFromBody, syncUpdateOf } from './lineage.js'
+import { SCHEMA_HASH, SCHEMA_OUTDATED_MESSAGE, schemaVerdict } from './schemaGate.js'
+import { authorizeDoc, sessionMessage } from './session.js'
 import { persistBoard } from './storeBoard.js'
 import { persistDoc } from './storeDoc.js'
+import { createBlockIdsTransform } from './transforms/blockIds.js'
+import { createLegacyContentTransform } from './transforms/legacyContent.js' // B2
 
 // Docs connect with the bare doc uuid as the document name. Boards connect with
 // a "board:" prefix so one server routes both to the right backend endpoints.
@@ -45,11 +48,16 @@ export const parseDocumentName = (documentName) => {
 export const UNAVAILABLE = 'document-unavailable'
 
 // A debounced save can aggregate edits from several people, so a version's
-// "edited by" is a SET of users. The distinct editor uuids since the last save
-// are kept in a Redis set (so it works across instances), read and cleared on
-// each save, and expire if the doc stops being edited.
-export const CONTRIBUTORS_TTL_SECONDS = 60 * 60
-export const contributorsKey = (documentName) => `collab:contributors:${documentName}`
+// "edited by" is a SET of people (contributors.js).
+export { CONTRIBUTORS_TTL_SECONDS, contributorsKey } from './contributors.js'
+
+// storedAtOf is when a doc as the API sends it was last stored (its body's
+// doc_updated_at), for the "persisted" message a tab hears as it connects;
+// the time it is read when the API does not say (the zero time is no time).
+export function storedAtOf(doc) {
+    const t = Date.parse(doc?.doc_updated_at ?? '')
+    return Number.isFinite(t) && t > 0 ? t : Date.now()
+}
 
 const refusal = (what, cause) => {
     const status = cause?.response?.status
@@ -79,18 +87,16 @@ export function createCollabServer({
     ...serverOptions
 }) {
     const buffer = createUpdateBuffer(redis, { log })
+    const contributors = createContributors(redis, { log })
+    // The last state the API stored of each open doc (persisted.js).
+    const persistence = createPersistence()
     const internalHeaders = () => ({ headers: { 'X-Internal-Secret': getSecret() } })
 
-    async function readAndClearContributors(documentName) {
-        try {
-            const key = contributorsKey(documentName)
-            const members = await redis.smembers(key)
-            if (members && members.length > 0) await redis.del(key)
-            return Array.isArray(members) ? members.filter((m) => m && m !== 'unknown') : []
-        } catch (e) {
-            log.error(`[Collab] Failed to read contributors for ${documentName}:`, e.message)
-            return []
-        }
+    // A board's save takes everyone who edited it so far, as before.
+    async function boardContributors(documentName) {
+        const members = await contributors.peek(documentName)
+        await contributors.ack(documentName, members)
+        return splitContributors(members).users
     }
 
     let server = null
@@ -116,6 +122,13 @@ export function createCollabServer({
         }
     }
 
+    // Block ids for a doc written before blocks had them, given once as it
+    // loads (transforms/blockIds.js), as an edit whose user is "unknown", so
+    // it is never counted as an editor.
+    const blockIds = createBlockIdsTransform({ extensions, log })
+    // Old toggles and colours moved over as a doc loads, before its blocks
+    // get ids (transforms/legacyContent.js, B2).
+    const legacyContent = createLegacyContentTransform({ log })
     const failures = createSaveFailures({
         buffer,
         log,
@@ -184,6 +197,9 @@ export function createCollabServer({
             ydoc = savedStateFor(body, doc.doc_yjs_state, doc.doc_yjs_body_hash)
             if (ydoc) {
                 log.log(`[Collab] Loading saved state for ${id}`)
+                // What is stored already: a save with nothing new sends nothing,
+                // and a tab opening it hears when it was stored.
+                persistence.stored(name, { at: storedAtOf(doc), stateVector: Y.encodeStateVector(ydoc), hash: doc.doc_yjs_body_hash, lineage: epochIn(ydoc) || '' })
             } else {
                 // Rebuilt from the body: the same bytes for the same body every
                 // time (lineage.js), and saved at once, so the next open uses it.
@@ -194,7 +210,7 @@ export function createCollabServer({
                     throw refusal(`doc ${id}`, Object.assign(new Error(`its body could not be read: ${e.message}`), { deterministic: true }))
                 }
                 log.log(`[Collab] Rebuilt ${id} from its body (${body.length} chars, epoch ${epoch})`)
-                saveRebuilt(id, ydoc, body)
+                saveRebuilt(name, id, ydoc, body)
             }
         } else {
             // Nothing stored yet (a new doc): empty is what it is.
@@ -215,7 +231,7 @@ export function createCollabServer({
     // saveRebuilt stores a just-rebuilt doc's state beside its body, only while
     // the body is still the one it was built from (expectBodyHash). Not waited
     // for: the rebuild is the same next time anyway.
-    function saveRebuilt(id, ydoc, body) {
+    function saveRebuilt(name, id, ydoc, body) {
         let yjsState
         try {
             yjsState = encodeState(ydoc)
@@ -223,16 +239,23 @@ export function createCollabServer({
             log.error(`[Collab] Could not encode the rebuilt state of ${id}:`, e?.message || e)
             return
         }
+        const stateVector = Y.encodeStateVector(ydoc)
+        const lineage = epochIn(ydoc) || ''
         // htmlContent is the same body: an API from before keepBody (mid-upgrade)
         // ignores the flag and writes back what it is given (storeDoc.js).
-        api.post(`${backendUrl}/docColab/updateDoc`, { documentId: id, keepBody: true, yjsState, expectBodyHash: bodyHash(body), htmlContent: body }, internalHeaders())
-            .then(() => log.log(`[Collab] Saved the rebuilt state of ${id}`))
+        api.post(`${backendUrl}/docColab/updateDoc`, { documentId: id, keepBody: true, yjsState, expectBodyHash: bodyHash(body), htmlContent: body, lineage }, internalHeaders())
+            .then((response) => {
+                if (response?.data?.data?.stored === false) return
+                if (!persistence.get(name)) persistence.stored(name, { stateVector, hash: bodyHash(body), lineage })
+                log.log(`[Collab] Saved the rebuilt state of ${id}`)
+            })
             .catch((e) => log.error(`[Collab] Saving the rebuilt state of ${id} failed (the next open rebuilds the same copy):`, e?.message || e))
     }
 
     const post = (path) => async (payload) => {
         const response = await api.post(`${backendUrl}${path}`, payload, internalHeaders())
         log.log(`[Collab] Saved ${payload.documentId}${payload.keepBody ? ' (state only, body kept)' : ''}: ${response?.status}`)
+        return response?.data?.data ?? null
     }
 
     server = new Server({
@@ -246,26 +269,19 @@ export function createCollabServer({
         maxDebounce,
         extensions: serverExtensions,
 
-        // Server-side appends from the Go backend (agents writing into a doc),
-        // POST /internal/docs/<id>/append (appendToDoc.js), and a saved state
-        // written as HTML for the repair command, POST /internal/docs/<id>/render
-        // (renderDoc.js). Each answers only its own path.
-        onRequest: (() => {
-            const append = createAppendHandler({
-                getSecret,
-                extensions,
-                recordContributor: async (documentName, userId) => {
-                    const key = contributorsKey(documentName)
-                    await redis.sadd(key, userId)
-                    await redis.expire(key, CONTRIBUTORS_TTL_SECONDS)
-                },
-            })
-            const render = createRenderHandler({ getSecret, extensions })
-            return async (data) => {
-                await render(data)
-                await append(data)
-            }
-        })(),
+        // THE PUBLIC PORT TAKES NO SERVER-SIDE WRITES. Appends and renders
+        // were answered here, behind the internal secret alone, on the port
+        // Traefik publishes. They are Live Doc Writer ops now, on the internal
+        // port (live/server.js); a caller still pointed here is told so instead
+        // of getting Hocuspocus's welcome page with a 200.
+        async onRequest({ request, response }) {
+            const path = (request.url || '').split('?')[0]
+            if (!path.startsWith('/internal/') && !path.startsWith('/live/')) return
+            response.writeHead(404, { 'Content-Type': 'application/json' })
+            response.end(JSON.stringify({ msg: 'server-side writes are on the internal port (LIVE_PORT)' }))
+            // Answered; stop Hocuspocus's default reply.
+            throw null
+        },
 
         async onAuthenticate(data) {
             const { token } = data
@@ -309,7 +325,20 @@ export function createCollabServer({
                     }
                     readOnly()
                     log.log(`[Collab] Guest joined ${kind} ${id} read-only`)
-                    return { user: { id: decoded.sub || 'guest', name: decoded.name || 'Guest' }, schemaOutdated: outdated }
+                    return {
+                        user: { id: decoded.sub || 'guest', name: decoded.name || 'Guest' },
+                        schemaOutdated: outdated,
+                        access: { level: 'view', canEdit: false, locked: false },
+                    }
+                }
+
+                // A member on a doc: everyone who may read joins live (the Doc
+                // Session, session.js); a reader's connection is read-only.
+                if (kind === 'doc') {
+                    const access = await authorizeDoc({ api, backendUrl, token, id, secret: getSecret() })
+                    if (!access.canEdit) readOnly()
+                    log.log(`[Collab] ${id}: user ${decoded?.sub} joined as ${access.level}${access.canEdit && !outdated ? '' : ' (read-only)'}`)
+                    return { user: { id: decoded?.sub || 'unknown', name: decoded?.name || 'Anonymous' }, schemaOutdated: outdated, access }
                 }
 
                 log.log(`[Collab] Authorizing user ${decoded?.sub} for ${kind} ${id}...`)
@@ -331,12 +360,17 @@ export function createCollabServer({
                 return { user: { id: decoded?.sub || 'unknown', name: decoded?.name || 'Anonymous' }, schemaOutdated: outdated }
             } catch (error) {
                 log.error('[Collab] Auth failed:', error.message)
-                // A doc or board that is gone (deleted, archived, or never
-                // there: the API answers 410 or 404) is refused as unavailable,
-                // as a load that cannot read it is, so the web app says it
-                // couldn't open it, with Retry, instead of reconnecting for
-                // ever. Both answers give the same reason: it says no more than
-                // the API's own 404 does.
+                // The tab is told why (session.js REFUSED), so it can fetch a
+                // fresh token, say the doc is gone, or stay on the saved copy.
+                // A member's doc that is gone or never there is refused here
+                // as 'gone' or 'not-found', which the web app takes as final.
+                if (error?.reason) throw Object.assign(new Error('Authentication failed'), { reason: error.reason })
+                // Anything else that is gone (a board, a guest's doc: deleted,
+                // archived, or never there, so the API answers 410 or 404) is
+                // refused as unavailable, as a load that cannot read it is, so
+                // the web app says it couldn't open it, with Retry, instead of
+                // reconnecting for ever. Both answers give the same reason: it
+                // says no more than the API's own 404 does.
                 const status = error?.response?.status
                 if (status === 404 || status === 410) {
                     const unavailable = new Error('Authentication failed')
@@ -369,6 +403,23 @@ export function createCollabServer({
             }
         },
 
+        // A doc whose blocks have no ids gets them, as one edit, before anyone
+        // syncs (transforms/blockIds.js). Never throws: a doc without ids
+        // opens as it always did.
+        async afterLoadDocument(data) {
+            if (parseDocumentName(data.documentName).kind !== 'doc') return
+            try {
+                legacyContent.give(data.documentName, data.document)
+            } catch (e) {
+                log.error(`[Collab] ${data.documentName}: moving its old toggles and colours over failed:`, e?.message || e)
+            }
+            try {
+                blockIds.give(data.documentName, data.document)
+            } catch (e) {
+                log.error(`[Collab] ${data.documentName}: giving its blocks ids failed:`, e?.message || e)
+            }
+        },
+
         // Never throws (see the top).
         async onStoreDocument(data) {
             const name = data.documentName
@@ -385,19 +436,32 @@ export function createCollabServer({
             // durable (counted before anything below changes the doc).
             const persisted = await buffer.count(name)
             try {
-                const contributors = () => readAndClearContributors(name)
-                const outcome = kind === 'board'
-                    ? await persistBoard({ id, document: data.document, contributors, log, post: post('/boardColab/updateBoard') })
-                    : await persistDoc({
+                if (kind === 'board') {
+                    const outcome = await persistBoard({ id, document: data.document, contributors: () => boardContributors(name), log, post: post('/boardColab/updateBoard') })
+                    if (outcome !== 'skipped') await buffer.trim(name, persisted)
+                } else {
+                    const saved = await persistDoc({
                         id,
                         document: data.document,
                         extensions,
-                        contributors,
+                        contributors: { peek: () => contributors.peek(name), ack: (members) => contributors.ack(name, members) },
+                        last: persistence.get(name),
                         log,
                         post: post('/docColab/updateDoc'),
                         storedBody: async () => (await api.get(`${backendUrl}/docColab/getDoc/${id}`, internalHeaders()))?.data?.data?.doc_body ?? null,
                     })
-                if (outcome !== 'skipped') await buffer.trim(name, persisted)
+                    if (saved.outcome !== 'skipped') await buffer.trim(name, persisted)
+                    if (saved.outcome === 'saved' || saved.outcome === 'state-only' || saved.outcome === 'kept-body') {
+                        const at = Date.now()
+                        persistence.stored(name, { at, stateVector: saved.stateVector, hash: saved.hash, lineage: saved.lineage })
+                        // Saved means stored (I8): the tabs' save dots follow this.
+                        try {
+                            data.document.broadcastStateless(persistedMessage({ at, stateVector: saved.stateVector, lineage: saved.lineage }))
+                        } catch (e) {
+                            log.error(`[Collab] Could not tell ${name}'s tabs it is stored:`, e?.message || e)
+                        }
+                    }
+                }
                 await failures.succeeded(name)
             } catch (err) {
                 await failures.failed(name, err, data.document)
@@ -412,25 +476,46 @@ export function createCollabServer({
             // Every update goes to the Redis buffer, so edits made between saves
             // survive a crash or a failed save.
             await buffer.push(data.documentName, data.update)
-            // Who edited, for the next version's attribution.
-            try {
-                const userId = data?.context?.user?.id
-                if (!userId || userId === 'unknown') return
-                const key = contributorsKey(data.documentName)
-                await redis.sadd(key, userId)
-                await redis.expire(key, CONTRIBUTORS_TTL_SECONDS)
-            } catch (e) {
-                // attribution is best-effort
-            }
+            // Who edited, for the next version's attribution. A Live Doc
+            // Writer op records its own (live/ops/write.js), with the agent and
+            // the asker; its direct connection is skipped here.
+            const userId = data?.context?.user?.id
+            if (!userId || userId === 'unknown' || data?.context?.liveDocWriter) return
+            await contributors.record(data.documentName, { user: userId })
         },
 
-        // Tell a tab with an older editor schema to reload (it joined read-only).
+        // Tell a doc's tab what the server decided (the Doc Session: its level,
+        // whether it may write, the doc's lineage), a tab with an older editor
+        // schema to reload (it joined read-only), and every doc tab what is
+        // stored already, so its save dot knows this server says when edits are
+        // stored (persisted.js).
         async connected(data) {
+            if (data.context?.access && parseDocumentName(data.documentName).kind === 'doc') {
+                try {
+                    const document = data.connection?.document
+                    data.connection.sendStateless(sessionMessage({
+                        access: data.context.access,
+                        lineage: document ? epochIn(document) : null,
+                        schemaVersion: SCHEMA_HASH,
+                        readOnly: !!data.connection?.readOnly || !!data.context.schemaOutdated,
+                    }))
+                } catch (e) {
+                    log.error('[Collab] Could not tell a tab its session:', e?.message || e)
+                }
+            }
             if (data.context?.schemaOutdated) {
                 try {
                     data.connection.sendStateless(SCHEMA_OUTDATED_MESSAGE)
                 } catch (e) {
                     log.error('[Collab] Could not tell a tab to reload:', e?.message || e)
+                }
+            }
+            const stored = persistence.get(data.documentName)
+            if (stored && parseDocumentName(data.documentName).kind === 'doc') {
+                try {
+                    data.connection.sendStateless(persistedMessage(stored))
+                } catch (e) {
+                    log.error('[Collab] Could not tell a tab what is stored:', e?.message || e)
                 }
             }
         },
@@ -468,6 +553,7 @@ export function createCollabServer({
         // onDestroy is the server's and has no document.
         async afterUnloadDocument(data) {
             startedEmpty.delete(data.documentName)
+            persistence.forget(data.documentName)
             log.log(`[Collab] Document ${data.documentName} unloaded from memory`)
         },
         async onDestroy() {
@@ -479,6 +565,9 @@ export function createCollabServer({
         server,
         buffer,
         failures,
+        persistence,
+        // What the Live Doc Writer's ops share (live/server.js, live/routes.js).
+        live: { extensions, contributors, persistence, log, isGone: (name) => failures.isGone(name) },
         // Retry the docs whose saves were failing when the service stopped.
         async recoverUnsaved() {
             await failures.recover(await buffer.unsavedNames())

@@ -2,6 +2,7 @@ package helpers
 
 import (
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -108,4 +109,41 @@ func TestSettleBackgroundNamesWhatIsStillRunning(t *testing.T) {
 	case <-time.After(time.Minute):
 		t.Fatal("SettleBackground is still waiting a minute past its 30 ms bound")
 	}
+}
+
+// Goroutines started with GoSafe, GoSafeNamed and GoSafeSend are counted until
+// they finish, panicking or not.
+func TestGoSafeGoroutinesAreWaitedFor(t *testing.T) {
+	release := make(chan struct{})
+	var ran atomic.Int32
+	GoSafe(func() { <-release; ran.Add(1) })
+	GoSafeNamed("test", func() { <-release; ran.Add(1); panic("after its work") })
+	ch := make(chan int, 1)
+	GoSafeSend("test", ch, func() int { <-release; ran.Add(1); return 1 })
+	if goSafeWork.Settle(20 * time.Millisecond) {
+		t.Fatal("three goroutines blocked, and they count as done")
+	}
+	close(release)
+	if busy := SettleBackground(time.Minute); len(busy) != 0 {
+		t.Fatalf("still busy: %v", busy)
+	}
+	if ran.Load() != 3 {
+		t.Fatalf("%d of the 3 had finished when they were said to be", ran.Load())
+	}
+}
+
+// A loop lasts as long as its context and is not work in flight: settling
+// doesn't wait for it, and a panic in it is recovered like GoSafe's.
+func TestGoSafeLoopIsNotWaitedFor(t *testing.T) {
+	stop, exited := make(chan struct{}), make(chan struct{})
+	GoSafeLoop("test loop", func() {
+		defer close(exited)
+		<-stop
+		panic("as it stops")
+	})
+	if !goSafeWork.Settle(0) {
+		t.Fatal("a loop is counted as work in flight")
+	}
+	close(stop)
+	<-exited
 }

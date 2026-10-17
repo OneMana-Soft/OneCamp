@@ -38,6 +38,7 @@ import (
 	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	"github.com/akashc777/OneCamp/business/DataTable/formula"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
+	sweepBusiness "github.com/akashc777/OneCamp/business/Sweep"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -419,22 +420,14 @@ func RepairItemLinks(ctx context.Context) (int, error) {
 	return changed, configModel.UpsertConfig(itemLinkRepairKey, fmt.Sprintf("done: %d rows", changed))
 }
 
-// StartItemLinkRepair runs RepairItemLinks in the background, a minute after
-// the server starts; one that fails is tried again at the next start.
-func StartItemLinkRepair(ctx context.Context) {
-	helpers.GoSafeNamed("tables.item-link-repair", func() {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(time.Minute):
-		}
+func init() {
+	// Hourly, claimed by one worker at a time, until it's done once; a pass
+	// that fails is tried again the next hour.
+	sweepBusiness.Jobs.Register(sweepBusiness.Job{Name: "tables.item-link-repair", Every: time.Hour, Run: func(ctx context.Context) error {
 		changed, err := RepairItemLinks(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "tables: reducing stored links to items to their ids failed after %d rows; the next start tries again: %v", changed, err)
-			return
-		}
 		if changed > 0 {
 			helpers.MessageLogs.InfoLog.Printf("tables: links to items in %d rows reduced to their ids", changed)
 		}
-	})
+		return err
+	}})
 }

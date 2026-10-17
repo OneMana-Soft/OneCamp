@@ -17,15 +17,13 @@ import (
 // Why this file exists
 // --------------------
 // Every inbound GitHub webhook event (issues, pull_request, push,
-// issue_comment, create, pull_request_review, check_run) hits Postgres
-// at least once via githubLinkModel.GetGitHubLinkByRepo to resolve
-// "is this repo linked to OneCamp, and which project?". The signature
-// verification path also calls it because per-link secrets live on
-// that row.
+// issue_comment, create, pull_request_review, check_run) reads the links to
+// its repository: whether any project links it, and whether any of those
+// links syncs what the event is about. The signature verification path reads
+// them too because per-link secrets live on those rows.
 //
 // For a busy repo (push storms during a release, large PR review
-// threads) this is one DB round-trip per event, sometimes two when
-// the event handler also invokes GetGitHubLinkById.
+// threads) this is one DB round-trip per event.
 //
 // Links change rarely (admin clicks "Link" / "Unlink" in the UI), so
 // a 5-minute TTL with explicit invalidation on every CRUD is safe and
@@ -50,20 +48,13 @@ const (
 )
 
 type githubLinkCacheEntry struct {
-	link *githubLinkModel.GitHubLink // nil = negative cache
-	// parsedRules is the pre-decoded automation rules map. We pre-parse
-	// once at cache-fill time so every webhook event handler that needs
-	// to apply automation rules avoids a per-event json.Unmarshal of
-	// the same JSON blob.
-	parsedRules map[string]string
-	generation  uint64
+	links      []*githubLinkModel.GitHubLink // none = negative cache
+	generation uint64
 }
 
 var (
-	githubLinkCache       = helpers.NewTTLCache[githubLinkCacheEntry](githubLinkPositiveTTL)
-	githubLinkGeneration  uint64
-	githubLinkCacheHits   uint64
-	githubLinkCacheMisses uint64
+	githubLinkCache      = helpers.NewTTLCache[githubLinkCacheEntry](githubLinkPositiveTTL)
+	githubLinkGeneration uint64
 )
 
 // invalidateGitHubLinkCache is called from every link CRUD path. We
@@ -83,36 +74,36 @@ func linkCacheKey(owner, name string) string {
 	return strings.ToLower(owner) + "/" + strings.ToLower(name)
 }
 
-// GetGitHubLinkByRepoCached is the cached entry-point the webhook
-// handlers should call. The behaviour matches GetGitHubLinkByRepo for
-// every caller, including the (nil, nil) "not linked" return.
+// repositoryLinks is every project's live link to the repository owner/name,
+// the oldest first, matched in any case as GitHub matches names; none when no
+// project links it. Several projects may link one repository (the unique
+// index is per project), so no one of their links speaks for the others: what
+// an event does to a task is its own project's link's to decide (eventTask),
+// and what it does without a task needs one of them to sync that
+// (linkSyncing). The webhook handlers and the signature check read them here.
 //
-// On generation mismatch or TTL expiry the helper falls through to
-// the underlying domain query and stores the fresh result.
-func GetGitHubLinkByRepoCached(ctx context.Context, owner, name string) (*githubLinkModel.GitHubLink, map[string]string, error) {
+// On generation mismatch or TTL expiry it reads them again and stores them.
+func repositoryLinks(ctx context.Context, owner, name string) ([]*githubLinkModel.GitHubLink, error) {
 	if owner == "" || name == "" {
-		return nil, nil, nil
+		return nil, nil
 	}
 
+	// The generation from before the read: an invalidation while the links
+	// are read leaves the entry stale, never current with what it replaced.
 	gen := atomic.LoadUint64(&githubLinkGeneration)
 	key := linkCacheKey(owner, name)
 
 	if entry, ok := githubLinkCache.Get(key); ok && entry.generation == gen {
-		atomic.AddUint64(&githubLinkCacheHits, 1)
-		return entry.link, entry.parsedRules, nil
+		return entry.links, nil
 	}
-	atomic.AddUint64(&githubLinkCacheMisses, 1)
 
-	link, err := githubLinkModel.GetGitHubLinkByRepo(owner, name)
+	links, err := githubLinkModel.GetGitHubLinksByRepo(ctx, owner, name)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	curGen := atomic.LoadUint64(&githubLinkGeneration)
-	rules := parseAutomationRules(link)
-	entry := githubLinkCacheEntry{link: link, parsedRules: rules, generation: curGen}
-
-	if link == nil {
+	entry := githubLinkCacheEntry{links: links, generation: gen}
+	if len(links) == 0 {
 		// Short TTL for negative results so a freshly-linked repo
 		// becomes visible quickly. We still store it so a flood of
 		// webhooks for an unlinked repo doesn't hammer Postgres.
@@ -120,12 +111,10 @@ func GetGitHubLinkByRepoCached(ctx context.Context, owner, name string) (*github
 	} else {
 		githubLinkCache.Set(key, entry)
 	}
-	return link, rules, nil
+	return links, nil
 }
 
-// parseAutomationRules pre-decodes the stored automation rules JSON
-// once per cache fill. Callers that don't need the rules can ignore
-// the second return value.
+// parseAutomationRules decodes a link's stored automation rules JSON.
 //
 // We swallow JSON parse errors deliberately: malformed rules are not
 // fatal to webhook handling — they just mean automation is skipped
@@ -164,14 +153,6 @@ func invalidateLinkByLink(link *githubLinkModel.GitHubLink) {
 		return
 	}
 	invalidateLinkByRepo(link.RepoOwner, link.RepoName)
-}
-
-// lookupGitHubLinkByRepo is the (link, error) shim used by callers
-// that don't care about pre-parsed automation rules. Keeps the call-
-// site change to a single drop-in replacement of githubLinkModel.GetGitHubLinkByRepo.
-func lookupGitHubLinkByRepo(ctx context.Context, owner, name string) (*githubLinkModel.GitHubLink, error) {
-	link, _, err := GetGitHubLinkByRepoCached(ctx, owner, name)
-	return link, err
 }
 
 // UpdateAutomationRulesAndInvalidate persists the rules JSON and

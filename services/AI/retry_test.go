@@ -2,6 +2,7 @@ package ai
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -140,28 +141,60 @@ func TestDoHTTPWithRetry_NoRetryOn4xx(t *testing.T) {
 	}
 }
 
-// Context cancellation during backoff aborts promptly.
+// Cancelled while it waits to retry, a call ends on the cancellation, however
+// long the wait: here the server asks for an hour. The wait used to be timed
+// (under 2 s with a 50 ms deadline), which a loaded machine broke, and the
+// deadline could end before the first answer arrived, so the wait went
+// untested. Now the context ends as the first answer arrives, and a call that
+// slept the wait out would still be waiting a minute later.
 func TestDoHTTPWithRetry_RespectsContextCancel(t *testing.T) {
+	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Retry-After", strconv.Itoa(60))
+		calls.Add(1)
+		w.Header().Set("Retry-After", strconv.Itoa(3600))
 		w.WriteHeader(http.StatusTooManyRequests)
 	}))
 	defer srv.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	client := &http.Client{Transport: cancelOnAnswer{base: srv.Client().Transport, cancel: cancel}}
+	cfg := retryConfig{maxAttempts: 4, baseDelay: time.Hour, maxDelay: time.Hour}
 
-	cfg := retryConfig{maxAttempts: 4, baseDelay: time.Second, maxDelay: 20 * time.Second}
-	start := time.Now()
-	_, err := doHTTPWithRetry(ctx, srv.Client(), func() (*http.Request, error) {
-		return http.NewRequestWithContext(ctx, http.MethodPost, srv.URL, nil)
-	}, cfg)
-	if err == nil {
-		t.Fatal("expected error from context cancellation")
+	done := make(chan error, 1)
+	go func() {
+		resp, err := doHTTPWithRetry(ctx, client, func() (*http.Request, error) {
+			return http.NewRequestWithContext(ctx, http.MethodPost, srv.URL, nil)
+		}, cfg)
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("the call ended with %v, want the cancellation", err)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("a minute after its context ended the call is still waiting to retry")
 	}
-	if time.Since(start) > 2*time.Second {
-		t.Errorf("took too long (%v); should abort on ctx cancel", time.Since(start))
+	if n := calls.Load(); n != 1 {
+		t.Errorf("%d requests, want 1: nothing is sent once the context has ended", n)
 	}
+}
+
+// cancelOnAnswer ends a context as the first answer arrives, so the caller is
+// past the request and into what follows it when the context ends.
+type cancelOnAnswer struct {
+	base   http.RoundTripper
+	cancel context.CancelFunc
+}
+
+func (c cancelOnAnswer) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := c.base.RoundTrip(r)
+	c.cancel()
+	return resp, err
 }
 
 func TestFriendlyProviderError(t *testing.T) {

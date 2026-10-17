@@ -8,19 +8,16 @@ package notification
 // the essentials, and an install may have no sending key) nobody was told
 // anything: no inbox item, no push, no live update. The event just appeared on
 // the owner's calendar the next time it loaded, while the guest read "Sam has
-// been told". Now the owner gets an inbox item, live in their open apps
-// (bookingInbox), a push to their devices (the lookup holds back anyone
-// paused, in quiet hours or in focus time), and the email where notification
-// email is on, each on its own. TellBookingOwner answers whether they were
-// told, so the guest's page says only what happened.
+// been told". Now the owner gets an inbox item, live in their open apps, and
+// a push to their devices (the lookup holds back anyone paused, in quiet
+// hours or in focus time), all by Tell as every notice is; and the email
+// where notification email is on, on its own. TellBookingOwner answers
+// whether they were told, so the guest's page says only what happened.
 
 import (
 	"context"
-	"slices"
 	"time"
 
-	fcmDomain "github.com/akashc777/OneCamp/domain/UserFCMToken"
-	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	"github.com/google/uuid"
 )
@@ -49,19 +46,18 @@ type BookingNotice struct {
 	Cancelled bool
 }
 
-// Seams for tests: the owner's devices, the push, and the email.
-var (
-	bookingDevices = fcmDomain.GetFCMTokenByListOfUserId
-	bookingPush    = func(ctx context.Context, data map[string]string, tokens []string) error {
-		return firebaseInit.FirebaseApp.MultiCastPush(ctx, data, tokens)
-	}
-	bookingEmail = Dispatch
-)
+// Seam for tests: the email.
+var bookingEmail = Dispatch
 
 // TellBookingOwner tells a booking page's owner that a guest booked or
 // cancelled, and answers whether they were told: an inbox item was written,
-// or an email was queued. The push goes either way. The same booking's same
-// change is told once. It outlives a guest who closes the page mid-request.
+// or an email was queued. The same booking's same change is told once. It
+// outlives a guest who closes the page mid-request.
+//
+// The guest is outside the workspace, so the notice has no actor: its data
+// carries their name with the page's title and the time, for the inbox to say
+// "Alex Kim booked Intro call". It opens the owner's calendar, and a later
+// push about the same booking replaces this one.
 func TellBookingOwner(ctx context.Context, n BookingNotice) bool {
 	owner, err := uuid.Parse(n.OwnerUUID)
 	if err != nil {
@@ -76,10 +72,25 @@ func TellBookingOwner(ctx context.Context, n BookingNotice) bool {
 	guest := actorOrSomeone(n.GuestName)
 	title := guest + verb + n.PageTitle
 
-	inbox, fresh := bookingInbox(ctx, owner, kind, n)
-	if fresh {
-		go pushBooking(owner.String(), title, n)
-	}
+	inbox := len(Tell(ctx, Notice{
+		Kind:         kind,
+		ResourceKind: "event",
+		ResourceUUID: n.EventUUID,
+		Data: map[string]string{
+			"booking_id": n.BookingID,
+			"guest_name": n.GuestName,
+			"page_title": n.PageTitle,
+			"starts_at":  n.Start.UTC().Format(time.RFC3339),
+			"ends_at":    n.End.UTC().Format(time.RFC3339),
+			"tz":         n.TZ,
+		},
+		DedupKey: kind + "|" + n.BookingID,
+		Title:    title,
+		Body:     n.When,
+		Path:     "/app/calendar",
+		Push: &Push{Type: firebaseInit.FIREBASE_PUSH_DATA_TYPE_CALENDAR, ID: n.EventUUID,
+			Tag: "booking-" + n.BookingID, From: guest},
+	}, []NoticeRecipient{{UserUUID: owner.String(), Reason: "owner"}})) > 0
 	subject, heading := title, "New booking"
 	if n.Cancelled {
 		heading = "Booking cancelled"
@@ -100,36 +111,4 @@ func TellBookingOwner(ctx context.Context, n BookingNotice) bool {
 		SkipOnlineCheck: true,
 	}) > 0
 	return inbox || emailed
-}
-
-// pushBooking pushes a booking to its owner's devices, the paused-aware
-// lookup holding back anyone who shouldn't be disturbed now. A later push
-// about the same booking replaces this one (its tag).
-func pushBooking(owner, title string, n BookingNotice) {
-	defer recoverDispatch("TellBookingOwner push")
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	tokens, err := bookingDevices(ctx, []string{owner})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "notification/TellBookingOwner: the owner's devices couldn't be read: %+v", err)
-		return
-	}
-	if len(tokens) == 0 {
-		return
-	}
-	data := map[string]string{
-		firebaseInit.FIREBASE_PUSH_DATA_TYPE:     firebaseInit.FIREBASE_PUSH_DATA_TYPE_CALENDAR,
-		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:  n.EventUUID,
-		firebaseInit.FIREBASE_PUSH_DATA_TITLE:    title,
-		firebaseInit.FIREBASE_PUSH_DATA_BODY:     n.When,
-		firebaseInit.FIREBASE_PUSH_DATA_USERNAME: actorOrSomeone(n.GuestName),
-		firebaseInit.FIREBASE_PUSH_DATA_TAG:      "booking-" + n.BookingID,
-	}
-	// 500 tokens a call is Firebase's limit.
-	for batch := range slices.Chunk(tokens, 500) {
-		if err := bookingPush(ctx, data, batch); err != nil {
-			helpers.LogErrorWithContext(ctx, "notification/TellBookingOwner: the push failed: %+v", err)
-			return
-		}
-	}
 }

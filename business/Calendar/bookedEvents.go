@@ -62,6 +62,19 @@ func pageZone(p *bookingModel.Page) string {
 	return hours.TZ
 }
 
+// guestZone is the zone a booking's guest reads times in: the one they booked
+// in, or the page's for a booking made before it was kept.
+func guestZone(b *bookingModel.Booking, p *bookingModel.Page) string {
+	if loc, ok := helpers.FirstLocation(b.GuestTZ); ok {
+		return loc.String()
+	}
+	return pageZone(p)
+}
+
+// pageLive is whether a page takes bookings, for a guest its owner (still in
+// the workspace, making the change) can point at it.
+func pageLive(p *bookingModel.Page) bool { return p.Active && p.DeletedAt == nil }
+
 // tellGuest emails a booking's guest about a change their host made, without
 // holding up the host: their calendar shows it already. Whether email is on is
 // decided now, at the change.
@@ -107,8 +120,8 @@ func bookingEventDeleted(ctx context.Context, ev *dgraphStruct.DgraphEvent) {
 		subject:  fmt.Sprintf("Cancelled: %s with %s", p.Title, host),
 		title:    host + " cancelled your meeting",
 		subtitle: p.Title,
-		body:     FormatWhen(b.StartsAt, b.EndsAt, pageZone(p)),
-		ctaText:  "Book another time", ctaURL: bookAgainURL(p, p.Active),
+		body:     FormatWhen(b.StartsAt, b.EndsAt, guestZone(b, p)),
+		ctaText:  "Book another time", ctaURL: bookAgainURL(p, pageLive(p)),
 		footer: "If it's in your calendar, the update attached takes it off.",
 		invite: bookingInvite(inviteCancel, b, p.Title, host, false, time.Now()),
 	})
@@ -143,7 +156,7 @@ func bookingEventUpdated(ctx context.Context, ev *dgraphStruct.DgraphEvent, star
 	if !b.EndsAt.After(time.Now()) {
 		return // moved into the past: the record keeps it, nobody is told
 	}
-	host, zone := hostName(ev), pageZone(p)
+	host, zone := hostName(ev), guestZone(b, p)
 	tellGuest(ctx, guestMail{
 		to: b.GuestEmail, name: b.GuestName,
 		subject:  fmt.Sprintf("Moved: %s with %s", p.Title, host),

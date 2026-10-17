@@ -33,6 +33,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	githubLinkModel "github.com/akashc777/OneCamp/models/postgres/GitHubLink"
+	githubTaskActivityModel "github.com/akashc777/OneCamp/models/postgres/GitHubTaskActivity"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
@@ -350,8 +351,9 @@ func LinkRepositoryToProject(ctx context.Context, input LinkRepoInput, createdBy
 	return link, nil
 }
 
-// UnlinkRepository soft-deletes a link and unlinks the project's tasks from
-// that repository.
+// UnlinkRepository soft-deletes a link, unlinks the project's tasks from that
+// repository, and deletes the repository's webhook unless another project
+// still links it.
 func UnlinkRepository(ctx context.Context, linkId uuid.UUID) error {
 	// Get the link first
 	getQuery := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1 AND deleted_at IS NULL`
@@ -373,19 +375,38 @@ func UnlinkRepository(ctx context.Context, linkId uuid.UUID) error {
 	}
 
 	// 2. Unlink the project's tasks from the repository by the rule every start
-	// applies (RepairTaskLinks): a task keeps a link only into a repository its
-	// own project links. A task linked by its pull request alone is unlinked
-	// too, and one linked to another of the project's repositories keeps its
-	// link. One that can't be unlinked now is never synced (syncAllowed) and is
-	// unlinked at the next start.
-	if _, err := RepairTaskLinks(ctx); err != nil {
+	// applies (RepairTaskLinks), to this project's tasks alone: a task keeps an
+	// issue or pull request only in a repository its own project links. A task
+	// linked by its pull request alone is unlinked too, and an issue or pull
+	// request in another of the project's repositories stays. One that can't be
+	// unlinked now is never synced (syncAllowed) and is unlinked at the next
+	// start.
+	if _, err := repairTaskLinks(ctx, link.ProjectId); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/UnlinkRepository couldn't unlink every task from %s/%s, the next start tries again: %+v", link.RepoOwner, link.RepoName, err)
 	}
 
-	// Delete webhook synchronously before returning so the operation is durable.
-	deleteGitHubWebhook(link)
+	// 3. The repository has one webhook, whichever projects link it, signed
+	// with the secret of the link that registered it last, which may be this
+	// one. The last link to go takes the webhook with it. While another
+	// remains, it stays, signed again with the oldest remaining link's secret
+	// (webhookSigners) so their deliveries still verify
+	// (VerifyGitHubWebhookSignature). Synchronous, so the operation is durable
+	// when this returns.
+	remaining, err := githubLinkModel.GetGitHubLinksByRepo(ctx, link.RepoOwner, link.RepoName)
+	switch {
+	case err != nil:
+		helpers.LogErrorWithContext(ctx, "business/UnlinkRepository couldn't read the other links to %s/%s, so its webhook stays: %+v", link.RepoOwner, link.RepoName, err)
+	case len(remaining) == 0:
+		deleteGitHubWebhook(link)
+	default:
+		if signers := webhookSigners(remaining); len(signers) > 0 {
+			registerGitHubWebhook(signers[0], *signers[0].WebhookSecret)
+		} else {
+			helpers.LogErrorWithContext(ctx, "business/UnlinkRepository: no link still to %s/%s has a webhook secret, so its webhook keeps the one it had", link.RepoOwner, link.RepoName)
+		}
+	}
 
-	// Invalidate the cached link for this repo so the next inbound
+	// Invalidate the cached links for this repo so the next inbound
 	// webhook delivery (if any in flight) doesn't see a stale entry.
 	invalidateLinkByLink(link)
 
@@ -488,6 +509,9 @@ func HandleGitHubWebhookEvent(ctx context.Context, eventType string, body []byte
 	// just received being PATCHed straight back onto the issue it came from.
 	// business.EnqueueGitHubSync reads the marker.
 	ctx = helpers.WithGitHubOrigin(ctx)
+	// Each task the event names, and each of those tasks' projects, is read
+	// once in it however often it is named (eventReads).
+	ctx = withEventReads(ctx)
 
 	switch eventType {
 	case "issues":
@@ -500,6 +524,8 @@ func HandleGitHubWebhookEvent(ctx context.Context, eventType string, body []byte
 		return handleIssueCommentEvent(ctx, body)
 	case "create":
 		return handleCreateEvent(ctx, body)
+	case "delete":
+		return handleDeleteEvent(ctx, body)
 	case "pull_request_review":
 		return handlePullRequestReviewEvent(ctx, body)
 	case "check_run":
@@ -573,7 +599,7 @@ func applyAutomationRules(ctx context.Context, link *githubLinkModel.GitHubLink,
 
 	// The activity says the status as people know it, "QA", not an id.
 	shown := to.Display()
-	go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "status_synced",
+	_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "status_synced",
 		nil, nil, nil, &shown, nil, nil)
 	publishGitHubSyncMqtt(taskUUIDStr, link.ProjectId.String(), "status_synced", statusSyncPayload(to))
 	helpers.MessageLogs.InfoLog.Printf("Applied automation rule %s -> %s for task %s", trigger, shown, taskUUIDStr)
@@ -617,14 +643,12 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 
 	helpers.MessageLogs.InfoLog.Printf("GitHub issue event: action=%s issue=#%d repo=%s", event.Action, event.Issue.Number, event.Repository.FullName)
 
-	link, err := lookupGitHubLinkByRepo(ctx, event.Repository.Owner.Login, event.Repository.Name)
-	if err != nil || link == nil {
-		helpers.MessageLogs.InfoLog.Printf("No GitHub link found for repo: %s", event.Repository.FullName)
-		return nil
+	links, err := repositoryLinks(ctx, event.Repository.Owner.Login, event.Repository.Name)
+	if err != nil {
+		return fmt.Errorf("couldn't read the links to %s: %w", event.Repository.FullName, err)
 	}
-
-	if !link.SyncIssues {
-		helpers.MessageLogs.InfoLog.Printf("Skipping issue event for %s — sync_issues disabled", event.Repository.FullName)
+	if linkSyncing(links, syncsIssues) == nil {
+		helpers.MessageLogs.InfoLog.Printf("Skipping issue event for %s: no project's link to it syncs issues", event.Repository.FullName)
 		return nil
 	}
 
@@ -643,8 +667,7 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 
 	// issueTask is the task linked to this issue and its own project's link to
 	// the repository, which decides what the event does to the task and who is
-	// told: several projects may link one repository, and the link looked up
-	// above is whichever came first.
+	// told: several projects may link one repository.
 	issueTask := func() (string, uuid.UUID, *githubLinkModel.GitHubLink, bool) {
 		taskUUIDStr, err := taskDomain.FindTaskUUIDByGitHubIssueURL(ctx, event.Issue.HTMLURL)
 		if err != nil || taskUUIDStr == "" {
@@ -657,7 +680,10 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 
 	switch event.Action {
 	case "opened":
-		if !link.AutoCreateTasks {
+		// One task for the issue, made in the project of the first link (the
+		// oldest) that syncs the repository's issues and makes tasks of new ones.
+		link := linkSyncing(links, makesIssueTasks)
+		if link == nil {
 			return nil
 		}
 		userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, link.CreatedBy.String())
@@ -712,7 +738,7 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 		}
 		taskDomain.CreateOrUpdateDgraphTask(ctx, dgraphTask)
 
-		go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "issue_opened",
+		_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "issue_opened",
 			&event.Sender.Login, nil, nil, &event.Issue.Title, nil, nil)
 		publishGitHubSyncMqtt(taskUUID.String(), link.ProjectId.String(), "issue_opened", map[string]interface{}{
 			"name":        event.Issue.Title,
@@ -783,7 +809,7 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 		if event.Action == "reopened" {
 			activityType = "issue_reopened"
 		}
-		go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, activityType,
+		_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, activityType,
 			&event.Sender.Login, nil, nil, &event.Issue.Title, nil, nil)
 		publishGitHubSyncMqtt(taskUUIDStr, own.ProjectId.String(), activityType, map[string]interface{}{
 			"status": defaultStatus,
@@ -980,13 +1006,12 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 
 	helpers.MessageLogs.InfoLog.Printf("GitHub PR event: action=%s pr=#%d branch=%s repo=%s", event.Action, event.PullRequest.Number, event.PullRequest.Head.Ref, event.Repository.FullName)
 
-	link, err := lookupGitHubLinkByRepo(ctx, event.Repository.Owner.Login, event.Repository.Name)
-	if err != nil || link == nil {
-		return nil
+	links, err := repositoryLinks(ctx, event.Repository.Owner.Login, event.Repository.Name)
+	if err != nil {
+		return fmt.Errorf("couldn't read the links to %s: %w", event.Repository.FullName, err)
 	}
-
-	if !link.SyncPRs {
-		helpers.MessageLogs.InfoLog.Printf("Skipping PR event for %s — sync_prs disabled", event.Repository.FullName)
+	if linkSyncing(links, syncsPRs) == nil {
+		helpers.MessageLogs.InfoLog.Printf("Skipping PR event for %s: no project's link to it syncs pull requests", event.Repository.FullName)
 		return nil
 	}
 
@@ -1003,23 +1028,15 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 		}
 	}
 
-	// Try to find an existing task linked by branch name first, then by issue URL references in PR body
-	taskUUIDStr, err := taskDomain.FindTaskUUIDByGitHubBranch(ctx, event.PullRequest.Head.Ref)
-	if err != nil || taskUUIDStr == "" {
-		// Fallback: look for task URLs in the PR body (Linear-style magic linking)
-		taskUUIDStr = findTaskUUIDInText(ctx, event.PullRequest.Body)
-	}
-
-	// Only a task in a project that linked this repository, through that
-	// project's own link: the branch and the body are the author's words.
-	var taskUUID uuid.UUID
-	if taskUUIDStr != "" {
-		if id, own, ok := eventTask(ctx, taskUUIDStr, event.Repository.Owner.Login, event.Repository.Name, syncsPRs); ok {
-			taskUUID, link = id, own
-		} else {
-			taskUUIDStr = ""
-		}
-	}
+	// The task on the pull request's branch in a project linking this
+	// repository, else one its body names (Linear-style magic linking). Only a
+	// task in a project that linked this repository, through that project's
+	// own link, which decides what the event does to the task and who is
+	// told: the branch and the body are the author's words.
+	owner, repo := event.Repository.Owner.Login, event.Repository.Name
+	taskUUIDStr, taskUUID, link, _ := leadTask(ctx, owner, repo, syncsPRs,
+		onBranch(ctx, owner, repo, event.PullRequest.Head.Ref),
+		func() string { return findTaskUUIDInText(ctx, event.PullRequest.Body) })
 
 	// Determine PR state for tracking
 	prState := event.PullRequest.State
@@ -1031,8 +1048,9 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 	// emitPRReview fans out an internal event so the AI agent (if enabled) can
 	// review the PR diff and post feedback as a task comment. Decoupled via the
 	// event bus so this package never imports the AI/code-agent packages. Draft
-	// PRs are skipped (still a work in progress).
-	emitPRReview := func(linkedTaskUUID string) {
+	// PRs are skipped (still a work in progress). link is the linked task's
+	// project's link to the repository.
+	emitPRReview := func(link *githubLinkModel.GitHubLink, linkedTaskUUID string) {
 		if linkedTaskUUID == "" || isDraft {
 			return
 		}
@@ -1059,7 +1077,7 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 				helpers.LogErrorWithContext(ctx, "business/handlePullRequestEvent Failed to update PR state: %v", err)
 				markInboundSyncFailed(ctx, taskUUID, "GitHub PR state sync failed")
 			}
-			go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "pr_opened",
+			_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "pr_opened",
 				&event.PullRequest.User.Login, nil, nil, &event.PullRequest.Title, nil, nil)
 			publishGitHubSyncMqtt(taskUUIDStr, link.ProjectId.String(), "pr_opened", nil)
 			trigger := "pr_opened"
@@ -1068,9 +1086,11 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 			}
 			applyAutomationRules(ctx, link, taskUUIDStr, trigger)
 			helpers.MessageLogs.InfoLog.Printf("Linked PR #%d to task %s via branch %s", event.PullRequest.Number, taskUUIDStr, event.PullRequest.Head.Ref)
-			emitPRReview(taskUUIDStr)
-		} else if link.AutoCreateTasks {
-			// Auto-create a task for the PR if no existing task is found
+			emitPRReview(link, taskUUIDStr)
+		} else if link := linkSyncing(links, makesPRTasks); link != nil {
+			// Auto-create a task for the PR if no existing task is found, in the
+			// project of the first link (the oldest) that syncs the repository's
+			// pull requests and makes tasks of new ones.
 			userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, link.CreatedBy.String())
 			if err != nil || userDgraphInfo == nil {
 				helpers.LogErrorWithContext(ctx, "business/handlePullRequestEvent Failed to get user dgraph info for auto-create: %v", err)
@@ -1104,7 +1124,7 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 							helpers.LogErrorWithContext(ctx, "business/handlePullRequestEvent Failed to update PR state on auto-created task: %v", err)
 							markInboundSyncFailed(ctx, taskUUID, "GitHub PR state sync failed")
 						}
-						go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "pr_opened",
+						_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "pr_opened",
 							&event.PullRequest.User.Login, nil, nil, &event.PullRequest.Title, nil, nil)
 						publishGitHubSyncMqtt(taskUUID.String(), link.ProjectId.String(), "pr_opened", map[string]interface{}{
 							"pr_state":    prState,
@@ -1117,7 +1137,7 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 						}
 						applyAutomationRules(ctx, link, taskUUID.String(), trigger)
 						helpers.MessageLogs.InfoLog.Printf("Auto-created task %s for opened PR #%d", taskUUID.String(), event.PullRequest.Number)
-						emitPRReview(taskUUID.String())
+						emitPRReview(link, taskUUID.String())
 					}
 				}
 			}
@@ -1171,7 +1191,7 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 				helpers.LogErrorWithContext(ctx, "business/handlePullRequestEvent Failed to update PR state for close: %v", err)
 				markInboundSyncFailed(ctx, taskUUID, "GitHub PR close sync failed")
 			}
-			go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, activityType,
+			_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, activityType,
 				&event.PullRequest.User.Login, nil, nil, &event.PullRequest.Title, nil, nil)
 			publishGitHubSyncMqtt(taskUUIDStr, link.ProjectId.String(), activityType, map[string]interface{}{
 				"pr_state":    prState,
@@ -1393,8 +1413,11 @@ func handleIssueCommentEvent(ctx context.Context, body []byte) error {
 		return fmt.Errorf("failed to parse issue comment event: %v", err)
 	}
 
-	link, err := lookupGitHubLinkByRepo(ctx, event.Repository.Owner.Login, event.Repository.Name)
-	if err != nil || link == nil || (!link.SyncIssues && !link.SyncPRs) {
+	links, err := repositoryLinks(ctx, event.Repository.Owner.Login, event.Repository.Name)
+	if err != nil {
+		return fmt.Errorf("couldn't read the links to %s: %w", event.Repository.FullName, err)
+	}
+	if linkSyncing(links, syncsIssuesOrPRs) == nil {
 		return nil
 	}
 
@@ -1410,20 +1433,21 @@ func handleIssueCommentEvent(ctx context.Context, body []byte) error {
 	// agent/app comment can't self-drive.
 	dispatchAgentPRCommentIfAny(ctx, body, event.Repository.Owner.Login, event.Repository.Name, event.Issue.Number)
 
-	taskUUIDStr, err := taskDomain.FindTaskUUIDByGitHubIssueURL(ctx, event.Issue.HTMLURL)
-	if err != nil || taskUUIDStr == "" {
-		prURL := fmt.Sprintf("https://github.com/%s/%s/pull/%d", event.Repository.Owner.Login, event.Repository.Name, event.Issue.Number)
-		taskUUIDStr, _ = taskDomain.FindTaskUUIDByPRURL(ctx, prURL)
-		if taskUUIDStr == "" {
-			helpers.MessageLogs.InfoLog.Printf("No task found for issue/PR #%d in repo %s/%s", event.Issue.Number, event.Repository.Owner.Login, event.Repository.Name)
-			return nil
-		}
-	}
-
+	// The task linked to the issue, else to the pull request of that number.
 	// The task's own project's link decides whether its comments sync, not
-	// whichever project's link to the repository was looked up above.
-	taskUUID, _, ok := eventTask(ctx, taskUUIDStr, event.Repository.Owner.Login, event.Repository.Name, syncsIssuesOrPRs)
+	// another project's link to the repository.
+	owner, repo := event.Repository.Owner.Login, event.Repository.Name
+	taskUUIDStr, taskUUID, _, ok := leadTask(ctx, owner, repo, syncsIssuesOrPRs,
+		func() string {
+			taskUUIDStr, _ := taskDomain.FindTaskUUIDByGitHubIssueURL(ctx, event.Issue.HTMLURL)
+			return taskUUIDStr
+		},
+		func() string {
+			taskUUIDStr, _ := taskDomain.FindTaskUUIDByPRURL(ctx, fmt.Sprintf("https://github.com/%s/%s/pull/%d", owner, repo, event.Issue.Number))
+			return taskUUIDStr
+		})
 	if !ok {
+		helpers.MessageLogs.InfoLog.Printf("No task of a project syncing %s/%s found for issue/PR #%d", owner, repo, event.Issue.Number)
 		return nil
 	}
 
@@ -1521,7 +1545,7 @@ func handleIssueCommentCreated(ctx context.Context, event struct {
 		}
 	}
 
-	go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "comment",
+	_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "comment",
 		&event.Comment.User.Login, userDgraphInfo.ProfileKey, &userDgraphInfo.EmailID, nil, &event.Comment.Body, nil)
 
 	if dgraphTaskInfo.Project != nil {
@@ -1704,39 +1728,96 @@ func handleCreateEvent(ctx context.Context, body []byte) error {
 		return nil
 	}
 
-	link, err := lookupGitHubLinkByRepo(ctx, event.Repository.Owner.Login, event.Repository.Name)
-	if err != nil || link == nil || !link.SyncPRs {
+	links, err := repositoryLinks(ctx, event.Repository.Owner.Login, event.Repository.Name)
+	if err != nil {
+		return fmt.Errorf("couldn't read the links to %s: %w", event.Repository.FullName, err)
+	}
+	if linkSyncing(links, syncsPRs) == nil {
 		return nil
 	}
 
 	branchName := strings.TrimPrefix(event.Ref, "refs/heads/")
 
-	// 1. Try to find an existing task already linked to this branch
-	taskUUIDStr, err := taskDomain.FindTaskUUIDByGitHubBranch(ctx, branchName)
+	// The task already on this branch in a project linking this repository,
+	// else the task whose id the branch's name carries.
+	owner, repo := event.Repository.Owner.Login, event.Repository.Name
+	taskUUIDStr, taskUUID, own, ok := leadTask(ctx, owner, repo, syncsPRs,
+		onBranch(ctx, owner, repo, branchName),
+		func() string { return findTaskUUIDInText(ctx, branchName) })
+	if !ok {
+		helpers.MessageLogs.InfoLog.Printf("New branch %s on %s: it names no task of a project syncing it", branchName, event.Repository.FullName)
+		return nil
+	}
+	if err := taskDomain.SetGitHubBranchOnTaskByTaskID(ctx, branchName, taskUUID); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/handleCreateEvent Failed to set branch on task %s: %v", taskUUIDStr, err)
+		return nil
+	}
+	helpers.MessageLogs.InfoLog.Printf("Linked new branch %s to task %s in project %s", branchName, taskUUIDStr, own.ProjectId.String())
+	publishGitHubSyncMqtt(taskUUIDStr, own.ProjectId.String(), "branch_created", map[string]interface{}{
+		"branch": branchName,
+	})
+	return nil
+}
+
+// handleDeleteEvent takes a branch deleted on GitHub off the tasks that carry
+// it: those carrying its name in a project whose link to the repository syncs
+// pull requests, unless a task's pull request is in another repository, where
+// its branch is. The pull request stays linked, as it outlives its branch,
+// merged or closed. Left on, the gone branch claimed any later branch of its
+// name (onBranch), and a pull request opened from the task named it as head.
+func handleDeleteEvent(ctx context.Context, body []byte) error {
+	var event struct {
+		Ref        string `json:"ref"`
+		RefType    string `json:"ref_type"`
+		Repository struct {
+			FullName string `json:"full_name"`
+			Owner    struct {
+				Login string `json:"login"`
+			} `json:"owner"`
+			Name string `json:"name"`
+		} `json:"repository"`
+	}
+	if err := json.Unmarshal(body, &event); err != nil {
+		return fmt.Errorf("failed to parse delete event: %v", err)
+	}
+	if event.RefType != "branch" {
+		return nil
+	}
+
+	owner, repo := event.Repository.Owner.Login, event.Repository.Name
+	links, err := repositoryLinks(ctx, owner, repo)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/handleCreateEvent Failed to find task by branch %s: %v", branchName, err)
+		return fmt.Errorf("couldn't read the links to %s: %w", event.Repository.FullName, err)
+	}
+	if linkSyncing(links, syncsPRs) == nil {
+		return nil
 	}
 
-	// 2. If no direct match, try extracting a task UUID from the branch name
-	if taskUUIDStr == "" {
-		taskUUIDStr = findTaskUUIDInText(ctx, branchName)
+	branch := strings.TrimPrefix(event.Ref, "refs/heads/")
+	carrying, err := githubLinkModel.TasksOnBranch(ctx, owner, repo, branch)
+	if err != nil {
+		return fmt.Errorf("couldn't read the tasks on branch %s of %s: %w", branch, event.Repository.FullName, err)
 	}
-
-	if taskUUIDStr != "" {
-		if taskUUID, own, ok := eventTask(ctx, taskUUIDStr, event.Repository.Owner.Login, event.Repository.Name, syncsPRs); ok {
-			if err := taskDomain.SetGitHubBranchOnTaskByTaskID(ctx, branchName, taskUUID); err != nil {
-				helpers.LogErrorWithContext(ctx, "business/handleCreateEvent Failed to set branch on task %s: %v", taskUUIDStr, err)
-			} else {
-				helpers.MessageLogs.InfoLog.Printf("Linked new branch %s to task %s in project %s", branchName, taskUUIDStr, own.ProjectId.String())
-				publishGitHubSyncMqtt(taskUUIDStr, own.ProjectId.String(), "branch_created", map[string]interface{}{
-					"branch": branchName,
-				})
+	var gone []uuid.UUID
+	for _, task := range carrying {
+		if task.PRURL != "" {
+			prOwner, prRepo, _, err := ExtractGitHubIssueInfo(task.PRURL)
+			if err == nil && !(strings.EqualFold(prOwner, owner) && strings.EqualFold(prRepo, repo)) {
+				continue
 			}
 		}
-	} else {
-		helpers.MessageLogs.InfoLog.Printf("New branch %s on %s — no matching task found in project %s", branchName, event.Repository.FullName, link.ProjectId.String())
+		gone = append(gone, task.TaskID)
 	}
-
+	unset, err := githubLinkModel.UnsetBranch(ctx, gone, branch)
+	if err != nil {
+		return fmt.Errorf("couldn't take the deleted branch %s of %s off its tasks: %w", branch, event.Repository.FullName, err)
+	}
+	for _, task := range unset {
+		helpers.MessageLogs.InfoLog.Printf("Branch %s deleted on %s: taken off task %s", branch, event.Repository.FullName, task.TaskID)
+		publishGitHubSyncMqtt(task.TaskID.String(), task.ProjectID.String(), "branch_deleted", map[string]interface{}{
+			"branch": branch,
+		})
+	}
 	return nil
 }
 
@@ -1774,13 +1855,14 @@ func VerifyGitHubWebhookSignature(ctx context.Context, body []byte, signatureHea
 	}
 	sig := strings.TrimPrefix(signatureHeader, "sha256=")
 
+	// Each project's link to the repository has a secret of its own, and the
+	// repository's one webhook is signed with the secret of whichever link
+	// registered it last (registerGitHubWebhook), so any of them may verify it.
 	repoOwner, repoName := extractRepoFromEvent(body)
-	if repoOwner != "" && repoName != "" {
-		link, _ := lookupGitHubLinkByRepo(ctx, repoOwner, repoName)
-		if link != nil && link.WebhookSecret != nil && *link.WebhookSecret != "" {
-			if verifyHMACSignature(*link.WebhookSecret, body, sig) {
-				return true, link
-			}
+	links, _ := repositoryLinks(ctx, repoOwner, repoName)
+	for _, link := range links {
+		if link.WebhookSecret != nil && *link.WebhookSecret != "" && verifyHMACSignature(*link.WebhookSecret, body, sig) {
+			return true, link
 		}
 	}
 
@@ -1833,7 +1915,10 @@ func registerGitHubWebhook(link *githubLinkModel.GitHubLink, secret string) {
 
 	webhookURL := getGitHubWebhookBaseURL() + "/integration/github/webhook"
 
-	desiredEvents := []string{"issues", "pull_request", "push", "issue_comment", "create", "pull_request_review", "check_run"}
+	// What the webhook sends, each event HandleGitHubWebhookEvent handles. A
+	// webhook registered before one was added doesn't send it until it is
+	// registered again (StartWebhookRefresh does at each start).
+	desiredEvents := []string{"issues", "pull_request", "push", "issue_comment", "create", "delete", "pull_request_review", "check_run"}
 
 	// Idempotency: check if our webhook already exists
 	listURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/hooks?per_page=100", link.RepoOwner, link.RepoName)
@@ -1919,7 +2004,7 @@ func registerGitHubWebhook(link *githubLinkModel.GitHubLink, secret string) {
 	payload := map[string]interface{}{
 		"name":   "web",
 		"active": true,
-		"events": []string{"issues", "pull_request", "push", "issue_comment", "create", "pull_request_review", "check_run"},
+		"events": desiredEvents,
 		"config": map[string]interface{}{
 			"url":          webhookURL,
 			"content_type": "json",
@@ -2107,16 +2192,30 @@ func handlePushEvent(ctx context.Context, body []byte) error {
 		return fmt.Errorf("failed to parse push event: %v", err)
 	}
 
-	link, err := lookupGitHubLinkByRepo(ctx, event.Repository.Owner.Login, event.Repository.Name)
-	if err != nil || link == nil || !link.SyncPRs {
+	links, err := repositoryLinks(ctx, event.Repository.Owner.Login, event.Repository.Name)
+	if err != nil {
+		return fmt.Errorf("couldn't read the links to %s: %w", event.Repository.FullName, err)
+	}
+	if linkSyncing(links, syncsPRs) == nil {
 		return nil
 	}
 
-	branchName := strings.TrimPrefix(event.Ref, "refs/heads/")
-	taskUUIDStr, branchErr := taskDomain.FindTaskUUIDByGitHubBranch(ctx, branchName)
-	if branchErr != nil {
-		helpers.LogErrorWithContext(ctx, "business/handlePushEvent Failed to find task by branch %s: %v", branchName, branchErr)
+	owner, repo := event.Repository.Owner.Login, event.Repository.Name
+
+	// Each commit naming a task, and each commit pushed to a task's branch, is
+	// a line of the task's history. A push lists up to 2,048 commits: the
+	// lines are written together, in line, before the delivery is recorded as
+	// done (a goroutine and an insert apiece raced for the pool's connections,
+	// and one that failed was lost after the delivery counted as handled), and
+	// each task's project is told once, not once per commit.
+	var history []githubTaskActivityModel.GitHubTaskActivity
+	line := func(task uuid.UUID, kind string, message, address *string) {
+		history = append(history, githubTaskActivityModel.GitHubTaskActivity{TaskID: task, ActivityType: kind,
+			GitHubLogin: &event.Sender.Login, Title: message, Body: address})
 	}
+	type tell struct{ task, project, kind string }
+	var tells []tell
+	told := map[tell]bool{}
 
 	// Magic words: parse commit messages for task references
 	for _, commit := range event.Commits {
@@ -2125,29 +2224,36 @@ func handlePushEvent(ctx context.Context, body []byte) error {
 			if ref.TaskUUID == "" {
 				continue
 			}
-			refTaskUUID, own, ok := eventTask(ctx, ref.TaskUUID, event.Repository.Owner.Login, event.Repository.Name, syncsPRs)
+			refTaskUUID, own, ok := eventTask(ctx, ref.TaskUUID, owner, repo, syncsPRs)
 			if !ok {
 				continue
 			}
-			go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, refTaskUUID, "commit_linked",
-				&event.Sender.Login, nil, nil, &commit.Message, &commit.URL, nil)
+			line(refTaskUUID, "commit_linked", &commit.Message, &commit.URL)
 			if ref.Action == "close" || ref.Action == "fix" {
 				applyAutomationRules(ctx, own, ref.TaskUUID, "commit_linked")
 			}
-			publishGitHubSyncMqtt(ref.TaskUUID, own.ProjectId.String(), "commit_linked", nil)
-		}
-	}
-
-	if taskUUIDStr != "" {
-		if taskUUID, own, ok := eventTask(ctx, taskUUIDStr, event.Repository.Owner.Login, event.Repository.Name, syncsPRs); ok {
-			for _, commit := range event.Commits {
-				go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "commit_pushed",
-					&event.Sender.Login, nil, nil, &commit.Message, &commit.URL, nil)
+			if t := (tell{ref.TaskUUID, own.ProjectId.String(), "commit_linked"}); !told[t] {
+				told[t] = true
+				tells = append(tells, t)
 			}
-			publishGitHubSyncMqtt(taskUUIDStr, own.ProjectId.String(), "commit_pushed", nil)
 		}
 	}
 
+	// The task on the pushed branch in a project linking this repository.
+	branchName := strings.TrimPrefix(event.Ref, "refs/heads/")
+	if taskUUIDStr, taskUUID, own, ok := leadTask(ctx, owner, repo, syncsPRs, onBranch(ctx, owner, repo, branchName)); ok {
+		for _, commit := range event.Commits {
+			line(taskUUID, "commit_pushed", &commit.Message, &commit.URL)
+		}
+		tells = append(tells, tell{taskUUIDStr, own.ProjectId.String(), "commit_pushed"})
+	}
+
+	if err := githubTaskActivityDomain.CreateGitHubTaskActivities(ctx, history); err != nil {
+		return fmt.Errorf("couldn't write the push's commits into its tasks' history: %w", err)
+	}
+	for _, t := range tells {
+		publishGitHubSyncMqtt(t.task, t.project, t.kind, nil)
+	}
 	return nil
 }
 
@@ -2230,8 +2336,12 @@ func handlePullRequestReviewEvent(ctx context.Context, body []byte) error {
 		return nil
 	}
 
-	link, err := lookupGitHubLinkByRepo(ctx, event.Repository.Owner.Login, event.Repository.Name)
-	if err != nil || link == nil || !link.SyncPRs {
+	links, err := repositoryLinks(ctx, event.Repository.Owner.Login, event.Repository.Name)
+	if err != nil {
+		return fmt.Errorf("couldn't read the links to %s: %w", event.Repository.FullName, err)
+	}
+	syncing := linkSyncing(links, syncsPRs)
+	if syncing == nil {
 		return nil
 	}
 
@@ -2240,7 +2350,8 @@ func handlePullRequestReviewEvent(ctx context.Context, body []byte) error {
 	// lands — post an update, ping the author, etc. Decoupled via the bus so
 	// this package never imports the AI/agent packages (loop-safe: agent writes
 	// are workflow-tagged and never re-enter here). Fires for any review on a
-	// linked repo, whether or not the PR is tied to a OneCamp task.
+	// repo some project's link syncs pull requests of, whether or not the PR is
+	// tied to a OneCamp task; the place it names is the first such link's project.
 	webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "github.pr.review_submitted", map[string]interface{}{
 		"owner":        event.Repository.Owner.Login,
 		"repo":         event.Repository.Name,
@@ -2249,21 +2360,21 @@ func handlePullRequestReviewEvent(ctx context.Context, body []byte) error {
 		"review_state": strings.ToUpper(event.Review.State),
 		"reviewer":     event.Review.User.Login,
 		"body":         event.Review.Body,
-		"project_id":   link.ProjectId.String(),
+		"project_id":   syncing.ProjectId.String(),
 	})
 
-	taskUUIDStr, err := taskDomain.FindTaskUUIDByGitHubBranch(ctx, event.PullRequest.Head.Ref)
-	if err != nil || taskUUIDStr == "" {
-		taskUUIDStr, _ = taskDomain.FindTaskUUIDByPRURL(ctx, event.PullRequest.HTMLURL)
-	}
-	if taskUUIDStr == "" {
-		return nil
-	}
-	taskUUID, own, ok := eventTask(ctx, taskUUIDStr, event.Repository.Owner.Login, event.Repository.Name, syncsPRs)
+	// The task on the pull request's branch in a project linking this
+	// repository, else the task linked to the pull request.
+	owner, repo := event.Repository.Owner.Login, event.Repository.Name
+	taskUUIDStr, taskUUID, link, ok := leadTask(ctx, owner, repo, syncsPRs,
+		onBranch(ctx, owner, repo, event.PullRequest.Head.Ref),
+		func() string {
+			taskUUIDStr, _ := taskDomain.FindTaskUUIDByPRURL(ctx, event.PullRequest.HTMLURL)
+			return taskUUIDStr
+		})
 	if !ok {
 		return nil
 	}
-	link = own
 
 	// Upsert the review record
 	if err := githubPRReviewDomain.UpsertGitHubPRReview(ctx, taskUUID, event.Review.User.Login, event.Review.User.AvatarURL, event.Review.User.HTMLURL, strings.ToUpper(event.Review.State), time.Now()); err != nil {
@@ -2275,7 +2386,7 @@ func handlePullRequestReviewEvent(ctx context.Context, body []byte) error {
 	updateTaskReviewState(ctx, taskUUID)
 
 	activityType := "pr_review_" + strings.ToLower(event.Review.State)
-	go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, activityType,
+	_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, activityType,
 		&event.Review.User.Login, nil, nil, nil, nil, &event.Review.Body)
 
 	trigger := ""
@@ -2351,8 +2462,12 @@ func handleCheckRunEvent(ctx context.Context, body []byte) error {
 		return nil
 	}
 
-	link, err := lookupGitHubLinkByRepo(ctx, event.Repository.Owner.Login, event.Repository.Name)
-	if err != nil || link == nil || !link.SyncPRs {
+	links, err := repositoryLinks(ctx, event.Repository.Owner.Login, event.Repository.Name)
+	if err != nil {
+		return fmt.Errorf("couldn't read the links to %s: %w", event.Repository.FullName, err)
+	}
+	syncing := linkSyncing(links, syncsPRs)
+	if syncing == nil {
 		return nil
 	}
 
@@ -2375,23 +2490,19 @@ func handleCheckRunEvent(ctx context.Context, body []byte) error {
 	for _, pr := range event.CheckRun.PullRequests {
 		prNumbers = append(prNumbers, pr.Number)
 	}
-	maybeEmitCIConcluded(ctx, event.Repository.Owner.Login, event.Repository.Name, link.ProjectId.String(), event.CheckRun.HeadSHA, prNumbers)
+	maybeEmitCIConcluded(ctx, event.Repository.Owner.Login, event.Repository.Name, syncing.ProjectId.String(), event.CheckRun.HeadSHA, prNumbers)
 
+	owner, repo := event.Repository.Owner.Login, event.Repository.Name
 	for _, pr := range event.CheckRun.PullRequests {
-		prURL := fmt.Sprintf("https://github.com/%s/%s/pull/%d", event.Repository.Owner.Login, event.Repository.Name, pr.Number)
-		taskUUIDStr, err := taskDomain.FindTaskUUIDByPRURL(ctx, prURL)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/handleCheckRunEvent Failed to find task for PR %s: %v", prURL, err)
-			continue
-		}
-		if taskUUIDStr == "" {
-			// Fallback: try finding by branch pattern if task was linked via branch
-			taskUUIDStr, _ = taskDomain.FindTaskUUIDByGitHubBranch(ctx, fmt.Sprintf("pull/%d/head", pr.Number))
-			if taskUUIDStr == "" {
-				continue
-			}
-		}
-		taskUUID, own, ok := eventTask(ctx, taskUUIDStr, event.Repository.Owner.Login, event.Repository.Name, syncsPRs)
+		// The task linked to the pull request, else the one on its head's
+		// branch pattern in a project linking this repository.
+		prURL := fmt.Sprintf("https://github.com/%s/%s/pull/%d", owner, repo, pr.Number)
+		taskUUIDStr, taskUUID, own, ok := leadTask(ctx, owner, repo, syncsPRs,
+			func() string {
+				taskUUIDStr, _ := taskDomain.FindTaskUUIDByPRURL(ctx, prURL)
+				return taskUUIDStr
+			},
+			onBranch(ctx, owner, repo, fmt.Sprintf("pull/%d/head", pr.Number)))
 		if !ok {
 			continue
 		}
@@ -2522,10 +2633,14 @@ func CreatePullRequestForTask(ctx context.Context, taskUUID uuid.UUID, title, bo
 	Number  int    `json:"number"`
 	HTMLURL string `json:"html_url"`
 }, error) {
-	// 1. Find linked repo via project
+	// 1. Find linked repo via project. What this returns is shown to the
+	// person (the controller puts it in msg), so a read of our own records
+	// that failed is logged here with its detail and answered in their words:
+	// wrapped, it showed the store's own error text.
 	taskInfo, err := taskDomain.GetTaskProjectID(ctx, taskUUID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get task project: %w", err)
+		helpers.LogErrorWithContext(ctx, "business/GitHub/CreatePullRequestForTask task's project err: %+v", err)
+		return nil, errors.New("couldn't read the task's project, try again")
 	}
 	if taskInfo == uuid.Nil {
 		return nil, fmt.Errorf("task has no project")
@@ -2535,8 +2650,12 @@ func CreatePullRequestForTask(ctx context.Context, taskUUID uuid.UUID, title, bo
 		SELECT id, project_id, repo_owner, repo_name, installation_id, webhook_secret, sync_issues, sync_prs, auto_create_tasks, default_task_status, label_mapping, automation_rules, branch_format, created_by, created_at, updated_at, deleted_at
 		FROM github_links WHERE project_id = $1 AND deleted_at IS NULL
 	`, taskInfo)
-	if err != nil || len(links) == 0 {
-		return nil, fmt.Errorf("no linked repo for project: %w", err)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/GitHub/CreatePullRequestForTask project's repos err: %+v", err)
+		return nil, errors.New("couldn't read which repository the project is linked to, try again")
+	}
+	if len(links) == 0 {
+		return nil, fmt.Errorf("no linked repo for project")
 	}
 	link := links[0]
 

@@ -116,13 +116,13 @@ func TestASlackImportStartsOnce(t *testing.T) {
 	// Once it has ended, the failed import can be run again.
 	letGo()
 	waitFor(t, "the failed import to start again", func() bool {
-		ok, err := importRun.Start(ctx, job, []string{slackModels.StatusFailed}, func() {})
+		ok, err := startRun(ctx, job, []string{slackModels.StatusFailed}, func() {})
 		return err == nil && ok
 	})
 
 	// A late cancel: the admin cancels a running import, and a stage that was
 	// already under way writes "running" afterwards.
-	if ok, err := slackModels.StartRunning(ctx, late, []string{slackModels.StatusPlanned, slackModels.StatusFailed}); err != nil || !ok {
+	if ok, err := importModels.StartRunning(ctx, late, []string{slackModels.StatusPlanned, slackModels.StatusFailed}); err != nil || !ok {
 		t.Fatalf("start: %v %v", ok, err)
 	}
 	if err := slackBusiness.CancelImport(ctx, late); err != nil {
@@ -135,7 +135,7 @@ func TestASlackImportStartsOnce(t *testing.T) {
 	if j, err := slackModels.GetJob(ctx, late); err != nil || j.Status != slackModels.StatusCancelled {
 		t.Errorf("after a late stage write: %+v %v, want cancelled", j, err)
 	}
-	if ok, err := slackModels.StartRunning(ctx, late, []string{slackModels.StatusPlanned, slackModels.StatusFailed}); err != nil || ok {
+	if ok, err := importModels.StartRunning(ctx, late, []string{slackModels.StatusPlanned, slackModels.StatusFailed}); err != nil || ok {
 		t.Errorf("a cancelled import was started again: %v %v", ok, err)
 	}
 }
@@ -157,7 +157,7 @@ func TestARetryWaitsForTheRunToEnd(t *testing.T) {
 	// A run, cancelled, still ending.
 	ending := make(chan struct{})
 	ended := make(chan struct{})
-	if ok, err := importRun.Start(ctx, job, []string{importModels.StatusPlanned}, func() {
+	if ok, err := startRun(ctx, job, []string{importModels.StatusPlanned}, func() {
 		defer close(ended)
 		<-ending
 	}); err != nil || !ok {
@@ -220,7 +220,7 @@ func TestARollbackWaitsForTheRunToEnd(t *testing.T) {
 	letGo := importRun.HoldRunsForTest()
 	defer letGo()
 	for _, job := range []uuid.UUID{tasks, messages} {
-		if ok, err := importRun.Start(ctx, job, []string{importModels.StatusPlanned}, func() {}); err != nil || !ok {
+		if ok, err := startRun(ctx, job, []string{importModels.StatusPlanned}, func() {}); err != nil || !ok {
 			t.Fatalf("start: %v %v", ok, err)
 		}
 		if _, err := e.PG.Exec(`UPDATE import_jobs SET status = 'cancelled' WHERE id = $1`, job); err != nil {
@@ -471,7 +471,7 @@ func TestARefusedRunSavesNothing(t *testing.T) {
 		if _, err := e.PG.Exec(`UPDATE import_jobs SET options = '{"channel_prefix": "old-"}' WHERE id = $1`, c.job); err != nil {
 			t.Fatal(err)
 		}
-		if ok, err := importRun.Start(ctx, c.job, []string{importModels.StatusPlanned}, func() {}); err != nil || !ok {
+		if ok, err := startRun(ctx, c.job, []string{importModels.StatusPlanned}, func() {}); err != nil || !ok {
 			t.Fatalf("start: %v %v", ok, err)
 		}
 		if _, err := e.PG.Exec(`UPDATE import_jobs SET status = 'failed' WHERE id = $1`, c.job); err != nil {
@@ -544,7 +544,7 @@ func TestAPlanAgainWaitsForTheRunToEnd(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if ok, err := importRun.Start(ctx, c.job, []string{importModels.StatusPlanned}, func() {}); err != nil || !ok {
+		if ok, err := startRun(ctx, c.job, []string{importModels.StatusPlanned}, func() {}); err != nil || !ok {
 			t.Fatalf("start: %v %v", ok, err)
 		}
 		if _, err := e.PG.Exec(`UPDATE import_jobs SET status = 'failed' WHERE id = $1`, c.job); err != nil {
@@ -599,7 +599,7 @@ func TestARunLeaseNeverOutlivesItsRun(t *testing.T) {
 
 	// A run that panics.
 	job := e.job(t, "racesource", "Panics", "planned", "staged/panics.json")
-	if ok, err := importRun.Start(ctx, job, []string{importModels.StatusPlanned}, func() { panic("boom") }); err != nil || !ok {
+	if ok, err := startRun(ctx, job, []string{importModels.StatusPlanned}, func() { panic("boom") }); err != nil || !ok {
 		t.Fatalf("start: %v %v", ok, err)
 	}
 	waitFor(t, "the panicked run's lease to be given back", func() bool { return leaseFree(job) })
@@ -610,13 +610,13 @@ func TestARunLeaseNeverOutlivesItsRun(t *testing.T) {
 	if status != importModels.StatusFailed || msg != "panic: boom" {
 		t.Errorf("after the panic the job is %s (%q), want failed (\"panic: boom\")", status, msg)
 	}
-	if ok, err := importRun.Start(ctx, job, []string{importModels.StatusFailed}, func() {}); err != nil || !ok {
+	if ok, err := startRun(ctx, job, []string{importModels.StatusFailed}, func() {}); err != nil || !ok {
 		t.Errorf("the panicked import could not be run again: %v %v", ok, err)
 	}
 
 	// A job in none of the statuses it starts from.
 	done := e.job(t, "racesource", "Done", "completed", "staged/done.json")
-	if ok, err := importRun.Start(ctx, done, []string{importModels.StatusPlanned}, func() { t.Error("a completed import ran") }); err != nil || ok {
+	if ok, err := startRun(ctx, done, []string{importModels.StatusPlanned}, func() { t.Error("a completed import ran") }); err != nil || ok {
 		t.Errorf("a completed import started: %v %v", ok, err)
 	}
 	if !leaseFree(done) {
@@ -627,7 +627,7 @@ func TestARunLeaseNeverOutlivesItsRun(t *testing.T) {
 	gone, cancel := context.WithCancel(ctx)
 	cancel()
 	errs := e.job(t, "racesource", "Errs", "planned", "staged/errs.json")
-	if ok, err := importRun.Start(gone, errs, []string{importModels.StatusPlanned}, func() { t.Error("an import ran after its start failed") }); err == nil || ok {
+	if ok, err := startRun(gone, errs, []string{importModels.StatusPlanned}, func() { t.Error("an import ran after its start failed") }); err == nil || ok {
 		t.Errorf("a start without its request: %v %v, want an error", ok, err)
 	}
 	if !leaseFree(errs) {
@@ -654,4 +654,14 @@ func TestARunLeaseNeverOutlivesItsRun(t *testing.T) {
 	}
 	close(ending)
 	waitFor(t, "the ended run's lease to be given back", func() bool { return leaseFree(held) })
+}
+
+// startRun takes the job's lease and starts the run under it, as the import
+// controllers do (importRun.Take, then Lease.Start).
+func startRun(ctx context.Context, job uuid.UUID, from []string, run func()) (bool, error) {
+	l, err := importRun.Take(job)
+	if err != nil {
+		return false, err
+	}
+	return l.Start(ctx, from, run)
 }

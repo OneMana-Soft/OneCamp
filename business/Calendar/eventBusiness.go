@@ -3,15 +3,18 @@ package Calendar
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Calendar"
 	integrationBusiness "github.com/akashc777/OneCamp/business/Integration"
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	domain "github.com/akashc777/OneCamp/domain/Calendar"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -204,7 +207,7 @@ func diffParticipants(existing *dgraphStruct.DgraphEvent, wanted []string) (add 
 
 // UpdateEvent changes an event, for its creator. Participants, when the
 // request names them, are the whole new guest list, an empty one included,
-// and whoever it no longer names is taken off. A request without
+// and whoever it no longer names is taken off and told. A request without
 // participants leaves the guests as they are.
 func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.CreateOrUpdateEventInput, userInfo *model.UserInfo) error {
 	currentTime := time.Now()
@@ -301,6 +304,18 @@ func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.Cre
 		return err
 	}
 
+	// Tell whoever was taken off; never the creator, who did it.
+	var told []string
+	for _, p := range removed {
+		if p.Uuid != me {
+			told = append(told, p.Uuid)
+		}
+	}
+	if len(told) > 0 {
+		actor, event := userInfo.UserDgraphInfo, *existingEvent
+		helpers.GoSafe(func() { tellRemovedGuests(context.WithoutCancel(ctx), &actor, &event, told, startTime) })
+	}
+
 	// Google's copy. The guest list goes only when the request named one, and
 	// then as a whole, an empty one included.
 	if existingEvent.GoogleCalendarEventId != nil && *existingEvent.GoogleCalendarEventId != "" {
@@ -321,6 +336,40 @@ func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.Cre
 
 	bookingEventUpdated(ctx, existingEvent, startTime, endTime)
 	return nil
+}
+
+// eventUninvited is the notice kind for a guest taken off an event.
+const eventUninvited = "event.uninvited"
+
+// tellNotice tells people; swapped in tests.
+var tellNotice = notificationBusiness.Tell
+
+// tellRemovedGuests tells the people taken off an event, in their inbox and
+// by a push that opens their calendar: who took them off and when it was,
+// never its title. A notice names a thing only for someone who can still open
+// it, and they no longer can.
+func tellRemovedGuests(ctx context.Context, actor *dgraphStruct.DgraphUser, event *dgraphStruct.DgraphEvent, people []string, start time.Time) {
+	// Told off the request, so bounded as TellBookingOwner is: a push service
+	// that doesn't answer holds nothing for long, shutdown included.
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	recipients := make([]notificationBusiness.NoticeRecipient, 0, len(people))
+	for _, id := range people {
+		recipients = append(recipients, notificationBusiness.NoticeRecipient{UserUUID: id, Reason: "subject"})
+	}
+	tellNotice(ctx, notificationBusiness.Notice{
+		Kind:         eventUninvited,
+		ResourceKind: "event",
+		ResourceUUID: event.Uuid,
+		Actor:        actor,
+		Data:         map[string]string{"start": start.UTC().Format(time.RFC3339)},
+		// Each removal is told once, and a later one again.
+		DedupKey: eventUninvited + "|" + event.Uuid + "|" + strconv.FormatInt(time.Now().UnixNano(), 10),
+		Title:    actor.DisplayName() + " took you off an event",
+		Path:     "/app/calendar",
+		// The calendar itself: the event is no longer theirs to open.
+		Push: &notificationBusiness.Push{Type: firebaseInit.FIREBASE_PUSH_DATA_TYPE_CALENDAR},
+	}, recipients)
 }
 
 // ErrNotEventCreator is someone other than an event's creator trying to

@@ -46,6 +46,9 @@ func RegisterToolExecutors() {
 	ai.RegisterExecutor("create_doc", executeCreateDoc)
 	ai.RegisterExecutor("read_doc", executeReadDoc)
 	ai.RegisterExecutor("append_to_doc", executeAppendToDoc)
+	ai.RegisterExecutor("doc_insert_after", executeDocInsertAfter)
+	ai.RegisterExecutor("doc_replace_section", executeDocReplaceSection)
+	ai.RegisterExecutor("doc_suggest", executeDocSuggest)
 	ai.RegisterExecutor("find_people", executeFindPeople)
 	ai.RegisterExecutor("read_meeting_transcript", executeReadMeetingTranscript)
 	ai.RegisterExecutor("send_message", executeSendMessage)
@@ -58,6 +61,7 @@ func RegisterToolExecutors() {
 	ai.RegisterExecutor("web_search", executeWebSearch)
 	ai.RegisterExecutor("run_analysis", executeRunAnalysis)
 	RegisterSearchExecutors()
+	ai.RegisterExecutor("list_docs", executeListDocs)
 
 	// Tables (first-class structured data): list / read / create row / update row.
 	registerTableExecutors()
@@ -177,6 +181,7 @@ func executeSendDM(ctx context.Context, action ai.ProposedAction, userUUID strin
 		// and otherwise the model is told who matched, to ask or to choose.
 		cleanUname := strings.TrimPrefix(strings.TrimSpace(toUUIDStr), "@")
 		foundUsers, uErr := domainUser.GetUserListWithSearchText(ctx, userUUID, cleanUname)
+		foundUsers = demoReachable(ctx, userUUID, foundUsers)
 		if uErr != nil || len(foundUsers) == 0 {
 			return "", nil, fmt.Errorf("could not find user '%s' in workspace", toUUIDStr)
 		}
@@ -212,6 +217,9 @@ func executeSendDM(ctx context.Context, action ai.ProposedAction, userUUID strin
 	if e := principalBusiness.CanReceiveDirectMessage(sendToDgraphInfo); !e.Allowed {
 		return "", nil, fmt.Errorf("%s", e.Reason)
 	}
+	if err := demoRefuses(ctx, userUUID, sendToDgraphInfo); err != nil {
+		return "", nil, err
+	}
 
 	// See executeSendMessage: rendered, not wrapped, so newlines survive.
 	htmlText := MarkAIGenerated(modelTextToHTML(text))
@@ -223,6 +231,9 @@ func executeSendDM(ctx context.Context, action ai.ProposedAction, userUUID strin
 	mentionsDgraphUsersList, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, mentions)
 	if len(mentionsDgraphUsersList) != len(mentions) {
 		return "", nil, fmt.Errorf("invalid users in mentions")
+	}
+	if err := demoRefuses(ctx, userUUID, mentionsDgraphUsersList...); err != nil {
+		return "", nil, err
 	}
 
 	// Prepare chat info
@@ -288,6 +299,9 @@ func executeSendGroupChat(ctx context.Context, action ai.ProposedAction, userUUI
 	mentionsDgraphUsersList, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, mentions)
 	if len(mentionsDgraphUsersList) != len(mentions) {
 		return "", nil, fmt.Errorf("invalid users in mentions")
+	}
+	if err := demoRefuses(ctx, userUUID, mentionsDgraphUsersList...); err != nil {
+		return "", nil, err
 	}
 
 	// Prepare chat info
@@ -422,11 +436,15 @@ func resolveAssigneeRef(ctx context.Context, actingUserUUID, ref string, strict 
 		if uerr != nil || u == nil {
 			return nil, fmt.Errorf("could not find the user to assign")
 		}
+		if err := demoRefuses(ctx, actingUserUUID, u); err != nil {
+			return nil, err
+		}
 		return u, nil
 	}
 	// Not a UUID: resolve by name, scoped to the acting user's workspace.
 	cleanName := strings.TrimPrefix(ref, "@")
 	found, err := domainUser.GetUserListWithSearchText(ctx, actingUserUUID, cleanName)
+	found = demoReachable(ctx, actingUserUUID, found)
 	if err != nil || len(found) == 0 {
 		return nil, fmt.Errorf("could not find a user matching %q to assign", ref)
 	}
@@ -680,7 +698,7 @@ func executeCreateDoc(ctx context.Context, action ai.ProposedAction, userUUID st
 	}
 
 	// Look up user's DGraph info
-	dgraphUser, err := getDgraphUserForExecutor(ctx, userUUID)
+	dgraphUser, err := createDocUser(ctx, userUUID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -690,35 +708,44 @@ func executeCreateDoc(ctx context.Context, action ai.ProposedAction, userUUID st
 		DocPrivate: isPrivate,
 	}
 
-	doc, err := docBusiness.CreateDoc(ctx, dgraphUser, inputDoc)
+	doc, err := createDocAs(ctx, dgraphUser, inputDoc)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create doc: %w", err)
 	}
 	if doc == nil {
 		return "", nil, fmt.Errorf("doc creation returned nil result")
 	}
+	// The new doc's id goes back to the model, so it can add to the doc it made
+	// (doc_insert_after, append_to_doc) without searching for it.
+	meta := map[string]string{"doc_uuid": doc.Uuid}
+	made := fmt.Sprintf("Created the doc \"%s\" (doc_uuid %s).", title, doc.Uuid)
 
-	// Persist the body, if any. Failure here is non-fatal: the (titled) doc
-	// already exists, so we surface a softer message rather than erroring out.
+	// The body, if any, is the doc's first body, seeded into its live copy
+	// (business/Doc SeedBodyLive) and credited to the person and the agent
+	// acting for them. Failure here is not fatal: the titled doc exists.
 	if strings.TrimSpace(body) != "" {
-		html := docMarkdownToHTML(body)
-		if html != "" {
-			updateErr := docBusiness.UpdateDoc(ctx, &docAdapter.InputUpdateDoc{
-				DocId: doc.Uuid,
-				Body:  &html,
-			})
-			if updateErr != nil {
-				helpers.LogErrorWithContext(ctx, "executeCreateDoc: created doc %s but failed to set body: %v", doc.Uuid, updateErr)
-				return fmt.Sprintf("✅ Document \"%s\" created. I could not write the body just now - you can add it in the doc.", title), nil, nil
+		if html := DocHTMLFromMarkdown(body); html != "" {
+			if _, err := seedDocBody(ctx, doc.Uuid, html, docEditByOf(ctx, userUUID)); err != nil {
+				helpers.LogErrorWithContext(ctx, "executeCreateDoc: created doc %s but failed to set body: %v", doc.Uuid, err)
+				return made + " I couldn't write its body just now; add it in the doc.", meta, nil
 			}
 		}
 	}
-
-	return fmt.Sprintf("✅ Document \"%s\" created successfully", title), nil, nil
+	return made, meta, nil
 }
 
 // saveLater keeps a Later item (business/SavedItem.Save); a seam for tests.
 var saveLater = savedItemBusiness.Save
+
+// createDocUser is the person a doc is made for: a seam for tests.
+var createDocUser = getDgraphUserForExecutor
+
+// createDocAs makes a doc owned by a person: a seam for tests.
+var createDocAs = docBusiness.CreateDoc
+
+// seedDocBody writes a new doc's first body into its live copy, never under a
+// copy someone may already have open: a seam for tests.
+var seedDocBody = docBusiness.SeedBodyLive
 
 // executeSetReminder sets a reminder: a Later item due at the time, which
 // comes back by itself then (it moves to the top of Later, an open app shows

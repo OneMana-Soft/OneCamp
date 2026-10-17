@@ -74,7 +74,7 @@ func DeleteTaskComment(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph comment info",
+			"msg": "Couldn't delete the comment. Try again.",
 			"err": err,
 		})
 		return
@@ -318,7 +318,7 @@ func CreateTaskComment(w http.ResponseWriter, r *http.Request) {
 			"controllers/CreateTaskComment Failed to get dgraph task info err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph task info err",
+			"msg": "Couldn't post the comment. Try again.",
 			"err": err,
 		})
 		return
@@ -421,7 +421,7 @@ func CreateTask(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get project dgraph info",
+			"msg": "Couldn't create the task. Try again.",
 			"err": err,
 		})
 		return
@@ -468,7 +468,7 @@ func CreateTask(w http.ResponseWriter, r *http.Request) {
 				err)
 
 			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "Failed to get asignee dgraph info",
+				"msg": "Couldn't find the person to assign it to.",
 				"err": err,
 			})
 			return
@@ -603,7 +603,7 @@ func AddAttachmentsToTask(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get task dgraph info",
+			"msg": "Couldn't attach the files. Try again.",
 			"err": err,
 		})
 		return
@@ -693,7 +693,7 @@ func RemoveAttachmentFromTask(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get project dgraph info",
+			"msg": "Couldn't remove the file. Try again.",
 			"err": err,
 		})
 		return
@@ -836,7 +836,7 @@ func UpdateTaskName(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get task dgraph info",
+			"msg": "Couldn't rename the task. Try again.",
 			"err": err,
 		})
 		return
@@ -864,7 +864,7 @@ func UpdateTaskName(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to update task name in dgraph",
+			"msg": "Couldn't rename the task. Try again.",
 			"err": err,
 		})
 		return
@@ -927,7 +927,7 @@ func UpdateTaskDesc(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get task dgraph info",
+			"msg": "Couldn't save the description. Try again.",
 			"err": err,
 		})
 		return
@@ -991,7 +991,7 @@ func UpdateTaskDesc(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to update task desc in dgraph",
+			"msg": "Couldn't save the description. Try again.",
 			"err": err,
 		})
 		return
@@ -1067,7 +1067,7 @@ func UpdateTaskAssignee(w http.ResponseWriter, r *http.Request) {
 				"controllers/UpdateTaskAssignee Failed to get task info from dgraph err: %+v",
 				err)
 			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "Failed to get task info from dgraph",
+				"msg": "Couldn't reassign the task. Try again.",
 				"err": err,
 			})
 			return
@@ -1082,7 +1082,7 @@ func UpdateTaskAssignee(w http.ResponseWriter, r *http.Request) {
 			"controllers/UpdateTaskAssignee Failed to get task info from dgraph err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get task info from dgraph",
+			"msg": "Couldn't reassign the task. Try again.",
 			"err": err,
 		})
 		return
@@ -1115,7 +1115,7 @@ func UpdateTaskAssignee(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to update task desc in dgraph",
+			"msg": "Couldn't reassign the task. Try again.",
 			"err": err,
 		})
 		return
@@ -1178,7 +1178,7 @@ func UpdateTaskDueDate(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get task dgraph info",
+			"msg": "Couldn't change the due date. Try again.",
 			"err": err,
 		})
 		return
@@ -1284,7 +1284,7 @@ func UpdateTaskStartDate(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get task dgraph info",
+			"msg": "Couldn't change the start date. Try again.",
 			"err": err,
 		})
 		return
@@ -1435,7 +1435,7 @@ func DeleteTaskCommentReaction(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": " Failed to get dgraph comment info",
+			"msg": "Couldn't remove the reaction. Try again.",
 			"err": err,
 		})
 		return
@@ -1524,7 +1524,7 @@ func UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get project dgraph info",
+			"msg": "Couldn't change the status. Try again.",
 			"err": err,
 		})
 		return
@@ -1621,7 +1621,7 @@ func UpdateTaskPriority(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get task dgraph info",
+			"msg": "Couldn't change the priority. Try again.",
 			"err": err,
 		})
 		return
@@ -1728,7 +1728,7 @@ func UpdateTaskLabel(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get project dgraph info",
+			"msg": "Couldn't change the tags. Try again.",
 			"err": err,
 		})
 		return
@@ -1791,7 +1791,7 @@ func CreateSubTask(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get project dgraph info",
+			"msg": "Couldn't add the subtask. Try again.",
 			"err": err,
 		})
 		return
@@ -1821,7 +1821,7 @@ func CreateSubTask(w http.ResponseWriter, r *http.Request) {
 				err)
 
 			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "Failed to get asignee dgraph info",
+				"msg": "Couldn't find the person to assign it to.",
 				"err": err,
 			})
 			return
@@ -1922,7 +1922,7 @@ func GetTaskActivityList(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get task dgraph info",
+			"msg": "Couldn't load the task's activity.",
 			"err": err,
 		})
 		return
@@ -1981,7 +1981,7 @@ func GetTaskActivityInfo(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get task dgraph info",
+			"msg": "Couldn't load that activity.",
 			"err": err,
 		})
 		return
@@ -2037,7 +2037,7 @@ func ArchiveTask(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get project dgraph info",
+			"msg": "Couldn't archive the task. Try again.",
 			"err": err,
 		})
 		return
@@ -2107,7 +2107,7 @@ func UnArchiveTask(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get project dgraph info",
+			"msg": "Couldn't restore the task. Try again.",
 			"err": err,
 		})
 		return
@@ -2673,45 +2673,71 @@ func BulkLinkTasksToGitHub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var successCount int
-	var errors []string
-
-	for _, link := range input.Links {
+	// First each task the person may change, and its issue's repository; a
+	// refusal keeps its link's place in the answer.
+	type checked struct {
+		at     int
+		ask    githubBusiness.TaskRepo
+		number int
+	}
+	refusals := make([]string, len(input.Links))
+	var mayLink []checked
+	for i, link := range input.Links {
 		taskUUID, err := uuid.Parse(link.TaskUUID)
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("Invalid task UUID: %s", link.TaskUUID))
+			refusals[i] = fmt.Sprintf("Invalid task UUID: %s", link.TaskUUID)
 			continue
 		}
 
 		if link.IssueNumber <= 0 || link.IssueURL == "" {
-			errors = append(errors, fmt.Sprintf("Invalid issue data for task %s", link.TaskUUID))
+			refusals[i] = fmt.Sprintf("Invalid issue data for task %s", link.TaskUUID)
 			continue
 		}
 		if refusal := changeRefusal(ctx, taskUUID, userInfo.UserDgraphInfo.Uid); refusal != "" {
-			errors = append(errors, refusal)
+			refusals[i] = refusal
 			continue
 		}
 		owner, repo, number, err := githubBusiness.ExtractGitHubIssueInfo(link.IssueURL)
 		if err != nil {
-			errors = append(errors, fmt.Sprintf("Invalid issue data for task %s", link.TaskUUID))
+			refusals[i] = fmt.Sprintf("Invalid issue data for task %s", link.TaskUUID)
 			continue
 		}
-		repoLink, err := githubBusiness.TaskRepoLink(ctx, taskUUID, owner, repo)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("Couldn't check the repositories of task %s's project. Try again.", link.TaskUUID))
-			continue
-		}
-		if repoLink == nil {
-			errors = append(errors, fmt.Sprintf("The issue for task %s isn't in a repository linked to its project", link.TaskUUID))
-			continue
-		}
+		mayLink = append(mayLink, checked{at: i, ask: githubBusiness.TaskRepo{Task: taskUUID, Owner: owner, Name: repo}, number: number})
+	}
 
-		// The number stored is the address's own, so the two always agree.
-		if err := taskDomain.SetGitHubIssueFieldsOnTask(ctx, taskUUID, number, link.IssueURL); err != nil {
-			errors = append(errors, fmt.Sprintf("Couldn't link task %s. Try again.", link.TaskUUID))
-			continue
+	// Then whether each issue is in a repository its task's own project links,
+	// asked for all of those tasks at once: per task it was two reads apiece.
+	asks := make([]githubBusiness.TaskRepo, len(mayLink))
+	for j, c := range mayLink {
+		asks[j] = c.ask
+	}
+	linked, linkedErr := githubBusiness.TaskRepoLinks(ctx, asks)
+	if linkedErr != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/BulkLinkTasksToGitHub couldn't read the tasks' projects' repositories err: %+v", linkedErr)
+	}
+
+	var successCount int
+	for _, c := range mayLink {
+		link := input.Links[c.at]
+		switch {
+		case linkedErr != nil:
+			refusals[c.at] = fmt.Sprintf("Couldn't check the repositories of task %s's project. Try again.", link.TaskUUID)
+		case !linked[c.ask]:
+			refusals[c.at] = fmt.Sprintf("The issue for task %s isn't in a repository linked to its project", link.TaskUUID)
+		default:
+			// The number stored is the address's own, so the two always agree.
+			if err := taskDomain.SetGitHubIssueFieldsOnTask(ctx, c.ask.Task, c.number, link.IssueURL); err != nil {
+				refusals[c.at] = fmt.Sprintf("Couldn't link task %s. Try again.", link.TaskUUID)
+				continue
+			}
+			successCount++
 		}
-		successCount++
+	}
+	var errors []string
+	for _, refusal := range refusals {
+		if refusal != "" {
+			errors = append(errors, refusal)
+		}
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
@@ -2760,9 +2786,20 @@ func CreateGitHubPRForTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get task branch (use "0x1" as userUid to avoid Dgraph "ID can't be empty" in server ops)
+	// The task's branch as every read of a task has it: the Postgres GitHub
+	// fields laid over the graph's copy (MergeGitHubMetaIntoTask). The graph's
+	// own branch is written only by creating one from the task, and stayed
+	// after the branch was deleted on GitHub. (Use "0x1" as userUid to avoid
+	// Dgraph "ID can't be empty" in server ops.)
 	dgraphTaskInfo, err := business.GetDgraphTaskInfo(helpers.WithSystemRead(ctx), taskUUIDStr, "0x1")
-	if err != nil || dgraphTaskInfo == nil || dgraphTaskInfo.GitHubBranch == nil || *dgraphTaskInfo.GitHubBranch == "" {
+	if err == nil && dgraphTaskInfo != nil {
+		err = business.MergeGitHubMetaIntoTask(ctx, taskUUID, dgraphTaskInfo)
+	}
+	if err != nil {
+		helpers.WriteReadFailure(w, r, err, "task", "controllers/CreateGitHubPRForTask")
+		return
+	}
+	if dgraphTaskInfo == nil || dgraphTaskInfo.GitHubBranch == nil || *dgraphTaskInfo.GitHubBranch == "" {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "Task has no GitHub branch. Create a branch first.",
 		})
@@ -2782,7 +2819,7 @@ func CreateGitHubPRForTask(w http.ResponseWriter, r *http.Request) {
 	_ = taskDomain.UpdateTaskPRInfo(ctx, taskUUID, pr.Number, pr.HTMLURL)
 
 	// Create activity
-	go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "pr_opened",
+	_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "pr_opened",
 		nil, nil, nil, nil, &pr.HTMLURL, nil)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
@@ -2954,7 +2991,7 @@ func UpdateTaskDates(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		helpers.LogErrorWithContext(ctx, "controllers/UpdateTaskDates err: %+v", err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The dates couldn't be saved just now. Try again in a moment."})
+		helpers.WriteRetryLater(w, "The dates couldn't be saved just now.")
 		return
 	}
 	shifted := []business.ShiftedTask{}
@@ -3034,7 +3071,7 @@ func dependencyChange(w http.ResponseWriter, r *http.Request, remove bool) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Task not found"})
 	default:
 		helpers.LogErrorWithContext(ctx, "controllers/dependencyChange (remove=%v) err: %+v", remove, err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "That couldn't be saved just now. Try again in a moment."})
+		helpers.WriteRetryLater(w, "That couldn't be saved just now.")
 	}
 }
 
@@ -3089,6 +3126,6 @@ func UpdateTaskEstimate(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
 	default:
 		helpers.LogErrorWithContext(ctx, "controllers/UpdateTaskEstimate err: %+v", err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The estimate couldn't be saved just now. Try again in a moment."})
+		helpers.WriteRetryLater(w, "The estimate couldn't be saved just now.")
 	}
 }

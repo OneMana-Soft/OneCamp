@@ -26,12 +26,14 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	taskAdapter "github.com/akashc777/OneCamp/adapter/Task"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	transcriptDomain "github.com/akashc777/OneCamp/domain/LiveKit"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	"github.com/akashc777/OneCamp/helpers"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/google/uuid"
@@ -41,6 +43,7 @@ const (
 	extractMaxTasks       = 20
 	extractMaxTitleLen    = 160
 	extractMaxDescLen     = 400
+	extractMaxNameLen     = 120
 	extractMinSourceChars = 40
 	extractMaxSourceChars = 16000
 	extractTranscriptMsgs = 80
@@ -91,90 +94,201 @@ Rules:
 - Return at most 20 items. If there are no clear action items, return exactly: {"tasks": []}
 - Output MUST be valid JSON. No trailing commas, no comments.`
 
-// rawProposedTask is the model's per-item JSON shape.
+// rawProposedTask is the model's per-item JSON shape. Block is the line a
+// doc's item came from, as the model wrote it (3, "3" or "[3]"; docTasks.go).
 type rawProposedTask struct {
-	Title    string `json:"title"`
-	Assignee string `json:"assignee"`
-	Due      string `json:"due"`
-	Priority string `json:"priority"`
-	Details  string `json:"details"`
+	Title    string          `json:"title"`
+	Assignee string          `json:"assignee"`
+	Due      string          `json:"due"`
+	Priority string          `json:"priority"`
+	Details  string          `json:"details"`
+	Block    json.RawMessage `json:"block,omitempty"`
 }
 
-// ExtractActionItems pulls the source text (permission-scoped) and asks the
-// model for candidate tasks. Read-only. sourceType is one of channel | dm |
-// group | meeting | text; for text, rawText carries the content, and for
-// meeting, sourceID is the call room name (its transcript is used).
+// ExtractActionItems proposes the action items in a conversation, a call or
+// pasted text (or a doc), read-only. sourceType is one of channel | dm |
+// group | meeting | text | doc; for text, rawText carries the content, and
+// for meeting, sourceID is the call room name (its transcript is used).
 func ExtractActionItems(ctx context.Context, userInfo *userModels.UserInfo, sourceType, sourceID, rawText string) (*ExtractTasksResult, error) {
-	resp := &ExtractTasksResult{Enabled: false, Tasks: []ProposedTask{}}
-
-	svc := ai.GetService()
-	if svc == nil || !svc.IsEnabled() {
-		return resp, nil // AI off → caller hides the surface
+	src := talkSource(userInfo, sourceType, sourceID, rawText)
+	if strings.EqualFold(strings.TrimSpace(sourceType), "doc") {
+		src = docTaskSource(userInfo, sourceID, nil)
 	}
-	resp.Enabled = true
-
-	text, scanned := gatherExtractionSource(ctx, userInfo, sourceType, sourceID, rawText)
-	resp.ScannedCount = scanned
-	text = strings.TrimSpace(text)
-	if len([]rune(text)) > extractMaxSourceChars {
-		text = string([]rune(text)[:extractMaxSourceChars])
-	}
-	if len(text) < extractMinSourceChars {
-		resp.Note = "There isn't enough here to pull action items from."
-		return resp, nil
-	}
-
-	userUUID := userInfo.UserDgraphInfo.Uuid
-	if err := svc.Resiliency.CheckRateLimit(ctx, userUUID); err != nil {
-		return nil, err
-	}
-	llm, cb := svc.ResolveUserModel(ctx, userUUID)
-	if llm == nil {
-		return nil, fmt.Errorf("AI is not enabled for this workspace")
-	}
-	if err := cb.Allow(); err != nil {
-		return nil, err
-	}
-
-	user := extractionCalendar(time.Now().UTC()) + "\n\nText:\n" + text
-	out, err := ai.ChatJSONWithRetry(ctx, llm, cb, taskExtractionPrompt, user,
-		ai.ChatOptions{Temperature: 0.2, MaxTokens: 1200},
-		func(s string) bool { return isValidTaskJSON(s) })
+	x, err := extractTasks(ctx, userInfo, src)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/AI/ExtractActionItems model call failed err: %v", err)
-		resp.Note = "Couldn't read the action items right now. Try again in a moment."
-		return resp, nil
+		return nil, err
 	}
-
-	raws := parseProposedTasks(out)
-	if len(raws) == 0 {
-		resp.Note = "No clear action items found."
-		return resp, nil
-	}
-
-	// Resolve assignees (name -> user) and normalize due/priority. Resolution
-	// is best-effort: an unmatched name is kept as a label so the user sees it.
-	for _, rt := range raws {
-		pt := ProposedTask{
-			Title:       rt.Title,
-			Description: rt.Details,
-			Priority:    normalizeTaskPriority(rt.Priority),
-		}
-		if name := strings.TrimSpace(rt.Assignee); name != "" {
-			pt.AssigneeName = name
-			if u, rerr := resolveAssigneeRef(ctx, userUUID, name, false); rerr == nil && u != nil {
-				pt.AssigneeUUID = u.Uuid
-				if u.UserName != "" {
-					pt.AssigneeName = u.UserName
-				}
-			}
-		}
-		if due := normalizeDueDate(rt.Due); due != "" {
-			pt.Due = due
-		}
-		resp.Tasks = append(resp.Tasks, pt)
+	resp := &ExtractTasksResult{Enabled: x.enabled, Note: x.note, ScannedCount: x.scanned, Tasks: make([]ProposedTask, 0, len(x.tasks))}
+	for _, t := range x.tasks {
+		resp.Tasks = append(resp.Tasks, t.ProposedTask)
 	}
 	return resp, nil
+}
+
+// talkSource is a conversation, a call's transcript or pasted text, read as
+// the person may read it, at most extractMaxSourceChars of it.
+func talkSource(userInfo *userModels.UserInfo, sourceType, sourceID, rawText string) taskSource {
+	return taskSource{
+		read: func(ctx context.Context) (string, int, error) {
+			text, scanned := gatherExtractionSource(ctx, userInfo, sourceType, sourceID, rawText)
+			return helpers.TruncateRunes(strings.TrimSpace(text), extractMaxSourceChars), scanned, nil
+		},
+		prompt:    taskExtractionPrompt,
+		noun:      "Text",
+		maxTokens: 1200,
+		tooShort:  "There isn't enough here to pull action items from.",
+		noneFound: "No clear action items found.",
+	}
+}
+
+// ---------------------------------------------------------------------------
+// One flow for every source
+// ---------------------------------------------------------------------------
+
+// taskSource is where action items are read from (a conversation, a call's
+// transcript, pasted text, a doc) and how the model is asked about it: all
+// that differs between the sources. extractTasks is the rest.
+type taskSource struct {
+	// read is the text the model reads, already bounded, and how many
+	// messages or lines it came from. It is called only when AI is on, and
+	// reads only what the person may: an error ends the extraction.
+	read func(ctx context.Context) (text string, scanned int, err error)
+	// prompt is the model's instructions; noun names the text in the
+	// message ("Text", "Document").
+	prompt, noun string
+	// maxTokens bounds the model's answer.
+	maxTokens int
+	// tooShort and noneFound are the notes for too little to read and for
+	// nothing found.
+	tooShort, noneFound string
+}
+
+// extractedTask is a proposed task, with the model's item it was made from
+// (a doc reads the line it names).
+type extractedTask struct {
+	ProposedTask
+	raw rawProposedTask
+}
+
+// extraction is what extractTasks found: enabled is false when AI is off (the
+// surface is hidden); note says why there are no tasks.
+type extraction struct {
+	enabled bool
+	tasks   []extractedTask
+	note    string
+	scanned int
+}
+
+// extractionOn reports whether AI is on, so the surface shows: a seam for
+// tests.
+var extractionOn = func() bool {
+	svc := ai.GetService()
+	return svc != nil && svc.IsEnabled()
+}
+
+// extractionModel is the person's model, asked for only once there is enough
+// to read: it spends one of their AI requests. nil when AI is off. A seam for
+// tests.
+var extractionModel = func(ctx context.Context, userUUID string) (ai.LLMProvider, *ai.CircuitBreaker, error) {
+	svc := ai.GetService()
+	if svc == nil || !svc.IsEnabled() {
+		return nil, nil, nil
+	}
+	if err := svc.Resiliency.CheckRateLimit(ctx, userUUID); err != nil {
+		return nil, nil, err
+	}
+	llm, cb := svc.ResolveUserModel(ctx, userUUID)
+	return llm, cb, nil
+}
+
+// chatExtraction asks the model for the items as JSON: a seam for tests.
+var chatExtraction = ai.ChatJSONWithRetry
+
+// extractionNow is the time the calendar is written from: a seam for tests.
+var extractionNow = time.Now
+
+// assigneeOf resolves an owner the text names to a member: a seam for tests.
+var assigneeOf = resolveAssigneeRef
+
+// extractTasks finds the action items in a source and proposes them as tasks,
+// read-only: the person's model, its rate limit and breaker, the calendar,
+// the JSON answer retried until it reads, and each item made a proposed task
+// (proposedTaskFrom), at most extractMaxTasks. A model that fails gives a
+// note, never an error.
+func extractTasks(ctx context.Context, u *userModels.UserInfo, src taskSource) (extraction, error) {
+	if !extractionOn() {
+		return extraction{}, nil
+	}
+	text, scanned, err := src.read(ctx)
+	if err != nil {
+		return extraction{}, err
+	}
+	x := extraction{enabled: true, scanned: scanned}
+	if utf8.RuneCountInString(text) < extractMinSourceChars {
+		x.note = src.tooShort
+		return x, nil
+	}
+	asker := u.UserDgraphInfo.Uuid
+	llm, cb, err := extractionModel(ctx, asker)
+	if err != nil {
+		return extraction{}, err
+	}
+	if llm == nil || cb == nil {
+		return extraction{}, nil // AI went off: the surface is hidden
+	}
+	if err := cb.Allow(); err != nil {
+		return extraction{}, err
+	}
+	user := extractionCalendar(extractionNow().UTC()) + "\n\n" + src.noun + ":\n" + text
+	out, err := chatExtraction(ctx, llm, cb, src.prompt, user, ai.ChatOptions{Temperature: 0.2, MaxTokens: src.maxTokens}, isValidTaskJSON)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/AI/extractTasks model call failed: %v", err)
+		x.note = "Couldn't read the action items just now. Try again in a moment."
+		return x, nil
+	}
+	items, _ := decodeTaskItems(out)
+	for _, it := range items {
+		pt, ok := proposedTaskFrom(ctx, asker, it)
+		if !ok {
+			continue
+		}
+		x.tasks = append(x.tasks, extractedTask{ProposedTask: pt, raw: it})
+		if len(x.tasks) >= extractMaxTasks {
+			break
+		}
+	}
+	if len(x.tasks) == 0 {
+		x.note = src.noneFound
+	}
+	return x, nil
+}
+
+// proposedTaskFrom is one item of the model's answer as a proposed task: its
+// title, details and owner's name cleaned and bounded (cleanLabel), its
+// priority and due date normalised, and its owner resolved to a member where
+// one matches; a name that matches nobody is kept as written, for the person
+// to see. ok is false for an item with no title.
+func proposedTaskFrom(ctx context.Context, askerUUID string, rt rawProposedTask) (ProposedTask, bool) {
+	title := cleanLabel(rt.Title, extractMaxTitleLen)
+	if title == "" {
+		return ProposedTask{}, false
+	}
+	pt := ProposedTask{
+		Title:       title,
+		Description: cleanLabel(rt.Details, extractMaxDescLen),
+		Priority:    normalizeTaskPriority(rt.Priority),
+		Due:         normalizeDueDate(rt.Due),
+	}
+	if name := cleanLabel(rt.Assignee, extractMaxNameLen); name != "" {
+		pt.AssigneeName = name
+		if du, err := assigneeOf(ctx, askerUUID, name, false); err == nil && du != nil {
+			pt.AssigneeUUID = du.Uuid
+			if du.UserName != "" {
+				pt.AssigneeName = du.UserName
+			}
+		}
+	}
+	return pt, true
 }
 
 // gatherExtractionSource returns the source text for extraction (permission
@@ -314,40 +428,6 @@ func isValidTaskJSON(out string) bool {
 	return ok
 }
 
-// parseProposedTasks decodes + sanitizes the model's answer. Pure + unit
-// tested. Drops items with no title and caps the count.
-func parseProposedTasks(rawOut string) []rawProposedTask {
-	items, ok := decodeTaskItems(rawOut)
-	if !ok {
-		return nil
-	}
-	out := make([]rawProposedTask, 0, len(items))
-	for _, it := range items {
-		title := sanitizeLabel(it.Title)
-		if title == "" {
-			continue
-		}
-		if len([]rune(title)) > extractMaxTitleLen {
-			title = string([]rune(title)[:extractMaxTitleLen])
-		}
-		details := sanitizeLabel(it.Details)
-		if len([]rune(details)) > extractMaxDescLen {
-			details = string([]rune(details)[:extractMaxDescLen])
-		}
-		out = append(out, rawProposedTask{
-			Title:    title,
-			Assignee: sanitizeLabel(it.Assignee),
-			Due:      strings.TrimSpace(it.Due),
-			Priority: strings.TrimSpace(it.Priority),
-			Details:  details,
-		})
-		if len(out) >= extractMaxTasks {
-			break
-		}
-	}
-	return out
-}
-
 // normalizeDueDate parses a YYYY-MM-DD (or RFC3339) date and returns it as an
 // RFC3339 timestamp at 17:00 UTC (end-of-workday), or "" when unparseable.
 // Pure.
@@ -387,44 +467,51 @@ func CreateTasksFromProposals(ctx context.Context, userInfo *userModels.UserInfo
 	}
 
 	for _, t := range tasks {
-		title := strings.TrimSpace(t.Title)
-		if title == "" {
-			failed++
-			continue
-		}
-		// Prefer the resolved uuid; fall back to the name so "assign to John"
-		// still works. Empty → unassigned.
-		ref := strings.TrimSpace(t.AssigneeUUID)
-		if ref == "" {
-			ref = strings.TrimSpace(t.AssigneeName)
-		}
-		assigneeDgraph, rerr := resolveAssigneeRef(ctx, userInfo.UserDgraphInfo.Uuid, ref, false)
-		if rerr != nil {
-			assigneeDgraph = nil // unresolved assignee → create unassigned rather than fail
-		}
-
-		input := taskAdapter.CreateOrUpdateTaskInput{
-			TaskName:        title,
-			TaskDescription: strings.TrimSpace(t.Description),
-			Priority:        normalizeTaskPriority(t.Priority),
-			Status:          "todo",
-		}
-		taskUUID, cerr := taskBusiness.CreateTask(ctx, projectParsed, userInfo, dgraphProject, assigneeDgraph, input, nil)
-		if cerr != nil {
+		if _, cerr := createProposedTask(ctx, userInfo, projectParsed, dgraphProject, t, strings.TrimSpace(t.Description)); cerr != nil {
 			failed++
 			continue
 		}
 		created++
+	}
+	return created, failed, nil
+}
 
-		// Set the due date when one was extracted (separate call: CreateTask
-		// does not persist a due date).
-		if due := strings.TrimSpace(t.Due); due != "" {
-			if dt, terr := time.Parse(time.RFC3339, due); terr == nil {
-				if _, dgTask, lerr := loadTaskForUpdateAsAdmin(ctx, taskUUID.String(), userInfo.UserDgraphInfo.Uuid); lerr == nil {
-					_ = taskBusiness.UpdateTaskDueDateByTaskUUID(ctx, taskUUID, &dt, dgTask, &userInfo.UserDgraphInfo)
-				}
+// createProposedTask makes one proposed task in a project the person is an
+// admin of, AS them, through the normal task path: its assignee resolved (uuid
+// or name; unresolved leaves it unassigned), its due date set when there is
+// one. description is what the task's description holds.
+func createProposedTask(ctx context.Context, userInfo *userModels.UserInfo, projectParsed uuid.UUID, dgraphProject *dgraphStruct.DgraphProject, t ProposedTask, description string) (uuid.UUID, error) {
+	title := strings.TrimSpace(t.Title)
+	if title == "" {
+		return uuid.Nil, fmt.Errorf("a task needs a title")
+	}
+	// Prefer the resolved uuid; fall back to the name so "assign to John"
+	// still works. Empty is unassigned.
+	ref := strings.TrimSpace(t.AssigneeUUID)
+	if ref == "" {
+		ref = strings.TrimSpace(t.AssigneeName)
+	}
+	assigneeDgraph, rerr := resolveAssigneeRef(ctx, userInfo.UserDgraphInfo.Uuid, ref, false)
+	if rerr != nil {
+		assigneeDgraph = nil // unresolved assignee: created unassigned rather than failed
+	}
+	input := taskAdapter.CreateOrUpdateTaskInput{
+		TaskName:        title,
+		TaskDescription: description,
+		Priority:        normalizeTaskPriority(t.Priority),
+		Status:          "todo",
+	}
+	taskUUID, err := taskBusiness.CreateTask(ctx, projectParsed, userInfo, dgraphProject, assigneeDgraph, input, nil)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	// The due date is a second call: CreateTask does not keep one.
+	if due := strings.TrimSpace(t.Due); due != "" {
+		if dt, terr := time.Parse(time.RFC3339, due); terr == nil {
+			if _, dgTask, lerr := loadTaskForUpdateAsAdmin(ctx, taskUUID.String(), userInfo.UserDgraphInfo.Uuid); lerr == nil {
+				_ = taskBusiness.UpdateTaskDueDateByTaskUUID(ctx, taskUUID, &dt, dgTask, &userInfo.UserDgraphInfo)
 			}
 		}
 	}
-	return created, failed, nil
+	return taskUUID, nil
 }

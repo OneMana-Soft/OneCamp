@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	placesBusiness "github.com/akashc777/OneCamp/business/Places"
 	"net"
 	"net/http"
 	"os"
@@ -75,8 +76,18 @@ func GetLoggedInUserProfile(w http.ResponseWriter, r *http.Request) {
 	// reaches a write to the graph.
 	profile := userInfo.UserDgraphInfo
 	profile.Handle = business.HandleOnRead(ctx, &userInfo.UserPostgresInfo, &userInfo.UserDgraphInfo)
+	markDemoVisitor(&profile, userInfo.UserPostgresInfo.EmailID)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": profile})
+}
+
+// markDemoVisitor says on the person's own profile whether they are the public
+// demo's shared visitor, whom the demo refuses a password, two-step sign-in,
+// passkeys and personal accounts (middleware DemoSignInStays,
+// NoPersonalAccountsInDemo): the app leaves those out for them instead of
+// offering what always fails (QA SH-07).
+func markDemoVisitor(profile *dgraphStruct.DgraphUser, email string) {
+	profile.DemoVisitor = helpers.IsDemoVisitor(email)
 }
 
 // changedNameProblem is why a display or full name that changed cannot be
@@ -203,7 +214,7 @@ func GetDgraphUserTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph user task",
+			"msg": "Couldn't load your tasks.",
 			"err": err,
 		})
 		return
@@ -230,7 +241,7 @@ func GetDgraphUserProjectList(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph user project",
+			"msg": "Couldn't load your projects.",
 			"err": err,
 		})
 		return
@@ -396,7 +407,7 @@ func GetDgraphUserTaskList(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph user task",
+			"msg": "Couldn't load your tasks.",
 			"err": err,
 		})
 		return
@@ -424,16 +435,37 @@ func GetDgraphUserInfoByUUIDForSidebarNav(w http.ResponseWriter, r *http.Request
 
 	dgraphUser, err := business.GetDgraphUserInfoByUUIDForSidebarNav(ctx, userInfo.UserPostgresInfo.Id)
 
+	// It wrote nothing on an error, which answered an empty 200, and the
+	// sidebar sat on its skeleton until the next read. A count that fails is
+	// left out by the business layer; what's left to fail is the graph.
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/GetDgraphUserInfoByUUIDForSidebarNav Failed to get dgraph user info err: %+v",
 			err)
+		helpers.WriteRetryLater(w, "Couldn't load your sidebar.")
+		return
+	}
+	if dgraphUser == nil {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That account isn't in this workspace."})
 		return
 	}
 
 	dgraphUser.IsAdmin = userInfo.UserDgraphInfo.IsAdmin
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": dgraphUser})
+	out := helpers.Envolope{"status": "success", "data": dgraphUser}
+	// The person's starred pages, in their order (docs programme A3). A failed
+	// read leaves "starred" out rather than sending an empty list, so the app
+	// can tell "no stars" from "couldn't read them".
+	who := placesBusiness.Person{UUID: userInfo.UserDgraphInfo.Uuid, UID: userInfo.UserDgraphInfo.Uid}
+	if starred, err := placesBusiness.List(ctx, who, "star", ""); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/GetDgraphUserInfoByUUIDForSidebarNav stars: %+v", err)
+	} else {
+		if starred == nil {
+			starred = []placesBusiness.Item{}
+		}
+		out["starred"] = starred
+	}
+	helpers.WriteJSON(w, http.StatusOK, out)
 }
 
 func AddChannelToUserFav(w http.ResponseWriter, r *http.Request) {
@@ -612,7 +644,7 @@ func GetUsersListWhoDontBelongToTheDM(w http.ResponseWriter, r *http.Request) {
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":   "Got users list!",
-		"users": dgraphUsers,
+		"users": userDomain.DemoVisibleUsers(userInfo.UserPostgresInfo.EmailID, dgraphUsers),
 	})
 
 }
@@ -671,7 +703,7 @@ func GetUsersListWhoDontBelongToTheTeam(w http.ResponseWriter, r *http.Request) 
 			"controllers/GetUsersListWhoDontBelongToTheTeam Failed to get dgraph team info err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph team info",
+			"msg": "Couldn't load the people you can add to the team.",
 			"err": err,
 		})
 		return
@@ -701,7 +733,7 @@ func GetUsersListWhoDontBelongToTheTeam(w http.ResponseWriter, r *http.Request) 
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":   "Got users list!",
-		"users": dgraphUsers,
+		"users": userDomain.DemoVisibleUsers(userInfo.UserPostgresInfo.EmailID, dgraphUsers),
 	})
 
 }
@@ -733,7 +765,7 @@ func GetUsersListWhoDontBelongToTheProjectButBelongToTheTeam(w http.ResponseWrit
 			"controllers/GetUsersListWhoDontBelongToTheProjectButBelongToTheTeam Failed to get dgraph project info err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph team info",
+			"msg": "Couldn't load the people you can add to the project.",
 			"err": err,
 		})
 		return
@@ -762,7 +794,7 @@ func GetUsersListWhoDontBelongToTheProjectButBelongToTheTeam(w http.ResponseWrit
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":   "Got users list!",
-		"users": dgraphUsers,
+		"users": userDomain.DemoVisibleUsers(userInfo.UserPostgresInfo.EmailID, dgraphUsers),
 	})
 
 }
@@ -773,7 +805,7 @@ func GetBotKinds(w http.ResponseWriter, r *http.Request) {
 	kinds, err := business.BotKinds(r.Context())
 	if err != nil {
 		helpers.LogErrorWithContext(r.Context(), "controllers/GetBotKinds err: %+v", err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Something went wrong. Try again in a moment."})
+		helpers.WriteRetryLater(w, "Something went wrong.")
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": kinds})
@@ -784,11 +816,13 @@ func GetProfileByUserId(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userId := chi.URLParam(r, "user_id")
 
+	// Nobody by that id is a 404, "Person not found", and a failed read a
+	// 503: a DM with an unknown person said "Failed to get user info err"
+	// (QA F-09), and an id that wasn't one answered nothing at all.
+	const where = "controllers/GetProfileByUserId"
 	_, err := uuid.Parse(userId)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProfileByUserId Failed to parse userId string to uuid err: %+v",
-			err)
+		helpers.WriteReadFailure(w, r, helpers.ErrNotFound, "person", where)
 		return
 	}
 
@@ -797,14 +831,7 @@ func GetProfileByUserId(w http.ResponseWriter, r *http.Request) {
 	otherUserInfo, err := business.GetDgraphUserInfoByUUID(ctx, userId)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProfileByUserId Failed to get user info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get user info err",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "person", where)
 		return
 	}
 
@@ -812,14 +839,7 @@ func GetProfileByUserId(w http.ResponseWriter, r *http.Request) {
 
 	notificationType, err := userChatNotificationBusiness.GetNotificationTypeByUserIdAndToUserId(ctx, userInfo.UserDgraphInfo.Uuid, grpId)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProfileByUserId Failed to get user's notification type err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get user's notification type err",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "person", where)
 		return
 	}
 
@@ -830,14 +850,7 @@ func GetProfileByUserId(w http.ResponseWriter, r *http.Request) {
 	otherUserInfo.CallActive, err = business.GetDmCallStatus(ctx, grpId)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetProfileByUserId Failed to get call status err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get call status",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "person", where)
 		return
 	}
 
@@ -1190,7 +1203,7 @@ func LogOutUser(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to remove refresh key in redis",
+			"msg": "Couldn't sign you out. Try again.",
 			"err": err,
 		})
 		return
@@ -1465,6 +1478,7 @@ func oauthRefusal(err error) (code, message string) {
 func UsersListNotBelongToChannelId(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
+	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
 	channelId := chi.URLParam(r, "channel_id")
 	if channelId == "" {
 
@@ -1508,7 +1522,7 @@ func UsersListNotBelongToChannelId(w http.ResponseWriter, r *http.Request) {
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":   "Got the users list!",
-		"users": usersList,
+		"users": userDomain.DemoVisibleUsers(userInfo.UserPostgresInfo.EmailID, usersList),
 	})
 }
 
@@ -1563,6 +1577,7 @@ func GetUserRecordingsList(w http.ResponseWriter, r *http.Request) {
 func AllUsersList(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
+	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
 
 	usersList, err := business.GetDgraphAllUsersList(ctx)
 	if err != nil {
@@ -1608,7 +1623,9 @@ func AllUsersList(w http.ResponseWriter, r *http.Request) {
 		}
 		filtered = append(filtered, u)
 	}
-	usersList = filtered
+	// On the public demo the visitor sees only the demo's own people
+	// (helpers.DemoListsPerson); everywhere else this is the list as it is.
+	usersList = userDomain.DemoVisibleUsers(userInfo.UserPostgresInfo.EmailID, filtered)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":   "Got the all users list!",
@@ -2075,8 +2092,7 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 
 		userDgraphPost = channelDgraph.Posts[0]
 		// A forward shows the message it carries, so a deleted one isn't
-		// forwarded back into view: its text stays in the graph after the
-		// delete. 404, as for a reply or a reaction to a deleted message.
+		// forwarded: its text stays in the graph after the delete.
 		if helpers.IsSoftDeleted(userDgraphPost.DeletedAt) {
 			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted, so it can't be forwarded."})
 			return
@@ -2106,7 +2122,6 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		// A deleted message isn't forwarded back into view.
 		if helpers.IsSoftDeleted(userDgraphChat.DeletedAt) {
 			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted, so it can't be forwarded."})
 			return
@@ -2500,7 +2515,7 @@ func UpdateUserProfile(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg":    "Failed to create user in dgraph",
+			"msg":    "Couldn't save your profile. Try again.",
 			"err":    err,
 			"status": "failed",
 		})
@@ -2947,7 +2962,7 @@ func FwdUserAndChannelList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resultList, err := business.GetChannelsAndUsers(ctx, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid, cleanSearch)
+	resultList, err := business.GetChannelsAndUsers(ctx, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid, userInfo.UserPostgresInfo.EmailID, cleanSearch)
 
 	if err != nil {
 
@@ -3335,8 +3350,10 @@ func GetAllInvitations(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	invitations, err := business.ListInvitations(ctx)
 	if err != nil {
+		// The store's own error, which names it: logged, not shown.
+		helpers.LogErrorWithContext(ctx, "controllers/GetAllInvitations err: %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
-			"msg":    err.Error(),
+			"msg":    "Couldn't load the invitations. Try again.",
 			"status": "failed",
 		})
 		return

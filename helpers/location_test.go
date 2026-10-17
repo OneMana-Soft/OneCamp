@@ -29,3 +29,14 @@ func TestFirstLocation(t *testing.T) {
 		t.Error("no names is a zone")
 	}
 }
+
+func TestPlaceName(t *testing.T) {
+	for zone, want := range map[string]string{"America/New_York": "New York", "Asia/Kolkata": "Kolkata", "UTC": "UTC", "": "UTC", "America/Argentina/Buenos_Aires": "Buenos Aires"} {
+		if got := PlaceName(Location(zone)); got != want {
+			t.Errorf("PlaceName(%q) = %q, want %q", zone, got, want)
+		}
+	}
+	if got := PlaceName(nil); got != "UTC" {
+		t.Errorf("PlaceName(nil) = %q", got)
+	}
+}

@@ -21,6 +21,7 @@ import (
 	aicoworker "github.com/akashc777/OneCamp/business/AICoworker"
 	mcpBusiness "github.com/akashc777/OneCamp/business/AIMCP"
 	archiveBusiness "github.com/akashc777/OneCamp/business/Archive"
+	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 	checkInBusiness "github.com/akashc777/OneCamp/business/CheckIn"
 	commandBusiness "github.com/akashc777/OneCamp/business/Command"
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
@@ -32,6 +33,7 @@ import (
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	slackBridgeBusiness "github.com/akashc777/OneCamp/business/SlackBridge"
+	sweepBusiness "github.com/akashc777/OneCamp/business/Sweep"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	chatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
@@ -212,6 +214,9 @@ func startBackgroundLoops(ctx context.Context) {
 	// Once per install: every doc's global search entries rewritten from the
 	// doc (who may find it, whether it is deleted), and its comments' too.
 	docBusiness.StartDocSearchRepair(ctx)
+	// Once per install: a group's messages left in search under an id it had
+	// before someone was added, moved to the id it has now.
+	chatBusiness.StartChatGroupingRepair(ctx)
 	// Every start: an @handle for each member who has none (accounts from
 	// before handles), derived from their name.
 	userBusiness.StartHandleBackfill(ctx)
@@ -219,7 +224,6 @@ func startBackgroundLoops(ctx context.Context) {
 	// group conversation who has none (groups someone was added to, and
 	// direct conversations, before the fix), or they are never told of it.
 	chatNotificationBusiness.StartChatSettingsRepair(ctx)
-
 	// Every start, idempotent: transcripts of unrecorded calls from before
 	// calls had an end get one (so they are listed, deletable and under
 	// retention); ones linked to no conversation are counted in the log and
@@ -228,6 +232,9 @@ func startBackgroundLoops(ctx context.Context) {
 	// Every start: unlink any task whose GitHub issue or pull request is in a
 	// repository its own project hasn't linked, and log each one.
 	githubBusiness.StartTaskLinkRepair(ctx)
+	// Every start: register each linked repository's webhook again, so one
+	// registered before an event joined what it sends sends that too.
+	githubBusiness.StartWebhookRefresh(ctx)
 	githubBusiness.StartGitHubSyncWorker(business.SyncSignal, ctx)
 	githubBusiness.StartGitHubImportWorker(ctx)
 
@@ -286,11 +293,9 @@ func startBackgroundLoops(ctx context.Context) {
 	// Vacuum the links between tables' rows as they change, which Postgres 12
 	// doesn't for a table that's mostly added to, so they stay quick to count.
 	dataTableBusiness.StartLinkUpkeep(ctx)
-	// Once per install: every link from a table's cell to a doc, task, board,
-	// project or person reduced to its id and kind. Links kept the item's title
-	// as it was when linked, and a cell no read names for its reader (a deleted
-	// field's) still gave it out.
-	dataTableBusiness.StartItemLinkRepair(ctx)
+	// Every registered sweep (business/Sweep): jobs register from their own
+	// packages, so this one line starts them all. Inert until one registers.
+	sweepBusiness.Jobs.StartAll(ctx)
 
 	// Start the Workflow Builder engine. It subscribes to the workspace event
 	// bus and runs admin-defined "when a message matches X → reply / create

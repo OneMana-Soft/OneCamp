@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
@@ -29,6 +30,34 @@ type DocAccess struct {
 	Reading    []string
 	Editing    []string
 	Commenting []string
+}
+
+// DocAccessOf is a doc's privacy and sharing, from the doc as the graph reads
+// it (domain/Doc GetDocPermissions, GetDocAccessPage), in the form the
+// entries carry them: user uuids, and empty lists rather than nil, so the
+// index is told "nobody" rather than nothing. A doc with no privacy recorded
+// is not private, as CanRead reads it. Pure.
+func DocAccessOf(docUUID string, doc *dgraphStruct.DgraphDoc) DocAccess {
+	uuids := func(users []*dgraphStruct.DgraphUser) []string {
+		out := []string{}
+		for _, u := range users {
+			if u != nil {
+				out = append(out, u.Uuid)
+			}
+		}
+		return out
+	}
+	a := DocAccess{
+		DocUUID:    docUUID,
+		Private:    doc.IsPrivate != nil && *doc.IsPrivate,
+		Reading:    uuids(doc.ReadingUser),
+		Editing:    uuids(doc.EditingUser),
+		Commenting: uuids(doc.CommentingUser),
+	}
+	if doc.CreatedBy != nil {
+		a.CreatedBy = doc.CreatedBy.Uuid
+	}
+	return a
 }
 
 // docAccessScript sets an entry's doc fields from params.docs, keyed by the

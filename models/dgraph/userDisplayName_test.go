@@ -1,6 +1,7 @@
 package models
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -17,6 +18,26 @@ func TestDgraphUserDisplayName(t *testing.T) {
 	u.UserName = "Sam"
 	if got := u.DisplayName(); got != "Sam" {
 		t.Fatalf("got %q, want the display name", got)
+	}
+}
+
+func TestDgraphUserPublicKeepsWhatAnyoneMaySee(t *testing.T) {
+	var nobody *DgraphUser
+	if nobody.Public() != nil || (&DgraphUser{UserFullName: "No id"}).Public() != nil {
+		t.Fatal("a nil user, or one with no id, is shown as someone")
+	}
+	picture := "p/1.png"
+	u := &DgraphUser{
+		Uid: "0x2a", Uuid: "u-1", UserName: "Sam", UserFullName: "Samuel Rivera", ProfileKey: &picture, IsBot: true,
+		EmailID: "sam@example.com", IsAdmin: true,
+	}
+	got := u.Public()
+	want := DgraphUser{Uuid: "u-1", UserName: "Sam", UserFullName: "Samuel Rivera", ProfileKey: &picture, IsBot: true}
+	if got == nil || !reflect.DeepEqual(*got, want) {
+		t.Fatalf("Public() = %+v, want only the id, names, picture and bot flag: %+v", got, want)
+	}
+	if got == u {
+		t.Fatal("Public() handed back the member itself, email and all")
 	}
 }
 

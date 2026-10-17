@@ -126,6 +126,7 @@ func SetupDgraph(t *testing.T) *DgraphEnv {
 
 	env := &DgraphEnv{container: c, Endpoint: endpoint}
 	t.Cleanup(env.Close)
+	settleBeforeTeardown(t)
 	return env
 }
 

@@ -67,7 +67,7 @@ func TestTheFirstConnectionIsTriedAgainUntilTheBrokerAnswers(t *testing.T) {
 	quietLogs(t)
 	fastBackoff(t)
 	b := &flakyBroker{failures: 3}
-	if err := ConnectWithBackoff(context.Background(), b); err != nil {
+	if err := ConnectWithBackoff(context.Background(), b, CurrentConnectTimings()); err != nil {
 		t.Fatalf("ConnectWithBackoff: %v", err)
 	}
 	if got := b.attempts.Load(); got != 4 {
@@ -86,7 +86,7 @@ func TestConnectingGivesUpWhenItsContextEnds(t *testing.T) {
 	b := &flakyBroker{failures: 1 << 30}
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
 	defer cancel()
-	err := ConnectWithBackoff(ctx, b)
+	err := ConnectWithBackoff(ctx, b, CurrentConnectTimings())
 	if err == nil {
 		t.Fatal("ConnectWithBackoff succeeded against a broker that never answers")
 	}
@@ -105,25 +105,27 @@ func TestAnAcceptedConnectThatConnectedNothingIsTriedAgain(t *testing.T) {
 	b := &flakyBroker{acceptWithoutConnecting: true}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	if err := ConnectWithBackoff(ctx, b); err == nil {
+	if err := ConnectWithBackoff(ctx, b, CurrentConnectTimings()); err == nil {
 		t.Fatal("ConnectWithBackoff took an accepted CONNECT with no connection for a connection")
 	}
 }
 
-// An effort to connect keeps the timings it started with. One left trying in
-// the background reads none of the variables afterwards, so a test can put
-// them back without waiting for it, and the server needs nothing that exists
-// only for a test to wait on. Reading them on every try instead fails here: a
-// race under -race, and without it a stall behind the hour-long pause.
+// An effort to connect runs on the timings it was handed, read once before it
+// started, as ConnectMqtt reads them. One left trying in the background reads
+// none of the variables afterwards, so a test can put them back without
+// waiting for it, and the server needs nothing that exists only for a test to
+// wait on. Reading them on every try instead fails here: a race under -race,
+// and without it a stall behind the hour-long pause.
 func TestAConnectionEffortKeepsTheTimingsItStartedWith(t *testing.T) {
 	quietLogs(t)
 	fastBackoff(t)
 	b := &flakyBroker{failures: 1 << 30}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	tm := CurrentConnectTimings()
 	go func() {
 		defer close(done)
-		_ = ConnectWithBackoff(ctx, b)
+		_ = ConnectWithBackoff(ctx, b, tm)
 	}()
 	// Runs before fastBackoff puts the timings back (cleanups run last first).
 	t.Cleanup(func() { cancel(); <-done })

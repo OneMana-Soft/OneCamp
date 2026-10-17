@@ -137,17 +137,6 @@ func Add(e Entry) (*Entry, error) {
 		RETURNING `+columns, e.TaskUUID, e.ProjectUUID, e.UserID, e.StartedAt, e.EndedAt, e.Note, e.Billable))
 }
 
-// Get is one entry, or nil.
-func Get(id uuid.UUID) (*Entry, error) {
-	ctx, cancel := withTimeout()
-	defer cancel()
-	e, err := scan(postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `SELECT `+columns+` FROM task_time_entries WHERE id = $1`, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	return e, err
-}
-
 // Update changes a finished entry's span, note and billing; only its owner's.
 func Update(id, userID uuid.UUID, startedAt, endedAt time.Time, note string, billable bool) (*Entry, error) {
 	ctx, cancel := withTimeout()
@@ -226,4 +215,13 @@ func SecondsByWeek(projectIDs []uuid.UUID, from, now time.Time, zone string) ([]
 		out = append(out, w)
 	}
 	return out, rows.Err()
+}
+
+// ClearForPersonInProject removes a person's entries on one project, so the
+// demo's refresh re-seeds them instead of adding a second set.
+func ClearForPersonInProject(userID, projectID uuid.UUID) error {
+	ctx, cancel := withTimeout()
+	defer cancel()
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `DELETE FROM task_time_entries WHERE user_id = $1 AND project_uuid = $2`, userID, projectID)
+	return err
 }

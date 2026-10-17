@@ -28,3 +28,20 @@ func TestSanitizeEvents(t *testing.T) {
 		})
 	}
 }
+
+// A webhook's messages always carry a name: its own, trimmed, or the
+// fallback when that leaves nothing, so its text never reaches the bot's
+// label-less Markdown path.
+func TestAWebhooksMessagesAlwaysCarryAName(t *testing.T) {
+	for _, c := range []struct{ name, fallback, want string }{
+		{"Deploys", defaultBotName, "Deploys"},
+		{"  Deploys  ", defaultBotName, "Deploys"},
+		{"", defaultBotName, defaultBotName},
+		{" \t\n", defaultBotName, defaultBotName},
+		{"   ", "Alerts", "Alerts"},
+	} {
+		if got := botNameOf(c.name, c.fallback); got != c.want {
+			t.Errorf("botNameOf(%q, %q) = %q, want %q", c.name, c.fallback, got, c.want)
+		}
+	}
+}

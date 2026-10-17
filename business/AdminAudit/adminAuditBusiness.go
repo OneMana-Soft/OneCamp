@@ -183,6 +183,10 @@ func SecretChangeSummary(field string, newValue *string) string {
 // from the rest is exactly how the admin UI's filter list came to omit it.
 const CategoryAgent = auditModel.CategoryAgent
 
+// CategoryDocs is what happened to docs: shares, access and lock changes,
+// deletes, restores, purges, exports, publishes, transfers and recoveries.
+const CategoryDocs = auditModel.CategoryDocs
+
 // Who acted, as opposed to who answers for it.
 //
 // The actor id names the accountable human, which for an agent is whoever's

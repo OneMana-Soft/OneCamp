@@ -44,6 +44,7 @@ import (
 	agentBusiness "github.com/akashc777/OneCamp/business/AIAgent"
 	aicoworker "github.com/akashc777/OneCamp/business/AICoworker"
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
+	"github.com/akashc777/OneCamp/business/DataTable/formula"
 	formBusiness "github.com/akashc777/OneCamp/business/Form"
 	githubBusiness "github.com/akashc777/OneCamp/business/GitHub"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
@@ -1181,7 +1182,7 @@ func TestAnAgentSeesOnlyWhatItsAskerCan(t *testing.T) {
 		}
 
 		obs := brain.run(t, func() {
-			if err := formBusiness.Submit(ctx, form(bot.UUID), sent, time.Now()); err != nil {
+			if err := formBusiness.Submit(ctx, form(bot.UUID), sent, formula.NumberSigns{}, time.Now()); err != nil {
 				t.Fatalf("submit: %v", err)
 			}
 			brain.waitForAll(t)
@@ -1210,7 +1211,7 @@ func TestAnAgentSeesOnlyWhatItsAskerCan(t *testing.T) {
 		setAgent(t, `UPDATE ai_agents SET trigger_type = 'event', trigger_config = '{"event":"task.created"}' WHERE id = $1`)
 		defer setAgent(t, `UPDATE ai_agents SET trigger_type = 'mention', trigger_config = '{}' WHERE id = $1`)
 		obs = brain.run(t, func() {
-			if err := formBusiness.Submit(ctx, form(""), sent, time.Now()); err != nil {
+			if err := formBusiness.Submit(ctx, form(""), sent, formula.NumberSigns{}, time.Now()); err != nil {
 				t.Fatalf("submit: %v", err)
 			}
 			brain.waitForAll(t)

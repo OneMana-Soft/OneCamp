@@ -1,0 +1,505 @@
+{
+  "nodes": {
+    "blockMath": {
+      "attrs": [
+        "blockId",
+        "latex"
+      ],
+      "group": "block",
+      "content": null,
+      "inline": false,
+      "atom": true
+    },
+    "blockquote": {
+      "attrs": [
+        "blockColor",
+        "blockId",
+        "dir",
+        "indent",
+        "quoteSize"
+      ],
+      "group": "block",
+      "content": "block+",
+      "inline": false,
+      "atom": false
+    },
+    "boardEmbed": {
+      "attrs": [
+        "blockId",
+        "projectId"
+      ],
+      "group": "block",
+      "content": null,
+      "inline": false,
+      "atom": true
+    },
+    "bookmark": {
+      "attrs": [
+        "blockId",
+        "description",
+        "href",
+        "icon",
+        "image",
+        "siteName",
+        "title"
+      ],
+      "group": "block",
+      "content": null,
+      "inline": false,
+      "atom": true
+    },
+    "bulletList": {
+      "attrs": [
+        "blockId",
+        "dir",
+        "indent"
+      ],
+      "group": "block list",
+      "content": "listItem+",
+      "inline": false,
+      "atom": false
+    },
+    "callout": {
+      "attrs": [
+        "blockId",
+        "color",
+        "dir",
+        "emoji",
+        "icon",
+        "indent"
+      ],
+      "group": "block",
+      "content": "block+",
+      "inline": false,
+      "atom": false
+    },
+    "channelMention": {
+      "attrs": [
+        "id",
+        "label",
+        "mentionSuggestionChar"
+      ],
+      "group": "inline",
+      "content": null,
+      "inline": true,
+      "atom": true
+    },
+    "chartEmbed": {
+      "attrs": [
+        "blockId",
+        "indent",
+        "spec"
+      ],
+      "group": "block",
+      "content": null,
+      "inline": false,
+      "atom": true
+    },
+    "codeBlock": {
+      "attrs": [
+        "blockId",
+        "caption",
+        "indent",
+        "language",
+        "wrap"
+      ],
+      "group": "block",
+      "content": "text*",
+      "inline": false,
+      "atom": false
+    },
+    "collapsible": {
+      "attrs": [
+        "blockColor",
+        "blockId",
+        "dir",
+        "indent"
+      ],
+      "group": "block",
+      "content": "(paragraph | heading) block*",
+      "inline": false,
+      "atom": false
+    },
+    "column": {
+      "attrs": [
+        "blockId",
+        "width"
+      ],
+      "group": null,
+      "content": "block+",
+      "inline": false,
+      "atom": false
+    },
+    "columnList": {
+      "attrs": [
+        "blockId"
+      ],
+      "group": "block",
+      "content": "column+",
+      "inline": false,
+      "atom": false
+    },
+    "dateMention": {
+      "attrs": [
+        "date",
+        "reminder"
+      ],
+      "group": "inline",
+      "content": null,
+      "inline": true,
+      "atom": true
+    },
+    "diffEmbed": {
+      "attrs": [
+        "blockId",
+        "diff",
+        "indent"
+      ],
+      "group": "block",
+      "content": null,
+      "inline": false,
+      "atom": true
+    },
+    "doc": {
+      "attrs": [],
+      "group": null,
+      "content": "block+",
+      "inline": false,
+      "atom": false
+    },
+    "entityMention": {
+      "attrs": [
+        "id",
+        "label",
+        "mentionSuggestionChar"
+      ],
+      "group": "inline",
+      "content": null,
+      "inline": true,
+      "atom": true
+    },
+    "fileBlock": {
+      "attrs": [
+        "blockId",
+        "caption",
+        "id",
+        "kind",
+        "mime",
+        "name",
+        "size",
+        "src"
+      ],
+      "group": "block",
+      "content": null,
+      "inline": false,
+      "atom": true
+    },
+    "hardBreak": {
+      "attrs": [],
+      "group": "inline",
+      "content": null,
+      "inline": true,
+      "atom": true
+    },
+    "heading": {
+      "attrs": [
+        "blockColor",
+        "blockId",
+        "dir",
+        "indent",
+        "level"
+      ],
+      "group": "block",
+      "content": "inline*",
+      "inline": false,
+      "atom": false
+    },
+    "horizontalRule": {
+      "attrs": [
+        "blockId",
+        "indent"
+      ],
+      "group": "block",
+      "content": null,
+      "inline": false,
+      "atom": true
+    },
+    "image": {
+      "attrs": [
+        "align",
+        "alt",
+        "blockId",
+        "caption",
+        "crop",
+        "fileName",
+        "height",
+        "href",
+        "id",
+        "indent",
+        "src",
+        "title",
+        "width"
+      ],
+      "group": "block",
+      "content": null,
+      "inline": false,
+      "atom": true
+    },
+    "inlineMath": {
+      "attrs": [
+        "latex"
+      ],
+      "group": "inline",
+      "content": null,
+      "inline": true,
+      "atom": true
+    },
+    "linkMention": {
+      "attrs": [
+        "href",
+        "icon",
+        "siteName",
+        "title"
+      ],
+      "group": "inline",
+      "content": null,
+      "inline": true,
+      "atom": true
+    },
+    "listItem": {
+      "attrs": [
+        "blockColor",
+        "blockId"
+      ],
+      "group": null,
+      "content": "paragraph block*",
+      "inline": false,
+      "atom": false
+    },
+    "mention": {
+      "attrs": [
+        "id",
+        "label",
+        "mentionSuggestionChar"
+      ],
+      "group": "inline",
+      "content": null,
+      "inline": true,
+      "atom": true
+    },
+    "orderedList": {
+      "attrs": [
+        "blockId",
+        "dir",
+        "indent",
+        "start",
+        "type"
+      ],
+      "group": "block list",
+      "content": "listItem+",
+      "inline": false,
+      "atom": false
+    },
+    "paragraph": {
+      "attrs": [
+        "blockColor",
+        "blockId",
+        "dir",
+        "indent"
+      ],
+      "group": "block",
+      "content": "inline*",
+      "inline": false,
+      "atom": false
+    },
+    "poll": {
+      "attrs": [
+        "blockId",
+        "id",
+        "indent"
+      ],
+      "group": "block",
+      "content": null,
+      "inline": false,
+      "atom": true
+    },
+    "recordingEmbed": {
+      "attrs": [
+        "blockId",
+        "egress",
+        "indent",
+        "kind",
+        "sid",
+        "u1",
+        "u2"
+      ],
+      "group": "block",
+      "content": null,
+      "inline": false,
+      "atom": true
+    },
+    "subpage": {
+      "attrs": [
+        "blockId",
+        "docId",
+        "title"
+      ],
+      "group": "block",
+      "content": null,
+      "inline": false,
+      "atom": true
+    },
+    "table": {
+      "attrs": [
+        "blockId"
+      ],
+      "group": "block",
+      "content": "tableRow+",
+      "inline": false,
+      "atom": false
+    },
+    "tableCell": {
+      "attrs": [
+        "background",
+        "blockId",
+        "colspan",
+        "colwidth",
+        "rowspan"
+      ],
+      "group": null,
+      "content": "block+",
+      "inline": false,
+      "atom": false
+    },
+    "tableEmbed": {
+      "attrs": [
+        "blockId",
+        "indent",
+        "tableId",
+        "viewId"
+      ],
+      "group": "block",
+      "content": null,
+      "inline": false,
+      "atom": true
+    },
+    "tableHeader": {
+      "attrs": [
+        "background",
+        "blockId",
+        "colspan",
+        "colwidth",
+        "rowspan"
+      ],
+      "group": null,
+      "content": "block+",
+      "inline": false,
+      "atom": false
+    },
+    "tableRow": {
+      "attrs": [
+        "blockId"
+      ],
+      "group": null,
+      "content": "(tableCell | tableHeader)*",
+      "inline": false,
+      "atom": false
+    },
+    "taskItem": {
+      "attrs": [
+        "blockColor",
+        "blockId",
+        "checked",
+        "taskId"
+      ],
+      "group": null,
+      "content": "paragraph block*",
+      "inline": false,
+      "atom": false
+    },
+    "taskList": {
+      "attrs": [
+        "blockId",
+        "dir",
+        "indent"
+      ],
+      "group": "block list",
+      "content": "taskItem+",
+      "inline": false,
+      "atom": false
+    },
+    "taskListEmbed": {
+      "attrs": [
+        "blockId",
+        "projectId",
+        "show"
+      ],
+      "group": "block",
+      "content": null,
+      "inline": false,
+      "atom": true
+    },
+    "text": {
+      "attrs": [],
+      "group": "inline",
+      "content": null,
+      "inline": true,
+      "atom": true
+    },
+    "toc": {
+      "attrs": [
+        "blockId"
+      ],
+      "group": "block",
+      "content": null,
+      "inline": false,
+      "atom": true
+    },
+    "webEmbed": {
+      "attrs": [
+        "blockId",
+        "height",
+        "src"
+      ],
+      "group": "block",
+      "content": null,
+      "inline": false,
+      "atom": true
+    }
+  },
+  "marks": {
+    "bold": {
+      "attrs": []
+    },
+    "code": {
+      "attrs": []
+    },
+    "highlight": {
+      "attrs": [
+        "color"
+      ]
+    },
+    "italic": {
+      "attrs": []
+    },
+    "link": {
+      "attrs": [
+        "class",
+        "href",
+        "rel",
+        "target"
+      ]
+    },
+    "strike": {
+      "attrs": []
+    },
+    "textStyle": {
+      "attrs": [
+        "color"
+      ]
+    },
+    "underline": {
+      "attrs": []
+    }
+  }
+}

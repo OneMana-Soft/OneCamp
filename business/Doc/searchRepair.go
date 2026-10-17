@@ -25,8 +25,6 @@ package businness
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -43,7 +41,10 @@ import (
 )
 
 const (
-	docSearchRepairKey  = "docs_search_entries_v2"
+	// v3: entries name the doc's owner, full-access people, teams and
+	// space (the Access Resolver's sources, A5), so every entry is written
+	// once more.
+	docSearchRepairKey  = "docs_search_entries_v3"
 	docSearchRepairPage = 100
 	// docSearchRepairTries bounds the retries in one process: about three and
 	// a half hours of waits, then the next start tries again.
@@ -77,34 +78,26 @@ func (r DocSearchRepair) String() string {
 // StartDocSearchRepair runs RunDocSearchRepair in the background until it
 // succeeds, ctx ends, or the tries run out.
 func StartDocSearchRepair(ctx context.Context) {
-	helpers.GoSafeNamed("doc.search-repair", func() {
-		wait := 30 * time.Second
-		for try := 0; try < docSearchRepairTries; try++ {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(wait):
-			}
+	helpers.RetryInBackground(ctx, "doc.search-repair",
+		helpers.Retries{First: 30 * time.Second, Cap: 30 * time.Minute, Tries: docSearchRepairTries},
+		func(ctx context.Context) error {
 			rep, ran, err := RunDocSearchRepair(ctx)
-			if err == nil {
-				if ran {
-					helpers.MessageLogs.InfoLog.Printf("Docs search repair: %s", rep)
-				}
-				return
+			if err != nil {
+				helpers.MessageLogs.ErrorLog.Printf("Docs search repair failed (will retry): %v (so far: %s)", err, rep)
+				return err
 			}
-			helpers.MessageLogs.ErrorLog.Printf("Docs search repair failed (will retry): %v (so far: %s)", err, rep)
-			if wait < 30*time.Minute {
-				wait *= 2
+			if ran {
+				helpers.MessageLogs.InfoLog.Printf("Docs search repair: %s", rep)
 			}
-		}
-	})
+			return nil
+		})
 }
 
 // RunDocSearchRepair rewrites every doc's search entries, unless that has
 // been done, and then records that it has, with what it did. ran is whether
 // it ran this time.
 func RunDocSearchRepair(ctx context.Context) (rep DocSearchRepair, ran bool, err error) {
-	if done, derr := docSearchRepairDone(); derr != nil || done {
+	if done, derr := configModel.IsDone(docSearchRepairKey); derr != nil || done {
 		return rep, false, derr
 	}
 	rep, err = RepairDocSearch(ctx)
@@ -200,15 +193,4 @@ func writeDocSearchRepairPage(ctx context.Context, rep *DocSearchRepair, docs []
 	rep.Children += changed
 	rep.Revived += revived
 	return err
-}
-
-func docSearchRepairDone() (bool, error) {
-	cfg, err := configModel.GetConfigByKey(docSearchRepairKey)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return cfg != nil && strings.HasPrefix(cfg.Value, "done"), nil
 }

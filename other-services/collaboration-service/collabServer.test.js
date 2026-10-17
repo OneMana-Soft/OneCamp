@@ -5,6 +5,8 @@ import { TiptapTransformer } from '@hocuspocus/transformer'
 import { COLLAB_EXTENSIONS } from './extensions.js'
 import { guardRedisExtension } from './guardRedis.js'
 import { SCHEMA_HASH } from './schemaGate.js'
+import { storedAtOf } from './collabServer.js'
+import { bodyHash, encodeState } from './docState.js'
 import { FakeBackend, FakeRedis, TestClient, startServer, until, sleep } from './testkit.js'
 
 // The collaboration server against a fake Redis and a fake API, over real
@@ -24,7 +26,9 @@ after(() => process.off('unhandledRejection', onRejection))
 
 const ID = '9d2f6c1a-7e1b-4c55-8a5e-2f9b0c3d4e5f'
 const OTHER = '1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d'
-const BODY = '<h1>Launch</h1><p>Ship on Thursday.</p>'
+// Stored as a doc is once its blocks have ids (transforms/blockIds.js gives a
+// doc without them its ids as it loads: transforms/blockIds.test.js).
+const BODY = '<h1 data-block-id="b-launch">Launch</h1><p data-block-id="b-ship">Ship on Thursday.</p>'
 const text = (doc) => JSON.stringify(TiptapTransformer.fromYdoc(doc, 'default'))
 const para = (t, type = 'paragraph') => {
     const p = new Y.XmlElement(type)
@@ -38,7 +42,7 @@ const world = () => {
     const redis = new FakeRedis()
     const backend = new FakeBackend()
     backend.doc(ID, BODY)
-    backend.doc(OTHER, '<p>Another doc.</p>')
+    backend.doc(OTHER, '<p data-block-id="b-another">Another doc.</p>')
     return { redis, backend }
 }
 
@@ -70,6 +74,37 @@ test('an unknown block is saved, kept, and survives a restart and a replay', asy
     assert.match(backend.docs.get(ID).doc_body, /data-oc-preserved="futureEmbed"/)
     await again.close()
     again.destroy()
+    await collab.stop()
+    assert.deepEqual(rejections, [])
+})
+
+test('a saved state from before toggles had a first line opens moved over, the new line given an id (B2)', async () => {
+    const { redis, backend } = world()
+    const old = new Y.Doc()
+    old.transact(() => {
+        const toggle = new Y.XmlElement('collapsible')
+        toggle.setAttribute('title', 'Risks')
+        toggle.setAttribute('open', false)
+        toggle.setAttribute('blockId', 'b-risks')
+        const inside = para('Body')
+        inside.setAttribute('blockId', 'b-body')
+        toggle.insert(0, [inside])
+        old.getXmlFragment('default').insert(0, [toggle])
+    })
+    const body = '<div data-type="collapsible" data-title="Risks" data-open="false" data-block-id="b-risks"><p data-block-id="b-body">Body</p></div>'
+    backend.doc(ID, body, { doc_yjs_state: encodeState(old), doc_yjs_body_hash: bodyHash(body) })
+    const collab = await startServer({ redis, backend })
+    const tab = await edit(collab, ID, () => {})
+    const toggle = TiptapTransformer.fromYdoc(tab.doc, 'default').content[0]
+    assert.equal(toggle.type, 'collapsible')
+    assert.equal(toggle.attrs.title, undefined)
+    assert.equal(toggle.attrs.open, undefined)
+    assert.deepEqual(toggle.content.map((n) => n.content?.[0]?.text), ['Risks', 'Body'])
+    assert.ok(toggle.content[0].attrs.blockId, 'the new first line has an id')
+    assert.equal(toggle.content[1].attrs.blockId, 'b-body')
+    await until(() => !backend.docs.get(ID).doc_body.includes('data-title'), 3000, 'the save of the moved-over doc')
+    await tab.close()
+    tab.destroy()
     await collab.stop()
     assert.deepEqual(rejections, [])
 })
@@ -239,6 +274,34 @@ test("a guest's connection is read-only: its deletions never reach the doc", asy
     assert.deepEqual(rejections, [])
 })
 
+test('an editor a hard lock holds at comment reconnects read-only: their edits never reach the doc', async () => {
+    const { redis, backend } = world()
+    const collab = await startServer({ redis, backend })
+    const token = '{"sub":"editor-1"}'
+
+    const before = new TestClient({ url: collab.url, name: ID, token })
+    assert.equal(await before.connect(), 'synced')
+    assert.equal(before.scope, 'read-write')
+    await before.close()
+    before.destroy()
+
+    // The owner locks the doc hard: the session answers this editor at
+    // comment (the Access Resolver holds them there), and their next
+    // connection (a reauth closes the old one) is read-only.
+    backend.levels.set('editor-1', 'comment')
+    const after = new TestClient({ url: collab.url, name: ID, token })
+    assert.equal(await after.connect(), 'synced')
+    assert.equal(after.scope, 'readonly')
+    after.doc.getXmlFragment('default').delete(0, after.doc.getXmlFragment('default').length)
+    await until(() => after.statuses.includes(false), 2000, 'the refusal')
+    assert.match(text(collab.server.hocuspocus.documents.get(ID)), /Ship on Thursday/)
+    await after.close()
+    after.destroy()
+    await collab.stop()
+    assert.equal(backend.docs.get(ID).doc_body, BODY)
+    assert.deepEqual(rejections, [])
+})
+
 test('a tab built against an older editor schema reads but cannot write, and is told to reload', async () => {
     const { redis, backend } = world()
     const schema = { current: SCHEMA_HASH, history: ['an-older-manifest', SCHEMA_HASH] }
@@ -247,8 +310,10 @@ test('a tab built against an older editor schema reads but cannot write, and is 
     const stale = new TestClient({ url: collab.url, name: ID, schema: 'an-older-manifest' })
     assert.equal(await stale.connect(), 'synced')
     assert.equal(stale.scope, 'readonly')
-    await until(() => stale.stateless.length > 0, 2000, 'the reload message')
-    assert.equal(JSON.parse(stale.stateless[0]).type, 'schema-outdated')
+    const told = () => stale.stateless.map((m) => JSON.parse(m))
+    await until(() => told().some((m) => m.type === 'schema-outdated'), 2000, 'the reload message')
+    // Its session says so too: it may not write.
+    assert.equal(told().find((m) => m.type === 'session')?.canEdit, false)
     stale.doc.getXmlFragment('default').delete(0, 1)
     await sleep(100)
     assert.match(text(collab.server.hocuspocus.documents.get(ID)), /Launch/)
@@ -264,4 +329,12 @@ test('a tab built against an older editor schema reads but cannot write, and is 
     }
     await collab.stop()
     assert.deepEqual(rejections, [])
+})
+
+test('a tab opening a stored doc hears when it was stored, not when it was read', () => {
+    assert.equal(storedAtOf({ doc_updated_at: '2026-10-01T08:00:00Z' }), Date.parse('2026-10-01T08:00:00Z'))
+    for (const doc of [{ doc_updated_at: '0001-01-01T00:00:00Z' }, {}, null]) {
+        const before = Date.now()
+        assert.ok(storedAtOf(doc) >= before, JSON.stringify(doc))
+    }
 })

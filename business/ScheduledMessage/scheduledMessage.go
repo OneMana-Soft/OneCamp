@@ -86,7 +86,8 @@ func init() {
 // ValidateSendAt keeps the time inside the window. Pure, so it is tested.
 func ValidateSendAt(sendAt, now time.Time) error {
 	if sendAt.Before(now.Add(MinLead)) {
-		return invalid("Pick a time at least a minute from now.")
+		// Said from the rule itself: it said "a minute" where 30 seconds passed (MC-41).
+		return invalid(fmt.Sprintf("Pick a time at least %d seconds from now.", int(MinLead/time.Second)))
 	}
 	if sendAt.After(now.Add(MaxLead)) {
 		return invalid("Pick a time within the next 120 days.")
