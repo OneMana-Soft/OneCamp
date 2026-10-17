@@ -878,13 +878,20 @@ func checkGitHubRateLimit(resp *http.Response) error {
 // overwrites the OneCamp task. It fetches title, body, status, labels, assignee,
 // comments, PR state, checks, and reviews. It is idempotent: calling it multiple
 // times is safe because GitHub comment IDs are deduplicated via
-// github_comment_mappings.
-func RefreshFromGitHub(ctx context.Context, taskUUID uuid.UUID, backfillComments bool) error {
+// github_comment_mappings. What it changes it changes as actor, whoever
+// pressed Refresh (one of the project's admins, as the route requires), and a
+// GitHub comment by someone it can't match to a person comes in as theirs.
+func RefreshFromGitHub(ctx context.Context, taskUUID uuid.UUID, backfillComments bool, actor *dgraphStruct.DgraphUser) error {
 	// Everything below applies GitHub's copy of the issue to the task, comments
 	// anyone wrote on GitHub included, so it is marked as the webhook marks its
 	// work: nothing it writes is sent back to GitHub, and no comment it brings
 	// in counts as a person in the workspace asking for anything.
 	ctx = helpers.WithGitHubOrigin(ctx)
+	// A deleted task is gone to a refresh (RefreshableTask), before anything
+	// of it is touched.
+	if err := RefreshableTask(ctx, taskUUID); err != nil {
+		return err
+	}
 	_ = taskDomain.SetGitHubSyncStatus(ctx, taskUUID, "pending", nil, 0)
 
 	// 1. Resolve GitHub URLs
@@ -936,15 +943,11 @@ func RefreshFromGitHub(ctx context.Context, taskUUID uuid.UUID, backfillComments
 		return fmt.Errorf("task not found in Dgraph: %w", err)
 	}
 
-	// Use task creator as the actor for refresh-generated activities
-	var actorDgraphInfo *dgraphStruct.DgraphUser
-	if dgraphTaskInfo.CreatedBy != nil {
-		actorDgraphInfo, _ = userBusiness.GetDgraphUserInfoByUUID(ctx, dgraphTaskInfo.CreatedBy.Uuid)
-	}
-	if actorDgraphInfo == nil {
-		actorDgraphInfo = dgraphTaskInfo.CreatedBy
-	}
-	if actorDgraphInfo == nil {
+	// The refresh acts as whoever pressed Refresh. It acted as the task's
+	// creator, read from this task read, which reads no creator, so every
+	// refresh stopped here, on every line.
+	actorDgraphInfo := actor
+	if actorDgraphInfo == nil || actorDgraphInfo.Uid == "" || actorDgraphInfo.Uuid == "" {
 		helpers.LogErrorWithContext(ctx, "RefreshFromGitHub: no actorDgraphInfo for task %s", taskUUID.String())
 		_ = taskDomain.SetGitHubSyncStatus(ctx, taskUUID, "failed", strPtr("actor user not found"), 1)
 		return fmt.Errorf("actor user not found")

@@ -169,52 +169,6 @@ func GetFCMTokenByListOfUserId(query string, userIDs []string) (tokens []string,
 	return
 }
 
-func GetFCMTokensForNewProjectActivityExcludingUserId(query string, projectId string, userId string, membersList []string, mentionsList []string) (tokens []string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query, projectId, userId, pq.Array(membersList), pq.Array(mentionsList))
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetFCMTokensForNewProjectActivityExcludingUserId Failed to get user's fcm token err: %+v",
-			err)
-		return
-	}
-	// A scan error below returns early, so without this the pooled
-	// connection is never released. database/sql only auto-closes when
-	// Next() runs to completion.
-	defer rows.Close()
-
-	for rows.Next() {
-		var userFCMToken FCMToken
-		if err = rows.Scan(&userFCMToken.FCMToken); err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/GetFCMTokensForNewProjectActivityExcludingUserId Failed to scan row err: %+v",
-				err)
-			return
-		}
-
-		tokens = append(tokens, userFCMToken.FCMToken)
-	}
-	// Iteration can stop on a mid-query failure (dropped connection,
-	// server-side error) rather than on end-of-rows. Without this the
-	// function returns a PARTIAL token list with a nil error, which
-	// silently drops push notifications for the users left off it.
-	if err = rows.Err(); err != nil {
-		helpers.LogErrorWithContext(ctx, "models/UserFCMToken rows iteration failed err: %+v", err)
-		return
-	}
-	if err = rows.Err(); err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetFCMTokensForNewProjectActivityExcludingUserId rows iteration err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func DeleteFromListOfFCMToken(query string, tokens []string) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()

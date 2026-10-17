@@ -8,6 +8,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/dgraph-io/dgo/v230"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
 
@@ -56,8 +57,12 @@ func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.Dgra
 }
 
 func GetDgraphUserInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	return GetDgraphUserInfoInTxn(ctx, dgraphInit.DgraphClient.NewTxn(), query, variables)
+}
 
+// GetDgraphUserInfoInTxn is GetDgraphUserInfoByUUID in txn, for a read made
+// of several queries that must see one snapshot (dgraphInit.InSnapshot).
+func GetDgraphUserInfoInTxn(ctx context.Context, txn *dgo.Txn, query string, variables map[string]string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

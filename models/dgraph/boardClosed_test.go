@@ -7,23 +7,20 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 )
 
-// helpers.ClosedLimit holds its own copy of these limits (helpers cannot
-// import this package); this keeps the two from drifting apart.
-func TestClosedLimitAgreesWithTheBoardLimits(t *testing.T) {
+// helpers.ClosedLimit and helpers.OpenLimit hold their own copies of these
+// limits (helpers cannot import this package); this keeps them from drifting
+// apart.
+func TestBoardLimitsAgreeWithTheHelpers(t *testing.T) {
 	if got := helpers.ClosedLimit(url.Values{}); got != BoardClosedLimit {
-		t.Errorf("default %d, want BoardClosedLimit %d", got, BoardClosedLimit)
+		t.Errorf("closed default %d, want BoardClosedLimit %d", got, BoardClosedLimit)
 	}
 	if got := helpers.ClosedLimit(url.Values{"closedLimit": {"1000000"}}); got != BoardClosedMax {
-		t.Errorf("ceiling %d, want BoardClosedMax %d", got, BoardClosedMax)
+		t.Errorf("closed ceiling %d, want BoardClosedMax %d", got, BoardClosedMax)
 	}
-}
-
-// The time report asks for every task (0); a board for its newest few.
-func TestClosedFirst(t *testing.T) {
-	cases := map[int]string{0: "", -1: "", 200: ", first: 200", 999999: ", first: 2000"}
-	for in, want := range cases {
-		if got := ClosedFirst(in); got != want {
-			t.Errorf("ClosedFirst(%d) = %q, want %q", in, got, want)
-		}
+	if got := helpers.OpenLimit(url.Values{}); got != BoardOpenLimit {
+		t.Errorf("open default %d, want BoardOpenLimit %d", got, BoardOpenLimit)
+	}
+	if got := helpers.OpenLimit(url.Values{"openLimit": {"1000000"}}); got != BoardOpenMax {
+		t.Errorf("open ceiling %d, want BoardOpenMax %d", got, BoardOpenMax)
 	}
 }

@@ -14,9 +14,12 @@ import (
 	domain "github.com/akashc777/OneCamp/domain/Project"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
+	taskStatusModel "github.com/akashc777/OneCamp/models/postgres/TaskStatus"
+	"github.com/dgraph-io/dgo/v230"
 	"github.com/google/uuid"
 )
 
@@ -456,25 +459,63 @@ func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgrap
 	return
 }
 
-func GetDgraphProjectTaskListForKanban(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, closedLimit int) (dgraphProject *dgraphStruct.DgraphProject, err error) {
-	dgraphProject, err = domain.GetDgraphProjectTaskListForKanban(ctx, projectUUID, userDgraphUID, filterQuery, closedLimit)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetDgraphProjectTaskListForKanban failed to get project task list from dgraph err: %+v", err)
-		return
+// GetDgraphProjectTaskListForKanban is a project's board: each open column's
+// first openLimit cards in board order (all of them when openLimit is 0),
+// each closed column's newest closedLimit (all when 0), and how many tasks
+// every column holds (ColumnCounts). It reads the columns' places, picks the
+// cards, then reads those cards, in one snapshot; Dgraph's own sorted read
+// stopped at 1,000 a column without saying so.
+func GetDgraphProjectTaskListForKanban(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, openLimit int, closedLimit int) (dgraphProject *dgraphStruct.DgraphProject, err error) {
+	// The project's own statuses each have a column of their own.
+	var known []string
+	isKnown := map[string]bool{}
+	if projectID, perr := uuid.Parse(projectUUID); perr == nil {
+		statuses, serr := taskStatusModel.List(ctx, projectID)
+		if serr != nil {
+			helpers.LogErrorWithContext(ctx, "business/GetDgraphProjectTaskListForKanban failed to read the project's statuses err: %+v", serr)
+			return nil, serr
+		}
+		for _, s := range statuses {
+			known = append(known, s.ID.String())
+			isKnown[s.ID.String()] = true
+		}
+	}
+	partOf := func(t *dgraphStruct.DgraphTask) string {
+		if t.CustomStatus != nil && isKnown[*t.CustomStatus] {
+			return *t.CustomStatus
+		}
+		return ""
 	}
 
-	if dgraphProject != nil {
-		for _, column := range [][]*dgraphStruct.DgraphTask{dgraphProject.TasksTodo, dgraphProject.TasksInProgresss, dgraphProject.TasksBacklog, dgraphProject.TasksInReview, dgraphProject.TasksCanceled, dgraphProject.TasksDone} {
-			taskrank.Sort(column)
+	err = dgraphInit.InSnapshot(ctx, func(txn *dgo.Txn) error {
+		project, places, err := domain.GetDgraphProjectBoardPlaces(ctx, txn, projectUUID, userDgraphUID, filterQuery, closedLimit)
+		if err != nil {
+			return err
 		}
-		allTasks := append([]*dgraphStruct.DgraphTask{}, dgraphProject.TasksTodo...)
-		allTasks = append(allTasks, dgraphProject.TasksInProgresss...)
-		allTasks = append(allTasks, dgraphProject.TasksBacklog...)
-		allTasks = append(allTasks, dgraphProject.TasksInReview...)
-		allTasks = append(allTasks, dgraphProject.TasksCanceled...)
-		allTasks = append(allTasks, dgraphProject.TasksDone...)
-		_ = taskBusiness.MergeGitHubMetaIntoTasks(ctx, allTasks)
+		picks, uids := taskrank.Pick(places, openLimit, partOf)
+		cards, err := domain.GetDgraphProjectBoardCards(ctx, txn, uids)
+		if err != nil {
+			return err
+		}
+		for key, column := range taskrank.Fill(picks, cards) {
+			*project.Column(key) = column
+		}
+		project.ColumnCounts = dgraphStruct.ColumnCounts(places, known)
+		project.TasksDoneCount = places["done"].Count
+		project.TasksCanceledCount = places["canceled"].Count
+		dgraphProject = project
+		return nil
+	})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/GetDgraphProjectTaskListForKanban failed to get project task list from dgraph err: %+v", err)
+		return nil, err
 	}
+
+	var allTasks []*dgraphStruct.DgraphTask
+	for _, c := range dgraphStruct.BoardColumns {
+		allTasks = append(allTasks, *dgraphProject.Column(c.Key)...)
+	}
+	_ = taskBusiness.MergeGitHubMetaIntoTasks(ctx, allTasks)
 
 	return
 }

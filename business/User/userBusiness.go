@@ -23,6 +23,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers/avscan"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/helpers/uploadsafe"
+	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	"github.com/akashc777/OneCamp/initializers/minioInit"
 	"github.com/akashc777/OneCamp/initializers/oauth"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -34,6 +35,7 @@ import (
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/dgraph-io/dgo/v230"
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 	"golang.org/x/oauth2"
@@ -1280,21 +1282,40 @@ func GetDgraphUserProjectList(ctx context.Context, userUUID string) (dgraphUser 
 
 }
 
-func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDgraphUID string, filterQuery string, closedLimit int) (dgraphUser *dgraphStruct.DgraphUser, err error) {
-	dgraphUser, err = domain.GetDgraphUserTaskListForKanban(ctx, userUUID, userDgraphUID, filterQuery, closedLimit)
+// GetDgraphUserTaskListForKanban is a person's board (My Tasks): each open
+// column's first openLimit cards in board order (all when 0), each closed
+// column's newest closedLimit (all when 0), and how many tasks each column
+// holds. Places, then the picked cards, in one snapshot, as a project's board
+// is read; Dgraph's own sorted read stopped at 1,000 a column without saying so.
+func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDgraphUID string, filterQuery string, openLimit int, closedLimit int) (dgraphUser *dgraphStruct.DgraphUser, err error) {
+	// My Tasks draws only the six built-in columns.
+	partOf := func(*dgraphStruct.DgraphTask) string { return "" }
+	err = dgraphInit.InSnapshot(ctx, func(txn *dgo.Txn) error {
+		user, places, err := domain.GetDgraphUserBoardPlaces(ctx, txn, userUUID, filterQuery, closedLimit)
+		if err != nil {
+			return err
+		}
+		picks, uids := taskrank.Pick(places, openLimit, partOf)
+		cards, err := domain.GetDgraphUserBoardCards(ctx, txn, userDgraphUID, uids)
+		if err != nil {
+			return err
+		}
+		for key, column := range taskrank.Fill(picks, cards) {
+			*user.Column(key) = column
+		}
+		user.ColumnCounts = dgraphStruct.ColumnCounts(places, nil)
+		user.TasksDoneCount = places["done"].Count
+		user.TasksCanceledCount = places["canceled"].Count
+		dgraphUser = user
+		return nil
+	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/GetDgraphUserTaskListForKanban Failed to get user's task list in dgraph err: %+v",
 			err,
 		)
-		return
+		return nil, err
 	}
-	if dgraphUser != nil {
-		for _, column := range [][]*dgraphStruct.DgraphTask{dgraphUser.TasksTodo, dgraphUser.TasksInProgress, dgraphUser.TasksBacklog, dgraphUser.TasksInReview, dgraphUser.TasksCanceled, dgraphUser.TasksDone} {
-			taskrank.Sort(column)
-		}
-	}
-
 	return
 }
 

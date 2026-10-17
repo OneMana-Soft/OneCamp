@@ -34,8 +34,3 @@ type FilterParam struct {
 	Id    string      `json:"id"`
 	Value interface{} `json:"value"`
 }
-
-type SortingParam struct {
-	Id   string      `json:"id"`
-	Desc interface{} `json:"desc"`
-}

@@ -3,11 +3,14 @@ package Domain
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Task"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
@@ -620,15 +623,16 @@ func GetDgraphBasicTaskInfoByUUID(ctx context.Context, teamUUID string, userDgra
 	return
 }
 
-func GetDgraphTaskActivityList(ctx context.Context, taskUUID string, userDgraphUID string) (dgraphTask *dgraphStruct.DgraphTask, err error) {
+// TaskHistoryMax is the most history lines one read of a task gives: a
+// task's panel carries its newest TaskHistoryMax, and GetDgraphTaskActivityList
+// pages back from there.
+const TaskHistoryMax = 1000
 
-	variables := make(map[string]string)
-	variables["$id"] = taskUUID
-	variables["$userUid"] = userDgraphUID
-	query := `query TaskInfo($id: string, $userUid: string){
-				taskInfo(func: eq(task_uuid, $id)) {
-					task_uuid
-					task_activities (orderasc: activity_time) {
+// ErrUnknownHistoryLine is a page of history asked for before a line the task
+// doesn't have.
+var ErrUnknownHistoryLine = errors.New("that history line isn't this task's")
+
+const historyLineFields = `
 						activity_uuid
 						activity_by {
 							user_uuid
@@ -637,27 +641,126 @@ func GetDgraphTaskActivityList(ctx context.Context, taskUUID string, userDgraphU
 						}
 						activity_time
 						activity_type
-						activity_next_state
-					}
+						activity_next_state`
+
+// taskHistoryBlock is the DQL, inside a task's block, for a page of its
+// history: newest first, by time then uuid so lines from one save keep their
+// order across pages, first+1 lines so settleHistory can tell whether older
+// ones are left, only those older than the line ($beforeTime, $beforeUUID)
+// when before is set; and how many lines the task has. It was sorted oldest
+// first with no first, which Dgraph stops at 1,000, so a long history lost
+// its newest lines.
+func taskHistoryBlock(first int, before bool) string {
+	filter := ""
+	if before {
+		filter = ` @filter(lt(activity_time, $beforeTime) OR (eq(activity_time, $beforeTime) AND lt(activity_uuid, $beforeUUID)))`
+	}
+	return fmt.Sprintf(`
+					task_activity_count: count(task_activities)
+					task_activities%s (orderdesc: activity_time, orderdesc: activity_uuid, first: %d) {%s
+					}`, filter, first+1, historyLineFields)
+}
+
+// settleHistory makes a taskHistoryBlock answer the page it asked for: at
+// most first lines, oldest first as a panel shows them, and whether older
+// lines are left.
+func settleHistory(t *dgraphStruct.DgraphTask, first int) {
+	if t == nil {
+		return
+	}
+	if len(t.Activity) > first {
+		t.Activity = t.Activity[:first]
+		t.ActivityHasMore = true
+	}
+	slices.Reverse(t.Activity)
+}
+
+// GetDgraphTaskActivityList is a page of a task's history: its newest first
+// lines (1..TaskHistoryMax), or those just older than the line
+// beforeActivityUUID when it is set, oldest first; with the line count,
+// whether older lines are left, and the viewer's membership of the project.
+func GetDgraphTaskActivityList(ctx context.Context, taskUUID string, userDgraphUID string, beforeActivityUUID string, first int) (dgraphTask *dgraphStruct.DgraphTask, err error) {
+	first = min(max(first, 1), TaskHistoryMax)
+	variables := map[string]string{"$id": taskUUID, "$userUid": userDgraphUID}
+	params := "$id: string, $userUid: string"
+	if beforeActivityUUID != "" {
+		at, member, err := taskHistoryLineTime(ctx, taskUUID, beforeActivityUUID, userDgraphUID)
+		if err != nil {
+			return nil, err
+		}
+		if !member {
+			// Nothing is said about the line to someone outside the project:
+			// the caller refuses them, as it does any read of the history.
+			return &dgraphStruct.DgraphTask{Uuid: taskUUID, Project: &dgraphStruct.DgraphProject{}}, nil
+		}
+		if at == "" {
+			return nil, ErrUnknownHistoryLine
+		}
+		variables["$beforeTime"], variables["$beforeUUID"] = at, beforeActivityUUID
+		params += ", $beforeTime: string, $beforeUUID: string"
+	}
+	query := `query TaskInfo(` + params + `){
+				taskInfo(func: eq(task_uuid, $id)) {
+					task_uuid` + taskHistoryBlock(first, beforeActivityUUID != "") + `
 					task_project {
 						project_is_member: count(project_members @filter(uid($userUid)))
 					}
-					
 				}
 			}`
 
 	dgraphTask, err = dgraphModels.GetDgraphTaskInfoByUUID(ctx, query, variables)
-
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/GetDgraphTaskActivityList Failed to get task in dgraph err: %+v",
 			err,
 		)
-		return
+		return nil, err
 	}
+	settleHistory(dgraphTask, first)
+	return dgraphTask, nil
+}
 
-	return
-
+// taskHistoryLineTime is when the task's history line activityUUID was
+// written, as Dgraph gives it ("" when the task has no such line), and
+// whether userDgraphUID is a member of the task's project.
+func taskHistoryLineTime(ctx context.Context, taskUUID, activityUUID, userDgraphUID string) (at string, member bool, err error) {
+	query := `query Line($id: string, $line: string, $userUid: string){
+				t(func: eq(task_uuid, $id)) {
+					task_project {
+						project_is_member: count(project_members @filter(uid($userUid)))
+					}
+					task_activities @filter(eq(activity_uuid, $line)) {
+						activity_time
+					}
+				}
+			}`
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
+	resp, err := txn.QueryWithVars(ctx, query, map[string]string{"$id": taskUUID, "$line": activityUUID, "$userUid": userDgraphUID})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/taskHistoryLineTime err: %+v", err)
+		return "", false, err
+	}
+	var out struct {
+		T []struct {
+			Project struct {
+				Member int `json:"project_is_member"`
+			} `json:"task_project"`
+			Lines []struct {
+				At string `json:"activity_time"`
+			} `json:"task_activities"`
+		} `json:"t"`
+	}
+	if err := json.Unmarshal(resp.Json, &out); err != nil {
+		return "", false, err
+	}
+	if len(out.T) == 0 {
+		return "", false, nil
+	}
+	if len(out.T[0].Lines) > 0 {
+		at = out.T[0].Lines[0].At
+	}
+	return at, out.T[0].Project.Member > 0, nil
 }
 
 func GetDgraphTaskActivityInfo(ctx context.Context, teamUUID string, activityUUID string, userDgraphUID string) (dgraphTask *dgraphStruct.DgraphTask, err error) {
@@ -669,7 +772,7 @@ func GetDgraphTaskActivityInfo(ctx context.Context, teamUUID string, activityUUI
 	query := `query TaskInfo($id: string, $userUid: string, $activityUUID: string){
 				taskInfo(func: eq(task_uuid, $id)) {
 					task_uuid
-					task_activities @filter(eq(activity_uuid, $activityUUID)) (orderasc: activity_time) {
+					task_activities @filter(eq(activity_uuid, $activityUUID)) {
 						activity_uuid
 						activity_by {
 							user_uuid
@@ -822,21 +925,12 @@ func GetDgraphTaskInfoByUUID(ctx context.Context, teamUUID string, userDgraphUID
 						comment_created_at
 					}
 						
-					task_activities (orderasc: activity_time) {
-						activity_uuid
-						activity_by {
-							user_uuid
-							user_name
-							user_profile_object_key
-						}
-						activity_time
-						activity_type
-						activity_next_state
-					}
+					` + taskHistoryBlock(TaskHistoryMax, false) + `
 				}
 			}`
 
 	dgraphTask, err = dgraphModels.GetDgraphTaskInfoByUUID(ctx, query, variables)
+	settleHistory(dgraphTask, TaskHistoryMax)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1237,11 +1331,13 @@ func GetDgraphTaskRanks(ctx context.Context, taskUUIDs []string) (tasks []*dgrap
 }
 
 // GetDgraphProjectColumnRanks returns every live task in one column of a
-// project's board, for renumbering it.
+// project's board, for renumbering it. Unsorted, so Dgraph sends them all: it
+// was sorted by creation with no first, which stops at 1,000, and renumbering
+// a bigger column left the rest out of order. The order is business/TaskRank's.
 func GetDgraphProjectColumnRanks(ctx context.Context, projectUUID string, status string) (tasks []*dgraphStruct.DgraphTask, err error) {
 	query := `query Column($project: string, $status: string){
 				project(func: eq(project_uuid, $project)) {
-					tasks: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, $status)) (orderdesc: task_created_at) {
+					tasks: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, $status)) {
 						task_uuid
 						task_rank
 						task_created_at
@@ -1417,7 +1513,7 @@ func GetDgraphTaskForGuest(ctx context.Context, taskUUID string) (*dgraphStruct.
 					task_deleted_at
 					task_assignee { user_name user_full_name }
 					task_project { project_uuid }
-					task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")) (orderasc: comment_created_at) {
+					task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")) {
 						comment_uuid
 						comment_text
 						comment_created_at
@@ -1428,8 +1524,14 @@ func GetDgraphTaskForGuest(ctx context.Context, taskUUID string) (*dgraphStruct.
 	t, err := dgraphModels.GetDgraphTaskInfoByUUID(ctx, query, map[string]string{"$id": taskUUID})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetDgraphTaskForGuest err: %+v", err)
+		return t, err
 	}
-	return t, err
+	// Oldest first, sorted here: Dgraph stops a sorted block at 1,000. As
+	// Dgraph did, a comment with no time goes last.
+	slices.SortStableFunc(t.Comments, func(a, b *dgraphStruct.DgraphComment) int {
+		return helpers.CompareTimes(a.CreatedAt, b.CreatedAt, false)
+	})
+	return t, nil
 }
 
 func GetDgraphBasicTaskInfoByUUIDWithProjectMembers(ctx context.Context, teamUUID string, userDgraphUID string) (dgraphTask *dgraphStruct.DgraphTask, err error) {

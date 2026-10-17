@@ -898,7 +898,7 @@ func GetDgraphProjectMemberInfoForComment(ctx context.Context, projectUUID strin
 				projectInfo(func: eq(project_uuid, $id)) {
 					project_uuid
 					project_name
-					project_members (orderasc: user_name){
+					project_members {
 						uid
 						user_uuid
 						user_name
@@ -916,6 +916,10 @@ func GetDgraphProjectMemberInfoForComment(ctx context.Context, projectUUID strin
 			err,
 		)
 		return
+	}
+	if dgraphProject != nil {
+		// By name, sorted here: Dgraph stops a sorted block at 1,000.
+		dgraphStruct.SortUsersByName(dgraphProject.Members)
 	}
 
 	return

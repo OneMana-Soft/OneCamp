@@ -1,7 +1,8 @@
 // Package business (AdminAudit) records admin configuration changes for
 // compliance. It extracts the actor, IP, and user-agent from the request and
-// writes a redacted, append-only entry. All writes are best-effort: an audit
-// failure is logged but never blocks the originating admin action.
+// writes a redacted, append-only entry. Rows join the chain in the order they
+// were recorded in (models/AdminAudit chainWriter.go). Record is best-effort:
+// an audit failure is logged but never blocks the originating admin action.
 package business
 
 import (
@@ -62,12 +63,10 @@ func Record(r *http.Request, action, category, summary string, metadata map[stri
 		}
 	}
 
-	// Fire-and-forget so the audit write never adds latency to the admin
-	// action. Uses a detached context bound by the model's own DB timeout.
-	go func() {
-		defer func() { _ = recover() }()
-		_ = auditModel.Insert(context.Background(), entry)
-	}()
+	// Handed to the chain's writer, which writes it after every row recorded
+	// before it: the action waits for no database, and the log's order is the
+	// order the actions happened in. A row that can't be written is logged.
+	auditModel.Append(entry)
 }
 
 // ListWhere is List with an initiator filter.
@@ -215,13 +214,14 @@ func AllCategories() []string { return auditModel.AllCategories() }
 // creator. The caller has already resolved that person, and passing it in is what
 // keeps this function honest about whose action it is recording.
 //
-// It is SYNCHRONOUS and returns an error, where Record is fire-and-forget. That
-// asymmetry is the point. Record covers admin UI actions, where losing one row to a
-// restart is a shame but the action is already visible in the product. An agent
-// action recorded nowhere is an action nobody can review — and under logging
-// obligations for high-risk AI systems, an unrecorded action is worse than a
-// refused one. So the caller can adopt "no record, no action": if this fails, fail
-// the call.
+// It WAITS until the row is written and returns an error, where Record hands its
+// row over and returns. That asymmetry is the point. Record covers admin UI
+// actions, where losing one row to a restart is a shame but the action is already
+// visible in the product. An agent action recorded nowhere is an action nobody can
+// review — and under logging obligations for high-risk AI systems, an unrecorded
+// action is worse than a refused one. So the caller can adopt "no record, no
+// action": if this fails, fail the call. Both go through the chain's one writer,
+// so a row recorded here never overtakes one Record took first.
 //
 // metadata must already be redacted; nothing here strips secrets.
 func RecordForPrincipal(

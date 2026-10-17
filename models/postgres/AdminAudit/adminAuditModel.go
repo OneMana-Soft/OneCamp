@@ -3,10 +3,11 @@
 //
 // Tamper-evidence (migration 106): each entry stores entry_hash =
 // SHA-256(prev_hash + canonical content), forming a hash chain. Any later
-// insert/edit/delete of a historical row breaks Verify. Inserts are serialized
-// under a Postgres advisory lock so the chain stays linear even though callers
-// write asynchronously. Pre-feature rows have NULL hashes and are skipped by
-// verification (the chain starts at the first hashed row).
+// insert/edit/delete of a historical row breaks Verify. Rows are written by one
+// writer per process, in the order they were handed over (chainWriter.go), and
+// under a Postgres advisory lock, so the chain stays linear across processes.
+// Pre-feature rows have NULL hashes and are skipped by verification (the chain
+// starts at the first hashed row).
 package models
 
 import (
@@ -184,54 +185,6 @@ func computeAuditHash(prevHash string, e *AuditEntry) string {
 		b.WriteString(e.ActorKind)
 	}
 	return helpers.SHA256Hex(b.String())
-}
-
-// Insert appends an audit entry and links it into the hash chain. Best-effort:
-// callers log but do not fail the originating action if the audit write fails.
-// The advisory lock serializes concurrent inserts so the chain is linear.
-func Insert(ctx context.Context, e *AuditEntry) error {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	tx, err := postgresInit.DBConn.SqlDB.BeginTx(dbctx, nil)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/AdminAudit.Insert begin err: %+v", err)
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	if _, err = tx.ExecContext(dbctx, `SELECT pg_advisory_xact_lock($1)`, auditChainLockKey); err != nil {
-		helpers.LogErrorWithContext(ctx, "models/AdminAudit.Insert lock err: %+v", err)
-		return err
-	}
-
-	var prev sql.NullString
-	if err = tx.QueryRowContext(dbctx,
-		`SELECT entry_hash FROM admin_audit_log WHERE entry_hash IS NOT NULL ORDER BY seq DESC LIMIT 1`).Scan(&prev); err != nil && err != sql.ErrNoRows {
-		helpers.LogErrorWithContext(ctx, "models/AdminAudit.Insert prev err: %+v", err)
-		return err
-	}
-
-	if e.Id == uuid.Nil {
-		e.Id = uuid.New()
-	}
-	e.CreatedAt = time.Now().UTC().Truncate(time.Microsecond)
-	e.PrevHash = prev.String
-	e.EntryHash = computeAuditHash(e.PrevHash, e)
-
-	const q = `
-		INSERT INTO admin_audit_log
-			(id, actor_id, actor_email, action, category, summary, metadata,
-			 ip_address, user_agent, created_at, entry_hash, prev_hash, actor_kind)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`
-	if _, err = tx.ExecContext(dbctx, q,
-		e.Id, e.ActorID, nullStr(e.ActorEmail), e.Action, e.Category, e.Summary,
-		e.Metadata, nullStr(e.IPAddress), nullStr(e.UserAgent), e.CreatedAt,
-		e.EntryHash, nullStr(e.PrevHash), nullStr(e.ActorKind)); err != nil {
-		helpers.LogErrorWithContext(ctx, "models/AdminAudit.Insert err: %+v", err)
-		return err
-	}
-	return tx.Commit()
 }
 
 const auditCols = `id, seq, actor_id, actor_email, action, category, summary, metadata, ip_address, user_agent, created_at, entry_hash, prev_hash, redacted_at, actor_kind`

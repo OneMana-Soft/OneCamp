@@ -755,22 +755,16 @@ func sendNewTaskNotification(body string, projectId string, taskName string, men
 	ctx := context.Background()
 
 	for _, mention := range mentionsDgraphUsersList {
+		if mention == nil {
+			continue
+		}
 		mentionsUUIDList = append(mentionsUUIDList, mention.Uuid)
 		mentionsMap[mention.Uuid] = true
 	}
 
-	// 1. Get eligible users for notifications (based on preferences)
-	eligibleUserIDs, err := userProjectNotificationBusiness.GetEligibleUsersForProjectActivity(ctx, projectId, userDgraph.Uuid, mentionsUUIDList, false)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/sendNewTaskNotification Failed to get eligible users err: %+v",
-			err)
-		return
-	}
-
-	if len(eligibleUserIDs) == 0 {
-		return
-	}
+	// 1. Who hears of it by their setting for the project, of those who may
+	// read it now (newTaskHearers).
+	eligibleUserIDs := newTaskHearers(ctx, projectId, taskUUID, userDgraph.Uuid, mentionsUUIDList)
 
 	// 2. Publish MQTT Activity Events
 	// Filter eligibleUserIDs to find those who are also in mentionsUUIDList
@@ -808,21 +802,25 @@ func sendNewTaskNotification(body string, projectId string, taskName string, men
 
 	// 3. The push, and the desktop app's notice, to those of them the push
 	// gate lets through (business/Notification Deliver), and to whoever it
-	// was given to, unless that is the person who made it.
-	if assigneeDrgraph != nil && assigneeDrgraph.Uuid != userDgraph.Uuid {
+	// was given to, unless that is the person who made it: them too when
+	// nobody's setting tells anyone else of it, which used to tell nobody at
+	// all, nor email them.
+	if assigneeDrgraph != nil && assigneeDrgraph.Uuid != "" && assigneeDrgraph.Uuid != userDgraph.Uuid {
 		eligibleUserIDs = append(eligibleUserIDs, assigneeDrgraph.Uuid)
 	}
 
-	pushData := make(map[string]string)
+	if len(eligibleUserIDs) > 0 {
+		pushData := make(map[string]string)
 
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_TASK
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] = taskUUID
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = taskName
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
-	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
+		pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE] = firebaseInit.FIREBASE_PUSH_DATA_TYPE_TASK
+		pushData[firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID] = taskUUID
+		pushData[firebaseInit.FIREBASE_PUSH_DATA_TITLE] = taskName
+		pushData[firebaseInit.FIREBASE_PUSH_DATA_BODY] = body
+		pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
+		pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 
-	notificationBusiness.Deliver(ctx, eligibleUserIDs, pushData, "task:"+taskUUID)
+		notificationBusiness.Deliver(ctx, eligibleUserIDs, pushData, "task:"+taskUUID)
+	}
 
 	// Email fan-out for task creation:
 	//   1. Assignee gets a "you have been assigned" email.
@@ -840,6 +838,44 @@ func sendNewTaskNotification(body string, projectId string, taskName string, men
 	}
 	// We do not currently have project name here — empty subtitle is fine.
 }
+
+// newTaskHearers is who of a project's people hears of a new task in it by
+// their setting for the project (GetEligibleUsersForProjectActivity), never
+// its maker, of those who may read it now (domain Readers). A setting outlives
+// someone's place in the project: taking someone off a team takes them off its
+// projects and leaves their settings, so a new task's name and description
+// were pushed to people taken off its team. With no answer of either, nobody
+// hears of it by setting.
+func newTaskHearers(ctx context.Context, projectID, taskUUID, makerUUID string, mentioned []string) []string {
+	eligible, err := newTaskEligible(ctx, projectID, makerUUID, mentioned, false)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/sendNewTaskNotification Failed to get eligible users err: %+v",
+			err)
+		return nil
+	}
+	if len(eligible) == 0 {
+		return nil
+	}
+	readers, err := newTaskReaders(ctx, taskUUID, eligible)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/sendNewTaskNotification could not check who may read task %s, telling only whom it's given to: %+v", taskUUID, err)
+		return nil
+	}
+	hearers := make([]string, 0, len(eligible))
+	for _, id := range eligible {
+		if readers[id] {
+			hearers = append(hearers, id)
+		}
+	}
+	return hearers
+}
+
+// Seams for tests: who hears of a new task by their setting, and who may read it.
+var (
+	newTaskEligible = userProjectNotificationBusiness.GetEligibleUsersForProjectActivity
+	newTaskReaders  = domain.Readers
+)
 
 func UpdateTaskDesByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskDesc string, mentionUsers []*dgraphStruct.DgraphUser, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) (err error) {
 	// A deleted task stays deleted: these writes set its deletion time to the
@@ -1941,8 +1977,10 @@ func GetDgraphBasicTaskInfoWithAttachmentsByUUID(ctx context.Context, teamUUID s
 	return
 }
 
-func GetDgraphTaskActivityList(ctx context.Context, taskUUID string, userDgraphUID string) (dgraphTask *dgraphStruct.DgraphTask, err error) {
-	dgraphTask, err = domain.GetDgraphTaskActivityList(ctx, taskUUID, userDgraphUID)
+// GetDgraphTaskActivityList is a page of a task's history; see
+// domain.GetDgraphTaskActivityList.
+func GetDgraphTaskActivityList(ctx context.Context, taskUUID string, userDgraphUID string, beforeActivityUUID string, first int) (dgraphTask *dgraphStruct.DgraphTask, err error) {
+	dgraphTask, err = domain.GetDgraphTaskActivityList(ctx, taskUUID, userDgraphUID, beforeActivityUUID, first)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/GetDgraphTaskActivityList failed to get task info from dgraph err: %+v", err)
 		return

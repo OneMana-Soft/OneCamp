@@ -568,13 +568,13 @@ func GetDgraphChannelInfoByUUID(ctx context.Context, channelUUID string, userDgr
 					ch_handle
 					ch_is_member: count(ch_members @filter(uid($userId)))
 					ch_is_admin: count(ch_moderators @filter(uid($userId)))
-					ch_moderators (orderasc: user_name) {
+					ch_moderators {
 						uid
 						user_uuid
 						user_name
 						user_email_id
 					}
-			ch_members @filter(NOT eq(is_external, true) OR eq(is_bot, true)) (orderasc: user_name) {
+			ch_members @filter(NOT eq(is_external, true) OR eq(is_bot, true)) {
 				uid
 				user_uuid
 				user_name
@@ -598,6 +598,13 @@ func GetDgraphChannelInfoByUUID(ctx context.Context, channelUUID string, userDgr
 			}`
 
 	dgraphUser, err = dgraphModels.GetDgraphChannelInfoByUUID(ctx, query, variables)
+	if err == nil && dgraphUser != nil {
+		// By name, sorted here: Dgraph stops a sorted block at 1,000, and a
+		// workspace's channel can be bigger. Callers walk the two lists side
+		// by side, so both are sorted alike.
+		dgraphStruct.SortUsersByName(dgraphUser.Moderators)
+		dgraphStruct.SortUsersByName(dgraphUser.Members)
+	}
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

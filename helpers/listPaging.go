@@ -31,11 +31,14 @@ func ListPaging(q url.Values) (getAll bool, pageSize, pageIndex int, err error) 
 	return getAll, pageSize, pageIndex, nil
 }
 
-// boardClosedDefault and boardClosedMax mirror models/dgraph BoardClosedLimit
-// and BoardClosedMax (helpers cannot import models).
+// boardClosedDefault, boardClosedMax, boardOpenDefault and boardOpenMax
+// mirror models/dgraph's BoardClosedLimit, BoardClosedMax, BoardOpenLimit and
+// BoardOpenMax (helpers cannot import models).
 const (
 	boardClosedDefault = 200
 	boardClosedMax     = 2000
+	boardOpenDefault   = 1000
+	boardOpenMax       = 5000
 )
 
 // ClosedLimit reads a board request's closedLimit: how many of its newest
@@ -50,4 +53,15 @@ func ClosedLimit(q url.Values) int {
 		return boardClosedMax
 	}
 	return n
+}
+
+// OpenLimit reads a board request's openLimit: how many cards of each open
+// column to send, first in board order. Missing, bad or below 1 means the
+// default; it is held to at most the maximum.
+func OpenLimit(q url.Values) int {
+	n, err := strconv.Atoi(q.Get("openLimit"))
+	if err != nil || n < 1 {
+		return boardOpenDefault
+	}
+	return min(n, boardOpenMax)
 }

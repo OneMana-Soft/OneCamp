@@ -14,13 +14,15 @@ package integration_test
 //     earlier one still in force took its place.
 //   - A status whose time has passed is not in force.
 //   - Two statuses an older server left in force give way to the next one set.
-//   - A person keeps five statuses, the newest.
+//   - A person keeps five statuses, the newest, however many they had: one
+//     with more than 1,000 from before the cap worked keeps five too.
 //
 // Run: go test -tags=integration ./tests/integration/ -run TestAStatus -v
 
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -225,6 +227,32 @@ func TestAStatusSetLastIsTheOneInForce(t *testing.T) {
 			if s.Words == mark+" One" || s.Words == mark+" Sick" {
 				t.Errorf("%q is still in the graph", s.Words)
 			}
+		}
+	})
+
+	t.Run("a person with more than a thousand statuses keeps five after the next set", func(t *testing.T) {
+		// Statuses were never deleted before the cap worked, so someone who
+		// set one a day for three years has more than 1,000. The set that trims
+		// them read those beyond the newest four with a sorted block and no
+		// first, which Dgraph stops at 1,000 (PROJ-BUG-8), and left the rest.
+		mark := uuid.NewString()[:8]
+		var old []map[string]any
+		for i := 0; i < 1010; i++ {
+			old = append(old, map[string]any{"dgraph.type": "Status", "status_user_emoji_id": "mask", "status_user_emoji_desc": fmt.Sprintf("%s old %d", mark, i),
+				"status_user_emoji_expiry_at": "2026-09-01T00:00:00Z", "status_user_emoji_expiry_in": "today"})
+		}
+		me, _ := person(t, map[string]any{"user_emoji_statuses": old})
+		set(t, me, "sandwich", mark+" Lunch", "30m")
+		var res struct {
+			Q []struct {
+				N int `json:"n"`
+			} `json:"q"`
+		}
+		if err := json.Unmarshal(dg.Query(t, `{ q(func: eq(user_uuid, "`+me+`")) { n: count(user_emoji_statuses) } }`), &res); err != nil || len(res.Q) != 1 {
+			t.Fatalf("counting the statuses: %v", err)
+		}
+		if res.Q[0].N != domain.EmojiStatusesKept {
+			t.Errorf("%d statuses kept; want %d", res.Q[0].N, domain.EmojiStatusesKept)
 		}
 	})
 }

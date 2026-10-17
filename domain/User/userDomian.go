@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dgraph-io/dgo/v230"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 	"github.com/lib/pq"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	recordingDgraphModels "github.com/akashc777/OneCamp/models/dgraph/Recording"
+	dgraphTaskModels "github.com/akashc777/OneCamp/models/dgraph/Task"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/User"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	OpenSearchModels "github.com/akashc777/OneCamp/models/openSearch/User"
@@ -980,11 +982,16 @@ func SetUserEmojiStatus(ctx context.Context, userUUID string, status *dgraphStru
 	}
 	at := now.UTC().Format(time.RFC3339Nano)
 	// The new one isn't in the graph yet, so the newest EmojiStatusesKept-1
-	// stay beside it.
+	// stay beside it, and every other one goes: picked as not the newest,
+	// unsorted, because a sorted block with an offset and no first stops at
+	// 1,000 (PROJ-BUG-8), and someone with more kept the rest.
 	query := fmt.Sprintf(`query {
 		%s
 		var(func: uid(user)) {
-			beyond as user_emoji_statuses (%s, offset: %d)
+			newest as user_emoji_statuses (%s, first: %d)
+		}
+		var(func: uid(user)) {
+			beyond as user_emoji_statuses @filter(NOT uid(newest))
 		}
 		var(func: uid(user)) {
 			inForce as user_emoji_statuses @filter(gt(status_user_emoji_expiry_at, %q) AND NOT uid(beyond))
@@ -1232,16 +1239,25 @@ func GetAllUserEmojiStatusList(ctx context.Context, userUUID string) (dgraphUser
 				userInfo(func: eq(user_uuid, $id)) {
 					uid
 					user_uuid
-					user_emoji_statuses @filter(gt(status_user_emoji_expiry_at, $time)) (` + emojiStatusOrder + `) {
+					user_emoji_statuses @filter(gt(status_user_emoji_expiry_at, $time)) {
 						status_user_emoji_id
 						status_user_emoji_desc
 						status_user_emoji_expiry_at
 						status_user_emoji_expiry_in
+						status_user_emoji_set_at
 					}
 				}
 			}`
 
 	dgraphUser, err = dgraphModels.GetDgraphUserInfoByUUID(ctx, query, variables)
+	if err == nil && dgraphUser != nil {
+		// Set last first, as emojiStatusOrder orders them (one set before set
+		// times were kept goes last), sorted here: Dgraph stops a sorted block
+		// at 1,000.
+		slices.SortStableFunc(dgraphUser.StatusEmoji, func(a, b *dgraphStruct.DgraphUserStatusEmoji) int {
+			return helpers.CompareTimes(a.SetAt, b.SetAt, true)
+		})
+	}
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1254,274 +1270,121 @@ func GetAllUserEmojiStatusList(ctx context.Context, userUUID string) (dgraphUser
 	return
 }
 
-func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDgraphUID string, filterQuery string, closedLimit int) (dgraphUser *dgraphStruct.DgraphUser, err error) {
+// userTaskCardFields is a card on a person's board (My Tasks). It reads
+// $userDgraphUID, for whether they may change the task's project.
+const userTaskCardFields = `
+						task_uuid
+						id: task_uuid
+						task_name
+						task_status
+						task_custom_status
+						task_custom_status_name
+						task_due_date
+						task_start_date
+						task_label
+						task_description
+						task_priority
+						task_project {
+							uid
+							project_uuid
+							project_name
+							project_is_admin: count(project_admins @filter(uid($userDgraphUID)))
+						}
+						task_assignee {
+							uid
+							user_uuid
+							user_name
+							user_profile_object_key
+						}
+						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
+						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
+						` + dgraphStruct.TASK_BLOCKED_OPEN + `
+						task_team {
+							team_name
+							team_uuid
+						}
+						task_created_at
+						task_rank
+						task_status_since`
 
+// GetDgraphUserBoardPlaces reads a person's board (My Tasks) without its
+// cards, in txn: their tasks' places by column (dgraphStruct.BoardPlacesQuery),
+// leaving out tasks of archived projects. The cards come from
+// GetDgraphUserBoardCards, in the same snapshot.
+func GetDgraphUserBoardPlaces(ctx context.Context, txn *dgo.Txn, userUUID string, filterQuery string, closedLimit int) (*dgraphStruct.DgraphUser, map[string]*dgraphStruct.BoardPlaces, error) {
+	filter := dgraphStruct.TASK_LIVE_FILTER + " AND not uid_in(task_project, uid(archivedProjects))"
 	if len(filterQuery) > 0 {
-		filterQuery = "AND " + filterQuery
+		filter += " AND " + filterQuery
 	}
-	variables := make(map[string]string)
-	variables["$id"] = userUUID
-	variables["$userDgraphUID"] = userDgraphUID
-
-	query := fmt.Sprintf(`query UserInfo($id: string, $userDgraphUID: string){
+	query := `query UserInfo($id: string){
 				# Tasks of archived projects are not the user's work any more.
 				var(func: eq(user_uuid, $id)) {
 					user_projects @filter(gt(project_deleted_at, "1970-01-01T00:00:00Z")) { archivedProjects as uid }
 				}
 				userInfo(func: eq(user_uuid, $id)) {
-					user_uuid
-					user_tasks_todo: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "todo") %s) (orderdesc: task_created_at) {
-						task_uuid
-						id: task_uuid
-						task_name
-						task_status
-						task_custom_status
-						task_custom_status_name
-						task_due_date
-						task_start_date
-						task_label
-						task_description
-						task_priority
-						task_project {
-							uid
-							project_uuid
-							project_name
-							project_is_admin: count(project_admins @filter(uid($userDgraphUID)))
-						}
-						task_assignee {
-							uid
-							user_uuid
-							user_name
-							user_profile_object_key
-						}
-						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
-						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						`+dgraphStruct.TASK_BLOCKED_OPEN+`
-						task_team {
-							team_name
-							team_uuid
-						}
-						task_created_at
-						task_rank
-						task_status_since
-					}
-					user_tasks_in_progress: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "inProgress") %s) (orderdesc: task_created_at) {
-						task_uuid
-						id: task_uuid
-						task_name
-						task_status
-						task_custom_status
-						task_custom_status_name
-						task_due_date
-						task_start_date
-						task_label
-						task_description
-						task_priority
-						task_project {
-							uid
-							project_uuid
-							project_name
-							project_is_admin: count(project_admins @filter(uid($userDgraphUID)))
-						}
-						task_assignee {
-							uid
-							user_uuid
-							user_name
-							user_profile_object_key
-						}
-						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
-						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						`+dgraphStruct.TASK_BLOCKED_OPEN+`
-						task_team {
-							team_name
-							team_uuid
-						}
-						task_created_at
-						task_rank
-						task_status_since
-					}
-					user_tasks_backlog: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "backlog") %s) (orderdesc: task_created_at) {
-						task_uuid
-						id: task_uuid
-						task_name
-						task_status
-						task_custom_status
-						task_custom_status_name
-						task_due_date
-						task_start_date
-						task_label
-						task_description
-						task_priority
-						task_project {
-							uid
-							project_uuid
-							project_name
-							project_is_admin: count(project_admins @filter(uid($userDgraphUID)))
-						}
-						task_assignee {
-							uid
-							user_uuid
-							user_name
-							user_profile_object_key
-						}
-						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
-						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						`+dgraphStruct.TASK_BLOCKED_OPEN+`
-						task_team {
-							team_name
-							team_uuid
-						}
-						task_created_at
-						task_rank
-						task_status_since
-					}
-					user_tasks_in_review: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "inReview") %s) (orderdesc: task_created_at) {
-						task_uuid
-						id: task_uuid
-						task_name
-						task_status
-						task_custom_status
-						task_custom_status_name
-						task_due_date
-						task_start_date
-						task_label
-						task_description
-						task_priority
-						task_project {
-							uid
-							project_uuid
-							project_name
-							project_is_admin: count(project_admins @filter(uid($userDgraphUID)))
-						}
-						task_assignee {
-							uid
-							user_uuid
-							user_name
-							user_profile_object_key
-						}
-						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
-						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						`+dgraphStruct.TASK_BLOCKED_OPEN+`
-						task_team {
-							team_name
-							team_uuid
-						}
-						task_created_at
-						task_rank
-						task_status_since
-					}
-					user_tasks_canceled: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "canceled") %s) (orderdesc: task_created_at%s) {
-						task_uuid
-						id: task_uuid
-						task_name
-						task_status
-						task_custom_status
-						task_custom_status_name
-						task_due_date
-						task_start_date
-						task_label
-						task_description
-						task_priority
-						task_project {
-							uid
-							project_uuid
-							project_name
-							project_is_admin: count(project_admins @filter(uid($userDgraphUID)))
-						}
-						task_assignee {
-							uid
-							user_uuid
-							user_name
-							user_profile_object_key
-						}
-						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
-						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						`+dgraphStruct.TASK_BLOCKED_OPEN+`
-						task_team {
-							team_name
-							team_uuid
-						}
-						task_created_at
-						task_rank
-						task_status_since
-					}
-					user_tasks_canceled_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "canceled") %s))
-
-					user_tasks_done: user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "done") %s) (orderdesc: task_created_at%s) {
-						task_uuid
-						id:task_uuid
-						task_name
-						task_status
-						task_custom_status
-						task_custom_status_name
-						task_due_date
-						task_start_date
-						task_label
-						task_description
-						task_priority
-						task_project {
-							uid
-							project_uuid
-							project_name
-							project_is_admin: count(project_admins @filter(uid($userDgraphUID)))
-						}
-						task_assignee {
-							uid
-							user_uuid
-							user_name
-							user_profile_object_key
-						}
-						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
-						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						`+dgraphStruct.TASK_BLOCKED_OPEN+`
-						task_team {
-							team_name
-							team_uuid
-						}
-						task_created_at
-						task_rank
-						task_status_since
-					}
-					user_tasks_done_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND eq(task_status, "done") %s))
+					user_uuid` + dgraphStruct.BoardPlacesQuery("user_tasks", filter, closedLimit) + `
 				}
-			}`, filterQuery, filterQuery, filterQuery, filterQuery, filterQuery, dgraphStruct.ClosedFirst(closedLimit), filterQuery, filterQuery, dgraphStruct.ClosedFirst(closedLimit), filterQuery)
-	dgraphUser, err = dgraphModels.GetDgraphUserInfoByUUID(ctx, query, variables)
-
+			}`
+	resp, err := txn.QueryWithVars(ctx, query, map[string]string{"$id": userUUID})
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphUserTaskListForKanban Failed to get user's task list from dgraph err: %+v",
-			err,
-		)
-		return
+		helpers.LogErrorWithContext(ctx, "domain/GetDgraphUserBoardPlaces Failed to get the user's board from dgraph err: %+v", err)
+		return nil, nil, err
 	}
-	return
+	var out struct {
+		UserInfo []json.RawMessage `json:"userInfo"`
+	}
+	if err := json.Unmarshal(resp.Json, &out); err != nil {
+		return nil, nil, err
+	}
+	if len(out.UserInfo) == 0 {
+		return nil, nil, errors.New("failed to get dgraph user")
+	}
+	var user dgraphStruct.DgraphUser
+	if err := json.Unmarshal(out.UserInfo[0], &user); err != nil {
+		return nil, nil, err
+	}
+	places, err := dgraphStruct.ParseBoardPlaces(out.UserInfo[0])
+	if err != nil {
+		return nil, nil, err
+	}
+	return &user, places, nil
+}
 
+// GetDgraphUserBoardCards reads the cards of a person's board by uid, in txn,
+// in no particular order; userDgraphUID is the person, for whether they may
+// change each task's project.
+func GetDgraphUserBoardCards(ctx context.Context, txn *dgo.Txn, userDgraphUID string, uids []string) ([]*dgraphStruct.DgraphTask, error) {
+	if len(uids) == 0 {
+		return nil, nil
+	}
+	if !dgraphquery.AllUIDs(uids) {
+		return nil, errors.New("domain/GetDgraphUserBoardCards: not a list of task ids")
+	}
+	query := fmt.Sprintf(`query Cards($userDgraphUID: string){
+				cards(func: uid(%s)) {%s
+				}
+			}`, strings.Join(uids, ", "), userTaskCardFields)
+	return dgraphTaskModels.QueryDgraphTasksInTxn(ctx, txn, query, map[string]string{"$userDgraphUID": userDgraphUID})
 }
 
 func GetDgraphUserTaskList(ctx context.Context, userUUID string, userDgraphUID string, filterQuery string, sortQuery string, pageSize int, pageIndex int, getAll bool) (dgraphUser *dgraphStruct.DgraphUser, err error) {
-	offset := pageIndex * pageSize
-
 	if len(filterQuery) > 0 {
 		filterQuery = "AND " + filterQuery
 	}
 	variables := make(map[string]string)
 	variables["$id"] = userUUID
 	variables["$userDgraphUID"] = userDgraphUID
-	firstVal := strconv.Itoa(pageSize)
-	offsetVal := strconv.Itoa(offset)
+	order := dgraphquery.TotalOrder(sortQuery, "task_uuid")
 
-	if !getAll {
-		sortQuery = fmt.Sprintf("first: %v, offset: %v ,", firstVal, offsetVal) + sortQuery
-	}
-
-	query := fmt.Sprintf(`query UserInfo($id: string, $userDgraphUID: string){
+	query := func(page dgraphquery.Page) string {
+		return fmt.Sprintf(`query UserInfo($id: string, $userDgraphUID: string){
 				# Tasks of archived projects are not the user's work any more.
 				var(func: eq(user_uuid, $id)) {
 					user_projects @filter(gt(project_deleted_at, "1970-01-01T00:00:00Z")) { archivedProjects as uid }
 				}
 				userInfo(func: eq(user_uuid, $id)) {
 					user_task_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) %s))
-					user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) %s) ( %s) {
+					user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) %s) (%s, %s) {
 						task_uuid
 						task_name
 						task_status
@@ -1553,16 +1416,38 @@ func GetDgraphUserTaskList(ctx context.Context, userUUID string, userDgraphUID s
 						task_created_at
 					}
 				}
-			}`, filterQuery, filterQuery, sortQuery)
+			}`, filterQuery, filterQuery, order, page.Args())
+	}
 
-	dgraphUser, err = dgraphModels.GetDgraphUserInfoByUUID(ctx, query, variables)
+	if !getAll && pageSize > 0 {
+		dgraphUser, err = dgraphModels.GetDgraphUserInfoByUUID(ctx, query(dgraphquery.Page{First: pageSize, Offset: pageIndex * pageSize}), variables)
+	} else {
+		// Everything: one sorted block stops at 1,000, so page through it, in
+		// one snapshot so the pages meet.
+		err = dgraphInit.InSnapshot(ctx, func(txn *dgo.Txn) error {
+			tasks, err := dgraphquery.ReadAll(dgraphquery.ReadAllPage, func(page dgraphquery.Page) ([]*dgraphStruct.DgraphTask, error) {
+				got, err := dgraphModels.GetDgraphUserInfoInTxn(ctx, txn, query(page), variables)
+				if err != nil {
+					return nil, err
+				}
+				if dgraphUser == nil {
+					dgraphUser = got
+				}
+				return got.Tasks, nil
+			})
+			if err == nil {
+				dgraphUser.Tasks = tasks
+			}
+			return err
+		})
+	}
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/GetDgraphUserTaskList Failed to get user's task list from dgraph err: %+v",
 			err,
 		)
-		return
+		return nil, err
 	}
 	return
 

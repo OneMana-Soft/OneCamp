@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1891,8 +1892,29 @@ func GetTaskActivityList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dgraphTask, err := business.GetDgraphTaskActivityList(ctx, taskUUIDString, userInfo.UserDgraphInfo.Uid)
+	// A page of history: ?first=N (1..1000, default 1000) lines, the newest,
+	// or with ?before=<activity_uuid> those just older than that line.
+	first := taskDomain.TaskHistoryMax
+	if v := r.URL.Query().Get("first"); v != "" {
+		if first, err = strconv.Atoi(v); err != nil || first < 1 || first > taskDomain.TaskHistoryMax {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "first must be a whole number from 1 to 1000"})
+			return
+		}
+	}
+	before := r.URL.Query().Get("before")
+	if before != "" {
+		if _, err := uuid.Parse(before); err != nil {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "before must be a history line's id"})
+			return
+		}
+	}
 
+	dgraphTask, err := business.GetDgraphTaskActivityList(ctx, taskUUIDString, userInfo.UserDgraphInfo.Uid, before, first)
+
+	if errors.Is(err, taskDomain.ErrUnknownHistoryLine) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		return
+	}
 	if err != nil {
 
 		helpers.LogErrorWithContext(ctx,
@@ -2843,10 +2865,17 @@ func RefreshFromGitHub(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// A deleted task isn't refreshed: it answers as one that isn't there.
+	if err := githubBusiness.RefreshableTask(r.Context(), taskUUID); err != nil {
+		helpers.WriteReadFailure(w, r, err, "task", "controllers/RefreshFromGitHub")
+		return
+	}
 
 	// Refresh never backfills historical comments by default (good UX: avoids flooding
 	// the task with old comments). Pass ?backfill=true to also import missing comments.
 	backfill := r.URL.Query().Get("backfill") == "true"
+	// What the refresh changes, it changes as whoever pressed Refresh.
+	presser := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo).UserDgraphInfo
 
 	go func() {
 		defer func() {
@@ -2859,7 +2888,7 @@ func RefreshFromGitHub(w http.ResponseWriter, r *http.Request) {
 		}()
 		procCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		if err := githubBusiness.RefreshFromGitHub(procCtx, taskUUID, backfill); err != nil {
+		if err := githubBusiness.RefreshFromGitHub(procCtx, taskUUID, backfill, &presser); err != nil {
 			helpers.LogErrorWithContext(procCtx, "controllers/RefreshFromGitHub Failed: %v", err)
 		}
 	}()
