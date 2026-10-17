@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"go.opentelemetry.io/contrib/bridges/otelslog"
-	otellog "go.opentelemetry.io/otel/log"
+	"go.opentelemetry.io/otel/attribute"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
 
@@ -27,11 +27,11 @@ func (e *captureExporter) ForceFlush(context.Context) error { return nil }
 
 // renderValue flattens an OTel log value, following groups, so a substring check cannot be fooled
 // by nesting.
-func renderValue(v otellog.Value) string {
+func renderValue(v attribute.Value) string {
 	if kvs := v.AsMap(); len(kvs) > 0 {
 		var b strings.Builder
 		for _, kv := range kvs {
-			b.WriteString(" " + kv.Key + "=" + renderValue(kv.Value))
+			b.WriteString(" " + string(kv.Key) + "=" + renderValue(kv.Value))
 		}
 		return b.String()
 	}
@@ -49,19 +49,19 @@ func renderValue(v otellog.Value) string {
 func renderRecord(r sdklog.Record) string {
 	var b strings.Builder
 	b.WriteString(r.Body().AsString())
-	r.WalkAttributes(func(kv otellog.KeyValue) bool {
-		b.WriteString(" " + kv.Key + "=" + renderValue(kv.Value))
+	r.WalkAttributes(func(kv attribute.KeyValue) bool {
+		b.WriteString(" " + string(kv.Key) + "=" + renderValue(kv.Value))
 		return true
 	})
 	return b.String()
 }
 
 // findAttr returns the named top-level attribute of an exported record.
-func findAttr(r sdklog.Record, key string) (otellog.Value, bool) {
-	var found otellog.Value
+func findAttr(r sdklog.Record, key string) (attribute.Value, bool) {
+	var found attribute.Value
 	var ok bool
-	r.WalkAttributes(func(kv otellog.KeyValue) bool {
-		if kv.Key == key {
+	r.WalkAttributes(func(kv attribute.KeyValue) bool {
+		if string(kv.Key) == key {
 			found, ok = kv.Value, true
 			return false
 		}
@@ -118,9 +118,12 @@ func TestUserInfoIsSummarisedOnTheOtelSinkToo(t *testing.T) {
 	}
 	gotKeys := make([]string, 0, len(group))
 	for _, kv := range group {
-		gotKeys = append(gotKeys, kv.Key)
+		gotKeys = append(gotKeys, string(kv.Key))
 	}
-	wantKeys := []string{"uuid", "is_admin", "is_external", "is_bot"}
+	// Compared as a set: since otel/log v0.21 a map value is an attribute.Value, whose
+	// entries come back sorted by key, not in the order LogValue wrote them.
+	slices.Sort(gotKeys)
+	wantKeys := []string{"is_admin", "is_bot", "is_external", "uuid"}
 	if !slices.Equal(gotKeys, wantKeys) {
 		t.Errorf("user_info group keys = %v, want %v — the set of fields shipped per log line "+
 			"changed", gotKeys, wantKeys)

@@ -76,7 +76,7 @@ IMAGE   = go_service_onecamp_onemana:1.0
 .PHONY: install_run auto-domain-https coding-up coding-smoke coding-down help setup update-admin-email update-server-ip replace-domain \
         create-traefik-password update-traefik-email update-allowed-domains \
         create-swap configure-livekit create_postgres_db migrate_up migrate_status \
-        build_restart_all build_restart_service console-tunnel doctor verify logs \
+        build_restart_all build_restart_service archive-dates console-tunnel doctor verify logs \
         set-flat-domains secrets rotate-livekit-key install mount-dirs wait-ready redis-keep-sign-ins api-ready \
         reset-link reset-password clear-2fa change-email update \
         ollama_up ollama_down ollama_update saml-cert \
@@ -1717,6 +1717,7 @@ coding-up:
 		echo "  Then set the SAME value in Admin -> AI -> Code PRs."; \
 		exit 1; \
 	fi
+	@$(MAKE) -f $(SELF) --no-print-directory archive-dates
 	$(COMPOSE) -f code-runner-coding-compose.yml --profile coding up -d --build
 	@echo "▶ started. Prove containment before enabling the feature:  make coding-smoke"
 
@@ -2323,8 +2324,25 @@ redis-keep-sign-ins:
 # Seconds between tries of the image pull below.
 PULL_RETRY_PAUSE ?= 10
 
+# archive-dates gives every file still carrying the release archive's date the
+# time of now, so the builds after it read what is on disk.
+#
+# WHY. The archive is made with one fixed date on every file (1980), and the
+# installer unpacks it with those dates. BuildKit knows a file in a build's
+# context by its size and date, so a file that changed between releases but
+# kept its size looked unchanged, and the build used the copy it had cached
+# from the last release. v2.73.1's update built the collaboration service from
+# v2.73.0's package.json (axios ^1.13.2 and ^1.20.0 are the same length) beside
+# v2.73.1's lockfile, and pnpm refused to install. Any image can go stale this
+# way, without a word. Only files that still have the archive's date are
+# touched: what the install wrote itself (data/, .env, compose.yml) keeps its
+# times, and data/ isn't walked at all.
+archive-dates:
+	@find . -path ./data -prune -o -type f ! -newermt '1981-01-01' -print0 2>/dev/null | xargs -0 -r touch -c 2>/dev/null; true
+
 build_restart_all:
 	@$(MAKE) -f $(SELF) --no-print-directory mount-dirs
+	@$(MAKE) -f $(SELF) --no-print-directory archive-dates
 	docker build --pull -t $(IMAGE) .
 	@: "EVERY IMAGE BUILT HERE IS REBUILT, so an update moves all of them: the"
 	@: "web app and the transcription agent with their profiles on, and the"
@@ -2365,6 +2383,7 @@ build_restart_all:
 
 build_restart_service: migrate_up
 	@if [ ! -d "data" ]; then mkdir -p "data" && echo "Directory created: data"; else echo "Directory already exists: data"; fi
+	@$(MAKE) -f $(SELF) --no-print-directory archive-dates
 	docker build --pull -t $(IMAGE) .
 	$(COMPOSE) up -d --force-recreate --no-deps go-service
 
@@ -2834,6 +2853,7 @@ endif
 stt_up:
 	$(call set_env,STT_LOCAL,1)
 	@$(MAKE) -f $(SELF) --no-print-directory configure-livekit
+	@$(MAKE) -f $(SELF) --no-print-directory archive-dates
 	@docker compose --env-file .env --project-name onecamp --profile transcription \
 		-f $(STACK_FILE) up -d --build whisper agent
 	@$(COMPOSE) up -d --force-recreate --no-deps livekit

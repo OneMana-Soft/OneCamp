@@ -430,7 +430,7 @@ func TestTraefikCanReadTheDockerDaemon(t *testing.T) {
 		m := traefikExactPatch.FindStringSubmatch(v)
 		if m == nil {
 			t.Errorf("%s:%d (%s) names %s. Pin Traefik to an exact release at or above %s, such as "+
-				"traefik:v3.7.13: a minor tag like v3.0 moves between builds, and a digest or a variable with no "+
+				"traefik:v3.7.14: a minor tag like v3.0 moves between builds, and a digest or a variable with no "+
 				"default names no version this can check", s.file, s.line, s.service, s.ref, floor)
 			continue
 		}

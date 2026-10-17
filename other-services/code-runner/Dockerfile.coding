@@ -14,7 +14,7 @@
 # deliberate image bump. No package manager runs at request time.
 
 # ---- build the runner binary ----
-FROM golang:1.23-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 COPY *.go ./
@@ -24,7 +24,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/code-ru
 # Debian slim gives a stable, well-known toolchain base. Versions are pinned via
 # the base tag + explicit apt pins where practical; treat an upgrade as a
 # reviewed image bump.
-FROM golang:1.23-bookworm AS runtime
+FROM golang:1.26-bookworm AS runtime
 
 # git for clone/commit/push; node for JS/TS repos' build/test. Go is already in
 # the base image. ca-certificates for TLS to the git host (via the proxy).
