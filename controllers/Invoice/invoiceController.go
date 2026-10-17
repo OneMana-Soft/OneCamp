@@ -33,7 +33,7 @@ func fail(w http.ResponseWriter, r *http.Request, where string, err error) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That invoice no longer exists."})
 	default:
 		helpers.LogErrorWithContext(r.Context(), "controllers/Invoice/%s err: %+v", where, err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "That couldn't be saved just now. Try again in a moment."})
+		helpers.WriteRetryLater(w, "That couldn't be saved just now.")
 	}
 }
 

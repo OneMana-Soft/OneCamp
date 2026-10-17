@@ -2,6 +2,7 @@ package router
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -52,8 +53,9 @@ var publicRoutes = map[string]string{
 	"/auth/ldap-login":                 "directory credentials exchange",
 	"/auth/forgot-password":            "sends a reset mail; uniform response, no account oracle",
 	"/auth/reset-password":             "consumes a mailed reset token",
+	"/auth/reset-password/check":       "whether a mailed reset token can still be used, before the form; ResetPassword's rate limit",
 	"/auth/validate-token":             "checks a mailed token before showing a form",
-	"/auth/providers":                  "which sign-in methods to render on the login page",
+	"/auth/providers":                  "which sign-in methods to render on the login page, and the workspace's name",
 	"/auth/admin-setup-required":       "first-boot check, before any account exists",
 	"/auth/admin-setup":                "creates the first admin, before any account exists",
 	"/demo-login":                      "demo deployments only",
@@ -96,6 +98,7 @@ var publicRoutes = map[string]string{
 	"/guest/table/{token}":                          "share-link token",
 	"/guest/doc-comments/{token}":                   "share-link token",
 	"/guest/board-attachment/{token}/{obj_uuid}":    "share-link grant scopes the attachment",
+	"/guest/doc-attachment/{token}/{obj_uuid}":      "share-link grant scopes the attachment to its doc",
 
 	// Email-driven, must work from a mail client with no session.
 	"/public/notifications/unsubscribe": "unsubscribe token; required by bulk-mail norms",
@@ -161,15 +164,49 @@ var (
 	authTokens    = []string{"VerifyAuth", "VerifyAdminAuth", "VerifyApiToken", "VerifyScimToken"}
 )
 
+// routeFile is one file of this package that declares routes.
+type routeFile struct {
+	name  string
+	lines []string
+}
+
+// routeFiles are the files that declare routes: router.go first, then every
+// other non-test file in this package. The docs programme declares its routes
+// beside router.go (docsProgramme.go, and a docs<Area>.go per package) rather
+// than in it, so the checks here read them all: a route declared through the
+// programme meets the same controls as one in router.go.
+func routeFiles(t *testing.T) []routeFile {
+	t.Helper()
+	names, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("cannot list the router package: %v", err)
+	}
+	sort.Strings(names)
+	files := []routeFile{{name: "router.go"}}
+	for _, n := range names {
+		if n != "router.go" && !strings.HasSuffix(n, "_test.go") {
+			files = append(files, routeFile{name: n})
+		}
+	}
+	for i := range files {
+		b, err := os.ReadFile(files[i].name)
+		if err != nil {
+			t.Fatalf("cannot read %s: %v", files[i].name, err)
+		}
+		files[i].lines = strings.Split(string(b), "\n")
+	}
+	if len(files[0].lines) < 200 {
+		t.Fatal("router.go looks truncated; this test would pass vacuously")
+	}
+	return files
+}
+
+// routerSource is every line of every route file, router.go's first.
 func routerSource(t *testing.T) []string {
 	t.Helper()
-	b, err := os.ReadFile("router.go")
-	if err != nil {
-		t.Fatalf("cannot read router.go: %v", err)
-	}
-	lines := strings.Split(string(b), "\n")
-	if len(lines) < 200 {
-		t.Fatal("router.go looks truncated; this test would pass vacuously")
+	var lines []string
+	for _, f := range routeFiles(t) {
+		lines = append(lines, f.lines...)
 	}
 	return lines
 }
@@ -213,54 +250,57 @@ func TestPublicRouteSurfaceIsPinned(t *testing.T) {
 }
 
 func TestEverySubRouterMountIsBehindAuth(t *testing.T) {
-	lines := routerSource(t)
+	files := routeFiles(t)
 	// Depth at which an auth-carrying group is open.
 	type grp struct {
 		depth int
 		auth  bool
 	}
-	var stack []grp
-	depth := 0
 	mounts := 0
 
 	// Sub-routers that apply an auth middleware to themselves, collected first
 	// because the .Use line can appear far above the .Mount line.
 	selfAuthed := map[string]bool{}
-	for _, line := range lines {
+	for _, line := range routerSource(t) {
 		if m := subRouterAuth.FindStringSubmatch(line); m != nil {
 			selfAuthed[m[1]] = true
 		}
 	}
 
-	for i, line := range lines {
-		if groupOpen.MatchString(line) {
-			stack = append(stack, grp{depth: depth})
-		}
-		if useAuth.MatchString(line) && len(stack) > 0 {
-			stack[len(stack)-1].auth = true
-		}
-		if m := mountLine.FindStringSubmatch(line); m != nil {
-			path, routerVar := m[2], m[3]
-			mounts++
-			protected := selfAuthed[routerVar]
-			for _, g := range stack {
-				if g.auth {
-					protected = true
+	// Each file on its own: a group never spans two files.
+	for _, f := range files {
+		var stack []grp
+		depth := 0
+		for i, line := range f.lines {
+			if groupOpen.MatchString(line) {
+				stack = append(stack, grp{depth: depth})
+			}
+			if useAuth.MatchString(line) && len(stack) > 0 {
+				stack[len(stack)-1].auth = true
+			}
+			if m := mountLine.FindStringSubmatch(line); m != nil {
+				path, routerVar := m[2], m[3]
+				mounts++
+				protected := selfAuthed[routerVar]
+				for _, g := range stack {
+					if g.auth {
+						protected = true
+					}
+				}
+				if !protected {
+					if _, ok := mountsProtectedElsewhere[path]; !ok {
+						t.Errorf("%s:%d: %s is mounted outside any group carrying "+
+							"VerifyAuth, so every route on that sub-router is reachable "+
+							"unauthenticated. Move the mount inside the authenticated group, "+
+							"or add it to mountsProtectedElsewhere with the protection it "+
+							"relies on instead.", f.name, i+1, path)
+					}
 				}
 			}
-			if !protected {
-				if _, ok := mountsProtectedElsewhere[path]; !ok {
-					t.Errorf("router.go:%d: %s is mounted outside any group carrying "+
-						"VerifyAuth, so every route on that sub-router is reachable "+
-						"unauthenticated. Move the mount inside the authenticated group, "+
-						"or add it to mountsProtectedElsewhere with the protection it "+
-						"relies on instead.", i+1, path)
-				}
+			depth += strings.Count(line, "{") - strings.Count(line, "}")
+			for len(stack) > 0 && depth <= stack[len(stack)-1].depth {
+				stack = stack[:len(stack)-1]
 			}
-		}
-		depth += strings.Count(line, "{") - strings.Count(line, "}")
-		for len(stack) > 0 && depth <= stack[len(stack)-1].depth {
-			stack = stack[:len(stack)-1]
 		}
 	}
 	if mounts < 20 {
@@ -295,13 +335,15 @@ func TestNoStateChangingGetRoutes(t *testing.T) {
 	allowed := map[string]string{
 		"connectorController.StartConnect": "begins an OAuth redirect: the browser navigates to it",
 	}
-	for i, line := range routerSource(t) {
-		exempt := false
-		for h := range allowed {
-			exempt = exempt || strings.Contains(line, h+")")
-		}
-		if getChanges.MatchString(line) && !exempt {
-			t.Errorf("router.go:%d registers a state-changing handler as GET: %s", i+1, strings.TrimSpace(line))
+	for _, f := range routeFiles(t) {
+		for i, line := range f.lines {
+			exempt := false
+			for h := range allowed {
+				exempt = exempt || strings.Contains(line, h+")")
+			}
+			if getChanges.MatchString(line) && !exempt {
+				t.Errorf("%s:%d registers a state-changing handler as GET: %s", f.name, i+1, strings.TrimSpace(line))
+			}
 		}
 	}
 }

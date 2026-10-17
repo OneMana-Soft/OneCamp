@@ -9,7 +9,7 @@
 //
 // Stages run in fixed order per provider capability:
 //
-//	users → teams → projects → tasks → subtasks → task_comments → attachments → finalize
+//	users → teams → projects → tasks → subtasks → task_comments → attachments → pages → finalize
 //
 // (For the legacy Slack provider the orchestrator delegates to the
 // existing SlackImport orchestrator so this package stays free of Slack
@@ -245,7 +245,27 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 		}
 	}
 
-	// ── Stage 8: finalize ───────────────────────────────────────────
+	// ── Stage 8: pages, as docs (pages_worker.go) ──────────────────
+	if prov.Capabilities()&importProvider.CapPages != 0 {
+		if has, err := importDomain.HasPendingWork(ctx, jobId, []string{importModels.ChunkDocPages}); err == nil && has {
+			if err := setStage(ctx, jobId, "pages"); err != nil {
+				return
+			}
+			if err := runWorkerPool(ctx, jobId, "pages", pageWorkers,
+				[]string{importModels.ChunkDocPages},
+				func(workerCtx context.Context, c *importModels.Chunk) error {
+					return processPageChunk(workerCtx, prov, job, opts, c, importingUser)
+				}); err != nil {
+				helpers.LogWarnWithContext(ctx,
+					"Import pages stage errors job=%s err=%+v", jobId, err)
+			}
+			if cancelledOrCtxDone(ctx, jobId) {
+				return
+			}
+		}
+	}
+
+	// ── Stage 9: finalize ───────────────────────────────────────────
 	_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusCompleted,
 		strPtr("finalize"), nil)
 	publishProgress(ctx, job, "completed", "finalize", "")

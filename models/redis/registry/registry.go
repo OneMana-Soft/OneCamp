@@ -65,6 +65,8 @@ const (
 	CategoryGitHub    Category = "github"
 	CategoryCommand   Category = "command"
 	CategoryCollab    Category = "collab"
+	CategorySweep     Category = "sweep"
+	CategoryUnfurl    Category = "unfurl"
 	CategoryCall      Category = "call"
 )
 
@@ -1005,6 +1007,72 @@ var CollabStateSize = withArity(Spec{
 	Category:    CategoryCollab,
 	Description: "Last persisted state byte-size per (kind, id) for cheap mass-delete detection on save.",
 }, 2) // (kind, id)
+
+// SWEEPS ---------------------------------------------------------------------
+
+// SweepClaim is one pass of a periodic job, won by the instance that runs it
+// (business/Sweep): SET NX on the job's slot, the interval-long stretch of
+// wall-clock time the tick falls in, so instances ticking in the same slot run
+// the job once between them. The claim sets its own expiry, two of the job's
+// intervals, so it outlives its slot; TTL is the longest of those today (the
+// six-hourly sweeps). A job that claims its own work takes no claim.
+var SweepClaim = withArity(Spec{
+	Namespace:   "sweep:claim",
+	TTL:         12 * time.Hour,
+	Datatype:    DatatypeString,
+	Category:    CategorySweep,
+	Description: "One instance's claim on one pass of a periodic job (SET NX); expires after two of the job's intervals, which the claim sets.",
+}, 2) // (job, slot)
+
+// SendOnce is a message send, by the person, the conversation ("ch:", "dm:" or
+// "grp:" and its id) and the id their app gave it (business/Send.Once): a
+// send under way holds it for a minute (SET NX), then its answer is kept for
+// a day, so a send tried again gets the first one's answer.
+var SendOnce = withArity(Spec{
+	Namespace:   "send:once",
+	TTL:         24 * time.Hour,
+	Datatype:    DatatypeString,
+	Category:    CategoryChannel,
+	Description: "A message send tried again is the same send: \"going\" for a minute while the first try runs (SET NX), then its answer as JSON for a day.",
+}, 3) // (user, conversation, client id)
+
+// DocUpdatedWebhooksDue holds each doc with an open minute of saves, scored by
+// when the minute closes (Unix ms): the doc.updated webhook goes out once per
+// minute per doc, whichever instance saved it (business/Follow webhooks.go).
+// The claimed flush removes each member as its minute closes, so the set
+// holds only the last minute's docs; the expiry, renewed on every add, only
+// clears what an hour with no instance flushing left behind.
+var DocUpdatedWebhooksDue = withArity(Spec{
+	Namespace:   "webhooks:doc.updated:due",
+	TTL:         time.Hour,
+	Datatype:    DatatypeSortedSet,
+	Category:    CategoryWebhook,
+	Description: "Docs whose minute of saves is open, scored by when it closes; one doc.updated webhook per doc per minute across instances.",
+}, 0) // global
+
+// LINK PREVIEWS (docs programme B4) -----------------------------------------
+
+// UnfurlCard caches a link's preview card (business/Unfurl), keyed by the
+// SHA-256 of its canonical URL, so a link pasted in many docs is fetched once a
+// day. A failed fetch is cached too, for 10 minutes (store's TTL override), so
+// an unreachable site isn't asked again on every render.
+var UnfurlCard = withArity(Spec{
+	Namespace:   "unfurl:card",
+	TTL:         24 * time.Hour,
+	Datatype:    DatatypeString,
+	Category:    CategoryUnfurl,
+	Description: "JSON link preview card per canonical URL hash; 24 h, a failure 10 minutes.",
+}, 1) // (sha256 of the canonical URL)
+
+// UnfurlRate limits the fetches a person's link previews and stored images
+// make: only fetches count, never cache hits.
+var UnfurlRate = withArity(Spec{
+	Namespace:   "unfurl:rate",
+	TTL:         1 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Outbound fetches per (action, user) for link previews and stored remote images. Window-locked; resets every minute.",
+}, 2) // (action, userUUID)
 
 // =============================================================================
 // Specs() returns every registered key for documentation / audit. Used

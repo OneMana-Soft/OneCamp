@@ -22,7 +22,7 @@ func ProjectTimeline(w http.ResponseWriter, r *http.Request) {
 	user := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	p, err := business.GetProjectTimeline(r.Context(), id.String(), user.UserDgraphInfo.Uid)
 	if err != nil || p == nil {
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The timeline couldn't load just now. Try again in a moment."})
+		helpers.WriteRetryLater(w, "The timeline couldn't load just now.")
 		return
 	}
 	tasks := p.Tasks

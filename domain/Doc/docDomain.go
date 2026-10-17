@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/akashc777/OneCamp/business/Access/level"
 	"strconv"
 	"strings"
 	"time"
@@ -110,14 +111,6 @@ func docUpdateRequest(dgraphDoc *dgraphStruct.DgraphDoc, filter string) (*api.Re
 	}, nil
 }
 
-// MarkDocDeleted puts a live doc in the trash at the given time: ErrNotFound
-// when no doc has the uuid, ErrDocDeleted when it is in the trash already.
-// One conditional transaction, as UpdateLiveDoc: a uuid with no doc makes no
-// node (the plain upsert it replaces made one for an id that matched nothing).
-func MarkDocDeleted(ctx context.Context, docUUID string, at time.Time) error {
-	return UpdateLiveDoc(ctx, &dgraphStruct.DgraphDoc{Uuid: docUUID, DType: []string{"Doc"}, DeletedAt: &at})
-}
-
 // GetDocDeletion reads whether a doc exists and whether it is deleted, and
 // nothing else: for the paths that hold a doc's id without reading the doc
 // (a guest's link). ErrNotFound when no doc has the uuid.
@@ -131,24 +124,17 @@ func GetDocDeletion(ctx context.Context, docUUID string) (*dgraphStruct.DgraphDo
 			}`, map[string]string{"$id": docUUID})
 }
 
+// CreateOrUpdateDgraphDoc makes a doc (no Uid), or with Uid "uid(doc)" updates
+// the doc with its uuid. An update goes through the conditional write
+// (UpdateStoredDoc): as a plain upsert, a uuid that matched no doc made a new,
+// empty one (a ghost doc); now it makes nothing and answers ErrNotFound, and
+// ErrNoDocToUpdate without a uuid.
 func CreateOrUpdateDgraphDoc(ctx context.Context, dgraphDoc *dgraphStruct.DgraphDoc) (docUid string, err error) {
-
-	var query string
 	if dgraphDoc.Uid == "uid(doc)" {
-		// An upsert with no uuid finds no doc and silently changes nothing.
-		if dgraphDoc.Uuid == "" {
-			return "", ErrNoDocToUpdate
-		}
-		// It's written into the query below: a uuid, and nothing else.
-		if _, err := uuid.Parse(dgraphDoc.Uuid); err != nil {
-			return "", ErrNoDocToUpdate
-		}
-		query = fmt.Sprintf(`query {
-									  doc as var(func: eq(doc_uuid, "%s"))
-								  }`, dgraphDoc.Uuid)
+		return "", UpdateStoredDoc(ctx, dgraphDoc)
 	}
 
-	docUid, err = dgraphModels.CreateOrUpdateDoc(ctx, query, dgraphDoc, "")
+	docUid, err = dgraphModels.CreateOrUpdateDoc(ctx, "", dgraphDoc, "")
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -162,28 +148,20 @@ func CreateOrUpdateDgraphDoc(ctx context.Context, dgraphDoc *dgraphStruct.Dgraph
 func GetDgraphDocByUUIDOnlyEditingInfo(ctx context.Context, docUUID string, userUID string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
 	variables := make(map[string]string)
 	variables["$id"] = docUUID
-	variables["$userId"] = userUID
+	variables["$userId"] = ViewerUID(userUID)
 
-	query := `query DocInfo($id: string, $userId: string){
+	// Everything the access rule decides by, for the person (docAccess.go).
+	query := `query DocInfo($id: string, $userId: string){` + AccessPrelude("$userId") + `
 				docInfo(func: eq(doc_uuid, $id)) {
 					uid
-					doc_uuid
-					doc_deleted_at
-					doc_edit_access: count(doc_editing_users @filter(uid($userId)))
-					doc_created_by @filter(uid($userId)) {
-						uid
-						user_uuid
-					}
+					doc_uuid` + accessFacts + `
 				}
 			}`
 
 	dgraphDoc, err = dgraphModels.GetDgraphDocInfoByUUID(ctx, query, variables)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphDocByUUIDOnlyEditingInfo Failed to get doc from dgraph err: %+v",
-			err,
-		)
+		helpers.LogReadFailure(ctx, err, "domain/GetDgraphDocByUUIDOnlyEditingInfo doc "+docUUID)
 		return
 	}
 
@@ -194,24 +172,14 @@ func GetDgraphDocByUUIDOnlyEditingInfo(ctx context.Context, docUUID string, user
 func GetBasicDgraphDocByUUID(ctx context.Context, docUUID string, userUID string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
 	variables := make(map[string]string)
 	variables["$id"] = docUUID
-	variables["$userId"] = userUID
+	variables["$userId"] = ViewerUID(userUID)
 
-	query := `query DocInfo($id: string, $userId: string){
+	query := `query DocInfo($id: string, $userId: string){` + AccessPrelude("$userId") + `
 				docInfo(func: eq(doc_uuid, $id)) {
 					uid
-					doc_uuid
-					doc_read_access: count(doc_reading_users @filter(uid($userId)))
-					doc_edit_access: count(doc_editing_users @filter(uid($userId)))
-					doc_comment_access: count(doc_commenting_users @filter(uid($userId)))
-					doc_private
-					doc_public_comment
+					doc_uuid` + accessFacts + `
 					doc_title
-					doc_deleted_at
 					doc_created_at
-					doc_created_by {
-						uid
-						user_uuid
-					}
 					doc_reading_users {
 						user_uuid
 					}
@@ -227,10 +195,7 @@ func GetBasicDgraphDocByUUID(ctx context.Context, docUUID string, userUID string
 	dgraphDoc, err = dgraphModels.GetDgraphDocInfoByUUID(ctx, query, variables)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetBasicDgraphDocByUUID Failed to get doc from dgraph err: %+v",
-			err,
-		)
+		helpers.LogReadFailure(ctx, err, "domain/GetBasicDgraphDocByUUID doc "+docUUID)
 		return
 	}
 
@@ -241,22 +206,21 @@ func GetBasicDgraphDocByUUID(ctx context.Context, docUUID string, userUID string
 func GetDgraphDocByUUID(ctx context.Context, docUUID string, userUID string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
 	variables := make(map[string]string)
 	variables["$id"] = docUUID
-	variables["$userId"] = userUID
+	variables["$userId"] = ViewerUID(userUID)
 
-	query := `query DocInfo($id: string, $userId: string){
+	query := `query DocInfo($id: string, $userId: string){` + AccessPrelude("$userId") + `
 				docInfo(func: eq(doc_uuid, $id)) {
 					uid
 					doc_uuid
-					doc_title
-					doc_read_access: count(doc_reading_users @filter(uid($userId)))
-					doc_edit_access: count(doc_editing_users @filter(uid($userId)))
-					doc_comment_access: count(doc_commenting_users @filter(uid($userId)))
+					doc_title` + accessFactsBut + lookFields + `
+					doc_owner_named: doc_owner { uid user_uuid user_name user_full_name user_profile_object_key }
+					doc_locked_at
+					doc_locked_by { uid user_uuid user_name user_full_name }
+					doc_backlink_count: count(~doc_mentions @filter(` + liveDocFilter + ` AND NOT eq(doc_uuid, $id)))
 					doc_comment_count: count(doc_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-					doc_private
-					doc_public_comment
 					doc_body
 					doc_created_at
-					doc_deleted_at
+					doc_updated_at
 					doc_created_by {
 						uid
 						user_uuid
@@ -269,10 +233,7 @@ func GetDgraphDocByUUID(ctx context.Context, docUUID string, userUID string) (dg
 	dgraphDoc, err = dgraphModels.GetDgraphDocInfoByUUID(ctx, query, variables)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphDocByUUID Failed to get doc from dgraph err: %+v",
-			err,
-		)
+		helpers.LogReadFailure(ctx, err, "domain/GetDgraphDocByUUID doc "+docUUID)
 		return
 	}
 
@@ -306,10 +267,7 @@ func GetSystemDocByUUID(ctx context.Context, docUUID string) (dgraphDoc *dgraphS
 	dgraphDoc, err = dgraphModels.GetDgraphDocInfoByUUID(ctx, query, variables)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetSystemDocByUUID Failed to get doc from dgraph err: %+v",
-			err,
-		)
+		helpers.LogReadFailure(ctx, err, "domain/GetSystemDocByUUID doc "+docUUID)
 		return
 	}
 
@@ -317,7 +275,8 @@ func GetSystemDocByUUID(ctx context.Context, docUUID string) (dgraphDoc *dgraphS
 }
 
 // GetCollabDocByUUID is a doc as the collaboration service opens it: its body,
-// and the Yjs state saved with the hash of the body it matches.
+// the Yjs state saved with the hash of the body it matches, and when its body
+// was last stored (what a tab opening it hears as "saved at").
 func GetCollabDocByUUID(ctx context.Context, docUUID string) (*dgraphStruct.DgraphDoc, error) {
 	query := `query DocInfo($id: string){
 				docInfo(func: eq(doc_uuid, $id)) {
@@ -327,12 +286,13 @@ func GetCollabDocByUUID(ctx context.Context, docUUID string) (*dgraphStruct.Dgra
 					doc_body
 					doc_yjs_state
 					doc_yjs_body_hash
+					doc_updated_at
 					doc_deleted_at
 				}
 			}`
 	doc, err := dgraphModels.GetDgraphDocInfoByUUID(ctx, query, map[string]string{"$id": docUUID})
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/GetCollabDocByUUID err: %+v", err)
+		helpers.LogReadFailure(ctx, err, "domain/GetCollabDocByUUID doc "+docUUID)
 	}
 	return doc, err
 }
@@ -357,36 +317,14 @@ func GetDocBodyPage(ctx context.Context, offset, first int) ([]*dgraphStruct.Dgr
 	return docs, nil
 }
 
-// SetDocCollabState saves the collaboration service's Yjs state of a live doc
-// and the hash of the body it was saved with, as UpdateLiveDoc writes a save:
-// ErrNotFound when no doc has the uuid (it makes no node), ErrDocDeleted when
-// the doc is in the trash, and a delete that commits while it is in flight
-// aborts it (docUpdateRequest). It used to write the state on whatever doc
-// had the uuid, after a separate read had found it live, so a delete landing
-// between the two left the state of edits made after it on the trashed doc.
-func SetDocCollabState(ctx context.Context, docUUID, state, bodyHash string) error {
-	return UpdateLiveDoc(ctx, collabStateUpdate(docUUID, state, bodyHash))
-}
-
-// collabStateUpdate is the update SetDocCollabState writes. Pure.
-func collabStateUpdate(docUUID, state, bodyHash string) *dgraphStruct.DgraphDoc {
-	return &dgraphStruct.DgraphDoc{Uuid: docUUID, YjsState: state, YjsBodyHash: bodyHash}
-}
-
 func GetDgraphDocAllCommentList(ctx context.Context, docUUID string, userUID string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
 	variables := make(map[string]string)
 	variables["$id"] = docUUID
-	variables["$userId"] = userUID
+	variables["$userId"] = ViewerUID(userUID)
 
-	query := `query DocInfo($id: string, $userId: string){
+	query := `query DocInfo($id: string, $userId: string){` + AccessPrelude("$userId") + `
 				docInfo(func: eq(doc_uuid, $id)) {
-					uid
-					doc_comment_access: count(doc_commenting_users @filter(uid($userId)))
-					doc_read_access: count(doc_reading_users @filter(uid($userId)))
-					doc_edit_access: count(doc_editing_users @filter(uid($userId)))
-					doc_private
-					doc_public_comment
-					doc_deleted_at
+					uid` + accessFactsBut + `
 					doc_created_by {
 						uid
 						user_uuid
@@ -429,10 +367,7 @@ func GetDgraphDocAllCommentList(ctx context.Context, docUUID string, userUID str
 	dgraphDoc, err = dgraphModels.GetDgraphDocInfoByUUID(ctx, query, variables)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphDocAllCommentList Failed to get doc from dgraph err: %+v",
-			err,
-		)
+		helpers.LogReadFailure(ctx, err, "domain/GetDgraphDocAllCommentList doc "+docUUID)
 		return
 	}
 
@@ -503,8 +438,8 @@ func GetDgraphPrivateDocFromDgraph(ctx context.Context, userUID string, pageInde
 
 	query := fmt.Sprintf(`query DocInfo($userId: string){
 				var(func: uid($userId)) {
-					user_private_docs as ~doc_created_by @filter(eq(doc_private, true) AND not gt(doc_deleted_at, "1970-01-01T00:00:00Z"))
-					private_doc_count_val as count(~doc_created_by) @filter(eq(doc_private, true) AND not gt(doc_deleted_at, "1970-01-01T00:00:00Z"))
+					user_private_docs as ~doc_created_by @filter(eq(doc_private, true) AND not gt(doc_deleted_at, "1970-01-01T00:00:00Z") AND (NOT has(doc_owner) OR uid_in(doc_owner, $userId)))
+					private_doc_count_val as count(~doc_created_by) @filter(eq(doc_private, true) AND not gt(doc_deleted_at, "1970-01-01T00:00:00Z") AND (NOT has(doc_owner) OR uid_in(doc_owner, $userId)))
 				}
 
 				doc_count(func: uid($userId)) {
@@ -602,8 +537,8 @@ func GetDgraphPrivateDocFromDgraphWithSearchText(ctx context.Context, userUID st
 
 	query := fmt.Sprintf(`query DocInfo($userId: string){
 				var(func: uid($userId)) {
-					user_private_docs as ~doc_created_by @filter(eq(doc_private, true) AND regexp(doc_title, /%s/i) AND not gt(doc_deleted_at, "1970-01-01T00:00:00Z"))
-					private_doc_count_val as count(~doc_created_by) @filter(eq(doc_private, true) AND regexp(doc_title, /%s/i) AND not gt(doc_deleted_at, "1970-01-01T00:00:00Z"))
+					user_private_docs as ~doc_created_by @filter(eq(doc_private, true) AND regexp(doc_title, /%s/i) AND not gt(doc_deleted_at, "1970-01-01T00:00:00Z") AND (NOT has(doc_owner) OR uid_in(doc_owner, $userId)))
+					private_doc_count_val as count(~doc_created_by) @filter(eq(doc_private, true) AND regexp(doc_title, /%s/i) AND not gt(doc_deleted_at, "1970-01-01T00:00:00Z") AND (NOT has(doc_owner) OR uid_in(doc_owner, $userId)))
 				}
 
 				doc_count(func: uid($userId)) {
@@ -651,6 +586,7 @@ func GetDocPermissions(ctx context.Context, docUUID string) (dgraphDoc *dgraphSt
 				docInfo(func: eq(doc_uuid, $id)) {
 					uid
 					doc_uuid
+					doc_title
 					doc_private
 					doc_deleted_at
 					doc_editing_users {
@@ -683,10 +619,7 @@ func GetDocPermissions(ctx context.Context, docUUID string) (dgraphDoc *dgraphSt
 	dgraphDoc, err = dgraphModels.GetDgraphDocInfoByUUID(ctx, query, variables)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDocPermissions Failed to get doc in dgraph err: %+v",
-			err,
-		)
+		helpers.LogReadFailure(ctx, err, "domain/GetDocPermissions doc "+docUUID)
 		return
 	}
 
@@ -719,7 +652,14 @@ const docSearchFields = `
 					}
 					doc_commenting_users {
 						user_uuid
-					}`
+					}
+					doc_owner { user_uuid }
+					doc_full_access_users { user_uuid }
+					doc_team_editors { team_uuid }
+					doc_team_commenters { team_uuid }
+					doc_team_viewers { team_uuid }
+					doc_space_kind
+					doc_space_uuid`
 
 // GetDocSearchEntry reads a doc as its search entry is written: its text, who
 // made it, who it's shared with, and whether it is deleted. ErrNotFound for
@@ -783,18 +723,10 @@ func GetDocsReadAccessFor(ctx context.Context, docUUIDs []string, userUUID strin
 	if len(quoted) == 0 {
 		return nil, nil
 	}
-	query := `query Readable($user: string) {
+	query := `query Readable($user: string) {` + accessPreludeByUUID("$user") + `
 				docInfo(func: eq(doc_uuid, [` + strings.Join(quoted, ", ") + `])) {
 					doc_uuid
-					doc_title
-					doc_private
-					doc_deleted_at
-					doc_created_by {
-						user_uuid
-					}
-					doc_read_access: count(doc_reading_users @filter(eq(user_uuid, $user)))
-					doc_edit_access: count(doc_editing_users @filter(eq(user_uuid, $user)))
-					doc_comment_access: count(doc_commenting_users @filter(eq(user_uuid, $user)))
+					doc_title` + accessFacts + `
 				}
 			}`
 	docs, err := dgraphModels.GetDgraphDocs(ctx, query, map[string]string{"$user": userUUID})
@@ -804,21 +736,14 @@ func GetDocsReadAccessFor(ctx context.Context, docUUIDs []string, userUUID strin
 	return docs, err
 }
 
-// CouldRead is who may read a doc, its deletion set aside: anyone signed in,
-// for a doc that isn't private; for a private one, its creator and the people
-// it's shared with. doc is read for the person (GetDocsReadAccessFor reads
-// their counts). The rule business/Doc's CanRead and CouldRead decide by, here
-// so the packages business/Doc depends on can ask it too (business/Archive's
-// restore list). Pure.
+// CouldRead is who may read a doc, its deletion set aside: the access rule's
+// level before the doc was deleted (docAccessRule.go), at least view. doc is
+// read for the person with the access facts (GetDocsReadAccessFor reads them).
+// The rule business/Doc's CanRead and CouldRead decide by, here so that the
+// packages business/Doc depends on ask it too (business/Archive's restore
+// list). Pure.
 func CouldRead(doc *dgraphStruct.DgraphDoc, userUUID string) bool {
-	if doc == nil {
-		return false
-	}
-	if doc.IsPrivate == nil || !*doc.IsPrivate {
-		return true
-	}
-	return doc.HasEditAccess > 0 || doc.HasReadAccess > 0 || doc.HasCommentAccess > 0 ||
-		(doc.CreatedBy != nil && doc.CreatedBy.Uuid == userUUID)
+	return DecideDoc(doc, Viewer{UUID: userUUID}).Was >= level.View
 }
 
 // DocsCouldReadFor answers, of the named docs, which the person (by uuid)

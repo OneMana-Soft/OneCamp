@@ -177,7 +177,7 @@ Incoming webhooks are rate-limited to **30 requests per minute** per token.
 4. **Scope**: Limit events to a specific channel or project, or receive all org-wide
 5. **Trigger Words** (optional): Only dispatch when the message contains specific words
 
-### Available Event Types (14 total)
+### Available Event Types (19 total)
 
 #### Posts
 | Event | Description |
@@ -212,6 +212,19 @@ Incoming webhooks are rate-limited to **30 requests per minute** per token.
 |-------|-------------|
 | `user.joined` | A user joins a channel |
 | `user.left` | A user is removed from or leaves a channel |
+
+#### Docs
+| Event | Description |
+|-------|-------------|
+| `doc.created` | A doc is made |
+| `doc.updated` | A doc's content changed: at most one a minute per doc, sent when the minute closes, so a burst of saves is one event |
+| `doc.deleted` | A doc is moved to the trash |
+| `doc.shared` | Someone gains access to a doc |
+| `doc.comment.created` | Someone comments on a doc |
+
+A doc's event goes to a webhook only when the person who set the webhook up can open
+the doc (for `doc.deleted`, could open it before it went to the trash). A doc event
+carries ids, never the doc's text, and a private doc's title is never in it.
 
 ### Payload Format
 
@@ -294,6 +307,19 @@ All outgoing webhooks receive:
   "new_status": "done",
   "project_id": "uuid",
   "updated_by": "user_dgraph_uid"
+}
+```
+
+**doc.shared:**
+```json
+{
+  "doc_uuid": "uuid",
+  "doc_private": false,
+  "doc_title": "Launch notes",
+  "actor_uuid": "uuid",
+  "user_uuids": ["uuid"],
+  "level": "edit",
+  "at": "2026-10-14T09:30:00Z"
 }
 ```
 

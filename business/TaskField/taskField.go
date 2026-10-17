@@ -97,13 +97,16 @@ type OptionInput struct {
 	Color string `json:"color"`
 }
 
-// Input is a field as the app sends it, to make or to change.
+// Input is a field as the app sends it, to make or to change. A change keeps
+// every option it doesn't list; RemovedOptions names, by id, those it takes
+// out (the shared options editor sends them).
 type Input struct {
-	Name     string        `json:"name"`
-	Type     string        `json:"type"`
-	Options  []OptionInput `json:"options"`
-	Currency string        `json:"currency"`
-	OnCard   bool          `json:"on_card"`
+	Name           string        `json:"name"`
+	Type           string        `json:"type"`
+	Options        []OptionInput `json:"options"`
+	RemovedOptions []string      `json:"removed_options,omitempty"`
+	Currency       string        `json:"currency"`
+	OnCard         bool          `json:"on_card"`
 }
 
 func cleanName(s string) string { return strings.Join(strings.Fields(s), " ") }
@@ -385,8 +388,8 @@ func Create(ctx context.Context, project uuid.UUID, in Input, by uuid.UUID, bill
 }
 
 // Update changes a field's name, options, currency or place on cards; its
-// type stays. Options taken away come off the tasks that had them, and
-// Changed lists those tasks.
+// type stays. Options it doesn't list are kept; those in.RemovedOptions names
+// come off the tasks that had them, and Changed lists those tasks.
 func Update(ctx context.Context, project, id uuid.UUID, in Input) (field *model.Field, changed []string, err error) {
 	old, err := model.Get(ctx, project, id)
 	if err != nil {
@@ -402,7 +405,12 @@ func Update(ctx context.Context, project, id uuid.UUID, in Input) (field *model.
 		return nil, nil, err
 	}
 	f.ID, f.ProjectID = old.ID, project
-	return model.Update(ctx, f)
+	field, changed, err = model.Update(ctx, f, in.RemovedOptions)
+	var taken *model.OptionTakenError
+	if errors.As(err, &taken) {
+		return nil, nil, invalid("%q is already an option of this field. Give each option its own name.", taken.Label)
+	}
+	return field, changed, err
 }
 
 // Delete removes a field and every task's value of it.

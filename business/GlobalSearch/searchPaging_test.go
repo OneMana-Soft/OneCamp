@@ -68,7 +68,7 @@ func TestSearchPagesCarryACursorToTheNextPage(t *testing.T) {
 	}
 
 	hits = 3
-	next, err := GetUnifiedGlobalSearchPage(context.Background(), "me", "me@example.test", nil, nil, nil, "alpha", after)
+	next, err := GetUnifiedGlobalSearchPage(context.Background(), "me", "me@example.test", nil, nil, nil, "alpha", after, Within{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +102,59 @@ func TestASearchCursorIsTwoNumbersOrNothing(t *testing.T) {
 	} {
 		if _, err := DecodeSearchCursor(bad); err == nil {
 			t.Errorf("the cursor %q was taken", bad)
+		}
+	}
+}
+
+// The demo visitor's page says there is more when a person the demo keeps
+// from its visitor was among its hits. The people were left out before the
+// page was cut, so a page whose 21 hits held one lost its 21st and answered
+// has_more false: "Show more" went, and with it every hit after the page.
+func TestTheDemoVisitorsPageKeepsShowMore(t *testing.T) {
+	t.Setenv("DEMO_MODE", "true")
+	t.Setenv("DEMO_USER_EMAIL", "visitor@demo.example")
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var rows []string
+		for i := 0; i < 21; i++ {
+			sort := fmt.Sprintf(`[%d.5,%d]`, 100-i, 1760000000000-int64(i)*1000)
+			if i == 4 {
+				// The workspace's owner, whom the demo keeps from its visitor.
+				rows = append(rows, fmt.Sprintf(`{"_index":"users","_id":"u%d","_source":{"user_id":"u%d","user_name":"owner","user_email":"owner@example.com"},"sort":%s}`, i, i, sort))
+				continue
+			}
+			rows = append(rows, fmt.Sprintf(`{"_index":"channels","_id":"c%d","_source":{"ch_id":"c%d","ch_name":"alpha %d"},"sort":%s}`, i, i, i, sort))
+		}
+		fmt.Fprintf(w, `{"hits":{"hits":[%s]}}`, strings.Join(rows, ","))
+	}))
+	defer node.Close()
+	client, err := opensearchapi.NewClient(opensearchapi.Config{Client: opensearch.Config{Addresses: []string{node.URL}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := opensearchInit.OpenSearchClient
+	opensearchInit.OpenSearchClient = client
+	t.Cleanup(func() { opensearchInit.OpenSearchClient = old })
+	withChecks(t, map[string]liveness.Checker{})
+
+	p, err := GetUnifiedGlobalSearch(context.Background(), "visitor", "visitor@demo.example", nil, nil, nil, "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.HasMore || p.Next == "" {
+		t.Fatalf("a page of 21 hits, one of them a person the demo leaves out: has_more %v, next %q; want more, and a cursor", p.HasMore, p.Next)
+	}
+	// The next page starts after the 20th hit the index gave: score 81.5,
+	// time 1760000000000-19000.
+	if after, err := DecodeSearchCursor(p.Next); err != nil || after[0] != 81.5 || after[1] != 1759999981000 {
+		t.Errorf("the cursor holds %v (%v); want the 20th hit's score and time", after, err)
+	}
+	if len(p.Page) != 19 {
+		t.Errorf("the page holds %d hits; want the first 20 less the person left out", len(p.Page))
+	}
+	for _, h := range p.Page {
+		if h.User != nil {
+			t.Errorf("the demo visitor's page shows %s", h.User.UserEmail)
 		}
 	}
 }

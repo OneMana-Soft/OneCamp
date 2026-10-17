@@ -187,12 +187,12 @@ func TestDemoSeededContentStaysForEveryVisitor(t *testing.T) {
 	}
 
 	// Docs.
-	code, out := call(visitor, docController.DeleteDoc, docAdapter.InputUpdateDoc{DocId: ids["seededDoc"].String()})
+	code, out := call(visitor, docController.DeleteDocTree, docAdapter.InputUpdateDoc{DocId: ids["seededDoc"].String()})
 	refused("the visitor deleting the demo's doc", code, out)
 	if docGone("seededDoc") {
 		t.Error("the demo's doc was deleted anyway")
 	}
-	code, out = call(visitor, docController.DeleteDoc, docAdapter.InputUpdateDoc{DocId: ids["ownDoc"].String()})
+	code, out = call(visitor, docController.DeleteDocTree, docAdapter.InputUpdateDoc{DocId: ids["ownDoc"].String()})
 	allowed("the visitor deleting a doc they made", code, out)
 	if !docGone("ownDoc") {
 		t.Error("the visitor's own doc was not deleted")
@@ -235,11 +235,11 @@ func TestDemoSeededContentStaysForEveryVisitor(t *testing.T) {
 	}
 
 	// The people who run the demo are not the shared visitor.
-	code, out = call(as("owner", false), docController.DeleteDoc, docAdapter.InputUpdateDoc{DocId: ids["ownersDoc"].String()})
+	code, out = call(as("owner", false), docController.DeleteDocTree, docAdapter.InputUpdateDoc{DocId: ids["ownersDoc"].String()})
 	allowed("the demo's own team deleting their doc", code, out)
 
 	// And on any other server, nothing is kept from anybody.
 	t.Setenv("DEMO_MODE", "")
-	code, out = call(visitor, docController.DeleteDoc, docAdapter.InputUpdateDoc{DocId: ids["seededDoc"].String()})
+	code, out = call(visitor, docController.DeleteDocTree, docAdapter.InputUpdateDoc{DocId: ids["seededDoc"].String()})
 	allowed("the same account on a server that is not the demo", code, out)
 }

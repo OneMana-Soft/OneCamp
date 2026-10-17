@@ -69,7 +69,12 @@ func TestDemoVisitorSeesNoOtherEmails(t *testing.T) {
 	visitor := seed(visitorEmail, "sam", "Sam Rivera")
 	seed("owner.realname@example.com", "ownerperson", "Owner Person")
 	member := seed("member.personal@example.org", "memberperson", "Member Person")
+	// One of the demo's seeded cast: the people the visitor is meant to see.
+	seed("cast"+helpers.DemoCastEmailDomain, "castperson", "Cast Person")
 	others := []string{"owner.realname@example.com", "member.personal@example.org"}
+	// Since 11 Oct the visitor's lists leave real accounts out altogether, not
+	// only their addresses: their names must not appear either.
+	otherNames := []string{"Owner Person", "ownerperson", "Member Person", "memberperson"}
 
 	r := chi.NewRouter()
 	r.Use(customMiddleware.VerifyAuth)
@@ -138,12 +143,17 @@ func TestDemoVisitorSeesNoOtherEmails(t *testing.T) {
 				t.Errorf("%s: the demo visitor reads %s: %s", rd.name, e, got)
 			}
 		}
-		if strings.Contains(got, "Owner Person") || strings.Contains(got, "ownerperson") {
+		for _, n := range otherNames {
+			if strings.Contains(got, n) {
+				t.Errorf("%s: the demo visitor's list names a real account, %s: %s", rd.name, n, got)
+			}
+		}
+		if strings.Contains(got, "Cast Person") || strings.Contains(got, "castperson") {
 			listed = true
 		}
 	}
 	if !listed {
-		t.Error("no read listed the other people at all, so the check above proves nothing")
+		t.Error("no read listed the demo's own cast at all, so the checks above prove nothing")
 	}
 	if v := call(visitor, http.MethodGet, "/user/allUsers", nil); !strings.Contains(v, visitorEmail) {
 		t.Errorf("the visitor's own address went too: %s", v)

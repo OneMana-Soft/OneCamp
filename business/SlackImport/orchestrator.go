@@ -14,6 +14,7 @@ import (
 
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/zipsafe"
 	minioInit "github.com/akashc777/OneCamp/initializers/minioInit"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	importModels "github.com/akashc777/OneCamp/models/postgres/SlackImport"
@@ -568,7 +569,7 @@ func openStagedZipDiskFallback(ctx context.Context, objectKey string) (*zip.Read
 		return nil, nil, err
 	}
 
-	zr, err := zip.NewReader(tmp, stat.Size())
+	zr, err := zipsafe.Open(tmp, stat.Size(), slackZipLimits())
 	if err != nil {
 		_ = tmp.Close()
 		_ = os.Remove(tmp.Name())

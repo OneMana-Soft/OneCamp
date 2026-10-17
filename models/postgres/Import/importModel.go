@@ -82,6 +82,9 @@ const (
 	ChunkTaskSubtasks = "task_subtasks"
 	ChunkTaskComments = "task_comments"
 	ChunkAttachment   = "attachment"
+	// ChunkDocPages is a tree of pages that become docs; its parent source id
+	// is the tree's root page.
+	ChunkDocPages = "doc_pages"
 )
 
 // Chunk statuses.
@@ -109,6 +112,8 @@ const (
 	EntitySubtask = "subtask"
 	EntityLabel   = "label"
 	EntityField   = "task_field" // a project's custom field (business/Import/fields.go)
+	EntityDoc     = "doc"        // a page that became a doc
+	EntityTable   = "data_table" // a database that became a table
 )
 
 // Severity levels for error rows.
@@ -968,7 +973,8 @@ func ExecSourceIdMap(ctx context.Context, query string, args []interface{}, hint
 
 // IdMappingsByTypeOwned returns mapping rows where this import was the
 // physical creator. Used by rollback so we never soft-delete entities
-// that a different import owns.
+// that a different import owns. Rows with no parent come first, so a tree
+// (a page and the pages under it) is taken away whole before its parts.
 func IdMappingsByTypeOwned(ctx context.Context, importId uuid.UUID, entityType string) ([]IdMapEntry, error) {
 	dbCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -977,7 +983,7 @@ func IdMappingsByTypeOwned(ctx context.Context, importId uuid.UUID, entityType s
 		WHERE import_id = $1
 		  AND entity_type = $2
 		  AND created_by_this_import = true
-		ORDER BY source_id`, importId, entityType)
+		ORDER BY parent_source_id IS NOT NULL, source_id`, importId, entityType)
 	if err != nil {
 		return nil, err
 	}
@@ -1293,13 +1299,6 @@ func GetPriorityMappings(ctx context.Context, importId uuid.UUID) (map[string]st
 // itself (e.g., backdating posts after creation).
 func Exec(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
 	return postgresInit.DBConn.SqlDB.ExecContext(ctx, query, args...)
-}
-
-// ExecQueryRow exposes QueryRowContext via this package, mirroring Exec.
-// Note the returned row is bound to the package-level connection pool's
-// context; per-call timeouts must be set by the caller.
-func ExecQueryRow(ctx context.Context, query string, args ...interface{}) (*sql.Row, error) {
-	return postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, args...), nil
 }
 
 // UpsertIdMappingThenFinish atomically writes the id_map row and marks

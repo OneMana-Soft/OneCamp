@@ -7,12 +7,17 @@ import { RenderError, decodeAttributeRefs, htmlToDoc, renderDocHTML } from './pr
 
 // A schema that lags the editor must never cost a doc its content: what it
 // does not know is written as it is, and read back as the same nodes.
+// A block with no id (schema/blockId.js) reads back with blockId null, and one
+// with no colour with blockColor null: the same as none. So does one with no
+// indent (0) or direction (null) (schema/indent.js, schema/blockDir.js).
 const plain = (v) => {
     if (Array.isArray(v)) return v.map(plain)
     if (!v || typeof v !== 'object') return v
     const out = {}
     for (const k of Object.keys(v).sort()) {
-        if (k === 'attrs' && Object.keys(v[k] || {}).length === 0) continue
+        if ((k === 'blockId' || k === 'blockColor' || k === 'dir') && v[k] === null) continue
+        if (k === 'indent' && v[k] === 0) continue
+        if (k === 'attrs' && Object.keys(plain(v[k] || {})).length === 0) continue
         out[k] = plain(v[k])
     }
     return out
@@ -41,7 +46,8 @@ const DOC = {
         { type: 'paragraph', content: [{ type: 'text', text: 'After.' }] },
     ],
 }
-const OLD = without('tableEmbed', 'entityMention')
+// An older server: no table embeds, no entity chips, no highlights, no dates.
+const OLD = without('tableEmbed', 'entityMention', 'highlight', 'dateMention')
 
 test('a doc holding unknown blocks and marks is still written, every one kept', () => {
     assert.throws(() => generateHTML(DOC, OLD), /Unknown node type|no mark type/i, 'the plain write fails (the bug)')
@@ -64,7 +70,7 @@ test('read back, the kept blocks and marks are the same nodes, under their own n
 test('a block an older server kept is read as that block once the schema knows it', () => {
     const { html } = renderDocHTML(DOC, OLD)
     const { json } = htmlToDoc(html, COLLAB_EXTENSIONS)
-    assert.deepEqual(json.content[5], { type: 'tableEmbed', attrs: { tableId: 't1', viewId: '' } })
+    assert.deepEqual(plain(json.content[5]), { type: 'tableEmbed', attrs: { tableId: 't1', viewId: '' } })
     assert.deepEqual(plain(json.content[4].content[4]), plain(DOC.content[4].content[4]))
 })
 

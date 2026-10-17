@@ -13,9 +13,12 @@ package business
 // It runs at every start rather than once per install behind a flag in
 // system_configs. When nobody is left, a run is one query that finds no rows.
 // A flag would stop it for good after one pass, and members still arrive
-// without a handle afterwards: the demo's visitor (EnsureDemoUserExists) and
-// anyone restored from a backup taken before v2.70.0; and a member whose
-// handle couldn't be set on the first pass would be left without one.
+// without a handle afterwards: anyone restored from a backup taken before
+// v2.70.0; and a member whose handle couldn't be set on the first pass would
+// be left without one. It runs only at start, so whoever is made after it
+// must be made with a handle: every creator claims one (CreateUserWithMethod),
+// the demo's visitor and cast included (EnsureDemoUserExists), whom the
+// nightly reset seeds after the API has started.
 // Bots and agents are never touched: they keep their own names
 // (agentBot.go, automationBot.go).
 
@@ -38,26 +41,15 @@ const (
 // StartHandleBackfill runs BackfillHandles in the background until a run
 // finishes, ctx ends, or the tries run out. It never delays or fails a start.
 func StartHandleBackfill(ctx context.Context) {
-	helpers.GoSafeNamed("user.handle-backfill", func() {
-		wait := 10 * time.Second
-		for try := 0; try < handleBackfillTries; try++ {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(wait):
-			}
+	helpers.RetryInBackground(ctx, "user.handle-backfill",
+		helpers.Retries{First: 10 * time.Second, Cap: 10 * time.Minute, Tries: handleBackfillTries},
+		func(ctx context.Context) error {
 			given, failed, err := BackfillHandles(ctx)
 			if given > 0 || failed > 0 || err != nil {
 				helpers.MessageLogs.InfoLog.Printf("handles: gave %d members without a handle one, %d could not be given one (err: %v)", given, failed, err)
 			}
-			if err == nil {
-				return
-			}
-			if wait < 10*time.Minute {
-				wait *= 2
-			}
-		}
-	})
+			return err
+		})
 }
 
 // HandleBackfillLockKey is the Postgres advisory lock a run holds, so that of

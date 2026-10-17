@@ -5,12 +5,12 @@ package integration_test
 
 // Booking pages against real Postgres 12, Dgraph and Redis, with Resend and
 // Firebase stood in for: a booking emails its guest an invite (CAL-BUG-15)
-// and tells its owner by email and by push (CAL-BUG-5); the owner moving or
+// and tells its owner in the app and by push (CAL-BUG-5); the owner moving or
 // deleting a booked meeting moves or cancels the booking, tells the guest and
 // frees the slot (CAL-BUG-4); a guest cancelling takes the meeting off both
-// calendars; and without notification email the owner still gets the push.
-// On this edition a page with bookings still to come can't be deleted
-// (CAL-BUG-3): switched off, it keeps them and their guests' links.
+// calendars; and without notification email the owner is still told. On
+// beta, a deleted page keeps its bookings and their links (CAL-BUG-3, with
+// migration 212 down and up again).
 //
 // Run: go test -tags=integration ./tests/integration/ -run TestBookingPages -v
 
@@ -19,13 +19,19 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/golang-migrate/migrate/v4"
 	"github.com/google/uuid"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Calendar"
@@ -162,7 +168,6 @@ func TestBookingPages(t *testing.T) {
 	sam := uuid.New()
 	exec(`INSERT INTO users (id, email_id, username) VALUES ($1, 'sam@acme.test', 'sam')`, sam)
 	exec(`INSERT INTO users_fcm_token (user_id, device_id, fcm_token) VALUES ($1, 'phone', 'tok-sam')`, sam)
-	exec(`INSERT INTO users_notification_preferences (user_id, unsubscribe_token) VALUES ($1, 'unsub-sam')`, sam)
 	dg.Mutate(t, map[string]any{"dgraph.type": "User", "user_uuid": sam.String(), "user_name": "Sam Rivera",
 		"user_full_name": "Samuel Rivera", "user_email_id": "sam@acme.test"})
 	du, err := userDomain.GetDgraphUserInfoByUUID(ctx, sam.String())
@@ -235,18 +240,16 @@ func TestBookingPages(t *testing.T) {
 		}
 		return false, nil
 	}
-	// This edition has no inbox item for a booking: the owner is told by email
-	// (queued here, sent by the worker) and by push.
-	ownerEmails := func(word, guest string) int {
+	ownerNotices := func(kind, event string) int {
 		var n int
-		_ = env.PG.QueryRow(`SELECT COUNT(*) FROM notification_email_queue WHERE user_id = $1 AND event_type = 'calendar.booking'
-			AND subject = $2`, sam, guest+" "+word+" Intro call").Scan(&n)
+		_ = env.PG.QueryRow(`SELECT COUNT(*) FROM resource_notices WHERE user_uuid = $1 AND kind = $2 AND resource_uuid = $3`,
+			sam, kind, event).Scan(&n)
 		return n
 	}
 
 	var alex *calendarBusiness.Booked
 	var alexEvent uuid.UUID
-	t.Run("a booking emails its guest an invite, and tells its owner by email and by push", func(t *testing.T) {
+	t.Run("a booking emails its guest an invite, and tells its owner in the app and by push", func(t *testing.T) {
 		alex = book(t, 10, "Alex Kim", "alex.kim@outlook.com")
 		alexEvent = eventOf(t, alex)
 		if !alex.Emailed || !alex.OwnerTold || alex.BookingID == "" {
@@ -266,8 +269,8 @@ func TestBookingPages(t *testing.T) {
 		if strings.Contains(inv, alex.CancelToken) {
 			t.Error("the invite carries the guest's cancel link")
 		}
-		if n := ownerEmails("booked", "Alex Kim"); n != 1 {
-			t.Errorf("Sam's emails: %d", n)
+		if n := ownerNotices("booking.created", alexEvent.String()); n != 1 {
+			t.Errorf("Sam's inbox items: %d", n)
 		}
 		bookingEventually(t, "a push to Sam", func() bool { return pushedFor("booked", alexEvent.String()) })
 		if found, b := listed(t, alexEvent); !found || b["guest_name"] != "Alex Kim" || b["page_title"] != "Intro call" || b["guest_told"] != true {
@@ -293,8 +296,9 @@ func TestBookingPages(t *testing.T) {
 			t.Fatalf("emails to the guest: %d", len(sent))
 		}
 		moved := sent[1]
-		if !strings.Contains(moved.Subject, "Moved") || !strings.Contains(moved.HTML, "Sam Rivera moved your meeting") {
-			t.Errorf("the move's email: %q", moved.Subject)
+		if !strings.Contains(moved.Subject, "Moved") || !strings.Contains(moved.HTML, "Sam Rivera moved your meeting") ||
+			!strings.Contains(moved.HTML, "(Europe/London)") {
+			t.Errorf("the move's email %q, in the guest's zone:\n%s", moved.Subject, moved.HTML)
 		}
 		inv := moved.invite()
 		if !strings.Contains(inv, "METHOD:REQUEST") || !strings.Contains(inv, "UID:"+alex.BookingID+"@onecamp") ||
@@ -321,7 +325,7 @@ func TestBookingPages(t *testing.T) {
 		if err := calendarBusiness.DeleteEvent(ctx, alexEvent, samInfo); err != nil {
 			t.Fatal(err)
 		}
-		if v := booking(t, alex); !v.Cancelled {
+		if v := booking(t, alex); !v.Cancelled || !v.CancelledByHost {
 			t.Errorf("the guest's link shows %+v", v)
 		}
 		bookingEventually(t, "the cancel's email", func() bool { return len(mailbox.to("alex.kim@outlook.com")) >= 3 })
@@ -358,8 +362,11 @@ func TestBookingPages(t *testing.T) {
 		if err != nil || !view.Cancelled || !view.OwnerTold || !view.PageLive || view.BookingID != mo.BookingID {
 			t.Fatalf("cancelled %+v, %v", view, err)
 		}
-		if n := ownerEmails("cancelled", "Mo Ali"); n != 1 {
-			t.Errorf("Sam's emails: %d", n)
+		if v := booking(t, mo); !v.Cancelled || v.CancelledByHost {
+			t.Errorf("the guest's link shows %+v", v)
+		}
+		if n := ownerNotices("booking.cancelled", event.String()); n != 1 {
+			t.Errorf("Sam's inbox items: %d", n)
 		}
 		bookingEventually(t, "a push to Sam", func() bool { return pushedFor("cancelled", event.String()) })
 		settled()
@@ -375,14 +382,16 @@ func TestBookingPages(t *testing.T) {
 		}
 	})
 
-	t.Run("without notification email the owner still gets the push, and the calendar says the guest won't be told", func(t *testing.T) {
+	t.Run("without notification email the owner is still told, and the calendar says the guest won't be", func(t *testing.T) {
 		t.Setenv("RESEND_API_KEY", "")
 		before := mailbox.count()
 		lee := book(t, 18, "Lee Chan", "lee.chan@outlook.com")
 		event := eventOf(t, lee)
-		// No inbox here and no email: the guest isn't told the owner was.
-		if lee.Emailed || lee.OwnerTold {
+		if lee.Emailed || !lee.OwnerTold {
 			t.Errorf("booked %+v", lee)
+		}
+		if n := ownerNotices("booking.created", event.String()); n != 1 {
+			t.Errorf("Sam's inbox items: %d", n)
 		}
 		bookingEventually(t, "a push to Sam", func() bool { return pushedFor("booked", event.String()) })
 		if found, b := listed(t, event); !found || b["guest_told"] != false {
@@ -422,11 +431,11 @@ func TestBookingPages(t *testing.T) {
 		}
 	})
 
-	t.Run("a page with bookings still to come is kept: switched off, its guests can still cancel", func(t *testing.T) {
-		hours := calendarBusiness.WorkingHours{Days: []int{0, 1, 2, 3, 4, 5, 6}, Start: "00:00", End: "24:00", TZ: "UTC"}
-		page, err := calendarBusiness.SaveBookingPage(ctx, sam, calendarBusiness.PageInput{
-			Slug: "office-hours", Title: "Office hours", DurationMinutes: 30, MaxDaysAhead: 30, Active: true, Hours: hours})
-		if err != nil {
+	t.Run("a deleted page keeps its bookings and their links, and its address", func(t *testing.T) {
+		if _, err := calendarBusiness.SaveBookingPage(ctx, sam, calendarBusiness.PageInput{
+			Slug: "office-hours", Title: "Office hours", DurationMinutes: 30, MaxDaysAhead: 30, Active: true,
+			Hours: calendarBusiness.WorkingHours{Days: []int{0, 1, 2, 3, 4, 5, 6}, Start: "00:00", End: "24:00", TZ: "UTC"},
+		}); err != nil {
 			t.Fatal(err)
 		}
 		pat, err := calendarBusiness.Book(ctx, "office-hours", calendarBusiness.BookInput{Start: at(20), Name: "Pat Lee",
@@ -434,28 +443,113 @@ func TestBookingPages(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var held *calendarBusiness.PageHasBookingsError
-		if ok, err := calendarBusiness.DeleteBookingPage(ctx, sam, page.Id); ok || !errors.As(err, &held) || held.Upcoming != 1 {
-			t.Fatalf("deleting a page with a booking to come: %v, %v", ok, err)
-		}
-		// Switched off instead: nobody can book it, and Pat's link still works.
-		if _, err := calendarBusiness.SaveBookingPage(ctx, sam, calendarBusiness.PageInput{Id: page.Id.String(),
-			Slug: "office-hours", Title: "Office hours", DurationMinutes: 30, MaxDaysAhead: 30, Active: false, Hours: hours}); err != nil {
+		var pageID uuid.UUID
+		if err := env.PG.QueryRow(`SELECT page_id FROM bookings WHERE id = $1`, pat.BookingID).Scan(&pageID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := calendarBusiness.GetPublicPage(ctx, "office-hours", time.Now(), time.Now()); !errors.Is(err, calendarBusiness.ErrNoPage) {
-			t.Errorf("the switched-off page answers %v", err)
+		ok, upcoming, err := calendarBusiness.DeleteBookingPage(ctx, sam, pageID)
+		if err != nil || !ok || upcoming != 1 {
+			t.Fatalf("deleted %v with %d upcoming: %v", ok, upcoming, err)
 		}
-		if v := booking(t, pat); v.Cancelled || v.PageLive {
+		if _, err := calendarBusiness.GetPublicPage(ctx, "office-hours", time.Now(), time.Now()); !errors.Is(err, calendarBusiness.ErrNoPage) {
+			t.Errorf("the deleted page answers %v", err)
+		}
+		if _, err := calendarBusiness.Book(ctx, "office-hours", calendarBusiness.BookInput{Start: at(21), Name: "Kai",
+			Email: "kai@outlook.com", TZ: "UTC"}, time.Now()); !errors.Is(err, calendarBusiness.ErrNoPage) {
+			t.Errorf("booking the deleted page: %v", err)
+		}
+		pages, _ := bookingModel.ListPages(sam)
+		for _, p := range pages {
+			if p.Slug == "office-hours" {
+				t.Error("the deleted page is still listed")
+			}
+		}
+		// The guest's link still shows the meeting, without "Book another time".
+		v := booking(t, pat)
+		if v.Cancelled || v.PageLive || !v.Start.Equal(at(20)) || v.Title != "Office hours" {
 			t.Errorf("the guest's link shows %+v", v)
 		}
+		// Nobody else can take the address, so an old link never lands on their page.
+		other := uuid.New()
+		exec(`INSERT INTO users (id, email_id, username) VALUES ($1, 'kim@acme.test', 'kim')`, other)
+		if _, err := calendarBusiness.SaveBookingPage(ctx, other, calendarBusiness.PageInput{
+			Slug: "office-hours", Title: "Mine now", DurationMinutes: 30, MaxDaysAhead: 30, Active: true,
+			Hours: calendarBusiness.WorkingHours{Days: []int{1}, Start: "09:00", End: "17:00", TZ: "UTC"},
+		}); err == nil || !strings.Contains(err.Error(), "already uses that address") {
+			t.Errorf("someone else took the address: %v", err)
+		}
+		// Nor can the page be removed outright under its bookings any more.
+		if _, err := env.PG.Exec(`DELETE FROM booking_pages WHERE id = $1`, pageID); err == nil {
+			t.Error("a page with bookings was removed outright")
+		}
+		// The guest can still cancel; Sam is told, and Pat's calendar loses it.
 		view, err := calendarBusiness.CancelBooking(ctx, pat.CancelToken)
-		if err != nil || !view.Cancelled {
+		if err != nil || !view.Cancelled || !view.OwnerTold || view.PageLive {
 			t.Fatalf("cancelled %+v, %v", view, err)
 		}
-		// Nothing still to come: now it goes.
-		if ok, err := calendarBusiness.DeleteBookingPage(ctx, sam, page.Id); !ok || err != nil {
-			t.Errorf("deleting a page with nothing to come: %v, %v", ok, err)
+		sent := mailbox.to("pat.lee@outlook.com")
+		if len(sent) != 2 || !strings.Contains(sent[1].invite(), "METHOD:CANCEL") || strings.Contains(sent[1].HTML, "/book/office-hours") {
+			t.Errorf("emails to the guest: %d", len(sent))
+		}
+		// Sam making a page at the address again gets the same page back.
+		again, err := calendarBusiness.SaveBookingPage(ctx, sam, calendarBusiness.PageInput{
+			Slug: "office-hours", Title: "Office hours again", DurationMinutes: 30, MaxDaysAhead: 30, Active: true,
+			Hours: calendarBusiness.WorkingHours{Days: []int{0, 1, 2, 3, 4, 5, 6}, Start: "00:00", End: "24:00", TZ: "UTC"},
+		})
+		if err != nil || again.Id != pageID {
+			t.Fatalf("the address again: %+v, %v", again, err)
+		}
+		if p, err := calendarBusiness.GetPublicPage(ctx, "office-hours", time.Now(), time.Now()); err != nil || p.Title != "Office hours again" {
+			t.Errorf("the page again: %+v, %v", p, err)
+		}
+	})
+
+	t.Run("migration 212 goes down and up again", func(t *testing.T) {
+		_, file, _, _ := runtime.Caller(0)
+		dir := filepath.Join(filepath.Dir(file), "..", "..", "migrations")
+		matches, err := filepath.Glob(filepath.Join(dir, "*_booking_pages_soft_delete.up.sql"))
+		if err != nil || len(matches) != 1 {
+			t.Fatalf("the migration: %v %v", matches, err)
+		}
+		n, err := strconv.Atoi(strings.SplitN(filepath.Base(matches[0]), "_", 2)[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(dir, fmt.Sprintf("%d_booking_pages_soft_delete.down.sql", n))); err != nil {
+			t.Fatal(err)
+		}
+		shape := func() (deletedAt int, onDelete string) {
+			_ = env.PG.QueryRow(`SELECT COUNT(*) FROM information_schema.columns
+				WHERE table_name = 'booking_pages' AND column_name = 'deleted_at'`).Scan(&deletedAt)
+			_ = env.PG.QueryRow(`SELECT confdeltype FROM pg_constraint WHERE conname = 'bookings_page_id_fkey'`).Scan(&onDelete)
+			return
+		}
+		if cols, del := shape(); cols != 1 || del != "r" {
+			t.Fatalf("before: deleted_at %d, on delete %q", cols, del)
+		}
+		m, err := migrate.New("file://"+dir, env.DSN)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer m.Close()
+		for v, _, _ := m.Version(); v >= uint(n); v, _, _ = m.Version() {
+			if err := m.Steps(-1); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if cols, del := shape(); cols != 0 || del != "c" {
+			t.Errorf("down: deleted_at %d, on delete %q", cols, del)
+		}
+		var bookings int
+		_ = env.PG.QueryRow(`SELECT COUNT(*) FROM bookings`).Scan(&bookings)
+		if bookings < 6 {
+			t.Errorf("down kept %d bookings", bookings)
+		}
+		if err := m.Up(); err != nil {
+			t.Fatal(err)
+		}
+		if cols, del := shape(); cols != 1 || del != "r" {
+			t.Errorf("up again: deleted_at %d, on delete %q", cols, del)
 		}
 	})
 }

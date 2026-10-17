@@ -78,12 +78,17 @@ const (
 	// Someone in a DM or group chat has seen it up to a time (MqttChatSeen),
 	// sent to each other person there who'd see the read receipt.
 	MESSAGE_CHAT_SEEN
-	// 35 to 37 are the next release's, not on this line yet (a doc import or
-	// export's progress; a doc's change of name, place or access; a notice):
-	// kept free so the numbers here are the same as there.
-	_
-	_
-	_
+	// A doc import or export changed state or got further (business/ContentIO's
+	// Job), sent to the person who started it.
+	MESSAGE_CONTENT_IO_JOB
+	// A doc changed in a way its open tabs act on (MqttDocMeta), on the doc's
+	// topic: renamed, deleted, restored, moved, its access or lock changed.
+	MESSAGE_DOC_META
+	// An inbox item of a kind the activity feed has no type of its own for
+	// (MqttNotice): a mention in a doc's body, "shared with you", a proposal.
+	// Its own message type, so an app from before notices ignores it instead
+	// of meeting an activity type it can't draw.
+	MESSAGE_NOTICE
 	// A conversation became the person's, or stopped being theirs
 	// (MqttConversationAccess): a DM or group chat started or joined, a
 	// channel made, joined or added to; removed from a channel, or left it.
@@ -97,6 +102,9 @@ const (
 	// desktop app's webview has no web push, so this is the only way it hears
 	// of a message; a browser tab ignores it, having the push.
 	MESSAGE_DESKTOP_NOTICE
+	// A task changed (MqttTaskChanged), on its project's topic: live task
+	// chips and task lists in docs show it (docs C1).
+	MESSAGE_TASK_CHANGED
 )
 
 // What MESSAGE_CONVERSATION_ACCESS says: which kind of conversation, and
@@ -208,6 +216,13 @@ type MqttChatTyping struct {
 	UserProfile string `json:"user_profile,omitempty"`
 	UserName    string `json:"user_name,omitempty"`
 	ChatGrpId   string `json:"chat_grp_id,omitempty"`
+	// IsBot and BotKind say a bot is typing, and which kind it is (domain/User
+	// BotKind, the kinds GET /user/botKinds lists), so the app says an AI
+	// teammate "is working" and anyone else "is typing". Both are left out
+	// for a person, whose message reads exactly as before, and an app older
+	// than them ignores them.
+	IsBot   bool   `json:"is_bot,omitempty"`
+	BotKind string `json:"user_bot_kind,omitempty"`
 }
 
 type MqttPostReaction struct {
@@ -249,6 +264,14 @@ type MqttTaskDates struct {
 	StartDate   string `json:"task_start_date"`
 	DueDate     string `json:"task_due_date"`
 	By          string `json:"by"`
+}
+
+// MqttTaskChanged says which task changed: its name, status or assignee, or
+// whether it is there at all. A chip or a task list reads it again through the entity
+// read, which checks the reader's access; this only says when.
+type MqttTaskChanged struct {
+	TaskUuid    string `json:"task_uuid"`
+	ProjectUuid string `json:"project_uuid"`
 }
 
 // MqttChatSeen is a read receipt: UserUuid has seen the conversation
@@ -357,6 +380,9 @@ type MqttPostComment struct {
 	IsBot bool `json:"is_bot,omitempty"`
 }
 
+// MqttDocComment names its doc twice: doc_uuid, as every doc payload does
+// (MqttDocCommentReaction's), and doc_id, its old key, kept for one release
+// for apps that read only that (MarshalJSON).
 type MqttDocComment struct {
 	Type           int8                       `json:"type"`
 	CommentUuid    string                     `json:"comment_uuid,omitempty"`
@@ -373,11 +399,35 @@ type MqttDocComment struct {
 	IsGuest bool `json:"is_guest,omitempty"`
 }
 
+// MqttDocMeta is a change to a doc for the tabs that have it open: Kind is the
+// Resource Event's kind ("doc.renamed"), and Data the little a tab needs to act
+// on it (the new title, the new parent, whether it's private now). It never
+// says who was given or lost access: anyone who can read the doc sees it, and a
+// tab that's told access changed asks again what it may do.
+type MqttDocMeta struct {
+	Kind      string            `json:"kind"`
+	DocUuid   string            `json:"doc_uuid"`
+	ActorUuid string            `json:"actor_uuid,omitempty"`
+	AgentUuid string            `json:"agent_uuid,omitempty"`
+	At        time.Time         `json:"at"`
+	Data      map[string]string `json:"data,omitempty"`
+}
+
+// MqttNotice is one inbox item for its person, as the activity feed lists it
+// (activity_type "NOTICE").
+type MqttNotice struct {
+	UserUuid string      `json:"user_uuid"`
+	Activity interface{} `json:"activity"`
+}
+
 type MqttChannelTyping struct {
 	UserUUID    string `json:"user_uuid,omitempty"`
 	UserProfile string `json:"user_profile,omitempty"`
 	UserName    string `json:"user_name,omitempty"`
 	ChannelUuid string `json:"channel_uuid,omitempty"`
+	// IsBot and BotKind: as on MqttChatTyping.
+	IsBot   bool   `json:"is_bot,omitempty"`
+	BotKind string `json:"user_bot_kind,omitempty"`
 }
 
 type MqttActivity struct {
@@ -503,4 +553,13 @@ type MqttPollUpdate struct {
 	Type        int8   `json:"type"`
 	PollUUID    string `json:"poll_uuid"`
 	ChannelUUID string `json:"channel_uuid"`
+}
+
+// MarshalJSON writes the doc's uuid under doc_uuid as well as doc_id.
+func (m MqttDocComment) MarshalJSON() ([]byte, error) {
+	type plain MqttDocComment
+	return json.Marshal(struct {
+		plain
+		DocUUID string `json:"doc_uuid,omitempty"`
+	}{plain(m), m.DocUuid})
 }

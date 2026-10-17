@@ -143,6 +143,7 @@ func SetupEnv(t *testing.T) *Env {
 
 	env := &Env{t: t, container: c, PG: db, DSN: dsn}
 	t.Cleanup(env.Close)
+	settleBeforeTeardown(t)
 	return env
 }
 

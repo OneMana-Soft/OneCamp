@@ -15,6 +15,7 @@ import (
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	channelDgraphModels "github.com/akashc777/OneCamp/models/dgraph/Channel"
 	postDgraphModels "github.com/akashc777/OneCamp/models/dgraph/Post"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -48,7 +49,15 @@ func CreatePost(w http.ResponseWriter, r *http.Request) {
 		writeSendError(w, err)
 		return
 	}
-	cratedPostInfo, err := post.Commit(ctx)
+	// Once per id the app gave it: Try again after a lost answer is the same
+	// post, not a second one.
+	cratedPostInfo, err := sendBusiness.Once(ctx, userInfo.UserDgraphInfo.Uuid, "ch:"+postInfo.ChannelUuid, postInfo.ClientMsgID, func() (*adapter.OutputCreatePostForPost, error) {
+		return post.Commit(ctx)
+	})
+	if rj, ok := sendBusiness.AsRejection(err); ok {
+		writeSendError(w, rj)
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/CreatePost Failed to create post err: %+v",
@@ -87,13 +96,13 @@ func DeletePostCommentReaction(w http.ResponseWriter, r *http.Request) {
 
 	commentInfo, err := commentBusiness.GetDgraphPostCommentInfoByUUID(ctx, commentReactionInfo.Uuid, userInfo.UserDgraphInfo.Uid)
 
-	if err != nil || !commentInfo.Post.Channel.DeletedAt.IsZero() {
+	if err != nil || commentInfo == nil || commentInfo.Post == nil || commentInfo.Post.Channel == nil || !commentInfo.Post.Channel.DeletedAt.IsZero() {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/DeletePostCommentReaction Failed to get dgraph comment info err: %+v",
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": " Failed to get dgraph comment info",
+			"msg": "Couldn't remove the reaction. Try again.",
 			"err": err,
 		})
 		return
@@ -127,6 +136,8 @@ func DeletePostCommentReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// It answered nothing on success: an empty 200 a client can't tell from a failure.
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "deleted reaction successfully!"})
 }
 
 func DeletePostReaction(w http.ResponseWriter, r *http.Request) {
@@ -157,7 +168,7 @@ func DeletePostReaction(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": " Failed to get post info from dgraph",
+			"msg": "Couldn't remove the reaction. Try again.",
 			"err": err,
 		})
 		return
@@ -292,7 +303,7 @@ func CreateOrUpdateReaction(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph post",
+			"msg": "Couldn't add the reaction. Try again.",
 			"err": err,
 		})
 		return
@@ -828,33 +839,7 @@ func GetOldPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	channelUUID, err := uuid.Parse(channelUUIDString)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetOldPost Failed to parse chat UUID err: %+v",
-			err)
-		return
-	}
-
-	channelInfo, err := channelBusiness.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetOldPost Failed to get channel info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to to get posts",
-			"err": err,
-		})
-		return
-	}
-
-	if channelInfo.IsMember == 0 && *channelInfo.IsPrivate {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get post since user is not member of private channel",
-			"err": err,
-		})
+	if !readableChannel(w, r, channelUUIDString, userInfo.UserDgraphInfo.Uid) {
 		return
 	}
 
@@ -885,42 +870,22 @@ func GetNewPostsWithCurrentPost(w http.ResponseWriter, r *http.Request) {
 	postUUIDString := chi.URLParam(r, "post_uuid")
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
-	_, err := uuid.Parse(postUUIDString)
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"business/GetNewPostsWithCurrentPost Failed to parse post uuid err: %+v",
-			err)
+	if _, err := uuid.Parse(channelUUIDString); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "channel_uuid must be a uuid"})
 		return
-
 	}
-
-	_, err = uuid.Parse(channelUUIDString)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetNewPostsWithCurrentPost Failed to parse channel UUID err: %+v",
-			err)
+	if _, err := uuid.Parse(postUUIDString); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "post_uuid must be a uuid"})
 		return
 	}
 
 	channelInfo, err := channelBusiness.GetBasicChannelAndPostInfoByUUID(ctx, channelUUIDString, postUUIDString, userInfo.UserDgraphInfo.Uid)
-
-	if err != nil || channelInfo.Post == nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetNewPostsWithCurrentPost Failed to get channel info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to to get posts",
-			"err": err,
-		})
+	if !mayReadChannel(w, r, channelInfo, err) {
 		return
 	}
-
-	if (channelInfo.IsMember == 0 && *channelInfo.IsPrivate) || (!channelInfo.Post.DeletedAt.IsZero()) {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get post since user is not member of private channel",
-		})
+	// A message that isn't in this channel, or was deleted, isn't there.
+	if channelInfo.Post == nil || helpers.IsSoftDeleted(channelInfo.Post.DeletedAt) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message isn't there."})
 		return
 	}
 
@@ -1025,33 +990,7 @@ func GetNewPosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	channelUUID, err := uuid.Parse(channelUUIDString)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetNewPost Failed to parse channel UUID err: %+v",
-			err)
-		return
-	}
-
-	channelInfo, err := channelBusiness.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetNewPost Failed to get channel info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to to get posts",
-			"err": err,
-		})
-		return
-	}
-
-	if channelInfo.IsMember == 0 && *channelInfo.IsPrivate {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get post since user is not member of private channel",
-			"err": err,
-		})
+	if !readableChannel(w, r, channelUUIDString, userInfo.UserDgraphInfo.Uid) {
 		return
 	}
 
@@ -1081,36 +1020,7 @@ func GetLatestPosts(w http.ResponseWriter, r *http.Request) {
 	channelUUIDString := chi.URLParam(r, "channel_uuid")
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
-	channelUUID, err := uuid.Parse(channelUUIDString)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetLatestPosts Failed to parse channel UUID err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse channelUUID",
-		})
-		return
-	}
-
-	channelInfo, err := channelBusiness.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetLatestPosts Failed to get channel info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to to get posts",
-			"err": err,
-		})
-		return
-	}
-
-	if channelInfo.IsMember == 0 && *channelInfo.IsPrivate {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get post since user is not member of private channel",
-			"err": err,
-		})
+	if !readableChannel(w, r, channelUUIDString, userInfo.UserDgraphInfo.Uid) {
 		return
 	}
 
@@ -1230,4 +1140,38 @@ func writeSendError(w http.ResponseWriter, err error) {
 		return
 	}
 	helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to send", "err": err})
+}
+
+// readableChannel answers for a channel's page routes: whether the person
+// asking may read the messages of the channel named by raw. When they may
+// not, it has written the answer: 400 for an id that isn't one, and
+// mayReadChannel's answers. The routes answered an empty 200 for a bad id,
+// and a channel whose privacy didn't load made them panic (F-15, F-16).
+func readableChannel(w http.ResponseWriter, r *http.Request, raw string, userDgraphUID string) bool {
+	channelUUID, err := uuid.Parse(raw)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "channel_uuid must be a uuid"})
+		return false
+	}
+	channel, err := channelBusiness.GetBasicDgraphChannelInfoByUUID(r.Context(), channelUUID, userDgraphUID)
+	return mayReadChannel(w, r, channel, err)
+}
+
+// mayReadChannel says whether a channel read for the person asking (channel,
+// err) lets them read its messages (channelBusiness.CanRead). When it doesn't,
+// it has written the answer: 404 for a channel that isn't there, 503 when the
+// graph doesn't answer (helpers.WriteReadFailure), 403 for one they can't read.
+func mayReadChannel(w http.ResponseWriter, r *http.Request, channel *dgraphStruct.DgraphChannel, err error) bool {
+	if err == nil && channel == nil {
+		err = channelDgraphModels.ErrNotFound
+	}
+	if err != nil {
+		helpers.WriteReadFailure(w, r, err, "channel", "controllers/mayReadChannel")
+		return false
+	}
+	if !channelBusiness.CanRead(channel) {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You're not in this private channel."})
+		return false
+	}
+	return true
 }

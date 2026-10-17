@@ -113,6 +113,8 @@ func createSchema() (err error) {
 		comment_doc: uid .
 		comment_board: uid @reverse .
 		comment_task: uid .
+		# The anchored thread a doc comment belongs to (business/Thread, A8).
+		comment_thread_id: string @index(exact) .
 
 		ch_moderators: [uid] .
 		ch_members: [uid] @reverse .
@@ -224,19 +226,71 @@ func createSchema() (err error) {
 		doc_uuid: string @index(exact) @upsert .
 		doc_title: string @index(trigram) .
 		doc_body: string .
+		# The first 1,000 characters as plain text, which lists and search show.
+		# Written since long ago but declared only now, so type Doc (and with it
+		# expand(_all_) and a node's deletion) covers it.
+		doc_snippet: string .
 		doc_yjs_state: string .
 		doc_yjs_body_hash: string .
-		doc_editing_users: [uid] .
-		doc_reading_users: [uid] .
+		# The Yjs history the stored state belongs to (the Live Doc Writer, A4).
+		doc_yjs_lineage: string .
+		# Sharing. @reverse reads what is shared with someone: Shared with me,
+		# the trash, the sidebar's sections. Adding it to the three older lists
+		# rebuilds their reverse index once, at the first start after upgrading.
+		doc_editing_users: [uid] @reverse .
+		doc_reading_users: [uid] @reverse .
+		doc_commenting_users: [uid] @reverse .
+		doc_full_access_users: [uid] @reverse .
+		doc_team_editors: [uid] @reverse .
+		doc_team_commenters: [uid] @reverse .
+		doc_team_viewers: [uid] @reverse .
 		doc_public_comment: bool .
+		doc_public_edit: bool .
 		doc_private: bool @index(bool) .
-		doc_commenting_users: [uid] .
 		doc_created_by: uid @reverse .
+		# Who owns the doc now: its maker, until it is handed on. Unset on docs
+		# made before it existed, whose maker is their owner.
+		doc_owner: uid @reverse .
 		doc_comments: [uid] .
-		doc_created_at: dateTime .
-		doc_updated_at: dateTime .
+		doc_created_at: dateTime @index(hour) .
+		doc_updated_at: dateTime @index(hour) .
+		doc_updated_by: uid .
 		doc_deleted_at: dateTime .
-		doc_archived_at: dateTime .
+		# What went to the trash together, and comes back together; and who put
+		# it there (business/Doc docTrash.go).
+		doc_deleted_batch: string @index(exact) .
+		doc_deleted_by: uid .
+		doc_archived_at: dateTime @index(hour) .
+		# The page tree: a doc's parent, and its place among its siblings, a
+		# fractional key (business/Tree/position). @reverse is a page's level.
+		doc_parent: uid @reverse .
+		doc_position: string @index(exact) .
+		# The project's or team's space a doc is in. None: its owner's own or
+		# the workspace's, by its privacy.
+		doc_space_kind: string @index(exact) .
+		doc_space_uuid: string @index(exact) .
+		# How it looks.
+		doc_icon: string .
+		doc_cover_key: string .
+		doc_cover_offset: int .
+		doc_full_width: bool .
+		doc_font: string .
+		doc_small_text: bool .
+		# The docs it links to; @reverse is its backlinks.
+		doc_mentions: [uid] @reverse .
+		# A lock (soft or hard), and who verified it until when.
+		doc_lock_level: string .
+		doc_locked_by: uid .
+		doc_locked_at: dateTime .
+		doc_verified_by: uid .
+		doc_verified_until: dateTime @index(hour) .
+		doc_is_wiki: bool .
+
+		# A tree's stamp (business/Tree/graph): every change to a tree's shape
+		# writes it, so two changes that would collide (a move each way between
+		# two pages) are run one after the other.
+		tree_stamp_kind: string @index(exact) @upsert .
+		tree_stamp_at: dateTime .
 		doc_restored_at: dateTime .
 
 		board_uuid: string @index(exact) @upsert .
@@ -375,20 +429,53 @@ func createSchema() (err error) {
 			doc_uuid
 			doc_title
 			doc_body
+			doc_snippet
 			doc_yjs_state
 			doc_yjs_body_hash
+			doc_yjs_lineage
 			doc_created_by: User
+			doc_owner: User
 			doc_comments: [Comment]
 			doc_private
 			doc_public_comment
+			doc_public_edit
 			doc_editing_users: [User]
 			doc_reading_users: [User]
 			doc_commenting_users: [User]
+			doc_full_access_users: [User]
+			doc_team_editors: [Team]
+			doc_team_commenters: [Team]
+			doc_team_viewers: [Team]
 			doc_created_at
 			doc_updated_at
+			doc_updated_by: User
 			doc_deleted_at
+			doc_deleted_batch
+			doc_deleted_by: User
 			doc_archived_at
+			doc_parent: Doc
+			doc_position
+			doc_space_kind
+			doc_space_uuid
+			doc_icon
+			doc_cover_key
+			doc_cover_offset
+			doc_full_width
+			doc_font
+			doc_small_text
+			doc_mentions: [Doc]
+			doc_lock_level
+			doc_locked_by: User
+			doc_locked_at
+			doc_verified_by: User
+			doc_verified_until
+			doc_is_wiki
 			doc_restored_at
+		}
+
+		type TreeStamp {
+			tree_stamp_kind
+			tree_stamp_at
 		}
 
 		type Board {
@@ -431,6 +518,7 @@ func createSchema() (err error) {
 			comment_task: Task
 			comment_on_content_added_by: User 
 			comment_replies: [Comment]
+			comment_thread_id
 			comment_created_at
 			comment_updated_at
 			comment_deleted_at

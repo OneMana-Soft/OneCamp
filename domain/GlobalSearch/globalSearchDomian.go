@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
@@ -16,7 +17,34 @@ const UNIFIED_SEARCH_COUNT = 20
 // for searchText across every index the person may search, best first. With
 // after (the sort values of the last hit of a page: its score, then its
 // time), the hits that come after it, for "Show more" (search_after).
-func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, userEmail string, channelUUIDs []string, projectUUIDs []string, teamUUIDs []string, searchText string, after []float64) (searchInfo []*openSearchStruct.GlobalSearchOpenSearchResp, err error) {
+// withinConversation narrows the search to one conversation's messages,
+// replies and files: a channel's by its id, a DM's or a group's by its
+// grouping id. It sits under the reader's own reach (every clause above still
+// holds), so it can only narrow what they may see. With a filter, the text
+// clauses must still match, hence minimum_should_match. Empty for none.
+// A chat's grouping id is matched whole (openSearchStruct.ChatGroupingIDField).
+func withinConversation(channelUUID string, groupingID string) string {
+	var fields []string
+	var id string
+	switch {
+	case channelUUID != "":
+		fields, id = []string{"post_ch_id", "comment_channel_id", "attachment_channel_id"}, channelUUID
+	case groupingID != "":
+		fields, id = []string{openSearchStruct.ChatGroupingIDField, "comment_chat_grp_id", "attachment_chat_grp_id"}, groupingID
+	default:
+		return ""
+	}
+	value, _ := json.Marshal(id)
+	terms := make([]string, len(fields))
+	for i, f := range fields {
+		terms[i] = `{ "term": { "` + f + `": ` + string(value) + ` } }`
+	}
+	return `,
+			"minimum_should_match": 1,
+			"filter": [ { "bool": { "should": [ ` + strings.Join(terms, ", ") + ` ], "minimum_should_match": 1 } } ]`
+}
+
+func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, userEmail string, channelUUIDs []string, projectUUIDs []string, teamUUIDs []string, searchText string, after []float64, withinChannel string, withinGrouping string) (searchInfo []*openSearchStruct.GlobalSearchOpenSearchResp, err error) {
 
 	if channelUUIDs == nil {
 		channelUUIDs = []string{}
@@ -63,15 +91,17 @@ func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, 
 	userUUIDByte, _ := json.Marshal(userUUID)
 	userUUIDEscaped := string(userUUIDByte)
 
-	// Numbers only, marshalled: the cursor comes from the client.
-	searchAfter := ""
-	if len(after) > 0 {
-		afterByte, err := json.Marshal(after)
-		if err != nil {
-			return nil, err
-		}
-		searchAfter = `"search_after": ` + string(afterByte) + `,`
-	}
+	// The docs the person reaches besides those shared with them by name (the
+	// Access Resolver's sources): as their owner, with full access, through a
+	// team they're in, and in the space of a project or team they're in.
+	// Built into the query, never through its format: these are JSON arrays
+	// of uuids. Every hit is checked against the graph before it is shown.
+	spaceUUIDs, _ := json.Marshal(append(append([]string{}, projectUUIDs...), teamUUIDs...))
+	docReach := `
+										{ "term": { "doc_owner_user_id": ` + userUUIDEscaped + ` } },
+										{ "term": { "doc_full_access_users": ` + userUUIDEscaped + ` } },
+										{ "terms": { "doc_team_uuids": ` + teamUUIDString + ` } },
+										{ "terms": { "doc_space_uuid": ` + string(spaceUUIDs) + ` } },`
 
 	// People are found by their address as well as their name, except by the
 	// demo's shared visitor, who is anyone at all: fuzziness finds an address
@@ -83,6 +113,16 @@ func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, 
 	userFields := `["user_name^5", "user_full_name^5", "user_email", "user_id"]`
 	if helpers.IsDemoVisitor(userEmail) {
 		userFields = `["user_name^5", "user_full_name^5", "user_id"]`
+	}
+
+	// Numbers only, marshalled: the cursor comes from the client.
+	searchAfter := ""
+	if len(after) > 0 {
+		afterByte, err := json.Marshal(after)
+		if err != nil {
+			return nil, err
+		}
+		searchAfter = `"search_after": ` + string(afterByte) + `,`
 	}
 
 	// doc_body is excluded from _source because it is a field to SEARCH, not one to
@@ -237,7 +277,7 @@ func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, 
 										{ "term": { "doc_created_by_user_id": %s } },
 										{ "term": { "doc_reading_users": %s } },
 										{ "term": { "doc_editing_users": %s } },
-										{ "term": { "doc_commenting_users": %s } },
+										{ "term": { "doc_commenting_users": %s } },`+docReach+`
 										{ "term": { "doc_private": false } }
 									],
 									"minimum_should_match": 1
@@ -404,7 +444,7 @@ func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, 
 						"filter": { "bool": { "must_not": [ { "exists": { "field": "deleted_date" } } ] } }
 					}
 				}
-			]
+			]%s
 		}
 	},
 	"sort": [
@@ -422,7 +462,8 @@ func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, userUUID string, 
 		projectUUIDString, searchTextEscaped, searchTextEscaped,
 		channelUUIDString, searchTextEscaped, searchTextEscaped,
 		teamUUIDString, searchTextEscaped, searchTextEscaped,
-		searchTextEscaped, userFields, searchTextEscaped, searchTextEscaped)
+		searchTextEscaped, userFields, searchTextEscaped, searchTextEscaped,
+		withinConversation(withinChannel, withinGrouping))
 
 	searchInfo, err = opensearchModels.GetUnifiedGlobalSearchFromOpenSearch(ctx, query)
 
@@ -475,4 +516,10 @@ func SyncCascadingDeletionInOpenSearchCombined(fieldIDs map[string][]string, del
 
 func SyncCascadingUnarchiveInOpenSearchCombined(fieldIDs map[string][]string, indices []string, deletedBy string) {
 	opensearchModels.SyncCascadingUnarchiveInOpenSearchCombined(context.Background(), fieldIDs, indices, deletedBy)
+}
+
+// MarkChannelArchivedInOpenSearch marks a channel's posts, replies and files
+// as in an archived channel, or clears the mark (models).
+func MarkChannelArchivedInOpenSearch(channelUUID string, archived bool) {
+	_ = opensearchModels.MarkChannelArchivedInOpenSearch(context.Background(), channelUUID, archived)
 }

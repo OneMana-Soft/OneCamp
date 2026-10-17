@@ -81,5 +81,6 @@ func SetupLiveKit(t *testing.T) *LiveKitEnv {
 		defer cancel()
 		_ = c.Terminate(ctx)
 	})
+	settleBeforeTeardown(t)
 	return env
 }

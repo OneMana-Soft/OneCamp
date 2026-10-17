@@ -6,6 +6,12 @@ import (
 	"runtime/debug"
 )
 
+// goSafeWork is every goroutine the GoSafe family started that hasn't
+// finished, so a shutdown or a test can wait for them (background.go).
+var goSafeWork Inflight
+
+func init() { RegisterBackground("goroutines started with GoSafe", goSafeWork.Settle) }
+
 // GoSafe runs fn in a new goroutine with a recover guard. Any panic
 // inside fn is caught, logged with a stack trace, and swallowed so the
 // process continues. Use this for fire-and-forget background work
@@ -14,31 +20,40 @@ import (
 //
 // Naming: pass a stable label as the first argument to make recovered
 // panics traceable in production logs.
-func GoSafe(fn func()) {
+func GoSafe(fn func()) { goSafe("helpers.GoSafe", true, fn) }
+
+// GoSafeNamed is GoSafe with a label so the recovered log line tells
+// the operator which call site panicked. Prefer this in any new code.
+func GoSafeNamed(name string, fn func()) { goSafe("helpers.GoSafeNamed["+name+"]", true, fn) }
+
+// GoSafeLoop is GoSafeNamed for a goroutine that lasts as long as its context
+// rather than one piece of work: a sweep on a ticker, a repair that retries for
+// hours, a rebuild that runs for six. It is recovered the same way, and is not
+// counted as work in flight: SettleBackground waits for work handed off, and a
+// loop that ends only with its context would hold every wait to its bound.
+func GoSafeLoop(name string, fn func()) { goSafe("helpers.GoSafeLoop["+name+"]", false, fn) }
+
+// goSafe runs fn on a goroutine of its own behind the one recover guard the
+// family shares, logging a panic under label. counted is whether it is work
+// in flight, which SettleBackground waits for.
+func goSafe(label string, counted bool, fn func()) {
+	if counted {
+		goSafeWork.Add(1)
+	}
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				LogErrorWithContext(context.Background(),
-					"helpers.GoSafe recovered panic: %v\n%s", r, debug.Stack())
-			}
-		}()
+		if counted {
+			defer goSafeWork.Add(-1)
+		}
+		defer logRecovered(label)
 		fn()
 	}()
 }
 
-// GoSafeNamed is GoSafe with a label so the recovered log line tells
-// the operator which call site panicked. Prefer this in any new code.
-func GoSafeNamed(name string, fn func()) {
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				LogErrorWithContext(context.Background(),
-					"helpers.GoSafeNamed[%s] recovered panic: %v\n%s",
-					name, r, debug.Stack())
-			}
-		}()
-		fn()
-	}()
+// logRecovered, deferred, swallows a panic and logs it with its stack.
+func logRecovered(label string) {
+	if r := recover(); r != nil {
+		LogErrorWithContext(context.Background(), "%s recovered panic: %v\n%s", label, r, debug.Stack())
+	}
 }
 
 // GoSafeSend runs fn in a goroutine and delivers its result on ch, converting a
@@ -65,7 +80,9 @@ func GoSafeNamed(name string, fn func()) {
 // ch should be buffered (cap >= 1) so a caller that has already given up on the
 // deadline does not leak this goroutine on the send.
 func GoSafeSend[T any](name string, ch chan<- T, fn func() T) {
+	goSafeWork.Add(1)
 	go func() {
+		defer goSafeWork.Add(-1)
 		var out T
 		defer func() {
 			r := recover()

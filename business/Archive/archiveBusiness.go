@@ -5,7 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,7 +18,6 @@ import (
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
 	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
-	fcmDomain "github.com/akashc777/OneCamp/domain/UserFCMToken"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
@@ -811,7 +811,13 @@ func archiveDocs(ctx context.Context, cutoff time.Time) (int64, int64, []string,
 	if err != nil || len(due) == 0 {
 		return 0, 0, nil, err
 	}
-	archived, err := docDomain.BulkArchiveDocs(ctx, due, cutoff)
+	// Whole subtrees only: never a page under one still in use, nor one with a
+	// subpage still in use (docTree.go).
+	taken, err := archivableDocsOf(ctx, due)
+	if err != nil || len(taken) == 0 {
+		return 0, int64(len(due)), nil, err
+	}
+	archived, err := docDomain.BulkArchiveDocs(ctx, taken, cutoff)
 	return int64(len(archived)), int64(len(due)), archived, err
 }
 
@@ -1357,30 +1363,20 @@ func restoreDocs(ctx context.Context, entityIds []uuid.UUID, archivedOnly bool) 
 // restored the doc they deleted and turned its guest links off (linksOffNotice
 // says what). Nothing told an owner about a restore; push is the notice this
 // package can send (email, comments and the activity feed are in packages that
-// depend on it). It opens the doc, as a push about a doc's comment does. Not
-// sent to an owner who paused notifications.
+// depend on it). It opens the doc, as a push about a doc's comment does, and
+// goes as every push does (notification.Deliver): through the push gate, with
+// the desktop app's notice beside it, which a desktop-only owner had none of.
 func pushLinksOffNotice(ctx context.Context, doc *dgraphStruct.DgraphDoc, links int64, byName string) {
 	if doc == nil || doc.CreatedBy == nil || doc.CreatedBy.Uuid == "" {
 		return
 	}
-	tokens, err := fcmDomain.GetFCMTokenByListOfUserId(ctx, []string{doc.CreatedBy.Uuid})
-	if err != nil || len(tokens) == 0 {
-		return
-	}
 	title, body := linksOffNotice(byName, doc.Title, links)
-	data := map[string]string{
+	notificationBusiness.Deliver(ctx, []string{doc.CreatedBy.Uuid}, map[string]string{
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE:    firebaseInit.FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT,
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID: doc.Uuid,
 		firebaseInit.FIREBASE_PUSH_DATA_TITLE:   title,
 		firebaseInit.FIREBASE_PUSH_DATA_BODY:    body,
-	}
-	// 500 tokens a call is Firebase's limit.
-	for batch := range slices.Chunk(tokens, 500) {
-		if err := firebaseInit.FirebaseApp.MultiCastPush(ctx, data, batch); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/pushLinksOffNotice push err: %+v", err)
-			break
-		}
-	}
+	}, "doc_restored:"+doc.Uuid+":"+strconv.FormatInt(time.Now().UnixNano(), 10))
 }
 
 // linksOffNotice is what a doc's owner is told when someone restores the doc

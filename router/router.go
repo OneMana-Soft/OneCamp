@@ -15,7 +15,6 @@ import (
 
 	apiTokenBusiness "github.com/akashc777/OneCamp/business/ApiToken"
 	boardBusiness "github.com/akashc777/OneCamp/business/Board"
-	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	activityController "github.com/akashc777/OneCamp/controllers/Activity"
 	adminConfigController "github.com/akashc777/OneCamp/controllers/AdminConfig"
 	apiTokenController "github.com/akashc777/OneCamp/controllers/ApiToken"
@@ -207,6 +206,7 @@ func Routes() http.Handler {
 	router.With(customMiddleware.LoginRateLimit("signup")).Post("/auth/signup", authController.EmailSignup)
 	router.With(customMiddleware.LoginRateLimit("forgot")).Post("/auth/forgot-password", authController.ForgotPassword)
 	router.With(customMiddleware.LoginRateLimit("reset")).Post("/auth/reset-password", authController.ResetPassword)
+	router.With(customMiddleware.LoginRateLimit("reset")).Post("/auth/reset-password/check", authController.CheckResetLink)
 	router.Get("/auth/admin-setup-required", authController.CheckAdminSetup)
 	router.Post("/auth/admin-setup", authController.AdminSetup)
 	router.Get("/auth/validate-token", authController.ValidateInvitationToken)
@@ -295,6 +295,8 @@ func Routes() http.Handler {
 	// (the attachment must belong to the grant's board). Not rate-limited: a
 	// board can load many images and the endpoint requires a valid grant token.
 	router.Get("/guest/board-attachment/{token}/{obj_uuid}", guestController.GuestBoardAttachment)
+	// The same for a picture or file in a doc shared through a guest link (B4).
+	mountGuestDocAttachment(router)
 	// Public read-only table bundle for a guest, authorized by the grant.
 	router.With(customMiddleware.LoginRateLimit("guest")).Get("/guest/table/{token}", guestController.GuestTable)
 	// Channel guests: a person outside the workspace reads (and, with the post
@@ -1261,7 +1263,6 @@ func Routes() http.Handler {
 	docColabRouter.Group(func(r chi.Router) {
 		r.Group(func(r chi.Router) {
 			r.Use(customMiddleware.VerifyInternalServiceRequest)
-			r.Post("/updateDoc", docController.UpdateDocFromCollab)
 			r.Get("/getDoc/{doc_uuid}", docController.GetDocForCollab)
 		})
 		// Public guest authorize: the collab service calls this when a
@@ -1516,6 +1517,10 @@ func Routes() http.Handler {
 		r.Post("/channelActiveListWithLatestPostWithSearchText", channelController.GetActiveChannelListWithLatestPostWithUserIdAndSearchText)
 		r.Post("/channelArchivedListWithLatestPostWithSearchText", channelController.GetArchivedChannelListWithLatestPostWithUserIdAndSearchText)
 		r.Get("/allActiveChannels", channelController.GetAllActiveChannelList)
+		// The channel browser's Discover tab: the public channels to join.
+		r.Get("/discover", channelController.GetDiscoverChannelList)
+		// Bring an archived channel back: its admins and workspace admins.
+		r.Post("/restore", channelController.RestoreChannel)
 		r.Get("/userActiveChannelsWithLatestPost", channelController.GetUserActiveChannelListWithLatestPost)
 		r.Get("/userArchiveChannelsWithLatestPost", channelController.GetUserArchivedChannelListWithLatestPost)
 		r.Post("/publishChannelTyping", channelController.PublishTypingInChannel)
@@ -1678,16 +1683,10 @@ func Routes() http.Handler {
 		r.Get("/getPrivateDoc", docController.GetPrivateDocList)
 		r.Get("/getPublicDoc", docController.GetPublicDocList)
 		r.Get("/getCommentList/{doc_uuid}", docController.GetAllCommentList)
-		r.Post("/createDoc", docController.CreateDoc)
-		// POST: it reads a JSON body, and the app has always posted to it. As a
-		// GET route every delete from the app answered 405.
-		r.Post("/deleteDoc", docController.DeleteDoc)
-		r.Get("/getDocInfo/{doc_uuid}", docController.GetDocInfo)
 		r.Post("/createComment", docController.CreateDocComment)
 		r.Post("/updateComment", docController.UpdateDocComment)
 		r.Get("/getFile/{doc_uuid}/{obj_uuid}", userController.GetDocFile)
 		r.Get("/getDocAttachment/{doc_uuid}/{obj_uuid}", userController.GetDocAttachment)
-		r.Post("/updateDoc", docController.UpdateDocBody)
 		r.Post("/updateDocPermissions", docController.UpdateDocPermissions)
 		r.Get("/getDocPermissions", docController.GetDocPermissions)
 		r.Post("/removeComment", docController.DeleteDocComment)
@@ -2005,8 +2004,14 @@ func Routes() http.Handler {
 
 	// Age-prune board snapshots (version history) past the retention window.
 	boardBusiness.StartBoardSnapshotCleanupLoop()
-	// Age-prune doc snapshots past the retention window.
-	docBusiness.StartDocSnapshotCleanupLoop()
+	// Doc versions are kept by the Snapshot Service's sweeps (A4).
+
+	// The docs programme's routes, last (docsProgramme.go). Its only line here.
+	mountDocsProgramme(newDocsRouters(router, docRouter, adminUserRouter, docColabRouter, v1Router))
+	// The chat programme's routes, last (chatProgramme.go). Its only line here.
+	mountChatProgramme(newChatRouters(router, adminUserRouter, channelRouter, postRouter, chatRouter, groupChatRouter))
+	// The calendar programme's routes, last (calendarProgramme.go). Its only line here.
+	mountCalendarProgramme(newCalendarRouters(router, adminUserRouter, eventRouter))
 
 	return router
 }

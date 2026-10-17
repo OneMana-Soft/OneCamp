@@ -74,18 +74,6 @@ func Save(ctx context.Context, s *SavedItem) (*SavedItem, error) {
 	return out, err
 }
 
-// Get returns one of the member's items.
-func Get(ctx context.Context, userID, id uuid.UUID) (*SavedItem, error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	out, err := scan(postgresInit.DBConn.SqlDB.QueryRowContext(c,
-		`SELECT `+columns+` FROM saved_items WHERE id = $1 AND user_id = $2`, id, userID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	return out, err
-}
-
 // GetByID returns an item by id alone, for the reminder job, which runs
 // without a member's session and checks the owner itself.
 func GetByID(ctx context.Context, id uuid.UUID) (*SavedItem, error) {

@@ -1,6 +1,9 @@
 package business
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestProvidersRegistered verifies the three connectors are registered with the
 // expected client reuse and that write-capable providers declare a write scope
@@ -56,4 +59,38 @@ func lower(s string) string {
 		}
 	}
 	return string(b)
+}
+
+// providerByID finds a registered provider the way the app lists them.
+func providerByID(id string) (Provider, bool) {
+	for _, p := range Providers() {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return Provider{}, false
+}
+
+// The connectors' words are shown to people as they are (Settings,
+// Connectors): British spelling, and no em dashes (QA SH-13, 14 Oct 2026: the
+// Gmail card said "summarize your email").
+func TestProviderCopyIsBritishAndPlain(t *testing.T) {
+	american := []string{"summariz", "organiz", "prioritiz", "recogniz", "analyz", "color "}
+	for _, p := range Providers() {
+		texts := []string{p.Name, p.Description}
+		for _, s := range p.Permissions {
+			texts = append(texts, s.Description)
+		}
+		for _, text := range texts {
+			l := lower(text)
+			for _, w := range american {
+				if strings.Contains(l, w) {
+					t.Errorf("%s: %q spells %q the American way", p.ID, text, w)
+				}
+			}
+			if strings.ContainsRune(text, '—') {
+				t.Errorf("%s: %q has an em dash", p.ID, text)
+			}
+		}
+	}
 }

@@ -9,7 +9,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
-	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
+	globalSearchModels "github.com/akashc777/OneCamp/models/openSearch/GlobalSearch"
 )
 
 func UpdateUserInOpenSearch(ctx context.Context, openSearchUser *openSearchStruct.OpenSearchUser) (err error) {
@@ -175,79 +175,21 @@ func PropagateUserInfoChangeInOpenSearch(ctx context.Context, userUUID string, n
 			continue
 		}
 
-		// conflicts=proceed, because a version conflict here is NORMAL, not a fault.
-		//
-		// This walks live indices while people are posting. Two propagations for the same user (a
-		// rename and an avatar change, or a retry overlapping its predecessor) touch the same
-		// documents, and without this the whole update_by_query is treated as failed the moment
-		// one document moved underneath it. Beta showed exactly that: total 9, updated 0,
-		// version_conflicts 9 — every document skipped on one pass, while a concurrent pass
-		// reported updated 71 of the same 111. With proceed, conflicted documents are skipped and
-		// the rest are written, which is the right semantics for a denormalised copy that the
-		// next write to those documents corrects anyway.
-		res, uerr := opensearchInit.OpenSearchClient.UpdateByQuery(
-			context.Background(),
-			opensearchapi.UpdateByQueryReq{
-				Indices: []string{index},
-				Body:    openSearchStruct.IndexReader(jsonData),
-				Params:  opensearchapi.UpdateByQueryParams{Conflicts: "proceed"},
-			},
-		)
-		err = uerr
-
-		// A COUNT, NOT THE RESPONSE BODY.
-		//
-		// A partial update_by_query returns HTTP 200 with a failures array, so the client could
-		// not parse it as an error and %+v rendered the ENTIRE response — every conflicted
-		// document with its seqNo and index_uuid, thousands of characters on one line, once per
-		// index. Those lines are batched to the OTel collector, which made the least useful log
-		// on the box one of the most expensive. These four numbers are what a reader needs, and
-		// they are emitted only when something was actually skipped.
-		if err == nil && res != nil && res.VersionConflicts > 0 {
-			helpers.LogInfoWithContext(ctx,
-				"models/PropagateUserInfoChangeInOpenSearch index=%s total=%d updated=%d "+
-					"skipped_on_conflict=%d (skipped documents keep the previous name/avatar "+
-					"until their next write)",
-				index, res.Total, res.Updated, res.VersionConflicts)
-		}
-
-		if err != nil {
+		// Settled, as every update-by-query is (UpdateByQuerySettled). A version conflict here is
+		// normal: this walks live indices while people are posting, and two propagations for the
+		// same person (a rename and an avatar change, or a retry overlapping its predecessor)
+		// touch the same documents. So conflicts "proceed", or the first document that moved
+		// underneath would fail the whole run (beta: total 9, updated 0, version_conflicts 9).
+		// But with proceed alone a held document is skipped, not written and not counted, and
+		// kept the old name until its next write, which for an old post never comes. The
+		// settled run goes again for those; any still held after its last run, or a document
+		// that failed, is an error, logged in a line of its own: a count and the first failure,
+		// never the whole response, which once put every conflicted document in the log, once
+		// per index. Its own context, as the run's always was: a caller that goes away mid-walk
+		// must not leave half of the indices with the old name.
+		if _, err := globalSearchModels.UpdateByQuerySettled(context.WithoutCancel(ctx), []string{index}, string(jsonData)); err != nil {
 			helpers.LogErrorWithContext(ctx, "models/PropagateUserInfoChangeInOpenSearch Failed to update index %s err: %+v", index, err)
 		}
 	}
 	return nil
-}
-
-func CreateUserInOpenSearch(ctx context.Context, openSearchUser *openSearchStruct.OpenSearchUser) (err error) {
-
-	jsonData, err := json.Marshal(openSearchUser)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateUserInOpenSearch Error mashiling strut to json err: %+v",
-			err)
-		return
-	}
-
-	document := openSearchStruct.IndexReader(jsonData)
-
-	docId := openSearchUser.Uuid
-
-	_, err = opensearchInit.OpenSearchClient.Document.Create(
-		context.Background(),
-		opensearchapi.DocumentCreateReq{
-			Index:      "users",
-			DocumentID: docId,
-			Body:       document,
-		},
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateUserInOpenSearch failed to create user document err: %+v",
-			err)
-		return
-	}
-
-	return
 }

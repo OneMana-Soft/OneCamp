@@ -38,6 +38,12 @@ const (
 	// question an auditor asks, and answering it with a query rather than a
 	// judgement call is the difference between an audit trail and a log file.
 	CategoryAgent = "agent"
+	// CategoryDocs is what happened to docs that an auditor asks about: who
+	// shared one, changed its access or lock, deleted, restored, purged,
+	// exported, published, transferred or recovered it (business/Follow's audit
+	// sink, from the Resource Events). Viewing it is on every plan; exporting
+	// the log stays behind FeatureAuditExport.
+	CategoryDocs = "docs"
 )
 
 // AllCategories is the canonical, ordered list of audit categories.
@@ -61,6 +67,7 @@ func AllCategories() []string {
 		CategoryApp,
 		CategorySecurity,
 		CategoryAgent,
+		CategoryDocs,
 	}
 }
 

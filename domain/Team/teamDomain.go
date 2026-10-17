@@ -459,7 +459,6 @@ func GetDgraphTeamMemberListByTeamUUID(ctx context.Context, teamUUID string, use
 					team_members @filter(NOT eq(is_external, true)) {
 						user_uuid
 						user_name
-						user_email
 						user_profile_object_key
 					}
 					team_admins {

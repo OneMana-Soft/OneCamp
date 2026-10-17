@@ -299,3 +299,34 @@ func TestASearchEntryPreviewIsText(t *testing.T) {
 		t.Errorf("a plain preview became %q", plain.DocSnippet)
 	}
 }
+
+// An entry names everyone who reaches the doc besides the people it is shared
+// with by name (the Access Resolver's sources): its owner (whoever it was
+// handed to, else its maker), its full-access people, its teams at any level
+// once each, and its space; written as empty, never left out, when there are
+// none (I13).
+func TestASearchEntryNamesTheDocsOtherSources(t *testing.T) {
+	u := func(id string) *dgraphStruct.DgraphUser { return &dgraphStruct.DgraphUser{Uuid: id} }
+	team := func(id string) *dgraphStruct.DgraphTeam { return &dgraphStruct.DgraphTeam{Uuid: id} }
+	e := DocSearchEntryOf(&dgraphStruct.DgraphDoc{
+		Uuid: "d", CreatedBy: u("maker"), Owner: u("owner"),
+		FullAccessUsers: []*dgraphStruct.DgraphUser{u("ann"), nil},
+		TeamEditors:     []*dgraphStruct.DgraphTeam{team("design")},
+		TeamViewers:     []*dgraphStruct.DgraphTeam{team("design"), team("ops")},
+		SpaceKind:       "project", SpaceUUID: "p1",
+	})
+	if e.DocOwnerUserUuid != "owner" || e.DocCreatedByUserUuid != "maker" || strings.Join(e.DocFullAccessUsers, ",") != "ann" ||
+		strings.Join(e.DocTeamUUIDs, ",") != "design,ops" || e.DocSpaceKind != "project" || e.DocSpaceUUID != "p1" {
+		t.Errorf("entry: %+v", e)
+	}
+	// A doc never handed on is its maker's.
+	if got := DocSearchEntryOf(&dgraphStruct.DgraphDoc{Uuid: "d", CreatedBy: u("maker")}).DocOwnerUserUuid; got != "maker" {
+		t.Errorf("owner of a doc never handed on: %q", got)
+	}
+	raw, _ := json.Marshal(DocSearchEntryOf(&dgraphStruct.DgraphDoc{Uuid: "d"}))
+	for _, field := range []string{`"doc_full_access_users":[]`, `"doc_team_uuids":[]`, `"doc_owner_user_id":""`, `"doc_space_uuid":""`} {
+		if !strings.Contains(string(raw), field) {
+			t.Errorf("an entry with none leaves %s out: %s", field, raw)
+		}
+	}
+}

@@ -114,23 +114,17 @@ func RepairCallTranscripts(ctx context.Context, now time.Time) (CallTranscriptRe
 // StartCallTranscriptRepair runs the repair in the background, once per
 // start, retrying with a growing wait while Dgraph isn't answering.
 func StartCallTranscriptRepair(ctx context.Context) {
-	helpers.GoSafeNamed("calls.transcript-repair", func() {
-		wait := time.Minute
-		for try := 0; try < 6; try++ {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(wait):
-			}
+	helpers.RetryInBackground(ctx, "calls.transcript-repair",
+		helpers.Retries{First: time.Minute, Tries: 6},
+		func(ctx context.Context) error {
 			rep, err := RepairCallTranscripts(ctx, time.Now())
-			if err == nil {
-				if rep.Ended+rep.Unreachable > 0 {
-					helpers.MessageLogs.InfoLog.Printf("Call transcript repair: %s", rep)
-				}
-				return
+			if err != nil {
+				helpers.MessageLogs.ErrorLog.Printf("Call transcript repair failed (will retry): %v (so far: %s)", err, rep)
+				return err
 			}
-			helpers.MessageLogs.ErrorLog.Printf("Call transcript repair failed (will retry): %v (so far: %s)", err, rep)
-			wait *= 2
-		}
-	})
+			if rep.Ended+rep.Unreachable > 0 {
+				helpers.MessageLogs.InfoLog.Printf("Call transcript repair: %s", rep)
+			}
+			return nil
+		})
 }

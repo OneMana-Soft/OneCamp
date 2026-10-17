@@ -247,7 +247,7 @@ func CreateDgraphChat(ctx context.Context, dgraphDm *dgraphStruct.DgraphDm, chat
 
 	query := fmt.Sprintf(`query {
 									  dm as var(func: eq(dm_grouping_id, %q))
-									  ch as var(func: eq(chat_id, %+q))
+									  ch as var(func: eq(chat_uuid, %+q))
 								  }`, dgraphDm.GroupingId, chatId)
 
 	chatUid, dmUID, err = dgraphModels.CreateChat(ctx, query, dgraphDm)
@@ -1130,6 +1130,7 @@ func GetDgraphChatByUUIDWithAllComments(ctx context.Context, chatUUID string) (d
 					chat_uuid
 					chat_body_text
 					chat_created_at
+					chat_updated_at
 					chat_deleted_at
 					chat_from {
 						user_uuid
@@ -1195,6 +1196,7 @@ func GetDgraphChatByUUIDWithAllComments(ctx context.Context, chatUUID string) (d
 							user_name
 						}
 						comment_created_at
+						comment_updated_at
 					}
 				}
 			}`

@@ -15,6 +15,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +26,7 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
 	docAdapter "github.com/akashc777/OneCamp/adapter/Doc"
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	docController "github.com/akashc777/OneCamp/controllers/Doc"
 	"github.com/akashc777/OneCamp/helpers"
@@ -104,25 +106,37 @@ func TestDocAccessRules(t *testing.T) {
 			}
 			return http.StatusForbidden
 		}
-		if got := call(c.who, docController.UpdateDocBody, docAdapter.InputUpdateDoc{DocId: doc, Title: &title}); got != code(c.edit) {
-			t.Errorf("%s renaming the doc: %d, want %d", c.who, got, code(c.edit))
+		// A doc someone can't open is, to them, one that isn't there.
+		rename := code(c.edit)
+		if !c.view {
+			rename = http.StatusNotFound
+		}
+		if got := call(c.who, docController.UpdateDocBodyLive, docAdapter.InputUpdateDoc{DocId: doc, Title: &title}); got != rename {
+			t.Errorf("%s renaming the doc: %d, want %d", c.who, got, rename)
 		}
 		if got := call(c.who, docController.DocCollabAuthorize, docAdapter.InputUpdateDoc{DocId: doc}); got != code(c.collab) {
 			t.Errorf("%s opening it in the editor: %d, want %d", c.who, got, code(c.collab))
 		}
-		if ok, err := docBusiness.CheckUserDocEditAccess(ctx, doc, uids[c.who]); err != nil || ok != c.edit {
-			t.Errorf("%s: CheckUserDocEditAccess = %v (%v), want %v", c.who, ok, err, c.edit)
+		// What an agent acting for them may change: business/AI docEdit.go asks
+		// the Access Resolver (docs programme B9).
+		d, err := accessBusiness.Rules.Resolve(ctx, accessBusiness.Subject{UserUID: uids[c.who], UserUUID: people[c.who].String()},
+			accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: doc})
+		if err != nil && !errors.Is(err, docBusiness.ErrNotFound) {
+			t.Errorf("%s: the Access Resolver: %v", c.who, err)
+		}
+		if mayEdit := err == nil && d.Level >= accessBusiness.LevelEdit; mayEdit != c.edit {
+			t.Errorf("%s: may edit = %v (level %v), want %v", c.who, mayEdit, d.Level, c.edit)
 		}
 		if c.edit {
 			// Making it public, then private again, is its owner's alone.
-			if got := call(c.who, docController.UpdateDocBody, docAdapter.InputUpdateDoc{DocId: doc, IsPrivate: &public}); got != code(c.changeWhoSees) {
+			if got := call(c.who, docController.UpdateDocBodyLive, docAdapter.InputUpdateDoc{DocId: doc, IsPrivate: &public}); got != code(c.changeWhoSees) {
 				t.Errorf("%s making the doc public: %d, want %d", c.who, got, code(c.changeWhoSees))
 			}
-			if got := call(c.who, docController.UpdateDocBody, docAdapter.InputUpdateDoc{DocId: doc, IsPrivate: &private}); got != code(c.changeWhoSees) {
+			if got := call(c.who, docController.UpdateDocBodyLive, docAdapter.InputUpdateDoc{DocId: doc, IsPrivate: &private}); got != code(c.changeWhoSees) {
 				t.Errorf("%s making the doc private: %d, want %d", c.who, got, code(c.changeWhoSees))
 			}
 		}
-		err := docBusiness.RecordDocView(ctx, doc, uids[c.who], people[c.who].String())
+		err = docBusiness.RecordDocView(ctx, doc, uids[c.who], people[c.who].String())
 		if (err == nil) != c.view {
 			t.Errorf("%s recording a view: %v, want allowed=%v", c.who, err, c.view)
 		}

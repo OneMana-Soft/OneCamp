@@ -19,18 +19,20 @@ func TestEachGuestWriteHasItsOwnLimit(t *testing.T) {
 	}
 	post := regexp.MustCompile(`\.Post\(("[^"]+")`)
 	seen := map[string]bool{}
-	for i, line := range routerSource(t) {
-		m := post.FindStringSubmatch(line)
-		if m == nil {
-			continue
-		}
-		kind, ok := writes[m[1]]
-		if !ok {
-			continue
-		}
-		seen[m[1]] = true
-		if !strings.Contains(line, "GuestRateLimit(customMiddleware."+kind+")") {
-			t.Errorf("router.go:%d %s is not limited as a %s: %s", i+1, m[1], kind, strings.TrimSpace(line))
+	for _, f := range routeFiles(t) {
+		for i, line := range f.lines {
+			m := post.FindStringSubmatch(line)
+			if m == nil {
+				continue
+			}
+			kind, ok := writes[m[1]]
+			if !ok {
+				continue
+			}
+			seen[m[1]] = true
+			if !strings.Contains(line, "GuestRateLimit(customMiddleware."+kind+")") {
+				t.Errorf("%s:%d %s is not limited as a %s: %s", f.name, i+1, m[1], kind, strings.TrimSpace(line))
+			}
 		}
 	}
 	for path := range writes {

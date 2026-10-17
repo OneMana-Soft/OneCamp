@@ -141,7 +141,6 @@ func TestEveryArchiveAndDeleteAsksFirst(t *testing.T) {
 	for file, act := range map[string]string{
 		"controllers/Channel/channelController.go": "business.UpdateChannelInfo(ctx, &updateChannelNameInfo, channelUUID)",
 		"controllers/Project/projectController.go": "business.ArchiveProjectByProjectUUID(ctx, projectUUID, dgraphProjectInfo)",
-		"controllers/Doc/docController.go":         "business.DeleteDoc(ctx, docInfo.DocId)",
 		"controllers/Team/teamController.go":       "business.ArchiveTeamByTeamUUID(ctx, teamUUID, dgraphTeam)",
 	} {
 		src, err := os.ReadFile(filepath.Join("..", "..", file))
@@ -163,5 +162,29 @@ func TestEveryArchiveAndDeleteAsksFirst(t *testing.T) {
 		if !regexp.MustCompile(`"code":\s*"demo"`).MatchString(before[guard:]) {
 			t.Errorf("%s: the refusal does not say code \"demo\", which the app words as the demo's", file)
 		}
+	}
+
+	// Docs (A3): the guard is in the trash itself, so every way of deleting a
+	// page, a whole subtree included, asks it before anything is trashed; the
+	// tree controller turns its refusal into code "demo".
+	trash, err := os.ReadFile(filepath.Join("..", "..", "business", "Doc", "docTrash.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const act = "domain.TrashDocs(ctx, docUUID, uids, batch, byUID, now, up...)"
+	i := strings.Index(string(trash), act)
+	if i < 0 {
+		t.Fatalf("business/Doc/docTrash.go: %q is gone; update this test with where it went", act)
+	}
+	before := string(trash)[:i]
+	if guard, fn := strings.LastIndex(before, "demoGuard.KeepsFromVisitor("), strings.LastIndex(before, "\nfunc "); guard < 0 || guard < fn {
+		t.Error("business/Doc/docTrash.go: trashes docs without asking demoGuard.KeepsFromVisitor first")
+	}
+	ctrl, err := os.ReadFile(filepath.Join("..", "..", "controllers", "Doc", "docTreeController.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`errors\.Is\(err, business\.ErrDemoKept\):\s*\n\s*helpers\.WriteJSON\([^\n]*"code":\s*"demo"`).Match(ctrl) {
+		t.Error("controllers/Doc/docTreeController.go: a delete the demo keeps is not refused with code \"demo\"")
 	}
 }

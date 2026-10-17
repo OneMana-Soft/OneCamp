@@ -39,8 +39,10 @@ func sharingIDsValid(input *adapter.InputUpdateDocPermissions) bool {
 }
 
 // ErrNotFound is a doc the graph has no node for, as opposed to a graph that
-// didn't answer.
-var ErrNotFound = errors.New("failed to get dgraph doc")
+// didn't answer. It is also helpers.ErrNotFound, which
+// helpers.WriteReadFailure answers as a 404 and every other failed read as a
+// 503.
+var ErrNotFound = helpers.NotFound("failed to get dgraph doc")
 
 func CreateOrUpdateDoc(ctx context.Context, query string, dgraphDoc *dgraphStruct.DgraphDoc, delStringJSON string) (docUID string, err error) {
 	txn := dgraphInit.DgraphClient.NewTxn()
@@ -111,11 +113,11 @@ func GetDgraphDocInfoByUUID(ctx context.Context, query string, variables map[str
 		return
 	}
 
+	// Nothing by that id is an answer, not a failure: the doc never was, or
+	// went for good a moment ago. It isn't logged here; its caller says
+	// whether it was expected (helpers.LogReadFailure, WriteReadFailure).
 	if len(docsInfo.DocInfo) == 0 {
 		err = ErrNotFound
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphDocInfoByUUID failed to get dgraph doc")
-
 		return
 	}
 	dgraphDoc = docsInfo.DocInfo[0]

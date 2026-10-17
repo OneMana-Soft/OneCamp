@@ -325,6 +325,9 @@ var EventTypes = []string{
 	"task.created", "task.deleted", "task.status_changed", "task.restored",
 	"channel.created", "channel.archived",
 	"user.joined", "user.left",
+	// Docs (business/Follow's webhook sink): doc.updated is at most one a
+	// minute per doc, and a private doc's title is never sent.
+	"doc.created", "doc.updated", "doc.deleted", "doc.shared", "doc.comment.created",
 }
 
 // HandleGetWebhookEventTypes returns the supported event types (admin only).

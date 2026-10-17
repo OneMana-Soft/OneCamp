@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Channel"
 	botpost "github.com/akashc777/OneCamp/business/BotPost"
@@ -16,6 +17,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	channelDgraphModels "github.com/akashc777/OneCamp/models/dgraph/Channel"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -249,6 +251,7 @@ func GetAllActiveChannelList(w http.ResponseWriter, r *http.Request) {
 	if userChannels == nil {
 		userChannels = []*dgraphStruct.DgraphChannel{}
 	}
+	business.MarkGuestAccess(ctx, userChannels...)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":           "got channel list successfully",
@@ -256,6 +259,98 @@ func GetAllActiveChannelList(w http.ResponseWriter, r *http.Request) {
 		"pageCount":     pageCount,
 	})
 
+}
+
+// RestoreChannel brings an archived channel back, for its admins and the
+// workspace's admins: POST /ch/restore {channel_uuid}. Archiving said "It can
+// be restored", and nothing in the app could: the update route takes channel
+// admins only and no screen offered it. Restoring revives its history in
+// search and the AI's memory (business.UpdateChannelInfo), and tells its
+// members' apps.
+func RestoreChannel(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+
+	var body struct {
+		ChannelUuid string `json:"channel_uuid"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to parse the body of the req"})
+		return
+	}
+	channelUUID, err := uuid.Parse(body.ChannelUuid)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a channel."})
+		return
+	}
+	channelInfo, err := business.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
+	if err == nil && (channelInfo == nil || channelInfo.Uuid == "") {
+		err = helpers.ErrNotFound
+	}
+	if err != nil {
+		helpers.WriteReadFailure(w, r, err, "channel", "controllers/RestoreChannel")
+		return
+	}
+	if channelInfo.IsAdmin == 0 && !userInfo.UserPostgresInfo.IsAdmin {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the channel's admins and workspace admins can restore it."})
+		return
+	}
+	if !helpers.IsSoftDeleted(channelInfo.DeletedAt) {
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "That channel isn't archived."})
+		return
+	}
+
+	err = business.UpdateChannelInfo(ctx, &adapter.UpdateChannelInfo{
+		ChannelUuid:    channelUUID.String(),
+		ChannelName:    channelInfo.Name,
+		ChannelPrivate: channelInfo.IsPrivate != nil && *channelInfo.IsPrivate,
+	}, channelUUID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/RestoreChannel Failed to restore the channel err: %+v", err)
+		helpers.WriteRetryLater(w, "Couldn't restore the channel.")
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Restored #" + channelInfo.Name + "."})
+}
+
+// GetDiscoverChannelList is the channel browser's Discover tab: a page of the
+// public channels the person could join and isn't in, by name, with ?search=
+// matched on the server. GET /ch/discover?pageIndex=&pageSize=&search=
+func GetDiscoverChannelList(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+
+	pageIndex, pageSize := 0, 20
+	if v, err := strconv.Atoi(r.URL.Query().Get("pageIndex")); err == nil && v >= 0 {
+		pageIndex = v
+	}
+	if v, err := strconv.Atoi(r.URL.Query().Get("pageSize")); err == nil && v > 0 && v <= 100 {
+		pageSize = v
+	}
+	search := ""
+	if raw := strings.TrimSpace(r.URL.Query().Get("search")); raw != "" {
+		safe, err := sanitizeSearchOrFail(ctx, w, raw)
+		if err != nil {
+			return
+		}
+		search = safe
+	}
+
+	channels, totalCount, err := business.GetDiscoverableChannels(ctx, userInfo.UserDgraphInfo.Uid, search, pageIndex, pageSize)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't load the channels you could join. Try again."})
+		return
+	}
+	if channels == nil {
+		channels = []*dgraphStruct.DgraphChannel{}
+	}
+	business.MarkGuestAccess(ctx, channels...)
+
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
+		"channels_list": channels,
+		"pageCount":     (uint64(totalCount) + uint64(pageSize) - 1) / uint64(pageSize),
+		"has_more":      int64((pageIndex+1)*pageSize) < totalCount,
+	})
 }
 
 func GetActiveChannelListWithLatestPostWithUserIdAndSearchText(w http.ResponseWriter, r *http.Request) {
@@ -307,6 +402,7 @@ func GetActiveChannelListWithLatestPostWithUserIdAndSearchText(w http.ResponseWr
 	if userChannels == nil {
 		userChannels = []*dgraphStruct.DgraphChannel{}
 	}
+	business.MarkGuestAccess(ctx, userChannels...)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":           "got user's channel list successfully",
@@ -371,6 +467,7 @@ func GetChannelListWithLatestPostWithUserIdAndSearchText(w http.ResponseWriter, 
 	if userChannels == nil {
 		userChannels = []*dgraphStruct.DgraphChannel{}
 	}
+	business.MarkGuestAccess(ctx, userChannels...)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":           "got user's channel list successfully",
@@ -423,6 +520,7 @@ func GetChannelInfoByUUIDWithMemberAdminFlag(w http.ResponseWriter, r *http.Requ
 		})
 		return
 	}
+	business.MarkGuestAccess(ctx, channelInfo)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":          "got channel's info successfully",
@@ -436,14 +534,13 @@ func GetChannelBasicInfoByUUID(w http.ResponseWriter, r *http.Request) {
 	channelUUIDString := chi.URLParam(r, "channel_uuid")
 	channelUUID, err := uuid.Parse(channelUUIDString)
 
+	// The read the channel's page stands on: an id that names nothing is a
+	// 404 and a failed read a 503, never a 400, which the app can only read as
+	// "gone" (QA F-08: an unknown channel drew a live page and "a connection
+	// problem").
+	const where = "controllers/GetChannelBasicInfoByUUID"
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChannelBasicInfoByUUID Failed to parse channelUUID string to uuid err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse channelUUID string to uuid",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, helpers.ErrNotFound, "channel", where)
 		return
 	}
 
@@ -452,20 +549,12 @@ func GetChannelBasicInfoByUUID(w http.ResponseWriter, r *http.Request) {
 	channelInfo, err := business.GetBasicDgraphChannelInfoByUUIDAndUpdateLastSeen(ctx, channelUUID, userInfo.UserPostgresInfo.Id, userInfo.UserDgraphInfo.Uid)
 
 	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetChannelBasicInfoByUUID Failed to channels info form dgraph err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to channels info",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "channel", where)
 		return
-
 	}
 
-	if channelInfo.IsMember == 0 && *channelInfo.IsPrivate {
+	// A channel whose privacy didn't load is private.
+	if channelInfo.IsMember == 0 && (channelInfo.IsPrivate == nil || *channelInfo.IsPrivate) {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/GetChannelBasicInfoByUUID Unauthorised user trying to access channelInfo")
 
@@ -480,15 +569,7 @@ func GetChannelBasicInfoByUUID(w http.ResponseWriter, r *http.Request) {
 		notificationType, err = userChannelNotificationBusiness.GetNotificationTypeByUserIdAndChannelId(userInfo.UserDgraphInfo.Uuid, channelUUID.String())
 
 		if err != nil {
-
-			helpers.LogErrorWithContext(ctx,
-				"controllers/GetChannelBasicInfoByUUID Failed to get users notificationType err: %+v",
-				err)
-
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "Failed to get users notificationType",
-				"err": err,
-			})
+			helpers.WriteReadFailure(w, r, err, "channel", where)
 			return
 		}
 		channelInfo.NotificationType = notificationType
@@ -496,18 +577,12 @@ func GetChannelBasicInfoByUUID(w http.ResponseWriter, r *http.Request) {
 		channelInfo.CallActive, err = business.GetChannelCallActiveStatus(ctx, channelUUID.String())
 
 		if err != nil {
-
-			helpers.LogErrorWithContext(ctx,
-				"controllers/GetChannelBasicInfoByUUID Failed to get channel call status err: %+v",
-				err)
-
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "Failed to get channel call status",
-				"err": err,
-			})
+			helpers.WriteReadFailure(w, r, err, "channel", where)
 			return
 		}
 	}
+	// The header's marker that people outside the workspace can read it.
+	business.MarkGuestAccess(ctx, channelInfo)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":          "got channel's info successfully",
@@ -683,6 +758,8 @@ func GetUserActiveChannelListWithLatestPost(w http.ResponseWriter, r *http.Reque
 	if userChannels == nil {
 		userChannels = []*dgraphStruct.DgraphChannel{}
 	}
+	// Each channel's marker that people outside the workspace can read it.
+	business.MarkGuestAccess(ctx, userChannels...)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":           "got user's channel list successfully",
@@ -797,6 +874,12 @@ func UpdateChannelInfo(w http.ResponseWriter, r *http.Request) {
 
 // SetChannelPostPolicy handles updating a channel's posting policy
 // (announcement mode). Channel-moderator gated.
+// Seams for tests: SetChannelPostPolicy's read of the channel, and its write.
+var (
+	readPostPolicyChannel = business.GetBasicDgraphChannelInfoByUUID
+	setChannelPostPolicy  = business.SetChannelPostPolicy
+)
+
 func SetChannelPostPolicy(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
@@ -816,9 +899,9 @@ func SetChannelPostPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	channelInfo, err := business.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
+	channelInfo, err := readPostPolicyChannel(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to get channel info"})
+		helpers.WriteReadFailure(w, r, err, "channel", "controllers/SetChannelPostPolicy")
 		return
 	}
 	if channelInfo.IsAdmin == 0 {
@@ -826,8 +909,14 @@ func SetChannelPostPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := business.SetChannelPostPolicy(ctx, channelUUID, body.PostPolicy); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+	if err := setChannelPostPolicy(ctx, channelUUID, body.PostPolicy); err != nil {
+		if errors.Is(err, business.ErrInvalidPostPolicy) {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Choose who can post: everyone, or only the channel's admins."})
+			return
+		}
+		// A write that failed says which store didn't take it: logged, not shown.
+		helpers.LogErrorWithContext(ctx, "controllers/SetChannelPostPolicy err: %+v", err)
+		helpers.WriteRetryLater(w, "Couldn't change who can post.")
 		return
 	}
 
@@ -869,17 +958,8 @@ func RemoveChannelModerator(w http.ResponseWriter, r *http.Request) {
 	}
 
 	channelInfo, err := business.GetDgraphChannelInfoByUUIDAndModeratorInfo(ctx, channelUUID, userInfo.UserPostgresInfo.Id, userInfo.UserDgraphInfo.Uid, removeModeratorInfo.UserUuid)
-
 	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/RemoveChannelModerators Failed to get channel info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to delete moderator",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "channel", "controllers/RemoveChannelModerator")
 		return
 	}
 
@@ -914,6 +994,10 @@ func RemoveChannelModerator(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !keepsAnAdmin(w, r, channelUUID, removeModeratorInfo.UserUuid, "controllers/RemoveChannelModerator") {
+		return
+	}
+
 	memberDgraphUID := channelInfo.Moderators[0].Uid
 
 	err = business.DeleteChannelModeratorEdge(ctx, channelInfo.Uid, memberDgraphUID, channelInfo.Uuid)
@@ -933,6 +1017,26 @@ func RemoveChannelModerator(w http.ResponseWriter, r *http.Request) {
 	business.NotifyChannelUpdated(channelUUID.String(), business.ChannelUpdateActionModerators)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Removed moderator successfully!"})
+}
+
+// keepsAnAdmin answers, for a change taking who's admin role away (they
+// leave, are removed, or step down), whether the channel keeps an admin
+// (business.KeepsAnAdmin), and when it wouldn't, answers 409 "last_admin",
+// as a failed read answers by the shared rule; the handler then returns.
+func keepsAnAdmin(w http.ResponseWriter, r *http.Request, channelUUID uuid.UUID, who, where string) bool {
+	userInfo := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	keeps, err := business.KeepsAnAdmin(r.Context(), channelUUID, userInfo.UserDgraphInfo.Uid, who)
+	if err != nil {
+		helpers.WriteReadFailure(w, r, err, "channel", where)
+		return false
+	}
+	if !keeps {
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+			"msg":  "Make someone else an admin first, so the channel keeps one.",
+			"code": "last_admin",
+		})
+	}
+	return keeps
 }
 
 func RemoveChannelMember(w http.ResponseWriter, r *http.Request) {
@@ -958,32 +1062,21 @@ func RemoveChannelMember(w http.ResponseWriter, r *http.Request) {
 
 	channelUUID, err := uuid.Parse(removeMemberInfo.ChannelUuid)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/RemoveChannelModerators Failed to parse channelUUID string to uuid err: %+v",
-			err)
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a channel."})
 		return
 	}
 
 	channelInfo, err := business.GetDgraphChannelInfoByUUIDAndMemberInfo(ctx, channelUUID, userInfo.UserDgraphInfo.Uid, removeMemberInfo.UserUuid)
-
 	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/RemoveChannelModerators Failed to get channel info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to delete moderator",
-			"err": err,
-		})
+		helpers.WriteReadFailure(w, r, err, "channel", "controllers/RemoveChannelMember")
 		return
 	}
 
-	if channelInfo.CreatedBy.Uuid == removeMemberInfo.UserUuid {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Cannot remove channel creator",
-			"err": err,
-		})
+	// Nobody else removes the channel's creator. They may leave it, as anyone
+	// may, once someone else is an admin (below): the creator was held in for
+	// good (QA F-46).
+	if channelInfo.CreatedBy.Uuid == removeMemberInfo.UserUuid && userInfo.UserDgraphInfo.Uuid != removeMemberInfo.UserUuid {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "The channel's creator can't be removed."})
 		return
 	}
 
@@ -1017,6 +1110,11 @@ func RemoveChannelMember(w http.ResponseWriter, r *http.Request) {
 			"msg": "Failed to remove channel member since given user is not channel member",
 			"err": err,
 		})
+		return
+	}
+
+	// Leaving takes an admin's role with them, so the channel keeps one.
+	if !keepsAnAdmin(w, r, channelUUID, removeMemberInfo.UserUuid, "controllers/RemoveChannelMember") {
 		return
 	}
 
@@ -1253,8 +1351,17 @@ func AddChannelMember(w http.ResponseWriter, r *http.Request) {
 	}
 
 	channelInfo, err := business.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
-
-	if (channelInfo.IsMember == 0 && !(*channelInfo.IsPrivate)) || (channelInfo.IsAdmin == 0 && (*channelInfo.IsPrivate)) {
+	// The answer was read before the error: a channel that isn't there was a
+	// panic (F-15). A channel whose privacy didn't load is private.
+	if err == nil && channelInfo == nil {
+		err = channelDgraphModels.ErrNotFound
+	}
+	if err != nil {
+		helpers.WriteReadFailure(w, r, err, "channel", "controllers/AddChannelMember")
+		return
+	}
+	private := channelInfo.IsPrivate == nil || *channelInfo.IsPrivate
+	if (channelInfo.IsMember == 0 && !private) || (channelInfo.IsAdmin == 0 && private) {
 
 		helpers.LogErrorWithContext(ctx,
 			"controllers/AddChannelMember user trying to add is not member or is not mederator if channel is private  err: %+v",
@@ -1410,9 +1517,11 @@ func MakeVideoChannelCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Said in the person's words: a bare "Not Authorised" became "You don't
+	// have permission to do that" in the green room (QA F-22).
 	if channelDraphInfo.IsMember == 0 {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
+			"msg": "Only people in the channel can join its huddle. Join the channel first.",
 		})
 		return
 	}

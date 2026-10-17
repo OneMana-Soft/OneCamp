@@ -99,7 +99,7 @@ func publishTrack(room *lksdk.Room, source livekit.TrackSource) error {
 	return err
 }
 
-// settled waits until server data reaches j: a participant removed in its
+// joinSettled waits until server data reaches j: a participant removed in its
 // first moments, before its data channel opens, is put out without the reason
 // (its client still learns it was removed, from the disconnect itself).
 func joinSettled(t *testing.T, room, identity string, j *joined) {

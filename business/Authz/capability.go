@@ -83,6 +83,28 @@ func Can(ctx context.Context, userInfo *userModels.UserInfo, capability string) 
 	return resolvePolicy(ctx, capability) == capabilityModels.PolicyAllMembers
 }
 
+// capabilityDoing is what each capability lets someone do, as a refusal says
+// it ("… can invite people").
+var capabilityDoing = map[string]string{
+	capabilityModels.CapWorkflowManage:   "create workflows",
+	capabilityModels.CapInvitationCreate: "invite people",
+	capabilityModels.CapAgentManage:      "build AI agents",
+}
+
+// AdminOnlyMsg is what a person refused something only an admin may do is
+// told.
+const AdminOnlyMsg = "Only admins can do this. Ask an admin."
+
+// RefusalMsg is what a person refused a capability is told: who may, and
+// whom to ask (QA SH-02: a refused invitation answered 403 with no words, and
+// the web blamed the person's connection).
+func RefusalMsg(capability string) string {
+	if doing, ok := capabilityDoing[capability]; ok {
+		return "Only admins, or people an admin allows, can " + doing + ". Ask an admin."
+	}
+	return AdminOnlyMsg
+}
+
 // ListPolicies returns the full capability policy catalog (admin Settings UI).
 func ListPolicies(ctx context.Context) ([]capabilityModels.CapabilityPolicy, error) {
 	return capabilityModels.ListPolicies(ctx)

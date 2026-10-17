@@ -334,7 +334,7 @@ func SearchUsersForBoard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	users, err := business.SearchUsersForBoard(ctx, userInfo.UserDgraphInfo.Uuid, input.SearchText)
+	users, err := business.SearchUsersForBoard(ctx, userInfo.UserDgraphInfo.Uuid, userInfo.UserPostgresInfo.EmailID, input.SearchText)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to search users", "err": err.Error()})
 		return

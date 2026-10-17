@@ -36,7 +36,7 @@ func answerFileAccess(ctx context.Context, w http.ResponseWriter, err error, pla
 	case errors.Is(err, fileAccessBusiness.ErrNoSuchFile):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such file."})
 	case errors.Is(err, docBusiness.ErrNotFound):
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such doc."})
+		helpers.WriteDocNotFound(w)
 	case errors.Is(err, docBusiness.ErrDocDeleted):
 		helpers.WriteJSON(w, http.StatusGone, helpers.Envolope{"msg": "This doc was deleted.", "deleted": true})
 	default:

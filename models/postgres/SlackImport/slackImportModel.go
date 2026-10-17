@@ -252,12 +252,6 @@ func UpdateStatus(ctx context.Context, jobId uuid.UUID, status string, stage *st
 	return jobs.UpdateStatus(ctx, jobId, status, stage, errMsg)
 }
 
-// StartRunning moves a job to running from one of the statuses in from, in one
-// statement, and reports whether it did: two clicks on Run start one import.
-func StartRunning(ctx context.Context, jobId uuid.UUID, from []string) (bool, error) {
-	return jobs.StartRunning(ctx, jobId, from)
-}
-
 // UpdateStatusFrom is UpdateStatus only from one of the statuses in from, in
 // one statement, and reports whether it moved the job.
 func UpdateStatusFrom(ctx context.Context, jobId uuid.UUID, from []string, status string, stage *string, errMsg *string) (bool, error) {
@@ -867,16 +861,6 @@ func UpsertIdMappingThenFinish(ctx context.Context, importId, chunkId uuid.UUID,
 	}
 	committed = true
 	return nil
-}
-
-// ExecQueryRow exposes QueryRowContext via this package, mirroring Exec.
-// Keeps the rollback code from importing postgresInit directly. Note the
-// returned row is bound to the package-level connection pool's context;
-// we deliberately do NOT cancel a per-call context here because Scan()
-// on the row would race with the cancel.
-func ExecQueryRow(ctx context.Context, query string, args ...interface{}) (*sql.Row, error) {
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, args...)
-	return row, nil
 }
 
 // ─── Dedup support (migration 60) ────────────────────────────────────────

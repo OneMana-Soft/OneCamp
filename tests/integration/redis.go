@@ -19,9 +19,6 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
-	MQTT "github.com/eclipse/paho.mqtt.golang"
-
-	mqttInit "github.com/akashc777/OneCamp/initializers/mqttInit"
 	redisInit "github.com/akashc777/OneCamp/initializers/redis"
 )
 
@@ -67,6 +64,7 @@ func SetupRedis(t *testing.T) *RedisEnv {
 
 	env := &RedisEnv{container: c, Addr: addr}
 	t.Cleanup(env.Close)
+	settleBeforeTeardown(t)
 	return env
 }
 
@@ -83,41 +81,4 @@ func (e *RedisEnv) Close() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	_ = e.container.Terminate(ctx)
-}
-
-// StubMqttClient gives the MQTT global a client object without a broker.
-//
-// The code under test publishes a "this channel changed" nudge from a
-// fire-and-forget goroutine, and with the global nil that goroutine dereferences
-// nil and takes the whole test binary down -- a crash, not a failure, pointing at
-// MQTT rather than at whatever the test was about.
-//
-// A broker container would be the wrong weight here. In production MqttClient is
-// never nil: ConnectMqtt assigns it from MQTT.NewClient before connecting and
-// returns nil even when the connect fails, so the only path that aborts boot is a
-// JWT signing error. An unconnected client is therefore the production shape under
-// a broker outage, and publishing on one returns a token carrying ErrNotConnected
-// instead of panicking. That is exactly what these tests want: no nil deref, and
-// no pretence of testing delivery.
-func StubMqttClient(t *testing.T) {
-	t.Helper()
-	ensureLoggers()
-	// Port 1 so nothing can accidentally connect; no Connect call, so nothing waits.
-	mqttInit.MqttClient = MQTT.NewClient(MQTT.NewClientOptions().AddBroker("tcp://127.0.0.1:1"))
-	t.Cleanup(func() { mqttInit.MqttClient = nil })
-}
-
-// UseMqttClient gives the test c as the server's broker client until it ends:
-// a stand-in that records what is published, for a test about what reaches the
-// broker. Afterwards the client is an unconnected one, as StubMqttClient's,
-// so a publish from work still finishing can't dereference nil. (Beta's kit
-// has it in mqtt.go, where it also waits for background work before teardown;
-// this line has no such wait.)
-func UseMqttClient(t *testing.T, c MQTT.Client) {
-	t.Helper()
-	ensureLoggers()
-	mqttInit.MqttClient = c
-	t.Cleanup(func() {
-		mqttInit.MqttClient = MQTT.NewClient(MQTT.NewClientOptions().AddBroker("tcp://127.0.0.1:1"))
-	})
 }

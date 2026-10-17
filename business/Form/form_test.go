@@ -2,6 +2,7 @@ package business
 
 import (
 	"encoding/json"
+	"github.com/akashc777/OneCamp/business/DataTable/formula"
 	"strings"
 	"testing"
 )
@@ -49,7 +50,7 @@ func TestCheckForm(t *testing.T) {
 func TestCheckAnswers(t *testing.T) {
 	a, err := CheckAnswers(fields(), map[string]any{
 		"what": " New logo ", "email": "Sam <sam@example.com>", "team": "Design", "when": "2026-10-20", "n": float64(3), "urgent": true,
-	})
+	}, formula.NumberSigns{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +77,7 @@ func TestCheckAnswers(t *testing.T) {
 		{"what": []any{"x"}, "email": "a@b.co"},
 	}
 	for i, raw := range bad {
-		if _, err := CheckAnswers(fields(), raw); err == nil {
+		if _, err := CheckAnswers(fields(), raw, formula.NumberSigns{}); err == nil {
 			t.Errorf("case %d accepted", i)
 		}
 	}
@@ -86,9 +87,36 @@ func TestCheckAnswers(t *testing.T) {
 // "€40" are numbers, which ParseFloat refused, and NaN isn't.
 func TestNumberAnswersAsPeopleWriteThem(t *testing.T) {
 	for _, n := range []string{"1,200", "€40", " 12.5 "} {
-		if _, err := CheckAnswers(fields(), map[string]any{"what": "x", "email": "a@b.co", "n": n}); err != nil {
+		if _, err := CheckAnswers(fields(), map[string]any{"what": "x", "email": "a@b.co", "n": n}, formula.NumberSigns{}); err != nil {
 			t.Errorf("%q: %v", n, err)
 		}
+	}
+}
+
+// A number answer is read in the signs of whoever sent it, which the form
+// sends with the answers: "1,5" from Berlin is one and a half. Read in
+// en-US's signs it is refused, since a comma there groups digits, and never
+// read as fifteen.
+func TestNumberAnswersInTheSendersSigns(t *testing.T) {
+	de := formula.NumberSigns{Decimal: ",", Group: "."}
+	for n, want := range map[string]string{"1,5": "1,5", "1.234,5": "1.234,5", "€ 12,50": "€ 12,50"} {
+		a, err := CheckAnswers(fields(), map[string]any{"what": "x", "email": "a@b.co", "n": n}, de)
+		if err != nil {
+			t.Errorf("%q in de-DE's signs: %v", n, err)
+			continue
+		}
+		for _, x := range a {
+			if x.Label == "Seats" && x.Value != want {
+				t.Errorf("%q kept as %q", n, x.Value)
+			}
+		}
+	}
+	if _, err := CheckAnswers(fields(), map[string]any{"what": "x", "email": "a@b.co", "n": "1,5"}, formula.NumberSigns{}); err == nil {
+		t.Error(`"1,5" in en-US's signs was read as a number`)
+	}
+	// Signs no number is written with are refused, not guessed at.
+	if _, err := CheckAnswers(fields(), map[string]any{"what": "x", "email": "a@b.co", "n": "1"}, formula.NumberSigns{Decimal: "x", Group: "."}); err == nil {
+		t.Error("a letter for a decimal sign was taken")
 	}
 }
 

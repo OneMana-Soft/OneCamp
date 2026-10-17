@@ -8,6 +8,13 @@ import (
 	models "github.com/akashc777/OneCamp/models/postgres/User"
 )
 
+// CapabilityRequired is the code of a refusal for a capability the person
+// does not hold.
+const CapabilityRequired = "capability_required"
+
+// AdminRequired is the code of a refusal for an admin-only route.
+const AdminRequired = "admin_required"
+
 // RequireCapability returns middleware that allows a request through only if
 // the authenticated user may exercise the given capability (admins always may;
 // members may when an admin has opened the capability to all members). This is
@@ -29,7 +36,13 @@ func RequireCapability(capability string) func(http.Handler) http.Handler {
 				return
 			}
 			if !authz.Can(ctx, &userInfo, capability) {
-				w.WriteHeader(http.StatusForbidden)
+				// Says why, so the app can (QA SH-02): the code is the
+				// condition, msg the words, capability which one.
+				helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
+					"code":       CapabilityRequired,
+					"capability": capability,
+					"msg":        authz.RefusalMsg(capability),
+				})
 				return
 			}
 			next.ServeHTTP(w, r)

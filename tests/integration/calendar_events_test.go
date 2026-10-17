@@ -90,8 +90,8 @@ func onCalendar(t *testing.T, who *userModels.UserInfo, eventUUID string, from, 
 }
 
 // CAL-BUG-1: a guest taken off an event loses it, from their calendar and
-// their busy times, and can't open it. It was a set mutation, which only ever
-// adds to a list: they kept the event, title and notes included.
+// their busy times, can't open it, and is told. It was a set mutation, which
+// only ever adds to a list: they kept the event, title and notes included.
 func TestTakingAGuestOffAnEventTakesItAway(t *testing.T) {
 	ctx := context.Background()
 	env, dg := calendarStores(t)
@@ -126,6 +126,28 @@ func TestTakingAGuestOffAnEventTakesItAway(t *testing.T) {
 	}
 	if listed, busy := onCalendar(t, maya, out.EventUuid, from, to); !listed || !busy {
 		t.Fatalf("Maya was kept, yet listed %v busy %v", listed, busy)
+	}
+
+	// Jonas is told, in his inbox, without the title; Maya and Sam aren't.
+	var kind, resource, actor, data string
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		err := env.PG.QueryRow(`SELECT kind, resource_uuid, actor_uuid::text, data::text FROM resource_notices WHERE user_uuid = $1`,
+			jonas.UserPostgresInfo.Id).Scan(&kind, &resource, &actor, &data)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, sql.ErrNoRows) || time.Now().After(deadline) {
+			t.Fatalf("Jonas wasn't told: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if kind != "event.uninvited" || resource != out.EventUuid || actor != sam.UserDgraphInfo.Uuid || strings.Contains(data, "Acquisition") || !strings.Contains(data, rfc(start)) {
+		t.Fatalf("Jonas's notice: %s %s by %s, %s", kind, resource, actor, data)
+	}
+	var others int
+	if err := env.PG.QueryRow(`SELECT count(*) FROM resource_notices WHERE user_uuid IN ($1, $2)`, maya.UserPostgresInfo.Id, sam.UserPostgresInfo.Id).Scan(&others); err != nil || others != 0 {
+		t.Fatalf("%d notices for Maya and Sam (%v)", others, err)
 	}
 
 	// A save that doesn't name the guests leaves them as they are.

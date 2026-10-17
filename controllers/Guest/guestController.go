@@ -23,7 +23,6 @@ import (
 	"time"
 
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
-	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	tableBusiness "github.com/akashc777/OneCamp/business/DataTable"
@@ -33,7 +32,6 @@ import (
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
-	fileBusiness "github.com/akashc777/OneCamp/business/User"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
@@ -135,8 +133,8 @@ func CreateInstantMeeting(w http.ResponseWriter, r *http.Request) {
 }
 
 // GetGuestMeeting GET /guest/meet/{token} — public link status. Returns 200
-// {available:true} for a usable link, else the uniform 404, or a 503 when the
-// server couldn't answer.
+// {available:true, workspace_name} for a usable link, else the uniform 404, or
+// a 503 when the server couldn't answer.
 func GetGuestMeeting(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	token := chi.URLParam(r, "token")
@@ -155,7 +153,7 @@ func GetGuestMeeting(w http.ResponseWriter, r *http.Request) {
 		read["recording"] = view.Recording
 		read["transcription"] = view.Transcription
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": read})
+	writeGuestRead(w, read)
 }
 
 // JoinGuestMeeting POST /guest/meet/{token}/join — mint a single-room guest
@@ -265,8 +263,10 @@ func RevokeGuestGrant(w http.ResponseWriter, r *http.Request) {
 }
 
 // hostedMeeting answers the room of the instant meeting in the URL for the
-// person who started it, or writes the refusal: 404 for a meeting that is
-// over (no live link) or isn't one, 403 for anyone else's.
+// person who started it, or writes the refusal: 404 "no_meeting" for an id no
+// meeting ever had, 404 "ended" for a meeting that is over (no live link),
+// 403 for anyone else's. Both 404s keep the status an older page reads as
+// "This meeting has ended"; the code is what tells them apart (F-54).
 func hostedMeeting(w http.ResponseWriter, r *http.Request) (userModels.UserInfo, string, time.Time, bool) {
 	ctx := r.Context()
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
@@ -276,7 +276,7 @@ func hostedMeeting(w http.ResponseWriter, r *http.Request) (userModels.UserInfo,
 	}
 	room, ok := guestBusiness.MeetingRoom(chi.URLParam(r, "meeting_id"))
 	if !ok {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "This meeting has ended."})
+		writeNoMeeting(w)
 		return userInfo, "", time.Time{}, false
 	}
 	until, err := guestBusiness.HostedMeeting(ctx, room, &userInfo.UserDgraphInfo)
@@ -284,8 +284,12 @@ func hostedMeeting(w http.ResponseWriter, r *http.Request) (userModels.UserInfo,
 	case errors.Is(err, guestBusiness.ErrNotHost):
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "not_host", "msg": "Only the person who started this meeting can open it here."})
 		return userInfo, "", time.Time{}, false
+	// Before ErrNotFound, which it also is.
+	case errors.Is(err, guestBusiness.ErrNoMeeting):
+		writeNoMeeting(w)
+		return userInfo, "", time.Time{}, false
 	case errors.Is(err, guestBusiness.ErrNotFound):
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "This meeting has ended."})
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"code": "ended", "msg": "This meeting has ended."})
 		return userInfo, "", time.Time{}, false
 	case err != nil:
 		helpers.LogErrorWithContext(ctx, "controllers/Guest/hostedMeeting err: %+v", err)
@@ -293,6 +297,11 @@ func hostedMeeting(w http.ResponseWriter, r *http.Request) (userModels.UserInfo,
 		return userInfo, "", time.Time{}, false
 	}
 	return userInfo, room, until, true
+}
+
+// writeNoMeeting answers a meeting id that no meeting ever had.
+func writeNoMeeting(w http.ResponseWriter) {
+	helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"code": "no_meeting", "msg": "We couldn't find this meeting."})
 }
 
 // GetInstantMeeting GET /meet/instant/{meeting_id} — an instant meeting's
@@ -489,14 +498,14 @@ func GuestCollabToken(w http.ResponseWriter, r *http.Request) {
 	// used for the collab awareness label, never resolved to a member).
 	recordGuestAccess(r, grant, grant.ResourceType, guestBusiness.SanitizeGuestName(body.DisplayName))
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{
+	writeGuestRead(w, map[string]interface{}{
 		"collab_token":  collabToken,
 		"document_name": documentName,
 		"resource_type": grant.ResourceType,
 		"resource_id":   grant.ResourceID,
 		"capability":    grant.Capability,
 		"title":         guestBusiness.SharedTitle(ctx, grant),
-	}})
+	})
 }
 
 // GuestDocColabAuthorize POST /docColab/guestAuthorize — called server-to-server
@@ -546,48 +555,9 @@ func GuestBoardColabAuthorize(w http.ResponseWriter, r *http.Request) {
 }
 
 // GuestBoardAttachment GET /guest/board-attachment/{token}/{obj_uuid} — public.
-// Serves a board image to a guest, authorized by the share-link grant rather
-// than a member session. The attachment must belong to the grant's board, so a
-// board grant can't be used to fetch another board's images. Presigned redirect
-// (no raw bytes proxied).
-func GuestBoardAttachment(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	token := chi.URLParam(r, "token")
-	objUUID := chi.URLParam(r, "obj_uuid")
-	if objUUID == "" {
-		notAvailable(w)
-		return
-	}
-
-	// A read that failed is a 503 the board retries, as every other guest
-	// read: it said "no longer available", and the image never came back.
-	grant, err := guestBusiness.ValidateResourceGrant(ctx, token, "board")
-	if err != nil {
-		guestReadFailed(w, r, "GuestBoardAttachment", err, "")
-		return
-	}
-
-	att, err := attachmentBusiness.GetAttachmentByObjUUID(ctx, objUUID, postgressStruct.ATTACHMENT_SRC_BOARD)
-	if errors.Is(err, sql.ErrNoRows) {
-		notAvailable(w)
-		return
-	}
-	if err != nil {
-		guestReadFailed(w, r, "GuestBoardAttachment", err, "")
-		return
-	}
-	if att.SrcKey != postgressStruct.ATTACHMENT_SRC_BOARD || att.SrcValue != grant.ResourceID {
-		notAvailable(w)
-		return
-	}
-
-	url, err := fileBusiness.GetFileURLByObjectName(ctx, att.ObjKey)
-	if err != nil {
-		guestReadFailed(w, r, "GuestBoardAttachment", err, "")
-		return
-	}
-	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
-}
+// Serves a board image to a guest, authorised by the share-link grant rather
+// than a member session (guestAttachment, guestDocAttachment.go).
+var GuestBoardAttachment = guestAttachment("board", postgressStruct.ATTACHMENT_SRC_BOARD, "GuestBoardAttachment")
 
 // GuestTable GET /guest/table/{token} — public. Returns the read-only table
 // bundle (header + fields + rows) for a guest, authorized by the share-link
@@ -619,7 +589,7 @@ func GuestTable(w http.ResponseWriter, r *http.Request) {
 	}
 	// R4.4: record the guest table access (resource + time), no member actor.
 	recordGuestAccess(r, grant, "table", "")
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": bundle})
+	writeGuestRead(w, bundle)
 }
 
 // ─── Phase 2: guest doc comments (capability = comment) ─────────────────
@@ -661,10 +631,10 @@ func GuestDocComments(w http.ResponseWriter, r *http.Request) {
 			CreatedAt: c.CreatedAt,
 		})
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{
+	writeGuestRead(w, map[string]interface{}{
 		"capability": grant.Capability,
 		"comments":   out,
-	}})
+	})
 }
 
 // CreateGuestDocComment POST /guest/doc-comments/{token} — public. Posts a
@@ -767,7 +737,7 @@ func GuestChannel(w http.ResponseWriter, r *http.Request) {
 	if before.IsZero() {
 		recordGuestAccess(r, grant, "channel", "")
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": view})
+	writeGuestRead(w, view)
 }
 
 // GuestChannelThread GET /guest/channel/{token}/thread/{post_id} — public.
@@ -781,7 +751,7 @@ func GuestChannelThread(w http.ResponseWriter, r *http.Request) {
 		guestReadFailed(w, r, "GuestChannelThread", err, "That message isn't here any more.")
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": t})
+	writeGuestRead(w, t)
 }
 
 // GuestChannelPost POST /guest/channel/{token} {display_name, text, reply_to}
@@ -842,7 +812,7 @@ func GuestProject(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("refresh") == "" {
 		recordGuestAccess(r, grant, "project", "")
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": view})
+	writeGuestRead(w, view)
 }
 
 // GuestProjectTask GET /guest/project/{token}/task/{task_id} — public.
@@ -856,7 +826,7 @@ func GuestProjectTask(w http.ResponseWriter, r *http.Request) {
 		guestReadFailed(w, r, "GuestProjectTask", err, "That task isn't here any more.")
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": t})
+	writeGuestRead(w, t)
 }
 
 // GuestProjectComment POST /guest/project/{token}/task/{task_id}/comment
@@ -931,7 +901,12 @@ func mayShare(w http.ResponseWriter, r *http.Request, userInfo userModels.UserIn
 	ctx := r.Context()
 	switch resourceType {
 	case "doc":
-		if status, refusal := docShareRefusal(ctx, userInfo, resourceID, newLink); status != 0 {
+		status, refusal, err := docShareRefusal(ctx, userInfo, resourceID, newLink)
+		if err != nil {
+			helpers.WriteDocReadFailure(w, r, err, "controllers/mayShare")
+			return false
+		}
+		if status != 0 {
 			helpers.WriteJSON(w, status, refusal)
 			return false
 		}
@@ -1006,6 +981,8 @@ func mayShare(w http.ResponseWriter, r *http.Request, userInfo userModels.UserIn
 
 // docShareRefusal is mayShare's answer for a doc, without writing it: 0 when
 // the caller may share it, and otherwise the status and body to refuse with.
+// err is a read that failed, which is neither a yes nor a no: the caller
+// answers it with helpers.WriteDocReadFailure.
 //
 // Sharing a doc outside the workspace is its owner's call, as sharing it
 // inside is (only the owner changes who it's shared with). Editors could mint
@@ -1013,21 +990,26 @@ func mayShare(w http.ResponseWriter, r *http.Request, userInfo userModels.UserIn
 // its owner had shared it with no member beyond its editors (decided 11 Oct
 // 2026). Links editors made before keep working until the owner, an admin, or
 // whoever made them turns them off.
-func docShareRefusal(ctx context.Context, userInfo userModels.UserInfo, docID string, newLink bool) (int, helpers.Envolope) {
+//
+// A doc the person can't open, or couldn't before it was deleted, is to them
+// one that isn't there (helpers.DocNotFound): it used to say only its owner
+// could share it, which said it was there.
+func docShareRefusal(ctx context.Context, userInfo userModels.UserInfo, docID string, newLink bool) (int, helpers.Envolope, error) {
+	notThere := helpers.Envolope{"msg": helpers.DocNotFound}
 	d, err := docBusiness.GetDgraphDocByUUIDOnlyEditingInfo(ctx, docID, userInfo.UserDgraphInfo.Uid)
-	if err != nil || d == nil {
-		return http.StatusNotFound, helpers.Envolope{"msg": "Document not found"}
+	switch {
+	case errors.Is(err, docBusiness.ErrNotFound), err == nil && d == nil:
+		return http.StatusNotFound, notThere, nil
+	case err != nil:
+		return 0, nil, err
+	case !docBusiness.CouldRead(d, userInfo.UserDgraphInfo.Uuid):
+		return http.StatusNotFound, notThere, nil
+	case !docBusiness.IsOwner(d, userInfo.UserDgraphInfo.Uid):
+		return http.StatusForbidden, helpers.Envolope{"msg": "Only the doc's owner can share it outside the workspace."}, nil
+	case newLink && docBusiness.IsDeleted(d):
+		return http.StatusGone, helpers.Envolope{"msg": "This doc was deleted.", "deleted": true}, nil
 	}
-	if !docBusiness.IsOwner(d, userInfo.UserDgraphInfo.Uid) {
-		if docBusiness.IsDeleted(d) && !docBusiness.CouldEdit(d, userInfo.UserDgraphInfo.Uid) {
-			return http.StatusNotFound, helpers.Envolope{"msg": "Document not found"}
-		}
-		return http.StatusForbidden, helpers.Envolope{"msg": "Only the doc's owner can share it outside the workspace."}
-	}
-	if newLink && docBusiness.IsDeleted(d) {
-		return http.StatusGone, helpers.Envolope{"msg": "This doc was deleted.", "deleted": true}
-	}
-	return 0, nil
+	return 0, nil, nil
 }
 
 // GuestLinkView is one live link to a resource, for the people who may share it.
@@ -1053,7 +1035,11 @@ func ListResourceGuestLinks(w http.ResponseWriter, r *http.Request) {
 	resourceType, resourceID := q.Get("resource_type"), q.Get("resource_id")
 	onlyMine := false
 	if resourceType == guestModel.ResourceDoc {
-		status, _ := docShareRefusal(r.Context(), userInfo, resourceID, false)
+		status, _, err := docShareRefusal(r.Context(), userInfo, resourceID, false)
+		if err != nil {
+			helpers.WriteDocReadFailure(w, r, err, "controllers/ListResourceGuestLinks")
+			return
+		}
 		onlyMine = status != 0
 	} else if !mayShare(w, r, userInfo, resourceType, resourceID, false) {
 		return

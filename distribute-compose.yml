@@ -974,6 +974,11 @@ services:
     restart: unless-stopped
     environment:
       - PORT=1234
+      # The Live Doc Writer's internal port (live/server.js): the API's writes
+      # into open docs. Deliberately NOT routed by Traefik (the labels below
+      # name 1234 only) and never published: go-service reaches it on this
+      # network as http://collaboration-service:1235, with INTERNAL_SECRET.
+      - LIVE_PORT=1235
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - GO_BACKEND_URL=http://go-service:3000

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	bookingModel "github.com/akashc777/OneCamp/models/postgres/Booking"
 )
 
 func TestNormaliseSlug(t *testing.T) {
@@ -48,6 +50,13 @@ func TestCheckGuest(t *testing.T) {
 	if err != nil || g.Name != "Priya Shah" || g.Email != "priya@example.com" || g.TZ != "UTC" {
 		t.Fatalf("got %+v %v", g, err)
 	}
+	// "Local" is the server's own zone and nobody's: kept, every email about
+	// the booking would say its times in the server's zone, "(Local)".
+	for tz, want := range map[string]string{"Local": "UTC", "": "UTC", "Asia/Kolkata": "Asia/Kolkata"} {
+		if g, err := CheckGuest(BookInput{Name: "Priya", Email: "priya@example.com", TZ: tz}); err != nil || g.TZ != want {
+			t.Errorf("zone %q kept as %q (%v), want %q", tz, g.TZ, err, want)
+		}
+	}
 	for _, in := range []BookInput{{Name: "", Email: "a@b.co"}, {Name: "A", Email: "nope"}, {Name: "A", Email: "a@localhost"},
 		{Name: "A", Email: "a@b.co", Note: strings.Repeat("x", 1001)}} {
 		if _, err := CheckGuest(in); err == nil {
@@ -56,22 +65,20 @@ func TestCheckGuest(t *testing.T) {
 	}
 }
 
+// A booking's guest reads its times in the zone they booked in, or the
+// page's when the booking kept none; never the server's own ("Local").
+func TestGuestZone(t *testing.T) {
+	page := &bookingModel.Page{Hours: []byte(`{"tz":"Europe/Berlin"}`)}
+	for kept, want := range map[string]string{"Asia/Kolkata": "Asia/Kolkata", "": "Europe/Berlin", "Local": "Europe/Berlin", "Mars/Base": "Europe/Berlin"} {
+		if got := guestZone(&bookingModel.Booking{GuestTZ: kept}, page); got != want {
+			t.Errorf("a booking kept in %q is read in %q, want %q", kept, got, want)
+		}
+	}
+}
+
 func TestFormatWhen(t *testing.T) {
 	s := time.Date(2026, 10, 6, 4, 30, 0, 0, time.UTC)
 	if got := FormatWhen(s, s.Add(30*time.Minute), "Asia/Kolkata"); got != "Tuesday 6 October 2026, 10:00–10:30 (Asia/Kolkata)" {
 		t.Fatalf("got %q", got)
-	}
-}
-
-// CAL-BUG-3 on this edition: deleting a page deletes its bookings, so a page
-// with bookings still to come is kept, and the owner is told what to do.
-func TestAPageWithBookingsSaysToSwitchItOff(t *testing.T) {
-	for n, want := range map[int]string{
-		1: "This page has 1 upcoming booking. Switch it off instead: its link stops working, and its guests can still cancel.",
-		2: "This page has 2 upcoming bookings. Switch it off instead: its link stops working, and its guests can still cancel.",
-	} {
-		if got := (&PageHasBookingsError{Upcoming: n}).Error(); got != want {
-			t.Errorf("%d: %q", n, got)
-		}
 	}
 }

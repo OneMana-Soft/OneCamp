@@ -122,6 +122,33 @@ type SourceRef struct {
 	SourceID string
 }
 
+// SourcePage is one page a provider brings, which becomes a doc.
+type SourcePage struct {
+	SourceID string
+	// ParentSourceID is the page it sits under, among the pages of its tree;
+	// "" for the tree's root.
+	ParentSourceID string
+	Title          string
+	// Icon is the page's emoji, when it has one.
+	Icon string
+	// HTML is its content in the editor's own HTML, which an import reads as
+	// foreign HTML. A link to another page of its tree is that page's SourceID
+	// as a relative address, and becomes a link to its doc.
+	HTML string
+	// Files are what the HTML names by a relative address (a picture the
+	// provider read, because its own address expires), by that address.
+	Files map[string][]byte
+}
+
+// PageSource is a provider that brings pages (CapPages). Its Plan queues one
+// ChunkDocPages chunk per tree of pages, the tree's root as the chunk's
+// ParentSourceId.
+type PageSource interface {
+	// PagesOf reads the tree of pages under root, every page after the page
+	// it sits under; read says how many pages it has read so far, as it goes.
+	PagesOf(ctx context.Context, j *importModels.Job, opts JobOptions, root string, read func(pages int)) ([]SourcePage, error)
+}
+
 // ─── Plan DTO ────────────────────────────────────────────────────────
 
 // Plan is what BuildPlan returns. The orchestrator persists it in
@@ -133,6 +160,7 @@ type Plan struct {
 	TeamCount    int      `json:"team_count"`
 	ProjectCount int      `json:"project_count"`
 	TaskCount    int      `json:"task_count"`
+	PageCount    int      `json:"page_count,omitempty"` // pages that become docs (CapPages)
 	SubtaskCount int      `json:"subtask_count"`
 	CommentCount int      `json:"comment_count"`
 	FileCount    int      `json:"file_count"`
@@ -170,6 +198,8 @@ const (
 	CapDMs
 	CapMessages
 	CapReactions
+	// CapPages is a provider that brings pages, which become docs (PageSource).
+	CapPages
 )
 
 // JobOptions are per-import operator knobs. The orchestrator and

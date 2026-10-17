@@ -54,7 +54,7 @@ func setUpPlacesForFiles(t *testing.T) *placesForFiles {
 	}
 	integration.StubMqttClient(t)
 	dg := integration.SetupDgraph(t)
-	startUploadMinio(t)
+	startMinio(t)
 
 	p := &placesForFiles{env: env, people: map[string]uuid.UUID{}}
 	var nodes []map[string]any

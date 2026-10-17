@@ -43,8 +43,21 @@ import (
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/router"
+	"github.com/akashc777/OneCamp/services/collab"
 	"github.com/akashc777/OneCamp/tests/integration"
 )
+
+// liveAccepts is the Live Doc Writer taking every first body and every
+// addition, with no collaboration service running.
+type liveAccepts struct{ collab.Writer }
+
+func (liveAccepts) Seed(context.Context, string, string, collab.Options) (collab.Result, error) {
+	return collab.Result{}, nil
+}
+
+func (liveAccepts) Append(context.Context, string, string, collab.Options) (collab.Result, error) {
+	return collab.Result{Blocks: 1}, nil
+}
 
 func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 	t.Setenv("JWT_SECRET", "public-api-routes-integration-secret")
@@ -70,6 +83,9 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 	opensearchInit.OpenSearchClient = client
 	settingsBusiness.ForgetSettingsForTest()
 	t.Cleanup(settingsBusiness.ForgetSettingsForTest)
+	savedLive := collab.Live
+	collab.Live = liveAccepts{}
+	t.Cleanup(func() { collab.Live = savedLive })
 
 	person := func(email, name string) userModels.UserInfo {
 		t.Helper()
@@ -139,7 +155,7 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 	}
 
 	// One case per route, in an order where each has what it needs.
-	var taskID string
+	var taskID, docID string
 	type step struct {
 		route string // "METHOD /pattern" as the router has it
 		run   func() (int, map[string]any)
@@ -176,6 +192,18 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 		}},
 		{"GET /v1/search", func() (int, map[string]any) { return call("GET", "/v1/search?q=deploy", nil) }},
 		{"POST /v1/search", func() (int, map[string]any) { return call("POST", "/v1/search", map[string]any{"query": "deploy"}) }},
+		{"POST /v1/docs", func() (int, map[string]any) {
+			code, out := call("POST", "/v1/docs", map[string]any{"markdown": "# Release notes\n\n- api\n- web"})
+			if d, ok := out["data"].(map[string]any); ok {
+				docID, _ = d["uuid"].(string)
+			}
+			return code, out
+		}},
+		{"GET /v1/docs/{id}", func() (int, map[string]any) { return call("GET", "/v1/docs/"+docID, nil) }},
+		{"POST /v1/docs/{id}/append", func() (int, map[string]any) {
+			return call("POST", "/v1/docs/"+docID+"/append", map[string]any{"markdown": "Shipped at 9."})
+		}},
+		{"GET /v1/docs", func() (int, map[string]any) { return call("GET", "/v1/docs?scope=mine", nil) }},
 		{"POST /v1/mcp", func() (int, map[string]any) {
 			return call("POST", "/v1/mcp", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize",
 				"params": map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{}, "clientInfo": map[string]any{"name": "ci", "version": "1"}}})
@@ -222,5 +250,8 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 	}
 	if taskID == "" {
 		t.Error("POST /v1/tasks named no task_uuid")
+	}
+	if docID == "" {
+		t.Error("POST /v1/docs named no uuid")
 	}
 }

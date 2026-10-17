@@ -19,7 +19,7 @@ type InputUpdateBoard struct {
 }
 
 // InputBoardCollabUpdate is the payload the Hocuspocus board namespace POSTs to
-// persist the serialized Yjs board state (mirrors InputDocCollabUpdate).
+// persist the serialized Yjs board state (as docBusiness.CollabSave is a doc's).
 type InputBoardCollabUpdate struct {
 	BoardUuid string `json:"documentId"`
 	State     string `json:"state"`

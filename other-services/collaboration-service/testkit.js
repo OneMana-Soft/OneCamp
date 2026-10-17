@@ -1,8 +1,9 @@
-// Test support for collabServer.test.js: an in-memory Redis, an API that
-// behaves like the Go endpoints the service calls, and a minimal Hocuspocus
+// Test support for the collaboration server's tests: an in-memory Redis, an API
+// that behaves like the Go endpoints the service calls, and a minimal Hocuspocus
 // client over a real websocket (the protocol a browser's provider speaks).
 // Not a test file itself (node --test runs *.test.js only).
 
+import { afterEach } from 'node:test'
 import { createRequire } from 'node:module'
 import * as Y from 'yjs'
 import { bodyHash } from './docState.js'
@@ -11,6 +12,52 @@ import { createCollabServer } from './collabServer.js'
 const require = createRequire(import.meta.url)
 // ws comes with Hocuspocus (no direct dependency needed for tests).
 const WebSocket = createRequire(require.resolve('@hocuspocus/server'))('ws')
+
+// ---------------------------------------------------------------------------
+// What a test opens is let go when it ends, however it ends
+// ---------------------------------------------------------------------------
+// A test closes its tabs and stops its server at its end. A test that fails
+// first never gets there, and what it opened (a listening server, its tabs'
+// sockets, the server's timers) keeps the test file's process alive. node
+// --test waits for every file's process to exit, so one failed assertion held
+// the whole run for ever instead of failing it: it happened on 12 Oct, when a
+// message every tab now hears as it connects came before the one a test read
+// first, and the suite hung instead of reporting that test.
+//
+// So after each test the kit lets go of whatever is still open, newest first
+// (tabs before the server they talk to): every server startServer started,
+// every tab that connected, and whatever a test hands to onClose. What a test
+// let go of itself is not touched again. The hook is registered at the top level
+// of every test file that imports the kit, so it covers every test in it; open
+// what a test needs inside that test (or its subtest), never shared between
+// tests.
+const opened = []
+
+// onClose registers release to run when the current test ends, and returns a
+// function that runs it at once instead (once, however often it is called).
+export function onClose(release) {
+    let done = null
+    const once = () => {
+        if (!done) {
+            const i = opened.indexOf(once)
+            if (i >= 0) opened.splice(i, 1)
+            done = Promise.resolve().then(release)
+        }
+        return done
+    }
+    opened.push(once)
+    return once
+}
+
+afterEach(async () => {
+    while (opened.length) {
+        try {
+            await opened.pop()()
+        } catch {
+            // What the test reports is its own failure, not this.
+        }
+    }
+})
 
 // ---------------------------------------------------------------------------
 // Redis
@@ -51,6 +98,7 @@ export class FakeRedis {
     async set(k, v) { this.check(); this.data.set(k, v); return 'OK' }
     async exists(k) { this.check(); return this.data.has(k) ? 1 : 0 }
     async expire() { this.check(); return 1 }
+    async srem(k, ...v) { this.check(); const set = this.data.get(k); let n = 0; for (const x of v) n += set?.delete(x) ? 1 : 0; return n }
     async sadd(k, ...v) { this.check(); if (!this.data.has(k)) this.data.set(k, new Set()); for (const x of v) this.data.get(k).add(x); return 1 }
     async smembers(k) { this.check(); return [...(this.data.get(k) || [])] }
     async scan(cursor, _m, pattern) {
@@ -74,10 +122,17 @@ export class FakeBackend {
         this.authStatus = null // e.g. 410 to refuse joining a deleted doc
         this.dropStateOnly = false // ignore keepBody writes (no saved state)
         this.saves = []
+        // The Doc Session (session.js): each person's level on every doc, by
+        // their token's sub; 'edit' when not set. A level of 'none' is a 403,
+        // 'gone' a 410. legacy: an API from before /docColab/session.
+        this.levels = new Map()
+        this.legacy = false
+        this.sessionAsks = []
         this.saveAttempts = 0 // every save asked for, refused or not
+        this.payloads = [] // every doc save request, as sent
         this.api = {
             get: async (url) => this.get(url),
-            post: async (url, body) => this.post(url, body),
+            post: async (url, body, config) => this.post(url, body, config),
         }
     }
     doc(id, body, extra = {}) {
@@ -100,8 +155,29 @@ export class FakeBackend {
         }
         throw httpError(404, `no route ${path}`)
     }
-    async post(url, body) {
+    async post(url, body, config) {
         const path = new URL(url).pathname
+        if (path === '/docColab/session') {
+            if (this.legacy) throw Object.assign(new Error('Request failed with status code 404'), { response: { status: 404, data: '404 page not found' } })
+            const headers = config?.headers || {}
+            if (!headers['X-Internal-Secret']) throw httpError(401, 'no secret')
+            let sub = null
+            try { sub = JSON.parse(String(headers.Authorization || '').replace(/^Bearer /, '')).sub } catch { /* not a test token */ }
+            this.sessionAsks.push({ sub, doc: body.doc_uuid })
+            // authStatus refuses everyone, as the API does a doc that went to
+            // the trash or was never there (410, 404).
+            if (this.authStatus) throw httpError(this.authStatus, 'refused')
+            const level = this.levels.get(sub) || 'edit'
+            if (level === 'none') throw httpError(403, 'Unauthorized doc access')
+            if (level === 'gone') throw httpError(410, 'This doc was deleted.')
+            return { status: 200, data: { msg: 'Authorised', level, canEdit: level === 'edit' || level === 'full', locked: false } }
+        }
+        if (this.legacy && path === '/docColab/authorize') {
+            const sub = (() => { try { return JSON.parse(String(config?.headers?.Authorization || '').replace(/^Bearer /, '')).sub } catch { return null } })()
+            const level = this.levels.get(sub) || 'edit'
+            if (level !== 'edit' && level !== 'full') throw httpError(403, 'Unauthorized doc access')
+            return { status: 200, data: { msg: 'Authorised' } }
+        }
         if (/\/(docColab|boardColab)\/(authorize|guestAuthorize)$/.test(path)) {
             if (this.authStatus) throw httpError(this.authStatus, 'refused')
             return { status: 200, data: { canEdit: true } }
@@ -111,19 +187,20 @@ export class FakeBackend {
             if (this.saveStatus) throw httpError(this.saveStatus, 'refused')
             const d = this.docs.get(body.documentId)
             if (!d) throw httpError(404, "There's no such doc.")
+            this.payloads.push(body)
             if (body.keepBody) {
-                if (this.dropStateOnly) return { status: 200 }
+                if (this.dropStateOnly) return { status: 200, data: { data: { stored: false } } }
                 const hash = bodyHash(d.doc_body)
-                if (body.expectBodyHash && body.expectBodyHash !== hash) return { status: 200 }
-                Object.assign(d, { doc_yjs_state: body.yjsState, doc_yjs_body_hash: hash })
-                this.saves.push({ id: body.documentId, keepBody: true })
-                return { status: 200 }
+                if (body.expectBodyHash && body.expectBodyHash !== hash) return { status: 200, data: { data: { stored: false } } }
+                Object.assign(d, { doc_yjs_state: body.yjsState, doc_yjs_body_hash: hash, doc_yjs_lineage: body.lineage || '' })
+                this.saves.push({ id: body.documentId, keepBody: true, contributors: body.contributors || [], agents: body.agents || [] })
+                return { status: 200, data: { data: { stored: true } } }
             }
             const html = body.htmlContent || ''
             if (!html.trim() || html.trim() === '<p>Error generating HTML</p>') throw httpError(422, 'unsafe body')
-            Object.assign(d, { doc_body: html, doc_yjs_state: body.yjsState || d.doc_yjs_state, doc_yjs_body_hash: body.yjsState ? bodyHash(html) : d.doc_yjs_body_hash })
-            this.saves.push({ id: body.documentId, html })
-            return { status: 200 }
+            Object.assign(d, { doc_body: html, doc_yjs_state: body.yjsState || d.doc_yjs_state, doc_yjs_body_hash: body.yjsState ? bodyHash(html) : d.doc_yjs_body_hash, doc_yjs_lineage: body.lineage || '' })
+            this.saves.push({ id: body.documentId, html, contributors: body.contributors || [], agents: body.agents || [] })
+            return { status: 200, data: { data: { stored: true } } }
         }
         if (path === '/boardColab/updateBoard') {
             if (this.saveStatus) throw httpError(this.saveStatus, 'refused')
@@ -159,6 +236,8 @@ export async function startServer({ redis, backend, log = quietLog(), ...options
         retryDelays: [30, 60, 120],
         ...options,
     })
+    // Stopped when the test ends, unless it stops it first.
+    collab.stop = onClose(collab.stop)
     await collab.server.listen()
     collab.url = `ws://127.0.0.1:${collab.server.address.port}`
     collab.logs = log
@@ -227,13 +306,20 @@ export class TestClient {
         this.authenticated = false
         this.denied = null
         this.synced = false
+        this.error = null
         const url = this.schema ? `${this.url}/?schema=${this.schema}` : this.url
-        this.ws = new WebSocket(url)
-        this.ws.binaryType = 'nodebuffer'
+        const ws = new WebSocket(url)
+        this.ws = ws
+        ws.binaryType = 'nodebuffer'
+        // Closed when the test ends, unless it closes the tab first.
+        this.release = onClose(() => closeSocket(ws))
         return new Promise((resolve) => {
-            this.ws.on('open', () => this.ws.send(this.msg(2, 0, this.token)))
-            this.ws.on('message', (data) => this.handle(Buffer.from(data), resolve))
-            this.ws.on('close', () => resolve('closed'))
+            ws.on('open', () => ws.send(this.msg(2, 0, this.token)))
+            ws.on('message', (data) => this.handle(Buffer.from(data), resolve))
+            // A socket that fails is closed next ('close' follows); kept here,
+            // not thrown out of the test file.
+            ws.on('error', (e) => { this.error = e })
+            ws.on('close', () => resolve('closed'))
         })
     }
     handle(buf, resolve) {
@@ -271,17 +357,24 @@ export class TestClient {
         }
     }
     async close() {
-        if (!this.ws) return
-        const ws = this.ws
+        const release = this.release
+        this.release = null
         this.ws = null
-        await new Promise((resolve) => {
-            ws.once('close', resolve)
-            ws.close()
-        })
+        if (release) await release()
     }
     destroy() {
         this.doc.off('update', this.onUpdate)
     }
+}
+
+// closeSocket closes a tab's socket and waits until it is closed. One the
+// server already closed is closed: its 'close' has been and will not come again.
+function closeSocket(ws) {
+    if (ws.readyState === WebSocket.CLOSED) return Promise.resolve()
+    return new Promise((resolve) => {
+        ws.once('close', resolve)
+        ws.close()
+    })
 }
 
 // Wait until a condition holds (polling), or fail after `ms`.

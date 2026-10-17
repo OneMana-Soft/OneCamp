@@ -135,35 +135,17 @@ func SaveBookingPage(ctx context.Context, owner uuid.UUID, in PageInput) (*booki
 	return saved, err
 }
 
-// PageHasBookingsError is a page that can't be deleted while bookings made
-// through it are still to come: on this edition deleting a page deletes its
-// bookings, and their guests' links with them (CAL-BUG-3). Switching it off
-// stops new bookings and keeps them. Its text is written for the owner.
-type PageHasBookingsError struct{ Upcoming int }
-
-func (e *PageHasBookingsError) Error() string {
-	n := "1 upcoming booking"
-	if e.Upcoming != 1 {
-		n = fmt.Sprintf("%d upcoming bookings", e.Upcoming)
-	}
-	return "This page has " + n + ". Switch it off instead: its link stops working, and its guests can still cancel."
-}
-
-// DeleteBookingPage deletes one of the person's pages; false when it isn't
-// theirs, and a PageHasBookingsError while bookings made through it are
-// still to come.
-func DeleteBookingPage(ctx context.Context, owner, id uuid.UUID) (bool, error) {
+// DeleteBookingPage deletes one of the person's pages, and says how many of
+// its bookings are still to come; false when it isn't theirs. The page stops
+// taking bookings and leaves their list, while its bookings stay on their
+// calendar with their guests' links working (CAL-BUG-3): deleting a page
+// used to delete every booking made through it.
+func DeleteBookingPage(ctx context.Context, owner, id uuid.UUID) (bool, int, error) {
 	ok, upcoming, err := bookingModel.DeletePage(owner, id)
-	if err != nil {
-		return false, err
-	}
-	if upcoming > 0 {
-		return false, &PageHasBookingsError{Upcoming: upcoming}
-	}
 	if ok {
 		pageCache.forgetOwner(owner.String())
 	}
-	return ok, nil
+	return ok, upcoming, err
 }
 
 // PublicPage is what a visitor sees: never the owner's events, only free slots.
@@ -197,7 +179,7 @@ func loadPage(ctx context.Context, slug string) (*livePage, error) {
 	if err != nil {
 		return nil, err
 	}
-	if p == nil || !p.Active {
+	if p == nil || !pageLive(p) {
 		return nil, ErrNoPage
 	}
 	var hours WorkingHours
@@ -378,7 +360,11 @@ func CheckGuest(in BookInput) (BookInput, error) {
 	if utf8.RuneCountInString(in.Note) > 1000 {
 		return in, &AvailabilityError{"Keep the note under 1,000 characters."}
 	}
-	if _, err := time.LoadLocation(in.TZ); err != nil || in.TZ == "" {
+	// The zone the guest reads the booking's times in, kept with the booking:
+	// one Go knows, and never "Local", the server's own and nobody's.
+	if loc, ok := helpers.FirstLocation(in.TZ); ok {
+		in.TZ = loc.String()
+	} else {
 		in.TZ = "UTC"
 	}
 	return in, nil
@@ -447,6 +433,7 @@ func Book(ctx context.Context, slug string, in BookInput, now time.Time) (*Booke
 	}
 	b, err := bookingModel.Reserve(bookingModel.Booking{
 		PageId: l.page.Id, GuestName: in.Name, GuestEmail: in.Email, Note: in.Note, StartsAt: start, EndsAt: end,
+		GuestTZ: in.TZ,
 	}, token)
 	if errors.Is(err, bookingModel.ErrSlotTaken) {
 		return nil, &AvailabilityError{"That time was just taken. Pick another."}
@@ -510,6 +497,9 @@ type BookingView struct {
 	// PageLive is whether the page still takes bookings: the page offers
 	// "Book another time" only then.
 	PageLive bool `json:"page_live"`
+	// CancelledByHost is a booking its host cancelled, by deleting the
+	// meeting: the page says so rather than the guest's own cancel's words.
+	CancelledByHost bool `json:"cancelled_by_host"`
 	// OwnerTold, on a cancel's answer, is whether the owner was told of it:
 	// an inbox item, or an email queued.
 	OwnerTold bool `json:"owner_told,omitempty"`
@@ -526,7 +516,8 @@ type tokenBooking struct {
 
 func (t *tokenBooking) view() *BookingView {
 	return &BookingView{BookingID: t.b.Id.String(), Title: t.p.Title, OwnerName: t.owner, Start: t.b.StartsAt,
-		End: t.b.EndsAt, Cancelled: t.b.CancelledAt != nil, Slug: t.p.Slug, PageLive: t.live}
+		End: t.b.EndsAt, Cancelled: t.b.CancelledAt != nil, Slug: t.p.Slug, PageLive: t.live,
+		CancelledByHost: t.b.CancelledAt != nil && t.b.CancelledBy != nil && *t.b.CancelledBy == bookingModel.CancelledByHost}
 }
 
 func bookingForToken(ctx context.Context, token string) (*tokenBooking, error) {
@@ -544,7 +535,8 @@ func bookingForToken(ctx context.Context, token string) (*tokenBooking, error) {
 	if err != nil || p == nil {
 		return nil, ErrNoPage
 	}
-	t := &tokenBooking{b: b, p: p, live: p.Active}
+	// A deleted page keeps its bookings and their links, but takes no more.
+	t := &tokenBooking{b: b, p: p, live: pageLive(p)}
 	du, err := userDomain.GetDgraphUserInfoByUUID(ctx, p.UserId.String())
 	if err == nil && du != nil {
 		t.owner = bookingOwnerName(du)
@@ -614,7 +606,7 @@ func CancelBooking(ctx context.Context, token string) (*BookingView, error) {
 		subject:  fmt.Sprintf("Cancelled: %s with %s", p.Title, name),
 		title:    "Your booking is cancelled",
 		subtitle: p.Title,
-		body:     FormatWhen(b.StartsAt, b.EndsAt, hours.TZ),
+		body:     FormatWhen(b.StartsAt, b.EndsAt, guestZone(b, p)),
 		ctaText:  "Book another time", ctaURL: bookAgainURL(p, t.live),
 		footer: "You cancelled this through your booking's link. If it's in your calendar, the update attached takes it off.",
 		invite: bookingInvite(inviteCancel, b, p.Title, name, false, time.Now()),

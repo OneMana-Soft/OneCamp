@@ -11,7 +11,7 @@ func init() {
 	register(Provider{
 		ID:          ProviderGmail,
 		Name:        "Gmail",
-		Description: "Let the AI search and summarize your email, and draft replies for your approval.",
+		Description: "Let the AI search and summarise your email, and draft replies for your approval.",
 		IconKey:     "gmail",
 		reuseClient: "google",
 		AuthURL:     "https://accounts.google.com/o/oauth2/v2/auth",

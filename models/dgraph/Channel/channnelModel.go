@@ -3,7 +3,6 @@ package models
 import (
 	"context"
 	"encoding/json"
-	"errors"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -12,8 +11,9 @@ import (
 )
 
 // ErrNotFound is a channel the graph has no node for, as opposed to a graph
-// that didn't answer.
-var ErrNotFound = errors.New("channel not found in dgraph")
+// that didn't answer. It is also helpers.ErrNotFound, which
+// helpers.WriteReadFailure answers as a 404.
+var ErrNotFound = helpers.NotFound("channel not found in dgraph")
 
 func CreateOrUpdateDgraphChannel(ctx context.Context, dgraphChannel *dgraphStruct.DgraphChannel, query string) (channelUid string, err error) {
 	pb, err := json.Marshal(dgraphChannel)

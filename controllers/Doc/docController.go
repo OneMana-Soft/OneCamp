@@ -10,8 +10,8 @@ import (
 	"sort"
 	"strconv"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
-	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
 	business "github.com/akashc777/OneCamp/business/Doc"
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
 	reactionBusiness "github.com/akashc777/OneCamp/business/Reaction"
@@ -36,7 +36,7 @@ func docGone(w http.ResponseWriter, couldSee bool) {
 		helpers.WriteJSON(w, http.StatusGone, helpers.Envolope{"msg": "This doc was deleted.", "deleted": true})
 		return
 	}
-	noSuchDoc(w)
+	helpers.WriteDocNotFound(w)
 }
 
 // docListPage bounds a list's paging as asked of the graph: a page of 1 to
@@ -87,8 +87,12 @@ const (
 	maxDocListOffset = 1_000_000
 )
 
-func noSuchDoc(w http.ResponseWriter) {
-	helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such doc."})
+// docDeleted is the doc page's 410 for a doc in the trash, for someone it was
+// there for. It also says whether they may restore it (its owner, full
+// access, its editors or an admin: business.CanRestore, the trash's rule,
+// which the restore checks again), so the page offers Restore only to them.
+func docDeleted(w http.ResponseWriter, canRestore bool) {
+	helpers.WriteJSON(w, http.StatusGone, helpers.Envolope{"msg": "This doc was deleted.", "deleted": true, "can_restore": canRestore})
 }
 
 // docMissing answers an error that says the doc isn't there for the person
@@ -99,65 +103,11 @@ func docMissing(w http.ResponseWriter, err error) bool {
 	case errors.Is(err, business.ErrDocDeleted):
 		docGone(w, true)
 	case errors.Is(err, business.ErrNotFound):
-		noSuchDoc(w)
+		helpers.WriteDocNotFound(w)
 	default:
 		return false
 	}
 	return true
-}
-
-func GetDocInfo(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	docUUIDString := chi.URLParam(r, "doc_uuid")
-	_, err := uuid.Parse(docUUIDString)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDocInfo Failed to parse docUUID string to uuid err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse docUUID string to uuid",
-			"err": err,
-		})
-		return
-	}
-
-	dgraphDoc, err := business.GetDocByDocUUID(ctx, docUUIDString, userInfo.UserDgraphInfo.Uid)
-
-	if docMissing(w, err) {
-		return
-	}
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDocInfo Failed to get dgraph doc info from dgraph err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to dgraph doc info from dgraph",
-			"err": err,
-		})
-		return
-	}
-
-	if business.IsDeleted(dgraphDoc) {
-		docGone(w, business.CouldRead(dgraphDoc, userInfo.UserDgraphInfo.Uuid))
-		return
-	}
-
-	if !business.CanRead(dgraphDoc, userInfo.UserDgraphInfo.Uuid) {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
-		return
-	}
-
-	dgraphDoc.MqttTopic = helpers.GetMqttTopicForDoc(dgraphDoc.Uuid)
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "got docInfo successfully!", "data": dgraphDoc})
-
 }
 
 func DeleteReactionOnCommentDoc(w http.ResponseWriter, r *http.Request) {
@@ -187,7 +137,7 @@ func DeleteReactionOnCommentDoc(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get comment dgraph info",
+			"msg": "Couldn't remove the reaction. Try again.",
 			"err": err,
 		})
 		return
@@ -247,7 +197,7 @@ func CreateOrUpdateDocCommentReaction(w http.ResponseWriter, r *http.Request) {
 			err)
 
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph comment",
+			"msg": "Couldn't add the reaction. Try again.",
 			"err": err,
 		})
 		return
@@ -337,7 +287,7 @@ func DeleteDocComment(w http.ResponseWriter, r *http.Request) {
 			"controllers/DeleteDocComment Failed to get dgraph doc comment info from dgraph err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to dgraph doc comment info from dgraph",
+			"msg": "Couldn't delete the comment. Try again.",
 			"err": err,
 		})
 		return
@@ -368,7 +318,7 @@ func DeleteDocComment(w http.ResponseWriter, r *http.Request) {
 			"controllers/DeleteDocComment Failed to delete comment from dgraph err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to delete comment from dgraph",
+			"msg": "Couldn't delete the comment. Try again.",
 			"err": err,
 		})
 		return
@@ -420,7 +370,7 @@ func UpdateDocComment(w http.ResponseWriter, r *http.Request) {
 			"controllers/UpdateDocComment Failed to get dgraph doc comment info from dgraph err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to dgraph doc comment info from dgraph",
+			"msg": "Couldn't save your edit. Try again.",
 			"err": err,
 		})
 		return
@@ -518,7 +468,7 @@ func CreateDocComment(w http.ResponseWriter, r *http.Request) {
 			"controllers/CreateDocComment Failed to get dgraph doc info from dgraph err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to dgraph doc info from dgraph",
+			"msg": "Couldn't post the comment. Try again.",
 			"err": err,
 		})
 		return
@@ -569,7 +519,7 @@ func CreateDocComment(w http.ResponseWriter, r *http.Request) {
 			"controllers/CreateDocComment Failed to create comment in dgraph err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to create comment in dgraph",
+			"msg": "Couldn't post the comment. Try again.",
 			"err": err,
 		})
 		return
@@ -634,7 +584,7 @@ func GetPrivateDocList(w http.ResponseWriter, r *http.Request) {
 			"controllers/GetPrivateDocList Failed to get doc list from dgraph err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get doc list from dgraph",
+			"msg": "Couldn't load your docs.",
 			"err": err,
 		})
 		return
@@ -706,7 +656,7 @@ func GetPublicDocList(w http.ResponseWriter, r *http.Request) {
 			"controllers/GetPublicDocList Failed to get doc list from dgraph err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get doc list from dgraph",
+			"msg": "Couldn't load the docs.",
 			"err": err,
 		})
 		return
@@ -765,10 +715,22 @@ func GetAllCommentList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !business.CanRead(docDgraph, userInfo.UserDgraphInfo.Uuid) {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+		refuseDoc(ctx, w, userInfo, docDgraph.Uuid)
+		return
+	}
+	// The comment box is offered by these counts: they say what the Access
+	// Resolver says, as GetDocInfo's do. They were the doc's direct shares
+	// only, so a member who could comment through its general access, a team,
+	// its space, full access or a hand-over found no box (docs incident, 14
+	// Oct 2026).
+	resolved, err := business.ShowAccessNow(ctx, docDgraph, business.Viewer{UID: userInfo.UserDgraphInfo.Uid, UUID: userInfo.UserDgraphInfo.Uuid})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/GetAllCommentList %s: what the person may do couldn't be decided: %+v", docDgraph.Uuid, err)
+		helpers.WriteRetryLater(w, "Couldn't load the comments just now.")
+		return
+	}
+	if resolved.Level < accessBusiness.LevelView {
+		refuseDoc(ctx, w, userInfo, docDgraph.Uuid)
 		return
 	}
 
@@ -780,7 +742,7 @@ func GetAllCommentList(w http.ResponseWriter, r *http.Request) {
 	// plain text and HTML-escaped here (the UI renders comment_text as HTML).
 	mergeGuestDocComments(ctx, docDgraph, docUUIDString)
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "created doc successfully!", "data": docDgraph})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "got comments", "data": docDgraph})
 
 }
 
@@ -818,303 +780,22 @@ func mergeGuestDocComments(ctx context.Context, docDgraph *dgraphStruct.DgraphDo
 	})
 }
 
-func CreateDoc(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	var docInfo adapter.InputCreateDoc
-
-	err := json.NewDecoder(r.Body).Decode(&docInfo)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateDoc Failed to parse the body of the req err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse the body of the req",
-			"err": err,
-		})
-		return
-	}
-
-	dgraphDoc, err := business.CreateDoc(ctx, &userInfo.UserDgraphInfo, &docInfo)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateDoc Failed to create doc in dgraph err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to create doc in dgraph",
-			"err": err,
-		})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "created doc successfully!", "data": dgraphDoc})
-
-}
-
-func DeleteDoc(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	var docInfo adapter.InputUpdateDoc
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	err := json.NewDecoder(r.Body).Decode(&docInfo)
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/DeleteDoc Failed to parse the body of the req err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse the body of the req",
-			"err": err,
-		})
-		return
-	}
-
-	docDgraph, err := business.GetBasicDgraphDocByUUID(ctx, docInfo.DocId, userInfo.UserDgraphInfo.Uid)
-	if docMissing(w, err) {
-		return
-	}
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/DeleteDoc Failed to get dgraph doc err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph doc",
-			"err": err,
-		})
-		return
-	}
-	if business.IsDeleted(docDgraph) {
-		docGone(w, business.CouldRead(docDgraph, userInfo.UserDgraphInfo.Uuid))
-		return
-	}
-
-	if !business.IsOwner(docDgraph, userInfo.UserDgraphInfo.Uid) {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
-		return
-
-	}
-
-	// The demo's own docs stay for every visitor (business/DemoGuard).
-	if demoGuard.KeepsFromVisitor(userInfo.UserPostgresInfo.EmailID, docDgraph.CreatedAt) {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "demo", "msg": helpers.DemoSeededMsg})
-		return
-	}
-
-	err = business.DeleteDoc(ctx, docInfo.DocId)
-
-	if docMissing(w, err) {
-		return
-	}
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/DeleteDoc Failed to delete dgraph doc err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to delete dgraph doc",
-			"err": err,
-		})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "deleted doc successfully!"})
-
-}
-
-func UpdateDocBody(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	var docInfo adapter.InputUpdateDoc
-
-	err := json.NewDecoder(r.Body).Decode(&docInfo)
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/UpdateDocBody Failed to parse the body of the req err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse the body of the req",
-			"err": err,
-		})
-		return
-
-	}
-
-	// Who may change what: editing a doc's body or title takes edit access;
-	// changing who can see it or comment on it is its owner's. This checked
-	// nothing, so anyone could rewrite a private doc or make it public.
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-	if _, perr := uuid.Parse(docInfo.DocId); perr != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid doc id"})
-		return
-	}
-	access, aerr := business.GetDgraphDocByUUIDOnlyEditingInfo(ctx, docInfo.DocId, userInfo.UserDgraphInfo.Uid)
-	if errors.Is(aerr, business.ErrNotFound) || (aerr == nil && access == nil) {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such doc."})
-		return
-	}
-	if aerr != nil {
-		// The graph didn't answer: not an answer about the doc, so the
-		// person can try again.
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Couldn't open the doc just now. Try again in a moment."})
-		return
-	}
-	if business.IsDeleted(access) {
-		docGone(w, business.CouldEdit(access, userInfo.UserDgraphInfo.Uid))
-		return
-	}
-	owner := business.IsOwner(access, userInfo.UserDgraphInfo.Uid)
-	if !business.CanEdit(access, userInfo.UserDgraphInfo.Uid) {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You can't edit this doc."})
-		return
-	}
-	if !owner && (docInfo.IsPrivate != nil || docInfo.PublicComment != nil) {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the doc's owner can change who sees it or comments on it."})
-		return
-	}
-
-	err = business.UpdateDoc(ctx, &docInfo)
-
-	if docMissing(w, err) {
-		return
-	}
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/UpdateDocBody Failed to update doc body err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to update doc body",
-			"err": err,
-		})
-		return
-
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "updated docInfo successfully!"})
-
-}
-
-func UpdateDocFromCollab(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	var collabInput adapter.InputDocCollabUpdate
-
-	err := json.NewDecoder(r.Body).Decode(&collabInput)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/UpdateDocFromCollab Failed to parse the body of the req err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse the body of the req",
-			"err": err,
-		})
-		return
-	}
-
-	// Map to InputUpdateDoc
-	// We'll store the HTML content as the doc body for now
-	err = business.UpdateDocFromCollab(ctx, collabInput.DocUuid, collabInput.HtmlContent, collabInput.YjsState, collabInput.Contributors, collabInput.KeepBody, collabInput.ExpectBodyHash)
-
-	// A doc deleted while an editor was still open on it takes no more saves
-	// (410), and nothing is written into the trash: the collaboration
-	// service keeps the unsaved edits rather than retrying a refusal.
-	if docMissing(w, err) {
-		return
-	}
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/UpdateDocFromCollab Failed to update doc body from collab err: %+v",
-			err)
-		// The collaboration service retries a save that may succeed later and
-		// gives up (quarantining the edits) on one refused for its content, so
-		// a graph that didn't answer must not look like a refusal:
-		// collaboration-service/saveFailures.js isTransient.
-		status := http.StatusServiceUnavailable
-		switch {
-		case errors.Is(err, business.ErrUnsafeCollabBody):
-			status = http.StatusUnprocessableEntity
-		case errors.Is(err, business.ErrNotFound):
-			status = http.StatusNotFound
-		}
-		helpers.WriteJSON(w, status, helpers.Envolope{
-			"msg": "Failed to update doc body",
-			"err": err,
-		})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "updated docInfo successfully!"})
-}
-
+// UpdateDocPermissions is the share dialog's older route, POST
+// /doc/updateDocPermissions, which router.go still declares (deleting that
+// line is the owner's call). A5's mount registers the same method and pattern
+// after it, so UpdateDocSharing answers, and this handler is reached only if
+// that registration ever goes. It is UpdateDocSharing, so either way a change
+// goes by the Access Resolver's rules (the A5×A6 join).
+//
+// On its own it let a doc's owner change its sharing with none of the rules a
+// change follows now: the demo's own docs weren't kept from its shared
+// visitor; someone taken off kept their live sockets; a grant that was to end
+// kept its end when it was given again for good, and so still ended; a change
+// wasn't capped at 200 people; and when the sharing before couldn't be read,
+// the change was made with no event, so no audit row. It never let anyone but
+// the owner share, nor give more than edit.
 func UpdateDocPermissions(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	var input adapter.InputUpdateDocPermissions
-	err := json.NewDecoder(r.Body).Decode(&input)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/UpdateDocPermissions Failed to parse the body of the req err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse the body of the req",
-			"err": err,
-		})
-		return
-	}
-
-	docDgraph, err := business.GetBasicDgraphDocByUUID(ctx, input.DocId, userInfo.UserDgraphInfo.Uid)
-
-	if docMissing(w, err) {
-		return
-	}
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/UpdateDocPermissions Failed to get dgraph doc info err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph doc info",
-			"err": err,
-		})
-		return
-	}
-	if business.IsDeleted(docDgraph) {
-		docGone(w, business.CouldRead(docDgraph, userInfo.UserDgraphInfo.Uuid))
-		return
-	}
-
-	if !business.IsOwner(docDgraph, userInfo.UserDgraphInfo.Uid) {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
-		return
-	}
-
-	err = business.UpdateDocPermissions(ctx, input, userInfo.UserDgraphInfo.Uid)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/UpdateDocPermissions Failed to update doc permmssion %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to update doc permmssion",
-			"err": err,
-		})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "updated doc permissions successfully!"})
+	UpdateDocSharing(w, r)
 }
 
 func GetDocPermissions(w http.ResponseWriter, r *http.Request) {
@@ -1139,7 +820,7 @@ func GetDocPermissions(w http.ResponseWriter, r *http.Request) {
 			"controllers/GetDocPermissions Failed to get dgraph doc info err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get dgraph doc info",
+			"msg": "Couldn't load who can open the doc.",
 			"err": err,
 		})
 		return
@@ -1156,7 +837,7 @@ func GetDocPermissions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	doc, err := business.GetDocPermissions(ctx, docUUID, userUID)
+	doc, err := business.GetDocPermissions(ctx, docUUID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/Doc/GetDocPermissions %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
@@ -1169,6 +850,8 @@ func GetDocPermissions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetDocForCollab is the collaboration service's read of a doc it opens (GET
+// /docColab/getDoc/{doc_uuid}, internal: no person asks it).
 func GetDocForCollab(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -1176,31 +859,24 @@ func GetDocForCollab(w http.ResponseWriter, r *http.Request) {
 
 	// Use GetSystemDocByUUID for internal fetch (no user context needed)
 	dgraphDoc, err := business.GetSystemDocByUUID(ctx, docUUIDString)
-
+	if err == nil && dgraphDoc == nil {
+		err = business.ErrNotFound
+	}
 	// The collaboration service refuses to open a doc it could not read, rather
 	// than serve it empty (an empty doc's first edit was saved over the body),
-	// and retries a read that may work later: so "no such doc" and "the graph
-	// didn't answer" are told apart.
-	if errors.Is(err, business.ErrNotFound) || (err == nil && dgraphDoc == nil) {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such doc."})
+	// and retries a read that may work later: so a doc that isn't there (404)
+	// and a graph that didn't answer (503) are told apart, by the one rule for
+	// a read of one doc.
+	if err != nil {
+		helpers.WriteDocReadFailure(w, r, err, "controllers/GetDocForCollab")
 		return
 	}
 	// A deleted doc isn't opened either. /authorize lets nobody into one, so
 	// this is a session let in a moment before the delete; the service, which
 	// refuses to open a doc it can't read rather than serve it empty, opens
 	// nothing that could later be saved over it.
-	if err == nil && business.IsDeleted(dgraphDoc) {
+	if business.IsDeleted(dgraphDoc) {
 		docGone(w, true)
-		return
-	}
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/GetDocForCollab Failed to get dgraph doc info from dgraph err: %+v",
-			err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{
-			"msg": "Failed to dgraph doc info from dgraph",
-			"err": err,
-		})
 		return
 	}
 
@@ -1210,63 +886,12 @@ func GetDocForCollab(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// DocCollabAuthorize is the live socket's authorisation (POST
+// /docColab/authorize). It delegates to the Access Resolver
+// (AuthorizeDocSocket, docAccessController.go), which the integrator swaps in
+// for this route and then deletes this.
 func DocCollabAuthorize(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	var docInfo adapter.InputUpdateDoc
-
-	err := json.NewDecoder(r.Body).Decode(&docInfo)
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/DocCollabAuthorize Failed to parse the body of the req err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse the body of the req",
-			"err": err,
-		})
-		return
-
-	}
-
-	dgraphDoc, err := business.GetDgraphDocByUUIDOnlyEditingInfo(ctx, docInfo.DocId, userInfo.UserDgraphInfo.Uid)
-
-	if docMissing(w, err) {
-		return
-	}
-	if err != nil || dgraphDoc == nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/DocCollabAuthorize Failed to get doc info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get channel list",
-			"err": err,
-		})
-		return
-
-	}
-
-	// Nobody joins a deleted doc live, its owner included.
-	if business.IsDeleted(dgraphDoc) {
-		docGone(w, business.CouldEdit(dgraphDoc, userInfo.UserDgraphInfo.Uid))
-		return
-	}
-	if !business.CanEdit(dgraphDoc, userInfo.UserDgraphInfo.Uid) {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Unauthorized doc access",
-		})
-		return
-	}
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-		"msg": "Authorised",
-	})
-
+	AuthorizeDocSocket(w, r)
 }
 
 func SearchPrivateDocList(w http.ResponseWriter, r *http.Request) {
@@ -1308,7 +933,7 @@ func SearchPrivateDocList(w http.ResponseWriter, r *http.Request) {
 			"controllers/SearchPrivateDocList Failed to get doc list from dgraph err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get doc list from dgraph",
+			"msg": "Couldn't search your docs.",
 			"err": err,
 		})
 		return
@@ -1364,7 +989,7 @@ func SearchPublicDocList(w http.ResponseWriter, r *http.Request) {
 			"controllers/SearchPublicDocList Failed to get doc list from dgraph err: %+v",
 			err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get doc list from dgraph",
+			"msg": "Couldn't search the docs.",
 			"err": err,
 		})
 		return
@@ -1398,7 +1023,7 @@ func SearchUsersForDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	users, err := business.SearchUsersForDoc(ctx, userInfo.UserDgraphInfo.Uuid, cleanOrEmpty(searchInput.SearchText))
+	users, err := business.SearchUsersForDoc(ctx, userInfo.UserDgraphInfo.Uuid, userInfo.UserPostgresInfo.EmailID, cleanOrEmpty(searchInput.SearchText))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/SearchUsersForDoc Failed to search users err: %+v", err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{

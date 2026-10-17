@@ -59,13 +59,22 @@ func DecodeSearchCursor(cursor string) ([]float64, error) {
 
 // GetUnifiedGlobalSearch is the first page of the unified search.
 func GetUnifiedGlobalSearch(ctx context.Context, userUUID string, userEmail string, userChannels []*dgraphStruct.DgraphChannel, userProjects []*dgraphStruct.DgraphProject, userTeams []*dgraphStruct.DgraphTeam, searchText string) (searchPage GlobalSearchPagination, err error) {
-	return GetUnifiedGlobalSearchPage(ctx, userUUID, userEmail, userChannels, userProjects, userTeams, searchText, nil)
+	return GetUnifiedGlobalSearchPage(ctx, userUUID, userEmail, userChannels, userProjects, userTeams, searchText, nil, Within{})
+}
+
+// Within narrows a search to one conversation: a channel by its id, or a DM
+// or a group by its grouping id (helpers.GetGroupingId for a DM). The zero
+// value searches everything the reader may see. A conversation the reader
+// isn't in finds nothing: the reader's own reach still holds.
+type Within struct {
+	ChannelUUID string
+	GroupingID  string
 }
 
 // GetUnifiedGlobalSearchPage is a page of the unified search: the first with
 // no after, else the one after the cursor a page answered with (Next). The
 // search page counted its 20 hits as "20 results" and never asked for more.
-func GetUnifiedGlobalSearchPage(ctx context.Context, userUUID string, userEmail string, userChannels []*dgraphStruct.DgraphChannel, userProjects []*dgraphStruct.DgraphProject, userTeams []*dgraphStruct.DgraphTeam, searchText string, after []float64) (searchPage GlobalSearchPagination, err error) {
+func GetUnifiedGlobalSearchPage(ctx context.Context, userUUID string, userEmail string, userChannels []*dgraphStruct.DgraphChannel, userProjects []*dgraphStruct.DgraphProject, userTeams []*dgraphStruct.DgraphTeam, searchText string, after []float64, within Within) (searchPage GlobalSearchPagination, err error) {
 	var channelUUIDs []string
 	for _, ch := range userChannels {
 		channelUUIDs = append(channelUUIDs, ch.Uuid)
@@ -89,7 +98,7 @@ func GetUnifiedGlobalSearchPage(ctx context.Context, userUUID string, userEmail 
 		teamUUIDs = append(teamUUIDs, team.Uuid)
 	}
 
-	searchInfo, err := domain.GetUnifiedGlobalSearchFromOpenSearch(ctx, userUUID, userEmail, channelUUIDs, projectUUIDs, teamUUIDs, searchText, after)
+	searchInfo, err := domain.GetUnifiedGlobalSearchFromOpenSearch(ctx, userUUID, userEmail, channelUUIDs, projectUUIDs, teamUUIDs, searchText, after, within.ChannelUUID, within.GroupingID)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -106,9 +115,29 @@ func GetUnifiedGlobalSearchPage(ctx context.Context, userUUID string, userEmail 
 		searchPage.Next = encodeSearchCursor(searchInfo[domain.UNIFIED_SEARCH_COUNT-1].Sort)
 	}
 	// After the page is cut: whether there is more is what the index said.
+	// The demo's people were left out before the cut, so a page of 21 hits
+	// with one of them in it lost its 21st and said there was no more.
+	searchPage.Page = demoPeopleHits(userEmail, searchPage.Page)
 	searchPage.Page = keepReadableDocHits(ctx, userUUID, searchPage.Page)
 	searchPage.Page = keepReadableBoardHits(ctx, userUUID, searchPage.Page)
 	searchPage.Page = keepReadableProjectFileHits(ctx, userUUID, userProjects, searchPage.Page)
 
 	return
+}
+
+// demoPeopleHits returns hits without the people the public demo keeps from
+// its shared visitor (helpers.DemoListsPerson): only the demo's own people
+// are found. Every other hit, and every hit for anyone else, stays.
+func demoPeopleHits(viewerEmail string, hits []*openSearchStruct.GlobalSearchOpenSearchResp) []*openSearchStruct.GlobalSearchOpenSearchResp {
+	if !helpers.IsDemoVisitor(viewerEmail) {
+		return hits
+	}
+	kept := make([]*openSearchStruct.GlobalSearchOpenSearchResp, 0, len(hits))
+	for _, h := range hits {
+		if h != nil && h.User != nil && !helpers.DemoListsPerson(viewerEmail, h.User.UserEmail, false) {
+			continue
+		}
+		kept = append(kept, h)
+	}
+	return kept
 }

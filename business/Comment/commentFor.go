@@ -14,8 +14,6 @@ import (
 	"slices"
 
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
-	userFCMtokenBusiness "github.com/akashc777/OneCamp/business/UserFCMToken"
-	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
@@ -29,24 +27,15 @@ func NotifyDocCommentFor(ctx context.Context, doc *dgraphStruct.DgraphDoc, who, 
 	if len(recipients) == 0 {
 		return
 	}
-	tokens, err := userFCMtokenBusiness.GetFCMTokenByListOfUserId(ctx, recipients)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/NotifyDocCommentFor Failed to get fcm tokens err: %+v", err)
-	}
-	pushData := map[string]string{
+	// As every push goes (Deliver): the push gate, and the desktop app's
+	// notice beside the push, which a desktop-only keeper had none of.
+	notificationBusiness.Deliver(ctx, recipients, map[string]string{
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE:     firebaseInit.FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT,
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:  doc.Uuid,
 		firebaseInit.FIREBASE_PUSH_DATA_TITLE:    "Comment - " + who,
 		firebaseInit.FIREBASE_PUSH_DATA_BODY:     plainText,
 		firebaseInit.FIREBASE_PUSH_DATA_USERNAME: who,
-	}
-	// 500 tokens a call is Firebase's limit.
-	for batch := range slices.Chunk(tokens, 500) {
-		if err := firebaseInit.FirebaseApp.MultiCastPush(ctx, pushData, batch); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/NotifyDocCommentFor Failed to send push notification err: %+v", err)
-			break
-		}
-	}
+	}, firebaseInit.FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT+":"+doc.Uuid+":"+commentID)
 
 	title := doc.Title
 	if title == "" {

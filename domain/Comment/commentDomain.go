@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Comment"
@@ -173,11 +174,16 @@ func CreateOrUpdateCommentInChat(ctx context.Context, dgraphChat *dgraphStruct.D
 	return
 }
 
+// UpdateDgraphCommentAndResetMentions saves a reply's edit and puts its
+// mentions back to the people it names now. Its mention node is found by
+// mention_comment_uuid, as a post's is by mention_post_uuid: it was looked up
+// by mention_comment_id, which no node has, so an edit kept the people it
+// dropped and wrote a second node for the rest (F-23).
 func UpdateDgraphCommentAndResetMentions(ctx context.Context, dgraphPost *dgraphStruct.DgraphComment, commentUUID string) (err error) {
 
 	query := fmt.Sprintf(`query {
 									  co as var(func: eq(comment_uuid, "%+v"))
-									  me as var(func: eq(mention_comment_id, "%+v"))
+									  me as var(func: eq(mention_comment_uuid, "%+v"))
 								  }`, commentUUID, commentUUID)
 
 	delStringJSON := `{
@@ -316,24 +322,23 @@ func GetDgraphDocCommentInfoByUUID(ctx context.Context, commentUUID string, user
 
 	variables := make(map[string]string)
 	variables["$id"] = commentUUID
-	variables["$userId"] = userDraphUid
-	query := `query CommentInfo($id: string, $userId: string){
+	variables["$userId"] = docDomain.ViewerUID(userDraphUid)
+	// The comment's doc with everything the access rule decides by, for the
+	// person (domain/Doc docAccess.go).
+	query := `query CommentInfo($id: string, $userId: string){` + docDomain.AccessPrelude("$userId") + `
 				commentInfo(func: eq(comment_uuid, $id)) {
 					uid
+					comment_created_at
 					comment_by {
 						uid
 						user_uuid
 					}
 					comment_doc {
-						doc_uuid
-						doc_read_access: count(doc_reading_users @filter(uid($userId)))
-						doc_edit_access: count(doc_editing_users @filter(uid($userId)))
-						doc_comment_access: count(doc_commenting_users @filter(uid($userId)))
-						doc_private
-						doc_deleted_at
-						doc_public_comment
+						uid
+						doc_uuid` + docDomain.DocAccessFacts + `
 						doc_title
 						doc_created_by {
+							uid
 							user_uuid
 						}
 					}
@@ -888,39 +893,5 @@ func GetCommentByUUID(ctx context.Context, commentUUID uuid.UUID) (commentInfo *
 			err)
 		return
 	}
-	return
-}
-
-func GetDgraphProjectMemberInfoForComment(ctx context.Context, projectUUID string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
-	variables := make(map[string]string)
-	variables["$id"] = projectUUID
-	query := `query ProjectInfo($id: string, $userUid: string){
-				projectInfo(func: eq(project_uuid, $id)) {
-					project_uuid
-					project_name
-					project_members {
-						uid
-						user_uuid
-						user_name
-						user_email
-						user_profile_object_key
-					}
-				}
-			}`
-
-	dgraphProject, err = dgraphModels.GetDgraphProjectMembersByUUID(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphProjectMemberInfoForComment Failed to get project info from dgraph err: %+v",
-			err,
-		)
-		return
-	}
-	if dgraphProject != nil {
-		// By name, sorted here: Dgraph stops a sorted block at 1,000.
-		dgraphStruct.SortUsersByName(dgraphProject.Members)
-	}
-
 	return
 }

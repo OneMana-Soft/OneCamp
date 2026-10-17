@@ -18,6 +18,9 @@ type InputCreateOrUpdatePostInfo struct {
 	// behaves exactly as a normal post. The business layer validates the parent
 	// (exists, not deleted, same channel) before setting the reply edge.
 	ReplyToUUID string `json:"reply_to_uuid,omitempty"`
+	// ClientMsgID is the id the app gave the post when it showed it: a send
+	// tried again with it is the same send (business/Send Once).
+	ClientMsgID string `json:"client_msg_id,omitempty"`
 }
 
 type InputCreateOrUpdateCommentToPost struct {

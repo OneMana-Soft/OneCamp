@@ -8,7 +8,9 @@
 //     cap, and a compression-ratio cap. Limits are enforced against
 //     both the central-directory metadata AND the actual stream.
 //  2. Excessive entry counts — a zip with millions of empty entries
-//     that DoSes downstream parsers. Defended by a hard entry cap.
+//     that DoSes downstream parsers, archive/zip's own reading of its
+//     directory first. Defended by a hard entry cap and a directory size
+//     cap that Open checks before archive/zip reads anything (open.go).
 //  3. Zip slip / path traversal — entries whose names contain "..",
 //     leading "/", or backslashes. Defended by SafePath().
 //  4. Symlink entries — defended by IsRegularEntry() which the caller
@@ -45,9 +47,15 @@ import (
 // always returns sane caps; callers should start from there.
 type Limits struct {
 	// MaxEntries caps the total number of entries (file + dir) in the
-	// zip. A zip with more entries is rejected outright. Set to 0 to
-	// disable this check.
+	// zip. A zip with more entries is rejected outright, by Open before
+	// archive/zip reads them. Set to 0 to disable this check.
 	MaxEntries int
+
+	// MaxDirectoryBytes caps the central directory's size: the records
+	// archive/zip copies a name, an extra field and a comment out of, for
+	// every entry. Open checks it before archive/zip reads anything. Set
+	// to 0 to disable.
+	MaxDirectoryBytes int64
 
 	// MaxTotalUncompressed caps the sum of UncompressedSize64 across
 	// every entry in the zip. Set to 0 to disable.
@@ -81,6 +89,7 @@ type Limits struct {
 func DefaultLimits() Limits {
 	return Limits{
 		MaxEntries:              500_000,   // 500K entries
+		MaxDirectoryBytes:       256 << 20, // 256 MiB of directory, ~500 bytes a record
 		MaxTotalUncompressed:    500 << 30, // 500 GB total expanded
 		MaxPerEntryUncompressed: 10 << 30,  // 10 GB per entry
 		MaxCompressionRatio:     200,       // 200x ratio cap

@@ -25,8 +25,6 @@ BulkArchiveTasks
 CanQuery
 CancelByUser
 ChartsAsText
-CheckIfChannelHandleExist
-CheckUserIsDocOwner
 ClaimIdempotencyKey
 ClearOwner
 ConnectedProviderNames
@@ -43,7 +41,6 @@ CreatePostsBulk
 CreateProjectWithAttachmentsInOpensearch
 CreatePullRequest
 CreateTaskInOpenSearch
-CreateUserInOpenSearch
 DeleteByScope
 DeleteBySource
 DeleteCommentOnDoc
@@ -71,7 +68,6 @@ GetDgraphAttachmentList
 GetDgraphBasicTaskInfoWithProjectMembers
 GetDgraphChannelInfoByName
 GetDgraphProjectInfo
-GetDgraphProjectMemberInfoForComment
 GetDgraphRecentPostsForAI
 GetDgraphTaskList
 GetHashTags
@@ -84,7 +80,6 @@ GetTeamPostgresInfo
 GetTranscriptLinesByRoom
 GetViewByID
 GitHubComment
-GitHubLinkCacheStats
 GitHubListMyIssues
 GitHubListMyPRs
 GitHubSearch
@@ -168,3 +163,91 @@ RevokeAny
 RotateSecret
 MCPResourceMetadataURL
 IsPublic
+
+# Edition-only, not debt (since v1.58.0): shared functions that the AI edition calls only from
+# its AI features, or that only beta's demo seed calls, both of which this edition leaves out.
+# Kept so the shared packages stay the same in both editions.
+#   CheckUserDocEditAccess, ListDocAIEntries: the AI's doc tools and Doc AI's activity panel.
+#   EndpointPolicy, CheckEndpoint: safefetch's endpoint half, for MCP servers and remote
+#   agents. This edition uses its fetch half (link previews, the Notion page import).
+#   CreateDoc: on beta, the demo seed's; documents are made through the doc tree here.
+CheckUserDocEditAccess
+ListDocAIEntries
+EndpointPolicy
+CheckEndpoint
+CreateDoc
+
+# Found by the package-exact check that came over with v2.73.0 (16 Oct 2026): dead on
+# this edition already, each hidden until now by a function of the same name in another
+# package that something calls. Beta deleted its own copies (cleanup b5db560b); deleting
+# these on this edition is a follow-up, not part of the release port.
+business/AdminAudit.List
+business/ApiToken.IsNotFound
+business/Attachment.BulkAddAttachmentsToDgraph
+business/Attachment.GetAttachmentsByObjUUIDs
+business/Attachment.GetDgraphAttachmentInfoByUUID
+business/Channel.GetChannelAIModel
+business/Channel.GetChannelAITokenCap
+business/Channel.GetChannelByHandle
+business/Channel.SetChannelAIModel
+business/Channel.SetChannelAITokenCap
+business/CodeSandbox.Run
+business/ContentCodec.Blocks
+business/DataSubject.Summary
+business/Integration.HandleGoogleCalendarWebhook
+business/LastSeenActivity.GetLastSeenActivityByUserId
+business/LiveKit.ListAllRooms
+business/Onboarding.Register
+business/Poll.Summary
+business/SlackImport.StartCleanupLoop
+business/SlackImport.StartReaperLoop
+business/Team.GetDgraphUnDeletedProjectListByTeamUUID
+business/UserFCMToken.GetFCMTokenByUserId
+business/User.GetDgraphUserInfoByUUIDForMQTTConfig
+business/User.GetDraphUserInfoWithProjectInfo
+business/User.GetUserListWithSearchText
+business/User.IncrementDeviceConnectedDgraphUser
+business/User.UpdateUNameByEmailID
+business/Webhook.SetAppContext
+controllers/Channel.GetChannelInfoByUUID
+domain/Attachment.CreateAttachmentInOpenSearch
+domain/Attachment.GetAttachmentByUUID
+domain/Channel.GetChannelNamesByUUIDs
+domain/Chat.CreateChatInOpenSearch
+domain/Comment.GetCommentByUUID
+domain/Import.LookupWorkspaceMappingsBatch
+domain/Integration.UpdateSyncToken
+domain/LastSeenChannel.GetLastSeenChannel
+domain/LastSeenChat.GetLastSeenChat
+domain/Post.CreatePostInOpenSearch
+domain/Project.GetProjectByUUID
+domain/Task.FindTaskUUIDByGitHubPRURL
+domain/Task.GetTaskLastSyncedAtByTaskID
+domain/Task.LinkPRToTaskByBranch
+domain/User.CreateUserWithPassword
+domain/User.GetUserByUname
+helpers/authcookie.Set
+helpers/safefetch.NewClient
+initializers/opensearchInit.EnsureAIEmbeddingsIndexDimension
+models/postgres/ApiToken.ListActive
+models/postgres/Chat.BulkUpdateGrpIdInChatAndAtachment
+models/postgres/Import.FindCompletedJobByHash
+models/postgres/Import.IdMappingsByType
+models/postgres/Import.SetContentHash
+models/postgres/NotificationEmailLog.ListByUser
+models/postgres/NotificationEmailSuppression.Delete
+models/postgres/PendingAction.Finalize
+models/postgres/ScheduledJob.GetByID
+models/postgres/SlackImport.LookupWorkspaceMappingsBatch
+models/postgres/WorkspaceMemory.GetByID
+models/postgres/WorkspaceMemory.SoftDelete
+models/postgres/WorkspaceMemory.UpdateStatus
+models/postgres/WorkspaceMemory.Upsert
+models/postgres/WorkspaceNudge.GetByID
+models/postgres/WorkspaceNudge.SetStatus
+models/postgres/WorkspaceNudge.Upsert
+models/redis/registry.All
+models/redis/store.Client
+models/redis/store.TTL
+models/redis/store.ZIncrBy
+models/redis/store.ZRevRangeWithScores

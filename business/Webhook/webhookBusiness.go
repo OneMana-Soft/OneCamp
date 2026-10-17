@@ -275,6 +275,21 @@ type WebhookUpdateInput struct {
 	ScopeEntityId *uuid.UUID `json:"scope_entity_id,omitempty"`
 }
 
+// defaultBotName labels an incoming webhook's messages when it names no bot.
+const defaultBotName = "Webhook Bot"
+
+// botNameOf is the name a webhook's messages are labelled with: name, trimmed,
+// or fallback when that leaves nothing. Every message a webhook posts carries
+// one: a bot message with no label is read as a model's Markdown
+// (business/BotPost badgeHTML), and a webhook's text is whatever its URL's
+// holder sends. Pure.
+func botNameOf(name, fallback string) string {
+	if n := strings.TrimSpace(name); n != "" {
+		return n
+	}
+	return fallback
+}
+
 // generateSecureToken creates a cryptographically secure random token.
 func generateSecureToken(length int) (string, error) {
 	b := make([]byte, length)
@@ -355,9 +370,7 @@ func CreateWebhook(ctx context.Context, input WebhookCreateInput, createdBy uuid
 	id := uuid.New()
 	now := time.Now()
 
-	if input.BotName == "" {
-		input.BotName = "Webhook Bot"
-	}
+	input.BotName = botNameOf(input.BotName, defaultBotName)
 
 	err = domain.CreateWebhook(ctx, id, input.Name, input.Description, input.Type, token, secret, input.TargetUrl, input.ChannelId, eventsJson, createdBy, input.BotName, input.BotAvatarUrl, nil, now)
 	if err != nil {
@@ -428,9 +441,7 @@ func UpdateWebhook(ctx context.Context, webhookId uuid.UUID, input WebhookUpdate
 		eventsJson = &evStr
 	}
 
-	if input.BotName == "" {
-		input.BotName = existing.BotName
-	}
+	input.BotName = botNameOf(input.BotName, botNameOf(existing.BotName, defaultBotName))
 
 	now := time.Now()
 
@@ -583,6 +594,26 @@ func ProcessIncomingWebhook(ctx context.Context, token string) (*webhookModel.We
 // Imported content is recorded directly to PG/Dgraph without any need
 // to notify external systems retroactively.
 func DispatchEvent(ctx context.Context, eventType string, data interface{}) {
+	dispatch(ctx, eventType, data, nil)
+}
+
+// DispatchEventFor is DispatchEvent for an event only some people may know
+// of: an outgoing webhook is sent it only when mayKnow says the person who set
+// the webhook up may. A doc's events go this way (business/Follow
+// webhooks.go), so a private doc's never reach a webhook whose owner can't
+// open the doc. In-process listeners, which act inside the workspace, are
+// told as of any event.
+func DispatchEventFor(ctx context.Context, eventType string, data map[string]interface{}, mayKnow func(ctx context.Context, owner uuid.UUID) bool) {
+	dispatch(ctx, eventType, data, mayKnow)
+}
+
+// deliver sends one webhook its payload, on its own goroutine; a seam for
+// tests.
+var deliver = func(webhook *webhookModel.Webhook, eventType string, payload []byte) {
+	go dispatchToWebhook(webhook, eventType, payload)
+}
+
+func dispatch(ctx context.Context, eventType string, data interface{}, mayKnow func(ctx context.Context, owner uuid.UUID) bool) {
 	if helpers.IsBulkImport(ctx) {
 		return
 	}
@@ -666,7 +697,19 @@ func DispatchEvent(ctx context.Context, eventType string, data interface{}) {
 		plainText = t
 	}
 
+	// Whether each webhook's owner may know of the event, asked once per owner.
+	knows := map[uuid.UUID]bool{}
 	for _, webhook := range webhooks {
+		if mayKnow != nil {
+			ok, asked := knows[webhook.CreatedBy]
+			if !asked {
+				ok = mayKnow(ctx, webhook.CreatedBy)
+				knows[webhook.CreatedBy] = ok
+			}
+			if !ok {
+				continue
+			}
+		}
 		switch deliveryTo(webhook.ScopeType, webhook.ScopeEntityId, place, public) {
 		case sendNothing:
 			continue
@@ -677,7 +720,7 @@ func DispatchEvent(ctx context.Context, eventType string, data interface{}) {
 			if webhook.TriggerWords != nil && *webhook.TriggerWords != "" && *webhook.TriggerWords != "[]" {
 				continue
 			}
-			go dispatchToWebhook(webhook, eventType, idBytes)
+			deliver(webhook, eventType, idBytes)
 			continue
 		}
 		// Trigger word filtering with word boundaries (cached compiled regexes)
@@ -698,7 +741,7 @@ func DispatchEvent(ctx context.Context, eventType string, data interface{}) {
 				}
 			}
 		}
-		go dispatchToWebhook(webhook, eventType, allBytes)
+		deliver(webhook, eventType, allBytes)
 	}
 }
 
@@ -942,7 +985,9 @@ func ProcessIncomingMessage(ctx context.Context, webhook *webhookModel.Webhook, 
 		return "", fmt.Errorf("webhook creator is not a member of this channel")
 	}
 
-	// Post as the shared automation bot, labelled with the webhook's bot name.
+	// Post as the shared automation bot, labelled with the webhook's bot name,
+	// the default for a webhook stored before names were trimmed.
+	botName = botNameOf(botName, defaultBotName)
 	res, err := botpost.PostToChannel(ctx, channelUUID, text, botName)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

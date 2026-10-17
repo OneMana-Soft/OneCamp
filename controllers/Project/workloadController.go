@@ -34,7 +34,7 @@ func Workload(w http.ResponseWriter, r *http.Request) {
 	wl, err := business.GetWorkload(r.Context(), user.UserDgraphInfo.Uid, user.UserDgraphInfo.Uuid, user.UserPostgresInfo.IsAdmin, from, until)
 	if err != nil {
 		helpers.LogErrorWithContext(r.Context(), "controllers/Project/Workload err: %+v", err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The workload couldn't load just now. Try again in a moment."})
+		helpers.WriteRetryLater(w, "The workload couldn't load just now.")
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": wl})
@@ -71,6 +71,6 @@ func SetWorkloadCapacity(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That person isn't in this workspace."})
 	default:
 		helpers.LogErrorWithContext(r.Context(), "controllers/Project/SetWorkloadCapacity err: %+v", err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The capacity wasn't saved. Try again in a moment."})
+		helpers.WriteRetryLater(w, "The capacity wasn't saved.")
 	}
 }

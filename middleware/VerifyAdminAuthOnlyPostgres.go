@@ -3,6 +3,7 @@ package middleware
 import (
 	"net/http"
 
+	authz "github.com/akashc777/OneCamp/business/Authz"
 	"github.com/akashc777/OneCamp/helpers"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
 )
@@ -22,7 +23,11 @@ func VerifyAdminAuthOnlyPostgres(next http.Handler) http.Handler {
 		}
 
 		if !userInfo.UserPostgresInfo.IsAdmin {
-			w.WriteHeader(http.StatusForbidden)
+			// Says why, as RequireCapability does (QA SH-02).
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
+				"code": AdminRequired,
+				"msg":  authz.AdminOnlyMsg,
+			})
 			return
 		}
 

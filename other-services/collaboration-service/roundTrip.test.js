@@ -10,14 +10,16 @@ import { htmlToDoc, renderDocHTML } from './preserved.js'
 // save and load unchanged: written as HTML and read back, and through the Yjs
 // document a browser edits. Before 11 Oct the save threw on the first
 // `tableEmbed`, and an image's caption, id and file name were dropped.
-// Same content, same attributes: key order and an empty `attrs: {}` (how Yjs
-// hands marks back) aside.
+// Same content, same attributes: key order, an empty `attrs: {}` (how Yjs
+// hands marks back) and B2's colour and quote size at none (read back as null
+// where the fixture leaves them out) aside.
 const plain = (v) => {
     if (Array.isArray(v)) return v.map(plain)
     if (!v || typeof v !== 'object') return v
     const out = {}
     for (const k of Object.keys(v).sort()) {
-        if (k === 'attrs' && Object.keys(v[k] || {}).length === 0) continue
+        if ((k === 'blockColor' || k === 'quoteSize') && v[k] === null) continue
+        if (k === 'attrs' && Object.keys(plain(v[k] || {})).length === 0) continue
         out[k] = plain(v[k])
     }
     return out
@@ -55,7 +57,8 @@ test('the HTML the web editor writes reads as the same blocks', () => {
     ].join('')
     const doc = plain(read(web))
     assert.deepEqual(doc.content.map((n) => n.type), ['tableEmbed', 'poll', 'chartEmbed', 'diffEmbed', 'recordingEmbed', 'paragraph', 'image'])
-    assert.deepEqual(doc.content[0].attrs, { tableId: 'tbl-1', viewId: 'view-1' })
+    // The web's HTML here has no data-block-id: a block read from it has no id yet.
+    assert.deepEqual(doc.content[0].attrs, { tableId: 'tbl-1', viewId: 'view-1', blockId: null, indent: 0 })
     assert.equal(doc.content[2].attrs.spec, '{"type":"bar"}')
     assert.equal(doc.content[3].attrs.diff, '-x\n+y <b>')
     assert.deepEqual(doc.content[5].content.filter((n) => n.type !== 'text').map((n) => [n.type, n.attrs.id, n.attrs.label]),

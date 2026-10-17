@@ -734,13 +734,6 @@ func taskHistoryLineTime(ctx context.Context, taskUUID, activityUUID, userDgraph
 					}
 				}
 			}`
-	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
-	defer func() { _ = txn.Discard(ctx) }()
-	resp, err := txn.QueryWithVars(ctx, query, map[string]string{"$id": taskUUID, "$line": activityUUID, "$userUid": userDgraphUID})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/taskHistoryLineTime err: %+v", err)
-		return "", false, err
-	}
 	var out struct {
 		T []struct {
 			Project struct {
@@ -751,7 +744,8 @@ func taskHistoryLineTime(ctx context.Context, taskUUID, activityUUID, userDgraph
 			} `json:"task_activities"`
 		} `json:"t"`
 	}
-	if err := json.Unmarshal(resp.Json, &out); err != nil {
+	if err := dgraphInit.ReadInto(ctx, query, map[string]string{"$id": taskUUID, "$line": activityUUID, "$userUid": userDgraphUID}, &out); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/taskHistoryLineTime err: %+v", err)
 		return "", false, err
 	}
 	if len(out.T) == 0 {
@@ -1084,19 +1078,6 @@ func ClearGitHubLinkFromTask(ctx context.Context, taskUUID uuid.UUID) error {
 	return nil
 }
 
-// GetTaskGitHubLinks lists every task with a GitHub issue or pull request
-// stored, deleted ones too (a restored task brings its link back).
-func GetTaskGitHubLinks(ctx context.Context) ([]models.TaskGitHubLink, error) {
-	query := `SELECT id, project_id, github_issue_url, github_pr_url FROM tasks
-		WHERE COALESCE(github_issue_url, '') <> '' OR COALESCE(github_pr_url, '') <> ''`
-	links, err := models.GetTaskGitHubLinks(query)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/GetTaskGitHubLinks Failed err: %+v", err)
-		return nil, err
-	}
-	return links, nil
-}
-
 // GetTaskGitHubURLs returns the GitHub issue and PR URLs for a task.
 func GetTaskGitHubURLs(ctx context.Context, taskUUID uuid.UUID) (issueURL, prURL *string, err error) {
 	query := `SELECT github_issue_url, github_pr_url FROM tasks WHERE id = $1`
@@ -1108,10 +1089,18 @@ func GetTaskGitHubURLs(ctx context.Context, taskUUID uuid.UUID) (issueURL, prURL
 	return issueURL, prURL, nil
 }
 
-// FindTaskUUIDByGitHubBranch finds a task by its linked GitHub branch.
-func FindTaskUUIDByGitHubBranch(ctx context.Context, branch string) (string, error) {
-	query := `SELECT id FROM tasks WHERE github_branch = $1 AND deleted_at IS NULL LIMIT 1`
-	taskUUID, err := models.FindTaskUUIDByGitHubBranch(query, branch)
+// FindTaskUUIDByGitHubBranch finds the task on branch of a project that links
+// the repository owner/name, matched in any case as GitHub matches names. A
+// branch's name is whoever pushes it's to choose ("main", "patch-1"), so a
+// task of a project that doesn't link the repository is never the one a
+// branch there means.
+func FindTaskUUIDByGitHubBranch(ctx context.Context, owner, name, branch string) (string, error) {
+	query := `SELECT t.id FROM tasks t
+		WHERE t.github_branch = $3 AND t.deleted_at IS NULL AND t.project_id IS NOT NULL
+		AND t.project_id IN (SELECT l.project_id FROM github_links l
+			WHERE lower(l.repo_owner) = lower($1) AND lower(l.repo_name) = lower($2) AND l.deleted_at IS NULL)
+		LIMIT 1`
+	taskUUID, err := models.FindTaskUUIDByGitHubBranch(query, owner, name, branch)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/FindTaskUUIDByGitHubBranch Failed err: %+v", err)
 		return "", err

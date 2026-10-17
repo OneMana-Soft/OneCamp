@@ -108,25 +108,6 @@ type Attachment struct {
 	DeletedAt time.Time
 }
 
-func CreateUser(query string, emailID string, userUUID uuid.UUID) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		userUUID,
-		emailID,
-	)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateUser Failed to create new user err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func CheckIfUserExistByEmail(query string, emailID string) (exist bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()

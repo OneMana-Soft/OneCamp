@@ -8,7 +8,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	sweepBusiness "github.com/akashc777/OneCamp/business/Sweep"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -291,6 +293,18 @@ func TestALinkToItemsKeepsItsKind(t *testing.T) {
 		&FieldInput{Name: "Docs", Type: model.FieldRelation, Config: map[string]interface{}{"relation_target": "task"}}); err != nil {
 		t.Errorf("a link to docs couldn't link to tasks instead: %v", err)
 	}
+}
+
+// The repair is a sweep: claimed by one worker at a time, and tried again
+// the next hour when a pass fails. It was a goroutine started from main.go,
+// run by every replica at once, and retried only at the next restart.
+func TestTheItemLinkRepairIsASweep(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("tables.item-link-repair isn't a registered sweep")
+		}
+	}()
+	sweepBusiness.Jobs.Register(sweepBusiness.Job{Name: "tables.item-link-repair", Every: time.Hour, Run: func(context.Context) error { return nil }})
 }
 
 // A refusal quotes the link it refuses briefly: a cell may be 100 KiB.

@@ -16,6 +16,8 @@ package integration_test
 //   - never its writer, someone paused or in focus time, a member who muted
 //     the channel, someone mentioned from outside a private channel, or
 //     someone deactivated (even by Notify anyway);
+//   - a notice (Tell) is pushed by the same gate, never to someone
+//     deactivated, and the desktop app hears of it too;
 //   - and when the push fails, the email after it still goes.
 //
 // Run: go test -tags=integration ./tests/integration/ -run TestDesktopNoticesReachWhomAPushWould -v
@@ -48,17 +50,19 @@ import (
 	postAdapter "github.com/akashc777/OneCamp/adapter/Post"
 	userAdapter "github.com/akashc777/OneCamp/adapter/User"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
+	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	userController "github.com/akashc777/OneCamp/controllers/User"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
+	fcmDomain "github.com/akashc777/OneCamp/domain/UserFCMToken"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
-	"github.com/akashc777/OneCamp/initializers/mqttInit"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/tests/integration"
@@ -125,8 +129,7 @@ func TestDesktopNoticesReachWhomAPushWould(t *testing.T) {
 	integration.SetupRedis(t)
 	integration.SetupDgraph(t)
 	broker := &noticeBroker{}
-	mqttInit.MqttClient = broker
-	t.Cleanup(func() { mqttInit.MqttClient = nil })
+	integration.UseMqttClient(t, broker)
 	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"took":1,"errors":false,"items":[]}`)
 	}))
@@ -168,7 +171,8 @@ func TestDesktopNoticesReachWhomAPushWould(t *testing.T) {
 
 	var pmu sync.Mutex
 	pushedTo := map[string]bool{}
-	pushedFor := map[string][]string{} // a push's thread_id: the devices it was for
+	pushedFor := map[string][]string{}    // a push's thread_id: the devices it was for
+	pushedTitled := map[string][]string{} // a push's title: the devices it was for
 	t.Cleanup(firebaseInit.ObservePushesForTest(func(data map[string]string, tokens []string) {
 		pmu.Lock()
 		for _, tok := range tokens {
@@ -176,6 +180,8 @@ func TestDesktopNoticesReachWhomAPushWould(t *testing.T) {
 		}
 		thread := data[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID]
 		pushedFor[thread] = append(pushedFor[thread], tokens...)
+		title := data[firebaseInit.FIREBASE_PUSH_DATA_TITLE]
+		pushedTitled[title] = append(pushedTitled[title], tokens...)
 		pmu.Unlock()
 	}))
 	pushed := func(tok string) bool {
@@ -357,6 +363,72 @@ func TestDesktopNoticesReachWhomAPushWould(t *testing.T) {
 		}
 		if pushed("tok-dex") {
 			t.Error("dex, deactivated, was pushed")
+		}
+	})
+
+	// A notice (notificationBusiness.Tell: a mention in a doc, a reply in its
+	// thread, a proposal, a booking) is pushed by the same gate as every push,
+	// and the desktop app hears of it. Tell had a push loop of its own, whose
+	// device lookup asked only whether someone was paused: deactivation leaves a
+	// person's grants, follows and phone's token in place, so a deactivated
+	// doc owner or follower was pushed the doc's title and the reply's words,
+	// and a desktop-only member heard of no notice at all (TN-BUG-12).
+	t.Run("a notice reaches no one deactivated, and the desktop app hears of it", func(t *testing.T) {
+		// Every device lookup leaves dex out, whichever place pushes.
+		if toks, err := fcmDomain.GetFCMTokenByListOfUserId(ctx, []string{id("bo").String(), id("dex").String()}); err != nil || !slices.Equal(toks, []string{"tok-bo"}) {
+			t.Errorf("the devices of bo and dex were %v (err %v), want bo's alone: dex is deactivated", toks, err)
+		}
+		if toks, err := fcmDomain.GetFCMTokenByUserId(ctx, id("dex").String()); err != nil || len(toks) != 0 {
+			t.Errorf("dex's devices were %v (err %v), want none: dex is deactivated", toks, err)
+		}
+
+		key := "doc.mentioned|" + uuid.NewString()
+		title := "Maya mentioned you in Board pack"
+		told := notificationBusiness.Tell(ctx, notificationBusiness.Notice{
+			Kind: "doc.mentioned", ResourceKind: "doc", ResourceUUID: uuid.NewString(), ResourceTitle: "Board pack",
+			Actor: &maya.UserDgraphInfo, Title: title, Body: "Severance terms are in the drive", Path: "/app/doc/board-pack", DedupKey: key,
+		}, []notificationBusiness.NoticeRecipient{
+			{UserUUID: id("bo").String(), Reason: "mention"},
+			{UserUUID: id("ana").String(), Reason: "mention"},
+			{UserUUID: id("dex").String(), Reason: "mention"},
+		})
+		if len(told) == 0 {
+			t.Fatal("nobody was told: the notices weren't written")
+		}
+		// Nor is dex given an inbox row: a deactivated person is told nothing.
+		if slices.Contains(told, id("dex").String()) || !slices.Contains(told, id("bo").String()) || !slices.Contains(told, id("ana").String()) {
+			t.Errorf("told %v, want bo and ana: dex is deactivated", told)
+		}
+		pmu.Lock()
+		devices := slices.Clone(pushedTitled[title])
+		pmu.Unlock()
+		if !slices.Equal(devices, []string{"tok-bo"}) {
+			t.Errorf("the notice was pushed to %v, want bo's device alone: ana has none, dex is deactivated", devices)
+		}
+		if pushed("tok-dex") {
+			t.Error("dex, deactivated, was pushed a notice")
+		}
+		if got := broker.notices(key, all); !slices.Equal(got, []string{"ana", "bo"}) {
+			t.Errorf("the notice's desktop copy reached %v, want ana and bo: ana uses only the desktop app, dex is deactivated", got)
+		}
+	})
+
+	// A guest's comment through a doc's share link tells whoever looks after
+	// the doc (business/Comment NotifyDocCommentFor). It looked up devices
+	// and pushed them itself, so a desktop-only owner heard of nothing.
+	t.Run("a guest's comment on a doc reaches its keepers' desktop app, never someone deactivated", func(t *testing.T) {
+		doc, comment := uuid.NewString(), uuid.NewString()
+		commentBusiness.NotifyDocCommentFor(ctx, &dgraphStruct.DgraphDoc{
+			Uuid: doc, Title: "Board pack",
+			CreatedBy:   &dgraphStruct.DgraphUser{Uuid: id("ana").String()},
+			EditingUser: []*dgraphStruct.DgraphUser{{Uuid: id("bo").String()}, {Uuid: id("dex").String()}},
+		}, "Priya (guest)", comment, "Can the launch move to Friday?")
+		key := firebaseInit.FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT + ":" + doc + ":" + comment
+		if got := broker.notices(key, all); !slices.Equal(got, []string{"ana", "bo"}) {
+			t.Errorf("the comment's desktop notice reached %v, want ana and bo: ana uses only the desktop app, dex is deactivated", got)
+		}
+		if pushed("tok-dex") {
+			t.Error("dex, deactivated, was pushed a guest's comment")
 		}
 	})
 

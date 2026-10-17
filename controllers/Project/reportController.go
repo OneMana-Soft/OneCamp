@@ -30,7 +30,7 @@ func Report(w http.ResponseWriter, r *http.Request) {
 	report, err := business.GetReport(r.Context(), user.UserDgraphInfo.Uid, time.Now(), loc, weeks, only)
 	if err != nil {
 		helpers.LogErrorWithContext(r.Context(), "controllers/Project/Report err: %+v", err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "The report couldn't load just now. Try again in a moment."})
+		helpers.WriteRetryLater(w, "The report couldn't load just now.")
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": report})

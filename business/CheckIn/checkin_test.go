@@ -87,7 +87,16 @@ func TestNext(t *testing.T) {
 
 func TestQuestionHTML(t *testing.T) {
 	got := QuestionHTML("What <b>blocked</b> you?", time.Date(2026, 10, 8, 17, 0, 0, 0, time.UTC))
-	if !strings.Contains(got, "What &lt;b&gt;blocked&lt;/b&gt; you?") || !strings.Contains(got, "Thursday 8 October") || !strings.Contains(got, "Answer in this thread") {
+	if !strings.Contains(got, "What &lt;b&gt;blocked&lt;/b&gt; you?") || !strings.Contains(got, "Thursday 8 October, UTC time") || !strings.Contains(got, "Answer in this thread") {
+		t.Errorf("got %s", got)
+	}
+	// The day is the check-in's, said as its zone's: the post's time is the
+	// reader's, which may be the next day (QA F-43).
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skip("no zone data")
+	}
+	if got := QuestionHTML("Standup", time.Date(2026, 10, 13, 17, 0, 0, 0, ny)); !strings.Contains(got, "Check-in for Tuesday 13 October, New York time.") {
 		t.Errorf("got %s", got)
 	}
 }

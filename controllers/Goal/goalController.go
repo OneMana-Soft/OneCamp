@@ -37,7 +37,7 @@ func write(w http.ResponseWriter, r *http.Request, where string, err error) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only whoever wrote the check-in can change it."})
 	default:
 		helpers.LogErrorWithContext(r.Context(), "controllers/Goal/%s err: %+v", where, err)
-		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Something went wrong. Try again in a moment."})
+		helpers.WriteRetryLater(w, "Something went wrong.")
 	}
 }
 

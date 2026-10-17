@@ -36,20 +36,6 @@ func BulkUpdateLastSeenChatForSender(ctx context.Context, grpIDs []string, userI
 	return
 }
 
-func BulkCreateOrUpdateLastSeenChat(ctx context.Context, grpId string, userIds []string, updatedTime time.Time) (err error) {
-
-	err = domain.BulkCreateOrUpdateLastSeenChat(ctx, userIds, grpId, updatedTime)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/BulkCreateOrUpdateLastSeenChat Failed to create or update last seen channel err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func BulkCreateLastSeenChatIfNotExists(ctx context.Context, userIds []string, grpId string) (err error) {
 	err = domain.BulkCreateLastSeenChatIfNotExists(ctx, userIds, grpId)
 

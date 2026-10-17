@@ -3,12 +3,10 @@ package business
 import (
 	"context"
 	"fmt"
-	"slices"
 	"time"
 
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
-	userFCMtokenBusiness "github.com/akashc777/OneCamp/business/UserFCMToken"
 	domain "github.com/akashc777/OneCamp/domain/Comment"
 	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
@@ -200,12 +198,10 @@ func CreateCommentInADoc(ctx context.Context, dgraphDoc *dgraphStruct.DgraphDoc,
 	}
 	/* AI call omitted in v1 */
 
-	notificationTitle := fmt.Sprintf("Comment - %+v", userInfo.UserDgraphInfo.DisplayName())
-	notificationBody := plainText
-	author := userInfo.UserDgraphInfo
-	helpers.GoSafeNamed("doc.comment-notify", func() {
-		sendNewDocCommentNotification(notificationTitle, notificationBody, commentUUID.String(), rawDgraphDocInfo, &author, mentionList)
-	})
+	// Who is told, and how, is the bus's: the doc.comment.created sink
+	// (commentParticipants.go) is the one notifier, and the audit, webhooks
+	// and anything else that cares hear of the comment from the same event.
+	emitDocComment(ctx, rawDgraphDocInfo.Uuid, userInfo.UserDgraphInfo.Uuid, commentUUID.String(), createdTime, mentionList)
 
 	return
 }
@@ -270,12 +266,9 @@ func docCommentEntry(doc *dgraphStruct.DgraphDoc, commentUUID, plainText string,
 // Seams for tests: where participants, devices, pushes and emails go.
 var (
 	docCommentParticipants = docDomain.GetDocCommentParticipants
-	docCommentDevices      = userFCMtokenBusiness.GetFCMTokenByListOfUserId
-	docCommentPush         = func(ctx context.Context, data map[string]string, tokens []string) error {
-		return firebaseInit.FirebaseApp.MultiCastPush(ctx, data, tokens)
-	}
-	docCommentEmail = notificationBusiness.DispatchDocComment
-	docCommentIcon  = userBusiness.GetSignedProfileURL
+	docCommentDeliver      = notificationBusiness.Deliver
+	docCommentEmail        = notificationBusiness.DispatchDocComment
+	docCommentIcon         = userBusiness.GetSignedProfileURL
 )
 
 func sendNewDocCommentNotification(title string, body string, commentUUID string, dgraphDoc *dgraphStruct.DgraphDoc, author *dgraphStruct.DgraphUser, mentions []*dgraphStruct.DgraphUser) {
@@ -296,32 +289,35 @@ func sendNewDocCommentNotification(title string, body string, commentUUID string
 			mentioned = append(mentioned, m.Uuid)
 		}
 	}
-	recipients := docCommentRecipients(doc, mentioned, author.Uuid)
+	follows, ferr := docCommentFollows(ctx, doc.Uuid)
+	if ferr != nil {
+		// Who follows it couldn't be read: its participants are told, as
+		// before follows existed, rather than nobody.
+		helpers.LogErrorWithContext(ctx, "business/sendNewDocCommentNotification Failed to read who follows doc %s err: %+v", doc.Uuid, ferr)
+	}
+	// Who may read it, by the Access Resolver's rule (teams, its space and
+	// grants that ended count): with no answer, nobody is told.
+	readable, err := docCommentReadable(ctx, doc, mentioned, follows)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/sendNewDocCommentNotification Failed to decide who may read doc %s, so nobody is told err: %+v", doc.Uuid, err)
+		return
+	}
+	recipients := docCommentAudience(doc, mentioned, author.Uuid, follows, readable)
 	if len(recipients) == 0 {
 		return
 	}
 	icon := docCommentIcon(ctx, author.ProfileKey)
 
-	// Push: to the recipients' devices, held by the lookup for anyone paused.
-	if tokens, err := docCommentDevices(ctx, recipients); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/sendNewDocCommentNotification Failed to get the recipients' devices err: %+v", err)
-	} else if len(tokens) > 0 {
-		pushData := map[string]string{
-			firebaseInit.FIREBASE_PUSH_DATA_TYPE:     firebaseInit.FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT,
-			firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:  doc.Uuid,
-			firebaseInit.FIREBASE_PUSH_DATA_TITLE:    title,
-			firebaseInit.FIREBASE_PUSH_DATA_BODY:     body,
-			firebaseInit.FIREBASE_PUSH_DATA_USERNAME: author.DisplayName(),
-			firebaseInit.FIREBASE_PUSH_DATA_ICON:     icon,
-		}
-		// 500 tokens a call is Firebase's limit.
-		for batch := range slices.Chunk(tokens, 500) {
-			if err := docCommentPush(ctx, pushData, batch); err != nil {
-				helpers.LogErrorWithContext(ctx, "business/sendNewDocCommentNotification Failed to send push notification err: %+v", err)
-				break
-			}
-		}
-	}
+	// Push, as every push goes (Deliver): through the push gate, with the
+	// desktop app's notice beside it, which a desktop-only reader had none of.
+	docCommentDeliver(ctx, recipients, map[string]string{
+		firebaseInit.FIREBASE_PUSH_DATA_TYPE:     firebaseInit.FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT,
+		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:  doc.Uuid,
+		firebaseInit.FIREBASE_PUSH_DATA_TITLE:    title,
+		firebaseInit.FIREBASE_PUSH_DATA_BODY:     body,
+		firebaseInit.FIREBASE_PUSH_DATA_USERNAME: author.DisplayName(),
+		firebaseInit.FIREBASE_PUSH_DATA_ICON:     icon,
+	}, firebaseInit.FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT+":"+doc.Uuid+":"+commentUUID)
 
 	// Email (and its own holds), whatever became of the push.
 	docTitle := doc.Title
@@ -329,42 +325,9 @@ func sendNewDocCommentNotification(title string, body string, commentUUID string
 		docTitle = "a document"
 	}
 	docCommentEmail(author.Uuid, author.DisplayName(), icon, doc.Uuid, docTitle, body, commentUUID, recipients)
-}
 
-// docCommentRecipients is who hears about a new comment on a doc: its owner,
-// its editors, whoever commented on it before, and anyone the comment
-// mentions, in that order and each once, never its author, and only people
-// who may read the doc now. Its readers who haven't taken part aren't told
-// of every comment. doc is read as GetDocCommentParticipants reads it. Pure.
-func docCommentRecipients(doc *dgraphStruct.DgraphDoc, mentioned []string, author string) []string {
-	if doc == nil {
-		return nil
-	}
-	var out []string
-	seen := map[string]bool{author: true, "": true}
-	add := func(id string) {
-		if !seen[id] && docDomain.ReadableBy(doc, id) {
-			out = append(out, id)
-		}
-		seen[id] = true
-	}
-	if doc.CreatedBy != nil {
-		add(doc.CreatedBy.Uuid)
-	}
-	for _, u := range doc.EditingUser {
-		if u != nil {
-			add(u.Uuid)
-		}
-	}
-	for _, c := range doc.Comments {
-		if c != nil && c.CommentBy != nil {
-			add(c.CommentBy.Uuid)
-		}
-	}
-	for _, id := range mentioned {
-		add(id)
-	}
-	return out
+	// And the inbox, for whoever its feed has no item for.
+	tellDocCommentInbox(ctx, doc, author, commentUUID, mentioned, recipients, follows, readable)
 }
 
 // CreateCommentInAPost writes a reply in a channel thread: Postgres, the graph,

@@ -203,8 +203,15 @@ type Answer struct {
 }
 
 // CheckAnswers validates a submission against the form's questions and
-// returns the answers in question order, written out. Pure.
-func CheckAnswers(fields []Field, raw map[string]any) ([]Answer, error) {
+// returns the answers in question order, written out. A number answer is read
+// in the signs its sender writes numbers with (the zero NumberSigns are
+// en-US's), which the form sends with the answers: "1,5" from Berlin was
+// refused, as a comma groups digits in en-US's. Pure.
+func CheckAnswers(fields []Field, raw map[string]any, signs formula.NumberSigns) ([]Answer, error) {
+	signs, ok := signs.Checked()
+	if !ok {
+		return nil, &FormError{"Those number signs can't be read."}
+	}
 	out := make([]Answer, 0, len(fields))
 	for _, f := range fields {
 		v, present := raw[f.Id]
@@ -251,7 +258,7 @@ func CheckAnswers(fields []Field, raw map[string]any) ([]Answer, error) {
 				}
 				s = a.Address
 			case Number:
-				if _, ok := formula.ParseNumber(s, formula.PlainSigns); !ok {
+				if _, ok := formula.ParseNumber(s, signs); !ok {
 					return nil, &FormError{fmt.Sprintf("“%s” needs a number.", f.Label)}
 				}
 			case Date:
@@ -365,14 +372,15 @@ func GetPublic(ctx context.Context, token string) (*Public, error) {
 	return &Public{Title: l.form.Title, Description: l.form.Description, Fields: l.fields}, nil
 }
 
-// Submit turns a visitor's answers into a task in the form's project.
-func Submit(ctx context.Context, token string, raw map[string]any, now time.Time) error {
+// Submit turns a visitor's answers into a task in the form's project. signs
+// are how the visitor writes numbers (CheckAnswers).
+func Submit(ctx context.Context, token string, raw map[string]any, signs formula.NumberSigns, now time.Time) error {
 	l, err := load(ctx, token)
 	if err != nil {
 		return err
 	}
 	f := l.form
-	answers, err := CheckAnswers(l.fields, raw)
+	answers, err := CheckAnswers(l.fields, raw, signs)
 	if err != nil {
 		return err
 	}

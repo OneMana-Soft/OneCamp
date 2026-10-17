@@ -22,6 +22,25 @@ func CreateGitHubTaskActivity(ctx context.Context, taskID uuid.UUID, activityTyp
 	return nil
 }
 
+// CreateGitHubTaskActivities records many activities at once, as a push's
+// commits are: a statement per thousand, where each had a goroutine and an
+// insert of its own. One without an id or a time is given one now.
+func CreateGitHubTaskActivities(ctx context.Context, activities []models.GitHubTaskActivity) error {
+	for i := range activities {
+		if activities[i].ID == uuid.Nil {
+			activities[i].ID = uuid.New()
+		}
+		if activities[i].CreatedAt.IsZero() {
+			activities[i].CreatedAt = time.Now()
+		}
+	}
+	if err := models.CreateGitHubTaskActivities(ctx, activities); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/CreateGitHubTaskActivities Failed err: %+v", err)
+		return err
+	}
+	return nil
+}
+
 func GetGitHubTaskActivitiesByTaskID(ctx context.Context, taskID uuid.UUID) ([]*models.GitHubTaskActivity, error) {
 	query := `
 		SELECT id, task_id, activity_type, github_login, github_avatar_url, github_html_url, title, body, payload, created_at

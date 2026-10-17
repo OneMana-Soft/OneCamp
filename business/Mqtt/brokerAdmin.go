@@ -19,7 +19,10 @@ package business
 //     discarded (DisconnectPerson);
 //   - a channel made private: each client still on its topics whose person
 //     isn't a member loses them (RecheckTopicSubscribers), a net under a cut
-//     that failed.
+//     that failed;
+//   - a doc taken from people (made Restricted, moved out of a space, a grant
+//     removed): each client on its topic whose person can't read it now loses
+//     the topic (RecheckTopics, from business/Doc AccessChanged).
 //
 // Each runs in the background and is tried again a few times, further apart,
 // then logged: nothing waits for the broker, and nothing fails because it
@@ -64,6 +67,9 @@ const (
 	// clients, or one topic's subscribers.
 	brokerPageSize = 100
 	brokerMaxPages = 50
+	// recheckChunk is the most topics one recheck takes in a try: a page and
+	// the pages under it can be thousands, and one try has 30 seconds.
+	recheckChunk = 200
 )
 
 // brokerAdmin calls the broker's admin API.
@@ -492,12 +498,21 @@ func DisconnectPerson(userUUID string) {
 // on them whose person isn't in the conversation now, as the broker would
 // answer if it were asked again.
 func RecheckTopicSubscribers(topics ...string) {
-	if len(topics) == 0 {
-		return
+	RecheckTopics(topics, stillMemberTopic)
+}
+
+// RecheckTopics takes each topic off every client on it whose person may no
+// longer have it: stillReads is the rule the broker asks before a
+// subscription to the topic, so a recheck answers as a fresh subscription
+// would. In the background, recheckChunk topics a try, each tried again as
+// every cut is (atTheBroker).
+func RecheckTopics(topics []string, stillReads func(ctx context.Context, userUUID, topic string) (bool, error)) {
+	for from := 0; from < len(topics); from += recheckChunk {
+		chunk := topics[from:min(from+recheckChunk, len(topics))]
+		atTheBroker("recheck "+strconv.Itoa(len(chunk))+" topics' subscribers", func(ctx context.Context, a *brokerAdmin) error {
+			return a.recheck(ctx, chunk, stillReads)
+		})
 	}
-	atTheBroker("recheck "+strconv.Itoa(len(topics))+" topics' subscribers", func(ctx context.Context, a *brokerAdmin) error {
-		return a.recheck(ctx, topics, stillMemberTopic)
-	})
 }
 
 // stillMemberTopic answers from a fresh read of the person's conversations.

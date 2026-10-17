@@ -145,15 +145,19 @@ func TestCustomFields(t *testing.T) {
 		t.Errorf("another project's field narrows nothing: %s", c)
 	}
 
-	// Options taken away come off the tasks that had them.
-	_, changed, err := Update(ctx, project, channel.ID, Input{Name: "Channel", Options: []OptionInput{{ID: email, Label: "Email"}}})
+	// A save from a copy that doesn't list blog (another tab) keeps it, and t1's
+	// value of it; options named as removed come off the tasks that had them.
+	if f, changed, err := Update(ctx, project, channel.ID, Input{Name: "Channel", Options: []OptionInput{{ID: email, Label: "Email"}}}); err != nil || len(changed) != 0 || len(f.Options) != 2 {
+		t.Fatalf("a save leaving blog out: %+v %v %v", f, changed, err)
+	}
+	_, changed, err := Update(ctx, project, channel.ID, Input{Name: "Channel", Options: []OptionInput{{ID: email, Label: "Email"}}, RemovedOptions: []string{blog}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(changed) != 1 || changed[0] != t1.Uuid {
 		t.Errorf("blog came off t1: %v", changed)
 	}
-	if _, changed, err = Update(ctx, project, areas.ID, Input{Name: "Areas", Options: []OptionInput{{ID: app, Label: "App"}}}); err != nil || len(changed) != 1 {
+	if _, changed, err = Update(ctx, project, areas.ID, Input{Name: "Areas", Options: []OptionInput{{ID: app, Label: "App"}}, RemovedOptions: []string{web}}); err != nil || len(changed) != 1 {
 		t.Fatalf("web came off t1: %v %v", changed, err)
 	}
 	v, _ := model.ValueOf(ctx, uuid.MustParse(t1.Uuid), areas.ID)
@@ -162,7 +166,7 @@ func TestCustomFields(t *testing.T) {
 	if len(left) != 1 || left[0] != app {
 		t.Errorf("t1's areas keep app: %s", v)
 	}
-	if _, _, err = Update(ctx, project, areas.ID, Input{Name: "Areas"}); err != nil {
+	if _, _, err = Update(ctx, project, areas.ID, Input{Name: "Areas", RemovedOptions: []string{app}}); err != nil {
 		t.Fatal(err)
 	}
 	if v, _ := model.ValueOf(ctx, uuid.MustParse(t1.Uuid), areas.ID); v != nil {

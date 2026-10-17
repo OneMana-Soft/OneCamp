@@ -143,3 +143,13 @@ func TestCapabilityCatalogIsWellFormed(t *testing.T) {
 		}
 	}
 }
+
+// Every capability's refusal says what it lets someone do (QA SH-02); one
+// added to the catalogue without its words would fall back to "do this".
+func TestEveryCapabilityRefusalSaysWhatItAllows(t *testing.T) {
+	for _, c := range capabilityModels.AllCapabilities {
+		if got := RefusalMsg(c); got == RefusalMsg("not.a.capability") {
+			t.Errorf("%s refuses with the generic words %q", c, got)
+		}
+	}
+}

@@ -18,17 +18,17 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	MQTT "github.com/eclipse/paho.mqtt.golang"
 	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 
 	mqttInit "github.com/akashc777/OneCamp/initializers/mqttInit"
 )
 
-// BrokerEnv is a live EMQX for one test.
+// BrokerEnv is the test binary's EMQX, as one test sees it.
 type BrokerEnv struct {
 	container testcontainers.Container
 	// MQTT is the broker's TCP address (tcp://host:port), API its admin
@@ -38,13 +38,91 @@ type BrokerEnv struct {
 	token     string // the test's own console login
 }
 
-// SetupBroker starts EMQX 6.0.0 and points the server at it: its own client
-// (mqttInit.MqttClient), and the admin API's address and console login
-// (EMQX_API_URL, EMQX_DASHBOARD_DEFAULT_USERNAME and _PASSWORD).
+// brokerReadyWait is how long a broker gets to let a client in and take a
+// console login after it starts. It bounds a stuck broker, not a slow one:
+// at a load of about 100 a boot took from 15 s to over a minute, once a run.
+const brokerReadyWait = 5 * time.Minute
+
+// brokerConnectTry bounds one CONNECT, as the server's own connections are
+// bounded (mqttInit.ConnectWithBackoff).
+const brokerConnectTry = 10 * time.Second
+
+// SetupBroker points the server at the test binary's EMQX, at the version
+// the compose files run: its own client (mqttInit.MqttClient), and the admin
+// API's address and console login (EMQX_API_URL,
+// EMQX_DASHBOARD_DEFAULT_USERNAME and _PASSWORD).
+//
+// ONE BROKER A RUN. At a load of about 100 EMQX took from 15 s to over a
+// minute to boot, and a broker for each test booted four a run, each adding to
+// the load the others booted under. The wait was also shorter than it said:
+// the 120 s deadline held two waits with a 60 s timeout each of their own, so
+// a boot past a minute failed before the test's code ran
+// (TestLiveJoiningAChannelTellsTheNewMembersApp, twice on 15 Oct). Now the
+// broker boots once, on first use, and is ready when it lets a client in: a
+// real CONNECT and CONNACK, made the way the server makes its own
+// (mqttInit.ConnectWithBackoff). Tests share it without meeting: every client
+// id carries the test's own uuids, and what a test does at the broker reaches
+// only its own clients and topics. The container goes when the binary exits
+// (testcontainers' reaper).
 func SetupBroker(t *testing.T) *BrokerEnv {
 	t.Helper()
 	ensureLoggers()
-	ctx := context.Background()
+	shared, err := theBroker()
+	if err != nil {
+		t.Fatalf("start the broker: %v", err)
+	}
+	env := *shared // the test's own copy: its console login is its own
+	t.Setenv("EMQX_API_URL", env.API)
+	t.Setenv("EMQX_DASHBOARD_DEFAULT_USERNAME", "console")
+	t.Setenv("EMQX_DASHBOARD_DEFAULT_PASSWORD", env.password)
+
+	backend := newBrokerClient(env.MQTT, "backend-test-")
+	ctx, cancel := context.WithTimeout(context.Background(), brokerReadyWait)
+	defer cancel()
+	if err := mqttInit.ConnectWithBackoff(ctx, backend, mqttInit.CurrentConnectTimings()); err != nil {
+		t.Fatalf("connect the server's own client: %v", err)
+	}
+	t.Cleanup(func() { backend.Disconnect(100) })
+	UseMqttClient(t, backend)
+	return &env
+}
+
+// newBrokerClient is a client of the server's kind for the broker at addr,
+// with an id of its own.
+func newBrokerClient(addr, idPrefix string) MQTT.Client {
+	raw := make([]byte, 4)
+	_, _ = rand.Read(raw)
+	return MQTT.NewClient(MQTT.NewClientOptions().AddBroker(addr).
+		SetClientID(idPrefix + hex.EncodeToString(raw)).SetUsername("backend").
+		SetAutoReconnect(false).SetConnectTimeout(brokerConnectTry))
+}
+
+var theOneBroker struct {
+	mu  sync.Mutex
+	env *BrokerEnv
+}
+
+// theBroker is the binary's broker, started on first use. A start that failed
+// leaves none, and the next test that asks starts one again.
+func theBroker() (*BrokerEnv, error) {
+	theOneBroker.mu.Lock()
+	defer theOneBroker.mu.Unlock()
+	if theOneBroker.env == nil {
+		env, err := startBroker()
+		if err != nil {
+			return nil, err
+		}
+		theOneBroker.env = env
+	}
+	return theOneBroker.env, nil
+}
+
+// startBroker starts EMQX and waits until it lets a client in and its console
+// takes a login. Nothing else is waited on: the status page and an open port
+// come before either, and say less.
+func startBroker() (*BrokerEnv, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), brokerReadyWait)
+	defer cancel()
 	raw := make([]byte, 12)
 	_, _ = rand.Read(raw)
 	password := "test-" + hex.EncodeToString(raw)
@@ -57,77 +135,65 @@ func SetupBroker(t *testing.T) *BrokerEnv {
 				"EMQX_DASHBOARD__DEFAULT_USERNAME": "console",
 				"EMQX_DASHBOARD__DEFAULT_PASSWORD": password,
 			},
-			WaitingFor: wait.ForAll(
-				wait.ForHTTP("/api/v5/status").WithPort("18083/tcp"),
-				wait.ForListeningPort("1883/tcp"),
-			).WithDeadline(120 * time.Second),
 		},
 		Started: true,
 	})
 	if err != nil {
-		t.Fatalf("start the broker: %v", err)
+		return nil, err
 	}
 	env := &BrokerEnv{container: c, password: password}
-	t.Cleanup(env.close)
-
-	host, err := c.Host(ctx)
-	if err != nil {
-		t.Fatalf("broker host: %v", err)
+	ready := func() error {
+		host, err := c.Host(ctx)
+		if err != nil {
+			return fmt.Errorf("broker host: %w", err)
+		}
+		mqttPort, err := c.MappedPort(ctx, "1883")
+		if err != nil {
+			return fmt.Errorf("broker port: %w", err)
+		}
+		apiPort, err := c.MappedPort(ctx, "18083")
+		if err != nil {
+			return fmt.Errorf("broker admin port: %w", err)
+		}
+		env.MQTT = fmt.Sprintf("tcp://%s:%s", host, mqttPort.Port())
+		env.API = fmt.Sprintf("http://%s:%s", host, apiPort.Port())
+		probe := newBrokerClient(env.MQTT, "ready-probe-")
+		if err := mqttInit.ConnectWithBackoff(ctx, probe, mqttInit.CurrentConnectTimings()); err != nil {
+			return fmt.Errorf("the broker never let a client in: %w", err)
+		}
+		probe.Disconnect(0)
+		// The console's account is made a moment after the broker is up, and
+		// a login before then is refused: wait for the first one to work.
+		return env.waitForConsole(ctx)
 	}
-	mqttPort, err := c.MappedPort(ctx, "1883")
-	if err != nil {
-		t.Fatalf("broker port: %v", err)
+	if err := ready(); err != nil {
+		stop, cancelStop := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancelStop()
+		_ = c.Terminate(stop)
+		return nil, err
 	}
-	apiPort, err := c.MappedPort(ctx, "18083")
-	if err != nil {
-		t.Fatalf("broker admin port: %v", err)
-	}
-	env.MQTT = fmt.Sprintf("tcp://%s:%s", host, mqttPort.Port())
-	env.API = fmt.Sprintf("http://%s:%s", host, apiPort.Port())
-	// The console's account is made a moment after the broker says it's up,
-	// and a login before then is refused: wait for the first one to work.
-	env.waitForConsole(t)
-
-	t.Setenv("EMQX_API_URL", env.API)
-	t.Setenv("EMQX_DASHBOARD_DEFAULT_USERNAME", "console")
-	t.Setenv("EMQX_DASHBOARD_DEFAULT_PASSWORD", password)
-
-	backend := MQTT.NewClient(MQTT.NewClientOptions().AddBroker(env.MQTT).
-		SetClientID("backend-test-" + hex.EncodeToString(raw[:4])).SetUsername("backend").SetAutoReconnect(false))
-	if tok := backend.Connect(); !tok.WaitTimeout(30*time.Second) || tok.Error() != nil {
-		t.Fatalf("connect the server's own client: %v", tok.Error())
-	}
-	mqttInit.MqttClient = backend
-	t.Cleanup(func() {
-		mqttInit.MqttClient = nil
-		backend.Disconnect(100)
-	})
-	return env
+	return env, nil
 }
 
-func (e *BrokerEnv) waitForConsole(t *testing.T) {
-	t.Helper()
+// waitForConsole waits until the console takes a login, or ctx ends.
+func (e *BrokerEnv) waitForConsole(ctx context.Context) error {
 	login, _ := json.Marshal(map[string]string{"username": "console", "password": e.password})
-	deadline := time.Now().Add(60 * time.Second)
 	for {
-		res, err := http.Post(e.API+"/api/v5/login", "application/json", strings.NewReader(string(login)))
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, e.API+"/api/v5/login", strings.NewReader(string(login)))
+		req.Header.Set("Content-Type", "application/json")
+		res, err := http.DefaultClient.Do(req)
 		if err == nil {
 			res.Body.Close()
 			if res.StatusCode == http.StatusOK {
-				return
+				return nil
 			}
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("the broker's console login never worked: %v", err)
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("the broker's console login never worked: %v", err)
+		case <-time.After(250 * time.Millisecond):
 		}
-		time.Sleep(250 * time.Millisecond)
 	}
-}
-
-func (e *BrokerEnv) close() {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	_ = e.container.Terminate(ctx)
 }
 
 // BrokerClient is a person's client, as the web app connects one: a client

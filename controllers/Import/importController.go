@@ -151,6 +151,7 @@ var capabilityNameMap = map[importProvider.Capability]string{
 	importProvider.CapDMs:          "dms",
 	importProvider.CapMessages:     "messages",
 	importProvider.CapReactions:    "reactions",
+	importProvider.CapPages:        "pages",
 }
 
 // ─── CreateJob (live-API) ──────────────────────────────────────────

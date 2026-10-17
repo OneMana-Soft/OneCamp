@@ -64,24 +64,35 @@ func TestDemoVisitorFindsNoOneByTheirAddress(t *testing.T) {
 			t.Fatalf("create %s: %v", index, err)
 		}
 	}
-	// One of the demo's members.
-	dana := uuid.NewString()
-	raw, _ := json.Marshal(map[string]any{"user_id": dana, "user_name": "dana", "user_full_name": "Dana Whitfield",
-		"user_email": "dana.whitfield@northwind.test", "created_date": time.Now().Unix()})
-	if _, err := client.Index(ctx, opensearchapi.IndexReq{
-		Index: openSearchStruct.USER_INDEX, DocumentID: dana, Body: strings.NewReader(string(raw)),
-		Params: opensearchapi.IndexParams{Refresh: "true"},
-	}); err != nil {
-		t.Fatal(err)
+	index := func(id, name, full, email string) {
+		t.Helper()
+		raw, _ := json.Marshal(map[string]any{"user_id": id, "user_name": name, "user_full_name": full,
+			"user_email": email, "created_date": time.Now().Unix()})
+		if _, err := client.Index(ctx, opensearchapi.IndexReq{
+			Index: openSearchStruct.USER_INDEX, DocumentID: id, Body: strings.NewReader(string(raw)),
+			Params: opensearchapi.IndexParams{Refresh: "true"},
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
+	// One of the demo's seeded cast, whom the visitor is meant to find by name.
+	danaEmail := "dana.whitfield" + helpers.DemoCastEmailDomain
+	dana := uuid.NewString()
+	index(dana, "dana", "Dana Whitfield", danaEmail)
+	// A real account on the same server, which the visitor must not find at all
+	// (since 11 Oct, not even by name).
+	rae := uuid.NewString()
+	index(rae, "rae", "Rae Holloway", "rae.holloway@northwind.test")
 
 	const visitorEmail = "visitor@demo.example"
 	t.Setenv("DEMO_MODE", "true")
 	t.Setenv("DEMO_USER_EMAIL", visitorEmail)
 
-	// search answers text for whoever is signed in as email: whether Dana is
-	// among the people found, and her result's highlight.
-	search := func(email, text string) (bool, map[string][]string) {
+	// searchFor answers text for whoever is signed in as email: whether the
+	// person with id who is among the people found, and that result's highlight.
+	var searchFor func(email, text, who string) (bool, map[string][]string)
+	search := func(email, text string) (bool, map[string][]string) { return searchFor(email, text, dana) }
+	searchFor = func(email, text, who string) (bool, map[string][]string) {
 		t.Helper()
 		as := context.WithValue(ctx, helpers.UserInfoContextKey, userModels.UserInfo{
 			UserPostgresInfo: userModels.User{Id: uuid.New(), EmailID: email},
@@ -107,7 +118,7 @@ func TestDemoVisitorFindsNoOneByTheirAddress(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, hit := range out.Data.Page {
-			if hit.User != nil && hit.User.Id == dana {
+			if hit.User != nil && hit.User.Id == who {
 				return true, hit.Highlight
 			}
 		}
@@ -115,7 +126,7 @@ func TestDemoVisitorFindsNoOneByTheirAddress(t *testing.T) {
 	}
 
 	// Her address, exactly and a letter off.
-	for _, guess := range []string{"dana.whitfield@northwind.test", "dana.whitfeld@northwind.test"} {
+	for _, guess := range []string{danaEmail, "dana.whitfeld" + helpers.DemoCastEmailDomain} {
 		// A member finds her by it, as before, with the address not highlighted.
 		found, highlight := search("owner@northwind.test", guess)
 		if !found {
@@ -133,9 +144,19 @@ func TestDemoVisitorFindsNoOneByTheirAddress(t *testing.T) {
 	if found, _ := search(visitorEmail, "Dana Whitfield"); !found {
 		t.Error("the demo visitor no longer finds people by name, so the check above proves nothing")
 	}
+	// A real account stays out of the visitor's results whatever is typed, and
+	// a member still finds them.
+	for _, guess := range []string{"Rae Holloway", "rae", "rae.holloway@northwind.test"} {
+		if found, _ := searchFor(visitorEmail, guess, rae); found {
+			t.Errorf("the demo visitor searching %q found a real account", guess)
+		}
+	}
+	if found, _ := searchFor("owner@northwind.test", "Rae Holloway", rae); !found {
+		t.Error("a member no longer finds a real teammate by name")
+	}
 	// Off the demo, the same account finds people by address.
 	t.Setenv("DEMO_MODE", "")
-	if found, _ := search(visitorEmail, "dana.whitfield@northwind.test"); !found {
+	if found, _ := search(visitorEmail, danaEmail); !found {
 		t.Error("off the demo, the visitor's address alone stopped search finding people by theirs")
 	}
 }

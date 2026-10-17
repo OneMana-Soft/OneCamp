@@ -209,9 +209,6 @@ func MayMessage(to *dgraphStruct.DgraphUser) *Rejection {
 	return nil
 }
 
-// Recipient is who the message goes to, for naming them to the person.
-func (m *DirectMessage) Recipient() *dgraphStruct.DgraphUser { return m.to }
-
 // Commit writes the direct message.
 func (m *DirectMessage) Commit(ctx context.Context) (*chatAdapter.OutputCreateChatForChat, error) {
 	return chatBusiness.CreateChat(ctx, m.in, m.user, m.to, m.toUUID, m.mentions)
@@ -270,9 +267,6 @@ func PrepareGroupMessage(ctx context.Context, user *userModels.UserInfo, in *cha
 	}
 	return &GroupMessage{in: in, user: user, participants: participants, mentions: mentions}, nil
 }
-
-// Participants are the people in the group, for naming it to the person.
-func (m *GroupMessage) Participants() []*dgraphStruct.DgraphUser { return m.participants }
 
 // Commit writes the group message.
 func (m *GroupMessage) Commit(ctx context.Context) (*chatAdapter.OutputCreateChatForChat, error) {

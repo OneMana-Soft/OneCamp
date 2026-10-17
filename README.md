@@ -12,7 +12,7 @@ channels, docs, tasks and an AI teammate already in it.
 
 | Chat | Tasks and boards |
 |---|---|
-| ![A channel in OneCamp](.github/assets/channel.jpg) | ![A project board in OneCamp](.github/assets/board.jpg) |
+| ![A channel in OneCamp](.github/assets/channel.jpg) | ![A project's tasks in OneCamp](.github/assets/board.jpg) |
 | **Docs, edited together live** | **Every agent action on the record** |
 | ![A collaborative doc in OneCamp](.github/assets/doc.jpg) | ![An agent's refused action, with the hash-chained record that proves it](.github/assets/drill.jpg) |
 

@@ -17,8 +17,10 @@ import (
 	taskrank "github.com/akashc777/OneCamp/business/TaskRank"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
+	lastSeenChannelDomain "github.com/akashc777/OneCamp/domain/LastSeenChannel"
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
 	domain "github.com/akashc777/OneCamp/domain/User"
+	userChannelNotificationDomain "github.com/akashc777/OneCamp/domain/UserChannelNotification"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/avscan"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
@@ -61,72 +63,6 @@ type PostPagination struct {
 type RecordingPagination struct {
 	Recordings []*dgraphStruct.DgraphRecording `json:"recordings,omitempty"`
 	HasMore    bool                            `json:"has_more"`
-}
-
-func CreateUser(ctx context.Context, emailID string, userName string) (err error) {
-
-	emailID = helpers.NormalizeEmail(emailID)
-	userUUID := uuid.New()
-	err = domain.CreateUser(ctx, emailID, userUUID)
-	zeroUnixTime := time.Time{}
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/CreateUser Failed to create new user err: %+v",
-			err)
-		return
-	}
-
-	dgraphUser := &dgraphStruct.DgraphUser{
-		Uuid:         userUUID.String(),
-		EmailID:      emailID,
-		UserName:     userName,
-		UserFullName: userName,
-		Status:       dgraphStruct.USER_OPT_STATUS_ONLINE,
-		DeletedAt:    &zeroUnixTime,
-	}
-
-	dgraphUID, err := CreateOrUpdateDgraphUser(ctx, dgraphUser)
-
-	if helpers.DgraphWriteFailed(dgraphUID, err) {
-		helpers.LogErrorWithContext(ctx,
-			"business/CreateUser Failed to create new user in dgraph err: %+v",
-			err)
-
-		// The uid was previously discarded, so a mutation that returned no uid and no error was
-		// treated as success — creating a Postgres user with no Dgraph node and reporting it fine.
-		if err == nil {
-			err = errors.New("dgraph returned no uid for the new user")
-		}
-
-		// Reverse the Postgres insert, or this locks the person out of their own email address
-		// FOREVER. users.email_id is NOT NULL UNIQUE and every user lookup reads Dgraph, so the
-		// row is an account nobody can see that still owns the address — and each retry fails on
-		// the constraint. Unlike a channel or project name, an email is not something the person
-		// can simply choose differently.
-		//
-		// Safe only in this window, which is why it is here and not anywhere else: users(id) is
-		// referenced by 55 tables with a mix of CASCADE, SET NULL and RESTRICT, and none of them
-		// has a row for a user created moments ago.
-		_ = helpers.CompensateOnFailure(ctx, "user row for "+emailID,
-			func(undoCtx context.Context) error {
-				return domain.HardDeleteUser(undoCtx, userUUID)
-			})
-
-		return
-	}
-
-	openSearchUser := &openSearchStruct.OpenSearchUser{
-		Uuid:          userUUID.String(),
-		UserName:      userName,
-		UserFullName:  userName,
-		UserEmail:     emailID,
-		UserCreatedAt: time.Now().Unix(),
-	}
-
-	go domain.UpdateUserInOpenSearch(openSearchUser)
-
-	return
 }
 
 // CreateExternalGitHubUser creates a stub user for an unmapped GitHub user.
@@ -1346,16 +1282,15 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID uuid.UUI
 		return
 	}
 
-	err, channelPostCount := postDomain.GetLatestPostInChannelCountByUserID(ctx, userUUID)
-
-	if err != nil {
+	// Each count below is read on its own and a failed one is left out, the
+	// rest kept: any one failing used to fail the whole sidebar, which then
+	// answered an empty 200 and sat on its skeleton.
+	postCountErr, channelPostCount := postDomain.GetLatestPostInChannelCountByUserID(ctx, userUUID)
+	if postCountErr != nil {
 		helpers.LogErrorWithContext(ctx,
-			"business/GetUserActiveChannelListWithLatestPost Failed to post count for channels err: %+v",
-			err)
-		return
-	}
-
-	if dgraphUser.Channels != nil {
+			"business/GetDgraphUserInfoByUUIDForSidebarNav channel unread counts left out err: %+v",
+			postCountErr)
+	} else if dgraphUser.Channels != nil {
 		for ind := range dgraphUser.Channels {
 			if count, ok := channelPostCount[dgraphUser.Channels[ind].Uuid]; ok {
 				dgraphUser.Channels[ind].UnreadPostCount = count.PostCount
@@ -1363,16 +1298,30 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID uuid.UUI
 		}
 	}
 
-	chatMessageCount, err := chatDomain.GetLatestChatMessageCountByUserID(ctx, userUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetUserChatListWithLatestChat Failed to get unread chat count err: %+v",
-			err)
+	addChannelMentionCounts(ctx, userUUID, dgraphUser)
 
-		return
+	// The person's notification level on each channel, so the sidebar can
+	// show a muted one muted (a level of "block").
+	if levels, levelErr := userChannelNotificationDomain.GetChannelNotificationTypesForUser(ctx, userUUID.String()); levelErr != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/GetDgraphUserInfoByUUIDForSidebarNav notification levels left out err: %+v",
+			levelErr)
+	} else {
+		for _, list := range [][]*dgraphStruct.DgraphChannel{dgraphUser.Channels, dgraphUser.FavChannels} {
+			for _, ch := range list {
+				if ch != nil {
+					ch.NotificationType = levels[ch.Uuid]
+				}
+			}
+		}
 	}
 
-	if dgraphUser.DMs != nil {
+	chatMessageCount, chatCountErr := chatDomain.GetLatestChatMessageCountByUserID(ctx, userUUID)
+	if chatCountErr != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/GetDgraphUserInfoByUUIDForSidebarNav conversation unread counts left out err: %+v",
+			chatCountErr)
+	} else if dgraphUser.DMs != nil {
 		for ind := range dgraphUser.DMs {
 			if countProxy, ok := chatMessageCount[dgraphUser.DMs[ind].GroupingId]; ok && countProxy != nil {
 				dgraphUser.DMs[ind].UnreadMessageCount = countProxy.ChatCount
@@ -1383,10 +1332,11 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID uuid.UUI
 	}
 
 	// What the Inbox will show that's new, counted from the feed itself.
-	activityUnreadCount, err := activityBusiness.UnreadActivityCount(ctx, userUUID, dgraphUser.Uid)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetDgraphUserInfoByUUIDForSidebarNav Failed to get activity unread count err: %+v", err)
-		// Don't return, just log
+	activityUnreadCount, activityErr := activityBusiness.UnreadActivityCount(ctx, userUUID, dgraphUser.Uid)
+	if activityErr != nil {
+		// Left out, the rest kept. It shared the function's error, so a failed
+		// count failed the whole sidebar.
+		helpers.LogErrorWithContext(ctx, "business/GetDgraphUserInfoByUUIDForSidebarNav Failed to get activity unread count err: %+v", activityErr)
 	} else {
 		dgraphUser.TotalUnreadActivityCount = activityUnreadCount
 	}
@@ -1425,7 +1375,47 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID uuid.UUI
 
 }
 
-func GetChannelsAndUsers(ctx context.Context, userDgraphUID string, userDgraphUUID string, searchText string) (fwdList []*adapterUser.UserAndChannelFwdMessage, err error) {
+// addChannelMentionCounts sets, on each of the person's channels, how many of
+// its unread posts mention them (postDomain.ChannelMentionCounts), counted
+// since their read mark there: a channel @mention shows "@2" in the sidebar,
+// where it looked like any chatter. A failed read leaves the counts out and
+// the rest of the sidebar stands, as for every count here.
+func addChannelMentionCounts(ctx context.Context, userUUID uuid.UUID, dgraphUser *dgraphStruct.DgraphUser) {
+	if len(dgraphUser.Channels) == 0 {
+		return
+	}
+	marks, err := lastSeenChannelDomain.GetAllLastSeenChannelsForUser(ctx, userUUID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/GetDgraphUserInfoByUUIDForSidebarNav channel mention counts left out err: %+v", err)
+		return
+	}
+	// Only the channels they are in now: a read mark outlives leaving.
+	inChannels := make(map[string]time.Time, len(dgraphUser.Channels))
+	for _, ch := range dgraphUser.Channels {
+		if ch == nil {
+			continue
+		}
+		if at, ok := marks[ch.Uuid]; ok {
+			inChannels[ch.Uuid] = at
+		}
+	}
+	mentions, err := postDomain.ChannelMentionCounts(ctx, dgraphUser.Uid, inChannels)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/GetDgraphUserInfoByUUIDForSidebarNav channel mention counts left out err: %+v", err)
+		return
+	}
+	for _, ch := range dgraphUser.Channels {
+		if ch != nil {
+			ch.UnreadMentionCount = mentions[ch.Uuid]
+		}
+	}
+}
+
+// GetChannelsAndUsers is where a message can be forwarded to: the channels,
+// people and group chats matching searchText. viewerEmail is whose list it
+// is: on the public demo its shared visitor
+// finds only the demo's own people (domain.DemoVisibleUsers).
+func GetChannelsAndUsers(ctx context.Context, userDgraphUID string, userDgraphUUID string, viewerEmail string, searchText string) (fwdList []*adapterUser.UserAndChannelFwdMessage, err error) {
 	// searchText is cleaned (dgraphquery.CleanSearchTerm), not escaped: the
 	// people search escapes it itself and also matches handles in Postgres.
 	safeSearch := dgraphquery.EscapeRegexLiteral(searchText)
@@ -1449,6 +1439,7 @@ func GetChannelsAndUsers(ctx context.Context, userDgraphUID string, userDgraphUU
 		)
 		return
 	}
+	usersList = domain.DemoVisibleUsers(viewerEmail, usersList)
 
 	groupChatList, err := chatDomain.GetUserGroupChatListWithSearchText(ctx, userDgraphUUID, userDgraphUID, safeSearch)
 	if err != nil {
@@ -1569,10 +1560,17 @@ func GetUsersListWhoDontBelongToTheDM(ctx context.Context, dmUID string) (dgraph
 	return
 }
 
-// EnsureDemoUserExists is an idempotent helper for the demo login flow.
-// It checks whether the demo user already exists in postgres; if not, it
-// creates them across all data stores (postgres → dgraph → opensearch),
-// mirroring the OAuthCallback new-user creation path.
+// EnsureDemoUserExists is an idempotent helper for the demo login and the demo
+// seed, which makes the shared visitor and the fictional cast with it. An
+// account that doesn't exist yet is made across all data stores (postgres →
+// dgraph → opensearch) by the canonical creator, so it has a handle from the
+// start, as anyone who joins does.
+//
+// It used to be made by a creator of its own that gave no handle. The nightly
+// reset seeds after the API has started and its handle backfill
+// (BackfillHandles) has run, and the cast never sign in to be given one on
+// reading their profile, so the @mention list showed Maya Chen and Jonas
+// Weber without a handle until the API next started.
 func EnsureDemoUserExists(ctx context.Context, emailID string, userName string) error {
 	err, exists := domain.CheckIfUserExistByEmail(ctx, emailID)
 	if err != nil {
@@ -1584,8 +1582,9 @@ func EnsureDemoUserExists(ctx context.Context, emailID string, userName string) 
 		return nil
 	}
 
-	// User doesn't exist — create across all stores
-	err = CreateUser(ctx, emailID, userName)
+	// No password and no sign-in method: the visitor signs in through the
+	// demo login, and the cast never sign in.
+	_, _, err = CreateUserWithMethod(ctx, emailID, userName, nil, "", false)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/EnsureDemoUserExists Failed to create demo user err: %+v", err)

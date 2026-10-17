@@ -357,6 +357,28 @@ type UnifiedActivityItem struct {
 	// ActorKind is who did it: "person", "agent" or "app", so a reader can
 	// see what people did apart from what agents and automations did.
 	ActorKind string `json:"actor_kind"`
+	// Notice is a "NOTICE" item: one with no graph record of its own
+	// (business/Follow), sent only to an app that asks for notices.
+	Notice *NoticeItem `json:"notice,omitempty"`
+}
+
+// NoticeItem is an inbox item from business/Follow's notices: what happened to
+// which thing, who did it, and why the reader was told ("mention",
+// "participant", "follower", "subject", "owner"). Title is empty, and CanOpen
+// false, when the reader can't open the thing now: the inbox never carries the
+// title of a page its reader can't open.
+type NoticeItem struct {
+	ID           string                   `json:"id"`
+	Kind         string                   `json:"kind"`
+	ResourceKind string                   `json:"resource_kind"`
+	ResourceUUID string                   `json:"resource_uuid"`
+	Title        string                   `json:"title,omitempty"`
+	CanOpen      bool                     `json:"can_open"`
+	Reason       string                   `json:"reason"`
+	Actor        *dgraphStruct.DgraphUser `json:"actor,omitempty"`
+	Agent        *dgraphStruct.DgraphUser `json:"agent,omitempty"`
+	Data         map[string]string        `json:"data,omitempty"`
+	CreatedAt    string                   `json:"created_at"`
 }
 
 type UnifiedActivityPagination struct {
