@@ -9,7 +9,7 @@
 # /work, non-root, cap_drop=ALL, seccomp, pids_limit, gVisor recommended).
 
 # ---- build the runner binary ----
-FROM golang:1.23-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 COPY *.go ./

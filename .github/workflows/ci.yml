@@ -15,7 +15,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.25"
+  GO_VERSION: "1.26"
 
 jobs:
   lint:
@@ -246,9 +246,10 @@ jobs:
         # The package opts in via the //go:build integration build tag
         # so the unit job above doesn't accidentally pull in the
         # heavyweight harness.
-        # 40 minutes: the suite outgrew 20 on a hosted runner with v2.72.0
-        # (101 tests), and a timeout reads as a failure with nothing failing.
-        run: go test -count=1 -timeout=40m -tags=integration ./tests/integration/...
+        # 90 minutes: the suite outgrew 20 on a hosted runner with v2.72.0
+        # (101 tests), then 40 with v2.73.0 (244), and a timeout reads as a
+        # failure with nothing failing.
+        run: go test -count=1 -timeout=90m -tags=integration ./tests/integration/...
         env:
           IMPORT_TOKEN_KEK: "ci-integration-kek-1234567890abcdef"
 

@@ -1,0 +1,3 @@
+# Logs the service writes when it runs from this folder (collab.log was tracked
+# from May to October 2026 and shipped in every install zip).
+*.log

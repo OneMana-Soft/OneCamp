@@ -313,7 +313,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
-    image: redis:8.6.2
+    image: redis:8.6.7
     restart: always
     # /data IS WHERE REDIS KEEPS ITS DATA, and it holds every signed-in session
     # (the refresh tokens). The mount was ./data/redis_data/data spelt with a
@@ -1011,7 +1011,7 @@ services:
     # first that negotiates the version; v3.6.4 to v3.6.6 also refused paths with
     # an encoded slash or percent, which file names carry. Change it deliberately:
     # helpers/imagePinGuard_test.go holds the floor.
-    image: "traefik:v3.7.13"
+    image: "traefik:v3.7.14"
     restart: unless-stopped
     labels:
       # Enable Traefik for this service, to make it available in the public network
