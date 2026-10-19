@@ -270,13 +270,8 @@ func writePostNode(ctx context.Context, postUUID uuid.UUID, postInfo *adapter.In
 		})
 	}
 
-	for _, mediaObj := range postInfo.MediaObj {
-		mediaObj.DType = []string{"Attachment"}
-		mediaObj.CreatedBy = &dgraphStruct.DgraphUser{
-			Uid: userInfo.UserDgraphInfo.Uid,
-		}
-		mediaObj.CreatedAt = &currentTime
-	}
+	// New nodes from the upload's own fields: never a node the request names.
+	postInfo.MediaObj = dgraphStruct.NewAttachments(postInfo.MediaObj, userInfo.UserDgraphInfo.Uid, currentTime)
 
 	// add channel in dgraph
 	dgraphPost := dgraphStruct.DgraphPost{
@@ -523,13 +518,8 @@ func CreatePostComment(ctx context.Context, commentInfo *adapter.InputCreateOrUp
 		})
 	}
 
-	for _, mediaObj := range commentInfo.MediaObj {
-		mediaObj.DType = []string{"Attachment"}
-		mediaObj.CreatedBy = &dgraphStruct.DgraphUser{
-			Uid: userInfo.UserDgraphInfo.Uid,
-		}
-		mediaObj.CreatedAt = &currentTime
-	}
+	// New nodes from the upload's own fields: never a node the request names.
+	commentInfo.MediaObj = dgraphStruct.NewAttachments(commentInfo.MediaObj, userInfo.UserDgraphInfo.Uid, currentTime)
 
 	dgraphPost := dgraphStruct.DgraphPost{
 		Uid:  "uid(po)",

@@ -36,9 +36,10 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 	var dgraphDMs []*dgraphStruct.DgraphDm
 	var dmCount = 0
 
-	for i, _ := range fwdMessageInput.Attachments {
-		fwdMessageInput.Attachments[i].DType = []string{"Attachment"}
-	}
+	// The files added in the forward box, as new nodes: a file the request
+	// carried was written as it came, so its uid linked (and overwrote) any
+	// node, another member's file or a private doc, into the forward.
+	fwdMessageInput.Attachments = dgraphStruct.NewAttachments(fwdMessageInput.Attachments, userInfo.Uid, currentTime)
 
 	var postUUIDs []string
 	var channelUUIDs []string

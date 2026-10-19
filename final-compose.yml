@@ -50,21 +50,30 @@ services:
 
   zero:
     logging: *default-logging
-    image: dgraph/dgraph:v25.3.3
+    image: dgraph/dgraph:v25.5.0
     volumes:
       - ./data/dgraph:/dgraph
     restart: unless-stopped
-    command: dgraph zero --my=zero:5080
+    # --security: Zero's admin HTTP endpoints (6080) answered anyone until v25.4.0; the
+    # whitelist keeps /state, /assign, /removeNode and /moveTablet to the Docker networks.
+    # --telemetry: Dgraph reports usage to its developers by default; a self-hosted
+    # install sends nothing anywhere. helpers/dgraphStackGuard_test.go holds both.
+    command: dgraph zero --my=zero:5080 --security "whitelist=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" --telemetry "reports=false; sentry=false"
     networks:
       - onecamp-shared-net
 
   alpha:
     logging: *default-logging
-    image: dgraph/dgraph:v25.3.3
+    image: dgraph/dgraph:v25.5.0
     volumes:
       - ./data/dgraph:/dgraph
     restart: unless-stopped
-    command: dgraph alpha --my=alpha:7080 --zero=zero:5080 --security whitelist=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+    # --cache: since v25.1.0 the default is 4 GB, the whole of a small server; DGRAPH_CACHE_MB
+    # sizes it (1 GB, the default before v25.1.0). mem_limit bounds the rest, so a runaway
+    # query restarts Alpha rather than taking the machine. Never add --mcp: Dgraph's own MCP
+    # server is the whole graph with no authentication (helpers/dgraphStackGuard_test.go).
+    command: dgraph alpha --my=alpha:7080 --zero=zero:5080 --security "whitelist=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" --cache "size-mb=${DGRAPH_CACHE_MB:-1024}" --telemetry "reports=false; sentry=false"
+    mem_limit: ${DGRAPH_MEM_LIMIT:-4g}
     # CONSOLE NOT PUBLISHED. This service used to carry a Traefik router on its
     # management port, so the console was reachable over HTTPS from anywhere with
     # only its own login in front of it. Reach it through an SSH tunnel instead:
@@ -76,11 +85,9 @@ services:
   ratel:
     logging: *default-logging
     restart: unless-stopped
-    # The one pin here that is a version CHOICE, not a record of what runs: no published
-    # ratel tag matches the digest on the host, so upstream re-pushed or pruned it and the
-    # running image cannot be named. v25.2.0 is the newest published, and pairing ratel with
-    # the v25 Dgraph it administers is the lower risk of the two directions.
-    image: dgraph/ratel:v25.2.0
+    # A version CHOICE, not a record of what runs: the newest published Ratel (v25.3.0,
+    # 8 Oct 2026), paired with the v25 Dgraph it administers.
+    image: dgraph/ratel:v25.3.0
     # CONSOLE NOT PUBLISHED. This service used to carry a Traefik router on its
     # management port, so the console was reachable over HTTPS from anywhere with
     # only its own login in front of it. Reach it through an SSH tunnel instead:

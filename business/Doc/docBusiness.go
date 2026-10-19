@@ -452,13 +452,8 @@ func CreateDocComment(ctx context.Context, rawDocDgraph *dgraphStruct.DgraphDoc,
 		})
 	}
 
-	for _, mediaObj := range createTaskCommentInfoInput.Attachments {
-		mediaObj.DType = []string{"Attachment"}
-		mediaObj.CreatedBy = &dgraphStruct.DgraphUser{
-			Uid: createdByUser.UserDgraphInfo.Uid,
-		}
-		mediaObj.CreatedAt = &currentTime
-	}
+	// New nodes from the upload's own fields: never a node the request names.
+	createTaskCommentInfoInput.Attachments = dgraphStruct.NewAttachments(createTaskCommentInfoInput.Attachments, createdByUser.UserDgraphInfo.Uid, currentTime)
 
 	dgraphDoc := &dgraphStruct.DgraphDoc{
 		Uid:  "uid(doc)",

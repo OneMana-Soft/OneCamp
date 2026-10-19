@@ -53,13 +53,8 @@ func CreateTaskComment(ctx context.Context, taskUUID uuid.UUID, rawTaskDgraph *d
 		})
 	}
 
-	for _, mediaObj := range createTaskCommentInfoInput.Attachments {
-		mediaObj.DType = []string{"Attachment"}
-		mediaObj.CreatedBy = &dgraphStruct.DgraphUser{
-			Uid: createdByUser.UserDgraphInfo.Uid,
-		}
-		mediaObj.CreatedAt = &currentTime
-	}
+	// New nodes from the upload's own fields: never a node the request names.
+	createTaskCommentInfoInput.Attachments = dgraphStruct.NewAttachments(createTaskCommentInfoInput.Attachments, createdByUser.UserDgraphInfo.Uid, currentTime)
 
 	dgraphTask := &dgraphStruct.DgraphTask{
 		Uid:  "uid(ta)",
@@ -508,13 +503,10 @@ func AddAttachmentToTask(ctx context.Context, taskUUID uuid.UUID, dgraphTaskInfo
 
 	var oldAttachmentsName []string
 
+	// New nodes from the upload's own fields: never a node the request names.
+	taskInfo.Attachments = dgraphStruct.NewAttachments(taskInfo.Attachments, userInfo.Uid, currentTime)
 	for _, attachment := range taskInfo.Attachments {
 		newAttachmentsName = append(newAttachmentsName, attachment.FileName)
-		attachment.DType = []string{"Attachment"}
-		attachment.CreatedBy = &dgraphStruct.DgraphUser{
-			Uid: userInfo.Uid,
-		}
-		attachment.CreatedAt = &currentTime
 	}
 
 	for _, attachment := range dgraphTaskInfo.Attachments {
@@ -578,13 +570,8 @@ func CreateTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.User
 		return
 	}
 
-	for _, mediaObj := range taskInfo.Attachments {
-		mediaObj.DType = []string{"Attachment"}
-		mediaObj.CreatedBy = &dgraphStruct.DgraphUser{
-			Uid: userInfo.UserDgraphInfo.Uid,
-		}
-		mediaObj.CreatedAt = &currentTime
-	}
+	// New nodes from the upload's own fields: never a node the request names.
+	taskInfo.Attachments = dgraphStruct.NewAttachments(taskInfo.Attachments, userInfo.UserDgraphInfo.Uid, currentTime)
 
 	dgraphTask := dgraphStruct.DgraphTask{
 		Uid:  "uid(task)",
