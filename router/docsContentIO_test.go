@@ -28,6 +28,16 @@ func (exportOff) Int(_ context.Context, p policyBusiness.IntPolicy) int    { ret
 func (exportOff) List(_ context.Context, p policyBusiness.ListPolicy) []string {
 	return p.Default
 }
+func (exportOff) Choice(_ context.Context, p policyBusiness.ChoicePolicy) string { return p.Default }
+func (e exportOff) BoolIn(ctx context.Context, p policyBusiness.BoolPolicy, _ policyBusiness.Scope) bool {
+	return e.Bool(ctx, p)
+}
+func (exportOff) IntIn(_ context.Context, p policyBusiness.IntPolicy, _ policyBusiness.Scope) int {
+	return p.Default
+}
+func (exportOff) ChoiceIn(_ context.Context, p policyBusiness.ChoicePolicy, _ policyBusiness.Scope) string {
+	return p.Default
+}
 func (exportOff) Require(policyBusiness.BoolPolicy) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

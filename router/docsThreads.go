@@ -15,4 +15,10 @@ func mountThreads(rt docsRouters) {
 	rt.Member.Post("/threads/{thread_id}/reopen", threadController.ReopenThread)
 	rt.Member.Post("/threads/{thread_id}/reanchor", threadController.ReanchorThread)
 	rt.Member.Post("/threads/{thread_id}/read", threadController.MarkThreadRead)
+	// A comment threads keep (a table's row's): edit, remove, react. A doc's
+	// comments change through the doc's own comment routes.
+	rt.Member.Post("/threads/{thread_id}/comments/{comment_id}/edit", threadController.EditThreadComment)
+	rt.Member.Post("/threads/{thread_id}/comments/{comment_id}/remove", threadController.RemoveThreadComment)
+	rt.Member.Post("/threads/{thread_id}/comments/{comment_id}/react", threadController.ReactToThreadComment)
+	rt.Member.Post("/threads/{thread_id}/comments/{comment_id}/unreact", threadController.UnreactToThreadComment)
 }

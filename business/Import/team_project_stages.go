@@ -347,7 +347,7 @@ func addProjectMembers(ctx context.Context, job *importModels.Job,
 		}
 		_ = projectBusiness.AddMemberToProject(ctx, projectUUID, dgUid, ocUUID.String())
 		if _, isAdmin := adminSet[sid]; isAdmin {
-			_ = projectBusiness.AddAdminMemberToProject(ctx, projectUUID, dgUid)
+			_ = projectBusiness.AddAdminMemberToProject(ctx, projectUUID, dgUid, ocUUID.String())
 		}
 	}
 }

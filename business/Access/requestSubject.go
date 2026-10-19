@@ -1,8 +1,11 @@
 package business
 
 import (
+	"context"
 	"net/http"
 
+	userDomain "github.com/akashc777/OneCamp/domain/User"
+	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 )
 
@@ -47,4 +50,36 @@ func TokenSubjectOf(u *userModels.UserInfo, agentUUID string) Subject {
 	s.Admin = false
 	s.AgentUUID = agentUUID
 	return s
+}
+
+// SubjectFor is the person an account names, for work that may act through an
+// API token: TokenSubjectOf's form, with none of the owner's admin powers, when
+// ctx acts through one (helpers.ActsThroughToken: the public API, MCP, an agent
+// run a token asked for), and SubjectOf's otherwise. What a tool's executor,
+// which MCP and agents run as well as the app, names its person with. The
+// agent acting, if any, is the caller's to set.
+func SubjectFor(ctx context.Context, u *userModels.UserInfo) Subject {
+	if helpers.ActsThroughToken(ctx) {
+		return TokenSubjectOf(u, "")
+	}
+	return SubjectOf(u)
+}
+
+// UIDOf is who's graph uid, which every membership in the graph is counted
+// by: as given (a request's person), else read for an active person by their
+// uuid. "" for someone who isn't an active person, who is in nothing. A kind
+// registered with RegisterKind that decides by membership names its person by
+// it (business/WorkAccess; business/Conversation's uidOf answers alike).
+func UIDOf(ctx context.Context, who Subject) (string, error) {
+	if who.UserUID != "" {
+		return who.UserUID, nil
+	}
+	if who.UserUUID == "" {
+		return "", nil
+	}
+	u, err := userDomain.GetActiveDgraphUserInfoByUUID(ctx, who.UserUUID)
+	if err != nil || u == nil {
+		return "", err
+	}
+	return u.Uid, nil
 }

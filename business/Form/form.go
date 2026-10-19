@@ -20,9 +20,10 @@ import (
 	"unicode/utf8"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Task"
-	"github.com/akashc777/OneCamp/business/DataTable/formula"
+	"github.com/akashc777/OneCamp/business/Formula"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -332,9 +333,10 @@ type live struct {
 
 // load finds an active form whose project is still there. A form of an
 // archived project, or one whose owner has gone (from the workspace or from
-// the project), answers as no form at all: nobody should be filing tasks into
-// a project nobody sees, and its tasks are filed as the owner, whose
-// notifications would carry the answers to someone no longer in the project.
+// the project) or may no longer add tasks to it, answers as no form at all:
+// nobody should be filing tasks into a project nobody sees, and its tasks are
+// filed as the owner, whose notifications would carry the answers to someone
+// no longer in the project.
 func load(ctx context.Context, token string) (*live, error) {
 	if len(token) != 24 {
 		return nil, ErrNoForm
@@ -357,7 +359,17 @@ func load(ctx context.Context, token string) (*live, error) {
 	}
 	project, err := projectDomain.GetBasicDgraphProjectInfo(sys, f.ProjectUUID.String(), owner.Uid)
 	if err != nil || project == nil || project.Uid == "" || project.Team == nil || helpers.IsSoftDeleted(project.DeletedAt) ||
-		project.IsProjectMember == 0 {
+		!project.ReaderIsIn() {
+		return nil, ErrNoForm
+	}
+	// Its tasks are filed as the owner, so the owner must still be able to
+	// add tasks here (Work Access): an owner made a viewer, or a member once
+	// the project keeps its tasks with its admins, closes their forms.
+	standing, err := workAccess.Of(sys, owner.Uuid, project)
+	if err != nil {
+		return nil, err
+	}
+	if !standing.Can(workAccess.NeedCreateTask) {
 		return nil, ErrNoForm
 	}
 	return &live{form: f, fields: fields, owner: owner, project: project}, nil

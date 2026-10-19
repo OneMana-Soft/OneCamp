@@ -50,6 +50,11 @@ type Change struct {
 	Contributors []string
 	Agents       []AgentContributor
 	SavedAt      time.Time
+	// Hosted is a doc that belongs to something else (a table row's page,
+	// D-18): only the hooks registered for hosted docs run for it
+	// (RegisterAlsoHosted), so a hook added later puts no hosted doc where
+	// docs are found (the AI index, mention notices) without asking to.
+	Hosted bool
 }
 
 // SaveHook is one thing to do after a save.
@@ -64,6 +69,8 @@ type SaveHookRegistry struct {
 type namedSaveHook struct {
 	name string
 	run  SaveHook
+	// hosted: it runs for a hosted doc's saves too.
+	hosted bool
 }
 
 // SaveHooks is the doc save path's registry.
@@ -73,6 +80,17 @@ var SaveHooks = &SaveHookRegistry{}
 // taken, panics: registration happens in init, where that fails the build's tests
 // instead of leaving a hook that never runs.
 func (r *SaveHookRegistry) Register(name string, hook SaveHook) {
+	r.register(name, hook, false)
+}
+
+// RegisterAlsoHosted adds a hook that runs for a hosted doc's saves too (a
+// table row's page, D-18): one that keeps the doc, its versions say, and puts
+// it nowhere docs are found.
+func (r *SaveHookRegistry) RegisterAlsoHosted(name string, hook SaveHook) {
+	r.register(name, hook, true)
+}
+
+func (r *SaveHookRegistry) register(name string, hook SaveHook, hosted bool) {
 	if name == "" || hook == nil {
 		panic(fmt.Sprintf("save hook %q needs a name and something to run", name))
 	}
@@ -83,7 +101,7 @@ func (r *SaveHookRegistry) Register(name string, hook SaveHook) {
 			panic(fmt.Sprintf("save hook %q is registered twice", name))
 		}
 	}
-	r.hooks = append(r.hooks, namedSaveHook{name: name, run: hook})
+	r.hooks = append(r.hooks, namedSaveHook{name: name, run: hook, hosted: hosted})
 }
 
 // run starts every hook for c and returns at once. The hooks keep ctx's values
@@ -97,6 +115,9 @@ func (r *SaveHookRegistry) run(ctx context.Context, c Change) {
 	}
 	ctx = context.WithoutCancel(ctx)
 	for _, h := range hooks {
+		if c.Hosted && !h.hosted {
+			continue
+		}
 		// Recovered, so a hook that panics doesn't take the server down, and
 		// counted, so a shutdown or a test waits for it (helpers.GoSafeNamed).
 		helpers.GoSafeNamed("doc save hook "+h.name+" for doc "+c.DocUUID, func() { h.run(ctx, c) })

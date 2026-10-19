@@ -52,6 +52,10 @@ type DocDecision struct {
 	Owner    bool
 	Deleted  bool
 	Archived bool
+	// Hosted is a doc that belongs to something else (D-18, docHost.go): the
+	// rule gives it none, and business/Doc asks its host on a path that
+	// opens one.
+	Hosted bool
 	// Lock is the doc's lock: level.LockNone, LockSoft or LockHard.
 	Lock    string
 	Reasons []level.Reason
@@ -106,6 +110,15 @@ func GeneralLevel(doc *dgraphStruct.DgraphDoc) level.Level {
 func DecideDoc(doc *dgraphStruct.DgraphDoc, v Viewer) DocDecision {
 	var d DocDecision
 	if doc == nil {
+		return d
+	}
+	if IsHosted(doc) {
+		// A hosted doc's level is its host's (D-18): business/Doc asks the
+		// host on a path that opens one (docHost.go), and every other path,
+		// which asks only this rule, finds it open to nobody, whoever made it.
+		d.Hosted = true
+		d.Deleted = helpers.IsSoftDeleted(doc.DeletedAt)
+		d.Archived = helpers.IsSoftDeleted(doc.ArchivedAt)
 		return d
 	}
 	d.Owner = isTheViewer(OwnerOf(doc), v)

@@ -66,6 +66,7 @@ const brokerConnectTry = 10 * time.Second
 // (testcontainers' reaper).
 func SetupBroker(t *testing.T) *BrokerEnv {
 	t.Helper()
+	guardTestState(t)
 	ensureLoggers()
 	shared, err := theBroker()
 	if err != nil {

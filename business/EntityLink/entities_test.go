@@ -141,7 +141,9 @@ func TestATaskChipFollowsTheTaskViewsRule(t *testing.T) {
 	for _, e := range got {
 		byID[e.ID] = e
 	}
-	if e := byID[member]; e.Access != AccessOK || e.Topic != topic || e.Data["can_edit"] != false || e.Data["status"] != dgraphStruct.TASK_STATUS_INPROGRESS ||
+	// Members change a project's tasks unless it keeps them with its admins
+	// (Work Access, A1; its rule's tests have the rest).
+	if e := byID[member]; e.Access != AccessOK || e.Topic != topic || e.Data["can_edit"] != true || e.Data["status"] != dgraphStruct.TASK_STATUS_INPROGRESS ||
 		e.Data["due"] != "2026-10-20" || e.Data["assignee"].(map[string]any)["name"] != "Maya" || e.Data["project_id"] != proj {
 		t.Errorf("a member's task: %+v", e)
 	}

@@ -120,3 +120,51 @@ func TestAJobThatClaimsItsOwnWorkRunsEverywhere(t *testing.T) {
 		t.Errorf("the claim was asked %d times for a job that claims its own work", n)
 	}
 }
+
+// A RunAtStart job runs when the sweeps start, not one interval later; claimed
+// like a tick, two instances starting in the same slot run it once between
+// them; and a start under a context that has already ended runs nothing.
+func TestARunAtStartJobRunsWhenTheSweepsStart(t *testing.T) {
+	store := &claims{won: map[int64]string{}, asked: map[int64]int{}}
+	var atStart, later atomic.Int32
+	jobs := func() []Job {
+		return []Job{
+			{Name: "conversations.index", Every: time.Hour, RunAtStart: true, Run: func(context.Context) error { atStart.Add(1); return nil }},
+			{Name: "doc.trash.purge", Every: time.Hour, Run: func(context.Context) error { later.Add(1); return nil }},
+		}
+	}
+	ended, end := context.WithCancel(context.Background())
+	end()
+	gone := &Registry{claim: store.for_("gone")}
+	for _, j := range jobs() {
+		gone.Register(j)
+	}
+	gone.StartAll(ended)
+
+	a := &Registry{claim: store.for_("a")}
+	b := &Registry{claim: store.for_("b")}
+	for _, j := range jobs() {
+		a.Register(j)
+		b.Register(j)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a.StartAll(ctx)
+	b.StartAll(ctx)
+	waitFor(t, func() bool {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		asked := 0
+		for _, n := range store.asked {
+			asked += n
+		}
+		return asked >= 2
+	})
+	time.Sleep(20 * time.Millisecond) // a pass already claimed may finish
+	if atStart.Load() != 1 {
+		t.Errorf("the job ran %d times at the start of two instances, want once", atStart.Load())
+	}
+	if later.Load() != 0 {
+		t.Errorf("a job without RunAtStart ran at the start (%d)", later.Load())
+	}
+}

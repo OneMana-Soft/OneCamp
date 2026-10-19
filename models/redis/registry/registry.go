@@ -1036,6 +1036,19 @@ var SendOnce = withArity(Spec{
 	Description: "A message send tried again is the same send: \"going\" for a minute while the first try runs (SET NX), then its answer as JSON for a day.",
 }, 3) // (user, conversation, client id)
 
+// OutboxOnce is one sink having told one person of one outbox event (push, an
+// Activity item: business/Outbox FirstTime): SET NX before each, so a retry
+// tells only those it hadn't. FirstTime sets the expiry, OnceTTL: past the
+// outbox's whole retry horizon (2 h 29 min 32 s today) with an hour to spare,
+// so a late retry still finds it. TTL is that, rounded up.
+var OutboxOnce = withArity(Spec{
+	Namespace:   "outbox:once",
+	TTL:         4 * time.Hour,
+	Datatype:    DatatypeString,
+	Category:    CategorySweep,
+	Description: "One sink having told one person of one outbox event (SET NX); expires past the outbox's retry horizon, which FirstTime sets.",
+}, 3) // (event, sink, recipient)
+
 // DocUpdatedWebhooksDue holds each doc with an open minute of saves, scored by
 // when the minute closes (Unix ms): the doc.updated webhook goes out once per
 // minute per doc, whichever instance saved it (business/Follow webhooks.go).
@@ -1073,6 +1086,17 @@ var UnfurlRate = withArity(Spec{
 	Category:    CategoryRateLimit,
 	Description: "Outbound fetches per (action, user) for link previews and stored remote images. Window-locked; resets every minute.",
 }, 2) // (action, userUUID)
+
+// QueryParseRate limits how often one person's query field asks the server
+// to read what they're typing (POST /query/parse): a field asks after each
+// pause in typing, so the limit sits well above that and stops a loop.
+var QueryParseRate = withArity(Spec{
+	Namespace:   "query:parse:rate",
+	TTL:         1 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Query texts read per user for the search and list fields (POST /query/parse). Window-locked; resets every minute.",
+}, 1) // (userUUID)
 
 // =============================================================================
 // Specs() returns every registered key for documentation / audit. Used

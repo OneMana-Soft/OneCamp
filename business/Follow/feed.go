@@ -65,9 +65,12 @@ func feedNotices(ctx context.Context, userUUID string, before time.Time, limit i
 		return nil, err
 	}
 	var docIDs, personIDs []string
+	others := map[string][]string{}
 	for _, n := range rows {
 		if n.ResourceKind == "doc" {
 			docIDs = append(docIDs, n.ResourceUUID)
+		} else if n.ResourceKind != "" {
+			others[n.ResourceKind] = append(others[n.ResourceKind], n.ResourceUUID)
 		}
 		personIDs = append(personIDs, n.ActorUUID, n.AgentUUID)
 	}
@@ -87,6 +90,22 @@ func feedNotices(ctx context.Context, userUUID string, before time.Time, limit i
 	if err != nil {
 		readable, titles = nil, nil
 	}
+	// The other kinds' notices, by what each kind says (noticeKinds.go).
+	if len(others) > 0 {
+		open, named := otherNotices(ctx, userUUID, others)
+		if readable == nil {
+			readable = map[string]bool{}
+		}
+		if titles == nil {
+			titles = map[string]string{}
+		}
+		for k, v := range open {
+			readable[k] = v
+		}
+		for k, v := range named {
+			titles[k] = v
+		}
+	}
 	byID := map[string]*dgraphStruct.DgraphUser{}
 	if who, err := people(ctx, personIDs); err == nil {
 		for _, u := range who {
@@ -99,13 +118,13 @@ func feedNotices(ctx context.Context, userUUID string, before time.Time, limit i
 }
 
 // noticeItems are notices as the feed lists them, for their reader: readable
-// is the docs they may open now and titles those docs' titles, both keyed by
-// lower-case uuid. Pure.
+// is what they may open now and titles what those are called, both keyed by
+// noticeKey (a doc by its lower-case uuid). Pure.
 func noticeItems(rows []*followModels.Notice, readable map[string]bool, titles map[string]string, byID map[string]*dgraphStruct.DgraphUser) []dgraphModels.UnifiedActivityItem {
 	out := make([]dgraphModels.UnifiedActivityItem, 0, len(rows))
 	for _, n := range rows {
-		id := strings.ToLower(n.ResourceUUID)
-		out = append(out, notificationBusiness.NoticeItem(n, byID[n.ActorUUID], byID[n.AgentUUID], titles[id], n.ResourceKind == "doc" && readable[id]))
+		key := noticeKey(n.ResourceKind, n.ResourceUUID)
+		out = append(out, notificationBusiness.NoticeItem(n, byID[n.ActorUUID], byID[n.AgentUUID], titles[key], readable[key]))
 	}
 	return out
 }

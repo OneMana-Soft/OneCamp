@@ -16,6 +16,7 @@ import (
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	timeBusiness "github.com/akashc777/OneCamp/business/TimeTracking"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -92,7 +93,9 @@ func views(r *http.Request, entries []timeModel.Entry, now time.Time) []EntryVie
 // taskProject is the project a task belongs to, which every entry records so
 // reports never need the graph to find it.
 func taskProject(w http.ResponseWriter, r *http.Request, raw string) (uuid.UUID, uuid.UUID, bool) {
-	taskID, task, ok := projectaccess.RequireTask(w, r, raw)
+	// Time is logged by the people who work in the project, and by the task's
+	// assignee wherever they are (Work Access).
+	taskID, task, ok := projectaccess.RequireTask(w, r, raw, workAccess.NeedLogTime)
 	if !ok {
 		return uuid.Nil, uuid.Nil, false
 	}
@@ -111,7 +114,7 @@ func taskProject(w http.ResponseWriter, r *http.Request, raw string) (uuid.UUID,
 // GetTaskTime is a task's time and the caller's running timer.
 // GET /task/time/{task_uuid}
 func GetTaskTime(w http.ResponseWriter, r *http.Request) {
-	taskID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"))
+	taskID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"), workAccess.NeedView)
 	if !ok {
 		return
 	}
@@ -287,12 +290,12 @@ func DeleteTime(w http.ResponseWriter, r *http.Request) {
 // admins also see what the billable time comes to at the project's rates.
 // GET /project/{project_uuid}/time?from=&to=[&format=csv&tz=Area/City]
 func ProjectTime(w http.ResponseWriter, r *http.Request) {
-	projectID, project, ok := projectaccess.Require(w, r, false, "")
+	projectID, project, standing, ok := projectaccess.RequireStanding(w, r, workAccess.NeedView, "")
 	if !ok {
 		return
 	}
 	// Money is for the project's admins; everyone else reads hours.
-	rates := ratesFor(r, projectID, project.IsProjectAdmin > 0)
+	rates := ratesFor(r, projectID, standing.Can(workAccess.NeedManage))
 	now := time.Now()
 	q := r.URL.Query()
 	from, to, err := timeBusiness.ReportRange(q.Get("from"), q.Get("to"), now)
@@ -392,7 +395,7 @@ func viewOf(rates *timeBusiness.Rates) ratesView {
 // ProjectRates is what the project's time is billed at. Its admins only.
 // GET /project/{project_uuid}/rates
 func ProjectRates(w http.ResponseWriter, r *http.Request) {
-	projectID, _, ok := projectaccess.Require(w, r, true, "Only the project's admins see its rates.")
+	projectID, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, "Only the project's admins see its rates.")
 	if !ok {
 		return
 	}
@@ -411,7 +414,7 @@ func ProjectRates(w http.ResponseWriter, r *http.Request) {
 // SetProjectRates sets the project's currency and rates. Its admins only.
 // POST /project/{project_uuid}/rates {currency, default_rate_cents, people: [{user_uuid, rate_cents}]}
 func SetProjectRates(w http.ResponseWriter, r *http.Request) {
-	projectID, _, ok := projectaccess.Require(w, r, true, "Only the project's admins set its rates.")
+	projectID, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, "Only the project's admins set its rates.")
 	if !ok {
 		return
 	}
@@ -435,7 +438,7 @@ func SetProjectRates(w http.ResponseWriter, r *http.Request) {
 // ClearProjectRates stops billing the project. Its admins only.
 // POST /project/{project_uuid}/rates/delete
 func ClearProjectRates(w http.ResponseWriter, r *http.Request) {
-	projectID, _, ok := projectaccess.Require(w, r, true, "Only the project's admins change its rates.")
+	projectID, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, "Only the project's admins change its rates.")
 	if !ok {
 		return
 	}

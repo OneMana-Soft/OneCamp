@@ -7,6 +7,7 @@ import (
 
 	adapter "github.com/akashc777/OneCamp/adapter/Doc"
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
+	business "github.com/akashc777/OneCamp/business/Doc"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 )
@@ -62,7 +63,9 @@ func DocCollabSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	who := accessBusiness.SubjectOf(&userInfo)
-	d, err := accessBusiness.Rules.Resolve(ctx, who, accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: input.DocId})
+	// The live session opens hosted docs (a table row's page) by their hosts
+	// (D-18): one of the three paths that do.
+	d, err := accessBusiness.Rules.Resolve(business.WithHostedOpen(ctx), who, accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: input.DocId})
 	if docMissing(w, err) {
 		return
 	}

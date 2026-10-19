@@ -19,12 +19,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"sort"
-	"strconv"
 	"strings"
 
-	"github.com/akashc777/OneCamp/business/DataTable/formula"
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
+	formula "github.com/akashc777/OneCamp/business/Formula"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -147,67 +146,6 @@ func parseRowValues(raw string) map[string]interface{} {
 	return m
 }
 
-// cellLabels reduces a cell value to zero or more display labels. Scalars yield
-// one label; arrays (multi-select / person / relation) yield one per element so
-// grouping on them explodes correctly. Empty/nil yields none.
-func cellLabels(v interface{}) []string { return labelsWith(v, formatFloat) }
-
-// labelsWith is cellLabels with numbers written by format.
-func labelsWith(v interface{}, format func(float64) string) []string {
-	switch t := v.(type) {
-	case nil:
-		return nil
-	case string:
-		if strings.TrimSpace(t) == "" {
-			return nil
-		}
-		return []string{t}
-	case bool:
-		return []string{strconv.FormatBool(t)}
-	case float64:
-		return []string{format(t)}
-	case json.Number:
-		return []string{t.String()}
-	case []interface{}:
-		var out []string
-		for _, e := range t {
-			switch el := e.(type) {
-			case string:
-				if strings.TrimSpace(el) != "" {
-					out = append(out, el)
-				}
-			case map[string]interface{}:
-				if lbl := refLabel(el); lbl != "" && !moreRef(el) && !hiddenRef(el) {
-					out = append(out, lbl)
-				}
-			case float64:
-				out = append(out, format(el))
-			case bool:
-				out = append(out, strconv.FormatBool(el))
-			}
-		}
-		return out
-	case map[string]interface{}:
-		if lbl := refLabel(t); lbl != "" && !moreRef(t) && !hiddenRef(t) {
-			return []string{lbl}
-		}
-		return nil
-	default:
-		return nil
-	}
-}
-
-// refLabel extracts a human label from a relation/person ref object, preferring
-// label, then name, then value/id.
-func refLabel(m map[string]interface{}) string {
-	for _, k := range []string{"label", "name", "value", "title", "id"} {
-		if s, ok := m[k].(string); ok && strings.TrimSpace(s) != "" {
-			return s
-		}
-	}
-	return ""
-}
-
 // cellNumber attempts to read a numeric value from a cell (number column, or a
 // numeric string, read as formula.ParseNumber reads one in en-US's signs).
 // Returns (value, true) only on success. Text was read by dropping its
@@ -231,20 +169,9 @@ func cellNumber(v interface{}) (float64, bool) {
 	return 0, false
 }
 
-// formatFloat writes a number for a label: in full, as people write numbers,
-// except from 1e21 up, which is 1e+21 as the web app shows it, and below
-// 1e-30. Written in full, one of those takes over 32 characters, and 1e308
-// takes 309: a list of them grouped 5,000 rows deep took a minute.
-func formatFloat(f float64) string {
-	if a := math.Abs(f); a >= 1e21 || (a != 0 && a < 1e-30) {
-		return strconv.FormatFloat(f, 'g', -1, 64)
-	}
-	return strconv.FormatFloat(f, 'f', -1, 64)
-}
-
 // firstLabel returns the single label of a cell (for filter comparison), or "".
 func firstLabel(v interface{}) string {
-	ls := cellLabels(v)
+	ls := fieldTypes.Labels(v)
 	if len(ls) == 0 {
 		return ""
 	}
@@ -284,7 +211,7 @@ func matchFilter(values map[string]interface{}, fields []*model.Field, f Filter)
 		}
 	case FilterContains:
 		needle := strings.ToLower(strings.TrimSpace(f.Value))
-		for _, l := range cellLabels(cell) {
+		for _, l := range fieldTypes.Labels(cell) {
 			if strings.Contains(strings.ToLower(l), needle) {
 				return true
 			}
@@ -302,7 +229,7 @@ func matchFilter(values map[string]interface{}, fields []*model.Field, f Filter)
 // labelEquals reports whether any label of the cell equals value (case-insensitive).
 func labelEquals(cell interface{}, value string) bool {
 	want := strings.ToLower(strings.TrimSpace(value))
-	for _, l := range cellLabels(cell) {
+	for _, l := range fieldTypes.Labels(cell) {
 		if strings.ToLower(strings.TrimSpace(l)) == want {
 			return true
 		}
@@ -427,7 +354,7 @@ func Aggregate(fields []*model.Field, rows []*model.Row, spec QuerySpec) (*AggRe
 		if groupField == nil {
 			labels = []string{"Total"}
 		} else {
-			labels = cellLabels(values[groupField.Id.String()])
+			labels = fieldTypes.Labels(values[groupField.Id.String()])
 			if len(labels) == 0 {
 				labels = []string{"(empty)"}
 			}
@@ -561,29 +488,15 @@ func readsShort(values map[string]interface{}, ids []string) bool {
 	return false
 }
 
-// moreRef is whether a cell's item is a link cell's count of the links past
-// those it shows ({"type": "more"}), not a link.
-func moreRef(item interface{}) bool {
-	m, ok := item.(map[string]interface{})
-	return ok && m["type"] == "more"
-}
-
 // hasMoreRef is whether a link cell, as read, shows only some of its links.
 func hasMoreRef(cell interface{}) bool {
 	items, _ := cell.([]interface{})
 	for _, it := range items {
-		if moreRef(it) {
+		if fieldTypes.IsMoreRef(it) {
 			return true
 		}
 	}
 	return false
-}
-
-// hiddenRef is whether a cell's item is a link to an item its reader can't
-// open ({"hidden": true}): a link, with no name to read.
-func hiddenRef(item interface{}) bool {
-	m, ok := item.(map[string]interface{})
-	return ok && m["hidden"] == true
 }
 
 // linksUnnamed is whether a link cell, as read, has links it doesn't name:
@@ -591,7 +504,7 @@ func hiddenRef(item interface{}) bool {
 func linksUnnamed(cell interface{}) bool {
 	items, _ := cell.([]interface{})
 	for _, it := range items {
-		if moreRef(it) || hiddenRef(it) {
+		if fieldTypes.IsMoreRef(it) || fieldTypes.IsHiddenRef(it) {
 			return true
 		}
 	}

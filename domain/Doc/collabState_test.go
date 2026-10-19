@@ -77,8 +77,16 @@ func TestACollabSaveSaysWhatItFound(t *testing.T) {
 		t.Errorf("a state for another body: %+v %v", got, err)
 	}
 	got, err = collabSaveAnswer([]byte(`{"found":[{"doc_yjs_body_hash":"h2","doc_deleted_at":"0001-01-01T00:00:00Z"}]}`), w)
-	if err != nil || !got.Stored {
+	if err != nil || !got.Stored || got.Hosted {
 		t.Errorf("a state for the stored body: %+v %v", got, err)
+	}
+	// A table row's page says so, so its save runs only the hooks that keep it.
+	got, err = collabSaveAnswer([]byte(`{"found":[{"doc_yjs_body_hash":"h2","doc_deleted_at":"0001-01-01T00:00:00Z","doc_host_kind":"table_row"}]}`), w)
+	if err != nil || !got.Hosted {
+		t.Errorf("a hosted doc's save: %+v %v", got, err)
+	}
+	if !strings.Contains(collabUpsertQuery, "doc_host_kind") {
+		t.Error("the save's read doesn't ask whether the doc is hosted")
 	}
 }
 

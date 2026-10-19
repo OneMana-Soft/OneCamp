@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/akashc777/OneCamp/business/DataTable/formula"
+	formula "github.com/akashc777/OneCamp/business/Formula"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )

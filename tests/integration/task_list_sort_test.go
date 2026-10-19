@@ -25,7 +25,6 @@ import (
 
 	projectController "github.com/akashc777/OneCamp/controllers/Project"
 	userController "github.com/akashc777/OneCamp/controllers/User"
-	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -48,8 +47,7 @@ func TestTaskListsSortByEverySortTheyOffer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opensearchInit.OpenSearchClient = client
-	t.Cleanup(func() { opensearchInit.OpenSearchClient = nil })
+	integration.UseOpenSearchClient(t, client)
 
 	const live = "0001-01-01T00:00:00Z"
 	ada, team, P := uuid.New(), uuid.New(), uuid.New()

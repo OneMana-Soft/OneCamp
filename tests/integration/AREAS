@@ -1,0 +1,11 @@
+# What a change reaches that the Go import graph can't show, for
+# scripts/integ-select.py. A line is a path (a file, or a directory ending in
+# /) and the test files that change reaches; # starts a comment.
+#
+# Most of the mapping needs no line here: the selector follows Go imports and
+# init-time registrations from each test file, and a test file that reads a
+# repo file by a "../../<path>" literal is chosen when that path changes. A
+# line is for what neither shows, such as a file the harness reads for a test.
+
+# SetupOwnBroker (broker_restart.go) starts EMQX with the shipped access rules.
+emqx/acl.conf  broker_reconnect_test.go

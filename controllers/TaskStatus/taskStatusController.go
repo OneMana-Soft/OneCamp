@@ -10,6 +10,7 @@ import (
 
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	business "github.com/akashc777/OneCamp/business/TaskStatus"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
@@ -39,10 +40,16 @@ func projectAccess(w http.ResponseWriter, r *http.Request, need access) (project
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Project not found."})
 		return uuid.Nil, user, false
 	}
+	standing, err := workAccess.Of(r.Context(), user.UserDgraphInfo.Uuid, project)
+	if err != nil {
+		helpers.LogErrorWithContext(r.Context(), "controllers/TaskStatus couldn't read the caller's role err: %+v", err)
+		helpers.WriteRetryLater(w, "Couldn't check what you can do in this project.")
+		return uuid.Nil, user, false
+	}
 	has := noAccess
-	if project.IsProjectAdmin > 0 {
+	if standing.Can(workAccess.NeedManage) {
 		has = admin
-	} else if project.IsProjectMember > 0 {
+	} else if standing.Can(workAccess.NeedView) {
 		has = member
 	} else if user.UserPostgresInfo.IsAdmin {
 		// A workspace admin sets GitHub automation rules for any linked

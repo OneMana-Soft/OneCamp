@@ -7,6 +7,7 @@ package business
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,6 +38,17 @@ type memberTopics struct {
 	since  time.Time // when the read began
 	list   []string  // in the order a client is handed them
 	topics map[string]struct{}
+	// byConversation is each channel's, DM's and group's topics (its message
+	// topic, then its typing topic), by the key the web app names it by
+	// ("channel:<uuid>", "dm:<grouping id>", "group:<grouping id>"): a topic
+	// is encrypted, so the app can't work out which conversation one is.
+	byConversation map[string][]string
+}
+
+// conversationKey is the key a conversation's topics are named by in the
+// client's settings, as the web app's keyOf names it. Pure.
+func conversationKey(kind, id string) string {
+	return kind + ":" + id
 }
 
 var (
@@ -73,7 +85,7 @@ func readMemberTopics(ctx context.Context, userUUID string) (*memberTopics, erro
 	if err != nil {
 		return nil, err
 	}
-	mt := &memberTopics{since: since, topics: map[string]struct{}{}}
+	mt := &memberTopics{since: since, topics: map[string]struct{}{}, byConversation: map[string][]string{}}
 	add := func(id string, topics ...string) {
 		if id == "" {
 			return
@@ -89,10 +101,20 @@ func readMemberTopics(ctx context.Context, userUUID string) (*memberTopics, erro
 		for _, ch := range user.Channels {
 			msg, typing := helpers.GetMqttTopicForChannel(ch.Uuid)
 			add(ch.Uuid, msg, typing)
+			if ch.Uuid != "" {
+				mt.byConversation[conversationKey("channel", ch.Uuid)] = []string{msg, typing}
+			}
 		}
 		for _, dm := range user.DMs {
 			msg, typing := helpers.GetMqttTopicForDm(dm.GroupingId)
 			add(dm.GroupingId, msg, typing)
+			if dm.GroupingId != "" {
+				kind := "group"
+				if strings.Contains(dm.GroupingId, " ") {
+					kind = "dm"
+				}
+				mt.byConversation[conversationKey(kind, dm.GroupingId)] = []string{msg, typing}
+			}
 		}
 		// Task comments, reactions and GitHub sync messages are published to
 		// a project's topic.

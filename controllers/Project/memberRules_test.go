@@ -44,29 +44,8 @@ func TestOnlyAdminsTakePeopleOffAProject(t *testing.T) {
 		{"a project that isn't there", nil, caller, http.StatusNotFound},
 		{"a project read empty", &dgraphStruct.DgraphProject{}, caller, http.StatusNotFound},
 	} {
-		if got, msg := memberChangeRefusal(c.p, takeOff, c.caller, maya); got != c.want {
+		if got, msg := memberChangeRefusal(c.p, manages(c.p), takeOff, c.caller, maya); got != c.want {
 			t.Errorf("%s: %d %q, want %d", c.name, got, msg, c.want)
-		}
-	}
-}
-
-// One rule says who manages a project's people, for adding and removing
-// members and admins alike: its admins and its team's admins. A project read
-// without its team is never taken as its team's admin.
-func TestManagesMembersIsTheProjectsOrItsTeamsAdmins(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		p    *dgraphStruct.DgraphProject
-		want bool
-	}{
-		{"one of its admins", &dgraphStruct.DgraphProject{IsProjectAdmin: 1}, true},
-		{"one of its team's admins", &dgraphStruct.DgraphProject{Team: &dgraphStruct.DgraphTeam{IsAdmin: 1}}, true},
-		{"a member", &dgraphStruct.DgraphProject{IsProjectMember: 1, Team: &dgraphStruct.DgraphTeam{}}, false},
-		{"a project read without its team", &dgraphStruct.DgraphProject{IsProjectMember: 1}, false},
-		{"no project", nil, false},
-	} {
-		if got := managesMembers(c.p); got != c.want {
-			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
 	}
 }
@@ -118,13 +97,49 @@ func TestEveryMemberChangeSaysWhoMayMakeIt(t *testing.T) {
 		if c.name == "a member leaving is no change to admins" {
 			caller = maya
 		}
-		if got, msg := memberChangeRefusal(c.p, c.change, caller, maya); got != c.want || msg != c.says {
+		if got, msg := memberChangeRefusal(c.p, manages(c.p), c.change, caller, maya); got != c.want || msg != c.says {
 			t.Errorf("%s: %d %q, want %d %q", c.name, got, msg, c.want, c.says)
 		}
 	}
-	for _, change := range []memberChange{addMember, takeOff, makeAdmin, removeAdmin} {
+	for _, change := range []memberChange{addMember, takeOff, makeAdmin, removeAdmin, changeRole} {
 		if refusedWords[change] == "" || doneWords[change] == "" {
 			t.Errorf("change %d has no words", change)
+		}
+	}
+}
+
+// manages is what Work Access answers for a project read with no role rows:
+// its admins and its team's admins manage its people (business/WorkAccess).
+func manages(p *dgraphStruct.DgraphProject) bool {
+	return p != nil && (p.IsProjectAdmin > 0 || (p.Team != nil && p.Team.IsAdmin > 0))
+}
+
+// Changing what someone may do is for those who manage the project's people,
+// and never lowers its creator.
+func TestARoleChangeIsTheirsWhoManageThePeople(t *testing.T) {
+	const caller, maya = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+	mayaIn := &dgraphStruct.DgraphUser{Uid: "0x2", Uuid: maya}
+	creator := &dgraphStruct.DgraphUser{Uid: "0x1", Uuid: maya}
+	in := func(admin bool, who *dgraphStruct.DgraphUser) *dgraphStruct.DgraphProject {
+		p := &dgraphStruct.DgraphProject{Uuid: "33333333-3333-4333-8333-333333333333", IsProjectMember: 1,
+			CreatedBy: &dgraphStruct.DgraphUser{Uid: "0x1"}, Members: []*dgraphStruct.DgraphUser{who}}
+		if admin {
+			p.IsProjectAdmin = 1
+		}
+		return p
+	}
+	for _, c := range []struct {
+		name string
+		p    *dgraphStruct.DgraphProject
+		want int
+		says string
+	}{
+		{"a member", in(false, mayaIn), http.StatusForbidden, "Only the project's admins can change what people can do in it."},
+		{"an admin", in(true, mayaIn), 0, ""},
+		{"an admin, for the creator", in(true, creator), http.StatusForbidden, "The project's creator stays one of its admins."},
+	} {
+		if got, msg := memberChangeRefusal(c.p, manages(c.p), changeRole, caller, maya); got != c.want || msg != c.says {
+			t.Errorf("%s: %d %q, want %d %q", c.name, got, msg, c.want, c.says)
 		}
 	}
 }

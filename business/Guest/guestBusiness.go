@@ -15,7 +15,6 @@ package business
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"errors"
@@ -410,13 +409,10 @@ func MeetingRoomExists(ctx context.Context, roomName string) (bool, error) {
 
 // --- helpers ---
 
-// randomToken returns a 32-byte URL-safe random string (the raw link token).
+// randomToken is a fresh raw link token (helpers.NewLinkSecret).
 func randomToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
+	raw, _, err := helpers.NewLinkSecret()
+	return raw, err
 }
 
 // randomShort returns a short random suffix for a guest identity.
@@ -428,11 +424,8 @@ func randomShort() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// hashToken returns the raw SHA-256 bytes of a token (stored as bytea).
-func hashToken(raw string) []byte {
-	sum := sha256.Sum256([]byte(raw))
-	return sum[:]
-}
+// hashToken is the hash a token is stored as (bytea) and found by.
+func hashToken(raw string) []byte { return helpers.LinkSecretHash(raw) }
 
 // SanitizeGuestName is the exported wrapper over sanitizeGuestName, used by
 // controllers that need to record a safe, content-free guest display name for

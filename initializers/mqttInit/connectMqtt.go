@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -25,6 +26,10 @@ type MqttConfig struct {
 	ClientID     string
 	Username     string
 	CleanSession bool
+	// PublishOnly connects without taking a share of what the broker
+	// announces to the backend: a one-shot subcommand's connection
+	// (helpers.ServiceRole ListensToBroker), which publishes and exits.
+	PublishOnly bool
 }
 
 type mqttClientConnect struct {
@@ -147,17 +152,21 @@ func clientOptions(mqttConfig *MqttConfig, password string) *MQTT.ClientOptions 
 	opts.SetPingTimeout(pingTimeout)
 	opts.SetAutoReconnect(true)
 	opts.SetMaxReconnectInterval(connectBackoffMax)
-	opts.SetOnConnectHandler(onConnect)
+	listen := !mqttConfig.PublishOnly
+	opts.SetOnConnectHandler(func(c MQTT.Client) { onConnect(c, listen) })
 	opts.SetConnectionLostHandler(func(_ MQTT.Client, err error) {
 		helpers.MessageLogs.ErrorLog.Printf("mqttInit lost the broker (%v); reconnecting", err)
 	})
 	return opts
 }
 
-// onConnect runs on the first connection and on every reconnection.
-func onConnect(client MQTT.Client) {
+// onConnect runs on the first connection and on every reconnection; listen
+// is whether this process takes its share of the broker's announcements.
+func onConnect(client MQTT.Client, listen bool) {
 	helpers.MessageLogs.InfoLog.Println("Successfully connected mqtt broker !")
-	subscribeClientEvents(client)
+	if listen {
+		subscribeClientEvents(client)
+	}
 }
 
 // ConnectWithBackoff makes client's first connection. It tries, and after
@@ -223,12 +232,18 @@ func connectOnce(client MQTT.Client, timeout time.Duration) error {
 // false) is still resumed; every env file uses clean sessions, which keep
 // nothing between connections, so the id only has to be unique. With no
 // configured id the broker names the client, as before.
+//
+// A one-shot subcommand adds its process id: two run on one host at once (a
+// dry run beside an apply) must not drop each other either.
 func ProcessClientID(configured string, role helpers.ServiceRole) string {
 	host, err := os.Hostname()
 	if err != nil || host == "" {
 		var b [4]byte
 		_, _ = rand.Read(b[:])
 		host = hex.EncodeToString(b[:])
+	}
+	if role == helpers.RoleOneShot {
+		host += "-" + strconv.Itoa(os.Getpid())
 	}
 	return clientIDFor(configured, role, host)
 }

@@ -52,7 +52,9 @@ const (
 
 func init() {
 	Register(docKind, docVersions{})
-	docBusiness.SaveHooks.Register("doc.versions", onDocSave)
+	// A row's page keeps its versions too (a hosted doc, D-18): they keep the
+	// doc and put it nowhere it is found.
+	docBusiness.SaveHooks.RegisterAlsoHosted("doc.versions", onDocSave)
 	collab.KeepVersion = keepVersionBeforeWrite
 	sweepBusiness.Jobs.Register(sweepBusiness.Job{Name: "doc.versions.idle", Every: 30 * time.Second, Run: takeIdleVersions})
 	sweepBusiness.Jobs.Register(sweepBusiness.Job{Name: "doc.versions.prune", Every: 6 * time.Hour, Run: pruneAllDocVersions})

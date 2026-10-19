@@ -47,27 +47,65 @@ type UserNotificationPreference struct {
 	UpdatedAt        time.Time  `json:"updated_at"`
 }
 
-var allColumns = `id, user_id, email_enabled, email_mentions, email_dms, email_task_assigned,
+// allColumns is every column a read returns, in scanRow's order. Built on
+// each call, as focus_until reads whichever calendar store is on.
+func allColumns() string {
+	return `id, user_id, email_enabled, email_mentions, email_dms, email_task_assigned,
 		email_task_status, email_comments, email_calls, email_channel_invites,
 		email_only_when_offline, email_digest_frequency, quiet_hours_enabled,
 		quiet_hours_start, quiet_hours_end, quiet_hours_tz, unsubscribe_token,
-		created_at, updated_at, notifications_paused_until, read_receipts, ` + focusUntilColumn
+		created_at, updated_at, notifications_paused_until, read_receipts, ` + focusUntilColumn(FocusStoreNow())
+}
 
-// FocusRunning is the one rule for being in focus time: a calendar event of
-// the person's own (alias, a calendar_events row; userCol, their id) marked
-// focus, not deleted, running now. The push gate (domain/UserFCMToken), the
-// row's focus_until, which email's hold reads (QuietUntil), and the status a
+// FocusStore is where focus time is read from: the calendar's one store's
+// events table once its events are there (helpers.CalendarReadsFromStore),
+// calendar_events before. Focus time is a kind of event in the one store,
+// timed, never whole days (business/Calendar). A query asks once
+// (FocusStoreNow) and builds every part from that one answer. Asked part by
+// part, a query built at the moment the move was recorded could name
+// calendar_events with the one store's columns, and fail.
+type FocusStore struct{ moved bool }
+
+// FocusStoreNow is where focus time is read from now.
+func FocusStoreNow() FocusStore { return FocusStore{moved: helpers.CalendarReadsFromStore()} }
+
+// Running is the one rule for being in focus time: a calendar event of the
+// person's own (alias, a row of Events; userCol, their id) marked focus, not
+// deleted, running now. The push gate (domain/UserFCMToken), the row's
+// focus_until, which email's hold reads (QuietUntil), and the status a
 // teammate is shown (business/Notification HeldFor) all read it, so none can
 // hold for focus time while another doesn't.
-func FocusRunning(alias, userCol string) string {
+func (s FocusStore) Running(alias, userCol string) string {
+	if s.moved {
+		return alias + `.created_by = ` + userCol + ` AND ` + alias + `.kind = 'focus' AND ` + alias + `.deleted_at IS NULL
+		  AND ` + alias + `.status <> 'cancelled' AND ` + alias + `.start_at <= NOW() AND ` + alias + `.end_at > NOW()`
+	}
 	return alias + `.created_by = ` + userCol + ` AND ` + alias + `.is_focus AND ` + alias + `.deleted_at IS NULL
 		  AND ` + alias + `.start_time <= NOW() AND ` + alias + `.end_time > NOW()`
 }
 
+// Events is the table Running reads, named alias.
+func (s FocusStore) Events(alias string) string {
+	if s.moved {
+		return "events " + alias
+	}
+	return "calendar_events " + alias
+}
+
+// end is the end of an Events row named alias.
+func (s FocusStore) end(alias string) string {
+	if s.moved {
+		return alias + ".end_at"
+	}
+	return alias + ".end_time"
+}
+
 // focusUntilColumn is when the focus-time event the person is in now ends, or
 // NULL. Read with the row so every reader of a pause sees focus time too.
-var focusUntilColumn = `(SELECT max(fe.end_time) FROM calendar_events fe
-		WHERE ` + FocusRunning("fe", "users_notification_preferences.user_id") + `) AS focus_until`
+func focusUntilColumn(s FocusStore) string {
+	return `(SELECT max(` + s.end("fe") + `) FROM ` + s.Events("fe") + `
+		WHERE ` + s.Running("fe", "users_notification_preferences.user_id") + `) AS focus_until`
+}
 
 // FocusUntilOf is when the focus-time event userID is in now ends, or nil, for
 // a person who may have no preferences row: the push gate holds their focus
@@ -76,8 +114,9 @@ func FocusUntilOf(userID uuid.UUID) (*time.Time, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	var until *time.Time
+	f := FocusStoreNow()
 	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx,
-		`SELECT max(fe.end_time) FROM calendar_events fe WHERE `+FocusRunning("fe", "$1"), userID).Scan(&until)
+		`SELECT max(`+f.end("fe")+`) FROM `+f.Events("fe")+` WHERE `+f.Running("fe", "$1"), userID).Scan(&until)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/UserNotificationPreference/FocusUntilOf err: %+v", err)
 		return nil, err
@@ -113,7 +152,7 @@ func GetByUserID(userID uuid.UUID) (*UserNotificationPreference, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	query := `SELECT ` + allColumns + ` FROM users_notification_preferences WHERE user_id = $1`
+	query := `SELECT ` + allColumns() + ` FROM users_notification_preferences WHERE user_id = $1`
 	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, userID)
 	pref, err := scanRow(row)
 	if err != nil {
@@ -131,7 +170,7 @@ func GetByUnsubscribeToken(token string) (*UserNotificationPreference, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	query := `SELECT ` + allColumns + ` FROM users_notification_preferences WHERE unsubscribe_token = $1`
+	query := `SELECT ` + allColumns() + ` FROM users_notification_preferences WHERE unsubscribe_token = $1`
 	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, token)
 	pref, err := scanRow(row)
 	if err != nil {
@@ -155,7 +194,7 @@ func EnsureForUser(userID uuid.UUID, unsubToken string) (*UserNotificationPrefer
 		VALUES ($1, $2)
 		ON CONFLICT (user_id) DO UPDATE
 		    SET unsubscribe_token = users_notification_preferences.unsubscribe_token
-		RETURNING ` + allColumns
+		RETURNING ` + allColumns()
 	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, userID, unsubToken)
 	pref, err := scanRow(row)
 	if err != nil {
@@ -302,7 +341,7 @@ func GetByUserIDs(userIDs []uuid.UUID) (map[uuid.UUID]*UserNotificationPreferenc
 	}
 
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx,
-		`SELECT `+allColumns+` FROM users_notification_preferences WHERE user_id = ANY($1::uuid[])`,
+		`SELECT `+allColumns()+` FROM users_notification_preferences WHERE user_id = ANY($1::uuid[])`,
 		"{"+strings.Join(ids, ",")+"}")
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

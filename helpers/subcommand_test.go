@@ -23,16 +23,19 @@ func TestOnlyAnExactSubcommandInFirstPositionDiverts(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		if got := IsClientSubcommand(tc.args, "journey"); got != tc.want {
+		name, kind := SubcommandOf(tc.args)
+		if got := name == "journey" && kind == ClientSubcommand; got != tc.want {
 			t.Errorf("%s: got %v, want %v (args %v)", tc.name, got, tc.want, tc.args)
 		}
 	}
 }
 
-// An empty name would otherwise match any process invoked with one argument.
-func TestAnEmptySubcommandNameNeverMatches(t *testing.T) {
-	if IsClientSubcommand([]string{"go-one-camp", ""}, "") {
-		t.Error("an empty subcommand name must never divert the server")
+// An empty word, or one that names nothing, is the server's own argument.
+func TestAnUnknownOrEmptyWordNeverDiverts(t *testing.T) {
+	for _, args := range [][]string{{"go-one-camp", ""}, {"go-one-camp", "serve"}, {"go-one-camp", "Journey"}} {
+		if name, kind := SubcommandOf(args); name != "" || kind != 0 {
+			t.Errorf("%v diverts the server to %q", args, name)
+		}
 	}
 }
 

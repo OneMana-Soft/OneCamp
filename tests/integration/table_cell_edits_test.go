@@ -149,6 +149,13 @@ func TestTableCellEdits(t *testing.T) {
 	t.Run("edits at the same moment keep each other", func(t *testing.T) {
 		row := newRow(t)
 		const rounds = 25
+		// A select holds only its options (tables A1): Amara's edits pick
+		// each of a stage's 25 in turn.
+		stages := make([]map[string]interface{}, rounds)
+		for i := range stages {
+			stages[i] = map[string]interface{}{"label": fmt.Sprintf("stage %d", i)}
+		}
+		stage := w.field("amara", deals, "Stage", dataTableModel.FieldSelect, map[string]interface{}{"options": stages})
 		var wg sync.WaitGroup
 		start := make(chan struct{})
 		errs := make(chan error, 2*rounds)
@@ -162,7 +169,7 @@ func TestTableCellEdits(t *testing.T) {
 			}
 		}
 		wg.Add(2)
-		go edit("amara", status, "status")
+		go edit("amara", stage, "stage")
 		go edit("bo", notes, "note")
 		close(start)
 		wg.Wait()
@@ -171,7 +178,7 @@ func TestTableCellEdits(t *testing.T) {
 			t.Fatalf("an edit failed: %v", err)
 		}
 		last := fmt.Sprintf(" %d", rounds-1)
-		if v := w.stored(deals, row); v[status] != "status"+last || v[notes] != "note"+last {
+		if v := w.stored(deals, row); v[stage] != "stage"+last || v[notes] != "note"+last {
 			t.Errorf("after both people's last edits the row holds %v", v)
 		}
 	})

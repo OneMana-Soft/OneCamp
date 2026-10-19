@@ -17,6 +17,7 @@ import (
 	taskrank "github.com/akashc777/OneCamp/business/TaskRank"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
+	conversationDomain "github.com/akashc777/OneCamp/domain/Conversation"
 	lastSeenChannelDomain "github.com/akashc777/OneCamp/domain/LastSeenChannel"
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
 	domain "github.com/akashc777/OneCamp/domain/User"
@@ -1330,6 +1331,7 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID uuid.UUI
 			}
 		}
 	}
+	dgraphUser.DMs = conversationDomain.WithoutHidden(ctx, userUUID.String(), dgraphUser.DMs)
 
 	// What the Inbox will show that's new, counted from the feed itself.
 	activityUnreadCount, activityErr := activityBusiness.UnreadActivityCount(ctx, userUUID, dgraphUser.Uid)

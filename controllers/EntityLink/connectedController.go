@@ -78,21 +78,15 @@ func MentionAccess(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// What someone who doesn't run the project is told: making a task from a
-// to-do, or ticking one that is a task.
-const (
-	notAdminToMake = "Only the project's admins can make its tasks. Ask one of them, or pick a project you run."
-	notAdminToTick = "Only the project's admins can change this task. Ask one of them to change it."
-)
-
 // todoRefusal answers a refusal of the to-do and task sync, or false for an
-// error that isn't one; notAdmin is what a project's non-admin is told.
-func todoRefusal(w http.ResponseWriter, err error, notAdmin string) bool {
+// error that isn't one. Someone the project's rule refuses is told why in its
+// words (Work Access).
+func todoRefusal(w http.ResponseWriter, err error) bool {
 	switch {
 	case errors.Is(err, taskBusiness.ErrDocNotEditable):
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You can't edit this doc, so its to-dos stay as they are."})
-	case errors.Is(err, taskBusiness.ErrNotProjectAdmin):
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": notAdmin})
+	case errors.Is(err, taskBusiness.ErrNotAllowed):
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": err.Error()})
 	case errors.Is(err, taskBusiness.ErrEmptyTodo):
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Write the to-do first, then make it a task."})
 	case errors.Is(err, taskBusiness.ErrTodoNotTied):
@@ -124,7 +118,7 @@ func TodoToTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	task, err := taskBusiness.TodoToTask(ctx, &userInfo, in.DocUUID, in.ProjectUUID, in.Title)
-	if todoRefusal(w, err, notAdminToMake) {
+	if todoRefusal(w, err) {
 		return
 	}
 	if err != nil {
@@ -150,7 +144,7 @@ func CheckTodo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := taskBusiness.SetTodoDone(ctx, &userInfo, in.DocUUID, in.TaskUUID, in.Done)
-	if todoRefusal(w, err, notAdminToTick) {
+	if todoRefusal(w, err) {
 		return
 	}
 	if err != nil {

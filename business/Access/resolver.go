@@ -34,7 +34,7 @@ func viewerOf(who Subject) docBusiness.Viewer {
 func decisionOf(d docBusiness.DocDecision) Decision {
 	out := Decision{
 		Level: d.Level, Owner: d.Owner, Deleted: d.Deleted, Archived: d.Archived, Was: d.Was,
-		Locked: d.Locked(), Lock: d.Lock, Unlocked: d.Unlocked,
+		Locked: d.Locked(), Lock: d.Lock, Unlocked: d.Unlocked, Hosted: d.Hosted,
 	}
 	for _, r := range d.Reasons {
 		out.Reasons = append(out.Reasons, string(r))
@@ -62,13 +62,15 @@ func (rules) ResolveAll(ctx context.Context, who Subject, res []Resource) (map[R
 			return nil, undecided(err)
 		}
 	}
+	// A hosted doc's host is decided for who, as asked (hosts.go).
+	docCtx := withSubject(ctx, who)
 	for from := 0; from < len(docs); from += batchSize {
 		chunk := docs[from:min(from+batchSize, len(docs))]
 		ids := make([]string, 0, len(chunk))
 		for _, r := range chunk {
 			ids = append(ids, r.UUID)
 		}
-		got, err := docBusiness.DecideDocs(ctx, viewerOf(who), ids)
+		got, err := docBusiness.DecideDocs(docCtx, viewerOf(who), ids)
 		if err != nil {
 			return nil, undecided(err)
 		}

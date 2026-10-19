@@ -1,17 +1,15 @@
 package controllers
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
-	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Chat"
 	business "github.com/akashc777/OneCamp/business/Chat"
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
-	lastSeenChatBusiness "github.com/akashc777/OneCamp/business/LastSeenChat"
+	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	reactionBusiness "github.com/akashc777/OneCamp/business/Reaction"
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
@@ -136,136 +134,6 @@ func GetGroupDMParticipants(w http.ResponseWriter, r *http.Request) {
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got Dm successfully!", "data": dgraphDm})
 
-}
-
-func AddParticipantToGroupChat(w http.ResponseWriter, r *http.Request) {
-
-	ctx := r.Context()
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	var chatInfo adapter.InputAddParticipantToGroupChat
-
-	err := json.NewDecoder(r.Body).Decode(&chatInfo)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/AddParticipantToGroupChat Failed to parse the body of the req err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse payload",
-			"err": err,
-		})
-		return
-	}
-
-	dgraphDm, err := business.GetDgraphDmBasicInfoFromDgraph(ctx, userInfo.UserDgraphInfo.Uid, chatInfo.GrpUuid)
-
-	if err != nil || dgraphDm == nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/AddParticipantToGroupChat Failed to get group chat info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get group chat info",
-			"err": err,
-		})
-		return
-	}
-
-	if dgraphDm.ParticipantIsMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
-		return
-	}
-
-	newDgraphUser, err := userBusiness.GetDgraphUserInfoByUUID(ctx, chatInfo.UserUuid)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/AddParticipantToGroupChat Failed to get user info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get user info",
-			"err": err,
-		})
-		return
-	}
-
-	var userUUIDList []string
-
-	userUUIDList = append(userUUIDList, newDgraphUser.Uuid)
-
-	for _, p := range dgraphDm.Participants {
-		userUUIDList = append(userUUIDList, p.Uuid)
-	}
-
-	newGrpId, err := helpers.GenerateGroupID(userUUIDList)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/AddParticipantToGroupChat Failed to get user info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get user info",
-			"err": err,
-		})
-		return
-	}
-
-	newDgraphDm, err := business.GetDgraphDmBasicInfoFromDgraph(ctx, userInfo.UserDgraphInfo.Uid, newGrpId)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/AddParticipantToGroupChat Failed to get group chat info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get group chat info",
-			"err": err,
-		})
-		return
-	}
-
-	if newDgraphDm != nil {
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
-			"msg":  "Group with these participants already exists",
-			"data": helpers.Envolope{"new_grp_id": newGrpId},
-		})
-		return
-
-	}
-
-	err = business.AddParticipantToGroupChat(ctx, chatInfo.GrpUuid, newGrpId, newDgraphUser.Uid, newDgraphUser.Uuid, userUUIDList)
-
-	if err != nil {
-
-		helpers.LogErrorWithContext(ctx,
-			"controllers/AddParticipantToGroupChat Failed to add participant to group chat err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to add participant to group chat",
-			"err": err,
-		})
-		return
-	}
-
-	// Initialize tracking for the newly added participant (plus any existing members who missed initialization)
-	go func() {
-		timeoutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = lastSeenChatBusiness.BulkCreateLastSeenChatIfNotExists(timeoutCtx, userUUIDList, newGrpId)
-	}()
-
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "added participant to group chat successfully!", "data": helpers.Envolope{"new_grp_id": newGrpId}})
 }
 
 func CreateGroupChat(w http.ResponseWriter, r *http.Request) {
@@ -1966,6 +1834,13 @@ func PublishTypingInChat(w http.ResponseWriter, r *http.Request) {
 
 	}
 
+	// One of its people: a group's id is a hash anyone can work out from
+	// its people, and this said "X is typing" into any group it named.
+	if !conversationBusiness.MayType(ctx, &userInfo, conversationBusiness.ChatRef(typingInfo.GrpUuid)) {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
+		return
+	}
+
 	business.PublishChatTyping(&userInfo.UserDgraphInfo, typingInfo.GrpUuid)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "published chat typing successfully!"})
@@ -2459,22 +2334,13 @@ func GetChatRecordingList(w http.ResponseWriter, r *http.Request) {
 	endDate := queryParams.Get("endDate")
 
 	pageValue := queryParams["pageIndex"]
-	limitValue := queryParams["pageSize"]
-
 	pageIndex := 0
-	pageSize := 20
+	pageSize := helpers.SizeParam(queryParams, "pageSize", 20, 100)
 
 	if len(pageValue) > 0 {
 		pageInt, err := strconv.Atoi(pageValue[0])
 		if err == nil {
 			pageIndex = pageInt
-		}
-	}
-
-	if len(limitValue) > 0 {
-		limitInt, err := strconv.Atoi(limitValue[0])
-		if err == nil {
-			pageSize = limitInt
 		}
 	}
 
@@ -2526,22 +2392,13 @@ func GetGrpChatRecordingList(w http.ResponseWriter, r *http.Request) {
 	endDate := queryParams.Get("endDate")
 
 	pageValue := queryParams["pageIndex"]
-	limitValue := queryParams["pageSize"]
-
 	pageIndex := 0
-	pageSize := 20
+	pageSize := helpers.SizeParam(queryParams, "pageSize", 20, 100)
 
 	if len(pageValue) > 0 {
 		pageInt, err := strconv.Atoi(pageValue[0])
 		if err == nil {
 			pageIndex = pageInt
-		}
-	}
-
-	if len(limitValue) > 0 {
-		limitInt, err := strconv.Atoi(limitValue[0])
-		if err == nil {
-			pageSize = limitInt
 		}
 	}
 
@@ -2578,7 +2435,6 @@ func GetChatRecordingTranscript(w http.ResponseWriter, r *http.Request) {
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	queryParams := r.URL.Query()
-	pageSizeStr := queryParams["pageSize"]
 	pageIndexStr := queryParams["pageIndex"]
 	egressIdString := chi.URLParam(r, "egress_id")
 
@@ -2586,7 +2442,7 @@ func GetChatRecordingTranscript(w http.ResponseWriter, r *http.Request) {
 
 	var err error
 
-	if len(pageSizeStr) == 0 || len(pageIndexStr) == 0 || len(chatUUIDString) == 0 || len(egressIdString) == 0 {
+	if !queryParams.Has("pageSize") || len(pageIndexStr) == 0 || len(chatUUIDString) == 0 || len(egressIdString) == 0 {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "invalid req",
 		})
@@ -2595,26 +2451,7 @@ func GetChatRecordingTranscript(w http.ResponseWriter, r *http.Request) {
 
 	grpIdString := helpers.GetGroupingId(userInfo.UserDgraphInfo.Uuid, chatUUIDString)
 
-	pageSize := 0
-
-	if len(pageSizeStr) != 0 {
-		pageSize, err = strconv.Atoi(pageSizeStr[0])
-		if err != nil {
-			if err != nil {
-
-				helpers.LogErrorWithContext(ctx,
-					"controllers/GetChatRecordingTranscript Failed to parse pageSize query param to int err: %+v",
-					err)
-
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-					"msg": "Failed to parse filters query param",
-					"err": err,
-				})
-				return
-
-			}
-		}
-	}
+	pageSize := helpers.SizeParam(queryParams, "pageSize", 20, 100)
 
 	pageIndex := 0
 	if len(pageIndexStr) != 0 {
@@ -2679,7 +2516,6 @@ func GetGrpChatRecordingTranscript(w http.ResponseWriter, r *http.Request) {
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	queryParams := r.URL.Query()
-	pageSizeStr := queryParams["pageSize"]
 	pageIndexStr := queryParams["pageIndex"]
 	egressIdString := chi.URLParam(r, "egress_id")
 
@@ -2687,33 +2523,14 @@ func GetGrpChatRecordingTranscript(w http.ResponseWriter, r *http.Request) {
 
 	var err error
 
-	if len(pageSizeStr) == 0 || len(pageIndexStr) == 0 || len(grpIdString) == 0 || len(egressIdString) == 0 {
+	if !queryParams.Has("pageSize") || len(pageIndexStr) == 0 || len(grpIdString) == 0 || len(egressIdString) == 0 {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "invalid req",
 		})
 		return
 	}
 
-	pageSize := 0
-
-	if len(pageSizeStr) != 0 {
-		pageSize, err = strconv.Atoi(pageSizeStr[0])
-		if err != nil {
-			if err != nil {
-
-				helpers.LogErrorWithContext(ctx,
-					"controllers/GetGrpChatRecordingTranscript Failed to parse pageSize query param to int err: %+v",
-					err)
-
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-					"msg": "Failed to parse filters query param",
-					"err": err,
-				})
-				return
-
-			}
-		}
-	}
+	pageSize := helpers.SizeParam(queryParams, "pageSize", 20, 100)
 
 	pageIndex := 0
 	if len(pageIndexStr) != 0 {

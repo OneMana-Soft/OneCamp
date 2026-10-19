@@ -10,6 +10,7 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/Channel"
 	botpost "github.com/akashc777/OneCamp/business/BotPost"
 	business "github.com/akashc777/OneCamp/business/Channel"
+	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
@@ -209,22 +210,13 @@ func GetAllActiveChannelList(w http.ResponseWriter, r *http.Request) {
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	pageValue := r.URL.Query()["pageIndex"]
-	limitValue := r.URL.Query()["pageSize"]
-
 	pageIndex := 0
-	pageSize := 20
+	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 100)
 
 	if len(pageValue) > 0 {
 		pageInt, err := strconv.Atoi(pageValue[0])
 		if err == nil {
 			pageIndex = pageInt
-		}
-	}
-
-	if len(limitValue) > 0 {
-		limitInt, err := strconv.Atoi(limitValue[0])
-		if err == nil {
-			pageSize = limitInt
 		}
 	}
 
@@ -320,12 +312,9 @@ func GetDiscoverChannelList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
-	pageIndex, pageSize := 0, 20
+	pageIndex, pageSize := 0, helpers.SizeParam(r.URL.Query(), "pageSize", 20, 100)
 	if v, err := strconv.Atoi(r.URL.Query().Get("pageIndex")); err == nil && v >= 0 {
 		pageIndex = v
-	}
-	if v, err := strconv.Atoi(r.URL.Query().Get("pageSize")); err == nil && v > 0 && v <= 100 {
-		pageSize = v
 	}
 	search := ""
 	if raw := strings.TrimSpace(r.URL.Query().Get("search")); raw != "" {
@@ -546,7 +535,10 @@ func GetChannelBasicInfoByUUID(w http.ResponseWriter, r *http.Request) {
 
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
-	channelInfo, err := business.GetBasicDgraphChannelInfoByUUIDAndUpdateLastSeen(ctx, channelUUID, userInfo.UserPostgresInfo.Id, userInfo.UserDgraphInfo.Uid)
+	// A read that writes nothing (F-6): it marked the channel read before it
+	// refused someone outside it, leaving read marks on private channels. The
+	// app marks a channel read when it opens it (POST /ch/markSeen).
+	channelInfo, err := business.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
 
 	if err != nil {
 		helpers.WriteReadFailure(w, r, err, "channel", where)
@@ -656,22 +648,13 @@ func GetUserArchivedChannelListWithLatestPost(w http.ResponseWriter, r *http.Req
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	pageValue := r.URL.Query()["pageIndex"]
-	limitValue := r.URL.Query()["pageSize"]
-
 	pageIndex := 0
-	pageSize := 20
+	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 100)
 
 	if len(pageValue) > 0 {
 		pageInt, err := strconv.Atoi(pageValue[0])
 		if err == nil {
 			pageIndex = pageInt
-		}
-	}
-
-	if len(limitValue) > 0 {
-		limitInt, err := strconv.Atoi(limitValue[0])
-		if err == nil {
-			pageSize = limitInt
 		}
 	}
 
@@ -715,22 +698,13 @@ func GetUserActiveChannelListWithLatestPost(w http.ResponseWriter, r *http.Reque
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	pageValue := r.URL.Query()["pageIndex"]
-	limitValue := r.URL.Query()["pageSize"]
-
 	pageIndex := 0
-	pageSize := 20
+	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 100)
 
 	if len(pageValue) > 0 {
 		pageInt, err := strconv.Atoi(pageValue[0])
 		if err == nil {
 			pageIndex = pageInt
-		}
-	}
-
-	if len(limitValue) > 0 {
-		limitInt, err := strconv.Atoi(limitValue[0])
-		if err == nil {
-			pageSize = limitInt
 		}
 	}
 
@@ -1448,15 +1422,9 @@ func PublishTypingInChannel(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	isChannelMember := false
-
-	for _, channel := range userInfo.UserDgraphInfo.Channels {
-		if channel.Uuid == channelTypingInfo.ChannelUuid {
-			isChannelMember = true
-		}
-	}
-
-	if !isChannelMember {
+	// Someone who can write in it, as it is now: the profile's channel list
+	// is kept an hour, so a removed member kept typing into the channel.
+	if !conversationBusiness.MayType(ctx, &userInfo, conversationBusiness.Ref{Kind: conversationBusiness.KindChannel, ID: channelTypingInfo.ChannelUuid}) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
@@ -1717,22 +1685,13 @@ func GetAllChannelRecordingList(w http.ResponseWriter, r *http.Request) {
 	endDate := queryParams.Get("endDate")
 
 	pageValue := queryParams["pageIndex"]
-	limitValue := queryParams["pageSize"]
-
 	pageIndex := 0
-	pageSize := 20
+	pageSize := helpers.SizeParam(queryParams, "pageSize", 20, 100)
 
 	if len(pageValue) > 0 {
 		pageInt, err := strconv.Atoi(pageValue[0])
 		if err == nil {
 			pageIndex = pageInt
-		}
-	}
-
-	if len(limitValue) > 0 {
-		limitInt, err := strconv.Atoi(limitValue[0])
-		if err == nil {
-			pageSize = limitInt
 		}
 	}
 
@@ -1766,12 +1725,11 @@ func GetChannelRecordingTranscript(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	queryParams := r.URL.Query()
-	pageSizeStr := queryParams["pageSize"]
 	pageIndexStr := queryParams["pageIndex"]
 	channelUUIDString := chi.URLParam(r, "channel_uuid")
 	egressIdString := chi.URLParam(r, "egress_id")
 
-	if len(pageSizeStr) == 0 || len(pageIndexStr) == 0 || len(channelUUIDString) == 0 || len(egressIdString) == 0 {
+	if !queryParams.Has("pageSize") || len(pageIndexStr) == 0 || len(channelUUIDString) == 0 || len(egressIdString) == 0 {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "invalid req",
 		})
@@ -1789,26 +1747,7 @@ func GetChannelRecordingTranscript(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	pageSize := 0
-
-	if len(pageSizeStr) != 0 {
-		pageSize, err = strconv.Atoi(pageSizeStr[0])
-		if err != nil {
-			if err != nil {
-
-				helpers.LogErrorWithContext(ctx,
-					"controllers/GetChannelRecordingTranscript Failed to parse pageSize query param to int err: %+v",
-					err)
-
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-					"msg": "Failed to parse filters query param",
-					"err": err,
-				})
-				return
-
-			}
-		}
-	}
+	pageSize := helpers.SizeParam(queryParams, "pageSize", 20, 100)
 
 	pageIndex := 0
 	if len(pageIndexStr) != 0 {

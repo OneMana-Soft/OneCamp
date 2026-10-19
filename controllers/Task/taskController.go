@@ -23,6 +23,7 @@ import (
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 
 	githubPRReviewDomain "github.com/akashc777/OneCamp/domain/GitHubPRReview"
@@ -94,7 +95,16 @@ func DeleteTaskComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Not a comment on a task (or one whose task is gone): its author only.
-	projectAdmin := dgraphCommentInfo.Task != nil && dgraphCommentInfo.Task.Project != nil && dgraphCommentInfo.Task.Project.IsProjectAdmin > 0
+	projectAdmin := false
+	if dgraphCommentInfo.Task != nil && dgraphCommentInfo.Task.Project != nil {
+		standing, err := workAccess.Of(ctx, userInfo.UserDgraphInfo.Uuid, dgraphCommentInfo.Task.Project)
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "controllers/DeleteTaskComment couldn't read the caller's role err: %+v", err)
+			helpers.WriteRetryLater(w, "Couldn't delete the comment.")
+			return
+		}
+		projectAdmin = standing.Can(workAccess.NeedManage)
+	}
 	if !projectAdmin && !isComentOwner {
 
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
@@ -189,7 +199,7 @@ func UpdateTaskCommentBody(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Comment not found"})
 		return
 	}
-	if _, _, ok := projectaccess.RequireTask(w, r, dgraphCommentInfo.Task.Uuid); !ok {
+	if _, _, ok := projectaccess.RequireTask(w, r, dgraphCommentInfo.Task.Uuid, workAccess.NeedComment); !ok {
 		return
 	}
 
@@ -324,10 +334,7 @@ func CreateTaskComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphTaskInfo.Project.IsProjectMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+	if !projectaccess.AllowTask(w, r, dgraphTaskInfo, workAccess.NeedComment) {
 		return
 	}
 
@@ -428,11 +435,7 @@ func CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphProjectInfo.IsProjectAdmin == 0 {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if _, ok := projectaccess.Allow(w, r, dgraphProjectInfo, workAccess.NeedCreateTask, ""); !ok {
 		return
 	}
 
@@ -610,11 +613,7 @@ func AddAttachmentsToTask(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphTaskInfo.Project.IsProjectAdmin == 0 {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if !projectaccess.AllowTask(w, r, dgraphTaskInfo, workAccess.NeedEditTask) {
 		return
 	}
 
@@ -700,11 +699,12 @@ func RemoveAttachmentFromTask(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphProjectInfo.IsProjectAdmin == 0 || len(dgraphProjectInfo.Tasks) == 0 {
-
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	// The file is on a task of its own project, which the person may change.
+	if len(dgraphProjectInfo.Tasks) == 0 || !strings.EqualFold(dgraphProjectInfo.Tasks[0].Uuid, removeTaskAttachmentInput.TaskUuid) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That file isn't on this task."})
+		return
+	}
+	if _, _, ok := projectaccess.RequireTask(w, r, removeTaskAttachmentInput.TaskUuid, workAccess.NeedEditTask); !ok {
 		return
 	}
 
@@ -771,14 +771,14 @@ func GetTaskInfo(w http.ResponseWriter, r *http.Request) {
 	if dgraphTaskInfo != nil {
 		_ = business.MergeGitHubMetaIntoTask(ctx, taskUUID, dgraphTaskInfo)
 		_ = taskFieldBusiness.MergeFieldValues(ctx, []*dgraphStruct.DgraphTask{dgraphTaskInfo})
+		// What the reader may do with it and in its project, for the panel
+		// (task_access, project_access). Without them the app keeps to the
+		// project's admins changing it, so a failed read of roles is said in
+		// the log and the task still opens.
+		if err := workAccess.DecorateTasks(ctx, userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.Uid, dgraphTaskInfo); err != nil {
+			helpers.LogErrorWithContext(ctx, "controllers/GetTaskInfo couldn't read what the reader may do with task %s err: %+v", taskUUID, err)
+		}
 	}
-
-	// if dgraphTaskInfo == nil || dgraphTaskInfo.Project.IsProjectMember == 0 {
-	// 	helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
-	// 		"msg": "Not Authorised",
-	// 	})
-	// 	return
-	// }
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got task info", "data": dgraphTaskInfo})
 
@@ -843,10 +843,7 @@ func UpdateTaskName(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphTaskInfo.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if !projectaccess.AllowTask(w, r, dgraphTaskInfo, workAccess.NeedEditTask) {
 		return
 	}
 
@@ -934,10 +931,7 @@ func UpdateTaskDesc(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphTaskInfo.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if !projectaccess.AllowTask(w, r, dgraphTaskInfo, workAccess.NeedEditTask) {
 		return
 	}
 
@@ -1088,10 +1082,7 @@ func UpdateTaskAssignee(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphTask.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if !projectaccess.AllowTask(w, r, dgraphTask, workAccess.NeedEditTask) {
 		return
 	}
 
@@ -1185,10 +1176,7 @@ func UpdateTaskDueDate(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphTaskInfo.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if !projectaccess.AllowTask(w, r, dgraphTaskInfo, workAccess.NeedEditTask) {
 		return
 	}
 
@@ -1291,10 +1279,7 @@ func UpdateTaskStartDate(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphTaskInfo.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if !projectaccess.AllowTask(w, r, dgraphTaskInfo, workAccess.NeedEditTask) {
 		return
 	}
 
@@ -1373,10 +1358,7 @@ func CreateOrUpdateReactionOnCommentTask(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if dgraphComment.Task.Project.IsProjectMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorized ",
-		})
+	if _, ok := projectaccess.Allow(w, r, dgraphComment.Task.Project, workAccess.NeedComment, ""); !ok {
 		return
 	}
 
@@ -1441,11 +1423,7 @@ func DeleteTaskCommentReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if commentInfo.Task.Project.IsProjectMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
+	if _, ok := projectaccess.Allow(w, r, commentInfo.Task.Project, workAccess.NeedComment, ""); !ok {
 		return
 	}
 
@@ -1531,10 +1509,7 @@ func UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphTaskInfo.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if !projectaccess.AllowTask(w, r, dgraphTaskInfo, workAccess.NeedEditTask) {
 		return
 	}
 
@@ -1628,10 +1603,7 @@ func UpdateTaskPriority(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphTaskInfo.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if !projectaccess.AllowTask(w, r, dgraphTaskInfo, workAccess.NeedEditTask) {
 		return
 	}
 
@@ -1735,10 +1707,7 @@ func UpdateTaskLabel(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphTaskInfo.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if !projectaccess.AllowTask(w, r, dgraphTaskInfo, workAccess.NeedEditTask) {
 		return
 	}
 
@@ -1798,10 +1767,11 @@ func CreateSubTask(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphProjectInfo.IsProjectAdmin == 0 || len(dgraphProjectInfo.Tasks) == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if len(dgraphProjectInfo.Tasks) == 0 {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task isn't in this project."})
+		return
+	}
+	if _, ok := projectaccess.Allow(w, r, dgraphProjectInfo, workAccess.NeedCreateTask, ""); !ok {
 		return
 	}
 
@@ -1929,10 +1899,7 @@ func GetTaskActivityList(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphTask.Project.IsProjectMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if !projectaccess.AllowTask(w, r, dgraphTask, workAccess.NeedView) {
 		return
 	}
 
@@ -1988,10 +1955,7 @@ func GetTaskActivityInfo(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphTask.Project.IsProjectMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if !projectaccess.AllowTask(w, r, dgraphTask, workAccess.NeedView) {
 		return
 	}
 
@@ -2044,10 +2008,7 @@ func ArchiveTask(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphTaskInfo.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if !projectaccess.AllowTask(w, r, dgraphTaskInfo, workAccess.NeedDeleteTask) {
 		return
 	}
 
@@ -2114,10 +2075,7 @@ func UnArchiveTask(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphTaskInfo.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not authorised",
-		})
+	if !projectaccess.AllowTask(w, r, dgraphTaskInfo, workAccess.NeedDeleteTask) {
 		return
 	}
 
@@ -2143,7 +2101,7 @@ func LinkTaskToGitHub(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	taskUUID, _, ok := projectaccess.RequireTaskAdmin(w, r, taskUUIDStr)
+	taskUUID, _, ok := projectaccess.RequireTask(w, r, taskUUIDStr, workAccess.NeedEditTask)
 	if !ok {
 		return
 	}
@@ -2261,7 +2219,7 @@ func LinkTaskToGitHub(w http.ResponseWriter, r *http.Request) {
 func UnlinkTaskFromGitHub(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	taskUUID, _, ok := projectaccess.RequireTaskAdmin(w, r, taskUUIDStr)
+	taskUUID, _, ok := projectaccess.RequireTask(w, r, taskUUIDStr, workAccess.NeedEditTask)
 	if !ok {
 		return
 	}
@@ -2281,7 +2239,7 @@ func CreateGitHubBranchForTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	taskUUID, taskInfo, ok := projectaccess.RequireTaskAdmin(w, r, taskUUIDStr)
+	taskUUID, taskInfo, ok := projectaccess.RequireTask(w, r, taskUUIDStr, workAccess.NeedEditTask)
 	if !ok {
 		return
 	}
@@ -2372,7 +2330,7 @@ func CreateGitHubBranchForTask(w http.ResponseWriter, r *http.Request) {
 func GetGitHubTaskActivity(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"))
+	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"), workAccess.NeedView)
 	if !ok {
 		return
 	}
@@ -2390,7 +2348,7 @@ func GetGitHubTaskActivity(w http.ResponseWriter, r *http.Request) {
 func GetGitHubPRReviews(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"))
+	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"), workAccess.NeedView)
 	if !ok {
 		return
 	}
@@ -2408,7 +2366,7 @@ func GetGitHubPRReviews(w http.ResponseWriter, r *http.Request) {
 func GetGitHubSyncStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"))
+	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"), workAccess.NeedView)
 	if !ok {
 		return
 	}
@@ -2436,7 +2394,7 @@ func GetGitHubSyncStatus(w http.ResponseWriter, r *http.Request) {
 func SearchGitHubIssues(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"))
+	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"), workAccess.NeedView)
 	if !ok {
 		return
 	}
@@ -2515,7 +2473,7 @@ func SearchGitHubIssues(w http.ResponseWriter, r *http.Request) {
 func SearchGitHubPRs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"))
+	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"), workAccess.NeedView)
 	if !ok {
 		return
 	}
@@ -2623,7 +2581,7 @@ func BulkUnlinkTasksFromGitHub(w http.ResponseWriter, r *http.Request) {
 			errors = append(errors, fmt.Sprintf("Invalid task UUID: %s", taskUUIDStr))
 			continue
 		}
-		if refusal := changeRefusal(ctx, taskUUID, userInfo.UserDgraphInfo.Uid); refusal != "" {
+		if refusal := changeRefusal(ctx, taskUUID, &userInfo); refusal != "" {
 			errors = append(errors, refusal)
 			continue
 		}
@@ -2693,7 +2651,7 @@ func BulkLinkTasksToGitHub(w http.ResponseWriter, r *http.Request) {
 			refusals[i] = fmt.Sprintf("Invalid issue data for task %s", link.TaskUUID)
 			continue
 		}
-		if refusal := changeRefusal(ctx, taskUUID, userInfo.UserDgraphInfo.Uid); refusal != "" {
+		if refusal := changeRefusal(ctx, taskUUID, &userInfo); refusal != "" {
 			refusals[i] = refusal
 			continue
 		}
@@ -2748,15 +2706,15 @@ func BulkLinkTasksToGitHub(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// changeRefusal is why the person (by graph uid) may not change the task, as a
-// bulk answer lists it, or "" when they may: one of its project's admins.
-func changeRefusal(ctx context.Context, taskID uuid.UUID, viewerUID string) string {
-	_, err := business.TaskFor(ctx, taskID, viewerUID, true)
+// changeRefusal is why the person may not change the task, as a bulk answer
+// lists it, or "" when they may (Work Access's rule).
+func changeRefusal(ctx context.Context, taskID uuid.UUID, who *userModels.UserInfo) string {
+	_, _, err := business.TaskFor(ctx, taskID, who, workAccess.NeedEditTask)
 	switch {
 	case err == nil:
 		return ""
-	case errors.Is(err, business.ErrNotProjectAdmin):
-		return fmt.Sprintf("Only the project's admins can change task %s", taskID)
+	case errors.Is(err, business.ErrNotAllowed):
+		return fmt.Sprintf("Task %s: %s", taskID, err)
 	case errors.Is(err, business.ErrTaskNotVisible):
 		return fmt.Sprintf("Task not found: %s", taskID)
 	default:
@@ -2770,7 +2728,7 @@ func CreateGitHubPRForTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	taskUUID, _, ok := projectaccess.RequireTaskAdmin(w, r, taskUUIDStr)
+	taskUUID, _, ok := projectaccess.RequireTask(w, r, taskUUIDStr, workAccess.NeedEditTask)
 	if !ok {
 		return
 	}
@@ -2834,7 +2792,7 @@ func RetryGitHubSync(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	taskUUIDStr := chi.URLParam(r, "task_uuid")
-	taskUUID, _, ok := projectaccess.RequireTaskAdmin(w, r, taskUUIDStr)
+	taskUUID, _, ok := projectaccess.RequireTask(w, r, taskUUIDStr, workAccess.NeedEditTask)
 	if !ok {
 		return
 	}
@@ -2898,7 +2856,7 @@ func RetryGitHubSync(w http.ResponseWriter, r *http.Request) {
 
 // RefreshFromGitHub pulls the latest state from GitHub and overwrites the OneCamp task.
 func RefreshFromGitHub(w http.ResponseWriter, r *http.Request) {
-	taskUUID, _, ok := projectaccess.RequireTaskAdmin(w, r, chi.URLParam(r, "task_uuid"))
+	taskUUID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"), workAccess.NeedEditTask)
 	if !ok {
 		return
 	}
@@ -2971,8 +2929,7 @@ func UpdateTaskDates(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Task not found"})
 		return
 	}
-	if task.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the project's admins can change its tasks."})
+	if !projectaccess.AllowTask(w, r, task, workAccess.NeedEditTask) {
 		return
 	}
 	start, startErr := dateOrUnset(in.StartDate)
@@ -3065,8 +3022,8 @@ func dependencyChange(w http.ResponseWriter, r *http.Request, remove bool) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Dependencies are between a project's tasks, not subtasks."})
 	case errors.Is(err, business.ErrDependencyLoop):
 		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "That would make a loop: the other task already waits on this one."})
-	case errors.Is(err, business.ErrNotProjectAdmin):
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the project's admins can change its tasks."})
+	case errors.Is(err, business.ErrNotAllowed):
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": err.Error()})
 	case errors.Is(err, business.ErrDependencyMissing):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Task not found"})
 	default:
@@ -3113,8 +3070,7 @@ func UpdateTaskEstimate(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Task not found"})
 		return
 	}
-	if task.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the project's admins can change its tasks."})
+	if !projectaccess.AllowTask(w, r, task, workAccess.NeedEditTask) {
 		return
 	}
 	switch err := business.UpdateTaskEstimate(ctx, taskUUID, in.Minutes, task, &userInfo.UserDgraphInfo); {

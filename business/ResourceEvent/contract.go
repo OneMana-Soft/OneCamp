@@ -117,6 +117,46 @@ const (
 	BookingRescheduled     Kind = "booking.rescheduled"
 	BookingRequested       Kind = "booking.requested"
 	CalendarSyncFailed     Kind = "sync.failed"
+
+	// Tables (design/tables-vs-airtable/PROGRAM.md §5), declared at its day 0
+	// and emitted by the packages that build them (A2 rows, trash and fields,
+	// A5 bases and sharing, B3 views, B11 comments). ResourceKind is "table"
+	// (a base's, "base") and ResourceUUID its id; Data names the change set,
+	// its kind, the rows and the fields it changed, never a cell's value.
+	// Today's table.row.created and table.row.updated webhooks stay as they
+	// are until B10 moves their subscribers.
+	TableCreated      Kind = "table.created"
+	TableDeleted      Kind = "table.deleted" // to the trash
+	TableRestored     Kind = "table.restored"
+	TableRowsChanged  Kind = "table.rows.changed"
+	TableRowsDeleted  Kind = "table.rows.deleted" // to the table's trash
+	TableRowsRestored Kind = "table.rows.restored"
+	TableFieldChanged Kind = "table.field.changed"
+	TableViewChanged  Kind = "table.view.changed"
+	TableCommentAdded Kind = "table.comment.added"
+	BaseCreated       Kind = "base.created"
+	BaseShared        Kind = "base.shared"
+
+	// Projects (design/projects-vs-asana-jira/PROGRAM.md §5), declared at its
+	// day 0 and emitted by the packages that build them (A1 membership, A3
+	// tasks through the Task Writer, B1 triage, B2 SLAs, B3 cycles, B10
+	// releases). ResourceKind is "task", "project", "cycle" or "release" and
+	// ResourceUUID its id; Data names what changed ("fields", "role",
+	// "from_project"), never a description or a comment.
+	TaskCreated          Kind = "task.created"
+	TaskChanged          Kind = "task.changed"
+	TaskMoved            Kind = "task.moved"
+	TaskDeleted          Kind = "task.deleted"
+	TaskRestored         Kind = "task.restored"
+	ProjectChanged       Kind = "project.changed"
+	ProjectMemberAdded   Kind = "project.member.added"
+	ProjectMemberRemoved Kind = "project.member.removed"
+	CycleStarted         Kind = "cycle.started"
+	CycleEnded           Kind = "cycle.ended"
+	TriageDecided        Kind = "triage.decided"
+	SLAAtRisk            Kind = "sla.at_risk"
+	SLABreached          Kind = "sla.breached"
+	ReleaseStage         Kind = "release.stage"
 )
 
 // Actor is who made the change, from server context (I11): for an agent, the

@@ -37,8 +37,6 @@ import (
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
-	"github.com/akashc777/OneCamp/initializers/mqttInit"
-	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/tests/integration"
@@ -55,8 +53,7 @@ func TestATasksEmailsReachOnlyItsReaders(t *testing.T) {
 	integration.SetupRedis(t)
 	dg := integration.SetupDgraph(t)
 	broker := &noticeBroker{}
-	mqttInit.MqttClient = broker
-	t.Cleanup(func() { mqttInit.MqttClient = nil })
+	integration.UseMqttClient(t, broker)
 	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"took":1,"errors":false,"items":[],"updated":0,"failures":[]}`)
 	}))
@@ -65,7 +62,7 @@ func TestATasksEmailsReachOnlyItsReaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opensearchInit.OpenSearchClient = client
+	integration.UseOpenSearchClient(t, client)
 	defer firebaseInit.ObservePushesForTest(func(map[string]string, []string) {})()
 
 	exec := func(q string, args ...any) {

@@ -96,19 +96,19 @@ func GetLinksForSource(ctx context.Context, sourceType, sourceUUID, userDgraphUI
 }
 
 // GetReverseLinksForRef returns the tasks and projects that link a doc/board,
-// dropping entries in projects the viewer isn't a member of.
+// dropping entries in projects the viewer isn't in (a member or an admin).
 func GetReverseLinksForRef(ctx context.Context, refType, refUUID, userDgraphUID string) (tasks []*dgraphStruct.DgraphTask, projects []*dgraphStruct.DgraphProject, err error) {
 	rawTasks, rawProjects, err := domain.GetReverseLinksForRef(ctx, refType, refUUID, userDgraphUID)
 	if err != nil {
 		return nil, nil, err
 	}
 	for _, t := range rawTasks {
-		if t != nil && t.Project != nil && t.Project.IsProjectMember > 0 {
+		if t != nil && t.Project.ReaderIsIn() {
 			tasks = append(tasks, t)
 		}
 	}
 	for _, p := range rawProjects {
-		if p != nil && p.IsProjectMember > 0 {
+		if p.ReaderIsIn() {
 			projects = append(projects, p)
 		}
 	}

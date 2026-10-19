@@ -43,6 +43,36 @@ type ListPolicy struct {
 	Default []string
 }
 
+// ChoicePolicy is a policy that takes one of a few named values ("members",
+// "assigned", "admins"), and its default, which is one of them.
+type ChoicePolicy struct {
+	Key     string
+	Default string
+	Choices []string
+}
+
+// Allows is whether v is one of the policy's choices. Pure.
+func (p ChoicePolicy) Allows(v string) bool {
+	for _, c := range p.Choices {
+		if c == v {
+			return true
+		}
+	}
+	return false
+}
+
+// Scope is one thing a policy can be set for beside the workspace: a project,
+// by its id. A value set for a scope beats the workspace's there, and the
+// workspace's beats the default; only a policy whose spec names the scope's
+// kind can be set for one (scoped.go).
+type Scope struct {
+	Kind string
+	ID   string
+}
+
+// ScopeProject is a project's own value.
+const ScopeProject = "project"
+
 var (
 	// DocsExportMembers lets members export docs; admins always may.
 	DocsExportMembers = BoolPolicy{Key: "docs.export.members", Default: true}
@@ -53,6 +83,51 @@ var (
 	// EmbedAllowlist lists the hosts docs may embed; nil means no list is
 	// configured.
 	EmbedAllowlist = ListPolicy{Key: "embed.allowlist"}
+
+	// Tables (design/tables-vs-airtable/PROGRAM.md §5), declared at its day 0
+	// with today's behaviour as the default, and shown to admins (specs) by
+	// the package that enforces each. The "who may" policies (tables.create.who,
+	// tables.export.who) and tables.share_guests, which follows guest.access,
+	// are declared by A5 and B12 as choices (projects' ChoicePolicy).
+	//
+	// TablesEmbedOutside lets a view be embedded on other sites (B3).
+	TablesEmbedOutside = BoolPolicy{Key: "tables.embed_outside", Default: false}
+	// TablesScripts lets tables run scripts (B6).
+	TablesScripts = BoolPolicy{Key: "tables.scripts", Default: false}
+	// TablesAIFields lets tables have AI fields where AI is on (B8).
+	TablesAIFields = BoolPolicy{Key: "tables.ai_fields", Default: true}
+	// TablesTrashRetentionDays is how long deleted rows, fields and tables stay
+	// in the trash; 0 keeps them, as today, until the owner decides (§13 O3).
+	TablesTrashRetentionDays = IntPolicy{Key: "tables.trash.retention_days", Default: 0}
+	// TablesHistoryRetentionDays is how long a table's change history is kept;
+	// 0 keeps it, until the owner decides (§13 O3).
+	TablesHistoryRetentionDays = IntPolicy{Key: "tables.history.retention_days", Default: 0}
+)
+
+// The projects programme's policies (design/projects-vs-asana-jira/PROGRAM.md
+// §5), declared at its day 0 with today's behaviour as each default. A policy
+// joins the admin's list (registry.go's specs) when the package that reads it
+// lands; until then it answers its default.
+var (
+	// ProjectsEditWho is who changes a project's tasks: its members (since
+	// A1), its members on the tasks assigned to them, or its admins only (the
+	// rule before roles). Set for the workspace, and for each project.
+	ProjectsEditWho = ChoicePolicy{Key: "projects.edit.who", Default: "members", Choices: []string{"members", "assigned", "admins"}}
+	// ProjectsCreateWho is who makes projects in a team: the team's admins
+	// (as before) or all its members.
+	ProjectsCreateWho = ChoicePolicy{Key: "projects.create.who", Default: "team_admins", Choices: []string{"team_admins", "team_members"}}
+	// ProjectsTriage turns a project's triage on (B1).
+	ProjectsTriage = BoolPolicy{Key: "projects.triage", Default: false}
+	// ProjectsWIPHard makes a board's work-in-progress limits hard (A7).
+	ProjectsWIPHard = BoolPolicy{Key: "projects.wip.hard", Default: false}
+	// ProjectsAutoCloseDays closes tasks nobody touched for this many days;
+	// 0 never does.
+	ProjectsAutoCloseDays = IntPolicy{Key: "projects.autoclose.days", Default: 0}
+	// ProjectsGuests is whether a project may be shared with guests: as the
+	// workspace's guest access says (follow), or on or off for it (B15).
+	ProjectsGuests = ChoicePolicy{Key: "projects.guests", Default: "follow", Choices: []string{"follow", "on", "off"}}
+	// ProjectsAITriage suggests a triage decision for a new task [AI] (B11).
+	ProjectsAITriage = BoolPolicy{Key: "projects.ai.triage", Default: false}
 )
 
 // Store answers policies.
@@ -60,6 +135,12 @@ type Store interface {
 	Bool(ctx context.Context, p BoolPolicy) bool
 	Int(ctx context.Context, p IntPolicy) int
 	List(ctx context.Context, p ListPolicy) []string
+	Choice(ctx context.Context, p ChoicePolicy) string
+	// BoolIn, IntIn and ChoiceIn answer a policy for one scope: the value set
+	// for it, else the workspace's, else the default.
+	BoolIn(ctx context.Context, p BoolPolicy, s Scope) bool
+	IntIn(ctx context.Context, p IntPolicy, s Scope) int
+	ChoiceIn(ctx context.Context, p ChoicePolicy, s Scope) string
 	// Require refuses a request when p is off for the signed-in member. Admins
 	// always pass.
 	Require(p BoolPolicy) func(http.Handler) http.Handler

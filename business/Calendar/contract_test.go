@@ -86,21 +86,23 @@ func TestStatusForCountsOnlyThePersonsOwnEvents(t *testing.T) {
 	}
 }
 
-// Events is the /event routes' functions, with their own rules: here the
-// ones that answer before anything is read.
-func TestEventsAreTodaysFunctions(t *testing.T) {
-	who := &model.UserInfo{}
-	var input *EventInputError
-	for _, id := range []string{"not an event id", "gcal-"} {
-		if _, err := Events.Get(context.Background(), who, id); !errors.As(err, &input) {
-			t.Errorf("Get(%q): %v, want GetEvent's input error", id, err)
-		}
+// Events is the calendar in its one store. On a server that hasn't switched
+// the store on, every call says so (a 503 on the API) rather than answer from
+// a store nothing writes to yet.
+func TestEventsIsTheOneStore(t *testing.T) {
+	if Events != Service(stored) {
+		t.Fatal("Events isn't the one store's service")
 	}
-	// A guest's one answer today is leaving.
-	for _, a := range []Answer{Accepted, Tentative} {
-		if err := Events.Respond(context.Background(), who, uuid.New(), a); !errors.Is(err, ErrUnavailable) {
-			t.Errorf("%s: %v", a, err)
-		}
+	t.Setenv("CALENDAR_STORE", "graph")
+	ctx, who, id := context.Background(), &model.UserInfo{}, uuid.NewString()
+	if _, err := Events.Get(ctx, who, id); !errors.Is(err, ErrStoreOff) {
+		t.Errorf("Get: %v", err)
+	}
+	if _, _, err := Events.Range(ctx, who, at(9, 0), at(10, 0)); !errors.Is(err, ErrStoreOff) {
+		t.Errorf("Range: %v", err)
+	}
+	if err := Events.Respond(ctx, who, id, Declined); !errors.Is(err, ErrStoreOff) {
+		t.Errorf("Respond: %v", err)
 	}
 }
 

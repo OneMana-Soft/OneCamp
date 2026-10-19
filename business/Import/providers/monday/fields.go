@@ -24,7 +24,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/akashc777/OneCamp/business/DataTable/formula"
+	"github.com/akashc777/OneCamp/business/Formula"
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 )
 

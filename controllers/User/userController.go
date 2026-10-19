@@ -46,6 +46,7 @@ import (
 	userChatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
 	userFCMtokenBusiness "github.com/akashc777/OneCamp/business/UserFCMToken"
 	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/authcookie"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
@@ -220,10 +221,29 @@ func GetDgraphUserTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 
 	}
 
+	if dgraphUser != nil {
+		decorateMine(ctx, userInfo, dgraphUser.TasksTodo, dgraphUser.TasksInProgress, dgraphUser.TasksBacklog,
+			dgraphUser.TasksInReview, dgraphUser.TasksCanceled, dgraphUser.TasksDone)
+	}
+
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":  "Sucessful got task list",
 		"data": dgraphUser,
 	})
+}
+
+// decorateMine sets what the person may do with each of their tasks
+// (task_access, Work Access) and in each task's project, for My Tasks to offer
+// only that, with one read of their roles. A failed read is logged and the
+// list still shows: the app then keeps to the project's admins changing tasks.
+func decorateMine(ctx context.Context, u models.UserInfo, lists ...[]*dgraphStruct.DgraphTask) {
+	var all []*dgraphStruct.DgraphTask
+	for _, l := range lists {
+		all = append(all, l...)
+	}
+	if err := workAccess.DecorateTasks(ctx, u.UserDgraphInfo.Uuid, u.UserDgraphInfo.Uid, all...); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/User couldn't read what the reader may do with their tasks err: %+v", err)
+	}
 }
 
 func GetDgraphUserProjectList(w http.ResponseWriter, r *http.Request) {
@@ -418,6 +438,7 @@ func GetDgraphUserTaskList(w http.ResponseWriter, r *http.Request) {
 	if pageSize > 0 {
 		pageCount = (dgraphUser.TaskCount + uint64(pageSize) - 1) / uint64(pageSize)
 	}
+	decorateMine(ctx, userInfo, dgraphUser.Tasks)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":       "Sucessful got task list",
@@ -767,13 +788,17 @@ func GetUsersListWhoDontBelongToTheProjectButBelongToTheTeam(w http.ResponseWrit
 		return
 	}
 
-	if dgraphProject.IsProjectAdmin == 0 && dgraphProject.Team.IsAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
+	// Whoever manages the project's people (Work Access: its admins, its
+	// team's admins) may see who could be added.
+	standing, err := workAccess.Of(ctx, userInfo.UserDgraphInfo.Uuid, dgraphProject)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/GetUsersListWhoDontBelongToTheProjectButBelongToTheTeam couldn't read the caller's role err: %+v", err)
+		helpers.WriteRetryLater(w, "Couldn't load the people you can add to the project.")
 		return
-
+	}
+	if !standing.Can(workAccess.NeedManagePeople) {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
+		return
 	}
 
 	dgraphUsers, err := business.GetUsersListWhoDontBelongToTheProjectButBelongToTheTeam(ctx, dgraphProject.Team.Uuid, dgraphProject.Uuid)
@@ -1531,22 +1556,13 @@ func GetUserRecordingsList(w http.ResponseWriter, r *http.Request) {
 	endDate := queryParams.Get("endDate")
 
 	pageValue := r.URL.Query()["pageIndex"]
-	limitValue := r.URL.Query()["pageSize"]
-
 	pageIndex := 0
-	pageSize := 20
+	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 100)
 
 	if len(pageValue) > 0 {
 		pageInt, err := strconv.Atoi(pageValue[0])
 		if err == nil {
 			pageIndex = pageInt
-		}
-	}
-
-	if len(limitValue) > 0 {
-		limitInt, err := strconv.Atoi(limitValue[0])
-		if err == nil {
-			pageSize = limitInt
 		}
 	}
 
@@ -2277,22 +2293,13 @@ func GetAllUsersList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	pageValue := r.URL.Query()["pageIndex"]
-	limitValue := r.URL.Query()["pageSize"]
-
 	pageIndex := 0
-	pageSize := 20
+	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 100)
 
 	if len(pageValue) > 0 {
 		pageInt, err := strconv.Atoi(pageValue[0])
 		if err == nil {
 			pageIndex = pageInt
-		}
-	}
-
-	if len(limitValue) > 0 {
-		limitInt, err := strconv.Atoi(limitValue[0])
-		if err == nil {
-			pageSize = limitInt
 		}
 	}
 
@@ -2565,22 +2572,13 @@ func GetUserPosts(w http.ResponseWriter, r *http.Request) {
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
 
 	pageValue := r.URL.Query()["pageIndex"]
-	limitValue := r.URL.Query()["pageSize"]
-
 	pageIndex := 0
-	pageSize := 20
+	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 100)
 
 	if len(pageValue) > 0 {
 		pageInt, err := strconv.Atoi(pageValue[0])
 		if err == nil {
 			pageIndex = pageInt
-		}
-	}
-
-	if len(limitValue) > 0 {
-		limitInt, err := strconv.Atoi(limitValue[0])
-		if err == nil {
-			pageSize = limitInt
 		}
 	}
 
@@ -3053,22 +3051,13 @@ func GetAllAdminUsers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	pageValue := r.URL.Query()["pageIndex"]
-	limitValue := r.URL.Query()["pageSize"]
-
 	pageIndex := 0
-	pageSize := 20
+	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 500)
 
 	if len(pageValue) > 0 {
 		pageInt, err := strconv.Atoi(pageValue[0])
 		if err == nil {
 			pageIndex = pageInt
-		}
-	}
-
-	if len(limitValue) > 0 {
-		limitInt, err := strconv.Atoi(limitValue[0])
-		if err == nil {
-			pageSize = limitInt
 		}
 	}
 
@@ -3208,7 +3197,7 @@ func UpdateUserProjectNotification(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if projectDgraphInfo.IsProjectMember == 0 {
+	if !projectDgraphInfo.ReaderIsIn() {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
@@ -3756,22 +3745,13 @@ func GetExternalUsers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	pageValue := r.URL.Query()["pageIndex"]
-	limitValue := r.URL.Query()["pageSize"]
-
 	pageIndex := 0
-	pageSize := 20
+	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 100)
 
 	if len(pageValue) > 0 {
 		pageInt, err := strconv.Atoi(pageValue[0])
 		if err == nil {
 			pageIndex = pageInt
-		}
-	}
-
-	if len(limitValue) > 0 {
-		limitInt, err := strconv.Atoi(limitValue[0])
-		if err == nil {
-			pageSize = limitInt
 		}
 	}
 

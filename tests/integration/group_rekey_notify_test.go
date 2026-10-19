@@ -7,16 +7,15 @@ package integration_test
 // direct conversation tells both people, against real Postgres, Redis and
 // Dgraph.
 //
-// A group's id is a hash of its people, so adding someone moves the group to
-// a new id. Its messages, files and read marks moved, but not its people's
-// notification settings, which are all that says who hears of a message, nor
-// the messages queued to be sent to it later: once anyone was added, nobody
-// was told of anything in the group again (no push, email, Activity item or
-// call ring), and a queued message failed when its time came. A new direct
-// conversation's two settings were one insert, which failed whole when either
-// row was already there, and left the other person never told.
+// Adding someone to a group opens the conversation of the new set of people
+// (D-S1): the group they were in keeps its id, its settings and the messages
+// queued for it, and the new one carries each person's setting across, the
+// person added hearing everything. (Before, the group moved to the new set's
+// id, and once anyone was added nobody was told of anything in it again.) A
+// new direct conversation's two settings were one insert, which failed whole
+// when either row was already there, and left the other person never told.
 //
-// Groups and conversations left that way before the fix get their settings
+// Groups and conversations left silent before the fix get their settings
 // back at the next start (StartChatSettingsRepair).
 //
 // Run: go test -tags=integration ./tests/integration/ -run TestAGroupKeepsTellingItsPeople -v
@@ -41,6 +40,7 @@ import (
 	chatAdapter "github.com/akashc777/OneCamp/adapter/Chat"
 	scheduledMessageBusiness "github.com/akashc777/OneCamp/business/ScheduledMessage"
 	chatController "github.com/akashc777/OneCamp/controllers/Chat"
+	conversationController "github.com/akashc777/OneCamp/controllers/Conversation"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	chatNotificationDomain "github.com/akashc777/OneCamp/domain/UserChatNotification"
 	"github.com/akashc777/OneCamp/helpers"
@@ -208,20 +208,21 @@ func TestAGroupKeepsTellingItsPeople(t *testing.T) {
 		t.Fatalf("queue a message: %v", err)
 	}
 
-	// Ada adds Dee: the group moves to the id of its four people.
-	if code, body := call("ada", chatController.AddParticipantToGroupChat, chatAdapter.InputAddParticipantToGroupChat{
-		GrpUuid: before, UserUuid: people["dee"].String()}); code != http.StatusOK {
+	// Ada adds Dee, through the route apps already loaded call: the four's
+	// group opens, and the answer names it.
+	after := groupOf("ada", "bo", "cy", "dee")
+	if code, body := call("ada", conversationController.AddParticipantToGroupChat, chatAdapter.InputAddParticipantToGroupChat{
+		GrpUuid: before, UserUuid: people["dee"].String()}); code != http.StatusOK || !strings.Contains(body, after) {
 		t.Fatalf("adding dee: %d %s", code, body)
 	}
-	after := groupOf("ada", "bo", "cy", "dee")
 
-	t.Run("the settings move with the group, and the person added hears of everything", func(t *testing.T) {
+	t.Run("the group keeps its settings, and the new one carries them across", func(t *testing.T) {
 		want := map[string]string{"ada": "all", "bo": "all", "cy": "mention", "dee": "all"}
 		if got := settings(after); fmt.Sprint(got) != fmt.Sprint(want) {
-			t.Errorf("settings under the new id: %v, want %v", got, want)
+			t.Errorf("settings in the new group: %v, want %v", got, want)
 		}
-		if got := settings(before); len(got) != 0 {
-			t.Errorf("settings left under the old id: %v", got)
+		if got, want := settings(before), map[string]string{"ada": "all", "bo": "all", "cy": "mention"}; fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("settings in the group Dee was added from: %v, want %v", got, want)
 		}
 	})
 
@@ -232,13 +233,13 @@ func TestAGroupKeepsTellingItsPeople(t *testing.T) {
 		}
 	})
 
-	t.Run("the message queued for later goes to the group as it now is", func(t *testing.T) {
+	t.Run("the message queued for later still goes to the group it was queued for", func(t *testing.T) {
 		var target, inBody string
 		if err := env.PG.QueryRow(`SELECT payload->>'target', payload->'body'->>'grp_id' FROM scheduled_jobs WHERE id = $1`, queued.ID).Scan(&target, &inBody); err != nil {
 			t.Fatal(err)
 		}
-		if target != after || inBody != after {
-			t.Errorf("the queued message names %s and %s, want %s", target, inBody, after)
+		if target != before || inBody != before {
+			t.Errorf("the queued message names %s and %s, want %s", target, inBody, before)
 		}
 	})
 

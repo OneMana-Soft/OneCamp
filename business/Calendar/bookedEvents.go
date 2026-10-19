@@ -26,6 +26,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	bookingModel "github.com/akashc777/OneCamp/models/postgres/Booking"
+	models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	emailService "github.com/akashc777/OneCamp/services/Email"
 	"github.com/google/uuid"
@@ -183,19 +184,50 @@ func markBookedEvents(ctx context.Context, reader *model.UserInfo, events []*dgr
 			mine[e.Uuid] = e
 		}
 	}
-	owner, err := uuid.Parse(reader.UserDgraphInfo.Uuid)
-	if len(mine) == 0 || err != nil {
-		return
+	for id, b := range bookingsFor(ctx, reader, len(mine)) {
+		if e := mine[id]; e != nil {
+			e.Booking = b
+		}
 	}
-	booked, err := bookingModel.UpcomingBookedEvents(owner, time.Now())
+}
+
+// bookingsOf is what the calendar's API says of the reader's own events that
+// a guest booked, by event id, as markBookedEvents says it.
+func bookingsOf(ctx context.Context, reader *model.UserInfo, events []*models.Event) map[string]*dgraphStruct.EventBooking {
+	mine := 0
+	for _, e := range events {
+		if e.CreatedBy == personOf(reader) {
+			mine++
+		}
+	}
+	return bookingsFor(ctx, reader, mine)
+}
+
+// upcomingBookings is an owner's bookings still to come; a seam for tests.
+var upcomingBookings = bookingModel.UpcomingBookedEvents
+
+// bookingsFor is the reader's upcoming booked events, by event id: one query,
+// and none when they have no events of their own in the answer (mine).
+func bookingsFor(ctx context.Context, reader *model.UserInfo, mine int) map[string]*dgraphStruct.EventBooking {
+	out := map[string]*dgraphStruct.EventBooking{}
+	if reader == nil || mine == 0 {
+		return out
+	}
+	owner, err := uuid.Parse(reader.UserDgraphInfo.Uuid)
+	if err != nil {
+		return out
+	}
+	booked, err := upcomingBookings(owner, time.Now())
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Calendar/markBookedEvents err: %+v", err)
-		return
+		return out
+	}
+	if len(booked) == 0 {
+		return out
 	}
 	told := emailService.NotificationEmailEnabled()
 	for _, b := range booked {
-		if e := mine[b.EventUUID.String()]; e != nil {
-			e.Booking = &dgraphStruct.EventBooking{GuestName: b.GuestName, PageTitle: b.PageTitle, GuestTold: told}
-		}
+		out[b.EventUUID.String()] = &dgraphStruct.EventBooking{GuestName: b.GuestName, PageTitle: b.PageTitle, GuestTold: told}
 	}
+	return out
 }

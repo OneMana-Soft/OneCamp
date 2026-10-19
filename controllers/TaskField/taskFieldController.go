@@ -13,6 +13,7 @@ import (
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	business "github.com/akashc777/OneCamp/business/TaskField"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
@@ -65,7 +66,7 @@ func userOf(r *http.Request) userModels.UserInfo {
 
 // ListFields is a project's fields. GET /project/{p}/fields
 func ListFields(w http.ResponseWriter, r *http.Request) {
-	id, p, ok := projectaccess.Require(w, r, false, "")
+	id, _, standing, ok := projectaccess.RequireStanding(w, r, workAccess.NeedView, "")
 	if !ok {
 		return
 	}
@@ -75,12 +76,12 @@ func ListFields(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// can_edit tells the app whether to offer making fields and setting values.
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"fields": business.Views(fields...), "can_edit": p.IsProjectAdmin > 0}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"fields": business.Views(fields...), "can_edit": standing.Can(workAccess.NeedManage)}})
 }
 
 // CreateField adds one. POST /project/{p}/fields {name, type, options, currency, on_card}
 func CreateField(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := projectaccess.Require(w, r, true, adminOnly)
+	id, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, adminOnly)
 	if !ok {
 		return
 	}
@@ -103,7 +104,7 @@ func CreateField(w http.ResponseWriter, r *http.Request) {
 // UpdateField renames a field, changes its options or currency, or whether
 // cards show it. POST /project/{p}/fields/{f}
 func UpdateField(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := projectaccess.Require(w, r, true, adminOnly)
+	id, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, adminOnly)
 	if !ok {
 		return
 	}
@@ -126,7 +127,7 @@ func UpdateField(w http.ResponseWriter, r *http.Request) {
 
 // ReorderFields puts the fields in the order given. POST /project/{p}/fields/reorder {ids}
 func ReorderFields(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := projectaccess.Require(w, r, true, adminOnly)
+	id, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, adminOnly)
 	if !ok {
 		return
 	}
@@ -152,7 +153,7 @@ func ReorderFields(w http.ResponseWriter, r *http.Request) {
 // DeleteField removes a field and every task's value of it.
 // POST /project/{p}/fields/{f}/delete
 func DeleteField(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := projectaccess.Require(w, r, true, adminOnly)
+	id, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, adminOnly)
 	if !ok {
 		return
 	}
@@ -194,8 +195,7 @@ func SetTaskField(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Task not found"})
 		return
 	}
-	if task.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the project's admins can change its tasks."})
+	if !projectaccess.AllowTask(w, r, task, workAccess.NeedEditTask) {
 		return
 	}
 	projectID, err := uuid.Parse(task.Project.Uuid)

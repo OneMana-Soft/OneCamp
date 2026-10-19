@@ -40,6 +40,7 @@ func unconnectedMqttClient() MQTT.Client {
 // an unconnected client again.
 func UseMqttClient(t *testing.T, c MQTT.Client) {
 	t.Helper()
+	guardTestState(t)
 	ensureLoggers()
 	mqttInit.MqttClient = c
 	t.Cleanup(func() { mqttInit.MqttClient = unconnectedMqttClient() })

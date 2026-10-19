@@ -176,6 +176,13 @@ ListDocAIEntries
 EndpointPolicy
 CheckEndpoint
 CreateDoc
+#   (v1.59.0) TextRefs: an AI column's prompt's references (tableAIColumn.go). RequireID: the
+#   AI project-update routes' project check. WithActsThroughToken: an agent run a token asked
+#   for (agentRequester.go). WriteAICell: an AI column's fill.
+TextRefs
+RequireID
+WithActsThroughToken
+WriteAICell
 
 # Found by the package-exact check that came over with v2.73.0 (16 Oct 2026): dead on
 # this edition already, each hidden until now by a function of the same name in another
@@ -212,7 +219,6 @@ business/Webhook.SetAppContext
 controllers/Channel.GetChannelInfoByUUID
 domain/Attachment.CreateAttachmentInOpenSearch
 domain/Attachment.GetAttachmentByUUID
-domain/Channel.GetChannelNamesByUUIDs
 domain/Chat.CreateChatInOpenSearch
 domain/Comment.GetCommentByUUID
 domain/Import.LookupWorkspaceMappingsBatch

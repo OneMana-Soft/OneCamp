@@ -72,6 +72,10 @@ const (
 	// A guest booked or cancelled time through a booking page; type_id is the
 	// event's id, and the click opens the calendar.
 	FIREBASE_PUSH_DATA_TYPE_CALENDAR = "calendar"
+	// Someone mentioned you on a table's row, or replied in a thread on one;
+	// type_id is the table's id and thread_id the row's, and the click opens
+	// the row in its table.
+	FIREBASE_PUSH_DATA_TYPE_TABLE_ROW = "table_row"
 	// The notification tag: a later push with the same one replaces it.
 	FIREBASE_PUSH_DATA_TAG         = "tag"
 	FIREBASE_PUSH_DATA_TITLE       = "title"

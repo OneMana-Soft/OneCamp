@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strings"
 
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -196,7 +197,7 @@ func RunPlan(fields []*model.Field, rows []*model.Row, plan QueryPlan) (*PlanRes
 		if groupField == nil {
 			groupLabels = []string{"Total"}
 		} else {
-			groupLabels = cellLabels(values[groupField.Id.String()])
+			groupLabels = fieldTypes.Labels(values[groupField.Id.String()])
 			if len(groupLabels) == 0 {
 				groupLabels = []string{"(empty)"}
 			}

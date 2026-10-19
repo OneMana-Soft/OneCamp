@@ -32,6 +32,7 @@ import (
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
@@ -879,7 +880,7 @@ func GuestProjectReview(w http.ResponseWriter, r *http.Request) {
 // TaskClientReview GET /task/clientReview/{task_uuid} — the client's newest
 // verdict on a task, for anyone who can see the task. Null when there's none.
 func TaskClientReview(w http.ResponseWriter, r *http.Request) {
-	taskID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"))
+	taskID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"), workAccess.NeedView)
 	if !ok {
 		return
 	}
@@ -964,13 +965,23 @@ func mayShare(w http.ResponseWriter, r *http.Request, userInfo userModels.UserIn
 		}
 		p, perr := projectBusiness.GetBasicDgraphProjectInfo(ctx, resourceID, userInfo.UserDgraphInfo.Uid)
 		if perr != nil || p == nil || p.Uuid == "" || helpers.IsSoftDeleted(p.DeletedAt) ||
-			(p.IsProjectMember == 0 && p.IsProjectAdmin == 0 && !userInfo.UserPostgresInfo.IsAdmin) {
+			(!p.ReaderIsIn() && !userInfo.UserPostgresInfo.IsAdmin) {
 			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Project not found"})
 			return false
 		}
-		if p.IsProjectAdmin == 0 && !userInfo.UserPostgresInfo.IsAdmin {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the project's admins can share it with a client."})
-			return false
+		// Its admins by Work Access's rule (a role, not only the edge), or a
+		// workspace admin; making a link is recorded either way.
+		if !userInfo.UserPostgresInfo.IsAdmin {
+			standing, serr := workAccess.Of(ctx, userInfo.UserDgraphInfo.Uuid, p)
+			if serr != nil {
+				helpers.LogErrorWithContext(ctx, "controllers/Guest mayShare couldn't read the caller's role err: %+v", serr)
+				helpers.WriteRetryLater(w, "Couldn't check what you can do in this project.")
+				return false
+			}
+			if !standing.Can(workAccess.NeedManage) {
+				helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the project's admins can share it with a client."})
+				return false
+			}
 		}
 	default:
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Unsupported resource type"})

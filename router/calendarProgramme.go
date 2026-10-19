@@ -41,5 +41,7 @@ func newCalendarRouters(root, admin, event chi.Router) calendarRouters {
 // mountCalendarProgramme mounts every merged package of the calendar
 // programme: one line per package, in merge order, and nothing else.
 func mountCalendarProgramme(rt calendarRouters) {
-	// No package has merged yet.
+	mountCalendarEvents(rt)    // A1: the calendar's events in its one store
+	mountCalendarAnswers(rt)   // A2: answers, nudges and guests' links
+	mountCalendarReminders(rt) // A5: each person's reminders, and snoozes
 }

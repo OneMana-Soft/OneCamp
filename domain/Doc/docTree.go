@@ -40,8 +40,9 @@ const archivedDocFilter = `gt(doc_archived_at, "1970-01-01T00:00:00Z")`
 const deletedDocFilter = `gt(doc_deleted_at, "1970-01-01T00:00:00Z")`
 
 // internalSpaces are spaces whose docs belong to something else and are never
-// listed as docs: a table row's body (C3) lives in one.
-const notInternalFilter = `NOT eq(doc_space_kind, "table")`
+// listed as docs: a table row's body (C3) lives in one. A hosted doc (D-18,
+// docHost.go) belongs to its host and is never listed either.
+const notInternalFilter = `NOT eq(doc_space_kind, "table") AND NOT has(doc_host_kind)`
 
 // docAccessFields is what the access rule reads of a doc for the person
 // asking (docAccess.go's facts, which need AccessPrelude in the query), with

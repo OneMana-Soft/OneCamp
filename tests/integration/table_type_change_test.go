@@ -24,7 +24,7 @@ import (
 	"testing"
 
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
-	"github.com/akashc777/OneCamp/business/DataTable/formula"
+	"github.com/akashc777/OneCamp/business/Formula"
 	dataTableController "github.com/akashc777/OneCamp/controllers/DataTable"
 	dataTableModel "github.com/akashc777/OneCamp/models/postgres/DataTable"
 )

@@ -4,7 +4,9 @@
 // failed at a load of 100, and passed alone). A test that can count its work
 // instead (reads, steps, probes in flight) counts it; this is for those that
 // can't. A test comparing two pieces of work (one size against another, a
-// case against a real doc) asks Ratio, which times them back to back.
+// case against a real doc) asks Ratio, which times them back to back. A test
+// holding one piece of work to a budget asks FastestCPU, which counts only
+// the time the work ran.
 package timing
 
 import (
@@ -20,6 +22,33 @@ func Fastest(runs int, f func()) time.Duration {
 		start := time.Now()
 		f()
 		if took := time.Since(start); best < 0 || took < best {
+			best = took
+		}
+	}
+	return best
+}
+
+// FastestCPU runs f runs times on one OS thread, and is the least CPU time a
+// run used (user and system): what the work costs, whatever else the machine
+// is doing. A busy machine stretches a run's wall time, which is all Fastest
+// can see: the fastest of twenty 10,000-instance expansions took 24 ms of
+// wall time at a load of 60 with a web gate beside it, and a 20 ms budget
+// failed on nothing but the load. A thread's CPU time counts only the time it
+// ran. Where a thread's CPU time can't be read (anywhere but Linux), it is
+// Fastest.
+func FastestCPU(runs int, f func()) time.Duration {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	best := time.Duration(-1)
+	for i := 0; i < runs; i++ {
+		before, ok := threadCPU()
+		start := time.Now()
+		f()
+		took := time.Since(start)
+		if after, read := threadCPU(); ok && read {
+			took = after - before
+		}
+		if best < 0 || took < best {
 			best = took
 		}
 	}

@@ -93,3 +93,9 @@ func Delete(userID, id uuid.UUID) (bool, error) {
 	n, _ := res.RowsAffected()
 	return n > 0, nil
 }
+
+// OwnersOf is each saved view's owner, by the view's id; a view that isn't
+// there is left out.
+func OwnersOf(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]uuid.UUID, error) {
+	return postgresInit.UUIDPairs(ctx, `SELECT id, user_id FROM task_views WHERE id = ANY($1)`, ids)
+}

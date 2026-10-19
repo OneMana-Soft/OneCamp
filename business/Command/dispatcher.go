@@ -290,11 +290,26 @@ func resolveHandlerURL(ctx context.Context, cmd *slashModel.SlashCommand) string
 
 func resolveSigningSecret(ctx context.Context, cmd *slashModel.SlashCommand) string {
 	if cmd.AppId != nil {
-		if app, err := slashModel.GetAppByID(ctx, *cmd.AppId); err == nil && app != nil && app.SigningSecret != nil {
-			return *app.SigningSecret
+		if app, err := slashModel.GetAppByID(ctx, *cmd.AppId); err == nil && app != nil {
+			return appSigningSecret(app)
 		}
 	}
 	return ""
+}
+
+// appSigningSecret is the secret an app checks our signature with: stored
+// encrypted (helpers.EncryptSecret), so it is decrypted here. Commands were
+// signed with the stored ciphertext itself, which no app could check; only
+// the Test probe decrypted it. A value that doesn't decrypt is one stored
+// before secrets were encrypted, and is the secret as it stands.
+func appSigningSecret(app *slashModel.App) string {
+	if app == nil || app.SigningSecret == nil || *app.SigningSecret == "" {
+		return ""
+	}
+	if plain, err := helpers.DecryptSecret(*app.SigningSecret); err == nil {
+		return plain
+	}
+	return *app.SigningSecret
 }
 
 // forwardToApp posts the command payload to the app handler, validating the

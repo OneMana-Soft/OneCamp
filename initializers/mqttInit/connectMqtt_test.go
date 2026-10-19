@@ -137,3 +137,28 @@ func TestClientEventsAreSharedAmongBackendProcesses(t *testing.T) {
 		t.Errorf("subscribed to %v, want %v", c.topics, want)
 	}
 }
+
+// A one-shot subcommand connects to publish what it changes, and takes no
+// share of the announcements the server counts devices by: it would count
+// them a second time, or take some with it when it exits. Its id is its own,
+// beside a server on the same host and beside another one-shot.
+func TestAOneShotListensToNothing(t *testing.T) {
+	if helpers.MessageLogs == nil {
+		discard := log.New(io.Discard, "", 0)
+		helpers.MessageLogs = &helpers.Message{InfoLog: discard, ErrorLog: discard}
+	}
+	quiet := &recordingClient{}
+	onConnect(quiet, false)
+	if len(quiet.topics) != 0 {
+		t.Errorf("a one-shot subscribed to %v", quiet.topics)
+	}
+	server := &recordingClient{}
+	onConnect(server, true)
+	if len(server.topics) != 2 {
+		t.Errorf("the server subscribed to %v", server.topics)
+	}
+	id := ProcessClientID("backend", helpers.RoleOneShot)
+	if !strings.HasPrefix(id, "backend-oneshot-") || id == ProcessClientID("backend", helpers.RoleAPI) {
+		t.Errorf("a one-shot connects as %q", id)
+	}
+}

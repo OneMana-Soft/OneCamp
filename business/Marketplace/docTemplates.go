@@ -65,23 +65,11 @@ const (
 	teamCategory = "Workspace"
 )
 
-// The camp hues, in the chart order (the web's lib/campHue.ts).
-var campHues = []string{"sky", "moss", "sun", "dusk", "berry", "lake"}
-
-func isCampHue(h string) bool {
-	for _, c := range campHues {
-		if c == h {
-			return true
-		}
-	}
-	return false
-}
-
 // HueFor is a stable hue for an id, for a template that names none.
 func HueFor(id string) string {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(strings.ToLower(id)))
-	return campHues[int(h.Sum32()%uint32(len(campHues)))]
+	return helpers.CampHues[int(h.Sum32()%uint32(len(helpers.CampHues)))]
 }
 
 var (
@@ -151,7 +139,7 @@ func normalDocPayload(p DocPayload, id string) (DocPayload, error) {
 	}
 	p.Preview = ""
 	p.Builtin = false
-	if !isCampHue(p.Hue) {
+	if !helpers.IsCampHue(p.Hue) {
 		p.Hue = HueFor(id)
 	}
 	if strings.TrimSpace(p.Glyph) == "" || len(p.Glyph) > maxIconLen {

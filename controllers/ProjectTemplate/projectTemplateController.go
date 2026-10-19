@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	business "github.com/akashc777/OneCamp/business/ProjectTemplate"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -111,7 +112,7 @@ func SaveProjectAsTemplate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	id, _, ok := projectaccess.Require(w, r, true, "Only the project's admins can save it as a template.")
+	id, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, "Only the project's admins can save it as a template.")
 	if !ok {
 		return
 	}

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Chat"
 	dgraphUserModels "github.com/akashc777/OneCamp/models/dgraph/User"
@@ -48,124 +47,6 @@ func UpdateChatByUUID(ctx context.Context, chatUUID uuid.UUID) (err error) {
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/UpdateChatByUUID Failed to update chat err: %+v",
-			err)
-		return
-	}
-	return
-}
-
-// BulkUpdateGrpIdInChatAndAtachment moves a group conversation to the id its
-// new set of people gives it (helpers.GenerateGroupID), in one transaction:
-// its messages, attachments and read marks, and with them each person's
-// notification setting for it, and the messages queued to be sent to it
-// later. addedUserID is the person joining: they hear of everything, as
-// whoever joins a group does. The settings and the queued messages used to
-// stay under the old id, and who hears of a group is read from those
-// settings alone, so once anyone was added nobody heard of it again, and a
-// message queued for later failed when its time came.
-func BulkUpdateGrpIdInChatAndAtachment(ctx context.Context, oldGrpID string, newGrpID string, addedUserID string) (err error) {
-	updateChatsQuery := `
-		UPDATE chats
-		SET grp_id = $1
-		WHERE grp_id = $2
-	`
-
-	updateAttachmentsQuery := `
-		UPDATE attachments
-		SET src_value = $1
-		WHERE src_value = $2 AND src_key = 'grpChat'
-	`
-
-	updateLastSeenChatQuery := `
-		UPDATE last_seen_chat
-		SET grp_id = $1
-		WHERE grp_id = $2
-	`
-
-	// Each setting goes across as it is; a row already under the new id
-	// (from before) is kept, and nothing is left under the old one.
-	moveSettingsQuery := `
-		INSERT INTO users_chat_notification (user_id, grp_id, notification_type, updated_at)
-		SELECT user_id, $1, notification_type, NOW() FROM users_chat_notification WHERE grp_id = $2
-		ON CONFLICT (user_id, grp_id) DO NOTHING
-	`
-	dropOldSettingsQuery := `
-		DELETE FROM users_chat_notification WHERE grp_id = $1
-	`
-	addedSettingQuery := `
-		INSERT INTO users_chat_notification (user_id, grp_id, notification_type, updated_at)
-		VALUES ($1, $2, 'all', NOW())
-		ON CONFLICT (user_id, grp_id) DO NOTHING
-	`
-	// A message queued for the group names it twice: as the place it goes
-	// and in the message itself.
-	moveQueuedQuery := `
-		UPDATE scheduled_jobs
-		SET payload = jsonb_set(jsonb_set(payload, '{target}', to_jsonb($1::text)), '{body,grp_id}', to_jsonb($1::text)),
-			updated_at = NOW()
-		WHERE job_type = 'scheduled_message' AND status = 'pending' AND deleted_at IS NULL
-			AND payload->>'kind' = 'group' AND payload->>'target' = $2
-	`
-
-	tx, err := postgresInit.DBConn.SqlDB.BeginTx(ctx, nil)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/BulkUpdateGrpIdInChatAndAtachment Failed to begin transaction err: %+v",
-			err)
-		return
-	}
-
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		}
-	}()
-
-	_, err = tx.ExecContext(ctx, updateChatsQuery, newGrpID, oldGrpID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/BulkUpdateGrpIdInChatAndAtachment Failed to update chats err: %+v",
-			err)
-		return
-	}
-
-	_, err = tx.ExecContext(ctx, updateAttachmentsQuery, newGrpID, oldGrpID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/BulkUpdateGrpIdInChatAndAtachment Failed to update attachments err: %+v",
-			err)
-		return
-	}
-
-	_, err = tx.ExecContext(ctx, updateLastSeenChatQuery, newGrpID, oldGrpID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/BulkUpdateGrpIdInChatAndAtachment Failed to update last_seen_chat err: %+v",
-			err)
-		return
-	}
-
-	for _, step := range []struct {
-		what  string
-		query string
-		args  []any
-	}{
-		{"move the notification settings", moveSettingsQuery, []any{newGrpID, oldGrpID}},
-		{"drop the old id's settings", dropOldSettingsQuery, []any{oldGrpID}},
-		{"give the person added a setting", addedSettingQuery, []any{addedUserID, newGrpID}},
-		{"move the queued messages", moveQueuedQuery, []any{newGrpID, oldGrpID}},
-	} {
-		if _, err = tx.ExecContext(ctx, step.query, step.args...); err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"domain/BulkUpdateGrpIdInChatAndAtachment Failed to %s err: %+v", step.what, err)
-			return
-		}
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/BulkUpdateGrpIdInChatAndAtachment Failed to commit transaction err: %+v",
 			err)
 		return
 	}
@@ -528,6 +409,7 @@ func GetUserChatListWithLatestChat(ctx context.Context, userUUID string) (dgraph
 					user_uuid
 					user_dms @cascade(dm_chats){
 						dm_grouping_id
+						dm_name
 						dm_participants @filter(` + dmParticipantVisible + `) {
 							user_uuid
 							user_name
@@ -541,6 +423,9 @@ func GetUserChatListWithLatestChat(ctx context.Context, userUUID string) (dgraph
 							chat_uuid
 							chat_body_text
 							chat_created_at
+							chat_kind
+							chat_system
+							chat_copy_of
 							chat_from {
 								user_uuid
 								user_name
@@ -593,6 +478,9 @@ func GetDgraphOldChatFromDgraph(ctx context.Context, groupingId string, lastChat
 						chat_uuid
 						chat_body_text
 						chat_created_at
+						chat_kind
+						chat_system
+						chat_copy_of
 						chat_from {
 							user_uuid
 							user_name
@@ -676,6 +564,9 @@ func GetDgraphNewChatFromDgraph(ctx context.Context, groupingId string, lastChat
 						chat_uuid
 						chat_body_text
 						chat_created_at
+						chat_kind
+						chat_system
+						chat_copy_of
 						chat_from {
 							user_uuid
 							user_name
@@ -874,6 +765,7 @@ func GetDgraphDmBasicInfoFromDgraph(ctx context.Context, userId string, grouping
 				dmInfo(func: eq(dm_grouping_id, $grpId)) {
 					uid
 					dm_grouping_id
+					dm_name
 					dm_participants @filter(` + dmParticipantVisible + `) {
 						user_uuid
 						user_name
@@ -913,6 +805,9 @@ func GetDgraphNewChatIncludingChatFromDgraph(ctx context.Context, groupingId str
 						chat_uuid
 						chat_body_text
 						chat_created_at
+						chat_kind
+						chat_system
+						chat_copy_of
 						chat_from {
 							user_uuid
 							user_name
@@ -994,6 +889,9 @@ func GetDgraphLatestChatFromDgraph(ctx context.Context, groupingId string) (dgra
 						chat_uuid
 						chat_body_text
 						chat_created_at
+						chat_kind
+						chat_system
+						chat_copy_of
 						chat_from {
 							user_uuid
 							user_name
@@ -1221,19 +1119,6 @@ func UpdateChatInOpenSearch(openSearchChat *openSearchStruct.OpenSearchChat) {
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/UpdateChatInOpenSearch Failed to insert to openSearch err: %+v",
-			err,
-		)
-		return
-	}
-}
-
-func MigrateChatGroupIDInOpensearch(oldGrpId string, newGrpId string) {
-	ctx := context.Background()
-	err := OpenSearchModels.MigrateChatGroupIDInOpensearch(ctx, oldGrpId, newGrpId)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/UpdateChatInOpenSearch Failed to update grpId in openSearch err: %+v",
 			err,
 		)
 		return

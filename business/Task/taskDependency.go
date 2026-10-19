@@ -13,6 +13,7 @@ import (
 	"errors"
 	"time"
 
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	domain "github.com/akashc777/OneCamp/domain/Task"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/google/uuid"
@@ -24,9 +25,18 @@ var (
 	ErrDependencySubtask = errors.New("subtasks don't take dependencies")
 	ErrDependencyLoop    = errors.New("the dependency would make a loop")
 	ErrDependencyMissing = errors.New("task not found")
-	ErrNotProjectAdmin   = errors.New("not one of the project's admins")
 	ErrDependencyKind    = errors.New("not a kind of dependency, or too long a lag")
 )
+
+// mayChangeInTxn is whether user may change task, as read inside the
+// dependency's transaction for them, by the rule (Work Access).
+func mayChangeInTxn(ctx context.Context, task *dgraphStruct.DgraphTask, user *dgraphStruct.DgraphUser) error {
+	s, f, err := workAccess.OfTask(ctx, user.Uuid, user.Uid, task)
+	if err != nil {
+		return err
+	}
+	return s.CheckTask(workAccess.NeedEditTask, f)
+}
 
 // The kinds of dependency, as the edge's kind facet keeps them. A
 // dependency with no kind is finish to start.
@@ -80,8 +90,8 @@ func AddTaskDependency(ctx context.Context, taskUUID, blockerUUID, kind string, 
 		if pair.Task.Project == nil || pair.Blocker.Project == nil || pair.Task.Project.Uuid != pair.Blocker.Project.Uuid {
 			return ErrDependencyProject
 		}
-		if pair.Task.Project.IsProjectAdmin == 0 {
-			return ErrNotProjectAdmin
+		if err := mayChangeInTxn(ctx, pair.Task, user); err != nil {
+			return err
 		}
 		if pair.Upstream[taskUUID] {
 			return ErrDependencyLoop
@@ -102,8 +112,8 @@ func RemoveTaskDependency(ctx context.Context, taskUUID, blockerUUID string, use
 		if pair.Task == nil || pair.Task.Uuid == "" || pair.Task.Project == nil {
 			return ErrDependencyMissing
 		}
-		if pair.Task.Project.IsProjectAdmin == 0 {
-			return ErrNotProjectAdmin
+		if err := mayChangeInTxn(ctx, pair.Task, user); err != nil {
+			return err
 		}
 		return nil
 	})

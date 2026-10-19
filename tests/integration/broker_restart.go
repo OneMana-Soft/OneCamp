@@ -45,6 +45,7 @@ const ownBrokerWait = 5 * time.Minute
 // the client's password is one the broker takes.
 func SetupOwnBroker(t *testing.T) *BrokerEnv {
 	t.Helper()
+	guardTestState(t)
 	ensureLoggers()
 	ctx := context.Background()
 	raw := make([]byte, 24)

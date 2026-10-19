@@ -231,7 +231,7 @@ func HandleGetRecentArchivedItems(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	entityType := chi.URLParam(r, "entityType")
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	limit := helpers.LimitParam(r.URL.Query(), 50, 100)
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 
 	items, total, err := business.GetRecentlyArchivedItems(ctx, entityType, limit, offset)

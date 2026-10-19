@@ -79,6 +79,9 @@ func GetTable(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// The member's grid marks the rows people are talking about.
+	business.WithCommentCounts(ctx, bundle.Rows)
+	business.WithPages(ctx, bundle.Rows)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": bundle})
 }
 
@@ -155,13 +158,15 @@ func ListRows(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
 		return
 	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	limit := helpers.LimitParam(r.URL.Query(), 500, 1000)
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	rows, err := business.ListRows(ctx, id, actorFrom(r), limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
+	business.WithCommentCounts(ctx, rows)
+	business.WithPages(ctx, rows)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": rows})
 }
 

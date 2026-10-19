@@ -31,6 +31,7 @@ import (
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -92,7 +93,7 @@ func mayEditDoc(ctx context.Context, user *model.UserInfo, docUUID string) error
 
 // TodoToTask makes a task named title in a project from a to-do in a doc, and
 // ties the two. The person must be able to edit the doc and, as in "Add task",
-// be one of the project's admins.
+// make tasks in the project (Work Access).
 func TodoToTask(ctx context.Context, user *model.UserInfo, docUUID, projectUUID, title string) (uuid.UUID, error) {
 	title = strings.TrimSpace(title)
 	if title == "" {
@@ -113,8 +114,15 @@ func TodoToTask(ctx context.Context, user *model.UserInfo, docUUID, projectUUID,
 	if err != nil {
 		return uuid.Nil, err
 	}
-	if !p.ReaderRunsIt() {
-		return uuid.Nil, ErrNotProjectAdmin
+	if !p.ReaderIsIn() {
+		return uuid.Nil, ErrTaskNotVisible
+	}
+	s, err := workAccess.Of(ctx, user.UserDgraphInfo.Uuid, p)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if err := s.Check(workAccess.NeedCreateTask); err != nil {
+		return uuid.Nil, err
 	}
 	// As "Add task" makes it: medium priority, in To do.
 	in := adapter.CreateOrUpdateTaskInput{TaskName: title, ProjectUuid: project.String(), Priority: dgraphStruct.TASK_PRIORITY_MEDIUM}
@@ -158,8 +166,12 @@ func SetTodoDone(ctx context.Context, user *model.UserInfo, docUUID, taskUUID st
 	if info == nil || !CanViewTask(info, user.UserDgraphInfo.Uid) {
 		return ErrTaskNotVisible
 	}
-	if !info.Project.ReaderRunsIt() {
-		return ErrNotProjectAdmin
+	s, f, err := workAccess.OfTask(ctx, user.UserDgraphInfo.Uuid, user.UserDgraphInfo.Uid, info)
+	if err != nil {
+		return err
+	}
+	if err := s.CheckTask(workAccess.NeedEditTask, f); err != nil {
+		return err
 	}
 	status := dgraphStruct.TASK_STATUS_TODO
 	if done {

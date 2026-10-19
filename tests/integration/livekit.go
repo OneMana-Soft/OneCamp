@@ -35,6 +35,7 @@ type LiveKitEnv struct {
 // which the host reaches directly on Linux.
 func SetupLiveKit(t *testing.T) *LiveKitEnv {
 	t.Helper()
+	guardTestState(t)
 	ensureLoggers()
 	ctx := context.Background()
 

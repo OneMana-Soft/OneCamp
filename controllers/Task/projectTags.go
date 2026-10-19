@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	business "github.com/akashc777/OneCamp/business/Task"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 )
@@ -12,7 +13,7 @@ import (
 // the project's tasks, most used first, for the tag picker and the board's
 // tag filter. Members may read them.
 func ProjectTags(w http.ResponseWriter, r *http.Request) {
-	projectID, _, ok := projectaccess.Require(w, r, false, "")
+	projectID, _, ok := projectaccess.Require(w, r, workAccess.NeedView, "")
 	if !ok {
 		return
 	}

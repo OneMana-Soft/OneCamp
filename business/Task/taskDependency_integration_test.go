@@ -44,10 +44,20 @@ func TestTaskDependencies(t *testing.T) {
 		}
 		return m
 	}
+	// The project in Postgres too, for the commenter's role row (migration
+	// 320): roles beside the graph's edges (Work Access).
+	adminUUID, memberUUID, talkerUUID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	if _, err := env.PG.Exec(`INSERT INTO projects (id, project_name) VALUES ($1, 'Launch')`, project); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.PG.Exec(`INSERT INTO project_roles (project_id, user_id, role) VALUES ($1, $2, 'commenter')`, project, talkerUUID); err != nil {
+		t.Fatal(err)
+	}
 	uids := dg.Mutate(t, map[string]any{
 		"uid": "_:p", "dgraph.type": "Project", "project_uuid": project,
-		"project_admins":  []map[string]any{{"uid": "_:admin", "dgraph.type": "User", "user_uuid": uuid.NewString()}},
-		"project_members": []map[string]any{{"uid": "_:member", "dgraph.type": "User", "user_uuid": uuid.NewString()}},
+		"project_admins": []map[string]any{{"uid": "_:admin", "dgraph.type": "User", "user_uuid": adminUUID}},
+		"project_members": []map[string]any{{"uid": "_:member", "dgraph.type": "User", "user_uuid": memberUUID},
+			{"uid": "_:talker", "dgraph.type": "User", "user_uuid": talkerUUID}},
 		"project_tasks": []map[string]any{
 			task("a", "Design", map[string]any{"task_due_date": "2026-03-04T17:00:00Z"}),
 			task("b", "Build", map[string]any{"task_start_date": "2026-03-05T09:00:00Z", "task_due_date": "2026-03-07T17:00:00Z"}),
@@ -69,8 +79,9 @@ func TestTaskDependencies(t *testing.T) {
 				"task_deleted_at": live, "task_project": map[string]any{"uid": "_:q"}, "task_start_date": "2026-03-05T09:00:00Z",
 				"task_blocked_by": []map[string]any{{"uid": uids["a"]}}},
 		}})
-	admin := &dgraphStruct.DgraphUser{Uid: uids["admin"]}
-	member := &dgraphStruct.DgraphUser{Uid: uids["member"]}
+	admin := &dgraphStruct.DgraphUser{Uid: uids["admin"], Uuid: adminUUID}
+	member := &dgraphStruct.DgraphUser{Uid: uids["member"], Uuid: memberUUID}
+	talker := &dgraphStruct.DgraphUser{Uid: uids["talker"], Uuid: talkerUUID}
 
 	read := func(key string) (blockedBy []string, start, due time.Time, lines int) {
 		t.Helper()
@@ -166,7 +177,7 @@ func TestTaskDependencies(t *testing.T) {
 		{"a", "b", FinishToFinish, 3, admin, ErrDependencyLoop},
 		{"b", "x", "", 0, admin, ErrDependencyProject},
 		{"s", "a", "", 0, admin, ErrDependencySubtask},
-		{"c", "a", "", 0, member, ErrNotProjectAdmin},
+		{"c", "a", "", 0, talker, ErrNotAllowed},
 		{"c", "gone", "", 0, admin, ErrDependencyMissing},
 		{"c", "a", "xx", 0, admin, ErrDependencyKind},
 		{"c", "a", StartToStart, MaxLag + 1, admin, ErrDependencyKind},
@@ -247,8 +258,15 @@ func TestTaskDependencies(t *testing.T) {
 	if _, _, _, lines := read("b"); lines != 4 {
 		t.Fatalf("taking off a dependency that isn't there writes no line: %d", lines)
 	}
-	if err := RemoveTaskDependency(ctx, id["c"], id["b"], member); !errors.Is(err, ErrNotProjectAdmin) {
-		t.Fatalf("a member can't take a dependency off: %v", err)
+	if err := RemoveTaskDependency(ctx, id["c"], id["b"], talker); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("a commenter can't take a dependency off: %v", err)
+	}
+	// A member does the work: they make a dependency and take it off again.
+	if err := AddTaskDependency(ctx, id["c"], id["b"], "", 0, member); err != nil {
+		t.Fatalf("a member making a dependency: %v", err)
+	}
+	if err := RemoveTaskDependency(ctx, id["c"], id["b"], member); err != nil {
+		t.Fatalf("a member taking it off: %v", err)
 	}
 }
 

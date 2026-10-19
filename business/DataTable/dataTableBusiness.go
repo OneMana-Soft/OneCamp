@@ -12,6 +12,7 @@
 package business
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -19,9 +20,12 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
-	"github.com/akashc777/OneCamp/business/DataTable/formula"
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
+	formula "github.com/akashc777/OneCamp/business/Formula"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
@@ -35,10 +39,30 @@ const (
 	maxValuesBytes    = 100 * 1024 // 100 KiB per row values blob
 )
 
+// tooLong is whether a name or a description is over max characters. People
+// count characters, and the web's fields do: counted in bytes, a name in
+// Hindi or Tamil (three bytes a letter) was refused at 41 letters of 120.
+func tooLong(s string, max int) bool { return utf8.RuneCountInString(s) > max }
+
 // Actor is the user performing an action.
 type Actor struct {
 	UserID  uuid.UUID
 	IsAdmin bool
+	// Kind is how they act: themselves in the app (the zero value), or
+	// through the API, an AI tool, an import, a form. It decides whether a
+	// new row must give every required field (completeWrite).
+	Kind rowLedger.ActorKind
+}
+
+// completeWrite is whether a's new rows must give every required field: one
+// made through the API, by an AI tool or by a form, never the grid's blank
+// new row or an import of what another tool held.
+func completeWrite(a Actor) bool {
+	switch a.Kind {
+	case rowLedger.ActorAPI, rowLedger.ActorAgent, rowLedger.ActorForm:
+		return true
+	}
+	return false
 }
 
 var (
@@ -89,6 +113,17 @@ type FieldInput struct {
 	Type     string                 `json:"type"`
 	Config   map[string]interface{} `json:"config"`
 	Position float64                `json:"position"`
+	// Description says what the field is for.
+	Description string `json:"description"`
+	// Required is a field every row made through the API, an AI tool or a
+	// form must give.
+	Required bool `json:"required"`
+	// Default is what a new row's cell starts as; JSON null or nothing is
+	// none.
+	Default json.RawMessage `json:"default_value"`
+	// keptDefault is a default the save didn't name, the field's own: one
+	// its new type can't read goes rather than refusing the save.
+	keptDefault bool
 }
 
 // FieldPatch is a change to a field: what it names changes, and what it
@@ -101,6 +136,14 @@ type FieldPatch struct {
 	// Config is left out by a nil map: JSON null, or no "config" at all.
 	Config   map[string]interface{} `json:"config"`
 	Position *float64               `json:"position"`
+	// Description, Required and Default change those settings; left out,
+	// they keep theirs. A JSON null default takes the default away.
+	Description *string         `json:"description"`
+	Required    *bool           `json:"required"`
+	Default     json.RawMessage `json:"default_value"`
+	// Primary true makes the field the one that names the table's rows, and
+	// its first column. A field stops being primary only by another becoming it.
+	Primary *bool `json:"primary"`
 	// NumberSigns are how whoever changes the field's type writes numbers
 	// ("decimal" and "group"): text in a column made numbers is read by them.
 	formula.NumberSigns
@@ -109,7 +152,19 @@ type FieldPatch struct {
 // onto is field f as a save of p leaves it: what p names, and f's stored
 // value of the rest. An empty type is one left out.
 func (p FieldPatch) onto(f *model.Field) FieldInput {
-	in := FieldInput{Name: f.Name, Type: f.Type, Config: p.Config, Position: f.Position}
+	in := FieldInput{Name: f.Name, Type: f.Type, Config: p.Config, Position: f.Position, Required: f.Required, Default: f.Default, keptDefault: true}
+	if f.Description != nil {
+		in.Description = *f.Description
+	}
+	if p.Description != nil {
+		in.Description = *p.Description
+	}
+	if p.Required != nil {
+		in.Required = *p.Required
+	}
+	if p.Default != nil {
+		in.Default, in.keptDefault = p.Default, false
+	}
 	if p.Name != nil {
 		in.Name = *p.Name
 	}
@@ -123,7 +178,32 @@ func (p FieldPatch) onto(f *model.Field) FieldInput {
 		in.Config = map[string]interface{}{}
 		_ = json.Unmarshal([]byte(f.Config), &in.Config)
 	}
+	if p.Default == nil && in.Type != f.Type {
+		in.Default = convertedDefault(f.Default, in.Type)
+	}
 	return in
+}
+
+// convertedDefault is a field's default as its new kind reads it, as its
+// cells are converted (nil when it can't be one): a default a type change
+// leaves unreadable goes, rather than refusing the change. Pure.
+func convertedDefault(raw json.RawMessage, to string) json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v interface{}
+	if json.Unmarshal(raw, &v) != nil {
+		return nil
+	}
+	out, _, _ := fieldTypes.ConvertCell(to, v, formula.PlainSigns)
+	if out == nil {
+		return nil
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 // whole is whether p is a save of a whole field: its name, type and place
@@ -306,10 +386,10 @@ func createTableRow(ctx context.Context, in TableInput, actor Actor) (uuid.UUID,
 	if name == "" {
 		return uuid.Nil, fmt.Errorf("name is required")
 	}
-	if len(name) > maxNameLen {
+	if tooLong(name, maxNameLen) {
 		return uuid.Nil, fmt.Errorf("name is too long")
 	}
-	if len(in.Description) > maxDescriptionLen {
+	if tooLong(in.Description, maxDescriptionLen) {
 		return uuid.Nil, fmt.Errorf("description is too long")
 	}
 	if len(in.Icon) > maxIconLen {
@@ -468,13 +548,13 @@ func UpdateTable(ctx context.Context, id uuid.UUID, in TablePatch, actor Actor) 
 		if name == "" {
 			return nil, "", fmt.Errorf("name is required")
 		}
-		if len(name) > maxNameLen {
+		if tooLong(name, maxNameLen) {
 			return nil, "", fmt.Errorf("name is too long")
 		}
 		change.Name = &name
 	}
 	if in.Description != nil {
-		if len(*in.Description) > maxDescriptionLen {
+		if tooLong(*in.Description, maxDescriptionLen) {
 			return nil, "", fmt.Errorf("description is too long")
 		}
 		change.Description = optStr(*in.Description)
@@ -500,6 +580,10 @@ func UpdateTable(ctx context.Context, id uuid.UUID, in TablePatch, actor Actor) 
 		return nil, "", fmt.Errorf("failed to update table")
 	}
 	mqttBusiness.PublishTableRow(id.String(), map[string]interface{}{"action": "table"})
+	if change.Visibility != nil && *change.Visibility != was {
+		// Who may open its rows' pages changed with it (rowPages.go).
+		tablePagesChanged(ctx, id)
+	}
 	return t, was, nil
 }
 
@@ -544,12 +628,18 @@ func wholeHeader(t *model.DataTable, in TablePatch) (TablePatch, error) {
 	return TablePatch{Name: in.Name}, nil
 }
 
-// DeleteTable soft-deletes a table (manage only).
+// DeleteTable soft-deletes a table (manage only): it goes to the tables'
+// trash, from which its creator or an admin can bring it back (RestoreTable).
 func DeleteTable(ctx context.Context, id uuid.UUID, actor Actor) error {
 	if _, err := loadManageable(ctx, id, actor); err != nil {
 		return err
 	}
-	return model.SoftDeleteTable(ctx, id)
+	if err := model.SoftDeleteTable(ctx, id, actor.UserID); err != nil {
+		return err
+	}
+	// Its rows' pages go to the trash with it (rowPages.go).
+	tablePagesChanged(ctx, id)
+	return nil
 }
 
 // ListTables returns the tables the actor may see.
@@ -651,10 +741,13 @@ func forGuests(b *TableBundle) {
 	b.Table.CreatedBy = uuid.Nil
 	b.Views = []*model.View{}
 	for _, r := range b.Rows {
-		r.CreatedBy = nil
+		// Who made and changed a row is the workspace's to know.
+		r.CreatedBy, r.UpdatedBy, r.DeletedBy = nil, nil, nil
 	}
 	for _, f := range b.Fields {
 		f.Config = guestConfig(f.Config)
+		// How members set the field up, not what a guest's view shows.
+		f.Description, f.Default, f.Required = nil, nil, false
 	}
 }
 
@@ -749,6 +842,11 @@ func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, p FieldPatch, 
 	if !ok {
 		return 0, errNumberSigns
 	}
+	if p.Primary != nil {
+		if err := primaryProblem(was, *p.Primary, fields); err != nil {
+			return 0, err
+		}
+	}
 	in := p.onto(was)
 	other, err := computedFieldConfig(ctx, actor, t, fields, fieldId, &in)
 	if err != nil {
@@ -764,10 +862,14 @@ func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, p FieldPatch, 
 	}
 	f.Id = fieldId
 	changed := 0
+	var cs *model.ChangeSet
 	if other != nil {
 		err = showLinksIn(ctx, f, t, other)
 	} else {
 		var planErr error
+		// The cells the change rewrites are a change set of their own (the
+		// row ledger): each row's history says the field's change changed it.
+		cs = newChangeSet(ctx, tableId, actor, rowLedger.ChangeField)
 		changed, err = model.UpdateFieldAndCells(ctx, tableId, fieldId, func(current *model.Field) (*model.Field, model.Convert, []model.CellRewrite, error) {
 			if current.Type != was.Type {
 				planErr = errFieldChanged
@@ -787,7 +889,7 @@ func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, p FieldPatch, 
 				}
 			}
 			return f, convert, model.Relabel(relabel), nil
-		})
+		}, cs, observe)
 		switch {
 		case planErr != nil:
 			err = planErr
@@ -800,9 +902,36 @@ func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, p FieldPatch, 
 	if err != nil {
 		return 0, err
 	}
+	if p.Primary != nil && *p.Primary && !was.Primary {
+		if err := model.SetPrimary(ctx, tableId, fieldId); err != nil {
+			return 0, fmt.Errorf("failed to make it the primary field")
+		}
+	}
 	tellFieldsChanged(tableId)
 	go tellTablesLinkedWith(context.WithoutCancel(ctx), tableId)
+	announce(ctx, t, cs, hooksOnly)
 	return changed, nil
+}
+
+// errPrimaryKept is a field asked to stop being the primary: one becomes the
+// primary instead, so a table always has a field naming its rows.
+var errPrimaryKept = fmt.Errorf("Make another field the primary field instead")
+
+// primaryProblem is why field f can't be (primary) or stop being the
+// primary field: only another becoming it moves the primary, and a field
+// whose cells name no row (a link, a rollup, a formula reading either) can't
+// name a table's rows.
+func primaryProblem(f *model.Field, primary bool, fields []*model.Field) error {
+	if !primary {
+		if f.Primary {
+			return errPrimaryKept
+		}
+		return nil
+	}
+	if !namesRows(f, fields) {
+		return fmt.Errorf("%q can't be the primary field: a link or a rollup can't name a table's rows", f.Name)
+	}
+	return nil
 }
 
 // tellFieldsChanged has a table's open views read it again: a field changed,
@@ -811,6 +940,10 @@ func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, p FieldPatch, 
 func tellFieldsChanged(tableID uuid.UUID) {
 	mqttBusiness.PublishTableRow(tableID.String(), map[string]interface{}{"action": "fields"})
 }
+
+// errPrimaryDeleted is a delete of the primary field: the field naming the
+// table's rows, which a table always has.
+var errPrimaryDeleted = fmt.Errorf("This is the primary field, which names every row: make another field the primary first")
 
 // DeleteField removes a column (manage only).
 func DeleteField(ctx context.Context, tableId, fieldId uuid.UUID, actor Actor) error {
@@ -827,14 +960,17 @@ func DeleteField(ctx context.Context, tableId, fieldId uuid.UUID, actor Actor) e
 			field = f
 		}
 	}
+	if field != nil && field.Primary {
+		return errPrimaryDeleted
+	}
 	// The tables told are those linking with this one before the field goes.
 	linked, _ := model.TablesLinkedWith(ctx, tableId)
 	if field != nil {
 		// A relation linking to a table goes with the field showing its links
 		// there.
-		err = unlinkPair(ctx, field)
+		err = unlinkPair(ctx, field, actor.UserID)
 	} else {
-		err = model.DeleteField(ctx, tableId, fieldId)
+		err = model.DeleteField(ctx, tableId, fieldId, actor.UserID)
 	}
 	if err == nil {
 		tellTables(linked...)
@@ -854,15 +990,19 @@ func buildField(tableId uuid.UUID, in FieldInput, was *model.Field, whole bool) 
 	if name == "" {
 		return nil, nil, fmt.Errorf("field name is required")
 	}
-	if len(name) > maxNameLen {
+	if tooLong(name, maxNameLen) {
 		return nil, nil, fmt.Errorf("field name is too long")
 	}
 	ftype := strings.TrimSpace(in.Type)
 	if ftype == "" {
 		ftype = model.FieldText
 	}
-	if !model.ValidFieldType(ftype) {
+	if !fieldTypes.Kinds.Valid(ftype) {
 		return nil, nil, fmt.Errorf("invalid field type")
+	}
+	description := strings.TrimSpace(in.Description)
+	if tooLong(description, maxDescriptionLen) {
+		return nil, nil, fmt.Errorf("field description is too long")
 	}
 	sent, err := jsonObject(in.Config)
 	if err != nil {
@@ -878,7 +1018,7 @@ func buildField(tableId uuid.UUID, in FieldInput, was *model.Field, whole bool) 
 		if was != nil && hasOptions(was.Type) {
 			var old map[string]interface{}
 			_ = json.Unmarshal([]byte(was.Config), &old)
-			stored = optionsIn(old)
+			stored = fieldTypes.Options(old)
 		}
 		relabel = planOptions(stored, cfg, removed, whole)
 	}
@@ -886,7 +1026,43 @@ func buildField(tableId uuid.UUID, in FieldInput, was *model.Field, whole bool) 
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid field config")
 	}
-	return &model.Field{TableId: tableId, Name: name, Type: ftype, Config: out, Position: in.Position}, relabel, nil
+	f := &model.Field{TableId: tableId, Name: name, Type: ftype, Config: out, Position: in.Position, Required: in.Required}
+	if description != "" {
+		f.Description = &description
+	}
+	if f.Default, err = defaultFor(f, in.Default); err != nil {
+		if !in.keptDefault {
+			return nil, nil, err
+		}
+		f.Default = nil
+	}
+	return f, relabel, nil
+}
+
+// defaultFor is a default value as field f stores it (nil for none), or why
+// f can't start new rows with it: what its kind would make of the value, as a
+// write of it would store it. A field changing type keeps a default the new
+// kind can read, and loses one it can't.
+func defaultFor(f *model.Field, raw json.RawMessage) (json.RawMessage, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var v interface{}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, fmt.Errorf("invalid default value")
+	}
+	stored, err := fieldTypes.Kinds.CheckDefault(f, v)
+	if err != nil || stored == nil {
+		return nil, err
+	}
+	b, err := json.Marshal(stored)
+	if err != nil {
+		return nil, fmt.Errorf("invalid default value")
+	}
+	if len(b) > maxValuesBytes/10 {
+		return nil, fmt.Errorf("default value is too long")
+	}
+	return b, nil
 }
 
 // ───────────────────────── rows ─────────────────────────
@@ -914,25 +1090,31 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 	if lerr != nil {
 		return nil, lerr
 	}
-	valuesJSON, verr := storedCells(fields, values)
+	valuesJSON, verr := storedCells(fields, values, fieldTypes.Input{New: true, Complete: completeWrite(actor)})
 	if verr != nil {
 		return nil, verr
 	}
-	r := &model.Row{Id: id, TableId: tableId, Values: valuesJSON, CreatedBy: &actor.UserID}
-	created, cerr := model.CreateRowWithLinks(ctx, r, in.Position, links, maxLinks)
+	cs := newChangeSet(ctx, tableId, actor, rowLedger.ChangeCreate)
+	done, cerr := model.ApplyBatch(ctx, tableId, actor.UserID, model.Batch{
+		Create: []model.NewRow{{ID: id, Values: valuesJSON}}, At: model.Place{Number: in.Position}, Links: links,
+	}, nil, maxValuesBytes, maxLinks, keys, cs, observe)
 	if errors.Is(cerr, model.ErrTooManyLinks) {
 		return nil, errTooManyLinks
 	}
 	if cerr != nil {
 		return nil, fmt.Errorf("failed to create row")
 	}
+	created := done.Created[0]
+	written := changedCells("{}", created.Values)
+	stored := *created // as written: what its AI columns read
 	withComputed(ctx, fields, []*model.Row{created})
 	broadcastRow(t.Id.String(), "created", created)
 	tellTables(linkedTables...)
-	// Continuous AI autofill: recompute any auto AI columns for the new row,
-	// as the creator, off the request path. Loop-safe (writes via the model
-	// layer, not CreateRow/UpdateRow).
-	go AutofillRowOnWrite(context.WithoutCancel(ctx), t, created, actor)
+	announce(ctx, t, cs, hooksOnly)
+	// Continuous AI autofill: fill the new row's auto AI columns it wasn't
+	// given, as the creator, off the request path. Loop-safe (writes via the
+	// model layer, not CreateRow/UpdateRow).
+	go AutofillRowOnWrite(context.WithoutCancel(ctx), t, &stored, written, actor)
 	// Reactive triggers: let agents react to new table rows (Notion-DB-style
 	// automation). Loop-safe — DispatchEvent skips in-process listeners for
 	// automation-generated writes, so an agent's own row write can't re-trigger.
@@ -963,19 +1145,33 @@ func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor
 	}
 	// Its links stay as they are: a row written back as an earlier read gave
 	// it would otherwise put back links removed since, or take away those
-	// added. They change through ChangeLinks.
-	valuesJSON, verr := storedCells(fields, values)
+	// added. They change through ChangeLinks. Only the cells it changes are
+	// checked: the web released before patches sends a cell edit as its copy
+	// of the whole row, and a cell it didn't touch, stored before the field
+	// types checked writes, mustn't make the edit fail.
+	stored, rerr := model.GetRowByID(ctx, tableId, rowId)
+	if rerr != nil {
+		return nil, fmt.Errorf("failed to update row")
+	}
+	if stored == nil {
+		return nil, errRowNotFound
+	}
+	valuesJSON, verr := storedCells(fields, values, fieldTypes.Input{Unchanged: parseRowValues(stored.Values)})
 	if verr != nil {
 		return nil, verr
 	}
-	r, uerr := model.UpdateRowValues(ctx, tableId, rowId, valuesJSON, in.Position)
+	cs := newChangeSet(ctx, tableId, actor, rowLedger.ChangeEdit)
+	r, uerr := model.WriteRow(ctx, tableId, rowId, actor.UserID, valuesJSON, in.Position, aiColumns(fields), maxValuesBytes, keys, cs, observe)
+	if errors.Is(uerr, model.ErrRowTooLarge) {
+		return nil, fmt.Errorf("row is too large")
+	}
 	if errors.Is(uerr, sql.ErrNoRows) {
 		return nil, errRowNotFound
 	}
 	if uerr != nil {
 		return nil, fmt.Errorf("failed to update row")
 	}
-	return rowUpdated(ctx, t, fields, r, actor), nil
+	return rowUpdated(ctx, t, fields, r, cs, actor), nil
 }
 
 // PatchRow changes only the cells it is given, leaving the row's other cells
@@ -999,36 +1195,51 @@ func PatchRow(ctx context.Context, tableId, rowId uuid.UUID, values map[string]i
 		values = map[string]interface{}{}
 	}
 	// Links change through ChangeLinks, as for UpdateRow.
-	patchJSON, verr := storedCells(fields, values)
+	patchJSON, verr := storedCells(fields, values, fieldTypes.Input{})
 	if verr != nil {
 		return nil, verr
 	}
 	if len(values) == 0 {
 		return nil, errNoCells
 	}
-	r, uerr := model.MergeRowValues(ctx, tableId, rowId, patchJSON, maxValuesBytes)
-	if errors.Is(uerr, model.ErrRowTooLarge) {
-		return nil, fmt.Errorf("row is too large")
-	}
-	if errors.Is(uerr, sql.ErrNoRows) {
-		return nil, errRowNotFound
-	}
+	cs := newChangeSet(ctx, tableId, actor, rowLedger.ChangeEdit)
+	done, uerr := model.ApplyBatch(ctx, tableId, actor.UserID, model.Batch{Patch: []model.CellsPatch{{Row: rowId, Cells: patchJSON}}},
+		aiColumns(fields), maxValuesBytes, maxLinks, keys, cs, observe)
 	if uerr != nil {
-		return nil, fmt.Errorf("failed to update row")
+		return nil, singleRowErr(uerr, "failed to update row")
 	}
-	return rowUpdated(ctx, t, fields, r, actor), nil
+	return rowUpdated(ctx, t, fields, done.Patched[0], cs, actor), nil
 }
 
-// rowUpdated is what follows a change to a row's cells: tables linking to it
-// recount, its computed cells are worked out, open views hear of it, its AI
-// columns refill, and webhooks fire.
-func rowUpdated(ctx context.Context, t *model.DataTable, fields []*model.Field, r *model.Row, actor Actor) *model.Row {
+// singleRowErr is what a write of one row says when it's refused: the row is
+// gone, too large, or why not.
+func singleRowErr(err error, otherwise string) error {
+	var re model.RowErrors
+	if errors.As(err, &re) && len(re) == 1 {
+		err = re[0].Err
+	}
+	switch {
+	case errors.Is(err, model.ErrRowTooLarge):
+		return fmt.Errorf("row is too large")
+	case errors.Is(err, sql.ErrNoRows):
+		return errRowNotFound
+	}
+	return fmt.Errorf("%s", otherwise)
+}
+
+// rowUpdated is what follows a change to a row's cells (cs, its change set):
+// tables linking to it recount, its computed cells are worked out, open views
+// hear of it, its AI columns that read a changed cell refill, and webhooks
+// fire, today's table.row.updated and the ledger's table.rows.changed.
+func rowUpdated(ctx context.Context, t *model.DataTable, fields []*model.Field, r *model.Row, cs *model.ChangeSet, actor Actor) *model.Row {
+	changed := changedIn(cs, r.Id)
+	announce(ctx, t, cs, hooksOnly)
 	go tellLinkedTables(context.WithoutCancel(ctx), t.Id, r.Id, false)
+	// The row as written, before its cells are worked out for this reader.
+	stored := *r
 	withComputed(ctx, fields, []*model.Row{r})
 	broadcastRow(t.Id.String(), "updated", r)
-	// Continuous AI autofill: recompute any auto AI columns so derived cells
-	// track the row's latest inputs. Loop-safe (model-layer write, no event).
-	go AutofillRowOnWrite(context.WithoutCancel(ctx), t, r, actor)
+	go AutofillRowOnWrite(context.WithoutCancel(ctx), t, &stored, changed, actor)
 	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "table.row.updated", map[string]interface{}{
 		"table_id":   t.Id.String(),
 		"table_name": t.Name,
@@ -1037,22 +1248,22 @@ func rowUpdated(ctx context.Context, t *model.DataTable, fields []*model.Field, 
 	return r
 }
 
-// DeleteRow soft-deletes a row (view/edit access) and broadcasts it; a row
-// that's gone is errRowNotFound.
+// DeleteRow soft-deletes a row (view/edit access) and broadcasts it: it goes
+// to the table's trash, with its cells and place, and its links kept in its
+// change set for a restore. A row that's gone is errRowNotFound.
 func DeleteRow(ctx context.Context, tableId, rowId uuid.UUID, actor Actor) error {
 	t, err := loadViewable(ctx, tableId, actor)
 	if err != nil {
 		return err
 	}
-	linked, err := model.DeleteRow(ctx, tableId, rowId)
-	if errors.Is(err, sql.ErrNoRows) {
-		return errRowNotFound
-	}
+	cs := newChangeSet(ctx, tableId, actor, rowLedger.ChangeDelete)
+	done, err := model.ApplyBatch(ctx, tableId, actor.UserID, model.Batch{Delete: []uuid.UUID{rowId}}, nil, maxValuesBytes, maxLinks, keys, cs, observe)
 	if err != nil {
-		return fmt.Errorf("failed to delete row")
+		return singleRowErr(err, "failed to delete row")
 	}
 	mqttBusiness.PublishTableRow(t.Id.String(), map[string]interface{}{"action": "deleted", "row_id": rowId.String()})
-	if linked {
+	announce(ctx, t, cs, hooksOnly)
+	if done.Linked {
 		go tellLinkedTables(context.WithoutCancel(ctx), tableId, rowId, true)
 	}
 	return nil
@@ -1073,13 +1284,36 @@ func ListRows(ctx context.Context, tableId uuid.UUID, actor Actor, limit, offset
 }
 
 // storedCells is a row's values as a write stores them, encoded: without what
-// each read works out (stripComputed), each link to an item as its {id, type}
-// alone (keepItemIDs), within the size cap.
-func storedCells(fields []*model.Field, values map[string]interface{}) (string, error) {
-	if err := keepItemIDs(fields, values); err != nil {
+// each read works out (stripComputed), each cell as its field's kind stores it
+// (business/FieldTypes: a number as a number, an option by its label, a link
+// to an item as its {id, type} alone; a new row's defaults; a complete write's
+// required fields), within the size cap. Every row write of every writer
+// passes here: the web, the API, AI tools, imports, AI generation, Turn into
+// database.
+func storedCells(fields []*model.Field, values map[string]interface{}, in fieldTypes.Input) (string, error) {
+	delete(values, model.AIKeptKey) // set by the server alone
+	checked, err := fieldTypes.Kinds.Check(fields, stripComputed(fields, values), in)
+	if err != nil {
 		return "", err
 	}
-	return validateValues(stripComputed(fields, values))
+	return validateValues(liveCells(fields, checked))
+}
+
+// liveCells is cells without those of fields that aren't among fields (the
+// table's live ones): a field in the trash keeps its cells as stored for its
+// restore, so no write names them, and a field that's gone, or never was, has
+// none to write.
+func liveCells(fields []*model.Field, cells map[string]interface{}) map[string]interface{} {
+	live := make(map[string]bool, len(fields))
+	for _, f := range fields {
+		live[f.Id.String()] = true
+	}
+	for k := range cells {
+		if !live[k] {
+			delete(cells, k)
+		}
+	}
+	return cells
 }
 
 // validateValues ensures the row values are a JSON object within the size cap
@@ -1156,7 +1390,7 @@ func buildView(tableId uuid.UUID, in ViewInput) (*model.View, error) {
 	if name == "" {
 		name = "View"
 	}
-	if len(name) > maxNameLen {
+	if tooLong(name, maxNameLen) {
 		return nil, fmt.Errorf("view name is too long")
 	}
 	vtype := strings.TrimSpace(in.Type)
@@ -1174,4 +1408,40 @@ func buildView(tableId uuid.UUID, in ViewInput) (*model.View, error) {
 }
 
 // AutofillRowOnWrite is a no-op on the AI-free edition. AI columns do not exist here.
-func AutofillRowOnWrite(ctx context.Context, t *model.DataTable, row *model.Row, actor Actor) {}
+func AutofillRowOnWrite(ctx context.Context, t *model.DataTable, row *model.Row, written map[string]bool, actor Actor) {
+}
+
+// aiColumns is the ids of a table's AI columns, whose cells a person's write
+// marks as theirs: this edition has none.
+func aiColumns(fields []*model.Field) []string { return nil }
+
+// changedCells is the cells that differ between two rows' values (was, is):
+// added, changed or gone.
+func changedCells(was, is string) map[string]bool {
+	var before, after map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(was), &before)
+	_ = json.Unmarshal([]byte(is), &after)
+	changed := map[string]bool{}
+	for id, v := range after {
+		if !bytes.Equal(compactJSON(before[id]), compactJSON(v)) {
+			changed[id] = true
+		}
+	}
+	for id := range before {
+		if _, kept := after[id]; !kept {
+			changed[id] = true
+		}
+	}
+	delete(changed, model.AIKeptKey)
+	return changed
+}
+
+// compactJSON is a JSON value without its insignificant spaces, so two
+// spellings of one value compare equal.
+func compactJSON(v json.RawMessage) []byte {
+	var b bytes.Buffer
+	if json.Compact(&b, v) != nil {
+		return v
+	}
+	return b.Bytes()
+}

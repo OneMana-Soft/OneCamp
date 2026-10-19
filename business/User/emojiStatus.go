@@ -2,7 +2,6 @@ package business
 
 import (
 	"fmt"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,10 +20,6 @@ import (
 // StatusTextMax is how long a status's words may be, in characters as the web
 // counts them too (code points, so an emoji in the words counts once).
 const StatusTextMax = 100
-
-// statusEmojiID is an emoji picker's id ("sandwich", "+1", "flag-in"): the
-// picker's longest is 54 characters.
-var statusEmojiID = regexp.MustCompile(`^[a-z0-9_+-]{1,64}$`)
 
 // statusClears are the "Clear after" choices a status may be set with.
 var statusClears = []string{
@@ -52,8 +47,8 @@ func CheckEmojiStatus(in *adapterUser.UserEmojiStatusInput, now time.Time) (*dgr
 	if in == nil {
 		return nil, refuseStatus("Write a few words for your status.")
 	}
-	emoji := strings.TrimSpace(in.EmojiUuid)
-	if !statusEmojiID.MatchString(emoji) {
+	emoji, ok := helpers.EmojiID(in.EmojiUuid)
+	if !ok {
 		return nil, refuseStatus("Choose an emoji for your status.")
 	}
 	text := strings.TrimSpace(in.StatusDesc)

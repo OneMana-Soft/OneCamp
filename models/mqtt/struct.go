@@ -146,6 +146,11 @@ type MqttPost struct {
 	// PostByIsBot marks an AI-authored post so the FE renders the "AI" badge
 	// live (matching the persisted read path). Append-only field.
 	PostByIsBot bool `json:"is_bot,omitempty"`
+	// PostKind is "system" for a line the server writes about the
+	// conversation, and PostSystem its facts as JSON (business/Conversation
+	// systemLine.go), as the post's post_kind and post_system. Append-only.
+	PostKind   string `json:"post_kind,omitempty"`
+	PostSystem string `json:"post_system,omitempty"`
 }
 
 type MqttChannelCall struct {
@@ -189,6 +194,10 @@ type MqttChat struct {
 	// ChatByIsBot marks an AI-authored chat so the FE renders the "AI" badge
 	// live (matching the persisted read path). Append-only field.
 	ChatByIsBot bool `json:"is_bot,omitempty"`
+	// ChatKind and ChatSystem are as a post's PostKind and PostSystem.
+	// Append-only.
+	ChatKind   string `json:"chat_kind,omitempty"`
+	ChatSystem string `json:"chat_system,omitempty"`
 }
 
 type MqttChatReaction struct {
@@ -290,10 +299,6 @@ type MqttConversationAccess struct {
 	Kind   string `json:"kind"`
 	Id     string `json:"id"`
 	Change string `json:"change"`
-	// PreviousId is the id the conversation had until now, when that
-	// changed: a group's id is its members' hash, so adding someone gives it
-	// a new one. Open apps move from the old id to this one.
-	PreviousId string `json:"previous_id,omitempty"`
 }
 
 // MqttTaskField is a task's value of one of its project's custom fields,

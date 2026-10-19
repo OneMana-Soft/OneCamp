@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
 	sweepBusiness "github.com/akashc777/OneCamp/business/Sweep"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
@@ -39,10 +40,10 @@ func newItemsWorld(t *testing.T) *itemsWorld {
 	w.fields = []*model.Field{w.name, w.links, w.title}
 	saved := itemNamers
 	itemNamers = map[string]func(context.Context, []string, *itemReader) (map[string]string, error){}
-	for kind := range itemKinds {
+	for kind := range fieldTypes.ItemKinds {
 		itemNamers[kind] = func(_ context.Context, ids []string, who *itemReader) (map[string]string, error) {
 			reader := who.uuid
-			if kind == itemUser {
+			if kind == fieldTypes.ItemUser {
 				reader = ""
 			}
 			w.asked = append(w.asked, kind+"/"+reader)
@@ -75,7 +76,7 @@ func (w *itemsWorld) may(reader, kind, id, title string) {
 
 // read works out a row with these stored links for ctx's reader, and gives
 // back its links cell and its formula's value.
-func (w *itemsWorld) read(t *testing.T, ctx context.Context, stored string) ([]itemRef, interface{}) {
+func (w *itemsWorld) read(t *testing.T, ctx context.Context, stored string) ([]fieldTypes.ItemRef, interface{}) {
 	t.Helper()
 	row := &model.Row{Id: uuid.New(), Values: fmt.Sprintf(`{%q: "Acme", %q: %s}`, w.name.Id, w.links.Id, stored)}
 	withComputed(ctx, w.fields, []*model.Row{row})
@@ -83,7 +84,7 @@ func (w *itemsWorld) read(t *testing.T, ctx context.Context, stored string) ([]i
 	if err := json.Unmarshal([]byte(row.Values), &cells); err != nil {
 		t.Fatalf("the row read back isn't JSON: %v", err)
 	}
-	var refs []itemRef
+	var refs []fieldTypes.ItemRef
 	if raw, ok := cells[w.links.Id.String()]; ok {
 		if err := json.Unmarshal(raw, &refs); err != nil {
 			t.Fatalf("the links cell %s: %v", raw, err)
@@ -98,11 +99,11 @@ func TestItemLinksAreNamedForTheirReader(t *testing.T) {
 	w := newItemsWorld(t)
 	maya, bo := Actor{UserID: uuid.New()}, Actor{UserID: uuid.New()}
 	plan, handbook, task, person := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
-	w.may(maya.UserID.String(), itemDoc, plan, "Restructuring plan Q4")
-	w.may(maya.UserID.String(), itemDoc, handbook, "Handbook")
-	w.may(bo.UserID.String(), itemDoc, handbook, "Handbook")
-	w.may(maya.UserID.String(), itemTask, task, "Close the Pune office")
-	w.may("", itemUser, person, "Maya Iyer")
+	w.may(maya.UserID.String(), fieldTypes.ItemDoc, plan, "Restructuring plan Q4")
+	w.may(maya.UserID.String(), fieldTypes.ItemDoc, handbook, "Handbook")
+	w.may(bo.UserID.String(), fieldTypes.ItemDoc, handbook, "Handbook")
+	w.may(maya.UserID.String(), fieldTypes.ItemTask, task, "Close the Pune office")
+	w.may("", fieldTypes.ItemUser, person, "Maya Iyer")
 	// As stored before: each link with a label copied when it was made, one
 	// of them forged.
 	stored := fmt.Sprintf(`[{"id":%q,"label":"Restructuring plan Q4","type":"doc"},{"id":%q,"label":"Forged","type":"doc"},`+
@@ -111,8 +112,8 @@ func TestItemLinksAreNamedForTheirReader(t *testing.T) {
 
 	t.Run("a member who can't open an item gets it hidden, without its title", func(t *testing.T) {
 		refs, title := w.read(t, asViewer(ctx, bo), stored)
-		want := []itemRef{{ID: plan, Type: itemDoc, Hidden: true}, {ID: handbook, Type: itemDoc, Label: "Handbook"},
-			{ID: task, Type: itemTask, Hidden: true}, {ID: person, Type: itemUser, Label: "Maya Iyer"}}
+		want := []fieldTypes.ItemRef{{ID: plan, Type: fieldTypes.ItemDoc, Hidden: true}, {ID: handbook, Type: fieldTypes.ItemDoc, Label: "Handbook"},
+			{ID: task, Type: fieldTypes.ItemTask, Hidden: true}, {ID: person, Type: fieldTypes.ItemUser, Label: "Maya Iyer"}}
 		if !reflect.DeepEqual(refs, want) {
 			t.Errorf("Bo reads %+v, want %+v", refs, want)
 		}
@@ -138,7 +139,7 @@ func TestItemLinksAreNamedForTheirReader(t *testing.T) {
 		withLeaver := strings.TrimSuffix(stored, "]") + fmt.Sprintf(`,{"id":%q,"type":"user"}]`, left)
 		for _, gctx := range []context.Context{asGuest(ctx), ctx} {
 			refs, title := w.read(t, gctx, withLeaver)
-			if want := []itemRef{{Type: itemUser, Label: "Maya Iyer"}}; !reflect.DeepEqual(refs, want) {
+			if want := []fieldTypes.ItemRef{{Type: fieldTypes.ItemUser, Label: "Maya Iyer"}}; !reflect.DeepEqual(refs, want) {
 				t.Errorf("a guest reads %+v, want %+v", refs, want)
 			}
 			if title != "Maya Iyer" {
@@ -148,8 +149,8 @@ func TestItemLinksAreNamedForTheirReader(t *testing.T) {
 	})
 
 	t.Run("items a lookup couldn't name are hidden", func(t *testing.T) {
-		w.failing[itemDoc] = true
-		defer delete(w.failing, itemDoc)
+		w.failing[fieldTypes.ItemDoc] = true
+		defer delete(w.failing, fieldTypes.ItemDoc)
 		refs, _ := w.read(t, asViewer(ctx, maya), stored)
 		if !refs[0].Hidden || !refs[1].Hidden || refs[2].Label != "Close the Pune office" {
 			t.Errorf("with docs failing Maya reads %+v", refs)
@@ -158,9 +159,9 @@ func TestItemLinksAreNamedForTheirReader(t *testing.T) {
 
 	t.Run("an item with no title is called untitled, not hidden", func(t *testing.T) {
 		blank := uuid.NewString()
-		w.may(maya.UserID.String(), itemDoc, blank, " ")
+		w.may(maya.UserID.String(), fieldTypes.ItemDoc, blank, " ")
 		refs, _ := w.read(t, asViewer(ctx, maya), fmt.Sprintf(`[{"id":%q,"type":"doc"}]`, blank))
-		if want := []itemRef{{ID: blank, Type: itemDoc, Label: "Untitled doc"}}; !reflect.DeepEqual(refs, want) {
+		if want := []fieldTypes.ItemRef{{ID: blank, Type: fieldTypes.ItemDoc, Label: "Untitled doc"}}; !reflect.DeepEqual(refs, want) {
 			t.Errorf("an untitled doc reads %+v", refs)
 		}
 	})
@@ -172,7 +173,7 @@ func TestItemLinksAreNamedForTheirReader(t *testing.T) {
 		for _, a := range w.asked {
 			counts[strings.SplitN(a, "/", 2)[0]]++
 		}
-		if counts[itemDoc] != 1 || counts[itemTask] != 1 || counts[itemUser] != 1 {
+		if counts[fieldTypes.ItemDoc] != 1 || counts[fieldTypes.ItemTask] != 1 || counts[fieldTypes.ItemUser] != 1 {
 			t.Errorf("a read looked up %v", w.asked)
 		}
 	})
@@ -185,7 +186,7 @@ func TestOneReadNamesSoManyItems(t *testing.T) {
 	var stored []string
 	for i := 0; i <= maxReadItems; i++ {
 		id := uuid.NewString()
-		w.may(maya.UserID.String(), itemDoc, id, fmt.Sprint("Doc ", i))
+		w.may(maya.UserID.String(), fieldTypes.ItemDoc, id, fmt.Sprint("Doc ", i))
 		stored = append(stored, fmt.Sprintf(`{"id":%q,"type":"doc"}`, id))
 	}
 	refs, _ := w.read(t, asViewer(context.Background(), maya), "["+strings.Join(stored, ",")+"]")
@@ -205,8 +206,8 @@ func TestItemLinksAreStoredAsIDs(t *testing.T) {
 		if err := json.Unmarshal([]byte(cell), &v); err != nil {
 			t.Fatal(err)
 		}
-		values := map[string]interface{}{field.Id.String(): v}
-		if err := keepItemIDs(fields, values); err != nil {
+		values, err := fieldTypes.Kinds.Check(fields, map[string]interface{}{field.Id.String(): v}, fieldTypes.Input{})
+		if err != nil {
 			return "", err
 		}
 		b, _ := json.Marshal(values[field.Id.String()])
@@ -247,8 +248,8 @@ func TestItemLinksAreStoredAsIDs(t *testing.T) {
 	}
 	// Clearing a cell isn't a link.
 	for _, clear := range []interface{}{nil, ""} {
-		values := map[string]interface{}{anyField.Id.String(): clear}
-		if err := keepItemIDs(fields, values); err != nil || values[anyField.Id.String()] != clear {
+		values, err := fieldTypes.Kinds.Check(fields, map[string]interface{}{anyField.Id.String(): clear}, fieldTypes.Input{})
+		if err != nil || values[anyField.Id.String()] != clear {
 			t.Errorf("clearing with %#v: %v, %#v", clear, err, values[anyField.Id.String()])
 		}
 	}
@@ -263,7 +264,7 @@ func TestHiddenItemsReadAsUnnamedLinks(t *testing.T) {
 	_ = json.Unmarshal([]byte(fmt.Sprintf(`[{"id":%q,"type":"doc","hidden":true}]`, id)), &cell)
 	values := map[string]interface{}{links.Id.String(): cell}
 	fields := []*model.Field{links}
-	if labels := cellLabels(cell); len(labels) != 0 {
+	if labels := fieldTypes.Labels(cell); len(labels) != 0 {
 		t.Errorf("a hidden link reads as %v", labels)
 	}
 	for op, want := range map[FilterOp]bool{FilterEmpty: false, FilterNotEmpty: true} {
@@ -310,7 +311,7 @@ func TestTheItemLinkRepairIsASweep(t *testing.T) {
 // A refusal quotes the link it refuses briefly: a cell may be 100 KiB.
 func TestARefusalQuotesBriefly(t *testing.T) {
 	f := &model.Field{Id: uuid.New(), Name: "Linked", Type: model.FieldRelation, Config: `{"relation_target":"doc"}`}
-	err := keepItemIDs([]*model.Field{f}, map[string]interface{}{f.Id.String(): strings.Repeat("x", 100000)})
+	_, err := fieldTypes.Kinds.Check([]*model.Field{f}, map[string]interface{}{f.Id.String(): strings.Repeat("x", 100000)}, fieldTypes.Input{})
 	if err == nil || len(err.Error()) > 200 {
 		t.Errorf("refusing a 100 KB cell said %d characters", len(fmt.Sprint(err)))
 	}

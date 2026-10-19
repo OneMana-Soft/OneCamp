@@ -255,6 +255,8 @@ func GetSystemDocByUUID(ctx context.Context, docUUID string) (dgraphDoc *dgraphS
 					doc_body
 					doc_created_at
 					doc_deleted_at
+					doc_host_kind
+					doc_host_uuid
 					doc_created_by {
 						uid
 						user_uuid
@@ -630,6 +632,7 @@ func GetDocPermissions(ctx context.Context, docUUID string) (dgraphDoc *dgraphSt
 const docSearchFields = `
 					uid
 					doc_uuid
+					doc_host_kind
 					doc_title
 					doc_body
 					doc_snippet
@@ -818,8 +821,9 @@ func BulkIndexDocEntries(ctx context.Context, entries []*openSearchStruct.OpenSe
 // creation time alone. A restore leaves the last edit as it was, so a doc an
 // admin restored, or a run's undo brought back, was archived again by the
 // next hourly run; it now waits out the retention period from its restore.
+// A hosted doc (D-18) is never one: it is kept, and goes, with its host.
 func inactiveDocFilter(cutoff string) string {
-	return fmt.Sprintf(`(lt(doc_updated_at, %[1]s) OR (NOT has(doc_updated_at) AND lt(doc_created_at, %[1]s))) AND NOT ge(doc_restored_at, %[1]s)`, cutoff)
+	return fmt.Sprintf(`(lt(doc_updated_at, %[1]s) OR (NOT has(doc_updated_at) AND lt(doc_created_at, %[1]s))) AND NOT ge(doc_restored_at, %[1]s) AND NOT has(doc_host_kind)`, cutoff)
 }
 
 // GetDocsInactiveSince returns up to limit live docs nobody has changed or

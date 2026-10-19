@@ -5,7 +5,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/akashc777/OneCamp/business/DataTable/formula"
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
+	formula "github.com/akashc777/OneCamp/business/Formula"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -52,7 +53,7 @@ func TestConvertCell(t *testing.T) {
 		{model.FieldURL, `"https://onemana.dev"`, "https://onemana.dev", kept, 0},
 	}
 	for _, c := range cases {
-		out, isKept, gone := convertCell(c.to, cell(c.in), formula.PlainSigns)
+		out, isKept, gone := fieldTypes.ConvertCell(c.to, cell(c.in), formula.PlainSigns)
 		how := converted
 		switch {
 		case out == nil && gone == 0:
@@ -94,7 +95,7 @@ func TestTextBecomesNumbersInItsWritersSigns(t *testing.T) {
 		{"Infinity", formula.PlainSigns, nil},
 		{"1e400", formula.PlainSigns, nil},
 	} {
-		out, kept, cleared := convertCell(model.FieldNumber, c.in, c.signs)
+		out, kept, cleared := fieldTypes.ConvertCell(model.FieldNumber, c.in, c.signs)
 		if out != c.want || kept || (out == nil) != (cleared == 1) {
 			t.Errorf("%q in %+v became %v (kept %v, %d cleared), want %v", c.in, c.signs, out, kept, cleared, c.want)
 		}
@@ -129,11 +130,11 @@ func TestConversionsOfferWhatCellsBecame(t *testing.T) {
 		var cfg map[string]interface{}
 		_ = json.Unmarshal([]byte(f.Config), &cfg)
 		var labels []string
-		for _, o := range optionsIn(cfg) {
-			if optionID(o) == "" {
+		for _, o := range fieldTypes.Options(cfg) {
+			if fieldTypes.OptionID(o) == "" {
 				t.Errorf("%s: option %v has no id", c.typ, o)
 			}
-			labels = append(labels, optionLabel(o))
+			labels = append(labels, fieldTypes.OptionLabel(o))
 		}
 		if err != nil || counts.Cleared != 0 || !reflect.DeepEqual(labels, c.want) {
 			t.Errorf("%s of %v offers %v (%+v, %v); cells %v", c.typ, c.cells, labels, counts, err, out)

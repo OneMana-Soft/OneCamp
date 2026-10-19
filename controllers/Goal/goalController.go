@@ -8,6 +8,7 @@ import (
 	"time"
 
 	goalBusiness "github.com/akashc777/OneCamp/business/Goal"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -275,7 +276,7 @@ func DeleteCheckIn(w http.ResponseWriter, r *http.Request) {
 
 // ProjectGoals is the open goals a project serves, for its page. GET /project/{project_uuid}/goals?tz=
 func ProjectGoals(w http.ResponseWriter, r *http.Request) {
-	pid, _, ok := projectaccess.Require(w, r, false, "")
+	pid, _, ok := projectaccess.Require(w, r, workAccess.NeedView, "")
 	if !ok {
 		return
 	}

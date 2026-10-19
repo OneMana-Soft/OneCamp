@@ -16,9 +16,11 @@ func pushGate(userCol string) string {
 
 // notPaused is the push gate's hold: a person who has paused notifications,
 // is inside their quiet hours, or is in one of their own focus-time events
-// (migration 184; prefModels.FocusRunning, the rule email and the held status
-// read too), gets no push now. Notify anyway goes past it, but never past
-// stillActive (reachableThroughPauseQuery).
+// (migration 184; prefModels.FocusStore's Running, the rule email and the
+// held status read too), gets no push now. Notify anyway goes past it, but
+// never past stillActive (reachableThroughPauseQuery). Focus time is read
+// from whichever store holds the calendar's events, decided once for the
+// query (prefModels.FocusStoreNow).
 //
 // Quiet hours are local wall-clock times (HH:MM, validated on write; migration
 // 174 cleared any invalid rows) in the person's zone, UTC when none is set, as
@@ -27,6 +29,7 @@ func pushGate(userCol string) string {
 // on write, since one it can't read would fail the lookup for everyone.
 func notPaused(userCol string) string {
 	local := `(NOW() AT TIME ZONE COALESCE(NULLIF(p.quiet_hours_tz, ''), 'UTC'))::time`
+	focus := prefModels.FocusStoreNow()
 	return ` NOT EXISTS (
 		SELECT 1 FROM users_notification_preferences p
 		WHERE p.user_id = ` + userCol + `
@@ -42,6 +45,6 @@ func notPaused(userCol string) string {
 		        END)
 		  ))
 		AND NOT EXISTS (
-		  SELECT 1 FROM calendar_events fe
-		  WHERE ` + prefModels.FocusRunning("fe", userCol) + `) `
+		  SELECT 1 FROM ` + focus.Events("fe") + `
+		  WHERE ` + focus.Running("fe", userCol) + `) `
 }

@@ -11,10 +11,11 @@ import (
 )
 
 // GetTasksReadAccessFor reads, for one person (by graph uid), what
-// business/Task CanViewTask decides each of the named tasks by: the person's
-// place in its project, its assignee and its maker; with the task's name and
-// its own and its project's deletion. One query for the lot; ids that aren't
-// uuids are left out, and so is any task that doesn't exist.
+// business/Task CanViewTask and business/WorkAccess decide each of the named
+// tasks by: the person's place in its project, its assignee and its maker;
+// with the task's name, its project's id, and its own and its project's
+// deletion. One query for the lot; ids that aren't uuids are left out, and so
+// is any task that doesn't exist.
 func GetTasksReadAccessFor(ctx context.Context, taskUUIDs []string, userUID string) ([]*dgraphStruct.DgraphTask, error) {
 	ids := make([]string, 0, len(taskUUIDs))
 	for _, id := range taskUUIDs {
@@ -34,9 +35,11 @@ func GetTasksReadAccessFor(ctx context.Context, taskUUIDs []string, userUID stri
 					task_uuid
 					task_name
 					task_deleted_at
-					task_assignee { uid }
-					task_created_by { uid }
+					task_assignee { uid user_uuid }
+					task_created_by { uid user_uuid }
 					task_project {
+						uid
+						project_uuid
 						project_deleted_at
 						project_is_member: count(project_members @filter(uid($user)))
 						project_is_admin: count(project_admins @filter(uid($user)))

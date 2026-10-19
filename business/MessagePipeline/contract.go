@@ -74,8 +74,9 @@ type Pipeline interface {
 // ErrUnavailable is a write the default doesn't make yet: A2 brings it.
 var ErrUnavailable = errors.New("messages: that change isn't available here yet")
 
-// Messages is the pipeline every writer calls.
-var Messages Pipeline = todaysWrites{}
+// Messages is the pipeline every writer calls: the durable write for the
+// surfaces MESSAGE_PIPELINE switches on, today's for the rest (durable.go).
+var Messages Pipeline = durable{today: todaysWrites{}}
 
 // todaysWrites sends as today's routes do.
 type todaysWrites struct{}

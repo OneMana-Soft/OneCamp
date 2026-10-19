@@ -147,7 +147,7 @@ func GetAuditLog(w http.ResponseWriter, r *http.Request) {
 	// "unattended" is the filter an auditor reaches for: what ran on somebody's
 	// authority while they were away. A kind narrows to one cause.
 	initiator := strings.TrimSpace(r.URL.Query().Get("initiator"))
-	limit := atoiDefault(r.URL.Query().Get("limit"), 50)
+	limit := helpers.LimitParam(r.URL.Query(), 50, 200)
 	offset := atoiDefault(r.URL.Query().Get("offset"), 0)
 
 	entries, err := auditBusiness.ListWhere(ctx, category, initiator, limit, offset)

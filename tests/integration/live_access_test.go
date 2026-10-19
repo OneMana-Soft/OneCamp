@@ -34,13 +34,15 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
-	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
+	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/mqttInit"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/tests/integration"
 )
 
@@ -249,15 +251,16 @@ func TestLiveJoiningAChannelTellsTheNewMembersApp(t *testing.T) {
 	}
 }
 
-// Adding someone to a group gives it a new id (its members' hash): every
-// member's app is told the new id and the one it replaces, the person added
-// included, so each moves to it without reconnecting.
-func TestLiveAGroupsMembersAreToldItsNewID(t *testing.T) {
+// Adding someone to a group opens the conversation of the new set of people
+// (D-S1): every one of them, the person added included, is told of it on
+// their own topic and subscribes without reconnecting, and nobody loses the
+// group they were in.
+func TestLiveAddingToAGroupOpensTheNewSetsConversationForEveryone(t *testing.T) {
 	env, dg, broker := liveStores(t)
 	ctx := context.Background()
 
-	// The search index is moved to the new id in the background; give it
-	// somewhere to go.
+	// The new group's first line is searched for nobody, but a copy would be:
+	// give the search somewhere to go.
 	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"took":1,"timed_out":false,"total":0,"updated":0,"deleted":0,"batches":0,"version_conflicts":0,"noops":0,"failures":[]}`)
 	}))
@@ -269,9 +272,8 @@ func TestLiveAGroupsMembersAreToldItsNewID(t *testing.T) {
 	opensearchInit.OpenSearchClient = client
 
 	people := map[string]string{"maya": uuid.NewString(), "jonas": uuid.NewString(), "sam": uuid.NewString(), "ana": uuid.NewString()}
-	// Everyone in a group has an account: the move takes each person's
-	// notification setting across to the new id and gives the person added
-	// one (chat fixer A, BE-BUG-7), and those rows name the account.
+	// Everyone in a group has an account: the new group's settings and read
+	// marks name the account.
 	for name, id := range people {
 		if _, err := env.PG.Exec(`INSERT INTO users (id, email_id, username, display_name, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, NOW(), NOW())`, id, id+"@example.test", name+"-"+id[:8], name); err != nil {
@@ -295,22 +297,37 @@ func TestLiveAGroupsMembersAreToldItsNewID(t *testing.T) {
 			"dm_participants": []map[string]any{{"uid": "_:maya"}, {"uid": "_:jonas"}, {"uid": "_:sam"}}},
 	})
 
+	_ = uids
+
 	apps := map[string]*integration.BrokerClient{}
-	members := []string{}
 	for name, id := range people {
 		app, _ := broker.Connect(t, "c_dev_"+id[:8]+"_"+name, id)
 		app.Subscribe(t, helpers.GetMqttTopicForUserActivity(id))
 		apps[name] = app
-		members = append(members, id)
 	}
 
-	if err := chatBusiness.AddParticipantToGroupChat(ctx, before, after, uids["ana"], people["ana"], members); err != nil {
-		t.Fatalf("Maya adds Ana: %v", err)
+	maya, err := userDomain.GetUserByUUID(ctx, uuid.MustParse(people["maya"]))
+	if err != nil || maya == nil {
+		t.Fatalf("read Maya: %v", err)
+	}
+	mayaNode, err := userDomain.GetDgraphUserInfoByUUID(ctx, people["maya"])
+	if err != nil || mayaNode == nil {
+		t.Fatalf("read Maya's node: %v", err)
+	}
+	who := &userModels.UserInfo{UserPostgresInfo: *maya, UserDgraphInfo: *mayaNode}
+	opened, err := conversationBusiness.AddPeople(ctx, who, conversationBusiness.Ref{Kind: conversationBusiness.KindGroup, ID: before},
+		[]string{people["ana"]}, conversationBusiness.ShareNone)
+	if err != nil || opened.ID != after {
+		t.Fatalf("Maya adds Ana: %+v %v", opened, err)
 	}
 	for name, app := range apps {
 		ev, ok := conversationEvent(t, app, 10*time.Second)
-		if !ok || ev.Kind != mqttStruct.CONVERSATION_KIND_GROUP || ev.Id != after || ev.PreviousId != before || ev.Change != mqttStruct.CONVERSATION_ADDED {
-			t.Errorf("%s's app wasn't told the group's new id: %+v %v", name, ev, ok)
+		if !ok || ev.Kind != mqttStruct.CONVERSATION_KIND_GROUP || ev.Id != after || ev.Change != mqttStruct.CONVERSATION_ADDED {
+			t.Errorf("%s's app wasn't told of the new group: %+v %v", name, ev, ok)
 		}
+	}
+	// Nobody lost the group they were in: its people are as they were.
+	if got := string(dg.Query(t, `{ q(func: eq(dm_grouping_id, "`+before+`")) { n: count(dm_participants) } }`)); !strings.Contains(got, `"n":3`) {
+		t.Errorf("the group people were added from: %s", got)
 	}
 }

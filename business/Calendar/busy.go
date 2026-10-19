@@ -14,7 +14,6 @@ import (
 	"time"
 
 	integrationBusiness "github.com/akashc777/OneCamp/business/Integration"
-	domain "github.com/akashc777/OneCamp/domain/Calendar"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/google/uuid"
@@ -22,9 +21,19 @@ import (
 
 // Seams for tests: a person's OneCamp events, and their Google busy times.
 var (
-	eventsOf     = domain.GetDgraphEventsByUserId
+	eventsOf     = calendarEventsOf
 	googleBusyOf = integrationBusiness.FetchUserGoogleBusy
 )
+
+// calendarEventsOf is a person's OneCamp events between from and to: from
+// the one store, the ones that show as busy, when its events are there; from
+// the graph otherwise.
+func calendarEventsOf(ctx context.Context, userUUID string, from, to *time.Time) ([]*dgraphStruct.DgraphEvent, error) {
+	if helpers.CalendarReadsFromStore() {
+		return stored.busyEvents(ctx, userUUID, *from, *to)
+	}
+	return graphEventsOf(ctx, userUUID, from, to)
+}
 
 // Busy is when someone is busy, and whether all of it could be read.
 type Busy struct {

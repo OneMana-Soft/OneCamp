@@ -152,3 +152,9 @@ func CountSince(form uuid.UUID, since time.Time) (int, error) {
 		`SELECT COUNT(*) FROM form_submissions WHERE form_id = $1 AND created_at > $2`, form, since).Scan(&n)
 	return n, err
 }
+
+// ProjectsOf is each form's project, by the form's id; a form that isn't
+// there is left out.
+func ProjectsOf(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]uuid.UUID, error) {
+	return postgresInit.UUIDPairs(ctx, `SELECT id, project_uuid FROM project_forms WHERE id = ANY($1)`, ids)
+}

@@ -1269,6 +1269,7 @@ const userTaskCardFields = `
 							project_uuid
 							project_name
 							project_is_admin: count(project_admins @filter(uid($userDgraphUID)))
+							project_is_member: count(project_members @filter(uid($userDgraphUID)))
 						}
 						task_assignee {
 							uid
@@ -1376,8 +1377,10 @@ func GetDgraphUserTaskList(ctx context.Context, userUUID string, userDgraphUID s
 							project_uuid
 							project_name
 							project_is_admin: count(project_admins @filter(uid($userDgraphUID)))
+							project_is_member: count(project_members @filter(uid($userDgraphUID)))
 						}
 						task_assignee {
+							uid
 							user_uuid
 							user_name
 							user_profile_object_key
@@ -1470,6 +1473,7 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID string) 
 					` + CurrentEmojiStatus + `
 					user_dms {
 						dm_grouping_id
+						dm_name
 						dm_participants {
 							user_uuid
 							user_name
@@ -1691,6 +1695,8 @@ func GetDgraphUserInfoByUUIDs(ctx context.Context, userUUIDs []string) (dgraphUs
 					user_uuid
 					user_name
 					user_email_id
+					is_external
+					is_bot
 					user_posts
 					user_profile_object_key
 					user_job_title

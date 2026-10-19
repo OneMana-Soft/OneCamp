@@ -23,6 +23,10 @@ type TemplateData struct {
 	BrandName      string
 	BrandLogo      string // optional; rendered if non-empty
 	FooterNote     string // optional small line at the bottom
+	// Why is why the email came, for someone it reaches without having
+	// subscribed to anything: a guest invited to a meeting, someone who booked
+	// one. It replaces the line about notifications.
+	Why string
 }
 
 // baseTemplate is a single responsive HTML email shell that all event
@@ -91,7 +95,7 @@ const baseTemplateHTML = `<!doctype html>
             <tr>
               <td align="center" style="font-size:12px; color:#94a3b8; line-height:1.6;">
                 {{if .FooterNote}}<div style="margin-bottom:6px;">{{.FooterNote | html}}</div>{{end}}
-                <div>You received this because you're subscribed to notifications on {{.BrandName | html}}.</div>
+                {{if .Why}}<div>{{.Why | html}}</div>{{else}}<div>You received this because you're subscribed to notifications on {{.BrandName | html}}.</div>{{end}}
                 {{if .UnsubscribeURL}}
                 <div style="margin-top:6px;">
                   <a href="{{.UnsubscribeURL}}" style="color:#94a3b8; text-decoration:underline;">Unsubscribe</a>
@@ -171,6 +175,9 @@ func renderPlainText(d TemplateData) string {
 	b.WriteString("---\n")
 	if d.FooterNote != "" {
 		b.WriteString(d.FooterNote + "\n")
+	}
+	if d.Why != "" {
+		b.WriteString(d.Why + "\n")
 	}
 	if d.UnsubscribeURL != "" {
 		b.WriteString("Unsubscribe: " + d.UnsubscribeURL + "\n")

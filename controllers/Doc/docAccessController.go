@@ -148,9 +148,13 @@ func canRequest(ctx context.Context, user userModels.UserInfo, who accessBusines
 
 // refuseDoc answers a live doc the person can't open: 403, with the code the
 // page reads (no_access) and whether a request for access would reach someone
-// who can answer it (canRequest), and nothing else of the doc.
+// who can answer it (canRequest), and nothing else of the doc. A hosted doc (a
+// table row's page) is answered by its host instead (refuseHosted).
 func refuseDoc(ctx context.Context, w http.ResponseWriter, user userModels.UserInfo, docUUID string) {
 	who := accessBusiness.SubjectOf(&user)
+	if refuseHosted(ctx, w, who, docUUID) {
+		return
+	}
 	helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 		"msg": "You don't have access to this doc.", "code": "no_access",
 		"can_request": canRequest(ctx, user, who, docUUID, accessBusiness.Decision{Level: accessBusiness.LevelNone}),
@@ -1063,7 +1067,8 @@ func AuthorizeDocSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	who := accessBusiness.SubjectOf(&userInfo)
-	d, err := accessBusiness.Rules.Resolve(ctx, who, docRes(in.DocUUID))
+	// The live socket opens hosted docs by their hosts, as the session does.
+	d, err := accessBusiness.Rules.Resolve(business.WithHostedOpen(ctx), who, docRes(in.DocUUID))
 	if errors.Is(err, accessBusiness.ErrNotFound) {
 		helpers.WriteDocNotFound(w)
 		return

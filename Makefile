@@ -81,6 +81,21 @@ test_all: test test_code_runner
 journey:
 	@go run ./cmd/journey
 
+# verify also vets the integration build. Nothing above compiles a file behind
+# the `integration` build tag: not tests/integration, and not the
+# *_integration_test.go files that sit beside the packages they test. The
+# integration runners build ./tests/integration alone. So when the shared
+# harness began importing business packages whose own integration tests import
+# the harness (17 Oct 2026), thirteen tests in eight packages stopped
+# compiling, and every gate still passed. The import cycle exists only with the
+# tag, and a -run naming one of those tests matched nothing in
+# ./tests/integration and reported ok. Vetting with the tag compiles every
+# integration test package, so one that can't build fails verify here, before
+# the unit tests start. The step names the module's trees (not scripts/, a
+# beta-only tool with no integration file), and
+# helpers/integrationHarnessGuard_test.go fails when an integration-tagged file
+# sits outside them. The same guard keeps the harness from importing a business
+# or domain package again.
 verify:
 	@echo "▶ gofmt"
 	@OUT="$$(gofmt -l $$(find . -name '*.go' -not -path './data/*' -not -path './.next/*' 2>/dev/null))"; \
@@ -92,6 +107,10 @@ verify:
 	@echo "▶ vet"
 	go vet ./business/... ./controllers/... ./domain/... ./models/... \
 		./helpers/... ./router/... ./adapter/... ./initializers/... ./services/... ./cmd/...
+	@echo "▶ vet the integration build (every integration test package must compile)"
+	go vet -tags integration . ./adapter/... ./business/... ./cmd/... ./controllers/... \
+		./docs/... ./domain/... ./helpers/... ./initializers/... ./middleware/... \
+		./models/... ./router/... ./services/... ./tests/...
 	@$(MAKE) --no-print-directory test
 	@echo "▶ verify OK"
 

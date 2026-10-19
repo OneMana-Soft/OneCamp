@@ -52,8 +52,11 @@ func TestReadReceiptStorage(t *testing.T) {
 		t.Fatalf("Maya's mark stays, Jonas starts at nothing: %v", seen)
 	}
 
-	// A mark only moves forward, one at a time or for a sender in bulk.
+	// A mark only moves forward, one at a time or in bulk.
 	if err := CreateOrUpdateLastSeenChat(ctx, maya, grp, earlier); err != nil {
+		t.Fatal(err)
+	}
+	if err := BulkCreateOrUpdateLastSeenChat(ctx, []string{maya.String()}, grp, earlier); err != nil {
 		t.Fatal(err)
 	}
 	if err := BulkUpdateLastSeenChatForSender(ctx, []string{grp}, maya.String(), earlier); err != nil {

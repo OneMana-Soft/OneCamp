@@ -250,7 +250,7 @@ func HandleGetWebhookLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	pageSize := helpers.SizeParam(r.URL.Query(), "page_size", 20, 100)
 
 	logs, err := business.GetWebhookLogs(ctx, webhookId, page, pageSize)
 	if err != nil {
@@ -276,12 +276,9 @@ func HandleGetGlobalWebhookLogs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	pageSize := helpers.SizeParam(r.URL.Query(), "page_size", 20, 100)
 	if page < 1 {
 		page = 1
-	}
-	if pageSize < 1 || pageSize > 100 {
-		pageSize = 20
 	}
 
 	var webhookId *uuid.UUID
@@ -328,6 +325,9 @@ var EventTypes = []string{
 	// Docs (business/Follow's webhook sink): doc.updated is at most one a
 	// minute per doc, and a private doc's title is never sent.
 	"doc.created", "doc.updated", "doc.deleted", "doc.shared", "doc.comment.created",
+	// Tables (business/DataTable ledger.go): one a change to a table's rows,
+	// naming every row it touched, ids alone.
+	"table.rows.changed",
 }
 
 // HandleGetWebhookEventTypes returns the supported event types (admin only).

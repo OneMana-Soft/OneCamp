@@ -34,6 +34,7 @@ import (
 
 	syncBusiness "github.com/akashc777/OneCamp/business"
 	githubBusiness "github.com/akashc777/OneCamp/business/GitHub"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	taskController "github.com/akashc777/OneCamp/controllers/Task"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -140,24 +141,28 @@ func TestTaskGitHubRoutesBelongToTheProject(t *testing.T) {
 		}
 	})
 
-	t.Run("a member who isn't an admin reads but changes nothing", func(t *testing.T) {
+	// Linking, branching and opening pull requests change the task, which
+	// a viewer may not (Work Access, A1); ben is one here, in the project.
+	t.Run("a viewer reads but changes nothing", func(t *testing.T) {
+		w.exec(`INSERT INTO project_roles (project_id, user_id, role) VALUES ($1, $2, 'viewer')`, w.project, w.people["ben"])
+		defer w.exec(`DELETE FROM project_roles WHERE project_id = $1 AND user_id = $2`, w.project, w.people["ben"])
 		for _, rt := range single {
 			code, body := call("ben", rt, w.task)
 			switch {
 			case rt.change && code != http.StatusForbidden:
-				t.Errorf("%s as a member: %d %s, want it refused", rt.name, code, body)
+				t.Errorf("%s as a viewer: %d %s, want it refused", rt.name, code, body)
 			case !rt.change && (code == http.StatusNotFound || code == http.StatusForbidden):
-				t.Errorf("%s as a member: %d %s, want it read", rt.name, code, body)
+				t.Errorf("%s as a viewer: %d %s, want it read", rt.name, code, body)
 			}
 		}
 		if n, refusals := bulk(t, "ben", taskController.BulkLinkTasksToGitHub, link(w.task, issue)); n != 0 || len(refusals) != 1 ||
-			!strings.HasPrefix(refusals[0], "Only the project's admins") {
-			t.Errorf("bulk link as a member: %d done, %v", n, refusals)
+			refusals[0] != "Task "+w.task+": You can see this task but not change it." {
+			t.Errorf("bulk link as a viewer: %d done, %v", n, refusals)
 		}
 		unlinked(t, w.task)
 		for _, c := range gh.calls() {
 			if !strings.HasPrefix(c, "GET /search/issues") {
-				t.Errorf("a member's request reached GitHub with %s", c)
+				t.Errorf("a viewer's request reached GitHub with %s", c)
 			}
 		}
 	})
@@ -487,7 +492,7 @@ func TestTaskGitHubRoutesBelongToTheProject(t *testing.T) {
 			return httptest.NewRequest(http.MethodGet, "/", nil).WithContext(context.WithValue(as, chi.RouteCtxKey, rc))
 		}
 		rec := httptest.NewRecorder()
-		if _, _, ok := projectaccess.Require(rec, with(asCy, "project_uuid", w.project), false, ""); ok || rec.Code != http.StatusNotFound {
+		if _, _, ok := projectaccess.Require(rec, with(asCy, "project_uuid", w.project), workAccess.NeedView, ""); ok || rec.Code != http.StatusNotFound {
 			t.Errorf("a project's route for someone outside it: %d %s, want 404", rec.Code, rec.Body.String())
 		}
 
@@ -498,15 +503,16 @@ func TestTaskGitHubRoutesBelongToTheProject(t *testing.T) {
 			t.Errorf("a task's route while the task can't be read: %d %s, want 503", rec.Code, rec.Body.String())
 		}
 		rec = httptest.NewRecorder()
-		if _, _, ok := projectaccess.Require(rec, with(asAna, "project_uuid", w.project), false, ""); ok || rec.Code != http.StatusServiceUnavailable {
+		if _, _, ok := projectaccess.Require(rec, with(asAna, "project_uuid", w.project), workAccess.NeedView, ""); ok || rec.Code != http.StatusServiceUnavailable {
 			t.Errorf("a project's route while the project can't be read: %d %s, want 503", rec.Code, rec.Body.String())
 		}
 	})
 }
 
 // githubWorkspace is a project ("Website") with an admin (ana) and a member
-// (ben), someone outside it (cy), three of its tasks, its repository acme/web,
-// and another project ("Billing") with acme/billing; GitHub is connected.
+// (ben, made a viewer where a test says so), someone outside it (cy), three
+// of its tasks, its repository acme/web, and another project ("Billing") with
+// acme/billing; GitHub is connected.
 type githubWorkspace struct {
 	t                  *testing.T
 	db                 *integration.Env

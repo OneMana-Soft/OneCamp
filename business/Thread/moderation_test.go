@@ -43,6 +43,7 @@ func TestThreadsSayWhoMayRemoveAnyonesComment(t *testing.T) {
 		{"a member, not an admin", asUser("bob", false), who("bob"), false},
 		{"someone else's admin request", asUser("sam", true), who("bob"), false},
 		{"an agent, whoever asked it", asUser("bob", true), agent, false},
+		{"a workspace admin through an API token", helpers.WithActsThroughToken(asUser("bob", true)), who("bob"), false},
 	} {
 		list, err := w.svc.List(c.ctx, c.who, w.res, Filter{})
 		if err != nil || len(list) != 1 {

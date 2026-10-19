@@ -63,15 +63,18 @@ func DeleteByUserIdAndDeviceId(ctx context.Context, userId string, deviceId stri
 }
 
 // tokensOfPersonQuery is the devices of one person ($1) the push gate lets
-// through now.
-var tokensOfPersonQuery = `
+// through now. Built on each call: the gate reads whichever calendar store
+// the events are in (helpers.CalendarReadsFromStore).
+func tokensOfPersonQuery() string {
+	return `
 		SELECT fcm_token
 		FROM users_fcm_token
 		WHERE user_id = $1 AND` + pushGate("users_fcm_token.user_id") + `
 	`
+}
 
 func GetFCMTokenByUserId(ctx context.Context, userId string) (tokens []string, err error) {
-	tokens, err = models.GetFCMTokenByUserId(tokensOfPersonQuery, userId)
+	tokens, err = models.GetFCMTokenByUserId(tokensOfPersonQuery(), userId)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/GetFCMTokenByUserId Failed to get user's fcm token err: %+v",

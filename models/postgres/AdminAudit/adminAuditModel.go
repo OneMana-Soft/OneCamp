@@ -44,6 +44,11 @@ const (
 	// sink, from the Resource Events). Viewing it is on every plan; exporting
 	// the log stays behind FeatureAuditExport.
 	CategoryDocs = "docs"
+	// CategoryCalendar is what happened to the calendar's events: made,
+	// changed, cancelled, deleted, restored and answered, by whom, from the
+	// Resource Events (business/Calendar's audit sink). Never an event's
+	// title or notes.
+	CategoryCalendar = "calendar"
 )
 
 // AllCategories is the canonical, ordered list of audit categories.
@@ -68,6 +73,7 @@ func AllCategories() []string {
 		CategorySecurity,
 		CategoryAgent,
 		CategoryDocs,
+		CategoryCalendar,
 	}
 }
 

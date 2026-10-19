@@ -54,7 +54,6 @@ import (
 	saml "github.com/akashc777/OneCamp/services/SAML"
 	"github.com/joho/godotenv"
 
-	demoseed "github.com/akashc777/OneCamp/services/DemoSeed"
 	journey "github.com/akashc777/OneCamp/services/Journey"
 
 	customMiddleware "github.com/akashc777/OneCamp/middleware"
@@ -68,7 +67,8 @@ import (
 // disagreeing about what this process is: an init that prepares a server while
 // main runs a client is the kind of split that only shows up in production.
 func runsAsClientSubcommand() bool {
-	return helpers.IsClientSubcommand(os.Args, "journey")
+	_, kind := helpers.SubcommandOf(os.Args)
+	return kind == helpers.ClientSubcommand
 }
 
 func init() {
@@ -482,6 +482,8 @@ func main() {
 		ClientID:     mqttInit.ProcessClientID(os.Getenv("MQTT_CLIENT_ID"), role),
 		Username:     os.Getenv("MQTT_USERNAME"),
 		CleanSession: boolValueMqttCleanSession,
+		// A one-shot publishes what it changes and listens for nothing.
+		PublishOnly: !role.ListensToBroker(),
 	}
 
 	err = mqttInit.ConnectMqtt(&mqttConfig)
@@ -567,8 +569,6 @@ func main() {
 			liveKitConfig.HostURL, err)
 	}
 
-	redisInit.InitRedisExpiryWorker()
-
 	// Initialise AV scanning. CLAMAV_HOST controls whether the hook
 	// is active; when unset every upload path treats the verdict as
 	// "unknown" and proceeds (current behaviour). When configured,
@@ -583,6 +583,22 @@ func main() {
 	} else {
 		helpers.MessageLogs.InfoLog.Println("AV scanner not configured (CLAMAV_HOST unset); uploads will skip AV scan")
 	}
+
+	// A one-shot subcommand runs HERE, and only here (helpers.Subcommands,
+	// oneshot.go): every store's client is connected, and nothing that makes
+	// this process a server has started. Everything below is the server's:
+	// the Redis expiry worker, the seeds and registries, the loops, the port.
+	// A one-shot runs beside the live instance and exits, so a worker in it
+	// would send mail a second time, and stop half-way when the command ends.
+	// Its role (helpers.RoleOneShot) runs no loop and takes no share of the
+	// broker's announcements either way; helpers/oneShotGuard_test.go holds
+	// main to this line.
+	if name, ok := helpers.OneShotOf(os.Args); ok {
+		os.Exit(runOneShot(ctx, name, os.Args[2:]))
+	}
+
+	// Redis's expired-key events, consumed by the server alone.
+	redisInit.InitRedisExpiryWorker()
 
 	// EVERYTHING BELOW THIS LINE, DOWN TO THE LOOPS, IS NEEDED BY EVERY ROLE.
 	// A request needs the command catalog and the bot identity exactly as much
@@ -682,60 +698,6 @@ func main() {
 	// NOTE: Admin user creation is handled via POST /auth/admin-setup endpoint.
 	// It properly creates both users + admin_users rows, and hashes the password.
 	// Do NOT auto-seed admin_users here — it creates orphan records.
-
-	// `go-one-camp demoseed <admin-email>` curates the public demo workspace and
-	// exits without binding a port.
-	//
-	// HERE, not beside the journey dispatch at the top. The journey speaks HTTP to
-	// a running instance and must connect to nothing; this writes through the
-	// business layer, so it needs Postgres, the graph and the object store already
-	// connected — which is everything above this line. It still exits before
-	// Serve, so it never becomes a second server beside the one it is curating.
-	//
-	// Refuses unless ONECAMP_DEMO_HOST is set. Every customer runs this binary,
-	// and a command that writes invented conversations into a workspace is one
-	// mistyped word away from putting fake content into somebody's real company.
-	if helpers.IsClientSubcommand(os.Args, "demoseed") {
-		adminEmail, refresh := "", false
-		for _, a := range os.Args[2:] {
-			if a == "--refresh" {
-				refresh = true
-				continue
-			}
-			if adminEmail == "" {
-				adminEmail = a
-			}
-		}
-		os.Exit(demoseed.Main(ctx, adminEmail, refresh))
-	}
-
-	// `go-one-camp repairdocs [--apply]` finds docs whose body a collaboration
-	// service before v2.70.0 replaced with "<p>Error generating HTML</p>" (or
-	// left far shorter than its saved Yjs state) and, with --apply, restores
-	// them from that state or from their version history. Without --apply it
-	// only lists what it would do. Idempotent; business/Doc/docRepair.go.
-	if helpers.IsClientSubcommand(os.Args, "repairdocs") {
-		apply := false
-		for _, a := range os.Args[2:] {
-			if a == "--apply" {
-				apply = true
-			}
-		}
-		rep, rerr := docBusiness.RepairDocs(ctx, apply, os.Stdout)
-		// A restored doc's search entry is written in the background: exiting
-		// at once cut the last of those writes off, and those docs kept the
-		// placeholder's text in search.
-		if pending := docBusiness.WaitForSearchWrites(ctx, 10*time.Minute); pending > 0 {
-			fmt.Fprintf(os.Stderr, "repairdocs: stopped waiting with %d docs' search entries still being written; each is written again when its doc is next saved\n", pending)
-		}
-		if rerr != nil || len(rep.Failed) > 0 {
-			if rerr != nil {
-				fmt.Fprintln(os.Stderr, "repairdocs:", rerr)
-			}
-			os.Exit(1)
-		}
-		os.Exit(0)
-	}
 
 	app := &Application{
 		Config: cfg,

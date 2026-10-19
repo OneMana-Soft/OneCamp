@@ -94,7 +94,6 @@ func CreatePost(ctx context.Context, postInfo *adapter.InputCreateOrUpdatePostIn
 	// all stamp the same historical timestamp. Falls back to
 	// time.Now() for native posts. See helpers.WithImportTimestamp.
 	currentTime := helpers.CreateTimeOrNow(ctx)
-	zeroUnixTime := time.Time{}
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -102,6 +101,154 @@ func CreatePost(ctx context.Context, postInfo *adapter.InputCreateOrUpdatePostIn
 			err)
 		return
 	}
+
+	replyParentPost, err := writePostNode(ctx, postUUID, postInfo, userInfo, mentionsDgraphUsersList, dgraphChannelInfo, currentTime)
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/CreatePost Failed to create new post in dgraph err: %+v",
+			err)
+
+		// Reverse the Postgres row written above, and return the ORIGINAL error.
+		//
+		// This was previously `err = domain.HardDeletePostByUUIUD(...)`, which overwrote the
+		// Dgraph failure with the rollback's own result. When the rollback SUCCEEDED — the
+		// normal case — err became nil and the naked return below reported success, so the
+		// controller replied 200 "created post successfully!" with a null payload for a post it
+		// had just deleted. The client showed the message as sent and it vanished on refresh.
+		//
+		// The compensation's own error is deliberately discarded: the caller's question is
+		// whether the post was created, which the Dgraph error answers. A failed rollback is a
+		// different problem — an orphaned row — and CompensateOnFailure already logs that case
+		// loudly with the word "orphan" for whoever greps for it.
+		_ = helpers.CompensateOnFailure(ctx, "postgres post row "+postUUID.String(),
+			func(compensateCtx context.Context) error {
+				return domain.HardDeletePostByUUIUD(compensateCtx, postUUID)
+			})
+
+		return
+
+	}
+
+	fanOutCreatedPost(ctx, postUUID, postInfo, userInfo, mentionsDgraphUsersList, dgraphChannelInfo, replyParentPost, currentTime)
+
+	var createdPostInfoRaw adapter.OutputCreatePostForPost
+	createdPostInfoRaw.Uuid = postUUID.String()
+	createdPostInfoRaw.PostCreated = currentTime
+
+	createdPostInfo = &createdPostInfoRaw
+
+	return
+}
+
+// fanOutCreatedPost is today's side effects of a new channel post, after its
+// node is written: what the durable pipeline's sinks do from the outbox
+// instead (postSinks.go), through the same seams, so golden_test.go can hold
+// the two to one answer.
+func fanOutCreatedPost(ctx context.Context, postUUID uuid.UUID, postInfo *adapter.InputCreateOrUpdatePostInfo, userInfo *userModels.UserInfo, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphChannelInfo *dgraphStruct.DgraphChannel, replyParentPost *dgraphStruct.DgraphPost, currentTime time.Time) {
+	plainText := helpers.HTMLToPlainText(postInfo.HTMLText)
+
+	// publish to MQTT
+	mqttCreatePost := mqttStruct.MqttPost{
+		Type:             mqttStruct.TYPE_CREATE,
+		PostAttachments:  postInfo.MediaObj,
+		PostHtmlText:     postInfo.HTMLText,
+		PostCreatedAt:    &currentTime,
+		PostByUserUuid:   userInfo.UserDgraphInfo.Uuid,
+		PostByProfileKey: userInfo.UserDgraphInfo.ProfileKey,
+		PostByUserName:   userInfo.UserDgraphInfo.DisplayName(),
+		PostByIsBot:      userInfo.UserDgraphInfo.IsBot,
+		PostChannelUuid:  postInfo.ChannelUuid,
+		PostUuid:         postUUID.String(),
+		PostReplyTo:      replyParentPost,
+	}
+
+	// Bulk imports (Slack, etc.) suppress notification fan-out so 100k
+	// historical messages don't wake every channel member 100k times.
+	// We still index OpenSearch because operators want imported content
+	// searchable immediately; AI embedding can be redone in one batch
+	// pass after the import. See helpers.IsBulkImport.
+	bulk := helpers.IsBulkImport(ctx)
+
+	if !bulk {
+		helpers.GoSafeNamed("post.publish", func() { publishPost(&mqttCreatePost, postInfo.ChannelUuid) })
+	}
+
+	// add in openSearch
+	openSearchPost := &openSearchStruct.OpenSearchPost{
+		Uuid:               postUUID.String(),
+		PostBody:           plainText,
+		PostChannelUuid:    postInfo.ChannelUuid,
+		PostCreatedAt:      currentTime.Unix(),
+		PostByUserUuid:     userInfo.UserDgraphInfo.Uuid,
+		PostByProfile:      userInfo.UserDgraphInfo.ProfileKey,
+		PostByUserFullName: userInfo.UserDgraphInfo.DisplayName(),
+		PostChannelName:    dgraphChannelInfo.Name,
+		PostDeletedAt:      nil,
+	}
+
+	helpers.GoSafeNamed("post.search", func() { createSearchEntry(openSearchPost, postInfo.MediaObj) })
+
+	if !bulk {
+		// embed for AI Second Brain (async). Skipped during bulk imports;
+		// a follow-up batch embed run handles imported content.
+		// For a reply, embed the parent snippet + reply text (contextual
+		// embedding) so terse replies carry the meaning of what they answer in
+		// the k-NN vector. Same-surface guarantees no permission leak.
+		/* AI call omitted in v1 */
+
+		// send push
+		pushTitle := fmt.Sprintf("#%s - %s", dgraphChannelInfo.Name, userInfo.UserDgraphInfo.DisplayName())
+		// A Discord-style inline reply implicitly pings the parent's author, so
+		// route them through the same mention pipeline (activity + push +
+		// email). Self-replies are suppressed inside sendNewPostNotification,
+		// and channel mute is respected exactly like a real mention.
+		replyToAuthorUUID := ""
+		if replyParentPost != nil && replyParentPost.PostBy != nil {
+			replyToAuthorUUID = replyParentPost.PostBy.Uuid
+		}
+		helpers.GoSafeNamed("post.notify", func() {
+			notifyPost(context.Background(), pushTitle, plainText, postInfo.ChannelUuid, mentionsDgraphUsersList, dgraphChannelInfo, postUUID.String(), &userInfo.UserDgraphInfo, replyToAuthorUUID, nil)
+		})
+
+		// Dispatch the workspace event (outgoing webhooks + in-process
+		// listeners like the Workflow engine). Detached from the request ctx
+		// so listener/dispatch work isn't cancelled when the handler returns.
+		event := postCreatedEvent(postUUID.String(), postInfo.ChannelUuid, dgraphChannelInfo.Name, postInfo.HTMLText, &userInfo.UserDgraphInfo)
+		detached := context.WithoutCancel(ctx)
+		helpers.GoSafeNamed("post.events", func() { dispatchPost(detached, "post.created", event) })
+	}
+}
+
+// postCreatedEvent is the workspace event a channel post raises (outgoing
+// webhooks and the in-process listeners: workflows, the Slack bridge, the AI
+// coworker, agents). Mention ids are parsed straight from the HTML so the set
+// is independent of mention resolution (which hides the bot from member
+// lists): a bot that was explicitly @mentioned must still be detectable here.
+// For native mentions these are Dgraph node uids. The author is named by the
+// one name rule without its last step, never part of their address: the
+// Slack bridge carries the name to Slack, where a shared channel can hold
+// people from other organisations. Pure.
+func postCreatedEvent(postID, channelID, channelName, html string, author *dgraphStruct.DgraphUser) map[string]interface{} {
+	mentionIDs, _ := helpers.GetMentions(html)
+	return map[string]interface{}{
+		"post_id":      postID,
+		"channel_id":   channelID,
+		"channel_name": channelName,
+		"text":         helpers.HTMLToPlainText(html),
+		"author_id":    author.Uuid,
+		"author_name":  helpers.PersonDisplayName(author.UserName, author.UserFullName, ""),
+		"mention_ids":  mentionIDs,
+		"source":       "user",
+	}
+}
+
+// writePostNode writes a new post's graph node, its channel's and author's
+// edges to it, its Mention node, and its quote of a post in the same channel,
+// and answers the post it quotes (nil for none). Shared by today's CreatePost
+// and the durable write (durable.go), so the two write the same node.
+func writePostNode(ctx context.Context, postUUID uuid.UUID, postInfo *adapter.InputCreateOrUpdatePostInfo, userInfo *userModels.UserInfo, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphChannelInfo *dgraphStruct.DgraphChannel, currentTime time.Time) (*dgraphStruct.DgraphPost, error) {
+	zeroUnixTime := time.Time{}
 
 	channelPost := dgraphStruct.DgraphChannel{
 		DType: []string{"Channel"},
@@ -129,8 +276,6 @@ func CreatePost(ctx context.Context, postInfo *adapter.InputCreateOrUpdatePostIn
 		}
 		mediaObj.CreatedAt = &currentTime
 	}
-
-	plainText := helpers.HTMLToPlainText(postInfo.HTMLText)
 
 	// add channel in dgraph
 	dgraphPost := dgraphStruct.DgraphPost{
@@ -175,134 +320,40 @@ func CreatePost(ctx context.Context, postInfo *adapter.InputCreateOrUpdatePostIn
 		}
 	}
 
-	_, err = domain.CreateOrUpdateDgraphPost(ctx, &dgraphPost)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/CreatePost Failed to create new post in dgraph err: %+v",
-			err)
-
-		// Reverse the Postgres row written above, and return the ORIGINAL error.
-		//
-		// This was previously `err = domain.HardDeletePostByUUIUD(...)`, which overwrote the
-		// Dgraph failure with the rollback's own result. When the rollback SUCCEEDED — the
-		// normal case — err became nil and the naked return below reported success, so the
-		// controller replied 200 "created post successfully!" with a null payload for a post it
-		// had just deleted. The client showed the message as sent and it vanished on refresh.
-		//
-		// The compensation's own error is deliberately discarded: the caller's question is
-		// whether the post was created, which the Dgraph error answers. A failed rollback is a
-		// different problem — an orphaned row — and CompensateOnFailure already logs that case
-		// loudly with the word "orphan" for whoever greps for it.
-		_ = helpers.CompensateOnFailure(ctx, "postgres post row "+postUUID.String(),
-			func(compensateCtx context.Context) error {
-				return domain.HardDeletePostByUUIUD(compensateCtx, postUUID)
-			})
-
-		return
-
-	}
-
-	// publish to MQTT
-	mqttCreatePost := mqttStruct.MqttPost{
-		Type:             mqttStruct.TYPE_CREATE,
-		PostAttachments:  postInfo.MediaObj,
-		PostHtmlText:     postInfo.HTMLText,
-		PostCreatedAt:    &currentTime,
-		PostByUserUuid:   userInfo.UserDgraphInfo.Uuid,
-		PostByProfileKey: userInfo.UserDgraphInfo.ProfileKey,
-		PostByUserName:   userInfo.UserDgraphInfo.DisplayName(),
-		PostByIsBot:      userInfo.UserDgraphInfo.IsBot,
-		PostChannelUuid:  postInfo.ChannelUuid,
-		PostUuid:         postUUID.String(),
-		PostReplyTo:      replyParentPost,
-	}
-
-	// Bulk imports (Slack, etc.) suppress notification fan-out so 100k
-	// historical messages don't wake every channel member 100k times.
-	// We still index OpenSearch because operators want imported content
-	// searchable immediately; AI embedding can be redone in one batch
-	// pass after the import. See helpers.IsBulkImport.
-	bulk := helpers.IsBulkImport(ctx)
-
-	if !bulk {
-		go mqttBusiness.PublishPost(&mqttCreatePost, postInfo.ChannelUuid)
-	}
-
-	// add in openSearch
-	openSearchPost := &openSearchStruct.OpenSearchPost{
-		Uuid:               postUUID.String(),
-		PostBody:           plainText,
-		PostChannelUuid:    postInfo.ChannelUuid,
-		PostCreatedAt:      currentTime.Unix(),
-		PostByUserUuid:     userInfo.UserDgraphInfo.Uuid,
-		PostByProfile:      userInfo.UserDgraphInfo.ProfileKey,
-		PostByUserFullName: userInfo.UserDgraphInfo.DisplayName(),
-		PostChannelName:    dgraphChannelInfo.Name,
-		PostDeletedAt:      nil,
-	}
-
-	go domain.CreatePostWithAttachmentsInOpenSearch(openSearchPost, postInfo.MediaObj)
-
-	if !bulk {
-		// embed for AI Second Brain (async). Skipped during bulk imports;
-		// a follow-up batch embed run handles imported content.
-		// For a reply, embed the parent snippet + reply text (contextual
-		// embedding) so terse replies carry the meaning of what they answer in
-		// the k-NN vector. Same-surface guarantees no permission leak.
-		/* AI call omitted in v1 */
-
-		// send push
-		pushTitle := fmt.Sprintf("#%s - %s", dgraphChannelInfo.Name, userInfo.UserDgraphInfo.DisplayName())
-		// A Discord-style inline reply implicitly pings the parent's author, so
-		// route them through the same mention pipeline (activity + push +
-		// email). Self-replies are suppressed inside sendNewPostNotification,
-		// and channel mute is respected exactly like a real mention.
-		replyToAuthorUUID := ""
-		if replyParentPost != nil && replyParentPost.PostBy != nil {
-			replyToAuthorUUID = replyParentPost.PostBy.Uuid
-		}
-		go sendNewPostNotification(pushTitle, plainText, postInfo.ChannelUuid, mentionsDgraphUsersList, dgraphChannelInfo, postUUID.String(), &userInfo.UserDgraphInfo, replyToAuthorUUID)
-
-		// Dispatch the workspace event (outgoing webhooks + in-process
-		// listeners like the Workflow engine). Detached from the request ctx
-		// so listener/dispatch work isn't cancelled when the handler returns.
-		// Mention ids for in-process listeners (e.g. the AI coworker). Parsed
-		// straight from the HTML so the set is independent of mention
-		// resolution (which hides the bot from member lists) — a bot that was
-		// explicitly @mentioned must still be detectable here. For native
-		// mentions these are Dgraph node uids. The author is named by the one
-		// name rule without its last step, never part of their address: the
-		// Slack bridge carries the name to Slack, where a shared channel can
-		// hold people from other organisations.
-		mentionIDs, _ := helpers.GetMentions(postInfo.HTMLText)
-		go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "post.created", map[string]interface{}{
-			"post_id":      postUUID.String(),
-			"channel_id":   postInfo.ChannelUuid,
-			"channel_name": dgraphChannelInfo.Name,
-			"text":         plainText,
-			"author_id":    userInfo.UserDgraphInfo.Uuid,
-			"author_name":  helpers.PersonDisplayName(userInfo.UserDgraphInfo.UserName, userInfo.UserDgraphInfo.UserFullName, ""),
-			"mention_ids":  mentionIDs,
-			"source":       "user",
-		})
-	}
-
-	var createdPostInfoRaw adapter.OutputCreatePostForPost
-	createdPostInfoRaw.Uuid = postUUID.String()
-	createdPostInfoRaw.PostCreated = currentTime
-
-	createdPostInfo = &createdPostInfoRaw
-
-	return
+	_, err := domain.CreateOrUpdateDgraphPost(ctx, &dgraphPost)
+	return replyParentPost, err
 }
 
 func sendNewPostNotification(title string, body string, channelId string, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphChannelInfo *dgraphStruct.DgraphChannel, postID string, userDgraph *dgraphStruct.DgraphUser, replyToAuthorUUID string) {
+	notifyNewPost(context.Background(), title, body, channelId, mentionsDgraphUsersList, dgraphChannelInfo, postID, userDgraph, replyToAuthorUUID, nil)
+}
+
+// told says whether a person is to be told of a post by one way ("activity",
+// "push", "email") this time: the outbox's sink asks FirstTime, so a retry
+// tells only those it hadn't. nil tells everyone, as today's path does.
+type told func(how, recipient string) bool
+
+// only is the recipients told lets through, all of them when it's nil. Pure.
+func (t told) only(how string, recipients []string) []string {
+	if t == nil {
+		return recipients
+	}
+	out := make([]string, 0, len(recipients))
+	for _, r := range recipients {
+		if t(how, r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// notifyNewPost is a channel post's notices: the Activity item for each
+// eligible person it mentions (or whose post it quotes), the push and desktop
+// notice for everyone eligible, and the email for those mentioned.
+func notifyNewPost(ctx context.Context, title string, body string, channelId string, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphChannelInfo *dgraphStruct.DgraphChannel, postID string, userDgraph *dgraphStruct.DgraphUser, replyToAuthorUUID string, tell told) {
 
 	mentionsUUIDList := []string{}
 	mentionsMap := make(map[string]bool)
-
-	ctx := context.Background()
 
 	for _, mention := range mentionsDgraphUsersList {
 		mentionsUUIDList = append(mentionsUUIDList, mention.Uuid)
@@ -338,7 +389,7 @@ func sendNewPostNotification(title string, body string, channelId string, mentio
 			eligibleMentionsUserIDs = append(eligibleMentionsUserIDs, uid)
 		}
 	}
-	for _, recipientID := range eligibleMentionsUserIDs {
+	for _, recipientID := range tell.only("activity", eligibleMentionsUserIDs) {
 		activityItem := &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION, // In channels, new posts are notifications for members
 			Time:         time.Now().UTC().Format(time.RFC3339Nano),
@@ -374,7 +425,9 @@ func sendNewPostNotification(title string, body string, channelId string, mentio
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 
-	notificationBusiness.Deliver(ctx, eligibleUserIDs, pushData, "channel:"+channelId+":"+postID)
+	if pushTo := tell.only("push", eligibleUserIDs); len(pushTo) > 0 {
+		notificationBusiness.Deliver(ctx, pushTo, pushData, "channel:"+channelId+":"+postID)
+	}
 
 	// Email fan-out: only mentioned users — channel posts in general are
 	// too noisy to email everyone. The dispatcher applies its own gates
@@ -387,7 +440,7 @@ func sendNewPostNotification(title string, body string, channelId string, mentio
 		dgraphChannelInfo.Name,
 		postID,
 		body,
-		eligibleMentionsUserIDs,
+		tell.only("email", eligibleMentionsUserIDs),
 	)
 }
 

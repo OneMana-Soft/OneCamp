@@ -284,6 +284,12 @@ func Routes() http.Handler {
 	router.With(customMiddleware.IPRateLimit("booking", 10, "Too many bookings from here. Try again later.")).With(customMiddleware.BodyLimit(8<<10)).Post("/public/book/{slug}", eventController.BookPublicSlot)
 	router.With(customMiddleware.BookingLinkReadLimit()).Get("/public/booking/{token}", eventController.GetPublicBooking)
 	router.With(customMiddleware.LoginRateLimit("booking-cancel")).Post("/public/booking/{token}/cancel", eventController.CancelPublicBooking)
+	// Someone invited to an event by email reads their invitation and answers
+	// it from their link, with no account (calendar A2). Reading is limited per
+	// address, every GET counted; answering per address too. Every "not
+	// available" is the same 404.
+	router.With(customMiddleware.InvitationReadLimit()).Get("/public/rsvp/{token}", eventController.GetPublicInvitation)
+	router.With(customMiddleware.IPRateLimit("rsvp", 20, "Too many answers sent from here. Try again later.")).With(customMiddleware.BodyLimit(8<<10)).Post("/public/rsvp/{token}", eventController.AnswerPublicInvitation)
 	router.With(customMiddleware.LoginRateLimit("guest")).Get("/guest/meet/{token}", guestController.GetGuestMeeting)
 	router.With(customMiddleware.GuestRateLimit(customMiddleware.GuestJoin)).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/meet/{token}/join", guestController.JoinGuestMeeting)
 	// Phase 2: exchange a doc/board share-link token for a short-lived,
@@ -1633,7 +1639,6 @@ func Routes() http.Handler {
 		r.Get("/latestChat/{grp_id}", chatController.GetLatestGroupChats)
 		r.Get("/seen/{grp_id}", chatController.GetChatReceipts)
 		r.Post("/seen/{grp_id}", chatController.MarkChatSeen)
-		r.Post("/addParticipant", chatController.AddParticipantToGroupChat)
 		r.Post("/getCallToken", chatController.MakeVideoCallForGroup)
 		r.Post("/startCallRecording", chatController.StartVideoCallRecordingForGroup)
 		r.Post("/stopCallRecording", chatController.StopVideoCallRecordingForGroup)
@@ -2012,6 +2017,10 @@ func Routes() http.Handler {
 	mountChatProgramme(newChatRouters(router, adminUserRouter, channelRouter, postRouter, chatRouter, groupChatRouter))
 	// The calendar programme's routes, last (calendarProgramme.go). Its only line here.
 	mountCalendarProgramme(newCalendarRouters(router, adminUserRouter, eventRouter))
+	// The tables programme's routes, last (tablesProgramme.go). Its only line here.
+	mountTablesProgramme(newTablesRouters(router, adminUserRouter, tableRouter, v1Router))
+	// The projects programme's routes, last (projectsProgramme.go). Its only line here.
+	mountProjectsProgramme(newProjectsRouters(router, adminUserRouter, projectRouter, taskRouter, v1Router))
 
 	return router
 }

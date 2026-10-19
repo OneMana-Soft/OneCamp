@@ -22,58 +22,16 @@ package business
 // gives the same id however often it's done.
 
 import (
-	"encoding/json"
 	"strings"
 
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
 	"github.com/akashc777/OneCamp/helpers"
-	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
-	"github.com/google/uuid"
 )
-
-// storedOptionID is how an option stored without an id is known.
-func storedOptionID(label string) string { return "label:" + label }
-
-// newOptionID is an id for an option that has none and whose label's id is
-// taken, made as the web makes one.
-func newOptionID() string {
-	return "o_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:10]
-}
 
 // hasOptions is whether a field of type typ keeps its cells as option labels.
 func hasOptions(typ string) bool {
-	return typ == model.FieldSelect || typ == model.FieldMultiSelect
-}
-
-// optionsIn is a field config's options, each as a map, in order: one given as
-// a bare string is the option of that label. A typed list, as Go callers
-// build one (the AI draft's), is read as JSON reads it.
-func optionsIn(cfg map[string]interface{}) []map[string]interface{} {
-	list, ok := cfg["options"].([]interface{})
-	if !ok && cfg["options"] != nil {
-		if b, err := json.Marshal(cfg["options"]); err == nil {
-			_ = json.Unmarshal(b, &list)
-		}
-	}
-	out := make([]map[string]interface{}, 0, len(list))
-	for _, it := range list {
-		switch o := it.(type) {
-		case map[string]interface{}:
-			out = append(out, o)
-		case string:
-			out = append(out, map[string]interface{}{"label": o})
-		}
-	}
-	return out
-}
-
-func optionLabel(o map[string]interface{}) string {
-	s, _ := o["label"].(string)
-	return s
-}
-
-func optionID(o map[string]interface{}) string {
-	s, _ := o["id"].(string)
-	return strings.TrimSpace(s)
+	k, ok := fieldTypes.Kinds.Lookup(typ)
+	return ok && k.HasOptions
 }
 
 // removedOptionsKey is where a field save names, by id, the options it takes
@@ -128,9 +86,9 @@ func planOptions(stored []map[string]interface{}, cfg map[string]interface{}, re
 	storedByLabel := map[string]string{}
 	storedAt := make([]string, len(stored)) // each stored option's id, by place
 	for i, o := range stored {
-		id, label := optionID(o), optionLabel(o)
+		id, label := fieldTypes.OptionID(o), fieldTypes.OptionLabel(o)
 		if id == "" {
-			id = storedOptionID(label)
+			id = fieldTypes.StoredOptionID(label)
 		}
 		if _, seen := storedLabel[id]; seen {
 			continue // a label stored twice without ids is one option
@@ -141,29 +99,29 @@ func planOptions(stored []map[string]interface{}, cfg map[string]interface{}, re
 			storedByLabel[label] = id
 		}
 	}
-	opts := optionsIn(cfg)
+	opts := fieldTypes.Options(cfg)
 	ids := make([]string, len(opts))
 	taken := map[string]bool{}
 	offered := map[string]bool{}
 	for i, o := range opts {
-		offered[optionLabel(o)] = true
-		if id := optionID(o); id != "" && !taken[id] {
+		offered[fieldTypes.OptionLabel(o)] = true
+		if id := fieldTypes.OptionID(o); id != "" && !taken[id] {
 			ids[i], taken[id] = id, true
 		}
 	}
 	for i, o := range opts {
-		if sid, ok := storedByLabel[optionLabel(o)]; ok && optionID(o) == "" && !taken[sid] {
+		if sid, ok := storedByLabel[fieldTypes.OptionLabel(o)]; ok && fieldTypes.OptionID(o) == "" && !taken[sid] {
 			ids[i], taken[sid] = sid, true
 		}
 	}
 	changes := map[string]string{}
 	list := make([]interface{}, 0, len(opts)+len(stored))
 	for i, o := range opts {
-		label := optionLabel(o)
+		label := fieldTypes.OptionLabel(o)
 		if ids[i] == "" {
-			id := storedOptionID(label)
+			id := fieldTypes.StoredOptionID(label)
 			if _, isStored := storedLabel[id]; isStored || taken[id] {
-				id = newOptionID()
+				id = fieldTypes.NewOptionID()
 			}
 			ids[i], taken[id] = id, true
 		}

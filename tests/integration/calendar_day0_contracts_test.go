@@ -3,11 +3,12 @@
 
 package integration_test
 
-// The calendar programme's day-0 contracts answer as today's code does,
-// against real Postgres and Dgraph (design/calendar-vs-gcal/PROGRAM.md §5, and
-// §9's "contracts guarded"): Events is the /event routes' functions with
-// their rules, StatusFor says focus and time off from the person's events,
-// and the event and booking kinds of the Access Resolver decide as today.
+// The calendar programme's contracts answer alike in either store, against
+// real Postgres and Dgraph (design/calendar-vs-gcal/PROGRAM.md §5, and §9's
+// "contracts guarded"): the /event routes' functions with their rules, the
+// calendar's own API (Events) when the one store is on and a plain "not on
+// here" when it isn't, StatusFor saying focus and time off from the person's
+// events, and the event and booking kinds of the Access Resolver.
 //
 // Run: go test -tags=integration ./tests/integration/ -run TestCalendarDay0ContractsAnswerAsToday -v
 
@@ -22,19 +23,23 @@ import (
 	calendarAdapter "github.com/akashc777/OneCamp/adapter/Calendar"
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	calendarBusiness "github.com/akashc777/OneCamp/business/Calendar"
+	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/akashc777/OneCamp/tests/integration"
 )
 
 func TestCalendarDay0ContractsAnswerAsToday(t *testing.T) {
+	integration.ForEachCalendarStore(t, calendarContractsAnswer)
+}
+
+func calendarContractsAnswer(t *testing.T) {
 	env, dg := calendarStores(t)
 	ctx := context.Background()
 	maya := seedCalendarPerson(t, env.PG, dg, "Maya")
 	jonas := seedCalendarPerson(t, env.PG, dg, "Jonas")
 	sam := seedCalendarPerson(t, env.PG, dg, "Sam")
-	events := calendarBusiness.Events
-
 	start := time.Now().Add(2 * time.Hour).Truncate(time.Minute)
-	created, err := events.Create(ctx, maya, calendarAdapter.CreateOrUpdateEventInput{Title: "Design review",
+	created, err := calendarBusiness.CreateEvent(ctx, maya, calendarAdapter.CreateOrUpdateEventInput{Title: "Design review",
 		StartTime: rfc(start), EndTime: rfc(start.Add(30 * time.Minute)), Participants: []string{jonas.UserDgraphInfo.Uuid}})
 	if err != nil || created == nil {
 		t.Fatalf("create: %+v %v", created, err)
@@ -48,16 +53,25 @@ func TestCalendarDay0ContractsAnswerAsToday(t *testing.T) {
 		sees  bool
 		level accessBusiness.Level
 	}{{maya, true, accessBusiness.LevelFull}, {jonas, true, accessBusiness.LevelView}, {sam, false, accessBusiness.LevelNone}} {
-		_, err := events.Get(ctx, c.who, id.String())
+		_, err := calendarBusiness.GetEvent(ctx, c.who, id.String())
 		if c.sees != (err == nil) || (!c.sees && !errors.Is(err, calendarBusiness.ErrEventNotFound)) {
 			t.Errorf("%s getting it: %v", c.who.UserDgraphInfo.UserName, err)
+		}
+		// The calendar's own API, on when the one store is.
+		_, apiErr := calendarBusiness.Events.Get(ctx, c.who, id.String())
+		switch {
+		case !helpers.CalendarInPostgres() && !errors.Is(apiErr, calendarBusiness.ErrStoreOff):
+			t.Errorf("%s: the API with the store off: %v", c.who.UserDgraphInfo.UserName, apiErr)
+		case helpers.CalendarInPostgres() && c.sees != (apiErr == nil):
+			t.Errorf("%s: the API: %v", c.who.UserDgraphInfo.UserName, apiErr)
 		}
 		d, err := accessBusiness.Rules.Resolve(ctx, accessBusiness.Subject{UserUID: c.who.UserDgraphInfo.Uid, UserUUID: c.who.UserDgraphInfo.Uuid}, resource)
 		if err != nil || d.Level != c.level {
 			t.Errorf("%s's level: %+v %v, want %s", c.who.UserDgraphInfo.UserName, d, err, c.level)
 		}
 	}
-	listed, err := events.Range(ctx, jonas, start.Add(-time.Hour), start.Add(time.Hour))
+	from, to := start.Add(-time.Hour), start.Add(time.Hour)
+	listed, err := calendarBusiness.GetEventsList(ctx, jonas, &from, &to)
 	found := false
 	for _, e := range listed {
 		found = found || e.Uuid == id.String()
@@ -66,23 +80,29 @@ func TestCalendarDay0ContractsAnswerAsToday(t *testing.T) {
 		t.Errorf("Jonas's range doesn't list it: %d events, %v", len(listed), err)
 	}
 
-	// Only its creator changes it; a guest's one answer is leaving.
-	if err := events.Update(ctx, jonas, id, calendarAdapter.CreateOrUpdateEventInput{Title: "Mine now", StartTime: rfc(start), EndTime: rfc(start.Add(time.Hour))}); !errors.Is(err, calendarBusiness.ErrOnlyCreatorChanges) {
+	// Only its creator changes it; a guest answers (calendar A2), and
+	// leaving is its own act.
+	if err := calendarBusiness.UpdateEvent(ctx, id, calendarAdapter.CreateOrUpdateEventInput{Title: "Mine now", StartTime: rfc(start), EndTime: rfc(start.Add(time.Hour))}, jonas); !errors.Is(err, calendarBusiness.ErrOnlyCreatorChanges) {
 		t.Errorf("Jonas changing it: %v", err)
 	}
-	if err := events.Respond(ctx, maya, id, calendarBusiness.Declined); !errors.Is(err, calendarBusiness.ErrCreatorCannotLeave) {
+	if err := calendarBusiness.LeaveEvent(ctx, id, maya); !errors.Is(err, calendarBusiness.ErrCreatorCannotLeave) {
 		t.Errorf("Maya declining her own event: %v", err)
 	}
-	if err := events.Respond(ctx, jonas, id, calendarBusiness.Declined); err != nil {
+	if helpers.CalendarInPostgres() {
+		if err := calendarBusiness.Events.Respond(ctx, jonas, id.String(), calendarBusiness.Accepted); err != nil {
+			t.Errorf("Jonas's yes: %v", err)
+		}
+	}
+	if err := calendarBusiness.LeaveEvent(ctx, id, jonas); err != nil {
 		t.Fatalf("Jonas declining: %v", err)
 	}
-	if _, err := events.Get(ctx, jonas, id.String()); !errors.Is(err, calendarBusiness.ErrEventNotFound) {
+	if _, err := calendarBusiness.GetEvent(ctx, jonas, id.String()); !errors.Is(err, calendarBusiness.ErrEventNotFound) {
 		t.Errorf("Jonas still sees the event he left: %v", err)
 	}
-	if err := events.Delete(ctx, maya, id); err != nil {
+	if err := calendarBusiness.DeleteEvent(ctx, id, maya); err != nil {
 		t.Fatalf("Maya deleting it: %v", err)
 	}
-	if _, err := events.Get(ctx, maya, id.String()); !errors.Is(err, calendarBusiness.ErrEventNotFound) {
+	if _, err := calendarBusiness.GetEvent(ctx, maya, id.String()); !errors.Is(err, calendarBusiness.ErrEventNotFound) {
 		t.Errorf("a deleted event is still there: %v", err)
 	}
 
@@ -90,7 +110,7 @@ func TestCalendarDay0ContractsAnswerAsToday(t *testing.T) {
 	yes := true
 	now := time.Now()
 	focusEnd := now.Add(40 * time.Minute).Truncate(time.Minute)
-	if _, err := events.Create(ctx, maya, calendarAdapter.CreateOrUpdateEventInput{Title: "Write the launch post",
+	if _, err := calendarBusiness.CreateEvent(ctx, maya, calendarAdapter.CreateOrUpdateEventInput{Title: "Write the launch post",
 		StartTime: rfc(now.Add(-20 * time.Minute)), EndTime: rfc(focusEnd), IsFocus: &yes}); err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +121,7 @@ func TestCalendarDay0ContractsAnswerAsToday(t *testing.T) {
 		t.Errorf("Sam's free calendar says %+v %v", s, err)
 	}
 	awayEnd := now.Add(72 * time.Hour).Truncate(time.Minute)
-	if _, err := events.Create(ctx, maya, calendarAdapter.CreateOrUpdateEventInput{Title: "Holiday",
+	if _, err := calendarBusiness.CreateEvent(ctx, maya, calendarAdapter.CreateOrUpdateEventInput{Title: "Holiday",
 		StartTime: rfc(now.Add(-time.Hour)), EndTime: rfc(awayEnd), IsAway: &yes}); err != nil {
 		t.Fatal(err)
 	}

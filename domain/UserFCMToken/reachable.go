@@ -21,11 +21,13 @@ import (
 
 // reachableQuery is who of $1 the gate (pushGate) lets through now, each with
 // their devices' tokens (none for someone with no device, who is still told).
-var reachableQuery = `
+func reachableQuery() string {
+	return `
 	SELECT u.id::text, t.fcm_token
 	FROM unnest($1::uuid[]) AS u(id)
 	LEFT JOIN users_fcm_token t ON t.user_id = u.id
 	WHERE` + pushGate("u.id")
+}
 
 // reachableThroughPauseQuery is reachableQuery without the push gate, for
 // the one notice that goes through a pause (Notify anyway, one a day per
@@ -50,7 +52,7 @@ func stillActive(userCol string) string {
 // once; tokens are their devices'. An id that
 // isn't a uuid is skipped, never failing the read for everyone else.
 func ReachableNow(ctx context.Context, userIds []string) (users []string, tokens []string, err error) {
-	return reachable(ctx, reachableQuery, userIds)
+	return reachable(ctx, reachableQuery(), userIds)
 }
 
 // ReachableThroughPause is ReachableNow without the gate.

@@ -177,7 +177,7 @@ Incoming webhooks are rate-limited to **30 requests per minute** per token.
 4. **Scope**: Limit events to a specific channel or project, or receive all org-wide
 5. **Trigger Words** (optional): Only dispatch when the message contains specific words
 
-### Available Event Types (19 total)
+### Available Event Types (20 total)
 
 #### Posts
 | Event | Description |
@@ -225,6 +225,14 @@ Incoming webhooks are rate-limited to **30 requests per minute** per token.
 A doc's event goes to a webhook only when the person who set the webhook up can open
 the doc (for `doc.deleted`, could open it before it went to the trash). A doc event
 carries ids, never the doc's text, and a private doc's title is never in it.
+
+#### Tables
+| Event | Description |
+|-------|-------------|
+| `table.rows.changed` | A table's rows changed: one event for each change, however many rows it touched (a cell edited, a paste, a bulk delete, an undo, rows restored from the trash) |
+
+A bulk change sends one `table.rows.changed` that names every row it touched, in place
+of one event a row (see its payload below). It carries ids, never a cell's value.
 
 ### Payload Format
 
@@ -309,6 +317,34 @@ All outgoing webhooks receive:
   "updated_by": "user_dgraph_uid"
 }
 ```
+
+**table.rows.changed:**
+```json
+{
+  "table_id": "uuid",
+  "table_name": "Deals",
+  "change_set_id": "uuid",
+  "change": "paste",
+  "rows_changed": 2,
+  "created_row_ids": [],
+  "updated_row_ids": ["uuid", "uuid"],
+  "deleted_row_ids": [],
+  "restored_row_ids": [],
+  "field_ids": ["uuid"],
+  "row_field_ids": {"uuid": ["uuid"], "uuid": ["uuid"]}
+}
+```
+
+Each row the change touched is in exactly one of the four lists, by what happened
+to it: made, changed (its cells, its place or its links), deleted (to the table's
+trash), or brought back. `row_field_ids` names, row by row, the fields whose cells
+or links changed; `field_ids` is all of them. `change` is what kind of change it was:
+`edit`, `create`, `delete`, `paste`, `fill`, `import`, `move`, `links`, `undo`, `redo`,
+`restore` or `field` (a field's change rewrote its cells: an option renamed, its type
+changed). A change is at most 1,000 rows, except a field's, which can change every
+row of its table: its event names at most 1,000 and `rows_changed` says how many
+it changed. A webhook sent only ids keeps every key here but `table_name` and
+`change`. An AI column's fill sends none.
 
 **doc.shared:**
 ```json

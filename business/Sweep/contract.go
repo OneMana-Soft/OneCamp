@@ -20,7 +20,9 @@ package business
 // Redis key set once (SET NX) and kept for two intervals, so two instances
 // ticking in the same slot run the job once between them, whatever their phase,
 // and a slot nobody ticked in is simply skipped. One instance's own ticks are an
-// interval apart, so they never meet in one slot.
+// interval apart, so they never meet in one slot. A RunAtStart job also ticks
+// when the sweeps start, claimed the same way for the slot the start falls in;
+// its first interval tick is in the next slot.
 //
 // Without Redis (a single instance, or a test) every tick claims. With Redis
 // configured but not answering, a tick runs unclaimed, as every job ran before
@@ -51,6 +53,11 @@ type Job struct {
 	// taken FOR UPDATE SKIP LOCKED, as business/ContentIO's runner does), so
 	// every instance runs every pass and they share the work between them.
 	ClaimsItsOwnWork bool
+	// RunAtStart is a job whose first pass is when the sweeps start rather than
+	// one interval later: conversations.index, whose comparison a process that
+	// has just started waits for before it trusts the conversations index
+	// (business/Conversation index.go).
+	RunAtStart bool
 }
 
 // claimer says whether this instance runs job's pass for slot. ttl is how long a
@@ -126,9 +133,13 @@ func (r *Registry) claimer() claimer {
 	return claimInRedis
 }
 
-// every ticks j once per interval, the first time one interval after the start,
-// until ctx is done, and runs it on each tick whose slot it claims.
+// every ticks j once per interval, the first time one interval after the start
+// (and at the start too for a RunAtStart job), until ctx is done, and runs it on
+// each tick whose slot it claims.
 func every(ctx context.Context, j Job, claim claimer) {
+	if j.RunAtStart && ctx.Err() == nil {
+		tick(ctx, j, claim, time.Now())
+	}
 	t := time.NewTicker(j.Every)
 	defer t.Stop()
 	for {
@@ -136,10 +147,15 @@ func every(ctx context.Context, j Job, claim claimer) {
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			if j.ClaimsItsOwnWork || claim(ctx, j.Name, slotOf(now, j.Every), 2*j.Every) {
-				runOnce(ctx, j)
-			}
+			tick(ctx, j, claim, now)
 		}
+	}
+}
+
+// tick runs j for the slot now falls in, when this instance claims it.
+func tick(ctx context.Context, j Job, claim claimer, now time.Time) {
+	if j.ClaimsItsOwnWork || claim(ctx, j.Name, slotOf(now, j.Every), 2*j.Every) {
+		runOnce(ctx, j)
 	}
 }
 

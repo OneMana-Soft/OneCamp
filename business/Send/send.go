@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	chatAdapter "github.com/akashc777/OneCamp/adapter/Chat"
 	postAdapter "github.com/akashc777/OneCamp/adapter/Post"
@@ -93,6 +94,12 @@ func PrepareChannelPost(ctx context.Context, user *userModels.UserInfo, in *post
 	if rj := MayPostIn(channel); rj != nil {
 		return nil, rj
 	}
+	// Through an API token (the public API, MCP, an agent run one asked for), never
+	// as one of the channel's admins: a token posts as a member, and an announcement
+	// channel's admins post in it in the app, as themselves (helpers.ActsThroughToken).
+	if channel.PostPolicy == "admins_only" && helpers.ActsThroughToken(ctx) {
+		return nil, &Rejection{Status: http.StatusForbidden, Msg: "Only channel admins can post in this announcement channel, in the app: a token posts as a member"}
+	}
 	mentions, err := resolveMentions(ctx, in.HTMLText)
 	if err != nil {
 		return nil, err
@@ -141,6 +148,31 @@ func (p *ChannelPost) Commit(ctx context.Context) (*postAdapter.OutputCreatePost
 		helpers.LogErrorWithContext(ctx, "Send/ChannelPost.Commit last seen err: %+v", lerr)
 	}
 	return created, nil
+}
+
+// CommitDurably writes the post as the durable pipeline does (chat A2,
+// business/Post durable.go): its rows and events at once, its side effects
+// from the outbox; clientMsgID is the id the app gave it. Then, as Commit, the
+// channel is read up to it for the sender.
+func (p *ChannelPost) CommitDurably(ctx context.Context, clientMsgID string) (*postAdapter.OutputCreatePostForPost, error) {
+	created, err := postBusiness.CreatePostDurably(ctx, p.in, p.user, p.mentions, p.channel, clientMsgID)
+	if err != nil {
+		return nil, durableRefusal(err)
+	}
+	if lerr := lastseenBusiness.CreateOrUpdateLastSeenChannel(ctx, p.user.UserPostgresInfo.Id, p.in.ChannelUUID); lerr != nil {
+		helpers.LogErrorWithContext(ctx, "Send/ChannelPost.CommitDurably last seen err: %+v", lerr)
+	}
+	return created, nil
+}
+
+// durableRefusal is a durable write's error as the routes answer it: a retry
+// whose first try hasn't finished is answered as Once answers a send in
+// flight, so the app tries again. Pure.
+func durableRefusal(err error) error {
+	if errors.Is(err, postBusiness.ErrStillBeingSent) {
+		return reject(http.StatusConflict, "This message is still being sent", err)
+	}
+	return err
 }
 
 // AlsoInChannel posts html in a channel as the person, for a feature that
@@ -248,8 +280,8 @@ func PrepareGroupMessage(ctx context.Context, user *userModels.UserInfo, in *cha
 		}
 		sender := false
 		for _, p := range users {
-			if p.IsExternal {
-				return nil, reject(http.StatusBadRequest, "Cannot add external users to group chats", nil)
+			if rj := MayBeInGroup(p); rj != nil {
+				return nil, rj
 			}
 			sender = sender || p.Uuid == user.UserDgraphInfo.Uuid
 		}
@@ -266,6 +298,24 @@ func PrepareGroupMessage(ctx context.Context, user *userModels.UserInfo, in *cha
 		return nil, err
 	}
 	return &GroupMessage{in: in, user: user, participants: participants, mentions: mentions}, nil
+}
+
+// MayBeInGroup is the rule for being one of a group's people: an account
+// someone signs in to (an external identity, imported or synced, never does)
+// that isn't deactivated. A new group's people are held to it, and so is
+// everyone added to one (business/Conversation AddPeople), so the rule has one
+// copy. The external check had read a field the participants' lookup never
+// selected, so it never refused anyone.
+func MayBeInGroup(u *dgraphStruct.DgraphUser) *Rejection {
+	switch {
+	case u == nil || u.Uid == "" || u.Uuid == "":
+		return &Rejection{Status: http.StatusBadRequest, Msg: "Got unregistered users in participants"}
+	case u.IsExternal:
+		return &Rejection{Status: http.StatusBadRequest, Msg: "Cannot add external users to group chats"}
+	case helpers.IsSoftDeleted(u.DeletedAt):
+		return &Rejection{Status: http.StatusBadRequest, Msg: strings.TrimSpace(u.DisplayName() + " can't be added: their account is deactivated.")}
+	}
+	return nil
 }
 
 // Commit writes the group message.

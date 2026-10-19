@@ -195,6 +195,9 @@ const postPageFields = `
 						post_text
 						post_created_at
 						post_updated_at
+						post_kind
+						post_system
+						post_copy_of
 						post_comment_count : count(post_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
 						post_comments (orderdesc: comment_created_at, first: 1){
 							comment_created_at
