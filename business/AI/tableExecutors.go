@@ -14,6 +14,8 @@ import (
 	"strings"
 
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
+	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
+	"github.com/akashc777/OneCamp/helpers"
 	tableModel "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	memoryModels "github.com/akashc777/OneCamp/models/postgres/WorkspaceMemory"
@@ -33,9 +35,11 @@ func registerTableExecutors() {
 }
 
 // tableActor builds a DataTable actor for the acting user, carrying their admin
-// flag so the permission model resolves correctly. The context it returns is
-// the one to read and write with: when an agent run acts for someone other
-// than its sponsor, it also names that person (forAskerToo).
+// flag so the permission model resolves correctly, unless the call acts through
+// an API token (MCP, or an agent run a token asked for): then it is a member's,
+// and list_tables lists what a member sees (helpers.ActsThroughToken). The
+// context it returns is the one to read and write with: when an agent run acts
+// for someone other than its sponsor, it also names that person (forAskerToo).
 func tableActor(ctx context.Context, userUUID string) (context.Context, dataTableBusiness.Actor, error) {
 	userInfo, err := getUserInfoForExecutor(ctx, userUUID)
 	if err != nil {
@@ -47,7 +51,8 @@ func tableActor(ctx context.Context, userUUID string) (context.Context, dataTabl
 	}
 	return ctx, dataTableBusiness.Actor{
 		UserID:  userInfo.UserPostgresInfo.Id,
-		IsAdmin: userInfo.UserPostgresInfo.IsAdmin,
+		IsAdmin: userInfo.UserPostgresInfo.IsAdmin && !helpers.ActsThroughToken(ctx),
+		Kind:    rowLedger.ActorAgent,
 	}, nil
 }
 
@@ -99,7 +104,7 @@ func executeReadTable(ctx context.Context, action ai.ProposedAction, userUUID st
 	}
 	actor := dataTableBusiness.Actor{
 		UserID:  userInfo.UserPostgresInfo.Id,
-		IsAdmin: userInfo.UserPostgresInfo.IsAdmin,
+		IsAdmin: userInfo.UserPostgresInfo.IsAdmin && !helpers.ActsThroughToken(ctx),
 	}
 	ctx, aerr := forAskerToo(ctx)
 	if aerr != nil {

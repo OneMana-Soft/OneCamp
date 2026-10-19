@@ -18,6 +18,14 @@ var ErrNotFound = helpers.NotFound("failed to get dgraph project")
 
 func CreateOrUpdateDgraphProject(ctx context.Context, dgraphProject *dgraphStruct.DgraphProject, query string) (projectUid string, err error) {
 	txn := dgraphInit.DgraphClient.NewTxn()
+	// What a reader may do in it is laid over a project read for them (Work
+	// Access), never written: a project read and written back must not carry
+	// it in as a node.
+	if dgraphProject != nil && dgraphProject.Access != nil {
+		stored := *dgraphProject
+		stored.Access = nil
+		dgraphProject = &stored
+	}
 	pb, err := json.Marshal(dgraphProject)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

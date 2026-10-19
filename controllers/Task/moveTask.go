@@ -8,6 +8,8 @@ import (
 
 	business "github.com/akashc777/OneCamp/business/Task"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -24,7 +26,7 @@ type moveTaskInput struct {
 // MoveTask POST /task/moveTask: a card dropped on a board. Sets its status and
 // keeps its place in the column, so it is still there on the next load.
 // The status is a built-in key or one of the project's custom statuses.
-// Same permission as changing a task's status: project admins.
+// Same permission as changing a task's status (Work Access).
 func MoveTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
@@ -58,8 +60,8 @@ func MoveTask(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Task not found"})
 		return
 	}
-	if dgraphTaskInfo.Project == nil || dgraphTaskInfo.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only project admins can move tasks"})
+	// Moving a card is changing its task (Work Access).
+	if !projectaccess.AllowTask(w, r, dgraphTaskInfo, workAccess.NeedEditTask) {
 		return
 	}
 

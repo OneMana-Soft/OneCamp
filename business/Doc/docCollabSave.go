@@ -111,7 +111,7 @@ func SaveFromCollab(ctx context.Context, in CollabSave) (CollabSaved, error) {
 
 	c := Change{
 		DocUUID: in.DocUUID, Body: in.HTML, Hash: hash, PrevHash: w.PrevHash, Lineage: in.Lineage,
-		Contributors: in.Contributors, Agents: in.Agents, SavedAt: time.Now(),
+		Contributors: in.Contributors, Agents: in.Agents, SavedAt: time.Now(), Hosted: w.Hosted,
 	}
 	if previous != "" && massDeletion(len(previous), len(in.HTML)) {
 		c.Previous = previous

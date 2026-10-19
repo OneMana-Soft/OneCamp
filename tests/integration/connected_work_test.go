@@ -8,8 +8,9 @@ package integration_test
 // to whoever may open it (a doc as the Access Resolver decides, a task and a
 // project by the task view's rule), and a doc is linked to a task only by
 // someone it may be named to (ReadableTitles); the "@" list learns who can't
-// open a doc; a to-do becomes a task only for one of the project's admins,
-// tied to its doc, and a tick in the doc changes the task only for them; the
+// open a doc; a to-do becomes a task only for someone who may add tasks to
+// the project, tied to its doc, and a tick in the doc changes the task only
+// for someone who may change it; the
 // ties keep, list and go; and the ties' migration goes down and up again.
 //
 // Run: go test -tags=integration ./tests/integration/ -run TestConnectedWork -v
@@ -103,6 +104,11 @@ func TestConnectedWork(t *testing.T) {
 	if _, err := env.PG.Exec(`INSERT INTO tasks (id, project_id, created_by) VALUES ($1, $2, $3)`, task, project, people["olu"]); err != nil {
 		t.Fatal(err)
 	}
+	// Gus is in the project and only views it (Work Access, A1): members
+	// change tasks by default, so the cases below need someone who may not.
+	if _, err := env.PG.Exec(`INSERT INTO project_roles (project_id, user_id, role) VALUES ($1, $2, 'viewer')`, project, people["gus"]); err != nil {
+		t.Fatal(err)
+	}
 	zero := "0001-01-01T00:00:00Z"
 	nodes = append(nodes,
 		map[string]any{"uid": "_:team", "dgraph.type": "Team", "team_uuid": team.String(), "team_name": "Launch", "team_deleted_at": zero,
@@ -180,7 +186,7 @@ func TestConnectedWork(t *testing.T) {
 		}
 		if e := gus["task:"+task.String()]; str(e["access"]) != "ok" || e["data"].(map[string]any)["can_edit"] != false ||
 			str(e["data"].(map[string]any)["name"]) != "Record the film" || str(e["topic"]) != helpers.GetMqttTopicForProjectMessage(project.String()) {
-			t.Errorf("the task for Gus, a member: %v", e)
+			t.Errorf("the task for Gus, a viewer: %v", e)
 		}
 		if e := gus["project:"+project.String()]; str(e["access"]) != "ok" || e["data"].(map[string]any)["can_edit"] != false {
 			t.Errorf("the project for Gus: %v", e)
@@ -238,10 +244,10 @@ func TestConnectedWork(t *testing.T) {
 	})
 
 	var made string
-	t.Run("a to-do becomes a task only for one of the project's admins", func(t *testing.T) {
+	t.Run("a to-do becomes a task only for someone who may add tasks", func(t *testing.T) {
 		in := map[string]any{"doc_uuid": plan, "project_uuid": project.String(), "title": "Write the launch post"}
 		if a := call("gus", "/doc/todoTask", entityLinkController.TodoToTask, in); a.code != 403 {
-			t.Fatalf("Gus, a member, made a task: %d %v", a.code, a.body)
+			t.Fatalf("Gus, a viewer, made a task: %d %v", a.code, a.body)
 		}
 		if a := call("zed", "/doc/todoTask", entityLinkController.TodoToTask, in); a.code != 403 {
 			t.Fatalf("Zed, who can't edit Plan, made a task: %d %v", a.code, a.body)

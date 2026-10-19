@@ -933,22 +933,13 @@ func GetAllTeamsList(w http.ResponseWriter, r *http.Request) {
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	pageValue := r.URL.Query()["pageIndex"]
-	limitValue := r.URL.Query()["pageSize"]
-
 	pageIndex := 0
-	pageSize := 20
+	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 100)
 
 	if len(pageValue) > 0 {
 		pageInt, err := strconv.Atoi(pageValue[0])
 		if err == nil {
 			pageIndex = pageInt
-		}
-	}
-
-	if len(limitValue) > 0 {
-		limitInt, err := strconv.Atoi(limitValue[0])
-		if err == nil {
-			pageSize = limitInt
 		}
 	}
 

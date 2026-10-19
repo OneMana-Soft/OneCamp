@@ -45,6 +45,7 @@ func TestAnEventReachesAnAgentOnlyWhereItsSponsorCanSee(t *testing.T) {
 		{"a task in their project", "task.created", map[string]interface{}{"project_id": "mine"}, true},
 		{"a task in another project", "task.status_changed", map[string]interface{}{"project_id": "theirs"}, false},
 		{"a row in a table they view", "table.row.updated", map[string]interface{}{"table_id": "t1"}, true},
+		{"rows of a table they view, changed together", "table.rows.changed", map[string]interface{}{"table_id": "t1"}, true},
 		{"a row in another table", "table.row.created", map[string]interface{}{"table_id": "t2"}, false},
 		{"a pull request on their project's repo", "github.pr.opened", map[string]interface{}{"project_id": "mine"}, true},
 		{"CI on another project's repo", "github.check_run.completed", map[string]interface{}{"project_id": "theirs"}, false},

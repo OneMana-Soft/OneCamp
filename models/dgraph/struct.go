@@ -113,6 +113,13 @@ type DgraphPost struct {
 	// resolves only its immediate parent). Mirrors the forward-message edge.
 	ReplyToPost *DgraphPost `json:"post_reply_to,omitempty"`
 	DType       []string    `json:"dgraph.type,omitempty"`
+	// Kind is "system" for a line the server writes about the conversation
+	// (business/Conversation's SystemLine), "" for a person's message. System
+	// is the line's facts as JSON. Never notified or counted unread.
+	Kind   string `json:"post_kind,omitempty"`
+	System string `json:"post_system,omitempty"`
+	// CopyOf is the message a shared history copied this one from.
+	CopyOf string `json:"post_copy_of,omitempty"`
 }
 
 type DgraphChannel struct {
@@ -188,9 +195,12 @@ type DgraphUser struct {
 	Channels    []*DgraphChannel `json:"user_channels,omitempty"`
 	FavChannels []*DgraphChannel `json:"user_fav_channels,omitempty"`
 	IsAdmin     bool             `json:"user_is_admin,omitempty"`
-	DemoVisitor bool             `json:"user_demo_visitor,omitempty"` // on your own profile only: you are the public demo's shared visitor (helpers.IsDemoVisitor). Never stored.
-	IsExternal  bool             `json:"is_external,omitempty"`
-	IsBot       bool             `json:"is_bot,omitempty"`
+	// ProjectRole is their role in the project a member list is of (admin,
+	// member, commenter or viewer). Never stored.
+	ProjectRole string `json:"user_project_role,omitempty"`
+	DemoVisitor bool   `json:"user_demo_visitor,omitempty"` // on your own profile only: you are the public demo's shared visitor (helpers.IsDemoVisitor). Never stored.
+	IsExternal  bool   `json:"is_external,omitempty"`
+	IsBot       bool   `json:"is_bot,omitempty"`
 	// BotKind says WHICH kind of bot this principal is. Computed at response
 	// time from the email and never stored, the same shape as IsModerator
 	// above. is_bot alone cannot carry it: the assistant, an agent's principal
@@ -247,6 +257,10 @@ type DgraphChat struct {
 	// chat replies to, in the SAME DM/group grouping. One level deep. Mirrors
 	// the forward-message edge; used for both DMs and group chats.
 	ReplyToChat *DgraphChat `json:"chat_reply_to,omitempty"`
+	// Kind, System and CopyOf are as a post's (DgraphPost).
+	Kind   string `json:"chat_kind,omitempty"`
+	System string `json:"chat_system,omitempty"`
+	CopyOf string `json:"chat_copy_of,omitempty"`
 }
 
 type DgraphAttachment struct {
@@ -281,6 +295,7 @@ type DgraphDm struct {
 	Uid                 string             `json:"uid,omitempty"`
 	DType               []string           `json:"dgraph.type,omitempty"`
 	GroupingId          string             `json:"dm_grouping_id,omitempty"`
+	Name                string             `json:"dm_name,omitempty"` // a group's name, which any of its people may set
 	Participants        []*DgraphUser      `json:"dm_participants,omitempty"`
 	ParticipantIsMember uint64             `json:"dm_is_member,omitempty"`
 	Chats               []*DgraphChat      `json:"dm_chats,omitempty"`
@@ -351,6 +366,11 @@ type DgraphDoc struct {
 	// the workspace's, by its privacy.
 	SpaceKind string `json:"doc_space_kind,omitempty"`
 	SpaceUUID string `json:"doc_space_uuid,omitempty"`
+	// What a hosted doc belongs to, set once when it is made (docs D-18): a
+	// table row's page is hosted by the row ("table_row", its id). Its level
+	// is its host's (business/Doc docHost.go); none, for a doc that has one.
+	HostKind string `json:"doc_host_kind,omitempty"`
+	HostUUID string `json:"doc_host_uuid,omitempty"`
 
 	// How it looks.
 	Icon        string `json:"doc_icon,omitempty"`
@@ -540,6 +560,9 @@ type DgraphTask struct {
 	// They live in Postgres and are laid over a task read for the app; they
 	// are never written to Dgraph (see models/dgraph/Task). See business/TaskField.
 	Fields map[string]json.RawMessage `json:"task_fields,omitempty"`
+	// Access is what the person it was read for may do with it (Work Access,
+	// set after the read). Never stored.
+	Access *TaskAccess `json:"task_access,omitempty"`
 }
 
 // DgraphMemoryItem is the GraphRAG projection of a workspace_memory_items
@@ -599,6 +622,34 @@ type DgraphEvent struct {
 	// Booking is set, on an answer to its creator only, when a guest booked
 	// this event through one of their booking pages. Never stored.
 	Booking *EventBooking `json:"event_booking,omitempty"`
+	// Guests are its guests' answers, as the reader may see them (calendar
+	// A2, from the one store): members by uuid, and guests invited by email
+	// by name and address. Answers only, never stored here.
+	Guests []EventGuest `json:"event_guests,omitempty"`
+	// Reminders are the reader's own reminders for it, minutes before
+	// (calendar A5, the one store): empty for none, and RemindersDefault
+	// when they set none and these are the default's.
+	Reminders        *[]int `json:"event_reminders,omitempty"`
+	RemindersDefault bool   `json:"event_reminders_default,omitempty"`
+	// Hue is the colour its organiser gave it, and Location where it is
+	// (the calendar's Event Form, from the one store), so the grid draws
+	// each event in its own colour. Answers only, never stored here.
+	Hue      string `json:"event_hue,omitempty"`
+	Location string `json:"event_location,omitempty"`
+}
+
+// EventGuest is one guest's answer to an event: needs_action, accepted,
+// declined or tentative, with their note.
+type EventGuest struct {
+	UserUUID string `json:"user_uuid,omitempty"`
+	Email    string `json:"email,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Role     string `json:"role"`
+	Response string `json:"response"`
+	Note     string `json:"note,omitempty"`
+	// Invite, to the organiser alone, says whether a guest by email was
+	// emailed their invitation: sent, not_sent or failed.
+	Invite string `json:"invite,omitempty"`
 }
 
 // EventBooking is what a booked event's creator sees of its booking: who
@@ -651,6 +702,9 @@ type DgraphProject struct {
 	DeletedAt        *time.Time          `json:"project_deleted_at,omitempty"`
 	LinkedDocs       []*DgraphDoc        `json:"linked_docs,omitempty"`
 	LinkedBoards     []*DgraphBoard      `json:"linked_boards,omitempty"`
+	// Access is what the person it was read for may do in it (Work Access,
+	// set after the read). Never stored.
+	Access *ProjectAccess `json:"project_access,omitempty"`
 }
 
 type DgraphTeam struct {

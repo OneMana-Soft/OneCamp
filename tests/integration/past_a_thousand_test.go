@@ -35,7 +35,6 @@ import (
 	taskController "github.com/akashc777/OneCamp/controllers/Task"
 	userController "github.com/akashc777/OneCamp/controllers/User"
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -97,8 +96,7 @@ func TestBoardsListsAndHistoryPastAThousand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	opensearchInit.OpenSearchClient = client
-	t.Cleanup(func() { opensearchInit.OpenSearchClient = nil })
+	integration.UseOpenSearchClient(t, client)
 
 	const live = "0001-01-01T00:00:00Z"
 	rfc := func(tm time.Time) string { return tm.UTC().Format(time.RFC3339) }
@@ -365,14 +363,18 @@ func TestBoardsListsAndHistoryPastAThousand(t *testing.T) {
 	if code := pastCall(t, taskController.GetTaskActivityList, "GET", fmt.Sprintf("/task/getTaskActivityList/%s?before=%s", hid, uuid.NewString()), nil, ada1, hp, nil); code != http.StatusBadRequest {
 		t.Fatalf("a line the task doesn't have: %d, want 400", code)
 	}
-	// Someone outside the project learns nothing, not even which lines exist.
+	// Someone outside the project learns nothing about the task, not even
+	// which lines exist. By Work Access's one rule, every task route answers
+	// a task the caller may not read as one that isn't there (404,
+	// writeTaskRefusal), and its history does too: the same answer for a line
+	// it has and one it hasn't. A 403 would say the task is there.
 	bob1 := userModels.UserInfo{
 		UserPostgresInfo: userModels.User{Id: bob, EmailID: "bob@example.test"},
 		UserDgraphInfo:   dgraphStruct.DgraphUser{Uid: base["bob"], Uuid: bob.String(), UserName: "bob"},
 	}
 	for _, line := range []string{lineIDs[500], uuid.NewString()} {
-		if code := pastCall(t, taskController.GetTaskActivityList, "GET", fmt.Sprintf("/task/getTaskActivityList/%s?before=%s", hid, line), nil, bob1, hp, nil); code != http.StatusForbidden {
-			t.Fatalf("history before %s for someone outside the project: %d, want 403", line, code)
+		if code := pastCall(t, taskController.GetTaskActivityList, "GET", fmt.Sprintf("/task/getTaskActivityList/%s?before=%s", hid, line), nil, bob1, hp, nil); code != http.StatusNotFound {
+			t.Fatalf("history before %s for someone outside the project: %d, want 404", line, code)
 		}
 	}
 

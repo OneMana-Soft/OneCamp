@@ -262,3 +262,9 @@ func Complete(id uuid.UUID, done int, carry []string, next *uuid.UUID) (bool, er
 	}
 	return true, tx.Commit()
 }
+
+// ProjectsOf is each cycle's project, by the cycle's id; a cycle that isn't
+// there is left out.
+func ProjectsOf(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]uuid.UUID, error) {
+	return postgresInit.UUIDPairs(ctx, `SELECT id, project_uuid FROM project_cycles WHERE id = ANY($1)`, ids)
+}

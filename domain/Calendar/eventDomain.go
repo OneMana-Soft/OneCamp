@@ -10,6 +10,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Calendar"
 	models "github.com/akashc777/OneCamp/models/postgres/Calendar"
+	v2Models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
 	"github.com/google/uuid"
 )
 
@@ -286,4 +287,10 @@ func GetDgraphEventsByUserId(ctx context.Context, userUuid string, startDate *ti
 		return nil, err
 	}
 	return events, nil
+}
+
+// SetEventGoogleID records an event's copy in Google Calendar in the
+// calendar's one store: the id, and nothing else.
+func SetEventGoogleID(ctx context.Context, id uuid.UUID, googleID string) error {
+	return v2Models.SetGoogleID(ctx, v2Models.Pool(), id, googleID)
 }

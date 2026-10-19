@@ -144,7 +144,7 @@ type Pager interface {
 
 // ErrNotFound is a conversation that isn't there or that who can't read: the
 // two answer alike.
-var ErrNotFound = errors.New("conversation: no such conversation")
+var ErrNotFound = helpers.NotFound("conversation: no such conversation")
 
 // Pages is the page read everything asks.
 var Pages Pager = todaysPages{}

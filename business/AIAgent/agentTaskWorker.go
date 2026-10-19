@@ -708,7 +708,7 @@ func runOneAgentTask(ctx context.Context, t *model.AgentTask) {
 	// job that reaches the tool loop was asked for by someone — a mention, a DM,
 	// a task handed over, a follow-up — so a job with no recorded asker refuses
 	// whatever needs one instead of running with the sponsor's whole reach.
-	runCtx = askedBy(runCtx, jobRequester(t))
+	runCtx = askedForJob(runCtx, t)
 	// What the person who asked wrote, carried at the end of the stored prompt
 	// (agentAskerWords.go), and taken off before the model sees it.
 	prompt, askerWords := splitAskerWords(t.Prompt)

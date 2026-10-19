@@ -21,7 +21,13 @@ import (
 	"google.golang.org/api/calendar/v3"
 )
 
+// CreateEvent makes an event for userInfo. With the calendar's one store on
+// (helpers.CalendarInPostgres) it is written there (legacy.go); otherwise to
+// the two stores, as below.
 func CreateEvent(ctx context.Context, userInfo *model.UserInfo, eventInfo adapter.CreateOrUpdateEventInput) (*adapter.OutputEvent, error) {
+	if helpers.CalendarInPostgres() {
+		return stored.legacyCreate(ctx, userInfo, eventInfo)
+	}
 	eventUUID := uuid.New()
 	currentTime := time.Now()
 	zeroUnixTime := time.Time{}
@@ -210,6 +216,9 @@ func diffParticipants(existing *dgraphStruct.DgraphEvent, wanted []string) (add 
 // and whoever it no longer names is taken off and told. A request without
 // participants leaves the guests as they are.
 func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.CreateOrUpdateEventInput, userInfo *model.UserInfo) error {
+	if helpers.CalendarInPostgres() {
+		return stored.legacyUpdate(ctx, eventUUID, eventInfo, userInfo)
+	}
 	currentTime := time.Now()
 
 	existingEvent, err := domain.GetDgraphEventInfoByUUID(ctx, eventUUID.String())
@@ -376,7 +385,12 @@ func tellRemovedGuests(ctx context.Context, actor *dgraphStruct.DgraphUser, even
 // delete it: invitees leave an event, they don't delete it for everyone.
 var ErrNotEventCreator = errors.New("Only the person who made this event can delete it.")
 
+// DeleteEvent deletes an event, for its creator: to the trash in the one
+// store, or from both old stores.
 func DeleteEvent(ctx context.Context, eventUUID uuid.UUID, userInfo *model.UserInfo) error {
+	if helpers.CalendarInPostgres() {
+		return stored.legacyDelete(ctx, eventUUID, userInfo)
+	}
 	currentTime := time.Now()
 
 	existingEvent, err := domain.GetDgraphEventInfoByUUID(ctx, eventUUID.String())
@@ -418,7 +432,11 @@ func DeleteEvent(ctx context.Context, eventUUID uuid.UUID, userInfo *model.UserI
 	return nil
 }
 
+// LeaveEvent takes a guest off an event.
 func LeaveEvent(ctx context.Context, eventUUID uuid.UUID, userInfo *model.UserInfo) error {
+	if helpers.CalendarInPostgres() {
+		return stored.legacyLeave(ctx, eventUUID, userInfo)
+	}
 
 	existingEvent, err := domain.GetDgraphEventInfoByUUID(ctx, eventUUID.String())
 	if errors.Is(err, domain.ErrEventNotFound) {
@@ -499,10 +517,25 @@ func LeaveEvent(ctx context.Context, eventUUID uuid.UUID, userInfo *model.UserIn
 	return nil
 }
 
+// graphEventsOf is a person's events in the graph, as every read before the
+// one store had them; a seam for tests.
+var graphEventsOf = domain.GetDgraphEventsByUserId
+
+// GetEventsList is user's events between startDate and endDate, from the one
+// store or the graph, with their linked Google calendar's.
 func GetEventsList(ctx context.Context, user *model.UserInfo, startDate *time.Time, endDate *time.Time) ([]*dgraphStruct.DgraphEvent, error) {
 	userIdStr := user.UserDgraphInfo.Uuid
 
-	events, err := domain.GetDgraphEventsByUserId(ctx, userIdStr, startDate, endDate)
+	var events []*dgraphStruct.DgraphEvent
+	var err error
+	if helpers.CalendarReadsFromStore() {
+		if startDate == nil || endDate == nil {
+			return nil, &EventInputError{"Say which days to read."}
+		}
+		events, err = stored.legacyRange(ctx, user, *startDate, *endDate)
+	} else {
+		events, err = graphEventsOf(ctx, userIdStr, startDate, endDate)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -616,6 +649,12 @@ func GetEvent(ctx context.Context, userInfo *model.UserInfo, eventID string) (*d
 		if ev = googleEventItem(item, userInfo); ev == nil {
 			return nil, ErrEventNotFound
 		}
+	} else if helpers.CalendarReadsFromStore() {
+		found, err := stored.legacyGet(ctx, userInfo, eventID)
+		if err != nil {
+			return nil, err
+		}
+		ev = found
 	} else {
 		id, err := uuid.Parse(eventID)
 		if err != nil {

@@ -7,8 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/akashc777/OneCamp/business/DataTable/formula"
 	formBusiness "github.com/akashc777/OneCamp/business/Form"
+	"github.com/akashc777/OneCamp/business/Formula"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	formModel "github.com/akashc777/OneCamp/models/postgres/Form"
@@ -37,7 +38,7 @@ func write(w http.ResponseWriter, r *http.Request, where string, err error) {
 
 // ListForms. GET /project/{p}/forms
 func ListForms(w http.ResponseWriter, r *http.Request) {
-	id, p, ok := projectaccess.Require(w, r, false, denied)
+	id, _, standing, ok := projectaccess.RequireStanding(w, r, workAccess.NeedView, denied)
 	if !ok {
 		return
 	}
@@ -46,12 +47,12 @@ func ListForms(w http.ResponseWriter, r *http.Request) {
 		write(w, r, "ListForms", err)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"forms": forms, "can_edit": p.IsProjectAdmin > 0}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"forms": forms, "can_edit": standing.Can(workAccess.NeedManage)}})
 }
 
 // SaveForm creates or updates a form. POST /project/{p}/forms
 func SaveForm(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := projectaccess.Require(w, r, true, denied)
+	id, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, denied)
 	if !ok {
 		return
 	}
@@ -71,7 +72,7 @@ func SaveForm(w http.ResponseWriter, r *http.Request) {
 
 // DeleteForm; tasks it made stay. POST /project/{p}/forms/{form_id}/delete
 func DeleteForm(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := projectaccess.Require(w, r, true, denied)
+	id, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, denied)
 	if !ok {
 		return
 	}

@@ -191,6 +191,11 @@ func ContinueAgentWork(ctx context.Context, entityID, authorID, followup string)
 			if t.SourceType != codepr.TaskSourceType {
 				ft.Prompt = withAskerWordsTrailer(ft.Prompt, []string{followup})
 			}
+			// Whether the follow-up came through an API token is its own request's to
+			// say, not the job it follows (askedForJob).
+			if s := DecodeSurface(t.Surface); s.AskedThroughToken != helpers.ActsThroughToken(ctx) {
+				ft.Surface, _ = EncodeSurface(askedThrough(ctx, s))
+			}
 			if tb, perr := uuid.Parse(strings.TrimSpace(authorID)); perr == nil {
 				// The follow-up is its author's own request, for them.
 				ft.TriggeredBy = &tb

@@ -18,6 +18,7 @@ import (
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	githubCommentMappingDomain "github.com/akashc777/OneCamp/domain/GitHubCommentMapping"
@@ -1549,6 +1550,27 @@ func UpdateTaskLabelByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskLabe
 	return
 }
 
+// taskSearchCascades runs each task's search marks one at a time in the
+// order the task was deleted and restored. Each started on goroutines of
+// their own, so a delete and an undo close together raced, and a restore
+// whose clear finished before the delete's mark left a live task's comments,
+// files and AI embeddings out of search.
+var taskSearchCascades helpers.InOrder
+
+// taskInSearch marks a task, and its comments, files and AI embeddings,
+// archived at archivedAt in search or, archivedAt nil, live again. A seam for
+// tests.
+var taskInSearch = func(taskUUID string, archivedAt *int64, updatedAt int64, attachments []*dgraphStruct.DgraphAttachment) {
+	domain.UpdateTaskWithAttachmentsInOpenSearch(&openSearchStruct.OpenSearchTask{Uuid: taskUUID, TaskDeletedAt: archivedAt, TaskUpdatedAt: updatedAt}, attachments)
+	fields := []string{"comment_task_id", "attachment_task_id", "content_uuid", "task_uuid"}
+	indices := []string{"comments", "attachments", "ai_embeddings"}
+	if archivedAt != nil {
+		_ = globalSearchDomain.SyncCascadingDeletionInOpenSearch(fields, taskUUID, *archivedAt, indices, "cascade")
+		return
+	}
+	_ = globalSearchDomain.SyncCascadingUnarchiveInOpenSearch(fields, taskUUID, indices, "cascade")
+}
+
 func ArchiveTaskByTaskUUID(ctx context.Context, taskUUID uuid.UUID, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser) (err error) {
 	currentTime := time.Now()
 	activityUUID := uuid.New()
@@ -1598,20 +1620,8 @@ func ArchiveTaskByTaskUUID(ctx context.Context, taskUUID uuid.UUID, dgraphTaskIn
 		return
 	}
 
-	taskOpenSearch := &openSearchStruct.OpenSearchTask{
-		Uuid:          taskUUID.String(),
-		TaskDeletedAt: helpers.Int64Pointer(currentTime.Unix()),
-		TaskUpdatedAt: currentTime.Unix(),
-	}
-	go domain.UpdateTaskWithAttachmentsInOpenSearch(taskOpenSearch, dgraphTaskInfo.Attachments)
-	// Cascade to comments, attachments, and AI embeddings in one call
-	go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
-		[]string{"comment_task_id", "attachment_task_id", "content_uuid", "task_uuid"},
-		taskUUID.String(),
-		currentTime.Unix(),
-		[]string{"comments", "attachments", "ai_embeddings"},
-		"cascade",
-	)
+	taskID, archivedAt, attachments := taskUUID.String(), helpers.Int64Pointer(currentTime.Unix()), dgraphTaskInfo.Attachments
+	taskSearchCascades.Go(taskID, "task.search-delete", func() { taskInSearch(taskID, archivedAt, currentTime.Unix(), attachments) })
 
 	if dgraphTaskInfo.Assignee != nil && dgraphTaskInfo.Assignee.Uuid != "" {
 		go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID.String(), dgraphTaskInfo.Assignee.Uuid)
@@ -1682,20 +1692,8 @@ func UnArchiveTaskByTaskUUID(ctx context.Context, taskUUID uuid.UUID, dgraphTask
 		return
 	}
 
-	taskOpenSearch := &openSearchStruct.OpenSearchTask{
-		Uuid:          taskUUID.String(),
-		TaskDeletedAt: nil,
-		TaskUpdatedAt: currentTime.Unix(),
-	}
-
-	go domain.UpdateTaskWithAttachmentsInOpenSearch(taskOpenSearch, dgraphTaskInfo.Attachments)
-	// Cascade unarchive to comments, attachments, and AI embeddings in one call
-	go globalSearchDomain.SyncCascadingUnarchiveInOpenSearch(
-		[]string{"comment_task_id", "attachment_task_id", "content_uuid", "task_uuid"},
-		taskUUID.String(),
-		[]string{"comments", "attachments", "ai_embeddings"},
-		"cascade",
-	)
+	taskID, attachments := taskUUID.String(), dgraphTaskInfo.Attachments
+	taskSearchCascades.Go(taskID, "task.search-restore", func() { taskInSearch(taskID, nil, currentTime.Unix(), attachments) })
 
 	if dgraphTaskInfo.Assignee != nil && dgraphTaskInfo.Assignee.Uuid != "" {
 		go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID.String(), dgraphTaskInfo.Assignee.Uuid)
@@ -1747,31 +1745,50 @@ func CanViewTask(task *dgraphStruct.DgraphTask, userDgraphUID string) bool {
 	}.MayRead(p != nil)
 }
 
-// TaskFor reads a task for a person and checks they may read it (CanViewTask)
-// or, with change, change it: one of its project's admins, as every task write
-// requires. A task they may not read is ErrTaskNotVisible whether or not it
-// exists; one they may read but not change is ErrNotProjectAdmin; a read that
-// failed is that failure, never "not found". The one check for a task named by
-// id, whether a request names one task or many.
-func TaskFor(ctx context.Context, taskID uuid.UUID, viewerUID string, change bool) (*dgraphStruct.DgraphTask, error) {
-	task, err := GetDgraphBasicTaskInfo(ctx, taskID.String(), viewerUID)
-	return taskAccess(task, err, viewerUID, change)
+// ErrNotAllowed is a task the person may read but not do that with: every
+// Work Access refusal is one, and says why in its words.
+var ErrNotAllowed = workAccess.ErrNotAllowed
+
+// TaskFor reads a task for a person and checks they may do need with it, by
+// Work Access's rule. A task they may not read is ErrTaskNotVisible whether or
+// not it exists; one they may read but not do need with is a
+// *workAccess.Refusal (ErrNotAllowed), in words; a read that failed is that
+// failure, never "not found". The one check for a task named by id, whether a
+// request names one task or many. Reading needs no more than the graph's
+// answer; anything else reads the person's role in the task's project too.
+func TaskFor(ctx context.Context, taskID uuid.UUID, who *model.UserInfo, need workAccess.Need) (*dgraphStruct.DgraphTask, workAccess.Standing, error) {
+	if who == nil {
+		return nil, workAccess.Standing{}, ErrTaskNotVisible
+	}
+	uid := who.UserDgraphInfo.Uid
+	task, err := readable(GetDgraphBasicTaskInfo(ctx, taskID.String(), uid))(uid)
+	if err != nil || need == workAccess.NeedView {
+		return task, workAccess.Standing{}, err
+	}
+	s, f, err := workAccess.OfTask(ctx, who.UserDgraphInfo.Uuid, uid, task)
+	if err != nil {
+		return nil, s, err
+	}
+	if err := s.CheckTask(need, f); err != nil {
+		return nil, s, err
+	}
+	return task, s, nil
 }
 
-// taskAccess is TaskFor's answer for a task read for viewerUID (readErr is
-// the read's error). Pure.
-func taskAccess(task *dgraphStruct.DgraphTask, readErr error, viewerUID string, change bool) (*dgraphStruct.DgraphTask, error) {
-	switch {
-	case errors.Is(readErr, helpers.ErrNotFound):
-		return nil, ErrTaskNotVisible
-	case readErr != nil:
-		return nil, readErr
-	case task == nil || task.Uuid == "" || !CanViewTask(task, viewerUID):
-		return nil, ErrTaskNotVisible
-	case change && (task.Project == nil || task.Project.IsProjectAdmin == 0):
-		return nil, ErrNotProjectAdmin
+// readable is TaskFor's answer to whether a task read for viewerUID (readErr
+// is the read's error) is theirs to read. Pure.
+func readable(task *dgraphStruct.DgraphTask, readErr error) func(viewerUID string) (*dgraphStruct.DgraphTask, error) {
+	return func(viewerUID string) (*dgraphStruct.DgraphTask, error) {
+		switch {
+		case errors.Is(readErr, helpers.ErrNotFound):
+			return nil, ErrTaskNotVisible
+		case readErr != nil:
+			return nil, readErr
+		case task == nil || task.Uuid == "" || !CanViewTask(task, viewerUID):
+			return nil, ErrTaskNotVisible
+		}
+		return task, nil
 	}
-	return task, nil
 }
 
 // GetDgraphTaskInfo reads a task AND enforces who may see it.

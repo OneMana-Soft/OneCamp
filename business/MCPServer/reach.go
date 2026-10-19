@@ -51,6 +51,7 @@ import (
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	teamBusiness "github.com/akashc777/OneCamp/business/Team"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/google/uuid"
@@ -74,8 +75,24 @@ const ReasonNotChannelMember = "the originating person is not a member of this c
 
 // PrincipalCanReach decides whether principalUserID may act on ref.
 //
-// principalUserID is the api_token's created_by — the human at the root. It is
-// never the token, and never an admin acting on their behalf.
+// principalUserID is the human at the root: the api_token's created_by for an
+// MCP call, or the person who asked an agent in the app (business/AIAgent
+// agentRequester.go). It is never the token, and never an admin acting on
+// their behalf.
+//
+// A CALL AN API TOKEN MADE ACTS AT MOST AS A MEMBER. A token carries none of its
+// owner's admin powers (the owner's decision of 16 Oct 2026, which
+// accessBusiness.TokenSubjectOf states for the Access Resolver): what only an
+// admin may do, they do in the app, as themselves. So for a call that acts
+// through a token (helpers.ActsThroughToken: the token's id the API token
+// middleware and AuthorizeToolCall set, or an agent run a token asked for), a
+// table's and a data source's rules see no workspace admin, a project's and a
+// team's see one of their members (Work Access: a token changes work and makes
+// projects where their members may), and a channel's admins' right to post
+// where only they may is not lent. A person who asked an agent in the app is
+// not a token: they are signed in and asking now, and the agent's sponsor
+// bounds the run as well (agentRequester.go), so their own roles still count
+// there.
 func PrincipalCanReach(ctx context.Context, principalUserID string, ref ResourceRef) (decision ReachDecision) {
 	// FAIL CLOSED, NEVER CRASH. The permission lookups below reach a graph client
 	// that is nil until the server has connected, and the underlying driver
@@ -99,6 +116,8 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 	if principal == "" {
 		return ReachDecision{Reason: "no originating person for this call"}
 	}
+	// Whether this call acts through an API token: it then acts at most as a member.
+	viaToken := helpers.ActsThroughToken(ctx)
 
 	// Validate the reference BEFORE any lookup. An unusable ref is a refusal on its
 	// own terms, and resolving the user first would spend a query to reach the same
@@ -179,6 +198,12 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 			info.PostPolicy == channelBusiness.ChannelPostPolicyAdminsOnly && info.IsAdmin <= 0 {
 			return ReachDecision{Reason: "this channel is admins-only for posting"}
 		}
+		// Nor as one of its admins through a token: a token acts at most as a member,
+		// and an announcement channel's admins post in it in the app, as themselves.
+		if !ref.Access.IsRead() &&
+			info.PostPolicy == channelBusiness.ChannelPostPolicyAdminsOnly && viaToken {
+			return ReachDecision{Reason: "this channel is admins-only for posting, and a token posts as a member, never as one of its admins"}
+		}
 		return ReachDecision{Allow: true, Reason: "channel member", PrincipalDgraphUID: uid}
 
 	case ResourceTask:
@@ -197,15 +222,21 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 		if helpers.IsSoftDeleted(info.Project.DeletedAt) {
 			return ReachDecision{Reason: "the project owning this task has been deleted"}
 		}
-		if info.Project.IsProjectMember <= 0 {
+		if !info.Project.ReaderIsIn() {
 			return ReachDecision{Reason: "the originating person is not a member of the project owning this task"}
 		}
-		// WRITE requires project ADMIN, the same rule the shipped task controllers
-		// apply to a mutation (taskController.go tests IsProjectAdmin before changing
-		// status, reassigning, or bulk-editing). Seeing a task on a board does not
-		// carry the right to reassign it.
-		if !ref.Access.IsRead() && info.Project.IsProjectAdmin <= 0 {
-			return ReachDecision{Reason: "changing this task requires being an admin of its project"}
+		// WRITE asks the rule the task controllers ask (Work Access): the
+		// person's role in the project, and its "Who can change tasks", for
+		// this task. Seeing a task on a board does not carry the right to
+		// change it: a viewer or commenter sees it and may not.
+		if !ref.Access.IsRead() {
+			standing, facts, serr := workAccess.OfTask(ctx, principal, uid, info)
+			if serr != nil {
+				return ReachDecision{Reason: "what the originating person may do in this task's project could not be read"}
+			}
+			if !standing.CanOnTask(workAccess.NeedEditTask, facts) {
+				return ReachDecision{Reason: "the originating person may not change this task"}
+			}
 		}
 		return ReachDecision{Allow: true, Reason: "project member", PrincipalDgraphUID: uid}
 
@@ -270,8 +301,9 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 		return ReachDecision{Allow: true, Reason: "the originating person's own objects", PrincipalDgraphUID: uid}
 
 	case ResourceTeam:
-		// The SAME lookup executeCreateProject uses, checked the same way, so the two
-		// cannot drift about who may create work in a team.
+		// The SAME lookup and the SAME rule as the app's CreateProject and the agent's
+		// executeCreateProject (workAccess.CanMakeProjects), so the three cannot drift
+		// about who may create work in a team.
 		team, terr := teamBusiness.GetBasicDgraphTeamInfoByUUID(ctx, strings.TrimSpace(ref.ID), uid)
 		if terr != nil || team == nil || strings.TrimSpace(team.Uuid) == "" {
 			return ReachDecision{Reason: "team could not be read"}
@@ -284,13 +316,19 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 		if helpers.IsSoftDeleted(team.DeletedAt) {
 			return ReachDecision{Reason: "this team has been deleted"}
 		}
-		if team.IsMember <= 0 && team.IsAdmin <= 0 {
+		// One of its admins sees it as one, in the app; through a token, only as a member.
+		if team.IsMember <= 0 && (team.IsAdmin <= 0 || viaToken) {
 			return ReachDecision{Reason: "the originating person is not a member of this team"}
 		}
-		// WRITE REQUIRES TEAM ADMIN, which is the rule executeCreateProject applies:
-		// belonging to a team does not carry the right to create projects in it.
-		if !ref.Access.IsRead() && team.IsAdmin <= 0 {
-			return ReachDecision{Reason: "creating in this team requires being one of its admins"}
+		// WRITE IS MAKING A PROJECT IN IT, by the workspace's "Who can make projects":
+		// the team's admins, or everyone in it. A token makes them as one of its
+		// members, never as one of its admins, whatever its owner is: CanMakeProjects
+		// asks, as it does for the app and the agent.
+		if !ref.Access.IsRead() && !workAccess.CanMakeProjects(ctx, team) {
+			if viaToken && team.IsAdmin > 0 {
+				return ReachDecision{Reason: "only this team's admins make projects in it, in the app; a token acts as a member, never as one of its admins"}
+			}
+			return ReachDecision{Reason: "only this team's admins make projects in it"}
 		}
 		return ReachDecision{Allow: true, Reason: "team member", PrincipalDgraphUID: uid}
 
@@ -409,16 +447,21 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 		if helpers.IsSoftDeleted(proj.DeletedAt) {
 			return ReachDecision{Reason: "this project has been deleted"}
 		}
-		if proj.IsProjectMember <= 0 {
+		if !proj.ReaderIsIn() {
 			return ReachDecision{Reason: "the originating person is not a member of this project"}
 		}
-		// WRITE requires project ADMIN, which is the rule the shipped controllers
-		// apply to project and task mutations (see controllers/Task/taskController.go,
-		// where creating, reassigning and bulk-changing tasks all test
-		// IsProjectAdmin). Membership grants sight of the work; changing it does not
-		// follow from being able to see it.
-		if !ref.Access.IsRead() && proj.IsProjectAdmin <= 0 {
-			return ReachDecision{Reason: "changing work in this project requires being a project admin"}
+		// WRITE asks the rule the task controllers ask (Work Access) whether
+		// the person may add work here: their role, and the project's "Who can
+		// change tasks". Being able to see the work does not mean being able
+		// to change it.
+		if !ref.Access.IsRead() {
+			standing, serr := workAccess.Of(ctx, principal, proj)
+			if serr != nil {
+				return ReachDecision{Reason: "what the originating person may do in this project could not be read"}
+			}
+			if !standing.Can(workAccess.NeedCreateTask) {
+				return ReachDecision{Reason: "the originating person may not change work in this project"}
+			}
 		}
 		return ReachDecision{Allow: true, Reason: "project member", PrincipalDgraphUID: uid}
 
@@ -482,7 +525,25 @@ func docReach(d accessBusiness.Decision, uid string, read bool) ReachDecision {
 	return granted
 }
 
+// dataSourceActorFor resolves the Postgres actor a data-source rule needs.
+//
+// A separate function from tableActorFor only because the two packages declare their own
+// Actor types. The resolution is identical and deliberately shares tableActorFor's
+// lookup, so the admin flag both rules test comes from one place, and a token's call
+// is a member's actor here too.
+func dataSourceActorFor(ctx context.Context, principalUserID string) (dataSourceBusiness.Actor, error) {
+	a, err := tableActorFor(ctx, principalUserID)
+	if err != nil {
+		return dataSourceBusiness.Actor{}, err
+	}
+	return dataSourceBusiness.Actor{UserID: a.UserID, IsAdmin: a.IsAdmin && !helpers.ActsThroughToken(ctx)}, nil
+}
+
 // tableActorFor builds the Postgres-side actor a table's visibility rule needs.
+// For a call that acts through an API token it is a member's actor: the admin flag
+// that lets an admin see and manage every table is not a token's (see
+// PrincipalCanReach), so the table is the owner's own, or open to the workspace,
+// or refused.
 //
 // SEPARATE FROM THE GRAPH LOOKUP ON PURPOSE. Most resource kinds here answer a
 // membership question, which lives in the graph. Tables answer an ownership-and-
@@ -494,19 +555,6 @@ func docReach(d accessBusiness.Decision, uid string, read bool) ReachDecision {
 // benefit for free: it filters deleted_at, so a deactivated person cannot pass this
 // even if the eligibility gate above were ever bypassed. Two independent refusals
 // for the same condition is the right amount for an authorization path.
-// dataSourceActorFor resolves the Postgres actor a data-source rule needs.
-//
-// A separate function from tableActorFor only because the two packages declare their own
-// Actor types. The resolution is identical and deliberately shares tableActorFor's
-// lookup, so the admin flag both rules test comes from one place.
-func dataSourceActorFor(ctx context.Context, principalUserID string) (dataSourceBusiness.Actor, error) {
-	a, err := tableActorFor(ctx, principalUserID)
-	if err != nil {
-		return dataSourceBusiness.Actor{}, err
-	}
-	return dataSourceBusiness.Actor{UserID: a.UserID, IsAdmin: a.IsAdmin}, nil
-}
-
 func tableActorFor(ctx context.Context, principalUserID string) (dataTableBusiness.Actor, error) {
 	userUUID, err := uuid.Parse(strings.TrimSpace(principalUserID))
 	if err != nil {
@@ -519,7 +567,7 @@ func tableActorFor(ctx context.Context, principalUserID string) (dataTableBusine
 	if row == nil || row.Id == (uuid.UUID{}) {
 		return dataTableBusiness.Actor{}, errPrincipalNotFound
 	}
-	return dataTableBusiness.Actor{UserID: row.Id, IsAdmin: row.IsAdmin}, nil
+	return dataTableBusiness.Actor{UserID: row.Id, IsAdmin: row.IsAdmin && !helpers.ActsThroughToken(ctx)}, nil
 }
 
 // errPrincipalNotFound is returned when a principal resolves to no active row.

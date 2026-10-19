@@ -821,7 +821,7 @@ func EnqueueDurableAgentRun(ctx context.Context, agent *model.AiAgent, surface S
 	if sourceID == "" {
 		return false
 	}
-	enc, err := EncodeSurface(surface)
+	enc, err := EncodeSurface(askedThrough(ctx, surface))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "agentTriggers: encode surface failed (agent=%s): %v", agent.Id, err)
 		return false
@@ -868,7 +868,7 @@ func handOffMentionToDurable(ctx context.Context, a *model.AiAgent, channelID, p
 		return false
 	}
 	surface := Surface{Kind: SurfaceChannelPost, ChannelID: channelID, PostID: postID}
-	enc, err := EncodeSurface(surface)
+	enc, err := EncodeSurface(askedThrough(ctx, surface))
 	if err != nil {
 		return false
 	}
@@ -1429,6 +1429,9 @@ var eventPromptKeys = []string{
 	// "a task moved to QA" had only ids to go on.
 	"task_name", "project_name", "updated_by_name",
 	"table_id", "table_name", "row_id",
+	// A change to a table's rows (table.rows.changed): what kind of change,
+	// and how many rows; its rows' ids are lists, which a prompt leaves out.
+	"change", "rows_changed",
 	// GitHub events (github.pr.opened / review_submitted / check_run.completed /
 	// issue.opened) so a "PR-follow" event agent gets the repo + PR context.
 	"owner", "repo", "pr_number", "pr_url", "review_state", "reviewer",

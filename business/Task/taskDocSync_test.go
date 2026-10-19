@@ -8,6 +8,7 @@ import (
 
 	adapter "github.com/akashc777/OneCamp/adapter/Task"
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
+	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
@@ -26,6 +27,7 @@ var (
 type world struct {
 	level     accessBusiness.Level
 	admin     bool
+	outside   bool
 	tied      bool
 	written   []string
 	ticks     []map[string]bool
@@ -40,7 +42,9 @@ type world struct {
 func newWorld(t *testing.T) *world {
 	w := &world{level: accessBusiness.LevelEdit, admin: true, tied: true}
 	saved := []any{tieDocTask, docHoldsTask, docsHolding, setChecks, docLevel, readProject, readTask, writeStatus, makeTask, publishTaskChanged, untieDocTask}
+	db := postgresInit.DBConn
 	t.Cleanup(func() {
+		postgresInit.DBConn = db
 		tieDocTask = saved[0].(func(context.Context, uuid.UUID, uuid.UUID, uuid.UUID) error)
 		docHoldsTask = saved[1].(func(context.Context, uuid.UUID, uuid.UUID) (bool, error))
 		docsHolding = saved[2].(func(context.Context, uuid.UUID) ([]uuid.UUID, error))
@@ -75,17 +79,32 @@ func newWorld(t *testing.T) *world {
 		return nil
 	}
 	docLevel = func(context.Context, *model.UserInfo, string) (accessBusiness.Level, error) { return w.level, nil }
-	isAdmin := func() uint8 {
-		if w.admin {
-			return 1
+	// The role read: Work Access (workAccess.Of, OfTask) reads the person's
+	// role row and the project's "Who can change tasks" from Postgres, and
+	// both read through this handle. Stubbed as no database, as the server
+	// stands before it connects, they answer without one: the role is the
+	// person's place below, and the policy its default (members change tasks).
+	// Left as it was, it is whatever the package's integration tests left
+	// behind, their stopped container.
+	postgresInit.DBConn = &postgresInit.DB{}
+	// The person's place in the project, as the graph counts it: its admin, a
+	// member, or outside it.
+	place := func() (admin, member uint8) {
+		switch {
+		case w.outside:
+			return 0, 0
+		case w.admin:
+			return 1, 1
 		}
-		return 0
+		return 0, 1
 	}
 	readProject = func(context.Context, string, string) (*dgraphStruct.DgraphProject, error) {
-		return &dgraphStruct.DgraphProject{Uuid: syncProj.String(), IsProjectAdmin: isAdmin(), IsProjectMember: 1}, nil
+		admin, member := place()
+		return &dgraphStruct.DgraphProject{Uuid: syncProj.String(), IsProjectAdmin: admin, IsProjectMember: member}, nil
 	}
 	readTask = func(context.Context, string, string) (*dgraphStruct.DgraphTask, error) {
-		return &dgraphStruct.DgraphTask{Uuid: syncTask.String(), Project: &dgraphStruct.DgraphProject{IsProjectMember: 1, IsProjectAdmin: isAdmin()}}, nil
+		admin, member := place()
+		return &dgraphStruct.DgraphTask{Uuid: syncTask.String(), Project: &dgraphStruct.DgraphProject{Uuid: syncProj.String(), IsProjectMember: member, IsProjectAdmin: admin}}, nil
 	}
 	writeStatus = func(_ context.Context, _ uuid.UUID, status string, _ *dgraphStruct.DgraphTask, _ *dgraphStruct.DgraphUser) error {
 		w.written = append(w.written, status)
@@ -106,6 +125,8 @@ func TestATickInTheDocChangesTheTaskThroughOnePath(t *testing.T) {
 	if err := SetTodoDone(context.Background(), syncUser, syncDoc.String(), syncTask.String(), true); err != nil {
 		t.Fatal(err)
 	}
+	// A member, who changes tasks since roles (Work Access), ticks it back.
+	w.admin = false
 	if err := SetTodoDone(context.Background(), syncUser, syncDoc.String(), syncTask.String(), false); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +143,7 @@ func TestNobodyChangesATaskFromADocThatTheyCouldNotChangeInItsPanel(t *testing.T
 	}{
 		{"a to-do that isn't the task's", func(w *world) { w.tied = false }, ErrTodoNotTied},
 		{"a reader of the doc", func(w *world) { w.level = accessBusiness.LevelComment }, ErrDocNotEditable},
-		{"a member who isn't the project's admin", func(w *world) { w.admin = false }, ErrNotProjectAdmin},
+		{"someone outside the task's project", func(w *world) { w.outside = true }, ErrTaskNotVisible},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -152,6 +173,12 @@ func TestATodoBecomesATaskTiedToItsDoc(t *testing.T) {
 	if !reflect.DeepEqual(w.tiedNew, []uuid.UUID{syncDoc, syncTask}) {
 		t.Fatalf("tied %v", w.tiedNew)
 	}
+	// A member makes tasks too, since roles.
+	member := newWorld(t)
+	member.admin = false
+	if _, err := TodoToTask(context.Background(), syncUser, syncDoc.String(), syncProj.String(), "Check the copy"); err != nil || member.made == nil {
+		t.Fatalf("a member's to-do: %v %+v", err, member.made)
+	}
 
 	refused := []struct {
 		name  string
@@ -159,7 +186,7 @@ func TestATodoBecomesATaskTiedToItsDoc(t *testing.T) {
 		title string
 		want  error
 	}{
-		{"a member who isn't the project's admin", func(w *world) { w.admin = false }, "Write the launch post", ErrNotProjectAdmin},
+		{"someone outside the project", func(w *world) { w.outside = true }, "Write the launch post", ErrTaskNotVisible},
 		{"a reader of the doc", func(w *world) { w.level = accessBusiness.LevelView }, "Write the launch post", ErrDocNotEditable},
 		{"an empty to-do", func(*world) {}, "   ", ErrEmptyTodo},
 	}

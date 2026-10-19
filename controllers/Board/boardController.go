@@ -790,12 +790,7 @@ func GetBoardViewers(w http.ResponseWriter, r *http.Request) {
 // (default 0) from the query, returning the page size and the row offset.
 func parseViewerPagination(r *http.Request) (pageSize int, offset int) {
 	q := r.URL.Query()
-	pageSize = 50
-	if v := q.Get("pageSize"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
-			pageSize = n
-		}
-	}
+	pageSize = helpers.SizeParam(q, "pageSize", 50, 200)
 	pageIndex := 0
 	if v := q.Get("pageIndex"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
@@ -829,12 +824,7 @@ func GetBoardList(w http.ResponseWriter, r *http.Request) {
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	q := r.URL.Query()
-	pageSize := 30
-	if v := q.Get("pageSize"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 100 {
-			pageSize = n
-		}
-	}
+	pageSize := helpers.SizeParam(q, "pageSize", 30, 100)
 	pageIndex := 0
 	if v := q.Get("pageIndex"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {

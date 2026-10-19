@@ -543,7 +543,7 @@ func HandleListErrors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	severity := r.URL.Query().Get("severity")
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	limit := helpers.LimitParam(r.URL.Query(), 100, 500)
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 
 	errs, err := importModels.ListErrors(ctx, jobId, severity, limit, offset)

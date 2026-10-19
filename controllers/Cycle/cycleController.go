@@ -8,6 +8,7 @@ import (
 	"time"
 
 	cycleBusiness "github.com/akashc777/OneCamp/business/Cycle"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -30,9 +31,10 @@ func write(w http.ResponseWriter, r *http.Request, where string, err error) {
 	helpers.WriteRetryLater(w, "Something went wrong.")
 }
 
-// project checks the caller may see (or, for needAdmin, change) the project.
-func project(w http.ResponseWriter, r *http.Request, needAdmin bool) (uuid.UUID, *dgraphStruct.DgraphProject, bool) {
-	return projectaccess.Require(w, r, needAdmin, "Only the project's admins can change its cycles.")
+// project checks the caller may do need with the project: see its cycles, or
+// (NeedManage) make, rename, complete and delete them.
+func project(w http.ResponseWriter, r *http.Request, need workAccess.Need) (uuid.UUID, *dgraphStruct.DgraphProject, workAccess.Standing, bool) {
+	return projectaccess.RequireStanding(w, r, need, "Only the project's admins can change its cycles.")
 }
 
 // cycleIn reads the cycle in the URL, which must belong to the project.
@@ -54,7 +56,7 @@ func cycleIn(w http.ResponseWriter, r *http.Request, projectID uuid.UUID) (*cycl
 
 // ListCycles is a project's cycles with progress. GET /project/{p}/cycles
 func ListCycles(w http.ResponseWriter, r *http.Request) {
-	id, p, ok := project(w, r, false)
+	id, _, standing, ok := project(w, r, workAccess.NeedView)
 	if !ok {
 		return
 	}
@@ -64,14 +66,14 @@ func ListCycles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// can_edit tells the page whether to offer making and completing cycles.
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"cycles": views, "can_edit": p.IsProjectAdmin > 0}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"cycles": views, "can_edit": standing.Can(workAccess.NeedManage)}})
 }
 
 // CycleBurndown is a cycle's burndown, by day in the reader's zone, and the
 // velocity of the project's latest completed cycles.
 // GET /project/{p}/cycles/{c}/burndown?tz=
 func CycleBurndown(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := project(w, r, false)
+	id, _, _, ok := project(w, r, workAccess.NeedView)
 	if !ok {
 		return
 	}
@@ -89,7 +91,7 @@ func CycleBurndown(w http.ResponseWriter, r *http.Request) {
 
 // CreateCycle adds one. POST /project/{p}/cycles {name, starts_at, weeks}
 func CreateCycle(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := project(w, r, true)
+	id, _, _, ok := project(w, r, workAccess.NeedManage)
 	if !ok {
 		return
 	}
@@ -109,7 +111,7 @@ func CreateCycle(w http.ResponseWriter, r *http.Request) {
 
 // RenameCycle. POST /project/{p}/cycles/{c}/rename {name}
 func RenameCycle(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := project(w, r, true)
+	id, _, _, ok := project(w, r, workAccess.NeedManage)
 	if !ok {
 		return
 	}
@@ -133,7 +135,7 @@ func RenameCycle(w http.ResponseWriter, r *http.Request) {
 
 // CompleteCycle closes a cycle. POST /project/{p}/cycles/{c}/complete {carry}
 func CompleteCycle(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := project(w, r, true)
+	id, _, _, ok := project(w, r, workAccess.NeedManage)
 	if !ok {
 		return
 	}
@@ -160,7 +162,7 @@ func CompleteCycle(w http.ResponseWriter, r *http.Request) {
 // DeleteCycle removes a cycle; its tasks stay, out of any cycle.
 // POST /project/{p}/cycles/{c}/delete
 func DeleteCycle(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := project(w, r, true)
+	id, _, _, ok := project(w, r, workAccess.NeedManage)
 	if !ok {
 		return
 	}
@@ -177,7 +179,7 @@ func DeleteCycle(w http.ResponseWriter, r *http.Request) {
 
 // GetTaskCycle is the cycle a task is in (null when none). GET /task/cycle/{task_uuid}
 func GetTaskCycle(w http.ResponseWriter, r *http.Request) {
-	taskID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"))
+	taskID, _, ok := projectaccess.RequireTask(w, r, chi.URLParam(r, "task_uuid"), workAccess.NeedView)
 	if !ok {
 		return
 	}
@@ -200,12 +202,13 @@ func SetTaskCycle(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that request."})
 		return
 	}
-	taskID, task, ok := projectaccess.RequireTask(w, r, in.TaskUUID)
+	// Putting a task in a cycle is changing the task.
+	taskID, task, ok := projectaccess.RequireTask(w, r, in.TaskUUID, workAccess.NeedEditTask)
 	if !ok {
 		return
 	}
-	if task.Project == nil || task.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the project's admins can change its cycles."})
+	if task.Project == nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "A task in no project has no cycles."})
 		return
 	}
 	var cycle *uuid.UUID

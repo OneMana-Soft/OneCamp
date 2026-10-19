@@ -7,7 +7,8 @@ package business
 // into checkboxes showed every filled cell ticked, select to multi-select hid
 // every value, and a chart and a filter on the column disagreed. Now the cells
 // are converted in the field update's transaction, over every row, by
-// convertCell, and a dry run (PreviewConversion) counts what it would do.
+// each kind's rule (business/FieldTypes ConvertCell), and a dry run
+// (PreviewConversion) counts what it would do.
 // Formulas, rollups and relations work their cells out, and keep them.
 
 import (
@@ -17,7 +18,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/akashc777/OneCamp/business/DataTable/formula"
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
+	formula "github.com/akashc777/OneCamp/business/Formula"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -30,9 +32,6 @@ type ConvertCounts struct {
 	Converted int `json:"converted"`
 	Cleared   int `json:"cleared"`
 }
-
-// textual is the field types whose cells are text.
-var textual = map[string]bool{model.FieldText: true, model.FieldURL: true, model.FieldEmail: true, model.FieldPerson: true}
 
 // typeChangeProblem is why field was can't become type to, or nil: a link's
 // cells are named for each reader on every read, and as another kind of
@@ -59,87 +58,6 @@ func converts(from, to string) bool {
 	return from != to && stored(from) && stored(to)
 }
 
-// isEmpty is whether a cell holds nothing.
-func isEmpty(v interface{}) bool {
-	switch x := v.(type) {
-	case nil:
-		return true
-	case string:
-		return strings.TrimSpace(x) == ""
-	case []interface{}:
-		return len(x) == 0
-	}
-	return false
-}
-
-// convertCell is a cell of a field changing to type to: its value then, and
-// whether it is kept, converted or cleared (cleared values; a cleared cell
-// is nil). Text becomes a number as whoever changes the type writes numbers
-// (signs): read with its commas dropped, "1,5" was 15 for good, and "NaN"
-// failed the whole change.
-func convertCell(to string, v interface{}, signs formula.NumberSigns) (out interface{}, kept bool, cleared int) {
-	// A checkbox reads as the grid shows it: ticked "Yes", unticked no value,
-	// which is nothing to clear. Every unticked row read "false".
-	if b, ok := v.(bool); ok && to != model.FieldCheckbox {
-		if !b {
-			return nil, false, 0
-		}
-		out, _, cleared := convertCell(to, "Yes", signs)
-		return out, false, cleared
-	}
-	switch {
-	case to == model.FieldNumber:
-		if n, ok := v.(float64); ok {
-			return n, true, 0
-		}
-		if s, ok := v.(string); ok {
-			if n, ok := formula.ParseNumber(s, signs); ok {
-				return n, false, 0
-			}
-		}
-	case to == model.FieldCheckbox:
-		if b, ok := v.(bool); ok {
-			return b, true, 0
-		}
-		switch strings.ToLower(strings.TrimSpace(fmt.Sprint(v))) {
-		case "true", "yes", "1", "✓":
-			return true, false, 0
-		}
-	case to == model.FieldDate:
-		if s, ok := v.(string); ok {
-			if d, ok := formula.ParseDate(s); ok {
-				day := d.Time.Format("2006-01-02")
-				return day, day == strings.TrimSpace(s), 0
-			}
-		}
-	case to == model.FieldMultiSelect:
-		if list, ok := v.([]interface{}); ok {
-			return list, true, 0
-		}
-		if labels := cellLabels(v); len(labels) > 0 {
-			return []interface{}{strings.Join(labels, ", ")}, false, 0
-		}
-	case to == model.FieldSelect:
-		if s, ok := v.(string); ok {
-			return s, true, 0
-		}
-		if labels := cellLabels(v); len(labels) > 0 {
-			if _, isList := v.([]interface{}); isList {
-				return labels[0], false, len(labels) - 1
-			}
-			return labels[0], false, 0
-		}
-	case textual[to]:
-		if s, ok := v.(string); ok {
-			return s, true, 0
-		}
-		if labels := cellLabels(v); len(labels) > 0 {
-			return strings.Join(labels, ", "), false, 0
-		}
-	}
-	return nil, false, 1
-}
-
 // conversion converts a field's cells (by row) to its type, in f, reading
 // numbers in signs, and counts what it does. A select's or a multi-select's
 // labels not among its options are added to them, in alphabetical order. It
@@ -150,10 +68,10 @@ func conversion(f *model.Field, cells map[uuid.UUID]json.RawMessage, signs formu
 	labels := map[string]bool{}
 	for id, raw := range cells {
 		var v interface{}
-		if json.Unmarshal(raw, &v) != nil || isEmpty(v) {
+		if json.Unmarshal(raw, &v) != nil || fieldTypes.IsEmpty(v) {
 			continue
 		}
-		to, kept, cleared := convertCell(f.Type, v, signs)
+		to, kept, cleared := fieldTypes.ConvertCell(f.Type, v, signs)
 		counts.Cleared += cleared
 		switch {
 		case to == nil:
@@ -186,9 +104,9 @@ func conversion(f *model.Field, cells map[uuid.UUID]json.RawMessage, signs formu
 	}
 	cfg := map[string]interface{}{}
 	_ = json.Unmarshal([]byte(f.Config), &cfg)
-	list := optionsIn(cfg)
+	list := fieldTypes.Options(cfg)
 	for _, o := range list {
-		delete(labels, optionLabel(o))
+		delete(labels, fieldTypes.OptionLabel(o))
 	}
 	opts := make([]interface{}, 0, len(list)+len(labels))
 	for _, o := range list {
@@ -237,7 +155,7 @@ func PreviewConversion(ctx context.Context, tableID, fieldID uuid.UUID, to strin
 	if was == nil {
 		return nil, errFieldNotFound
 	}
-	if !model.ValidFieldType(to) {
+	if !fieldTypes.Kinds.Valid(to) {
 		return nil, fmt.Errorf("invalid field type")
 	}
 	if err := typeChangeProblem(was, to); err != nil {

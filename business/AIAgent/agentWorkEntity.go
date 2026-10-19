@@ -114,7 +114,7 @@ func canSeeWorkSurface(ctx context.Context, actor Actor, t *model.AgentActiveTas
 		if terr != nil || info == nil || info.Project == nil {
 			return false
 		}
-		return info.Project.IsProjectMember > 0
+		return info.Project.ReaderIsIn()
 	default:
 		// Group chat / DM: this package holds no chat dependency by design, so
 		// visibility can't be proven here. Involved parties already matched above.

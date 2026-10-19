@@ -33,6 +33,9 @@ func GetMqttConfig(ctx context.Context, userUUID string, isSystemAdmin bool) (mq
 	var mqttConfigInfo adapter.OutputMqttConfig
 
 	mqttConfigInfo.Topics = append(mqttConfigInfo.Topics, member.list...)
+	// Which conversation each is, for the app's subscriptions by conversation
+	// (web lib/realtime/subscriptions).
+	mqttConfigInfo.ConversationTopics = member.byConversation
 
 	mqttConfigInfo.Topics = append(mqttConfigInfo.Topics, helpers.GetMqttTopicForUserActivity(userUUID))
 
@@ -771,19 +774,6 @@ func PublishConversationAccess(kind, id, change string, people ...string) {
 	}
 	PublishToTopics(activityTopics(people), mqttStruct.MESSAGE_CONVERSATION_ACCESS,
 		&mqttStruct.MqttConversationAccess{Kind: kind, Id: id, Change: change})
-}
-
-// PublishConversationMoved tells each of people that a conversation of theirs
-// has a new id, and which one it replaces: a group's id is its members' hash,
-// so adding someone to it gives it a new one, and every open app was on the
-// old id's topics (the person added on none). Each moves to the new id and
-// lets the old one go, without reconnecting.
-func PublishConversationMoved(kind, previousID, id string, people ...string) {
-	if id == "" || previousID == "" {
-		return
-	}
-	PublishToTopics(activityTopics(people), mqttStruct.MESSAGE_CONVERSATION_ACCESS,
-		&mqttStruct.MqttConversationAccess{Kind: kind, Id: id, Change: mqttStruct.CONVERSATION_ADDED, PreviousId: previousID})
 }
 
 // activityTopics is each person's activity topic, blanks left out.

@@ -18,7 +18,9 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/akashc777/OneCamp/business/DataTable/formula"
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
+	formula "github.com/akashc777/OneCamp/business/Formula"
+	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
 	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -277,13 +279,14 @@ func fillOneCell(ctx context.Context, llm ai.LLMProvider, cb *ai.CircuitBreaker,
 	}
 	cb.RecordSuccess()
 	answer = strings.TrimSpace(answer)
-	if len(answer) > maxAICellChars {
-		answer = answer[:maxAICellChars]
+	// Cut by characters: a cut by bytes split a letter of an answer in Hindi.
+	if r := []rune(answer); len(r) > maxAICellChars {
+		answer = string(r[:maxAICellChars])
 	}
 	if answer == "" {
 		return false, false
 	}
-	if uerr := writeCell(ctx, t, rw, target.Id.String(), answer, inputs, again); uerr != nil {
+	if uerr := writeCell(ctx, t, rw, target, answer, inputs, again); uerr != nil {
 		if !errors.Is(uerr, model.ErrAIKept) && !errors.Is(uerr, model.ErrCellChanged) { // written while the model answered
 			helpers.LogErrorWithContext(ctx, "fillOneCell write cell err: %v", uerr)
 		}
@@ -494,17 +497,30 @@ func readCells(fields []*model.Field, rw *model.Row, prompt string) string {
 // that changed since the fill read it (rw), or whose row's cells the answer
 // read (inputs, readCells) changed, is left as it now is, Fill again or not
 // (model.ErrCellChanged): a newer fill answers for them.
-func writeCell(ctx context.Context, t *model.DataTable, rw *model.Row, fieldID, value, inputs string, again bool) error {
-	blob, merr := json.Marshal(map[string]string{fieldID: value})
+//
+// The answer is stored as the column's kind stores what any writer sends
+// (business/FieldTypes): a number column's answer as a number, a select's as
+// one of its options, or not at all when it isn't one.
+func writeCell(ctx context.Context, t *model.DataTable, rw *model.Row, target *model.Field, value, inputs string, again bool) error {
+	fieldID := target.Id.String()
+	cells, cerr := fieldTypes.Kinds.Check([]*model.Field{target}, map[string]interface{}{fieldID: value}, fieldTypes.Input{})
+	if cerr != nil {
+		return cerr
+	}
+	blob, merr := json.Marshal(map[string]interface{}{fieldID: cells[fieldID]})
 	if merr != nil {
 		return merr
 	}
-	var cells map[string]json.RawMessage
-	_ = json.Unmarshal([]byte(rw.Values), &cells)
-	updated, uerr := model.WriteAICell(ctx, t.Id, rw.Id, fieldID, string(blob), cells[fieldID], inputs, again, maxValuesBytes)
+	var read map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(rw.Values), &read)
+	// The AI's own change set (the row ledger): no person's, so on no one's
+	// undo, and heard by no webhook, as a fill never set off row events.
+	cs := &model.ChangeSet{TableID: t.Id, ActorKind: string(rowLedger.ActorAutomation), Kind: string(rowLedger.ChangeAI)}
+	updated, uerr := model.WriteAICell(ctx, t.Id, rw.Id, fieldID, string(blob), read[fieldID], inputs, again, maxValuesBytes, cs, observe)
 	if uerr != nil {
 		return uerr
 	}
+	announce(ctx, t, cs, neither)
 	broadcastRow(t.Id.String(), "updated", updated)
 	go tellLinkedTables(context.WithoutCancel(ctx), t.Id, rw.Id, false)
 	return nil

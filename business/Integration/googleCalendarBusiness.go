@@ -586,6 +586,17 @@ func SyncEventToGoogleCalendar(ctx context.Context, eventId uuid.UUID, input ada
 		// Save the Google Calendar Event ID back to OneCamp
 		gcalId := res.Id
 
+		// The calendar's one store keeps the copy's id and nothing else: the
+		// writes below rewrote the event's title, notes and times from the
+		// create input after the round trip, undoing an edit made meanwhile
+		// (BE-F-6).
+		if helpers.CalendarInPostgres() {
+			if err := calendarDomain.SetEventGoogleID(ctx, eventId, gcalId); err != nil {
+				helpers.LogErrorWithContext(ctx, "business/SyncEventToGoogleCalendar failed to keep the gcal id err: %+v", err)
+			}
+			return nil
+		}
+
 		// 1. Update Postgres
 		// We need to parse times again for the update function if needed, or but we have the originals if it's simpler.
 		// Actually, let's just use the ones from input.

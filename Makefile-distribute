@@ -1539,6 +1539,20 @@ backup-list:
 #
 # CONFIRM=restore is the real guard and it works. Preview by reading the recipe,
 # never by adding -n and passing CONFIRM.
+#
+# THE CONVERSATIONS INDEX COMES BACK OLDER THAN THE GRAPH (17 Oct 2026). backup
+# is taken online: Postgres first, the graph after it. Restored, the index of who
+# is in each channel, DM and group, and the "clean" its last comparison with the
+# graph wrote, come back from the first moment beside a graph from the second.
+# Someone taken out of a private channel or a group between the two is in that
+# index and out of that graph, and the old "clean" would let them in. So once
+# Postgres is back, and before anything starts, RESTORED_INDEX_STATE marks the
+# index dirty: every access decision reads the graph until the comparison the
+# server runs when it starts has repaired the index and a later one has found it
+# clean (domain/Conversation source.go). The server also trusts no comparison
+# older than itself, which covers a database put back by other means.
+# tests/integration/conversations_restore_test.go runs this statement.
+RESTORED_INDEX_STATE = INSERT INTO system_configs (key, value, updated_at) VALUES ('conversations_access_state', 'dirty|' || replace(to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'), ' ', 'T') || 'Z|restored from a backup', NOW()) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
 restore:
 	@if [ -z "$(FROM)" ]; then \
 		echo "Usage: make restore FROM=<backup-dir-or-'latest'> CONFIRM=restore"; \
@@ -1631,6 +1645,12 @@ restore:
 	$(COMPOSE) exec -T postgres psql -U "$(DB_USER)" -d "$(DB_NAME)" -qtAc 'SELECT 1 FROM users LIMIT 1' > /dev/null \
 		|| fail "the database did not come back; the dump may not match this server"; \
 	echo "    ok    database restored"; \
+	: "Before anything starts: see RESTORED_INDEX_STATE above. A failure here"; \
+	: "leaves the server's own rule, that it trusts no comparison older than"; \
+	: "itself, to keep the index unread until it has been compared."; \
+	$(COMPOSE) exec -T postgres psql -U "$(DB_USER)" -d "$(DB_NAME)" -q -c "$(RESTORED_INDEX_STATE)" > /dev/null \
+		&& echo "    ok    conversations index marked unchecked until it is compared with the graph" \
+		|| echo "    warn  could not mark the conversations index unchecked; the server compares it with the graph before reading it"; \
 	\
 	echo "▶ 4/5  dgraph"; \
 	if [ -f "$$src/dgraph.tar.gz" ]; then \

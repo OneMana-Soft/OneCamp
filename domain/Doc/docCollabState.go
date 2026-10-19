@@ -69,6 +69,10 @@ type CollabWritten struct {
 	// Stored is false for a state-only save whose body is not the stored one
 	// any more, which wrote nothing.
 	Stored bool
+	// Hosted is a doc that belongs to something else (a table row's page,
+	// D-18): a save of it runs only the hooks that keep it, never the ones
+	// that put it where docs are found (business/Doc SaveHooks).
+	Hosted bool
 }
 
 // collabUpsertQuery finds the doc, whether it is live, and whether its stored
@@ -83,6 +87,7 @@ const collabUpsertQuery = `query q($id: string, $hash: string%s) {%s
 		uid
 		doc_yjs_body_hash
 		doc_deleted_at
+		doc_host_kind
 	}
 }`
 
@@ -175,6 +180,7 @@ func collabSaveAnswer(raw []byte, w CollabWrite) (CollabWritten, error) {
 		Found []struct {
 			Hash      string     `json:"doc_yjs_body_hash"`
 			DeletedAt *time.Time `json:"doc_deleted_at"`
+			HostKind  string     `json:"doc_host_kind"`
 		} `json:"found"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
@@ -187,5 +193,5 @@ func collabSaveAnswer(raw []byte, w CollabWrite) (CollabWritten, error) {
 		return CollabWritten{}, ErrDocDeleted
 	}
 	prev := out.Found[0].Hash
-	return CollabWritten{PrevHash: prev, Stored: !w.StateOnly || prev == w.Hash}, nil
+	return CollabWritten{PrevHash: prev, Stored: !w.StateOnly || prev == w.Hash, Hosted: out.Found[0].HostKind != ""}, nil
 }

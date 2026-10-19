@@ -26,6 +26,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
+	"github.com/google/uuid"
 )
 
 // calendarEventsOf and createCalendarEvent are the calendar's own list and
@@ -33,6 +34,7 @@ import (
 var (
 	calendarEventsOf    = calendarBusiness.GetEventsList
 	createCalendarEvent = calendarBusiness.CreateEvent
+	calendarEventByID   = calendarBusiness.GetEvent
 )
 
 type readerZoneKey struct{}
@@ -169,4 +171,19 @@ func eventSpan(e *dgraphStruct.DgraphEvent, loc *time.Location) string {
 		return fmt.Sprintf("%s, %s–%s", s.Format("Mon 2 Jan"), s.Format("15:04"), e2.Format("15:04"))
 	}
 	return fmt.Sprintf("%s – %s", s.Format("Mon 2 Jan, 15:04"), e2.Format("Mon 2 Jan, 15:04"))
+}
+
+// calendarEventFor is a OneCamp event the person asking is on, as the
+// calendar reads it (business/Calendar.GetEvent, whichever store is on):
+// "event not found" alike for one that isn't there and one that isn't
+// theirs. A Google event's "gcal-" id isn't one: these read OneCamp's.
+func calendarEventFor(ctx context.Context, userInfo *userModels.UserInfo, eventUUID string) (*dgraphStruct.DgraphEvent, error) {
+	if _, err := uuid.Parse(eventUUID); err != nil && !calendarBusiness.IsInstanceID(eventUUID) {
+		return nil, fmt.Errorf("event not found")
+	}
+	event, err := calendarEventByID(ctx, userInfo, eventUUID)
+	if err != nil || event == nil {
+		return nil, fmt.Errorf("event not found")
+	}
+	return event, nil
 }

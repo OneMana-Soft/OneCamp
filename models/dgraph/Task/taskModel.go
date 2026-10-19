@@ -17,14 +17,20 @@ import (
 var ErrNotFound = helpers.NotFound("failed to get dgraph task")
 
 // forDgraph is a task as Dgraph stores it: its custom field values live in
-// Postgres and are only laid over a task read for the app, so a task read
-// and written back must not carry them in as a nested node.
+// Postgres and what its reader may do with it is Work Access's, both only laid
+// over a task read for the app, so a task read and written back must not carry
+// them in as nested nodes.
 func forDgraph(t *dgraphStruct.DgraphTask) *dgraphStruct.DgraphTask {
-	if t == nil || t.Fields == nil {
+	if t == nil || (t.Fields == nil && t.Access == nil && (t.Project == nil || t.Project.Access == nil)) {
 		return t
 	}
 	c := *t
-	c.Fields = nil
+	c.Fields, c.Access = nil, nil
+	if c.Project != nil && c.Project.Access != nil {
+		p := *c.Project
+		p.Access = nil
+		c.Project = &p
+	}
 	return &c
 }
 

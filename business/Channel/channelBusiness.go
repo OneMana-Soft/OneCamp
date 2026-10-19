@@ -16,6 +16,7 @@ import (
 	userChannelNotificationBusiness "github.com/akashc777/OneCamp/business/UserChannelNotification"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	domain "github.com/akashc777/OneCamp/domain/Channel"
+	conversationDomain "github.com/akashc777/OneCamp/domain/Conversation"
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -107,6 +108,7 @@ func CreateChannel(ctx context.Context, channelInfo *adapter.InputCreateChannel,
 	// scoped by it: until it's dropped, the new channel is invisible to all
 	// three for them.
 	userDomain.InvalidateUserMemberships(ctx, userInfo.UserDgraphInfo.Uuid)
+	conversationDomain.Opened(ctx, conversationDomain.KindChannel, channelUUID.String(), userInfo.UserDgraphInfo.Uuid, []string{userInfo.UserDgraphInfo.Uuid}, []string{userInfo.UserDgraphInfo.Uuid})
 
 	// update channel last seen
 	err = business.CreateOrUpdateLastSeenChannel(ctx, userInfo.UserPostgresInfo.Id, channelUUID)
@@ -401,29 +403,6 @@ func GetChannelCallActiveStatus(ctx context.Context, channelId string) (exists b
 		)
 		return
 	}
-	return
-}
-
-func GetBasicDgraphChannelInfoByUUIDAndUpdateLastSeen(ctx context.Context, channelUUID uuid.UUID, userUUID uuid.UUID, userDgraphUUID string) (channelInfo *dgraphStruct.DgraphChannel, err error) {
-
-	channelInfo, err = domain.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID.String(), userDgraphUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetBasicDgraphChannelInfoByUUIDAndUpdateLastSeen Failed to get channel info by channel uuid err: %+v",
-			err)
-		return
-	}
-
-	// update last seen
-	err = business.CreateOrUpdateLastSeenChannel(ctx, userUUID, channelUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetBasicDgraphChannelInfoByUUIDAndUpdateLastSeen Failed to create entry in last seen channel err: %+v",
-			err)
-		return
-	}
-
 	return
 }
 
@@ -784,7 +763,7 @@ func KeepsAnAdmin(ctx context.Context, channelUUID uuid.UUID, readerUID, who str
 // person posting in an announcement channel for the rest of the TTL.
 func DeleteChannelModeratorEdge(ctx context.Context, channelDgraphUID string, userDgraphUID string, channelUUID string) (err error) {
 
-	err = domain.DeleteChannelModeratorEdge(ctx, channelDgraphUID, userDgraphUID)
+	err = conversationDomain.Demote(ctx, conversationDomain.KindChannel, channelUUID, userDgraphUID, func() error { return domain.DeleteChannelModeratorEdge(ctx, channelDgraphUID, userDgraphUID) })
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -818,6 +797,7 @@ func AddChannelModeratorEdge(ctx context.Context, channelUUID string, userUUID s
 
 		return
 	}
+	conversationDomain.Promoted(ctx, conversationDomain.KindChannel, channelUUID, userUUID)
 
 	NotifyChannelUpdated(channelUUID, ChannelUpdateActionModerators)
 
@@ -854,6 +834,7 @@ func AddChannelMemberEdge(ctx context.Context, channelUUID uuid.UUID, userDgraph
 	// commands are scoped by it, so the channel's history stayed out of their
 	// search for up to the hour it's kept. Synchronously, before the answer.
 	userDomain.InvalidateUserMemberships(ctx, newMemberUUID.String())
+	conversationDomain.Added(ctx, conversationDomain.KindChannel, channelUUID.String(), conversationDomain.RoleMember, newMemberUUID.String())
 
 	// update channel last seen
 	err = business.CreateOrUpdateLastSeenChannel(ctx, newMemberUUID, channelUUID)
@@ -890,7 +871,7 @@ func AddChannelMemberEdge(ctx context.Context, channelUUID uuid.UUID, userDgraph
 
 func DeleteChannelMemberEdge(ctx context.Context, channelDgraphUID string, userDgraphUID string, memberUUID string, channelUUID string) (err error) {
 
-	err = domain.DeleteChannelMemberEdge(ctx, channelDgraphUID, userDgraphUID)
+	err = conversationDomain.Remove(ctx, conversationDomain.KindChannel, channelUUID, []string{memberUUID}, func() error { return domain.DeleteChannelMemberEdge(ctx, channelDgraphUID, userDgraphUID) })
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -954,6 +935,7 @@ func AddChannelBotMemberEdge(ctx context.Context, channelUUID uuid.UUID, botDgra
 		helpers.LogErrorWithContext(ctx, "business/AddChannelBotMemberEdge failed: %+v", err)
 		return
 	}
+	conversationDomain.AddedByUID(ctx, conversationDomain.KindChannel, channelUUID.String(), conversationDomain.RoleMember, botDgraphUID)
 	NotifyChannelUpdated(channelUUID.String(), ChannelUpdateActionMemberAdded)
 	return
 }
@@ -972,7 +954,7 @@ func RemoveChannelBotMemberEdge(ctx context.Context, channelUUID uuid.UUID, botD
 		}
 		return cerr
 	}
-	if err = domain.DeleteChannelMemberEdge(ctx, channelInfo.Uid, botDgraphUID); err != nil {
+	if err = conversationDomain.RemoveByUID(ctx, conversationDomain.KindChannel, channelUUID.String(), []string{botDgraphUID}, func() error { return domain.DeleteChannelMemberEdge(ctx, channelInfo.Uid, botDgraphUID) }); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/RemoveChannelBotMemberEdge failed: %+v", err)
 		return
 	}

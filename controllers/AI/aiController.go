@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -1082,12 +1081,7 @@ type userUsageRow struct {
 func GetAIUserUsage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	limit := 25
-	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
-			limit = n
-		}
-	}
+	limit := helpers.LimitParam(r.URL.Query(), 25, 200)
 
 	top := ai.TopUserUsage(ctx, limit)
 	ids := make([]string, 0, len(top))
@@ -1127,12 +1121,7 @@ type channelUsageRow struct {
 func GetAIChannelUsage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	limit := 25
-	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
-			limit = n
-		}
-	}
+	limit := helpers.LimitParam(r.URL.Query(), 25, 200)
 
 	top := ai.TopChannelUsage(ctx, limit)
 	ids := make([]string, 0, len(top))

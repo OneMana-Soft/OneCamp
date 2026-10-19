@@ -44,6 +44,13 @@ func BookingLinkReadLimit() func(http.Handler) http.Handler {
 	return publicReadLimit("booking-link", bookingPageReadsPerAddress)
 }
 
+// InvitationReadLimit limits GET /public/rsvp/{token}: a guest's invitation to
+// an event, per address (calendar A2). Its token is 32 random bytes, so this
+// bounds load, not guessing.
+func InvitationReadLimit() func(http.Handler) http.Handler {
+	return publicReadLimit("invitation", bookingPageReadsPerAddress)
+}
+
 // publicReadLimit limits requests of every method (preflights aside) to
 // perAddress a minute from one address.
 func publicReadLimit(kind string, perAddress int) func(http.Handler) http.Handler {

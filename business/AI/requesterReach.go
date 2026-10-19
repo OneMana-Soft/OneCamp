@@ -22,6 +22,7 @@ import (
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
 	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -171,7 +172,8 @@ func askerTableActor(ctx context.Context) (*dataTableBusiness.Actor, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &dataTableBusiness.Actor{UserID: info.UserPostgresInfo.Id, IsAdmin: info.UserPostgresInfo.IsAdmin}, nil
+	// A member's, when a token asked for the run (helpers.ActsThroughToken).
+	return &dataTableBusiness.Actor{UserID: info.UserPostgresInfo.Id, IsAdmin: info.UserPostgresInfo.IsAdmin && !helpers.ActsThroughToken(ctx)}, nil
 }
 
 // askerInfo is the person who asked as the executors know a user, once per run.
@@ -232,7 +234,8 @@ func askerDataSources(ctx context.Context) (map[string]bool, error) {
 	if err != nil {
 		return nil, err
 	}
-	items, err := dataSourceBusiness.ListQueryable(ctx, dataSourceBusiness.Actor{UserID: info.UserPostgresInfo.Id, IsAdmin: info.UserPostgresInfo.IsAdmin})
+	items, err := dataSourceBusiness.ListQueryable(ctx, dataSourceBusiness.Actor{UserID: info.UserPostgresInfo.Id,
+		IsAdmin: info.UserPostgresInfo.IsAdmin && !helpers.ActsThroughToken(ctx)})
 	if err != nil {
 		return nil, fmt.Errorf("could not read which data sources the person who asked can query")
 	}

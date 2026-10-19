@@ -7,7 +7,8 @@ import (
 	"time"
 
 	business "github.com/akashc777/OneCamp/business/AI"
-	projectBusiness "github.com/akashc777/OneCamp/business/Project"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -37,13 +38,9 @@ func DraftProjectUpdate(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a project."})
 		return
 	}
-	p, err := projectBusiness.GetBasicDgraphProjectInfo(ctx, projectID.String(), user.UserDgraphInfo.Uid)
-	if err != nil || p == nil || (p.IsProjectMember == 0 && p.IsProjectAdmin == 0) {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Project not found"})
-		return
-	}
-	if p.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the project's admins can post its updates."})
+	// As the update's own routes: whoever posts the project's updates (Work
+	// Access: its members and admins).
+	if _, _, ok := projectaccess.RequireID(w, r, projectID.String(), workAccess.NeedPostUpdate, ""); !ok {
 		return
 	}
 	d, err := business.DraftProjectUpdate(ctx, projectID, user.UserDgraphInfo.Uid, time.Now().In(helpers.Location(in.TZ)))

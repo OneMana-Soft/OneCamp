@@ -540,6 +540,10 @@ func GetDgraphBasicTaskInfoWithAttachmentsByUUID(ctx context.Context, teamUUID s
 						task_uuid
 						task_name
 					}
+					task_created_by {
+						uid
+						user_uuid
+					}
 				}
 			}`
 
@@ -703,8 +707,13 @@ func GetDgraphTaskActivityList(ctx context.Context, taskUUID string, userDgraphU
 				taskInfo(func: eq(task_uuid, $id)) {
 					task_uuid` + taskHistoryBlock(first, beforeActivityUUID != "") + `
 					task_project {
+						uid
+						project_uuid
 						project_is_member: count(project_members @filter(uid($userUid)))
+						project_is_admin: count(project_admins @filter(uid($userUid)))
 					}
+					task_assignee { uid }
+					task_created_by { uid }
 				}
 			}`
 
@@ -724,11 +733,15 @@ func GetDgraphTaskActivityList(ctx context.Context, taskUUID string, userDgraphU
 // written, as Dgraph gives it ("" when the task has no such line), and
 // whether userDgraphUID is a member of the task's project.
 func taskHistoryLineTime(ctx context.Context, taskUUID, activityUUID, userDgraphUID string) (at string, member bool, err error) {
+	// Who reads the history is who reads the task (TaskReader): the people in
+	// its project (a member or an admin) and its assignee.
 	query := `query Line($id: string, $line: string, $userUid: string){
 				t(func: eq(task_uuid, $id)) {
 					task_project {
 						project_is_member: count(project_members @filter(uid($userUid)))
+						project_is_admin: count(project_admins @filter(uid($userUid)))
 					}
+					task_is_assignee: count(task_assignee @filter(uid($userUid)))
 					task_activities @filter(eq(activity_uuid, $line)) {
 						activity_time
 					}
@@ -738,8 +751,10 @@ func taskHistoryLineTime(ctx context.Context, taskUUID, activityUUID, userDgraph
 		T []struct {
 			Project struct {
 				Member int `json:"project_is_member"`
+				Admin  int `json:"project_is_admin"`
 			} `json:"task_project"`
-			Lines []struct {
+			Assignee int `json:"task_is_assignee"`
+			Lines    []struct {
 				At string `json:"activity_time"`
 			} `json:"task_activities"`
 		} `json:"t"`
@@ -754,7 +769,8 @@ func taskHistoryLineTime(ctx context.Context, taskUUID, activityUUID, userDgraph
 	if len(out.T[0].Lines) > 0 {
 		at = out.T[0].Lines[0].At
 	}
-	return at, out.T[0].Project.Member > 0, nil
+	t := out.T[0]
+	return at, t.Project.Member > 0 || t.Project.Admin > 0 || t.Assignee > 0, nil
 }
 
 func GetDgraphTaskActivityInfo(ctx context.Context, teamUUID string, activityUUID string, userDgraphUID string) (dgraphTask *dgraphStruct.DgraphTask, err error) {
@@ -778,9 +794,13 @@ func GetDgraphTaskActivityInfo(ctx context.Context, teamUUID string, activityUUI
 						activity_next_state
 					}
 					task_project {
+						uid
+						project_uuid
 						project_is_member: count(project_members @filter(uid($userUid)))
+						project_is_admin: count(project_admins @filter(uid($userUid)))
 					}
-					
+					task_assignee { uid }
+					task_created_by { uid }
 				}
 			}`
 

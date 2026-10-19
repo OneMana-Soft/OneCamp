@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	goalModel "github.com/akashc777/OneCamp/models/postgres/Goal"
 	updateModel "github.com/akashc777/OneCamp/models/postgres/ProjectUpdate"
@@ -33,12 +34,16 @@ func TestGoals(t *testing.T) {
 	dg := integration.SetupDgraph(t)
 	live := "0001-01-01T00:00:00Z"
 	me, other, bot := uuid.New(), uuid.New(), uuid.New()
+	// Maya's names in the graph. Where she is named to people (a check-in's
+	// author), the name is the one rule's (helpers.PersonDisplayName), asked
+	// here rather than written out, so the test can't fall behind the rule.
+	const mayaName, mayaFull = "maya", "Maya Chen"
 	mine, theirs := uuid.New(), uuid.New()
 	task := func(status string) map[string]any {
 		return map[string]any{"dgraph.type": "Task", "task_uuid": uuid.NewString(), "task_status": status, "task_deleted_at": live}
 	}
 	uids := dg.Mutate(t, map[string]any{
-		"uid": "_:me", "dgraph.type": "User", "user_uuid": me.String(), "user_full_name": "Maya Chen", "user_name": "maya",
+		"uid": "_:me", "dgraph.type": "User", "user_uuid": me.String(), "user_full_name": mayaFull, "user_name": mayaName,
 		"user_projects": []map[string]any{
 			{"uid": "_:mine", "dgraph.type": "Project", "project_uuid": mine.String(), "project_name": "Q4 launch", "project_deleted_at": live,
 				"project_members": []map[string]any{{"uid": "_:me"}},
@@ -78,7 +83,7 @@ func TestGoals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if g1.Progress == nil || *g1.Progress != 0.75 || g1.Projects != 1 || !g1.CanEdit || g1.Owner.FullName != "Maya Chen" {
+	if g1.Progress == nil || *g1.Progress != 0.75 || g1.Projects != 1 || !g1.CanEdit || g1.Owner.FullName != mayaFull {
 		t.Fatalf("progress from the project's tasks done, owner named: %+v", g1)
 	}
 	// Someone in the other project links it too: it counts, unnamed to this reader.
@@ -127,7 +132,7 @@ func TestGoals(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if posted.CheckIn.Progress == nil || *posted.CheckIn.Progress != 0.5 || posted.CheckIn.AuthorName != "Maya Chen" {
+	if posted.CheckIn.Progress == nil || *posted.CheckIn.Progress != 0.5 || posted.CheckIn.AuthorName != helpers.PersonDisplayName(mayaName, mayaFull, "") {
 		t.Fatalf("the check-in keeps the progress it moved to: %+v", posted.CheckIn)
 	}
 	list, err := List(ctx, r, now)

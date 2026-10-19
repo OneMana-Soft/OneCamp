@@ -123,7 +123,14 @@ func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID
 	query := `query q($t: string, $b: string, $u: string) {
 		t(func: eq(task_uuid, $t)) {
 			` + fields + `
-			task_project { uid project_uuid project_is_admin: count(project_admins @filter(uid($u))) }
+			task_assignee { uid }
+			task_created_by { uid }
+			task_project {
+				uid
+				project_uuid
+				project_is_member: count(project_members @filter(uid($u)))
+				project_is_admin: count(project_admins @filter(uid($u)))
+			}
 			link: task_blocked_by @facets(kind, lag) @filter(eq(task_uuid, $b)) { task_uuid }
 		}
 		b(func: eq(task_uuid, $b)) {

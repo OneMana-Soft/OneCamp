@@ -72,29 +72,39 @@ func TestDeletedTeamIsRefusedOnBothCreatePaths(t *testing.T) {
 	}
 }
 
-// Creating in a team requires ADMIN, not membership. Belonging to a team does not carry
-// the right to create projects in it, and that is the rule the shipped path applies.
-func TestCreatingInATeamRequiresAdminNotMembership(t *testing.T) {
+// Making a project in a team is the workspace's "Who can make projects"
+// (workAccess.CanMakeProjects): the team's admins, or everyone in it, and a token
+// as one of its members. It is the rule the app's CreateProject and the agent's
+// executeCreateProject ask, so MCP asks it too, or the three drift about who may
+// create work in a team (MCP once refused every token and asked everyone else to
+// be an admin where the team's members may). Seeing a team decides no write.
+func TestMakingAProjectInATeamAsksTheOneRule(t *testing.T) {
 	branch := teamBranch(t)
 
 	if !strings.Contains(branch, "ref.Access.IsRead()") {
 		t.Fatal("the ResourceTeam branch never consults ref.Access, so creating a project " +
 			"would be authorised by the rule for merely seeing the team")
 	}
-	if !strings.Contains(branch, "IsAdmin") {
-		t.Error("the write path does not test team admin")
+	// The rule must be tied to the write branch, not applied to reads as well —
+	// otherwise a member the rule leaves out could not even see the team.
+	writeAt := strings.Index(branch, "!ref.Access.IsRead()")
+	if writeAt < 0 || !strings.Contains(branch[writeAt:], "workAccess.CanMakeProjects(") {
+		t.Error("the write branch does not ask workAccess.CanMakeProjects, so MCP decides who " +
+			"makes projects in a team its own way")
 	}
-	// The admin test must be tied to the write branch, not applied to reads as well —
-	// otherwise a plain member could not even see the team.
-	writeAt := strings.Index(branch, "ref.Access.IsRead()")
-	adminAt := strings.Index(branch[writeAt:], "IsAdmin <= 0")
-	if adminAt < 0 {
-		t.Error("the team-admin requirement is not attached to the write branch")
+	for _, path := range []string{"../../business/AI/projectAgent.go", "../../controllers/Project/projectController.go"} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		code := regexp.MustCompile(`//[^\n]*`).ReplaceAllString(string(raw), " ")
+		if !strings.Contains(code, "workAccess.CanMakeProjects(") {
+			t.Errorf("%s no longer asks workAccess.CanMakeProjects: its rule and MCP's would drift", path)
+		}
 	}
 }
 
-// The container rules for every creation must be the ones the app applies, and must be
-// project/team ADMIN rather than membership.
+// The container rules for every creation must be the ones the app applies.
 func TestCreationsAreBoundToTheirContainer(t *testing.T) {
 	byTool := map[string]binding{}
 	for _, b := range bridgedTools {

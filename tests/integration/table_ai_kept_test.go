@@ -69,7 +69,7 @@ func TestTableAICells(t *testing.T) {
 	// cell and the notes as the fill read them.
 	aiFillsFrom := func(read json.RawMessage, inputs, answer string, again bool) error {
 		b, _ := json.Marshal(map[string]string{summary: answer})
-		_, err := dataTableModel.WriteAICell(w.ctx, tb.Id, row.Id, summary, string(b), read, inputs, again, 100*1024)
+		_, err := dataTableModel.WriteAICell(w.ctx, tb.Id, row.Id, summary, string(b), read, inputs, again, 100*1024, nil, nil)
 		return err
 	}
 	aiFills := func(read json.RawMessage, answer string, again bool) error {
@@ -276,7 +276,7 @@ func TestTableAICellsFromTheReleasedWeb(t *testing.T) {
 	// lands is that fill's answer landing, as fillOneCell writes it.
 	lands := func(row uuid.UUID, field string, cell json.RawMessage, inputs, answer string) error {
 		b, _ := json.Marshal(map[string]string{field: answer})
-		_, err := dataTableModel.WriteAICell(w.ctx, tb.Id, row, field, string(b), cell, inputs, false, 100*1024)
+		_, err := dataTableModel.WriteAICell(w.ctx, tb.Id, row, field, string(b), cell, inputs, false, 100*1024, nil, nil)
 		return err
 	}
 	fills := func(t *testing.T, row uuid.UUID, field, answer string) {

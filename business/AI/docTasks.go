@@ -35,6 +35,7 @@ import (
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	contentcodec "github.com/akashc777/OneCamp/business/ContentCodec"
 	entityLinkBusiness "github.com/akashc777/OneCamp/business/EntityLink"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -272,14 +273,19 @@ var projectForTasks = func(ctx context.Context, projectUUID, userUID string) (*d
 // makeDocTask makes one task: a seam for tests (createProposedTask).
 var makeDocTask = createProposedTask
 
+// standingIn is how the person stands to the project (Work Access): a seam
+// for tests.
+var standingIn = workAccess.Of
+
 // linkTaskToDoc lists the doc on the task: a seam for tests.
 var linkTaskToDoc = func(ctx context.Context, taskUUID, docUUID string) error {
 	return entityLinkBusiness.AddLink(ctx, entityLinkBusiness.SourceTask, taskUUID, entityLinkBusiness.RefDoc, docUUID)
 }
 
-// CreateDocTasks makes the chosen tasks in a project the person is an admin
-// of, AS them, each linking back to the doc and its line. A project they may
-// not add tasks to is refused and recorded.
+// CreateDocTasks makes the chosen tasks in a project the person may add tasks
+// to (Work Access), AS them, each linking back to the doc and its line. A
+// project they may not add tasks to is refused and recorded; one they aren't
+// in is refused without its name.
 func CreateDocTasks(ctx context.Context, u *userModels.UserInfo, docUUID, projectUUID string, tasks []DocProposedTask) (*DocTasksCreated, error) {
 	docUUID = strings.TrimSpace(docUUID)
 	if len(tasks) == 0 {
@@ -308,7 +314,14 @@ func CreateDocTasks(ctx context.Context, u *userModels.UserInfo, docUUID, projec
 	if err != nil || project == nil || project.Uuid == "" {
 		return nil, refuse("", "no such project, or the person can't see it")
 	}
-	if project.IsProjectAdmin == 0 {
+	if !project.ReaderIsIn() {
+		return nil, refuse("", "no such project, or the person can't see it")
+	}
+	standing, err := standingIn(ctx, u.UserDgraphInfo.Uuid, project)
+	if err != nil {
+		return nil, err
+	}
+	if !standing.Can(workAccess.NeedCreateTask) {
 		return nil, refuse(strings.TrimSpace(project.Name), "the person can't add tasks to this project")
 	}
 

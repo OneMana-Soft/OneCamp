@@ -13,8 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
-	"strings"
 
 	business "github.com/akashc777/OneCamp/business/AI"
 	"github.com/akashc777/OneCamp/helpers"
@@ -90,12 +88,7 @@ func DocAIActivity(w http.ResponseWriter, r *http.Request) {
 	if !limitedDocAI(w, r, userInfo.UserDgraphInfo.Uuid) {
 		return
 	}
-	limit := 50
-	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = n
-		}
-	}
+	limit := helpers.LimitParam(r.URL.Query(), 50, 100)
 	items, err := business.DocAIActivity(ctx, &userInfo, r.URL.Query().Get("doc_uuid"), limit)
 	if err != nil {
 		if writeDocAccessError(w, err) {

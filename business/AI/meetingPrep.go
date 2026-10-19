@@ -33,7 +33,6 @@ import (
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/AI"
-	calendarDomain "github.com/akashc777/OneCamp/domain/Calendar"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	memoryModels "github.com/akashc777/OneCamp/models/postgres/WorkspaceMemory"
@@ -87,9 +86,9 @@ func MeetingPrepBrief(ctx context.Context, userInfo *userModels.UserInfo, req ad
 	if eventUUID == "" {
 		return nil, fmt.Errorf("event_uuid is required")
 	}
-	event, err := calendarDomain.GetDgraphEventInfoByUUID(ctx, eventUUID)
-	if err != nil || event == nil {
-		return nil, fmt.Errorf("event not found")
+	event, err := calendarEventFor(ctx, userInfo, eventUUID)
+	if err != nil {
+		return nil, err
 	}
 
 	// Authorization: only people on the meeting may request its brief.

@@ -703,13 +703,7 @@ func HandleListJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	provider := r.URL.Query().Get("provider")
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 200 {
-		limit = 200
-	}
+	limit := helpers.LimitParam(r.URL.Query(), 50, 200)
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	if offset < 0 {
 		offset = 0
@@ -837,7 +831,7 @@ func HandleListErrors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	severity := r.URL.Query().Get("severity")
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	limit := helpers.LimitParam(r.URL.Query(), 100, 500)
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	errs, err := importModels.ListErrors(ctx, jobId, severity, limit, offset)
 	if err != nil {

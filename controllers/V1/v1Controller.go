@@ -13,17 +13,23 @@ import (
 
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
+	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
+// actor is the token's owner as a table's rules see them: as a member, never as
+// an admin, since every /v1 route is a token's and a token carries none of its
+// owner's admin powers (helpers.ActsThroughToken). So a table is theirs, open to
+// the workspace, or refused, as for any member.
 func actor(r *http.Request) dataTableBusiness.Actor {
 	userInfo, _ := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	return dataTableBusiness.Actor{
 		UserID:  userInfo.UserPostgresInfo.Id,
-		IsAdmin: userInfo.UserPostgresInfo.IsAdmin,
+		IsAdmin: userInfo.UserPostgresInfo.IsAdmin && !helpers.ActsThroughToken(r.Context()),
+		Kind:    rowLedger.ActorAPI,
 	}
 }
 

@@ -17,7 +17,7 @@
 //	func TestSomething(t *testing.T) {
 //	    env := integration.SetupEnv(t)
 //	    defer env.Close()
-//	    // env.PG is a *sql.DB pointed at a fresh Postgres with
+//	    // env.PG is a *sql.DB pointed at a fresh database with
 //	    // migrations applied. env.DSN gives you the URL for libraries
 //	    // that want it.
 //	}
@@ -29,6 +29,9 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,24 +43,33 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// Env carries the live test environment for a single test. Call Close
-// to release the container at the end.
+// Env carries the live test environment for a single test: a database of
+// its own. Call Close (or let t.Cleanup) to drop it at the end.
 type Env struct {
-	t         *testing.T
-	container testcontainers.Container
-	PG        *sql.DB
-	DSN       string
+	t        *testing.T
+	server   *pgServer
+	database string
+	closed   sync.Once
+	PG       *sql.DB
+	DSN      string
 }
 
-// SetupEnv brings up a Postgres 12 container, applies every migration
-// under ../../migrations, and returns a connected *sql.DB. The
-// container is automatically removed at the end of the test via t.Cleanup.
+// SetupEnv gives the test a Postgres 12 database of its own with every
+// migration under ../../migrations applied, and returns a connected *sql.DB.
+// The database is dropped at the end of the test via t.Cleanup.
 //
-// Each call gives you a fresh database, so two tests in the same
-// package don't share state.
+// Each call gives you a fresh database, so two tests in the same package
+// don't share state. The databases are copies of one template the binary
+// migrated once, from an empty database, on the binary's one Postgres
+// (shared.go): a copy holds what a new container with the migrations applied
+// held, and takes well under a second instead of half a minute. A test that
+// applies migrations itself (migratesItself) gets an empty database with
+// every migration applied to it in the test, as every test's database was
+// before.
 func SetupEnv(t *testing.T) *Env {
 	t.Helper()
-	// Required before any test wires the project's own pool at this container.
+	guardTestState(t)
+	// Required before any test wires the project's own pool at this database.
 	//
 	// postgresInit.ConnectPostgres logs on its SUCCESS path via helpers.MessageLogs,
 	// which loggerInit populates in the server and nothing populates in a test binary —
@@ -68,45 +80,31 @@ func SetupEnv(t *testing.T) *Env {
 	// layer needs it, and the same guard already exists in SetupDgraph for the same
 	// reason.
 	ensureLoggers()
-	ctx := context.Background()
 
-	req := testcontainers.ContainerRequest{
-		Image: "postgres:12-alpine",
-		Env: map[string]string{
-			"POSTGRES_USER":     "onecamp",
-			"POSTGRES_PASSWORD": "onecamp",
-			"POSTGRES_DB":       "onecamp_test",
-		},
-		ExposedPorts: []string{"5432/tcp"},
-		WaitingFor: wait.ForLog("database system is ready to accept connections").
-			WithOccurrence(2).
-			WithStartupTimeout(60 * time.Second),
-	}
-
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
+	var name string
+	fromBlank := migratesItself[strings.SplitN(t.Name(), "/", 2)[0]]
+	srv, err := thePostgres.prepared(startPostgres, func(s *pgServer) (err error) {
+		if fromBlank {
+			name, err = s.newMigratedDatabase()
+		} else {
+			name, err = s.newDatabase()
+		}
+		if err != nil {
+			return fmt.Errorf("make the test's database: %w", err)
+		}
+		return nil
 	})
 	if err != nil {
-		t.Fatalf("start postgres container: %v", err)
+		t.Fatalf("%v", err)
 	}
+	env := &Env{t: t, server: srv, database: name, DSN: srv.dsn(name)}
+	t.Cleanup(env.Close)
 
-	host, err := c.Host(ctx)
-	if err != nil {
-		t.Fatalf("container host: %v", err)
-	}
-	port, err := c.MappedPort(ctx, "5432")
-	if err != nil {
-		t.Fatalf("container port: %v", err)
-	}
-
-	dsn := fmt.Sprintf("postgres://onecamp:onecamp@%s:%s/onecamp_test?sslmode=disable",
-		host, port.Port())
-
-	db, err := sql.Open("postgres", dsn)
+	db, err := sql.Open("postgres", env.DSN)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	env.PG = db
 
 	// Connection pool is small for tests so we don't blow past the
 	// default postgres max_connections of 100 if tests run in parallel.
@@ -114,52 +112,269 @@ func SetupEnv(t *testing.T) *Env {
 	db.SetMaxIdleConns(4)
 	db.SetConnMaxLifetime(2 * time.Minute)
 
-	// Wait for SQL-level readiness (the log-level wait is necessary
-	// but not sufficient; pg startup logs appear before the listener
-	// is fully up).
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := db.Ping(); err == nil {
-			break
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	if err := db.Ping(); err != nil {
+	if err := pingUntil(db, 30*time.Second); err != nil {
 		t.Fatalf("postgres did not become reachable: %v", err)
 	}
 
-	// Pre-create the uuid_generate_v4 extension that several migrations
-	// depend on. Production deploys do this in their bootstrap script.
-	if _, err := db.Exec(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`); err != nil {
-		t.Fatalf("create extension uuid-ossp: %v", err)
-	}
-	if _, err := db.Exec(`CREATE EXTENSION IF NOT EXISTS pgcrypto`); err != nil {
-		t.Fatalf("create extension pgcrypto: %v", err)
-	}
-
-	if err := applyMigrations(dsn); err != nil {
-		t.Fatalf("apply migrations: %v", err)
-	}
-
-	env := &Env{t: t, container: c, PG: db, DSN: dsn}
-	t.Cleanup(env.Close)
 	settleBeforeTeardown(t)
 	return env
 }
 
-// Close terminates the container and closes the DB pool.
+// Close drops the test's database and closes the DB pool. Sessions still
+// open on it (the project's own pool, which the test pointed here, among
+// them) are ended first, as the test's own container going ended them.
 func (e *Env) Close() {
 	if e == nil {
 		return
 	}
-	if e.PG != nil {
-		_ = e.PG.Close()
+	e.closed.Do(func() {
+		if e.PG != nil {
+			_ = e.PG.Close()
+		}
+		if e.server != nil && e.database != "" {
+			if err := e.server.dropDatabase(e.database); err != nil {
+				e.t.Logf("drop the test's database %s: %v", e.database, err)
+			}
+		}
+	})
+}
+
+// pgServer is the binary's Postgres: the template the tests' databases are
+// copied from, a connection to the maintenance database to make and drop
+// them, the databases tests hold now, and the server's own settings as it
+// started (teststate.go).
+type pgServer struct {
+	container  testcontainers.Container
+	host, port string
+	admin      *sql.DB
+	made       atomic.Int64
+	liveMu     sync.Mutex
+	live       map[string]bool
+	baseline   map[string]string
+}
+
+// migratesItself names the tests that apply migrations themselves: down, up,
+// or to a version, with golang-migrate or by running a migration's SQL. Each
+// gets an empty database (CREATE DATABASE … TEMPLATE template0) with every
+// migration applied to it by golang-migrate in the test, not a copy of the
+// template, so what it does to migrations starts from a database migrated in
+// its own run, as before the shared server.
+// TestTheTestsThatApplyMigrationsGetADatabaseMigratedFromBlank reads the test
+// files and fails when this list and theirs differ.
+var migratesItself = map[string]bool{
+	"TestBookingPages":                                          true,
+	"TestCalendarAttendanceMigrationUpDownUp":                   true,
+	"TestCalendarRemindersMigrationUpDownUp":                    true,
+	"TestCalendarStoreMigrationUpDownUp":                        true,
+	"TestConnectedWork":                                         true,
+	"TestContentIOMigrationUpDownUp":                            true,
+	"TestConversationsMigrationUpDownUp":                        true,
+	"TestDocAIIndexMigrationUpDownUp":                           true,
+	"TestDocAccessResolver":                                     true,
+	"TestDocExportConsentsMigrationUpDownUp":                    true,
+	"TestDocTreeAcceptance":                                     true,
+	"TestDocVersionsMigrationUpDownUp":                          true,
+	"TestEditProposalsMigrationUpDownUp":                        true,
+	"TestEmailLookupIndexSurvivesAddressesThatDifferOnlyInCase": true,
+	"TestMigration204ClosesInvitationsToMembers":                true,
+	"TestOutboxMigrationUpDownUp":                               true,
+	"TestResourceFollowsMigrationUpDownUp":                      true,
+	"TestResourceMentionSyncsMigrationUpDownUp":                 true,
+	"TestTableMigrationFieldSettings":                           true,
+	"TestTableMigrationRowLedger":                               true,
+	"TestTableRowComments":                                      true,
+	"TestTableRowPages":                                         true,
+	"TestThreadsMigrationUpDownUp":                              true,
+}
+
+var thePostgres shared[pgServer]
+
+// templateDB holds every migration, applied once. Nothing connects to it
+// afterwards: CREATE DATABASE copies only a template nobody is using.
+const templateDB = "onecamp_template"
+
+func (s *pgServer) dsn(database string) string {
+	return fmt.Sprintf("postgres://onecamp:onecamp@%s:%s/%s?sslmode=disable", s.host, s.port, database)
+}
+
+// startPostgres starts the binary's Postgres and makes the template: the
+// extensions production's bootstrap creates, then every migration.
+func startPostgres() (*pgServer, func(), error) {
+	ctx := context.Background()
+	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image: "postgres:12-alpine",
+			Env: map[string]string{
+				"POSTGRES_USER":     "onecamp",
+				"POSTGRES_PASSWORD": "onecamp",
+				"POSTGRES_DB":       "onecamp_test",
+			},
+			// Flushing to disk is for surviving a crash, and no test crashes
+			// the server. Without it, copying the template and migrating it
+			// take a fraction of the time; what a session reads is the same.
+			Cmd:          []string{"postgres", "-c", "fsync=off", "-c", "synchronous_commit=off", "-c", "full_page_writes=off"},
+			ExposedPorts: []string{"5432/tcp"},
+			// One start a run, so a slow one on a busy machine (37 s at worst
+			// in the kept logs) is given room; a stuck one still fails.
+			WaitingFor: wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(2 * time.Minute),
+		},
+		Started: true,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("start postgres container: %w", err)
 	}
-	if e.container != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_ = e.container.Terminate(ctx)
+	host, err := c.Host(ctx)
+	if err != nil {
+		terminate(c)
+		return nil, nil, fmt.Errorf("container host: %w", err)
 	}
+	port, err := c.MappedPort(ctx, "5432")
+	if err != nil {
+		terminate(c)
+		return nil, nil, fmt.Errorf("container port: %w", err)
+	}
+	s := &pgServer{container: c, host: host, port: port.Port()}
+
+	admin, err := sql.Open("postgres", s.dsn("postgres"))
+	if err != nil {
+		terminate(c)
+		return nil, nil, fmt.Errorf("open the maintenance database: %w", err)
+	}
+	admin.SetMaxOpenConns(2)
+	s.admin = admin
+	stop := func() {
+		_ = admin.Close()
+		terminate(c)
+	}
+	// Wait for SQL-level readiness (the log-level wait is necessary
+	// but not sufficient; pg startup logs appear before the listener
+	// is fully up).
+	if err := pingUntil(admin, 30*time.Second); err != nil {
+		stop()
+		return nil, nil, fmt.Errorf("postgres did not become reachable: %w", err)
+	}
+
+	if _, err := admin.Exec(`CREATE DATABASE ` + templateDB); err != nil {
+		stop()
+		return nil, nil, fmt.Errorf("create the template database: %w", err)
+	}
+	tmpl, err := sql.Open("postgres", s.dsn(templateDB))
+	if err != nil {
+		stop()
+		return nil, nil, fmt.Errorf("open the template database: %w", err)
+	}
+	// Pre-create the uuid_generate_v4 extension that several migrations
+	// depend on. Production deploys do this in their bootstrap script.
+	for _, ext := range []string{`"uuid-ossp"`, `pgcrypto`} {
+		if _, err := tmpl.Exec(`CREATE EXTENSION IF NOT EXISTS ` + ext); err != nil {
+			_ = tmpl.Close()
+			stop()
+			return nil, nil, fmt.Errorf("create extension %s: %w", ext, err)
+		}
+	}
+	_ = tmpl.Close()
+	began := time.Now()
+	if err := applyMigrations(s.dsn(templateDB)); err != nil {
+		stop()
+		return nil, nil, fmt.Errorf("apply migrations: %w", err)
+	}
+	// Said in the run's output: the run's from-scratch proof of the
+	// migrations is this, every one applied to an empty Postgres 12.
+	fmt.Printf("integration: every migration applied to an empty database (the template) in %s\n", time.Since(began).Round(time.Millisecond))
+	s.live = map[string]bool{}
+	if s.baseline, err = s.pgSettings(); err != nil {
+		stop()
+		return nil, nil, fmt.Errorf("read postgres's own settings: %w", err)
+	}
+	return s, stop, nil
+}
+
+// newDatabase copies the template into a database of its own and answers
+// its name. Postgres waits up to 5 s for the template's last session to end
+// before refusing a copy, and the copy is tried again for half a minute.
+func (s *pgServer) newDatabase() (string, error) {
+	name := fmt.Sprintf("test_%d", s.made.Add(1))
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		_, err := s.admin.Exec(`CREATE DATABASE ` + name + ` TEMPLATE ` + templateDB)
+		if err == nil {
+			s.held(name, true)
+			return name, nil
+		}
+		if time.Now().After(deadline) {
+			return name, err
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// newMigratedDatabase makes an empty database, with the extensions
+// production's bootstrap creates, and applies every migration to it.
+func (s *pgServer) newMigratedDatabase() (string, error) {
+	name := fmt.Sprintf("test_%d", s.made.Add(1))
+	if _, err := s.admin.Exec(`CREATE DATABASE ` + name + ` TEMPLATE template0`); err != nil {
+		return name, err
+	}
+	s.held(name, true)
+	db, err := sql.Open("postgres", s.dsn(name))
+	if err != nil {
+		return name, err
+	}
+	for _, ext := range []string{`"uuid-ossp"`, `pgcrypto`} {
+		if _, err := db.Exec(`CREATE EXTENSION IF NOT EXISTS ` + ext); err != nil {
+			_ = db.Close()
+			return name, fmt.Errorf("create extension %s: %w", ext, err)
+		}
+	}
+	_ = db.Close()
+	if err := applyMigrations(s.dsn(name)); err != nil {
+		return name, fmt.Errorf("apply migrations: %w", err)
+	}
+	return name, nil
+}
+
+// held records that a test holds the database, or no longer does.
+func (s *pgServer) held(name string, yes bool) {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	if yes {
+		s.live[name] = true
+	} else {
+		delete(s.live, name)
+	}
+}
+
+// dropDatabase drops a test's database: first no new sessions, then the
+// open ones ended, since Postgres 12 drops only a database nobody is in.
+func (s *pgServer) dropDatabase(name string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, _ = s.admin.ExecContext(ctx, `ALTER DATABASE `+name+` ALLOW_CONNECTIONS false`)
+	for {
+		_, _ = s.admin.ExecContext(ctx, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1`, name)
+		_, err := s.admin.ExecContext(ctx, `DROP DATABASE IF EXISTS `+name)
+		if err == nil || ctx.Err() != nil {
+			// No test holds it now: one still there is left behind, and the
+			// test's guard says so (teststate.go).
+			s.held(name, false)
+			return err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// pingUntil pings db until it answers or wait has passed.
+func pingUntil(db *sql.DB, wait time.Duration) error {
+	deadline := time.Now().Add(wait)
+	for time.Now().Before(deadline) {
+		if err := db.Ping(); err == nil {
+			return nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return db.Ping()
 }
 
 // applyMigrations walks the project's migrations/ directory and applies
@@ -179,8 +394,8 @@ func applyMigrations(dsn string) error {
 		return fmt.Errorf("migrate.New: %w", err)
 	}
 	defer func() {
-		// Ignore the close errors — the DB is going away with the
-		// container anyway.
+		// Ignore the close errors — the template is copied, never used
+		// directly, once they're applied.
 		_, _ = m.Close()
 	}()
 

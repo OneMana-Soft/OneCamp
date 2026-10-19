@@ -20,6 +20,7 @@ type toldWays struct {
 	mu                   sync.Mutex
 	written, live        []string
 	delivered, emailed   []string
+	through              []string
 	deliverData          map[string]string
 	deliverID            string
 	keys                 map[string]bool
@@ -35,9 +36,9 @@ type toldWays struct {
 
 func withTellSeams(t *testing.T, w *toldWays) {
 	t.Helper()
-	oldW, oldD, oldL, oldE, oldOn := noticeWrite, noticeDeliver, noticeLive, noticeEmail, noticesOn
+	oldW, oldD, oldT, oldL, oldE, oldOn := noticeWrite, noticeDeliver, noticeDeliverThrough, noticeLive, noticeEmail, noticesOn
 	t.Cleanup(func() {
-		noticeWrite, noticeDeliver, noticeLive, noticeEmail, noticesOn = oldW, oldD, oldL, oldE, oldOn
+		noticeWrite, noticeDeliver, noticeDeliverThrough, noticeLive, noticeEmail, noticesOn = oldW, oldD, oldT, oldL, oldE, oldOn
 	})
 	w.keys = map[string]bool{}
 	noticesOn = func() bool { return true }
@@ -73,6 +74,11 @@ func withTellSeams(t *testing.T, w *toldWays) {
 		defer w.mu.Unlock()
 		w.delivered = append(w.delivered, to...)
 		w.deliverData, w.deliverID = data, id
+	}
+	noticeDeliverThrough = func(_ context.Context, to []string, _ map[string]string, _ string) {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.through = append(w.through, to...)
 	}
 	noticeLive = func(user string, item *dgraphModels.UnifiedActivityItem) {
 		w.mu.Lock()
@@ -343,5 +349,44 @@ func TestATellingWritesItsNoticesInOneStatement(t *testing.T) {
 		{UserUUID: "44444444-4444-4444-8444-444444444444", Reason: "mention"}})
 	if w.writes != 1 || len(told) != 3 {
 		t.Errorf("telling three people made %d writes and told %v, want one write telling all three", w.writes, told)
+	}
+}
+
+// A NoPush recipient is told in the inbox, live, and by email, but never by
+// push or desktop notice: an organiser hearing of a guest's answer, who asked
+// to be emailed answers (calendar D-CAL-17).
+func TestANoPushRecipientIsEmailedButNeverPushed(t *testing.T) {
+	w := &toldWays{}
+	withTellSeams(t, w)
+	told := Tell(context.Background(), mention(), []NoticeRecipient{
+		{UserUUID: sam, Reason: "organiser", NoPush: true},
+		{UserUUID: maya, Reason: "mention"},
+	})
+	if !slices.Equal(told, []string{sam, maya}) || !slices.Equal(w.live, []string{sam, maya}) {
+		t.Fatalf("told %v, live %v", told, w.live)
+	}
+	if !slices.Equal(w.delivered, []string{maya}) {
+		t.Errorf("pushed to %v; sam is never pushed", w.delivered)
+	}
+	if !slices.Equal(w.emailed, []string{sam, maya}) {
+		t.Errorf("emailed %v; sam is emailed", w.emailed)
+	}
+}
+
+// A reminder of an event someone said yes to reaches them through a pause,
+// quiet hours and focus time (calendar D-CAL-4); everyone else's push keeps
+// to their holds, and a listed notice has no inbox row.
+func TestAThroughHoldsRecipientIsPushedPastTheirHolds(t *testing.T) {
+	w := &toldWays{}
+	withTellSeams(t, w)
+	told := Tell(context.Background(), mention(), []NoticeRecipient{
+		{UserUUID: sam, Reason: "reminder", Listed: true, ThroughHolds: true},
+		{UserUUID: maya, Reason: "reminder", Listed: true},
+	})
+	if !slices.Equal(told, []string{sam, maya}) || len(w.live) != 0 {
+		t.Fatalf("told %v, live %v", told, w.live)
+	}
+	if !slices.Equal(w.through, []string{sam}) || !slices.Equal(w.delivered, []string{maya}) {
+		t.Errorf("through holds %v, within them %v", w.through, w.delivered)
 	}
 }

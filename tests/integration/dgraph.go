@@ -30,6 +30,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -61,19 +62,80 @@ func ensureLoggers() {
 
 // DgraphEnv carries a live Dgraph for one test.
 type DgraphEnv struct {
-	container testcontainers.Container
-	Endpoint  string
+	conn     *grpc.ClientConn // the project's client's, closed when the test ends
+	Endpoint string
 }
 
-// SetupDgraph starts a single-node Dgraph, connects the project's client to it and
-// applies the real schema (ConnectDgraph calls createSchema, so the predicates
-// under test are the production ones, not a hand-written subset — a hand-written
-// subset is how a test ends up passing against a shape production does not have).
+// SetupDgraph gives the test a single-node Dgraph holding nothing, connects the
+// project's client to it and applies the real schema (ConnectDgraph calls
+// createSchema, so the predicates under test are the production ones, not a
+// hand-written subset — a hand-written subset is how a test ends up passing
+// against a shape production does not have).
+//
+// The server is the binary's one (shared.go). What the tests before wrote is
+// dropped first, data and schema alike, so the graph the test starts from is
+// a new server's.
 func SetupDgraph(t *testing.T) *DgraphEnv {
 	t.Helper()
+	guardTestState(t)
 	ensureLoggers()
 	ctx := context.Background()
 
+	var conn *grpc.ClientConn
+	srv, err := theDgraph.prepared(startDgraph, func(s *dgraphServer) error {
+		// Retry: Alter can still be rejected for a moment after /health is green.
+		var connErr error
+		deadline := time.Now().Add(90 * time.Second)
+		for time.Now().Before(deadline) {
+			connErr = s.admin.Alter(ctx, &api.Operation{DropAll: true})
+			if connErr == nil {
+				connErr, conn = dgraphInit.ConnectDgraph(ctx, &dgraphInit.DgraphConfig{Endpoint: s.endpoint})
+				if connErr == nil && dgraphInit.DgraphClient != nil {
+					return nil
+				}
+				if conn != nil {
+					_ = conn.Close()
+					conn = nil
+				}
+			}
+			time.Sleep(time.Second)
+		}
+		return fmt.Errorf("connect dgraph at %s: %w", s.endpoint, connErr)
+	})
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+
+	env := &DgraphEnv{conn: conn, Endpoint: srv.endpoint}
+	t.Cleanup(env.Close)
+	settleBeforeTeardown(t)
+	return env
+}
+
+// Close leaves the project's graph client reaching nothing, as the test's own
+// server going used to: a later test that never set a graph up fails to reach
+// one rather than reading another test's.
+func (e *DgraphEnv) Close() {
+	if e == nil || e.conn == nil {
+		return
+	}
+	dgraphInit.DgraphClient = unreachableDgraph()
+	_ = e.conn.Close()
+	e.conn = nil
+}
+
+// dgraphServer is the binary's Dgraph, and a client of the harness's own for
+// dropping what a test leaves.
+type dgraphServer struct {
+	endpoint string
+	admin    *dgo.Dgraph
+}
+
+var theDgraph shared[dgraphServer]
+
+// startDgraph starts the binary's Dgraph.
+func startDgraph() (*dgraphServer, func(), error) {
+	ctx := context.Background()
 	req := testcontainers.ContainerRequest{
 		// Same image production runs (see final-compose.yml), running zero and
 		// alpha in one container because a test does not need them split. Using
@@ -97,47 +159,55 @@ func SetupDgraph(t *testing.T) *DgraphEnv {
 		Started:          true,
 	})
 	if err != nil {
-		t.Fatalf("start dgraph container: %v", err)
+		return nil, nil, fmt.Errorf("start dgraph container: %w", err)
 	}
-
 	host, err := c.Host(ctx)
 	if err != nil {
-		t.Fatalf("dgraph host: %v", err)
+		terminate(c)
+		return nil, nil, fmt.Errorf("dgraph host: %w", err)
 	}
 	port, err := c.MappedPort(ctx, "9080")
 	if err != nil {
-		t.Fatalf("dgraph port: %v", err)
+		terminate(c)
+		return nil, nil, fmt.Errorf("dgraph port: %w", err)
 	}
 	endpoint := fmt.Sprintf("%s:%s", host, port.Port())
-
-	// Retry: Alter can still be rejected for a moment after /health is green.
-	var connErr error
-	deadline := time.Now().Add(90 * time.Second)
-	for time.Now().Before(deadline) {
-		connErr, _ = dgraphInit.ConnectDgraph(ctx, &dgraphInit.DgraphConfig{Endpoint: endpoint})
-		if connErr == nil && dgraphInit.DgraphClient != nil {
-			break
-		}
-		time.Sleep(time.Second)
+	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		terminate(c)
+		return nil, nil, fmt.Errorf("dgraph client: %w", err)
 	}
-	if connErr != nil {
-		t.Fatalf("connect dgraph at %s: %v", endpoint, connErr)
-	}
-
-	env := &DgraphEnv{container: c, Endpoint: endpoint}
-	t.Cleanup(env.Close)
-	settleBeforeTeardown(t)
-	return env
+	srv := &dgraphServer{endpoint: endpoint, admin: dgo.NewDgraphClient(api.NewDgraphClient(conn))}
+	return srv, func() {
+		_ = conn.Close()
+		terminate(c)
+	}, nil
 }
 
-// Close terminates the Dgraph container.
-func (e *DgraphEnv) Close() {
-	if e == nil || e.container == nil {
-		return
+var nowhere struct {
+	once   sync.Once
+	client *dgo.Dgraph
+}
+
+// The server's graph client in the integration binary is never nil either
+// (mqtt.go says why): before the first test sets a graph up it reaches
+// nothing, as it does after every test (Close).
+func init() {
+	if dgraphInit.DgraphClient == nil {
+		dgraphInit.DgraphClient = unreachableDgraph()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	_ = e.container.Terminate(ctx)
+}
+
+// unreachableDgraph is a graph client with nowhere to go: every call fails
+// as a call to a server that went away does.
+func unreachableDgraph() *dgo.Dgraph {
+	nowhere.once.Do(func() {
+		conn, err := grpc.NewClient("127.0.0.1:1", grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err == nil {
+			nowhere.client = dgo.NewDgraphClient(api.NewDgraphClient(conn))
+		}
+	})
+	return nowhere.client
 }
 
 // Mutate applies a JSON set-mutation and returns the blank-node -> uid map, so a

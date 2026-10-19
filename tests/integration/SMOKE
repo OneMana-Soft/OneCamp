@@ -1,0 +1,73 @@
+# The integration smoke set: the tests every scoped run includes, whatever
+# changed (scripts/integ-select.py; SCOPE=smoke runs these alone). One name a
+# line, as `func TestX` names it; # starts a comment. It is the core of what
+# a person does, end to end against real stores, chosen to finish in about
+# ten minutes in one slot. The full suite still runs for every release and
+# once a day; this set never replaces it.
+
+# Migrations at start-up: every migration applies to an empty database.
+TestSmoke
+
+# Sign-in and sessions
+TestSignInSaysWhyAndPasswordsCanBeOff
+TestRefreshTokensAreTradedOnceAndCopiesEndTheSession
+TestDemotingAnAdminRefusesTheirNextRequest
+TestExternalPeopleSignInOnlyByJoining
+TestAnUpdateKeepsEveryoneSignedIn
+
+# Access rules: docs, projects and tasks, tables, channels, search, live topics
+TestDocAccessRules
+TestDocAbilitiesMatrix
+TestA1WorkAccessThroughTheHandlers
+TestProjectAndTaskReadsSayNotFound
+TestTableGuestBundle
+TestOnlyAnAdminOpensAPrivateChannel
+TestRevokingChannelMembershipTakesEffectImmediately
+TestGlobalSearchFindsDocsByWhoMayReadThemNow
+TestMqttAccessFollowsWhatAPersonCanRead
+
+# Tokens and MCP reach
+TestATokenActsAsAMemberOverMCP
+TestPrincipalCanReachDocsAgainstRealGraph
+TestAnAgentsTokenWritesDocsAsTheAgent
+TestEveryPublicAPIRouteAnswers
+
+# Chat: send and read
+TestChatA0ServerAnswers
+TestChatDay0ContractsAnswerAsToday
+TestADMStoredIsSentEvenWhenItsReadMarksCantBeWritten
+TestAConversationsReadSaysWhetherItIsThere
+TestPagingNeverSkipsAMessageInTheSameSecondAsTheEdge
+
+# Tasks: create and update
+TestProjectsDay0ContractsAnswerAsToday
+TestANewTaskReachesItsReadersAndWhomItIsGivenTo
+TestAStaleFieldSaveKeepsTheOptionsItDoesntName
+
+# Tables
+TestTableCellEdits
+
+# Docs: save and collaboration
+TestACollabSaveIsOneUpsertThatSaysWhatChanged
+TestOpeningADocIsNotEditingIt
+TestDocVersionRowsKeepNamedOnes
+
+# Restore, and the search index
+TestArchivingAndRestoringADoc
+TestTheBackfillFillsInTheIndexWithoutUndoingARemoval
+
+# Storage
+TestOnlyThoseWhoMayAddToADocUploadItsFiles
+TestContentIOZipOfThreeFilesMakesThreeDocsWithImagesInStorage
+
+# Calendar
+TestCalendarDay0ContractsAnswerAsToday
+
+# The harness's own: a run on shared servers hides nothing a fresh one would
+# show (isolation_test.go).
+TestLeakCanaryA
+TestLeakCanaryB
+TestTheTestsThatApplyMigrationsGetADatabaseMigratedFromBlank
+TestTheTestsPutBackWhatTheyChange
+# Work a test left running finds no nil client (after_cleanup_test.go).
+TestWorkLeftRunningAfterATestFindsNoNilClient

@@ -11,9 +11,10 @@ import (
 )
 
 // Every task GitHub route checks the task before it touches anything: a read
-// needs someone who may see the task (projectaccess.RequireTask), a change one
-// of its project's admins (projectaccess.RequireTaskAdmin), and a bulk change
-// checks each task it names (changeRefusal). Eleven of them checked nothing
+// needs someone who may see the task (projectaccess.RequireTask with
+// NeedView), a change someone who may change it (with NeedEditTask: Work
+// Access decides), and a bulk change checks each task it names
+// (changeRefusal). Eleven of them checked nothing
 // but sign-in, so anyone could link a private task to any issue (and have its
 // comments posted there), unlink, branch, open pull requests and search a
 // linked private repository. The routes are read from the router, so a new one
@@ -47,10 +48,10 @@ func TestTaskGitHubRoutesCheckTheTaskFirst(t *testing.T) {
 		"githubTaskActivityDomain": true, "githubPRReviewDomain": true, "syncBusiness": true}
 	for _, rt := range routes {
 		method, path, handler := rt[1], rt[2], rt[3]
-		guard := "projectaccess.RequireTaskAdmin"
+		guard := "projectaccess.RequireTask(workAccess.NeedEditTask)"
 		switch {
 		case method == "Get":
-			guard = "projectaccess.RequireTask"
+			guard = "projectaccess.RequireTask(workAccess.NeedView)"
 		case !strings.Contains(path, "{task_uuid}"):
 			guard = "changeRefusal"
 		}
@@ -84,10 +85,8 @@ func TestTaskGitHubRoutesCheckTheTaskFirst(t *testing.T) {
 	}
 	asksForChange := false
 	ast.Inspect(refusal.Body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && callName(call) == "business.TaskFor" && len(call.Args) == 4 {
-			if b, ok := call.Args[3].(*ast.Ident); ok && b.Name == "true" {
-				asksForChange = true
-			}
+		if call, ok := n.(*ast.CallExpr); ok && callName(call) == "business.TaskFor" && needOf(call, 3) == "workAccess.NeedEditTask" {
+			asksForChange = true
 		}
 		return true
 	})
@@ -97,18 +96,35 @@ func TestTaskGitHubRoutesCheckTheTaskFirst(t *testing.T) {
 }
 
 // callsInOrder is every call in body, in source order, by name: pkg.Func for a
-// selector, the bare name otherwise.
+// selector, the bare name otherwise; a task check with the need it asks,
+// projectaccess.RequireTask(workAccess.NeedView).
 func callsInOrder(body *ast.BlockStmt) []string {
 	var calls []string
 	ast.Inspect(body, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
 			if name := callName(call); name != "" {
+				if name == "projectaccess.RequireTask" {
+					name += "(" + needOf(call, 3) + ")"
+				}
 				calls = append(calls, name)
 			}
 		}
 		return true
 	})
 	return calls
+}
+
+// needOf is the call's argument at i as pkg.Name, or "" when it isn't one.
+func needOf(call *ast.CallExpr, i int) string {
+	if len(call.Args) <= i {
+		return ""
+	}
+	if sel, ok := call.Args[i].(*ast.SelectorExpr); ok {
+		if x, ok := sel.X.(*ast.Ident); ok {
+			return x.Name + "." + sel.Sel.Name
+		}
+	}
+	return ""
 }
 
 func callName(call *ast.CallExpr) string {

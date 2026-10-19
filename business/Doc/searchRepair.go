@@ -169,7 +169,8 @@ func writeDocSearchRepairPage(ctx context.Context, rep *DocSearchRepair, docs []
 	entries := make([]*openSearchStruct.OpenSearchDocEntry, 0, len(docs))
 	children := make(map[string]openSearchGlobalSearchModels.DocChildFields, len(docs))
 	for _, d := range docs {
-		if d == nil || strings.TrimSpace(d.Uuid) == "" {
+		// A hosted doc has no entry to repair: it is never written (D-18).
+		if d == nil || strings.TrimSpace(d.Uuid) == "" || domain.IsHosted(d) {
 			continue
 		}
 		e := domain.DocSearchEntryOf(d)

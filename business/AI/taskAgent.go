@@ -259,8 +259,8 @@ func executeListProjectTasks(ctx context.Context, action ai.ProposedAction, user
 	}
 
 	// Single query: GetDgraphProjectTaskList returns the project name, the
-	// caller's membership flag, and the tasks. We gate on the returned
-	// IsProjectMember (the same rule controllers/Project/GetProjectTaskList
+	// caller's place in it, and the tasks. We gate on the returned member and
+	// admin counts (ReaderIsIn, the rule controllers/Project/GetProjectTaskList
 	// enforces) without a separate project-info round-trip.
 	taskProject, err := projectBusiness.GetDgraphProjectTaskList(
 		ctx,
@@ -278,8 +278,8 @@ func executeListProjectTasks(ctx context.Context, action ai.ProposedAction, user
 	if taskProject == nil || taskProject.Uuid == "" {
 		return "", nil, fmt.Errorf("project not found or you don't have access")
 	}
-	if taskProject.IsProjectMember == 0 {
-		return "", nil, fmt.Errorf("you must be a member of this project to view its tasks")
+	if !taskProject.ReaderIsIn() {
+		return "", nil, fmt.Errorf("you must be in this project to view its tasks")
 	}
 
 	projectName := strings.TrimSpace(taskProject.Name)

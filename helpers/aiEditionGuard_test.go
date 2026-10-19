@@ -68,6 +68,7 @@ var aiEditionBoundary = map[string]bool{
 	"business/Chat":         true,
 	"business/Command":      true,
 	"business/Comment":      true,
+	"business/Conversation": true, // copies are embedded as their originals are; aistrip carves the calls
 	"business/DataTable":    true,
 	"business/Doc":          true,
 	"business/Marketplace":  true,

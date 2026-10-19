@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"testing"
 
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 )
 
@@ -14,7 +15,7 @@ import (
 func TestAFieldSaveKeepsWhatItLeavesOut(t *testing.T) {
 	f := &model.Field{Name: "Status", Type: model.FieldSelect, Config: `{"options":[{"id":"a","label":"Todo"}],"tinted":true}`, Position: 3}
 	in := FieldPatch{}.onto(f)
-	if in.Name != "Status" || in.Type != model.FieldSelect || in.Position != 3 || len(optionsIn(in.Config)) != 1 || in.Config["tinted"] != true {
+	if in.Name != "Status" || in.Type != model.FieldSelect || in.Position != 3 || len(fieldTypes.Options(in.Config)) != 1 || in.Config["tinted"] != true {
 		t.Errorf("a save naming nothing leaves %+v", in)
 	}
 	front, blank := 0.0, " "

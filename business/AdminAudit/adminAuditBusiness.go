@@ -40,8 +40,22 @@ const (
 // there is a human on the other end by construction, and letting a caller claim
 // otherwise would make the field a suggestion rather than a fact.
 func Record(r *http.Request, action, category, summary string, metadata map[string]interface{}) {
-	ctx := r.Context()
+	// Handed to the chain's writer, which writes it after every row recorded
+	// before it: the action waits for no database, and the log's order is the
+	// order the actions happened in. A row that can't be written is logged.
+	auditModel.Append(requestEntry(r, action, category, summary, metadata))
+}
 
+// RecordWritten is Record for an action that mustn't happen unrecorded: it
+// waits until the row is written and returns the write's error, so the
+// caller refuses the action when it can't be recorded ("no record, no
+// action"). Same chain, so it never overtakes a row Record took first.
+func RecordWritten(r *http.Request, action, category, summary string, metadata map[string]interface{}) error {
+	return auditModel.Insert(r.Context(), requestEntry(r, action, category, summary, metadata))
+}
+
+// requestEntry is the entry for the person making this request.
+func requestEntry(r *http.Request, action, category, summary string, metadata map[string]interface{}) *auditModel.AuditEntry {
 	entry := &auditModel.AuditEntry{
 		Action:    action,
 		Category:  category,
@@ -51,7 +65,7 @@ func Record(r *http.Request, action, category, summary string, metadata map[stri
 		UserAgent: truncate(r.UserAgent(), 512),
 	}
 
-	if id, email, ok := ActorFromContext(ctx); ok {
+	if id, email, ok := ActorFromContext(r.Context()); ok {
 		entry.ActorID = &id
 		entry.ActorEmail = email
 	}
@@ -62,11 +76,7 @@ func Record(r *http.Request, action, category, summary string, metadata map[stri
 			entry.Metadata = &s
 		}
 	}
-
-	// Handed to the chain's writer, which writes it after every row recorded
-	// before it: the action waits for no database, and the log's order is the
-	// order the actions happened in. A row that can't be written is logged.
-	auditModel.Append(entry)
+	return entry
 }
 
 // ListWhere is List with an initiator filter.
@@ -186,6 +196,9 @@ const CategoryAgent = auditModel.CategoryAgent
 // CategoryDocs is what happened to docs: shares, access and lock changes,
 // deletes, restores, purges, exports, publishes, transfers and recoveries.
 const CategoryDocs = auditModel.CategoryDocs
+
+// CategoryCalendar is what happened to the calendar's events.
+const CategoryCalendar = auditModel.CategoryCalendar
 
 // Who acted, as opposed to who answers for it.
 //

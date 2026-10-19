@@ -31,7 +31,6 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/AI"
 	calendarAdapter "github.com/akashc777/OneCamp/adapter/Calendar"
 	calendarBusiness "github.com/akashc777/OneCamp/business/Calendar"
-	calendarDomain "github.com/akashc777/OneCamp/domain/Calendar"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -375,8 +374,8 @@ func RescheduleOptions(ctx context.Context, userInfo *userModels.UserInfo, req a
 	if eventUUID == "" {
 		return nil, fmt.Errorf("event_uuid is required")
 	}
-	event, err := calendarDomain.GetDgraphEventInfoByUUID(ctx, eventUUID)
-	if err != nil || event == nil || event.StartTime == nil || event.EndTime == nil {
+	event, err := calendarEventFor(ctx, userInfo, eventUUID)
+	if err != nil || event.StartTime == nil || event.EndTime == nil {
 		return nil, fmt.Errorf("event not found")
 	}
 
@@ -491,8 +490,10 @@ func RescheduleOptions(ctx context.Context, userInfo *userModels.UserInfo, req a
 // and participants are preserved; only the time changes.
 func ConfirmReschedule(ctx context.Context, userInfo *userModels.UserInfo, req adapter.ScheduleConfirmRescheduleRequest) (*adapter.ScheduleConfirmResponse, error) {
 	eventUUID := strings.TrimSpace(req.EventUUID)
+	// One instance of a repeating event moves on its own.
+	instance := calendarBusiness.IsInstanceID(eventUUID)
 	id, perr := uuid.Parse(eventUUID)
-	if perr != nil {
+	if perr != nil && !instance {
 		return nil, fmt.Errorf("invalid event id")
 	}
 	st, err := time.Parse(time.RFC3339, strings.TrimSpace(req.Start))
@@ -507,9 +508,9 @@ func ConfirmReschedule(ctx context.Context, userInfo *userModels.UserInfo, req a
 		return nil, fmt.Errorf("end must be after start")
 	}
 
-	event, gerr := calendarDomain.GetDgraphEventInfoByUUID(ctx, eventUUID)
-	if gerr != nil || event == nil {
-		return nil, fmt.Errorf("event not found")
+	event, gerr := calendarEventFor(ctx, userInfo, eventUUID)
+	if gerr != nil {
+		return nil, gerr
 	}
 
 	// Preserve everything but the time. Participant UUIDs from the existing
@@ -528,7 +529,11 @@ func ConfirmReschedule(ctx context.Context, userInfo *userModels.UserInfo, req a
 		Participants:         participantUUIDs,
 		SyncToGoogleCalendar: req.SyncToGoogle,
 	}
-	if uerr := calendarBusiness.UpdateEvent(ctx, id, input, userInfo); uerr != nil {
+	update := func() error { return calendarBusiness.UpdateEvent(ctx, id, input, userInfo) }
+	if instance {
+		update = func() error { return calendarBusiness.UpdateEventInstance(ctx, eventUUID, input, userInfo) }
+	}
+	if uerr := update(); uerr != nil {
 		// UpdateEvent returns a friendly "only the creator can edit" error.
 		return nil, uerr
 	}

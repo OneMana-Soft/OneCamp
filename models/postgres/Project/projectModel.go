@@ -12,8 +12,9 @@ import (
 )
 
 type Project struct {
-	Id          uuid.UUID `gorm:"type:uuid;default:uuid_generate_v4()"`
-	ProjectName string    `gorm:"unique" json:"project_name"`
+	Id uuid.UUID `gorm:"type:uuid;default:uuid_generate_v4()"`
+	// ProjectName is unique within the project's team (migration 320).
+	ProjectName string `json:"project_name"`
 	TeamId      uuid.UUID
 	CreatedBy   uuid.UUID `json:"created_by"`
 	CreatedAt   time.Time
@@ -170,4 +171,41 @@ func ArchivedProjectsWithNamePrefix(ctx context.Context, prefix string) ([]Archi
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// FirstMadeBefore is the earliest made of the live projects ids that were
+// made before t, with its name; ok is false when none was.
+func FirstMadeBefore(ctx context.Context, ids []uuid.UUID, t time.Time) (id uuid.UUID, name string, ok bool, err error) {
+	if len(ids) == 0 || postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
+		return uuid.Nil, "", false, nil
+	}
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
+		`SELECT id, project_name FROM projects WHERE id = ANY($1) AND deleted_at IS NULL AND created_at < $2
+		 ORDER BY created_at, id LIMIT 1`, ids, t)
+	if err != nil {
+		return uuid.Nil, "", false, err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		if err := rows.Scan(&id, &name); err != nil {
+			return uuid.Nil, "", false, err
+		}
+		return id, name, true, rows.Err()
+	}
+	return uuid.Nil, "", false, rows.Err()
+}
+
+// AnyMadeBefore is whether any live project was made before t.
+func AnyMadeBefore(ctx context.Context, t time.Time) (bool, error) {
+	if postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
+		return false, nil
+	}
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	var found bool
+	err := postgresInit.DBConn.SqlDB.QueryRowContext(c,
+		`SELECT EXISTS (SELECT 1 FROM projects WHERE deleted_at IS NULL AND created_at < $1)`, t).Scan(&found)
+	return found, err
 }

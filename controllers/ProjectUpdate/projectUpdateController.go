@@ -5,10 +5,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"strconv"
 	"time"
 
 	business "github.com/akashc777/OneCamp/business/ProjectUpdate"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -36,8 +36,10 @@ func write(w http.ResponseWriter, r *http.Request, where string, err error) {
 	}
 }
 
-func project(w http.ResponseWriter, r *http.Request, needAdmin bool) (uuid.UUID, *dgraphStruct.DgraphProject, bool) {
-	return projectaccess.Require(w, r, needAdmin, "Only the project's admins can post its updates.")
+// project checks the caller may do need with the project: read its updates,
+// or (NeedPostUpdate, its members and admins) write them.
+func project(w http.ResponseWriter, r *http.Request, need workAccess.Need) (uuid.UUID, *dgraphStruct.DgraphProject, workAccess.Standing, bool) {
+	return projectaccess.RequireStanding(w, r, need, "")
 }
 
 func me(r *http.Request) *userModels.UserInfo {
@@ -66,22 +68,22 @@ func updateID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 // ListUpdates is a project's updates, newest first. GET /project/{p}/updates?limit=
 // can_post tells the page whether to offer writing one.
 func ListUpdates(w http.ResponseWriter, r *http.Request) {
-	id, p, ok := project(w, r, false)
+	id, _, standing, ok := project(w, r, workAccess.NeedView)
 	if !ok {
 		return
 	}
-	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	limit := helpers.LimitParam(r.URL.Query(), 50, 50)
 	list, err := business.List(r.Context(), id, limit, false)
 	if err != nil {
 		write(w, r, "ListUpdates", err)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"updates": list, "can_post": p.IsProjectAdmin > 0}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"updates": list, "can_post": standing.Can(workAccess.NeedPostUpdate)}})
 }
 
 // DraftUpdate drafts the next update from the project's tasks. GET /project/{p}/updates/draft?tz=
 func DraftUpdate(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := project(w, r, true)
+	id, _, _, ok := project(w, r, workAccess.NeedPostUpdate)
 	if !ok {
 		return
 	}
@@ -96,7 +98,7 @@ func DraftUpdate(w http.ResponseWriter, r *http.Request) {
 
 // PostUpdate posts an update. POST /project/{p}/updates {health, body, shared_with_client, channel_uuid}
 func PostUpdate(w http.ResponseWriter, r *http.Request) {
-	id, p, ok := project(w, r, true)
+	id, p, _, ok := project(w, r, workAccess.NeedPostUpdate)
 	if !ok {
 		return
 	}
@@ -114,7 +116,7 @@ func PostUpdate(w http.ResponseWriter, r *http.Request) {
 
 // EditUpdate changes an update. POST /project/{p}/updates/{u}/edit
 func EditUpdate(w http.ResponseWriter, r *http.Request) {
-	id, _, ok := project(w, r, true)
+	id, _, _, ok := project(w, r, workAccess.NeedPostUpdate)
 	if !ok {
 		return
 	}
@@ -136,7 +138,7 @@ func EditUpdate(w http.ResponseWriter, r *http.Request) {
 
 // DeleteUpdate removes an update. POST /project/{p}/updates/{u}/delete
 func DeleteUpdate(w http.ResponseWriter, r *http.Request) {
-	id, p, ok := project(w, r, false)
+	id, _, standing, ok := project(w, r, workAccess.NeedView)
 	if !ok {
 		return
 	}
@@ -144,7 +146,7 @@ func DeleteUpdate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := business.Delete(r.Context(), me(r), id, uid, p.IsProjectAdmin > 0); err != nil {
+	if err := business.Delete(r.Context(), me(r), id, uid, standing.Can(workAccess.NeedManage)); err != nil {
 		write(w, r, "DeleteUpdate", err)
 		return
 	}

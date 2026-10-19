@@ -26,6 +26,10 @@ func TestThreadRoutesRefuseTheSignedOut(t *testing.T) {
 		{http.MethodPost, id + "/reopen"},
 		{http.MethodPost, id + "/reanchor"},
 		{http.MethodPost, id + "/read"},
+		{http.MethodPost, id + "/comments/7a1d1c2e-0000-4000-8000-000000000002/edit"},
+		{http.MethodPost, id + "/comments/7a1d1c2e-0000-4000-8000-000000000002/remove"},
+		{http.MethodPost, id + "/comments/7a1d1c2e-0000-4000-8000-000000000002/react"},
+		{http.MethodPost, id + "/comments/7a1d1c2e-0000-4000-8000-000000000002/unreact"},
 	} {
 		rec := httptest.NewRecorder()
 		root.ServeHTTP(rec, httptest.NewRequest(c.method, c.path, nil))

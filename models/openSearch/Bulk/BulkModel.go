@@ -2,6 +2,8 @@ package models
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
@@ -35,4 +37,26 @@ func BulkCreateInOpenSearch(bulkCreateString string) (err error) {
 	}
 
 	return
+}
+
+// BulkIndexChecked performs a bulk (NDJSON) write, through the same BulkReader
+// guard, and answers an error when the cluster refused any item, naming the
+// first: the outbox's sinks try again on it, where BulkCreateInOpenSearch's
+// callers only ever saw a request that failed whole.
+func BulkIndexChecked(ctx context.Context, body string) error {
+	resp, err := opensearchInit.OpenSearchClient.Bulk(ctx, opensearchapi.BulkReq{Body: openSearchStruct.BulkReader(body)})
+	if err != nil {
+		return err
+	}
+	if resp == nil || !resp.Errors {
+		return nil
+	}
+	for _, item := range resp.Items {
+		for op, r := range item {
+			if r.Error != nil {
+				return fmt.Errorf("%s of %s in %s refused (%d): %s: %s", op, r.ID, r.Index, r.Status, r.Error.Type, r.Error.Reason)
+			}
+		}
+	}
+	return errors.New("the bulk write said some items failed, and named none")
 }

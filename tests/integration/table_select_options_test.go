@@ -30,8 +30,8 @@ import (
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
 	dataTableController "github.com/akashc777/OneCamp/controllers/DataTable"
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/mqttInit"
 	dataTableModel "github.com/akashc777/OneCamp/models/postgres/DataTable"
+	"github.com/akashc777/OneCamp/tests/integration"
 )
 
 // uuidOf is an id written as text, as a uuid.
@@ -47,8 +47,7 @@ func uuidOf(t *testing.T, s string) uuid.UUID {
 // listen records what the server publishes, for tableActions.
 func (w *tableWorld) listen() *noticeBroker {
 	b := &noticeBroker{}
-	mqttInit.MqttClient = b
-	w.t.Cleanup(func() { mqttInit.MqttClient = nil })
+	integration.UseMqttClient(w.t, b)
 	return b
 }
 

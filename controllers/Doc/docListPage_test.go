@@ -43,7 +43,8 @@ func TestDocViewersPagingIsBounded(t *testing.T) {
 	}{
 		{"", "", 50, 0},
 		{"2", "10", 10, 20},
-		{"-1", "500", 50, 0},
+		// A size past the most is the most (helpers.SizeParam), not the default.
+		{"-1", "500", 200, 0},
 		{huge, "", 50, 999_950},
 		{huge, "200", 200, 999_800},
 		{huge, "7", 7, 999_999},

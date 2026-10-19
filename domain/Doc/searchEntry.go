@@ -251,6 +251,11 @@ var writeDocSearch = func(ctx context.Context, docUUID string, children bool) er
 	if doc == nil || doc.Uuid == "" {
 		return ErrNotFound
 	}
+	// A hosted doc is in no docs list, so in no docs index: it reaches search
+	// through its host's own (D-18, docHost.go).
+	if IsHosted(doc) {
+		return nil
+	}
 	if err := IndexDocEntry(ctx, DocSearchEntryOf(doc)); err != nil {
 		return err
 	}

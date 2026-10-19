@@ -96,4 +96,5 @@ func mountDocsProgramme(rt docsRouters) {
 
 	mountDocsMigration(rt) // C4: the workspace export and its consents; reading other tools' exports
 	mountDocsV1(rt.V1)     // C4: docs in the public API
+	mountQuery(rt)         // C2: the one query grammar, read for the signed-in person
 }

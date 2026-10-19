@@ -157,7 +157,7 @@ func mayChangeDoc(ctx context.Context, a docEditActor, docUUID string, need acce
 		if err != nil || u == nil {
 			return ErrDocAINotFound
 		}
-		who := accessBusiness.SubjectOf(u)
+		who := accessBusiness.SubjectFor(ctx, u)
 		who.AgentUUID = a.Agent
 		if _, err := decideDoc(ctx, who, docUUID, need); err != nil {
 			return err
@@ -649,7 +649,7 @@ func executeDocSuggest(ctx context.Context, action ai.ProposedAction, userUUID s
 	if err != nil || asker == nil {
 		return "", nil, refuseDocEdit(ctx, a, docUUID, opSuggest, ErrDocAINotFound)
 	}
-	who := accessBusiness.SubjectOf(asker)
+	who := accessBusiness.SubjectFor(ctx, asker)
 	who.AgentUUID = a.Agent
 	p := proposalBusiness.Proposal{
 		ResourceKind: accessBusiness.KindDoc,
@@ -859,7 +859,7 @@ func RevertAgentEdits(ctx context.Context, u *userModels.UserInfo, docUUID, runI
 	if len(todo) == 0 {
 		return 0, &DocAIInvalidError{"There's nothing of that edit left to revert."}
 	}
-	who := accessBusiness.SubjectOf(u)
+	who := accessBusiness.SubjectFor(ctx, u)
 	by := collab.By{UserUUID: u.UserDgraphInfo.Uuid}
 	done := make([]string, 0, len(todo))
 	for _, r := range todo {

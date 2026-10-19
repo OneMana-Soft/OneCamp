@@ -90,7 +90,7 @@ func EnqueueCodePRTask(ctx context.Context, agentID, owner uuid.UUID, triggeredB
 	if instruction == "" {
 		return false, fmt.Errorf("a coding instruction is required")
 	}
-	enc, _ := EncodeSurface(surface)
+	enc, _ := EncodeSurface(askedThrough(ctx, surface))
 	t := &model.AgentTask{
 		AgentId:     agentID,
 		SourceType:  codepr.TaskSourceType,

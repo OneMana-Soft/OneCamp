@@ -77,13 +77,7 @@ func testHandlerURL(ctx context.Context, appID uuid.UUID, handlerURL string) *co
 	}
 
 	cmd, _ := slashModel.GetAppByID(ctx, appID)
-	signing := ""
-	if cmd != nil && cmd.SigningSecret != nil {
-		// Decrypt the signing secret for the probe signature.
-		if dec, derr := helpers.DecryptSecret(*cmd.SigningSecret); derr == nil {
-			signing = dec
-		}
-	}
+	signing := appSigningSecret(cmd)
 
 	payload := map[string]interface{}{
 		"type":      "ssl_check",

@@ -259,7 +259,9 @@ func exportableDocs(ctx context.Context, who accessBusiness.Subject, report func
 			return nil, 0, err
 		}
 		for _, d := range rows {
-			if d == nil || d.Uuid == "" || helpers.IsSoftDeleted(d.DeletedAt) || helpers.IsSoftDeleted(d.ArchivedAt) || d.SpaceKind == "table" {
+			// A table row's body, or a row's page (a hosted doc, D-18), goes
+			// with its table, never as a doc of the workspace's.
+			if d == nil || d.Uuid == "" || helpers.IsSoftDeleted(d.DeletedAt) || helpers.IsSoftDeleted(d.ArchivedAt) || d.SpaceKind == "table" || docDomain.IsHosted(d) {
 				continue
 			}
 			decision := decisions[accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: d.Uuid}]

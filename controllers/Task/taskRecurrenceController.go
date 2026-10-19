@@ -7,6 +7,8 @@ import (
 	"net/http"
 
 	business "github.com/akashc777/OneCamp/business/Task"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
@@ -76,8 +78,11 @@ func SetTaskRecurrence(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't read the task. Try again."})
 		return
 	}
-	if task.Project == nil || task.Project.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the project's admins can make its tasks repeat."})
+	if task.Project == nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "A task in no project doesn't repeat."})
+		return
+	}
+	if !projectaccess.AllowTask(w, r, task, workAccess.NeedEditTask) {
 		return
 	}
 	rec, err := business.SetTaskRecurrence(ctx, task, in.Rule, in.Mode, in.TZ, userInfo.UserPostgresInfo.Id)

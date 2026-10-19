@@ -26,6 +26,7 @@ import (
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	domain "github.com/akashc777/OneCamp/domain/EntityLink"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -223,11 +224,21 @@ func readDocs(ctx context.Context, who accessBusiness.Subject, ids []string) (ma
 }
 
 // readTasks reads tasks with the task view's rule for who may see each
-// (CanViewTask) and who may change it (the project's admins). A task in a
-// deleted project is gone with it.
+// (CanViewTask) and Work Access's for who may change it, with one read of the
+// reader's roles. A task in a deleted project is gone with it.
 func readTasks(ctx context.Context, who accessBusiness.Subject, ids []string) (map[string]Entity, error) {
 	asked := askedAs(ids)
 	tasks, err := readTaskChips(ctx, ids, who.UserUID)
+	if err != nil {
+		return nil, err
+	}
+	var projects []*dgraphStruct.DgraphProject
+	for _, t := range tasks {
+		if t != nil && t.Project != nil {
+			projects = append(projects, t.Project)
+		}
+	}
+	standings, err := workAccess.OfMany(ctx, who.UserUUID, projects)
 	if err != nil {
 		return nil, err
 	}
@@ -238,7 +249,11 @@ func readTasks(ctx context.Context, who accessBusiness.Subject, ids []string) (m
 		}
 		e := Entity{Access: AccessGone}
 		if !helpers.IsSoftDeleted(t.DeletedAt) && (t.Project == nil || !helpers.IsSoftDeleted(t.Project.DeletedAt)) {
-			e = Entity{Access: AccessOK, Title: t.Name, Data: taskData(t), Topic: projectTopicFor(t.Project)}
+			canEdit := false
+			if t.Project != nil {
+				canEdit = standings[strings.ToLower(t.Project.Uuid)].CanOnTask(workAccess.NeedEditTask, workAccess.FactsOf(t, who.UserUID))
+			}
+			e = Entity{Access: AccessOK, Title: t.Name, Data: taskData(t, canEdit), Topic: projectTopicFor(t.Project)}
 		}
 		for _, id := range asked[strings.ToLower(t.Uuid)] {
 			out[id] = e
@@ -256,14 +271,16 @@ func projectTopicFor(p *dgraphStruct.DgraphProject) string {
 	return helpers.GetMqttTopicForProjectMessage(p.Uuid)
 }
 
-func taskData(t *dgraphStruct.DgraphTask) map[string]any {
+// taskData is what a task's chip shows; canEdit is whether its reader may
+// change it (tick it done).
+func taskData(t *dgraphStruct.DgraphTask, canEdit bool) map[string]any {
 	status := taskStatusBusiness.Of(t)
 	data := map[string]any{
 		"name":        t.Name,
 		"status":      status.Category,
 		"status_name": status.Display(),
 		"done":        status.Category == dgraphStruct.TASK_STATUS_DONE,
-		"can_edit":    t.Project.ReaderRunsIt(),
+		"can_edit":    canEdit,
 	}
 	if t.DueDate != nil && !t.DueDate.IsZero() {
 		data["due"] = t.DueDate.Format("2006-01-02")
@@ -277,10 +294,15 @@ func taskData(t *dgraphStruct.DgraphTask) map[string]any {
 	return data
 }
 
-// readProjects reads each project for its members and admins only.
+// readProjects reads each project for the people in it only; can_edit is
+// whether the reader makes and changes its tasks (Work Access).
 func readProjects(ctx context.Context, who accessBusiness.Subject, ids []string) (map[string]Entity, error) {
 	asked := askedAs(ids)
 	projects, err := readProjectChips(ctx, ids, who.UserUID)
+	if err != nil {
+		return nil, err
+	}
+	standings, err := workAccess.OfMany(ctx, who.UserUUID, projects)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +313,8 @@ func readProjects(ctx context.Context, who accessBusiness.Subject, ids []string)
 		}
 		e := Entity{Access: AccessGone}
 		if !helpers.IsSoftDeleted(p.DeletedAt) {
-			e = Entity{Access: AccessOK, Title: p.Name, Data: map[string]any{"name": p.Name, "can_edit": p.ReaderRunsIt()}, Topic: projectTopicFor(p)}
+			canEdit := standings[strings.ToLower(p.Uuid)].Can(workAccess.NeedEditTask)
+			e = Entity{Access: AccessOK, Title: p.Name, Data: map[string]any{"name": p.Name, "can_edit": canEdit}, Topic: projectTopicFor(p)}
 		}
 		for _, id := range asked[strings.ToLower(p.Uuid)] {
 			out[id] = e

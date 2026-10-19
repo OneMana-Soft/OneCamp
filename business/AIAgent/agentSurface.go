@@ -57,6 +57,12 @@ type Surface struct {
 	// threads on.
 	GroupID   string `json:"group_id,omitempty"`
 	MessageID string `json:"message_id,omitempty"`
+	// AskedThroughToken says the request that queued the job came through an API
+	// token (the public API, MCP): its run acts at most as a member, for the person
+	// who asked and its sponsor alike, as it would have run there and then
+	// (helpers.ActsThroughToken). A worker resumes the job with nothing of that
+	// request's context left, so the job keeps it (askedForJob).
+	AskedThroughToken bool `json:"asked_through_token,omitempty"`
 }
 
 // EncodeSurface serializes a Surface for storage on a job (JSON). A zero/invalid

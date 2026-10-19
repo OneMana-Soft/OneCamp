@@ -4,14 +4,17 @@ package models
 // data_table_links (migration 197): a relation field's link from a row of its
 // table to a row of the table it links to, found from either end by index, in
 // the order they were made. Links are made only between rows that exist
-// (changeLinks locks them first), and a row's links go when it's deleted
-// (DeleteRow), so every link joins two rows that haven't been deleted.
+// (changeLinksMade's callers lock them first), and a row's links go when it's
+// deleted (DeleteRows, which keeps them in its change set for a restore), so
+// every link joins two rows that haven't been deleted. A deleted relation
+// field's links stay until the trash is purged; nothing reads them through it.
 
 import (
 	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"sort"
 	"time"
 
@@ -214,123 +217,6 @@ func linkPairs(ls []Link) (from, to []uuid.UUID) {
 	return from, to
 }
 
-// changeLinks makes link changes in tx, adding only links between rows live
-// says exist, each after those made before, in the order given, and says how
-// many it made and removed. A row that would link to more than maxPerRow
-// rows through a field makes it ErrTooManyLinks.
-func changeLinks(ctx context.Context, tx *sql.Tx, changes []FieldLinks, live map[uuid.UUID]bool, maxPerRow int) (added, removed int, err error) {
-	for _, c := range changes {
-		if len(c.Remove) > 0 {
-			from, to := linkPairs(c.Remove)
-			res, err := tx.ExecContext(ctx, `DELETE FROM data_table_links l USING unnest($2::uuid[], $3::uuid[]) AS p(f, t)
-				WHERE l.field_id = $1 AND l.from_row = p.f AND l.to_row = p.t`, c.Field, pq.Array(from), pq.Array(to))
-			if err != nil {
-				return 0, 0, err
-			}
-			n, _ := res.RowsAffected()
-			removed += int(n)
-		}
-		var add []Link
-		for _, l := range c.Add {
-			if live[l.From] && live[l.To] {
-				add = append(add, l)
-			}
-		}
-		if len(add) == 0 {
-			continue
-		}
-		from, to := linkPairs(add)
-		// Made a microsecond apart, so they keep the order given.
-		res, err := tx.ExecContext(ctx, `INSERT INTO data_table_links (field_id, from_row, to_row, created_at)
-			SELECT $1, p.f, p.t, NOW() + p.i * INTERVAL '1 microsecond' FROM unnest($2::uuid[], $3::uuid[]) WITH ORDINALITY AS p(f, t, i)
-			ON CONFLICT DO NOTHING`, c.Field, pq.Array(from), pq.Array(to))
-		if err != nil {
-			return 0, 0, err
-		}
-		n, _ := res.RowsAffected()
-		added += int(n)
-		var over int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM (SELECT from_row FROM data_table_links
-			WHERE field_id = $1 AND from_row = ANY($2) GROUP BY from_row HAVING COUNT(*) > $3) x`,
-			c.Field, pq.Array(from), maxPerRow).Scan(&over); err != nil {
-			return 0, 0, err
-		}
-		if over > 0 {
-			return 0, 0, ErrTooManyLinks
-		}
-	}
-	return added, removed, nil
-}
-
-// ChangeLinks adds and removes a relation field's links in one transaction,
-// and says how many it made and removed: links there already, and links to or
-// from a row deleted meanwhile, aren't made. A row that would link to more
-// than maxPerRow rows through the field makes it ErrTooManyLinks, and nothing
-// changes.
-func ChangeLinks(ctx context.Context, change FieldLinks, maxPerRow int) (added, removed int, err error) {
-	if len(change.Add) == 0 && len(change.Remove) == 0 {
-		return 0, 0, nil
-	}
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	tx, err := postgresInit.DBConn.SqlDB.BeginTx(dbctx, nil)
-	if err != nil {
-		return 0, 0, err
-	}
-	defer func() { _ = tx.Rollback() }()
-	changes := []FieldLinks{change}
-	live, err := lockLinked(dbctx, tx, changes)
-	if err == nil {
-		added, removed, err = changeLinks(dbctx, tx, changes, live, maxPerRow)
-	}
-	if err != nil {
-		if !errors.Is(err, ErrTooManyLinks) {
-			helpers.LogErrorWithContext(ctx, "models/ChangeLinks err: %+v", err)
-		}
-		return 0, 0, err
-	}
-	return added, removed, tx.Commit()
-}
-
-// CreateRowWithLinks inserts a row (with r.Id, when it's set) at position, or
-// after the table's last row when position is nil, and adds links to and from
-// it, in one transaction. The last place is found in the insert itself: one a
-// client works out from the rows it holds is wrong past the rows it holds.
-func CreateRowWithLinks(ctx context.Context, r *Row, position *float64, changes []FieldLinks, maxPerRow int) (*Row, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	tx, err := postgresInit.DBConn.SqlDB.BeginTx(dbctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = tx.Rollback() }()
-	id := r.Id
-	if id == uuid.Nil {
-		id = uuid.New()
-	}
-	const q = `INSERT INTO data_table_rows (id, table_id, values, position, created_by)
-		VALUES ($1, $2, $3, COALESCE($4::double precision, (SELECT COALESCE(MAX(position), 0) + 1
-			FROM data_table_rows WHERE table_id = $2 AND deleted_at IS NULL)), $5)
-		RETURNING ` + rowColumns
-	out, err := scanRow(tx.QueryRowContext(dbctx, q, id, r.TableId, emptyIfBlank(r.Values), position, r.CreatedBy))
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/CreateRowWithLinks err: %+v", err)
-		return nil, err
-	}
-	// No one else can see the new row to lock it, so it may come first.
-	live, err := lockLinked(dbctx, tx, changes)
-	if err == nil {
-		_, _, err = changeLinks(dbctx, tx, changes, live, maxPerRow)
-	}
-	if err != nil {
-		if !errors.Is(err, ErrTooManyLinks) {
-			helpers.LogErrorWithContext(ctx, "models/CreateRowWithLinks links err: %+v", err)
-		}
-		return nil, err
-	}
-	return out, tx.Commit()
-}
-
 func emptyIfBlank(values string) string {
 	if values == "" {
 		return "{}"
@@ -428,9 +314,9 @@ func CreateFieldsWithIDs(ctx context.Context, fields ...*Field) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	const q = `INSERT INTO data_table_fields (id, table_id, name, type, config, position) VALUES ($1,$2,$3,$4,$5,$6)`
 	for _, f := range fields {
-		if _, err := tx.ExecContext(dbctx, q, f.Id, f.TableId, f.Name, f.Type, f.Config, f.Position); err != nil {
+		if _, err := tx.ExecContext(dbctx, insertFieldSQL, f.Id, f.TableId, f.Name, f.Type, f.Config, f.Position,
+			f.Description, f.Required, defaultOf(f)); err != nil {
 			helpers.LogErrorWithContext(ctx, "models/CreateFieldsWithIDs err: %+v", err)
 			return err
 		}
@@ -439,9 +325,11 @@ func CreateFieldsWithIDs(ctx context.Context, fields ...*Field) error {
 }
 
 // DeleteFieldPair soft-deletes a relation field and the one showing its links
-// from the other table, and the links it made, in one transaction. The other
-// one may be gone already.
-func DeleteFieldPair(ctx context.Context, a, b *Field) error {
+// from the other table, in one transaction; by is who deleted them. The
+// other one may be gone already. Its links stay, unread through a deleted
+// field, so restoring the field brings it back whole (RestoreFields); they go
+// with it when the trash is purged (PurgeTrash).
+func DeleteFieldPair(ctx context.Context, a, b *Field, by uuid.UUID) error {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	tx, err := postgresInit.DBConn.SqlDB.BeginTx(dbctx, nil)
@@ -449,8 +337,8 @@ func DeleteFieldPair(ctx context.Context, a, b *Field) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	const q = `UPDATE data_table_fields SET deleted_at=NOW(), updated_at=NOW() WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL`
-	res, err := tx.ExecContext(dbctx, q, a.Id, a.TableId)
+	const q = `UPDATE data_table_fields SET deleted_at=NOW(), updated_at=NOW(), deleted_by=$3 WHERE id=$1 AND table_id=$2 AND deleted_at IS NULL`
+	res, err := tx.ExecContext(dbctx, q, a.Id, a.TableId, nullUUID(by))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/DeleteFieldPair err: %+v", err)
 		return err
@@ -459,37 +347,55 @@ func DeleteFieldPair(ctx context.Context, a, b *Field) error {
 		return sql.ErrNoRows
 	}
 	if b != nil {
-		if _, err := tx.ExecContext(dbctx, q, b.Id, b.TableId); err != nil {
+		if _, err := tx.ExecContext(dbctx, q, b.Id, b.TableId, nullUUID(by)); err != nil {
 			helpers.LogErrorWithContext(ctx, "models/DeleteFieldPair other err: %+v", err)
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(dbctx, `DELETE FROM data_table_links WHERE field_id = $1`, a.Id); err != nil {
-		return err
-	}
 	return tx.Commit()
 }
 
-// vacuumTimeout is how long a vacuum of the links may take.
+// vacuumTimeout is how long a vacuum of one of the insert-mostly tables may
+// take.
 const vacuumTimeout = 10 * time.Minute
 
-// LinksChanged is how many links have been made and removed in all, as
-// Postgres has counted them: it only ever grows, until its counts are reset.
-func LinksChanged(ctx context.Context) (int64, error) {
+// InsertMostly is the tables' tables that are mostly added to, which Postgres
+// 12 never vacuums on its own (business/DataTable linkUpkeep.go vacuums them):
+// the links between rows, and the row ledger's change sets and changes.
+var InsertMostly = []string{"data_table_links", "data_table_change_sets", "data_table_changes"}
+
+// insertMostly is whether table is one of InsertMostly: the only names a
+// vacuum here takes, as a name can't be a statement's parameter.
+func insertMostly(table string) bool {
+	for _, t := range InsertMostly {
+		if t == table {
+			return true
+		}
+	}
+	return false
+}
+
+// TuplesChanged is how many rows of one of InsertMostly have been added and
+// removed in all, as Postgres has counted them: it only ever grows, until
+// its counts are reset.
+func TuplesChanged(ctx context.Context, table string) (int64, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 	var n int64
 	err := postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, `SELECT COALESCE(SUM(n_tup_ins + n_tup_del), 0)
-		FROM pg_stat_user_tables WHERE relname = 'data_table_links'`).Scan(&n)
+		FROM pg_stat_user_tables WHERE relname = $1`, table).Scan(&n)
 	return n, err
 }
 
-// VacuumLinks vacuums data_table_links, so counts and reads of it take the
+// Vacuum vacuums one of InsertMostly, so counts and reads of it take the
 // index alone, unless another vacuum of it is running.
-func VacuumLinks(ctx context.Context) error {
+func Vacuum(ctx context.Context, table string) error {
+	if !insertMostly(table) {
+		return fmt.Errorf("models: %s isn't vacuumed here", table)
+	}
 	dbctx, cancel := context.WithTimeout(ctx, vacuumTimeout)
 	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, `VACUUM (ANALYZE, SKIP_LOCKED) data_table_links`)
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, `VACUUM (ANALYZE, SKIP_LOCKED) `+table)
 	return err
 }
 

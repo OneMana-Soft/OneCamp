@@ -27,8 +27,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/akashc777/OneCamp/business/DataTable/formula"
+	formula "github.com/akashc777/OneCamp/business/Formula"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -408,7 +409,8 @@ type LinksChanged struct {
 // and how many links changed.
 func ChangeLinks(ctx context.Context, tableID, rowID, fieldID uuid.UUID, add, remove []uuid.UUID, actor Actor) (*model.Row, LinksChanged, error) {
 	ctx = asViewer(ctx, actor)
-	if _, err := loadViewable(ctx, tableID, actor); err != nil {
+	t, err := loadViewable(ctx, tableID, actor)
+	if err != nil {
 		return nil, LinksChanged{}, err
 	}
 	fields, err := model.ListFields(ctx, tableID)
@@ -448,13 +450,15 @@ func ChangeLinks(ctx context.Context, tableID, rowID, fieldID uuid.UUID, add, re
 		change.Remove = append(change.Remove, l.link(rowID, id))
 	}
 	var done LinksChanged
-	if done.Added, done.Removed, err = model.ChangeLinks(ctx, change, maxLinks); err != nil {
+	cs := newChangeSet(ctx, tableID, actor, rowLedger.ChangeLinks)
+	if done.Added, done.Removed, err = model.ChangeRowLinks(ctx, rowID, fieldID, change, maxLinks, cs, observe); err != nil {
 		if errors.Is(err, model.ErrTooManyLinks) {
 			return nil, LinksChanged{}, errTooManyLinks
 		}
 		return nil, LinksChanged{}, fmt.Errorf("failed to change the links")
 	}
 	tellTables(tableID, l.table)
+	announce(ctx, t, cs, hooksOnly)
 	withComputed(ctx, fields, []*model.Row{row})
 	return row, done, nil
 }
@@ -650,19 +654,19 @@ func computedFieldConfig(ctx context.Context, actor Actor, t *model.DataTable, f
 //     and its links, with it;
 //   - one showing another's links goes alone, and the other is no longer
 //     shown elsewhere.
-func unlinkPair(ctx context.Context, f *model.Field) error {
+func unlinkPair(ctx context.Context, f *model.Field, by uuid.UUID) error {
 	l, ok := linkOf(f)
 	switch {
 	case !ok:
-		return model.DeleteField(ctx, f.TableId, f.Id)
+		return model.DeleteField(ctx, f.TableId, f.Id, by)
 	case l.inverseOf == "":
 		var other *model.Field
 		if id, err := uuid.Parse(l.inverse); err == nil {
 			other = &model.Field{Id: id, TableId: l.table}
 		}
-		return model.DeleteFieldPair(ctx, f, other)
+		return model.DeleteFieldPair(ctx, f, other, by)
 	}
-	if err := model.DeleteField(ctx, f.TableId, f.Id); err != nil {
+	if err := model.DeleteField(ctx, f.TableId, f.Id, by); err != nil {
 		return err
 	}
 	fid, err := uuid.Parse(l.inverseOf)

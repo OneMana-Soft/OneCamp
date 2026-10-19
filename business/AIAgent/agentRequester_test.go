@@ -59,12 +59,12 @@ func TestAnAskerWhoCannotBeIdentifiedGetsNothing(t *testing.T) {
 
 func TestARefusalNamesWhatTheAskerLacksInPlainWords(t *testing.T) {
 	cases := map[string]string{
-		"the originating person is not a member of this channel":    "they're not a member of this channel",
-		"the originating person has no grant on this private doc":   "they have no grant on this private doc",
-		"the originating person may not edit this doc":              "they may not edit this doc",
-		"the originating person's account is deactivated":           "their account is deactivated",
-		"the originating person could not be resolved":              "they could not be resolved",
-		"changing this task requires being an admin of its project": "changing this task requires being an admin of its project",
+		"the originating person is not a member of this channel":  "they're not a member of this channel",
+		"the originating person has no grant on this private doc": "they have no grant on this private doc",
+		"the originating person may not edit this doc":            "they may not edit this doc",
+		"the originating person's account is deactivated":         "their account is deactivated",
+		"the originating person could not be resolved":            "they could not be resolved",
+		"the originating person may not change this task":         "they may not change this task",
 	}
 	for in, want := range cases {
 		if got := askerReason(in); got != want {

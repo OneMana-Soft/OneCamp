@@ -93,6 +93,10 @@ type Decision struct {
 	// Reasons say where the level comes from, as codes the web app words
 	// (level.Reason: "owner", "team_edit", "space"). Never given for none.
 	Reasons []string `json:"reasons,omitempty"`
+	// Hosted is a doc that belongs to something else, a table row's page
+	// (docs D-18): its level is its host's on a path that opens hosted docs
+	// (business/Doc WithHostedOpen), and none on any other.
+	Hosted bool `json:"hosted,omitempty"`
 }
 
 // PrincipalKind is who a grant is to.

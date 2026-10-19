@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
+	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/google/uuid"
@@ -95,6 +96,14 @@ func mayCreateRoutine(ctx context.Context, agent *model.AiAgent, sc agentRunScop
 	// person who asked to have asked for it (agentMemoryScope.go).
 	if !humanAskedForRoutine(ctx) {
 		rec.Skipped = "not setting that up: nobody in this conversation asked me to do something on a schedule"
+		return nil, false
+	}
+	// Asked through an API token, no routine: its runs come later, for whoever
+	// asked, with their reach in the app, admin roles and all (routineRunFor),
+	// and a token acts as a member, never as an admin (helpers.ActsThroughToken).
+	// Standing work is set up in the app, as themselves.
+	if helpers.ActsThroughToken(ctx) {
+		rec.Error = "I can't set up a routine from a request made through an API token: ask me in the app, and it will run for you there"
 		return nil, false
 	}
 

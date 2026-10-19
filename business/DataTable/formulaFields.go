@@ -1,6 +1,6 @@
 package business
 
-// Formula fields (business/DataTable/formula). A formula's values are worked
+// Formula fields (business/Formula). A formula's values are worked
 // out each time rows are read, never stored, so every reader (the grid, the
 // guest link, the rows API, totals and a table's questions, AI columns) gets
 // the same value, and one that reads TODAY() is never stale. A field's config
@@ -15,7 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/akashc777/OneCamp/business/DataTable/formula"
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
+	formula "github.com/akashc777/OneCamp/business/Formula"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/topo"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
@@ -45,18 +46,13 @@ func zoneFrom(ctx context.Context) *time.Location {
 	return time.UTC
 }
 
-// kindOf is how a field's cells read in a formula.
+// kindOf is how a field's cells read in a formula: as its kind says
+// (business/FieldTypes), text for one nothing knows.
 func kindOf(fieldType string) formula.Kind {
-	switch fieldType {
-	case model.FieldNumber:
-		return formula.KindNumber
-	case model.FieldDate:
-		return formula.KindDate
-	case model.FieldCheckbox:
-		return formula.KindBool
-	default:
-		return formula.KindText
+	if k, ok := fieldTypes.Kinds.Lookup(fieldType); ok {
+		return k.FormulaKind
 	}
+	return formula.KindText
 }
 
 // kindOfField is how a field's cells read in a formula: a rollup by what it
@@ -94,7 +90,7 @@ func cellValue(fieldType string, raw interface{}) formula.Value {
 		return formula.Blank()
 	default:
 		// A number in a list reads as a number cell does (1e+21 from 1e21).
-		return formula.Text(strings.Join(labelsWith(raw, formula.FormatNumber), ", "))
+		return formula.Text(strings.Join(fieldTypes.LabelsWith(raw, formula.FormatNumber), ", "))
 	}
 }
 

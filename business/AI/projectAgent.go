@@ -4,14 +4,15 @@ package business
 // HTTP controllers enforce, so an agent action can never do more than the user
 // could do by hand:
 //
-//   - create_task already requires the user be a PROJECT admin of the target
-//     project (controllers/Task/CreateTask checks IsProjectAdmin). list_projects
-//     surfaces, per project, whether the user is an admin so the model proposes
-//     create_task only where it will succeed - and resolves a project by name.
-//   - create_project requires the user be a TEAM admin of the target team
-//     (controllers/Project/CreateProject checks dgraphTeam.IsAdmin). list_teams
-//     surfaces, per team, whether the user is a team admin so the model can
-//     resolve the team and know where a project may be created.
+//   - create_task requires the user may add tasks to the target project, by
+//     Work Access's rule (their role and its "Who can change tasks"), as
+//     controllers/Task/CreateTask asks. list_projects surfaces, per project,
+//     the user's role so the model proposes create_task only where it will
+//     succeed - and resolves a project by name.
+//   - create_project requires the user may make projects in the target team
+//     (the workspace's "Who can make projects", as controllers/Project/
+//     CreateProject asks). list_teams surfaces, per team, whether they may, so
+//     the model can resolve the team and know where a project may be created.
 //
 // list_projects / list_teams are read-only (auto-run in the agent loop);
 // create_project is a write and stays behind the user-confirmation gate.
@@ -24,14 +25,15 @@ import (
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	teamBusiness "github.com/akashc777/OneCamp/business/Team"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	"github.com/akashc777/OneCamp/helpers"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/google/uuid"
 )
 
 // executeListProjects lists the projects the acting user belongs to, marking
-// which ones they administer (and can therefore create/manage tasks in).
-// Read-only.
+// the ones they may add and change tasks in (Work Access). Read-only.
 func executeListProjects(ctx context.Context, action ai.ProposedAction, userUUID string) (string, map[string]string, error) {
 	actingUser, err := getDgraphUserForExecutor(ctx, userUUID)
 	if err != nil {
@@ -62,6 +64,23 @@ func executeListProjects(ctx context.Context, action ai.ProposedAction, userUUID
 		}
 	}
 
+	// What they may do in each, by Work Access's rule (their role and the
+	// project's "Who can change tasks"): one read of their roles for the lot.
+	reads := make([]*dgraphStruct.DgraphProject, 0, len(dgraphUser.Projects))
+	for _, p := range dgraphUser.Projects {
+		if p != nil && p.Uuid != "" {
+			read := &dgraphStruct.DgraphProject{Uuid: p.Uuid, IsProjectMember: 1}
+			if adminSet[p.Uuid] {
+				read.IsProjectAdmin = 1
+			}
+			reads = append(reads, read)
+		}
+	}
+	standings, err := workAccess.OfMany(ctx, actingUser.Uuid, reads)
+	if err != nil {
+		return "", nil, fmt.Errorf("couldn't read what you can do in your projects: %w", err)
+	}
+
 	var b strings.Builder
 	b.WriteString("Your projects:\n")
 	shown := 0
@@ -81,7 +100,7 @@ func executeListProjects(ctx context.Context, action ai.ProposedAction, userUUID
 			name = "(untitled project)"
 		}
 		canManage := "no"
-		if adminSet[p.Uuid] {
+		if standings[strings.ToLower(p.Uuid)].Can(workAccess.NeedCreateTask) {
 			canManage = "yes"
 		}
 		line := fmt.Sprintf("- %s [can create/manage tasks: %s", name, canManage)
@@ -102,7 +121,7 @@ func executeListProjects(ctx context.Context, action ai.ProposedAction, userUUID
 
 // executeReadProject returns an overview of a single project (status, team,
 // the user's role, and member names). Enforces the same rule as the project-
-// info endpoints: the user must be a MEMBER of the project. Read-only.
+// info endpoints: the user must be in the project. Read-only.
 func executeReadProject(ctx context.Context, action ai.ProposedAction, userUUID string) (string, map[string]string, error) {
 	projectUUID := strings.TrimSpace(action.Params["project_uuid"])
 	if projectUUID == "" {
@@ -121,18 +140,19 @@ func executeReadProject(ctx context.Context, action ai.ProposedAction, userUUID 
 	if err != nil || proj == nil || proj.Uuid == "" {
 		return "", nil, fmt.Errorf("project not found or you don't have access")
 	}
-	if proj.IsProjectMember == 0 {
-		return "", nil, fmt.Errorf("you must be a member of this project to view it")
+	if !proj.ReaderIsIn() {
+		return "", nil, fmt.Errorf("you must be in this project to view it")
+	}
+	standing, err := workAccess.Of(ctx, actingUser.Uuid, proj)
+	if err != nil {
+		return "", nil, fmt.Errorf("couldn't read your role in this project: %w", err)
 	}
 
 	name := strings.TrimSpace(proj.Name)
 	if name == "" {
 		name = "(untitled project)"
 	}
-	role := "member"
-	if proj.IsProjectAdmin > 0 {
-		role = "admin"
-	}
+	role := string(standing.Role)
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Project: %s\n", name))
@@ -196,6 +216,14 @@ func executeListTeams(ctx context.Context, action ai.ProposedAction, userUUID st
 			}
 		}
 	}
+	// The list is of the teams they're in; their admin ones are known above.
+	makes := func(t *dgraphStruct.DgraphTeam) bool {
+		read := &dgraphStruct.DgraphTeam{Uuid: t.Uuid, IsMember: 1, DeletedAt: t.DeletedAt}
+		if adminSet[t.Uuid] {
+			read.IsAdmin = 1
+		}
+		return workAccess.CanMakeProjects(ctx, read)
+	}
 
 	var b strings.Builder
 	b.WriteString("Your teams:\n")
@@ -208,7 +236,7 @@ func executeListTeams(ctx context.Context, action ai.ProposedAction, userUUID st
 			name = "(untitled team)"
 		}
 		canCreate := "no"
-		if adminSet[t.Uuid] {
+		if makes(t) {
 			canCreate = "yes"
 		}
 		b.WriteString(fmt.Sprintf("- %s [can create projects: %s] (team_uuid: %s)\n", name, canCreate, t.Uuid))
@@ -218,8 +246,9 @@ func executeListTeams(ctx context.Context, action ai.ProposedAction, userUUID st
 }
 
 // executeCreateProject creates a project inside a team. Enforces the same rule
-// as controllers/Project/CreateProject: the acting user must be a TEAM admin of
-// the target team. Write action - reaches here only after user confirmation.
+// as controllers/Project/CreateProject: the workspace's "Who can make
+// projects" (a team's admins, or everyone in it; Work Access). Write action -
+// reaches here only after user confirmation.
 func executeCreateProject(ctx context.Context, action ai.ProposedAction, userUUID string) (string, map[string]string, error) {
 	name := strings.TrimSpace(action.Params["name"])
 	teamUUIDStr := strings.TrimSpace(action.Params["team_uuid"])
@@ -251,12 +280,17 @@ func executeCreateProject(ctx context.Context, action ai.ProposedAction, userUUI
 	if helpers.IsSoftDeleted(dgraphTeam.DeletedAt) {
 		return "", nil, fmt.Errorf("team not found or you don't have access")
 	}
-	if dgraphTeam.IsAdmin == 0 {
+	if !workAccess.CanMakeProjects(ctx, dgraphTeam) {
 		teamName := dgraphTeam.Name
 		if teamName == "" {
 			teamName = "this team"
 		}
-		return "", nil, fmt.Errorf("you must be an admin of %s to create a project in it", teamName)
+		// One of its admins, through an API token, makes them in the app: a token
+		// acts as a member (helpers.ActsThroughToken; CanMakeProjects).
+		if dgraphTeam.IsAdmin > 0 && helpers.ActsThroughToken(ctx) {
+			return "", nil, fmt.Errorf("you can't create projects in %s through a token: its admins make them in the app, and a token acts as a member", teamName)
+		}
+		return "", nil, fmt.Errorf("you can't create projects in %s: its admins make them", teamName)
 	}
 
 	proj, err := projectBusiness.CreateProject(

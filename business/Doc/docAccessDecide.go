@@ -49,18 +49,33 @@ func GeneralLevel(doc *dgraphStruct.DgraphDoc) level.Level {
 
 // DecideDocs is the person's decision on each of the docs (by uuid), read in
 // one query, keyed by lower-case uuid; a doc that isn't there is left out.
+//
+// A hosted doc is decided by its host on a context that opens hosted docs
+// (WithHostedOpen, docHost.go), and as none on any other.
 func DecideDocs(ctx context.Context, v Viewer, docUUIDs []string) (map[string]DocDecision, error) {
 	rows, err := domain.GetDocAccessRows(ctx, docUUIDs, v.UID, v.UUID)
 	if err != nil {
 		return nil, err
 	}
 	out := make(map[string]DocDecision, len(rows))
+	var hosts map[string]Host
 	for _, d := range rows {
 		if d != nil && d.Uuid != "" {
-			out[strings.ToLower(d.Uuid)] = DecideDoc(d, v)
+			id := strings.ToLower(d.Uuid)
+			out[id] = DecideDoc(d, v)
+			if domain.IsHosted(d) {
+				if hosts == nil {
+					hosts = map[string]Host{}
+				}
+				hosts[id] = Host{Kind: d.HostKind, UUID: d.HostUUID}
+			}
 		}
 	}
-	return withEndedGrants(ctx, v, out)
+	out, err = withEndedGrants(ctx, v, out)
+	if err != nil {
+		return nil, err
+	}
+	return withHosts(ctx, v, out, hosts)
 }
 
 // ReadsDoc is whether someone (by uuid) may read a doc now, by the rule

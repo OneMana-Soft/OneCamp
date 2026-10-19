@@ -64,12 +64,7 @@ func docPageIndex(pageIndex, pageSize int) int {
 // offset: pages of 50 viewers, or of the 1 to 200 asked for, from page 0 or
 // the one asked for (docPageIndex).
 func docViewersPage(q url.Values) (limit, offset int) {
-	pageSize := 50
-	if v := q.Get("pageSize"); v != "" {
-		if n, perr := strconv.Atoi(v); perr == nil && n > 0 && n <= 200 {
-			pageSize = n
-		}
-	}
+	pageSize := helpers.SizeParam(q, "pageSize", 50, 200)
 	pageIndex := 0
 	if v := q.Get("pageIndex"); v != "" {
 		if n, perr := strconv.Atoi(v); perr == nil && n >= 0 {
@@ -535,10 +530,9 @@ func GetPrivateDocList(w http.ResponseWriter, r *http.Request) {
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	queryParams := r.URL.Query()
-	pageSizeStr := queryParams["pageSize"]
 	pageIndexStr := queryParams["pageIndex"]
 
-	if len(pageSizeStr) == 0 || len(pageIndexStr) == 0 {
+	if !queryParams.Has("pageSize") || len(pageIndexStr) == 0 {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "invalid req",
 		})
@@ -546,23 +540,7 @@ func GetPrivateDocList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var err error
-	pageSize := 0
-
-	if len(pageSizeStr) != 0 {
-		pageSize, err = strconv.Atoi(pageSizeStr[0])
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"controllers/GetPrivateDocList Failed to parse pageSize query param to int err: %+v",
-				err)
-
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "Failed to parse filters query param",
-				"err": err,
-			})
-			return
-
-		}
-	}
+	pageSize := helpers.SizeParam(queryParams, "pageSize", 20, 200)
 
 	pageIndex := 0
 	if len(pageIndexStr) != 0 {
@@ -607,10 +585,9 @@ func GetPublicDocList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	queryParams := r.URL.Query()
-	pageSizeStr := queryParams["pageSize"]
 	pageIndexStr := queryParams["pageIndex"]
 
-	if len(pageSizeStr) == 0 || len(pageIndexStr) == 0 {
+	if !queryParams.Has("pageSize") || len(pageIndexStr) == 0 {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "invalid req",
 		})
@@ -618,23 +595,7 @@ func GetPublicDocList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var err error
-	pageSize := 0
-
-	if len(pageSizeStr) != 0 {
-		pageSize, err = strconv.Atoi(pageSizeStr[0])
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"controllers/GetPublicDocList Failed to parse pageSize query param to int err: %+v",
-				err)
-
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "Failed to parse filters query param",
-				"err": err,
-			})
-			return
-
-		}
-	}
+	pageSize := helpers.SizeParam(queryParams, "pageSize", 20, 200)
 
 	pageIndex := 0
 	if len(pageIndexStr) != 0 {
@@ -681,7 +642,7 @@ func GetAllCommentList(w http.ResponseWriter, r *http.Request) {
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
 	docUUIDString := chi.URLParam(r, "doc_uuid")
-	_, err := uuid.Parse(docUUIDString)
+	parsedDoc, err := uuid.Parse(docUUIDString)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -715,7 +676,7 @@ func GetAllCommentList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !business.CanRead(docDgraph, userInfo.UserDgraphInfo.Uuid) {
-		refuseDoc(ctx, w, userInfo, docDgraph.Uuid)
+		refuseDoc(ctx, w, userInfo, parsedDoc.String())
 		return
 	}
 	// The comment box is offered by these counts: they say what the Access
@@ -730,7 +691,7 @@ func GetAllCommentList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if resolved.Level < accessBusiness.LevelView {
-		refuseDoc(ctx, w, userInfo, docDgraph.Uuid)
+		refuseDoc(ctx, w, userInfo, parsedDoc.String())
 		return
 	}
 

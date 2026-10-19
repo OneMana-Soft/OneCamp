@@ -11,6 +11,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
+	projectRoleModel "github.com/akashc777/OneCamp/models/postgres/ProjectRole"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
@@ -196,6 +197,27 @@ func AddAdminMemberToTeam(ctx context.Context, teamUUID uuid.UUID, userDgraphUUI
 	return
 }
 
+// BecomeAdmin makes someone (their graph uid, and their user uuid) an admin
+// and a member of a team in one write: the team's admin and member edges, and
+// theirs to the team.
+func BecomeAdmin(ctx context.Context, teamUUID uuid.UUID, userDgraphUID string, userUUID string) error {
+	dgraphTeam := dgraphStruct.DgraphTeam{
+		Uid:    "uid(team)",
+		Uuid:   teamUUID.String(),
+		Admins: []*dgraphStruct.DgraphUser{{Uid: userDgraphUID}},
+		Members: []*dgraphStruct.DgraphUser{{
+			Uid:   userDgraphUID,
+			Teams: []*dgraphStruct.DgraphTeam{{Uid: "uid(team)"}},
+		}},
+	}
+	if _, err := domain.CreateOrUpdateDgraphTeam(ctx, &dgraphTeam); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/BecomeAdmin failed to make them an admin of the team in dgraph err: %+v", err)
+		return err
+	}
+	userDomain.InvalidateUserMemberships(ctx, userUUID)
+	return nil
+}
+
 func GetDgraphTeamListByAdminDgraphUID(ctx context.Context, userDgraphUID string) (dgraphTeamList []*dgraphStruct.DgraphTeam, err error) {
 	dgraphTeamList, err = domain.GetDgraphTeamListByAdminDgraphUID(ctx, userDgraphUID)
 
@@ -243,12 +265,41 @@ func RemoveMemberFromTeam(ctx context.Context, teamDgraph *dgraphStruct.DgraphTe
 
 		return
 	}
+	// Their roles in the team's projects go with them. The graph edges just
+	// removed are what let anyone in, so a row left behind gives nothing, and
+	// the hourly parity sweep (projects.roles.parity) takes one this misses.
+	if derr := projectRoleModel.DeleteIn(ctx, parseOr(memberUUID), teamProjectIDs(teamDgraph)); derr != nil {
+		helpers.LogErrorWithContext(ctx, "business/RemoveMemberFromTeam couldn't remove their project roles err: %+v", derr)
+	}
 	// Their cached profile still lists the team and its projects, and search
 	// covers what it lists.
 	userDomain.InvalidateUserMemberships(ctx, memberUUID)
 
 	return
 
+}
+
+// teamSearchCascades runs each team's search marks one at a time in the
+// order the team was archived and restored. Each started on goroutines of
+// their own, so an archive and a restore close together raced, and a restore
+// whose clear finished before the archive's mark left a live team's projects,
+// tasks and AI embeddings out of search.
+var teamSearchCascades helpers.InOrder
+
+// teamInSearch marks a team, its projects and tasks, and its AI embeddings,
+// archived at archivedAt in search or, archivedAt nil, live again. A seam for
+// tests.
+var teamInSearch = func(teamUUID string, archivedAt *int64, dgraphTeamInfo *dgraphStruct.DgraphTeam) {
+	if archivedAt != nil {
+		domain.UpdateTeamProjectsAndTasksDeleteTimeForOpenSearch(dgraphTeamInfo, *archivedAt)
+		_ = domain.DeleteTeamInOpenSearch(teamUUID, *archivedAt)
+		// AI embeddings of all the team's content
+		_ = globalSearchDomain.SyncCascadingDeletionInOpenSearch([]string{"team_uuid"}, teamUUID, *archivedAt, []string{"ai_embeddings"}, "cascade")
+		return
+	}
+	domain.UpdateTeamProjectsAndTasksDeleteTimeForOpenSearch(dgraphTeamInfo, -1)
+	_ = domain.DeleteTeamInOpenSearch(teamUUID, 0)
+	_ = globalSearchDomain.SyncCascadingUnarchiveInOpenSearch([]string{"team_uuid"}, teamUUID, []string{"ai_embeddings"}, "cascade")
 }
 
 func ArchiveTeamByTeamUUID(ctx context.Context, teamUUID uuid.UUID, dgraphTeamInfo *dgraphStruct.DgraphTeam) (err error) {
@@ -276,16 +327,8 @@ func ArchiveTeamByTeamUUID(ctx context.Context, teamUUID uuid.UUID, dgraphTeamIn
 		return
 	}
 
-	go domain.UpdateTeamProjectsAndTasksDeleteTimeForOpenSearch(dgraphTeamInfo, currentTime.Unix())
-	go domain.DeleteTeamInOpenSearch(teamUUID.String(), currentTime.Unix())
-	// Cascade soft-delete to AI embeddings (all team content)
-	go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
-		[]string{"team_uuid"},
-		teamUUID.String(),
-		currentTime.Unix(),
-		[]string{"ai_embeddings"},
-		"cascade",
-	)
+	teamID, archivedAt := teamUUID.String(), helpers.Int64Pointer(currentTime.Unix())
+	teamSearchCascades.Go(teamID, "team.search-archive", func() { teamInSearch(teamID, archivedAt, dgraphTeamInfo) })
 	return
 }
 
@@ -316,15 +359,8 @@ func UnArchiveTeamByTeamUUID(ctx context.Context, teamUUID uuid.UUID, dgraphTeam
 		return
 	}
 
-	go domain.UpdateTeamProjectsAndTasksDeleteTimeForOpenSearch(dgraphTeamInfo, -1)
-	go domain.DeleteTeamInOpenSearch(teamUUID.String(), 0)
-	// Cascade unarchive to AI embeddings
-	go globalSearchDomain.SyncCascadingUnarchiveInOpenSearch(
-		[]string{"team_uuid"},
-		teamUUID.String(),
-		[]string{"ai_embeddings"},
-		"cascade",
-	)
+	teamID := teamUUID.String()
+	teamSearchCascades.Go(teamID, "team.search-restore", func() { teamInSearch(teamID, nil, dgraphTeamInfo) })
 	return
 }
 
@@ -450,4 +486,30 @@ func GetAllTeamDgraphInfo(ctx context.Context, userDgraphUid string, pageIndex i
 	}
 
 	return
+}
+
+// teamProjectIDs is the ids of the team's projects, as read. Pure.
+func teamProjectIDs(t *dgraphStruct.DgraphTeam) []uuid.UUID {
+	if t == nil {
+		return nil
+	}
+	out := make([]uuid.UUID, 0, len(t.Projects))
+	for _, p := range t.Projects {
+		if p == nil {
+			continue
+		}
+		if id, err := uuid.Parse(p.Uuid); err == nil {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// parseOr is id as a uuid, or the nil uuid. Pure.
+func parseOr(id string) uuid.UUID {
+	u, err := uuid.Parse(id)
+	if err != nil {
+		return uuid.Nil
+	}
+	return u
 }

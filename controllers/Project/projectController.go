@@ -18,11 +18,14 @@ import (
 	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
 	business "github.com/akashc777/OneCamp/business/Project"
 	templateBusiness "github.com/akashc777/OneCamp/business/ProjectTemplate"
+	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	teamBusiness "github.com/akashc777/OneCamp/business/Team"
 	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -74,7 +77,9 @@ func CreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphTeam.IsAdmin == 0 || len(createProjectInfo.TeamUuid) == 0 || len(createProjectInfo.Name) == 0 {
+	// Who makes projects in a team is the workspace's "Who can make projects":
+	// its admins, or everyone in it (Work Access).
+	if !workAccess.CanMakeProjects(ctx, dgraphTeam) || len(createProjectInfo.TeamUuid) == 0 || len(createProjectInfo.Name) == 0 {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
@@ -127,12 +132,12 @@ func CreateProject(w http.ResponseWriter, r *http.Request) {
 		// A duplicate name is the one failure here the user can act on, so it gets its own
 		// status and a message naming the project. The client renders msg verbatim.
 		//
-		// Note projects carries TWO unique constraints — project_name alone, and
-		// (project_name, team_id) — so a name taken by another team collides too. The message
-		// says a project with that name exists rather than claiming it is in this team.
+		// A project's name is unique within its team (migration 320): another team's
+		// project of the same name doesn't collide, so a collision is in this team, and
+		// the message says nothing about what other teams call theirs.
 		if helpers.IsUniqueViolation(err) {
 			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
-				"msg":    "A project named \"" + createProjectInfo.Name + "\" already exists.",
+				"msg":    "This team already has a project named \"" + createProjectInfo.Name + "\".",
 				"status": "failed",
 			})
 			return
@@ -244,10 +249,7 @@ func RemoveAttachmentFromProject(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	if dgraphProjectInfo.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+	if _, ok := projectaccess.Allow(w, r, dgraphProjectInfo, workAccess.NeedManage, "Only the project's admins remove its files."); !ok {
 		return
 	}
 
@@ -317,11 +319,11 @@ func AddAttachmentToProjectDgraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphProject.IsProjectAdmin == 0 || len(updateProjectInfo.Attachments) == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
+	if len(updateProjectInfo.Attachments) == 0 {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Choose the files to add."})
+		return
+	}
+	if _, ok := projectaccess.Allow(w, r, dgraphProject, workAccess.NeedAddFiles, ""); !ok {
 		return
 	}
 
@@ -392,17 +394,23 @@ func RemoveAdminRoleFromMember(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteReadFailure(w, r, err, "project", "controllers/RemoveAdminRoleFromMember")
 		return
 	}
-	if status, msg := memberChangeRefusal(dgraphProject, removeAdmin, userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid); status != 0 {
+	manages, ok := managesPeople(w, r, dgraphProject)
+	if !ok {
+		return
+	}
+	if status, msg := memberChangeRefusal(dgraphProject, manages, removeAdmin, userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid); status != 0 {
 		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
 
-	if err := business.RemoveAdminMemberFromProject(ctx, dgraphProject.Members[0].Uid, dgraphProject.Uid); err != nil {
+	projectUUID := uuid.MustParse(dgraphProject.Uuid)
+	if err := business.SetRole(ctx, userInfo.UserPostgresInfo.Id, projectUUID, dgraphProject.Uid, dgraphProject.Members[0], len(dgraphProject.Admins) > 0, workAccess.RoleMember); err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/RemoveAdminRoleFromMember Failed to remove admin role err: %+v", err)
 		helpers.WriteRetryLater(w, "Couldn't change their role.")
 		return
 	}
 
+	recordMemberChange(r, resourceEventBusiness.ProjectChanged, "project.member.role", "Changed someone's role in a project", dgraphProject.Uuid, dgraphProject.Members[0].Uuid, workAccess.RoleMember)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": doneWords[removeAdmin]})
 
 }
@@ -432,7 +440,11 @@ func RemoveMemberFromProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if status, msg := memberChangeRefusal(dgraphProject, takeOff, userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid); status != 0 {
+	manages, ok := managesPeople(w, r, dgraphProject)
+	if !ok {
+		return
+	}
+	if status, msg := memberChangeRefusal(dgraphProject, manages, takeOff, userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid); status != 0 {
 		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
@@ -447,8 +459,7 @@ func RemoveMemberFromProject(w http.ResponseWriter, r *http.Request) {
 	if strings.EqualFold(userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid) {
 		summary = "Left a project"
 	}
-	auditBusiness.Record(r, "project.member.remove", auditBusiness.CategorySecurity, summary,
-		map[string]interface{}{"project_uuid": dgraphProject.Uuid, "user_uuid": dgraphProject.Members[0].Uuid})
+	recordMemberChange(r, resourceEventBusiness.ProjectMemberRemoved, "project.member.remove", summary, dgraphProject.Uuid, dgraphProject.Members[0].Uuid, workAccess.RoleNone)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": doneWords[takeOff]})
 
@@ -479,12 +490,13 @@ func GetDgraphProjectAttachmentList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphProject.IsProjectMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+	if !dgraphProject.ReaderIsIn() {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
 	}
+	// Who adds files and who takes them away (project_access), for the
+	// Files tab to offer only that.
+	decorate(ctx, &userInfo, dgraphProject)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "got project attachment list!", "data": dgraphProject})
 
@@ -507,10 +519,21 @@ func GetDgraphProjectCombinedMemberInfo(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if dgraphProject.IsProjectMember == 0 && (dgraphProject.Team == nil || dgraphProject.Team.IsAdmin == 0) {
+	if !dgraphProject.ReaderIsIn() && (dgraphProject.Team == nil || dgraphProject.Team.IsAdmin == 0) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
 			"msg": "Not authorised",
 		})
+		return
+	}
+	// Each person's role, and what the reader may do (change them, for one).
+	if err := business.FillRoles(ctx, dgraphProject); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/GetDgraphProjectCombinedMemberInfo couldn't read the roles err: %+v", err)
+		helpers.WriteRetryLater(w, "Couldn't load the project's people.")
+		return
+	}
+	if err := workAccess.Decorate(ctx, userInfo.UserDgraphInfo.Uuid, dgraphProject); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/GetDgraphProjectCombinedMemberInfo couldn't read the reader's role err: %+v", err)
+		helpers.WriteRetryLater(w, "Couldn't load the project's people.")
 		return
 	}
 
@@ -543,13 +566,9 @@ func GetDgraphProjectMemberList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphProject.IsProjectMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
+	if !dgraphProject.ReaderIsIn() {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
-
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Project member list", "data": dgraphProject})
@@ -574,13 +593,16 @@ func ProjectInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphProject.IsProjectMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-			"err": err,
-		})
+	if !dgraphProject.ReaderIsIn() {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
-
+	}
+	// What the reader may do in it (project_access), from the rule: the app
+	// shows what they can do and never guesses.
+	if err := workAccess.Decorate(ctx, userInfo.UserDgraphInfo.Uuid, dgraphProject); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/ProjectInfo couldn't read the reader's role err: %+v", err)
+		helpers.WriteRetryLater(w, "Couldn't load the project.")
+		return
 	}
 
 	var notificationType string
@@ -641,10 +663,7 @@ func UpdateProjectName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphProject.IsProjectAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+	if _, ok := projectaccess.Allow(w, r, dgraphProject, workAccess.NeedManage, ""); !ok {
 		return
 	}
 
@@ -717,7 +736,11 @@ func AddMemberToProject(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteReadFailure(w, r, err, "project", "controllers/AddMemberToProject")
 		return
 	}
-	if status, msg := memberChangeRefusal(dgraphProject, addMember, userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid); status != 0 {
+	manages, ok := managesPeople(w, r, dgraphProject)
+	if !ok {
+		return
+	}
+	if status, msg := memberChangeRefusal(dgraphProject, manages, addMember, userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid); status != 0 {
 		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
@@ -728,6 +751,7 @@ func AddMemberToProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	recordMemberChange(r, resourceEventBusiness.ProjectMemberAdded, "project.member.add", "Added someone to a project", dgraphProject.Uuid, dgraphProject.Team.Members[0].Uuid, workAccess.RoleMember)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": doneWords[addMember]})
 
 }
@@ -784,19 +808,59 @@ func AddAdminMemberToProject(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteReadFailure(w, r, err, "project", "controllers/AddAdminMemberToProject")
 		return
 	}
-	if status, msg := memberChangeRefusal(dgraphProject, makeAdmin, userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid); status != 0 {
+	manages, ok := managesPeople(w, r, dgraphProject)
+	if !ok {
+		return
+	}
+	if status, msg := memberChangeRefusal(dgraphProject, manages, makeAdmin, userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid); status != 0 {
 		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
 
-	if err := business.AddAdminMemberToProject(ctx, projectUUID, dgraphProject.Members[0].Uid); err != nil {
+	if err := business.SetRole(ctx, userInfo.UserPostgresInfo.Id, projectUUID, dgraphProject.Uid, dgraphProject.Members[0], len(dgraphProject.Admins) > 0, workAccess.RoleAdmin); err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/AddAdminMemberToProject Failed to add admin member to project err: %+v", err)
 		helpers.WriteRetryLater(w, "Couldn't make them an admin.")
 		return
 	}
 
+	recordMemberChange(r, resourceEventBusiness.ProjectChanged, "project.member.role", "Made someone an admin of a project", dgraphProject.Uuid, dgraphProject.Members[0].Uuid, workAccess.RoleAdmin)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": doneWords[makeAdmin]})
 
+}
+
+// managesPeople is whether the caller may change who is in p (read for them)
+// and what each may do there, by Work Access's rule: its admins, and its
+// team's admins. A role that can't be read is a 503 written here.
+func managesPeople(w http.ResponseWriter, r *http.Request, p *dgraphStruct.DgraphProject) (manages, ok bool) {
+	if p == nil {
+		return false, true
+	}
+	u, _ := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	s, err := workAccess.Of(r.Context(), u.UserDgraphInfo.Uuid, p)
+	if err != nil {
+		helpers.LogErrorWithContext(r.Context(), "controllers/Project couldn't read the caller's role err: %+v", err)
+		helpers.WriteRetryLater(w, "Couldn't check what you can do in this project.")
+		return false, false
+	}
+	return s.Can(workAccess.NeedManagePeople), true
+}
+
+// recordMemberChange keeps a change to a project's people in the audit log
+// and tells its Resource Event (project.member.added, project.member.removed,
+// or project.changed with the person and their role).
+func recordMemberChange(r *http.Request, kind resourceEventBusiness.Kind, action, summary, projectUUID, memberUUID string, role workAccess.Role) {
+	auditBusiness.Record(r, action, auditBusiness.CategorySecurity, summary,
+		map[string]interface{}{"project_uuid": projectUUID, "user_uuid": memberUUID, "role": string(role)})
+	u, _ := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	data := map[string]string{"member": memberUUID}
+	if role != workAccess.RoleNone {
+		data["role"] = string(role)
+	}
+	resourceEventBusiness.Bus.Emit(r.Context(), resourceEventBusiness.Event{
+		Kind: kind, ResourceKind: workAccess.KindProject, ResourceUUID: projectUUID,
+		Actor: resourceEventBusiness.Actor{UserUUID: u.UserDgraphInfo.Uuid}, At: time.Now(),
+		Subjects: []string{memberUUID}, Data: data,
+	})
 }
 
 func ArchiveProject(w http.ResponseWriter, r *http.Request) {
@@ -846,10 +910,8 @@ func ArchiveProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphProjectInfo.Team.IsAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+	// Its admins, and its team's admins (Work Access).
+	if _, ok := projectaccess.Allow(w, r, dgraphProjectInfo, workAccess.NeedArchive, ""); !ok {
 		return
 	}
 
@@ -923,10 +985,8 @@ func UnArchiveProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphProjectInfo.Team.IsAdmin == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+	// Its admins, and its team's admins (Work Access).
+	if _, ok := projectaccess.Allow(w, r, dgraphProjectInfo, workAccess.NeedArchive, ""); !ok {
 		return
 	}
 
@@ -972,10 +1032,8 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphProject.IsProjectMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+	if !dgraphProject.ReaderIsIn() {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
 	}
 
@@ -1122,6 +1180,7 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 	if pageSize > 0 {
 		pageCount = (dgraphProjectWithTasks.TaskCount + uint64(pageSize) - 1) / uint64(pageSize)
 	}
+	decorate(ctx, &userInfo, dgraphProjectWithTasks)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":       "Sucessful got task list",
@@ -1155,10 +1214,8 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if dgraphProject.IsProjectMember == 0 {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
+	if !dgraphProject.ReaderIsIn() {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
 	}
 
@@ -1269,11 +1326,25 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 		_ = taskBusiness.MergeGitHubMetaIntoTasks(ctx, allTasks)
 		_ = taskFieldBusiness.MergeFieldValues(ctx, allTasks)
 	}
+	decorate(ctx, &userInfo, dgraphProjectWithTasks)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":  "Sucessful got task list",
 		"data": dgraphProjectWithTasks,
 	})
+}
+
+// decorate sets what the reader may do in the project they read
+// (project_access, Work Access), for a list or a board to offer only that.
+// Without it the app keeps to the project's admins changing its tasks, so a
+// failed read of roles is said in the log and the list still shows.
+func decorate(ctx context.Context, u *userModels.UserInfo, p *dgraphStruct.DgraphProject) {
+	if p == nil {
+		return
+	}
+	if err := workAccess.Decorate(ctx, u.UserDgraphInfo.Uuid, p); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/Project couldn't read what the reader may do in project %s err: %+v", p.Uuid, err)
+	}
 }
 
 // sideFilterClause is the clause for a filter on what Postgres keeps beside a

@@ -58,6 +58,15 @@ const (
 	EventCalendarBooking  EventType = "calendar.booking"
 	EventProjectUpdate    EventType = "project.update"
 	EventCheckIn          EventType = "checkin.ask"
+
+	// The calendar's (calendar A2), named as business/Notify's causes:
+	// invited to an event, an event changed or cancelled, and, to an
+	// organiser who asked for it ("Email me when guests answer"), a guest's
+	// answer. Like a booking's, on unless a person's email is off.
+	EventCalendarInvited   EventType = "calendar.invited"
+	EventCalendarUpdated   EventType = "calendar.updated"
+	EventCalendarCancelled EventType = "calendar.cancelled"
+	EventCalendarAnswered  EventType = "calendar.rsvp"
 )
 
 // Recipient describes a single user the dispatcher should consider. Only the
@@ -357,9 +366,9 @@ func eventEnabledForPref(t EventType, p *prefModels.UserNotificationPreference) 
 	switch t {
 	case EventChatDM:
 		return p.EmailDMs
-	case EventChannelMention, EventGroupChatMention, EventCheckIn, EventDocMention:
+	case EventChannelMention, EventGroupChatMention, EventCheckIn, EventDocMention, EventTableMention:
 		// A check-in asks each of its people directly, as a mention does, and
-		// so does an @ in a doc's body.
+		// so does an @ in a doc's body or in a comment on a table's row.
 		return p.EmailMentions
 	case EventTaskAssigned:
 		return p.EmailTaskAssigned
@@ -367,7 +376,7 @@ func eventEnabledForPref(t EventType, p *prefModels.UserNotificationPreference) 
 		// A project's update is news about its tasks, wanted (or not) by
 		// the same people who want to hear when tasks change status.
 		return p.EmailTaskStatus
-	case EventTaskComment, EventPostComment, EventDocComment, EventChatComment, EventDocProposal:
+	case EventTaskComment, EventPostComment, EventDocComment, EventChatComment, EventDocProposal, EventTableComment:
 		// A proposed change to a doc, and what became of it, is talk about
 		// the doc, wanted by whoever wants its comments.
 		return p.EmailComments

@@ -18,6 +18,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
+	roleModel "github.com/akashc777/OneCamp/models/postgres/ProjectRole"
 	taskStatusModel "github.com/akashc777/OneCamp/models/postgres/TaskStatus"
 	memoryModels "github.com/akashc777/OneCamp/models/postgres/WorkspaceMemory"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -96,6 +97,12 @@ func CreateProject(ctx context.Context, projectName string, createdByUserDgraphU
 	// The maker is a member now; their cached profile lists their projects,
 	// and search is scoped by it.
 	userDomain.InvalidateUserMemberships(ctx, createdByUserUUID.String())
+	// And its admin: the graph's edge says so already, and the row says so
+	// beside it (Work Access). A row that can't be written is the graph's
+	// answer until the parity sweep writes it, which is admin too.
+	if err := setRow(ctx, projectUUID, createdByUserUUID, roleModel.Admin, createdByUserUUID); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/CreateProject: the maker's role row for %s wasn't written, the graph's stands: %+v", projectUUID, err)
+	}
 
 	go userProjectNotificationBusiness.CreateProjectNotificationType(userDgraphInfo.Uuid, projectUUID.String(), postgressStruct.NOTIFICATION_TYPE_ALL)
 
@@ -144,7 +151,16 @@ func UpdateProjectName(ctx context.Context, projectName string, projectUUID uuid
 	return
 }
 
+// AddMemberToProject puts someone (their graph uid and user id) in the
+// project as a member: the row first, then the edges (roles.go), so a write
+// that fails halfway leaves them outside it.
 func AddMemberToProject(ctx context.Context, projectUUID uuid.UUID, userDgraphUID string, userDgraphUUID string) (err error) {
+	if who, perr := uuid.Parse(userDgraphUUID); perr == nil {
+		if err = setRow(ctx, projectUUID, who, roleModel.Member, uuid.Nil); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/AddMemberToProject failed to write the role row err: %+v", err)
+			return
+		}
+	}
 
 	dgraphProject := dgraphStruct.DgraphProject{
 		Uid:  "uid(project)",
@@ -172,8 +188,26 @@ func AddMemberToProject(ctx context.Context, projectUUID uuid.UUID, userDgraphUI
 	return
 }
 
-func AddAdminMemberToProject(ctx context.Context, projectUUID uuid.UUID, userDgraphUID string) (err error) {
+// AddAdminMemberToProject makes someone in the project (their graph uid and
+// user id) one of its admins: the row first, which counts for nothing until
+// the edge agrees, then the edge (roles.go).
+func AddAdminMemberToProject(ctx context.Context, projectUUID uuid.UUID, userDgraphUID string, userUUID string) (err error) {
+	if who, perr := uuid.Parse(userUUID); perr == nil {
+		if err = setRow(ctx, projectUUID, who, roleModel.Admin, uuid.Nil); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/AddAdminMemberToProject failed to write the role row err: %+v", err)
+			return
+		}
+	}
+	if err = addAdminEdgeOnly(ctx, projectUUID, userDgraphUID); err != nil {
+		return
+	}
+	userDomain.InvalidateUserMemberships(ctx, userUUID)
+	return
+}
 
+// addAdminEdgeOnly puts someone on the project's admin edge, and nothing
+// else.
+func addAdminEdgeOnly(ctx context.Context, projectUUID uuid.UUID, userDgraphUID string) error {
 	dgraphProject := dgraphStruct.DgraphProject{
 		Uid:  "uid(project)",
 		Uuid: projectUUID.String(),
@@ -181,17 +215,15 @@ func AddAdminMemberToProject(ctx context.Context, projectUUID uuid.UUID, userDgr
 			Uid: userDgraphUID,
 		}},
 	}
-
-	_, err = domain.CreateOrUpdateDgraphProject(ctx, &dgraphProject)
-
-	if err != nil {
+	if _, err := domain.CreateOrUpdateDgraphProject(ctx, &dgraphProject); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/AddAdminMemberToProject failed to add admin member to project in dgraph err: %+v", err)
-		return
+		return err
 	}
-
-	return
+	return nil
 }
 
+// RemoveMemberFromProject takes someone off the project: the edges first, so
+// they are out of it at once, then their row (roles.go).
 func RemoveMemberFromProject(ctx context.Context, userDgraphUID string, userDrgaphUUID string, projectDgraphUID string, projectDgraphUUID string) (err error) {
 
 	err = domain.RemoveMemberFromProject(ctx, projectDgraphUID, userDgraphUID)
@@ -205,19 +237,40 @@ func RemoveMemberFromProject(ctx context.Context, userDgraphUID string, userDrga
 
 	go userProjectNotificationBusiness.DeleteNotificationTypeWhenUserIsRemovedFormProject(userDrgaphUUID, projectDgraphUUID)
 
+	// A row left behind gives nothing (nobody is in a project without its
+	// edge) and the parity sweep takes it away.
+	projectID, perr := uuid.Parse(projectDgraphUUID)
+	who, uerr := uuid.Parse(userDrgaphUUID)
+	if perr == nil && uerr == nil {
+		if derr := deleteRow(ctx, projectID, who); derr != nil {
+			helpers.LogErrorWithContext(ctx, "business/RemoveMemberFromProject: their role row in %s stays for the sweep: %+v", projectDgraphUUID, derr)
+		}
+	}
 	return
 }
 
-func RemoveAdminMemberFromProject(ctx context.Context, userDgraphUID string, projectDgraphUID string) (err error) {
+// projectSearchCascades and projectMemoryCascades run each project's search
+// marks, and its memory's archive and restore, one at a time in the order the
+// project was archived and restored. Each started on goroutines of their own,
+// so an archive and a restore close together raced, and a restore whose
+// clear finished before the archive's mark left a live project's tasks,
+// comments, files and AI embeddings out of search (and its memory archived).
+var projectSearchCascades, projectMemoryCascades helpers.InOrder
 
-	err = domain.RemoveAdminMemberFromProject(ctx, projectDgraphUID, userDgraphUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/RemoveAdminMemberFromProject failed to remove admin member from project in dgraph err: %+v", err)
+// projectInSearch marks a project, and its tasks, comments, files and AI
+// embeddings, archived at archivedAt in search or, archivedAt nil, live
+// again. A seam for tests.
+var projectInSearch = func(projectUUID string, archivedAt *int64, dgraphProjectInfo *dgraphStruct.DgraphProject) {
+	domain.UpdateProjectWithAttachmentsInOpenSearch(&openSearchStruct.OpenSearchProject{Uuid: projectUUID, ProjectDeletedAt: archivedAt}, dgraphProjectInfo)
+	content := []string{"task_project_id", "comment_project_id", "attachment_project_id"}
+	if archivedAt != nil {
+		_ = globalSearchDomain.SyncCascadingDeletionInOpenSearch(content, projectUUID, *archivedAt, []string{"tasks", "comments", "attachments"}, "cascade")
+		// AI embeddings of the project's tasks and comments
+		_ = globalSearchDomain.SyncCascadingDeletionInOpenSearch([]string{"project_uuid"}, projectUUID, *archivedAt, []string{"ai_embeddings"}, "cascade")
 		return
 	}
-
-	return
+	_ = globalSearchDomain.SyncCascadingUnarchiveInOpenSearch(content, projectUUID, []string{"tasks", "comments", "attachments"}, "cascade")
+	_ = globalSearchDomain.SyncCascadingUnarchiveInOpenSearch([]string{"project_uuid"}, projectUUID, []string{"ai_embeddings"}, "cascade")
 }
 
 func ArchiveProjectByProjectUUID(ctx context.Context, projectUUID uuid.UUID, dgraphProjectInfo *dgraphStruct.DgraphProject) (err error) {
@@ -244,34 +297,15 @@ func ArchiveProjectByProjectUUID(ctx context.Context, projectUUID uuid.UUID, dgr
 		return
 	}
 
-	opensearchProject := &openSearchStruct.OpenSearchProject{
-		Uuid:             projectUUID.String(),
-		ProjectDeletedAt: helpers.Int64Pointer(currentTime.Unix()),
-	}
-	go domain.UpdateProjectWithAttachmentsInOpenSearch(opensearchProject, dgraphProjectInfo)
-	go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
-		[]string{"task_project_id", "comment_project_id", "attachment_project_id"},
-		projectUUID.String(),
-		currentTime.Unix(),
-		[]string{"tasks", "comments", "attachments"},
-		"cascade",
-	)
-	// Cascade soft-delete to AI embeddings (tasks + comments in this project)
-	go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
-		[]string{"project_uuid"},
-		projectUUID.String(),
-		currentTime.Unix(),
-		[]string{"ai_embeddings"},
-		"cascade",
-	)
+	prID, archivedAt := projectUUID.String(), helpers.Int64Pointer(currentTime.Unix())
+	projectSearchCascades.Go(prID, "project.search-archive", func() { projectInSearch(prID, archivedAt, dgraphProjectInfo) })
 	// Cascade the archive into the memory layer by SCOPE so facts derived
 	// from this project's tasks/threads stop surfacing. Reversible via
-	// UnArchiveProjectUUID. Own goroutine so a slow memory store never
-	// extends the archive request.
-	go func(prUUID string) {
-		defer recoverProjectMemoryCascade("archive")
-		ai.ArchiveMemoryByScope(context.Background(), memoryModels.ScopeRef{ProjectUUID: prUUID})
-	}(projectUUID.String())
+	// UnArchiveProjectUUID. In the background, so a slow memory store never
+	// extends the archive request, in turn with the project's restores.
+	projectMemoryCascades.Go(prID, "project.memory-archive", func() {
+		ai.ArchiveMemoryByScope(context.Background(), memoryModels.ScopeRef{ProjectUUID: prID})
+	})
 
 	return
 
@@ -301,42 +335,15 @@ func UnArchiveProjectUUID(ctx context.Context, projectUUID uuid.UUID, dgraphProj
 		return
 	}
 
-	opensearchProject := &openSearchStruct.OpenSearchProject{
-		Uuid:             projectUUID.String(),
-		ProjectDeletedAt: nil,
-	}
-
-	go domain.UpdateProjectWithAttachmentsInOpenSearch(opensearchProject, dgraphProjectInfo)
-	go globalSearchDomain.SyncCascadingUnarchiveInOpenSearch(
-		[]string{"task_project_id", "comment_project_id", "attachment_project_id"},
-		projectUUID.String(),
-		[]string{"tasks", "comments", "attachments"},
-		"cascade",
-	)
-	// Cascade unarchive to AI embeddings
-	go globalSearchDomain.SyncCascadingUnarchiveInOpenSearch(
-		[]string{"project_uuid"},
-		projectUUID.String(),
-		[]string{"ai_embeddings"},
-		"cascade",
-	)
+	prID := projectUUID.String()
+	projectSearchCascades.Go(prID, "project.search-restore", func() { projectInSearch(prID, nil, dgraphProjectInfo) })
 	// Revive the memory items the archive cascade removed for this project
-	// (never user-deleted ones). Mirrors the OpenSearch unarchive above.
-	go func(prUUID string) {
-		defer recoverProjectMemoryCascade("restore")
-		ai.RestoreMemoryByScope(context.Background(), memoryModels.ScopeRef{ProjectUUID: prUUID})
-	}(projectUUID.String())
+	// (never user-deleted ones), after the archive's cascade.
+	projectMemoryCascades.Go(prID, "project.memory-restore", func() {
+		ai.RestoreMemoryByScope(context.Background(), memoryModels.ScopeRef{ProjectUUID: prID})
+	})
 
 	return
-}
-
-// recoverProjectMemoryCascade guards a fire-and-forget project memory
-// cascade goroutine so a panic in the best-effort AI projection layer can
-// never crash the server. phase is "archive" or "restore" for the log.
-func recoverProjectMemoryCascade(phase string) {
-	if r := recover(); r != nil {
-		helpers.MessageLogs.ErrorLog.Printf("panic in project memory %s cascade: %v", phase, r)
-	}
 }
 
 func GetBasicDgraphProjectInfo(ctx context.Context, projectUUID string, userDgraphUID string) (dgraphProject *dgraphStruct.DgraphProject, err error) {

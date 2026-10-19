@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/akashc777/OneCamp/tests/integration"
 	"github.com/google/uuid"
 )
@@ -272,33 +274,74 @@ func TestWorkloadUndatedOfFormerPeople(t *testing.T) {
 }
 
 // Time off: away events of the people shown, in the window, and nothing else
-// (not a deleted one, not focus time, not someone outside the projects).
+// (not a deleted one, not focus time, not someone outside the projects), from
+// whichever calendar store is on.
 func TestWorkloadAway(t *testing.T) {
+	integration.ForEachCalendarStore(t, workloadAway)
+}
+
+func workloadAway(t *testing.T) {
 	ctx := context.Background()
 	dg := integration.SetupDgraph(t)
 	live, gone := "0001-01-01T00:00:00Z", "2026-09-01T00:00:00Z"
 	me, alice, stranger := uuid.NewString(), uuid.NewString(), uuid.NewString()
-	event := func(by map[string]any, start, end string, more map[string]any) map[string]any {
-		m := map[string]any{"dgraph.type": "Event", "event_uuid": uuid.NewString(), "event_title": "Leave", "event_is_away": true,
-			"event_start_time": start, "event_end_time": end, "event_deleted_at": live, "event_created_by": by}
-		for k, v := range more {
-			m[k] = v
-		}
-		return m
-	}
 	uids := dg.Mutate(t, map[string]any{
 		"uid": "_:me", "dgraph.type": "User", "user_uuid": me, "user_name": "Me",
 		"user_projects": []map[string]any{{"uid": "_:p", "dgraph.type": "Project", "project_uuid": uuid.NewString(), "project_name": "P",
 			"project_admins":  []map[string]any{{"uid": "_:me"}},
 			"project_members": []map[string]any{{"uid": "_:alice", "dgraph.type": "User", "user_uuid": alice, "user_name": "Alice"}}}},
 	})
-	a, s := map[string]any{"uid": uids["alice"]}, map[string]any{"uid": "_:s", "dgraph.type": "User", "user_uuid": stranger, "user_name": "Stranger"}
-	dg.Mutate(t, event(a, "2026-10-12T00:00:00Z", "2026-10-15T00:00:00Z", nil))
-	dg.Mutate(t, event(a, "2027-06-01T00:00:00Z", "2027-06-05T00:00:00Z", nil))
-	dg.Mutate(t, event(a, "2026-10-19T00:00:00Z", "2026-10-20T00:00:00Z", map[string]any{"event_deleted_at": gone}))
-	dg.Mutate(t, event(a, "2026-10-21T09:00:00Z", "2026-10-21T11:00:00Z", map[string]any{"event_is_away": false, "event_is_focus": true}))
-	dg.Mutate(t, event(s, "2026-10-12T00:00:00Z", "2026-10-15T00:00:00Z", nil))
-	dg.Mutate(t, event(a, "2026-10-26T00:00:00Z", "2026-10-26T00:00:00Z", nil))
+
+	// The events, in the store that is on.
+	type away struct {
+		by           string
+		start, end   string
+		deleted      bool
+		focusInstead bool
+	}
+	events := []away{
+		{alice, "2026-10-12T00:00:00Z", "2026-10-15T00:00:00Z", false, false},
+		{alice, "2027-06-01T00:00:00Z", "2027-06-05T00:00:00Z", false, false},
+		{alice, "2026-10-19T00:00:00Z", "2026-10-20T00:00:00Z", true, false},
+		{alice, "2026-10-21T09:00:00Z", "2026-10-21T11:00:00Z", false, true},
+		{stranger, "2026-10-12T00:00:00Z", "2026-10-15T00:00:00Z", false, false},
+		{alice, "2026-10-26T00:00:00Z", "2026-10-26T00:00:00Z", false, false},
+	}
+	if helpers.CalendarInPostgres() {
+		env := integration.SetupEnv(t)
+		if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
+			t.Fatal(err)
+		}
+		integration.MarkCalendarMoved(t, env.PG)
+		for _, id := range []string{alice, stranger} {
+			if _, err := env.PG.Exec(`INSERT INTO users (id, email_id, username, display_name, created_at, updated_at) VALUES ($1, $2, $3, $4, NOW(), NOW())`,
+				id, id+"@example.test", "u"+id[:6], "u"+id[:6]); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for _, e := range events {
+			start, _ := time.Parse(time.RFC3339, e.start)
+			end, _ := time.Parse(time.RFC3339, e.end)
+			kind := "out_of_office"
+			if e.focusInstead {
+				kind = "focus"
+			}
+			integration.InsertStoreEvent(t, env.PG, integration.StoreEvent{By: uuid.MustParse(e.by), Kind: kind, Title: "Leave", Start: start, End: end, Deleted: e.deleted})
+		}
+	} else {
+		person := map[string]map[string]any{alice: {"uid": uids["alice"]}, stranger: {"uid": "_:s", "dgraph.type": "User", "user_uuid": stranger, "user_name": "Stranger"}}
+		for _, e := range events {
+			m := map[string]any{"dgraph.type": "Event", "event_uuid": uuid.NewString(), "event_title": "Leave", "event_is_away": !e.focusInstead,
+				"event_start_time": e.start, "event_end_time": e.end, "event_deleted_at": live, "event_created_by": person[e.by]}
+			if e.deleted {
+				m["event_deleted_at"] = gone
+			}
+			if e.focusInstead {
+				m["event_is_focus"] = true
+			}
+			dg.Mutate(t, m)
+		}
+	}
 
 	from, until := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC), time.Date(2026, 12, 31, 0, 0, 0, 0, time.UTC)
 	w, err := GetWorkload(ctx, uids["me"], me, false, from, until)

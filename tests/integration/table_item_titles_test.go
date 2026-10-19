@@ -25,7 +25,7 @@ import (
 	"github.com/google/uuid"
 
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
-	"github.com/akashc777/OneCamp/business/DataTable/formula"
+	"github.com/akashc777/OneCamp/business/Formula"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	dataTableModel "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/akashc777/OneCamp/tests/integration"

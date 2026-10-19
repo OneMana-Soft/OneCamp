@@ -12,6 +12,7 @@ import (
 	business "github.com/akashc777/OneCamp/business/EntityLink"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 )
@@ -20,24 +21,43 @@ func validRefType(t string) bool {
 	return t == business.RefDoc || t == business.RefBoard
 }
 
-// canEditSource verifies the user may modify links on the given source. Tasks
-// require project membership; projects require membership. Returns ok and, on
-// failure, whether it was an access denial (vs a lookup error).
-func canEditSource(r *http.Request, sourceType, sourceUUID, userDgraphUID string) (ok bool, denied bool) {
+// canEditSource verifies the user may change the links on the given source,
+// by Work Access's rule: a task's links are part of the task (changing it, as
+// its project's "Who can change tasks" lets them); a project's are its files,
+// which its members and admins add. Returns ok and, on failure, whether it was
+// an access denial (vs a lookup error).
+func canEditSource(r *http.Request, sourceType, sourceUUID string, who userModels.UserInfo) (ok bool, denied bool) {
 	ctx := r.Context()
+	uid, me := who.UserDgraphInfo.Uid, who.UserDgraphInfo.Uuid
 	switch sourceType {
 	case business.SourceTask:
-		task, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, sourceUUID, userDgraphUID)
+		task, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, sourceUUID, uid)
 		if err != nil || task == nil || task.Project == nil {
 			return false, false
 		}
-		return task.Project.IsProjectMember > 0, task.Project.IsProjectMember == 0
+		if !task.Project.ReaderIsIn() {
+			return false, true
+		}
+		standing, facts, err := workAccess.OfTask(ctx, me, uid, task)
+		if err != nil {
+			return false, false
+		}
+		ok = standing.CanOnTask(workAccess.NeedEditTask, facts)
+		return ok, !ok
 	case business.SourceProject:
-		project, err := projectBusiness.GetBasicDgraphProjectInfo(ctx, sourceUUID, userDgraphUID)
+		project, err := projectBusiness.GetBasicDgraphProjectInfo(ctx, sourceUUID, uid)
 		if err != nil || project == nil {
 			return false, false
 		}
-		return project.IsProjectMember > 0, project.IsProjectMember == 0
+		if !project.ReaderIsIn() {
+			return false, true
+		}
+		standing, err := workAccess.Of(ctx, me, project)
+		if err != nil {
+			return false, false
+		}
+		ok = standing.Can(workAccess.NeedAddFiles)
+		return ok, !ok
 	default:
 		return false, false
 	}
@@ -69,7 +89,7 @@ func AddLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ok, _ := canEditSource(r, input.SourceType, input.SourceUUID, userInfo.UserDgraphInfo.Uid)
+	ok, _ := canEditSource(r, input.SourceType, input.SourceUUID, userInfo)
 	if !ok {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return
@@ -124,7 +144,7 @@ func RemoveLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ok, _ := canEditSource(r, input.SourceType, input.SourceUUID, userInfo.UserDgraphInfo.Uid)
+	ok, _ := canEditSource(r, input.SourceType, input.SourceUUID, userInfo)
 	if !ok {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
 		return

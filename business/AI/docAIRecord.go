@@ -131,7 +131,7 @@ func decideDoc(ctx context.Context, who accessBusiness.Subject, docUUID string, 
 // when they can't read it (or it is gone) and with ErrDocAICantEdit when need
 // is edit and they may not change it. A refusal is recorded.
 func CheckDocForAI(ctx context.Context, u *userModels.UserInfo, docUUID string, need accessBusiness.Level) (accessBusiness.Decision, error) {
-	d, err := decideDoc(ctx, accessBusiness.SubjectOf(u), docUUID, need)
+	d, err := decideDoc(ctx, accessBusiness.SubjectFor(ctx, u), docUUID, need)
 	if errors.Is(err, ErrDocAINotFound) || errors.Is(err, ErrDocAICantEdit) {
 		RecordDocAIRefusal(ctx, u, docUUID, ActionDocAIReadRefused, err.Error())
 	}
@@ -142,7 +142,7 @@ func CheckDocForAI(ctx context.Context, u *userModels.UserInfo, docUUID string, 
 // refused alike, but recorded nowhere, so polling a doc's id adds nothing to
 // the record.
 func checkDocQuietly(ctx context.Context, u *userModels.UserInfo, docUUID string, need accessBusiness.Level) (accessBusiness.Decision, error) {
-	return decideDoc(ctx, accessBusiness.SubjectOf(u), docUUID, need)
+	return decideDoc(ctx, accessBusiness.SubjectFor(ctx, u), docUUID, need)
 }
 
 // RecordDocAIRefusal records that doc AI was refused for u on a doc. Best

@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -268,5 +269,18 @@ func TestFillTargets(t *testing.T) {
 	}
 	if todo, skipped := fillTargets(rows, field, true); len(todo) != 3 || skipped != 0 {
 		t.Errorf("filling again takes %v and skips %d", todo, skipped)
+	}
+}
+
+// A drafted table's name is cut to 120 characters, never inside one: a cut by
+// bytes split a letter of a long Hindi name, and the table couldn't be stored.
+// (Here, in the AI-only tests, as the draft is AI-only.)
+func TestADraftedTableNameIsCutByCharacters(t *testing.T) {
+	g, err := parseGeneratedTable(`{"name":"` + strings.Repeat("क", maxNameLen+10) + `","fields":[{"name":"Item","type":"text"}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !utf8.ValidString(g.Name) || utf8.RuneCountInString(g.Name) != maxNameLen {
+		t.Errorf("the name was cut to %d characters, valid UTF-8 %v", utf8.RuneCountInString(g.Name), utf8.ValidString(g.Name))
 	}
 }

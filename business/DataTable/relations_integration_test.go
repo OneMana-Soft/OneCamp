@@ -268,8 +268,49 @@ func TestRelationsBetweenTables(t *testing.T) {
 		t.Errorf("Acme backs %q", got)
 	}
 
-	// Deleting the relation takes the other side, and its links, with it,
-	// and the rollups over it say so.
+	// Deleting the relation takes the other side with it to the trash, and
+	// the rollups over it say so. Its links wait with the field (A2, D14),
+	// read by nothing while it's deleted, so a restore brings it back whole.
+	linksOf := func(f uuid.UUID) int {
+		t.Helper()
+		var n int
+		if err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM data_table_links WHERE field_id = $1`, f).Scan(&n); err != nil {
+			t.Fatalf("count the links: %v", err)
+		}
+		return n
+	}
+	shown := func() int {
+		t.Helper()
+		n := 0
+		for _, c := range w.cells(budget, &w.me) {
+			refs, _ := c[vendor.Id.String()].([]interface{})
+			n += len(refs)
+		}
+		return n
+	}
+	linked := linksOf(vendor.Id)
+	if linked == 0 || shown() != linked {
+		t.Fatalf("before the delete Budget shows %d of its %d links", shown(), linked)
+	}
+	// historyNames is whether a row's history shows a change to field f.
+	historyNames := func(tb *model.DataTable, row, f uuid.UUID) bool {
+		t.Helper()
+		h, err := RowHistory(ctx, tb.Id, row, nil, w.me)
+		if err != nil {
+			t.Fatalf("%s's history: %v", tb.Name, err)
+		}
+		for _, it := range h.Items {
+			for _, c := range it.Changes {
+				if c.Field == f.String() {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if !historyNames(budget, booth, vendor.Id) || !historyNames(vendors, globex, other.Id) {
+		t.Fatal("before the delete the rows' histories don't show their links changing")
+	}
 	if err := DeleteField(ctx, budget.Id, vendor.Id, w.me); err != nil {
 		t.Fatalf("delete the relation: %v", err)
 	}
@@ -282,10 +323,99 @@ func TestRelationsBetweenTables(t *testing.T) {
 			t.Errorf("spend after the relation went: %s", f.Config)
 		}
 	}
-	var left int
-	_ = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM data_table_links WHERE field_id = $1`, vendor.Id).Scan(&left)
-	if left != 0 {
-		t.Errorf("%d links outlived their field", left)
+	if n := linksOf(vendor.Id); n != linked {
+		t.Errorf("the deleted relation keeps %d of its %d links, for its restore", n, linked)
+	}
+	if n := shown(); n != 0 {
+		t.Errorf("Budget still shows %d links of the deleted relation", n)
+	}
+
+	// Nor does any other reader. Rollups over the relation say it has been
+	// deleted rather than add its kept links up, and Vendors' side, which
+	// showed them in reverse, is gone with it.
+	vc := w.cells(vendors, &w.me)
+	for _, id := range []uuid.UUID{acme, globex} {
+		for _, f := range []*model.Field{spend, items, double} {
+			if v, isNumber := vc[id][f.Id.String()].(float64); isNumber {
+				t.Errorf("%s adds up the deleted relation's kept links: %v", f.Name, v)
+			}
+		}
+		if v, in := vc[id][other.Id.String()]; in {
+			t.Errorf("Vendors still shows the deleted relation's other side: %v", v)
+		}
+	}
+	// A guest's read, a page of rows (the v1 API's and the AI tools' read),
+	// and a total filtered on the relation by name read none of them.
+	for id, c := range w.cells(budget, nil) {
+		if v, in := c[vendor.Id.String()]; in {
+			t.Errorf("a guest reads %s's links of the deleted relation: %v", id, v)
+		}
+	}
+	page, err := ListRows(ctx, budget.Id, w.me, 100, 0)
+	if err != nil {
+		t.Fatalf("a page of Budget: %v", err)
+	}
+	for _, r := range page {
+		if v, in := parseRowValues(r.Values)[vendor.Id.String()]; in {
+			t.Errorf("a page of rows reads the deleted relation: %v", v)
+		}
+	}
+	// A total takes a filter on a field it doesn't know as no filter (as for
+	// a typo): it never reads the kept links to match the one row they would.
+	all, _, aerr := AggregateTable(ctx, budget.Id, w.me, QuerySpec{Op: OpCount})
+	byLink, _, err := AggregateTable(ctx, budget.Id, w.me, QuerySpec{Op: OpCount, Filters: []Filter{{Field: "Vendor", Op: "contains", Value: "Acme"}}})
+	if aerr != nil || err != nil || byLink.MatchedRows != all.MatchedRows {
+		t.Errorf("a total filtered on the deleted relation matches %+v of %+v rows (%v, %v)", byLink, all, err, aerr)
+	}
+	// A reader that passes the deleted field itself still reads none of
+	// its links: the computed read leaves fields in the trash out.
+	trashed, err := model.GetTrashedField(ctx, budget.Id, vendor.Id)
+	if err != nil || trashed == nil {
+		t.Fatalf("the deleted relation isn't in the trash: %v", err)
+	}
+	live, _ := model.ListFields(ctx, budget.Id)
+	rows, _ := model.ListRows(ctx, budget.Id, 100, 0)
+	withComputed(ctx, append(live, trashed), rows)
+	for _, r := range rows {
+		if v, in := parseRowValues(r.Values)[vendor.Id.String()]; in {
+			t.Errorf("a read given the deleted field shows its links: %v", v)
+		}
+	}
+	// Links can't be changed through it, from either side, and stay kept.
+	if _, _, err := ChangeLinks(ctx, budget.Id, ads, vendor.Id, []uuid.UUID{acme}, nil, w.me); err == nil {
+		t.Error("a link was made through the deleted relation")
+	}
+	if _, _, err := ChangeLinks(ctx, vendors.Id, acme, other.Id, nil, []uuid.UUID{booth}, w.me); err == nil {
+		t.Error("a link was removed through the deleted relation's other side")
+	}
+	if n := linksOf(vendor.Id); n != linked {
+		t.Errorf("the deleted relation keeps %d of its %d links", n, linked)
+	}
+	// A row's history leaves out the relation's changes, on both sides.
+	if historyNames(budget, booth, vendor.Id) {
+		t.Error("Booth's history shows the deleted relation's links changing")
+	}
+	if historyNames(vendors, globex, other.Id) {
+		t.Error("Globex's history shows the deleted relation's other side changing")
+	}
+
+	// Brought back from the trash, both sides read their links again.
+	if _, err := RestoreFromTrash(ctx, budget.Id, RestoreInput{Fields: []uuid.UUID{vendor.Id}}, w.me); err != nil {
+		t.Fatalf("restore the relation: %v", err)
+	}
+	if n := shown(); n != linked {
+		t.Errorf("the restored relation shows %d of its %d links", n, linked)
+	}
+	if !historyNames(budget, booth, vendor.Id) || !historyNames(vendors, globex, other.Id) {
+		t.Error("the restored relation's changes aren't in the rows' histories again")
+	}
+	b, _ = GetBundle(ctx, vendors.Id, w.me)
+	back := false
+	for _, f := range b.Fields {
+		back = back || f.Id == other.Id
+	}
+	if !back {
+		t.Error("the other side didn't come back with the relation")
 	}
 }
 
@@ -663,12 +793,18 @@ func TestRelationDeletes(t *testing.T) {
 	if has, _ := model.RowHasLinks(ctx, fresh); has {
 		t.Error("a deleted post's link outlived it")
 	}
-	// The links are vacuumed as the server does it, outside a transaction.
-	if _, err := model.LinksChanged(ctx); err != nil {
-		t.Errorf("counting the links changed: %v", err)
+	// The tables mostly added to are vacuumed as the server does it, outside
+	// a transaction: the links, and the row ledger's change sets and changes.
+	for _, table := range model.InsertMostly {
+		if _, err := model.TuplesChanged(ctx, table); err != nil {
+			t.Errorf("counting %s's changes: %v", table, err)
+		}
+		if err := model.Vacuum(ctx, table); err != nil {
+			t.Errorf("vacuuming %s: %v", table, err)
+		}
 	}
-	if err := model.VacuumLinks(ctx); err != nil {
-		t.Errorf("vacuuming the links: %v", err)
+	if err := model.Vacuum(ctx, "users"); err == nil {
+		t.Error("a table that isn't the tables' own was vacuumed")
 	}
 
 	// Rows linked as they're deleted: each link is made, then deleted with

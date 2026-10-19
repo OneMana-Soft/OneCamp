@@ -13,17 +13,27 @@ import (
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
+	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 )
 
 // mayModerate is whether who, with decision d, may remove anyone's comment.
 func mayModerate(ctx context.Context, who accessBusiness.Subject, d accessBusiness.Decision) bool {
+	return commentBusiness.CanModerate(moderatorOf(ctx, who, d))
+}
+
+// moderatorOf is who, with decision d, as moderating is decided by: the
+// workspace admin flag counts only for someone acting themselves, never through
+// an API token (a token acts as a member, helpers.ActsThroughToken) or as an
+// agent. Removing one stored comment asks the same (commentChanges.go,
+// CanRemoveComment).
+func moderatorOf(ctx context.Context, who accessBusiness.Subject, d accessBusiness.Decision) commentBusiness.Moderator {
 	u, ok := userModels.FromContext(ctx)
-	admin := who.AgentUUID == "" && ok && u.UserPostgresInfo.IsAdmin && u.UserDgraphInfo.Uuid == who.UserUUID
-	return commentBusiness.CanModerate(commentBusiness.Moderator{
+	admin := who.AgentUUID == "" && ok && u.UserPostgresInfo.IsAdmin && !helpers.ActsThroughToken(ctx) && u.UserDgraphInfo.Uuid == who.UserUUID
+	return commentBusiness.Moderator{
 		Owner:      d.Owner,
 		FullAccess: d.Level >= accessBusiness.LevelFull,
 		Admin:      admin,
 		Deleted:    d.Deleted,
-	})
+	}
 }

@@ -36,6 +36,10 @@ const (
 	EventDocMention  EventType = "doc.mention"
 	EventDocShared   EventType = "doc.shared"
 	EventDocProposal EventType = "doc.proposal"
+	// A mention in a comment on a table's row, and a reply in a thread on
+	// one (business/TableComments).
+	EventTableMention EventType = "table.mention"
+	EventTableComment EventType = "table.comment"
 )
 
 // ActivityNotice is the activity feed's type for a notice.
@@ -82,6 +86,9 @@ type Push struct {
 	ID   string
 	// Tag makes a later push with the same tag replace this one.
 	Tag string
+	// Thread is a second id the push opens within ID (its thread_id): a
+	// table's row within the table.
+	Thread string
 	// From is who it is from when the notice has no actor: a guest outside
 	// the workspace.
 	From string
@@ -98,6 +105,14 @@ type NoticeRecipient struct {
 	// the thing already (a comment on what they made, a mention of them). A
 	// hidden row still keeps them from being told twice.
 	Listed bool
+	// NoPush is told in the inbox and by email, never by push, desktop
+	// notice or sound: an organiser hearing of a guest's answer, who asked to
+	// be emailed answers (calendar D-CAL-17).
+	NoPush bool
+	// ThroughHolds is pushed through a pause, quiet hours and focus time
+	// (DeliverThroughPause): a reminder of an event they said yes to, which
+	// starts inside them (calendar D-CAL-4). Never someone deactivated.
+	ThroughHolds bool
 }
 
 // Seams for tests: where notices, pushes, live updates and emails go.
@@ -105,7 +120,13 @@ var (
 	noticeWrite   = followModels.InsertNotices
 	noticeActive  = userDomain.GetActiveUsersByUUIDsForNotification
 	noticeDeliver = Deliver
-	noticeLive    = func(userUUID string, item *dgraphModels.UnifiedActivityItem) {
+	// noticeDeliverThrough is Deliver past a person's holds (ThroughHolds).
+	noticeDeliverThrough = func(ctx context.Context, recipients []string, pushData map[string]string, noticeID string) {
+		if err := DeliverThroughPause(ctx, recipients, pushData, noticeID); err != nil {
+			helpers.LogErrorWithContext(ctx, "notification/Tell %s through holds: %+v", noticeID, err)
+		}
+	}
+	noticeLive = func(userUUID string, item *dgraphModels.UnifiedActivityItem) {
 		mqttBusiness.PublishMessageToUser(userUUID, mqttStruct.MESSAGE_NOTICE, mqttStruct.MqttNotice{UserUuid: userUUID, Activity: item})
 	}
 	noticeEmail = Dispatch
@@ -188,7 +209,7 @@ func Tell(ctx context.Context, n Notice, recipients []NoticeRecipient) []string 
 		helpers.LogErrorWithContext(ctx, "notification/Tell %s: the notices couldn't be written, telling nobody: %+v", n.Kind, err)
 		return nil
 	}
-	var told, reach []string
+	var told, reach, pushed, through []string
 	for _, t := range tells {
 		if !written[t.row.UserUUID] {
 			continue
@@ -201,12 +222,24 @@ func Tell(ctx context.Context, n Notice, recipients []NoticeRecipient) []string 
 		}
 		if !t.r.InboxOnly {
 			reach = append(reach, id)
+			switch {
+			case t.r.NoPush:
+			case t.r.ThroughHolds:
+				through = append(through, id)
+			default:
+				pushed = append(pushed, id)
+			}
 		}
 	}
 	if len(reach) == 0 {
 		return told
 	}
-	pushNotice(ctx, n, reach)
+	if len(pushed) > 0 {
+		pushNotice(ctx, n, pushed, noticeDeliver)
+	}
+	if len(through) > 0 {
+		pushNotice(ctx, n, through, noticeDeliverThrough)
+	}
 	emailNotice(ctx, n, reach)
 	return told
 }
@@ -268,7 +301,7 @@ func openTitle(n Notice) string {
 // or follower was pushed the doc's title and a reply's words, and the desktop
 // app heard of no notice at all. The desktop notice's id is the telling's key,
 // as the email's dedup part is, so the app raises it once.
-func pushNotice(ctx context.Context, n Notice, recipients []string) {
+func pushNotice(ctx context.Context, n Notice, recipients []string, deliver func(ctx context.Context, recipients []string, pushData map[string]string, noticeID string)) {
 	name := ""
 	if n.Actor != nil {
 		name = n.Actor.DisplayName()
@@ -290,7 +323,10 @@ func pushNotice(ctx context.Context, n Notice, recipients []string) {
 	if n.Push != nil && n.Push.Tag != "" {
 		data[firebaseInit.FIREBASE_PUSH_DATA_TAG] = n.Push.Tag
 	}
-	noticeDeliver(ctx, recipients, data, n.DedupKey)
+	if n.Push != nil && n.Push.Thread != "" {
+		data[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] = n.Push.Thread
+	}
+	deliver(ctx, recipients, data, n.DedupKey)
 }
 
 // emailNotice emails the recipients, by every rule an email follows.

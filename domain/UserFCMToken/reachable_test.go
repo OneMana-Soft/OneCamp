@@ -24,17 +24,17 @@ func TestWellFormedUserIDs(t *testing.T) {
 // The gate is the push's own (notPaused), by person: nothing about devices
 // decides who is told, and the version that goes through a pause has no gate.
 func TestReachableQueriesShareThePushGate(t *testing.T) {
-	if !strings.Contains(reachableQuery, notPaused("u.id")) {
+	if !strings.Contains(reachableQuery(), notPaused("u.id")) {
 		t.Fatal("ReachableNow doesn't apply the push gate")
 	}
-	if !strings.Contains(reachableQuery, "LEFT JOIN users_fcm_token") {
+	if !strings.Contains(reachableQuery(), "LEFT JOIN users_fcm_token") {
 		t.Fatal("ReachableNow must keep people with no device (LEFT JOIN)")
 	}
 	if strings.Contains(reachableThroughPauseQuery, "users_notification_preferences") {
 		t.Fatal("ReachableThroughPause must not apply the gate")
 	}
 	// A deactivated person is never told, through a pause or not (BE-11-G-3).
-	for name, q := range map[string]string{"ReachableNow": reachableQuery, "ReachableThroughPause": reachableThroughPauseQuery} {
+	for name, q := range map[string]string{"ReachableNow": reachableQuery(), "ReachableThroughPause": reachableThroughPauseQuery} {
 		if !strings.Contains(q, stillActive("u.id")) {
 			t.Errorf("%s doesn't leave out deactivated people", name)
 		}

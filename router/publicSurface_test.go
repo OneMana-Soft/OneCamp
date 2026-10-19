@@ -97,6 +97,7 @@ var publicRoutes = map[string]string{
 	"/public/book/{slug}":                           "booking page: outsiders see free slots and book; rate-limited",
 	"/public/booking/{token}":                       "a guest's booking, by its cancel-link token",
 	"/public/booking/{token}/cancel":                "a guest cancels through their cancel-link token",
+	"/public/rsvp/{token}":                          "a guest invited by email reads and answers their invitation through their link's token; rate-limited",
 	"/guest/channel/{token}":                        "share-link token",
 	"/guest/channel/{token}/thread/{post_id}":       "share-link token",
 	"/guest/project/{token}":                        "share-link token",

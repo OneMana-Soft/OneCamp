@@ -39,7 +39,7 @@ func CreateEventController(w http.ResponseWriter, r *http.Request) {
 
 	output, err := business.CreateEvent(ctx, &userInfo, input)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Internal Error", "err": err})
+		writeEventError(w, err)
 		return
 	}
 
@@ -74,6 +74,12 @@ func UpdateEventController(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "controllers/UpdateEventController Google Sync failed err: %+v", err)
 			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to update Google Calendar event", "err": err})
+			return
+		}
+	} else if business.IsInstanceID(eventUUIdString) {
+		// One instance of a repeating event: that instance alone.
+		if err := business.UpdateEventInstance(ctx, eventUUIdString, input, &userInfo); err != nil {
+			writeEventError(w, err)
 			return
 		}
 	} else {
@@ -112,6 +118,11 @@ func DeleteEventController(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "controllers/DeleteEventController Google Sync failed err: %+v", err)
 			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to delete Google Calendar event", "err": err})
+			return
+		}
+	} else if business.IsInstanceID(eventUUIdString) {
+		if err := business.DeleteEventInstance(ctx, eventUUIdString, &userInfo); err != nil {
+			writeEventError(w, err)
 			return
 		}
 	} else {
@@ -171,7 +182,7 @@ func GetEventsListController(w http.ResponseWriter, r *http.Request) {
 
 	events, err := business.GetEventsList(ctx, &userInfo, startDate, endDate)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Internal Error", "err": err})
+		writeEventError(w, err)
 		return
 	}
 
@@ -204,11 +215,18 @@ func GetEventController(w http.ResponseWriter, r *http.Request) {
 
 // writeEventError answers an event request that failed: 404 for an event that
 // isn't there or isn't the asker's to see, 403 for one they may see but not do
-// that to, 400 for a request that can't be read, and 500 for the rest. Every
-// failure was a 500 "Internal Error", even a guest trying to edit.
+// that to, 400 for a request that can't be read, 409 for a repeating event
+// someone changed at the same moment, 503 while the calendar is moving to its
+// one store, and 500 for the rest. Every failure was a 500 "Internal Error",
+// even a guest trying to edit.
 func writeEventError(w http.ResponseWriter, err error) {
 	var input *business.EventInputError
+	var stale *business.StaleError
 	switch {
+	case errors.As(err, &stale):
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "Someone changed this event at the same moment. Open it again to see it as it is now."})
+	case errors.Is(err, business.ErrMoving), errors.Is(err, business.ErrStoreOff):
+		writeCalendarUnavailable(w, err)
 	case errors.Is(err, business.ErrEventNotFound):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": err.Error()})
 	case errors.Is(err, business.ErrOnlyCreatorChanges), errors.Is(err, business.ErrNotEventCreator), errors.Is(err, business.ErrCreatorCannotLeave):
@@ -218,6 +236,17 @@ func writeEventError(w http.ResponseWriter, err error) {
 	default:
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Internal Error"})
 	}
+}
+
+// writeCalendarUnavailable answers 503 for a calendar whose store is moving
+// ("calendar_moving") or isn't switched on here ("calendar_off"): the code
+// lets the web say so plainly, where a 503 otherwise reads as a fault.
+func writeCalendarUnavailable(w http.ResponseWriter, err error) {
+	code := "calendar_off"
+	if errors.Is(err, business.ErrMoving) {
+		code = "calendar_moving"
+	}
+	helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": err.Error(), "code": code})
 }
 
 func LeaveEventController(w http.ResponseWriter, r *http.Request) {
@@ -239,6 +268,11 @@ func LeaveEventController(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "controllers/LeaveEventController Google Calendar decline failed err: %+v", err)
 			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to leave Google Calendar event", "err": err})
+			return
+		}
+	} else if business.IsInstanceID(eventUUIdString) {
+		if err := business.LeaveEventInstance(ctx, eventUUIdString, &userInfo); err != nil {
+			writeEventError(w, err)
 			return
 		}
 	} else {

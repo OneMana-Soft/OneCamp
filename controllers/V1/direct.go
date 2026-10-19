@@ -30,6 +30,7 @@ import (
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -203,8 +204,8 @@ func ListTasksV1(w http.ResponseWriter, r *http.Request) {
 }
 
 // CreateTaskV1 POST /v1/tasks — scope tasks:write. Body: task_name,
-// project_uuid, description, priority, assignee_uuid. Only an admin of the
-// project may, as in the app.
+// project_uuid, description, priority, assignee_uuid. Whoever may make tasks
+// in the project in the app may (Work Access).
 func CreateTaskV1(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := apiUser(r)
@@ -228,8 +229,19 @@ func CreateTaskV1(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusNotFound, "project not found or you don't have access")
 		return
 	}
-	if project.IsProjectAdmin == 0 {
-		refuse(w, http.StatusForbidden, "only an admin of the project can create tasks in it")
+	if !project.ReaderIsIn() {
+		refuse(w, http.StatusNotFound, "project not found or you don't have access")
+		return
+	}
+	// As in the app: members and admins make tasks, by the project's "Who
+	// can change tasks" (Work Access).
+	standing, err := workAccess.Of(ctx, user.UserDgraphInfo.Uuid, project)
+	if err != nil {
+		refuse(w, http.StatusServiceUnavailable, "couldn't check what you can do in that project; try again")
+		return
+	}
+	if err := standing.Check(workAccess.NeedCreateTask); err != nil {
+		refuse(w, http.StatusForbidden, err.Error())
 		return
 	}
 	priority := strings.ToLower(strings.TrimSpace(params["priority"]))
@@ -304,8 +316,17 @@ func UpdateTaskStatusV1(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusNotFound, "task not found or you don't have access")
 		return
 	}
-	if task.Project == nil || task.Project.IsProjectAdmin == 0 {
-		refuse(w, http.StatusForbidden, "only an admin of the task's project can change it")
+	if !taskBusiness.CanViewTask(task, user.UserDgraphInfo.Uid) {
+		refuse(w, http.StatusNotFound, "task not found or you don't have access")
+		return
+	}
+	standing, facts, err := workAccess.OfTask(ctx, user.UserDgraphInfo.Uuid, user.UserDgraphInfo.Uid, task)
+	if err != nil {
+		refuse(w, http.StatusServiceUnavailable, "couldn't check what you can do with that task; try again")
+		return
+	}
+	if err := standing.CheckTask(workAccess.NeedEditTask, facts); err != nil {
+		refuse(w, http.StatusForbidden, err.Error())
 		return
 	}
 	err = taskBusiness.UpdateTaskStatusByTaskUUID(ctx, taskID, status, task, &user.UserDgraphInfo)
@@ -357,13 +378,32 @@ func ListProjectsV1(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Whether they make and change tasks in each, by Work Access's rule: one
+	// read of their roles for the lot. The list is of projects they're in.
+	var standings map[string]workAccess.Standing
+	if got != nil {
+		in := make([]*dgraphStruct.DgraphProject, 0, len(got.Projects))
+		for _, p := range got.Projects {
+			if p != nil && p.Uuid != "" {
+				read := &dgraphStruct.DgraphProject{Uuid: p.Uuid, IsProjectMember: 1}
+				if admin[p.Uuid] {
+					read.IsProjectAdmin = 1
+				}
+				in = append(in, read)
+			}
+		}
+		if standings, err = workAccess.OfMany(ctx, user.UserDgraphInfo.Uuid, in); err != nil {
+			refuse(w, http.StatusServiceUnavailable, "couldn't list the projects; try again")
+			return
+		}
+	}
 	var list []apiProject
 	if got != nil {
 		for _, p := range got.Projects {
 			if p == nil || p.Uuid == "" || helpers.IsSoftDeleted(p.DeletedAt) {
 				continue
 			}
-			row := apiProject{UUID: p.Uuid, Name: strings.TrimSpace(p.Name), CanManage: admin[p.Uuid]}
+			row := apiProject{UUID: p.Uuid, Name: strings.TrimSpace(p.Name), CanManage: standings[strings.ToLower(p.Uuid)].Can(workAccess.NeedEditTask)}
 			if row.Name == "" {
 				row.Name = "(untitled project)"
 			}

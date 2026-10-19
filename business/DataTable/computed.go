@@ -21,7 +21,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/akashc777/OneCamp/business/DataTable/formula"
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
+	formula "github.com/akashc777/OneCamp/business/Formula"
 	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
@@ -149,8 +150,11 @@ func planComputed(ctx context.Context, fields []*model.Field) *computed {
 }
 
 // planComputedFor is planComputed for only the computed fields keep names,
-// by id, or all of them when it's nil.
+// by id, or all of them when it's nil. A field in the trash is left out,
+// whoever passes it: its links wait there for its restore (D14) and nothing
+// reads them, so a rollup over it says its relation has been deleted.
 func planComputedFor(ctx context.Context, fields []*model.Field, keep map[string]bool) *computed {
+	fields = liveOnly(fields)
 	c := &computed{
 		fields:   fields,
 		types:    make(map[string]string, len(fields)),
@@ -197,6 +201,24 @@ func planComputedFor(ctx context.Context, fields []*model.Field, keep map[string
 	return c
 }
 
+// liveOnly is fields without those in the trash, in their order: fields
+// itself when none is. Pure.
+func liveOnly(fields []*model.Field) []*model.Field {
+	for i, f := range fields {
+		if f.DeletedAt == nil {
+			continue
+		}
+		out := append(make([]*model.Field, 0, len(fields)-1), fields[:i]...)
+		for _, g := range fields[i+1:] {
+			if g.DeletedAt == nil {
+				out = append(out, g)
+			}
+		}
+		return out
+	}
+	return fields
+}
+
 // computedNeeds is the computed fields that reading the fields ids takes, by
 // id: those of them that are computed, the formulas, links (to tables' rows
 // and to items) and rollups those read, and the relations the rollups add up.
@@ -230,19 +252,32 @@ func computedNeeds(fields []*model.Field, ids []string) map[string]bool {
 	return keep
 }
 
-// labelField is the field whose value names a table's rows: the first with
-// a value of its own, or a formula that doesn't read links or rollups.
+// labelField is the field whose value names a table's rows: its primary
+// field (migration 300), or, when the primary can't name rows (it links, or
+// rolls up), the first with a value of its own, or a formula that doesn't
+// read links or rollups.
 func labelField(fields []*model.Field) *model.Field {
 	for _, f := range fields {
-		if readsLinks(f) || f.Type == model.FieldRollup {
-			continue
+		if f.Primary && namesRows(f, fields) {
+			return f
 		}
-		if f.Type == model.FieldFormula && readsComputed(f, fields) {
-			continue
+	}
+	for _, f := range fields {
+		if namesRows(f, fields) {
+			return f
 		}
-		return f
 	}
 	return nil
+}
+
+// namesRows is whether a field's value can name a table's rows: one of its
+// own, or a formula's that doesn't read links or rollups, worked out for every
+// reader alike.
+func namesRows(f *model.Field, fields []*model.Field) bool {
+	if readsLinks(f) || f.Type == model.FieldRollup {
+		return false
+	}
+	return f.Type != model.FieldFormula || !readsComputed(f, fields)
 }
 
 // target is the table a relation field links to, loaded once a read.
@@ -392,11 +427,11 @@ func (c *computed) apply(ctx context.Context, rows []*model.Row) {
 	c.readLinks(ctx, ids)
 	c.loadLinked(ctx, ids, now, loc)
 	// Each row's links to items, by field, as stored; then named, all at once.
-	stored := make([][]itemRef, len(page)*len(c.items))
-	var wanted []itemRef
+	stored := make([][]fieldTypes.ItemRef, len(page)*len(c.items))
+	var wanted []fieldTypes.ItemRef
 	for i, pr := range page {
 		for j, it := range c.items {
-			refs, _ := parseItems(pr.raw(it.field.Id.String()), it.target)
+			refs, _ := fieldTypes.ParseItems(pr.raw(it.field.Id.String()), it.target)
 			stored[i*len(c.items)+j] = refs
 			wanted = append(wanted, refs...)
 		}

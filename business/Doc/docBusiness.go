@@ -293,9 +293,13 @@ func updateDoc(ctx context.Context, updateInput *adapter.InputUpdateDoc, yjsStat
 		// vector (or, on a rename, the whole body).
 		if updateInput.Title != nil || updateInput.Body != nil {
 			stored, err := domain.GetSystemDocByUUID(context.Background(), updateInput.DocId)
-			if err != nil || stored == nil {
+			switch {
+			case err != nil || stored == nil:
 				helpers.LogErrorWithContext(ctx, "business/UpdateDoc Failed to read the saved doc to re-embed it err: %+v", err)
-			} else {
+			case domain.IsHosted(stored):
+				// A hosted doc (a table row's page) is in no docs index, the
+				// AI's included: it is found through its host (D-18).
+			default:
 				// Plain text, for the same reason the indexed body is plain text —
 				// and one more: this text is what the embedding VECTOR is computed
 				// from. Feeding it markup spends the model's limited input budget on

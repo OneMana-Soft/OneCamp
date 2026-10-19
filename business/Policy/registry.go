@@ -24,9 +24,10 @@ const cacheFor = 15 * time.Second
 
 // The kinds of policy, as the admin API names them.
 const (
-	KindBool = "bool"
-	KindInt  = "int"
-	KindList = "list"
+	KindBool   = "bool"
+	KindInt    = "int"
+	KindList   = "list"
+	KindChoice = "choice"
 )
 
 var (
@@ -42,7 +43,11 @@ var (
 type spec struct {
 	key, kind, label, help string
 	def                    any
-	min, max               int // for an int
+	min, max               int      // for an int
+	choices                []string // for a choice
+	// scopes are the kinds of thing it can be set for beside the workspace
+	// (ScopeProject); none, the workspace only.
+	scopes []string
 }
 
 // specs are every policy, in the order an admin sees them.
@@ -55,6 +60,10 @@ var specs = []spec{
 		label: "Longest a guest link lasts, in days", help: "0 sets no limit of its own."},
 	{key: EmbedAllowlist.Key, kind: KindList, def: EmbedAllowlist.Default,
 		label: "Sites docs can embed", help: "With no list, docs can embed any site they could before."},
+	{key: ProjectsEditWho.Key, kind: KindChoice, def: ProjectsEditWho.Default, choices: ProjectsEditWho.Choices, scopes: []string{ScopeProject},
+		label: "Who can change tasks", help: "Members, members on the tasks assigned to them, or admins only. Each project can choose its own."},
+	{key: ProjectsCreateWho.Key, kind: KindChoice, def: ProjectsCreateWho.Default, choices: ProjectsCreateWho.Choices,
+		label: "Who can make projects", help: "A team's admins, or everyone in the team."},
 }
 
 // Info is one policy as an admin sees it.
@@ -69,6 +78,8 @@ type Info struct {
 	IsSet   bool `json:"is_set"`
 	Min     *int `json:"min,omitempty"`
 	Max     *int `json:"max,omitempty"`
+	// Choices are a choice's values.
+	Choices []string `json:"choices,omitempty"`
 }
 
 // Changer is the admin making a change, for its record.
@@ -147,6 +158,14 @@ func (r *Registry) List(ctx context.Context, p ListPolicy) []string {
 	return out
 }
 
+func (r *Registry) Choice(ctx context.Context, p ChoicePolicy) string {
+	raw, ok := r.stored(ctx, p.Key)
+	if !ok || !p.Allows(raw) {
+		return p.Default
+	}
+	return raw
+}
+
 // Require refuses a member while p is off, asked at each request.
 func (r *Registry) Require(p BoolPolicy) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -209,8 +228,17 @@ func (r *Registry) info(ctx context.Context, s spec) Info {
 	case KindList:
 		def, _ := s.def.([]string)
 		in.Value = r.List(ctx, ListPolicy{Key: s.key, Default: def})
+	case KindChoice:
+		in.Value = r.Choice(ctx, s.choice())
+		in.Choices = append([]string(nil), s.choices...)
 	}
 	return in
+}
+
+// choice is a choice spec as the policy it declares. Pure.
+func (s spec) choice() ChoicePolicy {
+	def, _ := s.def.(string)
+	return ChoicePolicy{Key: s.key, Default: def, Choices: s.choices}
 }
 
 // Set changes a policy to value (JSON: true, 30, ["youtube.com"], or null for
@@ -237,7 +265,7 @@ func (r *Registry) Set(ctx context.Context, key string, value json.RawMessage, b
 	}
 	r.forget()
 	summary := fmt.Sprintf("Changed “%s” from %s to %s", s.label, describe(before.Value), shown)
-	meta := map[string]interface{}{"policy": key, "from": before.Value, "to": json.RawMessage(stored)}
+	meta := map[string]interface{}{"policy": key, "from": before.Value, "to": storedJSON(*s, stored)}
 	if err := recordIt(ctx, &by.UserID, by.Email, auditBusiness.ActorHuman, "policy.changed", auditBusiness.CategorySettings, summary, meta); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Policy: the change to %s couldn't be recorded, so it's undone: %+v", key, err)
 		undo := defaultRaw(*s)
@@ -251,6 +279,15 @@ func (r *Registry) Set(ctx context.Context, key string, value json.RawMessage, b
 		return Info{}, ErrNotRecorded
 	}
 	return r.info(ctx, *s), nil
+}
+
+// storedJSON is a stored value as JSON, for a change's record: a choice is
+// stored bare, every other kind as JSON already. Pure.
+func storedJSON(s spec, stored string) json.RawMessage {
+	if s.kind == KindChoice {
+		return json.RawMessage(strconv.Quote(stored))
+	}
+	return json.RawMessage(stored)
 }
 
 // hostPattern is a host a list of sites may name: "youtube.com", or a
@@ -305,6 +342,12 @@ func canonical(s spec, value json.RawMessage) (stored, shown string, err error) 
 		}
 		raw, _ := json.Marshal(out)
 		return string(raw), describe(out), nil
+	case KindChoice:
+		var v string
+		if json.Unmarshal(value, &v) != nil || !s.choice().Allows(v) {
+			return bad("it's one of " + strings.Join(s.choices, ", "))
+		}
+		return v, describe(v), nil
 	}
 	return bad("unknown kind")
 }
@@ -322,6 +365,8 @@ func defaultRaw(s spec) string {
 		}
 		raw, _ := json.Marshal(v)
 		return string(raw)
+	case string:
+		return v
 	}
 	return "null"
 }

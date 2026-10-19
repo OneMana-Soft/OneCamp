@@ -33,6 +33,36 @@ func CreateOrUpdateLastSeenChat(ctx context.Context, userID uuid.UUID, grpID str
 	return
 }
 
+func BulkCreateOrUpdateLastSeenChat(ctx context.Context, userIDs []string, grpID string, lastSeenChannelTime time.Time) (err error) {
+
+	if len(userIDs) == 0 {
+		return nil
+	}
+
+	query := `INSERT INTO last_seen_chat (user_id, grp_id, user_last_seen) VALUES `
+	values := []interface{}{}
+	placeholders := []string{}
+	values = append(values, grpID, lastSeenChannelTime)
+
+	for i := 0; i < len(userIDs); i++ {
+		placeholders = append(placeholders, fmt.Sprintf("($%d, $1, $2)", i+3))
+		values = append(values, userIDs[i])
+	}
+
+	query += strings.Join(placeholders, ",")
+	query += ` ON CONFLICT (user_id, grp_id) DO UPDATE SET user_last_seen = GREATEST(last_seen_chat.user_last_seen, EXCLUDED.user_last_seen)`
+
+	err = models.BulkCreateOrUpdateLastSeenChat(query, values...)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/BulkCreateOrUpdateLastSeenChat Failed to create chat last seen err: %+v",
+			err)
+		return err
+	}
+
+	return nil
+}
+
 func BulkCreateLastSeenChatIfNotExists(ctx context.Context, userIDs []string, grpID string) (err error) {
 	if len(userIDs) == 0 {
 		return nil

@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 
 	adapter "github.com/akashc777/OneCamp/adapter/AI"
@@ -654,14 +653,7 @@ func AIActivityProof(w http.ResponseWriter, r *http.Request) {
 }
 
 // proofLimitFrom reads an optional row cap, bounded by the business layer.
-func proofLimitFrom(r *http.Request) int {
-	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return 0
-}
+func proofLimitFrom(r *http.Request) int { return helpers.LimitParam(r.URL.Query(), 0, 500) }
 
 // AIActivity handles GET /admin/ai/activity — the unified AI activity timeline
 // (agent runs + AI-attributable audit entries), newest-first. Admin-only
@@ -670,12 +662,7 @@ func AIActivity(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 
-	limit := 50
-	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = n
-		}
-	}
+	limit := helpers.LimitParam(r.URL.Query(), 50, 200)
 	ownerID := userInfo.UserPostgresInfo.Id
 	items, err := business.AIActivity(ctx, userInfo.UserPostgresInfo.IsAdmin, &ownerID, limit)
 	if err != nil {

@@ -30,6 +30,7 @@ import (
 
 	taskAdapter "github.com/akashc777/OneCamp/adapter/Task"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	transcriptDomain "github.com/akashc777/OneCamp/domain/LiveKit"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	"github.com/akashc777/OneCamp/helpers"
@@ -446,7 +447,7 @@ func normalizeDueDate(s string) string {
 }
 
 // CreateTasksFromProposals creates the chosen tasks in the target project AS
-// the user, through the normal task path (project-admin enforced once). Each
+// the user, through the normal task path (Work Access checked once). Each
 // task's assignee is resolved (uuid or name) and its due date set when
 // present. Returns the count created and any per-task failures (best-effort;
 // one bad task never aborts the batch). Generic: works for any source.
@@ -462,8 +463,15 @@ func CreateTasksFromProposals(ctx context.Context, userInfo *userModels.UserInfo
 	if derr != nil || dgraphProject == nil || dgraphProject.Uuid == "" {
 		return 0, 0, fmt.Errorf("project not found or you don't have access")
 	}
-	if dgraphProject.IsProjectAdmin == 0 {
-		return 0, 0, fmt.Errorf("you must be an admin of project '%s' to create tasks", dgraphProject.Name)
+	if !dgraphProject.ReaderIsIn() {
+		return 0, 0, fmt.Errorf("project not found or you don't have access")
+	}
+	standing, serr := workAccess.Of(ctx, userInfo.UserDgraphInfo.Uuid, dgraphProject)
+	if serr != nil {
+		return 0, 0, fmt.Errorf("couldn't check what you can do in project '%s': %w", dgraphProject.Name, serr)
+	}
+	if err := standing.Check(workAccess.NeedCreateTask); err != nil {
+		return 0, 0, fmt.Errorf("project '%s': %w", dgraphProject.Name, err)
 	}
 
 	for _, t := range tasks {
@@ -508,7 +516,7 @@ func createProposedTask(ctx context.Context, userInfo *userModels.UserInfo, proj
 	// The due date is a second call: CreateTask does not keep one.
 	if due := strings.TrimSpace(t.Due); due != "" {
 		if dt, terr := time.Parse(time.RFC3339, due); terr == nil {
-			if _, dgTask, lerr := loadTaskForUpdateAsAdmin(ctx, taskUUID.String(), userInfo.UserDgraphInfo.Uuid); lerr == nil {
+			if _, dgTask, lerr := loadTaskForUpdate(ctx, taskUUID.String(), userInfo.UserDgraphInfo.Uuid); lerr == nil {
 				_ = taskBusiness.UpdateTaskDueDateByTaskUUID(ctx, taskUUID, &dt, dgTask, &userInfo.UserDgraphInfo)
 			}
 		}

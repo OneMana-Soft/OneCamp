@@ -10,6 +10,8 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/Post"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
+	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
+	messagePipeline "github.com/akashc777/OneCamp/business/MessagePipeline"
 	business "github.com/akashc777/OneCamp/business/Post"
 	reactionBusiness "github.com/akashc777/OneCamp/business/Reaction"
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
@@ -42,18 +44,18 @@ func CreatePost(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// Every rule for posting lives in business/Send, shared with scheduled
-	// messages, so a post sent now and one sent later obey the same checks.
-	post, err := sendBusiness.PrepareChannelPost(ctx, &userInfo, &postInfo)
-	if err != nil {
-		writeSendError(w, err)
-		return
-	}
-	// Once per id the app gave it: Try again after a lost answer is the same
-	// post, not a second one.
-	cratedPostInfo, err := sendBusiness.Once(ctx, userInfo.UserDgraphInfo.Uuid, "ch:"+postInfo.ChannelUuid, postInfo.ClientMsgID, func() (*adapter.OutputCreatePostForPost, error) {
-		return post.Commit(ctx)
+	// The message pipeline (chat A2): business/Send's rules, once per id the
+	// app gave it (Try again after a lost answer is the same post, not a
+	// second one), and the write, durable when MESSAGE_PIPELINE switches
+	// channels on, today's otherwise. The route is its thin adapter.
+	written, err := messagePipeline.Messages.Write(ctx, &userInfo, messagePipeline.Write{
+		Op: messagePipeline.OpSend,
+		To: conversationBusiness.Ref{Kind: conversationBusiness.KindChannel, ID: postInfo.ChannelUuid},
+		Draft: messagePipeline.Draft{
+			HTML: postInfo.HTMLText, Files: postInfo.MediaObj, ReplyTo: postInfo.ReplyToUUID, ClientMsgID: postInfo.ClientMsgID,
+		},
 	})
+	cratedPostInfo := &adapter.OutputCreatePostForPost{Uuid: written.ID, PostCreated: written.At}
 	if rj, ok := sendBusiness.AsRejection(err); ok {
 		writeSendError(w, rj)
 		return
@@ -258,9 +260,15 @@ func CreateOrUpdateReactionOnCommentPost(w http.ResponseWriter, r *http.Request)
 		commentPostReactionInfo.ReactionDgraphUid = reactionDgraph.Uid
 	}
 
-	commentPostReactionInfo.ReactionDgraphUid, err = business.CreateOrUpdatePostCommentReaction(ctx, &commentPostReactionInfo, dgraphComment, &userInfo.UserDgraphInfo)
+	// A new reaction answers with its uid; a changed one keeps its own. The
+	// write answers a uid only for a node it made, so a change answered none,
+	// and the reply's reaction lost its id in the answer.
+	created, err := business.CreateOrUpdatePostCommentReaction(ctx, &commentPostReactionInfo, dgraphComment, &userInfo.UserDgraphInfo)
+	if created != "" {
+		commentPostReactionInfo.ReactionDgraphUid = created
+	}
 
-	if err != nil {
+	if err != nil || commentPostReactionInfo.ReactionDgraphUid == "" {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/CreateOrUpdateReactionOnCommentPost Failed to create/update reaction on post comment req err: %+v",
 			err)

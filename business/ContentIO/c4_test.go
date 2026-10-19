@@ -96,6 +96,12 @@ func TestAWorkspaceExportLeavesOutPrivateDocsUnlessTheirOwnerLetThemIn(t *testin
 	archived := row(shelved, "Shelved", "", maya, false)
 	archivedAt := time.Now().Add(-time.Hour)
 	archived.ArchivedAt = &archivedAt
+	// A table row's page (a hosted doc, D-18) goes with its table: never in
+	// the docs' export, nor counted among the private docs left out, even
+	// where something decided it open.
+	acmePage := uuid.NewString()
+	hosted := row(acmePage, "Acme", "", "", true)
+	hosted.Owner, hosted.HostKind, hosted.HostUUID = nil, "table_row", uuid.NewString()
 	w.useWorkspace(&workspace{admin: true, rows: []*dgraphStruct.DgraphDoc{
 		row(handbook, "Handbook", "", maya, false),
 		row(onboarding, "Onboarding", handbook, maya, false),
@@ -103,8 +109,10 @@ func TestAWorkspaceExportLeavesOutPrivateDocsUnlessTheirOwnerLetThemIn(t *testin
 		row(plans, "Plans", "", maya, true),
 		row(gone, "Gone", "", maya, true),
 		archived,
+		hosted,
 	}, consents: map[string]string{plans: maya, gone: uuid.NewString()}})
-	w.levels[handbook], w.levels[onboarding] = accessBusiness.LevelView, accessBusiness.LevelEdit
+	w.levels[handbook], w.levels[onboarding], w.levels[acmePage] = accessBusiness.LevelView, accessBusiness.LevelEdit, accessBusiness.LevelEdit
+	w.bodies[acmePage] = [2]string{"Acme", "<p>Call on Friday.</p>"}
 	for id, title := range map[string]string{handbook: "Handbook", onboarding: "Onboarding", diary: "Diary", plans: "Plans", gone: "Gone"} {
 		w.bodies[id] = [2]string{title, "<p>About " + title + "</p>"}
 	}

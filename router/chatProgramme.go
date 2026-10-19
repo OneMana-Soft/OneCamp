@@ -49,5 +49,5 @@ func newChatRouters(root, admin, channel, post, dm, group chi.Router) chatRouter
 // mountChatProgramme mounts every merged package of the chat programme: one
 // line per package, in merge order, and nothing else.
 func mountChatProgramme(rt chatRouters) {
-	// No package has merged yet.
+	mountConversations(rt) // A9: the conversation service and group conversations
 }

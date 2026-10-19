@@ -503,7 +503,9 @@ func SetChannelMemoryExcluded(ctx context.Context, userInfo *userModels.UserInfo
 	if err != nil || dgraphChannel == nil {
 		return fmt.Errorf("channel not found or not authorized")
 	}
-	if dgraphChannel.IsAdmin == 0 {
+	// A channel admin changes it in the app, as themselves; never through an
+	// API token, which acts as a member (helpers.ActsThroughToken).
+	if dgraphChannel.IsAdmin == 0 || helpers.ActsThroughToken(ctx) {
 		return fmt.Errorf("you must be a channel admin to change this")
 	}
 	uid := userInfo.UserPostgresInfo.Id
@@ -522,7 +524,8 @@ func channelAccessOrVerify(ctx context.Context, userInfo *userModels.UserInfo, c
 	if err != nil || dgraphChannel == nil {
 		return false
 	}
-	return dgraphChannel.IsMember == 1 || dgraphChannel.IsAdmin == 1
+	// Its admins see it too, in the app; a token sees what a member does.
+	return dgraphChannel.IsMember == 1 || (dgraphChannel.IsAdmin == 1 && !helpers.ActsThroughToken(ctx))
 }
 
 // channelAccessUUIDs returns the channel uuids the user can see.

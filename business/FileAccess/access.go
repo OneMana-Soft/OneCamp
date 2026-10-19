@@ -303,6 +303,10 @@ func readsDoc(ctx context.Context, userUUID, docID string) error {
 		return docBusiness.ErrNotFound
 	case err != nil:
 		return err
+	case docBusiness.IsHosted(doc):
+		// A table row's page (docs D-18): its files are its host's to show,
+		// so its images show to whoever may open the row.
+		return hostedDocAllows(ctx, userUUID, docID, accessBusiness.LevelView)
 	case docBusiness.IsDeleted(doc) && docBusiness.CouldRead(doc, userUUID):
 		return docBusiness.ErrDocDeleted
 	case docBusiness.IsDeleted(doc):
@@ -321,7 +325,9 @@ func readsDoc(ctx context.Context, userUUID, docID string) error {
 // signs people in from Postgres alone, so the person is their account id.
 func addsToDoc(ctx context.Context, userUUID, docID string) error {
 	who := accessBusiness.Subject{UserUUID: userUUID}
-	d, err := accessBusiness.Rules.Resolve(ctx, who, accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: docID})
+	// A hosted doc (a table row's page) is decided by its host: a doc's place
+	// is one of the paths that open hosted docs (business/Doc docHost.go).
+	d, err := accessBusiness.Rules.Resolve(docBusiness.WithHostedOpen(ctx), who, accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: docID})
 	switch {
 	case errors.Is(err, accessBusiness.ErrNotFound):
 		return docBusiness.ErrNotFound
@@ -333,6 +339,25 @@ func addsToDoc(ctx context.Context, userUUID, docID string) error {
 		return docBusiness.ErrNotFound
 	case d.Level < accessBusiness.LevelComment:
 		return ErrRefused
+	}
+	return nil
+}
+
+// hostedDocAllows is a hosted doc's answer to someone asking for its files,
+// by its host, at least needs: as for any doc, someone it isn't there for
+// learns nothing, and someone it was there for is told it is deleted.
+func hostedDocAllows(ctx context.Context, userUUID, docID string, needs accessBusiness.Level) error {
+	who := accessBusiness.Subject{UserUUID: userUUID}
+	d, err := accessBusiness.Rules.Resolve(docBusiness.WithHostedOpen(ctx), who, accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: docID})
+	switch {
+	case errors.Is(err, accessBusiness.ErrNotFound):
+		return docBusiness.ErrNotFound
+	case err != nil:
+		return err
+	case d.Deleted && d.Was >= needs:
+		return docBusiness.ErrDocDeleted
+	case d.Deleted, d.Level < needs:
+		return docBusiness.ErrNotFound
 	}
 	return nil
 }

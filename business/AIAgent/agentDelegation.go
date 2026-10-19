@@ -679,7 +679,7 @@ func originCanAddressSurface(ctx context.Context, originUserID string, where Sur
 		if helpers.IsSoftDeleted(info.DeletedAt) || helpers.IsSoftDeleted(info.Project.DeletedAt) {
 			return false
 		}
-		return info.Project.IsProjectMember > 0
+		return info.Project.ReaderIsIn()
 
 	default:
 		// Group chat / DM: this package holds no chat dependency by design, so

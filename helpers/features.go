@@ -140,4 +140,9 @@ const (
 	// a task panel decides whether to offer a pull-request affordance with it, and
 	// asking the admin endpoint made every non-admin's task panel 403.
 	FeatureNameGitHub = "github"
+	// FeatureNameCalendarRepeats is whether the calendar's events are in its
+	// one store (the default, unless CALENDAR_STORE=graph; and the move
+	// done), where events repeat and a change to one instance asks its
+	// scope. Otherwise the web offers no repeat: the two old stores have none.
+	FeatureNameCalendarRepeats = "calendar_repeats"
 )

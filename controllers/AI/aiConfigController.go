@@ -1020,12 +1020,7 @@ func TestCodePRRunner(w http.ResponseWriter, r *http.Request) {
 // runs ledger for the admin runs view (transparency).
 func ListCodePRRuns(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	limit := 50
-	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = n
-		}
-	}
+	limit := helpers.LimitParam(r.URL.Query(), 50, 200)
 	runs, err := business.RecentCodePRRuns(ctx, limit)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})

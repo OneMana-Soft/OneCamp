@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -373,6 +374,7 @@ func GetDgraphProjectInfoAndTeamAdminFlagAndAttachments(ctx context.Context, pro
 				projectInfo(func: eq(project_uuid, $id)) {
 					project_uuid
 					project_created_at
+					project_is_member: count(project_members @filter(uid($userUid)))
 					project_is_admin: count(project_admins @filter(uid($userUid)))
 					project_team {
 						uid
@@ -553,6 +555,11 @@ func GetBasicDgraphProjectInfoWithGivenMemberUUID(ctx context.Context, projectUU
 						uid
 						user_uuid
 						user_name
+						is_external
+					}
+					project_admins @filter(eq(user_uuid, $memberUuid)){
+						uid
+						user_uuid
 					}
 					project_created_by {
 						uid
@@ -636,6 +643,7 @@ func GetBasicDgraphProjectInfo(ctx context.Context, projectUUID string, userDgra
 						uid
 						team_uuid
 						team_name
+						team_is_admin: count(team_admins @filter(uid($userUid)))
 					}
 					project_created_by {
 						user_uuid
@@ -1187,3 +1195,70 @@ func GetDgraphProjectCounts(ctx context.Context, userDgraphUID string, today, we
 	}
 	return list, nil
 }
+
+// GetProjectsReadAccessFor reads, for one person (by graph uid), what
+// business/WorkAccess decides each of the named projects by: whether the
+// person is its member, its admin, or an admin of its team; with its
+// deletion and its maker. One query for the lot; ids that aren't uuids are
+// left out, and so is any project that doesn't exist.
+func GetProjectsReadAccessFor(ctx context.Context, projectUUIDs []string, readerUID string) ([]*dgraphStruct.DgraphProject, error) {
+	list := dgraphquery.UUIDList(projectUUIDs)
+	if list == "" || readerUID == "" {
+		return nil, nil
+	}
+	projects, err := dgraphModels.GetDgraphProjectList(ctx, `query Access($userUid: string) {
+		projectInfo(func: eq(project_uuid, [`+list+`])) {
+			uid
+			project_uuid
+			project_deleted_at
+			project_is_member: count(project_members @filter(uid($userUid)))
+			project_is_admin: count(project_admins @filter(uid($userUid)))
+			project_created_by { uid user_uuid }
+			project_team {
+				uid
+				team_uuid
+				team_is_admin: count(team_admins @filter(uid($userUid)))
+			}
+		}
+	}`, map[string]string{"$userUid": readerUID})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetProjectsReadAccessFor err: %+v", err)
+	}
+	return projects, err
+}
+
+// MembershipsPage is how many projects a page of ProjectMembershipsPage holds.
+const MembershipsPage = 100
+
+// ProjectMembershipsPage reads a page of projects with who is on each one's
+// member and admin edges (graph uid and user id), after the project with
+// graph uid after ("" for the first page), in uid order: for bringing roles
+// into step with the graph (business/Project roles.go).
+func ProjectMembershipsPage(ctx context.Context, after string, n int) ([]*dgraphStruct.DgraphProject, error) {
+	if n <= 0 {
+		n = MembershipsPage
+	}
+	from := ""
+	if after != "" {
+		if !graphUID.MatchString(after) {
+			return nil, fmt.Errorf("domain/ProjectMembershipsPage: %q isn't a graph uid", after)
+		}
+		from = ", after: " + after
+	}
+	query := fmt.Sprintf(`{
+		projectInfo(func: type(Project), first: %d%s) {
+			uid
+			project_uuid
+			project_members (first: 100000) { uid user_uuid }
+			project_admins (first: 100000) { uid user_uuid }
+		}
+	}`, n, from)
+	projects, err := dgraphModels.GetDgraphProjectList(ctx, query, map[string]string{})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/ProjectMembershipsPage err: %+v", err)
+	}
+	return projects, err
+}
+
+// graphUID is a graph node's uid as Dgraph writes it.
+var graphUID = regexp.MustCompile(`^0x[0-9a-f]+$`)

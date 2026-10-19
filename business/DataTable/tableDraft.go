@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"strings"
 
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
+	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
 	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -107,6 +109,9 @@ func GenerateTable(ctx context.Context, actor Actor, prompt string, workspaceCon
 			byName[strings.ToLower(strings.TrimSpace(cf.Name))] = cf.Id.String()
 		}
 		rowCount := 0
+		// The rows are the AI's, made for the asker.
+		drafted := actor
+		drafted.Kind = rowLedger.ActorAgent
 		for _, raw := range gen.Rows {
 			if rowCount >= maxGeneratedRows {
 				break
@@ -120,7 +125,7 @@ func GenerateTable(ctx context.Context, actor Actor, prompt string, workspaceCon
 			if len(values) == 0 {
 				continue
 			}
-			if _, rerr := CreateRow(ctx, tbl.Id, RowInput{Values: values}, actor); rerr != nil {
+			if _, rerr := CreateRow(ctx, tbl.Id, RowInput{Values: values}, drafted); rerr != nil {
 				helpers.LogErrorWithContext(ctx, "GenerateTable seed row err: %v", rerr)
 				continue
 			}
@@ -149,7 +154,7 @@ func draftInputs(gen *generatedTable) (TableInput, []FieldInput, error) {
 			continue
 		}
 		ftype := strings.TrimSpace(f.Type)
-		if !model.ValidFieldType(ftype) {
+		if !fieldTypes.Kinds.Valid(ftype) {
 			ftype = model.FieldText
 		}
 		cfg := map[string]interface{}{}
@@ -183,8 +188,9 @@ func parseGeneratedTable(raw string) (*generatedTable, error) {
 	if g.Name == "" {
 		g.Name = "Untitled table"
 	}
-	if len(g.Name) > maxNameLen {
-		g.Name = g.Name[:maxNameLen]
+	// Cut by characters: a cut by bytes split a letter, and the table couldn't be stored.
+	if r := []rune(g.Name); len(r) > maxNameLen {
+		g.Name = string(r[:maxNameLen])
 	}
 	return &g, nil
 }

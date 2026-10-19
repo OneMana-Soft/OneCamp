@@ -35,6 +35,13 @@ package helpers
 // treating a typo as "all", would run a replica meant to be a worker as a second
 // API server, which is precisely the configuration the operator was trying to
 // leave.
+//
+// A fourth role is never configured: oneshot, which a one-shot subcommand
+// (helpers.Subcommands: demoseed, calendarmove) takes whatever SERVICE_ROLE
+// says. It connects the stores' clients and nothing more: it serves nothing,
+// runs no loop and listens to the broker for nothing, because it runs beside
+// the live instance and exits, and a loop in it would send mail, claim a job
+// or count a device a second time, then stop half-way when the command ends.
 
 import (
 	"fmt"
@@ -48,6 +55,8 @@ const (
 	RoleAll    ServiceRole = "all"
 	RoleAPI    ServiceRole = "api"
 	RoleWorker ServiceRole = "worker"
+	// RoleOneShot is a one-shot subcommand's, never SERVICE_ROLE's (RoleForProcess).
+	RoleOneShot ServiceRole = "oneshot"
 
 	// ServiceRoleEnv is the environment variable that selects the role.
 	ServiceRoleEnv = "SERVICE_ROLE"
@@ -72,8 +81,15 @@ func CurrentServiceRole() (ServiceRole, error) {
 	return ParseServiceRole(os.Getenv(ServiceRoleEnv))
 }
 
-// ServesHTTP says whether this process answers requests.
-func (r ServiceRole) ServesHTTP() bool { return r != RoleWorker }
+// ServesHTTP says whether this process answers requests. Named, never "not a
+// worker": a role added later serves nothing until it says it does.
+func (r ServiceRole) ServesHTTP() bool { return r == RoleAll || r == RoleAPI }
 
-// RunsWorkers says whether this process runs the background loops.
-func (r ServiceRole) RunsWorkers() bool { return r != RoleAPI }
+// RunsWorkers says whether this process runs the background loops: the same
+// rule, so a new role runs none until it says it does.
+func (r ServiceRole) RunsWorkers() bool { return r == RoleAll || r == RoleWorker }
+
+// ListensToBroker says whether this process takes its share of what the
+// broker announces to the backend (a client connecting or going): a one-shot
+// would take announcements meant for the server, and lose them when it exits.
+func (r ServiceRole) ListensToBroker() bool { return r != RoleOneShot }

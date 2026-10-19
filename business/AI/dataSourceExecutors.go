@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	dataSourceBusiness "github.com/akashc777/OneCamp/business/DataSource"
+	"github.com/akashc777/OneCamp/helpers"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/google/uuid"
 )
@@ -29,7 +30,9 @@ func registerDataSourceExecutors() {
 	ai.RegisterExecutor("query_data_source_plan", executeQueryDataSourcePlan)
 }
 
-// dataSourceActor builds a DataSource actor for the acting user.
+// dataSourceActor builds a DataSource actor for the acting user: a member's when
+// the call acts through an API token, so list_data_sources lists what a member
+// may query (helpers.ActsThroughToken).
 func dataSourceActor(ctx context.Context, userUUID string) (dataSourceBusiness.Actor, error) {
 	userInfo, err := getUserInfoForExecutor(ctx, userUUID)
 	if err != nil {
@@ -37,7 +40,7 @@ func dataSourceActor(ctx context.Context, userUUID string) (dataSourceBusiness.A
 	}
 	return dataSourceBusiness.Actor{
 		UserID:  userInfo.UserPostgresInfo.Id,
-		IsAdmin: userInfo.UserPostgresInfo.IsAdmin,
+		IsAdmin: userInfo.UserPostgresInfo.IsAdmin && !helpers.ActsThroughToken(ctx),
 	}, nil
 }
 

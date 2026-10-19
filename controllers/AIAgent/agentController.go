@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 
 	business "github.com/akashc777/OneCamp/business/AIAgent"
@@ -326,12 +325,7 @@ func ListAgentRuns(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid agent id"})
 		return
 	}
-	limit := 25
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if n, perr := strconv.Atoi(l); perr == nil {
-			limit = n
-		}
-	}
+	limit := helpers.LimitParam(r.URL.Query(), 25, 100)
 	runs, err := business.ListRuns(ctx, id, actorFrom(r), limit)
 	if err != nil {
 		writeManageErr(w, err)
@@ -346,12 +340,7 @@ func ListAgentRuns(w http.ResponseWriter, r *http.Request) {
 // Read-only.
 func GetAgentActivity(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	limit := 50
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if n, perr := strconv.Atoi(l); perr == nil {
-			limit = n
-		}
-	}
+	limit := helpers.LimitParam(r.URL.Query(), 50, 50)
 	items, err := business.RecentActivity(ctx, actorFrom(r), limit)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetAgentActivity err: %+v", err)
@@ -367,12 +356,7 @@ func GetAgentActivity(w http.ResponseWriter, r *http.Request) {
 // whole workspace; members: agents they own). Read-only.
 func GetAgentWork(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	limit := 100
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if n, perr := strconv.Atoi(l); perr == nil {
-			limit = n
-		}
-	}
+	limit := helpers.LimitParam(r.URL.Query(), 100, 100)
 	items, err := business.ActiveWork(ctx, actorFrom(r), limit)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetAgentWork err: %+v", err)
@@ -390,12 +374,7 @@ func GetAgentWork(w http.ResponseWriter, r *http.Request) {
 // in the business/model layer (never widens to other people's work).
 func GetMyAgentWork(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	limit := 100
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if n, perr := strconv.Atoi(l); perr == nil {
-			limit = n
-		}
-	}
+	limit := helpers.LimitParam(r.URL.Query(), 100, 100)
 	items, err := business.MyActiveWork(ctx, actorFrom(r), limit)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetMyAgentWork err: %+v", err)

@@ -48,6 +48,7 @@ import (
 	mcpServer "github.com/akashc777/OneCamp/business/MCPServer"
 	pollBusiness "github.com/akashc777/OneCamp/business/Poll"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/google/uuid"
@@ -76,9 +77,12 @@ var personalTools = map[string]string{
 }
 
 // askedBy records who asked for the run the context is about to start: the
-// person a DM, a mention or a task assignment came from. An empty requesterUUID
-// means a person asked and could not be identified, and the run then refuses
-// everything that needs one rather than act with the sponsor's reach.
+// person a DM, a mention or a task assignment came from. Whether they asked
+// through an API token rides on ctx (helpers.ActsThroughToken) and holds the
+// run to a member's powers; a durable job keeps it for its worker
+// (askedForJob). An empty requesterUUID means a person asked and could not be
+// identified, and the run then refuses everything that needs one rather than
+// act with the sponsor's reach.
 //
 // Only the asker is recorded here. Whose agent it is gets bound once, by the
 // runner (bindRunRequester), so no entry point can pair an asker with the wrong
@@ -86,6 +90,26 @@ var personalTools = map[string]string{
 // which can only narrow what is read on the way in.
 func askedBy(ctx context.Context, requesterUUID string) context.Context {
 	return ai.WithRunRequester(ctx, requesterUUID, "")
+}
+
+// askedThrough is s with whether the request queuing a durable job on it came
+// through an API token, which the job keeps so its run is held to a member's
+// powers wherever a worker resumes it (askedForJob).
+func askedThrough(ctx context.Context, s Surface) Surface {
+	s.AskedThroughToken = helpers.ActsThroughToken(ctx)
+	return s
+}
+
+// askedForJob is askedBy for a durable job a worker runs: who asked, from the
+// row, and, when they asked through an API token, the mark that holds the run
+// to a member's powers (helpers.WithActsThroughToken), since nothing of the
+// request's own context reaches the worker. Without it, a run a token queued
+// would regain its asker's admin flag and roles on the worker.
+func askedForJob(ctx context.Context, t *model.AgentTask) context.Context {
+	if t != nil && DecodeSurface(t.Surface).AskedThroughToken {
+		ctx = helpers.WithActsThroughToken(ctx)
+	}
+	return askedBy(ctx, jobRequester(t))
 }
 
 // bindRunRequester ties whoever asked for this run to THIS agent's sponsor,

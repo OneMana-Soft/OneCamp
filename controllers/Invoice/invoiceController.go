@@ -9,6 +9,7 @@ import (
 	"net/http"
 
 	business "github.com/akashc777/OneCamp/business/Invoice"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -57,7 +58,7 @@ func invoiceID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 // ListInvoices is a project's invoices, and the number the next would take.
 // GET /project/{p}/invoices
 func ListInvoices(w http.ResponseWriter, r *http.Request) {
-	id, p, ok := projectaccess.Require(w, r, true, adminOnly)
+	id, p, ok := projectaccess.Require(w, r, workAccess.NeedManage, adminOnly)
 	if !ok {
 		return
 	}
@@ -71,7 +72,7 @@ func ListInvoices(w http.ResponseWriter, r *http.Request) {
 
 // GetInvoice is one invoice. GET /project/{p}/invoices/{i}
 func GetInvoice(w http.ResponseWriter, r *http.Request) {
-	project, _, ok := projectaccess.Require(w, r, true, adminOnly)
+	project, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, adminOnly)
 	if !ok {
 		return
 	}
@@ -89,7 +90,7 @@ func GetInvoice(w http.ResponseWriter, r *http.Request) {
 
 // CreateInvoice saves an invoice. POST /project/{p}/invoices
 func CreateInvoice(w http.ResponseWriter, r *http.Request) {
-	project, _, ok := projectaccess.Require(w, r, true, adminOnly)
+	project, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, adminOnly)
 	if !ok {
 		return
 	}
@@ -108,7 +109,7 @@ func CreateInvoice(w http.ResponseWriter, r *http.Request) {
 
 // UpdateInvoice changes a draft. POST /project/{p}/invoices/{i}
 func UpdateInvoice(w http.ResponseWriter, r *http.Request) {
-	project, _, ok := projectaccess.Require(w, r, true, adminOnly)
+	project, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, adminOnly)
 	if !ok {
 		return
 	}
@@ -131,7 +132,7 @@ func UpdateInvoice(w http.ResponseWriter, r *http.Request) {
 // SetInvoiceStatus marks an invoice sent, paid, back to a draft, or void.
 // POST /project/{p}/invoices/{i}/status {"status": "paid"}
 func SetInvoiceStatus(w http.ResponseWriter, r *http.Request) {
-	project, _, ok := projectaccess.Require(w, r, true, adminOnly)
+	project, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, adminOnly)
 	if !ok {
 		return
 	}
@@ -155,7 +156,7 @@ func SetInvoiceStatus(w http.ResponseWriter, r *http.Request) {
 
 // DeleteInvoice removes a draft. POST /project/{p}/invoices/{i}/delete
 func DeleteInvoice(w http.ResponseWriter, r *http.Request) {
-	project, _, ok := projectaccess.Require(w, r, true, adminOnly)
+	project, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, adminOnly)
 	if !ok {
 		return
 	}

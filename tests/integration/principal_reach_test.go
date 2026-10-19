@@ -108,12 +108,13 @@ func TestPrincipalCanReachProjectsAgainstRealGraph(t *testing.T) {
 // reads through the pool an earlier test left pointing at its closed
 // container, and every doc is refused. Each such test needs its own: the
 // one before it closes its database when it ends.
-func ownDatabase(t *testing.T) {
+func ownDatabase(t *testing.T) *integration.Env {
 	t.Helper()
 	env := integration.SetupEnv(t)
 	if err := postgresInit.ConnectPostgres(context.Background(), env.DSN); err != nil {
 		t.Fatal(err)
 	}
+	return env
 }
 
 func TestPrincipalCanReachDocsAgainstRealGraph(t *testing.T) {
@@ -319,10 +320,11 @@ func TestPrincipalCanReachConversationsAgainstRealGraph(t *testing.T) {
 //
 // Run: go test -tags=integration ./tests/integration/ -run TestReadDoesNotImplyWrite -v
 func TestReadDoesNotImplyWriteAgainstRealGraph(t *testing.T) {
-	ownDatabase(t) // its doc case asks the resolver
+	env := ownDatabase(t) // its doc case asks the resolver, its project ones the roles
 	dg := integration.SetupDgraph(t)
 
 	plainMember := uuid.NewString()
+	viewer := uuid.NewString()
 	projectAdmin := uuid.NewString()
 	reader := uuid.NewString()
 	editor := uuid.NewString()
@@ -333,13 +335,14 @@ func TestReadDoesNotImplyWriteAgainstRealGraph(t *testing.T) {
 
 	if uids := dg.Mutate(t, []map[string]any{
 		{"uid": "_:member", "user_uuid": plainMember, "user_name": "member"},
+		{"uid": "_:viewer", "user_uuid": viewer, "user_name": "viewer"},
 		{"uid": "_:admin", "user_uuid": projectAdmin, "user_name": "padmin"},
 		{"uid": "_:reader", "user_uuid": reader, "user_name": "reader"},
 		{"uid": "_:editor", "user_uuid": editor, "user_name": "editor"},
 
-		// Both are members; only one is an admin.
+		// All three are in it; one is an admin, one only views it.
 		{"uid": "_:project", "project_uuid": projectUUID, "project_name": "Platform",
-			"project_members": []map[string]any{{"uid": "_:member"}, {"uid": "_:admin"}},
+			"project_members": []map[string]any{{"uid": "_:member"}, {"uid": "_:viewer"}, {"uid": "_:admin"}},
 			"project_admins":  []map[string]any{{"uid": "_:admin"}}},
 		{"uid": "_:task", "task_uuid": taskUUID, "task_name": "Ship it",
 			"task_project": map[string]any{"uid": "_:project"}},
@@ -353,20 +356,40 @@ func TestReadDoesNotImplyWriteAgainstRealGraph(t *testing.T) {
 		t.Fatal("seeding assigned no uids")
 	}
 
+	// What each may do in the project is their role (Work Access, A1): with no
+	// row the graph's edge says it, and the viewer's row says they only read.
+	if _, err := env.PG.Exec(`INSERT INTO projects (id, project_name) VALUES ($1, 'Platform')`, projectUUID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.PG.Exec(`INSERT INTO project_roles (project_id, user_id, role) VALUES ($1, $2, 'viewer')`, projectUUID, viewer); err != nil {
+		t.Fatal(err)
+	}
+
 	ctx := context.Background()
 	ref := func(kind mcpBusiness.ResourceKind, id string, access mcpBusiness.Access) mcpBusiness.ResourceRef {
 		return mcpBusiness.ResourceRef{Kind: kind, ID: id, Access: access}
 	}
 
-	t.Run("a plain project member may READ but not WRITE the project", func(t *testing.T) {
-		if d := mcpBusiness.PrincipalCanReach(ctx, plainMember,
+	t.Run("a viewer may READ but not WRITE the project", func(t *testing.T) {
+		if d := mcpBusiness.PrincipalCanReach(ctx, viewer,
 			ref(mcpBusiness.ResourceProject, projectUUID, mcpBusiness.AccessRead)); !d.Allow {
-			t.Fatalf("a member was refused the read: %s", d.Reason)
+			t.Fatalf("a viewer was refused the read: %s", d.Reason)
+		}
+		if d := mcpBusiness.PrincipalCanReach(ctx, viewer,
+			ref(mcpBusiness.ResourceProject, projectUUID, mcpBusiness.AccessWrite)); d.Allow {
+			t.Fatal("a viewer was granted WRITE on the project. Being in a project " +
+				"grants sight of its work; adding to it is for those whose role does the work.")
+		}
+	})
+
+	t.Run("a member may WRITE it, as members change tasks by default", func(t *testing.T) {
+		if d := mcpBusiness.PrincipalCanReach(ctx, plainMember,
+			ref(mcpBusiness.ResourceProject, projectUUID, mcpBusiness.AccessWrite)); !d.Allow {
+			t.Fatalf("a member was refused the write: %s", d.Reason)
 		}
 		if d := mcpBusiness.PrincipalCanReach(ctx, plainMember,
-			ref(mcpBusiness.ResourceProject, projectUUID, mcpBusiness.AccessWrite)); d.Allow {
-			t.Fatal("a plain member was granted WRITE on the project. Membership grants " +
-				"sight of the work; restructuring it is a project-admin action.")
+			ref(mcpBusiness.ResourceTask, taskUUID, mcpBusiness.AccessWrite)); !d.Allow {
+			t.Fatalf("a member was refused a task's write: %s", d.Reason)
 		}
 	})
 
@@ -378,14 +401,14 @@ func TestReadDoesNotImplyWriteAgainstRealGraph(t *testing.T) {
 		}
 	})
 
-	t.Run("a plain member may READ but not WRITE a task in that project", func(t *testing.T) {
-		if d := mcpBusiness.PrincipalCanReach(ctx, plainMember,
+	t.Run("a viewer may READ but not WRITE a task in that project", func(t *testing.T) {
+		if d := mcpBusiness.PrincipalCanReach(ctx, viewer,
 			ref(mcpBusiness.ResourceTask, taskUUID, mcpBusiness.AccessRead)); !d.Allow {
-			t.Fatalf("a project member was refused the task read: %s", d.Reason)
+			t.Fatalf("a viewer was refused the task read: %s", d.Reason)
 		}
-		if d := mcpBusiness.PrincipalCanReach(ctx, plainMember,
+		if d := mcpBusiness.PrincipalCanReach(ctx, viewer,
 			ref(mcpBusiness.ResourceTask, taskUUID, mcpBusiness.AccessWrite)); d.Allow {
-			t.Fatal("a plain member was granted WRITE on a task. Seeing a task on a board " +
+			t.Fatal("a viewer was granted WRITE on a task. Seeing a task on a board " +
 				"does not carry the right to reassign it.")
 		}
 	})

@@ -96,3 +96,26 @@ func TestAnAdminsTokenIsRefusedWhatOnlyAnAdminMay(t *testing.T) {
 		t.Fatal("an admin's token deleted for good a doc its owner never had")
 	}
 }
+
+// An executor names its person as the app does in a session, and as a token
+// does through one: the same admin is an admin acting themselves in the app,
+// and no admin at all through the public API, MCP, or a run a token queued.
+func TestSubjectForIsATokensSubjectThroughAToken(t *testing.T) {
+	var u userModels.UserInfo
+	u.UserDgraphInfo = dgraphStruct.DgraphUser{Uid: "0x3", Uuid: "5e2b8a1c-7d4f-4c9e-a3b6-1f8d2e7c9a04"}
+	u.UserPostgresInfo.IsAdmin = true
+	if who := SubjectFor(context.Background(), &u); !who.ActingAdmin() || who != SubjectOf(&u) {
+		t.Errorf("in the app: %+v, want SubjectOf's %+v", who, SubjectOf(&u))
+	}
+	for name, ctx := range map[string]context.Context{
+		"the public API or MCP":       context.WithValue(context.Background(), helpers.ApiTokenIDContextKey, "token-1"),
+		"a run a token queued, later": helpers.WithActsThroughToken(context.Background()),
+	} {
+		if who := SubjectFor(ctx, &u); who.Admin || who.ActingAdmin() || who != TokenSubjectOf(&u, "") {
+			t.Errorf("%s: %+v, want TokenSubjectOf's %+v", name, who, TokenSubjectOf(&u, ""))
+		}
+	}
+	if who := SubjectFor(context.Background(), nil); who != (Subject{}) {
+		t.Errorf("no account: %+v", who)
+	}
+}

@@ -79,6 +79,9 @@ const (
 	ReadersComment Reason = "readers_comment"
 	// HardLock: a hard lock holds them at comment.
 	HardLock Reason = "hard_lock"
+	// Host: it belongs to something else they may open (a table row's page,
+	// docs D-18), and its level is that thing's, never above edit.
+	Host Reason = "host"
 )
 
 // Lock levels (D-12). A soft lock is a guard in the editor, which anyone who

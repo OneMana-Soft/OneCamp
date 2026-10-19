@@ -8,6 +8,7 @@ import (
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	contentcodec "github.com/akashc777/OneCamp/business/ContentCodec"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -167,19 +168,27 @@ func TestTasksFromADocLinkBackToTheirLine(t *testing.T) {
 	}
 }
 
-// A member who can't add tasks to a project can't have them made there, even
-// with a forged request, and the refusal is in their activity.
+// Someone who can't add tasks to a project can't have them made there, even
+// with a forged request, and the refusal is in their activity: a viewer is
+// told the project's name, someone outside it isn't.
 func TestTasksAreRefusedInAProjectThePersonCantAddTo(t *testing.T) {
 	for _, c := range []struct {
 		project *dgraphStruct.DgraphProject
+		role    workAccess.Role
 		want    string
 	}{
-		{&dgraphStruct.DgraphProject{Uuid: billing, Name: "Billing", IsProjectAdmin: 0}, "You can't add tasks to Billing, so none were made."},
-		{nil, "You can't add tasks to that project, so none were made."},
+		{&dgraphStruct.DgraphProject{Uuid: billing, Name: "Billing", IsProjectMember: 1}, workAccess.RoleViewer, "You can't add tasks to Billing, so none were made."},
+		{&dgraphStruct.DgraphProject{Uuid: billing, Name: "Billing"}, workAccess.RoleNone, "You can't add tasks to that project, so none were made."},
+		{nil, workAccess.RoleNone, "You can't add tasks to that project, so none were made."},
 	} {
 		rows := fakeRecord(t)
 		fakeDecision(t, accessBusiness.Decision{Level: accessBusiness.LevelEdit}, nil)
 		made, _ := fakeTaskMaking(t, c.project)
+		saved := standingIn
+		standingIn = func(context.Context, string, *dgraphStruct.DgraphProject) (workAccess.Standing, error) {
+			return workAccess.Standing{ProjectUUID: billing, Role: c.role, EditWho: workAccess.EditMembers}, nil
+		}
+		t.Cleanup(func() { standingIn = saved })
 		_, err := CreateDocTasks(context.Background(), member(), recDoc, billing, []DocProposedTask{{ProposedTask: ProposedTask{Title: "Send the deck"}}})
 		var cant *CantAddTasksError
 		if !errors.As(err, &cant) || err.Error() != c.want {

@@ -19,6 +19,7 @@ import (
 	userFCMtokenBusiness "github.com/akashc777/OneCamp/business/UserFCMToken"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	domain "github.com/akashc777/OneCamp/domain/Chat"
+	conversationDomain "github.com/akashc777/OneCamp/domain/Conversation"
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
@@ -255,6 +256,7 @@ func CreateChatForGroup(ctx context.Context, chatInfo *adapter.ChatInfo, userInf
 	// so nothing else happened (no live message, no push, no search) and Try
 	// again stored it twice.
 	if len(dmUID) != 0 {
+		conversationDomain.Opened(ctx, conversationDomain.KindGroup, chatInfo.GrpUuid, userInfo.UserDgraphInfo.Uuid, userUUIDs, nil)
 		// The others haven't seen the new conversation: their marks start at
 		// nothing (it counts as unread, and no read receipt says otherwise).
 		if markErr := lastseenBusiness.BulkCreateLastSeenChatIfNotExists(ctx, userUUIDs, chatInfo.GrpUuid); markErr != nil {
@@ -352,51 +354,6 @@ func CreateChatForGroup(ctx context.Context, chatInfo *adapter.ChatInfo, userInf
 
 }
 
-// AddParticipantToGroupChat moves a group to the id of its members with one
-// more: a group's id is its members' hash. memberUUIDs is everyone in it
-// now, the person added included.
-func AddParticipantToGroupChat(ctx context.Context, oldGrpId string, newGrpId string, newUserDgraphUID string, newUserUUID string, memberUUIDs []string) (err error) {
-
-	err = domain.BulkUpdateGrpIdInChatAndAtachment(ctx, oldGrpId, newGrpId, newUserUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/AddParticipantToGroupChat Failed to update grpID in chats and attachments err: %+v",
-			err)
-		return
-	}
-
-	dgraphDM := &dgraphStruct.DgraphDm{
-		Uid:        "uid(dm)",
-		GroupingId: newGrpId,
-		Participants: []*dgraphStruct.DgraphUser{
-			{
-				Uid: newUserDgraphUID,
-			},
-		},
-	}
-
-	_, _, err = domain.CreateDM(ctx, dgraphDM, oldGrpId)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/AddParticipantToGroupChat Failed to update grpID in dgraph err: %+v",
-			err)
-		return
-	}
-
-	go domain.MigrateChatGroupIDInOpensearch(oldGrpId, newGrpId)
-
-	// Migrate AI embeddings: update chat_grp_id and append new participant to chat_participant_uuids
-	ai.MigrateEmbeddingsGroupIDAsync(oldGrpId, newGrpId, newUserUUID)
-
-	// Every open app was on the old id's topics, and the person added holds
-	// none: nothing in the group streamed to anyone after the add.
-	go mqttBusiness.PublishConversationMoved(mqttStruct.CONVERSATION_KIND_GROUP, oldGrpId, newGrpId, memberUUIDs...)
-
-	return
-
-}
 func CreateChat(ctx context.Context, chatInfo *adapter.ChatInfo, userInfo *userModels.UserInfo, sendToDgraph *dgraphStruct.DgraphUser, toUUID uuid.UUID, mentions []*dgraphStruct.DgraphUser) (createdChatInfo *adapter.OutputCreateChatForChat, err error) {
 
 	// create channel uuid
@@ -519,6 +476,7 @@ func CreateChat(ctx context.Context, chatInfo *adapter.ChatInfo, userInfo *userM
 	// The message is stored from here on: a read mark that can't be written
 	// is logged and the send goes on (see CreateChatForGroup).
 	if len(dmUID) != 0 {
+		conversationDomain.Opened(ctx, conversationDomain.KindDM, groupingId, userInfo.UserDgraphInfo.Uuid, []string{userInfo.UserDgraphInfo.Uuid, sendToDgraph.Uuid}, nil)
 		// The other person hasn't seen the new conversation: see CreateChatForGroup.
 		if markErr := lastseenBusiness.BulkCreateLastSeenChatIfNotExists(ctx, []string{toUUID.String()}, groupingId); markErr != nil {
 			helpers.LogErrorWithContext(ctx,
@@ -986,6 +944,7 @@ func GetUserChatListWithLatestChat(ctx context.Context, userUUID uuid.UUID) (dgr
 			dgraphUser.DMs[ind].UnreadMessageCount = 0
 		}
 	}
+	dgraphUser.DMs = conversationDomain.WithoutHidden(ctx, userUUID.String(), dgraphUser.DMs)
 
 	return
 }

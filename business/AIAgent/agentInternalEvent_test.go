@@ -51,6 +51,7 @@ func TestRealWorkspaceEventsStayBindable(t *testing.T) {
 		"user.joined",
 		"table.row.created",
 		"table.row.updated",
+		"table.rows.changed",
 	} {
 		if !bindableEvent(ev) || !boundEvent(ev) {
 			t.Errorf("event %q is a real workspace event and must stay bindable", ev)

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
+	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
 	"github.com/akashc777/OneCamp/helpers"
 	dataTableModels "github.com/akashc777/OneCamp/models/postgres/DataTable"
 )
@@ -44,6 +45,7 @@ type Column struct {
 // database becomes a table: the API import, and the tables and projects
 // programmes' importers, call it.
 func TableFromDatabase(ctx context.Context, actor dataTableBusiness.Actor, db Database) (table *dataTableModels.DataTable, rowsLeftOut int, err error) {
+	actor.Kind = rowLedger.ActorImport
 	name := strings.TrimSpace(db.Title)
 	if name == "" {
 		name = "Untitled database"

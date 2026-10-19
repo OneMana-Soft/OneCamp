@@ -1,10 +1,13 @@
 package business
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
 
+	postBusiness "github.com/akashc777/OneCamp/business/Post"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
@@ -57,5 +60,19 @@ func TestMayMessage(t *testing.T) {
 		if rj != nil && rj.Status != http.StatusBadRequest {
 			t.Errorf("%s: status %d, want the 400 a direct message gets", c.name, rj.Status)
 		}
+	}
+}
+
+// A durable send tried again while its first try hasn't finished is answered
+// as Once answers a send in flight, so the app tries again; any other error
+// is what it was.
+func TestADurableRetryOfAnUnfinishedSendIsStillBeingSent(t *testing.T) {
+	rj, ok := AsRejection(durableRefusal(fmt.Errorf("commit: %w", postBusiness.ErrStillBeingSent)))
+	if !ok || rj.Status != http.StatusConflict || rj.Msg != "This message is still being sent" {
+		t.Errorf("%+v %v: a 409 with Once's words", rj, ok)
+	}
+	other := errors.New("graph down")
+	if got := durableRefusal(other); got != other {
+		t.Errorf("%v: another error is passed on as it was", got)
 	}
 }

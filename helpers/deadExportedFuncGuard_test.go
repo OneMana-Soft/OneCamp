@@ -326,6 +326,12 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"integration test against databases of its own resolves the bot there; one resolved by an " +
 		"earlier test posts as a user the later test's databases don't have.",
 
+	"ForgetBookingPagesForTest": "drops the booking pages, answers and busy times the calendar " +
+		"keeps for a minute by address, after an integration test starts fresh databases: the " +
+		"booking test runs once per calendar store in one process, and the store before's " +
+		"\"office-hours\" answered for the next store's deleted page. In the integration build " +
+		"only (the tag keeps it out of the shipped binary).",
+
 	"ForgetSettingsForTest": "drops the workspace settings cached for 30 seconds, after an " +
 		"integration test starts a fresh database; the previous test's choices (the channels new " +
 		"members join, say) would otherwise apply in the next one.",
@@ -346,6 +352,13 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"sponsor is a member and a member's remote may not reach this server's network. It is " +
 		"built only with the integration tag, so the shipped binary never has it; the address " +
 		"rule itself is tested where it is the subject.",
+
+	"StartedForTest": "starts the server again, as far as the conversations index is concerned, " +
+		"so the integration test of a restore can prove that a process trusts no comparison older " +
+		"than itself: someone taken out of a private channel between a backup's Postgres dump and " +
+		"its graph export is refused after the restore. The integration tests run in one process " +
+		"started before every comparison they make, so nothing else can make a restored stamp " +
+		"older than the process. It is built only with the integration tag.",
 
 	"AgentBudgetLimit": "reads the per-agent cap off a context so business/MCPServer's tests can " +
 		"assert SpendContext actually carries it. services/AI keeps budgetDimensions unexported, " +

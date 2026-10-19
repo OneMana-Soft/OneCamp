@@ -5,6 +5,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
 )
 
 // opts reads a JSON list of options as a field config's.
@@ -14,7 +16,7 @@ func opts(t *testing.T, list string) []map[string]interface{} {
 	if err := json.Unmarshal([]byte(`{"options":`+list+`}`), &cfg); err != nil {
 		t.Fatal(err)
 	}
-	return optionsIn(cfg)
+	return fieldTypes.Options(cfg)
 }
 
 // save plans saving a field with options sent over one with stored, the ids
@@ -42,8 +44,8 @@ func plan(t *testing.T, whole bool, stored, sent string, removed ...string) ([]s
 	}
 	changes := planOptions(old, cfg, out, whole)
 	var ids []string
-	for _, o := range optionsIn(cfg) {
-		ids = append(ids, optionID(o))
+	for _, o := range fieldTypes.Options(cfg) {
+		ids = append(ids, fieldTypes.OptionID(o))
 	}
 	return ids, changes
 }

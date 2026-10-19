@@ -64,7 +64,7 @@ func docProjectFor(ctx context.Context, u *userModels.UserInfo, docUUID string) 
 		return nil
 	}
 	p, err := projectOpenTasks(ctx, space, u.UserDgraphInfo.Uid)
-	if err != nil || p == nil || p.Uuid == "" || p.IsProjectMember == 0 {
+	if err != nil || p == nil || p.Uuid == "" || !p.ReaderIsIn() {
 		return nil
 	}
 	return &DocProject{UUID: p.Uuid, Name: strings.TrimSpace(p.Name), OpenTasks: int(p.TaskCount)}
@@ -83,7 +83,7 @@ func ProjectOpenTasksText(ctx context.Context, u *userModels.UserInfo, projectUU
 	if err != nil {
 		return "", "", 0, err
 	}
-	if p == nil || p.Uuid == "" || p.IsProjectMember == 0 {
+	if p == nil || p.Uuid == "" || !p.ReaderIsIn() {
 		return "", "", 0, ErrNotInProject
 	}
 	var b strings.Builder

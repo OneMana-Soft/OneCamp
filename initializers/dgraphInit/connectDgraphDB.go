@@ -95,6 +95,14 @@ func createSchema() (err error) {
 		user_tasks: [uid] .
 		user_events: [uid] .
 		user_fav_channels: [uid] @reverse .
+		# Bots (an agent's or the automation's) and external identities (imported
+		# or synced people who never sign in). Written on every user node since
+		# long ago and declared only now (F-24), so type User (and with it
+		# expand(_all_) and a node's deletion) covers them and filters on them
+		# use an index. Declaring them builds the index once, at the first start
+		# after upgrading.
+		is_bot: bool @index(bool) .
+		is_external: bool @index(bool) .
 
 		comment_uuid: string @index(exact) @upsert .
 		comment_text: string .
@@ -131,6 +139,9 @@ func createSchema() (err error) {
 		ch_private: bool .
 		ch_post_policy: string .
 		ch_recording: [uid] .
+		# A channel's topic: one short line any member sets, shown in its header
+		# (chat B2, D-S11). Its description stays ch_about.
+		ch_topic: string .
 
 		status_user_emoji_id: string .
 		status_user_emoji_desc: string .
@@ -140,7 +151,9 @@ func createSchema() (err error) {
 
 		post_text: string .
 		post_by: uid .
-		post_created_at: dateTime .
+		# Indexed by the hour: every page of a channel sorts its posts by it
+		# (F-4). The index is built once, at the first start after upgrading.
+		post_created_at: dateTime @index(hour) .
 		post_updated_at: dateTime .
 		post_deleted_at: dateTime .
 		post_comments: [uid] .
@@ -154,15 +167,33 @@ func createSchema() (err error) {
 		post_fwd_msg_chat: uid .
 		post_reply_to: uid .
 		post_broadcast_of: uid @reverse .
+		# A line the server writes about the conversation rather than a person's
+		# message: kind "system", and system its facts as JSON (who did what to
+		# whom). Never notified or counted unread. business/Conversation writes
+		# its group lines with them; chat B28 adds joins, leaves and renames.
+		post_kind: string @index(exact) .
+		post_system: string .
+		# Who removed someone else's post: a channel manager or an admin (B24).
+		post_deleted_by: uid .
+		# The huddle a post records (B7).
+		post_call_session: string @index(exact) .
+		# The message a shared history copied this one from (business/Conversation).
+		post_copy_of: string @index(exact) .
 
-		dm_grouping_id: string @index(term) .
+		# A DM's id is its two people's ids with a space between, looked up whole
+		# (exact) and by one person's id (term) (F-25).
+		dm_grouping_id: string @index(exact, term) .
+		# A group's name, which any of its people may set (business/Conversation).
+		dm_name: string .
 		dm_participants: [uid] @reverse .
 		dm_chats: [uid] .
 		dm_recording: [uid] .
 
 		chat_from: uid .
 		chat_to: uid .
-		chat_created_at: dateTime .
+		# Indexed by the hour, as post_created_at is: every page of a DM or group
+		# sorts by it (F-4).
+		chat_created_at: dateTime @index(hour) .
 		chat_updated_at: dateTime .
 		chat_deleted_at: dateTime .
 		chat_body_text: string .
@@ -175,6 +206,13 @@ func createSchema() (err error) {
 		chat_fwd_msg_chat: uid .
 		chat_reply_to: uid .
 		chat_dm: uid .
+		# A line about the conversation, as post_kind and post_system are.
+		chat_kind: string @index(exact) .
+		chat_system: string .
+		# Who removed someone else's message (B24).
+		chat_deleted_by: uid .
+		# The message a shared history copied this one from (business/Conversation).
+		chat_copy_of: string @index(exact) .
 
 		attachment_uuid: string @index(exact) .
 		attachment_file_name: string .
@@ -269,6 +307,12 @@ func createSchema() (err error) {
 		# the workspace's, by its privacy.
 		doc_space_kind: string @index(exact) .
 		doc_space_uuid: string @index(exact) .
+		# What a hosted doc belongs to (docs D-18): a table row's page is
+		# hosted by the row, set once when it is made. Its level is its
+		# host's; it is in no docs list. @upsert on the host's id, so two
+		# makes of one host's doc at once conflict and one doc is made.
+		doc_host_kind: string @index(exact) .
+		doc_host_uuid: string @index(exact) @upsert .
 		# How it looks.
 		doc_icon: string .
 		doc_cover_key: string .
@@ -457,6 +501,8 @@ func createSchema() (err error) {
 			doc_position
 			doc_space_kind
 			doc_space_uuid
+			doc_host_kind
+			doc_host_uuid
 			doc_icon
 			doc_cover_key
 			doc_cover_offset
@@ -540,6 +586,7 @@ func createSchema() (err error) {
 			ch_private
 			ch_post_policy
 			ch_recording: [Recording]
+			ch_topic
 		}
 		
 		type Post {
@@ -559,6 +606,11 @@ func createSchema() (err error) {
 			post_fwd_msg_chat: Chat
 			post_reply_to: Post
 			post_broadcast_of: Comment
+			post_kind
+			post_system
+			post_deleted_by: User
+			post_call_session
+			post_copy_of
 		}
 
 		type User {
@@ -587,6 +639,8 @@ func createSchema() (err error) {
 			user_device_connected
 			user_emoji_statuses: [Status]
 			user_status
+			is_bot
+			is_external
 		}
 
 		type Attachment {
@@ -619,10 +673,15 @@ func createSchema() (err error) {
 			chat_fwd_msg_chat: Chat
 			chat_reply_to: Chat
 			chat_dm: Dm
+			chat_kind
+			chat_system
+			chat_deleted_by: User
+			chat_copy_of
 		}
 
 		type Dm {
 			dm_grouping_id
+			dm_name
 			dm_chats: [Chat]
 			dm_participants: [User]
 			dm_recording: [Recording]

@@ -144,11 +144,14 @@ func RemoveLink(ctx context.Context, sourceType, sourceUUID, refType, refUUID st
 
 type sourceLinksResp struct {
 	Q []struct {
-		// Project source: membership is on the root.
+		// Project source: membership is on the root. Its admins are in it too,
+		// whether or not they sit in project_members.
 		IsProjectMember uint8 `json:"project_is_member,omitempty"`
+		IsProjectAdmin  uint8 `json:"project_is_admin,omitempty"`
 		// Task source: membership is on the task's project.
 		TaskProject *struct {
 			IsProjectMember uint8 `json:"project_is_member,omitempty"`
+			IsProjectAdmin  uint8 `json:"project_is_admin,omitempty"`
 		} `json:"task_project,omitempty"`
 		LinkedDocs   []*dgraphStruct.DgraphDoc   `json:"linked_docs,omitempty"`
 		LinkedBoards []*dgraphStruct.DgraphBoard `json:"linked_boards,omitempty"`
@@ -269,9 +272,9 @@ func GetLinksForSource(ctx context.Context, sourceType, sourceUUID, userDgraphUI
 
 	// Membership block differs by source: a task inherits its project's
 	// membership; a project carries it directly.
-	membershipBlock := "project_is_member: count(project_members @filter(uid($userId)))"
+	membershipBlock := "project_is_member: count(project_members @filter(uid($userId))) project_is_admin: count(project_admins @filter(uid($userId)))"
 	if sourceType == SourceTask {
-		membershipBlock = "task_project { project_is_member: count(project_members @filter(uid($userId))) }"
+		membershipBlock = "task_project { project_is_member: count(project_members @filter(uid($userId))) project_is_admin: count(project_admins @filter(uid($userId))) }"
 	}
 
 	query := fmt.Sprintf(`query Links($uid: string, $userId: string) {
@@ -318,9 +321,9 @@ func GetLinksForSource(ctx context.Context, sourceType, sourceUUID, userDgraphUI
 	}
 	root := parsed.Q[0]
 	if sourceType == SourceTask {
-		isMember = root.TaskProject != nil && root.TaskProject.IsProjectMember > 0
+		isMember = root.TaskProject != nil && (root.TaskProject.IsProjectMember > 0 || root.TaskProject.IsProjectAdmin > 0)
 	} else {
-		isMember = root.IsProjectMember > 0
+		isMember = root.IsProjectMember > 0 || root.IsProjectAdmin > 0
 	}
 	return root.LinkedDocs, root.LinkedBoards, isMember, nil
 }
@@ -356,6 +359,7 @@ func GetReverseLinksForRef(ctx context.Context, refType, refUUID, userDgraphUID 
 					project_uuid
 					project_name
 					project_is_member: count(project_members @filter(uid($userId)))
+					project_is_admin: count(project_admins @filter(uid($userId)))
 				}
 			}
 			linked_projects: %s @filter(type(Project) AND not gt(project_deleted_at, "1970-01-01T00:00:00Z")) {
@@ -364,6 +368,7 @@ func GetReverseLinksForRef(ctx context.Context, refType, refUUID, userDgraphUID 
 				project_name
 				project_status
 				project_is_member: count(project_members @filter(uid($userId)))
+				project_is_admin: count(project_admins @filter(uid($userId)))
 			}
 		}
 	}`, refPred, notDeleted(refDeletedPredicate(refType)), reverseEdge, reverseEdge)

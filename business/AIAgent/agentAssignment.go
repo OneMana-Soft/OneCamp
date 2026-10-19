@@ -133,6 +133,12 @@ func handleTaskAssignedForAgent(ctx context.Context, eventType string, data map[
 	if by, perr := uuid.Parse(strings.TrimSpace(fmt.Sprint(data["assigned_by"]))); perr == nil && by != uuid.Nil && !writtenOutside(ctx) {
 		t.TriggeredBy = &by
 	}
+	// Handed over through an API token: the job keeps that, so the work is held
+	// to a member's powers when a worker runs it (askedForJob). The surface is the
+	// task's own either way.
+	if helpers.ActsThroughToken(ctx) {
+		t.Surface, _ = EncodeSurface(askedThrough(ctx, Surface{Kind: SurfaceTask}))
+	}
 	id, created, eerr := model.EnqueueAgentTask(ctx, t)
 	if eerr != nil {
 		helpers.LogErrorWithContext(ctx, "agentAssignment: enqueue failed (agent=%s task=%s): %v", agent.Id, taskID, eerr)

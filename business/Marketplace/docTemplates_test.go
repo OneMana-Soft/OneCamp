@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/google/uuid"
 )
 
@@ -23,7 +24,7 @@ func TestBuiltinDocTemplatesAreWholeAndStable(t *testing.T) {
 		if want := uuid.MustParse("b5d0c000-0000-4000-8000-" + strings.Repeat("0", 10) + []string{"01", "02", "03", "04", "05", "06", "07", "08", "09", "0a"}[i]); b.ID != want {
 			t.Errorf("%s has id %s, want %s (the web asks for it by id)", b.Name, b.ID, want)
 		}
-		if BlankBody(b.Body) || !isCampHue(b.Hue) || b.Glyph == "" || b.Category == "" || b.Description == "" {
+		if BlankBody(b.Body) || !helpers.IsCampHue(b.Hue) || b.Glyph == "" || b.Category == "" || b.Description == "" {
 			t.Errorf("%s is missing something: %+v", b.Name, b)
 		}
 		if strings.Contains(b.Body, "data-block-id") {
@@ -101,7 +102,7 @@ func TestADocTemplatesPayloadIsChecked(t *testing.T) {
 		t.Errorf("a body over the cap is refused: %v", err)
 	}
 	p, err := normalDocPayload(DocPayload{Title: " T ", Body: `<p data-block-id="1">hi</p>`, Builtin: true, Hue: "neon"}, "doc-1")
-	if err != nil || p.Body != "<p>hi</p>" || p.Builtin || !isCampHue(p.Hue) || p.Glyph != defaultGlyph || p.Category != teamCategory || p.Title != "T" {
+	if err != nil || p.Body != "<p>hi</p>" || p.Builtin || !helpers.IsCampHue(p.Hue) || p.Glyph != defaultGlyph || p.Category != teamCategory || p.Title != "T" {
 		t.Errorf("got %+v, %v", p, err)
 	}
 	if HueFor("doc-1") != HueFor("DOC-1") {

@@ -94,3 +94,50 @@ func TestASaveWithNoHooksDoesNothing(t *testing.T) {
 		t.Errorf("the save path's hooks are %v, want %v", names, want)
 	}
 }
+
+// A hosted doc's save (a table row's page, D-18) runs only the hooks that
+// asked to run for hosted docs, which keep the doc (its versions): a hook
+// registered as any is, the AI index's or the mention notices', never puts it
+// where docs are found. Any other doc's save runs them all.
+func TestAHostedDocsSaveRunsOnlyTheHooksThatAskedForIt(t *testing.T) {
+	var r SaveHookRegistry
+	var mu sync.Mutex
+	ran := map[string][]string{}
+	done := make(chan struct{}, 8)
+	hook := func(name string) SaveHook {
+		return func(_ context.Context, c Change) {
+			mu.Lock()
+			ran[c.DocUUID] = append(ran[c.DocUUID], name)
+			mu.Unlock()
+			done <- struct{}{}
+		}
+	}
+	r.Register("ai.embed", hook("ai.embed"))
+	r.Register("doc.mentions", hook("doc.mentions"))
+	r.RegisterAlsoHosted("doc.versions", hook("doc.versions"))
+
+	r.run(context.Background(), Change{DocUUID: "page", Hosted: true, SavedAt: time.Now()})
+	r.run(context.Background(), Change{DocUUID: "doc", SavedAt: time.Now()})
+	for range 4 {
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("a hook never ran")
+		}
+	}
+	select {
+	case <-done:
+		t.Fatal("a hook ran that shouldn't have")
+	case <-time.After(100 * time.Millisecond):
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(ran["page"], []string{"doc.versions"}) {
+		t.Errorf("a hosted doc's save ran %v; want only doc.versions", ran["page"])
+	}
+	got := append([]string(nil), ran["doc"]...)
+	sort.Strings(got)
+	if !slices.Equal(got, []string{"ai.embed", "doc.mentions", "doc.versions"}) {
+		t.Errorf("a doc's save ran %v; want every hook", got)
+	}
+}

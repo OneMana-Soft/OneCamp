@@ -19,6 +19,7 @@ import (
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	domainUser "github.com/akashc777/OneCamp/domain/User"
@@ -119,6 +120,11 @@ func executeSendMessage(ctx context.Context, action ai.ProposedAction, userUUID 
 	}
 	if dgraphChannel.PostPolicy == "admins_only" && dgraphChannel.IsAdmin == 0 {
 		return "", nil, fmt.Errorf("only channel admins can post in this announcement channel")
+	}
+	// Through an API token (MCP, or an agent run a token asked for), never as one
+	// of its admins: they post in it in the app, as themselves.
+	if dgraphChannel.PostPolicy == "admins_only" && helpers.ActsThroughToken(ctx) {
+		return "", nil, fmt.Errorf("only channel admins can post in this announcement channel, in the app: a token posts as a member")
 	}
 
 	// Render the model's text rather than wrapping it. A single <p> collapses
@@ -366,8 +372,15 @@ func executeCreateTask(ctx context.Context, action ai.ProposedAction, userUUID s
 	if dgraphProject == nil || dgraphProject.Uuid == "" {
 		return "", nil, fmt.Errorf("project not found or you don't have access")
 	}
-	if dgraphProject.IsProjectAdmin == 0 {
-		return "", nil, fmt.Errorf("you must be an admin of project '%s' to create tasks", dgraphProject.Name)
+	if !dgraphProject.ReaderIsIn() {
+		return "", nil, fmt.Errorf("project not found or you don't have access")
+	}
+	standing, err := workAccess.Of(ctx, userInfo.UserDgraphInfo.Uuid, dgraphProject)
+	if err != nil {
+		return "", nil, fmt.Errorf("couldn't check what you can do in project '%s': %w", dgraphProject.Name, err)
+	}
+	if err := standing.Check(workAccess.NeedCreateTask); err != nil {
+		return "", nil, fmt.Errorf("project '%s': %w", dgraphProject.Name, err)
 	}
 
 	// Optional assignee. The model may pass a uuid or (when it couldn't recall
@@ -531,10 +544,10 @@ func peopleByNameAndHandle(people []*dgraphStruct.DgraphUser) string {
 	return strings.Join(out, ", ")
 }
 
-// loadTaskForUpdateAsAdmin loads a task as the acting user and enforces the
-// same project-admin check the task-update HTTP endpoints use, so an agent
-// action can never do more than the user could do by hand.
-func loadTaskForUpdateAsAdmin(ctx context.Context, taskUUIDStr, userUUID string) (*userModels.UserInfo, *dgraphStruct.DgraphTask, error) {
+// loadTaskForUpdate loads a task as the acting user and enforces the check
+// the task-update HTTP endpoints use (Work Access), so an agent action can
+// never do more than the user could do by hand.
+func loadTaskForUpdate(ctx context.Context, taskUUIDStr, userUUID string) (*userModels.UserInfo, *dgraphStruct.DgraphTask, error) {
 	if strings.TrimSpace(taskUUIDStr) == "" {
 		return nil, nil, fmt.Errorf("task_uuid is required")
 	}
@@ -549,8 +562,12 @@ func loadTaskForUpdateAsAdmin(ctx context.Context, taskUUIDStr, userUUID string)
 	if err != nil || dgraphTask == nil {
 		return nil, nil, fmt.Errorf("task not found or you don't have access")
 	}
-	if dgraphTask.Project == nil || dgraphTask.Project.IsProjectAdmin == 0 {
-		return nil, nil, fmt.Errorf("you must be an admin of this task's project to change it")
+	standing, facts, err := workAccess.OfTask(ctx, userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.Uid, dgraphTask)
+	if err != nil {
+		return nil, nil, fmt.Errorf("couldn't check what you can do with this task: %w", err)
+	}
+	if err := standing.CheckTask(workAccess.NeedEditTask, facts); err != nil {
+		return nil, nil, err
 	}
 	return userInfo, dgraphTask, nil
 }
@@ -564,7 +581,7 @@ func executeUpdateTaskStatus(ctx context.Context, action ai.ProposedAction, user
 	if status == "" {
 		return "", nil, fmt.Errorf("status is required")
 	}
-	userInfo, dgraphTask, err := loadTaskForUpdateAsAdmin(ctx, taskUUIDStr, userUUID)
+	userInfo, dgraphTask, err := loadTaskForUpdate(ctx, taskUUIDStr, userUUID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -598,7 +615,7 @@ func executeUpdateTaskStatus(ctx context.Context, action ai.ProposedAction, user
 func executeAssignTask(ctx context.Context, action ai.ProposedAction, userUUID string) (string, map[string]string, error) {
 	taskUUIDStr := action.Params["task_uuid"]
 
-	userInfo, dgraphTask, err := loadTaskForUpdateAsAdmin(ctx, taskUUIDStr, userUUID)
+	userInfo, dgraphTask, err := loadTaskForUpdate(ctx, taskUUIDStr, userUUID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -652,7 +669,7 @@ func executeSetTaskDueDate(ctx context.Context, action ai.ProposedAction, userUU
 		due = t
 	}
 
-	userInfo, dgraphTask, err := loadTaskForUpdateAsAdmin(ctx, taskUUIDStr, userUUID)
+	userInfo, dgraphTask, err := loadTaskForUpdate(ctx, taskUUIDStr, userUUID)
 	if err != nil {
 		return "", nil, err
 	}

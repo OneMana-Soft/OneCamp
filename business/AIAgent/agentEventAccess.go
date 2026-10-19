@@ -58,6 +58,7 @@ var agentEvents = map[string]eventScope{
 	"task.deleted":         inProject,
 	"table.row.created":    inTable,
 	"table.row.updated":    inTable,
+	"table.rows.changed":   inTable,
 	// A GitHub event is about the repo linked to a project.
 	"github.pr.opened":           inProject,
 	"github.pr.review_submitted": inProject,

@@ -15,6 +15,7 @@ import (
 	chatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
 	domain "github.com/akashc777/OneCamp/domain/BulkPostAndChat"
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
+	conversationDomain "github.com/akashc777/OneCamp/domain/Conversation"
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
@@ -327,6 +328,10 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 		postgressStruct.NOTIFICATION_TYPE_ALL,
 		currentTime,
 	)
+	// A DM a forward started is in the conversations index, as one a message started is.
+	for i := 0; i < len(chatGroupingUUIDs) && i < len(chatToUUIDs); i++ {
+		conversationDomain.Opened(ctx, conversationDomain.KindDM, chatGroupingUUIDs[i], userInfo.Uuid, []string{userInfo.Uuid, chatToUUIDs[i]}, nil)
+	}
 
 	// add to opensearch
 	AddChatsAndPostsToOpensearch(dgraphPosts, dgraphDMs, fwdMessageInput.HtmlText, channelUUIDs, channelNames, userInfo, participantsByChatUUID)

@@ -218,7 +218,7 @@ func TestDesktopNoticesReachWhomAPushWould(t *testing.T) {
 	}
 	id := func(name string) uuid.UUID { return people[name].UserPostgresInfo.Id }
 	exec(`UPDATE users_notification_preferences SET notifications_paused_until = NOW() + INTERVAL '1 hour' WHERE user_id = $1`, id("paul"))
-	exec(`INSERT INTO calendar_events (title, start_time, end_time, created_by, is_focus) VALUES ('Deep work', NOW() - INTERVAL '10 minutes', NOW() + INTERVAL '50 minutes', $1, true)`, id("fay"))
+	heldEvent(t, env.PG, id("fay"), "Deep work", time.Now().Add(-10*time.Minute), time.Now().Add(50*time.Minute), true)
 	// dex was deactivated: their settings and their phone's token stay, as
 	// deactivation leaves them.
 	if err := userBusiness.DeactivateUser(ctx, id("dex")); err != nil {

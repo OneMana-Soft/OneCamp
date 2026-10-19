@@ -149,7 +149,7 @@ var ToolRegistry = []ToolDef{
 	},
 	{
 		Name:        "list_projects",
-		Description: "List the projects the user belongs to, including each project's UUID and whether the user can create/manage tasks in it (project admin). Use to resolve a project by name before creating a task, or when the user asks what projects they are in. Read-only.",
+		Description: "List the projects the user belongs to, including each project's UUID and whether the user can create/manage tasks in it (by their role and the project's \"Who can change tasks\"). Use to resolve a project by name before creating a task, or when the user asks what projects they are in. Read-only.",
 		ReadOnly:    true,
 		Parameters:  []ToolParam{},
 	},

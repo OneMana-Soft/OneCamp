@@ -33,6 +33,7 @@ import (
 	aiBusiness "github.com/akashc777/OneCamp/business/AI"
 	apiTokenBusiness "github.com/akashc777/OneCamp/business/ApiToken"
 	authz "github.com/akashc777/OneCamp/business/Authz"
+	"github.com/akashc777/OneCamp/helpers"
 	aiSettingsModel "github.com/akashc777/OneCamp/models/postgres/AI"
 )
 
@@ -111,6 +112,12 @@ func AuthorizeToolCall(ctx context.Context, req ToolCallRequest) Decision {
 	}
 	tokenID := auth.TokenID.String()
 	principal := auth.UserID.String()
+	// THIS CALL IS A TOKEN'S, said on the context the rest of the ladder reads, as the
+	// API token middleware says it for the public API. A token acts at most as a member
+	// (PrincipalCanReach), and that rule must not hang on which transport called: one
+	// that skipped the middleware would otherwise authorise with its owner's admin
+	// powers.
+	ctx = context.WithValue(ctx, helpers.ApiTokenIDContextKey, tokenID)
 
 	// 1b. ACTOR IDENTITY, and the agent kill switch. Immediately after the
 	// credential, because a deactivated agent must stop on the NEXT CALL rather

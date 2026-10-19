@@ -12,7 +12,9 @@ import (
 	"sort"
 	"time"
 
+	calendarBusiness "github.com/akashc777/OneCamp/business/Calendar"
 	domain "github.com/akashc777/OneCamp/domain/Project"
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
@@ -197,12 +199,29 @@ func GetWorkload(ctx context.Context, readerUID, readerUUID string, readerIsAdmi
 			w.Undated = append(w.Undated, UndatedCount{ProjectUUID: pr.UUID, UserUUID: who, Count: counts[who]})
 		}
 	}
-	// Time off of the people shown, and no one else's.
-	for _, e := range read.Away {
-		if e.CreatedBy == nil || people[e.CreatedBy.Uuid] == nil || e.StartTime == nil || e.EndTime == nil || !e.EndTime.After(*e.StartTime) {
-			continue
+	// Time off of the people shown, and no one else's: from the calendar's
+	// one store when its events are there, else from the graph's away events.
+	if helpers.CalendarReadsFromStore() {
+		shown := make([]string, 0, len(people))
+		for id := range people {
+			shown = append(shown, id)
 		}
-		w.Away = append(w.Away, AwaySpan{UserUUID: e.CreatedBy.Uuid, Start: *e.StartTime, End: *e.EndTime})
+		away, err := calendarBusiness.AwaySpans(ctx, shown, from, until)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range away {
+			if people[a.Person] != nil {
+				w.Away = append(w.Away, AwaySpan{UserUUID: a.Person, Start: a.Start, End: a.End})
+			}
+		}
+	} else {
+		for _, e := range read.Away {
+			if e.CreatedBy == nil || people[e.CreatedBy.Uuid] == nil || e.StartTime == nil || e.EndTime == nil || !e.EndTime.After(*e.StartTime) {
+				continue
+			}
+			w.Away = append(w.Away, AwaySpan{UserUUID: e.CreatedBy.Uuid, Start: *e.StartTime, End: *e.EndTime})
+		}
 	}
 	sort.SliceStable(w.Tasks, func(i, j int) bool { return lastOf(w.Tasks[i]).After(lastOf(w.Tasks[j])) })
 	if len(w.Tasks) > maxWorkloadTasks {
