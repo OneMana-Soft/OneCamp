@@ -132,13 +132,8 @@ func CreateChatForGroup(ctx context.Context, chatInfo *adapter.ChatInfo, userInf
 	currentTime := helpers.CreateTimeOrNow(ctx)
 	zeroUnixTime := time.Time{}
 
-	for _, mediaObj := range chatInfo.MediaObjects {
-		mediaObj.DType = []string{"Attachment"}
-		mediaObj.CreatedBy = &dgraphStruct.DgraphUser{
-			Uid: userInfo.UserDgraphInfo.Uid,
-		}
-		mediaObj.CreatedAt = &currentTime
-	}
+	// New nodes from the upload's own fields: never a node the request names.
+	chatInfo.MediaObjects = dgraphStruct.NewAttachments(chatInfo.MediaObjects, userInfo.UserDgraphInfo.Uid, currentTime)
 
 	var participantsDgraph []*dgraphStruct.DgraphUser
 	var userUUIDs []string
@@ -373,13 +368,8 @@ func CreateChat(ctx context.Context, chatInfo *adapter.ChatInfo, userInfo *userM
 	currentTime := helpers.CreateTimeOrNow(ctx)
 	zeroUnixTime := time.Time{}
 
-	for _, mediaObj := range chatInfo.MediaObjects {
-		mediaObj.DType = []string{"Attachment"}
-		mediaObj.CreatedBy = &dgraphStruct.DgraphUser{
-			Uid: userInfo.UserDgraphInfo.Uid,
-		}
-		mediaObj.CreatedAt = &currentTime
-	}
+	// New nodes from the upload's own fields: never a node the request names.
+	chatInfo.MediaObjects = dgraphStruct.NewAttachments(chatInfo.MediaObjects, userInfo.UserDgraphInfo.Uid, currentTime)
 
 	groupingId := helpers.GetGroupingId(userInfo.UserPostgresInfo.Id.String(), chatInfo.ToUuid)
 
@@ -721,10 +711,12 @@ func UpdateChat(ctx context.Context, chatInfo *adapter.ChatInfo, chatUUID uuid.U
 	currentTime := time.Now()
 
 	dgraphChat := dgraphStruct.DgraphChat{
-		Uid:       "uid(cha)",
-		Uuid:      chatInfo.Uuid,
-		Body:      chatInfo.TextHtml,
-		MediaObj:  chatInfo.MediaObjects,
+		Uid:  "uid(cha)",
+		Uuid: chatInfo.Uuid,
+		Body: chatInfo.TextHtml,
+		// An edit changes the text and who it names, never its files (as a
+		// post's and a comment's edits don't): the request's files were
+		// written as they came, so a uid in one linked and overwrote any node.
 		UpdatedAt: &currentTime,
 		Mentions: &dgraphStruct.DgraphMentions{
 			Uid:      "uid(me)",
@@ -1418,13 +1410,8 @@ func CreateChatComment(ctx context.Context, commentInfo *adapter.InputCreateOrUp
 		})
 	}
 
-	for _, mediaObj := range commentInfo.MediaObj {
-		mediaObj.DType = []string{"Attachment"}
-		mediaObj.CreatedBy = &dgraphStruct.DgraphUser{
-			Uid: userInfo.UserDgraphInfo.Uid,
-		}
-		mediaObj.CreatedAt = &currentTime
-	}
+	// New nodes from the upload's own fields: never a node the request names.
+	commentInfo.MediaObj = dgraphStruct.NewAttachments(commentInfo.MediaObj, userInfo.UserDgraphInfo.Uid, currentTime)
 
 	dgraphChat := dgraphStruct.DgraphChat{
 		Uid:  "uid(cha)",

@@ -140,8 +140,11 @@ func startDgraph() (*dgraphServer, func(), error) {
 		// Same image production runs (see final-compose.yml), running zero and
 		// alpha in one container because a test does not need them split. Using
 		// the production image rather than dgraph/standalone keeps the version
-		// under test the version that ships.
-		Image:        "dgraph/dgraph:latest",
+		// under test the version that ships. Pinned, not "latest": latest named
+		// whatever a machine last pulled (v25.4.1 here on 18 Oct, while the stacks
+		// ran v25.3.3). helpers/dgraphStackGuard_test.go holds it to the compose
+		// files' version.
+		Image:        "dgraph/dgraph:v25.5.0",
 		ExposedPorts: []string{"9080/tcp", "8080/tcp"},
 		Cmd: []string{"/bin/bash", "-c",
 			"dgraph zero --my=localhost:5080 & " +

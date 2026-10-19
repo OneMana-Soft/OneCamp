@@ -547,13 +547,8 @@ func AddAttachmentToProjectDgraph(ctx context.Context, projectUUID uuid.UUID, pr
 		return
 	}
 
-	for _, mediaObj := range projectInput.Attachments {
-		mediaObj.DType = []string{"Attachment"}
-		mediaObj.CreatedBy = &dgraphStruct.DgraphUser{
-			Uid: userInfo.Uid,
-		}
-		mediaObj.CreatedAt = &currentTime
-	}
+	// New nodes from the upload's own fields: never a node the request names.
+	projectInput.Attachments = dgraphStruct.NewAttachments(projectInput.Attachments, userInfo.Uid, currentTime)
 
 	dgraphProject := &dgraphStruct.DgraphProject{
 		Uid:         "uid(project)",
