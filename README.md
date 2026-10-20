@@ -1,6 +1,6 @@
 # OneCamp
 
-Chat, docs, tasks, boards, video calls and a calendar in one workspace you run
+Chat, docs, tasks, boards, tables, video calls and a calendar in one workspace you run
 yourself, with AI teammates you can govern. Agents act as the person who sponsors
 them and never more, ask before they change things until you say otherwise, and
 every action they take is signed and recorded.
@@ -8,13 +8,26 @@ every action they take is signed and recorded.
 **[Try the live demo](https://onemana.dev/demo)**: no signup, a real workspace with
 channels, docs, tasks and an AI teammate already in it.
 
-![The OneCamp AI assistant summarising what the team discussed today, with its sources](.github/assets/ai.jpg)
+<picture><source media="(prefers-color-scheme: dark)" srcset=".github/assets/ai-dark.jpg"><img src=".github/assets/ai.jpg" alt="OneCamp AI in a direct message: an agent that acts for you, can do only what you can, and lists the three things that need you today"></picture>
 
-| Chat | Tasks and boards |
-|---|---|
-| ![A channel in OneCamp](.github/assets/channel.jpg) | ![A project's tasks in OneCamp](.github/assets/board.jpg) |
-| **Docs, edited together live** | **Every agent action on the record** |
-| ![A collaborative doc in OneCamp](.github/assets/doc.jpg) | ![An agent's refused action, with the hash-chained record that proves it](.github/assets/drill.jpg) |
+<table>
+  <tr>
+    <td width="50%"><b>Chat, with agents in the channel</b><br><picture><source media="(prefers-color-scheme: dark)" srcset=".github/assets/channel-dark.jpg"><img src=".github/assets/channel.jpg" alt="The #engineering channel: the team and the Release Captain agent talking through the launch, and a daily check-in"></picture></td>
+    <td width="50%"><b>Tasks and boards</b><br><picture><source media="(prefers-color-scheme: dark)" srcset=".github/assets/board-dark.jpg"><img src=".github/assets/board.jpg" alt="The Q4 launch project's board: To do, In progress, QA and Done, with tags, due dates and assignees"></picture></td>
+  </tr>
+  <tr>
+    <td width="50%"><b>Timelines with dependencies</b><br><picture><source media="(prefers-color-scheme: dark)" srcset=".github/assets/timeline-dark.jpg"><img src=".github/assets/timeline.jpg" alt="The Q4 launch timeline: tasks as bars across the weeks, linked by their dependencies, with today marked"></picture></td>
+    <td width="50%"><b>Docs, edited together live</b><br><picture><source media="(prefers-color-scheme: dark)" srcset=".github/assets/doc-dark.jpg"><img src=".github/assets/doc.jpg" alt="The Q4 launch plan, a doc the team edits together"></picture></td>
+  </tr>
+  <tr>
+    <td width="50%"><b>A calendar for the whole team</b><br><picture><source media="(prefers-color-scheme: dark)" srcset=".github/assets/calendar-dark.jpg"><img src=".github/assets/calendar.jpg" alt="A week in the calendar: the daily standup, a launch review, a design crit and focus time"></picture></td>
+    <td width="50%"><b>Tables that link and add up</b><br><picture><source media="(prefers-color-scheme: dark)" srcset=".github/assets/table-dark.jpg"><img src=".github/assets/table.jpg" alt="The Vendors table: each vendor linked to the launch budget lines it is paid from, with totals"></picture></td>
+  </tr>
+  <tr>
+    <td width="50%"><b>Every agent action on the record</b><br><picture><source media="(prefers-color-scheme: dark)" srcset=".github/assets/drill-dark.jpg"><img src=".github/assets/drill.jpg" alt="An agent's refused action in the Agents inbox, with its entry in the hash-chained record"></picture></td>
+    <td width="50%"><b>Home: what needs you today</b><br><picture><source media="(prefers-color-scheme: dark)" srcset=".github/assets/home-dark.jpg"><img src=".github/assets/home.jpg" alt="Home: today's task and meetings, the projects, and what needs you now"></picture></td>
+  </tr>
+</table>
 
 - Live demo, no signup: https://onemana.dev/demo
 - Documentation: https://onemana.dev/docs
