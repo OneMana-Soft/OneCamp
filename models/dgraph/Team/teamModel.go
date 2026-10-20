@@ -12,7 +12,6 @@ import (
 )
 
 func CreateOrUpdateDgraphTeam(ctx context.Context, dgraphTeam *dgraphStruct.DgraphTeam, query string) (userUid string, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
 	pb, err := json.Marshal(dgraphTeam)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -21,16 +20,11 @@ func CreateOrUpdateDgraphTeam(ctx context.Context, dgraphTeam *dgraphStruct.Dgra
 		return
 	}
 
-	mu := &api.Mutation{
-		SetJson: pb,
-	}
-	req := &api.Request{
+	// An upsert, so a conflicting concurrent write is retried (DoCommitNow).
+	res, err := dgraphInit.DoCommitNow(ctx, &api.Request{
 		Query:     query,
-		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
-	}
-
-	res, err := txn.Do(ctx, req)
+		Mutations: []*api.Mutation{{SetJson: pb}},
+	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/CreateOrUpdateDgraphTeam failed to create or update dgraph team err: %+v",
@@ -40,20 +34,11 @@ func CreateOrUpdateDgraphTeam(ctx context.Context, dgraphTeam *dgraphStruct.Dgra
 
 	// will get uid only when new node is created
 	userUid = res.Uids["uid(team)"]
-
-	defer func() {
-		err = txn.Discard(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/CreateOrUpdateDgraphTeam failed to discard dgraph txn err: %+v",
-				err)
-		}
-	}()
 	return
 }
 
 func GetDgraphTeamInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphTeam *dgraphStruct.DgraphTeam, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -89,7 +74,7 @@ func GetDgraphTeamInfoByUUID(ctx context.Context, query string, variables map[st
 }
 
 func GetDgraphTeamList(ctx context.Context, query string, variables map[string]string) (dgraphTeams []*dgraphStruct.DgraphTeam, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -115,33 +100,11 @@ func GetDgraphTeamList(ctx context.Context, query string, variables map[string]s
 	return
 }
 
-func DeleteTeamEdge(ctx context.Context, delStringJSON string) (err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
-	mutation := &api.Mutation{
-		DeleteJson: []byte(delStringJSON),
-	}
-
-	_, err = txn.Mutate(context.Background(), mutation)
-	if err != nil {
-		return err
-	}
-
-	err = txn.Commit(context.Background())
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		err = txn.Discard(ctx)
-
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/DeleteTeamEdge failed to discard dgraph txn err: %+v",
-				err)
-		}
-
-	}()
-
-	return nil
+func DeleteTeamEdge(ctx context.Context, delStringJSON string) error {
+	// One all-or-nothing request, so an aborted try wrote nothing and is
+	// tried again (DoCommitNow).
+	_, err := dgraphInit.DoCommitNow(ctx, &api.Request{
+		Mutations: []*api.Mutation{{DeleteJson: []byte(delStringJSON)}},
+	})
+	return err
 }

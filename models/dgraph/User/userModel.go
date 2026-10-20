@@ -60,7 +60,9 @@ func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.Dgra
 }
 
 func GetDgraphUserInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
-	return GetDgraphUserInfoInTxn(ctx, dgraphInit.DgraphClient.NewTxn(), query, variables)
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
+	return GetDgraphUserInfoInTxn(ctx, txn, query, variables)
 }
 
 // GetDgraphUserInfoInTxn is GetDgraphUserInfoByUUID in txn, for a read made
@@ -100,7 +102,7 @@ func GetDgraphUserInfoInTxn(ctx context.Context, txn *dgo.Txn, query string, var
 }
 
 func GetDgraphUsersList(ctx context.Context, query string, variables map[string]string) (dgraphUsers []*dgraphStruct.DgraphUser, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -127,49 +129,18 @@ func GetDgraphUsersList(ctx context.Context, query string, variables map[string]
 }
 
 func DeleteUserEdge(ctx context.Context, delStringJSON string) (err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
-	mutation := &api.Mutation{
-		DeleteJson: []byte(delStringJSON),
-	}
-
-	_, err = txn.Mutate(context.Background(), mutation)
-	if err != nil {
-		return err
-	}
-
-	err = txn.Commit(context.Background())
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		err = txn.Discard(ctx)
-
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/DeleteChannelEdge failed to discard dgraph txn err: %+v",
-				err)
-		}
-
-	}()
-
-	return nil
+	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{
+		Mutations: []*api.Mutation{{DeleteJson: []byte(delStringJSON)}},
+	})
+	return err
 }
 
 func ExecDgraphQuery(ctx context.Context, query string, setJson []byte) (err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
-	mu := &api.Mutation{
-		SetJson: setJson,
-	}
-	req := &api.Request{
+	// An upsert, so a conflicting concurrent write is retried (DoCommitNow).
+	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{
 		Query:     query,
-		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
-	}
-
-	_, err = txn.Do(ctx, req)
+		Mutations: []*api.Mutation{{SetJson: setJson}},
+	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/ExecDgraphQuery failed to get user err: %+v",

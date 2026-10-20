@@ -150,11 +150,8 @@ func SetCommentThread(ctx context.Context, commentUUID, threadID string) error {
 			Cond:      "@if(eq(len(c), 1))",
 			SetNquads: []byte(fmt.Sprintf("uid(c) <comment_thread_id> %q .", tid.String())),
 		}},
-		CommitNow: true,
 	}
-	txn := dgraphInit.DgraphClient.NewTxn()
-	defer func() { _ = txn.Discard(context.WithoutCancel(ctx)) }()
-	if _, err := txn.Do(ctx, req); err != nil {
+	if _, err := dgraphInit.DoCommitNow(ctx, req); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/Thread SetCommentThread %s -> %s failed: %+v", commentUUID, threadID, err)
 		return err
 	}

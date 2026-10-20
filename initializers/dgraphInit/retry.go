@@ -3,14 +3,25 @@ package dgraphInit
 import (
 	"context"
 	"errors"
+	"math/rand/v2"
 	"time"
 
 	"github.com/dgraph-io/dgo/v230"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
 
-// abortRetries is how many times a committed request is tried in all.
-const abortRetries = 3
+// abortRetries is how many times a committed request is tried in all. Three
+// weren't enough for a burst: of 8 posts written into one channel at once,
+// 4 landed (tests/integration/messages_at_once_test.go).
+const abortRetries = 8
+
+// abortWait is how long the attempt'th try (from 1) waits: a backoff growing
+// with the square of the attempt, up to 3.5 s in all, half of it at random so
+// writers aborted together don't collide again on the same beat.
+func abortWait(attempt int) time.Duration {
+	step := time.Duration(attempt*attempt) * 25 * time.Millisecond
+	return step/2 + time.Duration(rand.Int64N(int64(step/2)+1))
+}
 
 // DoCommitNow runs a CommitNow request (an upsert, usually) in its own
 // transaction, and runs it again in a fresh one when Dgraph aborts it.
@@ -28,7 +39,7 @@ func DoCommitNow(ctx context.Context, req *api.Request) (*api.Response, error) {
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
-			case <-time.After(time.Duration(attempt*attempt) * 50 * time.Millisecond):
+			case <-time.After(abortWait(attempt)):
 			}
 		}
 		txn := DgraphClient.NewTxn()
@@ -57,7 +68,7 @@ func InTxn(ctx context.Context, fn func(txn *dgo.Txn) error) error {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(time.Duration(attempt*attempt) * 50 * time.Millisecond):
+			case <-time.After(abortWait(attempt)):
 			}
 		}
 		txn := DgraphClient.NewTxn()

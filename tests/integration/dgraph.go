@@ -221,9 +221,8 @@ func (e *DgraphEnv) Mutate(t *testing.T, setJSON any) map[string]string {
 	if err != nil {
 		t.Fatalf("marshal mutation: %v", err)
 	}
-	resp, err := dgraphInit.DgraphClient.NewTxn().Mutate(context.Background(), &api.Mutation{
-		SetJson:   raw,
-		CommitNow: true,
+	resp, err := dgraphInit.DoCommitNow(context.Background(), &api.Request{
+		Mutations: []*api.Mutation{{SetJson: raw}},
 	})
 	if err != nil {
 		t.Fatalf("dgraph mutate: %v\npayload: %s", err, raw)

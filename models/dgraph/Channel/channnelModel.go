@@ -43,7 +43,7 @@ func CreateOrUpdateDgraphChannel(ctx context.Context, dgraphChannel *dgraphStruc
 }
 
 func GetDgraphChannelsInfoByUserUUID(ctx context.Context, query string, variables map[string]string) (dgraphChannel []*dgraphStruct.DgraphChannel, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -79,7 +79,7 @@ func GetDgraphChannelsInfoByUserUUID(ctx context.Context, query string, variable
 }
 
 func GetDgraphChannelsInfoAndCount(ctx context.Context, query string, variables map[string]string) (dgraphChannel []*dgraphStruct.DgraphChannel, totalCount int64, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -123,7 +123,7 @@ func GetDgraphChannelsInfoAndCount(ctx context.Context, query string, variables 
 }
 
 func GetDgraphChannelInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphChannel *dgraphStruct.DgraphChannel, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -158,38 +158,14 @@ func GetDgraphChannelInfoByUUID(ctx context.Context, query string, variables map
 }
 
 func DeleteChannelEdge(ctx context.Context, delStringJSON string) (err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
-	mutation := &api.Mutation{
-		DeleteJson: []byte(delStringJSON),
-	}
-
-	_, err = txn.Mutate(context.Background(), mutation)
-	if err != nil {
-		return err
-	}
-
-	err = txn.Commit(context.Background())
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		err = txn.Discard(ctx)
-
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/DeleteChannelEdge failed to discard dgraph txn err: %+v",
-				err)
-		}
-
-	}()
-
-	return nil
+	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{
+		Mutations: []*api.Mutation{{DeleteJson: []byte(delStringJSON)}},
+	})
+	return err
 }
 
 func GetDgraphChannelInfoByName(ctx context.Context, query string, variables map[string]string) (dgraphChannel *dgraphStruct.DgraphChannel, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {

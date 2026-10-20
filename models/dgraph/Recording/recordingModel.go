@@ -13,7 +13,6 @@ import (
 )
 
 func CreateOrUpdateDgraphRecording(ctx context.Context, dgraphRecording *dgraphStruct.DgraphRecording, query string, delStringJSON string) (recordingUid string, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
 	pb, err := json.Marshal(dgraphRecording)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -29,10 +28,9 @@ func CreateOrUpdateDgraphRecording(ctx context.Context, dgraphRecording *dgraphS
 	req := &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
 	}
 
-	res, err := txn.Do(ctx, req)
+	res, err := dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/CreateOrUpdateDgraphRecording failed to create or update dgraph recording err: %+v",
@@ -43,14 +41,6 @@ func CreateOrUpdateDgraphRecording(ctx context.Context, dgraphRecording *dgraphS
 	// will get uid only when new node is created
 	recordingUid = res.Uids["uid(recording)"]
 
-	defer func() {
-		err = txn.Discard(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/CreateOrUpdateDgraphRecording failed to discard dgraph txn err: %+v",
-				err)
-		}
-	}()
 	return
 }
 
@@ -58,7 +48,7 @@ func CreateOrUpdateDgraphRecording(ctx context.Context, dgraphRecording *dgraphS
 var ErrNotFound = errors.New("failed to get dgraph recording")
 
 func GetDgraphRecordingInfo(ctx context.Context, query string, variables map[string]string) (dgraphRecoridng *dgraphStruct.DgraphRecording, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -90,7 +80,7 @@ func GetDgraphRecordingInfo(ctx context.Context, query string, variables map[str
 	return
 }
 func GetDgraphRecordingsList(ctx context.Context, query string, variables map[string]string) (dgraphRecordings []*dgraphStruct.DgraphRecording, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -120,7 +110,7 @@ func GetDgraphRecordingsList(ctx context.Context, query string, variables map[st
 
 // GetDgraphRecordingsWithCount returns recordings plus a count block in one query.
 func GetDgraphRecordingsWithCount(ctx context.Context, query string, variables map[string]string) (*dgraphStruct.DgraphRecordingList, error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -166,9 +156,6 @@ func SetDgraphRecordingsDeletedAt(ctx context.Context, query string, variables m
 // the variable named found, in one upsert. When it collects none, nothing is
 // written: uid() of an empty variable in a mutation would make a new node.
 func SetFoundRecordingsFields(ctx context.Context, query string, variables map[string]string, found string, fields map[string]interface{}) error {
-	txn := dgraphInit.DgraphClient.NewTxn()
-	defer func() { _ = txn.Discard(ctx) }()
-
 	set := map[string]interface{}{"uid": "uid(" + found + ")"}
 	for k, v := range fields {
 		set[k] = v
@@ -185,9 +172,8 @@ func SetFoundRecordingsFields(ctx context.Context, query string, variables map[s
 			SetJson: pb,
 			Cond:    "@if(gt(len(" + found + "), 0))",
 		}},
-		CommitNow: true,
 	}
-	if _, err = txn.Do(ctx, req); err != nil {
+	if _, err = dgraphInit.DoCommitNow(ctx, req); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SetFoundRecordingsFields failed: %v", err)
 		return err
 	}
@@ -199,9 +185,6 @@ func SetFoundRecordingsFields(ctx context.Context, query string, variables map[s
 // collects none, nothing is written: uid() of an empty variable in a mutation
 // would make a new node.
 func AddTranscriptToFound(ctx context.Context, query string, variables map[string]string, found string, line *dgraphStruct.DgraphTranscript) (bool, error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-	defer func() { _ = txn.Discard(ctx) }()
-
 	named := *line
 	named.Uid = "_:line"
 	pb, err := json.Marshal(map[string]interface{}{
@@ -211,14 +194,13 @@ func AddTranscriptToFound(ctx context.Context, query string, variables map[strin
 	if err != nil {
 		return false, err
 	}
-	resp, err := txn.Do(ctx, &api.Request{
+	resp, err := dgraphInit.DoCommitNow(ctx, &api.Request{
 		Query: query,
 		Vars:  variables,
 		Mutations: []*api.Mutation{{
 			SetJson: pb,
 			Cond:    "@if(eq(len(" + found + "), 1))",
 		}},
-		CommitNow: true,
 	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/AddTranscriptToFound failed: %v", err)

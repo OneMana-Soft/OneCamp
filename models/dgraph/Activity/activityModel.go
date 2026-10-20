@@ -42,7 +42,7 @@ func mentionShown(m *dgraphStruct.DgraphMentions) bool {
 }
 
 func GetComments(ctx context.Context, query string, variables map[string]string) (dgraphComment []*dgraphStruct.DgraphComment, actualLen int, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -88,7 +88,7 @@ func GetComments(ctx context.Context, query string, variables map[string]string)
 }
 
 func GetMentions(ctx context.Context, query string, variables map[string]string) (dgraphMention []*dgraphStruct.DgraphMentions, actualLen int, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -135,7 +135,7 @@ func GetMentions(ctx context.Context, query string, variables map[string]string)
 }
 
 func GetReactions(ctx context.Context, query string, variables map[string]string) (dgraphReaction []*ReactionsActivity, actualLen int, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -216,7 +216,7 @@ func GetUnifiedActivity(ctx context.Context, query string, variables map[string]
 	reactions []*ReactionsActivity,
 	err error,
 ) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -307,7 +307,7 @@ func GetUnifiedActivity(ctx context.Context, query string, variables map[string]
 }
 
 func GetTotalUnreadActivityCount(ctx context.Context, query string, variables map[string]string) (totalCount uint64, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {

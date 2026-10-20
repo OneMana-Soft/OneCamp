@@ -15,7 +15,7 @@ import (
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	urgentModels "github.com/akashc777/OneCamp/models/postgres/UrgentPing"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	prefModels "github.com/akashc777/OneCamp/models/postgres/UserNotificationPreference"
 	"github.com/google/uuid"
@@ -109,24 +109,6 @@ func senderRefused(ctx context.Context, sender *userModels.UserInfo) *UrgentErro
 	return nil
 }
 
-func countRecentPings(sender, recipient uuid.UUID, since time.Time) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	var n int
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM urgent_pings WHERE sender_id = $1 AND recipient_id = $2 AND created_at > $3`,
-		sender, recipient, since).Scan(&n)
-	return n, err
-}
-
-func recordPing(sender, recipient uuid.UUID) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx,
-		`INSERT INTO urgent_pings (sender_id, recipient_id) VALUES ($1, $2)`, sender, recipient)
-	return err
-}
-
 // NotifyAnyway sends one urgent ping from sender to a teammate they have a DM
 // with, through a pause or quiet hours, at most once a day per pair.
 //
@@ -159,13 +141,10 @@ func NotifyAnyway(ctx context.Context, sender *userModels.UserInfo, recipient uu
 	if !inDM {
 		return &UrgentError{"Message them first, then notify them if it's urgent."}
 	}
-	if n, err := countRecentPings(sender.UserPostgresInfo.Id, recipient, now.Add(-24*time.Hour)); err != nil {
+	if claimed, err := urgentModels.Claim(ctx, sender.UserPostgresInfo.Id, recipient, now.Add(-24*time.Hour), urgentPerDay); err != nil {
 		return err
-	} else if n >= urgentPerDay {
+	} else if !claimed {
 		return &UrgentError{"You've already notified them today. They'll see your messages when they're back."}
-	}
-	if err := recordPing(sender.UserPostgresInfo.Id, recipient); err != nil {
-		return err
 	}
 	name := sender.UserDgraphInfo.DisplayName()
 	data := map[string]string{

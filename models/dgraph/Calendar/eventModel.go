@@ -12,7 +12,6 @@ import (
 )
 
 func CreateOrUpdateDgraphEvent(ctx context.Context, dgraphEvent *dgraphStruct.DgraphEvent, query string, delStringJSON string) (eventUid string, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
 	pb, err := json.Marshal(dgraphEvent)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CreateOrUpdateDgraphEvent failed to marshal dgraphEvent struct err: %+v", err)
@@ -35,10 +34,9 @@ func CreateOrUpdateDgraphEvent(ctx context.Context, dgraphEvent *dgraphStruct.Dg
 	req := &api.Request{
 		Query:     query,
 		Mutations: mutations,
-		CommitNow: true,
 	}
 
-	res, err := txn.Do(ctx, req)
+	res, err := dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CreateOrUpdateDgraphEvent failed to create or update dgraph event err: %+v", err)
 		return
@@ -46,12 +44,6 @@ func CreateOrUpdateDgraphEvent(ctx context.Context, dgraphEvent *dgraphStruct.Dg
 
 	eventUid = res.Uids["uid(event)"]
 
-	defer func() {
-		err = txn.Discard(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "models/CreateOrUpdateDgraphEvent failed to discard dgraph txn err: %+v", err)
-		}
-	}()
 	return
 }
 
@@ -60,7 +52,7 @@ func CreateOrUpdateDgraphEvent(ctx context.Context, dgraphEvent *dgraphStruct.Dg
 var ErrEventNotFound = errors.New("event not found")
 
 func GetDgraphEventInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphEvent *dgraphStruct.DgraphEvent, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -89,7 +81,7 @@ func GetDgraphEventInfoByUUID(ctx context.Context, query string, variables map[s
 }
 
 func GetDgraphUserEvents(ctx context.Context, query string, variables map[string]string) (dgraphEvents []*dgraphStruct.DgraphEvent, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
