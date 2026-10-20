@@ -73,7 +73,7 @@ func CreateOrUpdateDgraphTask(ctx context.Context, dgraphTask *dgraphStruct.Dgra
 }
 
 func GetDgraphTaskInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphTask *dgraphStruct.DgraphTask, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {

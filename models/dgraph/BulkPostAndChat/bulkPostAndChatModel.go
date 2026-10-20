@@ -22,8 +22,6 @@ func BulkAddChatAndPostToDgraph(ctx context.Context, query string, dgraphPosts [
 		nodes = append(nodes, p)
 	}
 
-	txn := dgraphInit.DgraphClient.NewTxn()
-	defer func() { _ = txn.Discard(ctx) }()
 	pb, err := json.Marshal(nodes)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -37,11 +35,10 @@ func BulkAddChatAndPostToDgraph(ctx context.Context, query string, dgraphPosts [
 	}
 	req := &api.Request{
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
 		Query:     query,
 	}
 
-	res, err := txn.Do(ctx, req)
+	res, err := dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/BulkAddChatAndPostToDgraph failed to bulk create dgraph chats and posts err: %+v",

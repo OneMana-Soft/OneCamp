@@ -119,13 +119,9 @@ func mutateLink(ctx context.Context, sourceType, sourceUUID, refType, refUUID st
 		mu.SetJson = []byte(edgeJSON)
 	}
 
-	txn := dgraphInit.DgraphClient.NewTxn()
-	defer func() { _ = txn.Discard(ctx) }()
-
-	_, err := txn.Do(ctx, &api.Request{
+	_, err := dgraphInit.DoCommitNow(ctx, &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
 	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/mutateLink failed (%s->%s remove=%v) err: %+v", sourceType, refType, remove, err)

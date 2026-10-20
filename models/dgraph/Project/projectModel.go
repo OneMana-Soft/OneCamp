@@ -17,7 +17,6 @@ import (
 var ErrNotFound = helpers.NotFound("failed to get dgraph project")
 
 func CreateOrUpdateDgraphProject(ctx context.Context, dgraphProject *dgraphStruct.DgraphProject, query string) (projectUid string, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
 	// What a reader may do in it is laid over a project read for them (Work
 	// Access), never written: a project read and written back must not carry
 	// it in as a node.
@@ -40,10 +39,9 @@ func CreateOrUpdateDgraphProject(ctx context.Context, dgraphProject *dgraphStruc
 	req := &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
 	}
 
-	res, err := txn.Do(ctx, req)
+	res, err := dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/CreateOrUpdateDgraphProject failed to create or update dgraph project err: %+v",
@@ -53,19 +51,13 @@ func CreateOrUpdateDgraphProject(ctx context.Context, dgraphProject *dgraphStruc
 
 	projectUid = res.Uids["uid(project)"]
 
-	defer func() {
-		err = txn.Discard(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/CreateOrUpdateDgraphProject failed to discard dgraph txn err: %+v",
-				err)
-		}
-	}()
 	return
 }
 
 func GetDgraphProjectInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
-	return GetDgraphProjectInfoInTxn(ctx, dgraphInit.DgraphClient.NewTxn(), query, variables)
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
+	return GetDgraphProjectInfoInTxn(ctx, txn, query, variables)
 }
 
 // GetDgraphProjectInfoInTxn is GetDgraphProjectInfoByUUID in txn, for a read
@@ -105,7 +97,7 @@ func GetDgraphProjectInfoInTxn(ctx context.Context, txn *dgo.Txn, query string, 
 }
 
 func GetDgraphProjectList(ctx context.Context, query string, variables map[string]string) (dgraphProjects []*dgraphStruct.DgraphProject, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -132,32 +124,8 @@ func GetDgraphProjectList(ctx context.Context, query string, variables map[strin
 }
 
 func DeleteProjectEdge(ctx context.Context, delStringJSON string) (err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
-	mutation := &api.Mutation{
-		DeleteJson: []byte(delStringJSON),
-	}
-
-	_, err = txn.Mutate(context.Background(), mutation)
-	if err != nil {
-		return err
-	}
-
-	err = txn.Commit(context.Background())
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		err = txn.Discard(ctx)
-
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/DeleteProjectEdge failed to discard dgraph txn err: %+v",
-				err)
-		}
-
-	}()
-
-	return nil
+	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{
+		Mutations: []*api.Mutation{{DeleteJson: []byte(delStringJSON)}},
+	})
+	return err
 }

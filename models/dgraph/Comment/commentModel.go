@@ -12,8 +12,6 @@ import (
 )
 
 func CreateOrUpdateCommentInPost(ctx context.Context, query string, dgraphPost *dgraphStruct.DgraphPost) (commentUID string, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
 	pb, err := json.Marshal(dgraphPost)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -28,10 +26,9 @@ func CreateOrUpdateCommentInPost(ctx context.Context, query string, dgraphPost *
 	req := &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
 	}
 
-	res, err := txn.Do(ctx, req)
+	res, err := dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/CreateCommentInPost failed to create dgraph comment err: %+v",
@@ -42,21 +39,10 @@ func CreateOrUpdateCommentInPost(ctx context.Context, query string, dgraphPost *
 	for _, v := range res.Uids {
 		commentUID = v
 	}
-	defer func() {
-		err = txn.Discard(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/CreateCommentInPost failed to discard dgraph txn err: %+v",
-				err)
-		}
-	}()
-
 	return
 }
 
 func CreateOrUpdateCommentInDoc(ctx context.Context, query string, dgraphDoc *dgraphStruct.DgraphDoc) (commentUID string, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
 	pb, err := json.Marshal(dgraphDoc)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -71,10 +57,9 @@ func CreateOrUpdateCommentInDoc(ctx context.Context, query string, dgraphDoc *dg
 	req := &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
 	}
 
-	res, err := txn.Do(ctx, req)
+	res, err := dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/CreateOrUpdateCommentInDoc failed to create dgraph comment err: %+v",
@@ -85,21 +70,10 @@ func CreateOrUpdateCommentInDoc(ctx context.Context, query string, dgraphDoc *dg
 	for _, v := range res.Uids {
 		commentUID = v
 	}
-	defer func() {
-		err = txn.Discard(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/CreateOrUpdateCommentInDoc failed to discard dgraph txn err: %+v",
-				err)
-		}
-	}()
-
 	return
 }
 
 func CreateOrUpdateCommentInTask(ctx context.Context, query string, dgraphTask *dgraphStruct.DgraphTask) (commentUID string, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
 	pb, err := json.Marshal(dgraphTask)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -114,10 +88,9 @@ func CreateOrUpdateCommentInTask(ctx context.Context, query string, dgraphTask *
 	req := &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
 	}
 
-	res, err := txn.Do(ctx, req)
+	res, err := dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/CreateOrUpdateCommentInTask failed to create dgraph comment err: %+v",
@@ -128,21 +101,10 @@ func CreateOrUpdateCommentInTask(ctx context.Context, query string, dgraphTask *
 	for _, v := range res.Uids {
 		commentUID = v
 	}
-	defer func() {
-		err = txn.Discard(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/CreateOrUpdateCommentInTask failed to discard dgraph txn err: %+v",
-				err)
-		}
-	}()
-
 	return
 }
 
 func UpdateComment(ctx context.Context, query string, dgraphPost *dgraphStruct.DgraphComment, deleteJson string) (err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
 	pb, err := json.Marshal(dgraphPost)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -158,10 +120,9 @@ func UpdateComment(ctx context.Context, query string, dgraphPost *dgraphStruct.D
 	req := &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
 	}
 
-	_, err = txn.Do(ctx, req)
+	_, err = dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/UpdateComment failed to update dgraph comment err: %+v",
@@ -169,20 +130,11 @@ func UpdateComment(ctx context.Context, query string, dgraphPost *dgraphStruct.D
 		return
 	}
 
-	defer func() {
-		err = txn.Discard(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/UpdateComment failed to discard dgraph txn err: %+v",
-				err)
-		}
-	}()
-
 	return
 }
 
 func GetDgraphTaskCommentInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphTask *dgraphStruct.DgraphTask, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -218,7 +170,7 @@ func GetDgraphTaskCommentInfoByUUID(ctx context.Context, query string, variables
 }
 
 func GetDgraphPostCommentsInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphUser *dgraphStruct.DgraphPost, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -254,7 +206,7 @@ func GetDgraphPostCommentsInfoByUUID(ctx context.Context, query string, variable
 }
 
 func GetDgraphCommentInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphUser *dgraphStruct.DgraphComment, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -290,8 +242,6 @@ func GetDgraphCommentInfoByUUID(ctx context.Context, query string, variables map
 }
 
 func CreateOrUpdateCommentReaction(ctx context.Context, query string, dgraphPost *dgraphStruct.DgraphComment) (reactionUID string, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
 	pb, err := json.Marshal(dgraphPost)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -306,10 +256,9 @@ func CreateOrUpdateCommentReaction(ctx context.Context, query string, dgraphPost
 	req := &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
 	}
 
-	res, err := txn.Do(ctx, req)
+	res, err := dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/CreateOrUpdatePostCommentReaction failed to create or update dgraph post reaction err: %+v",
@@ -320,53 +269,17 @@ func CreateOrUpdateCommentReaction(ctx context.Context, query string, dgraphPost
 	for _, v := range res.Uids {
 		reactionUID = v
 	}
-
-	defer func() {
-		err = txn.Discard(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/CreateOrUpdatePostCommentReaction failed to discard dgraph txn err: %+v",
-				err)
-		}
-	}()
-
 	return
 }
 
 func DeleteReactionNodeOrEdges(ctx context.Context, delStringJSON string) (err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
-	mutation := &api.Mutation{
-		DeleteJson: []byte(delStringJSON),
-	}
-
-	_, err = txn.Mutate(context.Background(), mutation)
-	if err != nil {
-		return err
-	}
-
-	err = txn.Commit(context.Background())
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		err = txn.Discard(ctx)
-
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/DeleteReactionNodeOrEdges failed to discard dgraph txn err: %+v",
-				err)
-		}
-
-	}()
-
-	return nil
+	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{
+		Mutations: []*api.Mutation{{DeleteJson: []byte(delStringJSON)}},
+	})
+	return err
 }
 
 func CreateOrUpdateCommentInChat(ctx context.Context, query string, dgraphChat *dgraphStruct.DgraphChat) (commentUID string, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
 	pb, err := json.Marshal(dgraphChat)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -381,10 +294,9 @@ func CreateOrUpdateCommentInChat(ctx context.Context, query string, dgraphChat *
 	req := &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
 	}
 
-	res, err := txn.Do(ctx, req)
+	res, err := dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/CreateOrUpdateCommentInChat failed to create dgraph chat err: %+v",
@@ -395,15 +307,6 @@ func CreateOrUpdateCommentInChat(ctx context.Context, query string, dgraphChat *
 	for _, v := range res.Uids {
 		commentUID = v
 	}
-	defer func() {
-		err = txn.Discard(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/CreateOrUpdateCommentInChat failed to discard dgraph txn err: %+v",
-				err)
-		}
-	}()
-
 	return
 }
 
@@ -412,8 +315,6 @@ func CreateOrUpdateCommentInChat(ctx context.Context, query string, dgraphChat *
 // the comment itself (boards have no board_comments edge). The upsert query
 // must define `board`, `co`, and any `u_N` (mention user) vars.
 func CreateBoardComment(ctx context.Context, query string, dgraphComment *dgraphStruct.DgraphComment) (commentUID string, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
 	pb, err := json.Marshal(dgraphComment)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CreateBoardComment failed to marshal comment err: %+v", err)
@@ -424,10 +325,9 @@ func CreateBoardComment(ctx context.Context, query string, dgraphComment *dgraph
 	req := &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
 	}
 
-	res, err := txn.Do(ctx, req)
+	res, err := dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CreateBoardComment failed to create comment err: %+v", err)
 		return
@@ -436,10 +336,5 @@ func CreateBoardComment(ctx context.Context, query string, dgraphComment *dgraph
 	for _, v := range res.Uids {
 		commentUID = v
 	}
-	defer func() {
-		if derr := txn.Discard(ctx); derr != nil {
-			helpers.LogErrorWithContext(ctx, "models/CreateBoardComment failed to discard txn err: %+v", derr)
-		}
-	}()
 	return
 }

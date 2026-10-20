@@ -45,8 +45,6 @@ func sharingIDsValid(input *adapter.InputUpdateDocPermissions) bool {
 var ErrNotFound = helpers.NotFound("failed to get dgraph doc")
 
 func CreateOrUpdateDoc(ctx context.Context, query string, dgraphDoc *dgraphStruct.DgraphDoc, delStringJSON string) (docUID string, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
 	pb, err := json.Marshal(dgraphDoc)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -65,10 +63,9 @@ func CreateOrUpdateDoc(ctx context.Context, query string, dgraphDoc *dgraphStruc
 	req := &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
 	}
 
-	res, err := txn.Do(ctx, req)
+	res, err := dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/CreateOrUpdateDoc failed to create or update dgraph doc err: %+v",
@@ -77,20 +74,12 @@ func CreateOrUpdateDoc(ctx context.Context, query string, dgraphDoc *dgraphStruc
 	}
 
 	docUID = res.Uids["uid(doc)"]
-	defer func() {
-		err = txn.Discard(ctx)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/CreateOrUpdateDoc failed to discard dgraph txn err: %+v",
-				err)
-		}
-	}()
 
 	return
 }
 
 func GetDgraphDocInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -126,7 +115,7 @@ func GetDgraphDocInfoByUUID(ctx context.Context, query string, variables map[str
 }
 
 func GetDgraphDocs(ctx context.Context, query string, variables map[string]string) (dgraphDocs []*dgraphStruct.DgraphDoc, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -158,7 +147,7 @@ func GetDgraphDocs(ctx context.Context, query string, variables map[string]strin
 }
 
 func GetDgraphDocsWithCount(ctx context.Context, query string, variables map[string]string) (dgraphDocList *dgraphStruct.DgraphDocList, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -201,9 +190,6 @@ func UpdateDocPermissions(ctx context.Context, input *adapter.InputUpdateDocPerm
 	if !sharingIDsValid(input) {
 		return ErrSharingIDs
 	}
-	txn := dgraphInit.DgraphClient.NewTxn()
-	defer txn.Discard(ctx)
-
 	// 1. Build Query Block
 	// We need variables for the Doc and each User involved.
 	query := fmt.Sprintf(`
@@ -283,10 +269,9 @@ func UpdateDocPermissions(ctx context.Context, input *adapter.InputUpdateDocPerm
 	req := &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
 	}
 
-	_, err = txn.Do(ctx, req)
+	_, err = dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/UpdateDocPermissions failed to update permissions err: %+v",

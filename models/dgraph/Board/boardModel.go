@@ -18,8 +18,6 @@ import (
 // when Uid is "uid(board)" with the provided upsert query). Mirrors
 // CreateOrUpdateDoc.
 func CreateOrUpdateBoard(ctx context.Context, query string, dgraphBoard *dgraphStruct.DgraphBoard) (boardUID string, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-
 	pb, err := json.Marshal(dgraphBoard)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -31,10 +29,9 @@ func CreateOrUpdateBoard(ctx context.Context, query string, dgraphBoard *dgraphS
 	req := &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
 	}
 
-	res, err := txn.Do(ctx, req)
+	res, err := dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/CreateOrUpdateBoard failed to create or update dgraph board err: %+v", err)
@@ -42,13 +39,6 @@ func CreateOrUpdateBoard(ctx context.Context, query string, dgraphBoard *dgraphS
 	}
 
 	boardUID = res.Uids["uid(board)"]
-	defer func() {
-		derr := txn.Discard(ctx)
-		if derr != nil {
-			helpers.LogErrorWithContext(ctx,
-				"models/CreateOrUpdateBoard failed to discard dgraph txn err: %+v", derr)
-		}
-	}()
 
 	return
 }
@@ -58,9 +48,6 @@ func CreateOrUpdateBoard(ctx context.Context, query string, dgraphBoard *dgraphS
 // board_state blob so large boards keep their canvas data out of dgraph. It is
 // the persistence path used by the collaboration service.
 func SetBoardStateRefAndPurgeInline(ctx context.Context, boardUUID, stateKey, snippet string) (err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-	defer txn.Discard(ctx)
-
 	query := fmt.Sprintf(`query { board as var(func: eq(board_uuid, "%s")) }`, boardUUID)
 
 	currentTime := time.Now()
@@ -81,9 +68,9 @@ func SetBoardStateRefAndPurgeInline(ctx context.Context, boardUUID, stateKey, sn
 		SetJson:   pb,
 		DelNquads: []byte("uid(board) <board_state> * .\n"),
 	}
-	req := &api.Request{Query: query, Mutations: []*api.Mutation{mu}, CommitNow: true}
+	req := &api.Request{Query: query, Mutations: []*api.Mutation{mu}}
 
-	if _, err = txn.Do(ctx, req); err != nil {
+	if _, err = dgraphInit.DoCommitNow(ctx, req); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SetBoardStateRefAndPurgeInline failed err: %+v", err)
 		return
 	}
@@ -92,7 +79,7 @@ func SetBoardStateRefAndPurgeInline(ctx context.Context, boardUUID, stateKey, sn
 
 // GetDgraphBoardInfoByUUID runs a board query and returns the first board.
 func GetDgraphBoardInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphBoard *dgraphStruct.DgraphBoard, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -144,9 +131,6 @@ func GetDgraphBoards(ctx context.Context, query string, variables map[string]str
 // UpdateBoardPermissions adds/removes editors/viewers/commenters on a board in
 // a single upsert, mirroring UpdateDocPermissions. Users are resolved by UUID.
 func UpdateBoardPermissions(ctx context.Context, input *adapter.InputUpdateBoardPermissions) (err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
-	defer txn.Discard(ctx)
-
 	query := fmt.Sprintf(`
 		query {
 			board as var(func: eq(board_uuid, "%s"))
@@ -209,10 +193,9 @@ func UpdateBoardPermissions(ctx context.Context, input *adapter.InputUpdateBoard
 	req := &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
-		CommitNow: true,
 	}
 
-	_, err = txn.Do(ctx, req)
+	_, err = dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/UpdateBoardPermissions failed to update permissions err: %+v", err)
@@ -224,7 +207,7 @@ func UpdateBoardPermissions(ctx context.Context, input *adapter.InputUpdateBoard
 // GetDgraphBoardsWithCount runs a board-list query that returns a "boardList"
 // block plus a "board_count" aggregation block, mirroring GetDgraphDocsWithCount.
 func GetDgraphBoardsWithCount(ctx context.Context, query string, variables map[string]string) (list *dgraphStruct.DgraphBoardList, err error) {
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {

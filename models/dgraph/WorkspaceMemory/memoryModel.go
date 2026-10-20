@@ -89,17 +89,9 @@ func UpsertMemoryItem(ctx context.Context, item *dgraphStruct.DgraphMemoryItem,
 		return fmt.Errorf("marshal memory mutation: %w", err)
 	}
 
-	txn := dgraphInit.DgraphClient.NewTxn()
-	defer func() {
-		if derr := txn.Discard(ctx); derr != nil {
-			helpers.LogErrorWithContext(ctx, "models/dgraph/UpsertMemoryItem discard err: %+v", derr)
-		}
-	}()
-
-	_, err = txn.Do(ctx, &api.Request{
+	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{{SetJson: pb}},
-		CommitNow: true,
 	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/dgraph/UpsertMemoryItem failed: %+v", err)
@@ -122,13 +114,9 @@ func SetMemoryItemStatus(ctx context.Context, memUUID, status string) error {
 		return err
 	}
 
-	txn := dgraphInit.DgraphClient.NewTxn()
-	defer func() { _ = txn.Discard(ctx) }()
-
-	_, err = txn.Do(ctx, &api.Request{
+	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{{SetJson: pb}},
-		CommitNow: true,
 	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/dgraph/SetMemoryItemStatus failed: %+v", err)
@@ -148,17 +136,9 @@ func DeleteMemoryItem(ctx context.Context, memUUID string) error {
 	// Delete the whole node: S * * removes all predicates + the node.
 	delJSON := `{"uid": "uid(m)"}`
 
-	txn := dgraphInit.DgraphClient.NewTxn()
-	defer func() {
-		if derr := txn.Discard(ctx); derr != nil {
-			helpers.LogErrorWithContext(ctx, "models/dgraph/DeleteMemoryItem discard err: %+v", derr)
-		}
-	}()
-
-	_, err := txn.Do(ctx, &api.Request{
+	_, err := dgraphInit.DoCommitNow(ctx, &api.Request{
 		Query:     query,
 		Mutations: []*api.Mutation{{DeleteJson: []byte(delJSON)}},
-		CommitNow: true,
 	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/dgraph/DeleteMemoryItem failed: %+v", err)
@@ -176,7 +156,7 @@ func ExecScopeOpenItems(ctx context.Context, query string, variables map[string]
 	if query == "" {
 		return nil, nil
 	}
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
@@ -214,7 +194,7 @@ func ExecOwnedOpenItems(ctx context.Context, query string, variables map[string]
 	if query == "" {
 		return nil, nil
 	}
-	txn := dgraphInit.DgraphClient.NewTxn()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
 	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
