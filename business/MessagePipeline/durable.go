@@ -17,7 +17,9 @@ import (
 	"sort"
 	"strings"
 
+	chatAdapter "github.com/akashc777/OneCamp/adapter/Chat"
 	postAdapter "github.com/akashc777/OneCamp/adapter/Post"
+	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 	outboxBusiness "github.com/akashc777/OneCamp/business/Outbox"
 	postBusiness "github.com/akashc777/OneCamp/business/Post"
@@ -30,7 +32,11 @@ import (
 const SurfacesEnv = "MESSAGE_PIPELINE"
 
 // The surfaces the switch knows.
-const SurfaceChannel = "channel"
+const (
+	SurfaceChannel = "channel"
+	SurfaceDM      = "dm"
+	SurfaceGroup   = "group"
+)
 
 // surfacesOf is the surfaces a switch's value turns on. Pure.
 func surfacesOf(v string) map[string]bool {
@@ -43,11 +49,14 @@ func surfacesOf(v string) map[string]bool {
 	return on
 }
 
-// Seams for tests: the switch, the durable channel write, a post's answer.
+// Seams for tests: the switch, the durable writes, a message's answer.
 var (
 	surfaceOn    = func(s string) bool { return surfacesOf(os.Getenv(SurfacesEnv))[s] }
 	writeChannel = writeChannelDurably
+	writeDM      = writeDMDurably
+	writeGroup   = writeGroupDurably
 	postWritten  = postBusiness.PostWritten
+	chatStored   = chatBusiness.ChatWritten
 )
 
 // durable is the pipeline: the durable write for each surface switched on,
@@ -55,8 +64,15 @@ var (
 type durable struct{ today Pipeline }
 
 func (d durable) Write(ctx context.Context, who *userModels.UserInfo, w Write) (Written, error) {
-	if w.Op == OpSend && w.To.Kind == conversationBusiness.KindChannel && surfaceOn(SurfaceChannel) {
-		return writeChannel(ctx, who, w)
+	if w.Op == OpSend {
+		switch {
+		case w.To.Kind == conversationBusiness.KindChannel && surfaceOn(SurfaceChannel):
+			return writeChannel(ctx, who, w)
+		case w.To.Kind == conversationBusiness.KindDM && surfaceOn(SurfaceDM):
+			return writeDM(ctx, who, w)
+		case w.To.Kind == conversationBusiness.KindGroup && surfaceOn(SurfaceGroup):
+			return writeGroup(ctx, who, w)
+		}
 	}
 	return d.today.Write(ctx, who, w)
 }
@@ -81,12 +97,49 @@ func writeChannelDurably(ctx context.Context, who *userModels.UserInfo, w Write)
 	return Written{ID: out.Uuid, At: out.PostCreated}, nil
 }
 
+// writeDMDurably is a DM the durable way: today's rules and its once per
+// client id, then CommitDurably.
+func writeDMDurably(ctx context.Context, who *userModels.UserInfo, w Write) (Written, error) {
+	if who == nil {
+		return Written{}, conversationBusiness.ErrNotFound
+	}
+	me := who.UserDgraphInfo.Uuid
+	in, ok := dmInput(w, me)
+	if !ok {
+		return Written{}, conversationBusiness.ErrNotFound
+	}
+	dm, err := sendBusiness.PrepareDirectMessage(ctx, who, in)
+	if err != nil {
+		return Written{}, err
+	}
+	return chatWritten(sendBusiness.Once(ctx, me, onceKey(w, me), w.Draft.ClientMsgID, func() (*chatAdapter.OutputCreateChatForChat, error) {
+		return dm.CommitDurably(ctx, w.Draft.ClientMsgID)
+	}))
+}
+
+// writeGroupDurably is a group message the durable way, as writeDMDurably.
+func writeGroupDurably(ctx context.Context, who *userModels.UserInfo, w Write) (Written, error) {
+	if who == nil {
+		return Written{}, conversationBusiness.ErrNotFound
+	}
+	me := who.UserDgraphInfo.Uuid
+	group, err := sendBusiness.PrepareGroupMessage(ctx, who, groupInput(w))
+	if err != nil {
+		return Written{}, err
+	}
+	return chatWritten(sendBusiness.Once(ctx, me, onceKey(w, me), w.Draft.ClientMsgID, func() (*chatAdapter.OutputCreateChatForChat, error) {
+		return group.CommitDurably(ctx, w.Draft.ClientMsgID)
+	}))
+}
+
 // resolveMessage is the message topic's answer for an event its writer never
 // released: whether the message was written, by its kind.
 func resolveMessage(ctx context.Context, ev outboxBusiness.Event) (bool, error) {
 	switch ev.Entities["kind"] {
 	case conversationBusiness.KindChannel:
 		return postWritten(ctx, ev.Entities["message"])
+	case conversationBusiness.KindDM, conversationBusiness.KindGroup:
+		return chatStored(ctx, ev.Entities["message"])
 	}
 	// A kind with no answer of its own: its change was committed with the event.
 	return true, nil

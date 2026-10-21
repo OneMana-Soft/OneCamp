@@ -34,7 +34,10 @@ test:
 	go test -count=1 -race -timeout=20m -p=4 \
 		./business/... ./models/... ./domain/... ./controllers/... ./services/... \
 		./helpers/... ./middleware/... ./router/... ./adapter/... ./initializers/... \
-		./docs/... .
+		./docs/... ./tests/integration/dgfixture/ .
+# ./tests/integration/dgfixture is the Dgraph scale fixture's generator: pure,
+# no server, so its shape tests run here (the budget tests that build it in a
+# real Dgraph are integration-tagged, tests/integration/dgraph_budgets_test.go).
 # . (the module root, that one package only, so data/ is never walked) is in that
 # list for schema_test.go: it checks the migrations the binary embeds are the
 # directory's, each version once. Two branches can land the same number, and sqlx
@@ -96,6 +99,11 @@ journey:
 # helpers/integrationHarnessGuard_test.go fails when an integration-tagged file
 # sits outside them. The same guard keeps the harness from importing a business
 # or domain package again.
+# The staticcheck checks CI's lint job runs (.github/workflows/ci.yml): clean,
+# apart from //lint:ignore lines that say why.
+staticcheck:
+	go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 -checks SA4004,SA4006,SA4009,SA4010,SA4011,U1000 ./...
+
 verify:
 	@echo "▶ gofmt"
 	@OUT="$$(gofmt -l $$(find . -name '*.go' -not -path './data/*' -not -path './.next/*' 2>/dev/null))"; \

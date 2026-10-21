@@ -17,6 +17,7 @@ import (
 	onboardingBusiness "github.com/akashc777/OneCamp/business/Onboarding"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	business "github.com/akashc777/OneCamp/business/User"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	domain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/authcookie"
@@ -1078,7 +1079,10 @@ func generateSecureToken(length int) (string, error) {
 // Allows OAuth users (who have no password) to add a password for email login.
 func SetPassword(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 	userID := userInfo.UserPostgresInfo.Id
 
 	var requestBody struct {
@@ -1171,7 +1175,10 @@ func SetPassword(w http.ResponseWriter, r *http.Request) {
 // For OAuth-only users (no password set): only requires new_password (acts like SetPassword).
 func ChangePassword(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 	userID := userInfo.UserPostgresInfo.Id
 	userEmail := userInfo.UserPostgresInfo.EmailID
 
@@ -1287,7 +1294,10 @@ func ChangePassword(w http.ResponseWriter, r *http.Request) {
 // Returns whether the current user has a password set (used by FE to show correct UI).
 func HasPassword(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 	userEmail := userInfo.UserPostgresInfo.EmailID
 
 	existingUser, err := domain.GetUserByEmailIdWithPassword(ctx, userEmail)
@@ -1364,7 +1374,7 @@ func UpdateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 		GithubClientSecret *string `json:"github_client_secret,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to parse body"})
+		helpers.WriteBadRequest(w, "Failed to parse body")
 		return
 	}
 

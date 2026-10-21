@@ -444,9 +444,3 @@ func capOrDefault(v, def int) int {
 	}
 	return v
 }
-
-// BuildInlineDisposition returns `inline; filename="..."`. Use only
-// for content types in inlineSafeTypes after extension cross-check.
-func BuildInlineDisposition(filename string) string {
-	return buildInlineDisposition(filename)
-}

@@ -198,10 +198,8 @@ func resolveChannels(ctx context.Context, importId uuid.UUID, workspaceName stri
 		addChannelMembersBulk(ctx, importId, channelUUID, sc.Members, userCache)
 
 		// Creating it made the importing admin a member and its admin; a
-		// private channel they weren't in is handed on and left (tidy.go).
-		if e.isPrivate {
-			leavePrivateChannel(ctx, importId, channelUUID, sc, importingUser, userCache)
-		}
+		// channel they weren't in is handed on and left (tidy.go).
+		leaveChannel(ctx, importId, channelUUID, sc, e.isPrivate, importingUser, userCache)
 	}
 
 	patch := mustMarshal(map[string]interface{}{"channels": stats})

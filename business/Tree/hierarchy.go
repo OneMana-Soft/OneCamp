@@ -101,23 +101,28 @@ func allowed(ctx context.Context, who accessBusiness.Subject, kind string, ids [
 	return out, nil
 }
 
+// levels is the person's level on each of ids that is there, in one batch of
+// reads (accessBusiness.ResolveAll). A tree page used to ask twice, once for
+// "may open" and once for "may change", and a parent's level twice more.
+func levels(ctx context.Context, who accessBusiness.Subject, kind string, ids []string) (map[string]accessBusiness.Level, error) {
+	got, err := accessBusiness.ResolveAll(ctx, who, resources(kind, ids))
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]accessBusiness.Level, len(got))
+	for r, d := range got {
+		out[r.UUID] = d.Level
+	}
+	return out, nil
+}
+
 // level is the person's level on one node; LevelNone for one that isn't there.
 func level(ctx context.Context, who accessBusiness.Subject, kind, id string) (accessBusiness.Level, error) {
-	ok, err := allowed(ctx, who, kind, []string{id}, accessBusiness.LevelEdit)
+	got, err := levels(ctx, who, kind, []string{id})
 	if err != nil {
 		return accessBusiness.LevelNone, err
 	}
-	if ok[id] {
-		return accessBusiness.LevelEdit, nil
-	}
-	ok, err = allowed(ctx, who, kind, []string{id}, accessBusiness.LevelView)
-	if err != nil {
-		return accessBusiness.LevelNone, err
-	}
-	if ok[id] {
-		return accessBusiness.LevelView, nil
-	}
-	return accessBusiness.LevelNone, nil
+	return got[id], nil
 }
 
 func (h hierarchy) Children(ctx context.Context, who accessBusiness.Subject, kind, parentUUID, cursor string) (Page, error) {
@@ -159,13 +164,13 @@ func (hierarchy) Level(ctx context.Context, who accessBusiness.Subject, kind str
 		sibs[i], byID[r.UUID], ids[i] = r.Sibling(), r, r.UUID
 	}
 	position.Order(sibs)
-	readable, err := allowed(ctx, who, kind, ids, accessBusiness.LevelView)
+	lv, err := levels(ctx, who, kind, ids)
 	if err != nil {
 		return Page{}, err
 	}
 	var open []string
 	for _, s := range sibs {
-		if readable[s.ID] {
+		if lv[s.ID] >= accessBusiness.LevelView {
 			open = append(open, s.ID)
 		}
 	}
@@ -189,16 +194,12 @@ func (hierarchy) Level(ctx context.Context, who accessBusiness.Subject, kind str
 		to = len(open)
 	}
 	shown := open[from:to]
-	editable, err := allowed(ctx, who, kind, shown, accessBusiness.LevelEdit)
-	if err != nil {
-		return Page{}, err
-	}
 	page.Nodes = make([]Node, 0, len(shown))
 	for _, id := range shown {
 		r := byID[id]
 		page.Nodes = append(page.Nodes, Node{
 			Kind: kind, UUID: r.UUID, ParentUUID: q.Parent, Position: r.Position,
-			Title: r.Title, Icon: r.Icon, HasChildren: r.ChildCount > 0, CanEdit: editable[id], Data: r.Data,
+			Title: r.Title, Icon: r.Icon, HasChildren: r.ChildCount > 0, CanEdit: lv[id] >= accessBusiness.LevelEdit, Data: r.Data,
 		})
 	}
 	return page, nil

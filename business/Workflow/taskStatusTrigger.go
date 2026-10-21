@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
@@ -49,31 +50,77 @@ func normalizeTaskStatusTrigger(ctx context.Context, in *WorkflowInput) error {
 	return nil
 }
 
-// handleTaskStatusChanged runs the task_status_changed workflows a move
-// matches. Changes a workflow itself made never arrive here: its actions run
-// in a context that suppresses the event bus.
-func handleTaskStatusChanged(ctx context.Context, data map[string]interface{}) {
+// handleTaskEvent runs the rules a task event triggers: a project's rules
+// for its tasks, and workspace workflows scoped by their trigger config. The
+// task itself is read as each rule's owner when the rule runs (runs.go), so
+// what an event says is only what woke the rule.
+func handleTaskEvent(ctx context.Context, trigger string, data map[string]interface{}) {
 	str := func(k string) string { s, _ := data[k].(string); return s }
-	move := taskStatusBusiness.MoveFromEvent(data)
 	taskID := str("task_id")
+	if taskID == "" {
+		return
+	}
+	name := str("task_name")
+	if name == "" {
+		name = str("name")
+	}
+	by := str("updated_by_uuid")
+	for _, k := range []string{"assigned_by", "created_by"} {
+		if by == "" {
+			by = str(k)
+		}
+	}
 	vars := map[string]string{
-		"task":    str("task_name"),
+		"task":    name,
 		"status":  str("new_status_name"),
 		"from":    str("old_status_name"),
 		"project": str("project_name"),
-		"by":      str("updated_by_name"),
+		"by":      firstOf(str("updated_by_name"), str("assigned_by_name")),
 		"link":    authService.FrontendBaseURL() + "/app/task/" + taskID,
 	}
-	for _, cw := range candidatesFor(workflowModel.TriggerTaskStatusChanged) {
-		if !cw.taskMove.Matches(move) {
+	move := taskStatusBusiness.MoveFromEvent(data)
+	projectID := str("project_id")
+	key := eventKey(trigger, data)
+	for _, cw := range candidatesFor(trigger) {
+		if cw.projectID != "" && cw.projectID != projectID {
+			continue
+		}
+		if !cw.wants(trigger, data, move) {
 			continue
 		}
 		runWorkflow(ctx, cw, triggerEvent{
 			channelID:      cw.channelID,
-			projectID:      move.ProjectID,
-			text:           vars["task"],
-			targetUserUUID: str("updated_by_uuid"),
+			projectID:      projectID,
+			taskID:         taskID,
+			text:           name,
+			targetUserUUID: by,
 			vars:           vars,
+			eventKey:       key,
 		})
 	}
+}
+
+// wants says whether a rule cares about this task event beyond its kind:
+// the move it names, the fields it watches.
+func (cw *compiledWorkflow) wants(trigger string, data map[string]interface{}, move taskStatusBusiness.Move) bool {
+	switch trigger {
+	case workflowModel.TriggerTaskStatusChanged:
+		return cw.taskMove.Matches(move)
+	case workflowModel.TriggerTaskFieldChanged:
+		if len(cw.fields) == 0 {
+			return true
+		}
+		f, _ := data["field"].(string)
+		return slices.Contains(cw.fields, f)
+	}
+	return true
+}
+
+func firstOf(s ...string) string {
+	for _, v := range s {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

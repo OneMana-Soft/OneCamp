@@ -10,9 +10,6 @@ package business
 // and what it means.
 
 import (
-	"fmt"
-	"html"
-
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
@@ -45,17 +42,4 @@ func PrivacyChangeOf(channel *dgraphStruct.DgraphChannel, private bool) PrivacyC
 // it. Pure.
 func MayChangePrivacy(change PrivacyChange, workspaceAdmin bool) bool {
 	return change != PrivacyOpened || workspaceAdmin
-}
-
-// PrivacyLine is the line posted in the channel when who changes its
-// privacy, as HTML; "" for no change. Pure.
-func PrivacyLine(change PrivacyChange, who string) string {
-	who = html.EscapeString(who)
-	switch change {
-	case PrivacyOpened:
-		return fmt.Sprintf("<p><strong>%s</strong> made this channel public. Everyone in the workspace can now find it and read its history and files.</p>", who)
-	case PrivacyClosed:
-		return fmt.Sprintf("<p><strong>%s</strong> made this channel private. Only its members can find it and read it now.</p>", who)
-	}
-	return ""
 }

@@ -77,7 +77,7 @@ func SoftDeleteWebhook(ctx context.Context, id uuid.UUID, deletedAt time.Time) e
 // task events reached no webhook at all (SA-BUG-10).
 func GetActiveOutgoingWebhooksByEvent(ctx context.Context, eventType string, scopeType string, scopeEntityId *uuid.UUID) ([]*models.Webhook, error) {
 	query := `
-		SELECT id, name, token, secret, target_url, metadata, scope_type, trigger_words, scope_entity_id
+		SELECT id, name, token, secret, target_url, metadata, scope_type, trigger_words, scope_entity_id, created_by
 		FROM webhooks
 		WHERE type = 'outgoing'
 		  AND is_active = true
@@ -108,17 +108,8 @@ func UpdateWebhookTriggerInfo(ctx context.Context, id uuid.UUID, lastTriggeredAt
 	return logDomainError(ctx, "UpdateWebhookTriggerInfo", models.UpdateWebhookTriggerInfo(query, lastTriggeredAt, failureCount, id))
 }
 
-// IncrementWebhookFailureCount atomically increments failure_count and returns the new failure_count value.
-func IncrementWebhookFailureCount(ctx context.Context, id uuid.UUID, lastTriggeredAt time.Time) (int, error) {
-	query := `UPDATE webhooks SET failure_count = failure_count + 1, last_triggered_at = $1 WHERE id = $2 RETURNING failure_count`
-	newCount, err := models.IncrementWebhookFailureCount(query, lastTriggeredAt, id)
-	return newCount, logDomainError(ctx, "IncrementWebhookFailureCount", err)
-}
-
-func DisableWebhook(ctx context.Context, id uuid.UUID, updatedAt time.Time) error {
-	query := `UPDATE webhooks SET is_active = false, updated_at = $1 WHERE id = $2`
-	return logDomainError(ctx, "DisableWebhook", models.UpdateWebhook(query, updatedAt, id))
-}
+// A failed outgoing try is counted, and a webhook that keeps failing is
+// paused, by business/Hooks (models/postgres/WebhookDelivery).
 
 // Webhook Logs
 

@@ -13,6 +13,7 @@ import (
 
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -84,17 +85,28 @@ func Allow(w http.ResponseWriter, r *http.Request, p *dgraphStruct.DgraphProject
 	return s, true
 }
 
-// RequireTask reads a task by id and checks the caller may do need with it.
+// RequireTask reads a task by id, or by its key ("Q4-12"), and checks the
+// caller may do need with it. A key that names no task, or one they can't
+// open, answers as a task that isn't there.
 func RequireTask(w http.ResponseWriter, r *http.Request, raw string, need workAccess.Need) (uuid.UUID, *dgraphStruct.DgraphTask, bool) {
-	id, err := uuid.Parse(raw)
-	if err != nil {
+	id, err := taskKeys.Ref(r.Context(), raw)
+	if errors.Is(err, taskKeys.ErrNoTask) {
+		if _, _, isKey := taskKeys.Parse(raw); isKey {
+			WriteTaskRefusal(w, r, taskBusiness.ErrTaskNotVisible)
+			return uuid.Nil, nil, false
+		}
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a task."})
+		return uuid.Nil, nil, false
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(r.Context(), "controllers/ProjectAccess.RequireTask couldn't look the key up: %+v", err)
+		helpers.WriteRetryLater(w, "Couldn't look that task up.")
 		return uuid.Nil, nil, false
 	}
 	caller := callerOf(r)
 	task, _, err := taskBusiness.TaskFor(r.Context(), id, &caller, need)
 	if err != nil {
-		writeTaskRefusal(w, r, err)
+		WriteTaskRefusal(w, r, err)
 		return uuid.Nil, nil, false
 	}
 	return id, task, true
@@ -106,7 +118,7 @@ func RequireTask(w http.ResponseWriter, r *http.Request, raw string, need workAc
 func AllowTask(w http.ResponseWriter, r *http.Request, t *dgraphStruct.DgraphTask, need workAccess.Need) bool {
 	caller := callerOf(r)
 	if t == nil || t.Uuid == "" || !taskBusiness.CanViewTask(t, caller.UserDgraphInfo.Uid) {
-		writeTaskRefusal(w, r, taskBusiness.ErrTaskNotVisible)
+		WriteTaskRefusal(w, r, taskBusiness.ErrTaskNotVisible)
 		return false
 	}
 	if need == workAccess.NeedView {
@@ -117,16 +129,16 @@ func AllowTask(w http.ResponseWriter, r *http.Request, t *dgraphStruct.DgraphTas
 		err = s.CheckTask(need, f)
 	}
 	if err != nil {
-		writeTaskRefusal(w, r, err)
+		WriteTaskRefusal(w, r, err)
 		return false
 	}
 	return true
 }
 
-// writeTaskRefusal answers a task check that said no: a task they may not
+// WriteTaskRefusal answers a task check that said no: a task they may not
 // read as one that isn't there (404), a refusal in its words (403), anything
 // else as a failed read (503).
-func writeTaskRefusal(w http.ResponseWriter, r *http.Request, err error) {
+func WriteTaskRefusal(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, workAccess.ErrNotAllowed) {
 		refuse(w, err, "")
 		return

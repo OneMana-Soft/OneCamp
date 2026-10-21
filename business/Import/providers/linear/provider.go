@@ -58,14 +58,10 @@ import (
 const (
 	providerName = importModels.ProviderLinear
 
-	// pageSize is the upper bound on items per cursor page Linear
-	// will return. 100 is the documented cap.
-	pageSize = 100
-
 	// maxPages caps pagination so a runaway query can't hang a worker.
 	// 200 pages × 100 items = 20k items per call, which covers every
 	// realistic Linear project.
-	maxPages = 200
+	maxPages = 400
 
 	// inboxProjectID is the synthetic source id used for issues with
 	// no project. We add one such project per team so issues without
@@ -168,11 +164,11 @@ func (p *Provider) DefaultStatusMap() map[string]string {
 // this map keys on the human label.
 func (p *Provider) DefaultPriorityMap() map[string]string {
 	return map[string]string{
-		"urgent":      "high",
+		"urgent":      "urgent",
 		"high":        "high",
 		"medium":      "medium",
 		"low":         "low",
-		"no priority": "low",
+		"no priority": "",
 	}
 }
 
@@ -827,10 +823,13 @@ func (p *Provider) fetchProjects(ctx context.Context, tok string) ([]linearProje
 	return out, nil
 }
 
+// teamIssuesQuery stays under Linear's 10,000-point complexity cap: each
+// connection costs its page size times what it asks for, so 100 issues with
+// 100 comments each (as it was) was refused outright.
 const teamIssuesQuery = `
 query ($teamId: String!, $cursor: String) {
   team(id: $teamId) {
-    issues(first: 100, after: $cursor, includeArchived: true) {
+    issues(first: 50, after: $cursor, includeArchived: true) {
       nodes {
         id identifier title description url
         priority priorityLabel
@@ -842,14 +841,16 @@ query ($teamId: String!, $cursor: String) {
         parent   { id }
         team     { id }
         project  { id }
-        labels(first: 50) { nodes { name } }
-        comments(first: 100) {
+        estimate
+        labels(first: 20) { nodes { name } }
+        inverseRelations(first: 20) { nodes { type issue { id } } }
+        comments(first: 50) {
           nodes {
             id body createdAt
             user { id }
           }
         }
-        attachments(first: 50) {
+        attachments(first: 20) {
           nodes {
             id title url subtitle metadata
           }
@@ -920,6 +921,15 @@ func (p *Provider) fetchTeamIssues(ctx context.Context, tok, teamID string) ([]l
 		Attachments struct {
 			Nodes []rawAttachment `json:"nodes"`
 		} `json:"attachments"`
+		Estimate         *float64 `json:"estimate"`
+		InverseRelations struct {
+			Nodes []struct {
+				Type  string `json:"type"`
+				Issue *struct {
+					ID string `json:"id"`
+				} `json:"issue"`
+			} `json:"nodes"`
+		} `json:"inverseRelations"`
 	}
 
 	out := []linearIssue{}
@@ -983,6 +993,13 @@ func (p *Provider) fetchTeamIssues(ctx context.Context, tok, teamID string) ([]l
 					iss.Labels = append(iss.Labels, l.Name)
 				}
 			}
+			// An inverse "blocks" relation is an issue that blocks this one.
+			for _, rel := range r.InverseRelations.Nodes {
+				if rel.Type == "blocks" && rel.Issue != nil && rel.Issue.ID != "" {
+					iss.BlockedBy = append(iss.BlockedBy, rel.Issue.ID)
+				}
+			}
+			iss.Estimate = r.Estimate
 			for _, c := range r.Comments.Nodes {
 				lc := linearComment{
 					ID:        c.ID,
@@ -1178,6 +1195,7 @@ func (p *Provider) issueToSourceTask(iss linearIssue, projectID string) importPr
 
 	return importProvider.SourceTask{
 		SourceID:        iss.ID,
+		SourceKey:       iss.Identifier, // ENG-123
 		ParentTaskID:    iss.ParentID,
 		ProjectSourceID: projectID,
 		Name:            truncate(iss.Title, 256),
@@ -1194,6 +1212,8 @@ func (p *Provider) issueToSourceTask(iss linearIssue, projectID string) importPr
 		Completed:       iss.CompletedAt != nil,
 		AttachmentRefs:  atts,
 		CommentCount:    len(iss.Comments),
+		Dependencies:    blockedBy(iss.BlockedBy),
+		Fields:          points(iss.Estimate),
 		Metadata: map[string]any{
 			"linear_url":        iss.URL,
 			"linear_identifier": iss.Identifier, // e.g. "ENG-123"
@@ -1201,6 +1221,22 @@ func (p *Provider) issueToSourceTask(iss linearIssue, projectID string) importPr
 			"linear_priority":   iss.Priority,
 		},
 	}
+}
+
+// points is an issue's estimate, which Linear counts in points.
+func points(estimate *float64) []importProvider.SourceFieldValue {
+	if estimate == nil {
+		return nil
+	}
+	return []importProvider.SourceFieldValue{importProvider.PointsValue(*estimate)}
+}
+
+func blockedBy(ids []string) []importProvider.SourceDependency {
+	var out []importProvider.SourceDependency
+	for _, id := range ids {
+		out = append(out, importProvider.SourceDependency{BlockerSourceID: id})
+	}
+	return out
 }
 
 // markdownToHTML converts the small subset of Markdown Linear emits
@@ -1293,6 +1329,8 @@ type linearIssue struct {
 	TeamID        string
 	ProjectID     string
 	Labels        []string
+	BlockedBy     []string // ids of the issues that block this one
+	Estimate      *float64 // points, as the team estimates
 	Comments      []linearComment
 	Attachments   []linearAttachment
 }

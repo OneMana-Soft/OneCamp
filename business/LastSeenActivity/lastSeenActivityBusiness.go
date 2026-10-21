@@ -49,17 +49,3 @@ func GetTotalUnreadActivityCount(ctx context.Context, userDgraphId string, userI
 
 	return
 }
-
-func GetLastSeenActivityByUserId(ctx context.Context, userID uuid.UUID) (lastSeenActivityTime time.Time, err error) {
-
-	lastSeenActivityTime, err = domain.GetLastSeenActivityByUserId(ctx, userID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetLastSeenActivityByUserId Failed to get last seen activity err: %+v",
-			err)
-		return
-	}
-
-	return
-}

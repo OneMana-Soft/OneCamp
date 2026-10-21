@@ -30,6 +30,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/SlackBridge"
 	authService "github.com/akashc777/OneCamp/services/Auth"
+	slackapi "github.com/akashc777/OneCamp/services/Slack"
 	"github.com/google/uuid"
 )
 
@@ -393,9 +394,9 @@ func noteDelivery(ctx context.Context, err error, slackChannelName string) {
 // PointAtSlackForTest sends Slack Web API calls to base (a local fake) and
 // returns the function that restores the real endpoint.
 func PointAtSlackForTest(base string) (restore func()) {
-	prev := slackAPIBase
-	slackAPIBase = base
-	return func() { slackAPIBase = prev }
+	prev := slackapi.Base
+	slackapi.Base = base
+	return func() { slackapi.Base = prev }
 }
 
 // ForgetStateForTest drops the cached configuration after a test writes the

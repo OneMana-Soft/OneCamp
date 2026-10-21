@@ -31,6 +31,8 @@ type Ledger interface {
 	Add(ctx context.Context, resourceKind, uuid string, who []Contributor)
 	// Drain is everyone added since the last Drain, and clears them.
 	Drain(ctx context.Context, resourceKind, uuid string) []Contributor
+	// Members is everyone added since the last Drain, left in place.
+	Members(ctx context.Context, resourceKind, uuid string) []Contributor
 }
 
 // Marks keeps when resources were last edited, for idle versions.
@@ -82,6 +84,37 @@ func (redisLedger) Add(ctx context.Context, kind, uuid string, who []Contributor
 	if _, err := pipe.Exec(ctx); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Snapshot ledger add %s failed: %v", key, err)
 	}
+}
+
+func (redisLedger) Members(ctx context.Context, kind, uuid string) []Contributor {
+	if redisInit.RedisClient == nil {
+		return nil
+	}
+	members, err := redisInit.RedisClient.SMembers(ctx, ledgerKey(kind, uuid)).Result()
+	if err != nil && err != redis.Nil {
+		helpers.LogErrorWithContext(ctx, "business/Snapshot ledger members %s failed: %v", ledgerKey(kind, uuid), err)
+		return nil
+	}
+	return decodeContributors(members)
+}
+
+// newAuthor is whether who brings someone the ledger since the last version
+// doesn't hold, while it holds someone: the author changed, so the version
+// before is theirs alone. Nobody in the ledger yet is no change.
+func newAuthor(since, who []Contributor) bool {
+	if len(since) == 0 {
+		return false
+	}
+	held := make(map[Contributor]bool, len(since))
+	for _, c := range since {
+		held[c] = true
+	}
+	for _, c := range who {
+		if (c.UserUUID != "" || c.AgentUUID != "") && !held[c] {
+			return true
+		}
+	}
+	return false
 }
 
 func (redisLedger) Drain(ctx context.Context, kind, uuid string) []Contributor {

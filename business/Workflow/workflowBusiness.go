@@ -3,10 +3,15 @@
 //
 // Design: a workflow is a saved rule, NOT a new runtime. Triggers ride the
 // existing workspace event bus (webhook.RegisterEventListener → "post.created"),
-// and actions reuse the proven AI executors (send_message, create_task), which
-// already re-check the acting user's permissions. So a workflow can never do
-// something its owner couldn't do by hand, and we add no parallel
-// delivery/queue machinery.
+// and actions go through the business layer as the rule's owner (tasks
+// through the Task Writer, posts through the bot), which checks the owner's
+// permissions on every write. So a workflow can never do something its owner
+// couldn't do by hand, and we add no parallel delivery/queue machinery.
+//
+// It is the one rules engine (design/projects-vs-asana-jira/PROGRAM.md §16):
+// a project's rules are workflows with a project, task triggers, conditions
+// read against the task (conditions.go), an otherwise branch, task actions
+// (taskActions.go), and a run row per run (runs.go).
 //
 // Loop safety: actions run under helpers.WithWorkflowGenerated(ctx); the event
 // dispatcher skips in-process listeners for such writes, so a "reply" action
@@ -23,12 +28,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	taskAdapter "github.com/akashc777/OneCamp/adapter/Task"
 	botpost "github.com/akashc777/OneCamp/business/BotPost"
-	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
+	taskWriter "github.com/akashc777/OneCamp/business/TaskWriter"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
-	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
@@ -63,6 +66,16 @@ type WorkflowAction struct {
 	Description string `json:"description,omitempty"`
 	// flag_to_channel: the review channel the flagged message is routed to.
 	TargetChannelID string `json:"target_channel_id,omitempty"`
+	// set_status: a built-in key or the project's own status's id.
+	Status string `json:"status,omitempty"`
+	// assign: how (taskActions.go Assign*); UserIDs is the person or the pool.
+	Assign string `json:"assign,omitempty"`
+	// assign's people, or notify's.
+	UserIDs []string `json:"user_ids,omitempty"`
+	// set_due: days from today; nil clears the due date.
+	DueInDays *int `json:"due_in_days,omitempty"`
+	// notify: whom (taskActions.go Notify*).
+	Notify string `json:"notify,omitempty"`
 }
 
 // compiledWorkflow is the cached, ready-to-match form of a workflow row.
@@ -74,11 +87,20 @@ type compiledWorkflow struct {
 	botName     string // per-workflow bot label override; "" → fall back to name
 	channelID   string // "" = any channel
 	// task_status_changed only (see taskStatusTrigger.go): which moves count.
-	taskMove  taskStatusBusiness.MoveFilter
-	matchType string
-	keywords  []string
-	regexes   []*regexp.Regexp
-	actions   []WorkflowAction
+	taskMove taskStatusBusiness.MoveFilter
+	// task_field_changed only: which fields count ("" all).
+	fields []string
+	// A project rule's project ("" for a workspace workflow).
+	projectID string
+	// loc is the rule's zone (trigger_config "tz", saved from the browser of
+	// whoever set it; UTC when it has none): where its due dates are days.
+	loc         *time.Location
+	conditions  Conditions
+	elseActions []WorkflowAction
+	matchType   string
+	keywords    []string
+	regexes     []*regexp.Regexp
+	actions     []WorkflowAction
 }
 
 // triggerEvent is the normalized context an event delivers to a workflow's
@@ -92,6 +114,19 @@ type triggerEvent struct {
 	postUUID       string            // triggering post id (message_posted) for moderation
 	targetUserUUID string            // the user an ephemeral reply targets
 	vars           map[string]string // template substitutions for reply text
+	taskID         string            // the task a task trigger is about
+	eventKey       string            // what makes this event's run one run (runs.go)
+}
+
+// subjectID is what a run acted on, for its history.
+func (ev triggerEvent) subjectID() string {
+	switch {
+	case ev.taskID != "":
+		return ev.taskID
+	case ev.postUUID != "":
+		return ev.postUUID
+	}
+	return ev.channelID
 }
 
 // registry caches active workflows per trigger type for the hot match path,
@@ -145,6 +180,9 @@ var engineTriggers = []string{
 	// editor offered it and saving one failed ("not available yet").
 	workflowModel.TriggerMeetingEnded,
 	workflowModel.TriggerTaskStatusChanged,
+	workflowModel.TriggerTaskCreated,
+	workflowModel.TriggerTaskAssigned,
+	workflowModel.TriggerTaskFieldChanged,
 }
 
 // IsEngineTrigger reports whether a trigger type is actively evaluated by the
@@ -217,10 +255,8 @@ func compile(w *workflowModel.Workflow) (*compiledWorkflow, error) {
 		if kw == "" {
 			continue
 		}
-		// Word-boundary, case-insensitive — same convention as outgoing webhook
-		// trigger words.
-		re, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(kw) + `\b`)
-		if err == nil {
+		// The one keyword rule (helpers.KeywordPattern): word-boundary, any case.
+		if re := helpers.KeywordPattern(kw); re != nil {
 			regexes = append(regexes, re)
 		}
 	}
@@ -245,9 +281,50 @@ func compile(w *workflowModel.Workflow) (*compiledWorkflow, error) {
 			return nil, fmt.Errorf("bad trigger config json: %w", err)
 		}
 	}
+	var fieldCfg struct {
+		Fields []string `json:"fields"`
+	}
+	if w.TriggerType == workflowModel.TriggerTaskFieldChanged && strings.TrimSpace(w.TriggerConfig) != "" {
+		if err := json.Unmarshal([]byte(w.TriggerConfig), &fieldCfg); err != nil {
+			return nil, fmt.Errorf("bad trigger config json: %w", err)
+		}
+	}
+	var conds Conditions
+	if strings.TrimSpace(w.Conditions) != "" {
+		if err := json.Unmarshal([]byte(w.Conditions), &conds); err != nil {
+			return nil, fmt.Errorf("bad conditions json: %w", err)
+		}
+	}
+	var elseActions []WorkflowAction
+	if strings.TrimSpace(w.ElseActions) != "" {
+		if err := json.Unmarshal([]byte(w.ElseActions), &elseActions); err != nil {
+			return nil, fmt.Errorf("bad else actions json: %w", err)
+		}
+	}
+	projectID := ""
+	if w.ProjectId != nil {
+		projectID = w.ProjectId.String()
+	}
+	var cfg map[string]interface{}
+	if strings.TrimSpace(w.TriggerConfig) != "" {
+		if err := json.Unmarshal([]byte(w.TriggerConfig), &cfg); err != nil {
+			return nil, fmt.Errorf("bad trigger config json: %w", err)
+		}
+	}
+	loc := time.UTC
+	if tz, _ := cfg["tz"].(string); tz != "" {
+		if l, err := zoneNamed(tz); err == nil {
+			loc = l
+		}
+	}
 
 	return &compiledWorkflow{
+		loc:         loc,
 		taskMove:    move,
+		fields:      fieldCfg.Fields,
+		projectID:   projectID,
+		conditions:  conds,
+		elseActions: elseActions,
 		id:          w.Id,
 		name:        w.Name,
 		createdBy:   w.CreatedBy.String(),
@@ -273,7 +350,13 @@ func handleEvent(ctx context.Context, eventType string, data map[string]interfac
 	case "meeting.ended":
 		handleMeetingEnded(ctx, data)
 	case "task.status_changed":
-		handleTaskStatusChanged(ctx, data)
+		handleTaskEvent(ctx, workflowModel.TriggerTaskStatusChanged, data)
+	case "task.created":
+		handleTaskEvent(ctx, workflowModel.TriggerTaskCreated, data)
+	case "task.assigned":
+		handleTaskEvent(ctx, workflowModel.TriggerTaskAssigned, data)
+	case "task.changed":
+		handleTaskEvent(ctx, workflowModel.TriggerTaskFieldChanged, data)
 	}
 }
 
@@ -297,6 +380,7 @@ func handleMessagePosted(ctx context.Context, data map[string]interface{}) {
 			continue
 		}
 		runWorkflow(ctx, cw, triggerEvent{
+			eventKey:       eventKey(workflowModel.TriggerMessagePosted, data),
 			channelID:      channelID,
 			text:           text,
 			postUUID:       postID,
@@ -339,6 +423,7 @@ func handleUserJoinedChannel(ctx context.Context, data map[string]interface{}) {
 			continue
 		}
 		runWorkflow(ctx, cw, triggerEvent{
+			eventKey:       eventKey(workflowModel.TriggerUserJoinedChannel, data),
 			channelID:      channelID,
 			targetUserUUID: userID,
 			vars: map[string]string{
@@ -372,52 +457,18 @@ func (cw *compiledWorkflow) matches(lowerText string) bool {
 	return false
 }
 
-// runWorkflow executes a matched workflow's actions as its owner, then records
-// the run outcome. Actions run under a workflow-generated context so they don't
-// re-trigger workflows. An event from a channel or project its owner can't see
-// is skipped before any of them (see access.go), and isn't a run.
-func runWorkflow(ctx context.Context, cw *compiledWorkflow, ev triggerEvent) {
-	if !access.allows(ctx, cw.createdBy, ev) {
-		return
-	}
-	actionCtx := helpers.WithWorkflowGenerated(ctx)
-
-	n := len(cw.actions)
-	if n > MaxActionsPerWorkflow {
-		n = MaxActionsPerWorkflow
-	}
-
-	var firstErr error
-	for i := 0; i < n; i++ {
-		act := cw.actions[i]
-		if err := cw.runAction(actionCtx, act, ev); err != nil {
-			helpers.LogErrorWithContext(ctx, "Workflow %s action %q failed: %v", cw.id, act.Type, err)
-			if firstErr == nil {
-				firstErr = err
-			}
-		}
-	}
-
-	errMsg := ""
-	if firstErr != nil {
-		errMsg = firstErr.Error()
-	}
-	if err := workflowModel.RecordRun(ctx, cw.id, time.Now(), errMsg); err != nil {
-		helpers.LogErrorWithContext(ctx, "Workflow %s RecordRun err: %v", cw.id, err)
-	}
-}
-
 // runAction dispatches a single action. Channel-targeted actions resolve their
 // channel from the trigger event.
-func (cw *compiledWorkflow) runAction(ctx context.Context, act WorkflowAction, ev triggerEvent) error {
+// It answers what the action made (a post, a task), if anything.
+func (cw *compiledWorkflow) runAction(ctx context.Context, act WorkflowAction, ev triggerEvent, rc *runCtx) (string, error) {
 	switch act.Type {
 	case ActionReply:
 		text := applyVars(strings.TrimSpace(act.Text), ev.vars)
 		if text == "" {
-			return fmt.Errorf("reply action has empty text")
+			return "", fmt.Errorf("reply action has empty text")
 		}
 		if ev.channelID == "" {
-			return fmt.Errorf("reply action: no channel in trigger context")
+			return "", fmt.Errorf("reply action: no channel in trigger context")
 		}
 		// Post AS the shared automation bot, badged with this workflow's label
 		// (its bot_name override, falling back to the workflow name) so members
@@ -431,38 +482,38 @@ func (cw *compiledWorkflow) runAction(ctx context.Context, act WorkflowAction, e
 		}
 		chUUID, perr := uuid.Parse(ev.channelID)
 		if perr != nil {
-			return fmt.Errorf("reply action: invalid channel id %q: %w", ev.channelID, perr)
+			return "", fmt.Errorf("reply action: invalid channel id %q: %w", ev.channelID, perr)
 		}
 		_, err := botpost.PostToChannel(ctx, chUUID, text, label)
-		return err
+		return "", err
 
 	case ActionReplyEphemeral:
 		text := applyVars(strings.TrimSpace(act.Text), ev.vars)
 		if text == "" {
-			return fmt.Errorf("reply_ephemeral action has empty text")
+			return "", fmt.Errorf("reply_ephemeral action has empty text")
 		}
 		if ev.targetUserUUID == "" {
 			// No identifiable recipient (e.g. an anonymous/system event) — an
 			// ephemeral message has no audience, so skip rather than error.
-			return fmt.Errorf("reply_ephemeral action: no target user in trigger context")
+			return "", fmt.Errorf("reply_ephemeral action: no target user in trigger context")
 		}
 		label := cw.botName
 		if label == "" {
 			label = cw.name
 		}
-		return botpost.PostEphemeralToUser(ctx, ev.targetUserUUID, text, label)
+		return "", botpost.PostEphemeralToUser(ctx, ev.targetUserUUID, text, label)
 
 	case ActionCreateTask:
-		if strings.TrimSpace(act.ProjectID) == "" {
-			return fmt.Errorf("create_task action requires project_id")
+		projectID, err := uuid.Parse(strings.TrimSpace(act.ProjectID))
+		if err != nil {
+			return "", fmt.Errorf("create_task action requires project_id")
 		}
 		taskName := strings.TrimSpace(act.TaskName)
 		if taskName == "" {
 			// Default the task name to the triggering message (trimmed).
 			taskName = ev.text
 		}
-		taskName = applyVars(taskName, ev.vars)
-		taskName = truncate(taskName, 200)
+		taskName = truncate(applyVars(taskName, ev.vars), 200)
 		if strings.TrimSpace(taskName) == "" {
 			taskName = "Workflow task"
 		}
@@ -470,23 +521,37 @@ func (cw *compiledWorkflow) runAction(ctx context.Context, act WorkflowAction, e
 		if priority == "" {
 			priority = "medium"
 		}
-		return workflowCreateTask(ctx, cw.createdBy, act.ProjectID, taskName, applyVars(act.Description, ev.vars), priority)
+		// As the rule's owner, through the Task Writer: the same check as
+		// making it by hand, on both editions.
+		var owner *userModels.UserInfo
+		if rc != nil {
+			owner = rc.owner
+		} else if owner, err = loadActor(ctx, cw.createdBy); err != nil {
+			return "", fmt.Errorf("the rule's owner can't act any more")
+		}
+		id, err := makeTask(ctx, owner, projectID, taskWriter.NewTask{
+			Name: taskName, Description: applyVars(act.Description, ev.vars), Priority: priority,
+		})
+		if err != nil {
+			return "", err
+		}
+		return id.String(), nil
 
 	case ActionWarnUser:
 		// Private moderation notice to the message author. Ephemeral: it never
 		// touches channel history. No-op (not an error) when there's no author.
 		text := applyVars(strings.TrimSpace(act.Text), ev.vars)
 		if text == "" {
-			return fmt.Errorf("warn_user action has empty text")
+			return "", fmt.Errorf("warn_user action has empty text")
 		}
 		if ev.targetUserUUID == "" {
-			return fmt.Errorf("warn_user action: no target user in trigger context")
+			return "", fmt.Errorf("warn_user action: no target user in trigger context")
 		}
 		label := cw.botName
 		if label == "" {
 			label = cw.name
 		}
-		return botpost.PostEphemeralToUser(ctx, ev.targetUserUUID, text, label)
+		return "", botpost.PostEphemeralToUser(ctx, ev.targetUserUUID, text, label)
 
 	case ActionDeleteMessage:
 		// Moderation: remove the triggering message. Only meaningful for the
@@ -495,24 +560,24 @@ func (cw *compiledWorkflow) runAction(ctx context.Context, act WorkflowAction, e
 		// channel at execution time — owning a workflow never grants deletion
 		// rights a person doesn't already have.
 		if ev.postUUID == "" {
-			return fmt.Errorf("delete_message action: no message in trigger context")
+			return "", fmt.Errorf("delete_message action: no message in trigger context")
 		}
 		if ev.channelID == "" {
-			return fmt.Errorf("delete_message action: no channel in trigger context")
+			return "", fmt.Errorf("delete_message action: no channel in trigger context")
 		}
-		return cw.moderateDeleteMessage(ctx, ev.postUUID, ev.channelID)
+		return "", cw.moderateDeleteMessage(ctx, ev.postUUID, ev.channelID)
 
 	case ActionFlagToChannel:
 		// Moderation: route a copy + link of the flagged message to a review
 		// channel, posted as the bot. The workflow owner must have access to
 		// the target review channel (checked in the helper).
 		if strings.TrimSpace(act.TargetChannelID) == "" {
-			return fmt.Errorf("flag_to_channel action requires target_channel_id")
+			return "", fmt.Errorf("flag_to_channel action requires target_channel_id")
 		}
-		return cw.moderateFlagToChannel(ctx, act.TargetChannelID, ev)
+		return "", cw.moderateFlagToChannel(ctx, act.TargetChannelID, ev)
 
 	default:
-		return fmt.Errorf("unknown action type %q", act.Type)
+		return "", fmt.Errorf("unknown action type %q", act.Type)
 	}
 }
 
@@ -541,56 +606,6 @@ func truncate(s string, max int) string {
 		cut--
 	}
 	return s[:cut]
-}
-
-func workflowCreateTask(ctx context.Context, creatorUUID, projectUUID, taskName, description, priority string) error {
-	parsedCreatorUUID, err := uuid.Parse(creatorUUID)
-	if err != nil {
-		return fmt.Errorf("invalid creator UUID: %w", err)
-	}
-	postgresUser, err := userDomain.GetActiveUserWithAdminFlagByUserUUID(ctx, parsedCreatorUUID)
-	if err != nil {
-		return fmt.Errorf("failed to get postgres user: %w", err)
-	}
-	if postgresUser == nil {
-		return fmt.Errorf("user not found in postgres: %s", creatorUUID)
-	}
-	dgraphUser, err := userDomain.GetDgraphUserInfoByUUID(ctx, creatorUUID)
-	if err != nil {
-		return fmt.Errorf("failed to look up dgraph user: %w", err)
-	}
-	if dgraphUser == nil {
-		return fmt.Errorf("user not found in dgraph: %s", creatorUUID)
-	}
-	userInfo := &userModels.UserInfo{
-		UserPostgresInfo: *postgresUser,
-		UserDgraphInfo:   *dgraphUser,
-	}
-	projectParsedUUID, err := uuid.Parse(projectUUID)
-	if err != nil {
-		return fmt.Errorf("invalid project UUID: %w", err)
-	}
-	dgraphProject, err := projectDomain.GetDgraphProjectInfoByUUID(ctx, projectUUID, userInfo.UserDgraphInfo.Uid)
-	if err != nil {
-		return fmt.Errorf("failed to look up project: %w", err)
-	}
-	if dgraphProject == nil {
-		return fmt.Errorf("project not found or you don't have access")
-	}
-	if dgraphProject.IsProjectAdmin == 0 {
-		return fmt.Errorf("you must be an admin of project '%s' to create tasks", dgraphProject.Name)
-	}
-	taskInput := taskAdapter.CreateOrUpdateTaskInput{
-		TaskName:        taskName,
-		TaskDescription: description,
-		Priority:        priority,
-		Status:          "todo",
-	}
-	_, err = taskBusiness.CreateTask(ctx, projectParsedUUID, userInfo, dgraphProject, nil, taskInput, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create task: %w", err)
-	}
-	return nil
 }
 
 // handleMeetingEnded runs meeting_ended workflows for the surface a finished
@@ -627,6 +642,7 @@ func handleMeetingEnded(ctx context.Context, data map[string]interface{}) {
 			continue
 		}
 		runWorkflow(ctx, cw, triggerEvent{
+			eventKey:  eventKey(workflowModel.TriggerMeetingEnded, data),
 			channelID: channelID,
 			vars: map[string]string{
 				"channel": channelID,

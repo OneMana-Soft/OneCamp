@@ -32,7 +32,7 @@ type followInput struct {
 func subject(w http.ResponseWriter, r *http.Request) (accessBusiness.Subject, bool) {
 	_, who := accessBusiness.RequestSubject(r)
 	if who.UserUID == "" {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return accessBusiness.Subject{}, false
 	}
 	return who, true
@@ -104,7 +104,7 @@ func ListPolicies(w http.ResponseWriter, r *http.Request) {
 func SetPolicy(w http.ResponseWriter, r *http.Request) {
 	u, ok := userModels.FromContext(r.Context())
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	var in struct {

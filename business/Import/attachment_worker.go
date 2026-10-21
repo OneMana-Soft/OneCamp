@@ -118,7 +118,7 @@ func processAttachmentChunk(ctx context.Context, prov importProvider.Provider,
 		fetchErr  error
 	)
 	doneCh := make(chan struct{})
-	go func() {
+	helpers.GoSafeNamed("business/Import/attachment_worker:processAttachmentChunk", func() {
 		defer close(doneCh)
 		fetchMime, fetchSize, fetchErr = prov.FetchAttachment(ctx, job, opts, att, pw)
 		// Always close (or close-with-error) so PutObject's read side
@@ -129,7 +129,7 @@ func processAttachmentChunk(ctx context.Context, prov importProvider.Provider,
 		} else {
 			_ = pw.Close()
 		}
-	}()
+	})
 
 	contentType := meta.Mime
 	if contentType == "" {

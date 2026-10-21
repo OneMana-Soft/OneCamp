@@ -219,9 +219,3 @@ func Disconnect(ctx context.Context, userUUID uuid.UUID, provider string) error 
 func invalidateBriefingDayCache(ctx context.Context, userUUID uuid.UUID) {
 	_ = redisStore.Delete(ctx, registry.ConnectorBriefingDay, []string{userUUID.String()})
 }
-
-// GetProvider returns a provider definition by id.
-func GetProvider(id string) (Provider, bool) {
-	p, ok := providerRegistry[id]
-	return p, ok
-}

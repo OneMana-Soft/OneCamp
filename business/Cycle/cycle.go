@@ -239,6 +239,9 @@ func nextCycle(c *cycleModel.Cycle, by uuid.UUID) (*cycleModel.Cycle, error) {
 	return n, err
 }
 
+// tasksInProjectCycles is a seam for tests.
+var tasksInProjectCycles = cycleModel.TasksInProjectCycles
+
 // FilterClause narrows a project's task list to the tasks in the given
 // cycles ("none" for tasks in no cycle is not offered). The ids come from the
 // person; anything not a cycle of this project matches nothing.
@@ -247,24 +250,16 @@ func FilterClause(project string, ids []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	var tasks []string
+	var cycles []uuid.UUID
 	for _, raw := range ids {
-		id, err := uuid.Parse(raw)
-		if err != nil {
-			continue
+		if id, err := uuid.Parse(raw); err == nil {
+			cycles = append(cycles, id)
 		}
-		c, err := cycleModel.Get(id)
-		if err != nil {
-			return "", err
-		}
-		if c == nil || c.ProjectUUID != pid {
-			continue
-		}
-		ts, err := cycleModel.TasksIn(id)
-		if err != nil {
-			return "", err
-		}
-		tasks = append(tasks, ts...)
+	}
+	// One statement however many cycles (PR1, #15).
+	tasks, err := tasksInProjectCycles(pid, cycles)
+	if err != nil {
+		return "", err
 	}
 	if len(tasks) == 0 {
 		return `eq(task_uuid, "00000000-0000-0000-0000-000000000000")`, nil

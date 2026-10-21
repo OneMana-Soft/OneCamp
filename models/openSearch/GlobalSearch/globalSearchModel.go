@@ -8,6 +8,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
@@ -23,6 +24,15 @@ type customSearchResp struct {
 }
 
 func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, query string) (searchInfo []*openSearchStruct.GlobalSearchOpenSearchResp, err error) {
+	// Restricted tasks the reader may not see, with their comments and files,
+	// are in no answer and no count (models/taskread).
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if query, err = tr.SearchWithout(query, "task_id", "comment_task_id", "attachment_task_id"); err != nil {
+		return nil, err
+	}
 
 	var resp customSearchResp
 	_, err = opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{

@@ -46,7 +46,7 @@ func isWorkspaceSpeaker(ctx context.Context, identity string) bool {
 	if ok, hit := speakers.Get(identity); hit {
 		return ok
 	}
-	u, err := activeMember(ctx, identity)
+	u, err := ActiveMember(ctx, identity)
 	if err != nil {
 		return false
 	}

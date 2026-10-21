@@ -15,7 +15,6 @@ import (
 	business "github.com/akashc777/OneCamp/business/Post"
 	reactionBusiness "github.com/akashc777/OneCamp/business/Reaction"
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
-	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	channelDgraphModels "github.com/akashc777/OneCamp/models/dgraph/Channel"
@@ -124,17 +123,11 @@ func DeletePostCommentReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.DeleteReactionOnCommentPost(ctx, commentInfo, reactionDgraph.Uid)
+	err = business.DeleteReactionOnCommentPost(ctx, commentInfo, reactionDgraph.Uid, userInfo.UserDgraphInfo.Uid)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/DeletePostCommentReaction Failed to delete post on the comment req err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse the body of the req",
-			"err": err,
-		})
+		status, msg := reactionBusiness.Answer(err, "Couldn't remove the reaction. Try again.")
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
 
@@ -190,17 +183,11 @@ func DeletePostReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.DeletePostReaction(ctx, postInfo.Uid, reactionDgraphInfo.Uid, postInfo.PostBy.Uid, userInfo.UserDgraphInfo.Uid, postInfo.Uuid, userInfo.UserDgraphInfo.Uuid, postInfo.Channel.Uuid)
+	err = business.DeletePostReaction(ctx, postInfo.Uuid, reactionDgraphInfo.Uid, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid, postInfo.Channel.Uuid)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/DeletePostReaction Failed to parse the body of the req err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse the body of the req",
-			"err": err,
-		})
+		status, msg := reactionBusiness.Answer(err, "Couldn't remove the reaction. Try again.")
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
 
@@ -269,14 +256,17 @@ func CreateOrUpdateReactionOnCommentPost(w http.ResponseWriter, r *http.Request)
 	}
 
 	if err != nil || commentPostReactionInfo.ReactionDgraphUid == "" {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateOrUpdateReactionOnCommentPost Failed to create/update reaction on post comment req err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse the body of the req",
-			"err": err,
-		})
+		// A write that answered no node made none: a failure, not a reaction.
+		if err == nil {
+			err = errors.New("the reaction was not written")
+		}
+		if _, refused := reactionBusiness.AsRefusal(err); !refused {
+			helpers.LogErrorWithContext(ctx,
+				"controllers/CreateOrUpdateReactionOnCommentPost Failed to create/update reaction on post comment err: %+v",
+				err)
+		}
+		status, msg := reactionBusiness.Answer(err, "Couldn't add the reaction. Try again.")
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
 
@@ -344,14 +334,8 @@ func CreateOrUpdateReaction(w http.ResponseWriter, r *http.Request) {
 	postReactionInfo.ReactionDgraphUid, err = business.CreateOrUpdatePostReaction(ctx, &postReactionInfo, postInfo.PostBy.Uid, postInfo.PostBy.Uuid, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.DisplayName(), postInfo.Channel.Uuid)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateOrUpdateReaction Failed to update reaction err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to update reaction",
-			"err": err,
-		})
+		status, msg := reactionBusiness.Answer(err, "Couldn't add the reaction. Try again.")
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
 
@@ -430,27 +414,9 @@ func UpdatePost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// get mentions
-	mentions, err := helpers.GetMentions(postInfo.HTMLText)
+	mentionsDgraphUsersList, err := sendBusiness.Mentions(ctx, &userInfo, sendBusiness.Where{Channel: dgraphPost.Channel, Before: dgraphPost.Text}, &postInfo.HTMLText)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/UpdatePost Failed to get post mentions err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get post mentions",
-			"err": err,
-		})
-		return
-	}
-
-	mentionsDgraphUsersList, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, mentions)
-
-	if len(mentionsDgraphUsersList) != len(mentions) {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Got unregistered users in mentions",
-			"err": err,
-		})
+		writeSendError(w, err)
 		return
 	}
 
@@ -609,27 +575,9 @@ func UpdateCommentInPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mentions, err := helpers.GetMentions(commentInfo.HTMLText)
+	mentionsDgraphUsersList, err := sendBusiness.Mentions(ctx, &userInfo, sendBusiness.Where{Channel: dgraphComment.Post.Channel, Thread: true}, &commentInfo.HTMLText)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/UpdateCommentInPost Failed to get post mentions err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get post mentions",
-			"err": err,
-		})
-		return
-	}
-
-	mentionsDgraphUsersList, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, mentions)
-
-	if len(mentionsDgraphUsersList) != len(mentions) {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Got unregistered users in mentions",
-			"err": err,
-		})
+		writeSendError(w, err)
 		return
 	}
 
@@ -699,27 +647,9 @@ func CreateCommentInPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mentions, err := helpers.GetMentions(commentInfo.HTMLText)
+	mentionsDgraphUsersList, err := sendBusiness.Mentions(ctx, &userInfo, sendBusiness.Where{Channel: dgraphPost.Channel, Thread: true}, &commentInfo.HTMLText)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/AddCommentToPost Failed to get post mentions err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get post mentions",
-			"err": err,
-		})
-		return
-	}
-
-	mentionsDgraphUsersList, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, mentions)
-
-	if len(mentionsDgraphUsersList) != len(mentions) {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Got unregistered users in mentions",
-			"err": err,
-		})
+		writeSendError(w, err)
 		return
 	}
 
@@ -730,7 +660,8 @@ func CreateCommentInPost(w http.ResponseWriter, r *http.Request) {
 	// are asked before anything is written, so a refusal sends nothing.
 	var alsoPost *sendBusiness.ChannelPost
 	if commentInfo.AlsoSendToChannel && strings.TrimSpace(commentInfo.HTMLText) != "" {
-		alsoPost, err = sendBusiness.PrepareChannelPost(ctx, &userInfo, &adapter.InputCreateOrUpdatePostInfo{
+		// The reply tells the people it mentions; the copy doesn't again.
+		alsoPost, err = sendBusiness.PrepareReplyCopy(ctx, &userInfo, &adapter.InputCreateOrUpdatePostInfo{
 			HTMLText:    commentInfo.HTMLText,
 			MediaObj:    commentInfo.MediaObj,
 			ChannelUuid: dgraphPost.Channel.Uuid,
@@ -739,8 +670,6 @@ func CreateCommentInPost(w http.ResponseWriter, r *http.Request) {
 			writeSendError(w, err)
 			return
 		}
-		// The reply tells the people it mentions; the copy doesn't again.
-		alsoPost = alsoPost.WithoutMentions()
 	}
 
 	createdCommentData, err := business.CreatePostComment(ctx, &commentInfo, &userInfo, mentionsDgraphUsersList, dgraphPost)

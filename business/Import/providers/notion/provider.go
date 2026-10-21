@@ -697,6 +697,10 @@ type notionRichText struct {
 		Page *struct {
 			ID string `json:"id"`
 		} `json:"page,omitempty"`
+		// Date is a date mention: its start (a day, or a day and time).
+		Date *struct {
+			Start string `json:"start"`
+		} `json:"date,omitempty"`
 	} `json:"mention,omitempty"`
 	Equation *struct {
 		Expression string `json:"expression"`
@@ -754,6 +758,10 @@ type notionBlock struct {
 	LinkPreview *notionURLBox  `json:"link_preview,omitempty"`
 	Video       *notionFileBox `json:"video,omitempty"`
 	Audio       *notionFileBox `json:"audio,omitempty"`
+	// Column is a column of a column list: its share of the row's width.
+	Column *struct {
+		WidthRatio float64 `json:"width_ratio"`
+	} `json:"column,omitempty"`
 }
 
 // notionTitleBox is a child page's or a child database's block: its title.

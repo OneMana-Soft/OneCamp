@@ -76,16 +76,18 @@ func CreateBoard(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, in
 
 	// Index in OpenSearch for global search (async, best-effort). The creator
 	// is also the sole editor at creation time.
-	go openSearchBoardModels.CreateBoardInOpenSearch(context.Background(), &openSearchStruct.OpenSearchBoard{
-		Uuid:                   newBoardUUID.String(),
-		BoardTitle:             title,
-		BoardCreatedByUserUuid: createdByUser.Uuid,
-		BoardCreatedByFullName: createdByUser.DisplayName(),
-		BoardCreatedByProfile:  createdByUser.ProfileKey,
-		BoardPrivate:           isPrivate,
-		BoardEditingUsers:      []string{createdByUser.Uuid},
-		BoardCreatedAt:         currentTime.Unix(),
-		BoardUpdatedAt:         currentTime.Unix(),
+	helpers.GoSafeNamed("openSearchBoardModels.CreateBoardInOpenSearch", func() {
+		openSearchBoardModels.CreateBoardInOpenSearch(context.Background(), &openSearchStruct.OpenSearchBoard{
+			Uuid:                   newBoardUUID.String(),
+			BoardTitle:             title,
+			BoardCreatedByUserUuid: createdByUser.Uuid,
+			BoardCreatedByFullName: createdByUser.DisplayName(),
+			BoardCreatedByProfile:  createdByUser.ProfileKey,
+			BoardPrivate:           isPrivate,
+			BoardEditingUsers:      []string{createdByUser.Uuid},
+			BoardCreatedAt:         currentTime.Unix(),
+			BoardUpdatedAt:         currentTime.Unix(),
+		})
 	})
 
 	return
@@ -218,7 +220,9 @@ func UpdateBoardFromCollab(ctx context.Context, input *adapter.InputBoardCollabU
 
 	// Evaluate/capture a snapshot off the persist path (version history +
 	// mass-delete recovery). Never blocks or fails the persist.
-	go MaybeSnapshotBoard(context.Background(), input.BoardUuid, oldState, oldSnippet, input.State, input.Snippet, input.Contributors)
+	helpers.GoSafeNamed("MaybeSnapshotBoard", func() {
+		MaybeSnapshotBoard(context.Background(), input.BoardUuid, oldState, oldSnippet, input.State, input.Snippet, input.Contributors)
+	})
 	return
 }
 
@@ -249,13 +253,15 @@ func DeleteBoard(ctx context.Context, boardUUID string) (err error) {
 		[]string{"comments"},
 		"cascade",
 	)
-	go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
-		[]string{"board_uuid"},
-		boardUUID,
-		currentTime.Unix(),
-		[]string{"ai_embeddings"},
-		"cascade",
-	)
+	helpers.GoSafeNamed("globalSearchDomain.SyncCascadingDeletionInOpenSearch", func() {
+		globalSearchDomain.SyncCascadingDeletionInOpenSearch(
+			[]string{"board_uuid"},
+			boardUUID,
+			currentTime.Unix(),
+			[]string{"ai_embeddings"},
+			"cascade",
+		)
+	})
 	return
 }
 
@@ -308,7 +314,7 @@ func UpdateBoardPermissions(ctx context.Context, input adapter.InputUpdateBoardP
 
 	// Sync the search index's access lists so shared boards are findable by the
 	// right people (and removed users stop seeing them in search).
-	go func() {
+	helpers.GoSafeNamed("business/Board/boardBusiness:UpdateBoardPermissions", func() {
 		perms, perr := domain.GetBoardPermissions(context.Background(), input.BoardId)
 		if perr != nil || perms == nil {
 			return
@@ -332,7 +338,7 @@ func UpdateBoardPermissions(ctx context.Context, input adapter.InputUpdateBoardP
 		})
 		// And its comments' entries, which carry a copy of its sharing.
 		syncBoardCommentSearch(context.Background(), input.BoardId, perms)
-	}()
+	})
 	return nil
 }
 
@@ -513,7 +519,9 @@ func SyncBoardComment(ctx context.Context, createdByUser *dgraphStruct.DgraphUse
 	// Realtime activity: a MENTION for each mentioned user, and a COMMENT for the
 	// board owner. Only when this call carried mentions.
 	if len(resolvedUsers) > 0 {
-		go publishBoardCommentActivity(createdByUser, board, commentUUID, commentText, currentTime, resolvedUsers, seen)
+		helpers.GoSafeNamed("publishBoardCommentActivity", func() {
+			publishBoardCommentActivity(createdByUser, board, commentUUID, commentText, currentTime, resolvedUsers, seen)
+		})
 	}
 
 	return nil

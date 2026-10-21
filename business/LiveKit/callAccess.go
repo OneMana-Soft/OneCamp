@@ -17,11 +17,12 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
+	"github.com/google/uuid"
 )
 
-// activeMember answers the member a graph uid names, or nil for anyone who is
-// not (any more) a member of this workspace.
-func activeMember(ctx context.Context, uid string) (*dgraphStruct.DgraphUser, error) {
+// ActiveMember answers the member a graph uid (a member's call identity)
+// names, or nil for anyone who is not (any more) a member of this workspace.
+func ActiveMember(ctx context.Context, uid string) (*dgraphStruct.DgraphUser, error) {
 	if !helpers.IsDgraphUID(uid) {
 		return nil, nil
 	}
@@ -40,7 +41,7 @@ func activeMember(ctx context.Context, uid string) (*dgraphStruct.DgraphUser, er
 // the two people in the DM, a member of the group. An instant meeting belongs
 // to no conversation, so the answer there is no.
 func MayOpenConversation(ctx context.Context, roomName, uid string) (bool, error) {
-	u, err := activeMember(ctx, uid)
+	u, err := ActiveMember(ctx, uid)
 	if err != nil || u == nil {
 		return false, err
 	}
@@ -77,7 +78,7 @@ func conversationMember(ctx context.Context, roomName string, u *dgraphStruct.Dg
 // now: someone who can open its conversation, or, in an instant meeting, the
 // person who started it (everyone else there is a guest).
 func MemberMayBeInCall(ctx context.Context, roomName, uid string) (bool, error) {
-	u, err := activeMember(ctx, uid)
+	u, err := ActiveMember(ctx, uid)
 	if err != nil || u == nil {
 		return false, err
 	}
@@ -95,12 +96,14 @@ func isMeetingHost(ctx context.Context, roomName string, u *dgraphStruct.DgraphU
 	return creator.String() == u.Uuid, nil
 }
 
-// MayRemoveFromCall reports whether someone may put others out of the call in
-// a room: in a channel, its moderators and the workspace's admins; in an
-// instant meeting, the person who started it. Nobody in a DM or a group: the
-// people there are all equals in the conversation, and anyone removed could
-// call straight back.
-func MayRemoveFromCall(ctx context.Context, roomName string, user *dgraphStruct.DgraphUser, workspaceAdmin bool) (bool, error) {
+// HostByRule reports whether someone runs the call in a room by who they are,
+// before anyone hands them the part: in a channel, its managers and the
+// workspace's admins; in an instant meeting, the person who started it.
+// Nobody in a DM or a group: the people there are all equals in the
+// conversation (D-CL-6), so none of them is a host and all of them may mute
+// one another (business/CallControl). workspaceAdmin is the person's admin
+// flag as their own session says it, never an API token's.
+func HostByRule(ctx context.Context, roomName string, user *dgraphStruct.DgraphUser, workspaceAdmin bool) (bool, error) {
 	if user == nil || user.Uid == "" {
 		return false, nil
 	}
@@ -125,4 +128,20 @@ func MayRemoveFromCall(ctx context.Context, roomName string, user *dgraphStruct.
 // (their graph uid), as opposed to a guest's or the agent's. Pure.
 func IsMemberIdentity(identity string) bool {
 	return helpers.IsDgraphUID(identity)
+}
+
+// IsWorkspaceAdmin reports whether a member (by their uuid) is one of the
+// workspace's admins now, as far as this call goes: an admin's powers never
+// reach a call an API token made (helpers.ActsThroughToken). Unknown, or a
+// database that doesn't answer, is no.
+func IsWorkspaceAdmin(ctx context.Context, userUUID string) bool {
+	if helpers.ActsThroughToken(ctx) {
+		return false
+	}
+	id, err := uuid.Parse(strings.TrimSpace(userUUID))
+	if err != nil {
+		return false
+	}
+	u, err := userDomain.GetUserByUUID(ctx, id)
+	return err == nil && u != nil && u.IsAdmin
 }

@@ -2,7 +2,6 @@ package models
 
 import (
 	"encoding/json"
-	"io"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -12,19 +11,6 @@ import (
 // large enough to hurt it. The failure being prevented is concrete: one update
 // request carrying a base64 image in a doc body exhausted a search node's heap and
 // stopped the container.
-
-func decodeBody(t *testing.T, r io.Reader) map[string]any {
-	t.Helper()
-	raw, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var out map[string]any
-	if uerr := json.Unmarshal(raw, &out); uerr != nil {
-		t.Fatalf("body must be valid JSON: %v\n%s", uerr, raw)
-	}
-	return out
-}
 
 // THE KEY CASE: an inline base64 image is removed, and the prose around it stays
 // searchable.
@@ -121,103 +107,6 @@ func TestSanitizeIndexedText_LeavesOrdinaryTextUntouched(t *testing.T) {
 		if got := SanitizeIndexedText(in); got != in {
 			t.Errorf("ordinary text must pass through;\n in: %q\nout: %q", in, got)
 		}
-	}
-}
-
-// IndexBody must apply the rule to whatever shape it is handed, including nested
-// objects and arrays, so an index added later is protected without any new work.
-func TestIndexBody_SanitizesEveryStringAtEveryDepth(t *testing.T) {
-	payload := strings.Repeat("D", 3000)
-	doc := map[string]any{
-		"doc_uuid": "abc-123",
-		"doc_body": `<img src="data:image/png;base64,` + payload + `">`,
-		"nested": map[string]any{
-			"deep": `x data:image/png;base64,` + payload,
-		},
-		"list": []any{
-			`y data:image/png;base64,` + payload,
-			"clean value",
-		},
-	}
-	r, err := IndexBody(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	out := decodeBody(t, r)
-
-	if s, _ := out["doc_body"].(string); strings.Contains(s, payload[:64]) {
-		t.Error("top-level string not sanitised")
-	}
-	nested, _ := out["nested"].(map[string]any)
-	if s, _ := nested["deep"].(string); strings.Contains(s, payload[:64]) {
-		t.Error("nested object string not sanitised")
-	}
-	list, _ := out["list"].([]any)
-	if s, _ := list[0].(string); strings.Contains(s, payload[:64]) {
-		t.Error("array element not sanitised")
-	}
-	if s, _ := list[1].(string); s != "clean value" {
-		t.Errorf("a clean array element must be untouched, got %q", s)
-	}
-	if out["doc_uuid"] != "abc-123" {
-		t.Errorf("identifiers must be untouched, got %v", out["doc_uuid"])
-	}
-}
-
-// Round-tripping through interface{} without UseNumber turns integers into float64
-// and re-marshals large values in scientific notation, which would corrupt every
-// unix-timestamp field in the index.
-func TestIndexBody_PreservesNumbersExactly(t *testing.T) {
-	doc := map[string]any{
-		"created_date": int64(1767225600),
-		"updated_date": int64(1767225600123),
-		"count":        0,
-		"ratio":        1.5,
-		"deleted_date": nil,
-		"flag":         true,
-	}
-	r, err := IndexBody(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, _ := io.ReadAll(r)
-	body := string(raw)
-
-	for _, want := range []string{`"created_date":1767225600`, `"updated_date":1767225600123`, `"count":0`, `"ratio":1.5`, `"deleted_date":null`, `"flag":true`} {
-		if !strings.Contains(body, want) {
-			t.Errorf("expected %s in %s", want, body)
-		}
-	}
-	if strings.Contains(body, "e+") || strings.Contains(body, "E+") {
-		t.Fatalf("no number may be re-marshalled in scientific notation: %s", body)
-	}
-}
-
-// The bound that matters: whatever a caller hands over, the request that reaches
-// the cluster is small. A struct with several oversized fields is the realistic
-// worst case.
-func TestIndexBody_BoundsTheWholeDocument(t *testing.T) {
-	huge := strings.Repeat("z", 20<<20) // 20 MB per field
-	doc := map[string]any{
-		"doc_body":    huge,
-		"doc_title":   huge,
-		"doc_snippet": huge,
-	}
-	r, err := IndexBody(doc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, _ := io.ReadAll(r)
-	if len(raw) > 4*(MaxIndexedFieldBytes+len(truncationNote)+64) {
-		t.Fatalf("the indexed document must be bounded; got %d bytes from 60 MB of input", len(raw))
-	}
-	// And it must still be usable, not mangled.
-	decodeBody(t, strings.NewReader(string(raw)))
-}
-
-func TestIndexBody_RejectsUnmarshalableInput(t *testing.T) {
-	if _, err := IndexBody(map[string]any{"bad": func() {}}); err == nil {
-		t.Fatal("a value that cannot be marshalled must surface an error, not a silent empty body")
 	}
 }
 

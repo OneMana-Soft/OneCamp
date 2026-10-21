@@ -1,3 +1,5 @@
+// Package models (Team) runs the team queries domain/Team writes, through
+// models/dgexec.
 package models
 
 import (
@@ -6,105 +8,55 @@ import (
 	"errors"
 
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/dgraphInit"
+	"github.com/akashc777/OneCamp/models/dgexec"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
-	"github.com/dgraph-io/dgo/v230/protos/api"
+	"github.com/akashc777/OneCamp/models/taskread"
 )
 
+// CreateOrUpdateDgraphTeam upserts dgraphTeam over query (whose variable is
+// team) and returns the new node's uid, "" when it updated one. An aborted
+// write is tried again (it failed outright before).
 func CreateOrUpdateDgraphTeam(ctx context.Context, dgraphTeam *dgraphStruct.DgraphTeam, query string) (userUid string, err error) {
-	pb, err := json.Marshal(dgraphTeam)
+	uids, err := dgexec.Upsert(ctx, query, nil, dgraphTeam)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateOrUpdateDgraphTeam failed to marshal dgraphTeam struct err: %+v",
-			err)
-		return
+		helpers.LogErrorWithContext(ctx, "models/CreateOrUpdateDgraphTeam failed to create or update dgraph team err: %+v", err)
+		return "", err
 	}
-
-	// An upsert, so a conflicting concurrent write is retried (DoCommitNow).
-	res, err := dgraphInit.DoCommitNow(ctx, &api.Request{
-		Query:     query,
-		Mutations: []*api.Mutation{{SetJson: pb}},
-	})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateOrUpdateDgraphTeam failed to create or update dgraph team err: %+v",
-			err)
-		return
-	}
-
 	// will get uid only when new node is created
-	userUid = res.Uids["uid(team)"]
-	return
+	return uids[dgexec.Var("team")], nil
 }
 
-func GetDgraphTeamInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphTeam *dgraphStruct.DgraphTeam, err error) {
-	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
-
-	resp, err := txn.QueryWithVars(ctx, query, variables)
+// GetDgraphTeamInfoByUUID is the first node of query's teamInfo block, an
+// error when there is none.
+func GetDgraphTeamInfoByUUID(ctx context.Context, query string, variables map[string]string) (team *dgraphStruct.DgraphTeam, err error) {
+	// Only the tasks the reader may see (models/taskread).
+	defer taskread.Settle(ctx, &team, &err)
+	team, err = dgexec.First[dgraphStruct.DgraphTeam](ctx, query, variables, "teamInfo")
+	if errors.Is(err, dgexec.ErrNotFound) {
+		helpers.LogErrorWithContext(ctx, "models/GetDgraphTeamInfoByUUID failed to get dgraph team variables: %+v", variables)
+		return nil, errors.New("failed to get dgraph team")
+	}
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphTeamInfoByUUID failed to get team err: %+v",
-			err)
-		return
+		helpers.LogErrorWithContext(ctx, "models/GetDgraphTeamInfoByUUID failed to get team err: %+v", err)
+		return nil, err
 	}
-
-	type Teams struct {
-		TeamInfo []dgraphStruct.DgraphTeam `json:"teamInfo"`
-	}
-
-	var teamsInfo Teams
-	err = json.Unmarshal(resp.Json, &teamsInfo)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphTeamInfoByUUID failed to unmarshal response json err: %+v",
-			err)
-		return
-	}
-
-	if len(teamsInfo.TeamInfo) == 0 {
-		err = errors.New("failed to get dgraph team")
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphTeamInfoByUUID failed to get dgraph team variables: %+v", variables)
-
-		return
-	}
-	dgraphTeam = &teamsInfo.TeamInfo[0]
-
-	return
+	return team, nil
 }
 
-func GetDgraphTeamList(ctx context.Context, query string, variables map[string]string) (dgraphTeams []*dgraphStruct.DgraphTeam, err error) {
-	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
-
-	resp, err := txn.QueryWithVars(ctx, query, variables)
+// GetDgraphTeamList is the nodes of query's teamInfo block.
+func GetDgraphTeamList(ctx context.Context, query string, variables map[string]string) (teams []*dgraphStruct.DgraphTeam, err error) {
+	// Only the tasks the reader may see (models/taskread).
+	defer taskread.Settle(ctx, &teams, &err)
+	teams, err = dgexec.List[*dgraphStruct.DgraphTeam](ctx, query, variables, "teamInfo")
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphTeamList failed to get team err: %+v",
-			err)
-		return
+		helpers.LogErrorWithContext(ctx, "models/GetDgraphTeamList failed to get team err: %+v", err)
 	}
-
-	type Teams struct {
-		TeamInfo []*dgraphStruct.DgraphTeam `json:"teamInfo"`
-	}
-
-	var teamsInfo Teams
-	err = json.Unmarshal(resp.Json, &teamsInfo)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetDgraphTeamList failed to unmarshal response json err: %+v",
-			err)
-		return
-	}
-	dgraphTeams = teamsInfo.TeamInfo
-	return
+	return teams, err
 }
 
+// DeleteTeamEdge deletes what delStringJSON names. It ran on
+// context.Background(), so a cancelled request still wrote.
 func DeleteTeamEdge(ctx context.Context, delStringJSON string) error {
-	// One all-or-nothing request, so an aborted try wrote nothing and is
-	// tried again (DoCommitNow).
-	_, err := dgraphInit.DoCommitNow(ctx, &api.Request{
-		Mutations: []*api.Mutation{{DeleteJson: []byte(delStringJSON)}},
-	})
+	_, err := dgexec.Mutate(ctx, "", nil, dgexec.Mutation{Delete: json.RawMessage(delStringJSON)})
 	return err
 }

@@ -28,7 +28,7 @@ import (
 
 	domain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 )
 
 const (
@@ -67,28 +67,17 @@ const HandleBackfillLockKey int64 = 0x48616e646c6573
 // replica's run holds it, this one gives nobody a handle and answers 0, 0,
 // nil.
 func BackfillHandles(ctx context.Context) (given, failed int, err error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	conn, err := postgresInit.DBConn.SqlDB.Conn(c)
+	// The lock is the session's, taken on a connection of its own and given
+	// back before that goes back to the pool (pgexec.TryAdvisoryLock).
+	release, mine, err := pgexec.TryAdvisoryLock(ctx, HandleBackfillLockKey)
 	if err != nil {
-		return 0, 0, err
-	}
-	defer conn.Close()
-	var mine bool
-	if err := conn.QueryRowContext(c, `SELECT pg_try_advisory_lock($1)`, HandleBackfillLockKey).Scan(&mine); err != nil {
 		return 0, 0, err
 	}
 	if !mine {
 		return 0, 0, nil
 	}
 	defer func() {
-		// The lock is the session's, so it is released before the
-		// connection goes back to the pool, even once ctx has ended: a
-		// pooled connection still holding it would keep every replica from
-		// running this until the pool closed it.
-		c, cancel := context.WithTimeout(context.WithoutCancel(ctx), postgresInit.DBConn.DBTimeout)
-		defer cancel()
-		if _, err := conn.ExecContext(c, `SELECT pg_advisory_unlock($1)`, HandleBackfillLockKey); err != nil {
+		if err := release(); err != nil {
 			helpers.LogWarnWithContext(ctx, "business/BackfillHandles releasing its lock: %+v", err)
 		}
 	}()

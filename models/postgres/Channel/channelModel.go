@@ -359,47 +359,6 @@ func RestoreChannelRow(query string, channelName string, channelPrivate bool, de
 	return
 }
 
-func GetChannelByHandle(query *string, channelHandle *string) (channelInfo *Channel, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var channelData Channel
-	var createdAt sql.NullTime
-	var updatedAt sql.NullTime
-	var deletedAt sql.NullTime
-
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, *query, *channelHandle)
-	err = row.Scan(
-		&channelData.Id,
-		&channelData.Name,
-		&channelData.CreatedBy,
-		&createdAt,
-		&updatedAt,
-		&deletedAt,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetChannelByChannelName Failed to get channel err: %+v",
-			err)
-		return
-	}
-
-	if createdAt.Valid {
-		channelData.CreatedAt = createdAt.Time
-	}
-
-	if updatedAt.Valid {
-		channelData.UpdatedAt = updatedAt.Time
-	}
-
-	if deletedAt.Valid {
-		channelData.DeletedAt = deletedAt.Time
-	}
-
-	return &channelData, nil
-}
-
 // PublicLiveChannels returns the live public channels among ids, or every one
 // (up to limit) when ids is nil, by name. A channel that is missing, archived
 // or private is left out: these are the channels anyone may join themselves.

@@ -18,7 +18,7 @@ func TestProvidersRegistered(t *testing.T) {
 		{ProviderGitHub, "github"},
 	}
 	for _, c := range cases {
-		p, ok := GetProvider(c.id)
+		p, ok := providerByID(c.id)
 		if !ok {
 			t.Fatalf("provider %q not registered", c.id)
 		}

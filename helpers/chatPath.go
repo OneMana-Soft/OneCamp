@@ -2,6 +2,12 @@ package helpers
 
 import "strings"
 
+// IsDMGroupingID is whether a DM's or group's grouping id is a DM's: two
+// people's ids with a space between them (GetGroupingId). A group's has none.
+func IsDMGroupingID(groupingID string) bool {
+	return strings.Contains(strings.TrimSpace(groupingID), " ")
+}
+
 // ChatPath is where a conversation opens in the web app for viewerUUID, or
 // "" without a grouping id. A group opens at /app/chat/group/<grouping id>.
 // A DM's grouping id is both people's ids with a space between them

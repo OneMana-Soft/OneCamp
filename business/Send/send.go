@@ -78,8 +78,25 @@ type ChannelPost struct {
 	mentions []*dgraphStruct.DgraphUser
 }
 
-// PrepareChannelPost checks that the person may post this in the channel.
+// PrepareChannelPost checks that the person may post this in the channel, and
+// who it tells as mentioned: the people it names and those its broadcasts and
+// team mentions reach (Mentions).
 func PrepareChannelPost(ctx context.Context, user *userModels.UserInfo, in *postAdapter.InputCreateOrUpdatePostInfo) (*ChannelPost, error) {
+	return prepareChannelPost(ctx, user, in, true)
+}
+
+// PrepareReplyCopy is PrepareChannelPost for the copy of a thread reply sent
+// to the channel too ("Also send to #channel"): the same rules for posting,
+// and nobody told as mentioned. The reply tells the people it mentions; the
+// copy told them a second time and listed the mention twice in their
+// Activity. A broadcast reaches nobody from a thread (TN-71), so the copy
+// carries one in its words without notifying anyone, and is never refused
+// for it. Its text still shows them.
+func PrepareReplyCopy(ctx context.Context, user *userModels.UserInfo, in *postAdapter.InputCreateOrUpdatePostInfo) (*ChannelPost, error) {
+	return prepareChannelPost(ctx, user, in, false)
+}
+
+func prepareChannelPost(ctx context.Context, user *userModels.UserInfo, in *postAdapter.InputCreateOrUpdatePostInfo, mentioning bool) (*ChannelPost, error) {
 	channelUUID, err := uuid.Parse(in.ChannelUuid)
 	if err != nil {
 		return nil, reject(http.StatusBadRequest, "Failed to get channel UUID", err)
@@ -100,7 +117,10 @@ func PrepareChannelPost(ctx context.Context, user *userModels.UserInfo, in *post
 	if channel.PostPolicy == "admins_only" && helpers.ActsThroughToken(ctx) {
 		return nil, &Rejection{Status: http.StatusForbidden, Msg: "Only channel admins can post in this announcement channel, in the app: a token posts as a member"}
 	}
-	mentions, err := resolveMentions(ctx, in.HTMLText)
+	if !mentioning {
+		return &ChannelPost{in: in, user: user, channel: channel}, nil
+	}
+	mentions, err := Mentions(ctx, user, Where{Channel: channel}, &in.HTMLText)
 	if err != nil {
 		return nil, err
 	}
@@ -130,15 +150,6 @@ func MayPostIn(channel *dgraphStruct.DgraphChannel) *Rejection {
 func (p *ChannelPost) Channel() *dgraphStruct.DgraphChannel { return p.channel }
 
 // Commit writes the post and marks the channel read up to it for the sender.
-// WithoutMentions is the post as the copy of a thread reply sent to the
-// channel too ("Also send to #channel"): it names nobody of its own. The reply
-// tells the people it mentions; the copy told them a second time, and listed
-// the mention twice in their Activity. Its text still shows them.
-func (p *ChannelPost) WithoutMentions() *ChannelPost {
-	p.mentions = nil
-	return p
-}
-
 func (p *ChannelPost) Commit(ctx context.Context) (*postAdapter.OutputCreatePostForPost, error) {
 	created, err := postBusiness.CreatePost(ctx, p.in, p.user, p.mentions, p.channel)
 	if err != nil {
@@ -169,7 +180,7 @@ func (p *ChannelPost) CommitDurably(ctx context.Context, clientMsgID string) (*p
 // whose first try hasn't finished is answered as Once answers a send in
 // flight, so the app tries again. Pure.
 func durableRefusal(err error) error {
-	if errors.Is(err, postBusiness.ErrStillBeingSent) {
+	if errors.Is(err, postBusiness.ErrStillBeingSent) || errors.Is(err, chatBusiness.ErrStillBeingSent) {
 		return reject(http.StatusConflict, "This message is still being sent", err)
 	}
 	return err
@@ -219,7 +230,7 @@ func PrepareDirectMessage(ctx context.Context, user *userModels.UserInfo, in *ch
 	if rj := MayMessage(to); rj != nil {
 		return nil, rj
 	}
-	mentions, err := resolveMentions(ctx, in.TextHtml)
+	mentions, err := Mentions(ctx, user, Where{People: []string{user.UserDgraphInfo.Uuid, to.Uuid}}, &in.TextHtml)
 	if err != nil {
 		return nil, err
 	}
@@ -244,6 +255,17 @@ func MayMessage(to *dgraphStruct.DgraphUser) *Rejection {
 // Commit writes the direct message.
 func (m *DirectMessage) Commit(ctx context.Context) (*chatAdapter.OutputCreateChatForChat, error) {
 	return chatBusiness.CreateChat(ctx, m.in, m.user, m.to, m.toUUID, m.mentions)
+}
+
+// CommitDurably writes the direct message as the durable pipeline does (chat
+// A2, business/Chat durable.go): its rows and events at once, its side
+// effects from the outbox; clientMsgID is the id the app gave it.
+func (m *DirectMessage) CommitDurably(ctx context.Context, clientMsgID string) (*chatAdapter.OutputCreateChatForChat, error) {
+	created, err := chatBusiness.CreateDMDurably(ctx, m.in, m.user, m.to, m.toUUID, m.mentions, clientMsgID)
+	if err != nil {
+		return nil, durableRefusal(err)
+	}
+	return created, nil
 }
 
 // ---------------------------------------------------------------- group message
@@ -293,7 +315,7 @@ func PrepareGroupMessage(ctx context.Context, user *userModels.UserInfo, in *cha
 	if len(participants) < 3 {
 		return nil, reject(http.StatusBadRequest, "Minimum 3 participants required for a group", nil)
 	}
-	mentions, err := resolveMentions(ctx, in.TextHtml)
+	mentions, err := Mentions(ctx, user, Where{People: uuidsOf(participants)}, &in.TextHtml)
 	if err != nil {
 		return nil, err
 	}
@@ -321,4 +343,14 @@ func MayBeInGroup(u *dgraphStruct.DgraphUser) *Rejection {
 // Commit writes the group message.
 func (m *GroupMessage) Commit(ctx context.Context) (*chatAdapter.OutputCreateChatForChat, error) {
 	return chatBusiness.CreateChatForGroup(ctx, m.in, m.user, m.mentions, m.participants)
+}
+
+// CommitDurably writes the group message as the durable pipeline does, as a
+// direct message's CommitDurably does.
+func (m *GroupMessage) CommitDurably(ctx context.Context, clientMsgID string) (*chatAdapter.OutputCreateChatForChat, error) {
+	created, err := chatBusiness.CreateGroupMessageDurably(ctx, m.in, m.user, m.mentions, m.participants, clientMsgID)
+	if err != nil {
+		return nil, durableRefusal(err)
+	}
+	return created, nil
 }

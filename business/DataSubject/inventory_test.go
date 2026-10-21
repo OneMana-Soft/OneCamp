@@ -74,15 +74,3 @@ func TestTotalRowsSumsEveryLocation(t *testing.T) {
 		t.Errorf("TotalRows(nil) = %d, want 0", got)
 	}
 }
-
-func TestSummarySaysNothingRatherThanShowingAnEmptyTable(t *testing.T) {
-	if got := Summary(nil); !strings.Contains(got, "No personal data") {
-		t.Errorf("Summary(nil) = %q, expected it to say plainly that nothing was found", got)
-	}
-	got := Summary([]PersonalDataLocation{{Table: "posts", Column: "created_by", Rows: 2}})
-	for _, want := range []string{"posts", "created_by", "2"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("Summary missing %q in: %s", want, got)
-		}
-	}
-}

@@ -564,20 +564,24 @@ type asanaRefShort struct {
 
 // asanaTask is the per-task shape with the opt_fields we request below.
 type asanaTask struct {
-	GID          string             `json:"gid"`
-	Name         string             `json:"name"`
-	Notes        string             `json:"notes"`
-	HTMLNotes    string             `json:"html_notes"`
-	Completed    bool               `json:"completed"`
-	CompletedAt  string             `json:"completed_at"`
-	CreatedAt    string             `json:"created_at"`
-	ModifiedAt   string             `json:"modified_at"`
-	DueOn        string             `json:"due_on"`
-	DueAt        string             `json:"due_at"`
-	StartOn      string             `json:"start_on"`
-	StartAt      string             `json:"start_at"`
-	Assignee     *asanaRefShort     `json:"assignee"`
-	NumSubtasks  int                `json:"num_subtasks"`
+	GID         string         `json:"gid"`
+	Name        string         `json:"name"`
+	Notes       string         `json:"notes"`
+	HTMLNotes   string         `json:"html_notes"`
+	Completed   bool           `json:"completed"`
+	CompletedAt string         `json:"completed_at"`
+	CreatedAt   string         `json:"created_at"`
+	ModifiedAt  string         `json:"modified_at"`
+	DueOn       string         `json:"due_on"`
+	DueAt       string         `json:"due_at"`
+	StartOn     string         `json:"start_on"`
+	StartAt     string         `json:"start_at"`
+	Assignee    *asanaRefShort `json:"assignee"`
+	NumSubtasks int            `json:"num_subtasks"`
+	// Dependencies are the tasks this one waits on.
+	Dependencies []struct {
+		GID string `json:"gid"`
+	} `json:"dependencies"`
 	Memberships  []asanaMembership  `json:"memberships"`
 	Tags         []asanaRefShort    `json:"tags"`
 	CustomFields []asanaCustomField `json:"custom_fields"`
@@ -612,7 +616,7 @@ type asanaCustomField struct {
 // taskOptFields is the URL-encoded list of fields we ask for. Keep
 // trimmed to what we use because Asana counts payload bytes towards
 // rate limits.
-var taskOptFields = url.QueryEscape("gid,name,notes,html_notes,completed,completed_at,created_at,modified_at,due_on,due_at,start_on,start_at,assignee.gid,assignee.name,num_subtasks,memberships.project.gid,memberships.section.gid,memberships.section.name,tags.name,permalink_url," + valueOptFields)
+var taskOptFields = url.QueryEscape("gid,name,notes,html_notes,completed,completed_at,created_at,modified_at,due_on,due_at,start_on,start_at,dependencies.gid,assignee.gid,assignee.name,num_subtasks,memberships.project.gid,memberships.section.gid,memberships.section.name,tags.name,permalink_url," + valueOptFields)
 
 type asanaStory struct {
 	GID             string         `json:"gid"`
@@ -885,44 +889,14 @@ func (p *Provider) resolveWorkspaceGID(ctx context.Context, j *importModels.Job)
 	return gid, nil
 }
 
-// pickWorkspace is the workspace to import from those the token can see: the
-// one the admin picked; else the one named like the import's label; else the
-// token's only workspace. A pick it can't see any more, two workspaces with
-// the label's name, or several workspaces and no way to tell are errors that
-// say what to do. It used to fall back to the first workspace, so a label that
-// didn't match a name quietly imported some other workspace. Pure.
+// pickWorkspace is the workspace to import from those the token can see
+// (importProvider.PickScope). Pure.
 func pickWorkspace(workspaces []asanaWorkspace, picked, label string) (string, error) {
-	if picked != "" {
-		for _, w := range workspaces {
-			if w.GID == picked {
-				return w.GID, nil
-			}
-		}
-		return "", errors.New("the Asana workspace you picked isn't visible to this token any more. Pick another workspace, or reconnect with an account that can see it")
-	}
-	if len(workspaces) == 0 {
-		return "", errors.New("this Asana token can't see any workspace. Reconnect with an account that belongs to the workspace you want to import")
-	}
-	want := strings.ToLower(strings.TrimSpace(label))
-	var named []asanaWorkspace
+	items := make([]importProvider.DiscoverItem, 0, len(workspaces))
 	for _, w := range workspaces {
-		if strings.ToLower(strings.TrimSpace(w.Name)) == want {
-			named = append(named, w)
-		}
+		items = append(items, importProvider.DiscoverItem{ID: w.GID, Name: w.Name})
 	}
-	switch {
-	case len(named) == 1:
-		return named[0].GID, nil
-	case len(named) > 1:
-		return "", fmt.Errorf("more than one Asana workspace is called %q. Pick the one to import", strings.TrimSpace(label))
-	case len(workspaces) == 1:
-		return workspaces[0].GID, nil
-	}
-	names := make([]string, 0, len(workspaces))
-	for _, w := range workspaces {
-		names = append(names, w.Name)
-	}
-	return "", fmt.Errorf("pick which Asana workspace to import: this token can see %d (%s)", len(workspaces), strings.Join(names, ", "))
+	return importProvider.PickScope(items, picked, label, importProvider.Scope{Provider: "Asana", Noun: "workspace", Credential: "token"})
 }
 
 func (p *Provider) loadToken(ctx context.Context, j *importModels.Job) (string, error) {
@@ -961,6 +935,17 @@ func (p *Provider) loadToken(ctx context.Context, j *importModels.Job) (string, 
 // Priority: pulled from a custom field named "Priority" (case-insens),
 // then stamped as the raw display value. Tasks without one fall back
 // to "medium" via heuristic.
+// waitsOn is the tasks an Asana task waits on (its dependencies: finish to start).
+func waitsOn(t *asanaTask) []importProvider.SourceDependency {
+	var out []importProvider.SourceDependency
+	for _, d := range t.Dependencies {
+		if d.GID != "" {
+			out = append(out, importProvider.SourceDependency{BlockerSourceID: d.GID, Kind: "fs"})
+		}
+	}
+	return out
+}
+
 func buildSourceTask(t *asanaTask, projectGID string, sectionName map[string]string, fallbackParent string) importProvider.SourceTask {
 	created, _ := time.Parse(time.RFC3339, t.CreatedAt)
 	modified, _ := time.Parse(time.RFC3339, t.ModifiedAt)
@@ -1045,6 +1030,8 @@ func buildSourceTask(t *asanaTask, projectGID string, sectionName map[string]str
 		Created:         created,
 		Updated:         modified,
 		Completed:       t.Completed,
+		CommentCount:    importProvider.CommentsUnknown, // a task carries no count; the comments stage asks
+		Dependencies:    waitsOn(t),
 		Fields:          fieldValues(t.CustomFields),
 		Metadata:        map[string]any{"asana_url": t.Permalink},
 	}

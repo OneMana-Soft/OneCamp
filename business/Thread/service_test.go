@@ -81,6 +81,42 @@ func (m *memStore) setStatus(_ context.Context, id string, s Status, by string, 
 	m.threads[id] = t
 	return &t, true, nil
 }
+func (m *memStore) setTask(_ context.Context, id, task string, at time.Time) (*Thread, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.threads[id]
+	if !ok || (t.TaskUUID != "" && t.TaskUUID != task) {
+		return nil, nil
+	}
+	t.TaskUUID, t.UpdatedAt = task, at
+	m.threads[id] = t
+	return &t, nil
+}
+
+func (m *memStore) byTask(_ context.Context, task string) ([]Thread, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Thread
+	for _, t := range m.threads {
+		if t.TaskUUID == task {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
+func (m *memStore) tied(_ context.Context, limit int) ([]Thread, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Thread
+	for _, t := range m.threads {
+		if t.TaskUUID != "" && len(out) < limit {
+			out = append(out, t)
+		}
+	}
+	return out, nil
+}
+
 func (m *memStore) setAnchor(_ context.Context, id string, a Anchor, at time.Time) (*Thread, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

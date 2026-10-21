@@ -26,13 +26,13 @@ package business
 import (
 	"context"
 	"fmt"
+	archiveModels "github.com/akashc777/OneCamp/models/postgres/Archive"
 	"time"
 
 	attachmentDomain "github.com/akashc777/OneCamp/domain/Attachment"
 	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/minioInit"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/minio/minio-go/v7"
 )
 
@@ -132,13 +132,7 @@ func isNoSuchKey(err error) bool {
 
 // recordPurgeInPolicy adds what a pass removed to the policy's running total.
 func recordPurgeInPolicy(ctx context.Context, entityType string, removed, bytes int64) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		UPDATE archive_policies
-		SET purged_count = purged_count + $1, purged_bytes = purged_bytes + $2, last_purged_at = NOW()
-		WHERE entity_type = $3`, removed, bytes, entityType)
-	return err
+	return archiveModels.RecordPurge(ctx, entityType, removed, bytes)
 }
 
 // RunPurges runs one pass for every policy that purges. Each policy is its

@@ -136,14 +136,15 @@ func TestIsEngineTrigger(t *testing.T) {
 		t.Error("user_joined_channel must be an engine trigger")
 	}
 	// Both have handlers; meeting_ended was offered by the editor and refused on save.
-	for _, trig := range []string{workflowModel.TriggerMeetingEnded, workflowModel.TriggerTaskStatusChanged} {
+	for _, trig := range []string{workflowModel.TriggerMeetingEnded, workflowModel.TriggerTaskStatusChanged,
+		workflowModel.TriggerTaskCreated, workflowModel.TriggerTaskAssigned, workflowModel.TriggerTaskFieldChanged} {
 		if !IsEngineTrigger(trig) {
 			t.Errorf("%s must be an engine trigger", trig)
 		}
 	}
 	// A DB-valid but not-yet-wired trigger must be rejected by the engine gate.
-	if IsEngineTrigger(workflowModel.TriggerTaskCreated) {
-		t.Error("task_created is not wired yet and must not be an engine trigger")
+	if IsEngineTrigger(workflowModel.TriggerReactionAdded) {
+		t.Error("reaction_added is not wired yet and must not be an engine trigger")
 	}
 	if IsEngineTrigger("garbage") {
 		t.Error("unknown trigger must not be an engine trigger")
@@ -153,7 +154,7 @@ func TestIsEngineTrigger(t *testing.T) {
 func TestValidate_RejectsUnwiredTrigger(t *testing.T) {
 	in := &WorkflowInput{
 		Name:        "x",
-		TriggerType: workflowModel.TriggerTaskCreated,
+		TriggerType: workflowModel.TriggerReactionAdded,
 		Actions:     []WorkflowAction{{Type: ActionReply, Text: "hi"}},
 	}
 	if _, err := validate(in); err == nil {

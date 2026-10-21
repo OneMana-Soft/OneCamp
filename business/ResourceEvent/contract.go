@@ -92,11 +92,17 @@ const (
 	MemberAdded           Kind = "member.added"
 	MemberRemoved         Kind = "member.removed"
 	ChannelRenamed        Kind = "channel.renamed"
+	ChannelTopicChanged   Kind = "channel.topic_changed" // Data: topic ("" removed it); B28
 	ChannelPrivacyChanged Kind = "channel.privacy_changed"
 	ChannelArchived       Kind = "channel.archived"
 	ChannelRestored       Kind = "channel.restored"
 	CallStarted           Kind = "call.started"
 	CallEnded             Kind = "call.ended"
+	// Pins (chat B25): Data names the message. Declared for the webhooks
+	// catalogue; business/Pin tells open apps over MQTT until the pipeline
+	// emits them.
+	MessagePinned   Kind = "message.pinned"
+	MessageUnpinned Kind = "message.unpinned"
 
 	// The calendar (design/calendar-vs-gcal/PROGRAM.md §5), declared at its day
 	// 0 and emitted by the packages that build them (A1 events, A2 answers, A5
@@ -157,6 +163,20 @@ const (
 	SLAAtRisk            Kind = "sla.at_risk"
 	SLABreached          Kind = "sla.breached"
 	ReleaseStage         Kind = "release.stage"
+
+	// Calls (design/calls-vs-zoom/PROGRAM.md §5), emitted by Call State
+	// (business/CallState) beside chat's CallStarted and CallEnded above.
+	// ResourceKind is the conversation's kind, or "meeting" for an instant
+	// meeting, and ResourceUUID its id (a DM's or group's grouping id). Data
+	// names the call (session, room, kind) and the person ("identity"), never
+	// what was said. CallJoined fires at every join, with rejoin=true after the
+	// first; CallLeft at every leave.
+	CallJoined             Kind = "call.joined"
+	CallLeft               Kind = "call.left"
+	CallParticipantRemoved Kind = "call.participant.removed"
+	CallLocked             Kind = "call.locked"
+	CallUnlocked           Kind = "call.unlocked"
+	CallRoleChanged        Kind = "call.role_changed"
 )
 
 // Actor is who made the change, from server context (I11): for an agent, the

@@ -15,6 +15,8 @@ import (
 
 func TestProjectTimeline(t *testing.T) {
 	ctx := context.Background()
+	// Reads of tasks decide restricted ones from Postgres (WA2): this test's own.
+	integration.ConnectServerPostgres(t)
 	dg := integration.SetupDgraph(t)
 	project := uuid.NewString()
 	live, gone := "0001-01-01T00:00:00Z", "2026-03-10T00:00:00Z"

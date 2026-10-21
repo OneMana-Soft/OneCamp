@@ -26,6 +26,37 @@ func GoSafe(fn func()) { goSafe("helpers.GoSafe", true, fn) }
 // the operator which call site panicked. Prefer this in any new code.
 func GoSafeNamed(name string, fn func()) { goSafe("helpers.GoSafeNamed["+name+"]", true, fn) }
 
+// GoSafeBounded is GoSafeNamed with at most cap(slots) running at once: it
+// takes a place in slots BEFORE the goroutine starts, so a caller with a full
+// pool waits, and gives it back when fn is done. Starting the goroutine first
+// and then waiting for a place parks one goroutine per item, unbounded, under
+// a burst (F4 fixed that once in the webhook sender; business/Hooks had it
+// back). slots is the caller's own pool, shared by its call sites.
+func GoSafeBounded(slots chan struct{}, name string, fn func()) {
+	slots <- struct{}{}
+	goSafe("helpers.GoSafeBounded["+name+"]", true, func() {
+		defer func() { <-slots }()
+		fn()
+	})
+}
+
+// TryGoSafeBounded is GoSafeBounded for work that has somewhere else to go:
+// it starts fn only if slots has a free place at once, and says whether it
+// did. A caller on a request's path hands the rest to its queue instead of
+// waiting (business/Hooks leaves a full pool's deliveries to the drain).
+func TryGoSafeBounded(slots chan struct{}, name string, fn func()) bool {
+	select {
+	case slots <- struct{}{}:
+	default:
+		return false
+	}
+	goSafe("helpers.TryGoSafeBounded["+name+"]", true, func() {
+		defer func() { <-slots }()
+		fn()
+	})
+	return true
+}
+
 // GoSafeLoop is GoSafeNamed for a goroutine that lasts as long as its context
 // rather than one piece of work: a sweep on a ticker, a repair that retries for
 // hours, a rebuild that runs for six. It is recovered the same way, and is not

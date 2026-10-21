@@ -96,7 +96,8 @@ func (r *Registry) Register(j Job) {
 	r.names[j.Name] = true
 	r.jobs = append(r.jobs, j)
 	if r.running() {
-		go every(r.started, j, r.claimer())
+		started, claim := r.started, r.claimer()
+		helpers.GoSafeLoop("sweep:"+j.Name, func() { every(started, j, claim) })
 	}
 }
 
@@ -116,7 +117,8 @@ func (r *Registry) StartAll(ctx context.Context) {
 	}
 	r.started = ctx
 	for _, j := range r.jobs {
-		go every(ctx, j, r.claimer())
+		claim := r.claimer()
+		helpers.GoSafeLoop("sweep:"+j.Name, func() { every(ctx, j, claim) })
 	}
 }
 

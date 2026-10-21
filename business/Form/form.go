@@ -22,6 +22,7 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/Task"
 	"github.com/akashc777/OneCamp/business/Formula"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
@@ -133,13 +134,13 @@ func CheckForm(in Input) (formModel.Form, error) {
 	if f.TitleField == "" || !seen[f.TitleField] {
 		f.TitleField = fields[0].Id
 	}
-	switch in.Priority {
-	case dgraphStruct.TASK_PRIORITY_LOW, dgraphStruct.TASK_PRIORITY_MEDIUM, dgraphStruct.TASK_PRIORITY_HIGH:
-		f.Priority = in.Priority
-	case "":
+	switch {
+	case in.Priority == "":
 		f.Priority = dgraphStruct.TASK_PRIORITY_MEDIUM
+	case taskPriority.Is(in.Priority):
+		f.Priority = in.Priority
 	default:
-		return f, &FormError{"Pick low, medium or high priority."}
+		return f, &FormError{"Pick urgent, high, medium or low priority."}
 	}
 	if in.AssigneeUUID != "" {
 		id, err := uuid.Parse(in.AssigneeUUID)

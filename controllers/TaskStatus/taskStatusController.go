@@ -1,13 +1,17 @@
 // Package controller (TaskStatus) serves a project's task statuses: any member
 // can read them; the project's admins create, change, reorder and delete the
-// custom ones. See business/TaskStatus.
+// custom ones, and set the order of its board's columns. Every change is told
+// to the project's open boards (MESSAGE_PROJECT_STATUSES). See
+// business/TaskStatus.
 package controller
 
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
+	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	business "github.com/akashc777/OneCamp/business/TaskStatus"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
@@ -122,6 +126,7 @@ func Create(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, err)
 		return
 	}
+	changed(projectID)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": s})
 }
 
@@ -145,6 +150,7 @@ func Update(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, err)
 		return
 	}
+	changed(projectID)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": s})
 }
 
@@ -168,6 +174,7 @@ func Delete(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, err)
 		return
 	}
+	changed(projectID)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Deleted"})
 }
 
@@ -188,5 +195,45 @@ func Reorder(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, err)
 		return
 	}
+	changed(projectID)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Saved"})
+}
+
+// Order sets the project's column order: each of its statuses once, built-in
+// keys and custom ids, Done and Cancelled (and statuses that count as them)
+// after the open ones. Its admins only, as for every change to its statuses.
+// It answers with the project's statuses, in the order now.
+// POST /project/{project_uuid}/statuses/order {order}
+func Order(w http.ResponseWriter, r *http.Request) {
+	projectID, user, ok := projectAccess(w, r, admin)
+	if !ok {
+		return
+	}
+	var in struct {
+		Order []string `json:"order"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, orderBodyLimit)).Decode(&in); err != nil || len(in.Order) > len(business.BuiltIns)+business.MaxPerProject {
+		fail(w, r, business.ErrInvalid)
+		return
+	}
+	if _, err := business.SetOrder(r.Context(), projectID, in.Order, user.UserPostgresInfo.Id); err != nil {
+		fail(w, r, err)
+		return
+	}
+	changed(projectID)
+	res, err := business.List(r.Context(), projectID)
+	if err != nil {
+		fail(w, r, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": res})
+}
+
+// orderBodyLimit is the most an order's request may be: 26 statuses' ids.
+const orderBodyLimit = 16 << 10
+
+// changed tells the project's open boards and pickers that its statuses, or
+// their order, changed (a seam for tests).
+var changed = func(projectID uuid.UUID) {
+	mqttBusiness.PublishProjectStatuses(projectID.String())
 }

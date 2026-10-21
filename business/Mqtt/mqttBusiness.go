@@ -11,7 +11,9 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/mqttInit"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
+	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 )
 
 func GetMqttConfig(ctx context.Context, userUUID string, isSystemAdmin bool) (mqttConfig *adapter.OutputMqttConfig, err error) {
@@ -92,15 +94,15 @@ func PublishPost(mqttPost *mqttStruct.MqttPost, channelId string) {
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelMessage(channelId), 1, false, marshalMqttCreatePost)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishPost", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishPost failed to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 // PublishChannelUpdate notifies every member currently subscribed to a
@@ -130,15 +132,15 @@ func PublishChannelUpdate(channelId string, action string) {
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelMessage(channelId), 1, false, marshalled)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChannelUpdate", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishChannelUpdate failed to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 func PublishChannelCall(mqttChannelCall *mqttStruct.MqttChannelCall, channelId string) {
@@ -158,15 +160,15 @@ func PublishChannelCall(mqttChannelCall *mqttStruct.MqttChannelCall, channelId s
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelMessage(channelId), 1, false, marshalMqttChannelCall)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChannelCall", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishChannelCall failed to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 func PublishChatCall(mqttChatCall *mqttStruct.MqttChatCall, grpId string) {
@@ -186,15 +188,15 @@ func PublishChatCall(mqttChatCall *mqttStruct.MqttChatCall, grpId string) {
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDmMessage(grpId), 1, false, marshalMqttChannelCall)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChatCall", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishChatCall failed to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 func PublishPostReaction(mqttPostReaction *mqttStruct.MqttPostReaction, channelId string) {
@@ -214,15 +216,15 @@ func PublishPostReaction(mqttPostReaction *mqttStruct.MqttPostReaction, channelI
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelMessage(channelId), 1, false, marshalMqttCreatePost)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishPostReaction", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishPostReactionfailed to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 func PublishDocCommentReaction(mqttDocCommentReaction *mqttStruct.MqttDocCommentReaction, docId string) {
@@ -241,15 +243,15 @@ func PublishDocCommentReaction(mqttDocCommentReaction *mqttStruct.MqttDocComment
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDoc(docId), 1, false, marshalMqttCreatePost)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishDocCommentReaction", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishDocCommentReaction to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 func PublishPostCommentReaction(mqttPostCommentReaction *mqttStruct.MqttPostCommentReaction, channelId string) {
@@ -269,19 +271,25 @@ func PublishPostCommentReaction(mqttPostCommentReaction *mqttStruct.MqttPostComm
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelMessage(channelId), 1, false, marshalMqttCreatePost)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishPostCommentReaction", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishPostCommentReaction to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 // publishToProject sends one message to everyone in a project.
 func publishToProject(ctx context.Context, projectID string, kind int8, data any, what string) {
+	publishToTopic(ctx, helpers.GetMqttTopicForProjectMessage(projectID), kind, data, what)
+}
+
+// publishToTopic sends one message of a kind to a topic. what names the
+// publisher in the log.
+func publishToTopic(ctx context.Context, topic string, kind int8, data any, what string) {
 	if mqttInit.MqttClient == nil {
 		// No broker connected (a test, a tool): nobody is listening.
 		return
@@ -291,18 +299,62 @@ func publishToProject(ctx context.Context, projectID string, kind int8, data any
 		helpers.LogErrorWithContext(ctx, "business/%s marshal err: %+v", what, err)
 		return
 	}
-	res := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForProjectMessage(projectID), 1, false, payload)
-	go func() {
-		_ = res.Wait()
+	res := mqttInit.MqttClient.Publish(topic, 1, false, payload)
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:publishToTopic", func() {
+		_ = res.WaitTimeout(mqttInit.PublishWait)
 		if res.Error() != nil {
 			helpers.LogErrorWithContext(ctx, "business/%s publish err: %+v", what, res.Error())
 		}
-	}()
+	})
+}
+
+// PublishCallState tells a call's conversation that the call changed: a
+// channel's members, a DM's two people or a group's members, on the topics
+// the call's dot has always used. A meeting has no conversation to tell: the
+// people in it hear through the call itself.
+func PublishCallState(state *mqttStruct.MqttCallState) {
+	if state == nil || state.ResourceID == "" {
+		return
+	}
+	var topic string
+	switch state.ResourceKind {
+	case mqttStruct.CONVERSATION_KIND_CHANNEL:
+		topic = helpers.GetMqttTopicForChannelMessage(state.ResourceID)
+	case mqttStruct.CONVERSATION_KIND_DM, mqttStruct.CONVERSATION_KIND_GROUP:
+		topic = helpers.GetMqttTopicForDmMessage(state.ResourceID)
+	default:
+		return
+	}
+	publishToTopic(context.Background(), topic, mqttStruct.MESSAGE_CALL_STATE, state, "PublishCallState")
+}
+
+// restrictedTask is whether a task's project keeps it to a few people
+// (WA2): its project's topic, which every member hears, is told only that it
+// changed, never what (onlyChanged). A restriction that can't be read counts
+// as one. A seam for tests.
+var restrictedTask = func(taskUUID string) bool {
+	id, err := uuid.Parse(taskUUID)
+	if err != nil {
+		return false
+	}
+	r, err := restrictionModel.Of(context.Background(), id)
+	return err != nil || r.Restricted
+}
+
+// onlyChanged tells a restricted task's project that the task changed and
+// nothing more; whoever may see it reads what changed with the filter
+// (models/taskread). True when it did, so the caller sends nothing else.
+func onlyChanged(taskUUID, projectUUID string) bool {
+	if taskUUID == "" || projectUUID == "" || !restrictedTask(taskUUID) {
+		return false
+	}
+	publishToProject(context.Background(), projectUUID, mqttStruct.MESSAGE_TASK_CHANGED, &mqttStruct.MqttTaskChanged{TaskUuid: taskUUID, ProjectUuid: projectUUID}, "PublishTaskChanged")
+	return true
 }
 
 // PublishTaskDates tells a task's project that its dates changed.
 func PublishTaskDates(msg *mqttStruct.MqttTaskDates) {
-	if msg == nil || msg.ProjectUuid == "" {
+	if msg == nil || msg.ProjectUuid == "" || onlyChanged(msg.TaskUuid, msg.ProjectUuid) {
 		return
 	}
 	publishToProject(context.Background(), msg.ProjectUuid, mqttStruct.MESSAGE_TASK_DATES, msg, "PublishTaskDates")
@@ -316,9 +368,18 @@ func PublishTaskChanged(msg *mqttStruct.MqttTaskChanged) {
 	publishToProject(context.Background(), msg.ProjectUuid, mqttStruct.MESSAGE_TASK_CHANGED, msg, "PublishTaskChanged")
 }
 
+// PublishProjectStatuses tells a project that its statuses, or their order on
+// its board, changed: its open boards and pickers read them again.
+func PublishProjectStatuses(projectID string) {
+	if projectID == "" {
+		return
+	}
+	publishToProject(context.Background(), projectID, mqttStruct.MESSAGE_PROJECT_STATUSES, &mqttStruct.MqttProjectStatuses{ProjectUuid: projectID}, "PublishProjectStatuses")
+}
+
 // PublishTaskField tells a task's project that one of its field values changed.
 func PublishTaskField(msg *mqttStruct.MqttTaskField) {
-	if msg == nil || msg.ProjectUuid == "" {
+	if msg == nil || msg.ProjectUuid == "" || onlyChanged(msg.TaskUuid, msg.ProjectUuid) {
 		return
 	}
 	publishToProject(context.Background(), msg.ProjectUuid, mqttStruct.MESSAGE_TASK_FIELD, msg, "PublishTaskField")
@@ -326,6 +387,9 @@ func PublishTaskField(msg *mqttStruct.MqttTaskField) {
 
 func PublishTaskCommentReaction(mqttTaskCommentReaction *mqttStruct.MqttTaskCommentReaction, projectId string) {
 	ctx := context.Background()
+	if mqttTaskCommentReaction == nil || onlyChanged(mqttTaskCommentReaction.TaskUuid, projectId) {
+		return
+	}
 
 	mqttMessage := mqttStruct.Message{
 		Type: mqttStruct.MESSAGE_TASK_COMMENT_REACTION,
@@ -341,15 +405,15 @@ func PublishTaskCommentReaction(mqttTaskCommentReaction *mqttStruct.MqttTaskComm
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForProjectMessage(projectId), 1, false, marshalMqttCreatePost)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishTaskCommentReaction", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishTaskCommentReaction to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 // TypingRepublishInterval is how often a bot still at work says it is typing
@@ -375,15 +439,15 @@ func PublishChannelTyping(mqttChannelTyping *mqttStruct.MqttChannelTyping, chann
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelTyping(channelId), 0, false, marshalMqttCreatePost)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChannelTyping", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishChannelTyping to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 func PublishDocComment(mqttDocComment *mqttStruct.MqttDocComment, docId string) {
@@ -402,20 +466,24 @@ func PublishDocComment(mqttDocComment *mqttStruct.MqttDocComment, docId string) 
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDoc(docId), 1, false, marshalMqttCreatePost)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishDocComment", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishDocComment to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 func PublishTaskComment(mqttTaskComment *mqttStruct.MqttTaskComment, projectId string) {
 
 	ctx := context.Background()
+	// A restricted task's comment isn't said on its project's topic.
+	if mqttTaskComment == nil || onlyChanged(mqttTaskComment.TaskUuid, projectId) {
+		return
+	}
 
 	mqttMessage := mqttStruct.Message{
 		Type: mqttStruct.MESSAGE_TASK_COMMENT,
@@ -431,15 +499,15 @@ func PublishTaskComment(mqttTaskComment *mqttStruct.MqttTaskComment, projectId s
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForProjectMessage(projectId), 1, false, marshalMqttCreateTaskComment)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishTaskComment", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishTaskComment to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 
 }
 
@@ -460,15 +528,15 @@ func PublishPostComment(mqttPostCommentCount *mqttStruct.MqttPostComment, channe
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelMessage(channelId), 1, false, marshalMqttCreatePost)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishPostComment", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishPostComment to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 func PublishChat(mqttChat *mqttStruct.MqttChat, grpId string) {
@@ -487,15 +555,15 @@ func PublishChat(mqttChat *mqttStruct.MqttChat, grpId string) {
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDmMessage(grpId), 1, false, marshalMqttCreatePost)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChat", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishChat failed to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 func PublishChatReaction(mqttChatReaction *mqttStruct.MqttChatReaction, grpId string) {
@@ -514,15 +582,15 @@ func PublishChatReaction(mqttChatReaction *mqttStruct.MqttChatReaction, grpId st
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDmMessage(grpId), 1, false, marshalMqttCreatePost)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChatReaction", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishChatReaction failed to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 func PublishChatCommentReaction(mqttChatCommentReaction *mqttStruct.MqttChatCommentReaction, grpId string) {
@@ -541,15 +609,15 @@ func PublishChatCommentReaction(mqttChatCommentReaction *mqttStruct.MqttChatComm
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDmMessage(grpId), 1, false, marshalMqttCreatePost)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChatCommentReaction", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishChatCommentReaction failed to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 func PublishChatTyping(mqttChatTyping *mqttStruct.MqttChatTyping, grpId string) {
@@ -568,15 +636,15 @@ func PublishChatTyping(mqttChatTyping *mqttStruct.MqttChatTyping, grpId string) 
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDmTyping(grpId), 0, false, marshalMqttCreatePost)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChatTyping", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishChatTyping to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 func PublishUserEmojiStatus(mqttUserEmoji *mqttStruct.MqttUserEmojiStatus) {
@@ -597,15 +665,15 @@ func PublishUserEmojiStatus(mqttUserEmoji *mqttStruct.MqttUserEmojiStatus) {
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetPublicUsersStatusTopic(), 1, false, marshalMqttUserEmojiStatus)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishUserEmojiStatus", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishUserEmojiStatus to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 
 }
 
@@ -627,15 +695,15 @@ func PublishUserStatus(mqttUserStatus *mqttStruct.MqttUserStatus) {
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetPublicUsersStatusTopic(), 1, false, marshalMqttUserStatus)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishUserStatus", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishUserStatus to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 
 }
 
@@ -655,15 +723,15 @@ func PublishChatComment(mqttChatComment *mqttStruct.MqttChatComment, grpId strin
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForDmMessage(grpId), 1, false, marshalMqttCreatePost)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishChatComment", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishChatComment to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 func PublishActivity(mqttActivity *mqttStruct.MqttActivity, userUUID string) {
@@ -682,15 +750,15 @@ func PublishActivity(mqttActivity *mqttStruct.MqttActivity, userUUID string) {
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForUserActivity(userUUID), 1, false, marshalMqttActivity)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishActivity", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishActivity failed to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 // PublishMessageToUser publishes an arbitrary typed message to a single user's
@@ -712,7 +780,7 @@ func PublishMessageToUser(userUUID string, msgType int8, data interface{}) {
 	token := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForUserActivity(userUUID), 1, false, payload)
 	go func() {
 		defer func() { _ = recover() }()
-		_ = token.Wait()
+		_ = token.WaitTimeout(mqttInit.PublishWait)
 		if token.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishMessageToUser failed to publish to mqtt err: %+v", token.Error())
@@ -749,7 +817,7 @@ func PublishToTopics(topics []string, msgType int8, data interface{}) {
 		token := mqttInit.MqttClient.Publish(topic, 1, false, payload)
 		go func() {
 			defer func() { _ = recover() }()
-			_ = token.Wait()
+			_ = token.WaitTimeout(mqttInit.PublishWait)
 			if token.Error() != nil {
 				helpers.LogErrorWithContext(ctx,
 					"business/PublishToTopics failed to publish to %s err: %+v", name, token.Error())
@@ -805,15 +873,15 @@ func PublishGitHubSync(mqttGitHubSync *mqttStruct.MqttGitHubSync, projectId stri
 
 	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForProjectMessage(projectId), 1, false, marshalMqttGitHubSync)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishGitHubSync", func() {
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishGitHubSync failed to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 }
 
 // PublishArchiveJobStatus publishes archive job lifecycle changes to the
@@ -869,7 +937,7 @@ func PublishArchiveJobStatus(mqttArchiveJob *mqttStruct.MqttArchiveJobStatus) {
 					r)
 			}
 		}()
-		_ = mqttClientRes.Wait()
+		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishArchiveJobStatus failed to publish to mqtt err: %+v",
@@ -913,7 +981,7 @@ func PublishSlackImportProgress(p *mqttStruct.MqttSlackImportProgress) {
 	res := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForAdminBroadcast(), 1, false, marshalled)
 	go func() {
 		defer func() { _ = recover() }()
-		_ = res.Wait()
+		_ = res.WaitTimeout(mqttInit.PublishWait)
 		if res.Error() != nil {
 			helpers.LogErrorWithContext(ctx,
 				"business/PublishSlackImportProgress publish err: %+v", res.Error())
@@ -950,12 +1018,12 @@ func PublishTableRow(tableId string, data interface{}) {
 		return
 	}
 	res := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForTable(tableId), 1, false, payload)
-	go func() {
-		_ = res.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishTableRow", func() {
+		_ = res.WaitTimeout(mqttInit.PublishWait)
 		if res.Error() != nil {
 			helpers.LogErrorWithContext(ctx, "business/PublishTableRow publish err: %+v", res.Error())
 		}
-	}()
+	})
 }
 
 // PublishPollUpdate tells a channel's clients that one of its polls changed.
@@ -970,10 +1038,10 @@ func PublishPollUpdate(channelId, pollId string) {
 		return
 	}
 	res := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForChannelMessage(channelId), 1, false, marshalled)
-	go func() {
-		_ = res.Wait()
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishPollUpdate", func() {
+		_ = res.WaitTimeout(mqttInit.PublishWait)
 		if res.Error() != nil {
 			helpers.LogErrorWithContext(ctx, "business/PublishPollUpdate publish err: %+v", res.Error())
 		}
-	}()
+	})
 }

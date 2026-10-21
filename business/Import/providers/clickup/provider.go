@@ -153,7 +153,7 @@ func (p *Provider) DefaultStatusMap() map[string]string {
 // keys on the readable value.
 func (p *Provider) DefaultPriorityMap() map[string]string {
 	return map[string]string{
-		"urgent": "high",
+		"urgent": "urgent",
 		"high":   "high",
 		"normal": "medium",
 		"medium": "medium",
@@ -847,7 +847,9 @@ func (p *Provider) taskToSourceTask(t clickupTask) importProvider.SourceTask {
 		Completed:       t.DateClosed != "" || strings.EqualFold(t.StatusType, "closed"),
 		AttachmentRefs:  atts,
 		CommentCount:    len(t.Comments),
-		Fields:          fieldValues(t.CustomFields),
+		EstimateMinutes: estimateMinutes(t.TimeEstimate),
+		Dependencies:    waitsOn(t),
+		Fields:          withPoints(fieldValues(t.CustomFields), t.Points),
 		Metadata: map[string]any{
 			"clickup_url": t.URL,
 			"clickup_id":  t.ID,
@@ -858,6 +860,32 @@ func (p *Provider) taskToSourceTask(t clickupTask) importProvider.SourceTask {
 			"space_id":    t.SpaceID,
 		},
 	}
+}
+
+func estimateMinutes(ms *int64) int {
+	if ms == nil || *ms <= 0 {
+		return 0
+	}
+	return int(*ms / 60000)
+}
+
+// waitsOn is what t waits on: a task's dependencies list the tasks waiting on
+// it as well, which are theirs to say.
+func waitsOn(t clickupTask) []importProvider.SourceDependency {
+	var out []importProvider.SourceDependency
+	for _, d := range t.Dependencies {
+		if d.TaskID == t.ID && d.DependsOn != "" && d.DependsOn != t.ID {
+			out = append(out, importProvider.SourceDependency{BlockerSourceID: d.DependsOn})
+		}
+	}
+	return out
+}
+
+func withPoints(values []importProvider.SourceFieldValue, points *float64) []importProvider.SourceFieldValue {
+	if points == nil {
+		return values
+	}
+	return append(values, importProvider.PointsValue(*points))
 }
 
 // parseClickUpMillis turns ClickUp's millisecond-since-epoch string
@@ -1007,6 +1035,15 @@ type clickupTask struct {
 	Tags      []clickupTag  `json:"tags"`
 
 	CustomFields []clickupField `json:"custom_fields"`
+
+	// TimeEstimate is in milliseconds; Points are the task's sprint points.
+	TimeEstimate *int64   `json:"time_estimate"`
+	Points       *float64 `json:"points"`
+	// Dependencies carry both ways: task_id waits on depends_on.
+	Dependencies []struct {
+		TaskID    string `json:"task_id"`
+		DependsOn string `json:"depends_on"`
+	} `json:"dependencies"`
 
 	// ParentRaw can be a string (parent task id) or null.
 	ParentRaw json.RawMessage `json:"parent"`

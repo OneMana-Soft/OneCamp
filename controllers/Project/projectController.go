@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"io"
 	"net/http"
 	"strings"
@@ -19,13 +19,14 @@ import (
 	business "github.com/akashc777/OneCamp/business/Project"
 	templateBusiness "github.com/akashc777/OneCamp/business/ProjectTemplate"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
-	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
+	taskrank "github.com/akashc777/OneCamp/business/TaskRank"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	teamBusiness "github.com/akashc777/OneCamp/business/Team"
 	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
+	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -1068,76 +1069,23 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var filterStrings []string
-	currentTime := time.Now()
-
+	// One builder for every task list (domain/Task.TaskListFilter, PR1).
+	params := make([]taskDomain.TaskListParam, 0, len(filtersParam))
+	for _, p := range filtersParam {
+		params = append(params, taskDomain.TaskListParam{ID: p.Id, Value: p.Value})
+	}
+	listFilter := taskDomain.TaskListFilter{Params: params, Now: time.Now(), Status: taskStatusBusiness.FilterClause}
+	listFilter.Side = func(id string, values []string) (string, bool) {
+		return sideFilterClause(ctx, projectUUIDString, id, values)
+	}
 	if len(taskSearchStr) != 0 {
-		safe, sErr := dgraphquery.SanitizeSearchTerm(taskSearchStr[0])
-		if sErr != nil {
-			if !errors.Is(sErr, dgraphquery.ErrEmpty) {
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-					"msg": "search string is too long or invalid",
-				})
-				return
-			}
-		} else {
-			filterStrings = append(filterStrings, fmt.Sprintf(`regexp(task_name,  /.*%s.*/i)`, safe))
-		}
+		listFilter.Search = taskSearchStr[0]
 	}
-
-	for _, param := range filtersParam {
-
-		// Refuse unrecognised column names so a hostile body can't
-		// inject DQL via the `id` field.
-		if !dgraphquery.IsAllowedColumnName(param.Id) {
-			continue
-		}
-
-		var filterValue string
-		switch v := param.Value.(type) {
-		case string:
-			if param.Id == "task_name" {
-				safe, sErr := dgraphquery.SanitizeSearchTerm(v)
-				if sErr == nil {
-					filterValue = fmt.Sprintf(`regexp(%s,  /.*%s.*/i)`, param.Id, safe)
-				}
-			}
-			if param.Id == "overdue" {
-				filterValue = fmt.Sprintf(dgraphStruct.TASK_OPEN_FILTER+` AND lt(task_due_date, "%s") AND gt(task_due_date, "1970-01-01T00:00:00Z")`, currentTime.Format(time.RFC3339Nano))
-			}
-			if param.Id == "upcoming" {
-				filterValue = fmt.Sprintf(dgraphStruct.TASK_OPEN_FILTER+` AND gt(task_start_date, "%s")`, currentTime.Format(time.RFC3339Nano))
-			}
-		case []interface{}:
-			strValues := make([]string, 0, len(v))
-			for _, item := range v {
-				if s, ok := item.(string); ok && dgraphquery.IsAllowedFilterValue(s) {
-					strValues = append(strValues, s)
-				}
-			}
-			if param.Id == "task_priority" {
-				filterValue = fmt.Sprintf(`anyofterms(%s,"%s")`, param.Id, strings.Join(strValues, " "))
-			}
-			// Built-in and custom statuses; see business/TaskStatus.
-			if param.Id == "task_status" {
-				filterValue = taskStatusBusiness.FilterClause(strValues)
-			}
-			if param.Id == "task_assignee_name" {
-				filterValue = fmt.Sprintf(`uid_in(task_assignee, [%s])`, strings.Join(strValues, ", "))
-			}
-			// Cycles and custom fields live in Postgres beside the tasks.
-			if clause, ok := sideFilterClause(ctx, projectUUIDString, param.Id, strValues); ok {
-				filterValue = clause
-			}
-
-		}
-
-		if len(filterValue) > 0 {
-			filterStrings = append(filterStrings, filterValue)
-		}
+	filterQuery, err := listFilter.Clause()
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "search string is too long or invalid"})
+		return
 	}
-
-	filterQuery := strings.Join(filterStrings, " AND ")
 
 	// One mapping from the sorts the list offers to the graph's: no key a
 	// request names is passed to the graph as it came.
@@ -1171,7 +1119,7 @@ func GetProjectTaskList(w http.ResponseWriter, r *http.Request) {
 
 	// Overlay ephemeral GitHub metadata from PostgreSQL onto Dgraph tasks
 	if dgraphProjectWithTasks != nil && len(dgraphProjectWithTasks.Tasks) > 0 {
-		_ = taskBusiness.MergeGitHubMetaIntoTasks(ctx, dgraphProjectWithTasks.Tasks)
+		// GitHub's facts are already on them (business.GetDgraphProjectTaskList; PR1, #24).
 		_ = taskFieldBusiness.MergeFieldValues(ctx, dgraphProjectWithTasks.Tasks)
 	}
 
@@ -1219,84 +1167,14 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	queryParams := r.URL.Query()
-
-	filtersParamString := queryParams["filters"]
-	var filtersParam []adapter.FilterParam
-
-	if len(filtersParamString) != 0 {
-		err := json.Unmarshal([]byte(filtersParamString[0]), &filtersParam)
-		if err != nil {
-
-			helpers.LogErrorWithContext(ctx,
-				"controllers/GetProjectTaskListForKanban Failed to parse filters query param err: %+v",
-				err)
-
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-				"msg": "Failed to parse filters query param",
-				"err": err,
-			})
-			return
-
-		}
-
+	filterQuery, err := kanbanFilterQuery(ctx, projectUUIDString, r)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+			"msg": "Failed to parse filters query param",
+			"err": err,
+		})
+		return
 	}
-
-	var filterStrings []string
-	currentTime := time.Now()
-
-	for _, param := range filtersParam {
-
-		// Refuse unrecognised column names.
-		if !dgraphquery.IsAllowedColumnName(param.Id) {
-			continue
-		}
-
-		var filterValue string
-		switch v := param.Value.(type) {
-		case string:
-			if param.Id == "task_name" {
-				safe, sErr := dgraphquery.SanitizeSearchTerm(v)
-				if sErr == nil {
-					filterValue = fmt.Sprintf(`regexp(%s,  /.*%s.*/i)`, param.Id, safe)
-				}
-			}
-			if param.Id == "overdue" {
-				filterValue = fmt.Sprintf(dgraphStruct.TASK_OPEN_FILTER+` AND lt(task_due_date, "%s") AND gt(task_due_date, "1970-01-01T00:00:00Z")`, currentTime.Format(time.RFC3339Nano))
-			}
-			if param.Id == "upcoming" {
-				filterValue = fmt.Sprintf(dgraphStruct.TASK_OPEN_FILTER+` AND gt(task_start_date, "%s")`, currentTime.Format(time.RFC3339Nano))
-			}
-		case []interface{}:
-			strValues := make([]string, 0, len(v))
-			for _, item := range v {
-				if s, ok := item.(string); ok && dgraphquery.IsAllowedFilterValue(s) {
-					strValues = append(strValues, s)
-				}
-			}
-			if param.Id == "task_priority" {
-				filterValue = fmt.Sprintf(`anyofterms(%s,"%s")`, param.Id, strings.Join(strValues, " "))
-			}
-			// Built-in and custom statuses; see business/TaskStatus.
-			if param.Id == "task_status" {
-				filterValue = taskStatusBusiness.FilterClause(strValues)
-			}
-			if param.Id == "task_assignee_name" {
-				filterValue = fmt.Sprintf(`uid_in(task_assignee, [%s])`, strings.Join(strValues, ", "))
-			}
-			// Cycles and custom fields live in Postgres beside the tasks.
-			if clause, ok := sideFilterClause(ctx, projectUUIDString, param.Id, strValues); ok {
-				filterValue = clause
-			}
-
-		}
-
-		if len(filterValue) > 0 {
-			filterStrings = append(filterStrings, filterValue)
-		}
-	}
-
-	filterQuery := strings.Join(filterStrings, " AND ")
 
 	dgraphProjectWithTasks, err := business.GetDgraphProjectTaskListForKanban(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid, filterQuery, helpers.OpenLimit(r.URL.Query()), helpers.ClosedLimit(r.URL.Query()))
 
@@ -1323,7 +1201,7 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 		allTasks = append(allTasks, dgraphProjectWithTasks.TasksInReview...)
 		allTasks = append(allTasks, dgraphProjectWithTasks.TasksCanceled...)
 		allTasks = append(allTasks, dgraphProjectWithTasks.TasksDone...)
-		_ = taskBusiness.MergeGitHubMetaIntoTasks(ctx, allTasks)
+		// GitHub's facts are already on them (business.GetDgraphProjectTaskListForKanban; PR1, #24).
 		_ = taskFieldBusiness.MergeFieldValues(ctx, allTasks)
 	}
 	decorate(ctx, &userInfo, dgraphProjectWithTasks)
@@ -1332,6 +1210,41 @@ func GetProjectTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 		"msg":  "Sucessful got task list",
 		"data": dgraphProjectWithTasks,
 	})
+}
+
+// kanbanFilterQuery is the board's filters (?filters=) as one DQL clause, for
+// the board and for a page of one of its columns alike, so both read the same
+// cards.
+func kanbanFilterQuery(ctx context.Context, projectUUIDString string, r *http.Request) (string, error) {
+	queryParams := r.URL.Query()
+
+	filtersParamString := queryParams["filters"]
+	var filtersParam []adapter.FilterParam
+
+	if len(filtersParamString) != 0 {
+		err := json.Unmarshal([]byte(filtersParamString[0]), &filtersParam)
+		if err != nil {
+
+			helpers.LogErrorWithContext(ctx,
+				"controllers/GetProjectTaskListForKanban Failed to parse filters query param err: %+v",
+				err)
+
+			return "", err
+
+		}
+
+	}
+
+	// One builder for every task list (domain/Task.TaskListFilter, PR1).
+	params := make([]taskDomain.TaskListParam, 0, len(filtersParam))
+	for _, p := range filtersParam {
+		params = append(params, taskDomain.TaskListParam{ID: p.Id, Value: p.Value})
+	}
+	listFilter := taskDomain.TaskListFilter{Params: params, Now: time.Now(), Status: taskStatusBusiness.FilterClause}
+	listFilter.Side = func(id string, values []string) (string, bool) {
+		return sideFilterClause(ctx, projectUUIDString, id, values)
+	}
+	return listFilter.Clause()
 }
 
 // decorate sets what the reader may do in the project they read
@@ -1370,4 +1283,61 @@ func sideFilterClause(ctx context.Context, projectUUID, id string, values []stri
 		return `eq(task_uuid, "00000000-0000-0000-0000-000000000000")`, true
 	}
 	return clause, true
+}
+
+// GetProjectBoardColumn answers GET /project/boardColumn/{project_uuid}
+// ?status=&after=&limit=&filters=: the next cards of one open column of the
+// project's board, after the card whose uuid is after (DG4b). A reader of
+// the board may read its columns. 409 when after is no longer in the column
+// (the web re-reads the board), 400 for a closed or unknown column.
+func GetProjectBoardColumn(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
+	projectUUIDString := chi.URLParam(r, "project_uuid")
+	if _, err := uuid.Parse(projectUUIDString); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Not a project id"})
+		return
+	}
+	q := r.URL.Query()
+	status := q.Get("status")
+	after := q.Get("after")
+	if status == "" || (after != "" && uuid.Validate(after) != nil) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "A column page needs a status, and after must be a card's id"})
+		return
+	}
+	dgraphProject, err := business.GetBasicDgraphProjectInfo(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid)
+	if err != nil {
+		helpers.WriteReadFailure(w, r, err, "project", "controllers/GetProjectBoardColumn")
+		return
+	}
+	if !dgraphProject.ReaderIsIn() {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
+		return
+	}
+	filterQuery, err := kanbanFilterQuery(ctx, projectUUIDString, r)
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to parse filters query param"})
+		return
+	}
+	page, err := business.GetProjectBoardColumnPage(ctx, projectUUIDString, userInfo.UserDgraphInfo.Uid, filterQuery, status, after,
+		helpers.LimitParam(q, business.BoardColumnMax, business.BoardColumnMax))
+	switch {
+	case errors.Is(err, taskrank.ErrNoSuchCard):
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "The board changed; read it again"})
+		return
+	case errors.Is(err, taskrank.ErrClosedColumn), errors.Is(err, taskrank.ErrUnknownColumn):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
+		return
+	case err != nil:
+		helpers.WriteReadFailure(w, r, err, "board column", "controllers/GetProjectBoardColumn")
+		return
+	}
+	_ = taskFieldBusiness.MergeFieldValues(ctx, page.Cards)
+	// What the reader may do with each card, as the board says it.
+	view := &dgraphStruct.DgraphProject{Uuid: projectUUIDString, TasksTodo: page.Cards}
+	decorate(ctx, &userInfo, view)
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": page})
 }

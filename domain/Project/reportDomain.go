@@ -9,6 +9,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/taskread"
 )
 
 // ReportProjectsCap is how many tasks of each kind (open, and closed since
@@ -42,6 +43,12 @@ const reportTask = `uid task_status task_priority task_due_date task_created_at 
 // live tasks and the live tasks that closed since since.
 func GetDgraphReport(ctx context.Context, userDgraphUID string, since time.Time) ([]ReportProject, error) {
 	const epoch = `"1970-01-01T00:00:00Z"`
+	// Restricted tasks the person may not see are in no list of theirs
+	// (models/taskread).
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
 	closed := fmt.Sprintf(`(eq(task_status, %q) OR eq(task_status, %q)) AND ge(task_status_since, $since)`,
 		dgraphStruct.TASK_STATUS_DONE, dgraphStruct.TASK_STATUS_CANCELED)
 	query := fmt.Sprintf(`query Report($user: string, $since: string) {
@@ -53,7 +60,7 @@ func GetDgraphReport(ctx context.Context, userDgraphUID string, since time.Time)
 				closed: project_tasks @filter(%[2]s AND %[4]s) (orderdesc: task_status_since, first: %[5]d) { %[6]s }
 			}
 		}
-	}`, epoch, dgraphStruct.TASK_LIVE_FILTER, dgraphStruct.TASK_OPEN_FILTER, closed, ReportProjectsCap+1, reportTask)
+	}`, epoch, dgraphStruct.TASK_LIVE_FILTER+tr.And(), dgraphStruct.TASK_OPEN_FILTER, closed, ReportProjectsCap+1, reportTask)
 	resp, err := dgraphInit.DgraphClient.NewReadOnlyTxn().QueryWithVars(ctx, query, map[string]string{
 		"$user": userDgraphUID, "$since": since.UTC().Format(time.RFC3339),
 	})
@@ -69,6 +76,8 @@ func GetDgraphReport(ctx context.Context, userDgraphUID string, since time.Time)
 	if err := json.Unmarshal(resp.Json, &out); err != nil {
 		return nil, err
 	}
+	// A hidden parent is a stub (models/taskread).
+	tr.Keep(&out)
 	if len(out.Me) == 0 {
 		return []ReportProject{}, nil
 	}

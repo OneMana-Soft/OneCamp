@@ -14,11 +14,14 @@ package business
 // plan to its own store.
 
 import (
+	"context"
 	"os"
 	"sort"
 	"strconv"
+	"sync/atomic"
 	"time"
 
+	policyBusiness "github.com/akashc777/OneCamp/business/Policy"
 	"github.com/google/uuid"
 )
 
@@ -37,12 +40,47 @@ const (
 	hourlyFor       = 7 * 24 * time.Hour
 )
 
-// docPolicy is the doc history's policy: DOC_SNAPSHOT_RETENTION_DAYS (30 by
-// default) and DOC_SNAPSHOT_MAX_MB per doc (64 by default).
-func docPolicy() Policy {
-	days, mb := 30, int64(64)
-	if n, err := strconv.Atoi(os.Getenv("DOC_SNAPSHOT_RETENTION_DAYS")); err == nil && n > 0 {
+// historyDays is the workspace's setting, docs.history.days (a year unless an
+// admin sets it). A seam for tests.
+var historyDays = func(ctx context.Context) int {
+	return policyBusiness.Policies.Int(ctx, policyBusiness.DocsHistoryDays)
+}
+
+// appliedDays is the retention the last scheduled prune applied; 0 before the
+// first. A lowered setting removes nothing until that prune takes it, while a
+// raised one keeps more at once.
+var appliedDays atomic.Int64
+
+// longestDays is what a doc's own prune keeps before any scheduled prune ran.
+const longestDays = 3650
+
+// docPolicy is the doc history's policy, for the prune after a version is
+// kept: the setting, never below what the last scheduled prune applied (so a
+// lower setting waits for it), and never below DOC_SNAPSHOT_RETENTION_DAYS, the
+// server's floor. DOC_SNAPSHOT_MAX_MB caps each doc's versions (64 by default).
+func docPolicy(ctx context.Context) Policy {
+	applied := int(appliedDays.Load())
+	if applied == 0 {
+		applied = longestDays
+	}
+	return policyFor(max(historyDays(ctx), applied))
+}
+
+// scheduledDocPolicy is the policy the scheduled prune applies: the setting
+// as it is now, which it records for the docs' own prunes after it.
+func scheduledDocPolicy(ctx context.Context) Policy {
+	p := policyFor(historyDays(ctx))
+	appliedDays.Store(int64(p.Retention / (24 * time.Hour)))
+	return p
+}
+
+func policyFor(days int) Policy {
+	mb := int64(64)
+	if n, err := strconv.Atoi(os.Getenv("DOC_SNAPSHOT_RETENTION_DAYS")); err == nil && n > days {
 		days = n
+	}
+	if days < 1 {
+		days = 1
 	}
 	if n, err := strconv.ParseInt(os.Getenv("DOC_SNAPSHOT_MAX_MB"), 10, 64); err == nil && n > 0 {
 		mb = n

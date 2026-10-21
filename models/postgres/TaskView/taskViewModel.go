@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 )
 
@@ -97,5 +98,8 @@ func Delete(userID, id uuid.UUID) (bool, error) {
 // OwnersOf is each saved view's owner, by the view's id; a view that isn't
 // there is left out.
 func OwnersOf(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]uuid.UUID, error) {
-	return postgresInit.UUIDPairs(ctx, `SELECT id, user_id FROM task_views WHERE id = ANY($1)`, ids)
+	if len(ids) == 0 {
+		return map[uuid.UUID]uuid.UUID{}, nil
+	}
+	return pgexec.Pairs[uuid.UUID, uuid.UUID](ctx, `SELECT id, user_id FROM task_views WHERE id = ANY($1)`, ids)
 }

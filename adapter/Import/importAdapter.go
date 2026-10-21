@@ -115,4 +115,14 @@ type ProviderInfo struct {
 	Capabilities     []string          `json:"capabilities"`
 	DefaultStatusMap map[string]string `json:"default_status_map"`
 	DefaultPriority  map[string]string `json:"default_priority_map"`
+	// SignIn is set for a provider connected by signing in at it (Basecamp)
+	// rather than with a pasted token.
+	SignIn *SignInInfo `json:"sign_in,omitempty"`
+}
+
+// SignInInfo says whether this server can sign an admin in to the provider,
+// and when it can't, how it is set up.
+type SignInInfo struct {
+	Configured bool   `json:"configured"`
+	Setup      string `json:"setup,omitempty"`
 }

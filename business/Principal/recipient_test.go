@@ -127,17 +127,28 @@ func TestEverySendPathAsksTheOneRecipientRule(t *testing.T) {
 
 // The HTTP handler must reach the recipient rule through business/Send, not
 // around it: a direct call to the create function would skip every check.
+// Since chat A2 it reaches it through the message pipeline, whose writes (today's
+// and the durable one) each prepare a DM through business/Send.
 func TestTheAppDMHandlerSendsThroughTheSharedRules(t *testing.T) {
 	raw, err := os.ReadFile("../../controllers/Chat/chatController.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	src := string(raw)
-	if !strings.Contains(src, "sendBusiness.PrepareDirectMessage(") {
-		t.Error("controllers/Chat no longer prepares DMs through business/Send, so the recipient rule may be skipped")
+	if !strings.Contains(src, "messagePipeline.Messages.Write(") || !strings.Contains(src, "conversationBusiness.KindDM") {
+		t.Error("controllers/Chat no longer sends DMs through the message pipeline, so the recipient rule may be skipped")
 	}
 	if strings.Contains(src, "business.CreateChat(") {
 		t.Error("controllers/Chat calls CreateChat directly, around the recipient rule in business/Send")
+	}
+	for _, file := range []string{"../../business/MessagePipeline/contract.go", "../../business/MessagePipeline/durable.go"} {
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(raw), "sendBusiness.PrepareDirectMessage(") {
+			t.Errorf("%s writes DMs without preparing them through business/Send, so the recipient rule may be skipped", file)
+		}
 	}
 }
 

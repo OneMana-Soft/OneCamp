@@ -30,6 +30,7 @@ import (
 	"regexp"
 	"time"
 
+	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
 	attachmentDomain "github.com/akashc777/OneCamp/domain/Attachment"
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
@@ -345,6 +346,7 @@ func (g *groupTarget) writeMessage(ctx context.Context, id uuid.UUID, m conversa
 		})
 		return err
 	}
+	refsBusiness.Saved(ctx, refsBusiness.Chat, id.String(), m.HTML, true)
 	if replyTo != "" {
 		if err := chatDomain.LinkReplyTo(ctx, id.String(), replyTo); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/Conversation a copy's quote wasn't linked: %+v", err)
@@ -389,6 +391,7 @@ func (g *groupTarget) writeReply(ctx context.Context, root, id uuid.UUID, r conv
 	if _, err := commentDomain.CreateOrUpdateCommentInChat(ctx, &chat, id.String()); err != nil {
 		return err
 	}
+	refsBusiness.Saved(ctx, refsBusiness.Comment, id.String(), r.HTML, true)
 	plain := helpers.HTMLToPlainText(r.HTML)
 	ps := g.participants()
 	helpers.GoSafeNamed("conversation.share.search", func() {
@@ -456,6 +459,7 @@ func (c *channelTarget) writeMessage(ctx context.Context, id uuid.UUID, m conver
 		})
 		return err
 	}
+	refsBusiness.Saved(ctx, refsBusiness.Message, id.String(), m.HTML, true)
 	plain := helpers.HTMLToPlainText(body)
 	helpers.GoSafeNamed("conversation.share.search", func() {
 		postDomain.CreatePostWithAttachmentsInOpenSearch(&openSearchStruct.OpenSearchPost{
@@ -493,6 +497,7 @@ func (c *channelTarget) writeReply(ctx context.Context, root, id uuid.UUID, r co
 	if _, err := commentDomain.CreateDgraphCommentInAPost(ctx, &post, id.String()); err != nil {
 		return err
 	}
+	refsBusiness.Saved(ctx, refsBusiness.Comment, id.String(), r.HTML, true)
 	plain := helpers.HTMLToPlainText(r.HTML)
 	helpers.GoSafeNamed("conversation.share.search", func() {
 		commentDomain.CreatePostCommentWithAttachmentsInOpenSearch(&openSearchStruct.OpenSearchComment{

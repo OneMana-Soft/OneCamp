@@ -53,7 +53,7 @@ func fail(w http.ResponseWriter, err error) {
 func ImportDoc(w http.ResponseWriter, r *http.Request) {
 	who, _, ok := whoIs(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	mr, err := r.MultipartReader()
@@ -118,7 +118,7 @@ type presignBody struct {
 func PresignImport(w http.ResponseWriter, r *http.Request) {
 	who, _, ok := whoIs(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	var body presignBody
@@ -142,7 +142,7 @@ func PresignImport(w http.ResponseWriter, r *http.Request) {
 func StartImport(w http.ResponseWriter, r *http.Request) {
 	who, _, ok := whoIs(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	job, err := contentIOBusiness.Pipeline.StartUploaded(r.Context(), who, chi.URLParam(r, "job_id"))
@@ -159,7 +159,7 @@ func StartImport(w http.ResponseWriter, r *http.Request) {
 func GetJob(w http.ResponseWriter, r *http.Request) {
 	who, _, ok := whoIs(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	job, err := contentIOBusiness.Pipeline.Job(r.Context(), who, chi.URLParam(r, "job_id"))
@@ -177,7 +177,7 @@ func GetJob(w http.ResponseWriter, r *http.Request) {
 func GetCapabilities(w http.ResponseWriter, r *http.Request) {
 	who, u, ok := whoIs(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	c := contentIOBusiness.Pipeline.Capabilities(r.Context(), who, u.UserPostgresInfo.IsAdmin)
@@ -221,7 +221,7 @@ func (t *httpTarget) Start(filename, mediaType string) io.Writer {
 func ExportDoc(w http.ResponseWriter, r *http.Request) {
 	who, _, ok := whoIs(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	body, ok := readExportBody(w, r)
@@ -251,7 +251,7 @@ func ExportDoc(w http.ResponseWriter, r *http.Request) {
 func RecordExport(w http.ResponseWriter, r *http.Request) {
 	who, _, ok := whoIs(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	body, ok := readExportBody(w, r)

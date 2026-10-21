@@ -33,7 +33,7 @@ func TestPeopleSearchByEveryName(t *testing.T) {
 	}
 	dg := integration.SetupDgraph(t)
 
-	sam, priya, octo, searcher := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	sam, priya, octo, searcher, ana := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	for _, p := range []struct {
 		id              uuid.UUID
 		email, username string
@@ -43,6 +43,7 @@ func TestPeopleSearchByEveryName(t *testing.T) {
 		{priya, "priya@example.test", "priya.raman", false},
 		{octo, "octo@example.test", "octo-sam", true},
 		{searcher, "me@example.test", "me", false},
+		{ana, "ana@example.test", "ana.rivera", false},
 	} {
 		if _, err := env.PG.Exec(`INSERT INTO users (id, email_id, username, is_external, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, NOW(), NOW())`, p.id, p.email, p.username, p.external); err != nil {
@@ -54,7 +55,13 @@ func TestPeopleSearchByEveryName(t *testing.T) {
 		{"uid": "_:priya", "dgraph.type": "User", "user_uuid": priya.String(), "user_name": "PR", "user_full_name": "Priya Raman", "user_email_id": "priya@example.test"},
 		{"uid": "_:octo", "dgraph.type": "User", "user_uuid": octo.String(), "user_name": "Octo Cat", "is_external": true},
 		{"uid": "_:me", "dgraph.type": "User", "user_uuid": searcher.String(), "user_name": "Me"},
+		{"uid": "_:ana", "dgraph.type": "User", "user_uuid": ana.String(), "user_name": "Ana", "user_full_name": "Ana Rivera", "user_email_id": "ana@example.test"},
 	})
+	// Saved raw, as before search names: the start's backfill gives them
+	// theirs, where the search starts.
+	if _, err := userDomain.BackfillSearchNames(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	found := func(term string) map[string]string {
 		users, err := userDomain.GetUserListWithSearchText(ctx, searcher.String(), term)
@@ -113,6 +120,27 @@ func TestPeopleSearchByEveryName(t *testing.T) {
 		if u.Uuid == sam.String() && (u.Handle != "sam.r" || u.UserFullName != "Samuel Rivera") {
 			t.Errorf("mention list has Sam as handle %q, full name %q", u.Handle, u.UserFullName)
 		}
+	}
+
+	// The goal owner picker (GET /user/allUsers?q=&limit=): the people
+	// matching what is typed, with their handles, at most limit; with nothing
+	// typed, the first limit people. It read everyone to search in the browser.
+	riveras, err := userBusiness.PickerPeople(ctx, "rivera", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, u := range riveras {
+		got[u.Uuid] = u.Handle
+	}
+	if len(got) != 2 || got[sam.String()] != "sam.r" || got[ana.String()] != "ana.rivera" {
+		t.Errorf("picker search for rivera: %v", got)
+	}
+	if one, _ := userBusiness.PickerPeople(ctx, "rivera", 1); len(one) != 1 {
+		t.Errorf("picker search past its limit: %d", len(one))
+	}
+	if first, _ := userBusiness.PickerPeople(ctx, "", 2); len(first) != 2 {
+		t.Errorf("picker with nothing typed: %d people, want 2", len(first))
 	}
 
 	// Last: handles that can't be read (here, their column away) leave the

@@ -321,6 +321,9 @@ func GetActiveOutgoingWebhooksByEvent(query string, args ...interface{}) ([]*Web
 			&scopeType,
 			&triggerWords,
 			&scopeEntity,
+			// Who set it up: what it may be sent of a private doc or a
+			// restricted task is what they may see (business/Webhook dispatch).
+			&w.CreatedBy,
 		); err != nil {
 			helpers.LogErrorWithContext(ctx,
 				"models/GetActiveOutgoingWebhooksByEvent Failed to scan row err: %+v",
@@ -376,20 +379,4 @@ func UpdateWebhookTriggerInfo(query string, lastTriggeredAt time.Time, failureCo
 	}
 
 	return nil
-}
-
-// IncrementWebhookFailureCount atomically increments failure_count and returns the new value.
-func IncrementWebhookFailureCount(query string, lastTriggeredAt time.Time, id uuid.UUID) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var newCount int
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, lastTriggeredAt, id).Scan(&newCount)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/IncrementWebhookFailureCount Failed err: %+v",
-			err)
-		return 0, err
-	}
-	return newCount, nil
 }

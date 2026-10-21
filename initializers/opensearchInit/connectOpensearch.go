@@ -371,7 +371,7 @@ func ConnectOpenSearch(config *OpenSearchConfig) (err error) {
 
 	ensureDocAccessMapping(ctx)
 
-	go ensureAuditLogRetention(context.Background())
+	helpers.GoSafeNamed("ensureAuditLogRetention", func() { ensureAuditLogRetention(context.Background()) })
 
 	return nil
 }

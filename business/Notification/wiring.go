@@ -101,7 +101,7 @@ func DispatchMemoryDigest(recipientUUID, subject, body string) {
 	if recipientUUID == "" || body == "" {
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("business/Notification/wiring:DispatchMemoryDigest", func() {
 		defer recoverDispatch("DispatchMemoryDigest")
 		ctx := context.Background()
 		Dispatch(ctx, Event{
@@ -116,7 +116,7 @@ func DispatchMemoryDigest(recipientUUID, subject, body string) {
 			Recipients:      recipientsFromStrings([]string{recipientUUID}),
 			SkipOnlineCheck: true,
 		})
-	}()
+	})
 }
 
 // A booking page's owner is told of a booking in booking.go (TellBookingOwner):
@@ -135,7 +135,7 @@ func DispatchProjectUpdate(authorUUID, authorName, projectUUID, projectName, hea
 	if len(recipients) == 0 {
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("business/Notification/wiring:DispatchProjectUpdate", func() {
 		defer recoverDispatch("DispatchProjectUpdate")
 		Dispatch(context.Background(), Event{
 			Type:          EventProjectUpdate,
@@ -150,7 +150,7 @@ func DispatchProjectUpdate(authorUUID, authorName, projectUUID, projectName, hea
 			DedupKeyParts: []string{"project.update", updateID},
 			Recipients:    recipientsFromStrings(recipients),
 		})
-	}()
+	})
 }
 
 // DispatchCheckIn tells the people a check-in asks that its question is
@@ -160,7 +160,7 @@ func DispatchCheckIn(checkinID, postUUID, channelUUID, channelName, question str
 	if len(people) == 0 {
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("business/Notification/wiring:DispatchCheckIn", func() {
 		defer recoverDispatch("DispatchCheckIn")
 		Dispatch(context.Background(), Event{
 			Type:          EventCheckIn,
@@ -174,7 +174,7 @@ func DispatchCheckIn(checkinID, postUUID, channelUUID, channelName, question str
 			DedupKeyParts: []string{"checkin", checkinID, postUUID},
 			Recipients:    recipientsFromStrings(people),
 		})
-	}()
+	})
 }
 
 // DispatchMemoryDigestTest sends a one-off TEST digest to a single recipient,
@@ -226,7 +226,7 @@ func DispatchChatDM(senderUUID, senderName string, senderAvatar string,
 	if len(recipientUUIDs) == 0 {
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("business/Notification/wiring:DispatchChatDM", func() {
 		defer recoverDispatch("DispatchChatDM")
 		ctx := context.Background()
 		title := senderName + " sent you a message"
@@ -248,7 +248,7 @@ func DispatchChatDM(senderUUID, senderName string, senderAvatar string,
 			DedupKeyParts: []string{grpId, chatUUID},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
 		})
-	}()
+	})
 }
 
 // DispatchChannelMention is the integration point for channel post mentions.
@@ -263,7 +263,7 @@ func DispatchChannelMention(actorUUID, actorName, actorAvatar string,
 	if len(mentionUUIDs) == 0 {
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("business/Notification/wiring:DispatchChannelMention", func() {
 		defer recoverDispatch("DispatchChannelMention")
 		ctx := context.Background()
 		subject := actorName + " mentioned you in #" + channelName
@@ -281,7 +281,7 @@ func DispatchChannelMention(actorUUID, actorName, actorAvatar string,
 			DedupKeyParts: []string{channelUUID, postUUID},
 			Recipients:    recipientsFromStrings(mentionUUIDs),
 		})
-	}()
+	})
 }
 
 // taskReaders is the gate for an email about a task: the people who may read
@@ -303,7 +303,7 @@ func DispatchTaskAssignment(actorUUID, actorName, actorAvatar string,
 	if assigneeUUID == "" || assigneeUUID == actorUUID {
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("business/Notification/wiring:DispatchTaskAssignment", func() {
 		defer recoverDispatch("DispatchTaskAssignment")
 		ctx := context.Background()
 		subject := actorName + " assigned a task to you"
@@ -326,7 +326,7 @@ func DispatchTaskAssignment(actorUUID, actorName, actorAvatar string,
 			Recipients:    recipientsFromStrings([]string{assigneeUUID}),
 			MayRead:       taskReaders(taskUUID),
 		})
-	}()
+	})
 }
 
 // DispatchTaskStatusChange tells the people a task belongs to (its assignee,
@@ -341,7 +341,7 @@ func DispatchTaskStatusChange(actorUUID, actorName, actorAvatar string,
 	if len(recipientUUIDs) == 0 || taskUUID == "" {
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("business/Notification/wiring:DispatchTaskStatusChange", func() {
 		defer recoverDispatch("DispatchTaskStatusChange")
 		ctx := context.Background()
 		name := taskName
@@ -368,7 +368,7 @@ func DispatchTaskStatusChange(actorUUID, actorName, actorAvatar string,
 			Recipients:    recipientsFromStrings(recipientUUIDs),
 			MayRead:       taskReaders(taskUUID),
 		})
-	}()
+	})
 }
 
 // DispatchTaskComment fires for new task comments. Recipients are the
@@ -381,7 +381,7 @@ func DispatchTaskComment(actorUUID, actorName, actorAvatar string,
 	if len(recipientUUIDs) == 0 {
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("business/Notification/wiring:DispatchTaskComment", func() {
 		defer recoverDispatch("DispatchTaskComment")
 		ctx := context.Background()
 		subject := actorName + " commented on " + taskName
@@ -400,7 +400,7 @@ func DispatchTaskComment(actorUUID, actorName, actorAvatar string,
 			Recipients:    recipientsFromStrings(recipientUUIDs),
 			MayRead:       taskReaders(taskUUID),
 		})
-	}()
+	})
 }
 
 // DispatchPostComment fires for new comments on a channel post.
@@ -412,7 +412,7 @@ func DispatchPostComment(actorUUID, actorName, actorAvatar string,
 	if len(recipientUUIDs) == 0 {
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("business/Notification/wiring:DispatchPostComment", func() {
 		defer recoverDispatch("DispatchPostComment")
 		ctx := context.Background()
 		subject := actorName + " replied to a post"
@@ -430,7 +430,7 @@ func DispatchPostComment(actorUUID, actorName, actorAvatar string,
 			DedupKeyParts: []string{"post_comment", postUUID, commentUUID},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
 		})
-	}()
+	})
 }
 
 // DispatchDocComment fires for new doc comments. Recipients are the doc
@@ -443,7 +443,7 @@ func DispatchDocComment(actorUUID, actorName, actorAvatar string,
 	if len(recipientUUIDs) == 0 {
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("business/Notification/wiring:DispatchDocComment", func() {
 		defer recoverDispatch("DispatchDocComment")
 		ctx := context.Background()
 		subject := actorName + " commented on " + docTitle
@@ -461,7 +461,7 @@ func DispatchDocComment(actorUUID, actorName, actorAvatar string,
 			DedupKeyParts: []string{"doc_comment", docUUID, commentUUID},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
 		})
-	}()
+	})
 }
 
 // DispatchChatComment fires for new comments on a 1:1 / group chat message.
@@ -473,7 +473,7 @@ func DispatchChatComment(actorUUID, actorName, actorAvatar string,
 	if len(recipientUUIDs) == 0 {
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("business/Notification/wiring:DispatchChatComment", func() {
 		defer recoverDispatch("DispatchChatComment")
 		ctx := context.Background()
 		subject := actorName + " replied in a chat thread"
@@ -492,7 +492,7 @@ func DispatchChatComment(actorUUID, actorName, actorAvatar string,
 			DedupKeyParts: []string{"chat_comment", chatUUID, commentUUID},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
 		})
-	}()
+	})
 }
 
 // DispatchChannelCall fires when a video call starts in a channel.
@@ -504,7 +504,7 @@ func DispatchChannelCall(actorUUID, actorName, actorAvatar string,
 	if len(recipientUUIDs) == 0 {
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("business/Notification/wiring:DispatchChannelCall", func() {
 		defer recoverDispatch("DispatchChannelCall")
 		ctx := context.Background()
 		subject := actorName + " started a call in #" + channelName
@@ -523,7 +523,7 @@ func DispatchChannelCall(actorUUID, actorName, actorAvatar string,
 			DedupKeyParts: []string{"channel_call", channelUUID, helpers.NowDateKey()},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
 		})
-	}()
+	})
 }
 
 // DispatchChatCall fires when a video call starts in a DM/group chat.
@@ -535,7 +535,7 @@ func DispatchChatCall(actorUUID, actorName, actorAvatar string,
 	if len(recipientUUIDs) == 0 {
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("business/Notification/wiring:DispatchChatCall", func() {
 		defer recoverDispatch("DispatchChatCall")
 		ctx := context.Background()
 		subject := actorName + " is calling"
@@ -554,34 +554,7 @@ func DispatchChatCall(actorUUID, actorName, actorAvatar string,
 			DedupKeyParts: []string{"chat_call", grpId, helpers.NowDateKey()},
 			Recipients:    recipientsFromStrings(recipientUUIDs),
 		})
-	}()
-}
-
-// DispatchMemoryDigestTest sends a one-off TEST digest to a single recipient,
-// bypassing the per-(recipient, day) dedup so an admin can re-send and verify
-// delivery. It still honors the recipient's email settings + suppression
-// downstream in Dispatch. The unique dedup token (nanosecond) guarantees each
-// test is delivered rather than collapsed into the daily digest.
-func DispatchMemoryDigestTest(recipientUUID, subject, body string) {
-	if recipientUUID == "" || body == "" {
-		return
-	}
-	go func() {
-		defer recoverDispatch("DispatchMemoryDigestTest")
-		ctx := context.Background()
-		Dispatch(ctx, Event{
-			Type:            EventMemoryDigest,
-			SubjectLine:     subject,
-			Title:           "Your open items (test)",
-			Subtitle:        "From your workspace memory",
-			Body:            body,
-			CTAURL:          frontendMemoryURL(),
-			CTAText:         "Review in OneCamp",
-			DedupKeyParts:   []string{"memory_digest_test", strconv.FormatInt(time.Now().UnixNano(), 10)},
-			Recipients:      recipientsFromStrings([]string{recipientUUID}),
-			SkipOnlineCheck: true,
-		})
-	}()
+	})
 }
 
 // actorOrSomeone is the name an email or its subject gives whoever acted.

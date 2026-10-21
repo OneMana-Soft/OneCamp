@@ -33,6 +33,15 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # The staticcheck checks that have found real bugs here: a break that
+      # left only a select (SA4011, a cancelled GitHub import kept fetching),
+      # results built and never used (SA4010, SA4006), a ctx thrown away before
+      # use (SA4009), a loop that always stops after one pass (SA4004), and
+      # unused code (U1000). Clean, apart from //lint:ignore lines that say why.
+      # Same as `make staticcheck`.
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 -checks SA4004,SA4006,SA4009,SA4010,SA4011,U1000 ./...
+
       - name: gofmt check
         run: |
           # gofmt -l prints filenames that need formatting; non-empty

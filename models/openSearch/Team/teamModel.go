@@ -46,9 +46,10 @@ func CreateTeamInOpenSearch(ctx context.Context, openSearchTeam *openSearchStruc
 
 func UpdateTeamInOpenSearch(ctx context.Context, openSearchTeam *openSearchStruct.OpenSearchTeam) (err error) {
 
+	// Partial: a team the index doesn't have isn't created from a rename
+	// (opensearchInit.UpdateDocument); CreateTeamInOpenSearch writes it whole.
 	doc := openSearchStruct.BulkUpdate{
-		Doc:         openSearchTeam,
-		DocAsUpsert: true,
+		Doc: openSearchTeam,
 	}
 	jsonData, err := json.Marshal(doc)
 

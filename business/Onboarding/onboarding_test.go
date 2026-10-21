@@ -322,6 +322,12 @@ func TestTheImportStepNamesEveryProvider(t *testing.T) {
 		if !e.IsDir() {
 			continue
 		}
+		// RELEASE-LINE ONLY (v2.75.0 / v1.60.0): the release lines don't offer
+		// Basecamp yet (business/Import/providers/releaseLine_test.go), so the
+		// step doesn't name it.
+		if e.Name() == "basecamp" {
+			continue
+		}
 		providers++
 		if !strings.Contains(detail, e.Name()) {
 			t.Errorf("the import step doesn't name %s, which the importer takes", e.Name())

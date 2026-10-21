@@ -193,3 +193,60 @@ func TestAnUnrecordedScopedChangeIsUndone(t *testing.T) {
 		t.Error("never set before: undoing leaves nothing set")
 	}
 }
+
+// PR1 (#2): a page of tasks across many projects reads every project's own
+// values in one statement (Prime), never one per project; what was primed is
+// served from the cache, a scope with no values included, and a failed read
+// leaves each scope to its own read.
+func TestPrimingReadsManyScopesAtOnce(t *testing.T) {
+	sc := scopedStore{}
+	r := withScopes(t, &store{values: map[string]string{}}, sc)
+	a, b, c := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	sc[Scope{Kind: ScopeProject, ID: a}.cacheKey()] = map[string]string{whoEdits.Key: "members"}
+	oldMany := readScopedMany
+	t.Cleanup(func() { readScopedMany = oldMany })
+	var batches [][]string
+	readScopedMany = func(_ context.Context, kind string, ids []string) (map[string]map[string]string, error) {
+		batches = append(batches, ids)
+		out := map[string]map[string]string{}
+		for _, id := range ids {
+			if v, ok := sc[kind+":"+strings.ToLower(id)]; ok {
+				out[strings.ToLower(id)] = v
+			}
+		}
+		return out, nil
+	}
+	single := 0
+	oldR := readScoped
+	readScoped = func(ctx context.Context, sp Scope) (map[string]string, error) {
+		single++
+		return oldR(ctx, sp)
+	}
+	r.PrimeScopes(context.Background(), ScopeProject, []string{a, b, c, a})
+	if len(batches) != 1 || len(batches[0]) != 3 {
+		t.Fatalf("one read of the three scopes: %v", batches)
+	}
+	if got := r.ChoiceIn(context.Background(), whoEdits, Scope{Kind: ScopeProject, ID: a}); got != "members" {
+		t.Fatalf("a's own value: %s", got)
+	}
+	if got := r.ChoiceIn(context.Background(), whoEdits, Scope{Kind: ScopeProject, ID: b}); got != "admins" {
+		t.Fatalf("b has none: the workspace's: %s", got)
+	}
+	if single != 0 {
+		t.Fatalf("a primed scope was read again on its own %d times", single)
+	}
+	// Primed again within the cache's time: nothing is read.
+	r.PrimeScopes(context.Background(), ScopeProject, []string{a, b, c})
+	if len(batches) != 1 {
+		t.Fatalf("primed scopes are read again: %v", batches)
+	}
+	// A failed batch primes nothing: each scope reads its own, as before.
+	scopedCache.Purge()
+	readScopedMany = func(context.Context, string, []string) (map[string]map[string]string, error) {
+		return nil, errors.New("down")
+	}
+	r.PrimeScopes(context.Background(), ScopeProject, []string{a})
+	if got := r.ChoiceIn(context.Background(), whoEdits, Scope{Kind: ScopeProject, ID: a}); got != "members" || single != 1 {
+		t.Fatalf("after a failed batch: %s, %d reads of its own", got, single)
+	}
+}

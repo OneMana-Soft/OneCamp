@@ -8,6 +8,7 @@ import (
 
 	business "github.com/akashc777/OneCamp/business/Task"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
+	taskWriter "github.com/akashc777/OneCamp/business/TaskWriter"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/helpers"
@@ -23,10 +24,12 @@ type moveTaskInput struct {
 	After  string `json:"after_task_uuid"`
 }
 
-// MoveTask POST /task/moveTask: a card dropped on a board. Sets its status and
-// keeps its place in the column, so it is still there on the next load.
-// The status is a built-in key or one of the project's custom statuses.
-// Same permission as changing a task's status (Work Access).
+// MoveTask POST /task/moveTask: a card dropped on a board, or a row dragged in
+// the list. Keeps its place in the project's one order (business/Task
+// Reorder), so it is there on the next load, in every view. A board drop also
+// sets its status (a built-in key or one of the project's custom statuses);
+// a list drag sends none, and is the Task Writer's rank op. Same permission as
+// changing the task (Work Access).
 func MoveTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
@@ -51,7 +54,13 @@ func MoveTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if strings.TrimSpace(in.Status) == "" {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "task_status is required"})
+		place, _ := json.Marshal(map[string]string{"before": in.Before, "after": in.After})
+		_, _, err := taskWriter.Tasks.Apply(ctx, &userInfo, taskUUID, []taskWriter.Op{{Kind: taskWriter.OpRank, Value: place}}, 0)
+		if err != nil {
+			writeTaskWriteFailure(w, r, err)
+			return
+		}
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Moved task"})
 		return
 	}
 
@@ -71,9 +80,27 @@ func MoveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/MoveTask failed err: %+v", err)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to move the task"})
+		// A move that lost to another change of the same tasks, after the
+		// write's own retries, is a 409 to try again (a list reorder sends one
+		// move per task); anything else is a 503.
+		helpers.WriteWriteFailure(w, r, err, "Couldn't move the task.", "controllers/MoveTask")
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Moved task"})
+}
+
+// writeTaskWriteFailure answers a Task Writer change that failed: a value it
+// can't take (400), a task they may not see or change (as the check says it),
+// anything else as a failed write, as a board drop's is: a move that lost to
+// another change of the same tasks after the write's own retries is a 409 to
+// try again, the rest a 503 (helpers.WriteWriteFailure).
+func writeTaskWriteFailure(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, taskWriter.ErrBadValue):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That place couldn't be read."})
+	case errors.Is(err, workAccess.ErrNotAllowed), errors.Is(err, business.ErrTaskNotVisible):
+		projectaccess.WriteTaskRefusal(w, r, err)
+	default:
+		helpers.WriteWriteFailure(w, r, err, "Couldn't move the task.", "controllers/MoveTask")
+	}
 }

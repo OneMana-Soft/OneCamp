@@ -82,6 +82,8 @@ func ClassifyBot(email string) BotKind {
 		return ""
 	}
 	switch {
+	case strings.HasPrefix(email, AppBotPrefix):
+		return BotKindApp
 	case email == SystemBotEmail:
 		// One principal, two jobs. On a build with no AI it is not an
 		// assistant and must not be described as one.

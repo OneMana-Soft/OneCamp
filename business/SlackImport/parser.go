@@ -130,6 +130,16 @@ type SlackChannel struct {
 	Purpose struct {
 		Value string `json:"value"`
 	} `json:"purpose"`
+	// Pins is the channel's pinned messages, as channels.json and groups.json
+	// list them: the message's ts, who pinned it and when.
+	Pins []SlackPin `json:"pins,omitempty"`
+}
+
+// SlackPin is one pinned message in a channel's manifest.
+type SlackPin struct {
+	ID      string `json:"id"`      // the message's ts
+	Created int64  `json:"created"` // unix seconds
+	User    string `json:"user"`    // who pinned it
 }
 
 // SlackMessage is one record inside a per-day channel JSON file.
@@ -160,8 +170,15 @@ type SlackMessage struct {
 	Text       string           `json:"text"`
 	Blocks     json.RawMessage  `json:"blocks,omitempty"`
 	Files      []SlackFile      `json:"files,omitempty"`
-	Reactions  []SlackReaction  `json:"reactions,omitempty"`
-	Edited     *struct {
+	// A channel's own events (channel_join, channel_topic, channel_name…)
+	// carry what changed: the topic set, the new and the old name, and who
+	// added the person who joined.
+	Topic     string          `json:"topic,omitempty"`
+	Name      string          `json:"name,omitempty"`
+	OldName   string          `json:"old_name,omitempty"`
+	Inviter   string          `json:"inviter,omitempty"`
+	Reactions []SlackReaction `json:"reactions,omitempty"`
+	Edited    *struct {
 		User string `json:"user"`
 		Ts   string `json:"ts"`
 	} `json:"edited,omitempty"`
@@ -238,6 +255,12 @@ type ParsedExport struct {
 	// MessageFiles indexes per-day JSON entries by channel id. Each entry
 	// is the path inside the zip, e.g. "general/2024-01-15.json".
 	MessageFiles map[string][]string // slackChannelId -> []zipPath
+
+	// Uploads is the files the export carries itself, by Slack file id, at
+	// __uploads/<file id>/<name>: an Enterprise Grid export's, and the API
+	// reader's (api_reader.go). The file stage reads these from the export
+	// rather than from their links.
+	Uploads map[string]*zip.File
 }
 
 // ErrInvalidExport is returned when the zip is missing the bare minimum
@@ -264,6 +287,7 @@ func ParseManifests(zr *zip.Reader) (*ParsedExport, error) {
 
 	out := &ParsedExport{
 		MessageFiles: make(map[string][]string),
+		Uploads:      make(map[string]*zip.File),
 	}
 
 	// Map channel name -> id for the directory→channel association below.
@@ -323,6 +347,11 @@ func ParseManifests(zr *zip.Reader) (*ParsedExport, error) {
 	mpimIds := make(map[string]bool)
 	for _, c := range out.MPIMs {
 		mpimIds[c.ID] = true
+		// A group DM's folder is named after it ("mpdm-ada--bo--cy-1"), as
+		// Slack's exports lay them out; its id is taken too.
+		if c.Name != "" {
+			nameToId[c.Name] = c.ID
+		}
 	}
 
 	// Index per-day message files. Slack lays them out as
@@ -336,6 +365,10 @@ func ParseManifests(zr *zip.Reader) (*ParsedExport, error) {
 		}
 		dir, file := path.Split(f.Name)
 		dir = strings.TrimSuffix(dir, "/")
+		if id, ok := uploadID(dir); ok && file != "" {
+			out.Uploads[id] = f
+			continue
+		}
 		if !strings.HasSuffix(file, ".json") || dir == "" {
 			continue
 		}
@@ -470,6 +503,15 @@ func decodeJSONFile(f *zip.File, v interface{}) error {
 // rule stays consistent across every import in the codebase.
 func isSafeZipPath(p string) bool {
 	return zipsafe.SafePath(p)
+}
+
+// uploadID is the Slack file id an export's folder __uploads/<id> holds. Pure.
+func uploadID(dir string) (string, bool) {
+	id, ok := strings.CutPrefix(dir, "__uploads/")
+	if !ok || id == "" || strings.Contains(id, "/") {
+		return "", false
+	}
+	return id, true
 }
 
 // SubtypeIsSystem reports whether a subtype is a Slack system event we

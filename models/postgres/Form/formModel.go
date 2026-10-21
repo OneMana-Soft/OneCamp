@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 )
 
@@ -147,14 +148,14 @@ func Record(form uuid.UUID, task *uuid.UUID, answers json.RawMessage) error {
 func CountSince(form uuid.UUID, since time.Time) (int, error) {
 	ctx, cancel := withTimeout()
 	defer cancel()
-	var n int
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM form_submissions WHERE form_id = $1 AND created_at > $2`, form, since).Scan(&n)
-	return n, err
+	return pgexec.Scalar[int](ctx, `SELECT COUNT(*) FROM form_submissions WHERE form_id = $1 AND created_at > $2`, form, since)
 }
 
 // ProjectsOf is each form's project, by the form's id; a form that isn't
 // there is left out.
 func ProjectsOf(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]uuid.UUID, error) {
-	return postgresInit.UUIDPairs(ctx, `SELECT id, project_uuid FROM project_forms WHERE id = ANY($1)`, ids)
+	if len(ids) == 0 {
+		return map[uuid.UUID]uuid.UUID{}, nil
+	}
+	return pgexec.Pairs[uuid.UUID, uuid.UUID](ctx, `SELECT id, project_uuid FROM project_forms WHERE id = ANY($1)`, ids)
 }

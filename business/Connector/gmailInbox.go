@@ -177,14 +177,14 @@ func GmailThread(ctx context.Context, userUUID uuid.UUID, threadID string) (*Inb
 	// The address names the account the link opens in. Without it, Gmail opens
 	// the first account signed in to the browser, which is often the wrong one.
 	account := make(chan string, 1)
-	go func() {
+	helpers.GoSafeNamed("business/Connector/gmailInbox:GmailThread", func() {
 		p, perr := svc.Users.GetProfile("me").Context(ctx).Do()
 		if perr != nil {
 			account <- ""
 			return
 		}
 		account <- p.EmailAddress
-	}()
+	})
 	th, err := svc.Users.Threads.Get("me", threadID).Format("full").Context(ctx).Do()
 	if err != nil {
 		return nil, fmt.Errorf("gmail thread: %w", err)

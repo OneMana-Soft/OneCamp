@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -116,6 +117,22 @@ func SetStringWithTTL(ctx context.Context, spec registry.Spec, args []string, va
 		return err
 	}
 	return nil
+}
+
+// SetStringIfAbsent stores value only where the key holds nothing (SET NX),
+// with ttl, and says whether it did: a claim that one caller wins. Without
+// Redis it answers true, so a caller that guards a duplicate fails open.
+func SetStringIfAbsent(ctx context.Context, spec registry.Spec, args []string, value string, ttl time.Duration) (bool, error) {
+	if !IsAvailable() {
+		return true, nil
+	}
+	key := spec.Build(args...)
+	ok, err := redisInit.RedisClient.SetNX(ctx, key, value, ttl).Result()
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "redis store: SetStringIfAbsent failed key=%s err=%+v", key, err)
+		return true, err
+	}
+	return ok, nil
 }
 
 // GetString loads a plain string. Returns ("", false, nil) on miss.
@@ -226,6 +243,61 @@ func Delete(ctx context.Context, spec registry.Spec, args []string) error {
 	key := spec.Build(args...)
 	if err := redisInit.RedisClient.Del(ctx, key).Err(); err != nil {
 		helpers.LogErrorWithContext(ctx, "redis store: Del failed key=%s err=%+v", key, err)
+		return err
+	}
+	return nil
+}
+
+// SetJSONIndexed is SetJSON that also records args' last part in index under
+// the leading parts (index's args), so DeleteIndexed drops the whole family
+// by name. The index outlives its newest entry: its TTL is renewed on every
+// write.
+func SetJSONIndexed(ctx context.Context, spec, index registry.Spec, args []string, value interface{}) error {
+	if !IsAvailable() || len(args) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "redis store: SetJSONIndexed marshal failed key=%s err=%+v", spec.Namespace, err)
+		return err
+	}
+	key, idx := spec.Build(args...), index.Build(args[:len(args)-1]...)
+	pipe := redisInit.RedisClient.TxPipeline()
+	pipe.Set(ctx, key, data, spec.TTL)
+	pipe.SAdd(ctx, idx, args[len(args)-1])
+	pipe.Expire(ctx, idx, max(spec.TTL, index.TTL))
+	if _, err := pipe.Exec(ctx); err != nil {
+		helpers.LogErrorWithContext(ctx, "redis store: SetJSONIndexed failed key=%s err=%+v", key, err)
+		return err
+	}
+	return nil
+}
+
+// deleteIndexedScript reads an index (KEYS[1]) and deletes it and every
+// entry it names (ARGV[1] .. member) in one step. Read and delete were two
+// round trips: an entry another writer recorded between them was dropped
+// from the index but kept, and so outlived its writer's own drop.
+var deleteIndexedScript = redis.NewScript(`
+local members = redis.call('SMEMBERS', KEYS[1])
+for _, m in ipairs(members) do
+	redis.call('DEL', ARGV[1] .. m)
+end
+redis.call('DEL', KEYS[1])
+return #members
+`)
+
+// DeleteIndexed drops every entry of spec that SetJSONIndexed recorded in
+// index under leading, and the index: one atomic script, whatever the size
+// of the keyspace (DeletePattern scans all of it).
+func DeleteIndexed(ctx context.Context, spec, index registry.Spec, leading ...string) error {
+	if !IsAvailable() {
+		return nil
+	}
+	idx := index.Build(leading...)
+	// The entries' common prefix: spec's key for leading plus one more part.
+	prefix := strings.TrimSuffix(spec.Pattern(leading...), "*")
+	if err := deleteIndexedScript.Run(ctx, redisInit.RedisClient, []string{idx}, prefix).Err(); err != nil && !errors.Is(err, redis.Nil) {
+		helpers.LogErrorWithContext(ctx, "redis store: DeleteIndexed failed key=%s err=%+v", idx, err)
 		return err
 	}
 	return nil
@@ -635,25 +707,6 @@ type ScoredMember struct {
 	Score  float64
 }
 
-// ZIncrBy adds delta to member's score in a registered sorted set and pins the
-// spec's TTL so the set rolls over with its day bucket. Best-effort and
-// fail-open: a nil client or Redis error is swallowed so metering never blocks
-// the originating action.
-func ZIncrBy(ctx context.Context, spec registry.Spec, args []string, member string, delta float64) {
-	if !IsAvailable() || delta == 0 || member == "" {
-		return
-	}
-	key := spec.Build(args...)
-	pipe := redisInit.RedisClient.Pipeline()
-	pipe.ZIncrBy(ctx, key, delta, member)
-	if spec.TTL > 0 {
-		pipe.Expire(ctx, key, spec.TTL)
-	}
-	if _, err := pipe.Exec(ctx); err != nil {
-		helpers.LogErrorWithContext(ctx, "redis store: ZIncrBy failed key=%s err=%+v", key, err)
-	}
-}
-
 // ZRevRangeWithScores returns the top `limit` members of a registered sorted
 // set, highest score first. Returns an empty slice on miss or when Redis is
 // unavailable (read-only, best-effort).
@@ -678,33 +731,4 @@ func ZRevRangeWithScores(ctx context.Context, spec registry.Spec, args []string,
 		out = append(out, ScoredMember{Member: member, Score: z.Score})
 	}
 	return out
-}
-
-// Client returns the underlying client when callers need raw access
-// (Lua scripting, custom pipelines). Most code should not need this.
-func Client() *redis.Client {
-	return redisInit.RedisClient
-}
-
-// TTL returns the remaining TTL for a registered key, or 0 if the key
-// does not exist or has no expiry. Useful for tests and the admin
-// debug endpoint.
-func TTL(ctx context.Context, spec registry.Spec, args []string) (time.Duration, error) {
-	if !IsAvailable() {
-		return 0, ErrNotConnected
-	}
-	key := spec.Build(args...)
-	d, err := redisInit.RedisClient.TTL(ctx, key).Result()
-	if err != nil {
-		return 0, err
-	}
-	return d, nil
-}
-
-// String for log messages.
-func (r RateLimitResult) String() string {
-	if r.Allowed {
-		return fmt.Sprintf("allowed count=%d/%d", r.Count, r.Limit)
-	}
-	return fmt.Sprintf("blocked count=%d/%d retry=%s", r.Count, r.Limit, r.RetryAfter)
 }

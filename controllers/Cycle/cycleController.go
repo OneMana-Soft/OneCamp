@@ -10,6 +10,7 @@ import (
 	cycleBusiness "github.com/akashc777/OneCamp/business/Cycle"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	cycleModel "github.com/akashc777/OneCamp/models/postgres/Cycle"
@@ -65,8 +66,14 @@ func ListCycles(w http.ResponseWriter, r *http.Request) {
 		write(w, r, "ListCycles", err)
 		return
 	}
-	// can_edit tells the page whether to offer making and completing cycles.
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"cycles": views, "can_edit": standing.Can(workAccess.NeedManage)}})
+	schedule, err := cycleBusiness.GetSchedule(r.Context(), id)
+	if err != nil {
+		write(w, r, "ListCycles", err)
+		return
+	}
+	// can_edit tells the page whether to offer making and completing cycles;
+	// schedule, whether they run themselves (B3b).
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"cycles": views, "schedule": schedule, "can_edit": standing.Can(workAccess.NeedManage)}})
 }
 
 // CycleBurndown is a cycle's burndown, by day in the reader's zone, and the
@@ -231,4 +238,88 @@ func SetTaskCycle(w http.ResponseWriter, r *http.Request) {
 	}
 	c, _ := cycleModel.CycleOf(taskID)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": c})
+}
+
+// Backlog is the project's backlog (B3): its open cycles with their tasks,
+// estimates and the project's capacity, then the open tasks in no cycle.
+// can_edit offers starting, completing and making cycles; can_plan moving
+// tasks between them (each move is still checked per task).
+// GET /project/{p}/backlog
+func Backlog(w http.ResponseWriter, r *http.Request) {
+	id, _, standing, ok := project(w, r, workAccess.NeedView)
+	if !ok {
+		return
+	}
+	b, err := cycleBusiness.GetBacklog(r.Context(), id, time.Now())
+	if err != nil {
+		write(w, r, "Backlog", err)
+		return
+	}
+	// The schedule, when the project's cycles run themselves (B3b); null when by hand.
+	schedule, err := cycleBusiness.GetSchedule(r.Context(), id)
+	if err != nil {
+		write(w, r, "Backlog", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{
+		"backlog": b, "schedule": schedule, "can_edit": standing.Can(workAccess.NeedManage), "can_plan": standing.Can(workAccess.NeedEditTask),
+	}})
+}
+
+// SetCycleSchedule makes the project's cycles run themselves, or changes how
+// (B3b), and makes the cycles it keeps ready at once.
+// POST /project/{p}/cycles/schedule {weeks, cooldown_weeks, upcoming, roll_over, starts_at}
+func SetCycleSchedule(w http.ResponseWriter, r *http.Request) {
+	id, _, _, ok := project(w, r, workAccess.NeedManage)
+	if !ok {
+		return
+	}
+	var in cycleBusiness.ScheduleInput
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that request."})
+		return
+	}
+	userInfo, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	s, err := cycleBusiness.SetSchedule(r.Context(), id, in, userInfo.UserPostgresInfo.Id, time.Now())
+	if err != nil {
+		write(w, r, "SetCycleSchedule", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": s})
+}
+
+// StopCycleSchedule hands the project's cycles back to its people; the cycles
+// already made stay. POST /project/{p}/cycles/schedule/stop
+func StopCycleSchedule(w http.ResponseWriter, r *http.Request) {
+	id, _, _, ok := project(w, r, workAccess.NeedManage)
+	if !ok {
+		return
+	}
+	if _, err := cycleBusiness.StopSchedule(r.Context(), id); err != nil {
+		write(w, r, "StopCycleSchedule", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": nil})
+}
+
+// StartCycle starts an upcoming cycle now, keeping its length (B3).
+// POST /project/{p}/cycles/{c}/start
+func StartCycle(w http.ResponseWriter, r *http.Request) {
+	id, _, _, ok := project(w, r, workAccess.NeedManage)
+	if !ok {
+		return
+	}
+	c, ok := cycleIn(w, r, id)
+	if !ok {
+		return
+	}
+	started, err := cycleBusiness.Start(r.Context(), c, time.Now())
+	if err != nil {
+		write(w, r, "StartCycle", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": started})
 }

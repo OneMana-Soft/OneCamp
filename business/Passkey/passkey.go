@@ -47,6 +47,10 @@ var (
 	ErrNotConfigured = &Error{"Passkeys aren't set up on this server yet. Ask your admin to set the web app's address (FE_HOST_DOMAIN)."}
 	errExpired       = &Error{"That took too long. Try again."}
 	errSignIn        = &Error{"That passkey didn't work. Try again, or sign in another way."}
+	// errUnknownPasskey is a passkey this server has no record of: the
+	// browser offered one made for another install, or one whose record went
+	// (the demo's nightly reset). A refusal, not a failure.
+	errUnknownPasskey = errors.New("unknown passkey")
 )
 
 // RelyingParty is who passkeys are made for: the web app's host. Pure apart
@@ -302,8 +306,11 @@ func FinishLogin(ctx context.Context, ceremonyID string, body io.Reader, now tim
 	var refusal error
 	user, cred, err := rp.ValidatePasskeyLogin(func(rawID, userHandle []byte) (webauthn.User, error) {
 		key, err := passkeyModel.ByCredentialID(rawID)
-		if err != nil || key == nil {
-			return nil, errors.New("unknown passkey")
+		if err != nil {
+			return nil, err
+		}
+		if key == nil {
+			return nil, errUnknownPasskey
 		}
 		handle, _ := key.UserID.MarshalBinary()
 		if !bytes.Equal(handle, userHandle) {
@@ -323,7 +330,7 @@ func FinishLogin(ctx context.Context, ceremonyID string, body io.Reader, now tim
 		return uuid.Nil, refusal
 	}
 	if err != nil || user == nil || cred == nil || signedIn == nil {
-		helpers.LogErrorWithContext(ctx, "business/Passkey/FinishLogin refused: %v", err)
+		logSignInRefusal(ctx, err)
 		return uuid.Nil, errSignIn
 	}
 	if cred.Authenticator.CloneWarning {
@@ -336,4 +343,17 @@ func FinishLogin(ctx context.Context, ceremonyID string, body io.Reader, now tim
 		}
 	}
 	return signedIn.owner.UserID, nil
+}
+
+// logSignInRefusal says why a passkey sign-in was refused. A passkey the
+// server has no record of is a WARN: the browser offered one made elsewhere,
+// or one whose record went with the demo's nightly reset (27 in a week, every
+// one at ERROR). Anything else, a record that couldn't be read among them,
+// is an ERROR.
+func logSignInRefusal(ctx context.Context, err error) {
+	if errors.Is(err, errUnknownPasskey) {
+		helpers.LogWarnWithContext(ctx, "business/Passkey/FinishLogin refused: %v", err)
+		return
+	}
+	helpers.LogErrorWithContext(ctx, "business/Passkey/FinishLogin refused: %v", err)
 }

@@ -328,31 +328,3 @@ func fenceMarkerLen(s string, i int, kw string) int {
 func isWordByte(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
 }
-
-// chartMarkerLen returns the byte length of a chart fence marker starting at
-// s[i] (backticks + optional spaces + "chart" + a word boundary), or 0 when
-// there's no marker there. The word boundary stops "charter"/"charts" from
-// matching. Pure.
-func chartMarkerLen(s string, i int) int {
-	j := i
-	ticks := 0
-	for j < len(s) && s[j] == '`' {
-		ticks++
-		j++
-	}
-	if ticks < 3 {
-		return 0
-	}
-	for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
-		j++
-	}
-	const kw = "chart"
-	if j+len(kw) > len(s) || !strings.EqualFold(s[j:j+len(kw)], kw) {
-		return 0
-	}
-	j += len(kw)
-	if j < len(s) && isWordByte(s[j]) {
-		return 0 // e.g. "charter" — not a chart fence
-	}
-	return j - i
-}

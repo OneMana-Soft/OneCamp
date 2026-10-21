@@ -69,7 +69,7 @@ func handleGiphy(ctx context.Context, cc CommandContext) (*commandAdapter.Comman
 	}, nil
 }
 
-func handleGiphyInteract(ctx context.Context, cc CommandContext, ir commandAdapter.InteractRequest) (*commandAdapter.CommandResponse, error) {
+func handleGiphyInteract(ctx context.Context, cc CommandContext, ir Press) (*commandAdapter.CommandResponse, error) {
 	state, ok := loadGiphyState(ctx, ir.TriggerID)
 	if !ok {
 		return errorResponse("This GIF picker has expired. Try `/giphy` again."), nil

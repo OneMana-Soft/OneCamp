@@ -15,9 +15,12 @@ package business
 
 import (
 	"context"
+	"strings"
 	"sync"
 
 	"github.com/akashc777/OneCamp/helpers"
+	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
+	"github.com/google/uuid"
 )
 
 // EventListener reacts to a workspace event. data is the same map passed to
@@ -27,6 +30,9 @@ type EventListener func(ctx context.Context, eventType string, data map[string]i
 var (
 	listenerMu sync.RWMutex
 	listeners  []EventListener
+	// seesRestricted says, for each listener, whether it is told of a
+	// restricted task's events (RegisterEventListenerSeeingRestricted).
+	seesRestricted []bool
 )
 
 // RegisterEventListener subscribes a listener to ALL dispatched events. The
@@ -34,12 +40,56 @@ var (
 // wiring at startup (before traffic), so no locking contention on the hot path
 // beyond a read-lock.
 func RegisterEventListener(l EventListener) {
+	register(l, false)
+}
+
+// RegisterEventListenerSeeingRestricted is RegisterEventListener for a
+// listener that is told of a restricted task's events too (WA2): one that
+// acts only inside the task and tells no one of it, as a doc's to-dos synced
+// to it, or an agent the task is assigned to. Every other listener (a rule
+// that posts, a bridge that mirrors) is never told of them, so it can't
+// carry a restricted task to people who may not see it.
+func RegisterEventListenerSeeingRestricted(l EventListener) {
+	register(l, true)
+}
+
+func register(l EventListener, seesRestrictedTasks bool) {
 	if l == nil {
 		return
 	}
 	listenerMu.Lock()
 	listeners = append(listeners, l)
+	seesRestricted = append(seesRestricted, seesRestrictedTasks)
 	listenerMu.Unlock()
+}
+
+type openTasksKey struct{}
+
+// OfOpenTasks marks the task events dispatched through ctx as of tasks known
+// to be restricted to no one (tasks just made outside any restricted task, a
+// batch of them: business/Task CreateTasks), so each event doesn't read its
+// task's restriction again.
+func OfOpenTasks(ctx context.Context) context.Context {
+	return context.WithValue(ctx, openTasksKey{}, true)
+}
+
+// restrictedTaskEvent is whether an event is a restricted task's: its data
+// names a task (task_id, task_uuid) whose project keeps it to a few people.
+// A restriction that can't be read counts as one. A seam for tests.
+var restrictedTaskEvent = func(ctx context.Context, data map[string]interface{}) bool {
+	if open, _ := ctx.Value(openTasksKey{}).(bool); open {
+		return false
+	}
+	for _, key := range []string{"task_id", "task_uuid"} {
+		raw, _ := data[key].(string)
+		id, err := uuid.Parse(strings.TrimSpace(raw))
+		if err != nil {
+			continue
+		}
+		r, err := restrictionModel.Of(ctx, id)
+		return err != nil || r.Restricted
+	}
+	return false
 }
 
 // notifyEventListeners invokes every registered listener for an event. Each
@@ -47,6 +97,10 @@ func RegisterEventListener(l EventListener) {
 // neither block nor crash the dispatch path. ctx is detached from the request
 // lifecycle so listener work isn't cancelled when the HTTP handler returns.
 func notifyEventListeners(ctx context.Context, eventType string, data map[string]interface{}) {
+	// Each event carries its own id, minted here once, so a listener that is
+	// handed the same event twice (the hand-off delivers at least once) can
+	// tell it is the same one: the rules engine runs a rule once per id.
+	data = withEventID(data)
 	// A process that runs no listeners (SERVICE_ROLE=api) hands the event to
 	// the workers, which do (eventHandoff.go).
 	if handOff(ctx, eventType, data) {
@@ -58,7 +112,11 @@ func notifyEventListeners(ctx context.Context, eventType string, data map[string
 		return
 	}
 	detached := context.WithoutCancel(ctx)
-	for _, l := range listeners {
+	restricted := restrictedTaskEvent(detached, data)
+	for i, l := range listeners {
+		if restricted && (i >= len(seesRestricted) || !seesRestricted[i]) {
+			continue
+		}
 		l := l
 		go func() {
 			defer func() {
@@ -69,4 +127,18 @@ func notifyEventListeners(ctx context.Context, eventType string, data map[string
 			l(detached, eventType, data)
 		}()
 	}
+}
+
+// withEventID is the event with an "event_id", a copy when it had none (the
+// caller's map is left as it was: outgoing webhooks read it too).
+func withEventID(data map[string]interface{}) map[string]interface{} {
+	if id, _ := data["event_id"].(string); id != "" {
+		return data
+	}
+	out := make(map[string]interface{}, len(data)+1)
+	for k, v := range data {
+		out[k] = v
+	}
+	out["event_id"] = uuid.NewString()
+	return out
 }

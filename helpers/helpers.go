@@ -321,9 +321,11 @@ func LogWithContext(ctx context.Context, level string, message string, args ...i
 		}
 	}
 
+	level, attrs = effectiveLevel(ctx, strings.ToUpper(level), args, attrs)
+
 	logger := resolveLogger(Logger)
 
-	switch strings.ToUpper(level) {
+	switch level {
 	case "ERROR":
 		logger.ErrorContext(ctx, message, attrs...)
 	case "WARN":
@@ -333,6 +335,39 @@ func LogWithContext(ctx context.Context, level string, message string, args ...i
 	default:
 		logger.InfoContext(ctx, message, attrs...)
 	}
+}
+
+// effectiveLevel is the level a line is logged at. An ERROR that isn't one is
+// logged at DEBUG, with an attribute saying why, so the error logs (and
+// otel_logs' error rows) hold only what failed:
+//
+//   - the request's client stopped waiting (ClientWentAway): whatever failed
+//     after that failed because the request was called off, and no one is
+//     there to be told. These were most of the demo's error rows ("context
+//     canceled" from every layer a cancelled read passed through);
+//   - an argument is ErrNotFound: a lookup that found nothing is an answer,
+//     and the caller that turns it into a 404, or skips the thing, has handled
+//     it. A caller for whom a missing node IS a failure says so in its own
+//     words, without passing the not-found error along.
+func effectiveLevel(ctx context.Context, level string, args []interface{}, attrs []any) (string, []any) {
+	if level != "ERROR" {
+		return level, attrs
+	}
+	if ClientWentAway(ctx) {
+		return "DEBUG", append(attrs, slog.Bool("client_gone", true))
+	}
+	for _, a := range args {
+		if err, ok := a.(error); ok && errors.Is(err, ErrNotFound) {
+			return "DEBUG", append(attrs, slog.Bool("not_found", true))
+		}
+	}
+	return level, attrs
+}
+
+// LogDebugWithContext logs a debug message with context: what is worth
+// knowing while looking into something, and nothing to act on.
+func LogDebugWithContext(ctx context.Context, message string, args ...interface{}) {
+	LogWithContext(ctx, "DEBUG", message, args...)
 }
 
 // LogInfoWithContext logs an info message with context
@@ -799,57 +834,4 @@ func edgeSafeStatus(status int) int {
 		return http.StatusServiceUnavailable
 	}
 	return status
-}
-
-// LogDebugWithContext logs a debug message with context
-func LogDebugWithContext(ctx context.Context, message string, args ...interface{}) {
-	LogWithContext(ctx, "DEBUG", message, args...)
-}
-
-func ReadJSON(w http.ResponseWriter, r *http.Request, data interface{}) error {
-	maxByte := 1048576
-	r.Body = http.MaxBytesReader(w, r.Body, int64(maxByte))
-	dec := json.NewDecoder(r.Body)
-	err := dec.Decode(data)
-	if err != nil {
-		return err
-	}
-
-	err = dec.Decode(&struct{}{})
-
-	if err != nil {
-		return errors.New("Body must have only a single json object")
-	}
-	return nil
-}
-
-func GetHashTags(source string) (res []string, err error) {
-	re, err := regexp.Compile(`\#[a-zA-Z]+\b`)
-	if err != nil {
-		MessageLogs.ErrorLog.Printf(
-			"helpers/GetHashTags Failed to compile regex err: %+v",
-			err)
-		return
-	}
-
-	matches := re.FindAllString(source, -1)
-
-	for _, match := range matches {
-		if match[len(match)-1] != ';' {
-			res = append(res, match[1:])
-		}
-	}
-
-	return
-}
-
-func StringSliceToJSONString(slice []string) string {
-	if slice == nil {
-		return "[]"
-	}
-	jsonData, err := json.Marshal(slice)
-	if err != nil {
-		return "[]"
-	}
-	return string(jsonData)
 }

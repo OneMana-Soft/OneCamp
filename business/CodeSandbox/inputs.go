@@ -5,7 +5,6 @@ import (
 	"encoding/csv"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 )
 
@@ -168,15 +167,4 @@ func EncodeCSV(header []string, rows [][]string) []byte {
 	}
 	w.Flush()
 	return buf.Bytes()
-}
-
-// SortedKeys returns the keys of m in stable order — handy for deterministic
-// CSV column ordering when a caller builds rows from a map.
-func SortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }

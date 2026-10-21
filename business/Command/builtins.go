@@ -42,9 +42,8 @@ func init() {
 	// Feedback
 	Register("feedback", handleFeedback)
 
-	// Polls (interactive — see poll.go)
+	// Polls (stored polls — see poll.go)
 	Register("poll", handlePoll)
-	RegisterInteraction("poll", handlePollInteract)
 }
 
 // clientAction builds an ephemeral response carrying a FE directive.

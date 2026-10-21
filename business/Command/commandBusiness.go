@@ -7,8 +7,9 @@
 // special case. A command resolves to one of four execution modes:
 //
 //   - inline      : handler runs synchronously, returns text/blocks now.
-//   - interactive : handler returns an ephemeral Block Kit card; button
-//     clicks round-trip through HandleInteract.
+//   - interactive : handler returns an ephemeral card, sealed (business/Cards);
+//     a press goes to POST /cards/act, which checks it and hands it to the
+//     command's InteractionHandler (cardPresses.go).
 //   - deferred    : handler enqueues a scheduled_jobs row (/remind).
 //   - external    : the dispatcher forwards to an installed app's handler_url
 //     (Slack-compatible, SSRF-guarded, HMAC-signed).
@@ -58,8 +59,17 @@ type CommandContext struct {
 // Handler executes a built-in command and returns a response.
 type Handler func(ctx context.Context, cc CommandContext) (*commandAdapter.CommandResponse, error)
 
-// InteractionHandler resumes an interactive card after a button/select click.
-type InteractionHandler func(ctx context.Context, cc CommandContext, ir commandAdapter.InteractRequest) (*commandAdapter.CommandResponse, error)
+// Press is one checked press on a built-in's card: the card's trigger id (the
+// invocation it answered), and the element pressed.
+type Press struct {
+	TriggerID string
+	ActionID  string
+	Value     string
+}
+
+// InteractionHandler answers a press on a built-in's card, once business/Cards
+// has checked it against the card the server sealed.
+type InteractionHandler func(ctx context.Context, cc CommandContext, p Press) (*commandAdapter.CommandResponse, error)
 
 // commandRegistry holds built-in command handlers keyed by canonical command name.
 var commandRegistry = map[string]Handler{}

@@ -15,6 +15,7 @@ import (
 	integrationBusiness "github.com/akashc777/OneCamp/business/Integration"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
@@ -30,6 +31,7 @@ import (
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Activity"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
+	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
@@ -42,6 +44,15 @@ func CreateTaskComment(ctx context.Context, taskUUID uuid.UUID, rawTaskDgraph *d
 		currentTime = *createTaskCommentInfoInput.CreatedAt
 	}
 	zeroUnixTime := time.Time{}
+
+	// Only files the writer uploaded to the task's project (OwnFiles).
+	commentProject := ""
+	if rawTaskDgraph != nil && rawTaskDgraph.Project != nil {
+		commentProject = rawTaskDgraph.Project.Uuid
+	}
+	if createTaskCommentInfoInput.Attachments, err = businessAttachment.OwnFiles(ctx, createdByUser.UserPostgresInfo.Id.String(), postgressStruct.ATTACHMENT_SRC_PROJECT, commentProject, createTaskCommentInfoInput.Attachments); err != nil {
+		return nil, err
+	}
 
 	var commentMentions []*dgraphStruct.DgraphUser
 
@@ -108,7 +119,7 @@ func CreateTaskComment(ctx context.Context, taskUUID uuid.UUID, rawTaskDgraph *d
 		Attachments:    createTaskCommentInfoInput.Attachments,
 	}
 
-	go mqttBusiness.PublishTaskComment(taskCommentMqttStruct, rawTaskDgraph.Project.Uuid)
+	helpers.GoSafeNamed("mqttBusiness.PublishTaskComment", func() { mqttBusiness.PublishTaskComment(taskCommentMqttStruct, rawTaskDgraph.Project.Uuid) })
 
 	commentInfoRes = &adapter.OutputCreateCommentForTask{
 		Uuid:             commentUUID.String(),
@@ -278,7 +289,7 @@ func UpdateTaskCommentBody(ctx context.Context, commentUUID uuid.UUID, createTas
 		HTMLText:    createTaskCommentInfoInput.CommentBody,
 	}
 
-	go mqttBusiness.PublishTaskComment(taskCommentMqttStruct, rawDgraphCommentInfo.Task.Project.Uuid)
+	helpers.GoSafeNamed("mqttBusiness.PublishTaskComment", func() { mqttBusiness.PublishTaskComment(taskCommentMqttStruct, rawDgraphCommentInfo.Task.Project.Uuid) })
 
 	// Sync comment edit to GitHub if this comment was originally synced from GitHub.
 	if !createTaskCommentInfoInput.SkipGitHubSync && rawDgraphCommentInfo.Task != nil && rawDgraphCommentInfo.Task.Uuid != "" {
@@ -288,7 +299,7 @@ func UpdateTaskCommentBody(ctx context.Context, commentUUID uuid.UUID, createTas
 					"github_comment_id": ghID,
 					"comment_body":      createTaskCommentInfoInput.CommentBody,
 				}
-				go syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "comment_edit", payload)
+				helpers.GoSafeNamed("syncBusiness.EnqueueGitHubSync", func() { syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "comment_edit", payload) })
 			}
 		}
 	}
@@ -321,7 +332,7 @@ func ArchiveCommentByCommentUUID(ctx context.Context, commentUUID uuid.UUID, raw
 		UpdatedAt:   &currentTime,
 	}
 
-	go mqttBusiness.PublishTaskComment(taskCommentMqttStruct, rawDgraphComment.Task.Project.Uuid)
+	helpers.GoSafeNamed("mqttBusiness.PublishTaskComment", func() { mqttBusiness.PublishTaskComment(taskCommentMqttStruct, rawDgraphComment.Task.Project.Uuid) })
 
 	// Sync comment delete to GitHub if this comment was originally synced from GitHub.
 	if rawDgraphComment.Task != nil && rawDgraphComment.Task.Uuid != "" {
@@ -330,7 +341,7 @@ func ArchiveCommentByCommentUUID(ctx context.Context, commentUUID uuid.UUID, raw
 				payload := map[string]interface{}{
 					"github_comment_id": ghID,
 				}
-				go syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "comment_delete", payload)
+				helpers.GoSafeNamed("syncBusiness.EnqueueGitHubSync", func() { syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "comment_delete", payload) })
 			}
 		}
 	}
@@ -346,10 +357,21 @@ func CreateSubTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.U
 	zeroUnixTime := time.Time{}
 	activityUUID := uuid.New()
 
-	err = domain.CreateTask(ctx, taskUUID, projectUUID, userInfo.UserPostgresInfo.Id, currentTime)
+	number, err := domain.CreateTask(ctx, taskUUID, projectUUID, userInfo.UserPostgresInfo.Id, currentTime)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/CreateSubTask failed to create new task in postgres err: %+v", err)
+		return
+	}
+	settleKey(ctx, projectUUID, number)
+	// A sub-task of a restricted task is kept to the same people, before
+	// anyone is told of it (WA2).
+	var parentUUID uuid.UUID
+	if len(projectDgraphInfo.Tasks) > 0 && projectDgraphInfo.Tasks[0] != nil {
+		parentUUID, _ = uuid.Parse(projectDgraphInfo.Tasks[0].Uuid)
+	}
+	if err = workAccess.SettleRestriction(ctx, taskUUID, parentUUID, userInfo.UserPostgresInfo.Id, currentTime); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/CreateSubTask couldn't keep the sub-task to its restricted parent's people err: %+v", err)
 		return
 	}
 
@@ -451,7 +473,9 @@ func CreateSubTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.U
 
 	var emptyAttachments []*dgraphStruct.DgraphAttachment
 
-	go domain.CreateTaskWithAttachmentsInOpensearch(opensearchTask, emptyAttachments, &userInfo.UserDgraphInfo)
+	helpers.GoSafeNamed("domain.CreateTaskWithAttachmentsInOpensearch", func() {
+		domain.CreateTaskWithAttachmentsInOpensearch(opensearchTask, emptyAttachments, &userInfo.UserDgraphInfo)
+	})
 
 	/* AI call omitted in v1 */
 
@@ -480,6 +504,19 @@ func AddAttachmentToTask(ctx context.Context, taskUUID uuid.UUID, dgraphTaskInfo
 	// brought it back in the graph while Postgres still had it deleted.
 	if dgraphTaskInfo != nil && helpers.IsSoftDeleted(dgraphTaskInfo.DeletedAt) {
 		return ErrTaskDeleted
+	}
+
+	// Only files the writer uploaded to the task's project: any other entry
+	// would open for no one (business/Attachment OwnFiles).
+	projectID := ""
+	if dgraphTaskInfo != nil && dgraphTaskInfo.Project != nil {
+		projectID = dgraphTaskInfo.Project.Uuid
+	}
+	if taskInfo.Attachments, err = businessAttachment.OwnFiles(ctx, userInfo.Uuid, postgressStruct.ATTACHMENT_SRC_PROJECT, projectID, taskInfo.Attachments); err != nil {
+		return err
+	}
+	if len(taskInfo.Attachments) == 0 {
+		return nil
 	}
 
 	zeroUnixTime := time.Time{}
@@ -537,7 +574,9 @@ func AddAttachmentToTask(ctx context.Context, taskUUID uuid.UUID, dgraphTaskInfo
 		return
 	}
 
-	go domain.CreateTaskAttachmentsInOpensearch(&currentTime, dgraphTaskInfo, taskInfo.Attachments, userInfo)
+	helpers.GoSafeNamed("domain.CreateTaskAttachmentsInOpensearch", func() {
+		domain.CreateTaskAttachmentsInOpensearch(&currentTime, dgraphTaskInfo, taskInfo.Attachments, userInfo)
+	})
 
 	return
 
@@ -551,16 +590,27 @@ func CreateTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.User
 	if err != nil {
 		return
 	}
+	// Only files the maker uploaded to the project (OwnFiles).
+	if taskInfo.Attachments, err = businessAttachment.OwnFiles(ctx, userInfo.UserPostgresInfo.Id.String(), postgressStruct.ATTACHMENT_SRC_PROJECT, projectUUID.String(), taskInfo.Attachments); err != nil {
+		return
+	}
 
 	taskUUID := uuid.New()
 	zeroUnixTime := time.Time{}
 	currentTime := time.Now()
 	activityUUID := uuid.New()
 
-	err = domain.CreateTask(ctx, taskUUID, projectUUID, userInfo.UserPostgresInfo.Id, currentTime)
+	number, err := domain.CreateTask(ctx, taskUUID, projectUUID, userInfo.UserPostgresInfo.Id, currentTime)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/createTask failed to create new task in postgres err: %+v", err)
+		return
+	}
+	settleKey(ctx, projectUUID, number)
+	// Made from a restricted task (a repeat's next copy: RestrictedLike), it
+	// is kept to the same people before anyone is told of it (WA2).
+	if err = workAccess.SettleRestriction(ctx, taskUUID, uuid.Nil, userInfo.UserPostgresInfo.Id, currentTime); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/createTask couldn't keep the task to the people of the task it comes from err: %+v", err)
 		return
 	}
 
@@ -671,7 +721,9 @@ func CreateTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.User
 		return
 	}
 
-	go domain.CreateTaskWithAttachmentsInOpensearch(opensearchTask, taskInfo.Attachments, &userInfo.UserDgraphInfo)
+	helpers.GoSafeNamed("domain.CreateTaskWithAttachmentsInOpensearch", func() {
+		domain.CreateTaskWithAttachmentsInOpensearch(opensearchTask, taskInfo.Attachments, &userInfo.UserDgraphInfo)
+	})
 
 	/* AI call omitted in v1 */
 
@@ -943,7 +995,7 @@ func UpdateTaskDesByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskDesc s
 		TaskDescription: &plainText,
 	}
 
-	go domain.UpdateTaskInOpenSearch(taskOpenSearch)
+	helpers.GoSafeNamed("domain.UpdateTaskInOpenSearch", func() { domain.UpdateTaskInOpenSearch(taskOpenSearch) })
 
 	assigneeUUID := ""
 	if dgraphTaskInfo.Assignee != nil {
@@ -951,7 +1003,9 @@ func UpdateTaskDesByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskDesc s
 	}
 	go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID.String(), assigneeUUID)
 
-	go syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "description", map[string]interface{}{"description": taskDesc})
+	helpers.GoSafeNamed("syncBusiness.EnqueueGitHubSync", func() {
+		syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "description", map[string]interface{}{"description": taskDesc})
+	})
 
 	return
 }
@@ -1006,10 +1060,10 @@ func UpdateTaskNameByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskName 
 		TaskName:      taskName,
 	}
 
-	go domain.UpdateTaskInOpenSearch(taskOpenSearch)
+	helpers.GoSafeNamed("domain.UpdateTaskInOpenSearch", func() { domain.UpdateTaskInOpenSearch(taskOpenSearch) })
 
 	// Chips and task lists in docs read the new name (taskDocSync.go).
-	go taskRenamed(taskUUID, dgraphTaskInfo.Project)
+	helpers.GoSafeNamed("taskRenamed", func() { taskRenamed(taskUUID, dgraphTaskInfo.Project) })
 
 	assigneeUUID := ""
 	if dgraphTaskInfo.Assignee != nil {
@@ -1017,7 +1071,10 @@ func UpdateTaskNameByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskName 
 	}
 	go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID.String(), assigneeUUID)
 
-	go syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "name", map[string]interface{}{"name": taskName})
+	helpers.GoSafeNamed("syncBusiness.EnqueueGitHubSync", func() {
+		syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "name", map[string]interface{}{"name": taskName})
+	})
+	dispatchTaskChanged(ctx, dgraphTaskInfo, FieldName, dgraphTaskInfo.Name, taskName, userInfo)
 
 	return
 }
@@ -1092,7 +1149,7 @@ func UpdateTaskAssigneeByTaskUUID(ctx context.Context, taskUUID uuid.UUID, newAs
 		return
 	}
 
-	go domain.UpdateTaskInOpenSearch(taskOpenSearch)
+	helpers.GoSafeNamed("domain.UpdateTaskInOpenSearch", func() { domain.UpdateTaskInOpenSearch(taskOpenSearch) })
 
 	if newAssigneeDgraphInfo != nil {
 		go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID.String(), newAssigneeDgraphInfo.Uuid)
@@ -1188,7 +1245,27 @@ func UpdateTaskDates(ctx context.Context, taskUUID uuid.UUID, dates TaskDates, d
 		return ErrTaskDeleted
 	}
 	now := time.Now()
-	write := &dgraphStruct.DgraphTask{Uid: "uid(task)", Uuid: taskUUID.String(), UpdatedAt: &now}
+	write := datesWrite("uid(task)", taskUUID, dates, dgraphTaskInfo, userInfo, now)
+	if write == nil {
+		return nil
+	}
+	if err := domain.UpdateTaskByTaskUUID(ctx, taskUUID, now); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/UpdateTaskDates postgres err: %+v", err)
+		return err
+	}
+	if _, err := domain.CreateOrUpdateDgraphTask(ctx, write); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/UpdateTaskDates dgraph err: %+v", err)
+		return err
+	}
+	afterDates(ctx, dgraphTaskInfo, dates, userInfo)
+	return nil
+}
+
+// datesWrite is the graph write that gives a task (by uid, or "uid(task)"
+// for an upsert) its new dates, with a history line for each that changed;
+// nil when neither did. Pure.
+func datesWrite(uid string, taskUUID uuid.UUID, dates TaskDates, dgraphTaskInfo *dgraphStruct.DgraphTask, userInfo *dgraphStruct.DgraphUser, now time.Time) *dgraphStruct.DgraphTask {
+	write := &dgraphStruct.DgraphTask{Uid: uid, Uuid: taskUUID.String(), UpdatedAt: &now}
 	record := func(kind string, before, after *time.Time) {
 		write.Activity = append(write.Activity, &dgraphStruct.DgraphTaskActivity{
 			Uuid:      uuid.NewString(),
@@ -1210,16 +1287,20 @@ func UpdateTaskDates(ctx context.Context, taskUUID uuid.UUID, dates TaskDates, d
 	if len(write.Activity) == 0 {
 		return nil
 	}
-	if err := domain.UpdateTaskByTaskUUID(ctx, taskUUID, now); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/UpdateTaskDates postgres err: %+v", err)
-		return err
-	}
-	if _, err := domain.CreateOrUpdateDgraphTask(ctx, write); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/UpdateTaskDates dgraph err: %+v", err)
-		return err
-	}
+	return write
+}
+
+// afterDates tells what follows a task's new dates (dgraphTaskInfo is the
+// task as it was before them): its assignee's calendar, the rules watching
+// its due date (task.changed), and everyone with its project open. Off the
+// request.
+func afterDates(ctx context.Context, dgraphTaskInfo *dgraphStruct.DgraphTask, dates TaskDates, userInfo *dgraphStruct.DgraphUser) {
+	taskUUID := dgraphTaskInfo.Uuid
 	if dgraphTaskInfo.Assignee != nil && dgraphTaskInfo.Assignee.Uuid != "" {
-		go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID.String(), dgraphTaskInfo.Assignee.Uuid)
+		go integrationBusiness.SyncTaskToGoogleCalendar(context.Background(), taskUUID, dgraphTaskInfo.Assignee.Uuid)
+	}
+	if dates.Due != nil && !sameTime(dgraphTaskInfo.DueDate, dates.Due) {
+		dispatchTaskChanged(ctx, dgraphTaskInfo, FieldDue, dayOf(dgraphTaskInfo.DueDate), dayOf(dates.Due), userInfo)
 	}
 	// Everyone with the project open sees the new dates without a refresh.
 	if dgraphTaskInfo.Project != nil && dgraphTaskInfo.Project.Uuid != "" {
@@ -1231,11 +1312,10 @@ func UpdateTaskDates(ctx context.Context, taskUUID uuid.UUID, dates TaskDates, d
 			due = dates.Due
 		}
 		go mqttBusiness.PublishTaskDates(&mqttStruct.MqttTaskDates{
-			TaskUuid: taskUUID.String(), ProjectUuid: dgraphTaskInfo.Project.Uuid,
+			TaskUuid: taskUUID, ProjectUuid: dgraphTaskInfo.Project.Uuid,
 			StartDate: wireDate(start), DueDate: wireDate(due), By: userInfo.Uuid,
 		})
 	}
-	return nil
 }
 
 // wireDate is a date as the app reads one, "" when it is unset.
@@ -1356,7 +1436,7 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 		TaskUpdatedAt: currentTime.Unix(),
 	}
 
-	go domain.UpdateTaskInOpenSearch(taskOpenSearch)
+	helpers.GoSafeNamed("domain.UpdateTaskInOpenSearch", func() { domain.UpdateTaskInOpenSearch(taskOpenSearch) })
 
 	// GitHub knows open and closed, which the category decides.
 	if prev.Category != next.Category {
@@ -1455,7 +1535,8 @@ func UpdateTaskPriorityByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskP
 		TaskUpdatedAt: currentTime.Unix(),
 	}
 
-	go domain.UpdateTaskInOpenSearch(taskOpenSearch)
+	helpers.GoSafeNamed("domain.UpdateTaskInOpenSearch", func() { domain.UpdateTaskInOpenSearch(taskOpenSearch) })
+	dispatchTaskChanged(ctx, dgraphTaskInfo, FieldPriority, dgraphTaskInfo.Priority, taskPriority, userInfo)
 
 	return
 }
@@ -1508,15 +1589,18 @@ func UpdateTaskLabelByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskLabe
 		TaskLabel:     &taskLabel,
 	}
 
-	go domain.UpdateTaskInOpenSearch(taskOpenSearch)
+	helpers.GoSafeNamed("domain.UpdateTaskInOpenSearch", func() { domain.UpdateTaskInOpenSearch(taskOpenSearch) })
 
 	oldLabel := ""
 	if dgraphTaskInfo.Label != nil {
 		oldLabel = *dgraphTaskInfo.Label
 	}
-	go syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "label", map[string]interface{}{
-		"label":     taskLabel,
-		"old_label": oldLabel,
+	dispatchTaskChanged(ctx, dgraphTaskInfo, FieldTags, oldLabel, taskLabel, userInfo)
+	helpers.GoSafeNamed("syncBusiness.EnqueueGitHubSync", func() {
+		syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "label", map[string]interface{}{
+			"label":     taskLabel,
+			"old_label": oldLabel,
+		})
 	})
 
 	return
@@ -1673,11 +1757,13 @@ func UnArchiveTaskByTaskUUID(ctx context.Context, taskUUID uuid.UUID, dgraphTask
 
 	go syncBusiness.EnqueueGitHubSync(ctx, taskUUID, "status", map[string]interface{}{"status": dgraphTaskInfo.Status})
 
-	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "task.restored", map[string]interface{}{
-		"task_id":     taskUUID.String(),
-		"project_id":  dgraphTaskInfo.Project.Uuid,
-		"name":        dgraphTaskInfo.Name,
-		"restored_by": userInfo.Uid,
+	helpers.GoSafeNamed("webhookBusiness.DispatchEvent", func() {
+		webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "task.restored", map[string]interface{}{
+			"task_id":     taskUUID.String(),
+			"project_id":  dgraphTaskInfo.Project.Uuid,
+			"name":        dgraphTaskInfo.Name,
+			"restored_by": userInfo.Uid,
+		})
 	})
 
 	return
@@ -1797,6 +1883,8 @@ func GetDgraphTaskInfo(ctx context.Context, teamUUID string, userDgraphUID strin
 	if !CanViewTask(dgraphTask, userDgraphUID) {
 		return nil, ErrTaskNotVisible
 	}
+	// Its key and type, and its sub-tasks', parent's and dependencies'.
+	taskKeys.Lay(ctx, dgraphTask)
 	return dgraphTask, nil
 }
 
@@ -1874,93 +1962,6 @@ func MergeGitHubMetaIntoTasks(ctx context.Context, tasks []*dgraphStruct.DgraphT
 		t.GitHubPRIsDraft = meta.PRIsDraft
 	}
 	return nil
-}
-
-func DeleteReactionOnCommentTask(ctx context.Context, commentDgraph *dgraphStruct.DgraphComment, reactionDgraphUUID string) (err error) {
-	err = businessComment.DeleteCommentReaction(ctx, commentDgraph.Uid, reactionDgraphUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/DeleteReactionOnCommentTask Failed to delete reaction on comment in post err: %+v",
-			err)
-
-		return
-	}
-
-	mqttTaskCommentReaction := mqttStruct.MqttTaskCommentReaction{
-		Type:         mqttStruct.TYPE_DELETE,
-		CommentUuid:  commentDgraph.Uuid,
-		AddedByUuid:  commentDgraph.CommentBy.Uuid,
-		ReactionUuid: reactionDgraphUUID,
-		TaskUuid:     commentDgraph.Task.Uuid,
-	}
-
-	go mqttBusiness.PublishTaskCommentReaction(&mqttTaskCommentReaction, commentDgraph.Task.Project.Uuid)
-
-	return
-}
-
-func CreateOrUpdateTaskCommentReaction(ctx context.Context, reactionInfo *adapter.InputUpdateReactionForCommentInTask, dgraphCommentRaw *dgraphStruct.DgraphComment, userDgraph *dgraphStruct.DgraphUser) (reactionUUID string, err error) {
-	currentTime := time.Now()
-
-	dgraphComment := &dgraphStruct.DgraphComment{
-		Uid:   "uid(co)",
-		Uuid:  reactionInfo.Uuid,
-		DType: []string{"Comment"},
-		Reactions: []*dgraphStruct.DgraphReaction{
-			{
-				Uid:       reactionInfo.ReactionDgraphUid,
-				DType:     []string{"Reaction"},
-				EmojiUuid: reactionInfo.EmojiUuid,
-				AddedAt:   &currentTime,
-				ContentAddedBy: &dgraphStruct.DgraphUser{
-					Uid: dgraphCommentRaw.CommentBy.Uid,
-				},
-				AddedBy: &dgraphStruct.DgraphUser{
-					Uid: userDgraph.Uid,
-				},
-			},
-		},
-	}
-
-	reactionUUID, err = businessComment.CreateOrUpdateDgraphCommentReaction(ctx, dgraphComment)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/CreateOrUpdateTaskCommentReaction Failed to update comment reaction in post err: %+v",
-			err)
-		return
-	}
-
-	mqttPostCommentReaction := mqttStruct.MqttTaskCommentReaction{
-		Type:            mqttStruct.TYPE_CREATE,
-		CommentUuid:     reactionInfo.Uuid,
-		EmojiReactionId: reactionInfo.EmojiUuid,
-		AddedByUuid:     userDgraph.Uuid,
-		AddedByUserName: userDgraph.DisplayName(),
-		ReactionUuid:    reactionUUID,
-		TaskUuid:        dgraphCommentRaw.Task.Uuid,
-	}
-
-	if len(mqttPostCommentReaction.ReactionUuid) == 0 {
-		mqttPostCommentReaction.Type = mqttStruct.TYPE_UPDATE
-		mqttPostCommentReaction.ReactionUuid = reactionInfo.ReactionDgraphUid
-	}
-
-	go mqttBusiness.PublishTaskCommentReaction(&mqttPostCommentReaction, dgraphCommentRaw.Task.Project.Uuid)
-
-	return
-}
-
-func GetDgraphBasicTaskInfoWithProjectMembers(ctx context.Context, teamUUID string, userDgraphUID string) (dgraphTask *dgraphStruct.DgraphTask, err error) {
-	dgraphTask, err = domain.GetDgraphBasicTaskInfoByUUIDWithProjectMembers(ctx, teamUUID, userDgraphUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetDgraphBasicTaskInfoWithProjectMembers failed to get task info from dgraph err: %+v", err)
-		return
-	}
-
-	return
 }
 
 func GetDgraphBasicTaskInfo(ctx context.Context, teamUUID string, userDgraphUID string) (dgraphTask *dgraphStruct.DgraphTask, err error) {

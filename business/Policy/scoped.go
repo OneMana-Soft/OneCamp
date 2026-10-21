@@ -48,6 +48,28 @@ var (
 		}
 		return configModels.SetScopedValue(ctx, s.Kind, id, key, value, by)
 	}
+	// readScopedMany is the values set for many scopes of one kind, by
+	// lower-case id, in one read (PrimeScopes).
+	readScopedMany = func(ctx context.Context, kind string, ids []string) (map[string]map[string]string, error) {
+		if !connected() {
+			return map[string]map[string]string{}, nil
+		}
+		var parsed []uuid.UUID
+		for _, id := range ids {
+			if p, err := uuid.Parse(id); err == nil {
+				parsed = append(parsed, p)
+			}
+		}
+		got, err := configModels.ScopedValuesMany(ctx, kind, parsed)
+		if err != nil {
+			return nil, err
+		}
+		out := make(map[string]map[string]string, len(got))
+		for id, v := range got {
+			out[id.String()] = v
+		}
+		return out, nil
+	}
 	clearScoped = func(ctx context.Context, s Scope, key string) error {
 		id, err := uuid.Parse(s.ID)
 		if err != nil {
@@ -95,6 +117,41 @@ func (r *Registry) scopedValue(ctx context.Context, s Scope, key string) (string
 	}
 	v, ok := values[key]
 	return v, ok
+}
+
+// PrimeScopes reads the values set for every one of ids (scopes of kind)
+// not already kept, in one read, and keeps them, those with none included: a
+// page of tasks across fifty projects asks once, not fifty times (PR1, the BE
+// audit's #2). A failed read keeps nothing; each scope then reads its own.
+func (r *Registry) PrimeScopes(ctx context.Context, kind string, ids []string) {
+	var want []string
+	seen := map[string]bool{}
+	for _, id := range ids {
+		s := Scope{Kind: kind, ID: id}
+		key := s.cacheKey()
+		if id == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		if _, ok := scopedCache.Get(key); !ok {
+			want = append(want, strings.ToLower(id))
+		}
+	}
+	if len(want) == 0 {
+		return
+	}
+	got, err := readScopedMany(ctx, kind, want)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Policy: the values set for %d %s scopes couldn't be read at once; each reads its own: %+v", len(want), kind, err)
+		return
+	}
+	for _, id := range want {
+		v := got[id]
+		if v == nil {
+			v = map[string]string{}
+		}
+		scopedCache.Set(Scope{Kind: kind, ID: id}.cacheKey(), v)
+	}
 }
 
 func (r *Registry) BoolIn(ctx context.Context, p BoolPolicy, s Scope) bool {

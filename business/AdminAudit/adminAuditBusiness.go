@@ -197,6 +197,9 @@ const CategoryAgent = auditModel.CategoryAgent
 // deletes, restores, purges, exports, publishes, transfers and recoveries.
 const CategoryDocs = auditModel.CategoryDocs
 
+// CategoryCalls is what the people running a call did in it.
+const CategoryCalls = auditModel.CategoryCalls
+
 // CategoryCalendar is what happened to the calendar's events.
 const CategoryCalendar = auditModel.CategoryCalendar
 
@@ -273,9 +276,4 @@ func RecordForPrincipal(
 		}
 	}
 	return auditModel.Insert(ctx, entry)
-}
-
-// List proxies the model list for the admin audit viewer.
-func List(ctx context.Context, category string, limit, offset int) ([]*auditModel.AuditEntry, error) {
-	return auditModel.List(ctx, category, limit, offset)
 }

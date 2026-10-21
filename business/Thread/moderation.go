@@ -37,3 +37,13 @@ func moderatorOf(ctx context.Context, who accessBusiness.Subject, d accessBusine
 		Deleted:    d.Deleted,
 	}
 }
+
+// CanModerateDoc is whether who may remove anyone's comment on a doc,
+// guests' included (docs C5-2): the rule above, for the doc as who is decided.
+func CanModerateDoc(ctx context.Context, who accessBusiness.Subject, docUUID string) (bool, error) {
+	d, err := accessBusiness.Rules.Resolve(ctx, who, accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: docUUID})
+	if err != nil {
+		return false, err
+	}
+	return mayModerate(ctx, who, d), nil
+}

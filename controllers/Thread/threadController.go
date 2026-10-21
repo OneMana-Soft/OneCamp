@@ -7,6 +7,7 @@ package controllers
 import (
 	"encoding/json"
 	"errors"
+	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	"io"
 	"net/http"
 
@@ -46,7 +47,7 @@ func write(w http.ResponseWriter, r *http.Request, where string, err error) {
 func subjectOf(w http.ResponseWriter, r *http.Request) (accessBusiness.Subject, bool) {
 	_, who := accessBusiness.RequestSubject(r)
 	if who.UserUUID == "" {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return accessBusiness.Subject{}, false
 	}
 	return who, true
@@ -210,4 +211,37 @@ func MarkThreadRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "ok"})
+}
+
+// LinkThreadTask is POST /threads/{thread_id}/task {task_uuid}: ties a thread
+// to the task "Make a task" made from it (docs C5-2), for someone who may
+// resolve the thread and see the task. From then on resolving either resolves
+// both (business/Task threadTaskSync.go).
+func LinkThreadTask(w http.ResponseWriter, r *http.Request) {
+	who, ok := subjectOf(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		TaskUUID string `json:"task_uuid"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&in); err != nil || in.TaskUUID == "" {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Say which task."})
+		return
+	}
+	task, err := taskBusiness.GetDgraphBasicTaskInfo(r.Context(), in.TaskUUID, who.UserUID)
+	if err != nil || task == nil || !taskBusiness.CanViewTask(task, who.UserUID) {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task isn't here."})
+		return
+	}
+	t, err := threadBusiness.LinkTask(r.Context(), who, threadID(r), task.Uuid)
+	if errors.Is(err, threadBusiness.ErrTiedElsewhere) {
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "This comment already has a task."})
+		return
+	}
+	if err != nil {
+		write(w, r, "LinkThreadTask", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": t})
 }

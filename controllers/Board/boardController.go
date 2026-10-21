@@ -2,7 +2,6 @@ package boardController
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -225,17 +224,6 @@ func GenerateBoardDiagram(w http.ResponseWriter, r *http.Request) {
 // edit access (or ownership), same as generation.
 func PlanBoardDiagram(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusNotImplemented, helpers.Envolope{"msg": "AI features are not supported on this build"})
-}
-
-// sseSend writes one SSE data frame as JSON and flushes it. Best-effort: a
-// write error means the client went away, which the caller detects via ctx.
-func sseSend(w http.ResponseWriter, flusher http.Flusher, payload map[string]interface{}) {
-	b, err := json.Marshal(payload)
-	if err != nil {
-		return
-	}
-	fmt.Fprintf(w, "data: %s\n\n", string(b))
-	flusher.Flush()
 }
 
 // GenerateBoardDiagramStream POST /board/aiGenerateStream - same as

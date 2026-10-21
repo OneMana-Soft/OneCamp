@@ -1,10 +1,16 @@
 package domain
 
 import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
-	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+
+	readStateModels "github.com/akashc777/OneCamp/models/postgres/ReadState"
 )
 
 // The two unread-count queries must ask the same question.
@@ -22,14 +28,27 @@ import (
 //     >= every message you sent registered as one unread to yourself
 //   - a deleted message counted forever, and there was nothing left to open
 //
-// This test pins the parity rather than the text, so either query may be
-// rewritten as long as it still answers the question the same way.
+// Since 20 Oct 2026 the rule is written once (models/postgres/ReadState
+// Table.Unread) and both queries join on it, as the first unread and Mark
+// unread do. The guard reads each query as it runs: its literals, and each
+// shared fragment it joins in, replaced by the fragment's own text. This pins
+// the parity rather than the text, so either query may be rewritten as long as
+// it still answers the question the same way.
 func TestUnreadCountQueriesAgree(t *testing.T) {
-	chat := readSource(t, "chatDomain.go")
-	channel := readSource(t, "../Post/postDomain.go")
+	fragments := map[string]string{
+		"readStateModels.Chat.Unread()":    readStateModels.Chat.Unread(),
+		"readStateModels.Channel.Unread()": readStateModels.Channel.Unread(),
+	}
+	chatQ := extractQuery(t, "chatDomain.go", "GetLatestChatMessageCountByUserID", fragments)
+	channelQ := extractQuery(t, "../Post/postDomain.go", "GetLatestPostInChannelCountByUserID", fragments)
 
-	chatQ := extractQuery(t, chat, "GetLatestChatMessageCountByUserID")
-	channelQ := extractQuery(t, channel, "GetLatestPostInChannelCountByUserID")
+	// Both count by the read state's one rule.
+	if !strings.Contains(chatQ, readStateModels.Chat.Unread()) {
+		t.Errorf("the chat unread query no longer joins on the read state's rule (readStateModels.Chat.Unread()):\n%s", chatQ)
+	}
+	if !strings.Contains(channelQ, readStateModels.Channel.Unread()) {
+		t.Errorf("the channel unread query no longer joins on the read state's rule (readStateModels.Channel.Unread()):\n%s", channelQ)
+	}
 
 	for _, c := range []struct {
 		name string
@@ -60,25 +79,111 @@ func TestUnreadCountQueriesAgree(t *testing.T) {
 	}
 }
 
-func readSource(t *testing.T, name string) string {
-	t.Helper()
-	b, err := os.ReadFile(name)
-	if err != nil {
-		t.Fatalf("could not read %s: %v", name, err)
+// The guard reads a query built from a shared fragment as the query that runs,
+// and refuses one it can't read rather than passing it unchecked.
+func TestTheGuardReadsAQueryBuiltFromFragments(t *testing.T) {
+	src := []byte("package p\n\nfunc Count() {\n\tquery := `SELECT 1 FROM a m ON ` + rule.Of() + `\n\t\tWHERE x`\n\t_ = query\n}\n")
+	got, err := queryOf(src, "Count", map[string]string{"rule.Of()": "m.k = lsc.k"})
+	if err != nil || got != "SELECT 1 FROM a m ON m.k = lsc.k\n\t\tWHERE x" {
+		t.Fatalf("a query with a fragment: %q %v", got, err)
 	}
-	return string(b)
+	if _, err := queryOf(src, "Count", nil); err == nil || !strings.Contains(err.Error(), "rule.Of()") {
+		t.Errorf("a fragment the guard doesn't know must fail, naming it: %v", err)
+	}
+	if _, err := queryOf(src, "Gone", nil); err == nil || !strings.Contains(err.Error(), "Gone") {
+		t.Errorf("a function that isn't there must fail, naming it: %v", err)
+	}
+	plain := []byte("package p\n\nfunc Count() {\n\tquery := `SELECT 1`\n\t_ = query\n}\n")
+	if got, err := queryOf(plain, "Count", nil); err != nil || got != "SELECT 1" {
+		t.Errorf("a query of one literal: %q %v", got, err)
+	}
 }
 
-// extractQuery pulls the backtick-quoted SQL out of the named function.
-func extractQuery(t *testing.T, src, fn string) string {
+// extractQuery is the SQL the named function in the file at path runs
+// (queryOf), failing the test where it can't be read.
+func extractQuery(t *testing.T, path, fn string, fragments map[string]string) string {
 	t.Helper()
-	i := strings.Index(src, "func "+fn)
-	if i < 0 {
-		t.Fatalf("function %s not found; if it was renamed, this guard needs the new name", fn)
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("could not read %s: %v", path, err)
 	}
-	m := regexp.MustCompile("(?s)`([^`]*)`").FindStringSubmatch(src[i:])
-	if m == nil {
-		t.Fatalf("no SQL literal found in %s", fn)
+	q, err := queryOf(src, fn, fragments)
+	if err != nil {
+		t.Fatalf("%s: %v", path, err)
 	}
-	return m[1]
+	return q
+}
+
+// queryOf is the SQL function fn in src assigns to its query variable: its
+// string literals, joined with +, and each other operand replaced by its text
+// in fragments (keyed by the operand's source, "readStateModels.Chat.Unread()").
+// An operand not in fragments is an error naming it, so a part of the query the
+// guard can't see never passes for checked.
+func queryOf(src []byte, fn string, fragments map[string]string) (string, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "", src, 0)
+	if err != nil {
+		return "", err
+	}
+	var body *ast.BlockStmt
+	for _, d := range file.Decls {
+		if f, ok := d.(*ast.FuncDecl); ok && f.Name.Name == fn && f.Body != nil {
+			body = f.Body
+			break
+		}
+	}
+	if body == nil {
+		return "", fmt.Errorf("function %s not found; if it was renamed, this guard needs the new name", fn)
+	}
+	var expr ast.Expr
+	ast.Inspect(body, func(n ast.Node) bool {
+		if expr != nil {
+			return false
+		}
+		if a, ok := n.(*ast.AssignStmt); ok && len(a.Lhs) == 1 && len(a.Rhs) == 1 {
+			if id, ok := a.Lhs[0].(*ast.Ident); ok && id.Name == "query" {
+				expr = a.Rhs[0]
+				return false
+			}
+		}
+		return true
+	})
+	if expr == nil {
+		return "", fmt.Errorf("%s builds no query variable", fn)
+	}
+	var out strings.Builder
+	var walk func(ast.Expr) error
+	walk = func(e ast.Expr) error {
+		switch v := e.(type) {
+		case *ast.ParenExpr:
+			return walk(v.X)
+		case *ast.BinaryExpr:
+			if v.Op == token.ADD {
+				if err := walk(v.X); err != nil {
+					return err
+				}
+				return walk(v.Y)
+			}
+		case *ast.BasicLit:
+			if v.Kind == token.STRING {
+				s, err := strconv.Unquote(v.Value)
+				if err != nil {
+					return err
+				}
+				out.WriteString(s)
+				return nil
+			}
+		}
+		text := string(src[fset.Position(e.Pos()).Offset:fset.Position(e.End()).Offset])
+		frag, ok := fragments[text]
+		if !ok {
+			return fmt.Errorf("%s joins %s into its query, which this guard can't read: add its text to the fragments", fn, text)
+		}
+		out.WriteString(frag)
+		return nil
+	}
+	if err := walk(expr); err != nil {
+		return "", err
+	}
+	return out.String(), nil
 }

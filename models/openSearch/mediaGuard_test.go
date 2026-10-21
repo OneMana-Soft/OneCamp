@@ -18,6 +18,7 @@ package models
 //     also ate legitimate content would just be a different bug.
 
 import (
+	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -265,10 +266,11 @@ func TestIndexReader_StripsMediaAnywhereInTheDocument(t *testing.T) {
 		"list": []any{`<svg viewBox="0 0 9 9"><rect width="9" height="9"/></svg>`},
 	}
 
-	body, err := IndexBody(doc)
+	raw, err := json.Marshal(doc)
 	if err != nil {
-		t.Fatalf("IndexBody: %v", err)
+		t.Fatal(err)
 	}
+	body := IndexReader(raw)
 	buf := make([]byte, 1<<20)
 	n, _ := body.Read(buf)
 	out := string(buf[:n])

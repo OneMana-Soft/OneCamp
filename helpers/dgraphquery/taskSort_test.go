@@ -24,7 +24,6 @@ func TestTaskListOrder(t *testing.T) {
 		`[{"id":"task_created_date","desc":true}]`:  "orderdesc: task_created_at",
 		// Not offered: passed over, never handed to the graph.
 		`[{"id":"task_name","desc":false}]`:          newestFirst,
-		`[{"id":"task_rank","desc":false}]`:          newestFirst,
 		`[{"id":"uid","desc":true}]`:                 newestFirst,
 		`[{"id":"task_due_date) { x","desc":false}]`: newestFirst,
 		`[{"id":"TASK_DUE_DATE","desc":false}]`:      newestFirst,

@@ -132,3 +132,9 @@ func GetMultipleConfigsByKeys(keys []string) (configs []*SystemConfig, err error
 
 	return
 }
+
+// Ready is whether there is a database to read the config from (none in unit
+// tests and early boot, where callers fall back to the environment).
+func Ready() bool {
+	return postgresInit.DBConn != nil && postgresInit.DBConn.SqlDB != nil
+}

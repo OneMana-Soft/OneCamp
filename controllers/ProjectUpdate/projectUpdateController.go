@@ -159,7 +159,7 @@ func DeleteUpdate(w http.ResponseWriter, r *http.Request) {
 func ProjectsOverview(w http.ResponseWriter, r *http.Request) {
 	u := me(r)
 	if u == nil {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	list, err := business.Overviews(r.Context(), u.UserDgraphInfo.Uid, time.Now().In(helpers.Location(r.URL.Query().Get("tz"))))

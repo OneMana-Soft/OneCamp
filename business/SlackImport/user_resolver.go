@@ -10,7 +10,6 @@ import (
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
 	importModels "github.com/akashc777/OneCamp/models/postgres/SlackImport"
-	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
 
@@ -50,6 +49,58 @@ func resolveUsers(ctx context.Context, importId uuid.UUID, workspaceName string,
 	// user too — that's the price of consistency with the rest of the
 	// codebase. For tens of thousands of users this loop is the bound,
 	// so we keep it simple.
+	// The people's mappings and members are read for all of them at once
+	// (a statement each, a thousand ids at a time for the import's own),
+	// where each person was read alone, three times. A failed read leaves
+	// its map nil, and each person is then read alone.
+	ids := make([]string, 0, len(users))
+	emails := make([]string, 0, len(users))
+	for i := range users {
+		if users[i].ID != "" {
+			ids = append(ids, users[i].ID)
+		}
+		if e := strings.TrimSpace(strings.ToLower(users[i].Profile.Email)); e != "" {
+			emails = append(emails, e)
+		}
+	}
+	own, err := importModels.LookupIdMappingsMany(ctx, importId, importModels.EntityUser, ids)
+	if err != nil {
+		own = nil
+	}
+	var workspace map[string]uuid.UUID
+	if workspaceName != "" {
+		if workspace, err = importModels.LookupWorkspaceMappingsBatch(ctx, workspaceName, importModels.EntityUser, ids); err != nil {
+			workspace = nil
+		}
+	}
+	members, err := userBusiness.MembersByAddress(ctx, emails)
+	if err != nil {
+		members = nil
+	}
+	ownMapping := func(id string) uuid.UUID {
+		if own != nil {
+			return own[id]
+		}
+		u, _ := importModels.LookupIdMapping(ctx, importId, importModels.EntityUser, id)
+		return u
+	}
+	workspaceMapping := func(id string) uuid.UUID {
+		if workspace != nil || workspaceName == "" {
+			return workspace[id]
+		}
+		u, _ := importModels.LookupWorkspaceMapping(ctx, workspaceName, importModels.EntityUser, id)
+		return u
+	}
+	member := func(email string) uuid.UUID {
+		if members != nil {
+			return members[email]
+		}
+		if u, _ := userBusiness.GetUserByEmailId(ctx, &email); u != nil {
+			return u.Id
+		}
+		return uuid.Nil
+	}
+
 	for i := range users {
 		su := &users[i]
 
@@ -65,7 +116,7 @@ func resolveUsers(ctx context.Context, importId uuid.UUID, workspaceName string,
 		}
 
 		// 1. Already mapped within this import? (re-runnable per-import idempotency)
-		if existing, err := importModels.LookupIdMapping(ctx, importId, importModels.EntityUser, su.ID); err == nil && existing != uuid.Nil {
+		if existing := ownMapping(su.ID); existing != uuid.Nil {
 			stats.Reused++
 			continue
 		}
@@ -74,7 +125,7 @@ func resolveUsers(ctx context.Context, importId uuid.UUID, workspaceName string,
 		// Cross-import dedup: a re-export of the same workspace points
 		// at the same Slack user ids; we reuse the OneCamp user we
 		// already provisioned and only record the per-import mapping.
-		if existing, err := importModels.LookupWorkspaceMapping(ctx, workspaceName, importModels.EntityUser, su.ID); err == nil && existing != uuid.Nil {
+		if existing := workspaceMapping(su.ID); existing != uuid.Nil {
 			if err := importModels.UpsertIdMappingWithOwnership(ctx, importId,
 				importModels.EntityUser, su.ID, existing, nil,
 				mustMarshal(map[string]interface{}{"matched_by": "workspace_map"}),
@@ -86,25 +137,22 @@ func resolveUsers(ctx context.Context, importId uuid.UUID, workspaceName string,
 		}
 
 		email := strings.TrimSpace(strings.ToLower(su.Profile.Email))
-		var ocUser *userModels.User
-
+		matched := uuid.Nil
 		if email != "" {
 			// 3. Match by email against any OneCamp user.
-			ocUser, _ = userBusiness.GetUserByEmailId(ctx, &email)
+			matched = member(email)
 		}
 
-		if ocUser != nil {
-			// Reuse: do not mutate profile, do not invite, just record map.
-			if err := importModels.UpsertIdMappingWithOwnership(ctx, importId, importModels.EntityUser, su.ID,
-				ocUser.Id, nil, mustMarshal(map[string]interface{}{
+		if matched != uuid.Nil {
+			// Reuse: do not mutate profile, do not invite, just record map,
+			// here and in the workspace's so the next re-import skips it.
+			if err := importModels.RecordMapping(ctx, importId, importModels.EntityUser, su.ID,
+				matched, nil, mustMarshal(map[string]interface{}{
 					"matched_by": "email",
 					"email":      email,
-				}), false /* matched, not created */); err != nil {
+				}), false /* matched, not created */, workspaceName); err != nil {
 				return stats, err
 			}
-			// Promote into the workspace map so the next re-import skips it.
-			_ = importModels.UpsertWorkspaceMapping(ctx, workspaceName,
-				importModels.EntityUser, su.ID, ocUser.Id, importId)
 			stats.Reused++
 			continue
 		}
@@ -119,7 +167,7 @@ func resolveUsers(ctx context.Context, importId uuid.UUID, workspaceName string,
 			// Email exists in Slack but not in OneCamp; check the synth
 			// space wasn't already taken (rare collision with an earlier
 			// import). If so, suffix.
-			if existing, _ := userBusiness.GetUserByEmailId(ctx, &emailToUse); existing != nil {
+			if member(emailToUse) != uuid.Nil {
 				emailToUse = collisionSuffix(emailToUse, su.ID)
 			}
 		}
@@ -177,19 +225,17 @@ func resolveUsers(ctx context.Context, importId uuid.UUID, workspaceName string,
 			continue
 		}
 
-		if err := importModels.UpsertIdMappingWithOwnership(ctx, importId, importModels.EntityUser, su.ID,
+		// Mapped here and in the workspace's map, so a re-import skips them.
+		if err := importModels.RecordMapping(ctx, importId, importModels.EntityUser, su.ID,
 			newUser.Id, nil, mustMarshal(map[string]interface{}{
 				"matched_by":   "external",
 				"email":        emailToUse,
 				"display_name": displayName,
 				"is_bot":       su.IsBot,
 				"deleted":      su.Deleted,
-			}), true /* this import physically created the user */); err != nil {
+			}), true /* this import physically created the user */, workspaceName); err != nil {
 			return stats, err
 		}
-		// Promote into the workspace map so a future re-import skips this user.
-		_ = importModels.UpsertWorkspaceMapping(ctx, workspaceName,
-			importModels.EntityUser, su.ID, newUser.Id, importId)
 
 		if su.IsBot {
 			stats.Bots++

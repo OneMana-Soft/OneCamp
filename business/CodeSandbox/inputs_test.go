@@ -96,13 +96,6 @@ func TestEncodeCSV_RaggedRowsAligned(t *testing.T) {
 	}
 }
 
-func TestSortedKeys(t *testing.T) {
-	got := SortedKeys(map[string]string{"b": "1", "a": "2", "c": "3"})
-	if strings.Join(got, ",") != "a,b,c" {
-		t.Errorf("keys not sorted: %v", got)
-	}
-}
-
 func keysOf(m map[string][]byte) []string {
 	var k []string
 	for key := range m {

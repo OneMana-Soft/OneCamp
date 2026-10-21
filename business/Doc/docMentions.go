@@ -27,7 +27,6 @@ package businness
 
 import (
 	"context"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -35,11 +34,10 @@ import (
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	domain "github.com/akashc777/OneCamp/domain/Doc"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/bodyrefs"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	followModels "github.com/akashc777/OneCamp/models/postgres/Follow"
-	"github.com/google/uuid"
-	"golang.org/x/net/html"
 )
 
 // Seams for tests: where mentions are kept, and a doc's links.
@@ -156,70 +154,9 @@ func madeSince(doc *dgraphStruct.DgraphDoc, since time.Time) bool {
 }
 
 // bodyReferences is who a body @mentions (user uuids) and which docs it links
-// to (doc uuids), each once, in the order they appear. Pure.
+// to (doc uuids) with a chip or a link, each once, in the order they appear:
+// helpers/bodyrefs, the one parser of a body's links. Pure.
 func bodyReferences(body string) (people, docs []string) {
-	seenPerson, seenDoc := map[string]bool{}, map[string]bool{}
-	addDoc := func(id string) {
-		if u, err := uuid.Parse(id); err == nil && !seenDoc[u.String()] {
-			seenDoc[u.String()] = true
-			docs = append(docs, u.String())
-		}
-	}
-	z := html.NewTokenizer(strings.NewReader(body))
-	for {
-		tt := z.Next()
-		if tt == html.ErrorToken {
-			return people, docs
-		}
-		if tt != html.StartTagToken && tt != html.SelfClosingTagToken {
-			continue
-		}
-		name, hasAttr := z.TagName()
-		if !hasAttr {
-			continue
-		}
-		attrs := map[string]string{}
-		for {
-			k, v, more := z.TagAttr()
-			attrs[string(k)] = string(v)
-			if !more {
-				break
-			}
-		}
-		switch string(name) {
-		case "span":
-			switch attrs["data-type"] {
-			case "mention":
-				// "<user uuid>@<graph uid>"; older chips carry the uuid alone.
-				id, _, _ := strings.Cut(attrs["data-id"], "@")
-				if u, err := uuid.Parse(id); err == nil && !seenPerson[u.String()] {
-					seenPerson[u.String()] = true
-					people = append(people, u.String())
-				}
-			case "entityMention":
-				if id, ok := strings.CutPrefix(attrs["data-id"], "doc:"); ok {
-					addDoc(id)
-				}
-			}
-		case "a":
-			if id, ok := docLink(attrs["href"]); ok {
-				addDoc(id)
-			}
-		}
-	}
-}
-
-// docLink is the doc a link opens, for a link to /app/doc/<uuid> on this app
-// or any (a pasted link keeps its host). Pure.
-func docLink(href string) (string, bool) {
-	u, err := url.Parse(strings.TrimSpace(href))
-	if err != nil {
-		return "", false
-	}
-	rest, ok := strings.CutPrefix(u.Path, "/app/doc/")
-	if !ok {
-		return "", false
-	}
-	id, _, _ := strings.Cut(rest, "/")
-	return id, id != ""
+	r := bodyrefs.Scan(body)
+	return r.People, r.Of(bodyrefs.KindDoc, true)
 }

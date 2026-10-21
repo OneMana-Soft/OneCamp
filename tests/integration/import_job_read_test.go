@@ -45,7 +45,7 @@ func TestAnImportWaitingToBePlannedCanBeRead(t *testing.T) {
 	if j, err := importModels.GetJob(ctx, planned); err != nil || string(j.Plan) != `{"task_count": 7}` {
 		t.Fatalf("a planned job keeps its plan: %+v %v", j, err)
 	}
-	if jobs, err := importDomain.ListJobs(ctx, "", 50); err != nil || len(jobs) != 3 {
+	if jobs, err := importDomain.ListJobs(ctx, "", 50, 0); err != nil || len(jobs) != 3 {
 		t.Fatalf("the list of imports: %d %v", len(jobs), err)
 	}
 	if j, err := slackModels.GetJob(ctx, slack); err != nil || j == nil || j.Plan != nil {

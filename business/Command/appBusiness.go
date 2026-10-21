@@ -12,6 +12,7 @@ import (
 
 	commandAdapter "github.com/akashc777/OneCamp/adapter/Command"
 	"github.com/akashc777/OneCamp/helpers"
+	tokenModel "github.com/akashc777/OneCamp/models/postgres/ApiToken"
 	integrationModel "github.com/akashc777/OneCamp/models/postgres/Integration"
 	slashModel "github.com/akashc777/OneCamp/models/postgres/SlashCommand"
 	"github.com/google/uuid"
@@ -237,6 +238,11 @@ func SetAppEnabled(ctx context.Context, appID uuid.UUID, enabled bool) error {
 func DeleteApp(ctx context.Context, appID uuid.UUID) error {
 	if err := slashModel.SoftDeleteApp(ctx, appID); err != nil {
 		return err
+	}
+	// Its credentials go with it (business/App): revoked, not only refused
+	// (apiTokenBusiness.Validate refuses a removed app's on the next call anyway).
+	if _, err := tokenModel.RevokeAllForApp(ctx, appID); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Command/DeleteApp: revoking the app's tokens: %+v", err)
 	}
 	// Remove the encrypted secret bag.
 	delQ := `DELETE FROM integrations WHERE entity_type = 'app' AND entity_id = $1 AND provider = $2`

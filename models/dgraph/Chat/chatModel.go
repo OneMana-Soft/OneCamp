@@ -78,6 +78,7 @@ var ErrNotFound = helpers.NotFound("failed to get dgraph chats")
 
 func GetDgraphChatInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphChats *dgraphStruct.DgraphChat, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -102,7 +103,9 @@ func GetDgraphChatInfoByUUID(ctx context.Context, query string, variables map[st
 
 	if len(chatsInfo.ChatInfo) == 0 {
 		err = ErrNotFound
-		helpers.LogErrorWithContext(ctx,
+		// Found nothing: an answer its caller handles (a 404, or skipping
+		// the thing), so said at DEBUG, not as a failure.
+		helpers.LogDebugWithContext(ctx,
 			"models/GetDgraphChatInfoByGroupingID failed to get dgraph post")
 
 		return
@@ -116,6 +119,7 @@ func GetDgraphChatInfoByUUID(ctx context.Context, query string, variables map[st
 
 func GetDgraphBasicDmsInfoByGrpId(ctx context.Context, query string, variables map[string]string) (dgraphDmInfo *dgraphStruct.DgraphDm, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -148,6 +152,7 @@ func GetDgraphBasicDmsInfoByGrpId(ctx context.Context, query string, variables m
 
 func GetDgraphDmsInfoByGrpId(ctx context.Context, query string, variables map[string]string) (dgraphChats []*dgraphStruct.DgraphChat, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -180,44 +185,6 @@ func GetDgraphDmsInfoByGrpId(ctx context.Context, query string, variables map[st
 	}
 
 	return
-}
-
-func CreateOrUpdateChatReaction(ctx context.Context, query string, dgraphChat *dgraphStruct.DgraphChat) (reactionUID string, err error) {
-	pb, err := json.Marshal(dgraphChat)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateOrUpdateChatReaction failed to marshal dgraphChat struct err: %+v",
-			err)
-		return
-	}
-
-	mu := &api.Mutation{
-		SetJson: pb,
-	}
-	req := &api.Request{
-		Query:     query,
-		Mutations: []*api.Mutation{mu},
-	}
-
-	res, err := dgraphInit.DoCommitNow(ctx, req)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateOrUpdateChatReaction failed to create or update dgraph chat reaction err: %+v",
-			err)
-		return
-	}
-
-	for _, v := range res.Uids {
-		reactionUID = v
-	}
-	return
-}
-
-func DeleteNodeOrEdgesRelatedToChats(ctx context.Context, delStringJSON string) (err error) {
-	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{
-		Mutations: []*api.Mutation{{DeleteJson: []byte(delStringJSON)}},
-	})
-	return err
 }
 
 // BulkSoftDeleteDgraphChats sets chat_deleted_at on multiple chats in a single Dgraph mutation.

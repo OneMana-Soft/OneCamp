@@ -12,7 +12,6 @@
 package provider
 
 import (
-	"context"
 	"net"
 	"net/http"
 	"time"
@@ -49,11 +48,4 @@ var SharedAPIClient = &http.Client{
 		ExpectContinueTimeout: 1 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 	},
-}
-
-// DoWithContext is a tiny convenience wrapper that always sets the
-// request context before sending. Provider callers should use this so
-// a cancelled job context interrupts in-flight HTTP calls cleanly.
-func DoWithContext(ctx context.Context, req *http.Request) (*http.Response, error) {
-	return SharedAPIClient.Do(req.WithContext(ctx))
 }

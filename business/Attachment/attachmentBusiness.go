@@ -84,10 +84,15 @@ func ArchiveAttachmentByAttachmentUUID(ctx context.Context, attachmentUUID uuid.
 		AttachmentDeletedAt: helpers.Int64Pointer(currentTime.Unix()),
 	}
 
-	go domain.UpdateAttachmentInOpenSearch(opensearchAttachment)
+	helpers.GoSafeNamed("domain.UpdateAttachmentInOpenSearch", func() { domain.UpdateAttachmentInOpenSearch(opensearchAttachment) })
 
 	return
 
+}
+
+// AttachmentsOfPlace is the files with these ids kept at this place, by id.
+func AttachmentsOfPlace(ctx context.Context, ids []string, srcKey, srcValue string) (map[string]*models.Attachment, error) {
+	return domain.AttachmentsOfPlace(ctx, ids, srcKey, srcValue)
 }
 
 func GetAttachmentByObjUUID(ctx context.Context, objUUID string, srcKey string) (attachment *models.Attachment, err error) {
@@ -95,77 +100,6 @@ func GetAttachmentByObjUUID(ctx context.Context, objUUID string, srcKey string) 
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/GetAttachmentByObjUUID Failed to get attachment from postgres err: %+v", err)
-
-		return
-	}
-
-	return
-}
-
-func UnArchiveAttachmentByAttachmentUUID(ctx context.Context, attachmentUUID uuid.UUID) (err error) {
-
-	currentTime := time.Now()
-	zeroUnixTime := time.Time{}
-
-	err = domain.UpdateAttachmentDeletedTimeToNullByUUID(ctx, attachmentUUID, &currentTime)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/UnArchiveAttachmentByAttachmentUUID failed to update delete time in postgres err: %+v", err)
-
-		return
-	}
-
-	dgraphAttachment := &dgraphStruct.DgraphAttachment{
-		Uid:       "uid(attachment)",
-		Uuid:      attachmentUUID.String(),
-		DeletedAt: &zeroUnixTime,
-	}
-
-	_, err = domain.CreateOrUpdateDgraphAttachment(ctx, dgraphAttachment)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/UnArchiveAttachmentByAttachmentUUID failed to update delete time in dgraph err: %+v", err)
-
-		return
-	}
-
-	opensearchAttachment := &openSearchStruct.OpenSearchAttachment{
-		Uuid:                attachmentUUID.String(),
-		AttachmentDeletedAt: nil,
-	}
-
-	go domain.UpdateAttachmentInOpenSearch(opensearchAttachment)
-
-	return
-}
-
-func BulkAddAttachmentsToDgraph(ctx context.Context, dgraphAttachments []*dgraphStruct.DgraphAttachment) (dgraphAttachmentUUID []string, err error) {
-	dgraphAttachmentUUID, err = domain.BulkAddAttachmentsToDgraph(ctx, dgraphAttachments)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/BulkAddAttachmentsToDgraph Failed to add attachments in dgraph err: %+v", err)
-
-		return
-	}
-
-	return
-}
-
-func GetAttachmentsByObjUUIDs(ctx context.Context, objUUIDs []string) (attachments []*models.Attachment, err error) {
-	attachments, err = domain.GetAttachmentsByObjUUIDs(ctx, objUUIDs)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetAttachmentsByObjUUIDs Failed to get attachments list from postgres err: %+v", err)
-
-		return
-	}
-
-	return
-}
-
-func GetDgraphAttachmentInfoByUUID(ctx context.Context, attachmentUUID string, userDgraphUID string) (dgraphAttachment *dgraphStruct.DgraphAttachment, err error) {
-	dgraphAttachment, err = domain.GetDgraphAttachmentInfoByUUID(ctx, attachmentUUID, userDgraphUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetDgraphAttachmentInfoByUUID Failed to get attachment from dgraph err: %+v", err)
 
 		return
 	}

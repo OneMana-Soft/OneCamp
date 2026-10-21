@@ -9,7 +9,6 @@ import (
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	commentDomain "github.com/akashc777/OneCamp/domain/Comment"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
-	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
@@ -48,6 +47,7 @@ func processTaskCommentChunk(ctx context.Context, prov importProvider.Provider,
 
 	keepSystem, _ := opts["keep_system_comments"].(bool)
 
+	who := newPeople(job)
 	commentCh, errCh := prov.IterCommentsOfTask(ctx, job, opts, taskSrcId)
 	committed := 0
 	pendingChunks := make([]*importModels.Chunk, 0, 8)
@@ -79,6 +79,17 @@ func processTaskCommentChunk(ctx context.Context, prov importProvider.Provider,
 			errCh = nil
 		case sc, ok := <-commentCh:
 			if !ok {
+				// A source whose task files come apart from the task lists
+				// them here, with the task's comments (TaskFileLister).
+				if lister, isLister := prov.(importProvider.TaskFileLister); isLister {
+					refs, lerr := lister.ListTaskFiles(ctx, job, opts, taskSrcId)
+					if lerr != nil {
+						importModels.LogImportError(ctx, job.Id, &chunk.Id,
+							importModels.EntityTask, taskSrcId,
+							importModels.SeverityWarning, "TASK_FILES_UNLISTED", lerr.Error(), nil)
+					}
+					pendingChunks = append(pendingChunks, fileChunks(job, taskSrcId, "task", refs)...)
+				}
 				return importModels.FinishChunk(ctx, chunk.Id, committed, nil)
 			}
 			if sc.IsSystem && !keepSystem {
@@ -99,7 +110,7 @@ func processTaskCommentChunk(ctx context.Context, prov importProvider.Provider,
 
 			author := importingUser
 			if sc.AuthorSourceID != "" {
-				if _, info := resolveUserUUID(ctx, job, sc.AuthorSourceID); info != nil {
+				if _, info := who.resolve(ctx, sc.AuthorSourceID); info != nil {
 					author = info
 				}
 			}
@@ -129,31 +140,14 @@ func processTaskCommentChunk(ctx context.Context, prov importProvider.Provider,
 				continue
 			}
 
-			_ = importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
+			_ = importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 				importModels.EntityComment, sc.SourceID, commentUUID, &taskSrcId,
 				mustMarshal(map[string]any{
 					"task_source_id": taskSrcId,
 					"author":         sc.AuthorSourceID,
 				}), true)
-			_ = importModels.UpsertWorkspaceMapping(ctx,
-				job.Provider, job.SourceWorkspaceName,
-				importModels.EntityComment, sc.SourceID, commentUUID, job.Id)
 
-			for _, ar := range sc.AttachmentRefs {
-				ck := encodeAttachmentMeta(ar, sc.SourceID, "comment")
-				if ck == "" {
-					continue
-				}
-				pendingChunks = append(pendingChunks, &importModels.Chunk{
-					Id:             uuid.New(),
-					ImportId:       job.Id,
-					ChunkType:      importModels.ChunkAttachment,
-					ParentSourceId: strPtr(sc.SourceID),
-					ObjectKey:      &ck,
-					Status:         importModels.ChunkStatusPending,
-					MaxAttempts:    5,
-				})
-			}
+			pendingChunks = append(pendingChunks, fileChunks(job, sc.SourceID, "comment", sc.AttachmentRefs)...)
 
 			committed++
 			if committed%100 == 0 {
@@ -178,17 +172,11 @@ func writeTaskComment(ctx context.Context, dgTask *dgraphStruct.DgraphTask,
 	commentUUID := uuid.New()
 	zeroUnixTime := time.Time{}
 
-	// 1. Postgres.
+	// 1. Postgres, with its source time as both its times (CreateComment):
+	// the import set them in an UPDATE afterwards.
 	if err := commentDomain.CreateComment(ctx, commentUUID,
 		author.UserPostgresInfo.Id, createdAt); err != nil {
 		return uuid.Nil, fmt.Errorf("pg create comment: %w", err)
-	}
-	// Backdate created_at + updated_at.
-	if _, err := importModels.Exec(ctx,
-		`UPDATE comments SET created_at=$2, updated_at=$2 WHERE id=$1`,
-		commentUUID, createdAt); err != nil {
-		helpers.LogWarnWithContext(ctx,
-			"writeTaskComment backdate failed: %+v", err)
 	}
 
 	// 2. Dgraph: task → embedded comment in one upsert.

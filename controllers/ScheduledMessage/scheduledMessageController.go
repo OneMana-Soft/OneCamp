@@ -50,7 +50,7 @@ type scheduleInput struct {
 func Schedule(w http.ResponseWriter, r *http.Request) {
 	u, ok := person(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not signed in"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	var in scheduleInput
@@ -70,7 +70,7 @@ func Schedule(w http.ResponseWriter, r *http.Request) {
 func List(w http.ResponseWriter, r *http.Request) {
 	u, ok := person(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not signed in"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	vs, err := business.List(r.Context(), u, r.URL.Query().Get("target"))
@@ -91,7 +91,7 @@ func readID(w http.ResponseWriter, r *http.Request) (*userModels.UserInfo, idInp
 	var in idInput
 	u, ok := person(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not signed in"})
+		helpers.WriteUnauthorized(w)
 		return nil, in, uuid.Nil, false
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {

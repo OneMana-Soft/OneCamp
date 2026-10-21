@@ -33,6 +33,8 @@ import (
 
 func TestSearchFindsTheChannelsYouAreIn(t *testing.T) {
 	ctx := context.Background()
+	// A search's task hits are checked against who may see them in Postgres (models/taskread).
+	integration.ConnectServerPostgres(t)
 	search := integration.SetupOpenSearch(t)
 	// Every index, mapped as the server maps them at boot.
 	if err := opensearchInit.ConnectOpenSearch(&opensearchInit.OpenSearchConfig{Host: search.URL}); err != nil {

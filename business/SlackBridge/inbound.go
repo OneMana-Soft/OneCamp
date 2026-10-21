@@ -153,9 +153,9 @@ func receive(ctx context.Context, st *state, link model.Link, ev *messageEvent) 
 // messageHTML renders a Slack message as the body of a OneCamp post, led by
 // its sender's name.
 func messageHTML(ctx context.Context, st *state, m *messageEvent) (string, string) {
-	body := paragraphs(slackImport.RenderMrkdwn(ctx, m.Text, func(id string) string {
+	body := slackImport.RenderMrkdwn(ctx, m.Text, func(id string) string {
 		return senderName(ctx, st, id)
-	}))
+	})
 	var files []string
 	for _, f := range m.Files {
 		label := f.Title

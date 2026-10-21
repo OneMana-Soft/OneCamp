@@ -79,7 +79,8 @@ func TestABadSaveHookFailsWhereItIsRegistered(t *testing.T) {
 }
 
 // A registry with no hook starts nothing at all; the save path's holds the
-// hooks the docs programme registered here (A6: who a save mentions), and a
+// hooks the docs programme registered here (A6: who a save mentions; DG6:
+// what it links, for the work graph), and a
 // new one is added here on purpose. doc.updated is no hook: the save emits it
 // once itself (savedEvent), and a hook emitting it too made two of every save.
 func TestASaveWithNoHooksDoesNothing(t *testing.T) {
@@ -90,7 +91,7 @@ func TestASaveWithNoHooksDoesNothing(t *testing.T) {
 		names = append(names, h.name)
 	}
 	sort.Strings(names)
-	if want := []string{"doc.mentions"}; !slices.Equal(names, want) {
+	if want := []string{"doc.mentions", "doc.refs"}; !slices.Equal(names, want) {
 		t.Errorf("the save path's hooks are %v, want %v", names, want)
 	}
 }

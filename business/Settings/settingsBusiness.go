@@ -34,6 +34,13 @@ const (
 	keyAllowedUsers  = "allowed_users"
 	keyResendAPIKey  = "resend_api_key" // encrypted
 	keyGuestAccess   = "guest_access_enabled"
+	// keyGuestPublish is the one sub-option under guest access: whether a
+	// doc's view link may also be published as a web page (docs C6).
+	keyGuestPublish = "guest_publish_enabled"
+	// keyGuestRooms is guest access's second sub-option: whether personal
+	// meeting rooms answer at their addresses (calls CALLS-2, agreed with
+	// docs C6-2). Absent means on.
+	keyGuestRooms    = "guest_rooms_enabled"
 	keyRetentionDays = "audit_retention_days"
 	keyFirebaseCred  = "firebase_credential" // encrypted service-account JSON
 	keyReadReceipts  = "read_receipts_enabled"
@@ -55,7 +62,7 @@ const (
 // Firebase credential set in Admin went unused (TestEveryKeyIsLoaded).
 var settingsKeys = []string{
 	keyUploadLimitMB, keyAllowedUsers, keyResendAPIKey, keyGuestAccess, keyRetentionDays, keyFirebaseCred, keyReadReceipts,
-	keyDefaultChannels, keyManagedByCloud, keySenderEmail, keyGeneralChannel,
+	keyDefaultChannels, keyManagedByCloud, keySenderEmail, keyGeneralChannel, keyGuestPublish, keyGuestRooms,
 }
 
 // Defaults / floors.
@@ -313,6 +320,50 @@ func SetGuestAccessEnabled(enabled bool) error {
 	return nil
 }
 
+// GuestPublishAllowed is the guest-access sub-option as an admin set it: on
+// unless turned off. It means something only while guest access is on.
+func GuestPublishAllowed() bool {
+	return loadAll()[keyGuestPublish] != "false"
+}
+
+// GuestPublishEnabled reports whether a doc's view link may be published as
+// a web page, and its page served: guest access on, and its one sub-option
+// not turned off. Turning guest access off stops published pages too.
+func GuestPublishEnabled() bool {
+	return GuestAccessEnabled() && GuestPublishAllowed()
+}
+
+// SetGuestPublishEnabled persists the publishing sub-option.
+func SetGuestPublishEnabled(enabled bool) error {
+	if err := configModel.UpsertConfig(keyGuestPublish, strconv.FormatBool(enabled)); err != nil {
+		return err
+	}
+	invalidate()
+	return nil
+}
+
+// GuestRoomsAllowed is the rooms sub-option as an admin set it: on unless
+// turned off. It means something only while guest access is on.
+func GuestRoomsAllowed() bool {
+	return loadAll()[keyGuestRooms] != "false"
+}
+
+// GuestRoomsEnabled reports whether a personal meeting room answers at its
+// address: guest access on, and the rooms sub-option not turned off. Either
+// off stops every room at once.
+func GuestRoomsEnabled() bool {
+	return GuestAccessEnabled() && GuestRoomsAllowed()
+}
+
+// SetGuestRoomsEnabled persists the rooms sub-option.
+func SetGuestRoomsEnabled(enabled bool) error {
+	if err := configModel.UpsertConfig(keyGuestRooms, strconv.FormatBool(enabled)); err != nil {
+		return err
+	}
+	invalidate()
+	return nil
+}
+
 // ReadReceiptsEnabled reports whether people may see, in DMs and group
 // chats, who has read their messages (each can still turn theirs off). On
 // unless an admin has turned it off, as Teams and Zulip ship it.
@@ -516,7 +567,11 @@ type SettingsStatus struct {
 	HasResendAPIKey    bool     `json:"has_resend_api_key"`
 	ResendSource       string   `json:"resend_source"`
 	GuestAccessEnabled bool     `json:"guest_access_enabled"`
-	ReadReceipts       bool     `json:"read_receipts_enabled"`
+	// GuestPublishAllowed is guest access's sub-option: published pages.
+	GuestPublishAllowed bool `json:"guest_publish_enabled"`
+	// GuestRoomsAllowed is its second: personal meeting rooms.
+	GuestRoomsAllowed bool `json:"guest_rooms_enabled"`
+	ReadReceipts      bool `json:"read_receipts_enabled"`
 }
 
 // GetStatus returns the redacted settings view for the admin UI.
@@ -548,14 +603,16 @@ func GetStatus() SettingsStatus {
 	}
 
 	return SettingsStatus{
-		UploadLimitMB:      UploadLimitMB(),
-		UploadLimitSource:  uploadSrc,
-		AllowedUsers:       AllowedUsers(),
-		AllowedUsersSource: allowedSrc,
-		HasResendAPIKey:    hasResend,
-		ResendSource:       resendSrc,
-		GuestAccessEnabled: GuestAccessEnabled(),
-		ReadReceipts:       ReadReceiptsEnabled(),
+		UploadLimitMB:       UploadLimitMB(),
+		UploadLimitSource:   uploadSrc,
+		AllowedUsers:        AllowedUsers(),
+		AllowedUsersSource:  allowedSrc,
+		HasResendAPIKey:     hasResend,
+		ResendSource:        resendSrc,
+		GuestAccessEnabled:  GuestAccessEnabled(),
+		GuestPublishAllowed: GuestPublishAllowed(),
+		GuestRoomsAllowed:   GuestRoomsAllowed(),
+		ReadReceipts:        ReadReceiptsEnabled(),
 	}
 }
 

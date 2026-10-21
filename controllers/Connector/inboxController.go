@@ -21,7 +21,7 @@ import (
 func InboxUser(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 	info, ok := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		helpers.WriteUnauthorized(w)
 		return uuid.Nil, false
 	}
 	return info.UserPostgresInfo.Id, true

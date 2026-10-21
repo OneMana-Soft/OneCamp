@@ -78,7 +78,13 @@ var publicRoutes = map[string]string{
 	"/slack/events":                        "Slack signing-secret HMAC verified in the handler; before connection it only echoes Slack's URL challenge",
 	"/integration/google-calendar/webhook": "channel token verified in the handler",
 	"/webhooks/resend":                     "Svix signature verified in the handler, refused without the secret; rate limited per address",
-	"/webhook/incoming/{token}":            "the 32-byte path token IS the credential",
+	// It only posts messages: its own slash commands (and their relay to a
+	// caller's response_url) were removed in P-API part 3; a payload naming a
+	// command is answered with where they went (business/Webhook SlashCommandsMoved).
+	"/webhook/incoming/{token}": "the 32-byte path token IS the credential",
+	// An app's answer to one of its commands: the 24-byte token is the
+	// credential, good for five answers in 30 minutes, rate-limited per address.
+	"/command-responses/{token}": "the 24-byte path token IS the credential (an app's response URL)",
 
 	// Guest share links. The token is the credential; every one is rate-limited
 	// and returns a uniform not-available response so there is no oracle.
@@ -98,8 +104,21 @@ var publicRoutes = map[string]string{
 	"/guest/collab/{token}":                         "share-link token",
 	"/guest/table/{token}":                          "share-link token",
 	"/guest/doc-comments/{token}":                   "share-link token",
+	"/guest/doc-review/{token}":                     "share-link token (comment links only)",
 	"/guest/board-attachment/{token}/{obj_uuid}":    "share-link grant scopes the attachment",
 	"/guest/doc-attachment/{token}/{obj_uuid}":      "share-link grant scopes the attachment to its doc",
+
+	// A doc's view-only guest link, by its token or its published address (docs C6, D-25): one access
+	// check (the guest grant, under the guest-access switch), one script-free page under a sandboxed
+	// policy that reads no cookie and sets none, answering 404 the moment the link is revoked or
+	// unpublished, limited per address (helpers.ClientIP) and per page; its files only its own doc's.
+	"/public/p/{slug}":                   "a doc's published guest link: the same bytes for everyone, sandboxed; rate-limited",
+	"/public/p/{slug}/unlock":            "a published page's password, tried for its unlock; rate-limited per address and page",
+	"/public/p/{slug}/state":             "what a published address answers now (live, locked, gone, missing), for the web's /p; counted with the page's asks per address, saying nothing the page wouldn't",
+	"/public/p/{slug}/files/{obj_uuid}":  "a published page's own files, by slug and file; rate-limited",
+	"/public/d/{token}":                  "a doc's view-only guest link, by its token: the same page; rate-limited",
+	"/public/d/{token}/unlock":           "a view-only guest link's password, tried for its unlock; rate-limited per address and page",
+	"/public/d/{token}/files/{obj_uuid}": "a view-only guest link's own files, by token and file; rate-limited",
 
 	// Email-driven, must work from a mail client with no session.
 	"/public/notifications/unsubscribe": "unsubscribe token; required by bulk-mail norms",

@@ -5,7 +5,7 @@ package business
 // A Slack import leaves the channels the way the team had them: Slack's
 // #general goes into the workspace's own while that holds only its welcome
 // post, channels archived in Slack are archived once their history is in, and
-// the importing admin leaves the private channels they weren't in, handing
+// the importing admin leaves the channels they weren't in, handing
 // each to whoever made it in Slack.
 //
 // Run: go test -tags=integration ./business/SlackImport/ -run TestASlackImportsChannelsAreTheTeams -v
@@ -167,6 +167,15 @@ func TestASlackImportsChannelsAreTheTeams(t *testing.T) {
 	mine, _ := mapped("GMINE")
 	if count(mine, "ch_members", admin) != 1 || count(mine, "ch_moderators", admin) != 1 {
 		t.Error("the admin left a private channel they were in")
+	}
+	// A public channel too: its members are the team's, and the admin's
+	// sidebar is theirs.
+	cold, _ := mapped("COLD")
+	if count(cold, "ch_members", admin) != 0 || count(cold, "ch_moderators", admin) != 0 {
+		t.Error("the admin is still in a public channel they weren't in")
+	}
+	if count(cold, "ch_moderators", ada) != 1 || count(cold, "ch_members", ada) != 1 {
+		t.Error("the public channel went to its Slack creator, with its members")
 	}
 
 	// 3. Archived in Slack, archived here once the history is in.

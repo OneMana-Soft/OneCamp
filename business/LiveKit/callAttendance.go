@@ -2,39 +2,44 @@ package business
 
 // Who was in one call.
 //
-// Kept per call (its session key), never per room: a channel's room is the
-// same for every call in it, and attendance kept by room for 12 hours gathered
+// Kept per call (its session), never per room: a channel's room is the same
+// for every call in it, and attendance kept by room for 12 hours gathered
 // everyone from every call in the channel that day, so a later call's notes
-// were shared with people from earlier ones.
+// were shared with people from earlier ones. Call State (business/CallState)
+// records it from LiveKit's webhook.
 
 import (
 	"context"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/models/redis/registry"
-	redisStore "github.com/akashc777/OneCamp/models/redis/store"
+	callStateModel "github.com/akashc777/OneCamp/models/postgres/CallState"
 )
 
-// NoteAttendee records that a member joined (or was in) a call. Guests and
-// the agent are not members and are not recorded: attendance decides who
-// gets the call's notes, and only members can open a document. Best-effort:
-// a call must never fail because Redis did.
-func NoteAttendee(ctx context.Context, sessionKey, identity string) {
-	if !helpers.IsCallSessionKey(sessionKey) || !helpers.IsDgraphUID(identity) {
-		return
-	}
-	if err := redisStore.AddToSet(ctx, registry.CallAttendees, []string{sessionKey}, identity); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/NoteAttendee could not record a call attendee: %+v", err)
-	}
-}
-
-// CallAttendees answers the members who joined a call.
+// CallAttendees answers the members who joined a call (by their graph uid),
+// named by its session key (helpers.CallSessionKeyFor). Guests and the agent
+// are not members: attendance decides who gets the call's notes, and only
+// members can open a document.
 func CallAttendees(ctx context.Context, sessionKey string) ([]string, error) {
-	if !helpers.IsCallSessionKey(sessionKey) {
+	sid := helpers.CallSessionID(sessionKey)
+	if sid == "" {
 		return nil, nil
 	}
-	return redisStore.GetSetMembers(ctx, registry.CallAttendees, []string{sessionKey})
+	s, err := callStateModel.SessionBySID(ctx, sid)
+	if err != nil || s == nil {
+		return nil, err
+	}
+	people, err := callStateModel.Attendees(ctx, s.ID)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, a := range people {
+		if a.UserUUID != nil && helpers.IsDgraphUID(a.Identity) {
+			out = append(out, a.Identity)
+		}
+	}
+	return out, nil
 }
 
 // FinishedCall is a call that has just ended: its room, the session key its

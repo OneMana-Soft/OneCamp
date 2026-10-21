@@ -134,14 +134,3 @@ func IsSuppressedBatch(emails []string) (map[string]string, error) {
 	}
 	return out, rows.Err()
 }
-
-// Delete removes a suppression. Admin-only; the unsubscribe path uses the
-// preferences table instead.
-func Delete(email string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	email = strings.TrimSpace(strings.ToLower(email))
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx,
-		`DELETE FROM notification_email_suppressions WHERE email = $1`, email)
-	return err
-}

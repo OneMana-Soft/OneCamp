@@ -28,6 +28,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	prReviewModel "github.com/akashc777/OneCamp/models/postgres/GitHubPRReview"
+	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
@@ -103,13 +104,13 @@ var githubHTTPClient = &http.Client{Timeout: 15 * time.Second}
 // Retries up to 3 times with backoff to tolerate transient failures.
 //
 // Uses GitHubHTTPClient so the call sees an auto-refreshed token even
-// when the cached row's access_token is past expiry.
-func getGitHubBotLogin() string {
+// when the cached row's access_token is past expiry. The pauses between tries
+// end with ctx: they were time.Sleep, deaf to a cancelled request.
+func getGitHubBotLogin(ctx context.Context) string {
 	if cached, ok := botLoginCache.Load("bot"); ok && cached != "" {
 		return cached
 	}
 
-	ctx := context.Background()
 	client, err := GitHubHTTPClient(ctx)
 	if err != nil {
 		return ""
@@ -117,8 +118,8 @@ func getGitHubBotLogin() string {
 
 	var login string
 	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * time.Second)
+		if attempt > 0 && !helpers.SleepCtx(ctx, time.Duration(attempt)*time.Second) {
+			break
 		}
 
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.github.com/user", nil)
@@ -161,7 +162,9 @@ func invalidateBotLoginCache() {
 // Respects the provided context for graceful shutdown.
 func StartGitHubSyncWorker(signal <-chan struct{}, shutdownCtx context.Context) {
 	go func() {
-		time.Sleep(10 * time.Second)
+		if !helpers.SleepCtx(shutdownCtx, 10*time.Second) {
+			return
+		}
 		for {
 			func() {
 				defer func() {
@@ -199,6 +202,9 @@ func reapStaleSyncItems() {
 	}
 }
 
+// githubSyncClaimBatch is how many queue items one pass of the worker claims.
+const githubSyncClaimBatch = 10
+
 func processSyncQueue() {
 	ctx := context.Background()
 
@@ -208,18 +214,15 @@ func processSyncQueue() {
 		return
 	}
 
-	items, err := githubSyncQueueDomain.GetPendingGitHubSyncQueueItems(ctx)
+	// Claimed and marked processing in one statement, so another instance's
+	// worker never takes the same items.
+	items, err := githubSyncQueueDomain.ClaimGitHubSyncQueueItems(ctx, githubSyncClaimBatch)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "GitHub sync worker failed to fetch queue: %v", err)
+		helpers.LogErrorWithContext(ctx, "GitHub sync worker failed to claim queue items: %v", err)
 		return
 	}
 
 	for _, item := range items {
-		// Mark as processing
-		if err := githubSyncQueueDomain.MarkGitHubSyncQueueProcessing(ctx, item.ID); err != nil {
-			continue
-		}
-
 		syncErr := executeGitHubSync(item.TaskID, item.SyncType, item.Payload)
 
 		if syncErr == nil {
@@ -229,12 +232,13 @@ func processSyncQueue() {
 		} else {
 			errStr := syncErr.Error()
 			// A task linked outside its project's repositories stays refused.
-			if errors.Is(syncErr, errOutsideProject) || item.Attempts+1 >= githubSyncMaxRetries {
+			// item.Attempts already counts this try (the claim added it).
+			if errors.Is(syncErr, errOutsideProject) || item.Attempts >= githubSyncMaxRetries {
 				if err := githubSyncQueueDomain.MarkGitHubSyncQueueFailed(ctx, item.ID, errStr, nil); err != nil {
 					helpers.LogErrorWithContext(ctx, "GitHub sync worker failed to mark failed: %v", err)
 				}
 			} else {
-				backoff := time.Duration(1<<uint(item.Attempts)) * time.Second
+				backoff := time.Duration(1<<uint(item.Attempts-1)) * time.Second
 				nextRetry := time.Now().Add(backoff)
 				if err := githubSyncQueueDomain.MarkGitHubSyncQueuePending(ctx, item.ID, nextRetry); err != nil {
 					helpers.LogErrorWithContext(ctx, "GitHub sync worker failed to mark pending: %v", err)
@@ -246,6 +250,14 @@ func processSyncQueue() {
 
 func executeGitHubSync(taskID uuid.UUID, syncType string, payloadJSON string) error {
 	ctx := context.Background()
+
+	// A restricted task stays inside OneCamp (WA2): its link to GitHub is
+	// kept, and nothing of it is sent out while it is restricted. A
+	// restriction that can't be read sends nothing either.
+	if r, rerr := restrictionModel.Of(ctx, taskID); rerr != nil || r.Restricted {
+		helpers.LogInfoWithContext(ctx, "GitHub sync: task %s is restricted (or its restriction couldn't be read); nothing of it is sent", taskID)
+		return nil
+	}
 
 	// Mark as pending at start
 	_ = taskDomain.SetGitHubSyncStatus(ctx, taskID, "pending", nil, 0)
@@ -1232,8 +1244,10 @@ func syncCommentsFromGitHub(ctx context.Context, taskUUID uuid.UUID, owner, repo
 			_ = githubCommentMappingDomain.UpsertGitHubCommentMapping(ctx, owner, repo, c.ID, commentUUID, taskUUID)
 		}
 
-		// Log activity
-		go githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "comment",
+		// Log activity, here rather than on a goroutine per comment: a backfill
+		// of a thousand comments started a thousand, each with a ctx the sync
+		// could cancel before it ran.
+		_ = githubTaskActivityDomain.CreateGitHubTaskActivity(ctx, taskUUID, "comment",
 			&c.User.Login, userDgraphInfo.ProfileKey, &userDgraphInfo.EmailID, nil, &c.Body, nil)
 	}
 
@@ -1473,12 +1487,4 @@ func aggregateCheckStatus(runs []githubCheckRun) string {
 		return "success"
 	}
 	return "pending"
-}
-
-type githubSyncPayload struct {
-	Status   string `json:"status,omitempty"`
-	Name     string `json:"name,omitempty"`
-	Desc     string `json:"description,omitempty"`
-	Assignee string `json:"assignee_uuid,omitempty"`
-	Label    string `json:"label,omitempty"`
 }

@@ -24,13 +24,13 @@ func TestUpdatesRetryOnConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := updateDocument(context.Background(), c, "tasks", "t1", strings.NewReader(`{"doc":{"task_name":"Ship"}}`)); err != nil {
+	if err := updateDocument(context.Background(), c, "tasks", "t1", strings.NewReader(`{"doc":{"task_name":"Ship"}}`), false); err != nil {
 		t.Fatal(err)
 	}
 	if path != "/tasks/_update/t1" || !strings.Contains(query, "retry_on_conflict=5") || body != `{"doc":{"task_name":"Ship"}}` {
 		t.Fatalf("sent %s?%s %s", path, query, body)
 	}
-	if err := updateDocument(context.Background(), nil, "tasks", "t1", strings.NewReader(`{}`)); err == nil {
+	if err := updateDocument(context.Background(), nil, "tasks", "t1", strings.NewReader(`{}`), false); err == nil {
 		t.Fatal("no client is an error, not a panic")
 	}
 }

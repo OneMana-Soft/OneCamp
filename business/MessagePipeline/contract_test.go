@@ -45,6 +45,11 @@ func TestASendIsTodaysSend(t *testing.T) {
 	if in := groupInput(grp); in.GrpUuid != "g" || in.TextHtml != d.HTML || in.ClientMsgID != "c1" {
 		t.Errorf("group: %+v", in)
 	}
+	// A new group is named by its people, its id made from them.
+	fresh := Write{Op: OpSend, To: conversationBusiness.Ref{Kind: conversationBusiness.KindGroup}, People: []string{me, them, "cccc"}, Draft: d}
+	if in := groupInput(fresh); in.GrpUuid != "" || len(in.Participants) != 3 || in.Participants[2] != "cccc" {
+		t.Errorf("a new group: %+v", in)
+	}
 	if k := onceKey(grp, me); k != "grp:g" {
 		t.Errorf("group once key %q", k)
 	}

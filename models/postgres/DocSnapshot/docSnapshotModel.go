@@ -134,16 +134,24 @@ func GetLatestSnapshot(ctx context.Context, docUUID string) (*DocSnapshot, error
 	return s, nil
 }
 
-// ListSnapshots returns a doc's versions newest first, capped by limit.
-func ListSnapshots(ctx context.Context, docUUID string, limit int) ([]*DocSnapshot, error) {
+// ListSnapshots returns a doc's versions newest first, capped by limit: those
+// older than before when it is set (the next page of a long history).
+func ListSnapshots(ctx context.Context, docUUID string, before time.Time, limit int) ([]*DocSnapshot, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
+	if before.IsZero() {
+		return querySnapshots(ctx, `SELECT `+snapshotColumns+`
+			   FROM doc_snapshots
+			  WHERE doc_uuid = $1
+			  ORDER BY created_at DESC
+			  LIMIT $2`, docUUID, limit)
+	}
 	return querySnapshots(ctx, `SELECT `+snapshotColumns+`
 		   FROM doc_snapshots
-		  WHERE doc_uuid = $1
+		  WHERE doc_uuid = $1 AND created_at < $2
 		  ORDER BY created_at DESC
-		  LIMIT $2`, docUUID, limit)
+		  LIMIT $3`, docUUID, before, limit)
 }
 
 func querySnapshots(ctx context.Context, query string, args ...any) ([]*DocSnapshot, error) {

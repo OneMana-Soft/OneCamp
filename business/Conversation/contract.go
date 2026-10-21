@@ -79,6 +79,31 @@ func Resolve(ctx context.Context, who *userModels.UserInfo, ref Ref) (accessBusi
 	return d, nil
 }
 
+// ResolveAll is Resolve for several conversations, in as few reads as the
+// Access Resolver can (accessBusiness.ResolveAll): who's decision on each one
+// they can read, by ref. One that isn't there, or that who can't read, is
+// left out, as Resolve answers it ErrNotFound.
+func ResolveAll(ctx context.Context, who *userModels.UserInfo, refs []Ref) (map[Ref]accessBusiness.Decision, error) {
+	out := make(map[Ref]accessBusiness.Decision, len(refs))
+	if who == nil || len(refs) == 0 {
+		return out, nil
+	}
+	res := make([]accessBusiness.Resource, 0, len(refs))
+	for _, r := range refs {
+		res = append(res, r.Resource())
+	}
+	got, err := accessBusiness.ResolveAll(ctx, accessBusiness.SubjectOf(who), res)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range refs {
+		if d, ok := got[r.Resource()]; ok && d.Level >= LevelRead {
+			out[r] = d
+		}
+	}
+	return out, nil
+}
+
 // Route is where the conversation opens in the web app for viewerUUID: the one
 // link rule every link the server writes uses (email, push, the AI's
 // citations, the unread summary). With messageUUID it opens that message with
@@ -105,7 +130,7 @@ func (r Ref) Route(viewerUUID, messageUUID string) string {
 // ChatRef is the DM or group a grouping id names: a DM's is its two people's
 // ids with a space between (helpers.GetGroupingId), a group's has none.
 func ChatRef(groupingID string) Ref {
-	if strings.Contains(groupingID, " ") {
+	if helpers.IsDMGroupingID(groupingID) {
 		return Ref{Kind: KindDM, ID: groupingID}
 	}
 	return Ref{Kind: KindGroup, ID: groupingID}

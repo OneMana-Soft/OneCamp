@@ -6,6 +6,7 @@ import (
 	"math/rand/v2"
 	"time"
 
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/dgraph-io/dgo/v230"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
@@ -30,60 +31,65 @@ func abortWait(attempt int) time.Duration {
 // "Please retry". Two writes to the same user at once (sign-in and the agent
 // bot being ensured, say) is ordinary, and before this the loser simply
 // failed: 29 user writes in a month, agent setup among them. A CommitNow
-// request is all-or-nothing, so running it again is safe.
+// request is all-or-nothing, so running it again is safe. A request still
+// aborted after the last try is a helpers.Conflict, which handlers answer 409
+// "Someone changed this at the same moment. Try again." (WriteWriteFailure).
 func DoCommitNow(ctx context.Context, req *api.Request) (*api.Response, error) {
 	req.CommitNow = true
-	var lastErr error
-	for attempt := 0; attempt < abortRetries; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(abortWait(attempt)):
-			}
-		}
+	var res *api.Response
+	err := retryAborted(ctx, func() error {
 		txn := DgraphClient.NewTxn()
-		res, err := txn.Do(ctx, req)
+		r, err := txn.Do(ctx, req)
 		_ = txn.Discard(ctx)
-		if err == nil {
-			return res, nil
-		}
-		lastErr = err
-		if !errors.Is(err, dgo.ErrAborted) {
-			return nil, err
-		}
+		res = r
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
-	return nil, lastErr
+	return res, nil
 }
 
 // InTxn runs fn in one read-write transaction and commits what it wrote, so
 // what fn read and decided on is still true when its write lands. When Dgraph
 // aborts the commit because a concurrent transaction wrote the same thing,
 // fn runs again in a fresh transaction and sees that write. An error from fn
-// is returned as it is, with nothing written.
+// is returned as it is, with nothing written; a commit still aborted after
+// the last try is a helpers.Conflict, as DoCommitNow's.
 func InTxn(ctx context.Context, fn func(txn *dgo.Txn) error) error {
-	var lastErr error
-	for attempt := 0; attempt < abortRetries; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(abortWait(attempt)):
-			}
-		}
+	return retryAborted(ctx, func() error {
 		txn := DgraphClient.NewTxn()
 		err := fn(txn)
 		if err == nil {
 			err = txn.Commit(ctx)
 		}
 		_ = txn.Discard(ctx)
+		return err
+	})
+}
+
+// retryAborted runs attempt until it succeeds, fails for a reason other than
+// Dgraph's abort, or has been aborted abortRetries times, waiting abortWait
+// before each try. The last abort comes back as a helpers.Conflict
+// over the abort, so errors.Is still matches dgo.ErrAborted.
+func retryAborted(ctx context.Context, attempt func() error) error {
+	var lastErr error
+	for try := 0; try < abortRetries; try++ {
+		if try > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(abortWait(try)):
+			}
+		}
+		err := attempt()
 		if err == nil {
 			return nil
 		}
-		lastErr = err
 		if !errors.Is(err, dgo.ErrAborted) {
 			return err
 		}
+		lastErr = err
 	}
-	return lastErr
+	return helpers.Conflict(helpers.ConcurrentChangeText, lastErr)
 }

@@ -8,17 +8,20 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/Project"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskrank "github.com/akashc777/OneCamp/business/TaskRank"
 	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	domain "github.com/akashc777/OneCamp/domain/Project"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
 	roleModel "github.com/akashc777/OneCamp/models/postgres/ProjectRole"
+	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
 	taskStatusModel "github.com/akashc777/OneCamp/models/postgres/TaskStatus"
 	"github.com/dgraph-io/dgo/v230"
 	"github.com/google/uuid"
@@ -35,6 +38,11 @@ func CreateProject(ctx context.Context, projectName string, createdByUserDgraphU
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/CreateProject failed to create new project in postgres err: %+v", err)
 		return
+	}
+	// Its key, from its name ("Q4 launch" is Q4). One that fails is logged:
+	// its first task, or the projects.keys sweep, gives it one.
+	if _, kerr := taskKeys.Ensure(ctx, projectUUID, projectName); kerr != nil {
+		helpers.LogErrorWithContext(ctx, "business/CreateProject couldn't give project %s a key yet: %+v", projectUUID, kerr)
 	}
 
 	dgraphProject = &dgraphStruct.DgraphProject{
@@ -113,7 +121,7 @@ func CreateProject(ctx context.Context, projectName string, createdByUserDgraphU
 		ProjectDeletedAt: nil,
 	}
 
-	go domain.CreateProjectInOpenSearch(opensearchProject)
+	helpers.GoSafeNamed("domain.CreateProjectInOpenSearch", func() { domain.CreateProjectInOpenSearch(opensearchProject) })
 
 	return
 }
@@ -144,7 +152,7 @@ func UpdateProjectName(ctx context.Context, projectName string, projectUUID uuid
 
 	// The name alone: a whole document would clear deleted_date and put an
 	// archived project back in search.
-	go domain.RenameProjectInOpenSearch(projectUUID.String(), projectName, currentTime.Unix())
+	helpers.GoSafeNamed("domain.RenameProjectInOpenSearch", func() { domain.RenameProjectInOpenSearch(projectUUID.String(), projectName, currentTime.Unix()) })
 
 	return
 }
@@ -181,7 +189,9 @@ func AddMemberToProject(ctx context.Context, projectUUID uuid.UUID, userDgraphUI
 	// only what it lists.
 	userDomain.InvalidateUserMemberships(ctx, userDgraphUUID)
 
-	go userProjectNotificationBusiness.CreateProjectNotificationType(userDgraphUUID, projectUUID.String(), postgressStruct.NOTIFICATION_TYPE_ALL)
+	helpers.GoSafeNamed("userProjectNotificationBusiness.CreateProjectNotificationType", func() {
+		userProjectNotificationBusiness.CreateProjectNotificationType(userDgraphUUID, projectUUID.String(), postgressStruct.NOTIFICATION_TYPE_ALL)
+	})
 
 	return
 }
@@ -233,7 +243,9 @@ func RemoveMemberFromProject(ctx context.Context, userDgraphUID string, userDrga
 	// Their cached profile still lists the project, and search covers what it lists.
 	userDomain.InvalidateUserMemberships(ctx, userDrgaphUUID)
 
-	go userProjectNotificationBusiness.DeleteNotificationTypeWhenUserIsRemovedFormProject(userDrgaphUUID, projectDgraphUUID)
+	helpers.GoSafeNamed("userProjectNotificationBusiness.DeleteNotificationTypeWhenUserIsRemovedFormProject", func() {
+		userProjectNotificationBusiness.DeleteNotificationTypeWhenUserIsRemovedFormProject(userDrgaphUUID, projectDgraphUUID)
+	})
 
 	// A row left behind gives nothing (nobody is in a project without its
 	// edge) and the parity sweep takes it away.
@@ -242,6 +254,11 @@ func RemoveMemberFromProject(ctx context.Context, userDgraphUID string, userDrga
 	if perr == nil && uerr == nil {
 		if derr := deleteRow(ctx, projectID, who); derr != nil {
 			helpers.LogErrorWithContext(ctx, "business/RemoveMemberFromProject: their role row in %s stays for the sweep: %+v", projectDgraphUUID, derr)
+		}
+		// Leaving a project leaves its restricted tasks too (WA2). A grant
+		// left behind lets no one in: reading a task needs the project.
+		if gerr := restrictionModel.DropGrantsIn(ctx, []uuid.UUID{projectID}, who); gerr != nil {
+			helpers.LogErrorWithContext(ctx, "business/RemoveMemberFromProject: their grants in %s stay, and let them into nothing: %+v", projectDgraphUUID, gerr)
 		}
 	}
 	return
@@ -453,7 +470,11 @@ func GetDgraphProjectListByAdminDgraphUID(ctx context.Context, userDgraphUID str
 }
 
 func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, sortQuery string, pageSize int, pageIndex int, getAll bool) (dgraphProject *dgraphStruct.DgraphProject, err error) {
-	dgraphProject, err = domain.GetDgraphProjectTaskList(ctx, projectUUID, userDgraphUID, filterQuery, sortQuery, pageSize, pageIndex, getAll)
+	if sortQuery == dgraphquery.ManualOrder {
+		dgraphProject, err = manualTaskList(ctx, projectUUID, userDgraphUID, filterQuery, pageSize, pageIndex, getAll)
+	} else {
+		dgraphProject, err = domain.GetDgraphProjectTaskList(ctx, projectUUID, userDgraphUID, filterQuery, sortQuery, pageSize, pageIndex, getAll)
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/GetDgraphProjectTaskList failed to get project task list from dgraph err: %+v", err)
 		return
@@ -461,6 +482,7 @@ func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgrap
 
 	if dgraphProject != nil {
 		_ = taskBusiness.MergeGitHubMetaIntoTasks(ctx, dgraphProject.Tasks)
+		taskKeys.Lay(ctx, dgraphProject.Tasks...)
 	}
 
 	return
@@ -523,6 +545,7 @@ func GetDgraphProjectTaskListForKanban(ctx context.Context, projectUUID string, 
 		allTasks = append(allTasks, *dgraphProject.Column(c.Key)...)
 	}
 	_ = taskBusiness.MergeGitHubMetaIntoTasks(ctx, allTasks)
+	taskKeys.Lay(ctx, allTasks...)
 
 	return
 }
@@ -538,6 +561,15 @@ func GetDgraphProjectAttachmentsInfo(ctx context.Context, projectUUID string, us
 }
 
 func AddAttachmentToProjectDgraph(ctx context.Context, projectUUID uuid.UUID, projectInput *adapter.CreateOrUpdateProjectInput, userInfo *dgraphStruct.DgraphUser) (err error) {
+
+	// Only files the writer uploaded to the project: any other entry would
+	// open for no one (business/Attachment OwnFiles).
+	if projectInput.Attachments, err = attachmentBusiness.OwnFiles(ctx, userInfo.Uuid, postgressStruct.ATTACHMENT_SRC_PROJECT, projectUUID.String(), projectInput.Attachments); err != nil {
+		return err
+	}
+	if len(projectInput.Attachments) == 0 {
+		return nil
+	}
 
 	currentTime := time.Now()
 	err = domain.UpdateProjectDeletedTimeToNullByUUID(ctx, projectUUID, &currentTime)
@@ -563,7 +595,9 @@ func AddAttachmentToProjectDgraph(ctx context.Context, projectUUID uuid.UUID, pr
 		return
 	}
 
-	go domain.CreateProjectkAttachmentsInOpensearch(&currentTime, projectUUID.String(), projectInput.Attachments, userInfo.Uuid)
+	helpers.GoSafeNamed("domain.CreateProjectkAttachmentsInOpensearch", func() {
+		domain.CreateProjectkAttachmentsInOpensearch(&currentTime, projectUUID.String(), projectInput.Attachments, userInfo.Uuid)
+	})
 
 	return
 
@@ -599,17 +633,6 @@ func GetDgraphProjectInfoAndTeamAdminFlag(ctx context.Context, projectUUID strin
 	return
 }
 
-func GetDgraphProjectInfo(ctx context.Context, projectUUID string, userDgraphUID string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
-	dgraphProject, err = domain.GetDgraphProjectInfoByUUID(ctx, projectUUID, userDgraphUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetDgraphProjectInfo failed to get project from dgraph err: %+v", err)
-		return
-	}
-
-	return
-}
-
 // MaxTimelineTasks is the most tasks a project's timeline is sent: the newest
 // ones, which is every task in all but the largest projects.
 const MaxTimelineTasks = 2000
@@ -620,6 +643,10 @@ func GetProjectTimeline(ctx context.Context, projectUUID, userDgraphUID string) 
 	p, err := domain.GetDgraphProjectTimeline(ctx, projectUUID, userDgraphUID, MaxTimelineTasks)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/GetProjectTimeline err: %+v", err)
+		return p, err
 	}
-	return p, err
+	if p != nil {
+		taskKeys.Lay(ctx, p.Tasks...)
+	}
+	return p, nil
 }

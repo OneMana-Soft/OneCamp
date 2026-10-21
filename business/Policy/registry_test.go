@@ -87,12 +87,12 @@ func TestAPolicyChangeIsCheckedStoredAndRecorded(t *testing.T) {
 // A change the audit log can't record is undone and refused: no policy
 // changes unrecorded.
 func TestAnUnrecordedChangeIsUndone(t *testing.T) {
-	s := &store{values: map[string]string{DocsPublishMembers.Key: "true"}, failRec: true}
+	s := &store{values: map[string]string{DocsExportMembers.Key: "true"}, failRec: true}
 	r := withStore(t, s)
-	if _, err := r.Set(context.Background(), DocsPublishMembers.Key, json.RawMessage(`false`), admin); !errors.Is(err, ErrNotRecorded) {
+	if _, err := r.Set(context.Background(), DocsExportMembers.Key, json.RawMessage(`false`), admin); !errors.Is(err, ErrNotRecorded) {
 		t.Fatalf("err %v", err)
 	}
-	if s.values[DocsPublishMembers.Key] != "true" || !r.Bool(context.Background(), DocsPublishMembers) {
+	if s.values[DocsExportMembers.Key] != "true" || !r.Bool(context.Background(), DocsExportMembers) {
 		t.Error("the unrecorded change stood")
 	}
 	// Never set before: undoing writes the default back.
@@ -132,7 +132,8 @@ func TestARoutesPolicyIsAskedAtEachRequest(t *testing.T) {
 func TestEveryPolicyIsListed(t *testing.T) {
 	r := withStore(t, &store{values: map[string]string{GuestLinkMaxDays.Key: "14"}})
 	all := r.ListAll(context.Background())
-	if len(all) != len(specs) || len(all) != 6 {
+	// Six of the docs' and projects' programmes, and chat P3's three.
+	if len(all) != len(specs) || len(all) != 9 {
 		t.Fatalf("listed %d", len(all))
 	}
 	for _, in := range all {

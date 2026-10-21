@@ -13,6 +13,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
 
@@ -385,6 +386,10 @@ func GetReverseLinksForRef(ctx context.Context, refType, refUUID, userDgraphUID 
 	}
 	if len(parsed.Q) == 0 {
 		return nil, nil, nil
+	}
+	// Only the linked tasks the reader may see (models/taskread).
+	if err = taskread.KeepIn(ctx, &parsed); err != nil {
+		return nil, nil, err
 	}
 	return parsed.Q[0].LinkedTasks, parsed.Q[0].LinkedProjects, nil
 }

@@ -372,3 +372,22 @@ func TestAJobATokenQueuedActsAsAtMostAMember(t *testing.T) {
 		t.Error("a job a token queued makes projects as the team's admin")
 	}
 }
+
+// PR1 (#2): the projects' own "Who can change tasks" are read together,
+// once, for those the person is in, before each is asked.
+func TestManyProjectsReadTheirPoliciesTogether(t *testing.T) {
+	a, b, out := uuid.New(), uuid.New(), uuid.New()
+	fakeRoles(t, nil, EditMembers)
+	old := primeEditWho
+	t.Cleanup(func() { primeEditWho = old })
+	var primed [][]string
+	primeEditWho = func(_ context.Context, ids []string) { primed = append(primed, ids) }
+	if _, err := OfMany(context.Background(), uuid.NewString(), []*dgraphStruct.DgraphProject{
+		{Uuid: a.String(), IsProjectMember: 1}, {Uuid: b.String(), IsProjectAdmin: 1}, {Uuid: out.String()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(primed) != 1 || len(primed[0]) != 2 {
+		t.Fatalf("one priming of the two projects they're in: %v", primed)
+	}
+}

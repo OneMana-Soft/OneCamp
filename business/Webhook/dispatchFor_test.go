@@ -7,26 +7,37 @@ import (
 
 	"github.com/google/uuid"
 
+	hooksBusiness "github.com/akashc777/OneCamp/business/Hooks"
 	webhookModel "github.com/akashc777/OneCamp/models/postgres/Webhook"
 )
 
 // An event only some may know of goes to the workspace's webhooks whose owner
 // mayKnow allows, asking once per owner, and to no other.
 func TestAnEventOnlySomeMayKnowOfReachesOnlyTheirWebhooks(t *testing.T) {
-	saved := deliver
-	t.Cleanup(func() { deliver = saved; dispatchCache.Purge() })
-	var sent []string
-	deliver = func(w *webhookModel.Webhook, _ string, _ []byte) { sent = append(sent, w.Name) }
-
 	reader, stranger := uuid.New(), uuid.New()
+	hooks := []*webhookModel.Webhook{
+		{Id: uuid.New(), Name: "reader's", CreatedBy: reader, ScopeType: ScopeOrg},
+		{Id: uuid.New(), Name: "stranger's", CreatedBy: stranger, ScopeType: ScopeOrg},
+		{Id: uuid.New(), Name: "reader's other", CreatedBy: reader, ScopeType: ScopeOrg},
+	}
+	names := map[uuid.UUID]string{}
+	for _, w := range hooks {
+		names[w.Id] = w.Name
+	}
+	saved := queueDeliveries
+	t.Cleanup(func() { queueDeliveries = saved; dispatchCache.Purge() })
+	var sent []string
+	queueDeliveries = func(_ context.Context, _ uuid.UUID, _ string, targets []hooksBusiness.Target) error {
+		for _, tg := range targets {
+			sent = append(sent, names[tg.WebhookID])
+		}
+		return nil
+	}
+
 	dispatchCache.Purge()
 	dispatchCache.Set(dispatchCacheKey("doc.shared", ScopeOrg, nil), dispatchCacheEntry{
 		generation: atomic.LoadUint64(&dispatchGeneration),
-		webhooks: []*webhookModel.Webhook{
-			{Id: uuid.New(), Name: "reader's", CreatedBy: reader, ScopeType: ScopeOrg},
-			{Id: uuid.New(), Name: "stranger's", CreatedBy: stranger, ScopeType: ScopeOrg},
-			{Id: uuid.New(), Name: "reader's other", CreatedBy: reader, ScopeType: ScopeOrg},
-		},
+		webhooks:   hooks,
 	})
 	asked := map[uuid.UUID]int{}
 	DispatchEventFor(context.Background(), "doc.shared", map[string]interface{}{"doc_uuid": uuid.NewString()},

@@ -233,18 +233,3 @@ func IndexReader(raw []byte) io.Reader {
 	}
 	return bytes.NewReader(cleaned)
 }
-
-// IndexBody marshals any document for an OpenSearch write with every string value
-// sanitised. Preferred for new call sites: it removes the chance of marshalling and
-// forgetting to sanitise, because there is only one step.
-func IndexBody(v any) (io.Reader, error) {
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return nil, err
-	}
-	cleaned, err := SanitizeIndexedJSON(raw)
-	if err != nil {
-		return nil, err
-	}
-	return bytes.NewReader(cleaned), nil
-}

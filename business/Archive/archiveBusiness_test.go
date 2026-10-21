@@ -3,7 +3,9 @@ package business
 import (
 	"context"
 	"errors"
+	archiveModels "github.com/akashc777/OneCamp/models/postgres/Archive"
 	"testing"
+	"time"
 
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 )
@@ -71,7 +73,7 @@ func TestEntityRegistryCoversAllValidTypes(t *testing.T) {
 		}
 		// Dgraph sync functions are required for postgres-backed entities
 		// (docs live in the graph: their ArchiveFn writes it).
-		if _, postgresBacked := entityRestoreQuery[et]; postgresBacked {
+		if archiveModels.Archivable(et) {
 			if ops.ArchiveDgraphFn == nil {
 				t.Errorf("entityRegistry[%q].ArchiveDgraphFn is nil", et)
 			}
@@ -82,28 +84,17 @@ func TestEntityRegistryCoversAllValidTypes(t *testing.T) {
 	}
 }
 
-func TestEntityRestoreQuery(t *testing.T) {
+// The Postgres-backed types are the ones the archive's models archive and
+// restore (models/postgres/Archive): their SQL lives there now.
+func TestPostgresBackedTypesAreArchivable(t *testing.T) {
 	for _, et := range []string{"posts", "chats", "tasks", "attachments"} {
-		q, ok := entityRestoreQuery[et]
-		if !ok {
-			t.Errorf("entityRestoreQuery missing %q", et)
-			continue
-		}
-		if q == "" {
-			t.Errorf("entityRestoreQuery[%q] is empty", et)
+		if !archiveModels.Archivable(et) {
+			t.Errorf("%q is not archivable", et)
 		}
 	}
-}
-
-func TestEntityRecentQueries(t *testing.T) {
-	for _, et := range []string{"posts", "chats", "tasks", "attachments"} {
-		c, ok := entityRecentCountQuery[et]
-		if !ok || c == "" {
-			t.Errorf("entityRecentCountQuery missing or empty for %q", et)
-		}
-		l, ok := entityRecentListQuery[et]
-		if !ok || l == "" {
-			t.Errorf("entityRecentListQuery missing or empty for %q", et)
+	for _, et := range []string{"docs", "recordings", "users"} {
+		if archiveModels.Archivable(et) {
+			t.Errorf("%q is archived in Postgres by the models", et)
 		}
 	}
 }
@@ -162,12 +153,21 @@ func TestCheckRunningArchiveJob_SkippedWithoutDB(t *testing.T) {
 // Stub helpers
 // ------------------------------------------------------------------
 
-// dgraphAvailable returns true when dgraphInit.DgraphClient is non-nil.
-// The unit-test runner doesn't bring up a Dgraph instance, so any test
-// that bottoms out in a Dgraph query needs to skip when this is false
-// — otherwise the dgo client panics with a nil-pointer dereference.
+// dgraphAvailable says whether a graph answers. The unit-test runner brings
+// up no Dgraph, so a test that bottoms out in a Dgraph query skips when none
+// does. A client that exists is not enough: the integration build always has
+// one (tests/integration points it nowhere until a test sets a graph up), so
+// asking it once, briefly, is what tells a live graph from none.
 func dgraphAvailable() bool {
-	return dgraphInit.DgraphClient != nil
+	if dgraphInit.DgraphClient == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer txn.Discard(ctx)
+	_, err := txn.Query(ctx, `{ q(func: uid(0x1)) { uid } }`)
+	return err == nil
 }
 
 func TestGetRecentlyArchivedDocs(t *testing.T) {

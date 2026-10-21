@@ -2,6 +2,7 @@ package Domain
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -13,9 +14,11 @@ import (
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	OpenSearchModels "github.com/akashc777/OneCamp/models/openSearch/Attachment"
 	OpenSearchBulkModels "github.com/akashc777/OneCamp/models/openSearch/Bulk"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
 	models "github.com/akashc777/OneCamp/models/postgres/Attachment"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 //CREATE TABLE IF NOT EXISTS attachment(
@@ -144,6 +147,34 @@ func UpdateAttachmentDeletedTimeByUUID(ctx context.Context, attachmentUUID uuid.
 	}
 
 	return
+}
+
+// AttachmentsOfPlace is the files with these ids kept at this place (src_key
+// and src_value), live or not, by id: one statement for an agent's images,
+// where each was one (backend audit U2a).
+func AttachmentsOfPlace(ctx context.Context, ids []string, srcKey, srcValue string) (map[string]*models.Attachment, error) {
+	out := make(map[string]*models.Attachment, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := pgexec.Query(ctx, `
+		SELECT id, obj_key, src_key, src_value, created_by, created_at, deleted_at
+		FROM attachments
+		WHERE id = ANY($1::uuid[]) AND src_key = $2 AND src_value = $3`, func(r pgexec.Row) (*models.Attachment, error) {
+		var a models.Attachment
+		var createdAt, deletedAt sql.NullTime
+		err := r.Scan(&a.Uuid, &a.ObjKey, &a.SrcKey, &a.SrcValue, &a.CreatedBy, &createdAt, &deletedAt)
+		a.CreatedAt, a.DeletedAt = createdAt.Time, deletedAt.Time
+		return &a, err
+	}, pq.Array(ids), srcKey, srcValue)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/AttachmentsOfPlace err: %+v", err)
+		return nil, err
+	}
+	for _, a := range rows {
+		out[a.Uuid.String()] = a
+	}
+	return out, nil
 }
 
 func GetAttachmentByObjUUID(ctx context.Context, objUUID string, srcKey string) (attachment *models.Attachment, err error) {
@@ -297,102 +328,22 @@ func UpsertAttachmentInOpenSearchSafe(att *openSearchStruct.OpenSearchAttachment
 	}
 }
 
-func CreateAttachmentInOpenSearch(ctx context.Context, openSearchAttachment *openSearchStruct.OpenSearchAttachment) {
-	err := OpenSearchModels.CreateAttachmentInOpenSearch(ctx, openSearchAttachment)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/UpdateAttachmentInOpenSearch Failed to update attachment in open search err: %+v",
-			err)
-		return
+// ownUploadsIn is, of the attachments named ($1), the ones $2 uploaded to the
+// place $3/$4, each with the storage key its upload stored.
+const ownUploadsIn = `
+	SELECT DISTINCT id, obj_key FROM attachments
+	WHERE id = ANY($1::uuid[]) AND created_by = $2 AND src_key = $3 AND src_value = $4`
+
+// OwnUploadsIn is, by id, the storage key of each of ids that the person
+// with uploader (their account id) uploaded to the place srcKey/srcValue;
+// any other id is missing from the map.
+func OwnUploadsIn(ctx context.Context, ids []uuid.UUID, uploader uuid.UUID, srcKey, srcValue string) (map[uuid.UUID]string, error) {
+	if len(ids) == 0 {
+		return map[uuid.UUID]string{}, nil
 	}
-	return
-}
-
-func GetAttachmentByUUID(ctx context.Context, attachmentUUID uuid.UUID) (attachmentInfo *models.Attachment, err error) {
-
-	query := `
-        SELECT id, project_id, obj_key, src_key, src_value, created_by, created_at, deleted_at
-        FROM attachments
-        WHERE id = $1
-    `
-
-	attachmentInfo, err = models.GetAttachmentByUUID(query, attachmentUUID)
-
+	keys, err := pgexec.Pairs[uuid.UUID, string](ctx, ownUploadsIn, ids, uploader, srcKey, srcValue)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetAttachmentByUUID Failed to get attachment by uuid err: %+v",
-			err)
-		return
+		helpers.LogErrorWithContext(ctx, "domain/OwnUploadsIn Failed err: %+v", err)
 	}
-
-	return
-}
-
-func UpdateAttachmentDeletedTimeToNullByUUID(ctx context.Context, attachmentUUID uuid.UUID, updatedTime *time.Time) (err error) {
-	query := `
-        UPDATE attachments
-        SET updated_at = $1, deleted_at = null
-		WHERE id = $2`
-	err = models.UpdateAttachmentDeletedTimeToNullByUUID(query, updatedTime, attachmentUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/UpdateAttachmentDeletedTimeToNullByUUID Failed to attachment delete time to null err: %+v",
-			err)
-		return
-	}
-	return
-}
-
-func GetAttachmentsByObjUUIDs(ctx context.Context, objUUIDS []string) (attachments []*models.Attachment, err error) {
-	query := `
-		SELECT id, obj_key, created_by, created_at, deleted_at
-		FROM attachments
-		WHERE id = ANY($1)
-		AND deleted_at IS NULL
-		ORDER BY array_position($1, id::text)
-	`
-	attachments, err = models.GetAttachmentsByObjUUIDs(query, objUUIDS)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetAttachmentsByObjUUIDs Failed to attachments list for postgres err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
-func GetDgraphAttachmentInfoByUUID(ctx context.Context, attachmentUUID string, userDgraph string) (dgraphAttachment *dgraphStruct.DgraphAttachment, err error) {
-
-	variables := make(map[string]string)
-	variables["$id"] = attachmentUUID
-	variables["$userUid"] = userDgraph
-	query := `query AttachmentInfo($id: string){
-				attachmentInfo(func: eq(attachment_uuid, $id)) {
-					uid
-					attachment_uuid
-					attachment_obj_key
-					attachment_file_name
-					attachment_project {
-						project_is_member: count(project_members @filter(uid($userUid)))
-						project_is_admin: count(project_admins @filter(uid($userUid)))
-					}
-					attachment_task {
-						uid
-					}
-					
-				}
-			}`
-
-	dgraphAttachment, err = dgraphModels.GetDgraphAttachmentInfoByUUID(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphAttachmentInfoByUUID Failed to get attachment in dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
+	return keys, err
 }

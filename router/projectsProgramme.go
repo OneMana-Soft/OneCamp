@@ -1,6 +1,7 @@
 package router
 
 import (
+	projectController "github.com/akashc777/OneCamp/controllers/Project"
 	"github.com/go-chi/chi/v5"
 
 	// The work kinds of the Access Resolver (project, task, view, cycle, form)
@@ -50,5 +51,11 @@ func newProjectsRouters(root, admin, project, task, v1 chi.Router) projectsRoute
 // mountProjectsProgramme mounts every merged package of the projects
 // programme: one line per package, in merge order, and nothing else.
 func mountProjectsProgramme(rt projectsRouters) {
-	mountProjectRoles(rt) // A1: roles, "Who can change tasks", stewardship, notices
+	mountProjectRoles(rt)    // A1: roles, "Who can change tasks", stewardship, notices
+	mountProjectRules(rt)    // package 9 R1: a project's rules, their runs and undo
+	mountBoardColumns(rt)    // board columns dragged into the project's order
+	mountTaskKeys(rt)        // A8K: task keys and types
+	mountTaskRestriction(rt) // WA2: restricted tasks
+	// PR1: a project's counts, from the server, in the reader's day.
+	rt.Project.Get("/{project_uuid}/glance", projectController.ProjectGlance)
 }

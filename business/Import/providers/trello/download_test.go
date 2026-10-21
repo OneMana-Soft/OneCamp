@@ -1,34 +1,42 @@
 package trello
 
-import "testing"
+import (
+	"testing"
 
-// The importing admin's Trello key and token are added to a Trello URL and to
-// nothing else; with a substring check, each of the "someone else's" URLs
-// below got both.
+	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
+)
+
+// A Trello file is fetched with the importing admin's key and token in an
+// OAuth Authorization header: Trello stopped taking them in the query of a
+// /download/ URL on 25 Jan 2021, so every file failed (I1). They go to Trello
+// and to nothing else; with a substring check each of the "someone else's"
+// URLs below got both.
 func TestTrelloSendsItsKeyOnlyToTrello(t *testing.T) {
 	tok := &trelloToken{APIKey: "key1", Token: "tok1"}
+	want := `OAuth oauth_consumer_key="key1", oauth_token="tok1"`
 	for _, c := range []struct {
 		url  string
-		want string
+		ours bool
 	}{
-		{"https://trello.com/1/cards/c1/attachments/a1/download/plan.pdf",
-			"https://trello.com/1/cards/c1/attachments/a1/download/plan.pdf?key=key1&token=tok1"},
-		{"https://trello.com/1/cards/c1/attachments/a1/download/plan.pdf?v=2",
-			"https://trello.com/1/cards/c1/attachments/a1/download/plan.pdf?v=2&key=key1&token=tok1"},
-		{"https://api.trello.com/1/x", "https://api.trello.com/1/x?key=key1&token=tok1"},
+		{"https://trello.com/1/cards/c1/attachments/a1/download/plan.pdf", true},
+		{"https://api.trello.com/1/x", true},
 
 		// Someone else's.
-		{"https://evil.example/trello.com", "https://evil.example/trello.com"},
-		{"https://evil.example/?u=trello.com", "https://evil.example/?u=trello.com"},
-		{"https://trello.com.evil.example/x", "https://trello.com.evil.example/x"},
-		{"https://nottrello.com/x", "https://nottrello.com/x"},
-		{"http://trello.com/1/x", "http://trello.com/1/x"},
+		{"https://evil.example/trello.com", false},
+		{"https://evil.example/?u=trello.com", false},
+		{"https://trello.com.evil.example/x", false},
+		{"https://nottrello.com/x", false},
+		{"http://trello.com/1/x", false},
 	} {
-		if got := trelloDownloadURL(c.url, tok); got != c.want {
-			t.Errorf("trelloDownloadURL(%s) = %s, want %s", c.url, got, c.want)
+		got := trelloFile(importProvider.SourceAttachment{URL: c.url}, tok)
+		if got.URL != c.url {
+			t.Errorf("%s: the address changed to %s", c.url, got.URL)
+		}
+		if auth := got.Headers["Authorization"]; (auth == want) != c.ours || (!c.ours && auth != "") {
+			t.Errorf("%s: Authorization %q", c.url, auth)
 		}
 	}
-	if got := trelloDownloadURL("https://trello.com/1/x", nil); got != "https://trello.com/1/x" {
-		t.Errorf("with no token: %s", got)
+	if got := trelloFile(importProvider.SourceAttachment{URL: "https://trello.com/1/x"}, nil); got.Headers["Authorization"] != "" {
+		t.Errorf("with no token: %v", got.Headers)
 	}
 }

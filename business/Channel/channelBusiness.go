@@ -27,7 +27,6 @@ import (
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
-	models "github.com/akashc777/OneCamp/models/postgres/Channel"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
@@ -138,10 +137,12 @@ func CreateChannel(ctx context.Context, channelInfo *adapter.InputCreateChannel,
 	// The maker's open apps hold no topic of a channel made just now.
 	go mqttBusiness.PublishConversationAccess(mqttStruct.CONVERSATION_KIND_CHANNEL, channelUUID.String(), mqttStruct.CONVERSATION_ADDED, userInfo.UserDgraphInfo.Uuid)
 
-	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "channel.created", map[string]interface{}{
-		"channel_id":   channelUUID.String(),
-		"channel_name": channelInfo.ChannelName,
-		"created_by":   userInfo.UserDgraphInfo.Uuid,
+	helpers.GoSafeNamed("webhookBusiness.DispatchEvent", func() {
+		webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "channel.created", map[string]interface{}{
+			"channel_id":   channelUUID.String(),
+			"channel_name": channelInfo.ChannelName,
+			"created_by":   userInfo.UserDgraphInfo.Uuid,
+		})
 	})
 
 	return
@@ -347,26 +348,17 @@ func UpdateChannelInfo(ctx context.Context, channelUpdateInfo *adapter.UpdateCha
 	return
 }
 
+// TakenChannelNames is which of these channel names are taken.
+func TakenChannelNames(ctx context.Context, names []string) (map[string]bool, error) {
+	return domain.TakenChannelNames(ctx, names)
+}
+
 func CheckIfChannelExist(ctx context.Context, channelHandle *string) (exist bool, err error) {
 
 	exist, err = domain.CheckIfChannelExist(ctx, channelHandle)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/CheckIfChannelExist Failed to check channel by ch_name err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
-func GetChannelByHandle(ctx context.Context, channelHandle *string) (channelInfo *models.Channel, err error) {
-
-	channelInfo, err = domain.GetChannelByHandle(ctx, channelHandle)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetChannelByName Failed to channel by ch_name err: %+v",
 			err)
 		return
 	}
@@ -898,7 +890,9 @@ func DeleteChannelMemberEdge(ctx context.Context, channelDgraphUID string, userD
 	// broker never asks again about a topic a client holds.
 	mqttBusiness.DropConversation(mqttStruct.CONVERSATION_KIND_CHANNEL, channelUUID, memberUUID)
 
-	go userChannelNotificationBusiness.DeleteNotificationTypeWhenUserIsRemovedFormChannel(memberUUID, channelUUID)
+	helpers.GoSafeNamed("userChannelNotificationBusiness.DeleteNotificationTypeWhenUserIsRemovedFormChannel", func() {
+		userChannelNotificationBusiness.DeleteNotificationTypeWhenUserIsRemovedFormChannel(memberUUID, channelUUID)
+	})
 	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "user.left", map[string]interface{}{
 		"user_id":    memberUUID,
 		"channel_id": channelUUID,
@@ -909,7 +903,7 @@ func DeleteChannelMemberEdge(ctx context.Context, channelDgraphUID string, userD
 	// Out of the channel is out of its call. Their call token opens the room
 	// named after the channel, and nothing used to put them out of it.
 	helpers.GoSafeNamed("channel.leave-call", func() {
-		err := LiveKitBusiness.RemoveFromCall(context.WithoutCancel(ctx), channelUUID, userDgraphUID, "", LiveKitBusiness.RemovedNotAMember)
+		err := LiveKitBusiness.RemoveFromCall(context.WithoutCancel(ctx), channelUUID, userDgraphUID, LiveKitBusiness.Remover{}, LiveKitBusiness.RemovedNotAMember)
 		if err != nil && !errors.Is(err, LiveKitBusiness.ErrNotInCall) {
 			helpers.LogErrorWithContext(ctx, "business/DeleteChannelMemberEdge could not put them out of the channel's call: %+v", err)
 		}
@@ -990,7 +984,7 @@ const (
 // the controller layer use this after a successful mutation that lacks the
 // channel UUID at the business layer (e.g. moderator removal).
 func NotifyChannelUpdated(channelUUID string, action string) {
-	go mqttBusiness.PublishChannelUpdate(channelUUID, action)
+	helpers.GoSafeNamed("mqttBusiness.PublishChannelUpdate", func() { mqttBusiness.PublishChannelUpdate(channelUUID, action) })
 }
 
 func PublishTypingInChannel(userInfo *dgraphStruct.DgraphUser, channelId string) {
@@ -1003,7 +997,7 @@ func PublishTypingInChannel(userInfo *dgraphStruct.DgraphUser, channelId string)
 	if userInfo.ProfileKey != nil {
 		mqttChannelTyping.UserProfile = *userInfo.ProfileKey
 	}
-	go mqttBusiness.PublishChannelTyping(&mqttChannelTyping, channelId)
+	helpers.GoSafeNamed("mqttBusiness.PublishChannelTyping", func() { mqttBusiness.PublishChannelTyping(&mqttChannelTyping, channelId) })
 }
 
 func MakeVideoChannelCall(ctx context.Context, channelDraphInfo *dgraphStruct.DgraphChannel, userDraphInfo *dgraphStruct.DgraphUser, isAdmin bool, language string) (token string, alreadyExisted bool, err error) {
@@ -1018,21 +1012,8 @@ func MakeVideoChannelCall(ctx context.Context, channelDraphInfo *dgraphStruct.Dg
 		return
 	}
 
-	if !alreadyExisted {
-
-		pushTitle := fmt.Sprintf("#%s - %s", channelDraphInfo.Name, userDraphInfo.DisplayName())
-		body := "started call"
-
-		mqttChannelCall := mqttStruct.MqttChannelCall{
-			CallActive:  mqttStruct.MESSAGE_CALL_ACTIVE,
-			ChannelUUID: channelDraphInfo.Uuid,
-		}
-
-		go mqttBusiness.PublishChannelCall(&mqttChannelCall, channelDraphInfo.Uuid)
-
-		go sendChannelCallNotification(pushTitle, body, channelDraphInfo.Uuid, channelDraphInfo.Name, userDraphInfo)
-	}
-
+	// Its pushes and its call dot wait for the first person to really join
+	// (callStartedPush.go).
 	return
 }
 
@@ -1042,7 +1023,7 @@ func PublishChannelCallStop(channelId string) {
 		ChannelUUID: channelId,
 	}
 
-	go mqttBusiness.PublishChannelCall(&mqttChannelCall, channelId)
+	helpers.GoSafeNamed("mqttBusiness.PublishChannelCall", func() { mqttBusiness.PublishChannelCall(&mqttChannelCall, channelId) })
 }
 
 func sendChannelCallNotification(title string, body string, channelId string, channelName string, userDgraph *dgraphStruct.DgraphUser) {

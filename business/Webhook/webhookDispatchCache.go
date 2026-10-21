@@ -132,10 +132,3 @@ func getActiveOutgoingWebhooksByEventCached(ctx context.Context, eventType, scop
 	})
 	return webhooks, nil
 }
-
-// DispatchCacheStats returns current hit/miss counts for monitoring.
-// Exposed so the metrics layer (or admin debug endpoint) can surface
-// the cache effectiveness without reaching into package-private state.
-func DispatchCacheStats() (hits, misses uint64, size int) {
-	return atomic.LoadUint64(&dispatchCacheHits), atomic.LoadUint64(&dispatchCacheMisses), dispatchCache.Len()
-}

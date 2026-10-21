@@ -12,11 +12,11 @@ package business
 import (
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"unicode/utf8"
 
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
+	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -137,11 +137,6 @@ func day(d *int, task string) error {
 	return nil
 }
 
-// ValidPriority reports whether p is a priority a task can have; none is fine.
-func ValidPriority(p string) bool {
-	return p == "" || slices.Contains(dgraphStruct.VALID_TASK_PRIORITIES, p)
-}
-
 // Check is the template tidied as it is kept, or what to fix. Pure.
 func Check(t Template) (Template, error) {
 	var err error
@@ -214,8 +209,8 @@ func Check(t Template) (Template, error) {
 		default:
 			return t, fix("%q is in a status the template doesn't have: %q.", task.Name, task.Status)
 		}
-		if !ValidPriority(task.Priority) {
-			return t, fix("%q has a priority OneCamp doesn't know: %q. Use low, medium or high.", task.Name, task.Priority)
+		if !taskPriority.IsOrNone(task.Priority) {
+			return t, fix("%q has a priority OneCamp doesn't know: %q. Use urgent, high, medium or low.", task.Name, task.Priority)
 		}
 		task.Tags = helpers.NormaliseTags(task.Tags)
 		if err := day(task.StartDay, task.Name); err != nil {

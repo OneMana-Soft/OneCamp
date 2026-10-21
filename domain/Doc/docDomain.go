@@ -717,12 +717,7 @@ func GetDocUUIDPage(ctx context.Context, offset, first int) ([]string, error) {
 // they may read. One query for the lot; ids that aren't uuids are left out,
 // and so is any doc that doesn't exist.
 func GetDocsReadAccessFor(ctx context.Context, docUUIDs []string, userUUID string) ([]*dgraphStruct.DgraphDoc, error) {
-	quoted := make([]string, 0, len(docUUIDs))
-	for _, id := range docUUIDs {
-		if parsed, err := uuid.Parse(id); err == nil {
-			quoted = append(quoted, `"`+parsed.String()+`"`)
-		}
-	}
+	quoted := quoteUUIDs(docUUIDs)
 	if len(quoted) == 0 {
 		return nil, nil
 	}
@@ -775,12 +770,7 @@ func DocsCouldReadFor(ctx context.Context, docUUIDs []string, userUUID string) (
 // archived, before a restore clears both. One query for the lot; ids that
 // aren't uuids are left out, and so is any doc that doesn't exist.
 func GetDocsDeletion(ctx context.Context, docUUIDs []string) ([]*dgraphStruct.DgraphDoc, error) {
-	quoted := make([]string, 0, len(docUUIDs))
-	for _, id := range docUUIDs {
-		if parsed, err := uuid.Parse(id); err == nil {
-			quoted = append(quoted, `"`+parsed.String()+`"`)
-		}
-	}
+	quoted := quoteUUIDs(docUUIDs)
 	if len(quoted) == 0 {
 		return nil, nil
 	}

@@ -19,12 +19,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/dgraph-io/dgo/v230/protos/api"
+	"github.com/google/uuid"
 )
 
 // UpsertMemoryItem creates/updates a MemoryItem node and its owner/channel/
@@ -123,6 +125,32 @@ func SetMemoryItemStatus(ctx context.Context, memUUID, status string) error {
 		return err
 	}
 	return nil
+}
+
+// DeleteMemoryItems is DeleteMemoryItem for several items in one mutation
+// (backend audit U2b: a cascade deleted each node in a transaction of its
+// own). Anything that isn't a uuid is left out.
+func DeleteMemoryItems(ctx context.Context, memUUIDs []string) error {
+	quoted := make([]string, 0, len(memUUIDs))
+	for _, id := range memUUIDs {
+		if _, err := uuid.Parse(id); err == nil {
+			quoted = append(quoted, strconv.Quote(id))
+		}
+	}
+	if len(quoted) == 0 {
+		return nil
+	}
+	query := `query { m as var(func: eq(mem_uuid, [` + strings.Join(quoted, ", ") + `])) }`
+	// One all-or-nothing upsert, so a conflicting concurrent write is retried
+	// (DoCommitNow).
+	_, err := dgraphInit.DoCommitNow(ctx, &api.Request{
+		Query:     query,
+		Mutations: []*api.Mutation{{DeleteJson: []byte(`{"uid": "uid(m)"}`)}},
+	})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/dgraph/DeleteMemoryItems failed: %+v", err)
+	}
+	return err
 }
 
 // DeleteMemoryItem removes a MemoryItem node (and its outbound edges) by

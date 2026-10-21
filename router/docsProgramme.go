@@ -95,6 +95,9 @@ func mountDocsProgramme(rt docsRouters) {
 	mountConnectedWork(rt)
 
 	mountDocsMigration(rt) // C4: the workspace export and its consents; reading other tools' exports
-	mountDocsV1(rt.V1)     // C4: docs in the public API
-	mountQuery(rt)         // C2: the one query grammar, read for the signed-in person
+	// C4's docs in the public API register in controllers/V1/routes.go.
+	mountQuery(rt)       // C2: the one query grammar, read for the signed-in person
+	mountPublish(rt)     // C6: docs published to the web
+	mountGuestThread(rt) // C5-2: a doc's conversation with its guests, and its client verdict
+	mountDocsAdmin(rt)   // C6-2: the work of people who left, and the link lifetime's count
 }

@@ -123,17 +123,6 @@ var backoff = []time.Duration{
 	10 * time.Minute, 20 * time.Minute, 30 * time.Minute, time.Hour,
 }
 
-// backoffAfter is the wait after try n fails (n from 1). Pure.
-func backoffAfter(n int) time.Duration {
-	if n < 1 {
-		n = 1
-	}
-	if n > len(backoff) {
-		return backoff[len(backoff)-1]
-	}
-	return backoff[n-1]
-}
-
 // RetryHorizon is the longest an event can take from being written to being
 // given up on: held until its resolver is asked (heldFor, then a pass), then
 // MaxAttempts tries, each waiting a pass to be claimed and holding its lease to
@@ -149,7 +138,7 @@ func backoffAfter(n int) time.Duration {
 func RetryHorizon() time.Duration {
 	h := heldFor + drainEvery + time.Duration(MaxAttempts)*(lease+drainEvery)
 	for n := 1; n < MaxAttempts; n++ {
-		h += backoffAfter(n)
+		h += helpers.ScheduleWait(backoff, n, 0)
 	}
 	return h
 }
@@ -179,10 +168,31 @@ func FirstTime(ctx context.Context, ev Event, sink, recipient string) bool {
 	return first
 }
 
+// Told says whether a person is to be told of an event one way ("activity",
+// "push", "email") this time. A sink that tells people passes one that asks
+// FirstTime, so a retry tells only those it hadn't; nil tells everyone, as a
+// write's own fan-out does.
+type Told func(how, recipient string) bool
+
+// Only is the recipients t lets through one way: all of them when t is nil.
+func (t Told) Only(how string, recipients []string) []string {
+	if t == nil {
+		return recipients
+	}
+	out := make([]string, 0, len(recipients))
+	for _, r := range recipients {
+		if t(how, r) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
 // The store, a seam for tests.
 type store interface {
 	insert(ctx context.Context, ex models.Execer, r models.Row) (int64, error)
 	release(ctx context.Context, id int64) (bool, error)
+	releaseWith(ctx context.Context, id int64, more map[string]string) (bool, error)
 	cancel(ctx context.Context, ex models.Execer, id int64) error
 	claimDue(ctx context.Context, by string, lease time.Duration, limit int) ([]models.Row, error)
 	claimOne(ctx context.Context, id int64, by string, lease time.Duration) (models.Row, bool, error)
@@ -200,6 +210,9 @@ func (pgStore) insert(ctx context.Context, ex models.Execer, r models.Row) (int6
 	return models.Insert(ctx, ex, r)
 }
 func (pgStore) release(ctx context.Context, id int64) (bool, error) { return models.Release(ctx, id) }
+func (pgStore) releaseWith(ctx context.Context, id int64, more map[string]string) (bool, error) {
+	return models.ReleaseWith(ctx, id, more)
+}
 func (pgStore) cancel(ctx context.Context, ex models.Execer, id int64) error {
 	return models.Cancel(ctx, ex, id)
 }
@@ -334,6 +347,19 @@ func Release(ctx context.Context, id int64) error {
 	return err
 }
 
+// ReleaseWith releases a held event as Release does, adding to the ids it is
+// about what its change learnt while it wrote its other stores (a DM's first
+// message: that it made the conversation, and for whom). A writer that dies
+// before releasing leaves the event to its topic's resolver, which releases
+// it as it was written.
+func ReleaseWith(ctx context.Context, id int64, more map[string]string) error {
+	if len(more) == 0 {
+		return Release(ctx, id)
+	}
+	_, err := rows.releaseWith(ctx, id, more)
+	return err
+}
+
 // Cancel drops an event whose change was undone, inside ex.
 func Cancel(ctx context.Context, ex models.Execer, id int64) error {
 	return rows.cancel(ctx, ex, id)
@@ -403,7 +429,7 @@ func run(ctx context.Context, r models.Row) {
 	if dead {
 		helpers.LogErrorWithContext(ctx, "outbox: event %d (%s %s, key %s) is given up on after %d tries: %s", r.ID, r.Topic, r.Kind, r.Key, r.Attempts, why)
 	}
-	if _, err := rows.retry(ctx, r.ID, instance, done, now().Add(backoffAfter(r.Attempts)), why, dead); err != nil {
+	if _, err := rows.retry(ctx, r.ID, instance, done, now().Add(helpers.ScheduleWait(backoff, r.Attempts, 0)), why, dead); err != nil {
 		helpers.LogErrorWithContext(ctx, "outbox: event %d failed (%s) and couldn't be put back, so its lease will: %v", r.ID, why, err)
 	}
 }

@@ -46,7 +46,15 @@ func (s Standing) Can(n Need) bool {
 // those; deletes and restores only the tasks they made. A task's assignee
 // outside the project reads it and logs time on it; a task in no project is
 // its maker's to read.
+//
+// A restricted task (WA2) is for its project's admins, its assignee, its
+// creator and the people granted on it: to anyone else it is as if it weren't
+// there, so they may do nothing with it, reading included. Those let in act
+// on it by their role as on any task.
 func (s Standing) CanOnTask(n Need, f TaskFacts) bool {
+	if !s.LetIn(f) {
+		return false
+	}
 	switch n {
 	case NeedView, NeedLogTime:
 		if f.Assignee || (s.ProjectUUID == "" && f.Creator) {
@@ -69,6 +77,13 @@ func (s Standing) CanOnTask(n Need, f TaskFacts) bool {
 	return s.Can(n)
 }
 
+// LetIn is whether someone with standing s may see the task at all: always,
+// unless it is restricted and they are none of its project's admins, its
+// assignee, its creator or the people granted on it. Pure.
+func (s Standing) LetIn(f TaskFacts) bool {
+	return !f.Restricted || s.Role == RoleAdmin || f.Assignee || f.Creator || f.Granted
+}
+
 // Reasons, as codes the web app words (accessBusiness.Decision.Reasons).
 const (
 	ReasonAdmin     = "admin"
@@ -78,6 +93,8 @@ const (
 	ReasonAssignee  = "assignee"
 	ReasonCreator   = "creator"
 	ReasonOwner     = "owner"
+	// ReasonGranted is someone let into a restricted task by name.
+	ReasonGranted = "granted"
 )
 
 // ProjectLevel is the Access Resolver's level for standing s on the project:
@@ -120,6 +137,9 @@ func reasonsFor(s Standing, f *TaskFacts) []string {
 	}
 	if f != nil && f.Creator && s.ProjectUUID == "" {
 		out = append(out, ReasonCreator)
+	}
+	if f != nil && f.Restricted && f.Granted {
+		out = append(out, ReasonGranted)
 	}
 	return out
 }

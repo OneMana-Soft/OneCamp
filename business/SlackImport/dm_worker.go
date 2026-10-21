@@ -3,7 +3,6 @@ package business
 import (
 	"context"
 	"fmt"
-	"time"
 
 	chatAdapter "github.com/akashc777/OneCamp/adapter/Chat"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
@@ -33,7 +32,7 @@ import (
 // (set by the orchestrator). The chat business layer honours this flag
 // in both CreateChat and CreateChatForGroup.
 func processDMChunk(ctx context.Context, arc *Archive, chunk *importModels.Chunk,
-	skipSubtypes bool, importingUser *userModels.UserInfo, workspaceName string) error {
+	skipSubtypes bool, importingUser *userModels.UserInfo, workspaceName string, names map[string]string) error {
 
 	if chunk.ObjectKey == nil || chunk.ChannelSlackId == nil {
 		return fmt.Errorf("dm chunk missing object_key/slack_id")
@@ -43,6 +42,7 @@ func processDMChunk(ctx context.Context, arc *Archive, chunk *importModels.Chunk
 	if err != nil {
 		return err
 	}
+	dc.slackNames = names
 
 	// Always drain the buffered file chunks on exit. Without this, an
 	// early return from cancellation or a transient error would lose
@@ -66,7 +66,8 @@ func processDMChunk(ctx context.Context, arc *Archive, chunk *importModels.Chunk
 
 	// Two-pass: pass 1 = top-level messages only; pass 2 = thread
 	// replies only. The pass id distinguishes them.
-	for pass := 1; pass <= 2; pass++ {
+	// A pass, run twice, not in a loop: its reads are a batch at a time.
+	runPass := func(pass int) error {
 		passReplies := pass == 2
 
 		// Re-open the zip reader for pass 2 since IterMessages consumes it.
@@ -75,16 +76,19 @@ func processDMChunk(ctx context.Context, arc *Archive, chunk *importModels.Chunk
 			return err
 		}
 
-		err = IterMessages(ctx, arc, passZf, func(m *SlackMessage) bool {
+		passType := importModels.EntityMessage
+		if passReplies {
+			passType = importModels.EntityComment
+		}
+		err = iterBatches(ctx, arc, passZf, resumeCursor, func(batch []*SlackMessage) {
+			dc.maps.prefetch(ctx, passType, batch)
+		}, func(m *SlackMessage) bool {
 			select {
 			case <-ctx.Done():
 				return false
 			default:
 			}
 
-			if resumeCursor != "" && tsLE(m.Ts, resumeCursor) {
-				return true
-			}
 			if skipSubtypes && SubtypeIsSystem(m.Subtype) {
 				return true
 			}
@@ -136,7 +140,7 @@ func processDMChunk(ctx context.Context, arc *Archive, chunk *importModels.Chunk
 				}
 			}
 
-			if existing, _ := importModels.LookupIdMapping(ctx, dc.importId, entityType, m.Ts); existing != uuid.Nil {
+			if existing := dc.maps.ownMapping(ctx, entityType, m.Ts); existing != uuid.Nil {
 				if !isThreadReply {
 					dc.lastCursor = m.Ts
 				}
@@ -144,7 +148,7 @@ func processDMChunk(ctx context.Context, arc *Archive, chunk *importModels.Chunk
 			}
 
 			if dc.workspaceName != "" {
-				if existing, _ := importModels.LookupWorkspaceMapping(ctx, dc.workspaceName, entityType, m.Ts); existing != uuid.Nil {
+				if existing := dc.maps.workspaceMapping(ctx, entityType, m.Ts); existing != uuid.Nil {
 					_ = importModels.UpsertIdMappingWithOwnership(ctx, dc.importId, entityType, m.Ts,
 						existing, nil, mustMarshal(map[string]interface{}{"matched_by": "workspace_map"}),
 						false)
@@ -190,7 +194,10 @@ func processDMChunk(ctx context.Context, arc *Archive, chunk *importModels.Chunk
 			return true
 		})
 
-		if err != nil {
+		return err
+	}
+	for _, pass := range [2]int{1, 2} {
+		if err := runPass(pass); err != nil {
 			return err
 		}
 	}
@@ -257,25 +264,13 @@ func importDMTopLevel(ctx context.Context, dc *dmContext, m *SlackMessage, impor
 		if err != nil {
 			return fmt.Errorf("parse chat uuid: %w", err)
 		}
-		if err := backdateChat(ctx, chatUUID, slackTime); err != nil {
-			helpers.LogWarnWithContext(ctx,
-				"SlackImport could not backdate chat %s: %+v", chatUUID, err)
-		}
-		if err := importModels.UpsertIdMappingWithOwnership(ctx, dc.importId,
-			importModels.EntityMessage, m.Ts, chatUUID, nil,
+		return dc.maps.recordCreated(ctx, importModels.EntityMessage, m.Ts, chatUUID, nil,
 			mustMarshal(map[string]interface{}{
 				"grouping_id":    dc.groupingId,
 				"author_slack":   m.User,
 				"author_oc_uuid": authorInfo.UserPostgresInfo.Id.String(),
 				"is_mpim":        true,
-			}), true); err != nil {
-			return err
-		}
-		if dc.workspaceName != "" {
-			_ = importModels.UpsertWorkspaceMapping(ctx, dc.workspaceName,
-				importModels.EntityMessage, m.Ts, chatUUID, dc.importId)
-		}
-		return nil
+			}))
 	}
 
 	// 1:1 DM: pick the OTHER user as the recipient. dc.memberUUIDs has
@@ -321,25 +316,13 @@ func importDMTopLevel(ctx context.Context, dc *dmContext, m *SlackMessage, impor
 	if err != nil {
 		return fmt.Errorf("parse chat uuid: %w", err)
 	}
-	if err := backdateChat(ctx, chatUUID, slackTime); err != nil {
-		helpers.LogWarnWithContext(ctx,
-			"SlackImport could not backdate chat %s: %+v", chatUUID, err)
-	}
-	if err := importModels.UpsertIdMappingWithOwnership(ctx, dc.importId,
-		importModels.EntityMessage, m.Ts, chatUUID, nil,
+	return dc.maps.recordCreated(ctx, importModels.EntityMessage, m.Ts, chatUUID, nil,
 		mustMarshal(map[string]interface{}{
 			"grouping_id":    dc.groupingId,
 			"author_slack":   m.User,
 			"author_oc_uuid": authorInfo.UserPostgresInfo.Id.String(),
 			"is_mpim":        false,
-		}), true); err != nil {
-		return err
-	}
-	if dc.workspaceName != "" {
-		_ = importModels.UpsertWorkspaceMapping(ctx, dc.workspaceName,
-			importModels.EntityMessage, m.Ts, chatUUID, dc.importId)
-	}
-	return nil
+		}))
 }
 
 // importDMThreadReply attaches a Slack thread reply as a chat comment
@@ -347,7 +330,7 @@ func importDMTopLevel(ctx context.Context, dc *dmContext, m *SlackMessage, impor
 // thread replies follow a different path (importThreadReply in
 // message_worker) because they live as Post comments, not chat comments.
 func importDMThreadReply(ctx context.Context, dc *dmContext, m *SlackMessage, importingUser *userModels.UserInfo) error {
-	parentUUID, _ := importModels.LookupIdMapping(ctx, dc.importId, importModels.EntityMessage, m.ThreadTs)
+	parentUUID, _ := dc.maps.parentMapping(ctx, m.ThreadTs)
 	if parentUUID == uuid.Nil {
 		importModels.LogImportError(ctx, dc.importId, &dc.chunkId,
 			importModels.EntityComment, m.Ts,
@@ -389,72 +372,21 @@ func importDMThreadReply(ctx context.Context, dc *dmContext, m *SlackMessage, im
 		return importModels.UpsertIdMapping(ctx, dc.importId, importModels.EntityComment, m.Ts,
 			uuid.New(), &m.ThreadTs, mustMarshal(map[string]interface{}{"unparsed_uuid": created.Uuid}))
 	}
-	if err := backdateComment(ctx, commentUUID, slackTime); err != nil {
-		helpers.LogWarnWithContext(ctx,
-			"SlackImport could not backdate chat comment %s: %+v", commentUUID, err)
-	}
-	if err := importModels.UpsertIdMappingWithOwnership(ctx, dc.importId,
-		importModels.EntityComment, m.Ts, commentUUID, &m.ThreadTs,
+	return dc.maps.recordCreated(ctx, importModels.EntityComment, m.Ts, commentUUID, &m.ThreadTs,
 		mustMarshal(map[string]interface{}{
 			"author_slack": m.User,
 			"thread_ts":    m.ThreadTs,
-		}), true); err != nil {
-		return err
-	}
-	if dc.workspaceName != "" {
-		_ = importModels.UpsertWorkspaceMapping(ctx, dc.workspaceName,
-			importModels.EntityComment, m.Ts, commentUUID, dc.importId)
-	}
-	return nil
+		}))
 }
 
-// renderDMHTML mirrors renderMessageHTML for the DM context. The same
-// resolvers are reused; the only difference is the parent context type.
-//
-// Bot attribution: same as the channel path — messages from bots get a
-// "[bot: <name>]" prefix span so the imported timeline preserves the
-// human/bot distinction. Slack apps DM users (think OAuth or workflow
-// notifications) so this matters for chats too.
+// renderDMHTML is renderMessageHTML for a DM's or group's message: the same
+// names (textNames) and the same lead for an app's message, which matters here
+// too (apps DM people: sign-ins, workflows).
 func renderDMHTML(ctx context.Context, dc *dmContext, m *SlackMessage) string {
-	resolvers := mrkdwnResolvers{
-		resolveUser: func(slackId string) (string, string, bool) {
-			ocUUID, err := importModels.LookupIdMapping(ctx, dc.importId, importModels.EntityUser, slackId)
-			if err != nil || ocUUID == uuid.Nil {
-				return "", "", false
-			}
-			return ocUUID.String(), dc.userNameCache[slackId], true
-		},
-		// Channel mentions in DMs do happen (cross-link to a channel).
-		// Resolve via the standard channel id_map and hydrate the human
-		// name from id_map metadata so the rendered "#channel" stays
-		// recognisable instead of falling back to a bare hash sign.
-		resolveChannel: func(slackId string) (string, string, bool) {
-			ocUUID, err := importModels.LookupIdMapping(ctx, dc.importId, importModels.EntityChannel, slackId)
-			if err != nil || ocUUID == uuid.Nil {
-				return "", "", false
-			}
-			name := ""
-			if md, _ := importModels.GetIdMapMetadata(ctx, dc.importId, importModels.EntityChannel, slackId); len(md) > 0 {
-				var meta struct {
-					FinalName string `json:"final_name"`
-				}
-				_ = jsonUnmarshalRaw(md, &meta)
-				name = meta.FinalName
-			}
-			return ocUUID.String(), name, true
-		},
+	if dc.text == nil {
+		dc.text = newTextNames(dc.importId, dc.maps, dc.slackNames)
 	}
-	body := RenderSlackText(ctx, m, resolvers)
-
-	if isBotMessage(m) && body != "" {
-		botName := pickBotName(m)
-		if botName == "" {
-			botName = "bot"
-		}
-		body = `<span class="mention bot-attrib" data-id="bot@` +
-			htmlEscape(botName) + `">[bot: ` + htmlEscape(botName) + `]</span> ` + body
-	}
-	return body
+	return withBotLead(m, asMeMessage(m, RenderSlackText(ctx, m, dc.text.of(ctx, m))))
 }
 
 // mpimParticipantsDgraph builds the []*DgraphUser slice CreateChatForGroup
@@ -634,23 +566,4 @@ func applyDMDelete(ctx context.Context, dc *dmContext, originalTs string) error 
 		return nil
 	}
 	return nil
-}
-
-// backdateChat is the chat-table equivalent of backdatePost.
-func backdateChat(ctx context.Context, chatUUID uuid.UUID, t time.Time) error {
-	dbCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	_, err := importModels.Exec(dbCtx, `
-		UPDATE chats SET created_at = $2, updated_at = $2 WHERE id = $1`, chatUUID, t)
-	return err
-}
-
-// lookupDgraphUser resolves a OneCamp UUID to the cached DgraphUser.
-// Caller may need the full *dgraphStruct.DgraphUser for chat business
-// calls; use importingDgraphUser2 directly for that path.
-func (dc *dmContext) lookupDgraphUser(ctx context.Context, ocUUID string) *dgraphStruct.DgraphUser {
-	if u, ok := dc.userCache[ocUUID]; ok {
-		return &u.UserDgraphInfo
-	}
-	return importingDgraphUser2(ctx, ocUUID)
 }

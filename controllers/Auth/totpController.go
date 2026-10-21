@@ -15,6 +15,7 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/User"
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	authBusiness "github.com/akashc777/OneCamp/business/Auth"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	domain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
@@ -28,7 +29,10 @@ import (
 // one occasion they need one.
 func GetTwoFactorStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	status, err := authBusiness.TOTPStatusFor(ctx, userInfo.UserPostgresInfo.Id)
 	if err != nil {
@@ -55,7 +59,10 @@ func GetTwoFactorStatus(w http.ResponseWriter, r *http.Request) {
 // unconfirmed, so abandoning this screen cannot lock anyone out.
 func BeginTwoFactorSetup(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	enrollment, err := authBusiness.BeginTOTPEnrollment(ctx, userInfo.UserPostgresInfo.Id, userInfo.UserPostgresInfo.EmailID)
 	if err != nil {
@@ -92,13 +99,16 @@ func BeginTwoFactorSetup(w http.ResponseWriter, r *http.Request) {
 // only their hashes are kept — so the response is the single opportunity the user has to save them.
 func ConfirmTwoFactorSetup(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var body struct {
 		Code string `json:"code"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Code == "" {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "a code is required"})
+		helpers.WriteBadRequest(w, "a code is required")
 		return
 	}
 
@@ -134,7 +144,10 @@ func ConfirmTwoFactorSetup(w http.ResponseWriter, r *http.Request) {
 // would do first, so the request has to prove possession of the factor it is removing.
 func DisableTwoFactor(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var body struct {
 		Code string `json:"code"`
@@ -196,7 +209,10 @@ func DisableTwoFactor(w http.ResponseWriter, r *http.Request) {
 // has to be answerable afterwards.
 func AdminResetTwoFactor(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	actor := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	actor, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var body adapter.InputUserUUID
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {

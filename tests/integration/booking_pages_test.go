@@ -485,8 +485,23 @@ func TestBookingPages(t *testing.T) {
 			if _, err := calendarBusiness.SaveBookingPage(ctx, other, calendarBusiness.PageInput{
 				Slug: "office-hours", Title: "Mine now", DurationMinutes: 30, MaxDaysAhead: 30, Active: true,
 				Hours: calendarBusiness.WorkingHours{Days: []int{1}, Start: "09:00", End: "17:00", TZ: "UTC"},
-			}); err == nil || !strings.Contains(err.Error(), "already uses that address") {
-				t.Errorf("someone else took the address: %v", err)
+			}); !errors.Is(err, helpers.ErrConflict) || !strings.Contains(err.Error(), `already uses the address "office-hours"`) {
+				t.Errorf("someone else took the address, or wasn't told which one clashed: %v", err)
+			}
+			// Moving a page of their own onto the address is the same clash,
+			// found by Postgres' unique constraint on the address.
+			kims, err := calendarBusiness.SaveBookingPage(ctx, other, calendarBusiness.PageInput{
+				Slug: "kims-page", Title: "Kim's page", DurationMinutes: 30, MaxDaysAhead: 30, Active: true,
+				Hours: calendarBusiness.WorkingHours{Days: []int{1}, Start: "09:00", End: "17:00", TZ: "UTC"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := calendarBusiness.SaveBookingPage(ctx, other, calendarBusiness.PageInput{
+				Id: kims.Id.String(), Slug: "office-hours", Title: "Kim's page", DurationMinutes: 30, MaxDaysAhead: 30, Active: true,
+				Hours: calendarBusiness.WorkingHours{Days: []int{1}, Start: "09:00", End: "17:00", TZ: "UTC"},
+			}); !errors.Is(err, helpers.ErrConflict) || !strings.Contains(err.Error(), `"office-hours"`) {
+				t.Errorf("moving a page onto a taken address: %v", err)
 			}
 			// Nor can the page be removed outright under its bookings any more.
 			if _, err := env.PG.Exec(`DELETE FROM booking_pages WHERE id = $1`, pageID); err == nil {

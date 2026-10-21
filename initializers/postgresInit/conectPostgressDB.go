@@ -19,8 +19,14 @@ type DB struct {
 
 var DBConn = &DB{}
 
-const maxOpenDBConn = 10
-const maxIdleDbConn = 5
+// The pool every request and every background worker shares: outbox (8),
+// event handoff (16), email (5-20), webhook deliveries (up to 100), sweeps and
+// rollbacks. At 10, with waiting for a connection counted against the 3 s
+// statement timeout, a busy minute timed requests out with the database
+// idle. 30 leaves Postgres 12's default 100 connections room for a second API
+// instance, the migration tools and an operator's psql.
+const maxOpenDBConn = 30
+const maxIdleDbConn = 15
 const maxDbLifetime = 5 * time.Minute
 const dbTimeout = time.Second * 3
 

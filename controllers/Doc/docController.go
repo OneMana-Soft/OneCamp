@@ -16,6 +16,7 @@ import (
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
 	reactionBusiness "github.com/akashc777/OneCamp/business/Reaction"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 
@@ -148,17 +149,11 @@ func DeleteReactionOnCommentDoc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.DeleteReactionOnCommentDoc(ctx, commentDgraphInfo, dgraphReaction.Uid)
+	err = business.DeleteReactionOnCommentDoc(ctx, commentDgraphInfo, dgraphReaction.Uid, &userInfo.UserDgraphInfo)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/DeleteReactionOnCommentDoc Failed to delete comment reaction info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to delete comment reaction",
-			"err": err,
-		})
+		status, msg := reactionBusiness.Answer(err, "Couldn't remove the reaction. Try again.")
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
 
@@ -219,22 +214,14 @@ func CreateOrUpdateDocCommentReaction(w http.ResponseWriter, r *http.Request) {
 		reactionInfo.ReactionDgraphUid = dgraphReaction.Uid
 	}
 
-	// A new reaction answers with its uid; a changed one keeps its own.
+	// The answer is the reaction: the one added, or the one the person already had.
 	created, err := business.CreateOrUpdateDocCommentReaction(ctx, &reactionInfo, dgraphComment, &userInfo.UserDgraphInfo)
-	if created != "" {
-		reactionInfo.ReactionDgraphUid = created
-	}
-	if err != nil || reactionInfo.ReactionDgraphUid == "" {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateOrUpdateDocCommentReaction Failed to create/update reaction on comment err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to create/update reaction on comment",
-			"err": err,
-		})
+	if err != nil {
+		status, msg := reactionBusiness.Answer(err, "Couldn't add the reaction. Try again.")
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
+	reactionInfo.ReactionDgraphUid = created
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "created/updated chat comment successfully!", "data": reactionInfo})
 
@@ -716,6 +703,10 @@ func mergeGuestDocComments(ctx context.Context, docDgraph *dgraphStruct.DgraphDo
 		return
 	}
 	for _, gc := range guestComments {
+		if gc.FromTeam {
+			// A member's reply to a guest shows in the doc's guest conversation.
+			continue
+		}
 		created := gc.CreatedAt
 		docDgraph.Comments = append(docDgraph.Comments, &dgraphStruct.DgraphComment{
 			DType:     []string{"Comment"},
@@ -725,7 +716,7 @@ func mergeGuestDocComments(ctx context.Context, docDgraph *dgraphStruct.DgraphDo
 			CommentBy: &dgraphStruct.DgraphUser{
 				// Guest-namespaced uuid can never collide with a member; no
 				// profile key means the UI renders no member-profile surface.
-				Uuid:     "guest-" + gc.ID.String(),
+				Uuid:     gc.AuthorID,
 				UserName: "Guest: " + gc.GuestName,
 			},
 		})
@@ -1121,4 +1112,30 @@ func GetDocViewers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Success", "data": page.Viewers, "count": page.Total, "has_more": page.HasMore})
+}
+
+// GetDocInsights GET /doc/getInsights?doc_uuid=: the doc's last 28 days of
+// views and viewers, members apart from its page's visitors (C6-3).
+func GetDocInsights(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	docUUID := r.URL.Query().Get("doc_uuid")
+	if _, err := uuid.Parse(docUUID); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to parse docUUID"})
+		return
+	}
+	insights, err := business.DocInsights(ctx, docUUID, userInfo.UserDgraphInfo.Uid)
+	if docMissing(w, err) {
+		return
+	}
+	if err != nil {
+		// The cause stays in the log: a response never carries an error's text.
+		helpers.LogErrorWithContext(ctx, "controllers/GetDocInsights failed err: %+v", err)
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Couldn't read this doc's views just now"})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Success", "data": insights})
 }

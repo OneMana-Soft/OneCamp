@@ -26,6 +26,7 @@ import (
 	"time"
 
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
@@ -147,6 +148,7 @@ func (s *ChannelStream) Finalize(ctx context.Context, finalText string) (*Result
 			return nil, err
 		}
 		s.publishCreate(finalHTML)
+		refsBusiness.Saved(ctx, refsBusiness.Message, s.postUUID.String(), finalHTML, true)
 		s.indexFinal(finalText)
 		return s.result(finalHTML), nil
 	}
@@ -158,6 +160,7 @@ func (s *ChannelStream) Finalize(ctx context.Context, finalText string) (*Result
 		return nil, err
 	}
 	s.publishEdit(finalHTML, true)
+	refsBusiness.Saved(ctx, refsBusiness.Message, s.postUUID.String(), finalHTML, true)
 	s.indexFinal(finalText)
 	return s.result(finalHTML), nil
 }
@@ -296,7 +299,7 @@ func (s *ChannelStream) indexFinal(finalText string) {
 		PostByUserFullName: s.displayName,
 		PostChannelName:    s.channelName,
 	}
-	go postDomain.CreatePostWithAttachmentsInOpenSearch(osPost, nil)
+	helpers.GoSafeNamed("postDomain.CreatePostWithAttachmentsInOpenSearch", func() { postDomain.CreatePostWithAttachmentsInOpenSearch(osPost, nil) })
 }
 
 func (s *ChannelStream) result(htmlText string) *Result {

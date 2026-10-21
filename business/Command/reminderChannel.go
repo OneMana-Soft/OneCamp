@@ -77,17 +77,9 @@ func postChannelReminder(ctx context.Context, p reminderPayload) error {
 	if err != nil {
 		return fmt.Errorf("invalid creator id: %w", err)
 	}
-	postgresUser, err := userDomain.GetActiveUserWithAdminFlagByUserUUID(ctx, creatorUUID)
-	if err != nil || postgresUser == nil {
+	userInfo, err := userDomain.ActorByUUID(ctx, creatorUUID)
+	if err != nil {
 		return fmt.Errorf("creator not found")
-	}
-	dgraphUser, err := userDomain.GetDgraphUserInfoByUUID(ctx, p.CreatedBy)
-	if err != nil || dgraphUser == nil {
-		return fmt.Errorf("creator dgraph not found")
-	}
-	userInfo := &userModels.UserInfo{
-		UserPostgresInfo: *postgresUser,
-		UserDgraphInfo:   *dgraphUser,
 	}
 
 	post, err := prepareChannelReminder(ctx, userInfo, p.TargetID, p.Text)

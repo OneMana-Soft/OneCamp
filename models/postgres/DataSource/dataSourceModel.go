@@ -14,7 +14,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -237,6 +236,3 @@ func List(ctx context.Context) ([]*DataSource, error) {
 	}
 	return out, rows.Err()
 }
-
-// TrimName normalizes a display name (small shared helper for the business layer).
-func TrimName(s string) string { return strings.TrimSpace(s) }

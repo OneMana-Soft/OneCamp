@@ -2,15 +2,17 @@ package business
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	archiveModels "github.com/akashc777/OneCamp/models/postgres/Archive"
 	"strconv"
 	"strings"
 	"time"
 
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	attachmentDomain "github.com/akashc777/OneCamp/domain/Attachment"
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
 	docDomain "github.com/akashc777/OneCamp/domain/Doc"
@@ -20,13 +22,11 @@ import (
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
 	userModel "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
-	"github.com/lib/pq"
 )
 
 // ArchiveAlreadyRunningError is returned when an archive job is already in progress.
@@ -59,63 +59,17 @@ var entitySupportsUndo = map[string]bool{
 	"posts": true, "chats": true, "tasks": true, "attachments": true, "docs": true,
 }
 
-// entityRestoreQuery holds the RETURNING id::text query template per entity type.
-// The %s placeholder is for the IN-list placeholders (e.g. "$1,$2,$3").
-var entityRestoreQuery = map[string]string{
-	"posts":       `UPDATE posts SET deleted_at = NULL, updated_at = NOW() WHERE id::text IN (%s) AND deleted_at IS NOT NULL RETURNING id::text`,
-	"chats":       `UPDATE chats SET deleted_at = NULL, updated_at = NOW() WHERE id::text IN (%s) AND deleted_at IS NOT NULL RETURNING id::text`,
-	"tasks":       `UPDATE tasks SET deleted_at = NULL, updated_at = NOW() WHERE id::text IN (%s) AND deleted_at IS NOT NULL RETURNING id::text`,
-	"attachments": `UPDATE attachments SET deleted_at = NULL WHERE id::text IN (%s) AND deleted_at IS NOT NULL RETURNING id::text`, // no updated_at column
-}
-
+// entityRestoreQuery holds the RETURNING id::text query per entity type, over
+// the ids as one uuid array ($1): compared as uuids, so the primary key's
+// index finds them (cast to text, they scanned the table).
 // entityRecentCountQuery holds the COUNT query per entity type for recently-archived listings.
-var entityRecentCountQuery = map[string]string{
-	"posts":       `SELECT COUNT(*) FROM posts WHERE deleted_at IS NOT NULL AND deleted_at > $1`,
-	"chats":       `SELECT COUNT(*) FROM chats WHERE deleted_at IS NOT NULL AND deleted_at > $1`,
-	"tasks":       `SELECT COUNT(*) FROM tasks WHERE deleted_at IS NOT NULL AND deleted_at > $1`,
-	"attachments": `SELECT COUNT(*) FROM attachments WHERE deleted_at IS NOT NULL AND deleted_at > $1`,
-}
-
 // entityRecentListQuery holds the list query per entity type for recently-archived listings.
-var entityRecentListQuery = map[string]string{
-	"posts":       `SELECT id::text, deleted_at FROM posts WHERE deleted_at IS NOT NULL AND deleted_at > $1 ORDER BY deleted_at DESC LIMIT $2 OFFSET $3`,
-	"chats":       `SELECT id::text, deleted_at FROM chats WHERE deleted_at IS NOT NULL AND deleted_at > $1 ORDER BY deleted_at DESC LIMIT $2 OFFSET $3`,
-	"tasks":       `SELECT id::text, deleted_at FROM tasks WHERE deleted_at IS NOT NULL AND deleted_at > $1 ORDER BY deleted_at DESC LIMIT $2 OFFSET $3`,
-	"attachments": `SELECT id::text, deleted_at FROM attachments WHERE deleted_at IS NOT NULL AND deleted_at > $1 ORDER BY deleted_at DESC LIMIT $2 OFFSET $3`,
-}
-
 // ArchivePolicy represents an archive policy.
-type ArchivePolicy struct {
-	Id                          uuid.UUID `json:"id"`
-	EntityType                  string    `json:"entity_type"`
-	RetentionDays               int       `json:"retention_days"`
-	AutoArchive                 bool      `json:"auto_archive"`
-	ArchiveCompletedTasks       bool      `json:"archive_completed_tasks"`
-	ArchiveInactiveChannelsDays int       `json:"archive_inactive_channels_days"`
-	CompressAttachments         bool      `json:"compress_attachments"`
-	// Permanent removal, see purge.go. 0 keeps archived items forever.
-	PurgeAfterDays int        `json:"purge_after_days"`
-	PurgedCount    int64      `json:"purged_count"`
-	PurgedBytes    int64      `json:"purged_bytes"`
-	LastPurgedAt   *time.Time `json:"last_purged_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-}
+// ArchivePolicy and ArchiveJob are the model's (models/postgres/Archive).
+type ArchivePolicy = archiveModels.ArchivePolicy
 
 // ArchiveJob represents an archive job execution.
-type ArchiveJob struct {
-	Id             uuid.UUID  `json:"id"`
-	EntityType     string     `json:"entity_type"`
-	Status         string     `json:"status"`
-	StartedAt      *time.Time `json:"started_at,omitempty"`
-	CompletedAt    *time.Time `json:"completed_at,omitempty"`
-	ItemsProcessed int        `json:"items_processed"`
-	ItemsArchived  int        `json:"items_archived"`
-	ItemsFailed    int        `json:"items_failed"`
-	ErrorMessage   *string    `json:"error_message,omitempty"`
-	TriggeredBy    *uuid.UUID `json:"triggered_by,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
-}
+type ArchiveJob = archiveModels.ArchiveJob
 
 // ArchiveStats represents archive statistics.
 // TODO: add Dgraph-side counts for docs and recordings.
@@ -140,32 +94,11 @@ type PolicyUpdateInput struct {
 
 // GetArchivePolicies returns all archive policies.
 func GetArchivePolicies(ctx context.Context) ([]*ArchivePolicy, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, `
-		SELECT id, entity_type, retention_days, auto_archive, archive_completed_tasks, archive_inactive_channels_days, compress_attachments, purge_after_days, purged_count, purged_bytes, last_purged_at, created_at, updated_at
-		FROM archive_policies
-		ORDER BY entity_type
-	`)
+	policies, err := archiveModels.ListPolicies(ctx)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/GetArchivePolicies Failed err: %+v", err)
 		return nil, err
 	}
-	defer rows.Close()
-
-	var policies []*ArchivePolicy
-	for rows.Next() {
-		var p ArchivePolicy
-		if err := rows.Scan(&p.Id, &p.EntityType, &p.RetentionDays, &p.AutoArchive, &p.ArchiveCompletedTasks, &p.ArchiveInactiveChannelsDays, &p.CompressAttachments, &p.PurgeAfterDays, &p.PurgedCount, &p.PurgedBytes, &p.LastPurgedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
-			return nil, err
-		}
-		policies = append(policies, &p)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
 	return policies, nil
 }
 
@@ -188,27 +121,12 @@ func UpdateArchivePolicy(ctx context.Context, entityType string, input PolicyUpd
 		}
 	}
 
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		UPDATE archive_policies SET
-			retention_days = COALESCE($1, retention_days),
-			auto_archive = COALESCE($2, auto_archive),
-			archive_completed_tasks = COALESCE($3, archive_completed_tasks),
-			archive_inactive_channels_days = COALESCE($4, archive_inactive_channels_days),
-			compress_attachments = COALESCE($5, compress_attachments),
-			purge_after_days = COALESCE($6, purge_after_days),
-			updated_at = NOW()
-		WHERE entity_type = $7
-	`, input.RetentionDays, input.AutoArchive, input.ArchiveCompletedTasks, input.ArchiveInactiveChannelsDays, input.CompressAttachments, input.PurgeAfterDays, entityType)
-
+	rowsAffected, err := archiveModels.UpdatePolicy(ctx, entityType, input.RetentionDays, input.AutoArchive, input.ArchiveCompletedTasks,
+		input.ArchiveInactiveChannelsDays, input.CompressAttachments, input.PurgeAfterDays)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/UpdateArchivePolicy Failed err: %+v", err)
 		return err
 	}
-
-	rowsAffected, _ := res.RowsAffected()
 	if rowsAffected == 0 {
 		return fmt.Errorf("%w for entity type: %s", ErrPolicyNotFound, entityType)
 	}
@@ -222,37 +140,20 @@ func RunArchiveJob(ctx context.Context, entityType string, triggeredBy *uuid.UUI
 		return "", fmt.Errorf("invalid entity type: %s", entityType)
 	}
 
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
 	// DB-level guard: prevent overlapping archive runs across instances.
-	var runningExists bool
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx,
-		`SELECT EXISTS(SELECT 1 FROM archive_jobs WHERE entity_type = $1 AND status = 'running')`, entityType).Scan(&runningExists)
-	if err != nil {
-		return "", fmt.Errorf("failed to check running jobs: %w", err)
-	}
-	if runningExists {
-		return "", &ArchiveAlreadyRunningError{EntityType: entityType}
+	if err := checkRunningArchiveJob(ctx, entityType); err != nil {
+		return "", err
 	}
 
-	var policy ArchivePolicy
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx, `
-		SELECT id, entity_type, retention_days, auto_archive, archive_completed_tasks, archive_inactive_channels_days, compress_attachments, purge_after_days, purged_count, purged_bytes, last_purged_at, created_at, updated_at
-		FROM archive_policies WHERE entity_type = $1`, entityType).
-		Scan(&policy.Id, &policy.EntityType, &policy.RetentionDays, &policy.AutoArchive, &policy.ArchiveCompletedTasks, &policy.ArchiveInactiveChannelsDays, &policy.CompressAttachments, &policy.PurgeAfterDays, &policy.PurgedCount, &policy.PurgedBytes, &policy.LastPurgedAt, &policy.CreatedAt, &policy.UpdatedAt)
-	if err != nil {
+	policy, found, err := archiveModels.GetPolicy(ctx, entityType)
+	if err != nil || !found {
 		return "", fmt.Errorf("policy not found for entity type: %s", entityType)
 	}
 
 	jobId := uuid.New()
 	now := time.Now()
 
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		INSERT INTO archive_jobs (id, entity_type, status, started_at, triggered_by, created_at)
-		VALUES ($1, $2, 'running', $3, $4, $3)
-	`, jobId, entityType, now, triggeredBy)
-	if err != nil {
+	if err := archiveModels.CreateJob(ctx, jobId, entityType, now, triggeredBy); err != nil {
 		return "", fmt.Errorf("failed to create archive job: %w", err)
 	}
 
@@ -264,9 +165,9 @@ func RunArchiveJob(ctx context.Context, entityType string, triggeredBy *uuid.UUI
 	})
 
 	// Run the archive process asynchronously.
-	go func() {
-		executeArchiveJob(jobId, entityType, &policy)
-	}()
+	helpers.GoSafeNamed("business/Archive/archiveBusiness:RunArchiveJob", func() {
+		executeArchiveJob(jobId, entityType, policy)
+	})
 
 	return jobId.String(), nil
 }
@@ -536,21 +437,13 @@ func finalizeJob(ctx context.Context, jobId uuid.UUID, entityType string, attemp
 		errMsg = &e
 	}
 
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
 	// Persist the per-item id list in archive_job_items rather than a
-	// JSONB blob on archive_jobs. Done in chunks of 1000 inside a
-	// single transaction so a 100k-item job doesn't issue 100k inserts
-	// or a >1MB single statement.
-	if err := persistArchiveJobItems(dbCtx, jobId, ids); err != nil {
+	// JSONB blob on archive_jobs, in one statement.
+	if err := archiveModels.AddJobItems(ctx, jobId, ids); err != nil {
 		helpers.LogErrorWithContext(ctx, "finalizeJob: failed to persist job items: %v", err)
 	}
 
-	_, execErr := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		UPDATE archive_jobs SET status=$1, completed_at=$2, items_processed=$3, items_archived=$4, items_failed=$5, error_message=$6, metadata=NULL WHERE id=$7
-	`, status, time.Now(), attempted, archived, itemsFailed, errMsg, jobId)
-	if execErr != nil {
+	if execErr := archiveModels.FinishJob(ctx, jobId, status, time.Now(), attempted, archived, itemsFailed, errMsg); execErr != nil {
 		helpers.LogErrorWithContext(ctx, "finalizeJob: failed to finalize job status: %v", execErr)
 	}
 
@@ -566,72 +459,15 @@ func finalizeJob(ctx context.Context, jobId uuid.UUID, entityType string, attemp
 	if errMsg != nil {
 		mqttPayload.ErrorMessage = *errMsg
 	}
-	go mqttBusiness.PublishArchiveJobStatus(mqttPayload)
-}
-
-// persistArchiveJobItems writes the (job_id, entity_id) rows in
-// chunks of 1000 within a single transaction. ON CONFLICT DO NOTHING
-// makes the call idempotent so a transient PG hiccup that gets
-// retried won't bloat the table with duplicates.
-func persistArchiveJobItems(ctx context.Context, jobId uuid.UUID, ids []string) error {
-	if len(ids) == 0 {
-		return nil
-	}
-	const chunkSize = 1000
-
-	tx, err := postgresInit.DBConn.SqlDB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	for i := 0; i < len(ids); i += chunkSize {
-		end := i + chunkSize
-		if end > len(ids) {
-			end = len(ids)
-		}
-		batch := ids[i:end]
-		placeholders := make([]string, len(batch))
-		args := make([]interface{}, 0, 1+len(batch))
-		args = append(args, jobId)
-		for j, id := range batch {
-			placeholders[j] = fmt.Sprintf("($1, $%d)", j+2)
-			args = append(args, id)
-		}
-		query := fmt.Sprintf(
-			`INSERT INTO archive_job_items (job_id, entity_id) VALUES %s ON CONFLICT DO NOTHING`,
-			strings.Join(placeholders, ","),
-		)
-		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	helpers.GoSafeNamed("mqttBusiness.PublishArchiveJobStatus", func() { mqttBusiness.PublishArchiveJobStatus(mqttPayload) })
 }
 
 // loadArchiveJobItems returns the entity ids previously archived by a
 // job. Reads from archive_job_items first; falls back to the legacy
 // metadata.archived_ids JSONB blob for jobs that pre-date migration 68.
 func loadArchiveJobItems(ctx context.Context, jobId uuid.UUID, legacyMetadata *string) ([]string, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx,
-		`SELECT entity_id FROM archive_job_items WHERE job_id = $1`, jobId)
+	out, err := archiveModels.JobItems(ctx, jobId)
 	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := make([]string, 0, 256)
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		out = append(out, id)
-	}
-	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 
@@ -651,63 +487,29 @@ func loadArchiveJobItems(ctx context.Context, jobId uuid.UUID, legacyMetadata *s
 	return nil, nil
 }
 
-// archiveTable is the generic engine behind archivePosts /
-// archiveChats / archiveTasks / archiveAttachments. It:
-//   - lists all soft-deletable rows under cutoff
-//   - issues a single UPDATE to set deleted_at=NOW()
-//   - returns (rowsAffected, total, ids, err)
-//
-// The OpenSearch cascade is intentionally NOT fired here; callers can
-// rely on the entity registry's OpenSearchArchiveFn from
-// executeArchiveJob, which has a single recover guard and consistent
-// shape across entity types.
-//
-// extraWhere appends to the WHERE clause (e.g. tasks adds status IN
-// ('done','canceled')). Pass an empty string for no extra predicate.
-func archiveTable(ctx context.Context, table, extraWhere string, cutoff time.Time) (rowsAffected int64, total int64, ids []string, err error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout*10)
-	defer cancel()
-
-	idQuery := fmt.Sprintf(`SELECT id::text FROM %s WHERE created_at < $1 AND deleted_at IS NULL`, table)
-	updateQuery := fmt.Sprintf(`UPDATE %s SET deleted_at = NOW(), updated_at = NOW() WHERE created_at < $1 AND deleted_at IS NULL`, table)
-	if extraWhere != "" {
-		idQuery += " AND " + extraWhere
-		updateQuery += " AND " + extraWhere
-	}
-
-	rows, qErr := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, idQuery, cutoff)
-	if qErr != nil {
-		return 0, 0, nil, qErr
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var id string
-		if scanErr := rows.Scan(&id); scanErr == nil {
-			ids = append(ids, id)
-		}
-	}
-	if iterErr := rows.Err(); iterErr != nil {
-		return 0, 0, nil, iterErr
-	}
-
-	result, uErr := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, updateQuery, cutoff)
-	if uErr != nil {
+// archiveTable archives a table's live rows made before the cutoff, in one
+// statement that answers the ids it took (models ArchiveBefore): it listed
+// them and then updated by the same predicate, so a row deleted or restored
+// between the two was counted, and recorded, as archived. The OpenSearch
+// cascade follows from executeArchiveJob's entity registry.
+func archiveTable(ctx context.Context, table string, cutoff time.Time) (rowsAffected int64, total int64, ids []string, err error) {
+	ids, err = archiveModels.ArchiveBefore(ctx, table, cutoff)
+	if err != nil {
 		// One statement, so none of them was archived: no ids, or the run
-		// would take live rows out of search (entityOps).
-		return 0, int64(len(ids)), nil, uErr
+		// would take live rows out of search (entityOps). How many it set
+		// out to take is the run's failed count.
+		attempted, _ := archiveModels.CountBefore(ctx, table, cutoff)
+		return 0, attempted, nil, err
 	}
-	rowsAffected, _ = result.RowsAffected()
-	total = int64(len(ids))
-	return rowsAffected, total, ids, nil
+	return int64(len(ids)), int64(len(ids)), ids, nil
 }
 
 func archivePosts(ctx context.Context, cutoff time.Time) (int64, int64, []string, error) {
-	return archiveTable(ctx, "posts", "", cutoff)
+	return archiveTable(ctx, "posts", cutoff)
 }
 
 func archiveChats(ctx context.Context, cutoff time.Time) (int64, int64, []string, error) {
-	return archiveTable(ctx, "chats", "", cutoff)
+	return archiveTable(ctx, "chats", cutoff)
 }
 
 // archiveTaskBatch bounds one run of archiving completed tasks; the next run
@@ -716,7 +518,7 @@ const archiveTaskBatch = 5000
 
 func archiveTasks(ctx context.Context, cutoff time.Time, archiveCompletedTasks bool) (int64, int64, []string, error) {
 	if !archiveCompletedTasks {
-		return archiveTable(ctx, "tasks", "", cutoff)
+		return archiveTable(ctx, "tasks", cutoff)
 	}
 	// Only the done and canceled ones, closed before the cutoff. Their status
 	// is in the graph: Postgres has no status column, so this asked it for one
@@ -726,25 +528,8 @@ func archiveTasks(ctx context.Context, cutoff time.Time, archiveCompletedTasks b
 		return 0, 0, nil, err
 	}
 
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout*10)
-	defer cancel()
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx,
-		`UPDATE tasks SET deleted_at = NOW(), updated_at = NOW()
-		 WHERE id = ANY($2::uuid[]) AND created_at < $1 AND deleted_at IS NULL
-		 RETURNING id::text`, cutoff, pq.Array(closed))
+	ids, err := archiveModels.ArchiveTasksIn(ctx, cutoff, closed)
 	if err != nil {
-		return 0, 0, nil, err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return 0, 0, nil, err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Err(); err != nil {
 		return 0, 0, nil, err
 	}
 	return int64(len(ids)), int64(len(ids)), ids, nil
@@ -754,35 +539,7 @@ func archiveTasks(ctx context.Context, cutoff time.Time, archiveCompletedTasks b
 // (the column is missing on the attachments table). Falls back to the
 // generic helper but tolerates the missing column in the UPDATE.
 func archiveAttachments(ctx context.Context, cutoff time.Time) (int64, int64, []string, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout*10)
-	defer cancel()
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx,
-		`SELECT id::text FROM attachments WHERE created_at < $1 AND deleted_at IS NULL`, cutoff)
-	if err != nil {
-		return 0, 0, nil, err
-	}
-	defer rows.Close()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err == nil {
-			ids = append(ids, id)
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return 0, 0, nil, err
-	}
-
-	result, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx,
-		`UPDATE attachments SET deleted_at = NOW() WHERE created_at < $1 AND deleted_at IS NULL`, cutoff)
-	if err != nil {
-		// None archived, so no ids (as archiveTable).
-		return 0, int64(len(ids)), nil, err
-	}
-	rowsAffected, _ := result.RowsAffected()
-	return rowsAffected, int64(len(ids)), ids, nil
+	return archiveTable(ctx, "attachments", cutoff)
 }
 
 func archiveRecordings(ctx context.Context, cutoff time.Time) (int64, error) {
@@ -823,73 +580,22 @@ func archiveDocs(ctx context.Context, cutoff time.Time) (int64, int64, []string,
 
 // GetArchiveJobs returns recent archive job history.
 func GetArchiveJobs(ctx context.Context) ([]*ArchiveJob, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, `
-		SELECT id, entity_type, status, started_at, completed_at, items_processed, items_archived, items_failed, error_message, triggered_by, created_at
-		FROM archive_jobs
-		ORDER BY created_at DESC
-		LIMIT 50
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var jobs []*ArchiveJob
-	for rows.Next() {
-		var j ArchiveJob
-		if err := rows.Scan(&j.Id, &j.EntityType, &j.Status, &j.StartedAt, &j.CompletedAt, &j.ItemsProcessed, &j.ItemsArchived, &j.ItemsFailed, &j.ErrorMessage, &j.TriggeredBy, &j.CreatedAt); err != nil {
-			return nil, err
-		}
-		jobs = append(jobs, &j)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return jobs, nil
+	return archiveModels.ListJobs(ctx)
 }
 
 // GetArchiveStats returns statistics about archived data.
 func GetArchiveStats(ctx context.Context) (*ArchiveStats, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
 	stats := &ArchiveStats{}
 
 	// Consolidated count: one round-trip for all four Postgres tables.
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, `
-		SELECT 'posts' AS entity, COUNT(*) AS cnt FROM posts WHERE deleted_at IS NOT NULL
-		UNION ALL
-		SELECT 'chats', COUNT(*) FROM chats WHERE deleted_at IS NOT NULL
-		UNION ALL
-		SELECT 'tasks', COUNT(*) FROM tasks WHERE deleted_at IS NOT NULL
-		UNION ALL
-		SELECT 'attachments', COUNT(*) FROM attachments WHERE deleted_at IS NOT NULL
-	`)
+	counts, err := archiveModels.ArchivedCounts(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("GetArchiveStats postgres count failed: %w", err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var entity string
-		var cnt int64
-		if err := rows.Scan(&entity, &cnt); err != nil {
-			continue
-		}
-		switch entity {
-		case "posts":
-			stats.TotalArchivedPosts = cnt
-		case "chats":
-			stats.TotalArchivedChats = cnt
-		case "tasks":
-			stats.TotalArchivedTasks = cnt
-		case "attachments":
-			stats.TotalArchivedAttachments = cnt
-		}
-	}
+	stats.TotalArchivedPosts = counts["posts"]
+	stats.TotalArchivedChats = counts["chats"]
+	stats.TotalArchivedTasks = counts["tasks"]
+	stats.TotalArchivedAttachments = counts["attachments"]
 
 	// Dgraph counts for docs and recordings (soft-deleted = gt(deleted_at, sentinel)).
 	cutoff := time.Now().AddDate(0, 0, -30).Format(time.RFC3339)
@@ -901,15 +607,11 @@ func GetArchiveStats(ctx context.Context) (*ArchiveStats, error) {
 
 // checkRunningArchiveJob returns an error if an archive job is already running for the given entity type.
 func checkRunningArchiveJob(ctx context.Context, entityType string) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	var runningExists bool
-	checkErr := postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx,
-		`SELECT EXISTS(SELECT 1 FROM archive_jobs WHERE entity_type = $1 AND status = 'running')`, entityType).Scan(&runningExists)
-	if checkErr != nil {
-		return fmt.Errorf("failed to check running jobs: %w", checkErr)
+	running, err := archiveModels.RunningJobExists(ctx, entityType)
+	if err != nil {
+		return fmt.Errorf("failed to check running jobs: %w", err)
 	}
-	if runningExists {
+	if running {
 		return &ArchiveAlreadyRunningError{EntityType: entityType}
 	}
 	return nil
@@ -949,39 +651,19 @@ func RestoreItems(ctx context.Context, entityType string, entityIds []uuid.UUID)
 		return 0, fmt.Errorf("unsupported entity type for restore: %s", entityType)
 	}
 
-	queryTemplate, ok := entityRestoreQuery[entityType]
-	if !ok {
+	if !archiveModels.Archivable(entityType) {
 		return 0, fmt.Errorf("unsupported entity type for restore: %s", entityType)
 	}
 
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout*10)
-	defer cancel()
-
-	placeholders := make([]string, len(entityIds))
-	args := make([]interface{}, len(entityIds))
+	ids := make([]string, len(entityIds))
 	for i, id := range entityIds {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-		args[i] = id.String()
+		ids[i] = id.String()
 	}
-	query := fmt.Sprintf(queryTemplate, strings.Join(placeholders, ","))
 
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, query, args...)
+	restored, err := archiveModels.Restore(ctx, entityType, ids)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/RestoreItems Failed to bulk restore %s err: %+v", entityType, err)
 		return 0, err
-	}
-	defer rows.Close()
-
-	restored := make([]string, 0, len(entityIds))
-	for rows.Next() {
-		var idStr string
-		if err := rows.Scan(&idStr); err != nil {
-			continue
-		}
-		restored = append(restored, idStr)
-	}
-	if err := rows.Err(); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/RestoreItems error iterating results: %v", err)
 	}
 
 	if len(restored) == 0 {
@@ -1021,17 +703,17 @@ func RestoreItems(ctx context.Context, entityType string, entityIds []uuid.UUID)
 // and falls back to the legacy metadata.archived_ids JSONB blob for
 // jobs that ran before migration 68.
 func UndoArchiveJob(ctx context.Context, jobId uuid.UUID) (int, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
 	var job struct {
 		EntityType string
 		Status     string
 		Metadata   *string
 	}
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx,
-		`SELECT entity_type, status, metadata FROM archive_jobs WHERE id = $1`, jobId).
-		Scan(&job.EntityType, &job.Status, &job.Metadata)
+	var found bool
+	var err error
+	job.EntityType, job.Status, job.Metadata, found, err = archiveModels.UndoJob(ctx, jobId)
+	if err == nil && !found {
+		err = sql.ErrNoRows
+	}
 	if err != nil {
 		return 0, fmt.Errorf("archive job not found: %w", err)
 	}
@@ -1075,9 +757,7 @@ func UndoArchiveJob(ctx context.Context, jobId uuid.UUID) (int, error) {
 		return 0, err
 	}
 
-	_, execErr := postgresInit.DBConn.SqlDB.ExecContext(dbCtx,
-		`UPDATE archive_jobs SET status = 'cancelled', metadata = jsonb_build_object('restored', true) WHERE id = $1`, jobId)
-	if execErr != nil {
+	if execErr := archiveModels.MarkJobUndone(ctx, jobId); execErr != nil {
 		helpers.LogErrorWithContext(ctx, "UndoArchiveJob: failed to mark job cancelled: %v", execErr)
 	}
 
@@ -1113,34 +793,15 @@ func GetRecentlyArchivedItems(ctx context.Context, entityType string, limit int,
 		return nil, 0, fmt.Errorf("unsupported entity type: %s", entityType)
 	}
 
-	countQuery, ok := entityRecentCountQuery[entityType]
-	if !ok {
-		return nil, 0, fmt.Errorf("unsupported entity type: %s", entityType)
-	}
-	listQuery, ok := entityRecentListQuery[entityType]
-	if !ok {
-		return nil, 0, fmt.Errorf("unsupported entity type: %s", entityType)
-	}
-
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout*10)
-	defer cancel()
-
 	cutoff := time.Now().AddDate(0, 0, -30)
-	var total int64
-	postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx, countQuery, cutoff).Scan(&total)
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, listQuery, cutoff, limit, offset)
+	rows, total, err := archiveModels.RecentlyArchived(ctx, entityType, cutoff, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer rows.Close()
 
 	var items []*ArchivedItem
-	for rows.Next() {
-		var item ArchivedItem
-		if err := rows.Scan(&item.Id, &item.ArchivedAt); err != nil {
-			continue
-		}
+	for _, r := range rows {
+		item := ArchivedItem{Id: r.ID, ArchivedAt: r.At}
 		item.Name = fmt.Sprintf("%s · %s (%s)", label, item.ArchivedAt.Format("Jan 02, 3:04 PM"), item.Id[:8])
 		items = append(items, &item)
 	}
@@ -1184,7 +845,7 @@ func getRecentlyArchivedDocs(ctx context.Context, limit, offset int, label strin
 	}
 	items := make([]*ArchivedItem, 0, len(docs))
 	for _, d := range docs {
-		if d == nil || d.Uuid == "" || d.DeletedAt == nil {
+		if d == nil || d.Uuid == "" || !helpers.IsSoftDeleted(d.DeletedAt) {
 			continue
 		}
 		items = append(items, &ArchivedItem{
@@ -1238,15 +899,19 @@ func docRestoreName(d *dgraphStruct.DgraphDoc, readable bool) string {
 	return title + " · deleted by " + owner
 }
 
+// recentlyArchivedRecordings is the restore list's read of recordings:
+// production wiring, which tests replace.
+var recentlyArchivedRecordings = recordingDomain.GetRecentlyArchivedRecordings
+
 func getRecentlyArchivedRecordings(ctx context.Context, limit, offset int, label string) ([]*ArchivedItem, int64, error) {
 	cutoff := time.Now().AddDate(0, 0, -30).Format(time.RFC3339)
-	recs, total, err := recordingDomain.GetRecentlyArchivedRecordings(ctx, cutoff, limit, offset)
+	recs, total, err := recentlyArchivedRecordings(ctx, cutoff, limit, offset)
 	if err != nil {
 		return nil, 0, err
 	}
 	items := make([]*ArchivedItem, 0, len(recs))
 	for _, r := range recs {
-		if r.EgressId == "" || r.DeletedAt == nil {
+		if r.EgressId == "" || !helpers.IsSoftDeleted(r.DeletedAt) {
 			continue
 		}
 		items = append(items, &ArchivedItem{
@@ -1406,7 +1071,7 @@ var docSearchRestore = docSearchFollows(makeOpenSearchRestore(docCascadeFields, 
 // based on policies where auto_archive is true. Runs every hour after a 5-minute initial delay.
 // The provided context is used for graceful shutdown.
 func StartAutoArchiver(ctx context.Context) {
-	go func() {
+	helpers.GoSafeLoop("business/Archive/archiveBusiness:StartAutoArchiver", func() {
 		time.Sleep(5 * time.Minute)
 		ticker := time.NewTicker(1 * time.Hour)
 		defer ticker.Stop()
@@ -1436,5 +1101,5 @@ func StartAutoArchiver(ctx context.Context) {
 				}
 			}
 		}
-	}()
+	})
 }

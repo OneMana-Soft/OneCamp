@@ -10,6 +10,8 @@ import (
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	outboxBusiness "github.com/akashc777/OneCamp/business/Outbox"
+	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	channelNotificationBusiness "github.com/akashc777/OneCamp/business/UserChannelNotification"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
@@ -30,10 +32,6 @@ type PostPagination struct {
 	Posts   []*dgraphStruct.DgraphPost `json:"posts,omitempty"`
 	HasMore bool                       `json:"has_more"`
 }
-
-// replyContextSnippetLen bounds the parent snippet prepended to a reply's
-// contextual embedding so a long parent can't dominate the vector.
-const replyContextSnippetLen = 200
 
 // resolveReplyParentPost validates a Discord-style inline reply target and
 // returns the parent post's Dgraph node (uid + author + text, for the edge,
@@ -58,27 +56,6 @@ func resolveReplyParentPost(ctx context.Context, replyToUUID string, channelUUID
 		return nil
 	}
 	return parentDg
-}
-
-// withReplyContext prepends a compact "Replying to <author>: <snippet>" prefix
-// to a reply's text for the k-NN embedding, so short replies carry the meaning
-// of the message they answer. Returns text unchanged when parent is nil.
-func withReplyContext(parent *dgraphStruct.DgraphPost, text string) string {
-	if parent == nil {
-		return text
-	}
-	author := ""
-	if parent.PostBy != nil {
-		author = parent.PostBy.DisplayName()
-	}
-	snippet := helpers.HTMLToPlainText(parent.Text)
-	if len(snippet) > replyContextSnippetLen {
-		snippet = helpers.TruncateRunes(snippet, replyContextSnippetLen)
-	}
-	if author == "" && snippet == "" {
-		return text
-	}
-	return fmt.Sprintf("Replying to %s: %s\n%s", author, snippet, text)
 }
 
 func CreatePost(ctx context.Context, postInfo *adapter.InputCreateOrUpdatePostInfo, userInfo *userModels.UserInfo, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphChannelInfo *dgraphStruct.DgraphChannel) (createdPostInfo *adapter.OutputCreatePostForPost, err error) {
@@ -208,7 +185,7 @@ func fanOutCreatedPost(ctx context.Context, postUUID uuid.UUID, postInfo *adapte
 			replyToAuthorUUID = replyParentPost.PostBy.Uuid
 		}
 		helpers.GoSafeNamed("post.notify", func() {
-			notifyPost(context.Background(), pushTitle, plainText, postInfo.ChannelUuid, mentionsDgraphUsersList, dgraphChannelInfo, postUUID.String(), &userInfo.UserDgraphInfo, replyToAuthorUUID, nil)
+			notifyPost(context.Background(), pushTitle, plainText, postInfo.HTMLText, postInfo.ChannelUuid, mentionsDgraphUsersList, dgraphChannelInfo, postUUID.String(), &userInfo.UserDgraphInfo, replyToAuthorUUID, nil)
 		})
 
 		// Dispatch the workspace event (outgoing webhooks + in-process
@@ -316,36 +293,25 @@ func writePostNode(ctx context.Context, postUUID uuid.UUID, postInfo *adapter.In
 	}
 
 	_, err := domain.CreateOrUpdateDgraphPost(ctx, &dgraphPost)
+	if err == nil {
+		// What it links to joins the work graph (DG6).
+		refsBusiness.Saved(ctx, refsBusiness.Message, postUUID.String(), postInfo.HTMLText, true)
+	}
 	return replyParentPost, err
 }
 
 func sendNewPostNotification(title string, body string, channelId string, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphChannelInfo *dgraphStruct.DgraphChannel, postID string, userDgraph *dgraphStruct.DgraphUser, replyToAuthorUUID string) {
-	notifyNewPost(context.Background(), title, body, channelId, mentionsDgraphUsersList, dgraphChannelInfo, postID, userDgraph, replyToAuthorUUID, nil)
-}
-
-// told says whether a person is to be told of a post by one way ("activity",
-// "push", "email") this time: the outbox's sink asks FirstTime, so a retry
-// tells only those it hadn't. nil tells everyone, as today's path does.
-type told func(how, recipient string) bool
-
-// only is the recipients told lets through, all of them when it's nil. Pure.
-func (t told) only(how string, recipients []string) []string {
-	if t == nil {
-		return recipients
-	}
-	out := make([]string, 0, len(recipients))
-	for _, r := range recipients {
-		if t(how, r) {
-			out = append(out, r)
-		}
-	}
-	return out
+	notifyNewPost(context.Background(), title, body, "", channelId, mentionsDgraphUsersList, dgraphChannelInfo, postID, userDgraph, replyToAuthorUUID, nil)
 }
 
 // notifyNewPost is a channel post's notices: the Activity item for each
 // eligible person it mentions (or whose post it quotes), the push and desktop
-// notice for everyone eligible, and the email for those mentioned.
-func notifyNewPost(ctx context.Context, title string, body string, channelId string, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphChannelInfo *dgraphStruct.DgraphChannel, postID string, userDgraph *dgraphStruct.DgraphUser, replyToAuthorUUID string, tell told) {
+// notice for everyone eligible, and the email for those it names. html is the
+// post as written: whom its own chips name. Someone a broadcast or a team's
+// mention reached (business/Reach) is told in the Inbox and by push, as
+// anyone mentioned, and isn't emailed: one @channel in a large channel would
+// otherwise email everyone in it who is away.
+func notifyNewPost(ctx context.Context, title string, body string, html string, channelId string, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphChannelInfo *dgraphStruct.DgraphChannel, postID string, userDgraph *dgraphStruct.DgraphUser, replyToAuthorUUID string, tell outboxBusiness.Told) {
 
 	mentionsUUIDList := []string{}
 	mentionsMap := make(map[string]bool)
@@ -354,13 +320,24 @@ func notifyNewPost(ctx context.Context, title string, body string, channelId str
 		mentionsUUIDList = append(mentionsUUIDList, mention.Uuid)
 		mentionsMap[mention.Uuid] = true
 	}
+	named := namedIn(html, mentionsDgraphUsersList)
 
 	// Treat the replied-to author as an implicit mention recipient so an inline
 	// reply notifies them through the mention pipeline. Suppress self-replies
 	// and de-dup with an explicit @mention of the same person.
-	if replyToAuthorUUID != "" && replyToAuthorUUID != userDgraph.Uuid && !mentionsMap[replyToAuthorUUID] {
-		mentionsUUIDList = append(mentionsUUIDList, replyToAuthorUUID)
-		mentionsMap[replyToAuthorUUID] = true
+	if replyToAuthorUUID != "" && replyToAuthorUUID != userDgraph.Uuid {
+		if !mentionsMap[replyToAuthorUUID] {
+			mentionsUUIDList = append(mentionsUUIDList, replyToAuthorUUID)
+			mentionsMap[replyToAuthorUUID] = true
+		}
+		named[replyToAuthorUUID] = true
+	}
+
+	// Members whose keywords it holds hear of it as of a mention (TN-53),
+	// never by email (they aren't in named).
+	for _, id := range keywordReached(ctx, channelId, body, userDgraph.Uuid, mentionsMap) {
+		mentionsUUIDList = append(mentionsUUIDList, id)
+		mentionsMap[id] = true
 	}
 
 	// 1. Get eligible users for notifications (based on preferences)
@@ -377,14 +354,17 @@ func notifyNewPost(ctx context.Context, title string, body string, channelId str
 	}
 
 	// 2. Publish MQTT Activity Events
-	eligibleMentionsUserIDs := []string{}
+	eligibleMentionsUserIDs, eligibleNamedUserIDs := []string{}, []string{}
 
 	for _, uid := range eligibleUserIDs {
 		if mentionsMap[uid] {
 			eligibleMentionsUserIDs = append(eligibleMentionsUserIDs, uid)
 		}
+		if named[uid] {
+			eligibleNamedUserIDs = append(eligibleNamedUserIDs, uid)
+		}
 	}
-	for _, recipientID := range tell.only("activity", eligibleMentionsUserIDs) {
+	for _, recipientID := range tell.Only("activity", eligibleMentionsUserIDs) {
 		activityItem := &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION, // In channels, new posts are notifications for members
 			Time:         time.Now().UTC().Format(time.RFC3339Nano),
@@ -420,13 +400,13 @@ func notifyNewPost(ctx context.Context, title string, body string, channelId str
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_USERNAME] = userDgraph.DisplayName()
 	pushData[firebaseInit.FIREBASE_PUSH_DATA_ICON] = userBusiness.GetSignedProfileURL(ctx, userDgraph.ProfileKey)
 
-	if pushTo := tell.only("push", eligibleUserIDs); len(pushTo) > 0 {
-		notificationBusiness.Deliver(ctx, pushTo, pushData, "channel:"+channelId+":"+postID)
+	if pushTo := tell.Only("push", eligibleUserIDs); len(pushTo) > 0 {
+		notificationBusiness.DeliverFrom(ctx, userDgraph.Uuid, pushTo, pushData, "channel:"+channelId+":"+postID)
 	}
 
-	// Email fan-out: only mentioned users — channel posts in general are
-	// too noisy to email everyone. The dispatcher applies its own gates
-	// (per-user pref, online check, suppressions).
+	// Email fan-out: only the people it names — channel posts in general,
+	// and a broadcast's whole room, are too noisy to email. The dispatcher
+	// applies its own gates (per-user pref, online check, suppressions).
 	notificationBusiness.DispatchChannelMention(
 		userDgraph.Uuid,
 		userDgraph.DisplayName(),
@@ -435,8 +415,29 @@ func notifyNewPost(ctx context.Context, title string, body string, channelId str
 		dgraphChannelInfo.Name,
 		postID,
 		body,
-		tell.only("email", eligibleMentionsUserIDs),
+		tell.Only("email", eligibleNamedUserIDs),
 	)
+}
+
+// namedIn is the people of mentions (by user uuid) whom html names by their
+// own chip: its "<uuid>@<uid>" chips, matched by the graph uid, never by the
+// uuid the sender's chip claims (MC-91). Pure.
+func namedIn(html string, mentions []*dgraphStruct.DgraphUser) map[string]bool {
+	named := map[string]bool{}
+	uids, _ := helpers.GetMentions(html)
+	if len(uids) == 0 {
+		return named
+	}
+	chips := make(map[string]bool, len(uids))
+	for _, uid := range uids {
+		chips[uid] = true
+	}
+	for _, m := range mentions {
+		if m != nil && m.Uid != "" && chips[m.Uid] {
+			named[m.Uuid] = true
+		}
+	}
+	return named
 }
 
 func UpdatePostComment(ctx context.Context, commentUUID uuid.UUID, commentInfo *adapter.InputCreateOrUpdateCommentToPost, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, rawDgraphCommentInfo *dgraphStruct.DgraphComment) (err error) {
@@ -495,7 +496,7 @@ func UpdatePostComment(ctx context.Context, commentUUID uuid.UUID, commentInfo *
 		return
 	}
 
-	go mqttBusiness.PublishPostComment(&mqttPostCommentCount, rawDgraphCommentInfo.Post.Channel.Uuid)
+	helpers.GoSafeNamed("mqttBusiness.PublishPostComment", func() { mqttBusiness.PublishPostComment(&mqttPostCommentCount, rawDgraphCommentInfo.Post.Channel.Uuid) })
 
 	return
 }
@@ -582,7 +583,7 @@ func CreatePostComment(ctx context.Context, commentInfo *adapter.InputCreateOrUp
 	}
 
 	if !helpers.IsBulkImport(ctx) {
-		go mqttBusiness.PublishPostComment(&mqttPostCommentCount, dgraphPostInfo.Channel.Uuid)
+		helpers.GoSafeNamed("mqttBusiness.PublishPostComment", func() { mqttBusiness.PublishPostComment(&mqttPostCommentCount, dgraphPostInfo.Channel.Uuid) })
 
 		// Push, email and the live Activity items, to one audience: the
 		// thread's people who are in the channel now. A bulk import, which
@@ -621,191 +622,6 @@ func CreatePostComment(ctx context.Context, commentInfo *adapter.InputCreateOrUp
 			"text":         helpers.HTMLToPlainText(commentInfo.HTMLText),
 			"mention_ids":  mentionIDs,
 		})
-	}
-
-	return
-}
-
-func CreateOrUpdatePostCommentReaction(ctx context.Context, reactionInfo *adapter.InputUpdateReactionForCommentInPost, dgraphCommentRaw *dgraphStruct.DgraphComment, userDgraph *dgraphStruct.DgraphUser) (reactionUUID string, err error) {
-	currentTime := time.Now()
-
-	dgraphComment := &dgraphStruct.DgraphComment{
-		Uid:   "uid(co)",
-		Uuid:  reactionInfo.Uuid,
-		DType: []string{"Comment"},
-		Reactions: []*dgraphStruct.DgraphReaction{
-			{
-				Uid:       reactionInfo.ReactionDgraphUid,
-				DType:     []string{"Reaction"},
-				EmojiUuid: reactionInfo.EmojiUuid,
-				AddedAt:   &currentTime,
-				ContentAddedBy: &dgraphStruct.DgraphUser{
-					Uid: dgraphCommentRaw.CommentBy.Uid,
-				},
-				AddedBy: &dgraphStruct.DgraphUser{
-					Uid: userDgraph.Uid,
-				},
-			},
-		},
-	}
-
-	reactionUUID, err = commentBusiness.CreateOrUpdateDgraphCommentReaction(ctx, dgraphComment)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/CreateOrUpdatePostCommentReaction Failed to update comment reaction in post err: %+v",
-			err)
-		return
-	}
-
-	mqttPostCommentReaction := mqttStruct.MqttPostCommentReaction{
-		Type:            mqttStruct.TYPE_CREATE,
-		EmojiReactionId: reactionInfo.EmojiUuid,
-		CommentUuid:     reactionInfo.Uuid,
-		AddedByUserName: userDgraph.DisplayName(),
-		AddedByUuid:     userDgraph.Uuid,
-		ReactionUuid:    reactionUUID,
-		PostUuid:        dgraphCommentRaw.Post.Uuid,
-	}
-
-	if len(mqttPostCommentReaction.ReactionUuid) == 0 {
-		mqttPostCommentReaction.Type = mqttStruct.TYPE_UPDATE
-		mqttPostCommentReaction.ReactionUuid = reactionInfo.ReactionDgraphUid
-	}
-
-	// Suppress MQTT + activity fan-out during a bulk Slack import.
-	// Without this gate, importing a workspace with 50k historical
-	// comment reactions would push that many notifications/activity
-	// rows in a tight loop. The Dgraph reaction node is still written
-	// above so the data lands; only the live UI side-effects are skipped.
-	if helpers.IsBulkImport(ctx) {
-		return
-	}
-
-	go mqttBusiness.PublishPostCommentReaction(&mqttPostCommentReaction, dgraphCommentRaw.Post.Channel.Uuid)
-
-	// --- Activity Notification for Comment Owner/Post Owner ---
-	go func() {
-		recipients := make(map[string]bool)
-		// 1. Notify Comment Owner (if not the reactor)
-		if dgraphCommentRaw.CommentBy.Uuid != userDgraph.Uuid {
-			recipients[dgraphCommentRaw.CommentBy.Uuid] = true
-		}
-		// 2. Notify Post Owner (if not the reactor and not the comment owner)
-		if dgraphCommentRaw.Post.PostBy.Uuid != userDgraph.Uuid && dgraphCommentRaw.Post.PostBy.Uuid != dgraphCommentRaw.CommentBy.Uuid {
-			recipients[dgraphCommentRaw.Post.PostBy.Uuid] = true
-		}
-
-		for recipientID := range recipients {
-			activityItem := &dgraphModels.UnifiedActivityItem{
-				ActivityType: "REACTION",
-				Time:         time.Now().UTC().Format(time.RFC3339Nano),
-				Reaction: &dgraphModels.ReactionsActivity{
-					DgraphReaction: dgraphStruct.DgraphReaction{
-						EmojiUuid: reactionInfo.EmojiUuid,
-						AddedBy: &dgraphStruct.DgraphUser{
-							Uuid:     userDgraph.Uuid,
-							UserName: userDgraph.DisplayName(),
-						},
-						AddedAt: &currentTime,
-					},
-					Comment: &dgraphStruct.DgraphComment{
-						Uuid: reactionInfo.Uuid,
-						Post: &dgraphStruct.DgraphPost{
-							Uuid: dgraphCommentRaw.Post.Uuid,
-							Channel: &dgraphStruct.DgraphChannel{
-								Uuid: dgraphCommentRaw.Post.Channel.Uuid,
-							},
-						},
-					},
-				},
-			}
-			activityBusiness.PublishActivityToUser(recipientID, activityItem)
-		}
-	}()
-
-	return
-}
-
-func CreateOrUpdatePostReaction(ctx context.Context, reactionInfo *adapter.InputUpdateReactionForPost, postCreatedByDgraphUID string, postOwnerUUID string, userDgraphUID string, userUUID string, userName string, channelId string) (reactionUid string, err error) {
-
-	currentTime := time.Now()
-
-	dgraphPost := dgraphStruct.DgraphPost{
-		Uid:   "uid(po)",
-		Uuid:  reactionInfo.Uuid,
-		DType: []string{"Post"},
-		Reactions: []*dgraphStruct.DgraphReaction{
-			{
-				Uid:       reactionInfo.ReactionDgraphUid,
-				DType:     []string{"Reaction"},
-				EmojiUuid: reactionInfo.EmojiUuid,
-				AddedAt:   &currentTime,
-				ContentAddedBy: &dgraphStruct.DgraphUser{
-					Uid: postCreatedByDgraphUID,
-				},
-				AddedBy: &dgraphStruct.DgraphUser{
-					Uid: userDgraphUID,
-				},
-			},
-		},
-	}
-
-	reactionUid, err = domain.CreateOrUpdateDgraphPostReaction(ctx, &dgraphPost)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/CreateOrUpdatePostReaction Failed to update reaction in post err: %+v",
-			err)
-		return
-	}
-
-	bulk := helpers.IsBulkImport(ctx)
-
-	mqttPostReaction := mqttStruct.MqttPostReaction{
-		Type:            mqttStruct.TYPE_CREATE,
-		EmojiReactionId: reactionInfo.EmojiUuid,
-		PostUuid:        reactionInfo.Uuid,
-		AddedByUuid:     userUUID,
-		AddedByUserName: userName,
-		ChannelUuid:     channelId,
-		ReactionUuid:    reactionUid,
-	}
-
-	if len(mqttPostReaction.ReactionUuid) == 0 {
-		mqttPostReaction.Type = mqttStruct.TYPE_UPDATE
-		mqttPostReaction.ReactionUuid = reactionInfo.ReactionDgraphUid
-	}
-
-	if !bulk {
-		go mqttBusiness.PublishPostReaction(&mqttPostReaction, channelId)
-	}
-
-	// --- Activity Notification for Post Owner ---
-	if !bulk && postOwnerUUID != userUUID {
-		go func() {
-			activityItem := &dgraphModels.UnifiedActivityItem{
-				ActivityType: "POST_REACTION",
-				Time:         time.Now().UTC().Format(time.RFC3339Nano),
-				Reaction: &dgraphModels.ReactionsActivity{
-					DgraphReaction: dgraphStruct.DgraphReaction{
-						EmojiUuid: reactionInfo.EmojiUuid,
-						AddedBy: &dgraphStruct.DgraphUser{
-							Uuid:     userUUID,
-							UserName: userName,
-						},
-						AddedAt: &currentTime,
-					},
-					Post: &dgraphStruct.DgraphPost{
-						Uuid: reactionInfo.Uuid,
-						Channel: &dgraphStruct.DgraphChannel{
-							Uuid: channelId,
-						},
-					},
-				},
-			}
-			activityBusiness.PublishActivityToUser(postOwnerUUID, activityItem)
-		}()
 	}
 
 	return
@@ -866,8 +682,8 @@ func UpdatePost(ctx context.Context, inputPostInfo *adapter.InputCreateOrUpdateP
 			err)
 
 		return
-
 	}
+	refsBusiness.Saved(ctx, refsBusiness.Message, postUUID.String(), inputPostInfo.HTMLText, false)
 
 	mqttPost := mqttStruct.MqttPost{
 		Type:            mqttStruct.TYPE_UPDATE,
@@ -883,7 +699,7 @@ func UpdatePost(ctx context.Context, inputPostInfo *adapter.InputCreateOrUpdateP
 		PostBody:      plainText,
 		PostUpdatedAt: currentTime.Unix(),
 	}
-	go domain.UpdatePostInOpenSearch(&openSearchPost)
+	helpers.GoSafeNamed("domain.UpdatePostInOpenSearch", func() { domain.UpdatePostInOpenSearch(&openSearchPost) })
 
 	// Suppress MQTT, AI re-embedding, and webhook dispatch during bulk
 	// Slack import. The Postgres + Dgraph + OpenSearch writes above are
@@ -894,7 +710,7 @@ func UpdatePost(ctx context.Context, inputPostInfo *adapter.InputCreateOrUpdateP
 		return
 	}
 
-	go mqttBusiness.PublishPost(&mqttPost, channelId)
+	helpers.GoSafeNamed("mqttBusiness.PublishPost", func() { mqttBusiness.PublishPost(&mqttPost, channelId) })
 
 	// Re-embed for AI Second Brain with updated content (async)
 	/* AI call omitted in v1 */
@@ -904,9 +720,11 @@ func UpdatePost(ctx context.Context, inputPostInfo *adapter.InputCreateOrUpdateP
 	// it if the edit emptied the message. Preserves the user's save.
 	/* AI call omitted in v1 */
 
-	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "post.updated", map[string]interface{}{
-		"post_id":    postUUID.String(),
-		"channel_id": channelId,
+	helpers.GoSafeNamed("webhookBusiness.DispatchEvent", func() {
+		webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "post.updated", map[string]interface{}{
+			"post_id":    postUUID.String(),
+			"channel_id": channelId,
+		})
 	})
 
 	return
@@ -963,7 +781,7 @@ func DeletePost(ctx context.Context, rawDgraphPost *dgraphStruct.DgraphPost, cha
 		PostDeletedAt: helpers.Int64Pointer(currentTime.Unix()),
 	}
 
-	go domain.DeletePostWithAttachmentsInOpenSearch(openSearchPost, rawDgraphPost.MediaObj)
+	helpers.GoSafeNamed("domain.DeletePostWithAttachmentsInOpenSearch", func() { domain.DeletePostWithAttachmentsInOpenSearch(openSearchPost, rawDgraphPost.MediaObj) })
 	go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
 		[]string{"comment_post_id", "attachment_post_id"},
 		rawDgraphPost.Uuid,
@@ -981,7 +799,7 @@ func DeletePost(ctx context.Context, rawDgraphPost *dgraphStruct.DgraphPost, cha
 		return
 	}
 
-	go mqttBusiness.PublishPost(&mqttPost, channelId)
+	helpers.GoSafeNamed("mqttBusiness.PublishPost", func() { mqttBusiness.PublishPost(&mqttPost, channelId) })
 
 	/* AI call omitted in v1 */
 	// Cascade soft-delete to AI embeddings (post + its comments)
@@ -993,9 +811,11 @@ func DeletePost(ctx context.Context, rawDgraphPost *dgraphStruct.DgraphPost, cha
 		"cascade",
 	)
 
-	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "post.deleted", map[string]interface{}{
-		"post_id":    rawDgraphPost.Uuid,
-		"channel_id": channelId,
+	helpers.GoSafeNamed("webhookBusiness.DispatchEvent", func() {
+		webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "post.deleted", map[string]interface{}{
+			"post_id":    rawDgraphPost.Uuid,
+			"channel_id": channelId,
+		})
 	})
 
 	return
@@ -1141,29 +961,6 @@ func GetDgraphPostByUUIDWithAllComments(ctx context.Context, postDgraphUUID stri
 	return
 }
 
-func DeletePostReaction(ctx context.Context, postDgraphUUID string, reactionDgraphUUID string, postCreatedByUUID string, userDgraphUID string, postID string, userID string, channelID string) (err error) {
-	err = domain.DeletePostReaction(ctx, postDgraphUUID, reactionDgraphUUID, postCreatedByUUID, userDgraphUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/DeletePostReaction Failed to delete reaction form dgraph err: %+v",
-			err)
-
-		return
-	}
-
-	mqttPostReaction := mqttStruct.MqttPostReaction{
-		Type:         mqttStruct.TYPE_DELETE,
-		PostUuid:     postID,
-		AddedByUuid:  userID,
-		ChannelUuid:  channelID,
-		ReactionUuid: reactionDgraphUUID,
-	}
-
-	go mqttBusiness.PublishPostReaction(&mqttPostReaction, channelID)
-
-	return
-}
-
 func DeleteCommentOnPost(ctx context.Context, commentUUID uuid.UUID, rawDgraphComment *dgraphStruct.DgraphComment, userId string) (err error) {
 
 	currentTime := time.Now()
@@ -1199,30 +996,7 @@ func DeleteCommentOnPost(ctx context.Context, commentUUID uuid.UUID, rawDgraphCo
 		return
 	}
 
-	go mqttBusiness.PublishPostComment(&mqttPostCommentCount, rawDgraphComment.Post.Channel.Uuid)
-
-	return
-}
-
-func DeleteReactionOnCommentPost(ctx context.Context, commentDgraph *dgraphStruct.DgraphComment, reactionDgraphUUID string) (err error) {
-	err = commentBusiness.DeleteCommentReaction(ctx, commentDgraph.Uid, reactionDgraphUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/DeleteReactionOnCommentPost Failed to delete reaction on comment in post err: %+v",
-			err)
-
-		return
-	}
-
-	mqttPostCommentReaction := mqttStruct.MqttPostCommentReaction{
-		Type:         mqttStruct.TYPE_DELETE,
-		CommentUuid:  commentDgraph.Uuid,
-		ReactionUuid: reactionDgraphUUID,
-		PostUuid:     commentDgraph.Post.Uuid,
-	}
-
-	go mqttBusiness.PublishPostCommentReaction(&mqttPostCommentReaction, commentDgraph.Post.Channel.Uuid)
+	helpers.GoSafeNamed("mqttBusiness.PublishPostComment", func() { mqttBusiness.PublishPostComment(&mqttPostCommentCount, rawDgraphComment.Post.Channel.Uuid) })
 
 	return
 }

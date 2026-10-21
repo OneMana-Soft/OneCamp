@@ -26,6 +26,8 @@ package integration
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -41,6 +43,10 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
+	gormPostgres "gorm.io/driver/postgres"
+	"gorm.io/gorm"
+
+	"github.com/akashc777/OneCamp/initializers/postgresInit"
 )
 
 // Env carries the live test environment for a single test: a database of
@@ -120,9 +126,25 @@ func SetupEnv(t *testing.T) *Env {
 	return env
 }
 
+// ConnectServerPostgres is SetupEnv with the server's own pool connected to
+// it, as the server connects at boot: for a test of code that reads Postgres
+// as it goes. Every read of tasks does since restricted tasks (WA2: who may
+// see one is decided from its rows, models/taskread). A test of task reads
+// that sets up only the graph reads a pool that reaches nothing, and every
+// statement fails saying the test never called this (noPostgres, below).
+func ConnectServerPostgres(t *testing.T) *Env {
+	t.Helper()
+	env := SetupEnv(t)
+	if err := postgresInit.ConnectPostgres(context.Background(), env.DSN); err != nil {
+		t.Fatalf("connect the server's pool: %v", err)
+	}
+	return env
+}
+
 // Close drops the test's database and closes the DB pool. Sessions still
 // open on it (the project's own pool, which the test pointed here, among
-// them) are ended first, as the test's own container going ended them.
+// them) are ended first, as the test's own container going ended them. The
+// server's pool, once it reaches no database, points at nothing (noPostgres).
 func (e *Env) Close() {
 	if e == nil {
 		return
@@ -135,8 +157,103 @@ func (e *Env) Close() {
 			if err := e.server.dropDatabase(e.database); err != nil {
 				e.t.Logf("drop the test's database %s: %v", e.database, err)
 			}
+			releaseServerPostgres()
 		}
 	})
+}
+
+// errNeverConnected is what every statement on the server's pool answers
+// while it points at nothing.
+var errNeverConnected = errors.New("this test reads Postgres (for example through models/taskread) but never called ConnectServerPostgres, so the server's pool reaches no database")
+
+// noPostgres is the server's pool (postgresInit.DBConn, the SQL and the gorm
+// handle alike) when no test has it connected: every connection it tries
+// fails with errNeverConnected, so every statement does.
+//
+// A pool used to stay where the last test to connect it left it, on a
+// database dropped when that test ended. A test that read Postgres without
+// connecting (a search's or a profile's task reads, through models/taskread,
+// since WA2) failed with "database test_140 does not exist", and only after
+// such a test: run alone or first, it read a nil pool, which the models read
+// as no rows, and passed. Now it fails every time, saying what to do. The pool
+// points here from a test's first Setup until the test connects it, and again
+// once the database it reached is dropped (Close). It is never nil once a
+// test has used the harness, so a goroutine a test left behind gets an error,
+// not a nil dereference (mqtt.go). Production's pool is untouched: this is
+// only ever set here.
+var noPostgres struct {
+	once sync.Once
+	sql  *sql.DB
+	gorm *gorm.DB
+}
+
+// noPostgresReached counts the connections tried on noPostgres. Code that
+// fails closed on a read error (a refusal, a search answering 400) leaves the
+// test failing on something else, so a test that fails having tried one is
+// told why as well (guardTestState).
+var noPostgresReached atomic.Int64
+
+// neverConnected is noPostgres's connector and driver.
+type neverConnected struct{}
+
+func (neverConnected) Connect(context.Context) (driver.Conn, error) {
+	noPostgresReached.Add(1)
+	return nil, errNeverConnected
+}
+func (c neverConnected) Driver() driver.Driver { return c }
+func (c neverConnected) Open(string) (driver.Conn, error) {
+	return c.Connect(context.Background())
+}
+
+// pointServerPostgresAtNothing makes the server's pool noPostgres.
+func pointServerPostgresAtNothing() {
+	noPostgres.once.Do(func() {
+		noPostgres.sql = sql.OpenDB(neverConnected{})
+		// No ping: there is nothing to reach, and gorm opens no connection
+		// of its own over a pool it is given.
+		g, err := gorm.Open(gormPostgres.New(gormPostgres.Config{Conn: noPostgres.sql}), &gorm.Config{DisableAutomaticPing: true})
+		if err != nil {
+			panic(fmt.Sprintf("integration: gorm over a pool that reaches nothing: %v", err))
+		}
+		noPostgres.gorm = g
+	})
+	if postgresInit.DBConn == nil {
+		postgresInit.DBConn = &postgresInit.DB{}
+	}
+	postgresInit.DBConn.SqlDB, postgresInit.DBConn.GormDB = noPostgres.sql, noPostgres.gorm
+	if postgresInit.DBConn.DBTimeout <= 0 {
+		// What ConnectPostgres sets: a statement given no time at all would
+		// fail on its deadline before it said why.
+		postgresInit.DBConn.DBTimeout = 3 * time.Second
+	}
+}
+
+// serverPostgresNeverNil points a server's pool no test has connected yet at
+// nothing. Every Setup calls it (guardTestState): a test that runs first, or
+// alone, fails the way one that runs after another does.
+func serverPostgresNeverNil() {
+	if postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
+		pointServerPostgresAtNothing()
+	}
+}
+
+// releaseServerPostgres points the server's pool at nothing once it reaches
+// no database: the one a test connected it to has been dropped, or a pool a
+// test opened over it (CountPostgres) closed. A pool that still reaches one,
+// another database the test holds, is left as it is.
+func releaseServerPostgres() {
+	p := postgresInit.DBConn
+	if p == nil || p.SqlDB == nil || p.SqlDB == noPostgres.sql {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if p.SqlDB.PingContext(ctx) == nil {
+		return
+	}
+	gone := p.SqlDB
+	pointServerPostgresAtNothing()
+	_ = gone.Close()
 }
 
 // pgServer is the binary's Postgres: the template the tests' databases are
@@ -164,6 +281,7 @@ type pgServer struct {
 var migratesItself = map[string]bool{
 	"TestBookingPages":                                          true,
 	"TestCalendarAttendanceMigrationUpDownUp":                   true,
+	"TestCallStateMigrationUpDownUp":                            true,
 	"TestCalendarRemindersMigrationUpDownUp":                    true,
 	"TestCalendarStoreMigrationUpDownUp":                        true,
 	"TestConnectedWork":                                         true,
@@ -173,11 +291,13 @@ var migratesItself = map[string]bool{
 	"TestDocAccessResolver":                                     true,
 	"TestDocExportConsentsMigrationUpDownUp":                    true,
 	"TestDocTreeAcceptance":                                     true,
+	"TestDocsClientLoopMigration":                               true,
 	"TestDocVersionsMigrationUpDownUp":                          true,
 	"TestEditProposalsMigrationUpDownUp":                        true,
 	"TestEmailLookupIndexSurvivesAddressesThatDifferOnlyInCase": true,
 	"TestMigration204ClosesInvitationsToMembers":                true,
 	"TestOutboxMigrationUpDownUp":                               true,
+	"TestPublishMigrationUpDownUp":                              true,
 	"TestResourceFollowsMigrationUpDownUp":                      true,
 	"TestResourceMentionSyncsMigrationUpDownUp":                 true,
 	"TestTableMigrationFieldSettings":                           true,

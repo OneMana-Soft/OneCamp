@@ -148,7 +148,7 @@ func TestDocVersionRowsKeepNamedOnes(t *testing.T) {
 	if err != nil || len(keys) != 4 {
 		t.Fatalf("deleted %d %v", len(keys), err)
 	}
-	left, _ := snapshotModels.ListSnapshots(ctx, doc, 10)
+	left, _ := snapshotModels.ListSnapshots(ctx, doc, time.Time{}, 10)
 	if len(left) != 1 || left[0].ID != ids[0] {
 		t.Errorf("left %d", len(left))
 	}

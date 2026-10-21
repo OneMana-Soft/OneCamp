@@ -23,6 +23,7 @@ import (
 	model "github.com/akashc777/OneCamp/models/postgres/ProjectUpdate"
 	timeModel "github.com/akashc777/OneCamp/models/postgres/TimeEntry"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/akashc777/OneCamp/models/taskread"
 	authService "github.com/akashc777/OneCamp/services/Auth"
 	"github.com/google/uuid"
 )
@@ -146,7 +147,9 @@ func MakeDraft(ctx context.Context, projectID uuid.UUID, userDgraphUID string, n
 	from := Window(last, now)
 	// Every task: a draft must see work finished long after it was created,
 	// which the board's newest-200 cap on Done would hide, and every open one.
-	p, err := projectBusiness.GetDgraphProjectTaskListForKanban(ctx, projectID.String(), userDgraphUID, "", 0, 0)
+	// An update is read by the whole project: its draft names no restricted
+	// task, whoever drafts it (models/taskread AsNobody).
+	p, err := projectBusiness.GetDgraphProjectTaskListForKanban(taskread.AsNobody(ctx), projectID.String(), userDgraphUID, "", 0, 0)
 	if err != nil || p == nil {
 		return nil, fmt.Errorf("read the project's tasks: %w", err)
 	}

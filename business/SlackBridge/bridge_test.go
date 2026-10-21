@@ -41,16 +41,6 @@ func TestHTMLToMrkdwn(t *testing.T) {
 	}
 }
 
-func TestParagraphs(t *testing.T) {
-	if got := paragraphs("one\ntwo"); got != "<p>one<br/>two</p>" {
-		t.Errorf("got %q", got)
-	}
-	code := "<pre><code>a\nb</code></pre>"
-	if got := paragraphs(code); got != code {
-		t.Errorf("a code block was rewrapped: %q", got)
-	}
-}
-
 func TestManifestCarriesTheEventsURLAndEveryScopeUsed(t *testing.T) {
 	var m struct {
 		OAuth struct {
@@ -194,9 +184,7 @@ func TestClientRetriesOnceWhenRateLimited(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":true,"ts":"123.456"}`))
 	}))
 	defer srv.Close()
-	prev := slackAPIBase
-	slackAPIBase = srv.URL + "/"
-	defer func() { slackAPIBase = prev }()
+	defer PointAtSlackForTest(srv.URL + "/")()
 
 	ts, err := slackClient{token: "xoxb-t"}.postMessage(context.Background(), "C1", "hi", "Priya", "")
 	if err != nil || ts != "123.456" || calls != 2 {
@@ -209,9 +197,7 @@ func TestClientReturnsSlackRefusals(t *testing.T) {
 		_, _ = w.Write([]byte(`{"ok":false,"error":"channel_not_found"}`))
 	}))
 	defer srv.Close()
-	prev := slackAPIBase
-	slackAPIBase = srv.URL + "/"
-	defer func() { slackAPIBase = prev }()
+	defer PointAtSlackForTest(srv.URL + "/")()
 
 	err := slackClient{token: "x"}.delete(context.Background(), "C1", "1.1")
 	var se *SlackError

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	placesBusiness "github.com/akashc777/OneCamp/business/Places"
 	"net"
 	"net/http"
 	"os"
@@ -27,6 +26,7 @@ import (
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	teamBusiness "github.com/akashc777/OneCamp/business/Team"
+	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
@@ -40,6 +40,7 @@ import (
 	"github.com/google/uuid"
 
 	bulkPostAndChatbusiness "github.com/akashc777/OneCamp/business/BulkPostAndChat"
+	placesBusiness "github.com/akashc777/OneCamp/business/Places"
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	business "github.com/akashc777/OneCamp/business/User"
 	userChannelNotificationBusiness "github.com/akashc777/OneCamp/business/UserChannelNotification"
@@ -47,6 +48,7 @@ import (
 	userFCMtokenBusiness "github.com/akashc777/OneCamp/business/UserFCMToken"
 	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/authcookie"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
@@ -67,7 +69,10 @@ func GetLoggedInUserProfile(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	// The @handle lives in Postgres, where it is unique; the profile editor
 	// shows it and lets them change it. A member without one is given theirs
@@ -106,9 +111,10 @@ func changedNameProblem(label, sent, saved string) string {
 
 func GetActiveUserEmojiStatus(w http.ResponseWriter, r *http.Request) {
 
-	ctx := r.Context()
-
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var statusDraphInfo *dgraphStruct.DgraphUserStatusEmoji
 
@@ -123,7 +129,10 @@ func GetActiveUserEmojiStatus(w http.ResponseWriter, r *http.Request) {
 func GetDgraphUserTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	queryParams := r.URL.Query()
 
@@ -150,60 +159,17 @@ func GetDgraphUserTaskListForKanban(w http.ResponseWriter, r *http.Request) {
 
 	var err error
 
-	var filterStrings []string
-	currentTime := time.Now()
-
-	for _, param := range filtersParam {
-
-		// Defence: refuse unrecognised column names so a hostile body
-		// can't get its `id` interpolated as a DQL keyword.
-		if !dgraphquery.IsAllowedColumnName(param.Id) {
-			continue
-		}
-
-		var filterValue string
-		switch v := param.Value.(type) {
-		case string:
-			if param.Id == "task_name" {
-				safe, sErr := dgraphquery.SanitizeSearchTerm(v)
-				if sErr == nil {
-					filterValue = fmt.Sprintf(`regexp(%s,  /.*%s.*/i)`, param.Id, safe)
-				}
-			}
-			if param.Id == "overdue" {
-				filterValue = fmt.Sprintf(dgraphStruct.TASK_OPEN_FILTER+` AND lt(task_due_date, "%s") AND gt(task_due_date, "1970-01-01T00:00:00Z")`, currentTime.Format(time.RFC3339Nano))
-			}
-			if param.Id == "upcoming" {
-				filterValue = fmt.Sprintf(dgraphStruct.TASK_OPEN_FILTER+` AND gt(task_start_date, "%s")`, currentTime.Format(time.RFC3339Nano))
-			}
-
-		case []interface{}:
-			strValues := make([]string, 0, len(v))
-			for _, item := range v {
-				if s, ok := item.(string); ok && dgraphquery.IsAllowedFilterValue(s) {
-					strValues = append(strValues, s)
-				}
-			}
-			if param.Id == "task_priority" {
-				filterValue = fmt.Sprintf(`anyofterms(%s,"%s")`, param.Id, strings.Join(strValues, " "))
-			}
-			// Built-in and custom statuses; see business/TaskStatus.
-			if param.Id == "task_status" {
-				filterValue = taskStatusBusiness.FilterClause(strValues)
-			}
-			if param.Id == "task_project_name" {
-				filterValue = fmt.Sprintf(`uid_in(task_project, [%s])`, strings.Join(strValues, ", "))
-
-			}
-
-		}
-
-		if len(filterValue) > 0 {
-			filterStrings = append(filterStrings, filterValue)
-		}
+	// One builder for every task list (domain/Task.TaskListFilter, PR1).
+	params := make([]taskDomain.TaskListParam, 0, len(filtersParam))
+	for _, p := range filtersParam {
+		params = append(params, taskDomain.TaskListParam{ID: p.Id, Value: p.Value})
 	}
-
-	filterQuery := strings.Join(filterStrings, " AND ")
+	listFilter := taskDomain.TaskListFilter{Params: params, Now: time.Now(), Status: taskStatusBusiness.FilterClause}
+	filterQuery, err := listFilter.Clause()
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "search string is too long or invalid"})
+		return
+	}
 
 	dgraphUser, err := business.GetDgraphUserTaskListForKanban(ctx, userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.Uid, filterQuery, helpers.OpenLimit(r.URL.Query()), helpers.ClosedLimit(r.URL.Query()))
 
@@ -249,7 +215,10 @@ func decorateMine(ctx context.Context, u models.UserInfo, lists ...[]*dgraphStru
 func GetDgraphUserProjectList(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	userDgraphInfo, err := business.GetDgraphUserProjectList(ctx, userInfo.UserDgraphInfo.Uuid)
 
@@ -277,7 +246,10 @@ func GetDgraphUserProjectList(w http.ResponseWriter, r *http.Request) {
 func GetDgraphUserTaskList(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	queryParams := r.URL.Query()
 
@@ -310,102 +282,37 @@ func GetDgraphUserTaskList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var filterStrings []string
-	currentTime := time.Now()
-
+	// One builder for every task list (domain/Task.TaskListFilter, PR1).
+	params := make([]taskDomain.TaskListParam, 0, len(filtersParam))
+	for _, p := range filtersParam {
+		params = append(params, taskDomain.TaskListParam{ID: p.Id, Value: p.Value})
+	}
+	listFilter := taskDomain.TaskListFilter{Params: params, Now: time.Now(), Status: taskStatusBusiness.FilterClause}
 	if len(taskSearchStr) != 0 {
-		safe, sErr := dgraphquery.SanitizeSearchTerm(taskSearchStr[0])
-		if sErr != nil {
-			if !errors.Is(sErr, dgraphquery.ErrEmpty) {
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-					"msg": "search string is too long or invalid",
-				})
-				return
-			}
-			// Empty after sanitisation: fall through; search filter
-			// won't be appended and the unfiltered task list is
-			// returned, which is what the user expects when typing
-			// only whitespace.
-		} else {
-			filterStrings = append(filterStrings, fmt.Sprintf(`regexp(task_name,  /.*%s.*/i)`, safe))
+		listFilter.Search = taskSearchStr[0]
+	}
+	// RFC 3339 dates only: parsed, so nothing else reaches the query.
+	if from, e := time.Parse(time.RFC3339, queryParams.Get("startDate")); e == nil {
+		if to, e := time.Parse(time.RFC3339, queryParams.Get("endDate")); e == nil {
+			listFilter.From, listFilter.To = &from, &to
 		}
 	}
-
-	startDateStrParam := queryParams["startDate"]
-	endDateStrParam := queryParams["endDate"]
-
-	if len(startDateStrParam) > 0 && len(endDateStrParam) > 0 {
-		startDateStr := startDateStrParam[0]
-		endDateStr := endDateStrParam[0]
-		if startDateStr != "" && endDateStr != "" {
-			// RFC3339 dates only: parse-then-reformat so the value we
-			// interpolate cannot contain `"` or DQL operators.
-			if s, e := time.Parse(time.RFC3339, startDateStr); e == nil {
-				if t, e2 := time.Parse(time.RFC3339, endDateStr); e2 == nil {
-					sf := s.Format(time.RFC3339Nano)
-					tf := t.Format(time.RFC3339Nano)
-					dateFilter := fmt.Sprintf(`(ge(task_due_date, "%s") AND le(task_due_date, "%s")) OR (ge(task_start_date, "%s") AND le(task_start_date, "%s")) OR (le(task_start_date, "%s") AND ge(task_due_date, "%s"))`, sf, tf, sf, tf, tf, sf)
-					filterStrings = append(filterStrings, fmt.Sprintf(`(%s)`, dateFilter))
-				}
-			}
-		}
+	if dueBy, e := time.Parse(time.RFC3339, queryParams.Get("dueBy")); e == nil {
+		listFilter.DueBy = &dueBy
 	}
-
-	for _, param := range filtersParam {
-
-		// Defence: refuse unrecognised column names so a hostile body
-		// can't get its `id` interpolated as a DQL keyword.
-		if !dgraphquery.IsAllowedColumnName(param.Id) {
-			continue
-		}
-
-		var filterValue string
-		switch v := param.Value.(type) {
-		case string:
-			if param.Id == "task_name" {
-				safe, sErr := dgraphquery.SanitizeSearchTerm(v)
-				if sErr == nil {
-					filterValue = fmt.Sprintf(`regexp(%s,  /.*%s.*/i)`, param.Id, safe)
-				}
-			}
-			if param.Id == "overdue" {
-				filterValue = fmt.Sprintf(dgraphStruct.TASK_OPEN_FILTER+` AND lt(task_due_date, "%s") AND gt(task_due_date, "1970-01-01T00:00:00Z")`, currentTime.Format(time.RFC3339Nano))
-			}
-			if param.Id == "upcoming" {
-				filterValue = fmt.Sprintf(dgraphStruct.TASK_OPEN_FILTER+` AND gt(task_start_date, "%s")`, currentTime.Format(time.RFC3339Nano))
-			}
-
-		case []interface{}:
-			strValues := make([]string, 0, len(v))
-			for _, item := range v {
-				if s, ok := item.(string); ok && dgraphquery.IsAllowedFilterValue(s) {
-					strValues = append(strValues, s)
-				}
-			}
-			if param.Id == "task_priority" {
-				filterValue = fmt.Sprintf(`anyofterms(%s,"%s")`, param.Id, strings.Join(strValues, " "))
-			}
-			// Built-in and custom statuses; see business/TaskStatus.
-			if param.Id == "task_status" {
-				filterValue = taskStatusBusiness.FilterClause(strValues)
-			}
-			if param.Id == "task_project_name" {
-				filterValue = fmt.Sprintf(`uid_in(task_project, [%s])`, strings.Join(strValues, ", "))
-
-			}
-
-		}
-
-		if len(filterValue) > 0 {
-			filterStrings = append(filterStrings, filterValue)
-		}
+	filterQuery, err := listFilter.Clause()
+	if err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "search string is too long or invalid"})
+		return
 	}
-
-	filterQuery := strings.Join(filterStrings, " AND ")
 
 	// One mapping from the sorts the list offers to the graph's: no key a
 	// request names is passed to the graph as it came.
 	sortingQuery, err := dgraphquery.TaskListOrder(queryParams.Get("sorting"))
+	if sortingQuery == dgraphquery.ManualOrder {
+		// My Tasks spans projects, each with its own order: newest first.
+		sortingQuery, _ = dgraphquery.TaskListOrder("")
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/GetDgraphUserTaskList Failed to parse sorting query param err: %+v",
@@ -451,7 +358,10 @@ func GetDgraphUserInfoByUUIDForSidebarNav(w http.ResponseWriter, r *http.Request
 
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	dgraphUser, err := business.GetDgraphUserInfoByUUIDForSidebarNav(ctx, userInfo.UserPostgresInfo.Id)
 
@@ -466,7 +376,7 @@ func GetDgraphUserInfoByUUIDForSidebarNav(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if dgraphUser == nil {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That account isn't in this workspace."})
+		helpers.WriteNotFound(w, "That account isn't in this workspace.")
 		return
 	}
 
@@ -501,7 +411,10 @@ func AddChannelToUserFav(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	dgrpahChannel, err := channelBusiness.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
 
@@ -561,7 +474,10 @@ func RemoveChannelToUserFav(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	dgrpahChannel, err := channelBusiness.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, userInfo.UserDgraphInfo.Uid)
 
@@ -609,7 +525,10 @@ func RemoveChannelToUserFav(w http.ResponseWriter, r *http.Request) {
 func GetUsersListWhoDontBelongToTheDM(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	grpIDString := chi.URLParam(r, "grp_id")
 
@@ -696,7 +615,10 @@ func filterGroupAddBots(ctx context.Context, users []*dgraphStruct.DgraphUser) [
 func GetUsersListWhoDontBelongToTheTeam(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	teamUUIDString := chi.URLParam(r, "team_uuid")
 
@@ -758,7 +680,10 @@ func GetUsersListWhoDontBelongToTheTeam(w http.ResponseWriter, r *http.Request) 
 func GetUsersListWhoDontBelongToTheProjectButBelongToTheTeam(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	projectUUIDString := chi.URLParam(r, "project_uuid")
 
@@ -797,7 +722,7 @@ func GetUsersListWhoDontBelongToTheProjectButBelongToTheTeam(w http.ResponseWrit
 		return
 	}
 	if !standing.Can(workAccess.NeedManagePeople) {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not Authorised"})
+		helpers.WriteForbidden(w, "Not Authorised")
 		return
 	}
 
@@ -847,7 +772,10 @@ func GetProfileByUserId(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	otherUserInfo, err := business.GetDgraphUserInfoByUUID(ctx, userId)
 
@@ -1148,13 +1076,6 @@ func LogOutUser(w http.ResponseWriter, r *http.Request) {
 	feDomain := getFrontendCookieDomain()
 	secure, sameSite := getCookieSecureAndSameSite()
 
-	// Diagnostic logging for cookies
-	cookies := r.Cookies()
-	var cookieNames []string
-	for _, c := range cookies {
-		cookieNames = append(cookieNames, fmt.Sprintf("%s=%s", c.Name, c.Value))
-	}
-
 	// Always clear cookies in the browser - moved to top for robustness
 	domainsToClear := []string{"", feDomain}
 	if strings.Count(feDomain, ".") >= 2 {
@@ -1181,7 +1102,7 @@ func LogOutUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Also clear whatever cookies were sent (legacy loop)
-	for _, cookie := range cookies {
+	for _, cookie := range r.Cookies() {
 		c := &http.Cookie{
 			Name:     cookie.Name,
 			Value:    "",
@@ -1250,7 +1171,10 @@ func LogOutUser(w http.ResponseWriter, r *http.Request) {
 func RefreshToken(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	feDomain := getFrontendCookieDomain()
 	secure, sameSite := getCookieSecureAndSameSite()
@@ -1499,7 +1423,10 @@ func oauthRefusal(err error) (code, message string) {
 func UsersListNotBelongToChannelId(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 	channelId := chi.URLParam(r, "channel_id")
 	if channelId == "" {
 
@@ -1549,22 +1476,17 @@ func UsersListNotBelongToChannelId(w http.ResponseWriter, r *http.Request) {
 
 func GetUserRecordingsList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	queryParams := r.URL.Query()
 	startDate := queryParams.Get("startDate")
 	endDate := queryParams.Get("endDate")
 
-	pageValue := r.URL.Query()["pageIndex"]
-	pageIndex := 0
-	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 100)
-
-	if len(pageValue) > 0 {
-		pageInt, err := strconv.Atoi(pageValue[0])
-		if err == nil {
-			pageIndex = pageInt
-		}
-	}
+	page := helpers.PageParam(r.URL.Query(), 20, 100)
+	pageIndex, pageSize := page.Index, page.Size
 
 	recordingsPagination, err := business.GetUserRecordingsList(ctx, userInfo.UserDgraphInfo.Uid, startDate, endDate, pageIndex, pageSize)
 
@@ -1589,9 +1511,22 @@ func GetUserRecordingsList(w http.ResponseWriter, r *http.Request) {
 func AllUsersList(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
-	usersList, err := business.GetDgraphAllUsersList(ctx)
+	// A picker that searches on the server (the goal owner's) asks for the
+	// people matching q, at most limit (20 by default, 50 at most); the
+	// @mention picker, asking for neither, gets the whole list it searches.
+	query := r.URL.Query()
+	var usersList []*dgraphStruct.DgraphUser
+	var err error
+	if query.Has("q") || query.Has("limit") {
+		usersList, err = business.PickerPeople(ctx, query.Get("q"), helpers.SizeParam(query, "limit", 20, 50))
+	} else {
+		usersList, err = business.GetDgraphAllUsersList(ctx)
+	}
 	if err != nil {
 
 		helpers.LogErrorWithContext(ctx,
@@ -1729,7 +1664,10 @@ func GetBoardAttachment(w http.ResponseWriter, r *http.Request) {
 // people in it. The route names the other person; the conversation is named
 // by both (GetGroupingId).
 func GetChatFile(w http.ResponseWriter, r *http.Request) {
-	userInfo := r.Context().Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 	grpID := helpers.GetGroupingId(chi.URLParam(r, "chat_uuid"), userInfo.UserDgraphInfo.Uuid)
 	serveFileOf(w, r, fileAccessBusiness.Place{Kind: postgressStruct.ATTACHMENT_SRC_CHAT, ID: grpID}, false)
 }
@@ -1737,7 +1675,10 @@ func GetChatFile(w http.ResponseWriter, r *http.Request) {
 func GetAllUserEmojiStatusList(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	userDgraphInfo, err := business.GetAllUserEmojiStatusList(ctx, userInfo.UserDgraphInfo.Uuid)
 
@@ -1765,7 +1706,10 @@ func GetAllUserEmojiStatusList(w http.ResponseWriter, r *http.Request) {
 func ClearUserEmojiStatus(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	if err := business.ClearUserEmojiStatus(ctx, userInfo.UserDgraphInfo.Uuid); err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1784,7 +1728,10 @@ func ClearUserEmojiStatus(w http.ResponseWriter, r *http.Request) {
 func UpdateUserEmojiStatus(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var userInputStatus adapter.UserEmojiStatusInput
 
@@ -1826,7 +1773,10 @@ func UpdateUserEmojiStatus(w http.ResponseWriter, r *http.Request) {
 func GetGrpChatRecordingURL(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	grpIdString := chi.URLParam(r, "grp_id")
 	if grpIdString == "" {
@@ -1873,7 +1823,10 @@ func GetGrpChatRecordingURL(w http.ResponseWriter, r *http.Request) {
 func GetChatRecordingURL(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	chatUUIDString := chi.URLParam(r, "chat_uuid")
 	if chatUUIDString == "" {
@@ -1922,7 +1875,10 @@ func GetChatRecordingURL(w http.ResponseWriter, r *http.Request) {
 func GetChannelRecordingURL(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	channelUUIDString := chi.URLParam(r, "channel_uuid")
 	if channelUUIDString == "" {
@@ -2049,7 +2005,10 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	var userFwdMsgRawInfo adapter.UserFwdMsgInput
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	err := json.NewDecoder(r.Body).Decode(&userFwdMsgRawInfo)
 	if err != nil {
@@ -2103,7 +2062,7 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 		// A forward shows the message it carries, so a deleted one isn't
 		// forwarded: its text stays in the graph after the delete.
 		if helpers.IsSoftDeleted(userDgraphPost.DeletedAt) {
-			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted, so it can't be forwarded."})
+			helpers.WriteNotFound(w, "That message was deleted, so it can't be forwarded.")
 			return
 		}
 	}
@@ -2132,7 +2091,7 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if helpers.IsSoftDeleted(userDgraphChat.DeletedAt) {
-			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That message was deleted, so it can't be forwarded."})
+			helpers.WriteNotFound(w, "That message was deleted, so it can't be forwarded.")
 			return
 		}
 	}
@@ -2150,7 +2109,7 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case t.ChannelDgraphUid != "" || t.ChannelUuid != "":
 			if t.ChannelDgraphUid == "" {
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "A channel to forward to needs its id"})
+				helpers.WriteBadRequest(w, "A channel to forward to needs its id")
 				return
 			}
 			t.GrpId, t.UserUuid = "", ""
@@ -2176,7 +2135,7 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 		case t.UserUuid != "":
 			to, errTo := business.GetDgraphUserInfoByUUID(ctx, t.UserUuid)
 			if errTo != nil || to == nil {
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "There's no such person to forward to"})
+				helpers.WriteBadRequest(w, "There's no such person to forward to")
 				return
 			}
 			// The rule a direct message is sent by (business/Send).
@@ -2189,7 +2148,7 @@ func FwdUserMessage(w http.ResponseWriter, r *http.Request) {
 				t.UserProfileKey = *to.ProfileKey
 			}
 		default:
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Each place to forward to needs its id"})
+			helpers.WriteBadRequest(w, "Each place to forward to needs its id")
 			return
 		}
 	}
@@ -2292,18 +2251,17 @@ func GetProjectFile(w http.ResponseWriter, r *http.Request) {
 func GetAllUsersList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	pageValue := r.URL.Query()["pageIndex"]
-	pageIndex := 0
-	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 100)
-
-	if len(pageValue) > 0 {
-		pageInt, err := strconv.Atoi(pageValue[0])
-		if err == nil {
-			pageIndex = pageInt
-		}
+	q := r.URL.Query()
+	page := helpers.PageParam(q, 20, 100)
+	// Searched (q: a name or an address) and narrowed to admins or members
+	// (is_admin) here, and counted (total), so the admin's list need not walk
+	// every page to find someone.
+	filter := userDomain.MembersFilter{Q: q.Get("q")}
+	if v := q.Get("is_admin"); v == "true" || v == "false" {
+		admins := v == "true"
+		filter.Admins = &admins
 	}
-
-	dgraphUsers, hasMore, err := business.GetAllUsersListFromDgraph(ctx, pageIndex, pageSize)
+	dgraphUsers, hasMore, total, err := business.ListMembers(ctx, page, filter)
 	if err != nil {
 
 		helpers.LogErrorWithContext(ctx,
@@ -2321,13 +2279,17 @@ func GetAllUsersList(w http.ResponseWriter, r *http.Request) {
 		"msg":      "Got users list",
 		"data":     dgraphUsers,
 		"has_more": hasMore,
+		"total":    total,
 	})
 }
 
 func UpdateUserStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var userStatusInfo adapter.InputUserStatus
 	err := json.NewDecoder(r.Body).Decode(&userStatusInfo)
@@ -2387,7 +2349,10 @@ func UpdateUserStatus(w http.ResponseWriter, r *http.Request) {
 func UpdateUserProfile(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 	var userRawInfo adapter.InputEditUserProfile
 
 	err := json.NewDecoder(r.Body).Decode(&userRawInfo)
@@ -2531,7 +2496,10 @@ func UpdateUserProfile(w http.ResponseWriter, r *http.Request) {
 func UpdateUserTheme(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 	var themeInput adapter.InputUserTheme
 
 	err := json.NewDecoder(r.Body).Decode(&themeInput)
@@ -2569,18 +2537,13 @@ func UpdateUserTheme(w http.ResponseWriter, r *http.Request) {
 func GetUserPosts(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
-
-	pageValue := r.URL.Query()["pageIndex"]
-	pageIndex := 0
-	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 100)
-
-	if len(pageValue) > 0 {
-		pageInt, err := strconv.Atoi(pageValue[0])
-		if err == nil {
-			pageIndex = pageInt
-		}
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
 	}
+
+	page := helpers.PageParam(r.URL.Query(), 20, 100)
+	pageIndex, pageSize := page.Index, page.Size
 
 	dgraphUser, err := business.GetUsersPosts(ctx, userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.Uid, pageIndex, pageSize)
 
@@ -2609,7 +2572,10 @@ func UpdateUserFCMToken(w http.ResponseWriter, r *http.Request) {
 
 	deviceId := ctx.Value(helpers.DeviceIdContextKey).(string)
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var userFCMToken adapter.InputUserFCMToken
 
@@ -2649,7 +2615,10 @@ func UpdateUserFCMToken(w http.ResponseWriter, r *http.Request) {
 func UpdateUserGroupChatNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var userNotificationStatus adapter.InputUserGroupChatNotification
 
@@ -2721,7 +2690,10 @@ func UpdateUserGroupChatNotification(w http.ResponseWriter, r *http.Request) {
 func UpdateUserChatNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var userNotificationStatus adapter.InputUserChatNotification
 
@@ -2797,7 +2769,10 @@ func UpdateUserChatNotification(w http.ResponseWriter, r *http.Request) {
 
 func DeactivateUser(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var inputUserInfoRaw adapter.InputUserUUID
 
@@ -2848,7 +2823,7 @@ func DeactivateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go userFCMtokenBusiness.DeleteByUserId(inputUserInfoRaw.UserUuid)
+	helpers.GoSafeNamed("userFCMtokenBusiness.DeleteByUserId", func() { userFCMtokenBusiness.DeleteByUserId(inputUserInfoRaw.UserUuid) })
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":    "Blocked user",
@@ -2924,7 +2899,10 @@ func CreateAdmin(w http.ResponseWriter, r *http.Request) {
 func FwdUserAndChannelList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var searchTextInputRaw adapter.SearchInputFwdMsgText
 
@@ -2949,7 +2927,7 @@ func FwdUserAndChannelList(w http.ResponseWriter, r *http.Request) {
 			helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "empty search", "data": nil})
 			return
 		}
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "search text is too long or invalid"})
+		helpers.WriteBadRequest(w, "search text is too long or invalid")
 		return
 	}
 
@@ -2977,7 +2955,10 @@ func FwdUserAndChannelList(w http.ResponseWriter, r *http.Request) {
 
 func RemoveAdmin(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var inputUserInfoRaw adapter.InputUserUUID
 
@@ -3050,16 +3031,8 @@ func RemoveAdmin(w http.ResponseWriter, r *http.Request) {
 func GetAllAdminUsers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	pageValue := r.URL.Query()["pageIndex"]
-	pageIndex := 0
-	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 500)
-
-	if len(pageValue) > 0 {
-		pageInt, err := strconv.Atoi(pageValue[0])
-		if err == nil {
-			pageIndex = pageInt
-		}
-	}
+	page := helpers.PageParam(r.URL.Query(), 20, 500)
+	pageIndex, pageSize := page.Index, page.Size
 
 	usersInfo, hasMore, err := business.GetAllAdminUsers(ctx, pageIndex, pageSize)
 
@@ -3084,9 +3057,11 @@ func GetAllAdminUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func GetSelfAdminProfile(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":  "Self user profile",
@@ -3152,7 +3127,10 @@ func ActivateUser(w http.ResponseWriter, r *http.Request) {
 func UpdateUserProjectNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var userNotificationStatus adapter.InputUserProjectNotification
 
@@ -3240,7 +3218,10 @@ func UpdateUserProjectNotification(w http.ResponseWriter, r *http.Request) {
 func UpdateUserChannelNotification(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var userNotificationStatus adapter.InputUserChannelNotification
 
@@ -3348,7 +3329,10 @@ func GetAllInvitations(w http.ResponseWriter, r *http.Request) {
 
 func AddInvitation(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var requestBody struct {
 		Email string `json:"email"`
@@ -3494,7 +3478,10 @@ func writeInviteRefusal(w http.ResponseWriter, err error) {
 
 func ResendInvitation(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var requestBody struct {
 		Email string `json:"email"`
@@ -3744,16 +3731,8 @@ func respondInvitation(w http.ResponseWriter, resent bool, link string, sendErr 
 func GetExternalUsers(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	pageValue := r.URL.Query()["pageIndex"]
-	pageIndex := 0
-	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 100)
-
-	if len(pageValue) > 0 {
-		pageInt, err := strconv.Atoi(pageValue[0])
-		if err == nil {
-			pageIndex = pageInt
-		}
-	}
+	page := helpers.PageParam(r.URL.Query(), 20, 100)
+	pageIndex, pageSize := page.Index, page.Size
 
 	const maxPageSize = 100
 	if pageSize > maxPageSize {

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sort"
 
-	userBusiness "github.com/akashc777/OneCamp/business/User"
+	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	importModels "github.com/akashc777/OneCamp/models/postgres/SlackImport"
@@ -259,8 +259,9 @@ type dmContext struct {
 	isMPIM      bool
 
 	// User caches mirror messageContext.
-	userCache     map[string]*userModels.UserInfo
-	userNameCache map[string]string
+	userCache  map[string]*userModels.UserInfo
+	slackNames map[string]string // each Slack user's name, by id (slackNameBook)
+	text       *textNames        // what message text mentions (mrkdwn_names.go)
 
 	// Dgraph DM-node materialisation flag. False on the first message
 	// of this MPIM — that call into CreateChatForGroup must leave
@@ -284,6 +285,9 @@ type dmContext struct {
 
 	// Pending file-chunk inserts buffered for batch flush at chunk end.
 	pendingFileChunks []*importModels.Chunk
+
+	// The batch's mappings (batch.go).
+	maps *messageMaps
 }
 
 // loadDMContext reads the metadata stored at DM resolution time and
@@ -324,63 +328,38 @@ func loadDMContext(ctx context.Context, chunk *importModels.Chunk, workspaceName
 		memberUUIDs:   meta.Members,
 		isMPIM:        meta.IsMPIM,
 		userCache:     make(map[string]*userModels.UserInfo, 8),
-		userNameCache: make(map[string]string, 8),
 		enqueuedFiles: make(map[string]struct{}, 16),
+		maps:          newMessageMaps(chunk.ImportId, workspaceName),
 	}
 
-	// Detect whether the Dgraph DM node for this MPIM already exists.
-	// Two paths to true:
-	//   1. A prior chunk in this same import already wrote a message
-	//      for this DM (per-import resume / re-run).
-	//   2. A prior import of the same workspace wrote the DM
-	//      (cross-import dedup; the workspace_id_map covers this).
-	//
-	// We check both because either implies the Dgraph DM node exists
-	// and `chatInfo.GrpUuid` should be set so CreateChatForGroup
-	// short-circuits its DM-node write.
-	if dc.isMPIM {
-		owned, _ := importModels.HasAnyOwnedMessageForDM(ctx, chunk.ImportId, slackId)
-		if owned {
-			dc.dmNodeMaterialised = true
-		} else if workspaceName != "" {
-			// Workspace map check — if a prior import wrote this MPIM,
-			// the DM node still exists in Dgraph.
-			if existing, _ := importModels.LookupWorkspaceMapping(ctx, workspaceName, importModels.EntityMPIM, slackId); existing != uuid.Nil {
-				dc.dmNodeMaterialised = true
-			}
+	// A group's node is written with its people by its first message
+	// (CreateChatForGroup with no grouping id); the rest join it. Whether
+	// it is written is the graph's to say: the id map's checks said so for
+	// every group's first message (any message this import made, and the
+	// workspace mapping its own resolution writes), so groups came across
+	// with nobody in them.
+	if dc.isMPIM && meta.GroupingId != "" {
+		existing, err := groupingsThere(ctx, []string{meta.GroupingId})
+		if err != nil {
+			return nil, fmt.Errorf("is the group there: %w", err)
 		}
+		dc.dmNodeMaterialised = existing[meta.GroupingId]
 	}
 
 	return dc, nil
 }
 
+// groupingsThere is which groupings the graph has a conversation for; a seam
+// for tests.
+var groupingsThere = chatDomain.ExistingGroupingIDs
+
 // dmResolveAuthor mirrors messageContext.resolveAuthor for the chat path.
 func (dc *dmContext) resolveAuthor(ctx context.Context, m *SlackMessage, importingUser *userModels.UserInfo) (*userModels.UserInfo, *dgraphStruct.DgraphUser) {
-	authorId := m.User
-	if authorId == "" && m.BotID != "" {
-		return importingUser, &importingUser.UserDgraphInfo
+	// A bot's message with no person, or no author at all, is the importer's.
+	if who := importedPerson(ctx, dc.maps, dc.userCache, m.User); who != nil {
+		return who, &who.UserDgraphInfo
 	}
-	if authorId == "" {
-		return importingUser, &importingUser.UserDgraphInfo
-	}
-	if cached, ok := dc.userCache[authorId]; ok {
-		return cached, &cached.UserDgraphInfo
-	}
-	ocUUID, _ := importModels.LookupIdMapping(ctx, dc.importId, importModels.EntityUser, authorId)
-	if ocUUID == uuid.Nil {
-		return importingUser, &importingUser.UserDgraphInfo
-	}
-	pgUser, err := userBusiness.GetUserByUUID(ctx, ocUUID)
-	if err != nil || pgUser == nil {
-		return importingUser, &importingUser.UserDgraphInfo
-	}
-	dgUser, err := userBusiness.GetDgraphUserInfoByUUID(ctx, ocUUID.String())
-	if err != nil || dgUser == nil {
-		return importingUser, &importingUser.UserDgraphInfo
-	}
-	info := &userModels.UserInfo{UserPostgresInfo: *pgUser, UserDgraphInfo: *dgUser}
-	dc.userCache[authorId] = info
-	return info, dgUser
+	return importingUser, &importingUser.UserDgraphInfo
 }
 
 // jsonUnmarshalRaw is a tiny wrapper used by loadDMContext to keep the

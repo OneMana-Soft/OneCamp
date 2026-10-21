@@ -84,13 +84,13 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 	cancelCh := make(chan struct{})
 	registerActiveJob(jobId, cancelCh)
 
-	go func() {
+	helpers.GoSafeNamed("business/SlackImport/orchestrator:RunImport", func() {
 		select {
 		case <-cancelCh:
 			cancel()
 		case <-ctx.Done():
 		}
-	}()
+	})
 
 	job, err := importModels.GetJob(ctx, jobId)
 	if err != nil {
@@ -184,12 +184,15 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 		return
 	}
 
+	// A mention of someone who didn't come across reads as their Slack name.
+	names := slackNameBook(parsed.Users)
+
 	// Stage 4: messages (top-level)
 	_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusRunning, strPtr("messages"), nil)
 	if err := runWorkerPool(ctx, jobId, job.SlackWorkspaceName, "messages", messageWorkers,
 		[]string{importModels.ChunkChannelMessages},
 		func(workerCtx context.Context, c *importModels.Chunk) error {
-			return processMessageChunk(workerCtx, arc, c, isTrue(options.SkipSubtypes), importingUser, job.SlackWorkspaceName)
+			return processMessageChunk(workerCtx, arc, c, isTrue(options.SkipSubtypes), importingUser, job.SlackWorkspaceName, names)
 		}); err != nil {
 		failJob(ctx, jobId, job.SlackWorkspaceName, err)
 		return
@@ -203,7 +206,7 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 	if err := runWorkerPool(ctx, jobId, job.SlackWorkspaceName, "threads", messageWorkers,
 		[]string{importModels.ChunkChannelThreads},
 		func(workerCtx context.Context, c *importModels.Chunk) error {
-			return processMessageChunk(workerCtx, arc, c, isTrue(options.SkipSubtypes), importingUser, job.SlackWorkspaceName)
+			return processMessageChunk(workerCtx, arc, c, isTrue(options.SkipSubtypes), importingUser, job.SlackWorkspaceName, names)
 		}); err != nil {
 		failJob(ctx, jobId, job.SlackWorkspaceName, err)
 		return
@@ -221,7 +224,7 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 	if err := runWorkerPool(ctx, jobId, job.SlackWorkspaceName, "dm_messages", messageWorkers,
 		[]string{importModels.ChunkDMMessages},
 		func(workerCtx context.Context, c *importModels.Chunk) error {
-			return processDMChunk(workerCtx, arc, c, isTrue(options.SkipSubtypes), importingUser, job.SlackWorkspaceName)
+			return processDMChunk(workerCtx, arc, c, isTrue(options.SkipSubtypes), importingUser, job.SlackWorkspaceName, names)
 		}); err != nil {
 		// Non-fatal: DM failures should not abort the whole import.
 		// The error log surfaces specific issues; channels remain useful.
@@ -233,12 +236,15 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 	}
 
 	// Stage 6: files. Files are scheduled by the message workers, so we
-	// only enter this stage AFTER messages+threads have settled.
+	// only enter this stage AFTER messages+threads have settled. A file the
+	// export carries is read from it; an export read through Slack's API
+	// carries every file there is to read.
 	_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusRunning, strPtr("files"), nil)
+	files := fileSource{arc: arc, uploads: parsed.Uploads, linksOpen: job.Source != importModels.SourceAPI}
 	if err := runWorkerPool(ctx, jobId, job.SlackWorkspaceName, "files", fileWorkers,
 		[]string{importModels.ChunkFile},
 		func(workerCtx context.Context, c *importModels.Chunk) error {
-			return processFileChunk(workerCtx, c, importingUser.UserPostgresInfo.Id, options.MaxFileBytes)
+			return processFileChunk(workerCtx, files, c, importingUser.UserPostgresInfo.Id, options.MaxFileBytes)
 		}); err != nil {
 		// Files are best-effort: a single failed file should not fail
 		// the whole import. We log and proceed to reactions.
@@ -444,9 +450,10 @@ func progressPublisher(ctx context.Context, jobId uuid.UUID, workspaceName, stag
 
 // publishProgress reads aggregate counts and emits a single MQTT message.
 func publishProgress(ctx context.Context, jobId uuid.UUID, workspaceName, status, stage, errMsg string) {
-	total, done, failed, _ := importModels.CountChunks(ctx, jobId)
-	items, _ := importModels.SumItemsImported(ctx, jobId)
-	errCount, _ := importModels.CountErrors(ctx, jobId)
+	// One statement for the three counts, where it was three.
+	counts, _ := importModels.JobCounts(ctx, []uuid.UUID{jobId})
+	c := counts[jobId]
+	total, done, failed, items, errCount := c.ChunksTotal, c.ChunksDone, c.ChunksFailed, c.ItemsImported, c.ErrorsTotal
 
 	mqttBusiness.PublishSlackImportProgress(&mqttStruct.MqttSlackImportProgress{
 		JobId:              jobId.String(),
@@ -478,10 +485,11 @@ func failJob(ctx context.Context, jobId uuid.UUID, workspaceName string, err err
 // at their next loop iteration and exit; the orchestrator finalises the
 // job as cancelled.
 //
-// A job still waiting (an upload, or a plan never run) is discarded: it
-// kept its workspace's label busy, and nothing could clear it, so an
-// abandoned upload blocked importing that workspace again. Its staged
-// export goes with it, since a discarded job can't be planned again.
+// A job still waiting (an upload, a read from Slack's API, or a plan never
+// run) is discarded: it kept its workspace's label busy, and nothing could
+// clear it, so an abandoned upload blocked importing that workspace again.
+// A read under way stops. Its staged export goes with it, since a discarded
+// job can't be planned again.
 func CancelImport(ctx context.Context, jobId uuid.UUID) error {
 	job, err := importModels.GetJob(ctx, jobId)
 	if err != nil {
@@ -493,6 +501,7 @@ func CancelImport(ctx context.Context, jobId uuid.UUID) error {
 			strPtr("cancelled"), strPtr("Discarded before it ran.")); err != nil {
 			return err
 		}
+		stopActiveJob(jobId)
 		if err := DeleteStagedZip(ctx, jobId); err != nil {
 			helpers.LogWarnWithContext(ctx, "SlackImport discard could not delete staged export job=%s err=%+v", jobId, err)
 		}
@@ -511,8 +520,16 @@ func CancelImport(ctx context.Context, jobId uuid.UUID) error {
 		return err
 	}
 
-	// Tell any in-process orchestrator to stop.
+	stopActiveJob(jobId)
+	publishProgress(ctx, jobId, job.SlackWorkspaceName, "cancelled", "cancelled", "")
+	return nil
+}
+
+// stopActiveJob tells the job's work in this process, an import running or a
+// read from Slack's API, to stop.
+func stopActiveJob(jobId uuid.UUID) {
 	activeJobsMu.Lock()
+	defer activeJobsMu.Unlock()
 	if ch, ok := activeJobs[jobId]; ok {
 		select {
 		case <-ch:
@@ -521,10 +538,6 @@ func CancelImport(ctx context.Context, jobId uuid.UUID) error {
 		}
 		delete(activeJobs, jobId)
 	}
-	activeJobsMu.Unlock()
-
-	publishProgress(ctx, jobId, job.SlackWorkspaceName, "cancelled", "cancelled", "")
-	return nil
 }
 
 // --- Helpers --------------------------------------------------------------
@@ -643,26 +656,4 @@ func isTrue(b *bool) bool {
 		return true
 	}
 	return *b
-}
-
-// StartReaperLoop runs every 60s and resets stuck claims. Mirrors the
-// GitHub-sync reaper. Wire from main.go.
-func StartReaperLoop() {
-	go func() {
-		t := time.NewTicker(60 * time.Second)
-		defer t.Stop()
-		for range t.C {
-			ctx := context.Background()
-			n, err := importModels.ReapStuckChunks(ctx, 5*time.Minute)
-			if err != nil {
-				helpers.LogWarnWithContext(ctx,
-					"SlackImport reaper failed: %+v", err)
-				continue
-			}
-			if n > 0 {
-				helpers.LogInfoWithContext(ctx,
-					"SlackImport reaper reset %d stuck chunk(s)", n)
-			}
-		}
-	}()
 }

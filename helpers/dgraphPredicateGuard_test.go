@@ -42,8 +42,9 @@ func TestNoDgraphQueryAsksForAPredicateNothingHolds(t *testing.T) {
 	}
 }
 
-// The guard itself: it finds a name nothing holds, and leaves aliases, query
-// variables, value variables, format verbs and the language's words alone.
+// The guard itself: it finds a name nothing holds, and leaves aliases, block
+// names, query variables, value variables, format verbs and the language's
+// words alone.
 func TestUnknownPredicatesFindsTheNamesNothingHolds(t *testing.T) {
 	held := map[string]bool{"ch_uuid": true, "ch_members": true, "user_uuid": true, "dm_participants": true, "doc_private": true}
 	q := dgraphQuery{text: `query Q($ch_id: string) {
@@ -55,6 +56,7 @@ func TestUnknownPredicatesFindsTheNamesNothingHolds(t *testing.T) {
 			ch_members { user_uuid user_enail_id }
 			first_seen: val(first_seen)
 		}
+		found_owner(func: uid(dm_p)) { uid }
 	}`}
 	got := unknownPredicates(q.text, held, valueVariables([]dgraphQuery{q, {text: "first_seen as min(val(s))"}}))
 	if strings.Join(got, ",") != "ch_handle,user_enail_id" {
@@ -117,13 +119,17 @@ func valueVariables(queries []dgraphQuery) map[string]bool {
 // (dm_p as …), the end of a format verb (%s_private) or the language's own
 // words.
 func unknownPredicates(q string, held, vars map[string]bool) []string {
+	// The task filter's mark (models/taskread Mark) is filled before a query
+	// is sent: it names no predicate.
+	q = strings.ReplaceAll(q, "@@hidden_tasks@@", "")
 	var out []string
 	for _, at := range predicateLike.FindAllStringIndex(q, -1) {
 		name := q[at[0]:at[1]]
 		if at[0] > 0 && strings.ContainsAny(q[at[0]-1:at[0]], "$%._abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") {
 			continue
 		}
-		if strings.HasPrefix(strings.TrimLeft(q[at[1]:], " \t"), ":") || vars[name] || dqlWords[name] || held[name] {
+		rest := strings.TrimLeft(q[at[1]:], " \t")
+		if strings.HasPrefix(rest, ":") || strings.HasPrefix(rest, "(func") || vars[name] || dqlWords[name] || held[name] {
 			continue
 		}
 		out = append(out, name)

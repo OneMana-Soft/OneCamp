@@ -2,7 +2,6 @@ package models
 
 import (
 	"context"
-	"database/sql"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -75,44 +74,4 @@ func HardDeleteCommentByUUID(query string, commentUUID uuid.UUID) (err error) {
 	}
 
 	return
-}
-
-func GetCommentByUUID(query string, postUUID uuid.UUID) (postInfo *Comment, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var commentData Comment
-	var createdAt sql.NullTime
-	var updatedAt sql.NullTime
-	var deletedAt sql.NullTime
-
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, postUUID)
-	err = row.Scan(
-		&commentData.Id,
-		&commentData.CreatedBy,
-		&createdAt,
-		&updatedAt,
-		&deletedAt,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetCommentByUUID Failed to get post err: %+v",
-			err)
-		return
-	}
-
-	if createdAt.Valid {
-		commentData.CreatedAt = createdAt.Time
-	}
-
-	if updatedAt.Valid {
-		commentData.UpdatedAt = updatedAt.Time
-	}
-
-	if deletedAt.Valid {
-		commentData.DeletedAt = deletedAt.Time
-	}
-
-	return &commentData, nil
 }

@@ -22,6 +22,10 @@ import (
 	"github.com/minio/minio-go/v7"
 )
 
+// unknownSizePart is the part an upload of a size not known ahead is sent in:
+// minio-go's smallest, which still takes an object of up to 156 GB.
+const unknownSizePart = 16 << 20
+
 // SafeUploadOptions controls how SafeUploadToMinio writes an object.
 type SafeUploadOptions struct {
 	// Bucket is the destination MinIO bucket.
@@ -76,6 +80,13 @@ func SafeUploadToMinio(ctx context.Context, body io.Reader, opts SafeUploadOptio
 		ContentType:        opts.ContentType,
 		ContentDisposition: opts.ContentDisposition,
 	}
+	// A body of a size not known ahead goes up in parts of unknownSizePart.
+	// Left to itself, minio-go sizes the parts for a 5 TiB object and holds
+	// one part in memory: 528 MB for every such upload, each file an import
+	// brings among them, on a server that may have 4 GB.
+	if opts.Size < 0 {
+		putOpts.PartSize = unknownSizePart
+	}
 
 	if scanner == nil {
 		// No scanner configured: single read, single write.
@@ -96,7 +107,7 @@ func SafeUploadToMinio(ctx context.Context, body io.Reader, opts SafeUploadOptio
 	)
 
 	// AV consumer.
-	go func() {
+	helpers.GoSafeNamed("business/Attachment/safeUpload:SafeUploadToMinio", func() {
 		defer func() { done <- struct{}{} }()
 		scanRes, scanErr = scanner.Scan(ctx, pr)
 		// Drain to make sure the producer can exit even if the
@@ -104,10 +115,10 @@ func SafeUploadToMinio(ctx context.Context, body io.Reader, opts SafeUploadOptio
 		// early once a signature matches).
 		_, _ = io.Copy(io.Discard, pr)
 		_ = pr.Close()
-	}()
+	})
 
 	// MinIO consumer.
-	go func() {
+	helpers.GoSafeNamed("business/Attachment/safeUpload:SafeUploadToMinio", func() {
 		defer func() { done <- struct{}{} }()
 		ui, uiErr = minioInit.MinioClient.PutObject(ctx, opts.Bucket, opts.ObjectName,
 			tee, opts.Size, putOpts)
@@ -116,7 +127,7 @@ func SafeUploadToMinio(ctx context.Context, body io.Reader, opts SafeUploadOptio
 		} else {
 			_ = pw.Close()
 		}
-	}()
+	})
 
 	<-done
 	<-done

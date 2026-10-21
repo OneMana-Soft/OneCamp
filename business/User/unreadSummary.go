@@ -83,12 +83,11 @@ func buildUnreadSummary(user *dgraphStruct.DgraphUser, selfUUID string, activity
 // group by its grouping id. Which it is, its grouping id says: a DM's is both
 // people's ids with a space between them.
 func dmPlace(d *dgraphStruct.DgraphDm, selfUUID string) UnreadPlace {
-	var names, others []string
+	var names []string
 	for _, p := range d.Participants {
 		if p == nil || p.Uuid == selfUUID {
 			continue
 		}
-		others = append(others, p.Uuid)
 		if n := p.DisplayName(); n != "" {
 			names = append(names, n)
 		}

@@ -81,8 +81,14 @@ type GuestCollabClaims struct {
 // One function rather than the comparison inlined at each check, because the two
 // checks that exist got to disagree the moment the column became nullable, and
 // the failure mode of disagreeing is a link that opens where it should not.
-func grantExpired(g *guestModel.GuestGrant) bool {
-	return g.ExpiresAt != nil && !g.ExpiresAt.After(time.Now())
+//
+// The workspace's longest link lifetime counts too (docs C6-2): a link that
+// isn't standing and was made the cap's days ago or more is past, as the
+// model's liveSQL says. Lowering the cap stops older links at once; raising
+// it brings them back, since nothing is written.
+func grantExpired(ctx context.Context, g *guestModel.GuestGrant) bool {
+	now := time.Now()
+	return (g.ExpiresAt != nil && !g.ExpiresAt.After(now)) || pastCap(ctx, g, now)
 }
 
 // CreateResourceGrant mints a scoped, expiring grant for a doc/board/table.
@@ -121,24 +127,15 @@ func CreateResourceGrant(ctx context.Context, creatorUUID uuid.UUID, resourceTyp
 	if capability == guestModel.CapabilityPost && resourceType == guestModel.ResourceChannel {
 		cap = guestModel.CapabilityPost
 	}
-	// The ceiling still applies to every link that HAS an expiry. Permanence is
-	// only reachable by asking for it explicitly.
-	if ttl <= 0 {
-		ttl = resourceGrantTTL
-	}
-	if ttl > maxResourceGrantTTL {
-		ttl = maxResourceGrantTTL
-	}
 
 	raw, err := randomToken()
 	if err != nil {
 		return nil, err
 	}
-	var expiresAt *time.Time
-	if !neverExpires {
-		at := time.Now().Add(ttl)
-		expiresAt = &at
-	}
+	// The ceiling still applies to every link that HAS an expiry, and the
+	// workspace's cap to every link: permanence is only reachable by asking
+	// for it explicitly, and only while there is no cap (kinds.go).
+	expiresAt := linkLifetime(ctx, time.Now(), ttl, neverExpires)
 	grantID, err := guestModel.CreateGrant(ctx, hashToken(raw), resourceType, resourceID, cap, creatorUUID, expiresAt)
 	if err != nil {
 		return nil, err
@@ -166,6 +163,18 @@ type GuestCommentView struct {
 	GuestName string
 	Body      string // plain text (HTML already stripped)
 	CreatedAt time.Time
+	// ParentID is the guest comment a member's reply answers (docs C5-2);
+	// nil for a guest's own comment.
+	ParentID *uuid.UUID
+	// FromTeam is a member's reply, visible to the guest; GuestName is then
+	// "<name> from <workspace>".
+	FromTeam bool
+	// AuthorID is who wrote it, the same on every comment by one guest on one
+	// link (B13): "guest-…" for a guest; a member's user id for a reply.
+	AuthorID string
+	// AuthorName is a team member's own name, without the workspace, for
+	// their face (initials and hue, as inside the workspace); "" for a guest.
+	AuthorName string
 }
 
 // CreateGuestDocComment posts a comment on a doc on behalf of a guest, after
@@ -196,8 +205,8 @@ func CreateGuestDocComment(ctx context.Context, grant *guestModel.GuestGrant, di
 	if err != nil {
 		return nil, err
 	}
-	go notifyDocKeepers(context.WithoutCancel(ctx), grant.ResourceID, name, id.String(), plain)
-	return &GuestCommentView{ID: id, GuestName: name, Body: plain, CreatedAt: createdAt}, nil
+	helpers.GoSafeNamed("notifyDocKeepers", func() { notifyDocKeepers(context.WithoutCancel(ctx), grant.ResourceID, name, id.String(), plain) })
+	return &GuestCommentView{ID: id, GuestName: name, Body: plain, CreatedAt: createdAt, AuthorID: GuestAuthorID(grant.Id, name)}, nil
 }
 
 // notifyDocKeepers tells whoever made a doc, and its editors, that a guest
@@ -276,12 +285,14 @@ func ListGuestDocComments(ctx context.Context, docUUID string) ([]*GuestCommentV
 	}
 	out := make([]*GuestCommentView, 0, len(rows))
 	for _, c := range rows {
-		out = append(out, &GuestCommentView{
-			ID:        c.Id,
-			GuestName: c.GuestName,
-			Body:      c.Body,
-			CreatedAt: c.CreatedAt,
-		})
+		v := &GuestCommentView{ID: c.Id, GuestName: c.GuestName, Body: c.Body, CreatedAt: c.CreatedAt, ParentID: c.ParentID}
+		if c.AuthorKind == guestModel.AuthorMember && c.AuthorUserUUID != nil {
+			v.FromTeam, v.AuthorID = true, c.AuthorUserUUID.String()
+			v.AuthorName = teamName(c.GuestName, workspaceName())
+		} else {
+			v.AuthorID = GuestAuthorID(c.GrantID, c.GuestName)
+		}
+		out = append(out, v)
 	}
 	return out, nil
 }
@@ -291,22 +302,12 @@ func ListGuestDocComments(ctx context.Context, docUUID string) ([]*GuestCommentV
 // error (mapped to a uniform "not available" upstream) when access is not
 // available for any reason — no oracle — and a read that failed as it is.
 func ValidateResourceGrant(ctx context.Context, rawToken, expectedType string) (*guestModel.GuestGrant, error) {
-	if !settingsBusiness.GuestAccessEnabled() {
-		return nil, ErrGuestDisabled
-	}
-	rawToken = strings.TrimSpace(rawToken)
-	if rawToken == "" {
-		return nil, ErrInvalidGrant
-	}
-	g, err := guestModel.GetActiveByHash(ctx, hashToken(rawToken))
+	g, err := ResolveExternal(ctx, External{Token: rawToken})
 	if err != nil {
 		return nil, err
 	}
-	if g == nil || g.ResourceType != expectedType {
+	if g.ResourceType != expectedType {
 		return nil, ErrInvalidGrant
-	}
-	if err := grantedDocLive(ctx, g); err != nil {
-		return nil, err
 	}
 	return g, nil
 }
@@ -330,23 +331,16 @@ func grantedDocLive(ctx context.Context, g *guestModel.GuestGrant) error {
 // ValidateCollabGrant resolves a raw link token to an active grant for a LIVE
 // collaborative resource (doc or board), enforcing the workspace policy. Used
 // by the guest collab-token endpoint, which doesn't know the type in advance.
+//
+// A doc's view link answers too, though it never joins the collaboration
+// service: the caller sends its guest to the server's page (ServedAsPage).
 func ValidateCollabGrant(ctx context.Context, rawToken string) (*guestModel.GuestGrant, error) {
-	if !settingsBusiness.GuestAccessEnabled() {
-		return nil, ErrGuestDisabled
-	}
-	rawToken = strings.TrimSpace(rawToken)
-	if rawToken == "" {
-		return nil, ErrInvalidGrant
-	}
-	g, err := guestModel.GetActiveByHash(ctx, hashToken(rawToken))
+	g, err := ResolveExternal(ctx, External{Token: rawToken})
 	if err != nil {
 		return nil, err
 	}
-	if g == nil || (g.ResourceType != guestModel.ResourceDoc && g.ResourceType != guestModel.ResourceBoard) {
+	if g.ResourceType != guestModel.ResourceDoc && g.ResourceType != guestModel.ResourceBoard {
 		return nil, ErrInvalidGrant
-	}
-	if err := grantedDocLive(ctx, g); err != nil {
-		return nil, err
 	}
 	return g, nil
 }
@@ -359,6 +353,10 @@ func ValidateCollabGrant(ctx context.Context, rawToken string) (*guestModel.Gues
 func IssueGuestCollabToken(ctx context.Context, grant *guestModel.GuestGrant, displayName string) (string, error) {
 	if grant == nil {
 		return "", ErrInvalidGrant
+	}
+	if ServedAsPage(grant) {
+		// A doc's view link is the server's page alone (D-25).
+		return "", ErrForbidden
 	}
 	name := sanitizeGuestName(displayName)
 	if name == "" {
@@ -420,10 +418,15 @@ func AuthorizeGuestCollab(ctx context.Context, bearerToken, kind, resourceID str
 	if err != nil {
 		return nil, err
 	}
-	if g == nil || g.RevokedAt != nil || grantExpired(g) {
+	if g == nil || g.RevokedAt != nil || grantExpired(ctx, g) {
 		return nil, ErrInvalidGrant
 	}
 	if g.ResourceType != kind || g.ResourceID != strings.TrimSpace(resourceID) {
+		return nil, ErrInvalidGrant
+	}
+	if ServedAsPage(g) {
+		// A doc's view link (or one with a password) is the server's page
+		// alone: a token issued before it became one opens nothing here.
 		return nil, ErrInvalidGrant
 	}
 	// Every (re)connect, so a doc deleted while a guest has it open takes

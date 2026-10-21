@@ -396,7 +396,7 @@ func Trash(ctx context.Context, viewerUID string, isAdmin bool, now time.Time) (
 	}
 	out := make([]TrashItem, 0, len(docs))
 	for _, d := range docs {
-		if !couldEditDeleted(d, viewerUID) || d.DeletedAt == nil {
+		if !couldEditDeleted(d, viewerUID) || !helpers.IsSoftDeleted(d.DeletedAt) {
 			continue
 		}
 		// A page deleted with its parent is the parent's entry's.

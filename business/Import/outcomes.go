@@ -47,6 +47,11 @@ func OutcomesFor(ctx context.Context, userId uuid.UUID, now time.Time) ([]Import
 	if err != nil {
 		return nil, err
 	}
+	ids := make([]uuid.UUID, len(jobs))
+	for i, j := range jobs {
+		ids[i] = j.Id
+	}
+	counts, _ := importModels.JobCounts(ctx, ids) // one statement for all
 	out := make([]ImportOutcome, 0, len(jobs))
 	for _, j := range jobs {
 		o := ImportOutcome{JobID: j.Id, Provider: j.Provider, Label: j.SourceWorkspaceName, Status: j.Status}
@@ -56,7 +61,7 @@ func OutcomesFor(ctx context.Context, userId uuid.UUID, now time.Time) ([]Import
 		if j.ErrorMessage != nil {
 			o.Error = *j.ErrorMessage
 		}
-		o.ItemsImported, _ = importModels.SumItemsImported(ctx, j.Id)
+		o.ItemsImported = counts[j.Id].ItemsImported
 		if j.Status == importModels.StatusCompleted {
 			// A failed count leaves the offer at zero rather than losing the
 			// news that the import finished.

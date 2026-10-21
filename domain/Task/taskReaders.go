@@ -12,14 +12,73 @@ import (
 
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Task"
+	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
+	"github.com/akashc777/OneCamp/models/taskread"
+	"github.com/google/uuid"
 )
 
 // Readers is which of the people (user ids, matched in any case and answered
 // as given) may read the task now; a task that isn't there has none. One read
-// of the graph.
+// of the graph and one of the task's restriction: a restricted task is read
+// only by its project's admins, its assignee, its creator and the people
+// granted on it (business/WorkAccess LetIn), so a notice about it reaches no
+// one else.
 func Readers(ctx context.Context, taskUUID string, userUUIDs []string) (map[string]bool, error) {
+	task, readers, err := projectReaders(ctx, taskUUID, userUUIDs)
+	if err != nil || task == nil || len(readers) == 0 {
+		return readers, err
+	}
+	id, err := uuid.Parse(task.Uuid)
+	if err != nil {
+		return readers, nil
+	}
+	r, err := restrictionOf(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !r.Restricted {
+		return readers, nil
+	}
+	granted := make(map[string]bool, len(r.Grants))
+	for _, g := range r.Grants {
+		granted[g.String()] = true
+	}
+	is := func(u *dgraphStruct.DgraphUser, who string) bool {
+		return u != nil && u.Uuid != "" && strings.EqualFold(u.Uuid, who)
+	}
+	for who := range readers {
+		key := strings.ToLower(who)
+		if granted[key] || is(task.Assignee, who) || is(task.CreatedBy, who) {
+			continue
+		}
+		// Anyone else only as one of its project's admins, by the whole rule
+		// (a role row can say less than the graph's admin edge).
+		f, err := taskread.For(ctx, who)
+		if err != nil {
+			return nil, err
+		}
+		if f.Hides(task.Uuid) {
+			delete(readers, who)
+		}
+	}
+	return readers, nil
+}
+
+// InProject is which of the people are the task's project's people, or its
+// assignee: who may be let into it by name when it is restricted. One read.
+func InProject(ctx context.Context, taskUUID string, userUUIDs []string) (map[string]bool, error) {
+	_, readers, err := projectReaders(ctx, taskUUID, userUUIDs)
+	return readers, err
+}
+
+// restrictionOf is a seam for tests.
+var restrictionOf = restrictionModel.Of
+
+// projectReaders is which of the people its project lets read the task, with
+// the task as read for that, before any restriction.
+func projectReaders(ctx context.Context, taskUUID string, userUUIDs []string) (*dgraphStruct.DgraphTask, map[string]bool, error) {
 	if len(userUUIDs) == 0 {
-		return map[string]bool{}, nil
+		return nil, map[string]bool{}, nil
 	}
 	// The project's uid and uuid keep its block from reading as no project
 	// when nobody is in it.
@@ -36,14 +95,16 @@ func Readers(ctx context.Context, taskUUID string, userUUIDs []string) (map[stri
 					}
 				}
 			}`
-	task, err := dgraphModels.GetDgraphTaskInfoByUUID(ctx, query, map[string]string{"$id": taskUUID})
+	// Who may read it is decided for others than the reader of ctx, so the
+	// read itself sees the task whatever ctx's reader may (models/taskread).
+	task, err := dgraphModels.GetDgraphTaskInfoByUUID(taskread.WithSystem(ctx), query, map[string]string{"$id": taskUUID})
 	if errors.Is(err, dgraphModels.ErrNotFound) {
-		return map[string]bool{}, nil
+		return nil, map[string]bool{}, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return ReadersAmong(task, userUUIDs), nil
+	return task, ReadersAmong(task, userUUIDs), nil
 }
 
 // TaskReader is how one person stands to a task.

@@ -122,8 +122,13 @@ func (taskRules) DecideMany(ctx context.Context, who accessBusiness.Subject, ids
 			}
 		}
 	}
-	// One read of the person's roles for every task's project.
+	// One read of the person's roles for every task's project, and one of
+	// the tasks' restrictions.
 	standings, err := OfMany(ctx, who.UserUUID, projects)
+	if err != nil {
+		return nil, err
+	}
+	facts, err := FactsForMany(ctx, who.UserUUID, uid, tasks...)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +141,7 @@ func (taskRules) DecideMany(ctx context.Context, who accessBusiness.Subject, ids
 		if t.Project != nil && (t.Project.Uuid != "" || t.Project.Uid != "") {
 			s = standings[strings.ToLower(t.Project.Uuid)]
 		}
-		out[id] = taskDecision(s, FactsOf(t, uid))
+		out[id] = taskDecision(s, facts[strings.ToLower(t.Uuid)])
 	}
 	return out, nil
 }

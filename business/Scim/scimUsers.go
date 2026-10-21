@@ -544,7 +544,7 @@ func deactivate(ctx context.Context, userID uuid.UUID) error {
 	// Best-effort and asynchronous, matching controllers/User.DeactivateUser. Access is already revoked
 	// by the call above; this stops the notifications, and failing the SCIM request because a push-token
 	// row would not delete would tell the directory that offboarding did not happen when it did.
-	go fcmBusiness.DeleteByUserId(userID.String())
+	helpers.GoSafeNamed("fcmBusiness.DeleteByUserId", func() { fcmBusiness.DeleteByUserId(userID.String()) })
 	return nil
 }
 

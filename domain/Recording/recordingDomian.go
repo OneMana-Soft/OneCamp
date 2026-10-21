@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Recording"
 )
@@ -35,7 +36,7 @@ func CreateOrUpdateDgraphRecording(ctx context.Context, dgraphRecording *dgraphS
 // A recording opened by its egress id (to play it, read its transcript, or
 // delete it) must be live: one that was deleted or archived stayed playable by
 // link, since these reads didn't ask.
-const liveRecording = `gt(recording_ended_at, "1970-01-01T00:00:00Z") AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z")`
+var liveRecording = `gt(recording_ended_at, "1970-01-01T00:00:00Z") AND ` + dgraphquery.Live("recording_deleted_at")
 
 func GetDgraphChannelRecordingInfoByEgressId(ctx context.Context, egressId string, userDgraphUID string) (dgraphRecording *dgraphStruct.DgraphRecording, err error) {
 
@@ -271,5 +272,3 @@ func GetRecentlyArchivedRecordings(ctx context.Context, cutoffRFC3339 string, fi
 	}
 	return list.Recordings, int64(list.Count), nil
 }
-
-// RestoreDgraphRecording clears recording_deleted_at (un-soft-deletes).

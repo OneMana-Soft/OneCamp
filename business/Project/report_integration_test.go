@@ -21,6 +21,8 @@ import (
 
 func TestReportQuery(t *testing.T) {
 	ctx := context.Background()
+	// Reads of tasks decide restricted ones from Postgres (WA2): this test's own.
+	integration.ConnectServerPostgres(t)
 	dg := integration.SetupDgraph(t)
 	live, gone := "0001-01-01T00:00:00Z", "2026-09-01T00:00:00Z"
 	task := func(name, status string, more map[string]any) map[string]any {

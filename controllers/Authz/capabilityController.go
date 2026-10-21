@@ -61,7 +61,7 @@ func GetMyCapabilities(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "unauthorized"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	out := authz.MyCapabilities(ctx, &userInfo)

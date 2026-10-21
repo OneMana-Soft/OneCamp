@@ -118,6 +118,8 @@ func TestSavedTemplates(t *testing.T) {
 
 func TestProjectAsTemplateQuery(t *testing.T) {
 	ctx := context.Background()
+	// Reads of tasks decide restricted ones from Postgres (WA2): this test's own.
+	integration.ConnectServerPostgres(t)
 	dg := integration.SetupDgraph(t)
 	project := uuid.NewString()
 	live, gone := "0001-01-01T00:00:00Z", time.Now().UTC().Format(time.RFC3339)

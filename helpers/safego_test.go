@@ -193,3 +193,47 @@ func TestRecoverToErrIsInertWithoutAPanic(t *testing.T) {
 	default:
 	}
 }
+
+// GoSafeBounded takes its place before the goroutine: a full pool holds the
+// caller, and the place comes back when the work is done, panic or not.
+func TestGoSafeBoundedWaitsForAPlaceAndGivesItBack(t *testing.T) {
+	slots := make(chan struct{}, 1)
+	slots <- struct{}{}
+	started := make(chan struct{})
+	returned := make(chan struct{})
+	go func() {
+		GoSafeBounded(slots, "test", func() { close(started); panic("boom") })
+		close(returned)
+	}()
+	select {
+	case <-returned:
+		t.Fatal("it started with the pool full")
+	case <-time.After(100 * time.Millisecond):
+	}
+	<-slots
+	<-started
+	<-returned
+	for deadline := time.Now().Add(5 * time.Second); len(slots) != 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("a panicking goroutine kept its place")
+		}
+	}
+}
+
+// TryGoSafeBounded starts nothing when the pool is full, and says so.
+func TestTryGoSafeBoundedStartsOnlyWithAFreePlace(t *testing.T) {
+	slots := make(chan struct{}, 1)
+	ran := make(chan struct{})
+	if !TryGoSafeBounded(slots, "test", func() { <-ran }) {
+		t.Fatal("a free place wasn't taken")
+	}
+	if TryGoSafeBounded(slots, "test", func() { t.Error("ran with the pool full") }) {
+		t.Fatal("it started with the pool full")
+	}
+	close(ran)
+	for deadline := time.Now().Add(5 * time.Second); len(slots) != 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the place wasn't given back")
+		}
+	}
+}

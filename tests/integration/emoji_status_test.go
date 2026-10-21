@@ -37,6 +37,8 @@ import (
 
 func TestAStatusSetLastIsTheOneInForce(t *testing.T) {
 	ctx := context.Background()
+	// The profile's task counts leave out restricted tasks, read from Postgres (models/taskread).
+	integration.ConnectServerPostgres(t)
 	integration.StubMqttClient(t)
 	dg := integration.SetupDgraph(t)
 	integration.SetupRedis(t)

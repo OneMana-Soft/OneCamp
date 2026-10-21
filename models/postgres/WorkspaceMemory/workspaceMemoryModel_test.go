@@ -101,8 +101,8 @@ func TestScopeRefScopeWhere(t *testing.T) {
 		wantArg   any
 		wantEmpty bool
 	}{
-		{"channel", ScopeRef{ChannelUUID: "ch1"}, 1, "channel_uuid::text = $1", "ch1", false},
-		{"project", ScopeRef{ProjectUUID: "pr1"}, 2, "project_uuid::text = $2", "pr1", false},
+		{"channel", ScopeRef{ChannelUUID: "ch1"}, 1, "channel_uuid = $1::uuid", "ch1", false},
+		{"project", ScopeRef{ProjectUUID: "pr1"}, 2, "project_uuid = $2::uuid", "pr1", false},
 		{"group", ScopeRef{ChatGrpID: "g1"}, 2, "chat_grp_id = $2", "g1", false},
 		{"empty", ScopeRef{}, 1, "", nil, true},
 	}
@@ -129,7 +129,7 @@ func TestScopeRefScopeWhere(t *testing.T) {
 // (channel beats project beats group), matching enrich()'s precedence.
 func TestScopeRefScopeWherePrecedence(t *testing.T) {
 	pred, arg := ScopeRef{ChannelUUID: "ch1", ProjectUUID: "pr1", ChatGrpID: "g1"}.scopeWhere(1)
-	if pred != "channel_uuid::text = $1" || arg != "ch1" {
+	if pred != "channel_uuid = $1::uuid" || arg != "ch1" {
 		t.Errorf("channel should win precedence, got %q / %v", pred, arg)
 	}
 }

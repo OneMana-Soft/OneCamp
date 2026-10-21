@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +32,6 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
 	channelAdapter "github.com/akashc777/OneCamp/adapter/Channel"
-	userBusiness "github.com/akashc777/OneCamp/business/User"
 	channelController "github.com/akashc777/OneCamp/controllers/Channel"
 	postController "github.com/akashc777/OneCamp/controllers/Post"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -60,13 +60,6 @@ func TestOnlyAnAdminOpensAPrivateChannel(t *testing.T) {
 		t.Fatal(err)
 	}
 	opensearchInit.OpenSearchClient = client
-	// The bot that posts the privacy lines is kept for the process: resolve it
-	// in this test's databases, and leave the next test to resolve its own.
-	userBusiness.ForgetAutomationBotForTest()
-	t.Cleanup(userBusiness.ForgetAutomationBotForTest)
-	if _, err := userBusiness.EnsureAutomationBot(ctx); err != nil {
-		t.Fatalf("the automation bot: %v", err)
-	}
 
 	// #leadership is private. Mod moderates it; Boss is a workspace admin who
 	// moderates it too; Outsider is in the workspace, not in the channel.
@@ -122,25 +115,52 @@ func TestOnlyAnAdminOpensAPrivateChannel(t *testing.T) {
 		}
 		return pg, string(dg.Query(t, `{ q(func: eq(ch_uuid, "`+channel.String()+`")) { ch_private } }`))
 	}
-	// lines is every message in the channel, one after another.
-	lines := func() string {
+	// lines is the channel's history lines, each as "kind by who: words",
+	// sorted. The switch's handler tells the Resource Events bus, and the
+	// chat.lines sink writes the line after the handler has answered (chat
+	// B28), so lines first waits for the work the switch handed off.
+	lines := func() []string {
 		t.Helper()
+		integration.Settle(t)
+		named := map[string]string{}
+		for name, id := range people {
+			named[id.String()] = name
+		}
 		var out struct {
 			Q []struct {
 				Posts []struct {
-					Text string `json:"post_text"`
+					Text   string `json:"post_text"`
+					System string `json:"post_system"`
+					By     *struct {
+						UUID string `json:"user_uuid"`
+					} `json:"post_by"`
 				} `json:"ch_posts"`
 			} `json:"q"`
 		}
-		_ = json.Unmarshal(dg.Query(t, `{ q(func: eq(ch_uuid, "`+channel.String()+`")) { ch_posts { post_text } } }`), &out)
-		var texts []string
+		if err := json.Unmarshal(dg.Query(t, `{ q(func: eq(ch_uuid, "`+channel.String()+`")) { ch_posts @filter(eq(post_kind, "system")) { post_text post_system post_by { user_uuid } } } }`), &out); err != nil {
+			t.Fatal(err)
+		}
+		var got []string
 		for _, q := range out.Q {
 			for _, p := range q.Posts {
-				texts = append(texts, p.Text)
+				var l struct {
+					Kind  string `json:"kind"`
+					Actor string `json:"actor"`
+				}
+				_ = json.Unmarshal([]byte(p.System), &l)
+				if p.By == nil || p.By.UUID != l.Actor {
+					t.Errorf("a line written as %v, its actor %s", p.By, l.Actor)
+				}
+				got = append(got, l.Kind+" by "+named[l.Actor]+": "+p.Text)
 			}
 		}
-		return strings.Join(texts, "\n")
+		sort.Strings(got)
+		return got
 	}
+	const (
+		opened = "channel.public by boss: <p>boss made this channel public. Everyone in the workspace can now find it and read its history and files.</p>"
+		closed = "channel.private by mod: <p>mod made this channel private. Only its members can find it and read it now.</p>"
+	)
 	outsiderReads := func() (int, string) {
 		t.Helper()
 		rc := chi.NewRouteContext()
@@ -157,8 +177,8 @@ func TestOnlyAnAdminOpensAPrivateChannel(t *testing.T) {
 		if pg, graph := private(); !pg || !strings.Contains(graph, `"ch_private":true`) {
 			t.Errorf("the channel is no longer private: %v %s", pg, graph)
 		}
-		if strings.Contains(lines(), "made this channel") {
-			t.Errorf("a line for a change that didn't happen: %s", lines())
+		if got := lines(); len(got) != 0 {
+			t.Errorf("a line for a change that didn't happen: %q", got)
 		}
 	})
 
@@ -169,8 +189,8 @@ func TestOnlyAnAdminOpensAPrivateChannel(t *testing.T) {
 		if pg, graph := private(); pg || !strings.Contains(graph, `"ch_private":false`) {
 			t.Errorf("the channel is still private: %v %s", pg, graph)
 		}
-		if got := lines(); !strings.Contains(got, "<strong>boss</strong> made this channel public") {
-			t.Errorf("no line saying so: %s", got)
+		if got, want := lines(), []string{opened}; fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("the channel's lines: %q, want %q", got, want)
 		}
 		if code, body := outsiderReads(); code != http.StatusOK || !strings.Contains(body, "Reorg on Friday") {
 			t.Fatalf("someone outside it reads a public channel: %d %s", code, body)
@@ -181,8 +201,8 @@ func TestOnlyAnAdminOpensAPrivateChannel(t *testing.T) {
 		if code, body := setPrivate("mod", true); code != http.StatusOK {
 			t.Fatalf("the moderator closing it: %d %s", code, body)
 		}
-		if got := lines(); !strings.Contains(got, "<strong>mod</strong> made this channel private") {
-			t.Errorf("no line saying so: %s", got)
+		if got, want := lines(), []string{closed, opened}; fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("the channel's lines: %q, want %q", got, want)
 		}
 		if code, body := outsiderReads(); code == http.StatusOK || strings.Contains(body, "Reorg on Friday") {
 			t.Errorf("someone outside it still reads it: %d %s", code, body)

@@ -9,6 +9,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
 
@@ -53,7 +54,13 @@ type WorkloadRead struct {
 
 func GetDgraphWorkload(ctx context.Context, userDgraphUID string, from, until time.Time) (*WorkloadRead, error) {
 	const epoch = `"1970-01-01T00:00:00Z"`
-	open := dgraphStruct.TASK_LIVE_FILTER + ` AND ` + dgraphStruct.TASK_OPEN_FILTER
+	// Restricted tasks the person may not see weigh nothing on anyone's load
+	// as they see it, and show no name (models/taskread).
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
+	open := dgraphStruct.TASK_LIVE_FILTER + tr.And() + ` AND ` + dgraphStruct.TASK_OPEN_FILTER
 	// Tasks with a due date, the latest due first, and tasks with only a start,
 	// the latest first, each capped on its own: one sort would put the
 	// start-only tasks last and cut them before tasks overdue for years.
@@ -106,6 +113,8 @@ func GetDgraphWorkload(ctx context.Context, userDgraphUID string, from, until ti
 	if err := json.Unmarshal(resp.Json, &out); err != nil {
 		return nil, err
 	}
+	// A hidden parent is a stub (models/taskread).
+	tr.Keep(&out)
 	read := &WorkloadRead{Projects: []WorkloadProject{}, Away: out.Away}
 	if len(out.Me) == 0 {
 		return read, nil

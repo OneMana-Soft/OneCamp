@@ -38,7 +38,7 @@ func liveReplyCopy(ctx context.Context, commentUUID string) *dgraphStruct.Dgraph
 }
 
 // mirrorReplyEdit gives the reply's copy, when it has one, the reply's new
-// text. The copy names nobody of its own (sendBusiness WithoutMentions).
+// text. The copy names nobody of its own (sendBusiness PrepareReplyCopy).
 func mirrorReplyEdit(ctx context.Context, commentUUID, html string) {
 	cp := liveReplyCopy(ctx, commentUUID)
 	if cp == nil {

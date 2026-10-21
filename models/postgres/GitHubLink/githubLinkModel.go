@@ -3,11 +3,11 @@ package models
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	taskModels "github.com/akashc777/OneCamp/models/postgres/Task"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -35,43 +35,43 @@ type GitHubLink struct {
 
 const GITHUB_LINK_COLS = `id, project_id, repo_owner, repo_name, installation_id, webhook_secret, sync_issues, sync_prs, auto_create_tasks, default_task_status, label_mapping, automation_rules, branch_format, created_by, created_at, updated_at, deleted_at`
 
-func CreateGitHubLink(query string, id uuid.UUID, projectId uuid.UUID, repoOwner string, repoName string, installationId *int64, webhookSecret *string, syncIssues bool, syncPRs bool, autoCreateTasks bool, createdBy uuid.UUID, createdAt time.Time) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, id, projectId, repoOwner, repoName, installationId, webhookSecret, syncIssues, syncPRs, autoCreateTasks, createdBy, createdAt)
+func CreateGitHubLink(ctx context.Context, id uuid.UUID, projectId uuid.UUID, repoOwner string, repoName string, installationId *int64, webhookSecret *string, syncIssues bool, syncPRs bool, autoCreateTasks bool, createdBy uuid.UUID, createdAt time.Time) error {
+	_, err := pgexec.Exec(ctx, `
+		INSERT INTO github_links (id, project_id, repo_owner, repo_name, installation_id, webhook_secret, sync_issues, sync_prs, auto_create_tasks, created_by, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)`,
+		id, projectId, repoOwner, repoName, installationId, webhookSecret, syncIssues, syncPRs, autoCreateTasks, createdBy, createdAt)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CreateGitHubLink Failed err: %+v", err)
-		return err
 	}
-	return nil
+	return err
 }
 
-func GetGitHubLinkById(query string, id uuid.UUID) (*GitHubLink, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	link, err := scanLink(postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+// GetGitHubLinkById is the link with this id (only a live one when live),
+// or nil.
+func GetGitHubLinkById(ctx context.Context, id uuid.UUID, live bool) (*GitHubLink, error) {
+	q := `SELECT ` + GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1`
+	if live {
+		q += ` AND deleted_at IS NULL`
 	}
+	link, found, err := pgexec.QueryOne(ctx, q, func(r pgexec.Row) (*GitHubLink, error) { return scanLink(r) }, id)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/GetGitHubLinkById Failed err: %+v", err)
 		return nil, err
 	}
+	if !found {
+		return nil, nil
+	}
 	return link, nil
 }
 
-func GetGitHubLinksByProjectId(query string, projectId uuid.UUID) ([]*GitHubLink, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	links, err := queryLinks(ctx, query, projectId)
+// GetGitHubLinksByProjectId is a project's live links, the newest first.
+func GetGitHubLinksByProjectId(ctx context.Context, projectId uuid.UUID) ([]*GitHubLink, error) {
+	links, err := pgexec.Query(ctx, `SELECT `+GITHUB_LINK_COLS+` FROM github_links WHERE project_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC`,
+		func(r pgexec.Row) (*GitHubLink, error) { return scanLink(r) }, projectId)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/GetGitHubLinksByProjectId Failed err: %+v", err)
-		return nil, err
 	}
-	return links, nil
+	return links, err
 }
 
 // GetGitHubLinksByRepo is every project's live link to the repository
@@ -91,16 +91,14 @@ func GetGitHubLinksByRepo(ctx context.Context, repoOwner string, repoName string
 	return links, nil
 }
 
-func GetAllGitHubLinks(query string) ([]*GitHubLink, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	links, err := queryLinks(ctx, query)
+// GetAllGitHubLinks is every live link, the newest first.
+func GetAllGitHubLinks(ctx context.Context) ([]*GitHubLink, error) {
+	links, err := pgexec.Query(ctx, `SELECT `+GITHUB_LINK_COLS+` FROM github_links WHERE deleted_at IS NULL ORDER BY created_at DESC`,
+		func(r pgexec.Row) (*GitHubLink, error) { return scanLink(r) })
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/GetAllGitHubLinks Failed err: %+v", err)
-		return nil, err
 	}
-	return links, nil
+	return links, err
 }
 
 // queryLinks is every row query returns, each in GITHUB_LINK_COLS order.
@@ -156,40 +154,37 @@ func scanLink(row interface{ Scan(dest ...any) error }) (*GitHubLink, error) {
 	return &link, nil
 }
 
-func SoftDeleteGitHubLink(query string, deletedAt time.Time, id uuid.UUID) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, deletedAt, deletedAt, id)
+func SoftDeleteGitHubLink(ctx context.Context, deletedAt time.Time, id uuid.UUID) error {
+	_, err := pgexec.Exec(ctx, `UPDATE github_links SET deleted_at = $1, updated_at = $1 WHERE id = $2 AND deleted_at IS NULL`, deletedAt, id)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SoftDeleteGitHubLink Failed err: %+v", err)
-		return err
 	}
-	return nil
+	return err
 }
 
-func SoftDeleteAllGitHubLinks(query string, deletedAt time.Time) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, deletedAt, deletedAt)
+func SoftDeleteAllGitHubLinks(ctx context.Context, deletedAt time.Time) error {
+	_, err := pgexec.Exec(ctx, `UPDATE github_links SET deleted_at = $1, updated_at = $1 WHERE deleted_at IS NULL`, deletedAt)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SoftDeleteAllGitHubLinks Failed err: %+v", err)
-		return err
 	}
-	return nil
+	return err
 }
 
-func BatchClearAllGitHubFields(query string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query)
+// BatchClearAllGitHubFields unlinks every task from GitHub.
+func BatchClearAllGitHubFields(ctx context.Context) error {
+	_, err := pgexec.Exec(ctx, `
+		UPDATE tasks SET
+			github_issue_number = NULL,
+			github_issue_url = NULL,
+			github_pr_number = NULL,
+			github_pr_url = NULL,
+			github_branch = NULL,
+			updated_at = NOW()
+		WHERE github_issue_url IS NOT NULL OR github_pr_url IS NOT NULL`)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/BatchClearAllGitHubFields Failed err: %+v", err)
-		return err
 	}
-	return nil
+	return err
 }
 
 // TasksOnBranch is every task, deleted ones too, carrying branch in a project

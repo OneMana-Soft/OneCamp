@@ -8,42 +8,6 @@ import (
 	"testing"
 )
 
-func TestVerifyRepoAccessWithClient(t *testing.T) {
-	cases := []struct {
-		name    string
-		status  int
-		wantOK  bool
-		wantErr bool
-	}{
-		{"ok", http.StatusOK, true, false},
-		{"not found", http.StatusNotFound, false, false},
-		{"forbidden", http.StatusForbidden, false, false},
-		{"unauthorized", http.StatusUnauthorized, false, false},
-		{"server error", http.StatusInternalServerError, false, true},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			ok, err := verifyRepoAccessWithClient(context.Background(),
-				mockClient(c.status, "{}", nil), "owner", "name")
-			if ok != c.wantOK {
-				t.Fatalf("ok = %v, want %v", ok, c.wantOK)
-			}
-			if (err != nil) != c.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, c.wantErr)
-			}
-		})
-	}
-}
-
-func TestVerifyRepoAccessRequiresOwnerName(t *testing.T) {
-	if _, err := VerifyRepoAccess(context.Background(), "", "name"); err == nil {
-		t.Fatal("expected error for empty owner")
-	}
-	if _, err := VerifyRepoAccess(context.Background(), "owner", ""); err == nil {
-		t.Fatal("expected error for empty name")
-	}
-}
-
 // TestRepoPushAccessWithClient covers the distinction the coding agent depends on:
 // a 200 from GET /repos proves the identity can SEE the repository, not that it can
 // push to it. Reading only the status code meant a read-only collaborator was

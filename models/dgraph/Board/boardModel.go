@@ -11,6 +11,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
 
@@ -79,7 +80,10 @@ func SetBoardStateRefAndPurgeInline(ctx context.Context, boardUUID, stateKey, sn
 
 // GetDgraphBoardInfoByUUID runs a board query and returns the first board.
 func GetDgraphBoardInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphBoard *dgraphStruct.DgraphBoard, err error) {
+	// Only the tasks the reader may see (models/taskread).
+	defer taskread.Settle(ctx, &dgraphBoard, &err)
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -123,6 +127,10 @@ func GetDgraphBoards(ctx context.Context, query string, variables map[string]str
 	}
 	if err := json.Unmarshal(resp.Json, &boardsInfo); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/GetDgraphBoards failed to unmarshal response json err: %+v", err)
+		return nil, err
+	}
+	// Only the tasks the reader may see (models/taskread).
+	if err := taskread.KeepIn(ctx, &boardsInfo.BoardInfo); err != nil {
 		return nil, err
 	}
 	return boardsInfo.BoardInfo, nil
@@ -207,7 +215,10 @@ func UpdateBoardPermissions(ctx context.Context, input *adapter.InputUpdateBoard
 // GetDgraphBoardsWithCount runs a board-list query that returns a "boardList"
 // block plus a "board_count" aggregation block, mirroring GetDgraphDocsWithCount.
 func GetDgraphBoardsWithCount(ctx context.Context, query string, variables map[string]string) (list *dgraphStruct.DgraphBoardList, err error) {
+	// Only the tasks the reader may see (models/taskread).
+	defer taskread.Settle(ctx, &list, &err)
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {

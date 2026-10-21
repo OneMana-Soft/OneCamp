@@ -33,6 +33,7 @@ package business
 import (
 	"context"
 	"errors"
+	"strings"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
@@ -40,6 +41,7 @@ import (
 	postBusiness "github.com/akashc777/OneCamp/business/Post"
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	conversationDomain "github.com/akashc777/OneCamp/domain/Conversation"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -72,6 +74,8 @@ var (
 	indexChannels = models.ChannelFacts
 	indexGroups   = models.GroupFacts
 	indexPeople   = models.People
+	// The graph's standings for many channels at once.
+	readChannelStandings = channelDomain.ChannelStandings
 )
 
 // fromIndex is whether this decision reads the index.
@@ -377,16 +381,35 @@ func (channelRules) DecideMany(ctx context.Context, who accessBusiness.Subject, 
 		return out, nil
 	}
 	uid, err := uidOf(ctx, who)
-	if err != nil {
-		return nil, err
+	if err != nil || uid == "" {
+		return out, err
 	}
+	// The graph's standings for every channel asked, a batch a query (they
+	// were read one query each: a Connected panel naming fifteen channels
+	// made fifteen round trips).
+	asked := map[string][]string{}
 	for _, id := range ids {
-		ch, err := channelOf(ctx, id, uid)
+		if cu, err := uuid.Parse(id); err == nil {
+			asked[cu.String()] = append(asked[cu.String()], id)
+		}
+	}
+	keys := make([]string, 0, len(asked))
+	for k := range asked {
+		keys = append(keys, k)
+	}
+	for from := 0; from < len(keys); from += channelDomain.ChannelStandingsBatch {
+		chunk := keys[from:min(from+channelDomain.ChannelStandingsBatch, len(keys))]
+		got, err := readChannelStandings(ctx, chunk, uid)
 		if err != nil {
 			return nil, err
 		}
-		if ch != nil {
-			out[id] = channelDecision(ch)
+		for _, ch := range got {
+			if ch == nil || ch.Uuid == "" {
+				continue
+			}
+			for _, id := range asked[strings.ToLower(ch.Uuid)] {
+				out[id] = channelDecision(ch)
+			}
 		}
 	}
 	return out, nil

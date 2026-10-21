@@ -127,7 +127,7 @@ func StartConfigReconciler(ctx context.Context, r ConfigReconciler) error {
 	if err != nil {
 		LogErrorWithContext(ctx, "config reconciler %s: baseline: %v (will baseline on first successful read)", r.Name, err)
 	}
-	go func() {
+	GoSafeLoop("config-reconcile:"+r.Name, func() {
 		ticker := time.NewTicker(r.Interval)
 		defer ticker.Stop()
 		for {
@@ -148,6 +148,6 @@ func StartConfigReconciler(ctx context.Context, r ConfigReconciler) error {
 			}
 			st = next
 		}
-	}()
+	})
 	return nil
 }

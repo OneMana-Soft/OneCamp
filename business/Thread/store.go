@@ -30,6 +30,13 @@ type store interface {
 	touch(ctx context.Context, id string, at time.Time) error
 	// remove deletes a thread (one whose first comment could not be written).
 	remove(ctx context.Context, id string) error
+	// setTask ties a thread to a task; nil when there is no such thread or
+	// it is tied to another task (docs C5-2).
+	setTask(ctx context.Context, id, task string, at time.Time) (*Thread, error)
+	// byTask is the threads tied to a task.
+	byTask(ctx context.Context, task string) ([]Thread, error)
+	// tied is up to limit threads tied to tasks, the most recently changed first.
+	tied(ctx context.Context, limit int) ([]Thread, error)
 	// join records someone taking part, keeping their highest role and their
 	// latest read; a nil readAt leaves the read as it was.
 	join(ctx context.Context, threadID, userUUID string, r Role, readAt *time.Time) error
@@ -237,4 +244,43 @@ func threadOf(r *models.Row) Thread {
 		t.TaskUUID = r.TaskUUID.String()
 	}
 	return t
+}
+
+func (postgresStore) setTask(ctx context.Context, id, task string, at time.Time) (*Thread, error) {
+	uid, err := uuid.Parse(id)
+	if err != nil {
+		return nil, nil
+	}
+	tid, err := uuid.Parse(task)
+	if err != nil {
+		return nil, nil
+	}
+	r, err := models.SetTask(ctx, uid, tid, at)
+	if err != nil || r == nil {
+		return nil, err
+	}
+	t := threadOf(r)
+	return &t, nil
+}
+
+func threadsOf(rows []*models.Row) []Thread {
+	out := make([]Thread, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, threadOf(r))
+	}
+	return out
+}
+
+func (postgresStore) byTask(ctx context.Context, task string) ([]Thread, error) {
+	tid, err := uuid.Parse(task)
+	if err != nil {
+		return nil, nil
+	}
+	rows, err := models.ByTask(ctx, tid)
+	return threadsOf(rows), err
+}
+
+func (postgresStore) tied(ctx context.Context, limit int) ([]Thread, error) {
+	rows, err := models.Tied(ctx, limit)
+	return threadsOf(rows), err
 }

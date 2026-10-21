@@ -27,6 +27,7 @@ import (
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/pion/webrtc/v4"
 
+	callControlBusiness "github.com/akashc777/OneCamp/business/CallControl"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
@@ -36,6 +37,7 @@ import (
 	"github.com/akashc777/OneCamp/initializers/livekitInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	callStateModel "github.com/akashc777/OneCamp/models/postgres/CallState"
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
 	"github.com/akashc777/OneCamp/tests/integration"
 )
@@ -218,21 +220,33 @@ func TestCallAnEmptyRoomWaitsForASlowFirstJoin(t *testing.T) {
 // server, and disconnected; they can't mint a token to walk back in while the
 // call goes on; and once it ends they can join again.
 func TestCallAHostCanPutSomeoneOut(t *testing.T) {
+	ctx := context.Background()
+	pg := integration.SetupEnv(t)
+	if err := postgresInit.ConnectPostgres(ctx, pg.DSN); err != nil {
+		t.Fatal(err)
+	}
 	env := integration.SetupLiveKit(t)
 	integration.SetupRedis(t)
-	ctx := context.Background()
-	room := uuid.NewString()
+	dg := integration.SetupDgraph(t)
+	integration.StubMqttClient(t)
+	samUUID := uuid.New()
+	room := uuid.NewString() // a channel's call
+	uids := dg.Mutate(t, []map[string]any{
+		{"uid": "_:s", "dgraph.type": "User", "user_uuid": samUUID.String(), "user_name": "sam"},
+		{"uid": "_:c", "dgraph.type": "Channel", "ch_uuid": room, "ch_name": "launch", "ch_members": []map[string]any{{"uid": "_:s"}}},
+	})
 	if _, err := livekitInit.LiveKitService.CreateRoom(ctx, room); err != nil {
 		t.Fatal(err)
 	}
-	token, err := livekitInit.LiveKitService.GenerateToken(room, "0xb2", "Sam", false, "")
+	token, err := livekitInit.LiveKitService.GenerateToken(room, uids["s"], "Sam", false, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	sam := join(t, env, token)
-	joinSettled(t, room, "0xb2", sam)
+	joinSettled(t, room, uids["s"], sam)
+	sid := connected(t, ctx, room, uids["s"]) // what LiveKit's webhook tells the server
 
-	if err := liveKitBusiness.RemoveFromCall(ctx, room, "0xb2", "Maya Chen", liveKitBusiness.RemovedByHost); err != nil {
+	if err := liveKitBusiness.RemoveFromCall(ctx, room, uids["s"], liveKitBusiness.Remover{Identity: "0xa1", Name: "Maya Chen"}, liveKitBusiness.RemovedByHost); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "Sam to be disconnected", func() bool { return sam.disconnected.Load() != nil })
@@ -257,11 +271,11 @@ func TestCallAHostCanPutSomeoneOut(t *testing.T) {
 		t.Errorf("still in the call: %v", people)
 	}
 
-	user := &dgraphStruct.DgraphUser{Uid: "0xb2", UserName: "sam"}
+	user := &dgraphStruct.DgraphUser{Uid: uids["s"], Uuid: samUUID.String(), UserName: "sam"}
 	if _, _, err := liveKitBusiness.CreateRoomAndGetToken(ctx, room, user, false, ""); !errors.Is(err, liveKitBusiness.ErrRemovedFromCall) {
 		t.Fatalf("a removed member minted a token back into the call: %v", err)
 	}
-	liveKitBusiness.ForgetCall(ctx, room) // the call ended
+	callControlBusiness.OnEnded(ctx, room, sid, callStateModel.EndedLastLeft) // the call ended
 	if _, _, err := liveKitBusiness.CreateRoomAndGetToken(ctx, room, user, false, ""); err != nil {
 		t.Fatalf("after the call, they can't join its next one: %v", err)
 	}
@@ -380,10 +394,10 @@ func TestCallPeopleArePutOutWhenTheirRightGoes(t *testing.T) {
 	}
 }
 
-// CALL-BUG-11. Who may put people out of a call: a channel's moderators and
-// the workspace's admins who are in it, an instant meeting's host; nobody in
-// a DM or a group, and no other member.
-func TestCallWhoMayRemoveSomeone(t *testing.T) {
+// CALL-BUG-11, and Call Control's hosts. Who runs a call by who they are: a
+// channel's moderators and the workspace's admins who are in it, an instant
+// meeting's host; nobody in a DM or a group, and no other member.
+func TestCallWhoHostsByRule(t *testing.T) {
 	ctx := context.Background()
 	env := integration.SetupEnv(t)
 	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
@@ -430,9 +444,9 @@ func TestCallWhoMayRemoveSomeone(t *testing.T) {
 		{"another member in an instant meeting", meeting.Room, member, true, false},
 		{"nobody", channelUUID, nil, true, false},
 	} {
-		got, err := liveKitBusiness.MayRemoveFromCall(ctx, c.room, c.who, c.admin)
+		got, err := liveKitBusiness.HostByRule(ctx, c.room, c.who, c.admin)
 		if err != nil || got != c.want {
-			t.Errorf("%s: may remove = %v (%v), want %v", c.name, got, err, c.want)
+			t.Errorf("%s: hosts = %v (%v), want %v", c.name, got, err, c.want)
 		}
 	}
 }

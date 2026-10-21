@@ -1,0 +1,5 @@
+[
+  {"type": "message", "ts": "1759309900.000100", "user": "U0ADA0001", "text": "Hi Bo, got a minute?"},
+  {"type": "message", "ts": "1759309960.000200", "user": "U0BO00002", "text": "Sure <@U0ADA0001>",
+   "reactions": [{"name": "white_check_mark", "users": ["U0ADA0001"], "count": 1}]}
+]

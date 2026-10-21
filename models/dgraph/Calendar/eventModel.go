@@ -53,6 +53,7 @@ var ErrEventNotFound = errors.New("event not found")
 
 func GetDgraphEventInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphEvent *dgraphStruct.DgraphEvent, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -82,6 +83,7 @@ func GetDgraphEventInfoByUUID(ctx context.Context, query string, variables map[s
 
 func GetDgraphUserEvents(ctx context.Context, query string, variables map[string]string) (dgraphEvents []*dgraphStruct.DgraphEvent, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {

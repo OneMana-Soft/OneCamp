@@ -38,7 +38,7 @@ func write(w http.ResponseWriter, r *http.Request, where string, err error) {
 func me(w http.ResponseWriter, r *http.Request) (*userModels.UserInfo, bool) {
 	u, ok := userModels.FromContext(r.Context())
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 	}
 	return u, ok
 }

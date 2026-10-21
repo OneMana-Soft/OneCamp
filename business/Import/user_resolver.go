@@ -246,6 +246,33 @@ func sanitizeLogin(s string) string {
 
 // resolveUserUUID looks up an already-resolved user. Used by task/comment
 // workers that have a source author id and need the OneCamp user.
+// people is a chunk's memo of who source ids came across as: a person is
+// resolved (two statements and a graph read) once a chunk, where it was once
+// for each task, subtask and comment they made or were given.
+type people struct {
+	job  *importModels.Job
+	seen map[string]personRef
+}
+
+type personRef struct {
+	id   uuid.UUID
+	info *userModels.UserInfo
+}
+
+func newPeople(job *importModels.Job) *people {
+	return &people{job: job, seen: make(map[string]personRef, 16)}
+}
+
+// resolve is resolveUserUUID, once a person.
+func (p *people) resolve(ctx context.Context, sourceId string) (uuid.UUID, *userModels.UserInfo) {
+	if r, ok := p.seen[sourceId]; ok {
+		return r.id, r.info
+	}
+	id, info := resolveUserUUID(ctx, p.job, sourceId)
+	p.seen[sourceId] = personRef{id, info}
+	return id, info
+}
+
 func resolveUserUUID(ctx context.Context, job *importModels.Job, sourceId string) (uuid.UUID, *userModels.UserInfo) {
 	if sourceId == "" {
 		return uuid.Nil, nil

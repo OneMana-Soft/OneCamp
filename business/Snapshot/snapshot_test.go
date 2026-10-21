@@ -66,10 +66,19 @@ func (m *memStore) latest(_ context.Context, docUUID string) (*snapshotModels.Do
 	return nil, nil
 }
 
-func (m *memStore) list(_ context.Context, docUUID string, limit int) ([]*snapshotModels.DocSnapshot, error) {
+func (m *memStore) list(_ context.Context, docUUID string, before time.Time, limit int) ([]*snapshotModels.DocSnapshot, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	all := m.sorted(docUUID)
+	if !before.IsZero() {
+		var older []*snapshotModels.DocSnapshot
+		for _, r := range all {
+			if r.CreatedAt.Before(before) {
+				older = append(older, r)
+			}
+		}
+		all = older
+	}
 	if len(all) > limit {
 		all = all[:limit]
 	}
@@ -166,6 +175,12 @@ func (l *memLedger) Add(_ context.Context, kind, id string, who []Contributor) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.sets[kind+id] = append(l.sets[kind+id], who...)
+}
+
+func (l *memLedger) Members(_ context.Context, kind, id string) []Contributor {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return sortContributors(append([]Contributor(nil), l.sets[kind+id]...))
 }
 
 func (l *memLedger) Drain(_ context.Context, kind, id string) []Contributor {
@@ -386,7 +401,7 @@ func TestTheLedgerCreditsEveryoneBetweenTwoVersions(t *testing.T) {
 	if err := takeIdleVersions(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	all, _ := w.store.list(context.Background(), docID, 10)
+	all, _ := w.store.list(context.Background(), docID, time.Time{}, 10)
 	if len(all) != 2 {
 		t.Fatalf("%d versions, want 2", len(all))
 	}
@@ -405,7 +420,7 @@ func TestTheLedgerCreditsEveryoneBetweenTwoVersions(t *testing.T) {
 	if err := takeIdleVersions(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if again, _ := w.store.list(context.Background(), docID, 10); len(again) != 2 {
+	if again, _ := w.store.list(context.Background(), docID, time.Time{}, 10); len(again) != 2 {
 		t.Errorf("the idle version was taken twice")
 	}
 }
@@ -414,7 +429,7 @@ func TestTheLedgerCreditsEveryoneBetweenTwoVersions(t *testing.T) {
 func TestAMassDeletionKeepsTheBodyBefore(t *testing.T) {
 	w := newWorld(t)
 	onDocSave(context.Background(), docBusiness.Change{DocUUID: docID, Body: "<p>x</p>", Previous: "<p>" + strings.Repeat("everything ", 100) + "</p>", Contributors: []string{"ana"}, SavedAt: w.clock})
-	all, _ := w.store.list(context.Background(), docID, 10)
+	all, _ := w.store.list(context.Background(), docID, time.Time{}, 10)
 	if len(all) != 1 || all[0].Reason != snapshotModels.ReasonMassDelete || !strings.Contains(w.store.bodies[all[0].ID], "everything") {
 		t.Fatalf("versions %+v", all)
 	}
@@ -460,7 +475,7 @@ func TestAnAgentRunsVersionAndRevertRestoreExactly(t *testing.T) {
 		t.Errorf("revert asked %v", last)
 	}
 	// The agent's text was kept first, as the version before the restore.
-	all, _ := w.store.list(context.Background(), docID, 10)
+	all, _ := w.store.list(context.Background(), docID, time.Time{}, 10)
 	if len(all) != 2 || all[0].Reason != snapshotModels.ReasonManual || !strings.Contains(w.store.bodies[all[0].ID], "The agent's rewrite.") {
 		t.Errorf("versions after revert: %+v", all)
 	}
@@ -485,7 +500,7 @@ func TestVersionsTakeEditAccess(t *testing.T) {
 		{rulesFake{level: accessBusiness.LevelNone, deleted: true}, ErrNotFound},
 	} {
 		accessBusiness.Rules = c.rules
-		if _, err := Snapshots.List(context.Background(), who, docKind, docID); !errors.Is(err, c.want) {
+		if _, err := Snapshots.List(context.Background(), who, docKind, docID, time.Time{}); !errors.Is(err, c.want) {
 			t.Errorf("level %v deleted %v: %v, want %v", c.rules.level, c.rules.deleted, err, c.want)
 		}
 		if err := Snapshots.Restore(context.Background(), who, docKind, docID, uuid.NewString()); !errors.Is(err, c.want) {
@@ -493,10 +508,10 @@ func TestVersionsTakeEditAccess(t *testing.T) {
 		}
 	}
 	accessBusiness.Rules = rulesFake{level: accessBusiness.LevelEdit}
-	if _, err := Snapshots.List(context.Background(), who, docKind, docID); err != nil {
+	if _, err := Snapshots.List(context.Background(), who, docKind, docID, time.Time{}); err != nil {
 		t.Errorf("an editor: %v", err)
 	}
-	if _, err := Snapshots.List(context.Background(), who, "calendar", docID); !errors.Is(err, ErrUnknownKind) {
+	if _, err := Snapshots.List(context.Background(), who, "calendar", docID, time.Time{}); !errors.Is(err, ErrUnknownKind) {
 		t.Errorf("an unknown kind: %v", err)
 	}
 }

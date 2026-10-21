@@ -26,6 +26,19 @@ func ids(tasks []*dgraphStruct.DgraphTask) string {
 
 var t0 = time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
 
+// between and renumber are one task's drop: BetweenMany and RenumberMany for one.
+func between(before, after *dgraphStruct.DgraphTask) (float64, bool) {
+	r, ok := BetweenMany(before, after, 1)
+	if !ok {
+		return 0, false
+	}
+	return r[0], true
+}
+
+func renumber(column []*dgraphStruct.DgraphTask, moved, before, after *dgraphStruct.DgraphTask) []*dgraphStruct.DgraphTask {
+	return RenumberMany(column, []*dgraphStruct.DgraphTask{moved}, before, after)
+}
+
 // A board nobody has rearranged must look exactly as it did: newest first.
 func TestUnrankedColumnKeepsNewestFirst(t *testing.T) {
 	col := []*dgraphStruct.DgraphTask{
@@ -44,7 +57,7 @@ func TestUnrankedColumnKeepsNewestFirst(t *testing.T) {
 func TestDropBetweenStaysAfterRefetch(t *testing.T) {
 	a, b, c := task("a", t0.Add(3*time.Hour)), task("b", t0.Add(2*time.Hour)), task("c", t0.Add(time.Hour))
 	// Drag c between a and b.
-	rank, ok := Between(a, b)
+	rank, ok := between(a, b)
 	if !ok {
 		t.Fatal("no room between two tasks created an hour apart")
 	}
@@ -59,7 +72,7 @@ func TestDropBetweenStaysAfterRefetch(t *testing.T) {
 // A task created after a move still arrives at the top.
 func TestNewTaskArrivesOnTopOfMovedOnes(t *testing.T) {
 	a, b := task("a", t0), task("b", t0.Add(time.Hour))
-	r, _ := Between(nil, b) // a moved to the top
+	r, _ := between(nil, b) // a moved to the top
 	a.Rank = &r
 	fresh := task("fresh", t0.Add(24*time.Hour))
 	col := []*dgraphStruct.DgraphTask{a, b, fresh}
@@ -71,13 +84,13 @@ func TestNewTaskArrivesOnTopOfMovedOnes(t *testing.T) {
 
 func TestEnds(t *testing.T) {
 	a := task("a", t0, 10)
-	if r, ok := Between(nil, a); !ok || r >= 10 {
+	if r, ok := between(nil, a); !ok || r >= 10 {
 		t.Fatalf("top of column: %v %v", r, ok)
 	}
-	if r, ok := Between(a, nil); !ok || r <= 10 {
+	if r, ok := between(a, nil); !ok || r <= 10 {
 		t.Fatalf("bottom of column: %v %v", r, ok)
 	}
-	if _, ok := Between(nil, nil); !ok {
+	if _, ok := between(nil, nil); !ok {
 		t.Fatal("an empty column always has room")
 	}
 }
@@ -86,11 +99,11 @@ func TestEnds(t *testing.T) {
 // leave no room between them; that must ask for a renumber, not collide.
 func TestNoRoomAsksForRenumber(t *testing.T) {
 	a, b := task("a", t0), task("b", t0)
-	if _, ok := Between(a, b); ok {
+	if _, ok := between(a, b); ok {
 		t.Fatal("equal ranks must report no room")
 	}
 	// Neighbours out of order mean a stale view; also a renumber.
-	if _, ok := Between(task("x", t0, 5), task("y", t0, 1)); ok {
+	if _, ok := between(task("x", t0, 5), task("y", t0, 1)); ok {
 		t.Fatal("reversed neighbours must report no room")
 	}
 }
@@ -104,9 +117,9 @@ func TestRepeatedDropsIntoOneGap(t *testing.T) {
 	renumbered := false
 	for i := 0; i < 200; i++ {
 		m := task("m"+string(rune('A'+i%26))+string(rune('a'+i/26)), t0)
-		r, ok := Between(above, bottom)
+		r, ok := between(above, bottom)
 		if !ok {
-			col = Renumber(col, m, above, bottom)
+			col = renumber(col, m, above, bottom)
 			renumbered = true
 		} else {
 			m.Rank = &r
@@ -129,7 +142,7 @@ func TestRepeatedDropsIntoOneGap(t *testing.T) {
 func TestRenumberPlacesAndSpaces(t *testing.T) {
 	a, b, c := task("a", t0, 1), task("b", t0, 1), task("c", t0, 1)
 	moved := task("m", t0)
-	out := Renumber([]*dgraphStruct.DgraphTask{a, b, c, moved}, moved, b, c)
+	out := renumber([]*dgraphStruct.DgraphTask{a, b, c, moved}, moved, b, c)
 	if got := ids(out); got != "a,b,m,c" {
 		t.Fatalf("order = %s, want a,b,m,c", got)
 	}
@@ -149,11 +162,11 @@ func TestRenumberWithNeighbourFromAnotherProject(t *testing.T) {
 	a, b := task("a", t0, 0), task("b", t0, 100)
 	other := task("other", t0, 50)
 	moved := task("m", t0)
-	out := Renumber([]*dgraphStruct.DgraphTask{a, b}, moved, other, nil)
+	out := renumber([]*dgraphStruct.DgraphTask{a, b}, moved, other, nil)
 	if got := ids(out); got != "a,m,b" {
 		t.Fatalf("order = %s, want a,m,b", got)
 	}
-	out = Renumber([]*dgraphStruct.DgraphTask{task("a", t0, 0), task("b", t0, 100)}, task("m", t0), nil, task("o", t0, 150))
+	out = renumber([]*dgraphStruct.DgraphTask{task("a", t0, 0), task("b", t0, 100)}, task("m", t0), nil, task("o", t0, 150))
 	if got := ids(out); got != "a,b,m" {
 		t.Fatalf("order = %s, want a,b,m", got)
 	}

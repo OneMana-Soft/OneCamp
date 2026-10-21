@@ -194,7 +194,25 @@ func SetTranscription(ctx context.Context, roomName, identity, byName string, on
 			return nil, err
 		}
 	}
+	callChanged(ctx, roomName)
 	return sw, nil
+}
+
+// changeListeners are told when something a call says about itself changes.
+var changeListeners []func(ctx context.Context, room string)
+
+// OnCallChange adds a listener told whenever something about a room's call
+// changes that the call says about itself: a recording started or stopped,
+// transcription turned on or off. Call State listens, which this package
+// can't import (business/CallState imports it). Added from init functions.
+func OnCallChange(fn func(ctx context.Context, room string)) {
+	changeListeners = append(changeListeners, fn)
+}
+
+func callChanged(ctx context.Context, room string) {
+	for _, fn := range changeListeners {
+		fn(ctx, room)
+	}
 }
 
 // NoteRecording records the recording now running in a room's call, so its
@@ -226,12 +244,10 @@ func ForgetRecording(ctx context.Context, roomName, egressID string) {
 	}
 }
 
-// ForgetCall drops everything kept about the call that just ended in a room:
-// its switches, and who was put out of it.
+// ForgetCall drops the switches kept for the call that just ended in a room.
+// Who was put out of it is kept on the call's own record, which ended with it.
 func ForgetCall(ctx context.Context, roomName string) {
-	for _, spec := range []registry.Spec{registry.CallState, registry.CallRemoved} {
-		if err := redisStore.Delete(ctx, spec, []string{roomName}); err != nil {
-			helpers.LogErrorWithContext(ctx, "business/ForgetCall could not clear %s for a room: %+v", spec.Namespace, err)
-		}
+	if err := redisStore.Delete(ctx, registry.CallState, []string{roomName}); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/ForgetCall could not clear %s for a room: %+v", registry.CallState.Namespace, err)
 	}
 }

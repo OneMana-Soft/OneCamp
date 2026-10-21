@@ -12,7 +12,6 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
-	models "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
 
@@ -110,22 +109,4 @@ func EnsureSystemBotUser(ctx context.Context) (uuid.UUID, error) {
 		return uuid.Nil, err
 	}
 	return id, nil
-}
-
-// GetSystemBotUser returns the bot's Postgres row, or (nil, nil) if not seeded.
-func GetSystemBotUser(ctx context.Context) (*models.User, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	q := `SELECT id, email_id, is_bot FROM users WHERE email_id = $1 AND deleted_at IS NULL`
-	var u models.User
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(dbctx, q, SystemBotEmail).Scan(&u.Id, &u.EmailID, &u.IsBot)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/GetSystemBotUser failed: %+v", err)
-		return nil, err
-	}
-	return &u, nil
 }

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	domain "github.com/akashc777/OneCamp/domain/Project"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -102,9 +103,6 @@ func weekStart(t time.Time, loc *time.Location) time.Time {
 	return time.Date(t.Year(), t.Month(), t.Day()-(int(t.Weekday())+6)%7, 0, 0, 0, 0, loc)
 }
 
-// priorityOrder sorts priorities from high to none.
-var priorityOrder = map[string]int{dgraphStruct.TASK_PRIORITY_HIGH: 0, dgraphStruct.TASK_PRIORITY_MEDIUM: 1, dgraphStruct.TASK_PRIORITY_LOW: 2, "": 3}
-
 // BuildReport works the report out of what was read: projects and the hours
 // logged on them (nil when they couldn't be read), as of now in loc, for the
 // weeks up to this one. only, when not empty, keeps to those projects. Pure.
@@ -184,7 +182,7 @@ func BuildReport(projects []domain.ReportProject, hours []timeModels.WeekSeconds
 				count(&pr.ReportCounts)
 			}
 			prio := strings.ToLower(t.Priority)
-			if _, known := priorityOrder[prio]; !known {
+			if !taskPriority.Is(prio) {
 				prio = ""
 			}
 			pp, ok := priorities[prio]
@@ -279,7 +277,7 @@ func BuildReport(projects []domain.ReportProject, hours []timeModels.WeekSeconds
 		return strings.ToLower(a.Name) < strings.ToLower(b.Name)
 	})
 	sort.SliceStable(r.Priorities, func(i, j int) bool {
-		return priorityOrder[r.Priorities[i].Priority] < priorityOrder[r.Priorities[j].Priority]
+		return taskPriority.Rank(r.Priorities[i].Priority) < taskPriority.Rank(r.Priorities[j].Priority)
 	})
 	return r
 }

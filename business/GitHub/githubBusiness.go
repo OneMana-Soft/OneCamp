@@ -30,7 +30,6 @@ import (
 	integrationDomain "github.com/akashc777/OneCamp/domain/Integration"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	githubLinkModel "github.com/akashc777/OneCamp/models/postgres/GitHubLink"
@@ -324,11 +323,7 @@ func LinkRepositoryToProject(ctx context.Context, input LinkRepoInput, createdBy
 	// Generate webhook secret for this link
 	secret := uuid.New().String()
 
-	query := `
-		INSERT INTO github_links (id, project_id, repo_owner, repo_name, installation_id, webhook_secret, sync_issues, sync_prs, auto_create_tasks, created_by, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $11)
-	`
-	err := githubLinkModel.CreateGitHubLink(query, id, input.ProjectId, input.RepoOwner, input.RepoName, nil, &secret, input.SyncIssues, input.SyncPRs, input.AutoCreateTasks, createdBy, now)
+	err := githubLinkModel.CreateGitHubLink(ctx, id, input.ProjectId, input.RepoOwner, input.RepoName, nil, &secret, input.SyncIssues, input.SyncPRs, input.AutoCreateTasks, createdBy, now)
 	if err != nil {
 		if strings.Contains(err.Error(), "duplicate key") {
 			return nil, fmt.Errorf("this repository is already linked to this project")
@@ -337,8 +332,7 @@ func LinkRepositoryToProject(ctx context.Context, input LinkRepoInput, createdBy
 	}
 
 	// Fetch and return the created link
-	getQuery := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1`
-	link, err := githubLinkModel.GetGitHubLinkById(getQuery, id)
+	link, err := githubLinkModel.GetGitHubLinkById(ctx, id, false)
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +341,7 @@ func LinkRepositoryToProject(ctx context.Context, input LinkRepoInput, createdBy
 	// any earlier delivery from the same repo before linking.
 	invalidateLinkByRepo(input.RepoOwner, input.RepoName)
 
-	go registerGitHubWebhook(link, secret)
+	helpers.GoSafeNamed("registerGitHubWebhook", func() { registerGitHubWebhook(link, secret) })
 
 	return link, nil
 }
@@ -357,8 +351,7 @@ func LinkRepositoryToProject(ctx context.Context, input LinkRepoInput, createdBy
 // still links it.
 func UnlinkRepository(ctx context.Context, linkId uuid.UUID) error {
 	// Get the link first
-	getQuery := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1 AND deleted_at IS NULL`
-	link, err := githubLinkModel.GetGitHubLinkById(getQuery, linkId)
+	link, err := githubLinkModel.GetGitHubLinkById(ctx, linkId, true)
 	if err != nil {
 		return err
 	}
@@ -369,8 +362,7 @@ func UnlinkRepository(ctx context.Context, linkId uuid.UUID) error {
 	now := time.Now()
 
 	// 1. Soft-delete the link
-	deleteQuery := `UPDATE github_links SET deleted_at = $1, updated_at = $2 WHERE id = $3 AND deleted_at IS NULL`
-	err = githubLinkModel.SoftDeleteGitHubLink(deleteQuery, now, linkId)
+	err = githubLinkModel.SoftDeleteGitHubLink(ctx, now, linkId)
 	if err != nil {
 		return fmt.Errorf("failed to delete link: %v", err)
 	}
@@ -430,24 +422,13 @@ func DisconnectGitHub(ctx context.Context) error {
 	now := time.Now()
 
 	// 2. Soft-delete ALL github_links
-	deleteAllQuery := `UPDATE github_links SET deleted_at = $1, updated_at = $2 WHERE deleted_at IS NULL`
-	err := githubLinkModel.SoftDeleteAllGitHubLinks(deleteAllQuery, now)
+	err := githubLinkModel.SoftDeleteAllGitHubLinks(ctx, now)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/DisconnectGitHub Failed to delete all links err: %+v", err)
 	}
 
 	// 3. Batch-clear ALL GitHub metadata from ALL tasks
-	clearAllQuery := `
-		UPDATE tasks SET
-			github_issue_number = NULL,
-			github_issue_url = NULL,
-			github_pr_number = NULL,
-			github_pr_url = NULL,
-			github_branch = NULL,
-			updated_at = NOW()
-		WHERE github_issue_url IS NOT NULL OR github_pr_url IS NOT NULL
-	`
-	err = githubLinkModel.BatchClearAllGitHubFields(clearAllQuery)
+	err = githubLinkModel.BatchClearAllGitHubFields(ctx)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/DisconnectGitHub Failed to clear all task fields err: %+v", err)
 	}
@@ -486,20 +467,17 @@ func DisconnectGitHub(ctx context.Context) error {
 
 // GetLinkedRepos returns all repos linked to a specific project.
 func GetLinkedRepos(ctx context.Context, projectId uuid.UUID) ([]*githubLinkModel.GitHubLink, error) {
-	query := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE project_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC`
-	return githubLinkModel.GetGitHubLinksByProjectId(query, projectId)
+	return githubLinkModel.GetGitHubLinksByProjectId(ctx, projectId)
 }
 
 // GetAllLinkedRepos returns all active GitHub links.
 func GetAllLinkedRepos(ctx context.Context) ([]*githubLinkModel.GitHubLink, error) {
-	query := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE deleted_at IS NULL ORDER BY created_at DESC`
-	return githubLinkModel.GetAllGitHubLinks(query)
+	return githubLinkModel.GetAllGitHubLinks(ctx)
 }
 
 // GetGitHubLinkById returns a link by its ID.
 func GetGitHubLinkById(ctx context.Context, linkId uuid.UUID) (*githubLinkModel.GitHubLink, error) {
-	query := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1 AND deleted_at IS NULL`
-	return githubLinkModel.GetGitHubLinkById(query, linkId)
+	return githubLinkModel.GetGitHubLinkById(ctx, linkId, true)
 }
 
 // HandleGitHubWebhookEvent processes an incoming GitHub webhook event.
@@ -1372,7 +1350,7 @@ func dispatchAgentPRCommentIfAny(ctx context.Context, body []byte, owner, repo s
 	if pv.Action != "created" || pv.Issue.PullRequest == nil {
 		return
 	}
-	if !prCommentMayDriveAgent(pv.Sender.Type, pv.Comment.User.Login, getGitHubBotLogin()) {
+	if !prCommentMayDriveAgent(pv.Sender.Type, pv.Comment.User.Login, getGitHubBotLogin(ctx)) {
 		return
 	}
 	prURL := strings.TrimSpace(pv.Issue.PullRequest.HTMLURL)
@@ -2647,10 +2625,7 @@ func CreatePullRequestForTask(ctx context.Context, taskUUID uuid.UUID, title, bo
 		return nil, fmt.Errorf("task has no project")
 	}
 
-	links, err := githubLinkModel.GetGitHubLinksByProjectId(`
-		SELECT id, project_id, repo_owner, repo_name, installation_id, webhook_secret, sync_issues, sync_prs, auto_create_tasks, default_task_status, label_mapping, automation_rules, branch_format, created_by, created_at, updated_at, deleted_at
-		FROM github_links WHERE project_id = $1 AND deleted_at IS NULL
-	`, taskInfo)
+	links, err := githubLinkModel.GetGitHubLinksByProjectId(ctx, taskInfo)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/GitHub/CreatePullRequestForTask project's repos err: %+v", err)
 		return nil, errors.New("couldn't read which repository the project is linked to, try again")
@@ -2658,7 +2633,9 @@ func CreatePullRequestForTask(ctx context.Context, taskUUID uuid.UUID, title, bo
 	if len(links) == 0 {
 		return nil, fmt.Errorf("no linked repo for project")
 	}
-	link := links[0]
+	// The project's first link (they come newest first): the read had no
+	// order, which in practice was the order they were made.
+	link := links[len(links)-1]
 
 	// 2. Get GitHub token (auto-refreshed)
 	integration, err := integrationDomain.GetIntegration(ctx, "org", uuid.Nil, "github")
@@ -2750,150 +2727,6 @@ func getGitHubDefaultBranch(owner, repo, token string) (string, error) {
 		return "main", nil
 	}
 	return result.DefaultBranch, nil
-}
-
-// ExecRaw executes a raw SQL query with args.
-func ExecRaw(ctx context.Context, query string, args ...interface{}) error {
-	ctx2, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx2, query, args...)
-	return err
-}
-
-// ImportIssuesAsTasks imports open GitHub issues from a linked repo as OneCamp tasks.
-//
-// Deprecated: this synchronous variant is kept for backwards
-// compatibility with any internal callers. New flows should call
-// EnqueueImportIssues which routes through the background worker
-// and returns immediately. This function delegates the actual work
-// to the same per-page batch helpers so behaviour is identical.
-func ImportIssuesAsTasks(ctx context.Context, linkId uuid.UUID, userId uuid.UUID) (int, error) {
-	getQuery := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1 AND deleted_at IS NULL`
-	link, err := githubLinkModel.GetGitHubLinkById(getQuery, linkId)
-	if err != nil || link == nil {
-		return 0, fmt.Errorf("link not found")
-	}
-
-	client, err := GitHubHTTPClient(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("GitHub not connected")
-	}
-
-	userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, userId.String())
-	if err != nil {
-		return 0, fmt.Errorf("failed to get user dgraph info: %v", err)
-	}
-	userInfo := &userModels.UserInfo{
-		UserPostgresInfo: userModels.User{Id: userId},
-		UserDgraphInfo:   *userDgraphInfo,
-	}
-	dgraphProjectInfo, err := projectBusiness.GetBasicDgraphProjectInfo(ctx, link.ProjectId.String(), userDgraphInfo.Uid)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get project dgraph info: %v", err)
-	}
-
-	imported := 0
-	page := 1
-	for page <= importPagesMax {
-		issues, hasMore, err := fetchIssuesPage(ctx, client, link, page)
-		if err != nil {
-			return imported, err
-		}
-		if len(issues) == 0 {
-			break
-		}
-		urls := make([]string, 0, len(issues))
-		for _, issue := range issues {
-			if issue.PullRequest == nil {
-				urls = append(urls, issue.HTMLURL)
-			}
-		}
-		existing, _ := taskDomain.FindTasksByGitHubIssueURLs(ctx, urls)
-		for i := range issues {
-			issue := issues[i]
-			if issue.PullRequest != nil {
-				continue
-			}
-			if _, ok := existing[issue.HTMLURL]; ok {
-				continue
-			}
-			if err := createTaskFromIssue(ctx, link, userInfo, dgraphProjectInfo, &issue); err != nil {
-				helpers.LogErrorWithContext(ctx, "business/ImportIssuesAsTasks Failed to create task for issue #%d err: %+v", issue.Number, err)
-				continue
-			}
-			imported++
-		}
-		if !hasMore {
-			break
-		}
-		page++
-	}
-
-	return imported, nil
-}
-
-// ImportPRsAsTasks imports open GitHub PRs from a linked repo as OneCamp tasks.
-//
-// Deprecated: see the doc-comment on ImportIssuesAsTasks. New flows
-// should call EnqueueImportPRs.
-func ImportPRsAsTasks(ctx context.Context, linkId uuid.UUID, userId uuid.UUID) (int, error) {
-	getQuery := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1 AND deleted_at IS NULL`
-	link, err := githubLinkModel.GetGitHubLinkById(getQuery, linkId)
-	if err != nil || link == nil {
-		return 0, fmt.Errorf("link not found")
-	}
-
-	client, err := GitHubHTTPClient(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("GitHub not connected")
-	}
-
-	userDgraphInfo, err := userBusiness.GetDgraphUserInfoByUUID(ctx, userId.String())
-	if err != nil {
-		return 0, fmt.Errorf("failed to get user dgraph info: %v", err)
-	}
-	userInfo := &userModels.UserInfo{
-		UserPostgresInfo: userModels.User{Id: userId},
-		UserDgraphInfo:   *userDgraphInfo,
-	}
-	dgraphProjectInfo, err := projectBusiness.GetBasicDgraphProjectInfo(ctx, link.ProjectId.String(), userDgraphInfo.Uid)
-	if err != nil {
-		return 0, fmt.Errorf("failed to get project dgraph info: %v", err)
-	}
-
-	imported := 0
-	page := 1
-	for page <= importPagesMax {
-		prs, hasMore, err := fetchPRsPage(ctx, client, link, page)
-		if err != nil {
-			return imported, err
-		}
-		if len(prs) == 0 {
-			break
-		}
-		urls := make([]string, 0, len(prs))
-		for _, pr := range prs {
-			urls = append(urls, pr.HTMLURL)
-		}
-		existing, _ := taskDomain.FindTasksByGitHubPRURLs(ctx, urls)
-		for i := range prs {
-			pr := prs[i]
-			if _, ok := existing[pr.HTMLURL]; ok {
-				continue
-			}
-			if err := createTaskFromPR(ctx, link, userInfo, dgraphProjectInfo, &pr); err != nil {
-				helpers.LogErrorWithContext(ctx, "business/ImportPRsAsTasks Failed to create task for PR #%d err: %+v", pr.Number, err)
-				continue
-			}
-			imported++
-		}
-		if !hasMore {
-			break
-		}
-		page++
-	}
-
-	return imported, nil
 }
 
 // labelOf is a task's label (its tags), "" when it has none.

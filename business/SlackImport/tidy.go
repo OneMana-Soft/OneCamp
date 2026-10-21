@@ -13,11 +13,13 @@ package business
 //   - Channels archived in Slack came across live, so the sidebar filled with
 //     channels nobody had used in years. They are archived once their history
 //     is in, so search and the archive show them as they were.
-//   - The admin running the import was put in every private channel, as the
+//   - The admin running the import was put in every channel it made, as the
 //     person who created it: a member, and its admin, of conversations they
-//     were never part of. They now leave the private channels they weren't in,
-//     handing the channel's admin role to whoever made it in Slack (or its
-//     first member who came across).
+//     were never part of. They now leave the channels they weren't in, public
+//     and private, handing the channel's admin role to whoever made it in
+//     Slack (or its first member who came across). A public channel's
+//     history is everyone's to read, but its members are the team's, and the
+//     admin's sidebar is theirs.
 
 import (
 	"context"
@@ -70,7 +72,7 @@ func generalSharedWithGuests(ctx context.Context) bool {
 	return err == nil && ch != nil && ch.Id != uuid.Nil && sharedWithGuests(ctx, ch.Id)
 }
 
-// heirOf is who becomes a private channel's admin when the importing admin
+// heirOf is who becomes a channel's admin when the importing admin
 // leaves it: its Slack creator if they came across and are in it, else its
 // first member who came across. Bots are passed over: an integration can't
 // look after a channel. Pure apart from isBot.
@@ -115,16 +117,17 @@ func wasMember(sc *SlackChannel, resolved map[string]uuid.UUID, admin uuid.UUID)
 	return false
 }
 
-// leavePrivateChannel takes the importing admin out of a private channel they
-// weren't in, after handing its admin role on. When none of its members came
-// across there is nobody to hand it to, and they stay, said in the import's
-// warnings: a private channel with no member is one nobody can reach.
-func leavePrivateChannel(ctx context.Context, importId, channelUUID uuid.UUID, sc *SlackChannel,
+// leaveChannel takes the importing admin out of a channel the import made
+// that they weren't in, after handing its admin role on. When none of its
+// members came across there is nobody to hand it to, and they stay, said in
+// the import's warnings: a private channel with no member is one nobody can
+// reach, and a public one would have nobody to look after it.
+func leaveChannel(ctx context.Context, importId, channelUUID uuid.UUID, sc *SlackChannel, private bool,
 	admin *userModels.UserInfo, cache *dgraphUserCache) {
 
 	resolved, err := importModels.LookupIdMappingsBatch(ctx, importId, importModels.EntityUser, append([]string{sc.Creator}, sc.Members...))
 	if err != nil {
-		helpers.LogWarnWithContext(ctx, "SlackImport private channel %s members lookup failed: %+v", channelUUID, err)
+		helpers.LogWarnWithContext(ctx, "SlackImport channel %s members lookup failed: %+v", channelUUID, err)
 		return
 	}
 	if wasMember(sc, resolved, admin.UserPostgresInfo.Id) {
@@ -132,15 +135,17 @@ func leavePrivateChannel(ctx context.Context, importId, channelUUID uuid.UUID, s
 	}
 	heir, ok := heirOf(sc, resolved, slackBot(ctx, importId))
 	if !ok {
-		importModels.LogImportError(ctx, importId, nil, importModels.EntityChannel, sc.ID,
-			importModels.SeverityWarning, "PRIVATE_CHANNEL_KEPT",
-			fmt.Sprintf("You were left in the private channel %q: none of its members came across, so nobody else could open it.", sc.Name), nil)
+		code, why := "CHANNEL_KEPT", fmt.Sprintf("You were left in #%s: none of its members came across, so it would have had nobody to look after it.", sc.Name)
+		if private {
+			code, why = "PRIVATE_CHANNEL_KEPT", fmt.Sprintf("You were left in the private channel %q: none of its members came across, so nobody else could open it.", sc.Name)
+		}
+		importModels.LogImportError(ctx, importId, nil, importModels.EntityChannel, sc.ID, importModels.SeverityWarning, code, why, nil)
 		return
 	}
 	heirNode := cache.get(ctx, heir.String())
 	ch, err := channelBusiness.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, "")
 	if heirNode == nil || err != nil || ch == nil || ch.Uid == "" {
-		helpers.LogWarnWithContext(ctx, "SlackImport private channel %s: could not hand it on: %+v", channelUUID, err)
+		helpers.LogWarnWithContext(ctx, "SlackImport channel %s: could not hand it on: %+v", channelUUID, err)
 		return
 	}
 	if err := channelBusiness.AddChannelModeratorEdge(ctx, channelUUID.String(), heirNode.Uid); err != nil {

@@ -12,6 +12,7 @@ package models
 import (
 	"context"
 	"encoding/json"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
@@ -67,20 +68,6 @@ func InsertReceiptIfAbsent(ctx context.Context, r *EvidenceReceipt) (bool, error
 	return n > 0, err
 }
 
-// HasReceiptFor reports whether a window already has one, so the job can decide
-// without building a pack it is going to throw away. Building one is a full
-// chain verification and an export; asking first is an index lookup.
-func HasReceiptFor(ctx context.Context, from, to time.Time) (bool, error) {
-	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var exists bool
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(dbctx,
-		`SELECT EXISTS (SELECT 1 FROM evidence_receipts WHERE period_start = $1 AND period_end = $2)`,
-		from, to).Scan(&exists)
-	return exists, err
-}
-
 // ListReceipts returns the newest windows first, which is the only order anyone
 // reads them in.
 func ListReceipts(ctx context.Context, limit int) ([]*EvidenceReceipt, error) {
@@ -109,4 +96,19 @@ func ListReceipts(ctx context.Context, limit int) ([]*EvidenceReceipt, error) {
 		out = append(out, &r)
 	}
 	return out, rows.Err()
+}
+
+// ReceiptStartsSince is the period starts that have a receipt, from `since`
+// on: one read for a tick's months, where each was one (backend audit U2b).
+func ReceiptStartsSince(ctx context.Context, since time.Time) (map[time.Time]bool, error) {
+	starts, err := pgexec.Query(ctx, `SELECT period_start FROM evidence_receipts WHERE period_start >= $1`,
+		func(r pgexec.Row) (t time.Time, err error) { err = r.Scan(&t); return }, since)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[time.Time]bool, len(starts))
+	for _, t := range starts {
+		out[t.UTC()] = true
+	}
+	return out, nil
 }

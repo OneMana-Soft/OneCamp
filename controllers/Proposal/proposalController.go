@@ -54,7 +54,7 @@ func write(w http.ResponseWriter, r *http.Request, where string, err error) {
 func subject(w http.ResponseWriter, r *http.Request) (accessBusiness.Subject, bool) {
 	_, who := accessBusiness.RequestSubject(r)
 	if who.UserUID == "" {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return accessBusiness.Subject{}, false
 	}
 	return who, true

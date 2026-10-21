@@ -102,7 +102,7 @@ func (p *Provider) DefaultStatusMap() map[string]string {
 
 func (p *Provider) DefaultPriorityMap() map[string]string {
 	return map[string]string{
-		"highest": "high",
+		"highest": "urgent",
 		"high":    "high",
 		"medium":  "medium",
 		"low":     "low",
@@ -325,6 +325,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 				Description:  pr.Description,
 				TeamSourceID: team,
 				CreatedBy:    safeAccountID(pr.Lead),
+				SourceKey:    pr.Key,
 				Metadata:     map[string]any{"jira_key": pr.Key, "jira_url": site + "/browse/" + pr.Key},
 			}:
 			}
@@ -660,9 +661,14 @@ type jiraIssueFields struct {
 	Subtasks    []jiraIssueRef   `json:"subtasks"`
 	Attachment  []jiraAttachment `json:"attachment"`
 	Project     *jiraProjectRef  `json:"project"`
+	IssueLinks  []jiraIssueLink  `json:"issuelinks"`
+	// Estimate is the original estimate, in seconds.
+	Estimate int `json:"timeoriginalestimate"`
 	// Comment is the comments a search carries with an issue (the first page
 	// of them); only their authors are read (usersInScope).
+	// Total is all of them, which the comments stage reads in pages.
 	Comment *struct {
+		Total    int `json:"total"`
 		Comments []struct {
 			Author *jiraUser `json:"author"`
 		} `json:"comments"`
@@ -1112,9 +1118,44 @@ func parseJiraTime(s string) time.Time {
 	return time.Time{}
 }
 
+// jiraIssueLink is one of an issue's links: its type, and the issue at its
+// other end (inward: that one does the type's inward phrase to this one).
+type jiraIssueLink struct {
+	Type struct {
+		Name    string `json:"name"`
+		Inward  string `json:"inward"`
+		Outward string `json:"outward"`
+	} `json:"type"`
+	InwardIssue  *jiraIssueRef `json:"inwardIssue"`
+	OutwardIssue *jiraIssueRef `json:"outwardIssue"`
+}
+
+// blockedBy is the issues an issue waits on: the inward ends of its blocking
+// links ("is blocked by"). The other end of each link says it of itself, so
+// each dependency comes once; links that aren't waiting (relates, duplicates)
+// stay out.
+func blockedBy(iss *jiraIssue) []importProvider.SourceDependency {
+	var out []importProvider.SourceDependency
+	for _, l := range iss.Fields.IssueLinks {
+		blocking := strings.EqualFold(l.Type.Name, "Blocks") || strings.EqualFold(strings.TrimSpace(l.Type.Inward), "is blocked by")
+		if blocking && l.InwardIssue != nil && l.InwardIssue.Key != "" {
+			out = append(out, importProvider.SourceDependency{BlockerSourceID: l.InwardIssue.Key, Kind: "fs"})
+		}
+	}
+	return out
+}
+
+// commentTotal is how many comments an issue has, as a search answers it.
+func commentTotal(iss *jiraIssue) int {
+	if iss.Fields.Comment == nil {
+		return 0
+	}
+	return max(iss.Fields.Comment.Total, len(iss.Fields.Comment.Comments))
+}
+
 // buildSourceTask converts a Jira issue to the generic SourceTask.
 // issueFields are the fields a search asks for, besides custom ones.
-const issueFields = "summary,description,status,priority,assignee,reporter,creator,issuetype,labels,duedate,created,updated,parent,subtasks,attachment"
+const issueFields = "summary,description,status,priority,assignee,reporter,creator,issuetype,labels,duedate,created,updated,parent,subtasks,attachment,comment,issuelinks,timeoriginalestimate"
 
 func buildSourceTask(iss *jiraIssue, projectKey, site string, fields siteFields) importProvider.SourceTask {
 	created := parseJiraTime(iss.Fields.Created)
@@ -1162,6 +1203,7 @@ func buildSourceTask(iss *jiraIssue, projectKey, site string, fields siteFields)
 
 	return importProvider.SourceTask{
 		SourceID:        iss.Key,
+		SourceKey:       iss.Key,
 		ProjectSourceID: pkey,
 		Name:            iss.Fields.Summary,
 		Description:     body,
@@ -1175,6 +1217,9 @@ func buildSourceTask(iss *jiraIssue, projectKey, site string, fields siteFields)
 		DueDate:         due,
 		Completed:       isDoneStatus(iss.Fields.Status.Name),
 		AttachmentRefs:  atts,
+		CommentCount:    commentTotal(iss),
+		EstimateMinutes: iss.Fields.Estimate / 60,
+		Dependencies:    blockedBy(iss),
 		Fields:          issueFieldValues(iss.Custom, fields),
 		Metadata:        map[string]any{"jira_url": site + "/browse/" + iss.Key, "type": iss.Fields.IssueType.Name},
 	}

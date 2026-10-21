@@ -5,6 +5,7 @@ import (
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // Policy values set for one thing beside the workspace (a project), which beat
@@ -28,6 +29,35 @@ func ScopedValues(ctx context.Context, kind string, id uuid.UUID) (map[string]st
 			return nil, err
 		}
 		out[k] = v
+	}
+	return out, rows.Err()
+}
+
+// ScopedValuesMany is every policy value set for each of ids (scopes of one
+// kind), by id, in one statement; an id with none is missing.
+func ScopedValuesMany(ctx context.Context, kind string, ids []uuid.UUID) (map[uuid.UUID]map[string]string, error) {
+	out := map[uuid.UUID]map[string]string{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
+		`SELECT scope_id, key, value FROM policy_scoped_values WHERE scope_kind = $1 AND scope_id = ANY($2::uuid[])`, kind, pq.Array(ids))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id uuid.UUID
+		var k, v string
+		if err := rows.Scan(&id, &k, &v); err != nil {
+			return nil, err
+		}
+		if out[id] == nil {
+			out[id] = map[string]string{}
+		}
+		out[id][k] = v
 	}
 	return out, rows.Err()
 }

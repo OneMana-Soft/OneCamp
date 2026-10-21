@@ -23,6 +23,7 @@ import (
 
 	activityBusiness "github.com/akashc777/OneCamp/business/Activity"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	threadIndex "github.com/akashc777/OneCamp/business/ThreadIndex"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	domain "github.com/akashc777/OneCamp/domain/Comment"
 	channelNotificationDomain "github.com/akashc777/OneCamp/domain/UserChannelNotification"
@@ -50,11 +51,25 @@ type ThreadReply struct {
 	At        time.Time
 }
 
+// What a reply's notices read and the ways they go, and the thread's index
+// (business/ThreadIndex, chat P2): seams for tests.
+var (
+	threadOfPost     = domain.GetDgraphPostCommentsInfoByUUID
+	levelsInChannel  = channelNotificationDomain.GetLevelsInChannel
+	recordReply      = threadIndex.Replied
+	threadFollows    = threadIndex.Following
+	deliverReply     = notificationBusiness.Deliver
+	emailPostComment = notificationBusiness.DispatchPostComment
+	publishToUser    = activityBusiness.PublishActivityToUser
+	signedProfileURL = userBusiness.GetSignedProfileURL
+)
+
 // threadReplyAudience works out who hears of r (ThreadAudience): those who
-// replied before are read from the thread, and everyone's setting for the
-// channel, which says who is in it, in one read.
+// replied before are read from the thread, who follows it or turned it off
+// from its index, and everyone's setting for the channel, which says who is
+// in it, in one read.
 func threadReplyAudience(ctx context.Context, r ThreadReply) (notificationBusiness.Audience, error) {
-	thread, err := domain.GetDgraphPostCommentsInfoByUUID(ctx, r.Post.Uuid)
+	thread, err := threadOfPost(ctx, r.Post.Uuid)
 	if err != nil {
 		return notificationBusiness.Audience{}, err
 	}
@@ -64,28 +79,29 @@ func threadReplyAudience(ctx context.Context, r ThreadReply) (notificationBusine
 			repliers = append(repliers, c.CommentBy.Uuid)
 		}
 	}
-	var mentioned []string
-	for _, m := range r.Mentioned {
-		if m != nil {
-			mentioned = append(mentioned, m.Uuid)
-		}
+	mentioned := dgraphStruct.UUIDsOf(r.Mentioned)
+	on, off, err := threadFollows(ctx, r.Post.Uuid)
+	if err != nil {
+		return notificationBusiness.Audience{}, err
 	}
 	// Each person is asked about once, and only by a well-formed id: one
 	// malformed id would fail the whole read, and tell nobody.
 	var ask []string
-	for _, id := range slices.Concat([]string{r.Post.PostBy.Uuid}, repliers, mentioned) {
+	for _, id := range slices.Concat([]string{r.Post.PostBy.Uuid}, repliers, on, mentioned) {
 		if _, err := uuid.Parse(id); err == nil && !slices.Contains(ask, id) {
 			ask = append(ask, id)
 		}
 	}
-	levels, err := channelNotificationDomain.GetLevelsInChannel(ctx, r.Post.Channel.Uuid, ask)
+	levels, err := levelsInChannel(ctx, r.Post.Channel.Uuid, ask)
 	if err != nil {
 		return notificationBusiness.Audience{}, err
 	}
-	return notificationBusiness.ThreadAudience(levels, r.By.Uuid, r.Post.PostBy.Uuid, repliers, mentioned), nil
+	return notificationBusiness.ThreadAudience(levels, r.By.Uuid, r.Post.PostBy.Uuid, repliers, mentioned,
+		notificationBusiness.Follows{On: on, Off: off}), nil
 }
 
-// NotifyThreadReply tells a thread's people of a reply: a push, an email and,
+// NotifyThreadReply records a reply in its thread's index (business/ThreadIndex)
+// and tells the thread's people of it: a push, an email and,
 // to the post's author and those mentioned, the live Activity item, all to the
 // one audience worked out from the channel's members now (threadReplyAudience).
 // When that can't be worked out, nobody is told: a missed notice costs less
@@ -96,6 +112,12 @@ func NotifyThreadReply(r ThreadReply) {
 		return
 	}
 	ctx := context.Background()
+	// The thread's index first: its latest reply, the writer and those
+	// mentioned as its people, so the Threads view has it and the audience
+	// counts who follows it now.
+	recordReply(ctx, threadIndex.Reply{
+		Thread: threadIndex.OfPost(r.Post), By: r.By.Uuid, Mentioned: dgraphStruct.UUIDsOf(r.Mentioned), At: r.At,
+	})
 	aud, err := threadReplyAudience(ctx, r)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/NotifyThreadReply Failed to work out who hears of the reply, telling nobody err: %+v", err)
@@ -104,7 +126,7 @@ func NotifyThreadReply(r ThreadReply) {
 	if len(aud.Told) == 0 {
 		return
 	}
-	icon := userBusiness.GetSignedProfileURL(ctx, r.By.ProfileKey)
+	icon := signedProfileURL(ctx, r.By.ProfileKey)
 
 	// The push, and the desktop app's notice, to those of them the push gate
 	// lets through (business/Notification Deliver). A failure here costs the
@@ -118,10 +140,10 @@ func NotifyThreadReply(r ThreadReply) {
 		firebaseInit.FIREBASE_PUSH_DATA_USERNAME:  r.By.DisplayName(),
 		firebaseInit.FIREBASE_PUSH_DATA_ICON:      icon,
 	}
-	notificationBusiness.Deliver(ctx, aud.Told, pushData, "post_comment:"+r.Post.Uuid+":"+r.CommentUUID)
+	deliverReply(ctx, aud.Told, pushData, "post_comment:"+r.Post.Uuid+":"+r.CommentUUID)
 
 	// Email, by each one's own email settings (business/Notification).
-	notificationBusiness.DispatchPostComment(r.By.Uuid, r.By.DisplayName(), icon,
+	emailPostComment(r.By.Uuid, r.By.DisplayName(), icon,
 		r.Post.Channel.Uuid, r.Post.Uuid, r.PlainText, r.CommentUUID, aud.Told)
 
 	// The live Activity items.
@@ -136,7 +158,7 @@ func NotifyThreadReply(r ThreadReply) {
 		}
 	}
 	if aud.Author != "" {
-		activityBusiness.PublishActivityToUser(aud.Author, &dgraphModels.UnifiedActivityItem{
+		publishToUser(aud.Author, &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_COMMENT,
 			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Comment:      comment(),
@@ -144,7 +166,7 @@ func NotifyThreadReply(r ThreadReply) {
 	}
 	for _, id := range aud.Mentioned {
 		at := r.At
-		activityBusiness.PublishActivityToUser(id, &dgraphModels.UnifiedActivityItem{
+		publishToUser(id, &dgraphModels.UnifiedActivityItem{
 			ActivityType: mqttStruct.MESSAGE_ACTIVITY_MENTION,
 			Time:         time.Now().UTC().Format(time.RFC3339Nano),
 			Mention:      &dgraphStruct.DgraphMentions{CommentUuid: r.CommentUUID, Comment: comment(), CreatedAt: &at},

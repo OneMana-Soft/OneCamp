@@ -43,23 +43,3 @@ func MarkGitHubWebhookDeliveryFailed(ctx context.Context, deliveryID, errMsg str
 func GetGitHubWebhookHealth(ctx context.Context) (*models.HealthSummary, error) {
 	return models.GetHealthSummary(ctx)
 }
-
-// RecordGitHubWebhookDelivery is the legacy dedup primitive. It inserts
-// a row in 'completed' state on receipt — meaning a failed first attempt
-// was permanently lost. Kept for callers that haven't migrated to the
-// claim/complete/fail trio.
-//
-// Deprecated: use ClaimGitHubWebhookDelivery + MarkGitHubWebhookDeliveryCompleted.
-func RecordGitHubWebhookDelivery(ctx context.Context, deliveryID string, eventType string) (bool, error) {
-	query := `
-		INSERT INTO github_webhook_deliveries (delivery_id, event_type)
-		VALUES ($1, $2)
-		ON CONFLICT (delivery_id) DO NOTHING
-	`
-	inserted, err := models.InsertGitHubWebhookDelivery(query, deliveryID, eventType)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/RecordGitHubWebhookDelivery Failed err: %+v", err)
-		return false, err
-	}
-	return inserted, nil
-}

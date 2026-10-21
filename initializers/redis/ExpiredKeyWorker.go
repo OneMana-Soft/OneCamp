@@ -12,14 +12,14 @@ func InitRedisExpiryWorker() {
 	ctx := context.Background()
 	expiryPubSub := RedisClient.PSubscribe(ctx, "__keyevent@0__:expired")
 
-	go func() {
+	helpers.GoSafeLoop("initializers/redis/ExpiredKeyWorker:InitRedisExpiryWorker", func() {
 		for msg := range expiryPubSub.Channel() {
 			key := msg.Payload
 			if strings.HasPrefix(key, "refresh") {
 				handleExpiredFCMToken(ctx, key)
 			}
 		}
-	}()
+	})
 }
 
 func handleExpiredFCMToken(ctx context.Context, key string) {

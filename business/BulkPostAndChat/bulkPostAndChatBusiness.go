@@ -338,10 +338,14 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 	AddChatsAndPostsToOpensearch(dgraphPosts, dgraphDMs, fwdMessageInput.HtmlText, channelUUIDs, channelNames, userInfo, participantsByChatUUID)
 
 	// publish via MQTT for real-time delivery
-	go PublishChatsAndPostsMqtt(dgraphPosts, dgraphDMs, fwdMessageInput.HtmlText, channelUUIDs, userInfo, userDgraphPost, userDgraphChat)
+	helpers.GoSafeNamed("PublishChatsAndPostsMqtt", func() {
+		PublishChatsAndPostsMqtt(dgraphPosts, dgraphDMs, fwdMessageInput.HtmlText, channelUUIDs, userInfo, userDgraphPost, userDgraphChat)
+	})
 
 	// Bug 1 Fix: Send push notifications for DM and group chat forwards
-	go sendFwdMessageNotifications(context.WithoutCancel(ctx), userInfo, fwdMessageInput.HtmlText, dgraphDMs)
+	helpers.GoSafeNamed("sendFwdMessageNotifications", func() {
+		sendFwdMessageNotifications(context.WithoutCancel(ctx), userInfo, fwdMessageInput.HtmlText, dgraphDMs)
+	})
 
 	return
 
@@ -355,7 +359,7 @@ var (
 )
 
 // sendFwdMessageNotifications tells of each message forwarded into a DM or a
-// group as a new message there is told of (chatBusiness sendNewChatNotification):
+// group as a new message there is told of (chatBusiness notifyNewChat):
 // to everyone in the conversation on "all", never the sender, through
 // notificationBusiness.Deliver, so the push gate applies by person and the
 // desktop app gets its notice. It had its own token loop, which told the
@@ -441,7 +445,7 @@ func PublishChatsAndPostsMqtt(dgraphPosts []*dgraphStruct.DgraphPost,
 			ChatFwdChat:      userDgraphChat,
 		}
 
-		go mqttBusiness.PublishChat(&mqttChat, grpId)
+		helpers.GoSafeNamed("mqttBusiness.PublishChat", func() { mqttBusiness.PublishChat(&mqttChat, grpId) })
 
 	}
 
@@ -511,7 +515,7 @@ func AddChatsAndPostsToOpensearch(dgraphPosts []*dgraphStruct.DgraphPost, dgraph
 			PostChannelName:    channelNames[i],
 		}
 
-		go postDomain.CreatePostWithAttachmentsInOpenSearch(openSearchPost, dgraphPost.MediaObj)
+		helpers.GoSafeNamed("postDomain.CreatePostWithAttachmentsInOpenSearch", func() { postDomain.CreatePostWithAttachmentsInOpenSearch(openSearchPost, dgraphPost.MediaObj) })
 	}
 
 	// Only 1:1 DM forwards are indexed here; group chats use a separate index path.
@@ -530,7 +534,7 @@ func AddChatsAndPostsToOpensearch(dgraphPosts []*dgraphStruct.DgraphPost, dgraph
 			ChatDeletedAt:      nil,
 		}
 
-		go chatDomain.CreateChatWithAttachmentsInOpenSearch(openSearchChat, target.Chat.MediaObj)
+		helpers.GoSafeNamed("chatDomain.CreateChatWithAttachmentsInOpenSearch", func() { chatDomain.CreateChatWithAttachmentsInOpenSearch(openSearchChat, target.Chat.MediaObj) })
 
 	}
 

@@ -18,5 +18,8 @@ func mountConversations(rt chatRouters) {
 	rt.Member.Post("/conversations/{kind}/{id}/name", conversationController.Rename)
 	rt.Member.Post("/conversations/{kind}/{id}/private-channel", conversationController.MakePrivateChannel)
 	rt.Member.Get("/conversations/{kind}/{id}/members", conversationController.GetMembers)
+	// Where you are, and Mark unread (chat A3).
+	rt.Member.Get("/conversations/{kind}/{id}/read-state", conversationController.GetReadState)
+	rt.Member.Post("/conversations/{kind}/{id}/unread", conversationController.MarkUnread)
 	rt.Group.Post("/addParticipant", conversationController.AddParticipantToGroupChat)
 }

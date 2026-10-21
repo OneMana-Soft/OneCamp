@@ -343,20 +343,3 @@ func nullStr(s string) any {
 	}
 	return s
 }
-
-// GetByID returns a single nudge (used to authorize/act).
-func GetByID(ctx context.Context, id uuid.UUID) (*Nudge, error) {
-	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	const q = `
-		SELECT id, user_id, kind, title, body, cta_url, cta_text,
-		       source_type, source_id, status, priority, created_at, updated_at
-		FROM workspace_nudges WHERE id = $1`
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(cctx, q, id)
-	n, err := scanNudge(row)
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("nudge not found")
-	}
-	return n, err
-}

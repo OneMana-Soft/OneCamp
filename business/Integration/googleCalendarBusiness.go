@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -796,65 +795,4 @@ func DeclineGoogleCalendarEvent(ctx context.Context, googleEventId string, userI
 		helpers.LogErrorWithContext(ctx, "business/DeclineGoogleCalendarEvent failed to patch event %s err: %+v", googleEventId, err)
 	}
 	return err
-}
-
-// HandleGoogleCalendarWebhook is the legacy entry point; retained to
-// keep the package's external surface stable. Delegates to the new
-// header-only variant.
-func HandleGoogleCalendarWebhook(ctx context.Context, req *http.Request) error {
-	if req == nil {
-		return nil
-	}
-	return HandleGoogleCalendarWebhookEvent(ctx,
-		req.Header.Get("X-Goog-Channel-ID"),
-		req.Header.Get("X-Goog-Channel-Token"),
-		req.Header.Get("X-Goog-Resource-State"),
-		req.Header.Get("X-Goog-Resource-ID"),
-	)
-}
-
-func CreateGoogleCalendarEvent(ctx context.Context, input adapter.CreateOrUpdateEventInput, userInfo *model.UserInfo) (string, error) {
-	userId := userInfo.UserPostgresInfo.Id
-	integration, err := domain.GetIntegration(ctx, "user", userId, "google_calendar")
-	if err != nil || integration == nil || integration.AccessToken == nil || *integration.AccessToken == "" {
-		return "", fmt.Errorf("google calendar not connected")
-	}
-
-	srv, err := getGoogleCalendarService(ctx, integration)
-	if err != nil {
-		return "", err
-	}
-
-	event := &calendar.Event{
-		Summary:     input.Title,
-		Description: input.Description,
-		Start: &calendar.EventDateTime{
-			DateTime: input.StartTime,
-		},
-		End: &calendar.EventDateTime{
-			DateTime: input.EndTime,
-		},
-	}
-
-	// Resolve participants to emails
-	if len(input.Participants) > 0 {
-		var attendees []*calendar.EventAttendee
-		// Batched lookup: one Dgraph round-trip for all participant
-		// emails. Replaces a per-participant loop that was the worst
-		// N+1 in the calendar sync path for large meetings.
-		users, _ := userDomain.GetActiveDgraphUsersByUUIDsLight(ctx, input.Participants)
-		for _, pInfo := range users {
-			if pInfo != nil && pInfo.EmailID != "" {
-				attendees = append(attendees, &calendar.EventAttendee{Email: pInfo.EmailID})
-			}
-		}
-		event.Attendees = attendees
-	}
-
-	res, err := srv.Events.Insert("primary", event).Do()
-	if err != nil {
-		return "", err
-	}
-
-	return res.Id, nil
 }

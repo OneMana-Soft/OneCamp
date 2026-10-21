@@ -19,7 +19,9 @@ import (
 
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 
+	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	"github.com/akashc777/OneCamp/helpers"
+	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
 	"github.com/google/uuid"
 )
 
@@ -57,10 +59,8 @@ func CreateDoc(ctx context.Context, createdByUser *dgraphStruct.DgraphUser, inpu
 		},
 		IsPrivate:     &isPrivate,
 		PublicComment: &boolFalse,
-		EditingUser: []*dgraphStruct.DgraphUser{{
-			Uid: createdByUser.Uid,
-		}},
-		CreatedAt: &currentTime,
+		EditingUser:   docEditors(createdByUser.Uid, nil),
+		CreatedAt:     &currentTime,
 		// Made is the first change: a doc nobody has edited yet sorted last
 		// among its owner's docs, which order by it.
 		UpdatedAt: &currentTime,
@@ -369,51 +369,16 @@ func CreateDocComment(ctx context.Context, rawDocDgraph *dgraphStruct.DgraphDoc,
 
 	commentUUID := uuid.New()
 	currentTime := time.Now()
-	zeroUnixTime := time.Time{}
-
-	var commentMentions []*dgraphStruct.DgraphUser
-
-	for _, mention := range mentionsDgraphUsersList {
-		commentMentions = append(commentMentions, &dgraphStruct.DgraphUser{
-			DType: []string{"User"},
-			Uid:   mention.Uid,
-		})
+	// Only files the writer uploaded to the doc: any other entry would open
+	// for no one (business/Attachment OwnFiles).
+	if createTaskCommentInfoInput.Attachments, err = attachmentBusiness.OwnFiles(ctx, createdByUser.UserPostgresInfo.Id.String(), postgressStruct.ATTACHMENT_SRC_DOC, rawDocDgraph.Uuid, createTaskCommentInfoInput.Attachments); err != nil {
+		return nil, err
 	}
 
 	// New nodes from the upload's own fields: never a node the request names.
 	createTaskCommentInfoInput.Attachments = dgraphStruct.NewAttachments(createTaskCommentInfoInput.Attachments, createdByUser.UserDgraphInfo.Uid, currentTime)
 
-	dgraphDoc := &dgraphStruct.DgraphDoc{
-		Uid:  "uid(doc)",
-		Uuid: rawDocDgraph.Uuid,
-		Comments: []*dgraphStruct.DgraphComment{
-			{
-				DType: []string{"Comment"},
-				Uid:   "uid(co)",
-				Uuid:  commentUUID.String(),
-				Text:  createTaskCommentInfoInput.CommentBody,
-				Doc: &dgraphStruct.DgraphDoc{
-					Uid: "uid(doc)",
-				},
-				ContentAddedBy: contentAddedBy(rawDocDgraph),
-				Attachments:    createTaskCommentInfoInput.Attachments,
-				CreatedAt:      &currentTime,
-				DeletedAt:      &zeroUnixTime,
-				Mentions: &dgraphStruct.DgraphMentions{
-					CreatedAt:   &currentTime,
-					Mentions:    commentMentions,
-					CommentUuid: commentUUID.String(),
-					Comment: &dgraphStruct.DgraphComment{
-						Uid: "uid(co)",
-					},
-					DType: []string{"Mention"},
-				},
-				CommentBy: &dgraphStruct.DgraphUser{
-					Uid: createdByUser.UserDgraphInfo.Uid,
-				},
-			},
-		},
-	}
+	dgraphDoc := docCommentNode(rawDocDgraph, createdByUser, commentUUID, createTaskCommentInfoInput.CommentBody, currentTime, createTaskCommentInfoInput.Attachments, mentionsDgraphUsersList)
 
 	_, err = businessComment.CreateCommentInADoc(ctx, dgraphDoc, createdByUser, commentUUID, currentTime, rawDocDgraph, mentionsDgraphUsersList)
 
@@ -439,11 +404,76 @@ func CreateDocComment(ctx context.Context, rawDocDgraph *dgraphStruct.DgraphDoc,
 		Attachments:    createTaskCommentInfoInput.Attachments,
 	}
 
-	go mqttBusiness.PublishDocComment(&mqttDocComment, rawDocDgraph.Uuid)
+	helpers.GoSafeNamed("mqttBusiness.PublishDocComment", func() { mqttBusiness.PublishDocComment(&mqttDocComment, rawDocDgraph.Uuid) })
 
-	go PublishDocCommentActivity(commentUUID.String(), createTaskCommentInfoInput.CommentBody, currentTime, rawDocDgraph, createdByUser.UserDgraphInfo, mentionsDgraphUsersList)
+	helpers.GoSafeNamed("PublishDocCommentActivity", func() {
+		PublishDocCommentActivity(commentUUID.String(), createTaskCommentInfoInput.CommentBody, currentTime, rawDocDgraph, createdByUser.UserDgraphInfo, mentionsDgraphUsersList)
+	})
 
 	return
+}
+
+// docCommentNode is the mutation that adds a comment to a doc: by, at, with
+// its attachments and the people it mentions.
+func docCommentNode(rawDocDgraph *dgraphStruct.DgraphDoc, by *model.UserInfo, commentUUID uuid.UUID, body string, at time.Time, attachments []*dgraphStruct.DgraphAttachment, mentions []*dgraphStruct.DgraphUser) *dgraphStruct.DgraphDoc {
+	zeroUnixTime := time.Time{}
+	var commentMentions []*dgraphStruct.DgraphUser
+	for _, mention := range mentions {
+		commentMentions = append(commentMentions, &dgraphStruct.DgraphUser{
+			DType: []string{"User"},
+			Uid:   mention.Uid,
+		})
+	}
+	return &dgraphStruct.DgraphDoc{
+		Uid:  "uid(doc)",
+		Uuid: rawDocDgraph.Uuid,
+		Comments: []*dgraphStruct.DgraphComment{
+			{
+				DType: []string{"Comment"},
+				Uid:   "uid(co)",
+				Uuid:  commentUUID.String(),
+				Text:  body,
+				Doc: &dgraphStruct.DgraphDoc{
+					Uid: "uid(doc)",
+				},
+				ContentAddedBy: contentAddedBy(rawDocDgraph),
+				Attachments:    attachments,
+				CreatedAt:      &at,
+				DeletedAt:      &zeroUnixTime,
+				Mentions: &dgraphStruct.DgraphMentions{
+					CreatedAt:   &at,
+					Mentions:    commentMentions,
+					CommentUuid: commentUUID.String(),
+					Comment: &dgraphStruct.DgraphComment{
+						Uid: "uid(co)",
+					},
+					DType: []string{"Mention"},
+				},
+				CommentBy: &dgraphStruct.DgraphUser{
+					Uid: by.UserDgraphInfo.Uid,
+				},
+			},
+		},
+	}
+}
+
+// storeDocComment keeps a comment without telling anyone (business/Comment
+// StoreDocComment), a seam for tests.
+var storeDocComment = businessComment.StoreDocComment
+
+// ImportDocComment writes a comment made elsewhere (an import, docs N1) on
+// a doc as it was made: by its author, at its time. It tells nobody and
+// publishes nothing live, so bringing a workspace across notifies no one of
+// what was said there. Its id.
+func ImportDocComment(ctx context.Context, rawDocDgraph *dgraphStruct.DgraphDoc, by *model.UserInfo, body string, at time.Time) (string, error) {
+	if rawDocDgraph == nil || by == nil {
+		return "", errors.New("doc: a comment needs its doc and its author")
+	}
+	id := uuid.New()
+	if _, err := storeDocComment(ctx, docCommentNode(rawDocDgraph, by, id, body, at, nil, nil), by, id, at, rawDocDgraph); err != nil {
+		return "", err
+	}
+	return id.String(), nil
 }
 
 // Seams for tests: who of the people named may read a doc now (the Access
@@ -551,7 +581,7 @@ func DeleteDocComment(ctx context.Context, commentUUID uuid.UUID, docId string, 
 		UserUuid:    rawDgraphComment.CommentBy.Uuid,
 	}
 
-	go mqttBusiness.PublishDocComment(&mqttDocComment, rawDgraphComment.Doc.Uuid)
+	helpers.GoSafeNamed("mqttBusiness.PublishDocComment", func() { mqttBusiness.PublishDocComment(&mqttDocComment, rawDgraphComment.Doc.Uuid) })
 
 	return
 }
@@ -603,114 +633,7 @@ func UpdateDocComment(ctx context.Context, commentUUID uuid.UUID, commentInfo *a
 		HTMLText:    commentInfo.CommentBody,
 	}
 
-	go mqttBusiness.PublishDocComment(&mqttDocComment, rawDgraphCommentInfo.Doc.Uuid)
-
-	return
-}
-
-func DeleteCommentOnDoc(ctx context.Context, commentUUID uuid.UUID, rawDgraphComment *dgraphStruct.DgraphComment, userId string) (err error) {
-
-	currentTime := time.Now()
-	dgraphComment := &dgraphStruct.DgraphComment{
-		Uid:       "uid(co)",
-		Uuid:      commentUUID.String(),
-		DeletedAt: &currentTime,
-		DType:     []string{"Comment"},
-	}
-	err = businessComment.DeleteComment(ctx, dgraphComment, currentTime, commentUUID, rawDgraphComment)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/DeleteCommentOnDoc Failed to delete comment from doc err: %+v",
-			err)
-
-		return
-	}
-
-	mqttDocComment := mqttStruct.MqttDocComment{
-		Type:        mqttStruct.TYPE_DELETE,
-		DocUuid:     rawDgraphComment.Doc.Uuid,
-		CommentUuid: commentUUID.String(),
-		UserUuid:    userId,
-	}
-
-	go mqttBusiness.PublishDocComment(&mqttDocComment, rawDgraphComment.Doc.Uuid)
-
-	return
-}
-
-func CreateOrUpdateDocCommentReaction(ctx context.Context, reactionInfo *adapter.InputUpdateReactionForCommentInDoc, dgraphCommentRaw *dgraphStruct.DgraphComment, userDgraph *dgraphStruct.DgraphUser) (reactionUUID string, err error) {
-	currentTime := time.Now()
-
-	dgraphComment := &dgraphStruct.DgraphComment{
-		Uid:   "uid(co)",
-		Uuid:  reactionInfo.CommentId,
-		DType: []string{"Comment"},
-		Reactions: []*dgraphStruct.DgraphReaction{
-			{
-				Uid:       reactionInfo.ReactionDgraphUid,
-				DType:     []string{"Reaction"},
-				EmojiUuid: reactionInfo.EmojiReactionUuid,
-				AddedAt:   &currentTime,
-				ContentAddedBy: &dgraphStruct.DgraphUser{
-					Uid: dgraphCommentRaw.CommentBy.Uid,
-				},
-				AddedBy: &dgraphStruct.DgraphUser{
-					Uid: userDgraph.Uid,
-				},
-			},
-		},
-	}
-
-	reactionUUID, err = businessComment.CreateOrUpdateDgraphCommentReaction(ctx, dgraphComment)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/CreateOrUpdateDocCommentReaction Failed to update comment reaction in doc err: %+v",
-			err)
-		return
-	}
-
-	mqttDocCommentReaction := mqttStruct.MqttDocCommentReaction{
-		Type:            mqttStruct.TYPE_CREATE,
-		EmojiReactionId: reactionInfo.EmojiReactionUuid,
-		CommentUuid:     reactionInfo.CommentId,
-		AddedByUserName: userDgraph.DisplayName(),
-		AddedByUuid:     userDgraph.Uuid,
-		ReactionUuid:    reactionUUID,
-		DocUuid:         dgraphCommentRaw.Doc.Uuid,
-	}
-
-	if len(mqttDocCommentReaction.ReactionUuid) == 0 {
-		mqttDocCommentReaction.Type = mqttStruct.TYPE_UPDATE
-		mqttDocCommentReaction.ReactionUuid = reactionInfo.ReactionDgraphUid
-	}
-
-	go mqttBusiness.PublishDocCommentReaction(&mqttDocCommentReaction, dgraphCommentRaw.Doc.Uuid)
-
-	return
-}
-
-func DeleteReactionOnCommentDoc(ctx context.Context, commentDgraph *dgraphStruct.DgraphComment, reactionDgraphUUID string) (err error) {
-	err = businessComment.DeleteCommentReaction(ctx, commentDgraph.Uid, reactionDgraphUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/DeleteReactionOnCommentDoc Failed to delete reaction on comment in doc err: %+v",
-			err)
-
-		return
-	}
-
-	mqttDocCommentReaction := mqttStruct.MqttDocCommentReaction{
-		Type:         mqttStruct.TYPE_DELETE,
-		CommentUuid:  commentDgraph.Uuid,
-		ReactionUuid: reactionDgraphUUID,
-		DocUuid:      commentDgraph.Doc.Uuid,
-		AddedByUuid:  commentDgraph.CommentBy.Uuid, // Assuming the user deleting is the one who added it, or we need `userId` param
-	}
-
-	go mqttBusiness.PublishDocCommentReaction(&mqttDocCommentReaction, commentDgraph.Doc.Uuid)
+	helpers.GoSafeNamed("mqttBusiness.PublishDocComment", func() { mqttBusiness.PublishDocComment(&mqttDocComment, rawDgraphCommentInfo.Doc.Uuid) })
 
 	return
 }

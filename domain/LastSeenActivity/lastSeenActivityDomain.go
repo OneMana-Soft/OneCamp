@@ -7,6 +7,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	Activity "github.com/akashc777/OneCamp/models/dgraph/Activity"
 	models "github.com/akashc777/OneCamp/models/postgres/LastSeenActivity"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -64,10 +65,22 @@ func GetTotalUnreadActivityCount(ctx context.Context, userDgraphId string, userI
 	variables["$user_uid"] = userDgraphId
 	variables["$time"] = lastSeen.Format(time.RFC3339)
 
-	query := `query UnreadCount($user_id: string, $user_uid: string, $time: string) {
+	// A mention in a comment on a restricted task the person may no longer
+	// see counts for nothing (models/taskread): the feed leaves it out too.
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return 0, err
+	}
+	hiddenComments, notHidden := "", ""
+	if !tr.Empty() {
+		hiddenComments = `var(func: ` + tr.In() + `) { task_comments { hiddenComments as uid } }`
+		notHidden = ` AND NOT uid_in(mention_comment, uid(hiddenComments))`
+	}
 
+	query := `query UnreadCount($user_id: string, $user_uid: string, $time: string) {
+		` + hiddenComments + `
 		mentionInfo(func: uid($user_uid)) {
-			count: count(~mention_users @filter(gt(mention_created_at, $time) AND (has(mention_chat) OR has(mention_post) OR has(mention_comment))))
+			count: count(~mention_users @filter(gt(mention_created_at, $time) AND (has(mention_chat) OR has(mention_post) OR has(mention_comment))` + notHidden + `))
 		}
 		commentInfo(func: uid($user_uid)) {
 			count: count(~comment_on_content_added_by @filter(gt(comment_created_at, $time) AND not gt(comment_deleted_at, "1970-01-01T00:00:00Z") AND (has(comment_doc) OR has(comment_post) OR has(comment_chat) OR has(comment_task) OR has(comment_board)) AND NOT uid_in(comment_by, $user_uid)))

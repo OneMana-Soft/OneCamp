@@ -24,6 +24,7 @@ import (
 	"github.com/akashc777/OneCamp/business/Access/level"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	domain "github.com/akashc777/OneCamp/domain/Doc"
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/google/uuid"
 )
@@ -74,6 +75,11 @@ func emojiIcon(s string) bool {
 	}
 	return symbol
 }
+
+// IsEmojiIcon says whether a doc's icon is an emoji, which a page drawn
+// without the app (a published page, business/Publish) can show as it is.
+// Pure.
+func IsEmojiIcon(s string) bool { return emojiIcon(s) }
 
 // Check says why a change can't be kept on the doc, or nil. An upload's cover
 // must be the doc's own: an existing copy's cover is only ever kept, never
@@ -212,7 +218,7 @@ func TrashedPageOf(ctx context.Context, docUUID string, v Viewer, isAdmin bool) 
 	switch {
 	case d.Was < level.View:
 		return nil, ErrNotFound
-	case !d.Deleted || doc.DeletedAt == nil:
+	case !d.Deleted || !helpers.IsSoftDeleted(doc.DeletedAt):
 		return nil, ErrStillLive
 	}
 	p := &TrashedPage{

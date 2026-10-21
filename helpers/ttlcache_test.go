@@ -40,17 +40,6 @@ func TestTTLCachePerEntryTTL(t *testing.T) {
 	}
 }
 
-// A non-positive default TTL means entries live forever — useful for
-// caches that are explicitly invalidated.
-func TestTTLCacheForever(t *testing.T) {
-	c := NewTTLCache[int](Forever())
-	c.Set("k", 7)
-	time.Sleep(20 * time.Millisecond)
-	if got, ok := c.Get("k"); !ok || got != 7 {
-		t.Fatalf("expected forever hit, got=%d ok=%v", got, ok)
-	}
-}
-
 // Purge wipes everything in one shot.
 func TestTTLCachePurge(t *testing.T) {
 	c := NewTTLCache[int](time.Minute)

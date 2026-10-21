@@ -2,7 +2,6 @@ package models
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"time"
 
@@ -102,67 +101,4 @@ func CleanupOld(olderThan time.Duration) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected()
-}
-
-// ListByUser returns the most recent log rows for a user. Used by the user
-// settings page to show "your delivery history".
-func ListByUser(userID uuid.UUID, limit int) ([]LogRow, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	if limit <= 0 || limit > 100 {
-		limit = 25
-	}
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `
-		SELECT id, user_id, to_email, event_type, subject, status,
-		       provider_message_id, error_message, queue_id, attempts, created_at
-		FROM notification_email_log
-		WHERE user_id = $1
-		ORDER BY created_at DESC
-		LIMIT $2
-	`, userID, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []LogRow
-	for rows.Next() {
-		var l LogRow
-		var userIDNS sql.NullString
-		var providerNS sql.NullString
-		var errNS sql.NullString
-		var queueNS sql.NullString
-		if err := rows.Scan(&l.ID, &userIDNS, &l.ToEmail, &l.EventType, &l.Subject,
-			&l.Status, &providerNS, &errNS, &queueNS, &l.Attempts, &l.CreatedAt); err != nil {
-			return nil, err
-		}
-		if userIDNS.Valid {
-			if u, err := uuid.Parse(userIDNS.String); err == nil {
-				l.UserID = &u
-			}
-		}
-		if providerNS.Valid {
-			s := providerNS.String
-			l.ProviderMessageID = &s
-		}
-		if errNS.Valid {
-			s := errNS.String
-			l.ErrorMessage = &s
-		}
-		if queueNS.Valid {
-			if q, err := uuid.Parse(queueNS.String); err == nil {
-				l.QueueID = &q
-			}
-		}
-		out = append(out, l)
-	}
-	// Iteration can stop on a mid-query failure (dropped connection, server-side
-	// error) rather than on end-of-rows. Without it this returns a PARTIAL result
-	// with a nil error, and the caller cannot tell truncated data from a short list.
-	if err := rows.Err(); err != nil {
-		helpers.LogErrorWithContext(ctx, "models/NotificationEmailLog rows iteration failed err: %+v", err)
-		return nil, err
-	}
-	return out, nil
 }

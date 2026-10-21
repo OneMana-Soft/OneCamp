@@ -1,6 +1,7 @@
 // Package controllers (Command) exposes the user-facing slash command HTTP
-// surface: catalog (for the composer typeahead), execute, and interact
-// (Block Kit button/select round-trips).
+// surface: catalog (for the composer typeahead), execute, and the old
+// interact route, which only says a card is out of date (presses go to
+// POST /cards/act).
 package controllers
 
 import (
@@ -48,23 +49,14 @@ func Execute(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": resp})
 }
 
-// Interact handles POST /command/interact — a button/select activation on an
-// interactive card.
+// Interact is POST /command/interact, kept for a tab opened before cards were
+// sealed: it runs nothing, and answers that the card is out of date and how to
+// get a fresh one. Every press goes to POST /cards/act.
 func Interact(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
 	var req commandAdapter.InteractRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to parse body"})
 		return
 	}
-
-	resp, err := business.HandleInteract(ctx, userInfo, req)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/Command/Interact err: %+v", err)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Interaction failed"})
-		return
-	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": resp})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.HandleInteract(req.Command)})
 }

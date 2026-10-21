@@ -32,6 +32,8 @@ import (
 
 func TestSearchPagesThroughEveryHit(t *testing.T) {
 	ctx := context.Background()
+	// Task hits are checked against who may see them in Postgres (models/taskread).
+	integration.ConnectServerPostgres(t)
 	search := integration.SetupOpenSearch(t)
 	if err := opensearchInit.ConnectOpenSearch(&opensearchInit.OpenSearchConfig{Host: search.URL}); err != nil {
 		t.Fatalf("create the indices: %v", err)

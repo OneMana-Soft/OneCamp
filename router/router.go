@@ -13,16 +13,17 @@ import (
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	"github.com/akashc777/OneCamp/helpers"
 
-	apiTokenBusiness "github.com/akashc777/OneCamp/business/ApiToken"
 	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	activityController "github.com/akashc777/OneCamp/controllers/Activity"
 	adminConfigController "github.com/akashc777/OneCamp/controllers/AdminConfig"
 	apiTokenController "github.com/akashc777/OneCamp/controllers/ApiToken"
+	appController "github.com/akashc777/OneCamp/controllers/App"
 	archiveController "github.com/akashc777/OneCamp/controllers/Archive"
 	authController "github.com/akashc777/OneCamp/controllers/Auth"
 	authzController "github.com/akashc777/OneCamp/controllers/Authz"
 	boardController "github.com/akashc777/OneCamp/controllers/Board"
 	eventController "github.com/akashc777/OneCamp/controllers/Calendar"
+	cardsController "github.com/akashc777/OneCamp/controllers/Cards"
 	channelController "github.com/akashc777/OneCamp/controllers/Channel"
 	chatController "github.com/akashc777/OneCamp/controllers/Chat"
 	checkInController "github.com/akashc777/OneCamp/controllers/CheckIn"
@@ -65,7 +66,9 @@ import (
 	timeEntryController "github.com/akashc777/OneCamp/controllers/TimeEntry"
 	transcriptionController "github.com/akashc777/OneCamp/controllers/Transcription"
 	userController "github.com/akashc777/OneCamp/controllers/User"
-	v1Controller "github.com/akashc777/OneCamp/controllers/V1"
+	// The public API's routes register themselves (controllers/V1/routes.go).
+	v1api "github.com/akashc777/OneCamp/business/PublicAPI"
+	_ "github.com/akashc777/OneCamp/controllers/V1"
 	webhookController "github.com/akashc777/OneCamp/controllers/Webhook"
 	workflowController "github.com/akashc777/OneCamp/controllers/Workflow"
 
@@ -91,6 +94,40 @@ func corsFor(origins []string) func(http.Handler) http.Handler {
 	})
 }
 
+// useBaseMiddleware puts the middleware every request passes through on
+// router, outermost first.
+//
+// RecoverPanic sits inside the tracing middleware, so a panic is answered with
+// a msg the app can show, logged with the request's trace id, and recorded on
+// the request's span with its route and a 500. chi's Recoverer stays outermost
+// for a panic in the middleware itself; on its own it answered an empty 500,
+// which the app could only call "The server hit a problem", and the span ended
+// with no route and no status, so nothing in otel_traces or otel_logs said
+// where it happened.
+func useBaseMiddleware(router chi.Router, origins []string) {
+	router.Use(corsFor(origins))
+
+	router.Use(middleware.Recoverer)
+	// Response security headers. Before the handlers so every route gets them,
+	// after Recoverer so a panic response carries them too.
+	router.Use(customMiddleware.SecurityHeaders)
+	router.Use(customMiddleware.RequestIDMiddleware)
+
+	router.Use(otelchi.Middleware(
+		"onecamp-backend",
+		otelchi.WithTracerProvider(otel.GetTracerProvider()),
+		// The broker asks once per topic each time a client connects:
+		// hundreds of spans a sign-in, saying nothing.
+		otelchi.WithFilter(func(r *http.Request) bool {
+			return r.URL.Path != "/internal/mqtt/authorize"
+		}),
+	))
+	router.Use(customMiddleware.RecoverPanic)
+	// Inside the tracing too: a request whose client went away is recorded as
+	// 499, not as the 5xx its called-off reads made the handler answer.
+	router.Use(customMiddleware.ClientGone)
+}
+
 func Routes() http.Handler {
 	var allowedOrigins []string
 	if feHost := strings.TrimSpace(os.Getenv("FE_HOST_DOMAIN")); feHost != "" {
@@ -112,27 +149,7 @@ func Routes() http.Handler {
 		"https://localhost:3000", "https://localhost:3001",
 	)
 	router := chi.NewRouter()
-
-	router.Use(corsFor(allowedOrigins))
-
-	router.Use(middleware.Recoverer)
-	// Response security headers. Before the handlers so every route gets them,
-	// after Recoverer so a panic response carries them too.
-	router.Use(customMiddleware.SecurityHeaders)
-	// router.Use(middleware.Logger)
-	router.Use(customMiddleware.RequestIDMiddleware)
-
-	//router.Use(logOriginMiddleware)
-
-	router.Use(otelchi.Middleware(
-		"onecamp-backend",
-		otelchi.WithTracerProvider(otel.GetTracerProvider()),
-		// The broker asks once per topic each time a client connects:
-		// hundreds of spans a sign-in, saying nothing.
-		otelchi.WithFilter(func(r *http.Request) bool {
-			return r.URL.Path != "/internal/mqtt/authorize"
-		}),
-	))
+	useBaseMiddleware(router, allowedOrigins)
 
 	globalSearchRouter := chi.NewRouter()
 	channelRouter := chi.NewRouter()
@@ -280,6 +297,8 @@ func Routes() http.Handler {
 	// becomes a task. Sending is limited per address.
 	router.Get("/public/form/{token}", formController.GetPublicForm)
 	router.With(customMiddleware.IPRateLimit("form", 20, "Too many forms sent from here. Try again later.")).With(customMiddleware.BodyLimit(64<<10)).Post("/public/form/{token}", formController.SubmitPublicForm)
+	// An app's answer at its command's response URL: the token is the credential.
+	router.With(customMiddleware.IPRateLimit("command-respond", 600, "Too many answers from here. Try again later.")).With(customMiddleware.BodyLimit(256<<10)).Post("/command-responses/{token}", commandController.Respond)
 	router.With(customMiddleware.BookingPageReadLimit()).Get("/public/book/{slug}", eventController.GetPublicBookingPage)
 	router.With(customMiddleware.IPRateLimit("booking", 10, "Too many bookings from here. Try again later.")).With(customMiddleware.BodyLimit(8<<10)).Post("/public/book/{slug}", eventController.BookPublicSlot)
 	router.With(customMiddleware.BookingLinkReadLimit()).Get("/public/booking/{token}", eventController.GetPublicBooking)
@@ -303,6 +322,9 @@ func Routes() http.Handler {
 	router.Get("/guest/board-attachment/{token}/{obj_uuid}", guestController.GuestBoardAttachment)
 	// The same for a picture or file in a doc shared through a guest link (B4).
 	mountGuestDocAttachment(router)
+	// Docs published to the web (C6, D-25): public, each route protected in
+	// its controller (router/docsPublish.go).
+	mountPublishedPages(router)
 	// Public read-only table bundle for a guest, authorized by the grant.
 	router.With(customMiddleware.LoginRateLimit("guest")).Get("/guest/table/{token}", guestController.GuestTable)
 	// Channel guests: a person outside the workspace reads (and, with the post
@@ -321,6 +343,8 @@ func Routes() http.Handler {
 	// body-capped; the business layer enforces the capability and strips HTML.
 	router.With(customMiddleware.LoginRateLimit("guest")).Get("/guest/doc-comments/{token}", guestController.GuestDocComments)
 	router.With(customMiddleware.GuestRateLimit(customMiddleware.GuestDocComment)).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/doc-comments/{token}", guestController.CreateGuestDocComment)
+	// A client's verdict on a doc their comment link opens (docs C5-2).
+	router.With(customMiddleware.GuestRateLimit(customMiddleware.GuestApproval)).With(customMiddleware.BodyLimit(16<<10)).Post("/guest/doc-review/{token}", guestController.ReviewGuestDoc)
 
 	router.Group(func(r chi.Router) {
 		r.Use(customMiddleware.CSRFMiddleware)
@@ -329,6 +353,9 @@ func Routes() http.Handler {
 		r.With(customMiddleware.LoginRateLimit("collab")).Get("/auth/token", authController.GetCollabToken)
 		r.Post("/uploadFile", userController.UploadFile)
 		r.Get("/getFile/{obj_uuid}", userController.GetPublicFile)
+		// A profile picture as a redirect the web app puts in an <img src>,
+		// cached by the browser (userController.ServeAvatar).
+		r.Get("/avatar/{obj_uuid}", userController.ServeAvatar)
 		r.Post("/updateUserProfile", userController.UpdateUserProfile)
 		r.Post("/updateUserTheme", userController.UpdateUserTheme)
 		r.Post("/getIfUserNameIsAvailable", userController.GetIfUserNameIsAvailable)
@@ -427,6 +454,8 @@ func Routes() http.Handler {
 		r.Post("/csp-violations/clear", settingsController.ClearCSPViolations)
 
 		r.Get("/onboarding", settingsController.GetOnboardingStatus)
+		r.Post("/onboarding/sample", settingsController.MakeOnboardingSample)
+		r.Post("/onboarding/sample/remove", settingsController.RemoveOnboardingSample)
 		r.Post("/onboarding/dismiss", settingsController.DismissOnboarding)
 		// Set one step aside, or put it back. Same endpoint both ways: it is one
 		// edit in two directions, and two routes is how the two drift.
@@ -678,6 +707,14 @@ func Routes() http.Handler {
 		r.Get("/webhooks/{webhookId}/logs", webhookController.HandleGetWebhookLogs)
 		r.Get("/webhook-logs", webhookController.HandleGetGlobalWebhookLogs)
 		r.Post("/webhooks/{webhookId}/test", webhookController.HandleTestWebhook)
+		// Deliveries (platform P-API part 2, business/Hooks): what each webhook
+		// was sent and how it went, a delivery sent again, pause and resume.
+		r.Get("/webhooks/{webhookId}/deliveries", webhookController.HandleGetDeliveries)
+		r.Post("/webhooks/{webhookId}/deliveries/{deliveryId}/replay", webhookController.HandleReplayDelivery)
+		r.Post("/webhooks/{webhookId}/deliveries/replay-failed", webhookController.HandleReplayFailed)
+		r.Post("/webhooks/{webhookId}/pause", webhookController.HandlePauseWebhook)
+		r.Post("/webhooks/{webhookId}/resume", webhookController.HandleResumeWebhook)
+		r.Get("/webhook-health", webhookController.HandleGetDeliveryHealth)
 		r.Get("/webhooks/event-types", webhookController.HandleGetWebhookEventTypes)
 
 		// Workflow Builder routes moved to a capability-gated member group
@@ -700,6 +737,13 @@ func Routes() http.Handler {
 		r.Get("/apps/{appId}/oauth-url", commandController.GetOAuthInstallURL)
 		r.Post("/apps/{appId}/oauth-disconnect", commandController.DisconnectOAuthApp)
 		r.Post("/apps/{appId}/test", commandController.TestApp)
+		// An app as an identity (platform P-API, business/App): what it may
+		// carry and reach, and its credentials ("oc_app_…"), rotated in place.
+		r.Get("/apps/{appId}/identity", appController.GetIdentity)
+		r.Put("/apps/{appId}/access", appController.SetAccess)
+		r.Post("/apps/{appId}/tokens", appController.MintToken)
+		r.Post("/apps/{appId}/tokens/{tokenId}/rotate", appController.RotateToken)
+		r.Delete("/apps/{appId}/tokens/{tokenId}", appController.RevokeToken)
 
 		// Curated app marketplace — one-click install / uninstall of popular
 		// apps (Giphy, Zoom, Jira, Linear, …). Install pre-fills commands +
@@ -756,6 +800,7 @@ func Routes() http.Handler {
 		// admin broadcast topic; see business/SlackImport for stages.
 		r.Post("/import/slack/upload", slackImportController.HandleUpload)
 		r.Post("/import/slack/presign", slackImportController.HandlePresignUpload)
+		r.Post("/import/slack/api-read", slackImportController.HandleAPIRead)
 		r.Post("/import/slack/finalize/{jobId}", slackImportController.HandleFinalizeUpload)
 		r.Post("/import/slack/plan/{jobId}", slackImportController.HandlePlan)
 		r.Post("/import/slack/run/{jobId}", slackImportController.HandleRun)
@@ -774,6 +819,9 @@ func Routes() http.Handler {
 		r.Get("/import/connections", importController.HandleListConnections)
 		r.Post("/import/{provider}/connect", importController.HandleConnect)
 		r.Post("/import/{provider}/disconnect", importController.HandleDisconnect)
+		// Signing in at a provider with no tokens to paste (Basecamp).
+		r.Get("/import/{provider}/oauth-url", importController.HandleOAuthURL)
+		r.Get("/import/oauth/callback", importController.HandleOAuthCallback)
 		r.Post("/import/{provider}/discover", importController.HandleDiscover)
 		r.Post("/import/{provider}/jobs", importController.HandleCreateJob)
 		r.Post("/import/{provider}/presign", importController.HandlePresignUpload)
@@ -860,6 +908,8 @@ func Routes() http.Handler {
 		r.Mount("/poll", pollRouter)
 		r.Mount("/ai", aiRouter)
 		r.Mount("/command", commandRouter)
+		// A press on a card, checked on the server (business/Cards).
+		r.Post("/cards/act", cardsController.Act)
 		r.Mount("/link", linkRouter)
 		r.Mount("/tables", tableRouter)
 		r.Mount("/data-sources", dataSourceRouter)
@@ -1011,51 +1061,13 @@ func Routes() http.Handler {
 	v1Router.Use(customMiddleware.BodyLimit(1 << 20)) // 1 MiB cap on raw-decoded bodies
 	v1Router.Use(customMiddleware.VerifyApiToken)
 	v1Router.Use(customMiddleware.ApiTokenRateLimit)
-	v1Router.Get("/me", v1Controller.Me)
-	// What is waiting for the token's owner, for desktop bars (the OneMana kit
-	// for Omarchy). The AI edition also has /attention; this edition has no AI.
-	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeAttentionRead)).
-		Get("/unread", v1Controller.Unread)
-	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeTablesRead)).
-		Get("/tables", v1Controller.ListTables)
-	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeTablesRead)).
-		Get("/tables/{id}", v1Controller.GetTable)
-	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeTablesRead)).
-		Post("/tables/{id}/aggregate", v1Controller.AggregateTable)
-	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeTablesWrite)).
-		Post("/tables/{id}/rows", v1Controller.CreateRow)
-
-	// Tasks.
-	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeTasksRead)).
-		Get("/tasks", v1Controller.ListTasksV1)
-	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeTasksWrite)).
-		Post("/tasks", v1Controller.CreateTaskV1)
-	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeTasksWrite)).
-		Post("/tasks/{id}/status", v1Controller.UpdateTaskStatusV1)
-
-	// Projects (read).
-	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeProjectsRead)).
-		Get("/projects", v1Controller.ListProjectsV1)
-
-	// Messages (write).
-	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeMessagesWrite)).
-		Post("/messages/channel", v1Controller.SendMessageV1)
-	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeMessagesWrite)).
-		Post("/messages/dm", v1Controller.SendDMV1)
-
-	// Search (read): the workspace search the app's search box runs.
-	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeSearchRead)).
-		Get("/search", v1Controller.SearchV1)
-	v1Router.With(customMiddleware.RequireScope(apiTokenBusiness.ScopeSearchRead)).
-		Post("/search", v1Controller.SearchV1)
-
-	// OneCamp AS an MCP server: a single JSON-RPC endpoint that exposes the
-	// native workspace tools to any MCP-capable client. Auth is the same scoped
-	// bearer token; per-tool scope checks happen inside the handler, so a token
-	// only sees and can call the tools its scopes allow.
-	v1Router.Post("/mcp", func(w http.ResponseWriter, r *http.Request) {
-		helpers.WriteJSON(w, http.StatusNotImplemented, helpers.Envolope{"msg": "AI features are not supported on this build"})
-	})
+	// Every route is registered by the package that owns it (business/PublicAPI;
+	// controllers/V1/routes.go; /mcp answers that it is the AI edition's,
+	// controllers/V1/mcpThisEdition.go) and gets the API's one shape here: its
+	// scope, a limit per token and route, Idempotency-Key on writes, the version
+	// header and a request id; /openapi.json describes them.
+	// router/publicApiRegistry_test.go keeps this the only way in.
+	v1api.Mount(v1Router, v1api.Middleware{RequireScope: customMiddleware.RequireScope})
 	router.Mount("/v1", v1Router)
 
 	// SCIM 2.0 (/scim/v2): user provisioning and deprovisioning driven by the customer's identity
@@ -1322,12 +1334,11 @@ func Routes() http.Handler {
 	livekitRouter.With(customMiddleware.CSRFMiddleware, customMiddleware.VerifyAuth).
 		Post("/my-capability", livekitController.ReportTranscriptionCapability)
 	// A member in a call turns its transcription on or off, for everyone in
-	// it (the one switch behind captions and the kept transcript), and a host
-	// puts someone out of a call. Session-authenticated like the above.
+	// it (the one switch behind captions and the kept transcript).
+	// Session-authenticated like the above. What hosts do to a call is the
+	// calls programme's (POST /calls/{session_id}/act, callsSessions.go).
 	livekitRouter.With(customMiddleware.CSRFMiddleware, customMiddleware.VerifyAuth).
 		Post("/transcription", livekitController.SetCallTranscription)
-	livekitRouter.With(customMiddleware.CSRFMiddleware, customMiddleware.VerifyAuth).
-		Post("/remove-participant", livekitController.RemoveCallParticipant)
 	// The transcription agent says it is running, every 30 seconds, so the
 	// admin card and Test can tell server-side transcription has nothing to
 	// do it. Internal-secret gated.
@@ -1423,6 +1434,7 @@ func Routes() http.Handler {
 		r.Post("/updateName", projectController.UpdateProjectName)
 		r.Get("/taskList/{project_uuid}", projectController.GetProjectTaskList)
 		r.Get("/taskListForKanban/{project_uuid}", projectController.GetProjectTaskListForKanban)
+		r.Get("/boardColumn/{project_uuid}", projectController.GetProjectBoardColumn)
 		r.Get("/membersInfo/{project_uuid}", projectController.GetDgraphProjectMemberList)
 		r.Get("/info/{project_uuid}", projectController.ProjectInfo)
 		r.Post("/addAttachment", projectController.AddAttachmentToProjectDgraph)
@@ -1465,6 +1477,10 @@ func Routes() http.Handler {
 		r.Post("/{project_uuid}/cycles", cycleController.CreateCycle)
 		r.Post("/{project_uuid}/cycles/{cycle_id}/rename", cycleController.RenameCycle)
 		r.Post("/{project_uuid}/cycles/{cycle_id}/complete", cycleController.CompleteCycle)
+		r.Post("/{project_uuid}/cycles/{cycle_id}/start", cycleController.StartCycle)
+		r.Post("/{project_uuid}/cycles/schedule", cycleController.SetCycleSchedule)
+		r.Post("/{project_uuid}/cycles/schedule/stop", cycleController.StopCycleSchedule)
+		r.Get("/{project_uuid}/backlog", cycleController.Backlog)
 		r.Post("/{project_uuid}/cycles/{cycle_id}/delete", cycleController.DeleteCycle)
 		r.Get("/{project_uuid}/statuses", taskStatusController.List)
 		r.Post("/{project_uuid}/statuses", taskStatusController.Create)
@@ -1535,9 +1551,6 @@ func Routes() http.Handler {
 		r.Post("/stopCallRecording", channelController.StopVideoChannelCallRecording)
 		r.Get("/getRecordingList/{channel_uuid}", channelController.GetAllChannelRecordingList)
 		r.Get("/getRecordingURL/{channel_uuid}/{egress_id}", userController.GetChannelRecordingURL)
-		// The green room's read of the channel's call: on or not, recorded or
-		// transcribed and by whom, who is in it.
-		r.Get("/callState/{channel_uuid}", livekitController.GetChannelCallState)
 		r.Get("/getRecordingTranscript/{channel_uuid}/{egress_id}", channelController.GetChannelRecordingTranscript)
 		r.Post("/deleteRecording/{egressId}", recordingController.HandleDeleteChannelRecording)
 
@@ -1644,7 +1657,6 @@ func Routes() http.Handler {
 		r.Post("/stopCallRecording", chatController.StopVideoCallRecordingForGroup)
 		r.Get("/getRecordingList/{grp_id}", chatController.GetGrpChatRecordingList)
 		r.Get("/getRecordingURL/{grp_id}/{egress_id}", userController.GetGrpChatRecordingURL)
-		r.Get("/callState/{grp_id}", livekitController.GetGroupCallState)
 		r.Get("/getRecordingTranscript/{grp_id}/{egress_id}", chatController.GetGrpChatRecordingTranscript)
 		r.Post("/deleteRecording/{egressId}", recordingController.HandleDeleteChatRecording)
 
@@ -1679,7 +1691,6 @@ func Routes() http.Handler {
 		r.Post("/stopCallRecording", chatController.StopVideoCallRecordingForChat)
 		r.Get("/getRecordingList/{chat_uuid}", chatController.GetChatRecordingList)
 		r.Get("/getRecordingURL/{chat_uuid}/{egress_id}", userController.GetChatRecordingURL)
-		r.Get("/callState/{user_uuid}", livekitController.GetDMCallState)
 		r.Get("/getRecordingTranscript/{chat_uuid}/{egress_id}", chatController.GetChatRecordingTranscript)
 		r.Post("/deleteRecording/{egressId}", recordingController.HandleDeleteChatRecording)
 	})
@@ -1704,6 +1715,7 @@ func Routes() http.Handler {
 		r.Post("/restoreDocSnapshot", docController.RestoreDocSnapshot)
 		r.Post("/recordView", docController.RecordDocView)
 		r.Get("/getViewers", docController.GetDocViewers)
+		r.Get("/getInsights", docController.GetDocInsights)
 
 	})
 
@@ -2021,6 +2033,8 @@ func Routes() http.Handler {
 	mountTablesProgramme(newTablesRouters(router, adminUserRouter, tableRouter, v1Router))
 	// The projects programme's routes, last (projectsProgramme.go). Its only line here.
 	mountProjectsProgramme(newProjectsRouters(router, adminUserRouter, projectRouter, taskRouter, v1Router))
+	// The calls programme's routes, last (callsProgramme.go). Its only line here.
+	mountCallsProgramme(newCallsRouters(router))
 
 	return router
 }

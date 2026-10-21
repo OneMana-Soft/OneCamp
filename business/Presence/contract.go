@@ -73,6 +73,15 @@ func (todaysPresence) State(ctx context.Context, userUUID string) (State, error)
 	return stateOf(user, held), nil
 }
 
+// Here is whether someone is here now, as @here reaches (chat P3): a device
+// of theirs connected, and they haven't set themselves offline. The one rule
+// for "here", from the graph's fields of a user as read; A7's "active in the
+// last 10 minutes" replaces it here, for every caller. Pure.
+func Here(user *dgraphStruct.DgraphUser) bool {
+	return user != nil && user.DevicesConnected != nil && *user.DevicesConnected > 0 &&
+		user.Status != dgraphStruct.USER_OPT_STATUS_OFFLINE
+}
+
 // stateOf is a person's presence from their user as read and their held
 // status. Pure.
 func stateOf(user *dgraphStruct.DgraphUser, held notificationBusiness.HeldStatus) State {

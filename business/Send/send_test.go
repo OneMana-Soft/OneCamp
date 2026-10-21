@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 	postBusiness "github.com/akashc777/OneCamp/business/Post"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
@@ -70,6 +71,9 @@ func TestADurableRetryOfAnUnfinishedSendIsStillBeingSent(t *testing.T) {
 	rj, ok := AsRejection(durableRefusal(fmt.Errorf("commit: %w", postBusiness.ErrStillBeingSent)))
 	if !ok || rj.Status != http.StatusConflict || rj.Msg != "This message is still being sent" {
 		t.Errorf("%+v %v: a 409 with Once's words", rj, ok)
+	}
+	if rj, ok := AsRejection(durableRefusal(chatBusiness.ErrStillBeingSent)); !ok || rj.Status != http.StatusConflict {
+		t.Errorf("a DM's or group message's: %+v %v", rj, ok)
 	}
 	other := errors.New("graph down")
 	if got := durableRefusal(other); got != other {

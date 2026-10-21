@@ -12,7 +12,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	projectRoleModel "github.com/akashc777/OneCamp/models/postgres/ProjectRole"
-	models "github.com/akashc777/OneCamp/models/postgres/Team"
+	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
@@ -85,12 +85,14 @@ func CreateTeam(ctx context.Context, teamName string, userInfo *userModels.UserI
 	// and search is scoped by it.
 	userDomain.InvalidateUserMemberships(ctx, userInfo.UserDgraphInfo.Uuid)
 
-	go domain.CreateTeamInOpenSearch(&openSearchStruct.OpenSearchTeam{
-		Uuid:          teamUUID.String(),
-		TeamName:      teamName,
-		TeamCreatedAt: currentTime.Unix(),
-		TeamUpdatedAt: currentTime.Unix(),
-		TeamDeletedAt: nil,
+	helpers.GoSafeNamed("domain.CreateTeamInOpenSearch", func() {
+		domain.CreateTeamInOpenSearch(&openSearchStruct.OpenSearchTeam{
+			Uuid:          teamUUID.String(),
+			TeamName:      teamName,
+			TeamCreatedAt: currentTime.Unix(),
+			TeamUpdatedAt: currentTime.Unix(),
+			TeamDeletedAt: nil,
+		})
 	})
 
 	return
@@ -133,10 +135,12 @@ func UpdateTeamName(ctx context.Context, teamName string, teamUUID uuid.UUID) (e
 		return
 	}
 
-	go domain.UpdateTeamInOpenSearch(&openSearchStruct.OpenSearchTeam{
-		Uuid:          teamUUID.String(),
-		TeamName:      teamName,
-		TeamUpdatedAt: currentTime.Unix(),
+	helpers.GoSafeNamed("domain.UpdateTeamInOpenSearch", func() {
+		domain.UpdateTeamInOpenSearch(&openSearchStruct.OpenSearchTeam{
+			Uuid:          teamUUID.String(),
+			TeamName:      teamName,
+			TeamUpdatedAt: currentTime.Unix(),
+		})
 	})
 
 	return
@@ -272,6 +276,11 @@ func RemoveMemberFromTeam(ctx context.Context, teamDgraph *dgraphStruct.DgraphTe
 	if derr := projectRoleModel.DeleteIn(ctx, parseOr(memberUUID), teamProjectIDs(teamDgraph)); derr != nil {
 		helpers.LogErrorWithContext(ctx, "business/RemoveMemberFromTeam couldn't remove their project roles err: %+v", derr)
 	}
+	// And their grants on those projects' restricted tasks (WA2); one left
+	// behind lets no one in, since reading a task needs its project.
+	if gerr := restrictionModel.DropGrantsIn(ctx, teamProjectIDs(teamDgraph), parseOr(memberUUID)); gerr != nil {
+		helpers.LogErrorWithContext(ctx, "business/RemoveMemberFromTeam couldn't remove their grants err: %+v", gerr)
+	}
 	// Their cached profile still lists the team and its projects, and search
 	// covers what it lists.
 	userDomain.InvalidateUserMemberships(ctx, memberUUID)
@@ -387,17 +396,6 @@ func GetDgraphAllProjectListByTeamUUID(ctx context.Context, teamUUID string, use
 	return
 }
 
-func GetDgraphUnDeletedProjectListByTeamUUID(ctx context.Context, teamUUID string) (dgraphTeam *dgraphStruct.DgraphTeam, err error) {
-	dgraphTeam, err = domain.GetDgraphUnDeletedProjectListByTeamUUID(ctx, teamUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetDgraphUnDeletedProjectListByTeamUUID failed to get team info from dgraph err: %+v", err)
-		return
-	}
-
-	return
-
-}
-
 func GetDgraphAllProjectListByTeamUUIDInWhichUserIsMember(ctx context.Context, teamUUID string, userDgraphUID string) (dgraphTeam *dgraphStruct.DgraphTeam, err error) {
 
 	dgraphTeam, err = domain.GetDgraphAllProjectListByTeamUUIDInWhichUserIsMember(ctx, teamUUID, userDgraphUID)
@@ -439,18 +437,6 @@ func GetDgraphTeamMemberListByTeamUUID(ctx context.Context, teamUUID string, use
 
 	return
 
-}
-
-func GetTeamPostgresInfo(ctx context.Context, teamUUID uuid.UUID) (teamInfo *models.Team, err error) {
-
-	teamInfo, err = domain.GetTeamByUUID(ctx, teamUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/GetTeamPostgresInfo failed to get team info from postgres err: %+v", err)
-		return
-	}
-
-	return
 }
 
 func GetBasicDgraphTeamInfoByUUID(ctx context.Context, teamUUID string, userDgraphUid string) (dgraphTeam *dgraphStruct.DgraphTeam, err error) {

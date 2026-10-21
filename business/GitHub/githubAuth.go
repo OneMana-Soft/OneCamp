@@ -256,22 +256,3 @@ func GitHubAccessToken(ctx context.Context) (string, error) {
 	}
 	return t.AccessToken, nil
 }
-
-// LoadGitHubIntegration is a one-line shorthand for the
-// (entity_type=org, entity_id=nil, provider=github) lookup that's
-// repeated across the codebase. Returns ErrGitHubNotConnected when
-// the row is missing or has no access token, matching the semantics
-// of GitHubHTTPClient. This is the single canonical place to extend
-// if we ever shard the integration row by entity_id.
-func LoadGitHubIntegration(ctx context.Context) (*integrationModel.Integration, error) {
-	integration, err := integrationDomain.GetIntegration(ctx,
-		integrationModel.IntegrationEntityOrg, uuid.Nil,
-		integrationModel.ProviderGitHub)
-	if err != nil {
-		return nil, fmt.Errorf("load github integration: %w", err)
-	}
-	if integration == nil || integration.AccessToken == nil || *integration.AccessToken == "" {
-		return nil, ErrGitHubNotConnected
-	}
-	return integration, nil
-}

@@ -77,27 +77,3 @@ func ExecRawContext(ctx context.Context, query string, args ...interface{}) (sql
 	defer cancel()
 	return postgresInit.DBConn.SqlDB.ExecContext(ctx2, query, args...)
 }
-
-func CreateGitHubPRReview(query string, id uuid.UUID, taskId uuid.UUID, githubLogin string, githubAvatarURL string, githubHTMLURL string, reviewState string, submittedAt time.Time) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, id, taskId, githubLogin, githubAvatarURL, githubHTMLURL, reviewState, submittedAt)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/CreateGitHubPRReview Failed err: %+v", err)
-		return err
-	}
-	return nil
-}
-
-func DeleteGitHubPRReviewsByTaskId(query string, taskId uuid.UUID) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, taskId)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/DeleteGitHubPRReviewsByTaskId Failed err: %+v", err)
-		return err
-	}
-	return nil
-}

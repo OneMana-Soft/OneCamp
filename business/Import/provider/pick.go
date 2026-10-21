@@ -2,6 +2,7 @@ package provider
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
@@ -12,6 +13,7 @@ const (
 	OptJiraProjectKey     = "project_key"
 	OptTodoistProjectID   = "project_id"
 	OptAsanaWorkspaceGID  = "workspace_gid"
+	OptBasecampAccountID  = "account_id"
 	optLegacyDiscoverPick = "discover_id"
 )
 
@@ -41,4 +43,49 @@ func JobPickedID(j *importModels.Job, key string) string {
 		_ = json.Unmarshal(j.Options, &opts)
 	}
 	return PickedID(opts, key)
+}
+
+// Scope names what a provider imports from in the admin's words: Asana's
+// "workspace" seen by a "token", Basecamp's "account" seen by a "sign-in".
+type Scope struct {
+	Provider, Noun, Credential string
+}
+
+// PickScope is the id of the scope to import from those the credential can
+// see: the one the admin picked; else the one named like the import's label;
+// else the credential's only one. A pick it can't see any more, two named
+// like the label, or several and no way to tell are errors that say what to
+// do; it never guesses. Pure.
+func PickScope(items []DiscoverItem, picked, label string, s Scope) (string, error) {
+	if picked != "" {
+		for _, it := range items {
+			if it.ID == picked {
+				return it.ID, nil
+			}
+		}
+		return "", fmt.Errorf("the %s %s you picked isn't visible to this %s any more. Pick another %s, or reconnect with an account that can see it", s.Provider, s.Noun, s.Credential, s.Noun)
+	}
+	if len(items) == 0 {
+		return "", fmt.Errorf("this %s %s can't see any %s. Reconnect with an account that belongs to the %s you want to import", s.Provider, s.Credential, s.Noun, s.Noun)
+	}
+	want := strings.ToLower(strings.TrimSpace(label))
+	var named []DiscoverItem
+	for _, it := range items {
+		if strings.ToLower(strings.TrimSpace(it.Name)) == want {
+			named = append(named, it)
+		}
+	}
+	switch {
+	case len(named) == 1:
+		return named[0].ID, nil
+	case len(named) > 1:
+		return "", fmt.Errorf("more than one %s %s is called %q. Pick the one to import", s.Provider, s.Noun, strings.TrimSpace(label))
+	case len(items) == 1:
+		return items[0].ID, nil
+	}
+	names := make([]string, 0, len(items))
+	for _, it := range items {
+		names = append(names, it.Name)
+	}
+	return "", fmt.Errorf("pick which %s %s to import: this %s can see %d (%s)", s.Provider, s.Noun, s.Credential, len(items), strings.Join(names, ", "))
 }

@@ -20,6 +20,7 @@ import (
 	importBusiness "github.com/akashc777/OneCamp/business/Import"
 	importRun "github.com/akashc777/OneCamp/business/ImportRun"
 	business "github.com/akashc777/OneCamp/business/SlackImport"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/uploadsafe"
 	"github.com/akashc777/OneCamp/helpers/zipsafe"
@@ -28,7 +29,6 @@ import (
 	userModel "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
-	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 )
@@ -157,7 +157,7 @@ func HandleUpload(w http.ResponseWriter, r *http.Request) {
 
 	jobId := uuid.New()
 	bucket := helpers.UserUploadBucket()
-	objectKey := fmt.Sprintf("slackImport/%s/raw.zip", jobId)
+	objectKey := business.StagedExportKey(jobId)
 
 	if _, err := minioInit.MinioClient.PutObject(ctx, bucket, objectKey, body, hdr.Size,
 		minio.PutObjectOptions{ContentType: "application/zip"}); err != nil {
@@ -175,7 +175,7 @@ func HandleUpload(w http.ResponseWriter, r *http.Request) {
 		Status:             importModels.StatusValidating,
 		TriggeredBy:        &userInfo.UserPostgresInfo.Id,
 	}
-	if err := importModels.CreateJob(ctx, job); err != nil {
+	if err := business.CreateJob(ctx, job); err != nil {
 		_ = minioInit.MinioClient.RemoveObject(ctx, bucket, objectKey, minio.RemoveObjectOptions{})
 		if errors.Is(err, importModels.ErrConflictActiveJob) {
 			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
@@ -192,9 +192,9 @@ func HandleUpload(w http.ResponseWriter, r *http.Request) {
 	// kept inline here so a small upload that goes through this endpoint
 	// doesn't bypass duplicate detection.
 	if hash, err := business.HashStagedZip(ctx, rawKey); err == nil && hash != "" {
-		if dup, err := importModels.FindCompletedJobByHash(ctx, workspace, hash); err == nil && dup != nil && dup.Id != jobId {
+		if dup, err := business.FindCompletedJobByHash(ctx, workspace, hash); err == nil && dup != nil && dup.Id != jobId {
 			_ = minioInit.MinioClient.RemoveObject(ctx, bucket, objectKey, minio.RemoveObjectOptions{})
-			_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusFailed,
+			_ = business.UpdateStatus(ctx, jobId, importModels.StatusFailed,
 				strPtr("failed"),
 				strPtr(fmt.Sprintf("duplicate upload: identical file already imported as job %s", dup.Id)))
 			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
@@ -205,7 +205,7 @@ func HandleUpload(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		_ = importModels.SetContentHash(ctx, jobId, hash)
+		_ = business.SetContentHash(ctx, jobId, hash)
 	}
 
 	helpers.WriteJSON(w, http.StatusCreated, importAdapter.UploadResponse{
@@ -213,6 +213,78 @@ func HandleUpload(w http.ResponseWriter, r *http.Request) {
 		SlackWorkspaceName: workspace,
 		RawObjectKey:       rawKey,
 	})
+}
+
+// HandleAPIRead starts an import read through Slack's Web API, for what an
+// export can't hold: a free or Pro team's private channels, DMs and group
+// DMs. The read runs in the background (business/SlackImport api_job.go);
+// its job waits, stage "reading", and then is planned and run as an upload's
+// is. The token is used for the read and never stored or logged.
+//
+// Request: {"slack_workspace_name", "token" (xoxp- or xoxb-), "since"
+// (optional, YYYY-MM-DD), "max_messages" (optional, per conversation)}.
+//
+// Response: 202 Accepted {job_id, slack_workspace_name}.
+func HandleAPIRead(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo, ok := requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	if res := checkSlackImportRateLimit(ctx, "api-read", userInfo.UserPostgresInfo.Id, 3); !res.Allowed {
+		writeRateLimitExceeded(w, res.RetryAfterSeconds())
+		return
+	}
+	var body struct {
+		SlackWorkspaceName string `json:"slack_workspace_name"`
+		Token              string `json:"token"`
+		Since              string `json:"since"`
+		MaxMessages        int    `json:"max_messages"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
+		helpers.WriteBadRequest(w, "invalid body")
+		return
+	}
+	workspace := strings.TrimSpace(body.SlackWorkspaceName)
+	if workspace == "" {
+		helpers.WriteBadRequest(w, "slack_workspace_name is required")
+		return
+	}
+	token := strings.TrimSpace(body.Token)
+	if !strings.HasPrefix(token, "xoxp-") && !strings.HasPrefix(token, "xoxb-") {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
+			"msg":  "That isn't a Slack token. A person's token starts xoxp-, an app's xoxb-.",
+			"code": "bad_token",
+		})
+		return
+	}
+	opts := business.APIReadOptions{MaxMessages: body.MaxMessages, MaxBytes: slackUploadCap()}
+	if body.MaxMessages < 0 {
+		helpers.WriteBadRequest(w, "max_messages can't be negative")
+		return
+	}
+	if s := strings.TrimSpace(body.Since); s != "" {
+		since, err := time.Parse("2006-01-02", s)
+		if err != nil {
+			helpers.WriteBadRequest(w, "since is a date: YYYY-MM-DD")
+			return
+		}
+		opts.Since = since
+	}
+	jobId, err := business.StartAPIRead(ctx, business.APIRead{Workspace: workspace, Token: token, Options: opts}, userInfo.UserPostgresInfo.Id)
+	if errors.Is(err, importModels.ErrConflictActiveJob) {
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
+			"msg":  "Another import of this workspace is under way.",
+			"code": "active_job",
+		})
+		return
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "SlackImport API read: could not create the job: %+v", err)
+		helpers.WriteError(w, http.StatusInternalServerError, "Couldn't start the read. Try again.")
+		return
+	}
+	helpers.WriteJSON(w, http.StatusAccepted, helpers.Envolope{"job_id": jobId, "slack_workspace_name": workspace})
 }
 
 // verifyStagedZipMagic reads the leading 4 bytes of a staged MinIO
@@ -252,16 +324,15 @@ func HandlePlan(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireAdmin(w, r); !ok {
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 
 	var body importAdapter.PlanRequest
 	_ = json.NewDecoder(r.Body).Decode(&body)
 
-	job, err := importModels.GetJob(ctx, jobId)
+	job, err := business.GetJob(ctx, jobId)
 	if err != nil || job == nil {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "job not found"})
 		return
@@ -290,7 +361,7 @@ func HandlePlan(w http.ResponseWriter, r *http.Request) {
 		// From failed only, decided where it's written: Run may have started
 		// it since it was read, and a running import put back to waiting was
 		// started a second time.
-		reopened, err := importModels.UpdateStatusFrom(ctx, jobId, []string{importModels.StatusFailed},
+		reopened, err := business.UpdateStatusFrom(ctx, jobId, []string{importModels.StatusFailed},
 			importModels.StatusValidating, strPtr("validating"), nil)
 		switch {
 		case errors.Is(err, importModels.ErrConflictActiveJob):
@@ -316,7 +387,7 @@ func HandlePlan(w http.ResponseWriter, r *http.Request) {
 
 	// Persist updated options if supplied.
 	if optionsJSON, err := json.Marshal(body.Options); err == nil {
-		_ = importModels.UpdateOptions(ctx, jobId, optionsJSON)
+		_ = business.UpdateOptions(ctx, jobId, optionsJSON)
 	}
 
 	arc, cleanup, err := openMinioZipForRead(ctx, *job.RawObjectKey)
@@ -369,12 +440,11 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
-	job, err := importModels.GetJob(ctx, jobId)
+	job, err := business.GetJob(ctx, jobId)
 	if err != nil || job == nil {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "job not found"})
 		return
@@ -403,7 +473,7 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if body.Options != nil {
 		if optionsJSON, err := json.Marshal(*body.Options); err == nil {
-			_ = importModels.UpdateOptions(ctx, jobId, optionsJSON)
+			_ = business.UpdateOptions(ctx, jobId, optionsJSON)
 		}
 	}
 
@@ -449,9 +519,8 @@ func HandleCancel(w http.ResponseWriter, r *http.Request) {
 		writeRateLimitExceeded(w, res.RetryAfterSeconds())
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 	if err := business.CancelImport(ctx, jobId); err != nil {
@@ -473,9 +542,8 @@ func HandleRollback(w http.ResponseWriter, r *http.Request) {
 		writeRateLimitExceeded(w, res.RetryAfterSeconds())
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 	// The lease first: a run that has just been cancelled may still be ending,
@@ -500,14 +568,19 @@ func HandleListJobs(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireAdmin(w, r); !ok {
 		return
 	}
-	jobs, err := importModels.ListJobs(ctx, 50)
+	jobs, err := business.ListJobs(ctx, 50)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
 		return
 	}
+	ids := make([]uuid.UUID, len(jobs))
+	for i, j := range jobs {
+		ids[i] = j.Id
+	}
+	counts, _ := business.JobCounts(ctx, ids)
 	views := make([]importAdapter.JobView, 0, len(jobs))
 	for _, j := range jobs {
-		views = append(views, jobToView(ctx, j))
+		views = append(views, jobToView(j, counts[j.Id]))
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"jobs": views})
 }
@@ -518,17 +591,17 @@ func HandleGetJob(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireAdmin(w, r); !ok {
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
-	j, err := importModels.GetJob(ctx, jobId)
+	j, err := business.GetJob(ctx, jobId)
 	if err != nil || j == nil {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "job not found"})
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, jobToView(ctx, j))
+	counts, _ := business.JobCounts(ctx, []uuid.UUID{j.Id})
+	helpers.WriteJSON(w, http.StatusOK, jobToView(j, counts[j.Id]))
 }
 
 // HandleListErrors returns paginated error log entries.
@@ -537,16 +610,15 @@ func HandleListErrors(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireAdmin(w, r); !ok {
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 	severity := r.URL.Query().Get("severity")
 	limit := helpers.LimitParam(r.URL.Query(), 100, 500)
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 
-	errs, err := importModels.ListErrors(ctx, jobId, severity, limit, offset)
+	errs, err := business.ListErrors(ctx, jobId, severity, limit, offset)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
 		return
@@ -556,7 +628,7 @@ func HandleListErrors(w http.ResponseWriter, r *http.Request) {
 
 // --- helpers --------------------------------------------------------------
 
-func jobToView(ctx context.Context, j *importModels.Job) importAdapter.JobView {
+func jobToView(j *importModels.Job, c importModels.JobCount) importAdapter.JobView {
 	view := importAdapter.JobView{
 		Id:                 j.Id,
 		SlackWorkspaceName: j.SlackWorkspaceName,
@@ -579,9 +651,8 @@ func jobToView(ctx context.Context, j *importModels.Job) importAdapter.JobView {
 			view.Plan = &plan
 		}
 	}
-	view.ChunksTotal, view.ChunksDone, view.ChunksFailed, _ = importModels.CountChunks(ctx, j.Id)
-	view.ItemsImported, _ = importModels.SumItemsImported(ctx, j.Id)
-	view.ErrorsTotal, _ = importModels.CountErrors(ctx, j.Id)
+	view.ChunksTotal, view.ChunksDone, view.ChunksFailed = c.ChunksTotal, c.ChunksDone, c.ChunksFailed
+	view.ItemsImported, view.ErrorsTotal = c.ItemsImported, c.ErrorsTotal
 	return view
 }
 
@@ -619,37 +690,14 @@ func openMinioZipForRead(ctx context.Context, objectKey string) (*business.Archi
 //
 // Returns true when the user is allowed; writes 401/403 and returns
 // false otherwise.
+// requireAdmin is httpx.RequireAdmin, as the pointer this package's
+// handlers take.
 func requireAdmin(w http.ResponseWriter, r *http.Request) (*userModel.UserInfo, bool) {
-	userInfo := mustUser(r)
-	if userInfo == nil {
-		w.WriteHeader(http.StatusUnauthorized)
+	u, ok := httpx.RequireAdmin(w, r)
+	if !ok {
 		return nil, false
 	}
-	if !userInfo.UserPostgresInfo.IsAdmin {
-		helpers.LogWarnWithContext(r.Context(),
-			"SlackImport %s blocked for non-admin user=%s path=%s",
-			r.Method, userInfo.UserPostgresInfo.Id, r.URL.Path)
-		w.WriteHeader(http.StatusForbidden)
-		return nil, false
-	}
-	return userInfo, true
-}
-
-func mustUser(r *http.Request) *userModel.UserInfo {
-	v := r.Context().Value(helpers.UserInfoContextKey)
-	if v == nil {
-		return nil
-	}
-	// Other controllers across the codebase store UserInfo as a value;
-	// accept both shapes so a future middleware refactor doesn't silently
-	// break this controller.
-	if u, ok := v.(userModel.UserInfo); ok {
-		return &u
-	}
-	if u, ok := v.(*userModel.UserInfo); ok {
-		return u
-	}
-	return nil
+	return &u, true
 }
 
 func strPtr(s string) *string { return &s }
@@ -728,7 +776,7 @@ func HandlePresignUpload(w http.ResponseWriter, r *http.Request) {
 
 	jobId := uuid.New()
 	bucket := helpers.UserUploadBucket()
-	objectKey := fmt.Sprintf("slackImport/%s/raw.zip", jobId)
+	objectKey := business.StagedExportKey(jobId)
 
 	// 1 hour is enough for even a transcontinental 50 GB upload over a
 	// 100 Mbps link; a slow client with worse bandwidth should request
@@ -750,7 +798,7 @@ func HandlePresignUpload(w http.ResponseWriter, r *http.Request) {
 		Status:             importModels.StatusPending, // becomes 'validating' after finalize
 		TriggeredBy:        &userInfo.UserPostgresInfo.Id,
 	}
-	if err := importModels.CreateJob(ctx, job); err != nil {
+	if err := business.CreateJob(ctx, job); err != nil {
 		if errors.Is(err, importModels.ErrConflictActiveJob) {
 			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{
 				"error": "another import is already active for this workspace",
@@ -791,13 +839,12 @@ func HandleFinalizeUpload(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 
-	job, err := importModels.GetJob(ctx, jobId)
+	job, err := business.GetJob(ctx, jobId)
 	if err != nil || job == nil {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "job not found"})
 		return
@@ -884,7 +931,7 @@ func HandleFinalizeUpload(w http.ResponseWriter, r *http.Request) {
 		// transient MinIO read hiccup.
 		helpers.LogWarnWithContext(ctx,
 			"SlackImport finalize: hashing failed (proceeding without file-level dedup): %+v", err)
-	} else if dup, err := importModels.FindCompletedJobByHash(ctx, job.SlackWorkspaceName, hash); err == nil && dup != nil && dup.Id != jobId {
+	} else if dup, err := business.FindCompletedJobByHash(ctx, job.SlackWorkspaceName, hash); err == nil && dup != nil && dup.Id != jobId {
 		// Same workspace + same content_hash + a non-failed prior job.
 		// Fail this job fast and tell the operator about the existing one.
 		// We delete the staged duplicate ZIP from MinIO so storage doesn't bloat.
@@ -900,7 +947,7 @@ func HandleFinalizeUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if hash != "" {
 		// Persist the hash so subsequent uploads can dedup against this one.
-		if err := importModels.SetContentHash(ctx, jobId, hash); err != nil {
+		if err := business.SetContentHash(ctx, jobId, hash); err != nil {
 			helpers.LogWarnWithContext(ctx,
 				"SlackImport finalize: could not persist content_hash: %+v", err)
 		}
@@ -932,7 +979,7 @@ func HandleFinalizeUpload(w http.ResponseWriter, r *http.Request) {
 // discarded while its export uploaded was brought back to waiting, or failed,
 // by the upload finishing.
 func leavePending(ctx context.Context, jobId uuid.UUID, status string, errMsg *string) (bool, error) {
-	return importModels.UpdateStatusFrom(ctx, jobId, []string{importModels.StatusPending}, status, strPtr(status), errMsg)
+	return business.UpdateStatusFrom(ctx, jobId, []string{importModels.StatusPending}, status, strPtr(status), errMsg)
 }
 
 // HandleDeleteStagedZip removes the staged Slack export ZIP from MinIO
@@ -953,12 +1000,11 @@ func HandleDeleteStagedZip(w http.ResponseWriter, r *http.Request) {
 		writeRateLimitExceeded(w, res.RetryAfterSeconds())
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
-	job, err := importModels.GetJob(ctx, jobId)
+	job, err := business.GetJob(ctx, jobId)
 	if err != nil || job == nil {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "job not found"})
 		return

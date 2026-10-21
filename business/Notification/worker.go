@@ -63,8 +63,8 @@ func StartEmailWorker(shutdownCtx context.Context) {
 		return
 	}
 
-	go workerLoop(shutdownCtx)
-	go cleanupLoop(shutdownCtx)
+	helpers.GoSafeLoop("workerLoop", func() { workerLoop(shutdownCtx) })
+	helpers.GoSafeLoop("cleanupLoop", func() { cleanupLoop(shutdownCtx) })
 	helpers.MessageLogs.InfoLog.Println("Email worker started")
 }
 

@@ -325,15 +325,11 @@ func run(ctx context.Context, j *jobModel.ScheduledJob) error {
 }
 
 func loadUser(ctx context.Context, id uuid.UUID) (*userModels.UserInfo, error) {
-	pg, err := userDomain.GetActiveUserWithAdminFlagByUserUUID(ctx, id)
-	if err != nil || pg == nil {
+	u, err := userDomain.ActorByUUID(ctx, id)
+	if err != nil {
 		return nil, fmt.Errorf("sender not found")
 	}
-	dg, err := userDomain.GetDgraphUserInfoByUUID(ctx, id.String())
-	if err != nil || dg == nil {
-		return nil, fmt.Errorf("sender not found")
-	}
-	return &userModels.UserInfo{UserPostgresInfo: *pg, UserDgraphInfo: *dg}, nil
+	return u, nil
 }
 
 // Notice tells the person's open apps a scheduled message changed state, and

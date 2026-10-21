@@ -231,3 +231,30 @@ func TestASaveWithNobodysEditIsAConversion(t *testing.T) {
 		}
 	}
 }
+
+// A hook that will keep the body as it was asks for it before the save, and
+// gets it with the change (docs H1: a doc's history when its author changes).
+func TestAHookThatAsksGetsTheBodyBeforeTheSave(t *testing.T) {
+	w := newSaveWorld(t)
+	w.stored[saveDoc] = "an-older-hash"
+	SaveHooks.AskForBefore(func(_ context.Context, _ string, people []string, _ []AgentContributor) bool {
+		return len(people) == 1 && people[0] == "ben"
+	})
+	if SaveHooks.wantsBefore(context.Background(), saveDoc, []string{"ana"}, nil) {
+		t.Error("asked for Ana's save")
+	}
+	if !SaveHooks.wantsBefore(context.Background(), saveDoc, []string{"ben"}, nil) {
+		t.Error("didn't ask for Ben's save")
+	}
+	if _, err := SaveFromCollab(context.Background(), CollabSave{DocUUID: saveDoc, HTML: "<p>Ben's words.</p>", YjsState: "c3RhdGU=", Contributors: []string{"ben"}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case c := <-w.hooks:
+		if c.Before != "<p>stored</p>" || c.Previous != "" {
+			t.Errorf("the change: before %q, previous %q", c.Before, c.Previous)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the hook didn't run")
+	}
+}

@@ -121,6 +121,12 @@ func GetUnifiedGlobalSearchPage(ctx context.Context, userUUID string, userEmail 
 	searchPage.Page = keepReadableDocHits(ctx, userUUID, searchPage.Page)
 	searchPage.Page = keepReadableBoardHits(ctx, userUUID, searchPage.Page)
 	searchPage.Page = keepReadableProjectFileHits(ctx, userUUID, userProjects, searchPage.Page)
+	// A search for exactly a task's key ("Q4-12") shows that task first, on
+	// the first page of a search of everything; every task hit carries its key.
+	if after == nil && within == (Within{}) {
+		searchPage.Page = withExactKey(exactKeyHit(ctx, searchText, projectUUIDMap), searchPage.Page)
+	}
+	keyTaskHits(ctx, searchPage.Page)
 
 	return
 }

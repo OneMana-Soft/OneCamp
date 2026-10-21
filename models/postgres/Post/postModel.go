@@ -24,26 +24,6 @@ type ChannelPostCount struct {
 	PostCount uint64
 }
 
-func CreatePost(query string, id uuid.UUID, channelUUID uuid.UUID, createdBy uuid.UUID) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		id,
-		channelUUID,
-		createdBy,
-	)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreatePost Failed to create new post err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func GetPostByUUID(query string, postUUID uuid.UUID) (postInfo *Post, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
@@ -163,61 +143,4 @@ func HardDeletePstByUUID(query string, postUUID uuid.UUID) (err error) {
 	}
 
 	return
-}
-
-func BulkInsertPost(query string, values ...interface{}) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(ctx, query, values...)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/BulkInsertPost Failed to execute bulk insert err: %+v",
-			err)
-		return err
-	}
-
-	return nil
-}
-
-// GetEntityIdsOlderThan returns UUIDs of entities created before cutoff that are not soft-deleted.
-func GetEntityIdsOlderThan(query string, cutoff time.Time) ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query, cutoff)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err == nil {
-			ids = append(ids, id)
-		}
-	}
-	// Iteration can stop on a mid-query failure (dropped connection, server-side
-	// error) rather than on end-of-rows. Without this the function returns a
-	// PARTIAL result with a nil error, so the caller cannot tell truncated data
-	// from a genuinely short list.
-	if err := rows.Err(); err != nil {
-		helpers.LogErrorWithContext(ctx, "models/Post archive-candidate rows iteration failed err: %+v", err)
-		return nil, err
-	}
-	return ids, nil
-}
-
-// BulkArchiveEntity soft-deletes entities created before cutoff.
-func BulkArchiveEntity(query string, cutoff time.Time) (int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	result, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, cutoff)
-	if err != nil {
-		return 0, err
-	}
-	rows, _ := result.RowsAffected()
-	return rows, nil
 }

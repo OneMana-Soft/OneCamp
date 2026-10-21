@@ -437,7 +437,7 @@ func snapshotRetentionDays() int {
 // so a backlog can't hammer object storage. Wire from the router alongside the
 // other background loops.
 func StartBoardSnapshotCleanupLoop() {
-	go func() {
+	helpers.GoSafeLoop("business/Board/boardSnapshot:StartBoardSnapshotCleanupLoop", func() {
 		// Stagger the first run so it doesn't line up with other startup loops.
 		time.Sleep(20 * time.Minute)
 		t := time.NewTicker(24 * time.Hour)
@@ -446,7 +446,7 @@ func StartBoardSnapshotCleanupLoop() {
 			runBoardSnapshotCleanupTick()
 			<-t.C
 		}
-	}()
+	})
 }
 
 func runBoardSnapshotCleanupTick() {

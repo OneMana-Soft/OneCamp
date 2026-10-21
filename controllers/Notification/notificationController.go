@@ -85,6 +85,8 @@ func GetMyNotificationPreferences(w http.ResponseWriter, r *http.Request) {
 			// and whether the workspace allows them at all.
 			"read_receipts":         pref.ReadReceipts,
 			"read_receipts_allowed": settingsBusiness.ReadReceiptsEnabled(),
+			// Whether this person's views of docs are recorded (docs C6-3).
+			"record_views": pref.RecordViews,
 		},
 	})
 }
@@ -110,7 +112,7 @@ func PauseMyNotifications(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not signed in"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	// Preferences are keyed by the Postgres user id, as everywhere else here.
@@ -646,7 +648,7 @@ func NotifyAnyway(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not signed in"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	var in struct {

@@ -151,8 +151,3 @@ func (c *TTLCache[V]) Len() int {
 	defer c.mu.RUnlock()
 	return len(c.items)
 }
-
-// Forever is a sentinel for "cache without time-based expiry". Use as
-// the defaultTTL argument to NewTTLCache when entries are only ever
-// invalidated explicitly.
-func Forever() time.Duration { return 0 }

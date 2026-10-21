@@ -337,7 +337,7 @@ func PublishActivityToUser(recipientUserUUID string, activityItem *dgraphModels.
 		Activity: activityItem,
 	}
 
-	go mqttBusiness.PublishActivity(mqttActivity, recipientUserUUID)
+	helpers.GoSafeNamed("mqttBusiness.PublishActivity", func() { mqttBusiness.PublishActivity(mqttActivity, recipientUserUUID) })
 }
 
 // Who an activity item's actor is, for the people / agents / apps filter.

@@ -16,8 +16,6 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	passkeyModel "github.com/akashc777/OneCamp/models/postgres/Passkey"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
-	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 )
 
 // A WebAuthn answer is a few kilobytes; anything far larger is not one.
@@ -86,7 +84,7 @@ func BeginPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
 	// The demo is one account everyone shares; a passkey added to it would
 	// sit in the next visitor's settings.
 	if helpers.IsDemoVisitor(u.UserPostgresInfo.EmailID) {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "The demo is shared by everyone who opens it, so it can't keep a passkey. Install OneCamp free to use passkeys with your own account."})
+		helpers.WriteForbidden(w, "The demo is shared by everyone who opens it, so it can't keep a passkey. Install OneCamp free to use passkeys with your own account.")
 		return
 	}
 	options, ceremony, err := passkeyBusiness.BeginRegistration(r.Context(), u.UserPostgresInfo.Id)
@@ -114,16 +112,15 @@ func FinishPasskeyRegistration(w http.ResponseWriter, r *http.Request) {
 
 // RenamePasskey POST /auth/passkeys/{id}/rename {name}
 func RenamePasskey(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a passkey."})
+	id, validID := helpers.UUIDParam(w, r, "id")
+	if !validID {
 		return
 	}
 	var in struct {
 		Name string `json:"name"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1024)).Decode(&in); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that request."})
+		helpers.WriteBadRequest(w, "Couldn't read that request.")
 		return
 	}
 	name, err := passkeyBusiness.PasskeyName(in.Name)
@@ -137,7 +134,7 @@ func RenamePasskey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That passkey isn't yours."})
+		helpers.WriteNotFound(w, "That passkey isn't yours.")
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Renamed"})
@@ -145,9 +142,8 @@ func RenamePasskey(w http.ResponseWriter, r *http.Request) {
 
 // DeletePasskey POST /auth/passkeys/{id}/delete
 func DeletePasskey(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a passkey."})
+	id, validID := helpers.UUIDParam(w, r, "id")
+	if !validID {
 		return
 	}
 	ok, err := passkeyModel.Delete(id, passkeyUser(r).UserPostgresInfo.Id)
@@ -156,7 +152,7 @@ func DeletePasskey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That passkey isn't yours."})
+		helpers.WriteNotFound(w, "That passkey isn't yours.")
 		return
 	}
 	auditBusiness.Record(r, "auth.passkey.remove", auditBusiness.CategorySecurity, "Removed a passkey",

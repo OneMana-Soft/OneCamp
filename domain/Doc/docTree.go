@@ -21,6 +21,7 @@ import (
 
 	"github.com/akashc777/OneCamp/business/Tree/graph"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Doc"
@@ -85,13 +86,7 @@ const docListPathDepth = 3
 // quoteUUIDs writes ids for an eq(doc_uuid, [...]) list, leaving out any that
 // aren't uuids, as uuids are written (lower case).
 func quoteUUIDs(ids []string) []string {
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if parsed, err := uuid.Parse(id); err == nil {
-			out = append(out, `"`+parsed.String()+`"`)
-		}
-	}
-	return out
+	return dgraphquery.QuotedUUIDs(ids)
 }
 
 // GetDocWithChildren reads a live doc and its live children, each as a row,
@@ -521,12 +516,7 @@ func CountDocBatches(ctx context.Context, batches []string) (map[string]int, err
 	if len(batches) == 0 {
 		return out, nil
 	}
-	quoted := make([]string, 0, len(batches))
-	for _, b := range batches {
-		if parsed, err := uuid.Parse(b); err == nil {
-			quoted = append(quoted, `"`+parsed.String()+`"`)
-		}
-	}
+	quoted := quoteUUIDs(batches)
 	if len(quoted) == 0 {
 		return out, nil
 	}

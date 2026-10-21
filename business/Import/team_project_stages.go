@@ -288,6 +288,7 @@ func resolveOneProject(ctx context.Context, job *importModels.Job,
 	if err != nil {
 		return err
 	}
+	keepSourceKey(ctx, job, sp, projectUUID, importingUser.UserPostgresInfo.Id)
 
 	if err := importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
 		importModels.EntityProject, sp.SourceID, projectUUID, nil,

@@ -130,6 +130,9 @@ type OpenSearchTask struct {
 	TaskPriority            string  `json:"task_priority,omitempty"`
 	TaskLabel               *string `json:"task_label,omitempty"`
 	TaskCreatedByUserUuid   string  `json:"task_created_by_user_id,omitempty"`
+	// TaskKey is the task's key ("Q4-12"), laid over a search answer
+	// (business/GlobalSearch exactKey.go); never indexed.
+	TaskKey string `json:"task_key,omitempty"`
 }
 
 type OpenSearchDoc struct {
@@ -254,9 +257,12 @@ type BulkActions struct {
 	Delete *DocInfoAttachment `json:"delete,omitempty"`
 }
 
+// BulkUpdate is the body of a single-document update, {"doc": …}. Whether a
+// missing document is created from it is opensearchInit's to say:
+// UpdateDocument never does (a partial document), UpsertDocument always does
+// (the whole of it).
 type BulkUpdate struct {
-	Doc         interface{} `json:"doc,omitempty"`
-	DocAsUpsert bool        `json:"doc_as_upsert,omitempty"`
+	Doc interface{} `json:"doc,omitempty"`
 }
 
 type GlobalSearchOpenSearchResp struct {

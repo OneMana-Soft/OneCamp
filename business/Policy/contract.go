@@ -73,16 +73,25 @@ type Scope struct {
 // ScopeProject is a project's own value.
 const ScopeProject = "project"
 
+// ScopeChannel is a channel's own value (chat P3: "Allow @channel and @here").
+const ScopeChannel = "channel"
+
 var (
+	// ChatLinesJoinsInLarge shows joins and leaves as lines in a public
+	// channel of more than 20 people too (chat B28); private channels and
+	// smaller ones always show them.
+	ChatLinesJoinsInLarge = BoolPolicy{Key: "chat.lines.joins_large", Default: false}
 	// DocsExportMembers lets members export docs; admins always may.
 	DocsExportMembers = BoolPolicy{Key: "docs.export.members", Default: true}
-	// DocsPublishMembers lets members publish docs to the web; admins always may.
-	DocsPublishMembers = BoolPolicy{Key: "docs.publish.members", Default: true}
 	// GuestLinkMaxDays caps how long a guest link lasts; 0 sets no cap.
 	GuestLinkMaxDays = IntPolicy{Key: "guest.link.max_days", Default: 0}
 	// EmbedAllowlist lists the hosts docs may embed; nil means no list is
 	// configured.
 	EmbedAllowlist = ListPolicy{Key: "embed.allowlist"}
+	// DocsHistoryDays is how long a doc's versions are kept (docs H1). Named
+	// and pinned versions are always kept; the server's
+	// DOC_SNAPSHOT_RETENTION_DAYS is a floor no setting goes below.
+	DocsHistoryDays = IntPolicy{Key: "docs.history.days", Default: 365}
 
 	// Tables (design/tables-vs-airtable/PROGRAM.md §5), declared at its day 0
 	// with today's behaviour as the default, and shown to admins (specs) by
@@ -130,6 +139,22 @@ var (
 	ProjectsAITriage = BoolPolicy{Key: "projects.ai.triage", Default: false}
 )
 
+// The chat programme's mention policies (design/chat-vs-slack/PROGRAM.md B5,
+// chat P3), each default what a workspace expects of Slack.
+var (
+	// ChatBroadcastMembers lets members notify a whole channel (@channel,
+	// @here, @everyone); a channel's managers and the workspace's admins
+	// always may. Set for the workspace, and for each channel.
+	ChatBroadcastMembers = BoolPolicy{Key: "chat.broadcast.members", Default: true}
+	// ChatBroadcastConfirmAt is how many people a broadcast reaches before the
+	// composer asks first ("This notifies 24 people in #launch"); 0 never asks.
+	ChatBroadcastConfirmAt = IntPolicy{Key: "chat.broadcast.confirm_at", Default: 6}
+	// ChatBroadcastAdminsOnlyAt is how many members a channel has beyond which
+	// only its managers and the workspace's admins notify all of it; 0 sets no
+	// such limit.
+	ChatBroadcastAdminsOnlyAt = IntPolicy{Key: "chat.broadcast.admins_only_at", Default: 0}
+)
+
 // Store answers policies.
 type Store interface {
 	Bool(ctx context.Context, p BoolPolicy) bool
@@ -141,6 +166,8 @@ type Store interface {
 	BoolIn(ctx context.Context, p BoolPolicy, s Scope) bool
 	IntIn(ctx context.Context, p IntPolicy, s Scope) int
 	ChoiceIn(ctx context.Context, p ChoicePolicy, s Scope) string
+	// PrimeScopes reads many scopes' values at once, ahead of asking each.
+	PrimeScopes(ctx context.Context, kind string, ids []string)
 	// Require refuses a request when p is off for the signed-in member. Admins
 	// always pass.
 	Require(p BoolPolicy) func(http.Handler) http.Handler

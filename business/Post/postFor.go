@@ -16,6 +16,7 @@ import (
 
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
@@ -37,8 +38,10 @@ func NotifyPostFor(bot *userBusiness.BotIdentity, name string, channel *dgraphSt
 	if bot == nil || channel == nil || channel.Uuid == "" {
 		return
 	}
-	go sendNewPostNotification(fmt.Sprintf("#%s - %s", channel.Name, name), plainText, channel.Uuid, nil,
-		channel, postUUID, principalFor(bot, name), "")
+	helpers.GoSafeNamed("sendNewPostNotification", func() {
+		sendNewPostNotification(fmt.Sprintf("#%s - %s", channel.Name, name), plainText, channel.Uuid, nil,
+			channel, postUUID, principalFor(bot, name), "")
+	})
 }
 
 // NotifyReplyFor is NotifyPostFor for a reply in a thread: the post's author
@@ -49,12 +52,14 @@ func NotifyReplyFor(bot *userBusiness.BotIdentity, name string, post *dgraphStru
 	if bot == nil || post == nil || post.PostBy == nil || post.Channel == nil {
 		return
 	}
-	go commentBusiness.NotifyThreadReply(commentBusiness.ThreadReply{
-		By:          principalFor(bot, name),
-		Post:        post,
-		CommentUUID: commentUUID,
-		HTML:        bodyHTML,
-		PlainText:   plainText,
-		At:          time.Now(),
+	helpers.GoSafeNamed("commentBusiness.NotifyThreadReply", func() {
+		commentBusiness.NotifyThreadReply(commentBusiness.ThreadReply{
+			By:          principalFor(bot, name),
+			Post:        post,
+			CommentUUID: commentUUID,
+			HTML:        bodyHTML,
+			PlainText:   plainText,
+			At:          time.Now(),
+		})
 	})
 }

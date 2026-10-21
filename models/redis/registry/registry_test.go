@@ -9,7 +9,7 @@ import (
 // SCAN of the namespace doesn't collide with another feature's keys.
 func TestNamespacesUnique(t *testing.T) {
 	seen := map[string]bool{}
-	for _, s := range All() {
+	for _, s := range all() {
 		if seen[s.Namespace] {
 			t.Fatalf("duplicate namespace %q", s.Namespace)
 		}
@@ -45,12 +45,12 @@ func TestBuildArity(t *testing.T) {
 
 // Pattern returns the SCAN-friendly wildcard.
 func TestPattern(t *testing.T) {
-	got := ProjectTasks.Pattern("p")
-	want := "project:tasks:p:*"
+	got := UserRefreshToken.Pattern("u")
+	want := "auth:refresh:u:*"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
-	if got := ProjectTasks.PatternAll(); got != "project:tasks:*" {
+	if got := UserRefreshToken.PatternAll(); got != "auth:refresh:*" {
 		t.Fatalf("PatternAll mismatch: %q", got)
 	}
 }
@@ -58,7 +58,7 @@ func TestPattern(t *testing.T) {
 // All TTLs should be set explicitly. A 0 TTL is OK only when paired
 // with a Description that explains the manual-cleanup contract.
 func TestTTLPositive(t *testing.T) {
-	for _, s := range All() {
+	for _, s := range all() {
 		if s.TTL <= 0 {
 			t.Errorf("spec %q has non-positive TTL; document manual cleanup or set a TTL", s.Namespace)
 		}
@@ -72,6 +72,9 @@ func all() []Spec {
 		UserRefreshToken,
 		LoginRate,
 		PublicReadRate,
+		PublishPage,
+		PublishPageRate,
+		PublishUnlockRate,
 		SSOState,
 		UserProfile,
 		UserDgraphProfile,
@@ -79,7 +82,7 @@ func all() []Spec {
 		UserChannels,
 		UserProjects,
 		ChannelBasicInfo,
-		ProjectTasks,
+		ChannelBasicInfoKeys,
 		AISession,
 		AIRate,
 		AIModelList,
@@ -102,6 +105,8 @@ func all() []Spec {
 		TranscriptionAdminRate,
 		WebhookRateLimit,
 		ApiTokenRate,
+		ApiRouteRate,
+		ApiIdempotency,
 		InviterDailyInvites,
 		MCPToolReadRate,
 		MCPToolWriteRate,
@@ -122,14 +127,20 @@ func all() []Spec {
 		CommandCatalogVersion,
 		CommandRate,
 		CommandInteraction,
+		CardTrigger,
+		CommandResponse,
 		CommandOAuthState,
 		ConnectorOAuthState,
 		PasskeyCeremony,
 		ConnectorBriefingDay,
 		CollabStateSize,
+		ViewSalt,
 		SweepClaim,
 		SendOnce,
 		OutboxOnce,
+		DraftWriteRate,
+		WorkGraphRefsCursor,
+		WorkGraphRefsReport,
 		DocUpdatedWebhooksDue,
 		UnfurlCard,
 		UnfurlRate,

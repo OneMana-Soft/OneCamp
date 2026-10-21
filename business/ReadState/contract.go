@@ -3,19 +3,22 @@
 // A3 builds it): markers at message precision, every count from one place, and
 // one live read.moved event.
 //
-// DAY 0. Today's markers, behind the same names: a channel's last_seen_channel
-// row (business/Channel MarkChannelSeen, as POST /ch/markSeen moves it, for
-// someone the channel kind lets read it) and a DM's or group's last_seen_chat
-// row with its read receipt (business/Chat MarkChatSeen, as POST /dm/seen and
-// /groupChat/seen); the counts are the sidebar's
+// The markers are a channel's last_seen_channel row (business/Channel
+// MarkChannelSeen, as POST /ch/markSeen moves it, for someone the channel kind
+// lets read it) and a DM's or group's last_seen_chat row with its read receipt
+// (business/Chat MarkChatSeen, as POST /dm/seen and /groupChat/seen), read at
+// message precision through models/postgres/ReadState: where someone is in a
+// conversation (Position), and Mark unread from a message (MarkUnread). Every
+// move is told to the mover's own activity topic (read.moved, Moved), so each
+// tab and device they have open agrees at once. The counts are the sidebar's
 // (GetDgraphUserInfoByUUIDForSidebarNav). Threads and the Inbox have no marker
-// of their own yet. Nothing calls States yet, so nothing changes by its
-// existing.
+// of their own yet.
 package business
 
 import (
 	"context"
 	"errors"
+	"time"
 
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
@@ -34,22 +37,48 @@ type Count struct {
 	Unread uint64 `json:"unread"`
 }
 
+// Position is where someone is in one conversation: what they haven't read,
+// the first of it, and since when.
+type Position struct {
+	Conversation conversationBusiness.Ref `json:"conversation"`
+	Unread       int                      `json:"unread"`
+	// FirstUnread is the first unread message's uuid; empty with none.
+	FirstUnread string `json:"first_unread,omitempty"`
+	// Since is the moment they had read up to; nil where they have no marker.
+	Since *time.Time `json:"since,omitempty"`
+}
+
 // Reader keeps who has read what.
 type Reader interface {
 	// MarkRead marks ref read for who, up to now. ErrNotFound for a
 	// conversation they can't read.
 	MarkRead(ctx context.Context, who *userModels.UserInfo, ref conversationBusiness.Ref) error
+	// MarkUnread makes message, and everything after it but who's own, unread
+	// for who: the marker moves back as well as forward. ErrNotFound for a
+	// conversation they can't read or a message not live in it.
+	MarkUnread(ctx context.Context, who *userModels.UserInfo, ref conversationBusiness.Ref, message string) error
+	// Position is where who is in ref. ErrNotFound as MarkRead.
+	Position(ctx context.Context, who *userModels.UserInfo, ref conversationBusiness.Ref) (Position, error)
 	// Counts is who's count for every conversation they're in.
 	Counts(ctx context.Context, who *userModels.UserInfo) ([]Count, error)
 }
 
 // States is the read state everything asks.
-var States Reader = todaysMarkers{}
+var States Reader = markers{}
 
-// todaysMarkers are today's last_seen_* rows.
-type todaysMarkers struct{}
+// markers are the last_seen_* rows.
+type markers struct{}
 
-func (todaysMarkers) MarkRead(ctx context.Context, who *userModels.UserInfo, ref conversationBusiness.Ref) error {
+func (markers) MarkRead(ctx context.Context, who *userModels.UserInfo, ref conversationBusiness.Ref) error {
+	if err := markRead(ctx, who, ref); err != nil {
+		return err
+	}
+	Moved(ctx, who, ref)
+	return nil
+}
+
+// markRead moves who's marker in ref to now.
+func markRead(ctx context.Context, who *userModels.UserInfo, ref conversationBusiness.Ref) error {
 	if who == nil {
 		return conversationBusiness.ErrNotFound
 	}
@@ -77,7 +106,7 @@ func (todaysMarkers) MarkRead(ctx context.Context, who *userModels.UserInfo, ref
 	return conversationBusiness.ErrNotFound
 }
 
-func (todaysMarkers) Counts(ctx context.Context, who *userModels.UserInfo) ([]Count, error) {
+func (markers) Counts(ctx context.Context, who *userModels.UserInfo) ([]Count, error) {
 	if who == nil {
 		return nil, conversationBusiness.ErrNotFound
 	}

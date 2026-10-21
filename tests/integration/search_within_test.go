@@ -12,6 +12,7 @@ package integration_test
 
 import (
 	"context"
+	"database/sql"
 	"sort"
 	"testing"
 	"time"
@@ -31,22 +32,38 @@ import (
 
 func TestSearchWithinOneConversation(t *testing.T) {
 	ctx := context.Background()
+	// A hit is shown only while its post or chat is still there (search's
+	// liveness check reads Postgres, domain/Liveness), so every entry below is
+	// a row as well as an index entry. With no database the check gives up and
+	// keeps every hit, which is how this test once passed without the rows.
+	env := integration.ConnectServerPostgres(t)
 	search := integration.SetupOpenSearch(t)
 	if err := opensearchInit.ConnectOpenSearch(&opensearchInit.OpenSearchConfig{Host: search.URL}); err != nil {
 		t.Fatalf("create the indices: %v", err)
 	}
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := env.PG.Exec(q, args...); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
 
-	me, maya := uuid.NewString(), uuid.NewString()
+	me, maya := seedPerson(t, env.PG, "Me"), seedPerson(t, env.PG, "Maya")
 	launch, design, theirs := uuid.NewString(), uuid.NewString(), uuid.NewString()
 	now := time.Now().Unix()
 	for channel, body := range map[string]string{launch: "rollout in launch", design: "rollout in design", theirs: "rollout in theirs"} {
+		post := uuid.NewString()
+		exec(`INSERT INTO channels (id, ch_name, ch_private) VALUES ($1, $2, false)`, channel, body)
+		exec(`INSERT INTO posts (id, post_channel, created_by) VALUES ($1, $2, $3)`, post, channel, me)
 		postDomain.CreatePostWithAttachmentsInOpenSearch(&openSearchStruct.OpenSearchPost{
-			Uuid: uuid.NewString(), PostBody: body, PostByUserUuid: me, PostChannelUuid: channel, PostCreatedAt: now,
+			Uuid: post, PostBody: body, PostByUserUuid: me, PostChannelUuid: channel, PostCreatedAt: now,
 		}, nil)
 	}
 	dm := helpers.GetGroupingId(me, maya)
+	chat := uuid.NewString()
+	exec(`INSERT INTO chats (id, grp_id, created_by) VALUES ($1, $2, $3)`, chat, dm, maya)
 	chatDomain.CreateChatWithAttachmentsInOpenSearch(&openSearchStruct.OpenSearchChat{
-		Uuid: uuid.NewString(), ChatBody: "rollout in our DM", ChatByUserUuid: maya, ChatGrpId: dm, ChatCreatedAt: now,
+		Uuid: chat, ChatBody: "rollout in our DM", ChatByUserUuid: maya, ChatGrpId: dm, ChatCreatedAt: now,
 		ChatParticipants: []*openSearchStruct.OpenSearchChatParticipants{{Uuid: maya}, {Uuid: me}},
 	}, nil)
 	if _, err := opensearchInit.OpenSearchClient.Indices.Refresh(ctx, &opensearchapi.IndicesRefreshReq{Indices: []string{"posts", "chats"}}); err != nil {
@@ -106,4 +123,16 @@ func TestSearchWithinOneConversation(t *testing.T) {
 			t.Errorf("%s: %v, want %v", name, got, c.want)
 		}
 	}
+}
+
+// seedPerson inserts a users row with a display name. On the AI edition it
+// lives in agent_requester_test.go, which without-ai doesn't carry.
+func seedPerson(t *testing.T, db *sql.DB, name string) string {
+	t.Helper()
+	id := uuid.NewString()
+	if _, err := db.Exec(`INSERT INTO users (id, email_id, display_name) VALUES ($1, $2, $3)`,
+		id, id[:8]+"@example.test", name); err != nil {
+		t.Fatalf("seed %s: %v", name, err)
+	}
+	return id
 }

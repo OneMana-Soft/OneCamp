@@ -105,7 +105,45 @@ const (
 	// A task changed (MqttTaskChanged), on its project's topic: live task
 	// chips and task lists in docs show it (docs C1).
 	MESSAGE_TASK_CHANGED
+	// A message was pinned to its conversation or unpinned (MqttPin), on the
+	// conversation's message topic: open apps show the pin and the pins list
+	// (chat B25).
+	MESSAGE_PIN
+	// A call changed (MqttCallState), on its conversation's topic: it began or
+	// ended, someone joined or left, or it was locked, recorded or captioned
+	// (business/CallState). The header's faces and the green room show it.
+	MESSAGE_CALL_STATE
 )
+
+// MESSAGE_PROJECT_STATUSES: a project's statuses, or their order on its board,
+// changed (MqttProjectStatuses), on its project's topic: open boards and
+// pickers read them again (design/projects-vs-asana-jira/BOARD_COLUMNS_PLAN.md).
+// Numbered outright, past MESSAGE_PIN (41, chat) and MESSAGE_CALL_STATE (42,
+// calls) at the end of the sequence above. The app has the same number
+// (services/mqttService.ts).
+const MESSAGE_PROJECT_STATUSES = 43
+
+// Message types numbered by hand, outside the sequence above: the integrator
+// gives each package its number as branches add them in parallel (43 project
+// statuses, 44 an invitation accepted, 45 a task's timer, 46 read moved), so
+// two branches never take the same one, and a type keeps its number whichever
+// lands first. The web app's enum names them all.
+const (
+	// An invitation was accepted (MqttInvitationAccepted), on the admin
+	// broadcast topic: the admin's members and invitations lists show the
+	// person joined without a reload.
+	MESSAGE_INVITATION_ACCEPTED int8 = 44
+	// A person's read marker moved (chat A3): on their own activity topic,
+	// {kind, id, unread, first_unread}, so every tab and device they have open
+	// moves its line and its counts at once (business/ReadState).
+	MESSAGE_READ_MOVED = 46
+)
+
+// MqttInvitationAccepted is who accepted their invitation.
+type MqttInvitationAccepted struct {
+	Email  string `json:"email"`
+	UserID string `json:"user_id"`
+}
 
 // What MESSAGE_CONVERSATION_ACCESS says: which kind of conversation, and
 // whether it was added or dropped.
@@ -175,6 +213,46 @@ type MqttChannelUpdate struct {
 type MqttChatCall struct {
 	CallActive bool   `json:"call_status"`
 	GrpId      string `json:"grpId,omitempty"`
+}
+
+// MqttCallState is a call as the people of its conversation see it from
+// outside (MESSAGE_CALL_STATE): whether it is on, who is in it, and what is
+// switched on. People holds the first twelve in the call; Count is them all.
+type MqttCallState struct {
+	Session       string             `json:"session"`
+	ResourceKind  string             `json:"resource_kind"`
+	ResourceID    string             `json:"resource_id"`
+	Live          bool               `json:"live"`
+	StartedAt     time.Time          `json:"started_at"`
+	EndedAt       *time.Time         `json:"ended_at,omitempty"`
+	People        []MqttCallPerson   `json:"people"`
+	Count         int                `json:"count"`
+	Locked        bool               `json:"locked"`
+	Recording     MqttCallSwitch     `json:"recording"`
+	Transcription MqttCallTranscript `json:"transcription"`
+}
+
+// MqttCallPerson is someone in a call, for the faces outside it.
+type MqttCallPerson struct {
+	Identity string `json:"identity"`
+	UserUUID string `json:"user_uuid,omitempty"`
+	Name     string `json:"name"`
+	Role     string `json:"role"`
+	Guest    bool   `json:"guest,omitempty"`
+}
+
+// MqttCallSwitch is something switched on in a call, and by whom (a name).
+type MqttCallSwitch struct {
+	On     bool   `json:"on"`
+	ByName string `json:"by_name,omitempty"`
+}
+
+// MqttCallTranscript is the call's transcription switch, and where the audio
+// goes while it is on (business/Transcription's Where).
+type MqttCallTranscript struct {
+	On     bool   `json:"on"`
+	ByName string `json:"by_name,omitempty"`
+	Where  string `json:"where,omitempty"`
 }
 
 type MqttChat struct {
@@ -281,6 +359,15 @@ type MqttTaskDates struct {
 type MqttTaskChanged struct {
 	TaskUuid    string `json:"task_uuid"`
 	ProjectUuid string `json:"project_uuid"`
+	// Ranks are tasks' new places in the project's order (business/Task
+	// Reorder), by task uuid: a view re-sorts them in place.
+	Ranks map[string]float64 `json:"ranks,omitempty"`
+}
+
+// MqttProjectStatuses says which project's statuses changed: the app reads
+// them again, so it carries nothing else.
+type MqttProjectStatuses struct {
+	ProjectUuid string `json:"project_uuid"`
 }
 
 // MqttChatSeen is a read receipt: UserUuid has seen the conversation
@@ -299,6 +386,18 @@ type MqttConversationAccess struct {
 	Kind   string `json:"kind"`
 	Id     string `json:"id"`
 	Change string `json:"change"`
+}
+
+// MqttPin says a message was pinned (Pinned) or unpinned in a conversation:
+// Kind is a CONVERSATION_KIND_*, Id the conversation's id, MessageId the
+// message's uuid, and By who did it.
+type MqttPin struct {
+	Kind      string `json:"kind"`
+	Id        string `json:"id"`
+	MessageId string `json:"message_id"`
+	Pinned    bool   `json:"pinned"`
+	ByUuid    string `json:"by_uuid,omitempty"`
+	ByName    string `json:"by_name,omitempty"`
 }
 
 // MqttTaskField is a task's value of one of its project's custom fields,

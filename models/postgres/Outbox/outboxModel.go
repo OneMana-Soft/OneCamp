@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -117,6 +118,19 @@ func Release(ctx context.Context, id int64) (bool, error) {
 		return false, err
 	}
 	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// ReleaseWith makes a held row ready with more entities merged into its own,
+// answering whether it was held.
+func ReleaseWith(ctx context.Context, id int64, more map[string]string) (bool, error) {
+	raw, err := json.Marshal(more)
+	if err != nil {
+		return false, err
+	}
+	n, err := pgexec.Exec(ctx, `
+		UPDATE outbox SET state = 'ready', available_at = NOW(), entities = entities || $2::jsonb
+		WHERE id = $1 AND state = 'held'`, id, raw)
 	return n == 1, err
 }
 

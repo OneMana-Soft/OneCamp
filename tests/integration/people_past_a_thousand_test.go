@@ -29,6 +29,8 @@ import (
 
 func TestMemberListsCommentsAndStatusesPastAThousand(t *testing.T) {
 	ctx := context.Background()
+	// A task read leaves out restricted tasks, decided from Postgres (models/taskread).
+	integration.ConnectServerPostgres(t)
 	dg := integration.SetupDgraph(t)
 	const n = 1100
 	now := time.Now().UTC().Truncate(time.Second)

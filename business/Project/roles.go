@@ -27,6 +27,7 @@ package business
 import (
 	"context"
 	"errors"
+	"maps"
 	"time"
 
 	sweepBusiness "github.com/akashc777/OneCamp/business/Sweep"
@@ -47,6 +48,7 @@ var (
 	setRow        = roleModel.Set
 	deleteRow     = roleModel.Delete
 	rowsOf        = roleModel.Roles
+	rowsOfMany    = roleModel.RolesOfMany
 	keepRows      = roleModel.Keep
 	addAdminEdge  = addAdminEdgeOnly
 	dropAdminEdge = domain.RemoveAdminMemberFromProject
@@ -147,8 +149,19 @@ func SettleRoles(ctx context.Context) (changed int, err error) {
 		if err != nil {
 			return changed, err
 		}
+		// The page's rows in one read (PR3, the BE audit's #34).
+		ids := make([]uuid.UUID, 0, len(page))
 		for _, p := range page {
-			n, err := settleProject(ctx, p)
+			if id, err := uuid.Parse(p.Uuid); err == nil {
+				ids = append(ids, id)
+			}
+		}
+		rowsByProject, err := rowsOfMany(ctx, ids)
+		if err != nil {
+			return changed, err
+		}
+		for _, p := range page {
+			n, err := settleProjectWith(ctx, p, rowsByProject)
 			changed += n
 			if err != nil {
 				helpers.LogErrorWithContext(ctx, "business/Project SettleRoles: project %s: %+v", p.Uuid, err)
@@ -161,18 +174,22 @@ func SettleRoles(ctx context.Context) (changed int, err error) {
 	}
 }
 
-// settleProject is SettleRoles for one project, read with its members and
-// admins.
-func settleProject(ctx context.Context, p *dgraphStruct.DgraphProject) (int, error) {
+// settleProjectWith is SettleRoles for one project, read with its members
+// and admins, its rows among rowsByProject. A project already in step writes
+// nothing.
+func settleProjectWith(ctx context.Context, p *dgraphStruct.DgraphProject, rowsByProject map[uuid.UUID]map[uuid.UUID]string) (int, error) {
 	id, err := uuid.Parse(p.Uuid)
 	if err != nil {
 		return 0, nil
 	}
-	rows, err := rowsOf(ctx, id)
-	if err != nil {
-		return 0, err
+	rows := rowsByProject[id]
+	if rows == nil {
+		rows = map[uuid.UUID]string{}
 	}
 	want, dropEdges := settled(p, rows)
+	if len(dropEdges) == 0 && maps.Equal(want, rows) {
+		return 0, nil
+	}
 	changed := 0
 	for _, uid := range dropEdges {
 		if err := dropAdminEdge(ctx, p.Uid, uid); err != nil {

@@ -12,6 +12,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // SavedItem is one saved thing.
@@ -189,4 +190,20 @@ func update(ctx context.Context, query string, args ...any) (*SavedItem, error) 
 		helpers.LogErrorWithContext(ctx, "models/SavedItem update err: %+v", err)
 	}
 	return out, err
+}
+
+// CountsAmong is Counts of the person's open items of one type whose ids are
+// among ids: what a list that leaves those out takes off its counts.
+func CountsAmong(ctx context.Context, userID uuid.UUID, now time.Time, itemType string, ids []string) (open, due int, err error) {
+	if len(ids) == 0 {
+		return 0, 0, nil
+	}
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	err = postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+		SELECT COUNT(*), COUNT(*) FILTER (WHERE remind_at IS NOT NULL AND remind_at <= $2)
+		FROM saved_items
+		WHERE user_id = $1 AND done_at IS NULL AND item_type = $3::varchar AND item_id = ANY($4::varchar[])`,
+		userID, now, itemType, pq.Array(ids)).Scan(&open, &due)
+	return
 }

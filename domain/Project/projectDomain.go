@@ -19,13 +19,12 @@ import (
 	OpenSearchBulkModels "github.com/akashc777/OneCamp/models/openSearch/Bulk"
 	OpenSearchModels "github.com/akashc777/OneCamp/models/openSearch/Project"
 	models "github.com/akashc777/OneCamp/models/postgres/Project"
-	"github.com/akashc777/OneCamp/models/redis/registry"
-	redisStore "github.com/akashc777/OneCamp/models/redis/store"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/dgraph-io/dgo/v230"
 	"github.com/google/uuid"
 )
 
-const projectTaskFields = `
+var projectTaskFields = `
 						id: task_uuid
 						task_uuid
 						task_name
@@ -35,7 +34,6 @@ const projectTaskFields = `
 						task_due_date
 						task_start_date
 						task_label
-						task_description
 						task_priority
 						task_github_issue_number
 						task_github_issue_url
@@ -52,7 +50,7 @@ const projectTaskFields = `
 							user_name
 							user_profile_object_key
 						}
-						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
+						task_sub_task_count: count(task_sub_tasks @filter(` + dgraphquery.Live("task_deleted_at") + ` @@hidden_tasks@@))
 						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
 						task_team {
 							team_name
@@ -166,11 +164,6 @@ func CreateOrUpdateDgraphProject(ctx context.Context, dgraphProject *dgraphStruc
 		return
 	}
 
-	// Invalidate cache
-	if dgraphProject.Uuid != "" {
-		_ = redisStore.DeletePattern(ctx, registry.ProjectTasks.Pattern(dgraphProject.Uuid))
-	}
-
 	return
 }
 
@@ -180,8 +173,12 @@ func CreateOrUpdateDgraphProject(ctx context.Context, dgraphProject *dgraphStruc
 func GetDgraphProjectListByAdminDgraphUID(ctx context.Context, userDgraphUID string) (dgraphProject []*dgraphStruct.DgraphProject, err error) {
 	variables := make(map[string]string)
 	variables["$user_id"] = userDgraphUID
+	// From the person's side of project_admins, not every project's.
 	query := `query ProjectInfo($user_id: string){
-				projectInfo(func: has(project_uuid)) @filter(uid_in(project_admins, $user_id) AND NOT gt(project_deleted_at, "1970-01-01T00:00:00Z")) {
+				var(func: uid($user_id)) {
+					admins as ~project_admins
+				}
+				projectInfo(func: uid(admins)) @filter(has(project_uuid) AND NOT gt(project_deleted_at, "1970-01-01T00:00:00Z")) {
 					uid
 					project_uuid
 					project_name
@@ -218,10 +215,17 @@ func GetDgraphProjectListByAdminDgraphUID(ctx context.Context, userDgraphUID str
 // its columns' places (dgraphStruct.BoardPlacesQuery). The cards come from
 // GetDgraphProjectBoardCards, in the same snapshot.
 func GetDgraphProjectBoardPlaces(ctx context.Context, txn *dgo.Txn, projectUUID string, userDgraphUID string, filterQuery string, closedLimit int) (*dgraphStruct.DgraphProject, map[string]*dgraphStruct.BoardPlaces, error) {
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	filter := dgraphStruct.TASK_LIVE_FILTER
 	if len(filterQuery) > 0 {
 		filter += " AND " + filterQuery
 	}
+	// Restricted tasks the viewer may not see leave every column, its count
+	// and its groups (models/taskread).
+	filter += tr.And()
 	// Members are sorted here, not by Dgraph: a sorted block stops at 1,000.
 	query := `query ProjectInfo($id: string, $userDgraphUID: string){
 			projectInfo(func: eq(project_uuid, $id)) {
@@ -268,12 +272,37 @@ func GetDgraphProjectBoardCards(ctx context.Context, txn *dgo.Txn, uids []string
 	if !dgraphquery.AllUIDs(uids) {
 		return nil, errors.New("domain/GetDgraphProjectBoardCards: not a list of task ids")
 	}
-	query := fmt.Sprintf(`{
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
+	query := tr.Fill(fmt.Sprintf(`{
 			cards(func: uid(%s)) {
 				%s
 			}
-		}`, strings.Join(uids, ", "), projectTaskFields)
+		}`, strings.Join(uids, ", "), projectTaskFields))
 	return dgraphTaskModels.QueryDgraphTasksInTxn(ctx, txn, query, nil)
+}
+
+// GetDgraphProjectTaskPlaces is every live task of a project the list's
+// filter keeps, with only what places it in the project's one order (its
+// uid, rank and creation), for the Manual sort, which the graph can't do.
+// Unsorted, so Dgraph sends them all.
+func GetDgraphProjectTaskPlaces(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string) ([]*dgraphStruct.DgraphTask, error) {
+	if len(filterQuery) > 0 {
+		filterQuery = "AND " + filterQuery
+	}
+	query := fmt.Sprintf(`query Places($id: string, $userDgraphUID: string){
+				project(func: eq(project_uuid, $id)) {
+					tasks: project_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` %s) {
+						uid
+						task_uuid
+						task_rank
+						task_created_at
+					}
+				}
+			}`, filterQuery)
+	return dgraphTaskModels.QueryDgraphTasks(ctx, query, map[string]string{"$id": projectUUID, "$userDgraphUID": userDgraphUID})
 }
 
 func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, sortQuery string, pageSize int, pageIndex int, getAll bool) (dgraphProject *dgraphStruct.DgraphProject, err error) {
@@ -285,15 +314,21 @@ func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgrap
 	variables["$userDgraphUID"] = userDgraphUID
 	order := dgraphquery.TotalOrder(sortQuery, "task_uuid")
 
+	// Restricted tasks the viewer may not see leave the count and the pages
+	// alike (models/taskread).
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
 	query := func(page dgraphquery.Page) string {
-		return fmt.Sprintf(`query ProjectInfo($id: string, $userDgraphUID: string){
+		return tr.Fill(fmt.Sprintf(`query ProjectInfo($id: string, $userDgraphUID: string){
 				projectInfo(func: eq(project_uuid, $id)) {
 					project_uuid
 					project_name
 					project_is_member: count(project_members @filter(uid($userDgraphUID)))
 					project_is_admin: count(project_admins @filter(uid($userDgraphUID)))
-					project_task_count: count(project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") %s))
-					project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") %s) (%s, %s) {
+					project_task_count: count(project_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` %s @@hidden_tasks@@))
+					project_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` %s @@hidden_tasks@@) (%s, %s) {
 						task_uuid
 						task_name
 						task_status
@@ -319,7 +354,7 @@ func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgrap
 							user_name
 							user_profile_object_key
 						}
-						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
+						task_sub_task_count: count(task_sub_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` @@hidden_tasks@@))
 						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
 						`+dgraphStruct.TASK_BLOCKED_OPEN+`
 						task_team {
@@ -327,9 +362,10 @@ func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgrap
 							team_uuid
 						}
 						task_created_at
+						task_rank
 					}
 				}
-			}`, filterQuery, filterQuery, order, page.Args())
+			}`, filterQuery, filterQuery, order, page.Args()))
 	}
 
 	if !getAll && pageSize > 0 {
@@ -399,7 +435,9 @@ func GetDgraphProjectInfoAndTeamAdminFlagAndAttachments(ctx context.Context, pro
 				}
 			}`
 
-	dgraphProject, err = dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, variables)
+	// The files of every task, restricted ones too: what goes with the project
+	// (ids only, never shown), whoever asks for it to go (models/taskread).
+	dgraphProject, err = dgraphModels.GetDgraphProjectInfoByUUID(taskread.WithSystem(ctx), query, variables)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1010,99 +1048,6 @@ func HardDeleteProject(ctx context.Context, projectUUID uuid.UUID) (err error) {
 	return
 }
 
-func GetProjectByUUID(ctx context.Context, TeamUUID uuid.UUID) (projectInfo *models.Project, err error) {
-
-	query := `
-        SELECT id, project_name, created_by, team_id, created_at, updated_at, deleted_at
-        FROM projects
-        WHERE id = $1
-    `
-
-	projectInfo, err = models.GetProjectByUUID(query, TeamUUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetProjectByUUID Failed to get project by uuid err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
-// GetDgraphProjectInfoByUUID is a project with the reader's standing in it,
-// for making a task in it (a workflow's create_task). It no longer reads the
-// project's tasks: nothing used them, and the block, sorted by due date with
-// no first, stopped at 1,000 tasks without saying so.
-func GetDgraphProjectInfoByUUID(ctx context.Context, projectUUID string, userDgraphUID string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
-
-	variables := make(map[string]string)
-	variables["$id"] = projectUUID
-	variables["$userUid"] = userDgraphUID
-	query := `query ProjectInfo($id: string, $userUid: string){
-				projectInfo(func: eq(project_uuid, $id)) {
-					uid
-					project_uuid
-					project_name
-					project_status
-					project_is_member: count(project_members @filter(uid($userUid)))
-					project_is_admin: count(project_admins @filter(uid($userUid)))
-					project_team {
-						uid
-					}
-					project_admins {
-						user_uuid
-					}
-				}
-			}`
-
-	dgraphProject, err = dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, variables)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphProjectInfoByUUID Failed to get project in dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
-}
-
-func CreateProjectWithAttachmentsInOpensearch(ctx context.Context, openSearchProject *openSearchStruct.OpenSearchProject, dgraphAttachments []*dgraphStruct.DgraphAttachment, userInfo *dgraphStruct.DgraphUser) {
-
-	var openSearchAttachments []*openSearchStruct.OpenSearchAttachment
-
-	for _, attachment := range dgraphAttachments {
-		openSearchAttachments = append(openSearchAttachments, &openSearchStruct.OpenSearchAttachment{
-			Uuid:                  attachment.Uuid,
-			AttachmentFileName:    attachment.FileName,
-			AttachmentByUserUuid:  userInfo.Uuid,
-			AttachmentObjKey:      attachment.ObjectKey,
-			AttachmentProjectUuid: openSearchProject.Uuid,
-			AttachmentCreatedAt:   openSearchProject.ProjectCreatedAt,
-		})
-	}
-
-	bulkOperationString, err := getProjectWithAttachmentBulkOperationStringForOpenSearch(ctx, openSearchProject, openSearchAttachments)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/CreateProjectWithAttachmentsInOpensearch Error getting bulk string for project's attachments err: %+v",
-			err)
-		return
-	}
-
-	err = OpenSearchBulkModels.BulkCreateInOpenSearch(bulkOperationString)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/CreateProjectWithAttachmentsInOpensearch Error getting bulk string for project's attachments err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 // GetDgraphProjectTasksForTemplate returns what a template keeps of a
 // project: its live top-level tasks, each with its live subtasks, and how many
 // top-level tasks it has. Both lists come in the order the tasks were made
@@ -1112,12 +1057,18 @@ func CreateProjectWithAttachmentsInOpensearch(ctx context.Context, openSearchPro
 // caps both lists, so a project too big for a template is found out without
 // reading all of it.
 func GetDgraphProjectTasksForTemplate(ctx context.Context, projectUUID string, first int) (*dgraphStruct.DgraphProject, error) {
-	query := fmt.Sprintf(`query Template($id: string){
+	// A template is copied into projects anyone may be in: it never carries a
+	// restricted task (models/taskread Nobody).
+	tr, err := taskread.Nobody(ctx)
+	if err != nil {
+		return nil, err
+	}
+	query := tr.Fill(fmt.Sprintf(`query Template($id: string){
 			projectInfo(func: eq(project_uuid, $id)) {
 				project_uuid
 				project_name
-				project_task_count: count(project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND NOT has(task_parent_task)))
-				project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND NOT has(task_parent_task)) (first: %d) {
+				project_task_count: count(project_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` AND NOT has(task_parent_task) @@hidden_tasks@@))
+				project_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` AND NOT has(task_parent_task) @@hidden_tasks@@) (first: %d) {
 					task_uuid
 					task_name
 					task_description
@@ -1129,15 +1080,15 @@ func GetDgraphProjectTasksForTemplate(ctx context.Context, projectUUID string, f
 					task_start_date
 					task_due_date
 					task_created_at
-					task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")) (first: %d) {
+					task_sub_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` @@hidden_tasks@@) (first: %d) {
 						task_name
 						task_status
 						task_due_date
 					}
 				}
 			}
-		}`, first, first)
-	return dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, map[string]string{"$id": projectUUID})
+		}`, first, first))
+	return dgraphModels.GetDgraphProjectInfoByUUID(taskread.WithSystem(ctx), query, map[string]string{"$id": projectUUID})
 }
 
 // GetDgraphProjectTimeline returns what a project's timeline draws: its live
@@ -1145,12 +1096,16 @@ func GetDgraphProjectTasksForTemplate(ctx context.Context, projectUUID string, f
 // the heavier fields (descriptions, comments, GitHub) a list needs. The newest
 // first ones when there are more; project_task_count says how many there are.
 func GetDgraphProjectTimeline(ctx context.Context, projectUUID, userDgraphUID string, first int) (*dgraphStruct.DgraphProject, error) {
-	query := fmt.Sprintf(`query Timeline($id: string, $user: string){
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
+	query := tr.Fill(fmt.Sprintf(`query Timeline($id: string, $user: string){
 			projectInfo(func: eq(project_uuid, $id)) {
 				project_uuid
 				project_is_admin: count(project_admins @filter(uid($user)))
-				project_task_count: count(project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND NOT has(task_parent_task)))
-				project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND NOT has(task_parent_task)) (orderdesc: task_created_at, first: %d) {
+				project_task_count: count(project_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` AND NOT has(task_parent_task) @@hidden_tasks@@))
+				project_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` AND NOT has(task_parent_task) @@hidden_tasks@@) (orderdesc: task_created_at, first: %d) {
 					task_uuid
 					task_name
 					task_status
@@ -1165,12 +1120,12 @@ func GetDgraphProjectTimeline(ctx context.Context, projectUUID, userDgraphUID st
 						user_name
 						user_profile_object_key
 					}
-					task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
+					task_sub_task_count: count(task_sub_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` @@hidden_tasks@@))
 					task_blocked_by @facets(kind, lag) @filter(%s) { task_uuid }
 					%s
 				}
 			}
-		}`, first, dgraphStruct.TASK_LIVE_FILTER, dgraphStruct.TASK_BLOCKED_OPEN)
+		}`, first, dgraphStruct.TASK_LIVE_FILTER, dgraphStruct.TASK_BLOCKED_OPEN))
 	return dgraphModels.GetDgraphProjectInfoByUUID(ctx, query, map[string]string{"$id": projectUUID, "$user": userDgraphUID})
 }
 
@@ -1224,7 +1179,13 @@ func latest(a, b *time.Time) *time.Time {
 // the week's end) tasks. today and weekEnd are instants, the start of the
 // person's today and seven days on, so days are theirs.
 func GetDgraphProjectCounts(ctx context.Context, userDgraphUID string, today, weekEnd time.Time) ([]ProjectCounts, error) {
-	const live = dgraphStruct.TASK_LIVE_FILTER
+	// Restricted tasks the person may not see count for nothing
+	// (models/taskread).
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
+	live := dgraphStruct.TASK_LIVE_FILTER + tr.And()
 	open := live + ` AND ` + dgraphStruct.TASK_OPEN_FILTER
 	top := live + ` AND NOT has(task_parent_task)`
 	// The first and last days come from aggregates over the tasks, so the

@@ -86,58 +86,71 @@ func Window(column []*dgraphStruct.DgraphTask, n int, partOf func(*dgraphStruct.
 	return kept
 }
 
-// Between is the rank for a card dropped between before (the card above it)
-// and after (the card below it); either may be nil at the ends of a column.
-// ok is false when there is no room between them and the column needs
-// renumbering.
-func Between(before, after *dgraphStruct.DgraphTask) (rank float64, ok bool) {
+// BetweenMany is n ranks, in order, for tasks dropped together between before
+// (the task above them) and after (the task below them); either may be nil at
+// an end. They are evenly spaced in the gap, or a Step apart going outward at
+// an end. ok is false when the gap has no room for them all, and the column
+// needs renumbering (RenumberMany).
+func BetweenMany(before, after *dgraphStruct.DgraphTask, n int) (ranks []float64, ok bool) {
+	ranks = make([]float64, n)
 	switch {
 	case before == nil && after == nil:
-		return 0, true
+		for i := range ranks {
+			ranks[i] = float64(i) * Step
+		}
+		return ranks, true
 	case before == nil:
-		return Effective(after) - Step, true
+		for i := range ranks {
+			ranks[i] = Effective(after) - float64(n-i)*Step
+		}
+		return ranks, true
 	case after == nil:
-		return Effective(before) + Step, true
+		for i := range ranks {
+			ranks[i] = Effective(before) + float64(i+1)*Step
+		}
+		return ranks, true
 	}
 	lo, hi := Effective(before), Effective(after)
-	mid := lo + (hi-lo)/2
-	// Also refuses a drop whose neighbours are out of order, which only happens
-	// when the caller's view of the column is stale: renumbering settles it.
-	if !(lo < mid && mid < hi) {
-		return 0, false
+	prev := lo
+	for i := range ranks {
+		r := lo + (hi-lo)*float64(i+1)/float64(n+1)
+		// Also refuses a drop whose neighbours are out of order, which only
+		// happens when the caller's view is stale: renumbering settles it.
+		if !(prev < r && r < hi) {
+			return nil, false
+		}
+		ranks[i], prev = r, r
 	}
-	return mid, true
+	return ranks, true
 }
 
-// Renumber places moved in column right below before, or else right above
-// after, or else at the top, and returns every card in the column with a
-// fresh, evenly spaced rank. A neighbour from outside the column (My Tasks
-// mixes projects) places the card by its rank instead. The first card keeps
-// its current rank, so the column stays put relative to cards that were not
-// renumbered.
-func Renumber(column []*dgraphStruct.DgraphTask, moved, before, after *dgraphStruct.DgraphTask) []*dgraphStruct.DgraphTask {
-	ordered := make([]*dgraphStruct.DgraphTask, 0, len(column)+1)
+// RenumberMany places moved (one task, or a selection in its order) in column
+// right below before, or else right above after, or else at the top, and
+// returns every task in the column with a fresh, evenly spaced rank. A
+// neighbour from outside the column (My Tasks mixes projects) places them by
+// its rank instead. The first task that wasn't moved keeps its rank, so the
+// column stays put relative to tasks that were not renumbered.
+func RenumberMany(column, moved []*dgraphStruct.DgraphTask, before, after *dgraphStruct.DgraphTask) []*dgraphStruct.DgraphTask {
+	isMoved := map[string]bool{}
+	for _, m := range moved {
+		isMoved[m.Uuid] = true
+	}
+	ordered := make([]*dgraphStruct.DgraphTask, 0, len(column)+len(moved))
 	for _, t := range column {
-		if t != nil && t.Uuid != moved.Uuid {
+		if t != nil && !isMoved[t.Uuid] {
 			ordered = append(ordered, t)
 		}
 	}
 	Sort(ordered)
 
 	at := insertAt(ordered, before, after)
-	ordered = append(ordered, nil)
-	copy(ordered[at+1:], ordered[at:])
-	ordered[at] = moved
-
+	// The first task that wasn't moved keeps its rank, so the column stays put
+	// relative to tasks that aren't renumbered.
 	start := 0.0
-	if len(ordered) > 1 {
-		// The card that was first before the move.
-		first := ordered[0]
-		if at == 0 {
-			first = ordered[1]
-		}
-		start = Effective(first)
+	if len(ordered) > 0 {
+		start = Effective(ordered[0])
 	}
+	ordered = append(ordered[:at], append(append([]*dgraphStruct.DgraphTask{}, moved...), ordered[at:]...)...)
 	for i, t := range ordered {
 		r := start + float64(i)*Step
 		t.Rank = &r

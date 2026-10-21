@@ -65,28 +65,3 @@ func SetScopeExcluded(ctx context.Context, scopeType, scopeID string, excludedBy
 	}
 	return err
 }
-
-// LoadExclusionSet loads ALL exclusions into a set keyed by
-// "<scope_type>:<scope_id>" for O(1) lookups during a worker sweep — one
-// query instead of one-per-scope. Returns an empty (non-nil) set on error.
-func LoadExclusionSet(ctx context.Context) (map[string]struct{}, error) {
-	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	out := map[string]struct{}{}
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(cctx,
-		`SELECT scope_type, scope_id FROM ai_memory_exclusions`)
-	if err != nil {
-		helpers.LogErrorWithContext(cctx, "models/WorkspaceMemory LoadExclusionSet failed: %+v", err)
-		return out, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var t, id string
-		if err := rows.Scan(&t, &id); err != nil {
-			return out, err
-		}
-		out[t+":"+id] = struct{}{}
-	}
-	return out, rows.Err()
-}

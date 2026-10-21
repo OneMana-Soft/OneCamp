@@ -25,10 +25,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -68,10 +66,11 @@ type raceEnv struct {
 	*integration.Env
 	admin   uuid.UUID
 	asAdmin context.Context
+	store   *memStore
 }
 
-// newRaceEnv serves objects from the store by the end of their keys (any
-// other is not found) for the rest of the test.
+// newRaceEnv serves objects from the store by the end of their keys, and
+// what the test's code writes to it, for the rest of the test.
 func newRaceEnv(t *testing.T, objects map[string][]byte) *raceEnv {
 	t.Helper()
 	ctx := context.Background()
@@ -81,16 +80,8 @@ func newRaceEnv(t *testing.T, objects map[string][]byte) *raceEnv {
 	}
 	importProvider.Register(raceProvider{})
 
-	store := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		for key, body := range objects {
-			if strings.HasSuffix(r.URL.Path, "/"+key) {
-				w.Header().Set("ETag", `"0123456789abcdef0123456789abcdef"`)
-				http.ServeContent(w, r, path.Base(key), time.Now(), bytes.NewReader(body))
-				return
-			}
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
+	objectStore := newMemStore(objects)
+	store := httptest.NewServer(objectStore)
 	t.Cleanup(store.Close)
 	endpoint, _ := url.Parse(store.URL)
 	client, err := minio.New(endpoint.Host, &minio.Options{
@@ -108,7 +99,7 @@ func newRaceEnv(t *testing.T, objects map[string][]byte) *raceEnv {
 	if _, err := env.PG.Exec(`INSERT INTO users (id, email_id) VALUES ($1, 'admin@acme.test')`, admin); err != nil {
 		t.Fatal(err)
 	}
-	return &raceEnv{Env: env, admin: admin, asAdmin: context.WithValue(ctx, helpers.UserInfoContextKey, userModels.UserInfo{
+	return &raceEnv{Env: env, admin: admin, store: objectStore, asAdmin: context.WithValue(ctx, helpers.UserInfoContextKey, userModels.UserInfo{
 		UserPostgresInfo: userModels.User{Id: admin, IsAdmin: true},
 	})}
 }

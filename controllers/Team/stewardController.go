@@ -7,8 +7,6 @@ import (
 	business "github.com/akashc777/OneCamp/business/Team"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
-	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
 )
 
 // MakeMeTeamAdmin makes the workspace admin asking an admin of a team, and so
@@ -21,16 +19,15 @@ func MakeMeTeamAdmin(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	me, ok := userModels.FromContext(ctx)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	if !me.UserPostgresInfo.IsAdmin {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only the workspace's admins can do that."})
+		helpers.WriteForbidden(w, "Only the workspace's admins can do that.")
 		return
 	}
-	teamID, err := uuid.Parse(chi.URLParam(r, "team_uuid"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a team."})
+	teamID, validID := helpers.UUIDParam(w, r, "team_uuid")
+	if !validID {
 		return
 	}
 	team, err := business.GetBasicDgraphTeamInfoByUUID(ctx, teamID.String(), me.UserDgraphInfo.Uid)
@@ -39,7 +36,7 @@ func MakeMeTeamAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if team == nil || team.Uuid == "" {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That team isn't there."})
+		helpers.WriteNotFound(w, "That team isn't there.")
 		return
 	}
 	if helpers.IsSoftDeleted(team.DeletedAt) {

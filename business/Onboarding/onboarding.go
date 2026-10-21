@@ -105,6 +105,9 @@ type State struct {
 	// list; Skipped is what was set aside.
 	Complete bool `json:"complete"`
 	Skipped  int  `json:"skipped"`
+	// Sample is the live sample project (sample.go), so the guided run can
+	// open it or offer to remove it; nil when there is none.
+	Sample *Sample `json:"sample,omitempty"`
 }
 
 // stepDef is a step and the question that decides whether it is finished.
@@ -210,7 +213,7 @@ func Status(ctx context.Context, user userModels.UserInfo) State {
 		skipped[id] = true
 	}
 
-	state := State{Dismissed: isDismissed()}
+	state := State{Dismissed: isDismissed(), Sample: CurrentSample()}
 	managed := settingsBusiness.Managed()
 	for _, def := range allDefinitions() {
 		if !onTheList(def, features, managed) {
@@ -365,7 +368,7 @@ func definitions() []stepDef {
 				Href: "/app/admin?tab=import",
 				// NOT SLACK-SPECIFIC, and the first version of this step was.
 				//
-				// The import pipeline takes eight providers and the done probe has
+				// The import pipeline takes nine providers and the done probe has
 				// always asked about all of them, but the row said "Bring your
 				// Slack history over" and linked to the Slack tab. A team arriving
 				// from Jira read a checklist that did not describe their migration
@@ -438,10 +441,22 @@ func hasAnyChannel(ctx context.Context, user userModels.UserInfo) bool {
 }
 
 // hasAnyProject asks whether this admin runs a project. Only the projects they
-// admin, which is what a new workspace's first admin's projects are.
+// admin, which is what a new workspace's first admin's projects are; the
+// sample project (sample.go) is never one.
 func hasAnyProject(ctx context.Context, user userModels.UserInfo) bool {
 	projects, err := projectBusiness.GetDgraphProjectListByAdminDgraphUID(ctx, user.UserDgraphInfo.Uid)
-	return err == nil && len(projects) > 0
+	if err != nil {
+		return false
+	}
+	// The sample is ours, not theirs: it never answers this step. It is read
+	// once, not for each project.
+	sample := CurrentSample()
+	for _, p := range projects {
+		if p != nil && !sampleIs(sample, p.Uuid) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasImported reports whether any import has ever been started here.
@@ -453,7 +468,7 @@ func hasAnyProject(ctx context.Context, user userModels.UserInfo) bool {
 // that is not a workspace which still needs to be told the feature exists, it is
 // one whose admin is already in the middle of it.
 func hasImported(ctx context.Context, _ userModels.UserInfo) bool {
-	jobs, err := importDomain.ListJobs(ctx, "", 1)
+	jobs, err := importDomain.ListJobs(ctx, "", 1, 0)
 	return err == nil && len(jobs) > 0
 }
 

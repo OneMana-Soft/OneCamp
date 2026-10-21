@@ -66,23 +66,26 @@ func TestApplyPriorityMap(t *testing.T) {
 		"low":     "low",
 	}
 
+	// One priority scale (models/dgraph priority.go): a source's urgent stays
+	// urgent, and a task with no priority has none, not medium.
 	cases := []struct {
 		source, want string
 	}{
-		{"highest", "high"},
+		{"highest", "high"}, // the import's own map says so
 		{"low", "low"},
 		// Heuristic
-		{"urgent", "high"},
-		{"critical", "high"},
-		{"p0", "high"},
+		{"urgent", "urgent"},
+		{"critical", "urgent"},
+		{"p0", "urgent"},
 		{"p1", "high"},
 		{"p2", "medium"},
 		{"p3", "medium"},
 		{"p4", "low"},
 		{"p5", "low"},
+		{"No priority", ""},
+		{"", ""},
 		// Fallback
 		{"weirdval", "medium"},
-		{"", "medium"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.source, func(t *testing.T) {

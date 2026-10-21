@@ -1,6 +1,7 @@
 package business
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -33,7 +34,7 @@ func TestGrantExpiry(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := grantExpired(&guestModel.GuestGrant{ExpiresAt: c.expires})
+			got := grantExpired(context.Background(), &guestModel.GuestGrant{ExpiresAt: c.expires})
 			if got != c.want {
 				t.Errorf("grantExpired(%v) = %v, want %v", c.expires, got, c.want)
 			}

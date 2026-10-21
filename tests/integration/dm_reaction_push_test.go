@@ -153,7 +153,11 @@ func TestADirectMessageReactionReachesItsAuthor(t *testing.T) {
 		if _, err := env.PG.Exec(`UPDATE users_chat_notification SET notification_type = 'block' WHERE user_id = $1 AND grp_id = $2`, people["sam"], grp); err != nil {
 			t.Fatal(err)
 		}
-		send("alex", chatController.CreateOrUpdateChatReaction, chatAdapter.InputUpdateReactionForChat{Uuid: lunch, EmojiReactionUuid: "heart"})
+		// A message alex hasn't reacted to: an author hears of someone's
+		// reactions once, so a second one to lunch would say nothing either way.
+		coffee := send("sam", chatController.CreateChat, chatAdapter.ChatInfo{ToUuid: people["alex"].String(), TextHtml: "<p>Coffee?</p>"})["uuid"].(string)
+		pushed(firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_REACTION, false) // clears what came before
+		send("alex", chatController.CreateOrUpdateChatReaction, chatAdapter.InputUpdateReactionForChat{Uuid: coffee, EmojiReactionUuid: "heart"})
 		if to := pushed(firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_REACTION, false); len(to) != 0 {
 			t.Errorf("pushed to %v while sam hears nothing from it", to)
 		}
