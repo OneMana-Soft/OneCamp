@@ -23,8 +23,8 @@ import (
 	"fmt"
 	"time"
 
+	syncQueueDomain "github.com/akashc777/OneCamp/domain/GitHubSyncQueue"
 	"github.com/akashc777/OneCamp/helpers"
-	syncQueueModel "github.com/akashc777/OneCamp/models/postgres/GitHubSyncQueue"
 )
 
 // doomedWindow is how far back to look. Long enough to catch a regression that
@@ -38,7 +38,7 @@ func init() {
 		Describe: "No sync work is being queued for tasks that have no GitHub link. It does not prove syncs " +
 			"succeed: a revoked token fails differently and is counted as an ordinary failure.",
 		Probe: func(ctx context.Context) error {
-			doomed, other, err := syncQueueModel.CountRecentFailures(ctx, time.Now().Add(-doomedWindow))
+			doomed, other, err := syncQueueDomain.CountRecentFailures(ctx, time.Now().Add(-doomedWindow))
 			if err != nil {
 				return fmt.Errorf("could not read the sync queue: %w", err)
 			}

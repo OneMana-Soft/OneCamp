@@ -90,6 +90,52 @@ func TestAFailedMoveIsTriedAgainAfterAMinute(t *testing.T) {
 	}
 }
 
+// What the latch knows is kept for the database it learned it from: a
+// process that connects to another, as each integration test does with a
+// fresh database, asks that one afresh. An attempt that failed on one
+// database doesn't hold the next one's move back for a minute, and a move
+// done for one isn't taken as done for another (TestDesktopNoticesReachWhomAPushWould
+// read Fay's focus time from the old stores after two other tests).
+func TestTheLatchIsForTheDatabaseItWasSetFor(t *testing.T) {
+	release, fail, now := make(chan struct{}), &atomic.Bool{}, time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC)
+	close(release)
+	m, attempts := testMover(release, fail, &now)
+	m.wait = time.Second
+	var store atomic.Value
+	store.Store("first")
+	m.store = func() any { return store.Load() }
+	ctx := context.Background()
+
+	// The first database's move fails, a moment ago.
+	fail.Store(true)
+	if err := m.ready(ctx); !errors.Is(err, ErrMoving) || attempts.Load() != 1 {
+		t.Fatalf("the first database: %v after %d attempts", err, attempts.Load())
+	}
+	// The next one moves at once, not a minute later.
+	fail.Store(false)
+	store.Store("second")
+	if err := m.ready(ctx); err != nil || attempts.Load() != 2 {
+		t.Fatalf("the second database: %v after %d attempts", err, attempts.Load())
+	}
+	// Done for the second isn't done for a third: it is asked, and moved.
+	store.Store("third")
+	if m.movedNow() {
+		t.Fatal("a move done for one database was taken as done for another")
+	}
+	if err := m.ready(ctx); err != nil || attempts.Load() != 3 {
+		t.Fatalf("the third database: %v after %d attempts", err, attempts.Load())
+	}
+	// One database for good, as a server has: done is done, asked no more.
+	for i := 0; i < 5; i++ {
+		if err := m.ready(ctx); err != nil || !m.movedNow() {
+			t.Fatalf("the same database again: %v", err)
+		}
+	}
+	if n := attempts.Load(); n != 3 {
+		t.Errorf("moved %d times, want once a database", n)
+	}
+}
+
 // A move marked done on this install isn't run again.
 func TestAMoveMarkedDoneIsNotRunAgain(t *testing.T) {
 	release, fail, now := make(chan struct{}), &atomic.Bool{}, time.Date(2026, 10, 16, 8, 0, 0, 0, time.UTC)

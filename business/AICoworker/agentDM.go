@@ -68,7 +68,7 @@ func handleAgentDM(ctx context.Context, receiverID, senderID, groupID, text, mes
 	// Live "typing…" as the agent's own principal while the run executes, so a
 	// slow/multi-step run reads as the teammate working rather than dead air.
 	stopTyping := make(chan struct{})
-	go runBotChatTyping(ctx, agentBot, groupID, stopTyping)
+	helpers.GoSafeLoop("runBotChatTyping", func() { runBotChatTyping(ctx, agentBot, groupID, stopTyping) })
 	reply := agentbusiness.RunAgentDMReply(ctx, agent, senderID, groupID, text, imageContext)
 	close(stopTyping)
 
@@ -195,7 +195,7 @@ func runGroupChatAgent(ctx context.Context, m agentbusiness.MentionedAgent, mess
 	}
 
 	stopTyping := make(chan struct{})
-	go runBotChatTyping(ctx, m.Bot, groupID, stopTyping)
+	helpers.GoSafeLoop("runBotChatTyping", func() { runBotChatTyping(ctx, m.Bot, groupID, stopTyping) })
 	reply := agentbusiness.RunAgentGroupReply(ctx, m.Agent, senderID, groupID, text, imageContext)
 	close(stopTyping)
 

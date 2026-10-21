@@ -16,7 +16,7 @@ func TestPlanFromModel(t *testing.T) {
 	 "statuses":[{"name":"QA","category":"inReview"},{"name":"Done","category":"done"},{"name":"qa","category":"todo"},{"name":"Beta","category":"inProgress"},{"name":"Extra","category":"todo"}],
 	 "tasks":[{"name":"Write the store listing","details":"Title, screenshots.\n- Icon\n- Video","priority":"HIGH","start_day":2,"due_day":1,"steps":["Screenshots"," ","Copy"]},
 	          {"name":"  ","details":"no name"},
-	          {"name":"Submit for review","priority":"urgent","due_day":99999}]}` + "\n```"
+	          {"name":"Submit for review","priority":"someday","due_day":99999}]}` + "\n```"
 	tpl, ok := planFromModel(good, "fallback")
 	if !ok {
 		t.Fatal("a fenced, slightly wrong plan is mended, not refused")

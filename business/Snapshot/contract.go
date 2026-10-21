@@ -86,7 +86,9 @@ type Take struct {
 // Service is the Snapshot Service.
 type Service interface {
 	Take(ctx context.Context, t Take) (Version, error)
-	List(ctx context.Context, who accessBusiness.Subject, resourceKind, resourceUUID string) ([]Version, error)
+	// List is the versions newest first, a page at a time: those before
+	// `before` when it is set.
+	List(ctx context.Context, who accessBusiness.Subject, resourceKind, resourceUUID string, before time.Time) ([]Version, error)
 	// Preview is a version's body as HTML, for reading beside the live doc.
 	Preview(ctx context.Context, who accessBusiness.Subject, resourceKind, resourceUUID, versionID string) (string, error)
 	// Name names a version and pins or unpins it ("" unnames it).
@@ -117,7 +119,7 @@ type Resource interface {
 	// else ErrNotFound, ErrForbidden or ErrInTrash.
 	Allow(ctx context.Context, who accessBusiness.Subject, resourceUUID string) error
 	Take(ctx context.Context, t Take) (Version, error)
-	List(ctx context.Context, resourceUUID string) ([]Version, error)
+	List(ctx context.Context, resourceUUID string, before time.Time) ([]Version, error)
 	Preview(ctx context.Context, resourceUUID, versionID string) (string, error)
 	Name(ctx context.Context, resourceUUID, versionID, name string, pinned bool) error
 	Restore(ctx context.Context, who accessBusiness.Subject, resourceUUID, versionID string) error
@@ -172,7 +174,7 @@ func (versions) Take(ctx context.Context, t Take) (Version, error) {
 	return r.Take(ctx, t)
 }
 
-func (versions) List(ctx context.Context, who accessBusiness.Subject, kind, uuid string) ([]Version, error) {
+func (versions) List(ctx context.Context, who accessBusiness.Subject, kind, uuid string, before time.Time) ([]Version, error) {
 	r, err := resourceOf(kind)
 	if err != nil {
 		return nil, err
@@ -180,7 +182,7 @@ func (versions) List(ctx context.Context, who accessBusiness.Subject, kind, uuid
 	if err := r.Allow(ctx, who, uuid); err != nil {
 		return nil, err
 	}
-	return r.List(ctx, uuid)
+	return r.List(ctx, uuid, before)
 }
 
 func (versions) Preview(ctx context.Context, who accessBusiness.Subject, kind, uuid, versionID string) (string, error) {

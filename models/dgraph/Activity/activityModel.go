@@ -6,7 +6,9 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
+	"github.com/akashc777/OneCamp/models/dgexec"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/taskread"
 )
 
 type RawReactionsActivity struct {
@@ -38,11 +40,19 @@ func mentionShown(m *dgraphStruct.DgraphMentions) bool {
 		return true
 	}
 	c := m.Comment
-	return c != nil && (c.Post != nil || c.Chat != nil || c.Task != nil || c.Doc != nil || c.Board != nil)
+	return c != nil && (c.Post != nil || c.Chat != nil || seen(c.Task) || c.Doc != nil || c.Board != nil)
+}
+
+// seen is whether a comment's task is one the reader may see: there, and not
+// the stub models/taskread leaves of a restricted task they may not. A
+// comment on a task they can't see is no activity of theirs. Pure.
+func seen(t *dgraphStruct.DgraphTask) bool {
+	return t != nil && !t.Hidden
 }
 
 func GetComments(ctx context.Context, query string, variables map[string]string) (dgraphComment []*dgraphStruct.DgraphComment, actualLen int, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -73,12 +83,14 @@ func GetComments(ctx context.Context, query string, variables map[string]string)
 	if len(commentInfo.CommentInfo) == 0 {
 		return
 	}
-
-	actualLen = len(commentInfo.CommentInfo[0].CommentInfo)
+	// Restricted tasks the reader may not see become stubs (models/taskread).
+	if err = taskread.KeepIn(ctx, &commentInfo); err != nil {
+		return nil, 0, err
+	}
 
 	// Filter out orphaned comments where all parent content is nil (deleted/filtered)
 	for _, c := range commentInfo.CommentInfo[0].CommentInfo {
-		if c.Post == nil && c.Chat == nil && c.Task == nil && c.Doc == nil {
+		if c.Post == nil && c.Chat == nil && !seen(c.Task) && c.Doc == nil {
 			continue
 		}
 		dgraphComment = append(dgraphComment, c)
@@ -89,6 +101,7 @@ func GetComments(ctx context.Context, query string, variables map[string]string)
 
 func GetMentions(ctx context.Context, query string, variables map[string]string) (dgraphMention []*dgraphStruct.DgraphMentions, actualLen int, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -119,8 +132,9 @@ func GetMentions(ctx context.Context, query string, variables map[string]string)
 	if len(mentionInfo.MentionInfo) == 0 {
 		return
 	}
-
-	actualLen = len(mentionInfo.MentionInfo[0].Mentions)
+	if err = taskread.KeepIn(ctx, &mentionInfo); err != nil {
+		return nil, 0, err
+	}
 
 	// Filter out orphaned mentions where all parent content is nil (deleted/filtered/self-mention)
 	for _, m := range mentionInfo.MentionInfo[0].Mentions {
@@ -136,6 +150,7 @@ func GetMentions(ctx context.Context, query string, variables map[string]string)
 
 func GetReactions(ctx context.Context, query string, variables map[string]string) (dgraphReaction []*ReactionsActivity, actualLen int, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -164,6 +179,9 @@ func GetReactions(ctx context.Context, query string, variables map[string]string
 
 	if len(reactionInfo.ReactionInfo) == 0 {
 		return
+	}
+	if err = taskread.KeepIn(ctx, &reactionInfo); err != nil {
+		return nil, 0, err
 	}
 
 	for _, rea := range reactionInfo.ReactionInfo[0].Reactions {
@@ -197,7 +215,7 @@ func GetReactions(ctx context.Context, query string, variables map[string]string
 		if filteredRea.Comment != nil &&
 			filteredRea.Comment.Post == nil &&
 			filteredRea.Comment.Chat == nil &&
-			filteredRea.Comment.Task == nil &&
+			!seen(filteredRea.Comment.Task) &&
 			filteredRea.Comment.Doc == nil {
 			continue
 		}
@@ -217,6 +235,7 @@ func GetUnifiedActivity(ctx context.Context, query string, variables map[string]
 	err error,
 ) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -244,6 +263,10 @@ func GetUnifiedActivity(ctx context.Context, query string, variables map[string]
 		helpers.LogErrorWithContext(ctx, "models/GetUnifiedActivity Failed to unmarshal response err: %+v", err)
 		return
 	}
+	// Restricted tasks the reader may not see become stubs (models/taskread).
+	if err = taskread.KeepIn(ctx, &unifiedResp); err != nil {
+		return nil, nil, nil, err
+	}
 
 	if len(unifiedResp.MentionInfo) > 0 {
 		// Filter out orphaned mentions where all parent content is nil
@@ -257,7 +280,7 @@ func GetUnifiedActivity(ctx context.Context, query string, variables map[string]
 	if len(unifiedResp.CommentInfo) > 0 {
 		// Filter out orphaned comments where all parent content is nil
 		for _, c := range unifiedResp.CommentInfo[0].Comments {
-			if c.Post == nil && c.Chat == nil && c.Task == nil && c.Doc == nil {
+			if c.Post == nil && c.Chat == nil && !seen(c.Task) && c.Doc == nil {
 				continue
 			}
 			comments = append(comments, c)
@@ -293,7 +316,7 @@ func GetUnifiedActivity(ctx context.Context, query string, variables map[string]
 			if filteredRea.Comment != nil &&
 				filteredRea.Comment.Post == nil &&
 				filteredRea.Comment.Chat == nil &&
-				filteredRea.Comment.Task == nil &&
+				!seen(filteredRea.Comment.Task) &&
 				filteredRea.Comment.Doc == nil {
 				continue
 			}
@@ -307,44 +330,24 @@ func GetUnifiedActivity(ctx context.Context, query string, variables map[string]
 }
 
 func GetTotalUnreadActivityCount(ctx context.Context, query string, variables map[string]string) (totalCount uint64, err error) {
-	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
-
-	resp, err := txn.QueryWithVars(ctx, query, variables)
+	type counted []struct {
+		Count uint64 `json:"count"`
+	}
+	countResp, err := dgexec.Read[struct {
+		MentionInfo  counted `json:"mentionInfo"`
+		CommentInfo  counted `json:"commentInfo"`
+		ReactionInfo counted `json:"reactionInfo"`
+	}](ctx, query, variables)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/GetTotalUnreadActivityCount failed to execute query err: %+v", err)
-		return
+		helpers.LogErrorWithContext(ctx, "models/GetTotalUnreadActivityCount failed to read the counts err: %+v", err)
+		return 0, err
 	}
-
-	type CountResp struct {
-		MentionInfo []struct {
-			Count uint64 `json:"count"`
-		} `json:"mentionInfo"`
-		CommentInfo []struct {
-			Count uint64 `json:"count"`
-		} `json:"commentInfo"`
-		ReactionInfo []struct {
-			Count uint64 `json:"count"`
-		} `json:"reactionInfo"`
+	for _, c := range []counted{countResp.MentionInfo, countResp.CommentInfo, countResp.ReactionInfo} {
+		if len(c) > 0 {
+			totalCount += c[0].Count
+		}
 	}
-
-	var countResp CountResp
-	err = json.Unmarshal(resp.Json, &countResp)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/GetTotalUnreadActivityCount failed to unmarshal response err: %+v", err)
-		return
-	}
-
-	if len(countResp.MentionInfo) > 0 {
-		totalCount += countResp.MentionInfo[0].Count
-	}
-	if len(countResp.CommentInfo) > 0 {
-		totalCount += countResp.CommentInfo[0].Count
-	}
-	if len(countResp.ReactionInfo) > 0 {
-		totalCount += countResp.ReactionInfo[0].Count
-	}
-
-	return
+	return totalCount, nil
 }
 
 type UnifiedActivityItem struct {

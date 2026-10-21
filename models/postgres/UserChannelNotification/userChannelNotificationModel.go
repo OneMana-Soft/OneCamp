@@ -8,6 +8,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 )
 
 func CreateChannelNotificationType(query string, userID string, channelId string, notificationType string, updatedAt time.Time) (err error) {
@@ -150,4 +151,14 @@ func GetLevelsInChannel(query string, channelID string, userIDs []string) (map[s
 		return nil, err
 	}
 	return levels, nil
+}
+
+// GetMemberIDs runs query, which takes a channel's id and a limit and answers
+// user ids, into a list. Any error answers no list: a partial one would read
+// as fewer members.
+func GetMemberIDs(ctx context.Context, query string, channelID string, limit int) ([]string, error) {
+	return pgexec.Query(ctx, query, func(r pgexec.Row) (id string, err error) {
+		err = r.Scan(&id)
+		return
+	}, channelID, limit)
 }

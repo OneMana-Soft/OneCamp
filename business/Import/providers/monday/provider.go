@@ -146,8 +146,8 @@ func (p *Provider) DefaultStatusMap() map[string]string {
 // (emoji stripped: "Critical ⚠️" arrives as "Critical").
 func (p *Provider) DefaultPriorityMap() map[string]string {
 	return map[string]string{
-		"critical":    "high",
-		"urgent":      "high",
+		"critical":    "urgent",
+		"urgent":      "urgent",
 		"high":        "high",
 		"medium":      "medium",
 		"normal":      "medium",

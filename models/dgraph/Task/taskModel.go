@@ -3,10 +3,12 @@ package models
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/dgraph-io/dgo/v230"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
@@ -16,22 +18,60 @@ import (
 // helpers.ErrNotFound, which helpers.WriteReadFailure answers as a 404.
 var ErrNotFound = helpers.NotFound("failed to get dgraph task")
 
-// forDgraph is a task as Dgraph stores it: its custom field values live in
-// Postgres and what its reader may do with it is Work Access's, both only laid
-// over a task read for the app, so a task read and written back must not carry
-// them in as nested nodes.
+// forDgraph is a task as Dgraph stores it: its custom field values, key and
+// type live in Postgres and what its reader may do with it is Work Access's,
+// all only laid over a task read for the app, so a task read and written back
+// must not carry them in as predicates or nested nodes, its own or those of
+// the tasks it holds (sub-tasks, parent, dependencies).
 func forDgraph(t *dgraphStruct.DgraphTask) *dgraphStruct.DgraphTask {
-	if t == nil || (t.Fields == nil && t.Access == nil && (t.Project == nil || t.Project.Access == nil)) {
+	if !appOnly(t) {
 		return t
 	}
 	c := *t
-	c.Fields, c.Access = nil, nil
+	c.Fields, c.Access, c.Key, c.WorkType, c.Hidden, c.Restricted = nil, nil, "", nil, false, false
 	if c.Project != nil && c.Project.Access != nil {
 		p := *c.Project
 		p.Access = nil
 		c.Project = &p
 	}
+	c.ParentTask = forDgraph(c.ParentTask)
+	c.SubTasks = forDgraphAll(c.SubTasks)
+	c.BlockedBy = forDgraphAll(c.BlockedBy)
+	c.Blocks = forDgraphAll(c.Blocks)
 	return &c
+}
+
+// appOnly says whether t, or a task it holds, carries something only an
+// answer to the app has.
+func appOnly(t *dgraphStruct.DgraphTask) bool {
+	if t == nil {
+		return false
+	}
+	if t.Fields != nil || t.Access != nil || t.Key != "" || t.WorkType != nil || t.Hidden || t.Restricted || (t.Project != nil && t.Project.Access != nil) {
+		return true
+	}
+	if appOnly(t.ParentTask) {
+		return true
+	}
+	for _, list := range [][]*dgraphStruct.DgraphTask{t.SubTasks, t.BlockedBy, t.Blocks} {
+		for _, o := range list {
+			if appOnly(o) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func forDgraphAll(ts []*dgraphStruct.DgraphTask) []*dgraphStruct.DgraphTask {
+	if ts == nil {
+		return nil
+	}
+	out := make([]*dgraphStruct.DgraphTask, len(ts))
+	for i, t := range ts {
+		out[i] = forDgraph(t)
+	}
+	return out
 }
 
 func CreateOrUpdateDgraphTask(ctx context.Context, dgraphTask *dgraphStruct.DgraphTask, query string, delStringJSON string) (taskUid string, err error) {
@@ -74,6 +114,7 @@ func CreateOrUpdateDgraphTask(ctx context.Context, dgraphTask *dgraphStruct.Dgra
 
 func GetDgraphTaskInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphTask *dgraphStruct.DgraphTask, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -98,13 +139,25 @@ func GetDgraphTaskInfoByUUID(ctx context.Context, query string, variables map[st
 
 	if len(tasksInfo.TaskInfo) == 0 {
 		err = ErrNotFound
-		helpers.LogErrorWithContext(ctx,
+		// Found nothing: an answer its caller handles (a 404, or skipping
+		// the thing), so said at DEBUG, not as a failure.
+		helpers.LogDebugWithContext(ctx,
 			"models/GetDgraphTaskInfoByUUID failed to get dgraph task")
 
 		return
 	}
 	dgraphTask = &tasksInfo.TaskInfo[0]
 
+	// A restricted task the reader may not see isn't there for them; of one
+	// they may, what it links to that they may not is a stub or gone.
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if tr.Hides(dgraphTask.Uuid) {
+		return nil, ErrNotFound
+	}
+	tr.Keep(dgraphTask)
 	return
 }
 
@@ -156,7 +209,12 @@ func QueryDgraphTasksInTxn(ctx context.Context, txn *dgo.Txn, query string, vari
 			out = append(out, rows[i].Tasks...)
 		}
 	}
-	return out, nil
+	// Only what the reader may see (models/taskread).
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return tr.KeepTasks(out), nil
 }
 
 // UpdateExistingTasks applies set (and delJSON, if any) to the tasks in the
@@ -204,4 +262,25 @@ func UpdateExistingTasksReturning(ctx context.Context, set *dgraphStruct.DgraphT
 		}
 	}
 	return uuids, nil
+}
+
+// SetDgraphTasks writes many tasks already in the graph, each named by its
+// uid, in one mutation (PR2's bulk writes). A task without a uid isn't
+// written: a bulk write never makes a task.
+func SetDgraphTasks(ctx context.Context, tasks []*dgraphStruct.DgraphTask) error {
+	var nodes []*dgraphStruct.DgraphTask
+	for _, t := range tasks {
+		if t != nil && strings.HasPrefix(t.Uid, "0x") {
+			nodes = append(nodes, forDgraph(t))
+		}
+	}
+	if len(nodes) == 0 {
+		return nil
+	}
+	pb, err := json.Marshal(nodes)
+	if err != nil {
+		return err
+	}
+	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{Mutations: []*api.Mutation{{SetJson: pb}}})
+	return err
 }

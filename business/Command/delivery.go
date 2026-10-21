@@ -74,7 +74,7 @@ func PublishEphemeralToUser(userUUID string, resp *commandAdapter.CommandRespons
 	token := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForUserActivity(userUUID), 1, false, payload)
 	go func() {
 		defer func() { _ = recover() }()
-		_ = token.Wait()
+		_ = token.WaitTimeout(mqttInit.PublishWait)
 		if token.Error() != nil {
 			helpers.MessageLogs.ErrorLog.Printf("business/Command/PublishEphemeralToUser publish err: %+v", token.Error())
 		}

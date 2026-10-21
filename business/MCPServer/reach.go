@@ -47,6 +47,7 @@ import (
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 	dataSourceBusiness "github.com/akashc777/OneCamp/business/DataSource"
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
+	entityLinkBusiness "github.com/akashc777/OneCamp/business/EntityLink"
 	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
@@ -479,12 +480,36 @@ func PrincipalCanReach(ctx context.Context, principalUserID string, ref Resource
 		// (docReach): only someone the doc was there for is told it was deleted.
 		return docReach(d, uid, ref.Access.IsRead())
 
+	case ResourceWorkItem:
+		// The work graph's rule for a kind with none of its own here: what
+		// business/EntityLink ReadMany says the person may see, as a member (no
+		// admin power is lent to a read like this, through a token or not).
+		// Hidden and missing are the same refusal, so a refusal can't be used to
+		// learn what exists.
+		if !ref.Access.IsRead() {
+			return ReachDecision{Reason: "a work-graph item can only be read here"}
+		}
+		kind, id, ok := strings.Cut(strings.TrimSpace(ref.ID), ":")
+		if !ok || !helpers.IsCanonicalUUID(id) {
+			return ReachDecision{Reason: "not an item of the work graph"}
+		}
+		got, rerr := readWorkItems(ctx, accessBusiness.Subject{UserUID: uid, UserUUID: principal},
+			[]entityLinkBusiness.Ref{{Kind: kind, ID: id}})
+		if rerr != nil || len(got) != 1 || got[0].Access != entityLinkBusiness.AccessOK {
+			return ReachDecision{Reason: "this item isn't there, or the originating person can't see it"}
+		}
+		return ReachDecision{Allow: true, Reason: "the originating person can see this " + kind, PrincipalDgraphUID: uid}
+
 	default:
 		// A kind nobody has written an authority rule for. Refusing here is what
 		// makes ResourceKind's closedness meaningful.
 		return ReachDecision{Reason: "unsupported resource kind"}
 	}
 }
+
+// readWorkItems is how a work-graph item is read as a person (a seam for
+// tests): the work graph's own reader.
+var readWorkItems = entityLinkBusiness.ReadMany
 
 // ReasonDocDeleted is the refusal for a doc in the trash, given only to someone
 // who could have read it (or, for a write, changed it) while it was live.

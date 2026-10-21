@@ -19,8 +19,8 @@ type ExecuteCommandRequest struct {
 	Mentions map[string]string `json:"mentions,omitempty"`
 }
 
-// InteractRequest is the body of POST /command/interact (a button/select click
-// on an interactive card).
+// InteractRequest is the body of POST /command/interact. The route only
+// answers that a card is out of date now: every press goes to POST /cards/act.
 type InteractRequest struct {
 	TriggerID string            `json:"trigger_id"`        // correlates to the card
 	ActionID  string            `json:"action_id"`         // which element was activated
@@ -55,6 +55,10 @@ type CommandResponse struct {
 	// (e.g. the full Giphy result set), so an interactive shuffle swaps to an
 	// already-downloaded image instantly instead of fetching on each click.
 	PreloadURLs []string `json:"preload_urls,omitempty"`
+	// CardToken is the sealed card the answer's blocks are (business/Cards):
+	// a press on one of its buttons goes to POST /cards/act with it, and the
+	// server checks the press against it.
+	CardToken string `json:"card_token,omitempty"`
 	// Kind says what an answer that arrives later, over MQTT, is (KindReminder,
 	// KindApp), so the app titles it by what it is: every one was titled
 	// "Reminder", an app's answer too (MC-BUG-8).

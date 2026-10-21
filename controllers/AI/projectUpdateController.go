@@ -21,7 +21,7 @@ func DraftProjectUpdate(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user, ok := userModels.FromContext(ctx)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	var in struct {

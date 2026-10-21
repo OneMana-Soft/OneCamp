@@ -75,13 +75,13 @@ func recordSinks(t *testing.T, stored *dgraphStruct.DgraphPost, storedErr error)
 		createSearchEntry(p, files)
 		return nil
 	}
-	notifyPost = func(_ context.Context, title, body, ch string, mentions []*dgraphStruct.DgraphUser, _ *dgraphStruct.DgraphChannel, post string, author *dgraphStruct.DgraphUser, replyTo string, tell told) {
+	notifyPost = func(_ context.Context, title, body, _, ch string, mentions []*dgraphStruct.DgraphUser, _ *dgraphStruct.DgraphChannel, post string, author *dgraphStruct.DgraphUser, replyTo string, tell outboxBusiness.Told) {
 		var ids []string
 		for _, m := range mentions {
 			ids = append(ids, m.Uuid)
 		}
 		rec.mu.Lock()
-		rec.notices = append(rec.notices, noticeCall{title: title, body: body, channel: ch, post: post, author: author.Uuid, replyTo: replyTo, mentions: ids, told: tell != nil, pushTo: tell.only("push", []string{"u-sam", "u-jonas"})})
+		rec.notices = append(rec.notices, noticeCall{title: title, body: body, channel: ch, post: post, author: author.Uuid, replyTo: replyTo, mentions: ids, told: tell != nil, pushTo: tell.Only("push", []string{"u-sam", "u-jonas"})})
 		rec.mu.Unlock()
 	}
 	dispatchPost = func(_ context.Context, kind string, data interface{}) {
@@ -95,7 +95,7 @@ func recordSinks(t *testing.T, stored *dgraphStruct.DgraphPost, storedErr error)
 		publishPost = prev[0].(func(*mqttStruct.MqttPost, string))
 		createSearchEntry = prev[1].(func(*openSearchStruct.OpenSearchPost, []*dgraphStruct.DgraphAttachment))
 		indexPost = prev[2].(func(context.Context, *openSearchStruct.OpenSearchPost, []*dgraphStruct.DgraphAttachment) error)
-		notifyPost = prev[3].(func(context.Context, string, string, string, []*dgraphStruct.DgraphUser, *dgraphStruct.DgraphChannel, string, *dgraphStruct.DgraphUser, string, told))
+		notifyPost = prev[3].(func(context.Context, string, string, string, string, []*dgraphStruct.DgraphUser, *dgraphStruct.DgraphChannel, string, *dgraphStruct.DgraphUser, string, outboxBusiness.Told))
 		dispatchPost = prev[4].(func(context.Context, string, interface{}))
 		firstTime = prev[5].(func(context.Context, outboxBusiness.Event, string, string) bool)
 		readPost = prev[6].(func(context.Context, string) (*dgraphStruct.DgraphPost, error))

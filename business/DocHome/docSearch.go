@@ -145,7 +145,7 @@ func readable(ctx context.Context, who accessBusiness.Subject, ids []string) (ma
 		chunk := ids[start:min(start+filterChunk, len(ids))]
 		wg.Add(1)
 		slots <- struct{}{}
-		go func() {
+		helpers.GoSafeNamed("business/DocHome/docSearch:readable", func() {
 			defer func() {
 				<-slots
 				wg.Done()
@@ -167,7 +167,7 @@ func readable(ctx context.Context, who accessBusiness.Subject, ids []string) (ma
 			for _, r := range kept {
 				out[strings.ToLower(r.UUID)] = true
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if first != nil {

@@ -40,12 +40,6 @@ type ViewersPage struct {
 	HasMore bool         `json:"has_more"`
 }
 
-// RecordView records (deduplicated, throttled) that userUUID viewed a resource.
-// The caller must have already verified the user can access the resource.
-func RecordView(ctx context.Context, resourceType, resourceUUID, userUUID string) error {
-	return viewModels.RecordView(ctx, resourceType, resourceUUID, userUUID)
-}
-
 // CachedStateSize returns the last persisted state byte-size for a resource
 // (board/doc) and whether it was found. Used on the collab persist path to
 // detect a sharp shrink (mass-delete) cheaply, without reading the full prior

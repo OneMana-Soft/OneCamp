@@ -302,27 +302,32 @@ var UserProjects = withArity(Spec{
 // CHANNEL --------------------------------------------------------------------
 
 // ChannelBasicInfo caches per-user-per-channel basic info (admin/member flags).
-// Args: (channelUUID, userDgraphUid)
+// Args: (channelUUID, userDgraphUid). Written with store.SetJSONIndexed and
+// dropped per channel with store.DeleteIndexed, through ChannelBasicInfoKeys:
+// "channel:basic" was dropped with a SCAN of the whole keyspace on every
+// membership or admin change. The namespace moved with it, so a key written
+// before the index (never recorded in one) is simply never read again and
+// expires within its TTL.
 var ChannelBasicInfo = withArity(Spec{
-	Namespace:   "channel:basic",
+	Namespace:   "channel:basic2",
 	TTL:         30 * time.Minute,
 	Datatype:    DatatypeString,
 	Category:    CategoryChannel,
 	Description: "Per-user channel summary (admin/member flags). Invalidated on membership/admin change.",
 }, 2) // (channelUUID, userDgraphUid)
 
-// PROJECT --------------------------------------------------------------------
+// ChannelBasicInfoKeys is the set of users (their graph uids) a channel's
+// ChannelBasicInfo is cached for, so the channel's entries are dropped by
+// name. Args: (channelUUID). Its TTL is ChannelBasicInfo's, renewed on every add.
+var ChannelBasicInfoKeys = withArity(Spec{
+	Namespace:   "channel:basic2-keys",
+	TTL:         30 * time.Minute,
+	Datatype:    DatatypeSet,
+	Category:    CategoryChannel,
+	Description: "Which users a channel's basic-info cache holds entries for, so a membership change drops them without a SCAN.",
+}, 1) // (channelUUID)
 
-// ProjectTasks caches the kanban/list task fan-out per project.
-// Multi-arg variants are stored under suffixes; we use the spec for
-// invalidation patterns and the call site builds the full key.
-var ProjectTasks = withArity(Spec{
-	Namespace:   "project:tasks",
-	TTL:         5 * time.Minute,
-	Datatype:    DatatypeString,
-	Category:    CategoryProject,
-	Description: "Kanban/list task payload per project. Invalidated on task CRUD.",
-}, 1) // (projectUUID)
+// PROJECT --------------------------------------------------------------------
 
 // AI -------------------------------------------------------------------------
 
@@ -734,6 +739,30 @@ var ApiTokenRate = withArity(Spec{
 	Description: "Per-token public-API request counter. Fixed window; resets every minute.",
 }, 1) // (tokenID)
 
+// ApiRouteRate is the public API's limit per token and route (platform P-API;
+// design/platform/API_CONTRACT.md §3.2), beside ApiTokenRate's limit per
+// token: a route registered with business/PublicAPI gets its own bucket, so a
+// loop on one route can't spend what a token's other calls need, and writes
+// are held tighter than reads.
+var ApiRouteRate = withArity(Spec{
+	Namespace:   "apiroute:rate",
+	TTL:         1 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Per-token, per-route public-API request counter. Fixed window; resets every minute.",
+}, 2) // (tokenID, route)
+
+// ApiIdempotency is a write's answer kept under the Idempotency-Key it was
+// sent with (platform P-API, §3.2): the same key again with the same body is
+// answered from here, never run twice; with another body it is refused.
+var ApiIdempotency = withArity(Spec{
+	Namespace:   "apiroute:idem",
+	TTL:         24 * time.Hour,
+	Datatype:    DatatypeString,
+	Category:    CategoryRateLimit,
+	Description: "A public-API write's answer under its Idempotency-Key, replayed for a retry with the same body.",
+}, 3) // (tokenID, route, key)
+
 // MCPToolReadRate bounds how fast one credential can READ through the MCP server.
 //
 // Separate from ApiTokenRate rather than reusing it, because the two surfaces fail
@@ -889,6 +918,17 @@ var ImportDiscover = withArity(Spec{
 	Description: "Per-(provider,owner) discovery list. Dropped on connect/disconnect.",
 }, 2) // (provider, ownerUserID)
 
+// ImportOAuthState is one sign-in at an import provider in progress: the
+// state handed to the provider, to whom and for which provider it was
+// minted. GETDEL on the callback, so a state works once.
+var ImportOAuthState = withArity(Spec{
+	Namespace:   "import:oauth-state",
+	TTL:         10 * time.Minute,
+	Datatype:    DatatypeString,
+	Category:    CategoryImport,
+	Description: "One-shot import sign-in state nonce → provider and admin. GETDEL on the callback.",
+}, 1) // (state)
+
 // ImportRate is the per-user rate limiter for import-related admin actions.
 var ImportRate = withArity(Spec{
 	Namespace:   "import:rate",
@@ -962,6 +1002,28 @@ var CommandInteraction = withArity(Spec{
 	Description: "Transient interactive-card state keyed by trigger id.",
 }, 1) // (triggerID)
 
+// CommandResponse is one command's response URL (business/Command): the app,
+// who typed the command and where, and the answers it has left. It stops 30
+// minutes after the command, whatever its TTL says after a use.
+var CommandResponse = withArity(Spec{
+	Namespace:   "command:response",
+	TTL:         30 * time.Minute,
+	Datatype:    DatatypeString,
+	Category:    CategoryCommand,
+	Description: "An app command's response URL: the invocation and its answers left (5 in 30 minutes).",
+}, 1) // (token)
+
+// CardTrigger is one press on a card (business/Cards): who pressed and whose
+// card, for the owner to open a modal with, once. GETDEL on use; it lasts
+// as long as a modal may take to open.
+var CardTrigger = withArity(Spec{
+	Namespace:   "cards:trigger",
+	TTL:         3 * time.Second,
+	Datatype:    DatatypeString,
+	Category:    CategoryCommand,
+	Description: "One-shot trigger of a press on a card: the presser and the card's owner. GETDEL on use.",
+}, 1) // (triggerID)
+
 // CommandOAuthState is the one-shot OAuth install state nonce for app
 // authorization. GETDEL on consume to prevent replay (mirrors SSOState).
 var CommandOAuthState = withArity(Spec{
@@ -1021,6 +1083,17 @@ var CollabStateSize = withArity(Spec{
 	Description: "Last persisted state byte-size per (kind, id) for cheap mass-delete detection on save.",
 }, 2) // (kind, id)
 
+// ViewSalt is the day's random salt a published page's visitors are counted
+// under (docs C6-3): one per UTC day, shared by every instance, gone two days
+// on. Never logged; what it keys is never an address.
+var ViewSalt = withArity(Spec{
+	Namespace:   "views:salt",
+	TTL:         48 * time.Hour,
+	Datatype:    DatatypeString,
+	Category:    CategoryCollab,
+	Description: "The day's random salt for counting a published page's visitors, per UTC day; never logged.",
+}, 1) // (day)
+
 // SWEEPS ---------------------------------------------------------------------
 
 // SweepClaim is one pass of a periodic job, won by the instance that runs it
@@ -1061,6 +1134,52 @@ var OutboxOnce = withArity(Spec{
 	Category:    CategorySweep,
 	Description: "One sink having told one person of one outbox event (SET NX); expires past the outbox's retry horizon, which FirstTime sets.",
 }, 3) // (event, sink, recipient)
+
+// DraftWriteRate counts one person's draft writes (kept or emptied) in a
+// one-minute window (business/Draft): the app saves a draft a second or so
+// after typing stops, so a burst past the limit is a client stuck in a loop.
+var DraftWriteRate = withArity(Spec{
+	Namespace:   "chat:draft:rate",
+	TTL:         1 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Draft writes per person. Fixed one-minute window; 120 a minute.",
+}, 1) // (userId)
+
+// ThreadWriteRate counts one person's writes to the threads they follow in a
+// one-minute window (business/ChatThread): a follow, an unfollow, a thread
+// read or marked unread, or all marked read. Opening a thread reads it, so a
+// burst past the limit is a client stuck in a loop.
+var ThreadWriteRate = withArity(Spec{
+	Namespace:   "chat:thread:rate",
+	TTL:         1 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Writes to followed threads per person. Fixed one-minute window; 240 a minute.",
+}, 1) // (userId)
+// WorkGraphRefsCursor is where the nightly reconciler of the work graph's
+// references (business/Refs) stopped in one kind's nodes (a graph uid), so
+// the next night goes on from there: each night reads a bounded number. It
+// is written every night; the expiry only drops a cursor no night has
+// renewed in a week, and the next night starts at the beginning.
+var WorkGraphRefsCursor = withArity(Spec{
+	Namespace:   "workgraph:refs:cursor",
+	TTL:         8 * 24 * time.Hour,
+	Datatype:    DatatypeString,
+	Category:    CategorySweep,
+	Description: "Where the nightly work-graph references reconciler stopped in one kind's nodes (a graph uid); renewed every night.",
+}, 1) // (kind)
+
+// WorkGraphRefsReport is the last nightly reconcile's report (JSON: what it
+// read, and the drift it found and fixed, per kind), for the admins' system
+// check on whichever instance is asked.
+var WorkGraphRefsReport = withArity(Spec{
+	Namespace:   "workgraph:refs:report",
+	TTL:         8 * 24 * time.Hour,
+	Datatype:    DatatypeString,
+	Category:    CategorySweep,
+	Description: "The last nightly work-graph references reconcile's report (JSON), for the system check; renewed every night.",
+}, 0)
 
 // DocUpdatedWebhooksDue holds each doc with an open minute of saves, scored by
 // when the minute closes (Unix ms): the doc.updated webhook goes out once per
@@ -1110,6 +1229,40 @@ var QueryParseRate = withArity(Spec{
 	Category:    CategoryRateLimit,
 	Description: "Query texts read per user for the search and list fields (POST /query/parse). Window-locked; resets every minute.",
 }, 1) // (userUUID)
+
+// PublishPage caches a published doc's rendered page (docs C6, D-25) for a
+// short while: every request still resolves its guest grant in Postgres, so
+// revoking or unpublishing ends the page at once, and a save, a trash or a
+// restore of the doc drops the copy (business/Publish's event sink).
+var PublishPage = withArity(Spec{
+	Namespace:   "publish:page",
+	TTL:         30 * time.Second,
+	Datatype:    DatatypeString,
+	Category:    CategoryCollab,
+	Description: "JSON-encoded rendered page of a doc's published guest link, by grant. Missed when the grant changes; dropped on a save of the doc, and on its trash or restore.",
+}, 1) // (grant id)
+
+// PublishPageRate limits how often one published page is worked out afresh
+// in a minute, whoever asks: rendered (an answer from PublishPage's copy isn't
+// counted, so one host can't keep a page at 429 for everyone), a password
+// tried, or a copy made. The per-address limit is PublicReadRate's.
+var PublishPageRate = withArity(Spec{
+	Namespace:   "publish:page:rate",
+	TTL:         1 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Work per doc page outside the workspace (a render, a password tried, a copy made), from anyone. Window-locked; resets every minute.",
+}, 1) // (grant id)
+
+// PublishUnlockRate limits password tries on a published page, per address
+// and page, in a fifteen-minute window.
+var PublishUnlockRate = withArity(Spec{
+	Namespace:   "publish:unlock:rate",
+	TTL:         15 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Password tries per (address, guest link's page). Window-locked; resets every fifteen minutes.",
+}, 2) // (ip, grant id)
 
 // =============================================================================
 // Specs() returns every registered key for documentation / audit. Used

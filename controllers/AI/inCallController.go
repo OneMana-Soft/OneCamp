@@ -215,7 +215,7 @@ func InCallAskStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userContent := req.Question
+	var userContent string
 	if transcript != "" {
 		userContent = "Live call transcript so far (each line is \"Speaker: text\"):\n" +
 			transcript + "\n\nParticipant's question: " + req.Question
@@ -318,7 +318,14 @@ func fetchPersistedTranscript(ctx context.Context, roomID string) string {
 		return ""
 	}
 
-	nameByUID := map[string]string{}
+	// Every speaker's name in one read (backend audit #22).
+	var uids []string
+	for _, l := range lines {
+		if l.ParticipantIdentity != "" {
+			uids = append(uids, l.ParticipantIdentity)
+		}
+	}
+	nameByUID, _ := userDomain.UserNamesByDgraphUIDs(ctx, uids)
 	var sb strings.Builder
 	for _, l := range lines {
 		t := strings.TrimSpace(l.Text)
@@ -326,17 +333,8 @@ func fetchPersistedTranscript(ctx context.Context, roomID string) string {
 			continue
 		}
 		name := "participant"
-		if uid := l.ParticipantIdentity; uid != "" {
-			if cached, ok := nameByUID[uid]; ok {
-				name = cached
-			} else {
-				resolved := "participant"
-				if u, uErr := userDomain.GetDgraphUserInfoByDgraphUID(ctx, uid); uErr == nil && u != nil && u.UserName != "" {
-					resolved = u.UserName
-				}
-				nameByUID[uid] = resolved
-				name = resolved
-			}
+		if n := nameByUID[l.ParticipantIdentity]; n != "" {
+			name = n
 		}
 		sb.WriteString(name)
 		sb.WriteString(": ")

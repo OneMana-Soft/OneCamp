@@ -61,13 +61,17 @@ type SourceProject struct {
 	CreatedBy    string
 	Created      time.Time
 	Archived     bool
-	Fields       []SourceField  // custom fields, in the source's order (fields.go)
-	Metadata     map[string]any // includes per-provider URL, color, etc.
+	// SourceKey is the source's own project key (Jira's ENG): the project
+	// keeps it when no other project has it, so ENG-123 still finds its task.
+	SourceKey string
+	Fields    []SourceField  // custom fields, in the source's order (fields.go)
+	Metadata  map[string]any // includes per-provider URL, color, etc.
 }
 
 // SourceTask covers tasks/issues/cards/database-rows.
 type SourceTask struct {
 	SourceID        string
+	SourceKey       string // the source's own key (ENG-123): the task keeps its number
 	ParentTaskID    string // empty for top-level
 	ProjectSourceID string
 	Name            string
@@ -82,11 +86,34 @@ type SourceTask struct {
 	Created         time.Time
 	Updated         time.Time
 	Completed       bool
+	EstimateMinutes int                // how long the source says it takes; 0 is none
 	AttachmentRefs  []SourceAttachment // queued lazily by worker
-	CommentCount    int                // hint
+	CommentCount    int                // hint; CommentsUnknown when the source can't say
 	SubtaskCount    int                // hint
 	Fields          []SourceFieldValue // custom field values (fields.go)
+	Dependencies    []SourceDependency // the tasks this one waits on
 	Metadata        map[string]any     // source URL, etc.
+}
+
+// SourceDependency is a task this one waits on: by its source id, how it
+// waits (fs, ss, ff or sf as business/Task takes them; empty is finish to
+// start) and the lag in days. It is linked once every task has landed.
+type SourceDependency struct {
+	BlockerSourceID string `json:"blocker"`
+	Kind            string `json:"kind,omitempty"`
+	LagDays         int    `json:"lag,omitempty"`
+}
+
+// CommentsUnknown is a SourceTask's CommentCount when the source can't count
+// a task's comments without asking for them (Asana): the comments stage asks.
+// A count of 0 is a task with none, and asks nothing.
+const CommentsUnknown = -1
+
+// TaskFileLister is a provider whose task files aren't in the task it reads
+// (Asana): the comments stage lists them with the task's comments, and each
+// is fetched as a file of the task.
+type TaskFileLister interface {
+	ListTaskFiles(ctx context.Context, j *importModels.Job, opts JobOptions, taskSourceId string) ([]SourceAttachment, error)
 }
 
 // SourceComment covers task/issue/card comments.
@@ -138,6 +165,9 @@ type SourcePage struct {
 	// Files are what the HTML names by a relative address (a picture the
 	// provider read, because its own address expires), by that address.
 	Files map[string][]byte
+	// Comments are the comments on the page itself, oldest first, as the
+	// doc's comments; their TaskSourceID is unused.
+	Comments []SourceComment
 }
 
 // PageSource is a provider that brings pages (CapPages). Its Plan queues one

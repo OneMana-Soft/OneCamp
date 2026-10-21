@@ -3,15 +3,14 @@ package controllers
 import (
 	"encoding/json"
 	"net/http"
-	"strconv"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Team"
 	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
 	business "github.com/akashc777/OneCamp/business/Team"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
-	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -20,7 +19,10 @@ func CreateTeam(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var createTeamInfo adapter.CreateOrUpdateTeamInput
 	err := json.NewDecoder(r.Body).Decode(&createTeamInfo)
@@ -39,7 +41,7 @@ func CreateTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !userInfo.UserPostgresInfo.IsAdmin {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only workspace admins can create teams."})
+		helpers.WriteForbidden(w, "Only workspace admins can create teams.")
 		return
 	}
 	if !helpers.IsValidName(createTeamInfo.Name) {
@@ -107,10 +109,13 @@ func CheckIfTeamNameExist(w http.ResponseWriter, r *http.Request) {
 
 	teamName := r.URL.Query()["team_name"]
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	if !userInfo.UserPostgresInfo.IsAdmin {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only workspace admins can create teams."})
+		helpers.WriteForbidden(w, "Only workspace admins can create teams.")
 		return
 	}
 	if len(teamName) == 0 || !helpers.IsValidName(teamName[0]) {
@@ -139,7 +144,10 @@ func UpdateTeamName(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var inputTeamInfo adapter.CreateOrUpdateTeamInput
 	err := json.NewDecoder(r.Body).Decode(&inputTeamInfo)
@@ -158,7 +166,7 @@ func UpdateTeamName(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(inputTeamInfo.Uuid) == 0 || len(inputTeamInfo.Name) == 0 {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Say which team, and its new name."})
+		helpers.WriteBadRequest(w, "Say which team, and its new name.")
 		return
 	}
 
@@ -218,7 +226,10 @@ func UpdateTeamName(w http.ResponseWriter, r *http.Request) {
 
 func AddMemberToTeam(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var addMemberInfo adapter.AddOrRemoveTeamMemberInput
 	err := json.NewDecoder(r.Body).Decode(&addMemberInfo)
@@ -297,7 +308,7 @@ func AddMemberToTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if memberInfo == nil {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That person isn't in OneCamp."})
+		helpers.WriteNotFound(w, "That person isn't in OneCamp.")
 		return
 	}
 
@@ -327,7 +338,10 @@ func AddMemberToTeam(w http.ResponseWriter, r *http.Request) {
 
 func AddAdminMemberToTeam(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var addMemberInfo adapter.AddOrRemoveTeamMemberInput
 	err := json.NewDecoder(r.Body).Decode(&addMemberInfo)
@@ -397,7 +411,10 @@ func AddAdminMemberToTeam(w http.ResponseWriter, r *http.Request) {
 
 func RemoveMemberFromTeam(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var removeMemberInfo adapter.AddOrRemoveTeamMemberInput
 	err := json.NewDecoder(r.Body).Decode(&removeMemberInfo)
@@ -429,7 +446,7 @@ func RemoveMemberFromTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if removeMemberInfo.UserUuid == userInfo.UserDgraphInfo.Uuid {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "You can't change your own place in the team here."})
+		helpers.WriteBadRequest(w, "You can't change your own place in the team here.")
 		return
 	}
 
@@ -485,7 +502,10 @@ func RemoveMemberFromTeam(w http.ResponseWriter, r *http.Request) {
 
 func RemoveAdminMemberFromTeam(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var removeMemberInfo adapter.AddOrRemoveTeamMemberInput
 	err := json.NewDecoder(r.Body).Decode(&removeMemberInfo)
@@ -530,7 +550,7 @@ func RemoveAdminMemberFromTeam(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if removeMemberInfo.UserUuid == userInfo.UserDgraphInfo.Uuid {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "You can't change your own place in the team here."})
+		helpers.WriteBadRequest(w, "You can't change your own place in the team here.")
 		return
 	}
 
@@ -573,7 +593,10 @@ func RemoveAdminMemberFromTeam(w http.ResponseWriter, r *http.Request) {
 func GetDgraphTeamProjectListByTeamUUID(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	teamUUIDString := chi.URLParam(r, "team_uuid")
 
@@ -650,7 +673,10 @@ func GetDgraphTeamProjectListByTeamUUID(w http.ResponseWriter, r *http.Request) 
 func GetDgraphTeamMemberListByTeamUUID(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	teamUUIDString := chi.URLParam(r, "team_uuid")
 
@@ -694,7 +720,10 @@ func GetDgraphTeamMemberListByTeamUUID(w http.ResponseWriter, r *http.Request) {
 func GetDgraphTeamListByUserDgraphUID(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	dgraphTeamList, err := business.GetDgraphTeamListByUserDgraphUID(ctx, userInfo.UserDgraphInfo.Uid)
 
@@ -717,7 +746,10 @@ func GetDgraphTeamListByUserDgraphUID(w http.ResponseWriter, r *http.Request) {
 func GetDgraphTeamListByAdminDgraphUID(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	dgraphTeamList, err := business.GetDgraphTeamListByAdminDgraphUID(ctx, userInfo.UserDgraphInfo.Uid)
 
@@ -740,7 +772,10 @@ func GetDgraphTeamListByAdminDgraphUID(w http.ResponseWriter, r *http.Request) {
 func ArchiveTeam(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var inputTeamInfo adapter.CreateOrUpdateTeamInput
 	err := json.NewDecoder(r.Body).Decode(&inputTeamInfo)
@@ -817,7 +852,10 @@ func ArchiveTeam(w http.ResponseWriter, r *http.Request) {
 func GetTeamInfo(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	teamUUIDString := chi.URLParam(r, "team_uuid")
 
@@ -860,7 +898,10 @@ func GetTeamInfo(w http.ResponseWriter, r *http.Request) {
 func UnArchiveTeam(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	var inputTeamInfo adapter.CreateOrUpdateTeamInput
 	err := json.NewDecoder(r.Body).Decode(&inputTeamInfo)
@@ -930,18 +971,13 @@ func UnArchiveTeam(w http.ResponseWriter, r *http.Request) {
 func GetAllTeamsList(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	pageValue := r.URL.Query()["pageIndex"]
-	pageIndex := 0
-	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 100)
-
-	if len(pageValue) > 0 {
-		pageInt, err := strconv.Atoi(pageValue[0])
-		if err == nil {
-			pageIndex = pageInt
-		}
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
 	}
+
+	page := helpers.PageParam(r.URL.Query(), 20, 100)
+	pageIndex, pageSize := page.Index, page.Size
 
 	dgraphTeams, hasMore, err := business.GetAllTeamDgraphInfo(ctx, userInfo.UserDgraphInfo.Uid, pageIndex, pageSize)
 

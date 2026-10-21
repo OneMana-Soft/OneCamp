@@ -12,6 +12,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	projectRoleModel "github.com/akashc777/OneCamp/models/postgres/ProjectRole"
+	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
@@ -84,12 +85,14 @@ func CreateTeam(ctx context.Context, teamName string, userInfo *userModels.UserI
 	// and search is scoped by it.
 	userDomain.InvalidateUserMemberships(ctx, userInfo.UserDgraphInfo.Uuid)
 
-	go domain.CreateTeamInOpenSearch(&openSearchStruct.OpenSearchTeam{
-		Uuid:          teamUUID.String(),
-		TeamName:      teamName,
-		TeamCreatedAt: currentTime.Unix(),
-		TeamUpdatedAt: currentTime.Unix(),
-		TeamDeletedAt: nil,
+	helpers.GoSafeNamed("domain.CreateTeamInOpenSearch", func() {
+		domain.CreateTeamInOpenSearch(&openSearchStruct.OpenSearchTeam{
+			Uuid:          teamUUID.String(),
+			TeamName:      teamName,
+			TeamCreatedAt: currentTime.Unix(),
+			TeamUpdatedAt: currentTime.Unix(),
+			TeamDeletedAt: nil,
+		})
 	})
 
 	return
@@ -132,10 +135,12 @@ func UpdateTeamName(ctx context.Context, teamName string, teamUUID uuid.UUID) (e
 		return
 	}
 
-	go domain.UpdateTeamInOpenSearch(&openSearchStruct.OpenSearchTeam{
-		Uuid:          teamUUID.String(),
-		TeamName:      teamName,
-		TeamUpdatedAt: currentTime.Unix(),
+	helpers.GoSafeNamed("domain.UpdateTeamInOpenSearch", func() {
+		domain.UpdateTeamInOpenSearch(&openSearchStruct.OpenSearchTeam{
+			Uuid:          teamUUID.String(),
+			TeamName:      teamName,
+			TeamUpdatedAt: currentTime.Unix(),
+		})
 	})
 
 	return
@@ -270,6 +275,11 @@ func RemoveMemberFromTeam(ctx context.Context, teamDgraph *dgraphStruct.DgraphTe
 	// the hourly parity sweep (projects.roles.parity) takes one this misses.
 	if derr := projectRoleModel.DeleteIn(ctx, parseOr(memberUUID), teamProjectIDs(teamDgraph)); derr != nil {
 		helpers.LogErrorWithContext(ctx, "business/RemoveMemberFromTeam couldn't remove their project roles err: %+v", derr)
+	}
+	// And their grants on those projects' restricted tasks (WA2); one left
+	// behind lets no one in, since reading a task needs its project.
+	if gerr := restrictionModel.DropGrantsIn(ctx, teamProjectIDs(teamDgraph), parseOr(memberUUID)); gerr != nil {
+		helpers.LogErrorWithContext(ctx, "business/RemoveMemberFromTeam couldn't remove their grants err: %+v", gerr)
 	}
 	// Their cached profile still lists the team and its projects, and search
 	// covers what it lists.

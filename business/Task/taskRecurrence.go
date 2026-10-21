@@ -17,6 +17,7 @@ import (
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -201,7 +202,8 @@ func repeatIfRecurring(ctx context.Context, taskUUID uuid.UUID, by *dgraphStruct
 		in.Priority = dgraphStruct.TASK_PRIORITY_MEDIUM
 	}
 	actor := &model.UserInfo{UserPostgresInfo: model.User{Id: actorID}, UserDgraphInfo: *by}
-	nextUUID, err := CreateTask(ctx, uuid.MustParse(project.Uuid), actor, project, assignee, in, nil)
+	// The next copy of a restricted task is kept to the same people (WA2).
+	nextUUID, err := CreateTask(workAccess.RestrictedLike(ctx, taskUUID), uuid.MustParse(project.Uuid), actor, project, assignee, in, nil)
 	if err != nil {
 		putBack("create next", err)
 		return

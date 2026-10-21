@@ -110,7 +110,7 @@ func RunMemoryBackfillAsync(ctx context.Context) (started bool, reason string) {
 		return false, "a memory backfill is already running"
 	}
 
-	go runMemoryBackfill()
+	helpers.GoSafeNamed("runMemoryBackfill", func() { runMemoryBackfill() })
 	return true, ""
 }
 
@@ -154,7 +154,7 @@ func runMemoryBackfill() {
 	// Goes through the same mutex+snapshot, so it never regresses loop
 	// progress. Stops when the job ends or the context is cancelled.
 	hbStop := make(chan struct{})
-	go func() {
+	helpers.GoSafeLoop("business/AI/memoryBackfill:runMemoryBackfill", func() {
 		t := time.NewTicker(backfillHeartbeatInterval)
 		defer t.Stop()
 		for {
@@ -167,7 +167,7 @@ func runMemoryBackfill() {
 				publish()
 			}
 		}
-	}()
+	})
 	defer close(hbStop)
 
 	lookback := time.Duration(backfillLookbackDays()) * 24 * time.Hour

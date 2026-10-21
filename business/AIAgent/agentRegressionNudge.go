@@ -86,14 +86,19 @@ func recentSkillChanges(ctx context.Context, a *model.AiAgent) string {
 	if len(ids) == 0 {
 		return ""
 	}
+	// Every skill's newest revision in one read, where each was one.
+	latest, err := model.LatestSkillRevisions(ctx, ids)
+	if err != nil {
+		return ""
+	}
+	byID := make(map[uuid.UUID]*model.SkillRevision, len(latest))
+	for _, r := range latest {
+		byID[r.SkillId] = r
+	}
 	names := []string{}
 	for _, id := range ids {
-		revs, err := model.ListSkillRevisions(ctx, id, 1)
-		if err != nil || len(revs) == 0 {
-			continue
-		}
-		if time.Since(revs[0].CreatedAt) <= regressionNudgeCooldown {
-			names = append(names, revs[0].Name)
+		if r := byID[id]; r != nil && time.Since(r.CreatedAt) <= regressionNudgeCooldown {
+			names = append(names, r.Name)
 		}
 	}
 	switch len(names) {

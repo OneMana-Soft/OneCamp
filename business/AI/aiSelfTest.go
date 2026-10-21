@@ -294,7 +294,7 @@ func RunSelfTestAsync(ctx context.Context, modelID *uuid.UUID) (started bool, re
 	if !acquireSelfTestLock(ctx) {
 		return false, "an AI self-test is already running"
 	}
-	go runSelfTest(modelID)
+	helpers.GoSafeNamed("runSelfTest", func() { runSelfTest(modelID) })
 	return true, ""
 }
 
@@ -381,7 +381,7 @@ func runSelfTest(modelID *uuid.UUID) {
 
 	// Liveness heartbeat so a long model call doesn't look dead.
 	hbStop := make(chan struct{})
-	go func() {
+	helpers.GoSafeLoop("business/AI/aiSelfTest:runSelfTest", func() {
 		t := time.NewTicker(selfTestHeartbeat)
 		defer t.Stop()
 		for {
@@ -394,7 +394,7 @@ func runSelfTest(modelID *uuid.UUID) {
 				publish()
 			}
 		}
-	}()
+	})
 	defer close(hbStop)
 
 	// Same tool-enabled prompt the chat path builds (no connectors keeps it

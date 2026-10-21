@@ -27,6 +27,7 @@ import (
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	model "github.com/akashc777/OneCamp/models/postgres/SavedItem"
 	jobModel "github.com/akashc777/OneCamp/models/postgres/ScheduledJob"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -208,8 +209,33 @@ func List(ctx context.Context, userID uuid.UUID, done bool) (*ListResult, error)
 	if err != nil {
 		return nil, err
 	}
+	// A task saved for later that's restricted from them now leaves the list,
+	// and its counts (models/taskread): a list never names what its reader
+	// can't open.
+	tr, err := taskread.ForReader(ctx, userID.String())
+	if err != nil {
+		return nil, err
+	}
+	if !tr.Empty() {
+		kept := items[:0]
+		for _, it := range items {
+			if it != nil && it.ItemType == savedTask && tr.Hides(it.ItemID) {
+				continue
+			}
+			kept = append(kept, it)
+		}
+		items = kept
+		hiddenOpen, hiddenDue, err := model.CountsAmong(ctx, userID, now, savedTask, tr.IDs())
+		if err != nil {
+			return nil, err
+		}
+		open, due = open-hiddenOpen, due-hiddenDue
+	}
 	return &ListResult{Items: items, Open: open, Due: due}, nil
 }
+
+// savedTask is a saved item that is a task.
+const savedTask = "task"
 
 type reminderPayload struct {
 	ID       string    `json:"id"`
@@ -272,6 +298,16 @@ func runReminder(ctx context.Context, job *jobModel.ScheduledJob) error {
 	title := item.Title
 	if title == "" {
 		title = "Something you saved for later"
+	}
+	// A task restricted from them since it was saved says nothing of itself.
+	if item.ItemType == savedTask {
+		tr, err := taskread.For(ctx, item.UserID.String())
+		if err != nil {
+			return err
+		}
+		if tr.Hides(item.ItemID) {
+			title = "Something you saved for later"
+		}
 	}
 	mqttBusiness.PublishMessageToUser(item.UserID.String(), mqttStruct.MESSAGE_SAVED_ITEM_DUE, DueNotice{
 		ID: item.ID.String(), Title: title, Link: item.Link,

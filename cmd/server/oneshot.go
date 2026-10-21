@@ -21,6 +21,7 @@ import (
 	calendarBusiness "github.com/akashc777/OneCamp/business/Calendar"
 	commandBusiness "github.com/akashc777/OneCamp/business/Command"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
+	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/mqttInit"
 	demoseed "github.com/akashc777/OneCamp/services/DemoSeed"
@@ -28,9 +29,10 @@ import (
 
 // oneShots runs each one-shot subcommand: its own arguments in, an exit code out.
 var oneShots = map[string]func(ctx context.Context, args []string) int{
-	"demoseed":     runDemoSeed,
-	"repairdocs":   runRepairDocs,
-	"calendarmove": runCalendarMove,
+	"demoseed":      runDemoSeed,
+	"repairdocs":    runRepairDocs,
+	"calendarmove":  runCalendarMove,
+	"workgraphrefs": runWorkGraphRefs,
 }
 
 // oneShotSettle is how long work a one-shot handed to the background (a
@@ -122,6 +124,25 @@ func runCalendarMove(ctx context.Context, args []string) int {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "calendarmove:", err)
 		}
+		return 1
+	}
+	return 0
+}
+
+// runWorkGraphRefs is `go-one-camp workgraphrefs [--apply]`: it re-derives
+// the work graph's links (refers_to: what each message, direct message,
+// comment and doc links to, and the tasks each doc holds a to-do for) from the
+// bodies, every one from the beginning, and prints the drift per kind. With
+// --apply it fixes it: after a restore from backup, or to check the nightly
+// reconcile. Idempotent; prints counts, never what a body says.
+// business/Refs/reconcile.go.
+func runWorkGraphRefs(ctx context.Context, args []string) int {
+	reports, err := refsBusiness.ReconcileAll(ctx, refsBusiness.Options{Apply: hasFlag(args, "--apply"), Mirror: -1})
+	for _, r := range reports {
+		fmt.Fprintln(os.Stdout, "workgraphrefs:", r)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "workgraphrefs:", err)
 		return 1
 	}
 	return 0

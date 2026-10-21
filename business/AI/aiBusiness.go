@@ -1025,12 +1025,12 @@ func askAIWithStream(ctx context.Context, userInfo *userModels.UserInfo, questio
 	// Save this turn to session (fire and forget)
 	if sessionID != "" {
 		owner := userInfo.UserDgraphInfo.Uuid
-		go func() {
+		helpers.GoSafeNamed("business/AI/aiBusiness:askAIWithStream", func() {
 			bgCtx := context.Background()
 			if err := ai.AppendToSession(bgCtx, sessionID, owner, question, cleanAnswer); err != nil {
 				helpers.MessageLogs.ErrorLog.Printf("AI session save failed: %v", err)
 			}
-		}()
+		})
 	}
 
 	// Convert to adapter types
@@ -1578,6 +1578,40 @@ func BuildUserContextPublic(ctx context.Context, userInfo *userModels.UserInfo, 
 // using OpenSearch k-NN semantic vector search with full permission filtering.
 // Also injects workspace metadata (channels, projects, DMs) so the LLM understands
 // the user's workspace structure for better answers.
+// namedChannels is the reader's channels a question names (by name or id),
+// in their order. Pure.
+func namedChannels(userInfo *userModels.UserInfo, qLower string) []string {
+	var out []string
+	for _, ch := range userInfo.UserDgraphInfo.Channels {
+		if ch == nil || ch.Uuid == "" {
+			continue
+		}
+		if (ch.Name != "" && strings.Contains(qLower, strings.ToLower(ch.Name))) || strings.Contains(qLower, ch.Uuid) {
+			out = append(out, ch.Uuid)
+		}
+	}
+	return out
+}
+
+// namedConversations is the reader's conversations with someone a question
+// names (by name or id), in their order. Pure.
+func namedConversations(userInfo *userModels.UserInfo, me, qLower string) []string {
+	var out []string
+	for _, dm := range userInfo.UserDgraphInfo.DMs {
+		if dm == nil || dm.GroupingId == "" {
+			continue
+		}
+		for _, p := range dm.Participants {
+			if p != nil && p.Uuid != me && p.UserName != "" &&
+				(strings.Contains(qLower, strings.ToLower(p.UserName)) || strings.Contains(qLower, p.Uuid)) {
+				out = append(out, dm.GroupingId)
+				break
+			}
+		}
+	}
+	return out
+}
+
 func buildUserContext(ctx context.Context, userInfo *userModels.UserInfo, question string, localization map[string]string) (string, []adapter.SourceRef, error) {
 	var sb strings.Builder
 
@@ -1680,9 +1714,9 @@ func buildUserContext(ctx context.Context, userInfo *userModels.UserInfo, questi
 	memChan := make(chan []*memoryModels.MemoryItem, 1)
 	wantMemory := isMemoryIntent(question)
 	if wantMemory {
-		go func() {
+		helpers.GoSafeNamed("business/AI/aiBusiness:buildUserContext", func() {
 			memChan <- fetchMemoryItems(ctx, userInfo, accessibleChannels, accessibleProjects)
-		}()
+		})
 	}
 
 	// GraphRAG ownership view: when the question is about the asker's
@@ -1693,9 +1727,9 @@ func buildUserContext(ctx context.Context, userInfo *userModels.UserInfo, questi
 	ownedChan := make(chan []*dgraphStruct.DgraphMemoryItem, 1)
 	wantOwned := isOwnershipIntent(question)
 	if wantOwned {
-		go func() {
+		helpers.GoSafeNamed("business/AI/aiBusiness:buildUserContext", func() {
 			ownedChan <- fetchGraphOwnedItems(ctx, userUUID, 12)
-		}()
+		})
 	}
 
 	// GraphRAG scope view: when the question references a specific
@@ -1716,15 +1750,15 @@ func buildUserContext(ctx context.Context, userInfo *userModels.UserInfo, questi
 	wantScope := scopeType != "" && scopeUUID != ""
 	if wantScope {
 		scopeLabel = lbl
-		go func() {
+		helpers.GoSafeNamed("business/AI/aiBusiness:buildUserContext", func() {
 			// Bounded to keep the scope block within a sane share of the
 			// prompt budget; the token ceiling in AskAI is the hard backstop.
 			scopeChan <- fetchGraphScopeItems(ctx, scopeType, scopeUUID, 30)
-		}()
+		})
 	}
 
 	// 1. Concurrent Chronological Search (for summarization / recent updates)
-	go func() {
+	helpers.GoSafeNamed("business/AI/aiBusiness:buildUserContext", func() {
 		if !ai.IsSummaryOrReadIntent(question) {
 			chronChan <- searchResult{nil, nil}
 			return
@@ -1732,33 +1766,21 @@ func buildUserContext(ctx context.Context, userInfo *userModels.UserInfo, questi
 
 		qLower := strings.ToLower(question)
 
-		// Try to resolve #channel or @user from the question text
+		// Try to resolve #channel or @user from the question text: the
+		// channels it names in one search, then the conversations with the
+		// people it names in another, where each was a search of its own
+		// (with its own permission filter) until one had something.
 		var results []ai.SimilarResult
-		for _, ch := range userInfo.UserDgraphInfo.Channels {
-			if strings.Contains(qLower, strings.ToLower(ch.Name)) || (ch.Uuid != "" && strings.Contains(qLower, ch.Uuid)) {
-				res, err := ai.SearchRecent(ctx, userUUID, accessibleChannels, accessibleProjects, accessibleGrps, "channel_uuid", ch.Uuid, 15)
-				if err == nil && len(res) > 0 {
-					results = res
-					break
-				}
+		named := namedChannels(userInfo, qLower)
+		if len(named) > 0 {
+			if res, err := ai.SearchRecentIn(ctx, userUUID, accessibleChannels, accessibleProjects, accessibleGrps, "channel_uuid", named, 15); err == nil {
+				results = res
 			}
 		}
-
 		if len(results) == 0 {
-			for _, dm := range userInfo.UserDgraphInfo.DMs {
-				for _, p := range dm.Participants {
-					if p != nil && p.Uuid != userUUID && p.UserName != "" {
-						if strings.Contains(qLower, strings.ToLower(p.UserName)) || strings.Contains(qLower, p.Uuid) {
-							res, err := ai.SearchRecent(ctx, userUUID, accessibleChannels, accessibleProjects, accessibleGrps, "chat_grp_id", dm.GroupingId, 10)
-							if err == nil && len(res) > 0 {
-								results = res
-								break
-							}
-						}
-					}
-				}
-				if len(results) > 0 {
-					break
+			if withPeople := namedConversations(userInfo, userUUID, qLower); len(withPeople) > 0 {
+				if res, err := ai.SearchRecentIn(ctx, userUUID, accessibleChannels, accessibleProjects, accessibleGrps, "chat_grp_id", withPeople, 10); err == nil {
+					results = res
 				}
 			}
 		}
@@ -1775,14 +1797,14 @@ func buildUserContext(ctx context.Context, userInfo *userModels.UserInfo, questi
 		}
 
 		chronChan <- searchResult{results, nil}
-	}()
+	})
 
 	// 2. Concurrent Semantic Search
-	go func() {
+	helpers.GoSafeNamed("business/AI/aiBusiness:buildUserContext", func() {
 		// Reduced limit (12 -> 5) to save prompt tokens on local LLMs
 		res, err := searchSimilar(ctx, userInfo, question, accessibleChannels, accessibleProjects, accessibleGrps, 5)
 		semanticChan <- searchResult{res, err}
-	}()
+	})
 
 	// Wait for results with smart short-circuit for summaries
 	var chronResults []ai.SimilarResult
@@ -1922,6 +1944,14 @@ func buildUserContext(ctx context.Context, userInfo *userModels.UserInfo, questi
 			TaskUUID:     result.TaskUUID,
 			DocUUID:      result.DocUUID,
 		})
+	}
+
+	// 5. GraphRAG (DG7): the hits above, followed one step along the work
+	// graph, as the asker may see it. Last, so the prompt's token ceiling
+	// trims it before any search result; waited on for at most 800 ms.
+	if block, linked := graphContext(ctx, userInfo, results); block != "" {
+		sb.WriteString(block)
+		sources = append(sources, linked...)
 	}
 
 	return sb.String(), sources, nil

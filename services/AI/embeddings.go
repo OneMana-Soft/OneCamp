@@ -12,6 +12,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
@@ -198,8 +199,9 @@ func storeEmbeddingDirect(ctx context.Context, doc EmbeddingDoc) error {
 	if err != nil {
 		// If document already exists, try update
 		if strings.Contains(err.Error(), "version_conflict") {
-			updateBody := fmt.Sprintf(`{"doc": %s, "doc_as_upsert": true}`, string(jsonData))
-			err = opensearchInit.UpdateDocument(ctx, AI_EMBEDDINGS_INDEX, docID, openSearchStruct.IndexReader([]byte(updateBody)))
+			// The whole entry: written over the one there (or anew, if it went).
+			updateBody := fmt.Sprintf(`{"doc": %s}`, string(jsonData))
+			err = opensearchInit.UpsertDocument(ctx, AI_EMBEDDINGS_INDEX, docID, openSearchStruct.IndexReader([]byte(updateBody)))
 			if err != nil {
 				return fmt.Errorf("failed to update embedding in OpenSearch: %w", err)
 			}
@@ -568,7 +570,7 @@ func SearchSimilar(ctx context.Context, query string, userUUID string, channelUU
 				}
 			}
 		},
-		"_source": ["content_text", "content_type", "content_uuid", "channel_uuid", "channel_name", "project_uuid", "author_name", "doc_uuid", "board_uuid"]
+		"_source": ["content_text", "content_type", "content_uuid", "channel_uuid", "channel_name", "project_uuid", "author_name", "doc_uuid", "board_uuid", "task_uuid"]
 	}`, limit, string(vectorJSON), limit, permissionFilter)
 
 	// Execute search
@@ -582,6 +584,10 @@ func SearchSimilar(ctx context.Context, query string, userUUID string, channelUU
 		} `json:"hits"`
 	}
 
+	searchBody, seen, err := seenOnly(ctx, userUUID, searchBody)
+	if err != nil {
+		return nil, err
+	}
 	var resp knnResp
 	_, err = opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{
 		Indices: []string{AI_EMBEDDINGS_INDEX},
@@ -605,13 +611,20 @@ func SearchSimilar(ctx context.Context, query string, userUUID string, channelUU
 		results = append(results, result)
 	}
 
-	return KeepLive(ctx, results), nil
+	return KeepLive(ctx, dropHidden(seen, results)), nil
 }
 
 // SearchRecent fetches the most recent content from OpenSearch based on a filter
 // (e.g. channel_uuid or chat_grp_id) and sorts by created_date.
 // It enforces the same permission model as SearchSimilar.
 func SearchRecent(ctx context.Context, userUUID string, channelUUIDs []string, projectUUIDs []string, grpIDs []string, filterType string, filterValue string, limit int) ([]SimilarResult, error) {
+	return SearchRecentIn(ctx, userUUID, channelUUIDs, projectUUIDs, grpIDs, filterType, []string{filterValue}, limit)
+}
+
+// SearchRecentIn is SearchRecent over several channels (or conversations)
+// at once, newest first across them: one search where the AskAI context
+// asked one per channel the question named (backend audit #20).
+func SearchRecentIn(ctx context.Context, userUUID string, channelUUIDs []string, projectUUIDs []string, grpIDs []string, filterType string, filterValues []string, limit int) ([]SimilarResult, error) {
 	if opensearchInit.OpenSearchClient == nil {
 		return nil, fmt.Errorf("OpenSearch client not initialized")
 	}
@@ -619,14 +632,21 @@ func SearchRecent(ctx context.Context, userUUID string, channelUUIDs []string, p
 	if limit <= 0 {
 		limit = 15
 	}
+	if len(filterValues) == 0 {
+		return nil, nil
+	}
+	values, err := json.Marshal(filterValues)
+	if err != nil {
+		return nil, err
+	}
 
 	// Build filter based on type
 	var termClause string
 	switch filterType {
 	case "channel_uuid":
-		termClause = fmt.Sprintf(`{"term": {"channel_uuid": "%s"}}`, filterValue)
+		termClause = fmt.Sprintf(`{"terms": {"channel_uuid": %s}}`, values)
 	case "grp_id", "chat_grp_id":
-		termClause = fmt.Sprintf(`{"term": {"chat_grp_id": "%s"}}`, filterValue)
+		termClause = fmt.Sprintf(`{"terms": {"chat_grp_id": %s}}`, values)
 	default:
 		return nil, fmt.Errorf("unsupported filter type: %s", filterType)
 	}
@@ -651,7 +671,7 @@ func SearchRecent(ctx context.Context, userUUID string, channelUUIDs []string, p
 		"sort": [
 			{"created_date": {"order": "desc"}}
 		],
-		"_source": ["content_text", "content_type", "content_uuid", "channel_uuid", "channel_name", "project_uuid", "author_name", "doc_uuid", "board_uuid"]
+		"_source": ["content_text", "content_type", "content_uuid", "channel_uuid", "channel_name", "project_uuid", "author_name", "doc_uuid", "board_uuid", "task_uuid"]
 	}`, limit, termClause, permissionFilter)
 
 	type osHit struct {
@@ -663,6 +683,10 @@ func SearchRecent(ctx context.Context, userUUID string, channelUUIDs []string, p
 		} `json:"hits"`
 	}
 
+	searchBody, seen, err := seenOnly(ctx, userUUID, searchBody)
+	if err != nil {
+		return nil, err
+	}
 	var resp osResp
 	_, err = opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{
 		Indices: []string{AI_EMBEDDINGS_INDEX},
@@ -682,7 +706,7 @@ func SearchRecent(ctx context.Context, userUUID string, channelUUIDs []string, p
 		results = append(results, result)
 	}
 
-	return KeepLive(ctx, results), nil
+	return KeepLive(ctx, dropHidden(seen, results)), nil
 }
 
 // SearchRecentGlobal fetches the most recent content across ALL accessible resources. Used when the user asks for broad updates (e.g. "what are the recent updates?")
@@ -740,6 +764,10 @@ func SearchRecentGlobal(ctx context.Context, userUUID string, channelUUIDs []str
 		} `json:"hits"`
 	}
 
+	searchBody, seen, err := seenOnly(ctx, userUUID, searchBody)
+	if err != nil {
+		return nil, err
+	}
 	var resp osResp
 	_, err = opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{
 		Indices: []string{AI_EMBEDDINGS_INDEX},
@@ -759,7 +787,7 @@ func SearchRecentGlobal(ctx context.Context, userUUID string, channelUUIDs []str
 		results = append(results, result)
 	}
 
-	return KeepLive(ctx, results), nil
+	return KeepLive(ctx, dropHidden(seen, results)), nil
 }
 
 // DeleteEmbedding removes an embedding from the index (e.g. when content is deleted).
@@ -1054,8 +1082,14 @@ func FetchContentSince(ctx context.Context, filterType, filterValue string, sinc
 		} `json:"hits"`
 	}
 
+	// No restricted task the reader may not see, nor a comment on one, is in
+	// what's caught up on (models/taskread).
+	searchBody, _, err := seenOnly(ctx, "", searchBody)
+	if err != nil {
+		return nil, err
+	}
 	var resp osResp
-	_, err := opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{
+	_, err = opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{
 		Indices: []string{AI_EMBEDDINGS_INDEX},
 		Body:    strings.NewReader(searchBody),
 	}, &resp)
@@ -1138,6 +1172,12 @@ func FetchUnreadAcrossScopes(ctx context.Context, userUUID string, channelUUIDs,
 		} `json:"hits"`
 	}
 
+	// No restricted task the reader may not see, nor a comment on one, is in
+	// what's caught up on (models/taskread).
+	searchBody, _, err = seenOnly(ctx, userUUID, searchBody)
+	if err != nil {
+		return nil, err
+	}
 	var resp osResp
 	_, err = opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{
 		Indices: []string{AI_EMBEDDINGS_INDEX},
@@ -1232,6 +1272,12 @@ func DiscoverActiveScopes(ctx context.Context, sinceUnix int64, maxPerDimension 
 	type termsAgg struct {
 		Buckets []bucket `json:"buckets"`
 	}
+	// Only counts of scopes come back, but a restricted task's comments are
+	// no one's new activity to discover as anyone's (models/taskread).
+	body, _, err := seenOnly(ctx, "", body)
+	if err != nil {
+		return nil, err
+	}
 	var resp struct {
 		Aggregations struct {
 			Channels termsAgg `json:"channels"`
@@ -1267,4 +1313,39 @@ func DiscoverActiveScopes(ctx context.Context, sinceUnix int64, maxPerDimension 
 	appendBuckets("chat_grp_id", resp.Aggregations.Groups.Buckets)
 	appendBuckets("project_uuid", resp.Aggregations.Projects.Buckets)
 	return out, nil
+}
+
+// seenOnly keeps the restricted tasks the reader (userUUID; ctx's reader when
+// "") may not see, and their comments, out of an embeddings search: out of
+// its query, so pages and counts leave them out (models/taskread). The
+// filter comes back for dropHidden, which checks what the query can't (an
+// index whose task_uuid was mapped by OpenSearch itself).
+func seenOnly(ctx context.Context, userUUID, body string) (string, taskread.Filter, error) {
+	var tr taskread.Filter
+	var err error
+	if strings.TrimSpace(userUUID) == "" {
+		tr, err = taskread.From(ctx)
+	} else {
+		tr, err = taskread.ForReader(ctx, userUUID)
+	}
+	if err != nil {
+		return "", tr, err
+	}
+	body, err = tr.SearchWithout(body, "content_uuid", "task_uuid.keyword")
+	return body, tr, err
+}
+
+// dropHidden leaves out results that are a hidden task or a comment on one.
+func dropHidden(tr taskread.Filter, results []SimilarResult) []SimilarResult {
+	if tr.Empty() {
+		return results
+	}
+	out := results[:0]
+	for _, r := range results {
+		if tr.Hides(r.ContentUUID) || tr.Hides(r.TaskUUID) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }

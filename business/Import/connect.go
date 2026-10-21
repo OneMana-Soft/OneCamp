@@ -42,27 +42,29 @@ const connectTimeout = 25 * time.Second
 // tokenHints is where each provider's credentials are, for the message when
 // the provider refuses them.
 var tokenHints = map[string]string{
-	importModels.ProviderTrello:  "Trello didn't accept that API key and token. Copy both again from your Power-Up's API key page: the API key, then the token from the Token link beside it.",
-	importModels.ProviderAsana:   "Asana didn't accept that token. Create a personal access token in Asana's developer console and paste it again.",
-	importModels.ProviderJira:    "Jira didn't accept that email and API token. Use a classic API token (id.atlassian.com, Security, Create and manage API tokens, Create API token) with the email you sign in to Jira with.",
-	importModels.ProviderNotion:  "Notion didn't accept that token. Copy the internal integration secret again from notion.so/my-integrations.",
-	importModels.ProviderTodoist: "Todoist didn't accept that token. Copy your API token again from Todoist's Settings, Integrations, Developer.",
-	importModels.ProviderLinear:  "Linear didn't accept that key. Create a personal API key in Linear's Settings, API, and paste it again.",
-	importModels.ProviderClickUp: "ClickUp didn't accept that token. Copy your personal API token again from ClickUp's Settings, Apps.",
-	"monday":                     "monday.com didn't accept that token. Open your avatar, Developers, My access tokens, and copy the personal API token again.",
+	importModels.ProviderTrello:   "Trello didn't accept that API key and token. Copy both again from your Power-Up's API key page: the API key, then the token from the Token link beside it.",
+	importModels.ProviderAsana:    "Asana didn't accept that token. Create a personal access token in Asana's developer console and paste it again.",
+	importModels.ProviderJira:     "Jira didn't accept that email and API token. Use a classic API token (id.atlassian.com, Security, Create and manage API tokens, Create API token) with the email you sign in to Jira with.",
+	importModels.ProviderNotion:   "Notion didn't accept that token. Copy the internal integration secret again from notion.so/my-integrations.",
+	importModels.ProviderTodoist:  "Todoist didn't accept that token. Copy your API token again from Todoist's Settings, Integrations, Developer.",
+	importModels.ProviderLinear:   "Linear didn't accept that key. Create a personal API key in Linear's Settings, API, and paste it again.",
+	importModels.ProviderClickUp:  "ClickUp didn't accept that token. Copy your personal API token again from ClickUp's Settings, Apps.",
+	importModels.ProviderBasecamp: "Basecamp didn't accept the sign-in any more. Connect Basecamp again.",
+	importModels.ProviderMonday:   "monday.com didn't accept that token. Open your avatar, Developers, My access tokens, and copy the personal API token again.",
 }
 
 // providerNames is how each provider is written in a sentence.
 var providerNames = map[string]string{
-	importModels.ProviderTrello:  "Trello",
-	importModels.ProviderAsana:   "Asana",
-	importModels.ProviderJira:    "Jira",
-	importModels.ProviderNotion:  "Notion",
-	importModels.ProviderTodoist: "Todoist",
-	importModels.ProviderLinear:  "Linear",
-	importModels.ProviderClickUp: "ClickUp",
-	"monday":                     "monday.com",
-	importModels.ProviderSlack:   "Slack",
+	importModels.ProviderTrello:   "Trello",
+	importModels.ProviderAsana:    "Asana",
+	importModels.ProviderJira:     "Jira",
+	importModels.ProviderNotion:   "Notion",
+	importModels.ProviderTodoist:  "Todoist",
+	importModels.ProviderLinear:   "Linear",
+	importModels.ProviderClickUp:  "ClickUp",
+	importModels.ProviderMonday:   "monday.com",
+	importModels.ProviderBasecamp: "Basecamp",
+	importModels.ProviderSlack:    "Slack",
 }
 
 func providerName(provider string) string {

@@ -111,7 +111,9 @@ func CreateEvent(ctx context.Context, userInfo *model.UserInfo, eventInfo adapte
 	}
 
 	// Trigger Google Calendar Sync
-	go integrationBusiness.SyncEventToGoogleCalendar(context.Background(), eventUUID, eventInfo, userInfo, eventInfo.SyncToGoogleCalendar)
+	helpers.GoSafeNamed("integrationBusiness.SyncEventToGoogleCalendar", func() {
+		integrationBusiness.SyncEventToGoogleCalendar(context.Background(), eventUUID, eventInfo, userInfo, eventInfo.SyncToGoogleCalendar)
+	})
 
 	return &adapter.OutputEvent{
 		EventUuid:    eventUUID.String(),
@@ -329,7 +331,7 @@ func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.Cre
 	// then as a whole, an empty one included.
 	if existingEvent.GoogleCalendarEventId != nil && *existingEvent.GoogleCalendarEventId != "" {
 		googleEventID, syncGuests := *existingEvent.GoogleCalendarEventId, eventInfo.Participants != nil
-		go func() {
+		helpers.GoSafeNamed("business/Calendar/eventBusiness:UpdateEvent", func() {
 			bgCtx := context.Background()
 			updateErr := integrationBusiness.UpdateGoogleCalendarEvent(bgCtx, googleEventID, eventInfo, userInfo, syncGuests)
 			var goneErr *integrationBusiness.GCalEventGoneError
@@ -340,7 +342,7 @@ func UpdateEvent(ctx context.Context, eventUUID uuid.UUID, eventInfo adapter.Cre
 				_ = domain.UpdateCalendarEvent(bgCtx, eventUUID, eventInfo.Title, eventInfo.Description, startTime, endTime, nil, time.Now())
 				_ = domain.ClearDgraphEventGoogleId(bgCtx, existingEvent.Uid)
 			}
-		}()
+		})
 	}
 
 	bookingEventUpdated(ctx, existingEvent, startTime, endTime)
@@ -483,7 +485,7 @@ func LeaveEvent(ctx context.Context, eventUUID uuid.UUID, userInfo *model.UserIn
 
 	// Sync the attendee removal to Google Calendar if the event is synced
 	if gcalEventId != "" && existingEvent.CreatedBy != nil && existingEvent.CreatedBy.Uuid != "" {
-		go func() {
+		helpers.GoSafeNamed("business/Calendar/eventBusiness:LeaveEvent", func() {
 			bgCtx := context.Background()
 
 			// Get the creator's Dgraph info to retrieve their email
@@ -511,7 +513,7 @@ func LeaveEvent(ctx context.Context, eventUUID uuid.UUID, userInfo *model.UserIn
 					UserPostgresInfo: *creatorPostgresUser,
 				},
 			)
-		}()
+		})
 	}
 
 	return nil

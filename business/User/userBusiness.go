@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	LiveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskrank "github.com/akashc777/OneCamp/business/TaskRank"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
@@ -109,7 +111,7 @@ func CreateExternalGitHubUser(ctx context.Context, login string, displayName str
 		UserEmail:     email,
 		UserCreatedAt: time.Now().Unix(),
 	}
-	go domain.UpdateUserInOpenSearch(openSearchUser)
+	helpers.GoSafeNamed("domain.IndexUserInOpenSearch", func() { domain.IndexUserInOpenSearch(openSearchUser) })
 
 	return &userModels.User{
 		Id:              userUUID,
@@ -264,10 +266,36 @@ func GetRecordingURLByObjectName(ctx context.Context, objName string, ttl time.D
 }
 
 func GetFileURLByObjectName(ctx context.Context, objName string) (objURL string, err error) {
+	return GetFileURLByObjectNameFor(ctx, objName, 5*time.Minute)
+}
+
+// AvatarURLTTL is how long a profile picture's signed address lasts when the
+// page loads it from a redirect: an hour, so a browser that kept the redirect
+// (AvatarRedirectMaxAge) keeps loading the same address and the picture it
+// already has. A profile picture is a public attachment, any member's to see.
+const AvatarURLTTL = time.Hour
+
+// AvatarRedirectMaxAge is how long a browser may reuse an avatar redirect:
+// inside AvatarURLTTL, so a reused redirect never points at an expired address.
+const AvatarRedirectMaxAge = 50 * time.Minute
+
+// PlaceFileURLTTL is how long a place's file (a channel's, a conversation's,
+// a doc's) stays signed when the page loads it from a redirect: as short as
+// before, so a link never outlives the member's access by more than this. The
+// redirect itself checks that access every time it is asked.
+const PlaceFileURLTTL = 5 * time.Minute
+
+// PlaceFileRedirectMaxAge is how long a browser may reuse a place file's
+// redirect: inside PlaceFileURLTTL.
+const PlaceFileRedirectMaxAge = 4 * time.Minute
+
+// GetFileURLByObjectNameFor is GetFileURLByObjectName with the signature
+// lasting ttl.
+func GetFileURLByObjectNameFor(ctx context.Context, objName string, ttl time.Duration) (objURL string, err error) {
 	bucketName := helpers.UserUploadBucket()
 	completeObjectName := fmt.Sprintf("%v/%v", "userFileUpload", objName)
 	// Get a pre-signed URL for the object.
-	url, err := minioInit.MinioClient.PresignedGetObject(ctx, bucketName, completeObjectName, time.Duration(5*time.Minute), nil)
+	url, err := minioInit.MinioClient.PresignedGetObject(ctx, bucketName, completeObjectName, ttl, nil)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/GetFileURLByObjectName Invalid obj key",
@@ -314,6 +342,12 @@ func CheckIfUserExistByUserName(ctx context.Context, userName *string) (exists b
 	}
 
 	return
+}
+
+// MembersByAddress is the member each of these addresses belongs to, by
+// address in lower case (domain.MembersByAddress).
+func MembersByAddress(ctx context.Context, emails []string) (map[string]uuid.UUID, error) {
+	return domain.MembersByAddress(ctx, emails)
 }
 
 func GetUserByEmailId(ctx context.Context, emailId *string) (userInfo *userModels.User, err error) {
@@ -415,14 +449,17 @@ func LoginUserByEmailID(ctx context.Context, emailID string, uname string, authT
 		return
 	}
 
+	// Every field people are found by, so a sign-in writes the person's whole
+	// search document and puts back one an emptied index lost.
 	openSearchUser := &openSearchStruct.OpenSearchUser{
 		Uuid:           userInfo.Uuid,
 		UserName:       userInfo.UserName,
+		UserFullName:   userInfo.UserFullName,
 		UserEmail:      userInfo.EmailID,
 		UserProfileKey: userInfo.ProfileKey,
 	}
 
-	go domain.UpdateUserInOpenSearch(openSearchUser)
+	helpers.GoSafeNamed("domain.IndexUserInOpenSearch", func() { domain.IndexUserInOpenSearch(openSearchUser) })
 
 	return
 
@@ -855,6 +892,17 @@ func ActivateUser(ctx context.Context, userUUID uuid.UUID) (err error) {
 
 }
 
+// ListMembers is a page of the admin's members list matching f, with how many
+// match in all, each member with their @handle.
+func ListMembers(ctx context.Context, page helpers.Page, f domain.MembersFilter) (members []*dgraphStruct.DgraphUser, hasMore bool, total int, err error) {
+	members, total, err = domain.GetMembersPage(ctx, page.Size, page.Offset(), f)
+	if err != nil {
+		return nil, false, 0, err
+	}
+	domain.AttachHandles(ctx, members)
+	return members, page.Offset()+len(members) < total, total, nil
+}
+
 func GetAllUsersListFromDgraph(ctx context.Context, pageIndex int, pageSize int) (dgraphUsers []*dgraphStruct.DgraphUser, hasMore bool, err error) {
 	dgraphUsers, actualLen, err := domain.GetAllUsersListFromDgraph(ctx, pageIndex, pageSize)
 
@@ -899,7 +947,7 @@ func UpdateUserStatusInDgraph(ctx context.Context, status string, userUUID strin
 		Status:   status,
 	}
 
-	go mqttBusiness.PublishUserStatus(&mqttEmojiStatus)
+	helpers.GoSafeNamed("mqttBusiness.PublishUserStatus", func() { mqttBusiness.PublishUserStatus(&mqttEmojiStatus) })
 
 	return
 }
@@ -951,7 +999,7 @@ func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.Dgra
 		UserProfileKey: dgraphUser.ProfileKey,
 		UserUpdatedAt:  time.Now().Unix(),
 	}
-	go domain.UpdateUserInOpenSearch(openSearchUser)
+	helpers.GoSafeNamed("domain.UpdateUserInOpenSearch", func() { domain.UpdateUserInOpenSearch(openSearchUser) })
 
 	// Propagate the denormalised copies of the name people see (shownNameAfter) and profile pic across every index that
 	// embeds them — ONLY IF ONE OF THEM ACTUALLY CHANGED.
@@ -980,7 +1028,7 @@ func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.Dgra
 			"business/CreateOrUpdateDgraphUser could not read the previous profile for %s (%v); "+
 				"propagating anyway rather than risk a stale name in search", dgraphUser.Uuid, prevErr)
 		if name := shownNameAfter(nil, dgraphUser); name != "" {
-			go domain.PropagateUserInfoInOpenSearch(dgraphUser.Uuid, name, profilePic)
+			helpers.GoSafeNamed("domain.PropagateUserInfoInOpenSearch", func() { domain.PropagateUserInfoInOpenSearch(dgraphUser.Uuid, name, profilePic) })
 		}
 	case previous == nil:
 		// Defensive only. A missing user comes back as an ERROR from the read, not as a nil with
@@ -994,7 +1042,7 @@ func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.Dgra
 		}
 		name := shownNameAfter(previous, dgraphUser)
 		if name != previous.DisplayName() || prevProfilePic != profilePic {
-			go domain.PropagateUserInfoInOpenSearch(dgraphUser.Uuid, name, profilePic)
+			helpers.GoSafeNamed("domain.PropagateUserInfoInOpenSearch", func() { domain.PropagateUserInfoInOpenSearch(dgraphUser.Uuid, name, profilePic) })
 		}
 	}
 
@@ -1085,6 +1133,33 @@ func GetDgraphAllUsersList(ctx context.Context) (dgraphUsers []*dgraphStruct.Dgr
 	domain.AttachHandles(ctx, dgraphUsers)
 
 	return
+}
+
+// PickerPeople is the people a picker shows for what is typed (q: a display
+// name, full name or @handle, without case), at most limit, each with their
+// handle; with nothing typed, the first limit of the workspace's people. The
+// goal owner picker read everyone (GetDgraphAllUsersList) to search in the
+// browser. Neither guests nor, when searched, bots are among them.
+func PickerPeople(ctx context.Context, q string, limit int) ([]*dgraphStruct.DgraphUser, error) {
+	if strings.TrimSpace(q) == "" {
+		users, err := domain.GetDgraphUsersFirst(ctx, limit)
+		if err != nil {
+			return nil, err
+		}
+		domain.AttachHandles(ctx, users)
+		return users, nil
+	}
+	users, err := domain.GetUserListWithSearchText(ctx, "", q)
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(users, func(i, j int) bool {
+		return strings.ToLower(users[i].UserName) < strings.ToLower(users[j].UserName)
+	})
+	if len(users) > limit {
+		users = users[:limit]
+	}
+	return users, nil
 }
 
 // ClearUserEmojiStatus clears the person's status: every status of theirs in
@@ -1253,6 +1328,11 @@ func GetDgraphUserTaskListForKanban(ctx context.Context, userUUID string, userDg
 		)
 		return nil, err
 	}
+	var cards []*dgraphStruct.DgraphTask
+	for _, c := range dgraphStruct.BoardColumns {
+		cards = append(cards, *dgraphUser.Column(c.Key)...)
+	}
+	taskKeys.Lay(ctx, cards...)
 	return
 }
 
@@ -1264,6 +1344,9 @@ func GetDgraphUserTaskList(ctx context.Context, userUUID string, userDgraphUID s
 			err,
 		)
 		return
+	}
+	if dgraphUser != nil {
+		taskKeys.Lay(ctx, dgraphUser.Tasks...)
 	}
 
 	return
@@ -1711,7 +1794,12 @@ func joinAsMember(
 	}
 	// Whatever the way in, an invitation to this address is now used: the
 	// admin's list says Joined, and its link no longer admits anyone.
-	_ = domain.MarkInvitationJoined(ctx, emailID)
+	// Every admin's app hears of it (MESSAGE_INVITATION_ACCEPTED), once:
+	// an invitation already used says nothing more.
+	if marked, _ := domain.MarkInvitationJoined(ctx, emailID); marked {
+		mqttBusiness.PublishToTopics([]string{helpers.GetMqttTopicForAdminBroadcast()}, mqttStruct.MESSAGE_INVITATION_ACCEPTED,
+			&mqttStruct.MqttInvitationAccepted{Email: emailID, UserID: userID.String()})
+	}
 	joined := Joined{UserID: userID, Handle: handle, Adopted: adopted}
 	if welcome {
 		joined.Landing = WelcomeNewMember(ctx, userID)
@@ -1797,7 +1885,7 @@ func CreateUserWithMethod(
 		UserCreatedAt: time.Now().Unix(),
 	}
 
-	go domain.UpdateUserInOpenSearch(openSearchUser)
+	helpers.GoSafeNamed("domain.IndexUserInOpenSearch", func() { domain.IndexUserInOpenSearch(openSearchUser) })
 
 	return userUUID, handle, nil
 }

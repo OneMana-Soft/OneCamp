@@ -12,6 +12,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 )
 
 // ListDocAIEntries is a doc's rows whose action starts with prefix (which must
@@ -40,4 +41,23 @@ func ListDocAIEntries(ctx context.Context, docUUID, prefix string, limit int) ([
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// ListDocEvents is a doc's newest rows in the "docs" record (business/Follow
+// audit.go: shared, locked, published, restored...), newest first, at most
+// limit; a row retention redacted is left out. Migration 470's index answers
+// it.
+func ListDocEvents(ctx context.Context, docUUID string, limit int) ([]*AuditEntry, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 30
+	}
+	q := `SELECT ` + auditCols + ` FROM admin_audit_log
+		WHERE category = '` + CategoryDocs + `' AND (metadata ->> 'resource_uuid') = $1 AND redacted_at IS NULL
+		ORDER BY seq DESC LIMIT $2`
+	out, err := pgexec.Query(ctx, q, func(r pgexec.Row) (*AuditEntry, error) { return scanEntry(r) }, docUUID, limit)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/AdminAudit.ListDocEvents err: %+v", err)
+		return nil, err
+	}
+	return out, nil
 }

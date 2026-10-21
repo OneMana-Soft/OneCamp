@@ -269,7 +269,7 @@ func streamChannelReply(ctx context.Context, bot *userBusiness.BotIdentity, user
 	stopTyping := make(chan struct{})
 	var stopOnce sync.Once
 	stopTypingFn := func() { stopOnce.Do(func() { close(stopTyping) }) }
-	go runBotTyping(ctx, bot, channelID, stopTyping)
+	helpers.GoSafeLoop("runBotTyping", func() { runBotTyping(ctx, bot, channelID, stopTyping) })
 
 	final, aerr := aiBusiness.AnswerChannelQuestionStream(ctx, userInfo, channelID, channelName, question, func(running string) {
 		stopTypingFn() // first content: the live message itself is now the indicator
@@ -340,7 +340,7 @@ func streamlessChannelReply(ctx context.Context, bot *userBusiness.BotIdentity, 
 	ctx = ai.WithContextNoticeSink(ctx)
 	ai.NoteQuestion(ctx, question)
 	stopTyping := make(chan struct{})
-	go runBotTyping(ctx, bot, channelID, stopTyping)
+	helpers.GoSafeLoop("runBotTyping", func() { runBotTyping(ctx, bot, channelID, stopTyping) })
 	reply, aerr := aiBusiness.AnswerChannelQuestion(ctx, userInfo, channelID, channelName, question)
 	close(stopTyping)
 
@@ -543,7 +543,7 @@ func handleChatMention(ctx context.Context, data map[string]interface{}) {
 	// where live editing adds little. The reply lands as an in-thread COMMENT on
 	// the triggering message (Slack-style threaded reply) when its id is known.
 	stopTyping := make(chan struct{})
-	go runBotChatTyping(ctx, bot, groupID, stopTyping)
+	helpers.GoSafeLoop("runBotChatTyping", func() { runBotChatTyping(ctx, bot, groupID, stopTyping) })
 	answer, aerr := aiBusiness.AnswerChatQuestion(ctx, userInfo, groupID, label, question)
 	close(stopTyping)
 

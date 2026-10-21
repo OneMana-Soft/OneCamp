@@ -275,6 +275,8 @@ func TestTaskDependencies(t *testing.T) {
 // commit abort; run again, it sees the other's link and refuses the loop.
 func TestTaskDependenciesAtOnce(t *testing.T) {
 	ctx := context.Background()
+	// Reads of tasks decide restricted ones from Postgres (WA2): this test's own.
+	integration.ConnectServerPostgres(t)
 	dg := integration.SetupDgraph(t)
 	live := "0001-01-01T00:00:00Z"
 	d, e := uuid.NewString(), uuid.NewString()

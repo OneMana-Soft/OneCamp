@@ -10,7 +10,7 @@ import (
 // StartWebhookCleanupScheduler starts a background goroutine that cleans up old webhook logs.
 // It should be called once during application startup.
 func StartWebhookCleanupScheduler() {
-	go func() {
+	helpers.GoSafeLoop("business/Webhook/webhookScheduler:StartWebhookCleanupScheduler", func() {
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
 
@@ -20,7 +20,7 @@ func StartWebhookCleanupScheduler() {
 		for range ticker.C {
 			runCleanup()
 		}
-	}()
+	})
 }
 
 func runCleanup() {

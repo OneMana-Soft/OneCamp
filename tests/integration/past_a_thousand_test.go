@@ -366,7 +366,7 @@ func TestBoardsListsAndHistoryPastAThousand(t *testing.T) {
 	// Someone outside the project learns nothing about the task, not even
 	// which lines exist. By Work Access's one rule, every task route answers
 	// a task the caller may not read as one that isn't there (404,
-	// writeTaskRefusal), and its history does too: the same answer for a line
+	// WriteTaskRefusal), and its history does too: the same answer for a line
 	// it has and one it hasn't. A 403 would say the task is there.
 	bob1 := userModels.UserInfo{
 		UserPostgresInfo: userModels.User{Id: bob, EmailID: "bob@example.test"},

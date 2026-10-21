@@ -6,8 +6,10 @@ import (
 	"strings"
 	"testing"
 
+	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 	outboxBusiness "github.com/akashc777/OneCamp/business/Outbox"
+	postBusiness "github.com/akashc777/OneCamp/business/Post"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 )
 
@@ -54,7 +56,8 @@ func TestAChannelSendGoesTheDurableWayOnlyWhenSwitchedOn(t *testing.T) {
 	if w, _ := p.Write(context.Background(), nil, send); w.ID != "durable" || durableWrites != 1 {
 		t.Fatal("a channel send didn't go the durable way with channels switched on")
 	}
-	// Only sends to channels, so far: a DM and an edit are today's.
+	// Only sends to the surfaces switched on: a DM, with channels alone on, and
+	// an edit are today's.
 	for _, w := range []Write{dm, edit} {
 		if got, _ := p.Write(context.Background(), nil, w); got.ID != "today" {
 			t.Errorf("%s to %s went the durable way", w.Op, w.To.Kind)
@@ -62,9 +65,47 @@ func TestAChannelSendGoesTheDurableWayOnlyWhenSwitchedOn(t *testing.T) {
 	}
 }
 
+// A DM or a group send goes the durable way only when its own surface is
+// switched on, each apart from the other and from channels.
+func TestADMOrGroupSendGoesTheDurableWayOnlyWhenItsSurfaceIsOn(t *testing.T) {
+	prevOn, prevDM, prevGroup := surfaceOn, writeDM, writeGroup
+	t.Cleanup(func() { surfaceOn, writeDM, writeGroup = prevOn, prevDM, prevGroup })
+	writeDM = func(context.Context, *userModels.UserInfo, Write) (Written, error) {
+		return Written{ID: "durable dm"}, nil
+	}
+	writeGroup = func(context.Context, *userModels.UserInfo, Write) (Written, error) {
+		return Written{ID: "durable group"}, nil
+	}
+	p := durable{today: &recordingPipeline{}}
+	dm := Write{Op: OpSend, To: conversationBusiness.Ref{Kind: conversationBusiness.KindDM, ID: "a b"}}
+	group := Write{Op: OpSend, To: conversationBusiness.Ref{Kind: conversationBusiness.KindGroup, ID: "g"}}
+	for _, c := range []struct {
+		on        []string
+		dm, group string
+	}{
+		{nil, "today", "today"},
+		{[]string{SurfaceChannel}, "today", "today"},
+		{[]string{SurfaceDM}, "durable dm", "today"},
+		{[]string{SurfaceGroup}, "today", "durable group"},
+		{[]string{SurfaceDM, SurfaceGroup}, "durable dm", "durable group"},
+	} {
+		on := map[string]bool{}
+		for _, s := range c.on {
+			on[s] = true
+		}
+		surfaceOn = func(s string) bool { return on[s] }
+		if w, _ := p.Write(context.Background(), nil, dm); w.ID != c.dm {
+			t.Errorf("with %v on, a DM was written %q", c.on, w.ID)
+		}
+		if w, _ := p.Write(context.Background(), nil, group); w.ID != c.group {
+			t.Errorf("with %v on, a group message was written %q", c.on, w.ID)
+		}
+	}
+}
+
 func TestAHeldMessageIsAnsweredByItsKind(t *testing.T) {
-	prev := postWritten
-	t.Cleanup(func() { postWritten = prev })
+	prev, prevChat := postWritten, chatStored
+	t.Cleanup(func() { postWritten, chatStored = prev, prevChat })
 	asked := ""
 	postWritten = func(_ context.Context, id string) (bool, error) {
 		asked = id
@@ -72,6 +113,10 @@ func TestAHeldMessageIsAnsweredByItsKind(t *testing.T) {
 			return false, errors.New("graph down")
 		}
 		return id == "p-written", nil
+	}
+	chatStored = func(_ context.Context, id string) (bool, error) {
+		asked = "chat " + id
+		return id == "m-written", nil
 	}
 	ev := func(kind, message string) outboxBusiness.Event {
 		return outboxBusiness.Event{Entities: map[string]string{"kind": kind, "message": message}}
@@ -85,7 +130,15 @@ func TestAHeldMessageIsAnsweredByItsKind(t *testing.T) {
 	if _, err := resolveMessage(context.Background(), ev("channel", "broken")); err == nil {
 		t.Error("an unanswered question was taken as an answer")
 	}
-	if ok, err := resolveMessage(context.Background(), ev("dm", "m1")); !ok || err != nil {
+	for _, kind := range []string{"dm", "group"} {
+		if ok, err := resolveMessage(context.Background(), ev(kind, "m-written")); !ok || err != nil || asked != "chat m-written" {
+			t.Errorf("a written %s message: %v %v (asked %q)", kind, ok, err, asked)
+		}
+		if ok, _ := resolveMessage(context.Background(), ev(kind, "m-lost")); ok {
+			t.Errorf("a %s message whose node was never written was released", kind)
+		}
+	}
+	if ok, err := resolveMessage(context.Background(), ev("thread", "r1")); !ok || err != nil {
 		t.Error("a kind with no answer of its own should be released: its change was committed with it")
 	}
 }
@@ -96,5 +149,13 @@ func TestTheSystemCheckSaysWhichSurfacesAreOn(t *testing.T) {
 	}
 	if got := switchNote("group,channel"); got != "These surfaces write through the outbox: channel, group." {
 		t.Errorf("on: %q", got)
+	}
+}
+
+// Channel posts and DMs and group messages are on one outbox topic, so one
+// resolver answers for all of them and the drain treats them alike.
+func TestPostsAndChatsShareOneMessageTopic(t *testing.T) {
+	if postBusiness.MessageTopic != chatBusiness.MessageTopic || postBusiness.MessageCreated != chatBusiness.MessageCreated {
+		t.Errorf("posts on %q (%q), chats on %q (%q)", postBusiness.MessageTopic, postBusiness.MessageCreated, chatBusiness.MessageTopic, chatBusiness.MessageCreated)
 	}
 }

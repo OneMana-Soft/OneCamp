@@ -105,8 +105,7 @@ func EnqueueImportPRs(ctx context.Context, linkId uuid.UUID, triggeredBy uuid.UU
 // instead of being deferred to the worker (and surfacing as a vague
 // "import failed" later).
 func validateImportLink(ctx context.Context, linkId uuid.UUID) error {
-	getQuery := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1 AND deleted_at IS NULL`
-	link, err := githubLinkModel.GetGitHubLinkById(getQuery, linkId)
+	link, err := githubLinkModel.GetGitHubLinkById(ctx, linkId, true)
 	if err != nil {
 		return fmt.Errorf("link lookup failed: %w", err)
 	}
@@ -133,14 +132,16 @@ func ListImportJobs(ctx context.Context, linkId uuid.UUID, limit int) ([]*import
 // Behaviour mirrors StartGitHubSyncWorker: wake on signal, fall back
 // to a periodic poll, recover from panics, exit cleanly on shutdown.
 func StartGitHubImportWorker(shutdownCtx context.Context) {
-	go importWorkerLoop(shutdownCtx)
-	go importCleanupLoop(shutdownCtx)
+	helpers.GoSafeLoop("importWorkerLoop", func() { importWorkerLoop(shutdownCtx) })
+	helpers.GoSafeLoop("importCleanupLoop", func() { importCleanupLoop(shutdownCtx) })
 	helpers.MessageLogs.InfoLog.Println("GitHub import worker started")
 }
 
 func importWorkerLoop(shutdownCtx context.Context) {
 	// Brief startup pause so other initializers settle.
-	time.Sleep(8 * time.Second)
+	if !helpers.SleepCtx(shutdownCtx, 8*time.Second) {
+		return
+	}
 
 	ticker := time.NewTicker(importWorkerPoll)
 	defer ticker.Stop()
@@ -170,7 +171,9 @@ func importWorkerLoop(shutdownCtx context.Context) {
 }
 
 func importCleanupLoop(shutdownCtx context.Context) {
-	time.Sleep(2 * time.Minute)
+	if !helpers.SleepCtx(shutdownCtx, 2*time.Minute) {
+		return
+	}
 	for {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		if n, err := importJobModel.CleanupOld(ctx, importRetention); err == nil && n > 0 {
@@ -250,8 +253,7 @@ func processImportJob(shutdownCtx context.Context, job *importJobModel.Job) {
 	// asked for by nobody identified (eventAsker).
 	ctx = helpers.WithGitHubOrigin(ctx)
 
-	getQuery := `SELECT ` + githubLinkModel.GITHUB_LINK_COLS + ` FROM github_links WHERE id = $1 AND deleted_at IS NULL`
-	link, err := githubLinkModel.GetGitHubLinkById(getQuery, job.LinkId)
+	link, err := githubLinkModel.GetGitHubLinkById(ctx, job.LinkId, true)
 	if err != nil || link == nil {
 		_ = importJobModel.Finalize(ctx, job.Id, false, 0, 0, 0, 0, "link not found")
 		return
@@ -319,23 +321,10 @@ func (c *importCounters) flushProgress(ctx context.Context, jobId uuid.UUID) {
 func runIssueImport(ctx context.Context, job *importJobModel.Job, link *githubLinkModel.GitHubLink, client *http.Client, userInfo *userModels.UserInfo, dgraphProjectInfo *dgraphStruct.DgraphProject) {
 	c := &importCounters{}
 
-	page := 1
-	finalErr := ""
-	for page <= importPagesMax {
-		select {
-		case <-ctx.Done():
-			finalErr = "context cancelled"
-			break
-		default:
-		}
-
+	finalErr := importPages(ctx, importPagesMax, func(page int) (bool, error) {
 		issues, hasMore, err := fetchIssuesPage(ctx, client, link, page)
-		if err != nil {
-			finalErr = err.Error()
-			break
-		}
-		if len(issues) == 0 {
-			break
+		if err != nil || len(issues) == 0 {
+			return false, err
 		}
 
 		// Batch idempotency: one DB roundtrip per page instead of
@@ -370,11 +359,8 @@ func runIssueImport(ctx context.Context, job *importJobModel.Job, link *githubLi
 		})
 
 		c.flushProgress(ctx, job.Id)
-		if !hasMore {
-			break
-		}
-		page++
-	}
+		return hasMore, nil
+	})
 
 	total, imported, skipped, failed := c.snapshot()
 	success := finalErr == ""
@@ -389,23 +375,10 @@ func runIssueImport(ctx context.Context, job *importJobModel.Job, link *githubLi
 func runPRImport(ctx context.Context, job *importJobModel.Job, link *githubLinkModel.GitHubLink, client *http.Client, userInfo *userModels.UserInfo, dgraphProjectInfo *dgraphStruct.DgraphProject) {
 	c := &importCounters{}
 
-	page := 1
-	finalErr := ""
-	for page <= importPagesMax {
-		select {
-		case <-ctx.Done():
-			finalErr = "context cancelled"
-			break
-		default:
-		}
-
+	finalErr := importPages(ctx, importPagesMax, func(page int) (bool, error) {
 		prs, hasMore, err := fetchPRsPage(ctx, client, link, page)
-		if err != nil {
-			finalErr = err.Error()
-			break
-		}
-		if len(prs) == 0 {
-			break
+		if err != nil || len(prs) == 0 {
+			return false, err
 		}
 
 		urls := make([]string, 0, len(prs))
@@ -431,11 +404,8 @@ func runPRImport(ctx context.Context, job *importJobModel.Job, link *githubLinkM
 		})
 
 		c.flushProgress(ctx, job.Id)
-		if !hasMore {
-			break
-		}
-		page++
-	}
+		return hasMore, nil
+	})
 
 	total, imported, skipped, failed := c.snapshot()
 	success := finalErr == ""
@@ -443,6 +413,28 @@ func runPRImport(ctx context.Context, job *importJobModel.Job, link *githubLinkM
 	helpers.MessageLogs.InfoLog.Printf(
 		"GitHub PR import job=%s repo=%s/%s total=%d imported=%d skipped=%d failed=%d success=%v",
 		job.Id.String(), link.RepoOwner, link.RepoName, total, imported, skipped, failed, success)
+}
+
+// importPages walks an import's pages from the first, up to max, running one
+// page per step: the step says whether there is a next page, and an error
+// from it ends the walk as that error. A cancelled ctx ends it before the next
+// page is fetched, as "context cancelled". "" when the walk ran to the end.
+func importPages(ctx context.Context, max int, step func(page int) (more bool, err error)) string {
+	for page := 1; page <= max; page++ {
+		select {
+		case <-ctx.Done():
+			return "context cancelled"
+		default:
+		}
+		more, err := step(page)
+		if err != nil {
+			return err.Error()
+		}
+		if !more {
+			return ""
+		}
+	}
+	return ""
 }
 
 // runItemPool runs `count` tasks via `fn(i)` with bounded

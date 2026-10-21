@@ -3,8 +3,11 @@ package business
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	callStateModel "github.com/akashc777/OneCamp/models/postgres/CallState"
+	"github.com/google/uuid"
 	"github.com/livekit/protocol/livekit"
 
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -122,7 +125,9 @@ func IsAgentIdentity(identity string) bool {
 
 // CreateRoomAndGetToken makes the call room when there is none and mints the
 // member's token for it. Refused with ErrRemovedFromCall for someone a host put
-// out of the call that is still going on there.
+// out of the call that is still going on there, and with ErrCallLocked for
+// someone new while it is locked (both helpers.CallRefusal). isAdmin is an
+// instant meeting's own host.
 //
 // What the person chose in the green room (microphone, camera) is not asked:
 // it is the client's state, and the token always lets them change their mind
@@ -132,8 +137,8 @@ func CreateRoomAndGetToken(ctx context.Context, roomId string, userDgraphInfo *d
 	if userDgraphInfo == nil || userDgraphInfo.Uid == "" {
 		return "", false, ErrNotInCall
 	}
-	if IsRemovedFromCall(ctx, roomId, userDgraphInfo.Uid) {
-		return "", false, ErrRemovedFromCall
+	if err := MayEnter(ctx, roomId, userDgraphInfo, isAdmin); err != nil {
+		return "", false, err
 	}
 
 	alreadyExisted, err = CheckRoomExists(ctx, roomId)
@@ -207,8 +212,19 @@ func StartRecording(ctx context.Context, roomName string, userDgraphInfo *dgraph
 		return
 	}
 
-	// While it runs, the call's transcript lines are filed under it.
+	// While it runs, the call's transcript lines are filed under it, and the
+	// call's record lists it.
 	NoteRecording(ctx, roomName, egresssInfo.EgressId)
+	var by *uuid.UUID
+	if userDgraphInfo != nil {
+		if id, perr := uuid.Parse(userDgraphInfo.Uuid); perr == nil {
+			by = &id
+		}
+	}
+	if _, ferr := callStateModel.RecordingStarted(ctx, roomName, egresssInfo.EgressId, by, time.Now()); ferr != nil {
+		helpers.LogErrorWithContext(ctx, "business/StartRecording could not file the recording under its call: %+v", ferr)
+	}
+	callChanged(ctx, roomName)
 	return
 }
 
@@ -224,5 +240,6 @@ func StopRecording(ctx context.Context, roomName string) (err error) {
 	}
 
 	ForgetRecording(ctx, roomName, "")
+	callChanged(ctx, roomName)
 	return
 }

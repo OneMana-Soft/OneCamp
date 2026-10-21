@@ -26,6 +26,14 @@ const pgUniqueViolation = "23505"
 // message you wrote.
 func IsUniqueViolation(err error) bool { return pgErrorCodeIs(err, pgUniqueViolation) }
 
+// IsUniqueViolationOn reports whether err is Postgres refusing a duplicate
+// value for the one unique constraint named (booking_pages_slug_key), so a
+// handler names the clash it knows ("another page uses that address") and
+// not one a different constraint on the same row would make.
+func IsUniqueViolationOn(err error, constraint string) bool {
+	return IsUniqueViolation(err) && pgConstraint(err) == constraint
+}
+
 // There is deliberately no IsForeignKeyViolation or IsNotNullViolation here. Both were written
 // alongside IsUniqueViolation because a set of three looked more complete than one, and neither
 // ever acquired a caller — a foreign-key or NOT NULL failure is a server-side bug, not something
@@ -50,6 +58,19 @@ func IsRowRejected(err error) bool {
 // pgErrorCodeIs unwraps err looking for a driver error carrying code.
 func pgErrorCodeIs(err error, code string) bool {
 	return err != nil && pgErrorCode(err) == code
+}
+
+// pgConstraint is the constraint the driver error err carries names, or "" for none.
+func pgConstraint(err error) string {
+	var pgxErr *pgconn.PgError
+	if errors.As(err, &pgxErr) {
+		return pgxErr.ConstraintName
+	}
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		return pqErr.Constraint
+	}
+	return ""
 }
 
 // pgErrorCode is the condition code of the driver error err carries, or "" for none.

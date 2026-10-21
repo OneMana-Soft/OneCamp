@@ -18,7 +18,7 @@ import (
 func currentUser(w http.ResponseWriter, r *http.Request) (*userModels.UserInfo, bool) {
 	info, ok := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		helpers.WriteUnauthorized(w)
 		return nil, false
 	}
 	return &info, true

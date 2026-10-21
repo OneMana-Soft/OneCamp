@@ -5,6 +5,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -70,13 +71,24 @@ func ListFields(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	fields, err := business.List(r.Context(), id)
+	data, err := Fields(r.Context(), id, standing)
 	if err != nil {
 		fail(w, r, "ListFields", err)
 		return
 	}
-	// can_edit tells the app whether to offer making fields and setting values.
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"fields": business.Views(fields...), "can_edit": standing.Can(workAccess.NeedManage)}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": data})
+}
+
+// Fields is a project's custom fields as GET /project/{p}/fields answers them,
+// for a reader who may see the project; the task panel's
+// ?include=project_meta reads the same. can_edit tells the app whether to
+// offer making fields and setting values.
+func Fields(ctx context.Context, project uuid.UUID, standing workAccess.Standing) (map[string]any, error) {
+	fields, err := business.List(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"fields": business.Views(fields...), "can_edit": standing.Can(workAccess.NeedManage)}, nil
 }
 
 // CreateField adds one. POST /project/{p}/fields {name, type, options, currency, on_card}

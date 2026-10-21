@@ -60,7 +60,5 @@ func stopAgentWork(ctx context.Context, agentID, by uuid.UUID) {
 		helpers.LogErrorWithContext(ctx, "business/AIAgent stopAgentWork (agent=%s) err: %+v", agentID, err)
 		return
 	}
-	for _, id := range ids {
-		publishAgentWorkChanged(ctx, id)
-	}
+	publishAgentWorkChangedMany(ctx, ids)
 }

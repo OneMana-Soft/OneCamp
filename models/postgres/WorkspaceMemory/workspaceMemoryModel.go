@@ -21,6 +21,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // ErrTombstoned is returned by Upsert when an identical fact was previously
@@ -261,23 +262,23 @@ func List(ctx context.Context, f QueryFilter) ([]*MemoryItem, error) {
 		n++
 	}
 	if len(f.CreatedBy) > 0 {
-		ph, vals := inClause(&n, f.CreatedBy)
-		where = append(where, "created_by_user_id::text IN ("+ph+")")
-		args = append(args, vals...)
+		clause, arg := uuidAny(&n, "created_by_user_id", f.CreatedBy)
+		where = append(where, clause)
+		args = append(args, arg)
 	}
 
 	// Permission OR-group: visible if scoped to an accessible resource,
 	// or owned by the caller.
 	var perm []string
 	if len(f.AccessibleChannels) > 0 {
-		ph, vals := inClause(&n, f.AccessibleChannels)
-		perm = append(perm, "channel_uuid::text IN ("+ph+")")
-		args = append(args, vals...)
+		clause, arg := uuidAny(&n, "channel_uuid", f.AccessibleChannels)
+		perm = append(perm, clause)
+		args = append(args, arg)
 	}
 	if len(f.AccessibleProjects) > 0 {
-		ph, vals := inClause(&n, f.AccessibleProjects)
-		perm = append(perm, "project_uuid::text IN ("+ph+")")
-		args = append(args, vals...)
+		clause, arg := uuidAny(&n, "project_uuid", f.AccessibleProjects)
+		perm = append(perm, clause)
+		args = append(args, arg)
 	}
 	if len(f.AccessibleGrpIDs) > 0 {
 		ph, vals := inClause(&n, f.AccessibleGrpIDs)
@@ -357,22 +358,6 @@ func UpdateDueDate(ctx context.Context, id uuid.UUID, dueAt *time.Time) error {
 		return fmt.Errorf("memory item not found")
 	}
 	return nil
-}
-
-// ClearOwner detaches a stale owner from an item (sets owner_user_id NULL).
-// Used by the nudge engine when it detects the owner has left the item's
-// scope: the item should no longer be addressed to them. Deliberately does
-// NOT bump updated_at — clearing ownership is a system reconciliation, not
-// user activity, and shouldn't reset the staleness window. Idempotent: a
-// no-op (already NULL or missing) returns nil.
-func ClearOwner(ctx context.Context, id uuid.UUID) error {
-	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(cctx,
-		`UPDATE workspace_memory_items SET owner_user_id = NULL
-		 WHERE id = $1 AND owner_user_id IS NOT NULL AND deleted_at IS NULL`, id)
-	return err
 }
 
 // SoftDelete dismisses an item (reversible audit-friendly delete).
@@ -513,9 +498,9 @@ type ScopeRef struct {
 func (s ScopeRef) scopeWhere(start int) (string, any) {
 	switch {
 	case s.ChannelUUID != "":
-		return fmt.Sprintf("channel_uuid::text = $%d", start), s.ChannelUUID
+		return fmt.Sprintf("channel_uuid = $%d::uuid", start), s.ChannelUUID
 	case s.ProjectUUID != "":
-		return fmt.Sprintf("project_uuid::text = $%d", start), s.ProjectUUID
+		return fmt.Sprintf("project_uuid = $%d::uuid", start), s.ProjectUUID
 	case s.ChatGrpID != "":
 		return fmt.Sprintf("chat_grp_id = $%d", start), s.ChatGrpID
 	}
@@ -1008,6 +993,22 @@ func nullStr(s string) any {
 
 // inClause builds "$n,$n+1,..." placeholders for an IN list and returns
 // the value slice, advancing *n.
+// uuidAny is "col = ANY($n::uuid[])" over the vals that are uuids, as one
+// array argument: the column compared as itself, so its index serves the
+// filter (col::text IN (...) could not). A val that isn't a uuid names no row
+// and is left out; none left matches nothing.
+func uuidAny(n *int, col string, vals []string) (string, any) {
+	ids := make([]string, 0, len(vals))
+	for _, v := range vals {
+		if u, err := uuid.Parse(v); err == nil {
+			ids = append(ids, u.String())
+		}
+	}
+	clause := fmt.Sprintf("%s = ANY($%d::uuid[])", col, *n)
+	*n++
+	return clause, pq.Array(ids)
+}
+
 func inClause(n *int, vals []string) (string, []any) {
 	ph := make([]string, len(vals))
 	out := make([]any, len(vals))

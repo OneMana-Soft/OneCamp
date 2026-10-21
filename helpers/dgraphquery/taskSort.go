@@ -19,6 +19,15 @@ var taskSorts = map[string]string{
 	"task_created_date": "task_created_at",
 }
 
+// ManualOrder is the list's Manual sort: the project's one order
+// (business/TaskRank, shared with the board), which the graph can't sort by,
+// as a task never moved has no rank. The caller orders those tasks itself
+// (business/Project GetDgraphProjectTaskList).
+const ManualOrder = "manual"
+
+// manualSort is the key the app sends for it.
+const manualSort = "task_rank"
+
 // taskListDefaultOrder is a task list's order when it asks for none the list
 // offers: newest first.
 const taskListDefaultOrder = "orderdesc: task_created_at"
@@ -41,6 +50,10 @@ func TaskListOrder(sorting string) (string, error) {
 	}
 	order := taskListDefaultOrder
 	for _, s := range sorts {
+		if s.ID == manualSort {
+			order = ManualOrder
+			continue
+		}
 		predicate, ok := taskSorts[s.ID]
 		if !ok {
 			continue

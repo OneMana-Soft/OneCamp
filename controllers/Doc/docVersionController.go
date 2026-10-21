@@ -3,21 +3,25 @@ package docController
 // A doc's version history (docs programme A4, the Snapshot Service; B8 builds the
 // history sheet on it):
 //
-//	GET  /doc/versions?doc_uuid=                  versions, newest first, and the people they credit
+//	GET  /doc/versions?doc_uuid=&before=          versions, newest first, a page at a time, and the people they credit
 //	POST /doc/versions {doc_uuid, name, pinned}    keep the doc as it is now ("Save this version")
 //	GET  /doc/versions/{version_id}?doc_uuid=     a version's body, to read beside the doc
 //	POST /doc/versions/{version_id}/name {doc_uuid, name, pinned}
 //	POST /doc/versions/{version_id}/restore {doc_uuid}   live, for everyone
 //
-// Each takes edit access to the doc, decided by the Access Resolver.
+// Each takes edit access to the doc, decided by the Access Resolver. A table
+// row's page (a hosted doc, D-18) keeps its history too: these routes open
+// hosted docs for their hosts (historyOpen), and no other path does.
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
+	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	snapshotBusiness "github.com/akashc777/OneCamp/business/Snapshot"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -59,19 +63,38 @@ func versionError(w http.ResponseWriter, r *http.Request, err error) {
 	helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 }
 
-// ListDocVersions is GET /doc/versions.
+// historyOpen is r for a history route: one that opens a table row's page
+// for its host (D-18), as the row page's own read does.
+func historyOpen(r *http.Request) *http.Request {
+	return r.WithContext(docBusiness.WithHostedOpen(r.Context()))
+}
+
+// ListDocVersions is GET /doc/versions: a page of versions, newest first;
+// before (RFC 3339) asks for the next page, and next is its cursor while
+// there are more.
 func ListDocVersions(w http.ResponseWriter, r *http.Request) {
+	r = historyOpen(r)
 	docUUID := r.URL.Query().Get("doc_uuid")
+	var before time.Time
+	if raw := r.URL.Query().Get("before"); raw != "" {
+		t, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a time in this doc's history."})
+			return
+		}
+		before = t
+	}
 	_, who := accessBusiness.RequestSubject(r)
-	list, err := snapshotBusiness.Snapshots.List(r.Context(), who, accessBusiness.KindDoc, docUUID)
+	list, err := snapshotBusiness.Snapshots.List(r.Context(), who, accessBusiness.KindDoc, docUUID, before)
 	if err != nil {
 		versionError(w, r, err)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Success", "data": helpers.Envolope{
-		"versions": list,
-		"people":   peopleIn(r.Context(), list),
-	}})
+	data := helpers.Envolope{"versions": list, "people": peopleIn(r.Context(), list)}
+	if len(list) == snapshotBusiness.ListPage {
+		data["next"] = list[len(list)-1].CreatedAt.UTC().Format(time.RFC3339Nano)
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Success", "data": data})
 }
 
 // peopleIn names everyone the versions credit, people and agents, in one read.
@@ -111,6 +134,7 @@ func peopleIn(ctx context.Context, list []snapshotBusiness.Version) map[string]v
 
 // TakeDocVersion is POST /doc/versions: keep the doc as it is now.
 func TakeDocVersion(w http.ResponseWriter, r *http.Request) {
+	r = historyOpen(r)
 	var in versionRequest
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to parse the body of the req"})
@@ -130,6 +154,7 @@ func TakeDocVersion(w http.ResponseWriter, r *http.Request) {
 
 // PreviewDocVersion is GET /doc/versions/{version_id}.
 func PreviewDocVersion(w http.ResponseWriter, r *http.Request) {
+	r = historyOpen(r)
 	_, who := accessBusiness.RequestSubject(r)
 	html, err := snapshotBusiness.Snapshots.Preview(r.Context(), who, accessBusiness.KindDoc, r.URL.Query().Get("doc_uuid"), chi.URLParam(r, "version_id"))
 	if err != nil {
@@ -141,6 +166,7 @@ func PreviewDocVersion(w http.ResponseWriter, r *http.Request) {
 
 // NameDocVersion is POST /doc/versions/{version_id}/name.
 func NameDocVersion(w http.ResponseWriter, r *http.Request) {
+	r = historyOpen(r)
 	var in versionRequest
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to parse the body of the req"})
@@ -156,6 +182,7 @@ func NameDocVersion(w http.ResponseWriter, r *http.Request) {
 
 // RestoreDocVersion is POST /doc/versions/{version_id}/restore.
 func RestoreDocVersion(w http.ResponseWriter, r *http.Request) {
+	r = historyOpen(r)
 	var in versionRequest
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to parse the body of the req"})

@@ -15,6 +15,8 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/LiveKit"
 	aiBusiness "github.com/akashc777/OneCamp/business/AI"
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
+	callControlBusiness "github.com/akashc777/OneCamp/business/CallControl"
+	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 
@@ -22,95 +24,14 @@ import (
 	business "github.com/akashc777/OneCamp/business/LiveKit"
 	recordingBusiness "github.com/akashc777/OneCamp/business/Recording"
 	workflowBusiness "github.com/akashc777/OneCamp/business/Workflow"
-	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
-	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/livekitInit"
-	"github.com/go-chi/chi/v5"
-	"github.com/google/uuid"
+	callStateModel "github.com/akashc777/OneCamp/models/postgres/CallState"
 	"github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/webhook"
 	"google.golang.org/protobuf/encoding/protojson"
 )
-
-// roomBelongsToThisInstance checks whether a LiveKit room (identified by its name)
-// belongs to this customer instance. This is critical for multi-tenant deployments
-// where a shared LiveKit server sends webhooks to ALL backends.
-//
-// Room naming conventions:
-//   - Channel calls: room name is a UUID (e.g. "550e8400-e29b-41d4-a716-446655440000")
-//   - DM calls:      room name is space-separated sorted UUIDs (e.g. "uuid1 uuid2")
-//   - Group chats:   room name is a 32-char hex hash (no hyphens, no spaces)
-func roomBelongsToThisInstance(ctx context.Context, roomName string) bool {
-	// Instant meeting (guest-shareable) — room name is "meet-<uuid>". Owned by
-	// this instance iff a guest grant row exists for it.
-	if guestBusiness.IsMeetingRoom(roomName) {
-		exists, err := guestBusiness.MeetingRoomExists(ctx, roomName)
-		if err != nil {
-			return false
-		}
-		return exists
-	}
-
-	// Channel call — room name is a UUID with hyphens
-	if strings.Contains(roomName, "-") && !strings.Contains(roomName, " ") {
-		channelUUID, err := uuid.Parse(roomName)
-		if err != nil {
-			return false
-		}
-		channelInfo, err := channelDomain.GetChannelInfoByUUID(ctx, channelUUID)
-		if err != nil || channelInfo == nil {
-			return false
-		}
-		return true
-	}
-
-	// DM call — room name contains space-separated UUIDs
-	if strings.Contains(roomName, " ") {
-		parts := strings.Fields(roomName)
-		if len(parts) < 2 {
-			return false
-		}
-		// The room belongs to this instance if ANY of its participant UUIDs
-		// exists in this instance's Postgres. Checking only the first UUID
-		// (the lexicographically smaller one) would wrongly reject — and
-		// silently drop the call-stop broadcast for — DMs whose first UUID
-		// belongs to a different tenant in a shared-LiveKit deployment.
-		for _, p := range parts {
-			userUUID, err := uuid.Parse(p)
-			if err != nil {
-				continue
-			}
-			if checkUserExistsInPostgres(ctx, userUUID) {
-				return true
-			}
-		}
-		return false
-	}
-
-	// Group chat — room name is a 32-char hex hash
-	if len(roomName) == 32 && !strings.Contains(roomName, "-") {
-		// For group chats we cannot easily verify ownership from the hash alone.
-		// However, the MQTT publish will go to this instance's own EMQX broker,
-		// targeting a topic derived from this instance's JWT_SECRET. If the room
-		// doesn't belong here, no client will be subscribed — effectively a no-op.
-		// We allow processing to avoid blocking legitimate group chat webhooks.
-		return true
-	}
-
-	// Unknown format — skip to be safe
-	return false
-}
-
-// checkUserExistsInPostgres does a lightweight check for a user UUID in Postgres.
-func checkUserExistsInPostgres(ctx context.Context, userUUID uuid.UUID) bool {
-	userInfo, err := userDomain.GetUserByUUID(ctx, userUUID)
-	if err != nil || userInfo == nil {
-		return false
-	}
-	return true
-}
 
 func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -139,43 +60,38 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle specific events
+	// When it happened, as LiveKit says: Call State orders joins and leaves by
+	// it, so a webhook that arrives late or twice changes nothing it shouldn't.
+	at := time.Now()
+	if event.CreatedAt > 0 {
+		at = time.Unix(event.CreatedAt, 0)
+	}
+
+	// Handle specific events. A LiveKit server shared between workspaces tells
+	// every one of them about every room: a room that isn't ours is left alone.
 	switch event.Event {
 	case "egress_ended":
 		recordingEnded(ctx, event.EgressInfo)
 
 	case "room_finished":
-		if event.Room != nil {
-			roomName := event.Room.Name
-
-			// ── Multi-tenant guard ──────────────────────────────────────
-			// In a shared LiveKit setup, webhooks are sent to ALL backends.
-			// Only process events for rooms that belong to THIS instance.
-			if !roomBelongsToThisInstance(ctx, roomName) {
-				helpers.LogInfoWithContext(ctx, "controllers/HandleWebhook Skipping room_finished for non-local room: %s", roomName)
-				w.WriteHeader(http.StatusOK)
-				w.Write([]byte("ok"))
-				return
-			}
-
-			helpers.LogInfoWithContext(ctx, "Room finished: %s", roomName)
-			broadcastCallStop(ctx, roomName)
-			callFinished(ctx, event.Room)
+		if event.Room == nil || !callStateBusiness.BelongsHere(ctx, event.Room.Name) {
+			break
 		}
+		roomName := event.Room.Name
+		helpers.LogInfoWithContext(ctx, "Room finished: %s", roomName)
+		callControlBusiness.OnEnded(ctx, roomName, event.Room.Sid, callStateModel.EndedRoomFinished)
+		broadcastCallStop(ctx, roomName)
+		callFinished(ctx, event.Room)
 
 	case "participant_joined":
-		// Who joined THIS call (the room's session), for its notes; and a
-		// check that they may be in it now, since a token outlives the right
-		// it was minted for (removed from the channel, a link revoked, put out
-		// by a host).
-		if event.Room != nil && event.Participant != nil && !business.IsAgentIdentity(event.Participant.Identity) {
-			roomName := event.Room.Name
-			if !roomBelongsToThisInstance(ctx, roomName) {
-				break
-			}
-			business.NoteAttendee(ctx, helpers.CallSessionKeyFor(event.Room.Sid), event.Participant.Identity)
-			admitParticipant(roomName, event.Participant.Identity)
+		// Who joined this call, their part in it, and a check that they may be
+		// in it now, since a token outlives the right it was minted for
+		// (removed from the channel, a link revoked, put out by a host, a call
+		// locked since): business/CallControl.
+		if event.Room == nil || event.Participant == nil || !callStateBusiness.BelongsHere(ctx, event.Room.Name) {
+			break
 		}
+		callControlBusiness.OnJoined(ctx, event.Room.Name, event.Room.Sid, event.Participant, at)
 
 	case "participant_left":
 		// Clear the call indicator the moment the LAST human leaves, instead
@@ -184,52 +100,41 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		// also leaves, so it can lag by many seconds or, if the agent lingers,
 		// effectively never arrive. This is the primary fix for the call dot
 		// that stays lit (and, for DMs, never clears) after a call ends.
-		if event.Room != nil && event.Participant != nil {
-			roomName := event.Room.Name
-
-			// Ignore the agent's own departure — its leaving doesn't change
-			// whether a human call is in progress.
-			if business.IsAgentIdentity(event.Participant.Identity) {
-				break
-			}
-
-			// Attendance again, as a backstop for a participant_joined that
-			// never arrived: a room can't finish until everyone has left, so
-			// this fires for every participant. Best-effort.
-			business.NoteAttendee(ctx, helpers.CallSessionKeyFor(event.Room.Sid), event.Participant.Identity)
-
-			if !roomBelongsToThisInstance(ctx, roomName) {
-				helpers.LogInfoWithContext(ctx, "controllers/HandleWebhook Skipping participant_left for non-local room: %s", roomName)
-				w.WriteHeader(http.StatusOK)
-				w.Write([]byte("ok"))
-				return
-			}
-
-			// Only broadcast "call stopped" if no human participants remain.
-			// Exclude the participant who just left — LiveKit may still list
-			// them briefly depending on event ordering. A transient
-			// ListParticipants error is treated as "still active" so we never
-			// falsely clear a live call; room_finished remains the backstop.
-			active, lerr := business.IsCallActiveExcluding(ctx, roomName, event.Participant.Identity)
-			if lerr != nil {
-				helpers.LogErrorWithContext(ctx,
-					"controllers/HandleWebhook participant_left active-check failed for %s err: %+v",
-					roomName, lerr)
-				break
-			}
-			if active {
-				// Other humans are still in the call; nothing to do.
-				break
-			}
-
-			helpers.LogInfoWithContext(ctx, "Last human left, ending call: %s", roomName)
-			broadcastCallStop(ctx, roomName)
-
-			// Best-effort: evict the room so the lingering transcription
-			// agent disconnects promptly and LiveKit reclaims resources,
-			// rather than holding the room open for its departure timeout.
-			business.DeleteRoom(ctx, roomName)
+		if event.Room == nil || event.Participant == nil || business.IsAgentIdentity(event.Participant.Identity) {
+			break
 		}
+		roomName := event.Room.Name
+		if !callStateBusiness.BelongsHere(ctx, roomName) {
+			helpers.LogInfoWithContext(ctx, "controllers/HandleWebhook Skipping participant_left for non-local room: %s", roomName)
+			break
+		}
+		callControlBusiness.OnLeft(ctx, roomName, event.Room.Sid, event.Participant, at)
+
+		// Only broadcast "call stopped" if no human participants remain.
+		// Exclude the participant who just left — LiveKit may still list
+		// them briefly depending on event ordering. A transient
+		// ListParticipants error is treated as "still active" so we never
+		// falsely clear a live call; room_finished remains the backstop.
+		active, lerr := business.IsCallActiveExcluding(ctx, roomName, event.Participant.Identity)
+		if lerr != nil {
+			helpers.LogErrorWithContext(ctx,
+				"controllers/HandleWebhook participant_left active-check failed for %s err: %+v",
+				roomName, lerr)
+			break
+		}
+		if active {
+			// Other humans are still in the call; nothing to do.
+			break
+		}
+
+		helpers.LogInfoWithContext(ctx, "Last human left, ending call: %s", roomName)
+		callControlBusiness.OnEnded(ctx, roomName, event.Room.Sid, callStateModel.EndedLastLeft)
+		broadcastCallStop(ctx, roomName)
+
+		// Best-effort: evict the room so the lingering transcription
+		// agent disconnects promptly and LiveKit reclaims resources,
+		// rather than holding the room open for its departure timeout.
+		business.DeleteRoom(ctx, roomName)
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -265,6 +170,10 @@ func recordingEnded(ctx context.Context, info *livekit.EgressInfo) {
 		helpers.LogErrorWithContext(ctx, "controllers/HandleWebhook recording %s ended %s: %s", info.EgressId, info.Status, info.Error)
 	}
 	_ = recordingBusiness.UpdateStopRecordingTime(ctx, info.EgressId, durationSec, fileSize, info.StartedAt, status)
+	// The call's record lists it with how it ended.
+	if err := callStateModel.RecordingEnded(ctx, info.EgressId, status, time.Now()); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/HandleWebhook could not note the end of recording %s on its call: %+v", info.EgressId, err)
+	}
 	// Its transcript lines go back to the call's own session from here.
 	business.ForgetRecording(ctx, info.RoomName, info.EgressId)
 }
@@ -317,53 +226,7 @@ func callFinished(ctx context.Context, room *livekit.Room) {
 	workflowBusiness.NotifyMeetingEnded(call.Room)
 }
 
-// admitParticipant checks, in the background, that someone who just
-// connected to a call may be in it, and puts them out if not.
-func admitParticipant(roomName, identity string) {
-	helpers.GoSafeNamed("calls.admit", func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		ok, reason := mayStayInCall(ctx, roomName, identity)
-		if ok {
-			return
-		}
-		if err := business.RemoveFromCall(ctx, roomName, identity, "", reason); err != nil && !errors.Is(err, business.ErrNotInCall) {
-			helpers.LogErrorWithContext(ctx, "controllers/admitParticipant could not put %s out of %s: %+v", identity, roomName, err)
-		}
-	})
-}
-
-// mayStayInCall decides whether an identity that just connected to a room may
-// be there, and why not. Only identities this server mints are judged (a
-// member's graph uid, a guest's "guest-…"); anything else (LiveKit's own
-// recorder) is none of its business. A store that doesn't answer lets them
-// stay: removal is a consequence, and it must not follow from an outage.
-func mayStayInCall(ctx context.Context, roomName, identity string) (bool, string) {
-	if business.IsRemovedFromCall(ctx, roomName, identity) {
-		return false, business.RemovedByHost
-	}
-	switch {
-	case strings.HasPrefix(identity, "guest-"):
-		ok, err := guestBusiness.GuestMayJoin(ctx, roomName, identity)
-		if err != nil {
-			return true, ""
-		}
-		return ok, business.RemovedLinkRevoked
-	case business.IsMemberIdentity(identity):
-		ok, err := business.MemberMayBeInCall(ctx, roomName, identity)
-		if err != nil {
-			return true, ""
-		}
-		return ok, business.RemovedNotAMember
-	}
-	return true, ""
-}
-
-// broadcastCallStop publishes the "call ended" MQTT signal to the correct
-// audience based on the room-name shape. Shared by the room_finished and
-// participant_left webhook paths.
-//
-// Room naming conventions (see roomBelongsToThisInstance):
+// Room naming conventions (business/CallState rooms.go):
 //   - DM call:     space-separated sorted UUIDs ("uuidA uuidB")
 //   - Group chat:  32-char hex hash (no hyphens, no spaces)
 //   - Channel:     a UUID (hyphens, no spaces)
@@ -444,7 +307,7 @@ func SaveMyTranscript(w http.ResponseWriter, r *http.Request) {
 
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
 	if !ok || strings.TrimSpace(userInfo.UserDgraphInfo.Uid) == "" {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in first."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 
@@ -492,7 +355,7 @@ func ReportTranscriptionCapability(w http.ResponseWriter, r *http.Request) {
 
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
 	if !ok || strings.TrimSpace(userInfo.UserDgraphInfo.Uid) == "" {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in first."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	identity := userInfo.UserDgraphInfo.Uid
@@ -587,7 +450,7 @@ func SetCallTranscription(w http.ResponseWriter, r *http.Request) {
 	}
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
 	if !ok || strings.TrimSpace(userInfo.UserDgraphInfo.Uid) == "" {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in first."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	sw, err := business.SetTranscription(ctx, input.RoomName, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.DisplayName(), input.On)
@@ -603,140 +466,7 @@ func SetCallTranscription(w http.ResponseWriter, r *http.Request) {
 	if input.On {
 		action, summary = "call.transcription.on", "Turned transcription on in a call"
 	}
-	auditBusiness.Record(r, action, auditBusiness.CategorySecurity, summary,
+	auditBusiness.Record(r, action, auditBusiness.CategoryCalls, summary,
 		map[string]interface{}{"room": input.RoomName, "where": sw.Where})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": sw})
-}
-
-// RemoveCallParticipant POST /livekit/remove-participant — a host puts someone
-// out of a call: a channel's moderators (and the workspace's admins) in its
-// call, the person who started an instant meeting in it. Not offered in DMs
-// and groups.
-func RemoveCallParticipant(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	var input struct {
-		RoomName string `json:"room_name"`
-		Identity string `json:"identity"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil || strings.TrimSpace(input.RoomName) == "" || strings.TrimSpace(input.Identity) == "" {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Say which call and who to remove."})
-		return
-	}
-	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
-	if !ok || strings.TrimSpace(userInfo.UserDgraphInfo.Uid) == "" {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in first."})
-		return
-	}
-	if input.Identity == userInfo.UserDgraphInfo.Uid {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"code": "not_allowed", "msg": "To leave the call, hang up."})
-		return
-	}
-	allowed, err := business.MayRemoveFromCall(ctx, input.RoomName, &userInfo.UserDgraphInfo, userInfo.UserPostgresInfo.IsAdmin)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/RemoveCallParticipant could not check the caller: %+v", err)
-		helpers.WriteRetryLater(w, "The server couldn't answer just now.")
-		return
-	}
-	if !allowed {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "not_allowed", "msg": "Only the call's host can remove people from it."})
-		return
-	}
-	err = business.RemoveFromCall(ctx, input.RoomName, input.Identity, userInfo.UserDgraphInfo.DisplayName(), business.RemovedByHost)
-	if errors.Is(err, business.ErrNotInCall) {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"code": "not_in_call", "msg": "They're not in the call."})
-		return
-	}
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/RemoveCallParticipant failed: %+v", err)
-		helpers.WriteRetryLater(w, "The call server couldn't answer just now.")
-		return
-	}
-	auditBusiness.Record(r, "call.participant.remove", auditBusiness.CategorySecurity, "Removed someone from a call",
-		map[string]interface{}{"room": input.RoomName, "identity": input.Identity})
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{"removed": true}})
-}
-
-// writeCallState answers a member's green-room read of the call in a room
-// they may be in.
-func writeCallState(w http.ResponseWriter, r *http.Request, userInfo models.UserInfo, roomName string) {
-	ctx := r.Context()
-	view, err := business.ReadCallView(ctx, roomName, true)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/writeCallState failed: %+v", err)
-		helpers.WriteRetryLater(w, "The call server couldn't answer just now.")
-		return
-	}
-	view.CanRemove, _ = business.MayRemoveFromCall(ctx, roomName, &userInfo.UserDgraphInfo, userInfo.UserPostgresInfo.IsAdmin)
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": view})
-}
-
-// GetChannelCallState GET /ch/callState/{channel_uuid} — the green room's
-// read of a channel's call: on or not, recorded or transcribed (and by whom),
-// who is in it. Members only.
-func GetChannelCallState(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
-	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
-		return
-	}
-	channelUUID, err := uuid.Parse(chi.URLParam(r, "channel_uuid"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid channel"})
-		return
-	}
-	member, err := business.MayOpenConversation(ctx, channelUUID.String(), userInfo.UserDgraphInfo.Uid)
-	if err != nil {
-		helpers.WriteRetryLater(w, "The server couldn't answer just now.")
-		return
-	}
-	if !member {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not authorised"})
-		return
-	}
-	writeCallState(w, r, userInfo, channelUUID.String())
-}
-
-// GetDMCallState GET /dm/callState/{user_uuid} — the same for the DM with
-// that person.
-func GetDMCallState(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
-	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
-		return
-	}
-	other, err := uuid.Parse(chi.URLParam(r, "user_uuid"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid person"})
-		return
-	}
-	// The room names the caller, so it can only ever be a call they are in.
-	writeCallState(w, r, userInfo, helpers.GetGroupingId(other.String(), userInfo.UserDgraphInfo.Uuid))
-}
-
-// GetGroupCallState GET /groupChat/callState/{grp_id} — the same for a group
-// the caller is in.
-func GetGroupCallState(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(models.UserInfo)
-	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
-		return
-	}
-	grpID := strings.TrimSpace(chi.URLParam(r, "grp_id"))
-	if channelUUID, chatGroupID := helpers.ClassifyRoom(grpID); channelUUID != "" || chatGroupID == "" || strings.Contains(grpID, " ") {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid group"})
-		return
-	}
-	member, err := business.MayOpenConversation(ctx, grpID, userInfo.UserDgraphInfo.Uid)
-	if err != nil {
-		helpers.WriteRetryLater(w, "The server couldn't answer just now.")
-		return
-	}
-	if !member {
-		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Not authorised"})
-		return
-	}
-	writeCallState(w, r, userInfo, grpID)
 }

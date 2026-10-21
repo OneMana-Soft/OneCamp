@@ -10,7 +10,9 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // UserNotificationPreference is the per-user master switchboard for emails.
@@ -39,6 +41,10 @@ type UserNotificationPreference struct {
 	// ReadReceipts is whether others in a DM or group chat see when this
 	// person has read it; off, they don't see others' either.
 	ReadReceipts bool `json:"read_receipts"`
+	// RecordViews is whether this person's views of a doc are recorded, for
+	// "Viewed by" and a doc's insights; off ("Don't record my views"), neither
+	// hears of them (docs C6-3).
+	RecordViews bool `json:"record_views"`
 	// FocusUntil is when the focus-time event the person is in ends; nil when
 	// they are in none. Computed, never written.
 	FocusUntil       *time.Time `json:"focus_until,omitempty"`
@@ -54,7 +60,7 @@ func allColumns() string {
 		email_task_status, email_comments, email_calls, email_channel_invites,
 		email_only_when_offline, email_digest_frequency, quiet_hours_enabled,
 		quiet_hours_start, quiet_hours_end, quiet_hours_tz, unsubscribe_token,
-		created_at, updated_at, notifications_paused_until, read_receipts, ` + focusUntilColumn(FocusStoreNow())
+		created_at, updated_at, notifications_paused_until, read_receipts, record_views, ` + focusUntilColumn(FocusStoreNow())
 }
 
 // FocusStore is where focus time is read from: the calendar's one store's
@@ -138,7 +144,7 @@ func scanRow(row rowScanner) (*UserNotificationPreference, error) {
 		&p.EmailChannelInvites, &p.EmailOnlyWhenOffline, &p.EmailDigestFrequency,
 		&p.QuietHoursEnabled, &p.QuietHoursStart, &p.QuietHoursEnd, &p.QuietHoursTZ,
 		&p.UnsubscribeToken, &p.CreatedAt, &p.UpdatedAt, &p.NotificationsPausedUntil,
-		&p.ReadReceipts, &p.FocusUntil,
+		&p.ReadReceipts, &p.RecordViews, &p.FocusUntil,
 	)
 	if err != nil {
 		return nil, err
@@ -223,6 +229,7 @@ type UpdatePreferenceInput struct {
 	QuietHoursEnd        *string `json:"quiet_hours_end,omitempty"`
 	QuietHoursTZ         *string `json:"quiet_hours_tz,omitempty"`
 	ReadReceipts         *bool   `json:"read_receipts,omitempty"`
+	RecordViews          *bool   `json:"record_views,omitempty"`
 }
 
 // Update writes the supplied changes to the database. The row must already
@@ -285,6 +292,9 @@ func Update(userID uuid.UUID, in UpdatePreferenceInput) error {
 	}
 	if in.ReadReceipts != nil {
 		add("read_receipts", *in.ReadReceipts)
+	}
+	if in.RecordViews != nil {
+		add("record_views", *in.RecordViews)
 	}
 	if len(sets) == 0 {
 		return nil
@@ -394,6 +404,36 @@ func (p *UserNotificationPreference) QuietUntil(now time.Time) *time.Time {
 		if t != nil && t.After(now) && (out == nil || t.After(*out)) {
 			out = t
 		}
+	}
+	return out
+}
+
+// ZonesOf is the time zone each of the people (user ids) set with their quiet
+// hours, by id, for those who set one: the one place a person's zone is kept
+// today (task recurrences read it too). For "23:40 for Jonas" in the "@" list.
+func ZonesOf(ctx context.Context, userIDs []string) (map[string]string, error) {
+	ids := wellFormedIDs(userIDs)
+	if len(ids) == 0 {
+		return map[string]string{}, nil
+	}
+	// A uuid's text is lower case, so the answer is keyed by lower-cased id.
+	return pgexec.Pairs[string, string](ctx,
+		`SELECT user_id::text, quiet_hours_tz FROM users_notification_preferences
+		  WHERE user_id = ANY($1::uuid[]) AND COALESCE(quiet_hours_tz, '') <> ''`, pq.Array(ids))
+}
+
+// wellFormedIDs is the uuids among ids, each once; one that isn't a uuid is
+// skipped rather than failing the read for everyone else. Pure.
+func wellFormedIDs(ids []string) []uuid.UUID {
+	out := make([]uuid.UUID, 0, len(ids))
+	seen := make(map[uuid.UUID]bool, len(ids))
+	for _, id := range ids {
+		u, err := uuid.Parse(strings.TrimSpace(id))
+		if err != nil || seen[u] {
+			continue
+		}
+		seen[u] = true
+		out = append(out, u)
 	}
 	return out
 }

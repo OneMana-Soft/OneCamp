@@ -2,78 +2,42 @@ package models
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/dgraphInit"
+	"github.com/akashc777/OneCamp/models/dgexec"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
-	"github.com/dgraph-io/dgo/v230/protos/api"
 )
 
+// CreateOrUpdateDgraphAttachment upserts dgraphAttachment over query (whose
+// variable is attachment) and returns the new node's uid, "" when it updated
+// one. An aborted write is tried again.
 func CreateOrUpdateDgraphAttachment(ctx context.Context, dgraphAttachment *dgraphStruct.DgraphAttachment, query string) (userUid string, err error) {
-	pb, err := json.Marshal(dgraphAttachment)
+	uids, err := dgexec.Upsert(ctx, query, nil, dgraphAttachment)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateOrUpdateDgraphAttachment failed to marshal dgraphAttachment struct err: %+v",
-			err)
-		return
+		helpers.LogErrorWithContext(ctx, "models/CreateOrUpdateDgraphAttachment failed to create or update dgraph attachment err: %+v", err)
+		return "", err
 	}
-
-	// An upsert, so a conflicting concurrent write is retried (DoCommitNow).
-	res, err := dgraphInit.DoCommitNow(ctx, &api.Request{
-		Query:     query,
-		Mutations: []*api.Mutation{{SetJson: pb}},
-	})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateOrUpdateDgraphAttachment failed to create or update dgraph attachment err: %+v",
-			err)
-		return
-	}
-
 	// will get uid only when new node is created
-	userUid = res.Uids["uid(attachment)"]
-	return
+	return uids[dgexec.Var("attachment")], nil
 }
 
+// BulkAddAttachmentsToDgraph sets the attachments in one mutation and returns
+// the uids Dgraph gave them.
 func BulkAddAttachmentsToDgraph(ctx context.Context, dgraphAttachments []*dgraphStruct.DgraphAttachment) (dgraphAttachmentUUID []string, err error) {
-	pb, err := json.Marshal(dgraphAttachments)
+	uids, err := dgexec.Set(ctx, dgraphAttachments)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/BulkAddAttachmentsToDgraph failed to marshal dgraphAttachment struct err: %+v",
-			err)
-		return
+		helpers.LogErrorWithContext(ctx, "models/BulkAddAttachmentsToDgraph failed to bulk create dgraph attachment err: %+v", err)
+		return nil, err
 	}
-
-	// One all-or-nothing request: an aborted try created nothing, so trying
-	// again makes no duplicates (DoCommitNow).
-	res, err := dgraphInit.DoCommitNow(ctx, &api.Request{
-		Mutations: []*api.Mutation{{SetJson: pb}},
-	})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/BulkAddAttachmentsToDgraph failed to bulk create dgraph attachment err: %+v",
-			err)
-		return
+	for _, uid := range uids {
+		dgraphAttachmentUUID = append(dgraphAttachmentUUID, uid)
 	}
-
-	for _, attachmentUid := range res.Uids {
-		dgraphAttachmentUUID = append(dgraphAttachmentUUID, attachmentUid)
-	}
-	return
+	return dgraphAttachmentUUID, nil
 }
 
 // BulkSoftDeleteDgraphAttachments sets attachment_deleted_at on multiple attachments in a single Dgraph mutation.
 func BulkSoftDeleteDgraphAttachments(ctx context.Context, attachments []*dgraphStruct.DgraphAttachment, query string) error {
-	pb, err := json.Marshal(attachments)
-	if err != nil {
-		return err
-	}
-	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{
-		Query:     query,
-		Mutations: []*api.Mutation{{SetJson: pb}},
-	})
-	if err != nil {
+	if _, err := dgexec.Mutate(ctx, query, nil, dgexec.Mutation{Set: attachments}); err != nil {
 		helpers.LogErrorWithContext(ctx, "models/BulkSoftDeleteDgraphAttachments failed: %v", err)
 		return err
 	}

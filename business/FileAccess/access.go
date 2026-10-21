@@ -128,6 +128,27 @@ func FileOf(ctx context.Context, place Place, id string) (*attachmentModels.Atta
 	return att, nil
 }
 
+// FilesOf is FileOf for several files of one place in one read: the ones
+// that are files of it, by id; any other id is left out.
+func FilesOf(ctx context.Context, place Place, ids []string) (map[string]*attachmentModels.Attachment, error) {
+	valid := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, err := uuid.Parse(id); err == nil {
+			valid = append(valid, id)
+		}
+	}
+	found, err := attachmentBusiness.AttachmentsOfPlace(ctx, valid, place.Kind, place.ID)
+	if err != nil {
+		return nil, err
+	}
+	for id, att := range found {
+		if att == nil || att.ObjKey == "" {
+			delete(found, id)
+		}
+	}
+	return found, nil
+}
+
 // sources are where the answers come from: each place's own rule, everywhere
 // but tests. The yes-or-no ones answer false for a place that isn't there.
 type sources struct {

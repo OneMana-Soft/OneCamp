@@ -40,24 +40,32 @@ type ApiToken struct {
 	// becomes an independent kill switch: deactivating the agent stops every
 	// credential bound to it, without hunting for tokens to revoke.
 	AgentId *uuid.UUID `json:"agent_id,omitempty"`
+
+	// AppId binds the credential to an installed app (migration 360), as AgentId
+	// binds it to an agent: the app is the identity and acts as its own bot user
+	// (created_by); turning the app off stops every credential bound to it.
+	AppId *uuid.UUID `json:"app_id,omitempty"`
 }
 
 type scanner interface {
 	Scan(dest ...any) error
 }
 
-const tokenColumns = `id, name, token_prefix, scopes, created_by, last_used_at, expires_at, revoked_at, created_at, updated_at, agent_id`
+const tokenColumns = `id, name, token_prefix, scopes, created_by, last_used_at, expires_at, revoked_at, created_at, updated_at, agent_id, app_id`
 
 func scanToken(s scanner) (*ApiToken, error) {
 	var t ApiToken
 	var lastUsedAt, expiresAt, revokedAt sql.NullTime
-	var agentID uuid.NullUUID
+	var agentID, appID uuid.NullUUID
 	if err := s.Scan(&t.Id, &t.Name, &t.TokenPrefix, &t.Scopes, &t.CreatedBy,
-		&lastUsedAt, &expiresAt, &revokedAt, &t.CreatedAt, &t.UpdatedAt, &agentID); err != nil {
+		&lastUsedAt, &expiresAt, &revokedAt, &t.CreatedAt, &t.UpdatedAt, &agentID, &appID); err != nil {
 		return nil, err
 	}
 	if agentID.Valid {
 		t.AgentId = &agentID.UUID
+	}
+	if appID.Valid {
+		t.AppId = &appID.UUID
 	}
 	if lastUsedAt.Valid {
 		t.LastUsedAt = &lastUsedAt.Time
@@ -95,6 +103,63 @@ func CreateToken(ctx context.Context, name, tokenHash, tokenPrefix, scopesJSON s
 		return uuid.Nil, err
 	}
 	return id, nil
+}
+
+// CreateAppToken inserts a credential for an installed app (migration 360): it
+// acts as the app's bot user (createdBy), and app_id is set once, at creation,
+// for the same reason agent_id is.
+func CreateAppToken(ctx context.Context, name, tokenHash, tokenPrefix, scopesJSON string, botUser uuid.UUID, expiresAt *time.Time, appID uuid.UUID) (uuid.UUID, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	if strings.TrimSpace(scopesJSON) == "" {
+		scopesJSON = "[]"
+	}
+	id := uuid.New()
+	const q = `INSERT INTO api_tokens (id, name, token_hash, token_prefix, scopes, created_by, expires_at, app_id)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`
+	if _, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, name, tokenHash, tokenPrefix, scopesJSON, botUser, expiresAt, appID); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/CreateAppToken err: %+v", err)
+		return uuid.Nil, err
+	}
+	return id, nil
+}
+
+// ListByApp is an app's credentials that still work, newest first.
+func ListByApp(ctx context.Context, appID uuid.UUID) ([]*ApiToken, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	q := `SELECT ` + tokenColumns + ` FROM api_tokens
+		WHERE app_id=$1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())
+		ORDER BY created_at DESC`
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q, appID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/ListByApp err: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*ApiToken
+	for rows.Next() {
+		t, err := scanToken(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// RevokeAllForApp revokes every credential of an app (it was removed), and
+// says how many.
+func RevokeAllForApp(ctx context.Context, appID uuid.UUID) (int64, error) {
+	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx,
+		`UPDATE api_tokens SET revoked_at=NOW(), updated_at=NOW() WHERE app_id=$1 AND revoked_at IS NULL`, appID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/RevokeAllForApp err: %+v", err)
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // GetActiveByHash returns the active (non-revoked, non-expired) token for a

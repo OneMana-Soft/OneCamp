@@ -11,10 +11,12 @@ package business
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	domain "github.com/akashc777/OneCamp/domain/Task"
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/google/uuid"
 )
@@ -156,7 +158,7 @@ const maxShifted = 500
 // project the person was checked to run. Each move goes into its task's
 // history. Days are in loc.
 func ShiftDependents(ctx context.Context, projectUUID, movedUUID string, loc *time.Location, user *dgraphStruct.DgraphUser) ([]ShiftedTask, error) {
-	all, err := domain.DownstreamSchedule(ctx, movedUUID)
+	all, err := shiftSeams.schedule(ctx, movedUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -167,18 +169,53 @@ func ShiftDependents(ctx context.Context, projectUUID, movedUUID string, loc *ti
 		}
 	}
 	plan := PlanShifts(tasks, movedUUID, loc)
+	// One Postgres statement and one graph mutation for the whole chain
+	// (PR2, the BE audit's #14), each task keeping its own history line.
+	now := time.Now()
 	done := make([]ShiftedTask, 0, len(plan))
+	var ids []uuid.UUID
+	var writes []*dgraphStruct.DgraphTask
 	for _, s := range plan {
 		id, err := uuid.Parse(s.UUID)
-		if err != nil {
+		if err != nil || s.before == nil || !strings.HasPrefix(s.before.Uid, "0x") {
 			continue
 		}
-		if err := UpdateTaskDates(ctx, id, TaskDates{Start: s.Start, Due: s.Due}, s.before, user); err != nil {
-			return done, err
+		if helpers.IsSoftDeleted(s.before.DeletedAt) {
+			continue
 		}
+		w := datesWrite(s.before.Uid, id, TaskDates{Start: s.Start, Due: s.Due}, s.before, user, now)
+		if w == nil {
+			continue
+		}
+		ids, writes = append(ids, id), append(writes, w)
 		done = append(done, s)
 	}
+	if len(writes) == 0 {
+		return done, nil
+	}
+	if err := shiftSeams.touch(ctx, ids, now); err != nil {
+		return nil, err
+	}
+	if err := shiftSeams.write(ctx, writes); err != nil {
+		return nil, err
+	}
+	for _, s := range done {
+		shiftSeams.after(ctx, s.before, TaskDates{Start: s.Start, Due: s.Due}, user)
+	}
 	return done, nil
+}
+
+// shiftSeams are where a shift reads and writes: seams for tests.
+var shiftSeams = struct {
+	schedule func(ctx context.Context, movedUUID string) ([]*dgraphStruct.DgraphTask, error)
+	touch    func(ctx context.Context, ids []uuid.UUID, at time.Time) error
+	write    func(ctx context.Context, ts []*dgraphStruct.DgraphTask) error
+	after    func(ctx context.Context, t *dgraphStruct.DgraphTask, dates TaskDates, user *dgraphStruct.DgraphUser)
+}{
+	schedule: domain.DownstreamSchedule,
+	touch:    domain.TouchTasks,
+	write:    domain.SetDgraphTasks,
+	after:    afterDates,
 }
 
 // civil is t's calendar day in loc, as UTC midnight, so days subtract exactly.

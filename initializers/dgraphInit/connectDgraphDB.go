@@ -72,6 +72,11 @@ func createSchema() (err error) {
 		user_channels: [uid] @reverse .
 		user_name: string @index(exact) @upsert .
 		user_full_name: string @index(trigram) .
+		# Where people searches start (domain/User SearchName): their name,
+		# full name, job title and department in one value, without @upsert,
+		# so its trigrams are never conflict keys and people joining at once
+		# with like names don't abort each other (c925fc70).
+		user_search_name: string @index(trigram) .
 		user_job_title: string .
 		user_department: string .
 		user_app_lang: string .
@@ -159,7 +164,18 @@ func createSchema() (err error) {
 		post_comments: [uid] .
 		post_attachments: [uid] .
 		post_channel: uid .
-		post_doc: uid .
+		# Walked backwards by the work graph (DG5): the posts that shared a doc,
+		# and through them the channels it was shared in. The reverse index is
+		# built once, at the first start after upgrading.
+		post_doc: uid @reverse .
+		# The work graph's references (DG6): the docs, tasks and projects a
+		# message, a direct message, a comment or a doc's body links to, kept
+		# by business/Refs from the body as saved (and, for a doc, its to-dos'
+		# tasks, doc_task_links). Walked both ways, so @reverse; no @upsert and
+		# no token index (a list edge needs neither, and either would add
+		# conflict keys to every save). The reverse index is built once, at the
+		# first start after upgrading.
+		refers_to: [uid] @reverse .
 		post_mentions: [uid] .
 		post_uuid: string @index(exact) @upsert .
 		post_reactions: [uid] @reverse .
@@ -249,6 +265,9 @@ func createSchema() (err error) {
 		reaction_emoji_id: string .
 		reaction_added_by: uid .
 		reaction_on_content_added_by: uid @reverse .
+		# One person's one emoji on one message or comment (domain/Reaction Key):
+		# @upsert, so two adds of the same reaction at once can't both land.
+		reaction_key: string @index(exact) @upsert .
 
 		mention_users: [uid] @reverse .
 		mention_chat_uuid: string @index(exact) . 
@@ -517,6 +536,7 @@ func createSchema() (err error) {
 			doc_verified_until
 			doc_is_wiki
 			doc_restored_at
+			refers_to
 		}
 
 		type TreeStamp {
@@ -568,6 +588,7 @@ func createSchema() (err error) {
 			comment_created_at
 			comment_updated_at
 			comment_deleted_at
+			refers_to
 		}
 
 		type Channel {
@@ -611,6 +632,7 @@ func createSchema() (err error) {
 			post_deleted_by: User
 			post_call_session
 			post_copy_of
+			refers_to
 		}
 
 		type User {
@@ -629,6 +651,7 @@ func createSchema() (err error) {
 			user_channels: [Channel]
 			user_docs: [Doc]
 			user_full_name
+			user_search_name
 			user_job_title
 			user_department
 			user_hobbies
@@ -677,6 +700,7 @@ func createSchema() (err error) {
 			chat_system
 			chat_deleted_by: User
 			chat_copy_of
+			refers_to
 		}
 
 		type Dm {
@@ -692,6 +716,7 @@ func createSchema() (err error) {
 			reaction_emoji_id
 			reaction_added_by: User
 			reaction_on_content_added_by: User
+			reaction_key
 		}
 
 		type Mention {

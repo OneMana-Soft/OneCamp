@@ -29,6 +29,7 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/Task"
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
@@ -56,9 +57,11 @@ var (
 var (
 	tieDocTask   = linkModels.AddDocTask
 	untieDocTask = linkModels.RemoveDocTask
-	docHoldsTask = linkModels.HasDocTask
-	docsHolding  = linkModels.DocsForTask
-	setChecks    = func(ctx context.Context, docUUID string, checks map[string]bool, o collab.Options) (collab.TaskChecks, error) {
+	// docRefsChanged tells the work graph a doc's ties changed (business/Refs).
+	docRefsChanged = refsBusiness.Changed
+	docHoldsTask   = linkModels.HasDocTask
+	docsHolding    = linkModels.DocsForTask
+	setChecks      = func(ctx context.Context, docUUID string, checks map[string]bool, o collab.Options) (collab.TaskChecks, error) {
 		return collab.SetTaskChecks(ctx, docUUID, checks, o)
 	}
 	docLevel = func(ctx context.Context, user *model.UserInfo, docUUID string) (accessBusiness.Level, error) {
@@ -77,7 +80,7 @@ var (
 )
 
 func init() {
-	webhookBusiness.RegisterEventListener(taskToDocs)
+	webhookBusiness.RegisterEventListenerSeeingRestricted(taskToDocs)
 }
 
 func mayEditDoc(ctx context.Context, user *model.UserInfo, docUUID string) error {
@@ -134,6 +137,9 @@ func TodoToTask(ctx context.Context, user *model.UserInfo, docUUID, projectUUID,
 	if err := tieDocTask(ctx, doc, task, by); err != nil {
 		// The task is made; its to-do just won't tick from elsewhere. Said, not hidden.
 		helpers.LogErrorWithContext(ctx, "business/TodoToTask doc %s task %s: the tie wasn't kept, so the to-do won't follow the task: %+v", doc, task, err)
+	} else {
+		// The work graph mirrors the tie: the doc refers to the task (DG6).
+		docRefsChanged(ctx, refsBusiness.Doc, doc.String())
 	}
 	return task, nil
 }
@@ -235,6 +241,8 @@ func taskToDocs(ctx context.Context, eventType string, data map[string]interface
 		case errors.Is(err, collab.ErrNoSuchDoc), err == nil && got.Held == 0:
 			if err := untieDocTask(ctx, doc, task); err != nil {
 				helpers.LogErrorWithContext(ctx, "business/taskToDocs task %s doc %s: the doc no longer holds its to-do, but still follows it: %+v", task, doc, err)
+			} else {
+				docRefsChanged(ctx, refsBusiness.Doc, doc.String())
 			}
 		case err != nil:
 			helpers.LogErrorWithContext(ctx, "business/taskToDocs task %s doc %s: its to-do wasn't ticked: %+v", task, doc, err)

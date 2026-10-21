@@ -65,6 +65,10 @@ const (
 	// maxPictureBytes and pictureTimeout bound reading one picture.
 	maxPictureBytes = 20 << 20
 	pictureTimeout  = 30 * time.Second
+	// maxFileBytes and fileTimeout bound reading one other file (a PDF, a
+	// video); the doc's upload limit applies again when it is stored.
+	maxFileBytes = 100 << 20
+	fileTimeout  = 2 * time.Minute
 )
 
 // maxTreePages is the most pages one tree brings.
@@ -75,6 +79,9 @@ var maxTreePages = 1000
 var (
 	fetchPicture = func(ctx context.Context, address string) (*safefetch.Response, error) {
 		return safefetch.Fetch(ctx, address, safefetch.Options{MaxBytes: maxPictureBytes, Timeout: pictureTimeout, Accept: "image/*"})
+	}
+	fetchFile = func(ctx context.Context, address string) (*safefetch.Response, error) {
+		return safefetch.Fetch(ctx, address, safefetch.Options{MaxBytes: maxFileBytes, Timeout: fileTimeout})
 	}
 	tableFromDatabase = notionAdapter.TableFromDatabase
 	lookupMapped      = importModels.LookupIdMapping
@@ -98,7 +105,7 @@ func pageKey(id string) string {
 var pagesWarnings = []string{
 	"Pages come across as docs private to the person importing, in their tree; share them or move them into a space afterwards.",
 	"A database's rows come across in its table; what is written inside a row's own page stays in Notion.",
-	"Comments on pages, and files other than pictures, stay in Notion.",
+	"Comments on a page come across as the doc's comments, by whoever wrote them when they are in this workspace; comments on a line inside a page stay in Notion.",
 }
 
 // searchHit is a page as /search lists it.
@@ -198,7 +205,7 @@ func (p *Provider) PagesOf(ctx context.Context, j *importModels.Job, _ importPro
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, importProvider.SourcePage{SourceID: w.key, ParentSourceID: w.parent, Title: w.title, Icon: w.icon, HTML: html, Files: w.files})
+		out = append(out, importProvider.SourcePage{SourceID: w.key, ParentSourceID: w.parent, Title: w.title, Icon: w.icon, HTML: html, Files: w.files, Comments: w.comments})
 	}
 	return out, nil
 }
@@ -240,6 +247,8 @@ type walked struct {
 	// address the page names each by; srcs is that address by its block.
 	files map[string][]byte
 	srcs  map[string]string
+	// comments are the comments on the page itself, oldest first.
+	comments []importProvider.SourceComment
 }
 
 // tree is one tree of pages being read.
@@ -256,6 +265,9 @@ type tree struct {
 	tables map[string][]string
 	// capped is set once the tree reaches maxTreePages.
 	capped bool
+	// noComments is set once the connection is found unable to read
+	// comments, which it then isn't asked for again.
+	noComments bool
 }
 
 func (t *tree) get(path string, out any) error {
@@ -316,6 +328,9 @@ func (t *tree) page(key, parent string) error {
 	}
 	w := walked{key: key, parent: parent, title: title, icon: emoji(pg.Icon), blocks: blocks, files: map[string][]byte{}, srcs: map[string]string{}}
 	t.pictures(&w, blocks)
+	if w.comments, err = t.comments(key); err != nil {
+		return err
+	}
 	t.pages = append(t.pages, w)
 	for _, sub := range subpages(blocks) {
 		if err := t.page(sub, key); err != nil {
@@ -373,6 +388,55 @@ func (t *tree) children(id string, depth int) ([]notionBlock, error) {
 			}
 			b.Children = kids
 		}
+	}
+	return out, nil
+}
+
+// comments reads the comments on a page itself (its discussions), oldest
+// first, in the words the task import writes them in (renderRichText). A
+// connection without Notion's "Read comments" capability is told once, and
+// the tree comes across without them; comments on a line inside a page are
+// on its blocks, which the API reads one block at a time, and stay in Notion.
+func (t *tree) comments(key string) ([]importProvider.SourceComment, error) {
+	if t.noComments {
+		return nil, nil
+	}
+	var out []importProvider.SourceComment
+	cursor := ""
+	for i := 0; i < maxPages; i++ {
+		path := "/comments?block_id=" + url.QueryEscape(key) + "&page_size=100"
+		if cursor != "" {
+			path += "&start_cursor=" + url.QueryEscape(cursor)
+		}
+		var resp notionCommentsResp
+		if err := t.get(path, &resp); err != nil {
+			if !unreadable(err) {
+				return nil, err
+			}
+			t.noComments = true
+			break
+		}
+		for _, c := range resp.Results {
+			body := strings.TrimSpace(renderRichText(c.RichText))
+			if body == "" {
+				continue
+			}
+			created, _ := time.Parse(time.RFC3339, c.CreatedTime)
+			author := ""
+			if c.CreatedBy != nil {
+				author = c.CreatedBy.ID
+			}
+			out = append(out, importProvider.SourceComment{SourceID: c.ID, Body: "<p>" + body + "</p>", AuthorSourceID: author, Created: created})
+		}
+		if !resp.HasMore || resp.NextCursor == "" {
+			break
+		}
+		cursor = resp.NextCursor
+	}
+	if t.noComments {
+		// Said once, for the whole import: every page's comments stay behind.
+		t.note(key, "COMMENTS_LEFT_IN_NOTION", "The connection can't read comments, so comments stay in Notion: give it the Read comments capability, then import again.")
+		return nil, nil
 	}
 	return out, nil
 }
@@ -719,6 +783,11 @@ func (t *tree) text(rts []notionRichText) string {
 		}
 		s := strings.ReplaceAll(html.EscapeString(rt.PlainText), "\n", "<br>")
 		if rt.Type == "mention" {
+			// A date is a doc's own date chip.
+			if rt.Mention != nil && rt.Mention.Date != nil && len(rt.Mention.Date.Start) >= 10 {
+				fmt.Fprintf(&b, `<time data-type="date-mention" datetime="%s">%s</time>`, html.EscapeString(rt.Mention.Date.Start[:10]), s)
+				continue
+			}
 			if rt.Mention != nil && rt.Mention.Page != nil {
 				if href := t.pageHref(rt.Mention.Page.ID); href != "" {
 					s = `<a href="` + html.EscapeString(href) + `">` + s + `</a>`
@@ -893,14 +962,27 @@ func (t *tree) block(b *strings.Builder, w walked, blk notionBlock) error {
 		t.tableBlock(b, blk)
 	case "image":
 		t.picture(b, w, blk)
-	case "bookmark", "embed", "link_preview":
-		box := map[string]*notionURLBox{"bookmark": blk.Bookmark, "embed": blk.Embed, "link_preview": blk.LinkPreview}[blk.Type]
+	case "bookmark", "link_preview":
+		// A doc's own bookmark card; the codec keeps the link inside it for
+		// any reader that knows no cards.
+		box := map[string]*notionURLBox{"bookmark": blk.Bookmark, "link_preview": blk.LinkPreview}[blk.Type]
 		if box != nil && box.URL != "" {
 			label := plainText(box.Caption)
-			if label == "" {
+			title := ""
+			if label != "" {
+				title = ` data-title="` + html.EscapeString(label) + `"`
+			} else {
 				label = box.URL
 			}
-			b.WriteString(`<p><a href="` + html.EscapeString(box.URL) + `">` + html.EscapeString(label) + `</a></p>`)
+			u := html.EscapeString(box.URL)
+			b.WriteString(`<div data-type="bookmark" data-href="` + u + `"` + title + `><a href="` + u + `">` + html.EscapeString(label) + `</a></div>`)
+		}
+	case "embed":
+		// A doc's own embed, which shows what its sites allow and is a link
+		// everywhere else.
+		if box := blk.Embed; box != nil && box.URL != "" {
+			u := html.EscapeString(box.URL)
+			b.WriteString(`<div data-type="web-embed" data-src="` + u + `"><a href="` + u + `">` + u + `</a></div>`)
 		}
 	case "video", "audio", "file", "pdf":
 		t.attachment(b, w, blk)
@@ -928,7 +1010,24 @@ func (t *tree) block(b *strings.Builder, w walked, blk notionBlock) error {
 		}
 	case "table_of_contents":
 		b.WriteString(`<nav data-type="toc"></nav>`)
-	case "column_list", "column", "synced_block", "tab":
+	case "column_list":
+		// Columns side by side, as the doc's own column list.
+		b.WriteString(`<div data-type="column-list">`)
+		if err := children(); err != nil {
+			return err
+		}
+		b.WriteString("</div>")
+	case "column":
+		width := ""
+		if blk.Column != nil && blk.Column.WidthRatio > 0 && blk.Column.WidthRatio < 1 {
+			width = fmt.Sprintf(` data-width="%d"`, max(1, min(99, int(blk.Column.WidthRatio*100+0.5))))
+		}
+		b.WriteString(`<div data-type="column"` + width + `>`)
+		if err := children(); err != nil {
+			return err
+		}
+		b.WriteString("</div>")
+	case "synced_block", "tab":
 		return children()
 	}
 	return nil
@@ -960,13 +1059,22 @@ func (t *tree) tableBlock(b *strings.Builder, blk notionBlock) {
 	b.WriteString("</table>")
 }
 
-// pictures reads the pictures Notion keeps in a page's blocks as soon as the
-// page is read, since their addresses expire within the hour, into the files
-// the page goes in with.
+// pictures reads the pictures and files Notion keeps in a page's blocks as
+// soon as the page is read, since their addresses expire within the hour,
+// into the files the page goes in with.
 func (t *tree) pictures(w *walked, blocks []notionBlock) {
 	for _, blk := range blocks {
 		if blk.InTrash {
 			continue
+		}
+		if box := fileBoxOf(blk); box != nil && (box.External == nil || box.External.URL == "") && box.File != nil && box.File.URL != "" {
+			name := fileName(box, blk.Type)
+			if data, err := t.fetchKept(box.File.URL); err != nil {
+				t.note(w.key, "FILE_LEFT_IN_NOTION", fmt.Sprintf("%q in %q couldn't be brought across from Notion; it stays there.", name, w.title))
+			} else {
+				src := "files/" + pageKey(blk.ID) + path.Ext(name)
+				w.files[src], w.srcs[blk.ID] = data, src
+			}
 		}
 		if box := blk.Image; box != nil && (box.External == nil || box.External.URL == "") && box.File != nil && box.File.URL != "" {
 			if data, ext, err := t.fetch(box.File.URL); err != nil {
@@ -1018,27 +1126,72 @@ func (t *tree) fetch(address string) ([]byte, string, error) {
 	return resp.Body, ext, nil
 }
 
-// attachment writes a video, a sound, a PDF or another file: a link to one on
-// the web, or its name for one Notion keeps, which stays there.
+// fileBoxOf is a video's, a sound's, a PDF's or another file's block.
+func fileBoxOf(blk notionBlock) *notionFileBox {
+	return map[string]*notionFileBox{"video": blk.Video, "audio": blk.Audio, "file": blk.File, "pdf": blk.PDF}[blk.Type]
+}
+
+// fileName is what a file is called: its name, or its address's last part,
+// or what it is.
+func fileName(box *notionFileBox, kind string) string {
+	if n := strings.TrimSpace(box.Name); n != "" {
+		return n
+	}
+	address := ""
+	if box.External != nil {
+		address = box.External.URL
+	} else if box.File != nil {
+		address = box.File.URL
+	}
+	if u, err := url.Parse(address); err == nil {
+		if base := path.Base(u.Path); base != "" && base != "." && base != "/" {
+			if un, err := url.PathUnescape(base); err == nil {
+				return un
+			}
+			return base
+		}
+	}
+	if n, ok := map[string]string{"video": "A video", "audio": "A recording", "pdf": "A PDF"}[kind]; ok {
+		return n
+	}
+	return "A file"
+}
+
+// fetchKept reads a file Notion keeps.
+func (t *tree) fetchKept(address string) ([]byte, error) {
+	resp, err := fetchFile(t.ctx, address)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status != http.StatusOK || resp.Truncated {
+		return nil, fmt.Errorf("notion file: status %d", resp.Status)
+	}
+	return resp.Body, nil
+}
+
+// attachment writes a video, a sound, a PDF or another file as the doc's
+// own file block: one on the web at its address, one Notion keeps as the
+// file read with its page (pictures), which the import uploads.
 func (t *tree) attachment(b *strings.Builder, w walked, blk notionBlock) {
-	box := map[string]*notionFileBox{"video": blk.Video, "audio": blk.Audio, "file": blk.File, "pdf": blk.PDF}[blk.Type]
+	box := fileBoxOf(blk)
 	if box == nil {
 		return
 	}
-	name := plainText(box.Caption)
-	if name == "" {
-		name = box.Name
-	}
+	name := fileName(box, blk.Type)
+	src := w.srcs[blk.ID]
 	if box.External != nil && box.External.URL != "" {
-		if name == "" {
-			name = box.External.URL
-		}
-		b.WriteString(`<p><a href="` + html.EscapeString(box.External.URL) + `">` + html.EscapeString(name) + `</a></p>`)
+		src = box.External.URL
+	}
+	if src == "" {
+		// Not read (said when it was tried): its name, so the page still
+		// says something was there.
+		b.WriteString("<p>" + html.EscapeString(name) + "</p>")
 		return
 	}
-	if name == "" {
-		name = "A file"
+	caption := ""
+	if c := plainText(box.Caption); c != "" {
+		caption = ` data-caption="` + html.EscapeString(c) + `"`
 	}
-	b.WriteString("<p>" + html.EscapeString(name) + "</p>")
-	t.note(w.key, "FILE_LEFT_IN_NOTION", fmt.Sprintf("%q in %q stays in Notion: files other than pictures aren't brought across.", name, w.title))
+	fmt.Fprintf(b, `<div data-type="file" data-kind="%s" data-src="%s" data-name="%s"%s><a href="%s">%s</a></div>`,
+		blk.Type, html.EscapeString(src), html.EscapeString(name), caption, html.EscapeString(src), html.EscapeString(name))
 }

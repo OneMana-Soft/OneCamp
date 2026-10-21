@@ -153,6 +153,18 @@ const (
 	// whose result other people own. If a tool creates INTO a container, the container
 	// is what must permit it — see ResourceTeam and ResourceProject.
 	ResourceSelfOwned ResourceKind = "self_owned"
+	// ResourceWorkItem — a thing of the work graph that has no rule of its own on
+	// this surface: a person, a whiteboard, a channel post, a comment, a memory
+	// item. Its ID is "kind:uuid". Authority is the rule the work graph and every
+	// chip in the app name it by (business/EntityLink ReadMany, as the person,
+	// never with an admin's powers): a person in the workspace, a board its
+	// sharing allows, a post in a channel the person may read, a comment on
+	// something they may see, their own memory. A work-graph tool naming a doc,
+	// task, project, channel or team is checked by that kind's own rule instead
+	// (bridge.go workItemKinds), never by this one.
+	//
+	// READ ONLY. Nothing writes through it.
+	ResourceWorkItem ResourceKind = "work_item"
 )
 
 // IdentifiesNoObject reports whether this kind names a single object at all.

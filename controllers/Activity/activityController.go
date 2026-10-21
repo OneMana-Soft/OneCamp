@@ -2,29 +2,23 @@ package controllers
 
 import (
 	"net/http"
-	"strconv"
 	"time"
 
 	business "github.com/akashc777/OneCamp/business/Activity"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
-	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 )
 
 func GetLatestMentions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	pageValue := r.URL.Query()["pageIndex"]
-	pageIndex := 0
-	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 50)
-
-	if len(pageValue) > 0 {
-		pageInt, err := strconv.Atoi(pageValue[0])
-		if err == nil {
-			pageIndex = pageInt
-		}
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
 	}
+
+	page := helpers.PageParam(r.URL.Query(), 20, 50)
+	pageIndex, pageSize := page.Index, page.Size
 
 	mentionsPage, err := business.GetMentionsByUserId(ctx, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid, pageIndex, pageSize)
 
@@ -48,18 +42,13 @@ func GetLatestMentions(w http.ResponseWriter, r *http.Request) {
 func GetLatestComments(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	pageValue := r.URL.Query()["pageIndex"]
-	pageIndex := 0
-	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 50)
-
-	if len(pageValue) > 0 {
-		pageInt, err := strconv.Atoi(pageValue[0])
-		if err == nil {
-			pageIndex = pageInt
-		}
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
 	}
+
+	page := helpers.PageParam(r.URL.Query(), 20, 50)
+	pageIndex, pageSize := page.Index, page.Size
 
 	commentsPage, err := business.GetCommentsByUserId(ctx, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid, pageIndex, pageSize)
 
@@ -83,18 +72,13 @@ func GetLatestComments(w http.ResponseWriter, r *http.Request) {
 func GetLatestReactions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-
-	pageValue := r.URL.Query()["pageIndex"]
-	pageIndex := 0
-	pageSize := helpers.SizeParam(r.URL.Query(), "pageSize", 20, 50)
-
-	if len(pageValue) > 0 {
-		pageInt, err := strconv.Atoi(pageValue[0])
-		if err == nil {
-			pageIndex = pageInt
-		}
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
 	}
+
+	page := helpers.PageParam(r.URL.Query(), 20, 50)
+	pageIndex, pageSize := page.Index, page.Size
 
 	reactionsPage, err := business.GetReactionsByUserId(ctx, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid, pageIndex, pageSize)
 
@@ -125,7 +109,10 @@ var unifiedActivity = business.GetUnifiedActivity
 func GetUnifiedActivity(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	timeValue := r.URL.Query()["beforeTime"]
 
@@ -177,7 +164,10 @@ func GetUnifiedActivity(w http.ResponseWriter, r *http.Request) {
 func MarkActivitySeen(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	if err := business.MarkActivitySeen(ctx, userInfo.UserPostgresInfo.Id); err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/MarkActivitySeen Failed to mark the feed seen err: %+v", err)

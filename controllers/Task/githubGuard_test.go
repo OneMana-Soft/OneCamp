@@ -14,7 +14,7 @@ import (
 // needs someone who may see the task (projectaccess.RequireTask with
 // NeedView), a change someone who may change it (with NeedEditTask: Work
 // Access decides), and a bulk change checks each task it names
-// (changeRefusal). Eleven of them checked nothing
+// (changeRefusals, all of them in one read and one check since PR2). Eleven of them checked nothing
 // but sign-in, so anyone could link a private task to any issue (and have its
 // comments posted there), unlink, branch, open pull requests and search a
 // linked private repository. The routes are read from the router, so a new one
@@ -53,7 +53,7 @@ func TestTaskGitHubRoutesCheckTheTaskFirst(t *testing.T) {
 		case method == "Get":
 			guard = "projectaccess.RequireTask(workAccess.NeedView)"
 		case !strings.Contains(path, "{task_uuid}"):
-			guard = "changeRefusal"
+			guard = "changeRefusals"
 		}
 		fn := funcs[handler]
 		if fn == nil {
@@ -79,19 +79,19 @@ func TestTaskGitHubRoutesCheckTheTaskFirst(t *testing.T) {
 	}
 
 	// A bulk change asks the same question of each task: may this person change it?
-	refusal := funcs["changeRefusal"]
+	refusal := funcs["changeRefusals"]
 	if refusal == nil {
-		t.Fatal("changeRefusal is gone")
+		t.Fatal("changeRefusals is gone")
 	}
 	asksForChange := false
 	ast.Inspect(refusal.Body, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && callName(call) == "business.TaskFor" && needOf(call, 3) == "workAccess.NeedEditTask" {
+		if call, ok := n.(*ast.CallExpr); ok && callName(call) == "business.ChangeRefusals" && needOf(call, 3) == "workAccess.NeedEditTask" {
 			asksForChange = true
 		}
 		return true
 	})
 	if !asksForChange {
-		t.Error("changeRefusal doesn't ask business.TaskFor whether the person may change the task")
+		t.Error("changeRefusals doesn't ask business.ChangeRefusals whether the person may change each task")
 	}
 }
 

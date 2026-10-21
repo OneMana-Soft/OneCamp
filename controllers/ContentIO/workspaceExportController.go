@@ -25,7 +25,7 @@ import (
 func StartWorkspaceExport(w http.ResponseWriter, r *http.Request) {
 	who, _, ok := whoIs(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	job, err := contentIOBusiness.ExportWorkspace(r.Context(), who)
@@ -52,7 +52,7 @@ func StartWorkspaceExport(w http.ResponseWriter, r *http.Request) {
 func ListWorkspaceExports(w http.ResponseWriter, r *http.Request) {
 	who, _, ok := whoIs(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	exports, err := contentIOBusiness.RecentWorkspaceExports(r.Context(), who)
@@ -72,7 +72,7 @@ func ListWorkspaceExports(w http.ResponseWriter, r *http.Request) {
 func GetWorkspaceExport(w http.ResponseWriter, r *http.Request) {
 	who, _, ok := whoIs(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	job, url, err := contentIOBusiness.WorkspaceExport(r.Context(), who, chi.URLParam(r, "job_id"))
@@ -94,7 +94,7 @@ func GetWorkspaceExport(w http.ResponseWriter, r *http.Request) {
 func GetExportConsent(w http.ResponseWriter, r *http.Request) {
 	who, _, ok := whoIs(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	state, err := contentIOBusiness.ExportConsent(r.Context(), who, r.URL.Query().Get("doc_uuid"))
@@ -113,7 +113,7 @@ func GetExportConsent(w http.ResponseWriter, r *http.Request) {
 func SetExportConsent(w http.ResponseWriter, r *http.Request) {
 	who, _, ok := whoIs(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	var body struct {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"slices"
 	"strings"
 	"testing"
@@ -52,11 +53,15 @@ func withFakeNotion(t *testing.T, answers map[string]string) (*Provider, *fakeNo
 	t.Helper()
 	fake := &fakeNotion{t: t, answers: answers}
 	saved := importProvider.SharedAPIClient
-	savedFetch, savedTable, savedLookup, savedRecord := fetchPicture, tableFromDatabase, lookupMapped, recordMapped
+	savedFetch, savedFile, savedTable, savedLookup, savedRecord := fetchPicture, fetchFile, tableFromDatabase, lookupMapped, recordMapped
 	t.Cleanup(func() {
 		importProvider.SharedAPIClient = saved
-		fetchPicture, tableFromDatabase, lookupMapped, recordMapped = savedFetch, savedTable, savedLookup, savedRecord
+		fetchPicture, fetchFile, tableFromDatabase, lookupMapped, recordMapped = savedFetch, savedFile, savedTable, savedLookup, savedRecord
 	})
+	fetchFile = func(_ context.Context, address string) (*safefetch.Response, error) {
+		u, _ := url.Parse(address)
+		return &safefetch.Response{URL: u, Status: http.StatusOK, ContentType: "application/octet-stream", Body: []byte("file " + path.Base(u.Path))}, nil
+	}
 	importProvider.SharedAPIClient = &http.Client{Transport: fake}
 	mapped := map[string]uuid.UUID{}
 	lookupMapped = func(_ context.Context, _ uuid.UUID, entity, source string) (uuid.UUID, error) {
@@ -186,8 +191,9 @@ func TestATreeOfNotionPagesComesAcrossWithItsTitlesIconsAndTables(t *testing.T) 
 		len(db.Rows) != 2 || db.Rows[0]["Stage"] != "Shipped" || db.Rows[0]["Due"] != "2026-10-20" {
 		t.Fatalf("the database as a table: %+v", db)
 	}
-	if len(root.files) != 1 || string(root.files["files/ba.png"]) != "\x89PNG picture" || !strings.Contains(html, `<img src="files/ba.png">`) {
-		t.Fatalf("pictures read from Notion: %v", root.files)
+	if len(root.files) != 2 || string(root.files["files/ba.png"]) != "\x89PNG picture" || !strings.Contains(html, `<img src="files/ba.png">`) ||
+		string(root.files["files/bg.pdf"]) != "file plan.pdf" || !strings.Contains(html, `data-src="files/bg.pdf"`) {
+		t.Fatalf("pictures and files read from Notion: %v", root.files)
 	}
 	for _, unwanted := range []string{"notion-unsupported", "[Notion", "breadcrumb"} {
 		if strings.Contains(html, unwanted) {
@@ -197,7 +203,7 @@ func TestATreeOfNotionPagesComesAcrossWithItsTitlesIconsAndTables(t *testing.T) 
 
 	// What the docs pipeline reads from it (business/Import pages_worker.go
 	// reads the HTML as foreign HTML).
-	body, err := contentcodec.FromHTML(html, contentcodec.HTMLOptions{Foreign: true})
+	body, err := contentcodec.FromHTML(html, contentcodec.HTMLOptions{Foreign: true, Assets: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +227,7 @@ func TestATreeOfNotionPagesComesAcrossWithItsTitlesIconsAndTables(t *testing.T) 
 		}
 		return true
 	})
-	for _, want := range []string{"heading", "bulletList", "taskList", "collapsible", "callout", "codeBlock", "blockMath", "image", "horizontalRule", "table", "tableHeader", "tableEmbed"} {
+	for _, want := range []string{"heading", "bulletList", "taskList", "collapsible", "callout", "codeBlock", "blockMath", "image", "horizontalRule", "table", "tableHeader", "tableEmbed", "columnList", "fileBlock"} {
 		if !kinds[want] {
 			t.Errorf("no %s in the doc:\n%s", want, html)
 		}

@@ -113,6 +113,19 @@ func fileHref(s string) bool {
 	return r != '/' && r != '\\' && !jsSpace(r) && !endsInSpace(s) && safeHref(s)
 }
 
+// importPath is a relative path to one of an import's own files: no scheme,
+// not rooted, nothing a browser would read as another place.
+func importPath(s string) bool {
+	if s == "" || s[0] == '/' || s[0] == '\\' || strings.ContainsAny(s, "\\\x00") || strings.Contains(s, "..") {
+		return false
+	}
+	if _, has := schemeOf(s); has {
+		return false
+	}
+	r, _ := utf8.DecodeLastRuneInString(s)
+	return !jsSpace(r) && safeHref(s)
+}
+
 // mediaLinkOf is the address and the words of the link a node stands for.
 func mediaLinkOf(typ string, attrs map[string]any) (href, text string, ok bool) {
 	file := typ == "fileBlock"
@@ -197,7 +210,7 @@ func writeLinkMention(b *strings.Builder, n *Node) {
 // safe address), and the div is read as any other. Foreign HTML keeps no
 // picture: an icon or an image there is another site's address, never one
 // kept with the doc.
-func readMediaBlock(dataType string, el *html.Node, foreign bool) *Node {
+func readMediaBlock(dataType string, el *html.Node, foreign, assets bool) *Node {
 	typ := ""
 	for k, mb := range mediaBlocks {
 		if mb.dataType == dataType {
@@ -215,7 +228,7 @@ func readMediaBlock(dataType string, el *html.Node, foreign bool) *Node {
 		}
 	}
 	if typ == "fileBlock" {
-		if s := n.attrString("src"); s != "" && !fileHref(s) {
+		if s := n.attrString("src"); s != "" && !fileHref(s) && !(assets && importPath(s)) {
 			delete(n.Attrs, "src")
 		}
 		if foreign && n.attrString("src") == "" {

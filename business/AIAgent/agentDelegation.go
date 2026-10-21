@@ -539,7 +539,7 @@ func EmitAgentMessage(ctx context.Context, where Surface, entityID, channelName,
 
 	// Detached: the emitting agent's run must not be blocked by, or cancelled
 	// into, the downstream agent's dispatch.
-	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), EventTypeAgentMessage, payload)
+	helpers.GoSafeNamed("webhookBusiness.DispatchEvent", func() { webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), EventTypeAgentMessage, payload) })
 }
 
 // ---------------------------------------------------------------------------

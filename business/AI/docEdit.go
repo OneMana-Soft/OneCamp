@@ -47,7 +47,9 @@ import (
 	contentcodec "github.com/akashc777/OneCamp/business/ContentCodec"
 	proposalBusiness "github.com/akashc777/OneCamp/business/Proposal"
 	snapshotBusiness "github.com/akashc777/OneCamp/business/Snapshot"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	agentModel "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -764,16 +766,26 @@ func agentEditsOf(ctx context.Context, docUUID string) ([]agentEditRow, map[stri
 	return out, reverted, nil
 }
 
-// personName is a person's name for the margin chip: a seam.
-var personName = func(ctx context.Context, userUUID string) string {
-	u, err := personByUUID(ctx, userUUID)
-	if err != nil || u == nil {
-		return ""
+// personNames are people's names for the margin chips, by uuid, read in one
+// query for all of them (it was a read per asker): their full name, or their
+// display name. Someone who has since left keeps theirs. A seam.
+var personNames = func(ctx context.Context, userUUIDs []string) map[string]string {
+	people, err := helpers.LoadMap(ctx, userUUIDs, 200, userDomain.GetPeopleByUUIDs, func(u *dgraphStruct.DgraphUser) string { return strings.ToLower(u.Uuid) })
+	out := make(map[string]string, len(people))
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/AI personNames: the askers' names couldn't be read: %+v", err)
+		return out
 	}
-	if n := strings.TrimSpace(u.UserDgraphInfo.UserFullName); n != "" {
-		return n
+	for _, id := range userUUIDs {
+		if u := people[strings.ToLower(id)]; u != nil {
+			if n := strings.TrimSpace(u.UserFullName); n != "" {
+				out[id] = n
+			} else {
+				out[id] = strings.TrimSpace(u.UserName)
+			}
+		}
 	}
-	return strings.TrimSpace(u.UserDgraphInfo.UserName)
+	return out
 }
 
 // ListAgentEdits is a doc's agent edits, newest first, for someone who can
@@ -789,12 +801,15 @@ func ListAgentEdits(ctx context.Context, u *userModels.UserInfo, docUUID string)
 		return nil, err
 	}
 	canEdit := canEditDecision(d)
-	names := map[string]string{}
+	var askers []string
+	for _, r := range rows {
+		if r.AskerUUID != "" {
+			askers = append(askers, r.AskerUUID)
+		}
+	}
+	names := personNames(ctx, askers)
 	out := make([]AgentEditView, 0, len(rows))
 	for _, r := range rows {
-		if _, ok := names[r.AskerUUID]; !ok && r.AskerUUID != "" {
-			names[r.AskerUUID] = personName(ctx, r.AskerUUID)
-		}
 		agent := r.AgentName
 		if agent == "" {
 			agent = assistantName

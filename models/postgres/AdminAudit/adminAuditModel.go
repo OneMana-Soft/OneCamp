@@ -44,6 +44,11 @@ const (
 	// sink, from the Resource Events). Viewing it is on every plan; exporting
 	// the log stays behind FeatureAuditExport.
 	CategoryDocs = "docs"
+	// CategoryCalls is what the people running a call did to it and to the
+	// people in it: muted someone or everyone, asked them to unmute, removed
+	// them, locked it, ended it for everyone, named co-hosts, spotlit someone
+	// (business/CallControl). Viewing it is on every plan.
+	CategoryCalls = "calls"
 	// CategoryCalendar is what happened to the calendar's events: made,
 	// changed, cancelled, deleted, restored and answered, by whom, from the
 	// Resource Events (business/Calendar's audit sink). Never an event's
@@ -73,6 +78,7 @@ func AllCategories() []string {
 		CategorySecurity,
 		CategoryAgent,
 		CategoryDocs,
+		CategoryCalls,
 		CategoryCalendar,
 	}
 }
@@ -202,7 +208,8 @@ func computeAuditHash(prevHash string, e *AuditEntry) string {
 
 const auditCols = `id, seq, actor_id, actor_email, action, category, summary, metadata, ip_address, user_agent, created_at, entry_hash, prev_hash, redacted_at, actor_kind`
 
-func scanEntry(rows *sql.Rows) (*AuditEntry, error) {
+// scanEntry reads one row of auditCols: from *sql.Rows, or a pgexec scan.
+func scanEntry(rows interface{ Scan(dest ...any) error }) (*AuditEntry, error) {
 	var e AuditEntry
 	var actorID uuid.NullUUID
 	var actorEmail, metadata, ip, ua, entryHash, prevHash, actorKind sql.NullString

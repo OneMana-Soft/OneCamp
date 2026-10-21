@@ -10,6 +10,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 	"github.com/google/uuid"
 )
@@ -79,7 +80,10 @@ func CreateOrUpdateDoc(ctx context.Context, query string, dgraphDoc *dgraphStruc
 }
 
 func GetDgraphDocInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphDoc *dgraphStruct.DgraphDoc, err error) {
+	// Only the tasks the reader may see (models/taskread).
+	defer taskread.Settle(ctx, &dgraphDoc, &err)
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -115,7 +119,10 @@ func GetDgraphDocInfoByUUID(ctx context.Context, query string, variables map[str
 }
 
 func GetDgraphDocs(ctx context.Context, query string, variables map[string]string) (dgraphDocs []*dgraphStruct.DgraphDoc, err error) {
+	// Only the tasks the reader may see (models/taskread).
+	defer taskread.Settle(ctx, &dgraphDocs, &err)
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -147,7 +154,10 @@ func GetDgraphDocs(ctx context.Context, query string, variables map[string]strin
 }
 
 func GetDgraphDocsWithCount(ctx context.Context, query string, variables map[string]string) (dgraphDocList *dgraphStruct.DgraphDocList, err error) {
+	// Only the tasks the reader may see (models/taskread).
+	defer taskread.Settle(ctx, &dgraphDocList, &err)
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {

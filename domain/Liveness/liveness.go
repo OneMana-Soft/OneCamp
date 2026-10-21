@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/lib/pq"
@@ -130,15 +131,9 @@ func postgres(table string) Checker {
 // with the same filter the rest of the code base uses. ids must already be
 // uuids; anything else is left out. Pure.
 func DocQuery(ids []string) string {
-	quoted := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if uuidPattern.MatchString(id) {
-			quoted = append(quoted, `"`+id+`"`)
-		}
-	}
-	list := `[` + strings.Join(quoted, ", ") + `]`
+	list := `[` + dgraphquery.UUIDList(ids) + `]`
 	return `{ docs(func: eq(doc_uuid, ` + list + `)) { doc_uuid }` +
-		` deleted(func: eq(doc_uuid, ` + list + `)) @filter(gt(doc_deleted_at, "1970-01-01T00:00:00Z")) { doc_uuid } }`
+		` deleted(func: eq(doc_uuid, ` + list + `)) @filter(` + dgraphquery.Deleted("doc_deleted_at") + `) { doc_uuid } }`
 }
 
 // DocStates turns the two lists into liveness: every doc found, live unless it

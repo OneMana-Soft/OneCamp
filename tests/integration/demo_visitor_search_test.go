@@ -40,6 +40,8 @@ import (
 
 func TestDemoVisitorFindsNoOneByTheirAddress(t *testing.T) {
 	ctx := context.Background()
+	// A search's task hits are checked against who may see them in Postgres (models/taskread).
+	integration.ConnectServerPostgres(t)
 	integration.SetupOpenSearch(t)
 	client := opensearchInit.OpenSearchClient
 

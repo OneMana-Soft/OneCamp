@@ -10,7 +10,7 @@ import (
 	business "github.com/akashc777/OneCamp/business/Chat"
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
 	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
-	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
+	messagePipeline "github.com/akashc777/OneCamp/business/MessagePipeline"
 	reactionBusiness "github.com/akashc777/OneCamp/business/Reaction"
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
@@ -43,18 +43,23 @@ func CreateChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Every rule for messaging lives in business/Send, shared with scheduled
-	// messages, so a message sent now and one sent later obey the same checks.
-	dm, err := sendBusiness.PrepareDirectMessage(ctx, &userInfo, &chatInfo)
-	if err != nil {
-		writeSendError(w, err)
+	// The message pipeline (chat A2): business/Send's rules, once per id the
+	// app gave it (Try again after a lost answer is the same message, not a
+	// second one), and the write, durable when MESSAGE_PIPELINE switches DMs
+	// on, today's otherwise. The route is its thin adapter; a recipient that
+	// isn't an id is refused as business/Send refuses it.
+	if _, perr := uuid.Parse(chatInfo.ToUuid); perr != nil {
+		writeSendError(w, &sendBusiness.Rejection{Status: http.StatusBadRequest, Msg: "Failed to parse toUUID in req", Err: perr})
 		return
 	}
-	// Once per id the app gave it: Try again after a lost answer is the same
-	// message, not a second one.
-	createdChatInfo, err := sendBusiness.Once(ctx, userInfo.UserDgraphInfo.Uuid, "dm:"+chatInfo.ToUuid, chatInfo.ClientMsgID, func() (*adapter.OutputCreateChatForChat, error) {
-		return dm.Commit(ctx)
+	written, err := messagePipeline.Messages.Write(ctx, &userInfo, messagePipeline.Write{
+		Op: messagePipeline.OpSend,
+		To: conversationBusiness.Ref{Kind: conversationBusiness.KindDM, ID: helpers.GetGroupingId(userInfo.UserDgraphInfo.Uuid, chatInfo.ToUuid)},
+		Draft: messagePipeline.Draft{
+			HTML: chatInfo.TextHtml, Files: chatInfo.MediaObjects, ReplyTo: chatInfo.ReplyToUuid, ClientMsgID: chatInfo.ClientMsgID,
+		},
 	})
+	createdChatInfo := &adapter.OutputCreateChatForChat{Uuid: written.ID, ChatCreated: written.At}
 	if rj, ok := sendBusiness.AsRejection(err); ok {
 		writeSendError(w, rj)
 		return
@@ -156,14 +161,17 @@ func CreateGroupChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	group, err := sendBusiness.PrepareGroupMessage(ctx, &userInfo, &chatInfo)
-	if err != nil {
-		writeSendError(w, err)
-		return
-	}
-	createdChatInfo, err := sendBusiness.Once(ctx, userInfo.UserDgraphInfo.Uuid, "grp:"+chatInfo.GrpUuid, chatInfo.ClientMsgID, func() (*adapter.OutputCreateChatForChat, error) {
-		return group.Commit(ctx)
+	// The message pipeline, as for a DM: a group's id, or a new group's
+	// people, whose id they make.
+	written, err := messagePipeline.Messages.Write(ctx, &userInfo, messagePipeline.Write{
+		Op:     messagePipeline.OpSend,
+		To:     conversationBusiness.Ref{Kind: conversationBusiness.KindGroup, ID: chatInfo.GrpUuid},
+		People: chatInfo.Participants,
+		Draft: messagePipeline.Draft{
+			HTML: chatInfo.TextHtml, Files: chatInfo.MediaObjects, ReplyTo: chatInfo.ReplyToUuid, ClientMsgID: chatInfo.ClientMsgID,
+		},
 	})
+	createdChatInfo := &adapter.OutputCreateChatForChat{Uuid: written.ID, ChatCreated: written.At}
 	if rj, ok := sendBusiness.AsRejection(err); ok {
 		writeSendError(w, rj)
 		return
@@ -412,27 +420,9 @@ func UpdateChatInGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mentions, err := helpers.GetMentions(chatInfo.TextHtml)
+	mentionsDgraphUsersList, err := sendBusiness.Mentions(ctx, &userInfo, sendBusiness.Where{Conversation: chatDgraphInfo.DM.GroupingId}, &chatInfo.TextHtml)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/UpdateChatInGroup Failed to get chat mentions err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chat mentions",
-			"err": err,
-		})
-		return
-	}
-
-	mentionsDgraphUsersList, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, mentions)
-
-	if len(mentionsDgraphUsersList) != len(mentions) {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Got unregistered users in mentions",
-			"err": err,
-		})
+		writeSendError(w, err)
 		return
 	}
 
@@ -517,27 +507,9 @@ func UpdateChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mentions, err := helpers.GetMentions(chatInfo.TextHtml)
+	mentionsDgraphUsersList, err := sendBusiness.Mentions(ctx, &userInfo, sendBusiness.Where{People: []string{chatDgraphInfo.From.Uuid, chatDgraphInfo.To.Uuid}}, &chatInfo.TextHtml)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreUpdateChatateChat Failed to get chat mentions err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chat mentions",
-			"err": err,
-		})
-		return
-	}
-
-	mentionsDgraphUsersList, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, mentions)
-
-	if len(mentionsDgraphUsersList) != len(mentions) {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Got unregistered users in mentions",
-			"err": err,
-		})
+		writeSendError(w, err)
 		return
 	}
 
@@ -1263,14 +1235,8 @@ func CreateOrUpdateChatReaction(w http.ResponseWriter, r *http.Request) {
 	reactionUID, err := business.CreateOrUpdateChatReaction(ctx, &reactionInfo, dgraphChat, &userInfo.UserDgraphInfo, dgraphChat.DM.GroupingId)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateOrUpdateChatReaction Failed to get dgraphChat info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chat info",
-			"err": err,
-		})
+		status, msg := reactionBusiness.Answer(err, "Couldn't add the reaction. Try again.")
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
 
@@ -1317,16 +1283,10 @@ func DeleteChatReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.DeleteChatReaction(ctx, dgraphChat.Uid, dgraphReaction.Uid, &userInfo.UserDgraphInfo, dgraphChat.DM.GroupingId, reactionInfo.Uuid)
+	err = business.DeleteChatReaction(ctx, reactionInfo.Uuid, dgraphReaction.Uid, &userInfo.UserDgraphInfo, dgraphChat.DM.GroupingId)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/DeleteChatReaction Failed to remove chat reaction err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to remove chat reaction",
-			"err": err,
-		})
+		status, msg := reactionBusiness.Answer(err, "Couldn't remove the reaction. Try again.")
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
 
@@ -1427,27 +1387,9 @@ func CreateChatComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mentions, err := helpers.GetMentions(commentInfo.HTMLText)
+	mentionsDgraphUsersList, err := sendBusiness.Mentions(ctx, &userInfo, sendBusiness.Where{Thread: true, Conversation: dgraphChat.DM.GroupingId}, &commentInfo.HTMLText)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateChatComment Failed to get chat mentions err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chat mentions",
-			"err": err,
-		})
-		return
-	}
-
-	mentionsDgraphUsersList, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, mentions)
-
-	if len(mentionsDgraphUsersList) != len(mentions) {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Got unregistered users in mentions",
-			"err": err,
-		})
+		writeSendError(w, err)
 		return
 	}
 
@@ -1560,27 +1502,9 @@ func UpdateChatComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mentions, err := helpers.GetMentions(commentInfo.HTMLText)
+	mentionsDgraphUsersList, err := sendBusiness.Mentions(ctx, &userInfo, sendBusiness.Where{Thread: true, Conversation: stored.Chat.DM.GroupingId}, &commentInfo.HTMLText)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/UpdateChatComment Failed to get chat mentions err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to get chat mentions",
-			"err": err,
-		})
-		return
-	}
-
-	mentionsDgraphUsersList, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, mentions)
-
-	if len(mentionsDgraphUsersList) != len(mentions) {
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Got unregistered users in mentions",
-			"err": err,
-		})
+		writeSendError(w, err)
 		return
 	}
 
@@ -1725,22 +1649,14 @@ func CreateOrUpdateChatCommentReaction(w http.ResponseWriter, r *http.Request) {
 		reactionInfo.ReactionDgraphUid = dgraphReaction.Uid
 	}
 
-	// A new reaction answers with its uid; a changed one keeps its own.
+	// The answer is the reaction: the one added, or the one the person already had.
 	created, err := business.CreateOrUpdateChatCommentReaction(ctx, &reactionInfo, dgraphComment, &userInfo.UserDgraphInfo)
-	if created != "" {
-		reactionInfo.ReactionDgraphUid = created
-	}
-	if err != nil || reactionInfo.ReactionDgraphUid == "" {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateOrUpdateChatCommentReaction Failed to create/update reaction on comment err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to create/update reaction on comment",
-			"err": err,
-		})
+	if err != nil {
+		status, msg := reactionBusiness.Answer(err, "Couldn't add the reaction. Try again.")
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
+	reactionInfo.ReactionDgraphUid = created
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "created/updated chat comment successfully!", "data": reactionInfo})
 
@@ -1785,17 +1701,11 @@ func DeleteReactionOnCommentChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.DeleteReactionOnCommentChat(ctx, commentDgraphInfo, dgraphReaction)
+	err = business.DeleteReactionOnCommentChat(ctx, commentDgraphInfo, dgraphReaction.Uid, &userInfo.UserDgraphInfo)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/DeleteReactionOnCommentChat Failed to delete comment reaction info err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to delete comment reaction",
-			"err": err,
-		})
+		status, msg := reactionBusiness.Answer(err, "Couldn't remove the reaction. Try again.")
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
 
@@ -1905,8 +1815,8 @@ func MakeVideoCallForGroup(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 
-		if errors.Is(err, liveKitBusiness.ErrRemovedFromCall) {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "removed_from_call", "msg": liveKitBusiness.RemovedFromCallMsg})
+		// Put out of it by a host, or it is locked: said in its own words.
+		if helpers.WriteCallRefusal(w, err) {
 			return
 		}
 
@@ -2137,8 +2047,8 @@ func MakeVideoCallForChat(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 
-		if errors.Is(err, liveKitBusiness.ErrRemovedFromCall) {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "removed_from_call", "msg": liveKitBusiness.RemovedFromCallMsg})
+		// Put out of it by a host, or it is locked: said in its own words.
+		if helpers.WriteCallRefusal(w, err) {
 			return
 		}
 

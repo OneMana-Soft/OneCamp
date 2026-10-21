@@ -2,6 +2,7 @@ package Domain
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -13,9 +14,11 @@ import (
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	OpenSearchModels "github.com/akashc777/OneCamp/models/openSearch/Attachment"
 	OpenSearchBulkModels "github.com/akashc777/OneCamp/models/openSearch/Bulk"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
 	models "github.com/akashc777/OneCamp/models/postgres/Attachment"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 //CREATE TABLE IF NOT EXISTS attachment(
@@ -144,6 +147,34 @@ func UpdateAttachmentDeletedTimeByUUID(ctx context.Context, attachmentUUID uuid.
 	}
 
 	return
+}
+
+// AttachmentsOfPlace is the files with these ids kept at this place (src_key
+// and src_value), live or not, by id: one statement for an agent's images,
+// where each was one (backend audit U2a).
+func AttachmentsOfPlace(ctx context.Context, ids []string, srcKey, srcValue string) (map[string]*models.Attachment, error) {
+	out := make(map[string]*models.Attachment, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := pgexec.Query(ctx, `
+		SELECT id, obj_key, src_key, src_value, created_by, created_at, deleted_at
+		FROM attachments
+		WHERE id = ANY($1::uuid[]) AND src_key = $2 AND src_value = $3`, func(r pgexec.Row) (*models.Attachment, error) {
+		var a models.Attachment
+		var createdAt, deletedAt sql.NullTime
+		err := r.Scan(&a.Uuid, &a.ObjKey, &a.SrcKey, &a.SrcValue, &a.CreatedBy, &createdAt, &deletedAt)
+		a.CreatedAt, a.DeletedAt = createdAt.Time, deletedAt.Time
+		return &a, err
+	}, pq.Array(ids), srcKey, srcValue)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/AttachmentsOfPlace err: %+v", err)
+		return nil, err
+	}
+	for _, a := range rows {
+		out[a.Uuid.String()] = a
+	}
+	return out, nil
 }
 
 func GetAttachmentByObjUUID(ctx context.Context, objUUID string, srcKey string) (attachment *models.Attachment, err error) {
@@ -295,4 +326,24 @@ func UpsertAttachmentInOpenSearchSafe(att *openSearchStruct.OpenSearchAttachment
 			"domain/UpsertAttachmentInOpenSearchSafe bulk create failed att=%s err=%+v",
 			att.Uuid, err)
 	}
+}
+
+// ownUploadsIn is, of the attachments named ($1), the ones $2 uploaded to the
+// place $3/$4, each with the storage key its upload stored.
+const ownUploadsIn = `
+	SELECT DISTINCT id, obj_key FROM attachments
+	WHERE id = ANY($1::uuid[]) AND created_by = $2 AND src_key = $3 AND src_value = $4`
+
+// OwnUploadsIn is, by id, the storage key of each of ids that the person
+// with uploader (their account id) uploaded to the place srcKey/srcValue;
+// any other id is missing from the map.
+func OwnUploadsIn(ctx context.Context, ids []uuid.UUID, uploader uuid.UUID, srcKey, srcValue string) (map[uuid.UUID]string, error) {
+	if len(ids) == 0 {
+		return map[uuid.UUID]string{}, nil
+	}
+	keys, err := pgexec.Pairs[uuid.UUID, string](ctx, ownUploadsIn, ids, uploader, srcKey, srcValue)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/OwnUploadsIn Failed err: %+v", err)
+	}
+	return keys, err
 }

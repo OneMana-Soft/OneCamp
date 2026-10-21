@@ -5,30 +5,40 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
+	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
 
 // BulkDeleteChatsAndPosts removes the posts and chats with these ids, in one
-// transaction.
+// transaction. Ids that aren't uuids name no row and are left out; the rest
+// are compared as uuids, so the primary key's index finds them.
 func BulkDeleteChatsAndPosts(ctx context.Context, postIDs, chatIDs []string) error {
-	ctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	tx, err := postgresInit.DBConn.SqlDB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if len(postIDs) > 0 {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM posts WHERE id::text = ANY($1)`, pq.Array(postIDs)); err != nil {
-			return err
+	postIDs, chatIDs = onlyUUIDs(postIDs), onlyUUIDs(chatIDs)
+	return pgexec.InTx(ctx, func(ctx context.Context) error {
+		if len(postIDs) > 0 {
+			if _, err := pgexec.Exec(ctx, `DELETE FROM posts WHERE id = ANY($1::uuid[])`, pq.Array(postIDs)); err != nil {
+				return err
+			}
+		}
+		if len(chatIDs) > 0 {
+			if _, err := pgexec.Exec(ctx, `DELETE FROM chats WHERE id = ANY($1::uuid[])`, pq.Array(chatIDs)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// onlyUUIDs is ids that parse as uuids.
+func onlyUUIDs(ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if u, err := uuid.Parse(id); err == nil {
+			out = append(out, u.String())
 		}
 	}
-	if len(chatIDs) > 0 {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM chats WHERE id::text = ANY($1)`, pq.Array(chatIDs)); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+	return out
 }
 
 func BulkInsertChatsAndPosts(query string, values []interface{}) (err error) {

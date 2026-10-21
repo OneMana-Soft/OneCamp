@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	threadIndex "github.com/akashc777/OneCamp/business/ThreadIndex"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Activity"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
@@ -27,7 +28,13 @@ const (
 type told struct {
 	pushed, emailed []string
 	items           []struct{ to, kind string }
+	// recorded is the reply as the thread's index was told of it.
+	recorded []threadIndex.Reply
 }
+
+// follows is who follows the thread in the tests' index, and who turned it
+// off; replyIn reads it.
+var follows struct{ on, off []string }
 
 // replyIn runs a reply by writer in the thread of message, with the
 // conversation's settings levels and the thread's earlier repliers, and says
@@ -37,9 +44,23 @@ func replyIn(t *testing.T, levels map[string]string, repliers []string, message 
 	var mu sync.Mutex
 	var got told
 	oldLevels, oldRepliers, oldDeliver, oldPublish, oldEmail := threadLevels, threadRepliers, deliverTo, publishActivityTo, emailChatComment
+	oldFollows, oldRecord := threadFollows, recordThreadReply
 	t.Cleanup(func() {
 		threadLevels, threadRepliers, deliverTo, publishActivityTo, emailChatComment = oldLevels, oldRepliers, oldDeliver, oldPublish, oldEmail
+		threadFollows, recordThreadReply = oldFollows, oldRecord
+		follows.on, follows.off = nil, nil
 	})
+	threadFollows = func(_ context.Context, root string) ([]string, []string, error) {
+		if root != message.Uuid {
+			t.Errorf("follows read for %q, want the thread's root %q", root, message.Uuid)
+		}
+		return follows.on, follows.off, nil
+	}
+	recordThreadReply = func(_ context.Context, r threadIndex.Reply) {
+		mu.Lock()
+		defer mu.Unlock()
+		got.recorded = append(got.recorded, r)
+	}
 	threadLevels = func(_ context.Context, _ string, ids []string) (map[string]string, error) {
 		out := map[string]string{}
 		for _, id := range ids {
@@ -136,5 +157,52 @@ func TestAThreadReplyWhoseAudienceFailsTellsNobody(t *testing.T) {
 	notifyChatThreadReply(time.Now(), "c1", "<p>x</p>", &dgraphStruct.DgraphUser{Uuid: jonas}, "grp", nil, group(maya, maya, jonas))
 	if pushed {
 		t.Error("told someone with no audience")
+	}
+}
+
+// A reply in a DM's or group's thread is recorded in the thread's index (chat
+// P2): the conversation by its kind and grouping id, the root and its author,
+// the writer and those mentioned, when it was written.
+func TestAChatThreadReplyIsRecordedInTheIndex(t *testing.T) {
+	at := time.Date(2026, 10, 18, 9, 30, 0, 0, time.UTC)
+	rootAt := at.Add(-time.Hour)
+	message := group(maya, maya, jonas, sam)
+	message.CreatedAt = &rootAt
+	got := replyIn(t, map[string]string{maya: "all", jonas: "all", sam: "all"}, nil, message, jonas, sam)
+	if len(got.recorded) != 1 {
+		t.Fatalf("recorded %d replies, want 1", len(got.recorded))
+	}
+	r := got.recorded[0]
+	want := threadIndex.Thread{Kind: threadIndex.KindGroup, ID: "grp", Root: "m1", RootBy: maya, RootAt: rootAt}
+	if r.Thread != want || r.By != jonas || !slices.Equal(r.Mentioned, []string{sam}) || r.At.IsZero() {
+		t.Errorf("recorded %+v, want thread %+v by jonas mentioning sam", r, want)
+	}
+	// A DM's grouping id is two people's ids with a space between.
+	if kind := threadIndex.KindOfChat(maya + " " + jonas); kind != threadIndex.KindDM {
+		t.Errorf("a DM's grouping id is a %q", kind)
+	}
+}
+
+// Who follows a DM's or group's thread hears of its replies by their setting,
+// and who turned it off hears only a reply that mentions them, even under
+// their own message.
+func TestFollowingAChatThreadDecidesWhoHears(t *testing.T) {
+	levels := map[string]string{maya: "all", jonas: "all", sam: "all", ada: "all", eve: "all"}
+	everyone := group(maya, maya, jonas, sam, ada, eve)
+
+	follows.on, follows.off = []string{sam}, []string{maya, ada}
+	got := replyIn(t, levels, []string{ada}, everyone, jonas)
+	if !slices.Equal(got.pushed, []string{sam}) {
+		t.Errorf("pushed %v, want sam alone: he follows it; maya (its author) and ada (replied) turned it off", got.pushed)
+	}
+	for _, it := range got.items {
+		if it.to == maya {
+			t.Errorf("maya turned her thread off, and still got %q", it.kind)
+		}
+	}
+
+	follows.on, follows.off = nil, []string{ada}
+	if got := replyIn(t, levels, []string{ada}, everyone, jonas, ada); !slices.Contains(got.pushed, ada) {
+		t.Errorf("pushed %v: ada turned it off, but this reply mentions her", got.pushed)
 	}
 }

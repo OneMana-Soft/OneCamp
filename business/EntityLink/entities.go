@@ -115,6 +115,13 @@ func ReadEntities(ctx context.Context, who accessBusiness.Subject, refs []Ref) (
 	if len(refs) > MaxRefs {
 		return nil, ErrTooMany
 	}
+	return ReadMany(ctx, who, refs)
+}
+
+// ReadMany is ReadEntities without its cap, for a server-side caller that
+// bounds its own reads (the work graph's few hundred nodes): each kind is
+// still read once, however many of it are asked.
+func ReadMany(ctx context.Context, who accessBusiness.Subject, refs []Ref) ([]Entity, error) {
 	byKind := map[string][]string{}
 	for _, r := range refs {
 		byKind[r.Kind] = append(byKind[r.Kind], r.ID)

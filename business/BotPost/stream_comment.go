@@ -28,6 +28,8 @@ import (
 	"time"
 
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
+	threadIndex "github.com/akashc777/OneCamp/business/ThreadIndex"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	commentDomain "github.com/akashc777/OneCamp/domain/Comment"
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
@@ -67,6 +69,7 @@ type PostCommentStream struct {
 	postAuthorUID string // Dgraph uid of the parent post's author (ContentAddedBy)
 	channelUUID   string
 	channelName   string
+	thread        threadIndex.Thread // the thread, for its index
 
 	mu          sync.Mutex
 	commentUUID uuid.UUID // zero until the first Push creates the comment
@@ -107,6 +110,7 @@ func BeginPostCommentStream(ctx context.Context, postUUID uuid.UUID, bot *userBu
 		postAuthorUID: postInfo.PostBy.Uid,
 		channelUUID:   postInfo.Channel.Uuid,
 		channelName:   postInfo.Channel.Name,
+		thread:        threadIndex.OfPost(postInfo),
 	}, nil
 }
 
@@ -164,6 +168,7 @@ func (s *PostCommentStream) Finalize(ctx context.Context, finalText string) (*Re
 			return nil, err
 		}
 		s.publishCreate(finalHTML)
+		refsBusiness.Saved(ctx, refsBusiness.Comment, s.commentUUID.String(), finalHTML, true)
 		s.indexFinal(finalText)
 		return s.result(finalHTML), nil
 	}
@@ -172,6 +177,7 @@ func (s *PostCommentStream) Finalize(ctx context.Context, finalText string) (*Re
 		return nil, err
 	}
 	s.publishEdit(finalHTML, true)
+	refsBusiness.Saved(ctx, refsBusiness.Comment, s.commentUUID.String(), finalHTML, true)
 	s.indexFinal(finalText)
 	return s.result(finalHTML), nil
 }
@@ -272,6 +278,9 @@ func (s *PostCommentStream) publishCreate(htmlText string) {
 	// broadcast.
 	s.lastHTML = htmlText
 	now := time.Now()
+	// The thread's index: the reply is there from its first words.
+	reply := threadIndex.Reply{Thread: s.thread, By: s.bot.UUID, At: now}
+	helpers.GoSafeNamed("threadIndex.recordReply", func() { recordReply(context.Background(), reply) })
 	mqttBusiness.PublishPostComment(&mqttStruct.MqttPostComment{
 		Type:           mqttStruct.TYPE_CREATE,
 		CommentUuid:    s.commentUUID.String(),
@@ -320,7 +329,7 @@ func (s *PostCommentStream) indexFinal(finalText string) {
 		CommentPostUuid:       s.postUUID.String(),
 		CommentCreatedAt:      now.Unix(),
 	}
-	go commentDomain.CreatePostCommentWithAttachmentsInOpenSearch(osComment, nil)
+	helpers.GoSafeNamed("commentDomain.CreatePostCommentWithAttachmentsInOpenSearch", func() { commentDomain.CreatePostCommentWithAttachmentsInOpenSearch(osComment, nil) })
 }
 
 func (s *PostCommentStream) result(htmlText string) *Result {

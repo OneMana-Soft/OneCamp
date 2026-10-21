@@ -732,8 +732,23 @@ func buildSourceTask(snap *todoistSnapshot, it *todoistItem, sectionName map[str
 		Created:         addedAt,
 		Updated:         updatedAt,
 		Completed:       status == "checked",
+		CommentCount:    notesOf(snap, it.ID),
 		Metadata:        map[string]any{"todoist_url": "https://todoist.com/showTask?id=" + it.ID},
 	}
+}
+
+// notesOf is how many live notes (comments) a task has in the sync.
+func notesOf(snap *todoistSnapshot, itemID string) int {
+	if snap == nil {
+		return 0
+	}
+	n := 0
+	for _, note := range snap.Notes {
+		if note.ItemID == itemID && !note.IsDeleted.on() {
+			n++
+		}
+	}
+	return n
 }
 
 // todoistMarkdownToHTML produces a tiny HTML rendering of Todoist's

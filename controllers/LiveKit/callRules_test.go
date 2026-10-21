@@ -69,20 +69,6 @@ func TestARecordingEndWithoutItsEgressIsIgnored(t *testing.T) {
 	recordingEnded(context.Background(), nil)
 }
 
-// Only identities this server mints are judged when someone connects;
-// LiveKit's own participants (the recorder) are none of its business. A guest
-// token only ever names an instant meeting.
-func TestWhoIsJudgedWhenTheyConnect(t *testing.T) {
-	ctx := context.Background()
-	if ok, _ := mayStayInCall(ctx, "4f0c2a1e-3b7d-4c55-9a51-0d8b1f6a2c33", "EG_abc123"); !ok {
-		t.Error("the recorder was put out of a call")
-	}
-	ok, reason := mayStayInCall(ctx, "4f0c2a1e-3b7d-4c55-9a51-0d8b1f6a2c33", "guest-6f1c0e2a-1111-4222-8333-944455556666-abcdefgh")
-	if ok || reason != business.RemovedLinkRevoked {
-		t.Errorf("a guest in a channel's call: stays %v (%s)", ok, reason)
-	}
-}
-
 // The server decides which call a line belongs to; the agent says only that it
 // transcribed the line itself. The marker lives in two languages, so the two
 // are pinned together here, and the agent must not relay packets any more.

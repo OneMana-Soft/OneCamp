@@ -33,7 +33,6 @@ type CallView struct {
 	Recording     RecordingView       `json:"recording"`
 	Transcription TranscriptionSwitch `json:"transcription"`
 	Participants  []CallPerson        `json:"participants,omitempty"`
-	CanRemove     bool                `json:"can_remove"`
 }
 
 // roomMetaView is the part of a room's metadata the green room reads.

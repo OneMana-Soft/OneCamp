@@ -26,7 +26,7 @@ const (
 //
 // Mirrors the legacy SlackImport cleanup loop but generic across providers.
 func StartCleanupLoop() {
-	go func() {
+	helpers.GoSafeLoop("business/Import/cleanup:StartCleanupLoop", func() {
 		// Stagger first run to avoid lining up with reaper.
 		time.Sleep(15 * time.Minute)
 		t := time.NewTicker(1 * time.Hour)
@@ -35,7 +35,7 @@ func StartCleanupLoop() {
 			runCleanupTick()
 			<-t.C
 		}
-	}()
+	})
 }
 
 func runCleanupTick() {

@@ -42,4 +42,7 @@ type TaskAccess struct {
 	Delete  bool `json:"delete"`
 	Comment bool `json:"comment"`
 	LogTime bool `json:"log_time"`
+	// Restrict is whether they may choose who sees the task (WA2): its
+	// project's admins, and its creator while they may change it.
+	Restrict bool `json:"restrict"`
 }

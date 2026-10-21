@@ -4,7 +4,10 @@ package controllers
 // has seen a conversation, and marking it seen while it's open.
 
 import (
+	"context"
 	"errors"
+	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
+	readStateBusiness "github.com/akashc777/OneCamp/business/ReadState"
 	"net/http"
 
 	business "github.com/akashc777/OneCamp/business/Chat"
@@ -66,6 +69,11 @@ func MarkChatSeen(w http.ResponseWriter, r *http.Request) {
 	err := business.MarkChatSeen(r.Context(), &me, grp)
 	switch {
 	case err == nil, errors.Is(err, business.ErrNotInChat) && dm:
+		if err == nil {
+			// Your other tabs and devices move their line and counts (read.moved).
+			moved := context.WithoutCancel(r.Context())
+			helpers.GoSafeNamed("read.moved", func() { readStateBusiness.Moved(moved, &me, conversationBusiness.ChatRef(grp)) })
+		}
 		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Seen."})
 	case errors.Is(err, business.ErrNotInChat):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "You're not in this conversation."})

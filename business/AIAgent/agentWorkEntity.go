@@ -60,13 +60,14 @@ func ActiveWorkForEntity(ctx context.Context, actor Actor, entityID string) ([]A
 	}
 	out := make([]ActiveWorkItem, 0, len(tasks))
 	requesters := make([]string, 0, len(tasks))
+	seesSurface := onceASurface(func(t *model.AgentActiveTask) bool { return canSeeWorkSurface(ctx, actor, t) })
 	for _, t := range tasks {
 		if t == nil {
 			continue
 		}
 		principals := activeTaskPrincipals(t)
 		canStop := canStopAgentWork(actor, principals)
-		if !canStop && !canSeeWorkSurface(ctx, actor, t) {
+		if !canStop && !seesSurface(t) {
 			continue // not their work, and they can't see where it's happening
 		}
 		item := toActiveWorkItem(t)
@@ -78,6 +79,22 @@ func ActiveWorkForEntity(ctx context.Context, actor Actor, entityID string) ([]A
 	}
 	attachRequesters(ctx, out, requesters)
 	return out, nil
+}
+
+// onceASurface asks see once a surface (its kind and entity): the jobs on
+// one entity are nearly always on the same one, and each asked again (a
+// channel's or a task's graph read apiece).
+func onceASurface(see func(*model.AgentActiveTask) bool) func(*model.AgentActiveTask) bool {
+	seen := map[string]bool{}
+	return func(t *model.AgentActiveTask) bool {
+		key := t.Surface + "\x00" + workEntityID(t)
+		v, ok := seen[key]
+		if !ok {
+			v = see(t)
+			seen[key] = v
+		}
+		return v
+	}
 }
 
 // canSeeWorkSurface reports whether the actor can see the SURFACE a job is

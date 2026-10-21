@@ -1,0 +1,6 @@
+[
+  {"id": "G0MPDM001", "name": "mpdm-ada--bo--cy-1", "created": 1759000400, "creator": "U0ADA0001", "is_archived": false,
+   "members": ["U0ADA0001", "U0BO00002", "U0CY00003"],
+   "topic": {"value": "Group of three", "creator": "U0ADA0001", "last_set": 1759000400},
+   "purpose": {"value": "", "creator": "", "last_set": 0}}
+]

@@ -51,7 +51,7 @@ func writeCalendarError(w http.ResponseWriter, r *http.Request, where string, er
 func member(w http.ResponseWriter, r *http.Request) (*model.UserInfo, bool) {
 	u, ok := r.Context().Value(helpers.UserInfoContextKey).(model.UserInfo)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return nil, false
 	}
 	return &u, true

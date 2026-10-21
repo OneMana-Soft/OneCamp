@@ -8,7 +8,9 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // Cycle is one time-boxed stretch of a project's work (migration 178).
@@ -104,6 +106,45 @@ func Create(project uuid.UUID, name string, startsAt, endsAt time.Time, by uuid.
 	return c, tx.Commit()
 }
 
+// Start moves an upcoming cycle to run from startsAt to endsAt (B3), under
+// the project's lock: a completed cycle still on the calendar then ends at
+// startsAt; one that isn't completed and overlaps is ErrOverlap.
+func Start(ctx context.Context, project, id uuid.UUID, startsAt, endsAt time.Time) (*Cycle, error) {
+	var started *Cycle
+	err := pgexec.InTx(ctx, func(ctx context.Context) error {
+		if err := lockProject(ctx, project); err != nil {
+			return err
+		}
+		clash, err := pgexec.Scalar[bool](ctx, `SELECT EXISTS (SELECT 1 FROM project_cycles
+			WHERE project_uuid = $1 AND id <> $4 AND completed_at IS NULL AND starts_at < $3 AND ends_at > $2)`, project, startsAt, endsAt, id)
+		if err != nil {
+			return err
+		}
+		if clash {
+			return ErrOverlap
+		}
+		if _, err := pgexec.Exec(ctx, `UPDATE project_cycles SET ends_at = $2
+			WHERE project_uuid = $1 AND completed_at IS NOT NULL AND ends_at > $2 AND starts_at < $2`, project, startsAt); err != nil {
+			return err
+		}
+		c, _, err := pgexec.QueryOne(ctx, `UPDATE project_cycles SET starts_at = $3, ends_at = $4
+			WHERE id = $1 AND project_uuid = $2 RETURNING `+columns, func(r pgexec.Row) (*Cycle, error) { return scan(r) }, id, project, startsAt, endsAt)
+		started = c
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return started, nil
+}
+
+// lockProject holds the project's cycles lock until the transaction ends, so
+// two writes of its cycles at once can't collide.
+func lockProject(ctx context.Context, project uuid.UUID) error {
+	_, err := pgexec.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, "cycles:"+project.String())
+	return err
+}
+
 // Rename changes a cycle's name.
 func Rename(id uuid.UUID, name string) error {
 	ctx, cancel := withTimeout()
@@ -147,6 +188,33 @@ func TasksIn(cycle uuid.UUID) ([]string, error) {
 	ctx, cancel := withTimeout()
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `SELECT task_uuid FROM task_cycles WHERE cycle_id = $1`, cycle)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var t uuid.UUID
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t.String())
+	}
+	return out, rows.Err()
+}
+
+// TasksInProjectCycles is the tasks of those of cycles that belong to
+// project, in one statement (a list filtered by cycles; PR1, the BE audit's
+// #15): a cycle of another project, or none, adds nothing.
+func TasksInProjectCycles(project uuid.UUID, cycles []uuid.UUID) ([]string, error) {
+	if len(cycles) == 0 {
+		return nil, nil
+	}
+	ctx, cancel := withTimeout()
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `SELECT tc.task_uuid FROM task_cycles tc
+		JOIN project_cycles c ON c.id = tc.cycle_id
+		WHERE c.project_uuid = $1 AND c.id = ANY($2::uuid[])`, project, pq.Array(cycles))
 	if err != nil {
 		return nil, err
 	}
@@ -266,5 +334,8 @@ func Complete(id uuid.UUID, done int, carry []string, next *uuid.UUID) (bool, er
 // ProjectsOf is each cycle's project, by the cycle's id; a cycle that isn't
 // there is left out.
 func ProjectsOf(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]uuid.UUID, error) {
-	return postgresInit.UUIDPairs(ctx, `SELECT id, project_uuid FROM project_cycles WHERE id = ANY($1)`, ids)
+	if len(ids) == 0 {
+		return map[uuid.UUID]uuid.UUID{}, nil
+	}
+	return pgexec.Pairs[uuid.UUID, uuid.UUID](ctx, `SELECT id, project_uuid FROM project_cycles WHERE id = ANY($1)`, ids)
 }

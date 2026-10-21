@@ -29,7 +29,7 @@ const (
 // server from before row keys (migration 301), between the migration and
 // this server starting (model.KeyRowsWithout).
 func StartLinkUpkeep(ctx context.Context) {
-	go func() {
+	helpers.GoSafeLoop("business/DataTable/linkUpkeep:StartLinkUpkeep", func() {
 		first := time.NewTimer(linkUpkeepFirst)
 		defer first.Stop()
 		ticker := time.NewTicker(linkUpkeepEvery)
@@ -67,5 +67,5 @@ func StartLinkUpkeep(ctx context.Context) {
 				look()
 			}
 		}
-	}()
+	})
 }

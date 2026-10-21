@@ -9,18 +9,22 @@ package controllers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
 	onboardingBusiness "github.com/akashc777/OneCamp/business/Onboarding"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
-	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 )
 
 // GetOnboardingStatus handles GET /admin/onboarding
 func GetOnboardingStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"data": onboardingBusiness.Status(ctx, userInfo),
@@ -73,4 +77,40 @@ func SkipOnboardingStep(w http.ResponseWriter, r *http.Request) {
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "saved"})
+}
+
+// MakeOnboardingSample handles POST /admin/onboarding/sample: the sample
+// project, made once from the built-in client project template, as the admin.
+func MakeOnboardingSample(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
+	sample, err := onboardingBusiness.MakeSample(ctx, userInfo)
+	if err != nil && sample.ProjectUUID == "" {
+		helpers.LogErrorWithContext(ctx, "controllers/MakeOnboardingSample err: %+v", err)
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Couldn't make the sample project. Try again in a moment."})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": sample})
+}
+
+// RemoveOnboardingSample handles POST /admin/onboarding/sample/remove:
+// archives what the sample made, and nothing else.
+func RemoveOnboardingSample(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	userInfo, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
+	switch err := onboardingBusiness.RemoveSample(ctx, userInfo); {
+	case err == nil:
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "removed"})
+	case errors.Is(err, onboardingBusiness.ErrNoSample):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no sample project to remove."})
+	default:
+		helpers.LogErrorWithContext(ctx, "controllers/RemoveOnboardingSample err: %+v", err)
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Couldn't remove the sample project. Try again in a moment."})
+	}
 }

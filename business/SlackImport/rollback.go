@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
 	importModels "github.com/akashc777/OneCamp/models/postgres/SlackImport"
@@ -112,42 +111,21 @@ func RollbackImport(ctx context.Context, jobId uuid.UUID) error {
 // left intact, otherwise rolling back a re-import would wipe the
 // original import's content too.
 func softDelete(ctx context.Context, tx *sql.Tx, importId uuid.UUID, entityType, table string) error {
-	entries, err := importModels.IdMappingsByTypeOwned(ctx, importId, entityType)
+	// One statement for all of them, where it was one per 500 after reading
+	// every mapping row into memory.
+	res, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		UPDATE %s SET %s
+		WHERE id IN (
+			SELECT onecamp_uuid FROM import_id_map
+			WHERE import_id = $1 AND entity_type = $2 AND created_by_this_import = true)
+		  AND deleted_at IS NULL`, tableNameWhitelist(table), markDeleted(table)), importId, entityType)
 	if err != nil {
-		return err
+		return fmt.Errorf("rollback %s: %w", table, err)
 	}
-	if len(entries) == 0 {
-		return nil
-	}
-
-	const batchSize = 500
-	for i := 0; i < len(entries); i += batchSize {
-		end := i + batchSize
-		if end > len(entries) {
-			end = len(entries)
-		}
-		batch := entries[i:end]
-
-		// Build IN-list of placeholders.
-		placeholders := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch))
-		for j, e := range batch {
-			placeholders = append(placeholders, fmt.Sprintf("$%d", j+1))
-			args = append(args, e.OnecampUUID)
-		}
-		query := fmt.Sprintf(`
-			UPDATE %s SET %s
-			WHERE id IN (%s) AND deleted_at IS NULL`,
-			tableNameWhitelist(table), markDeleted(table),
-			strings.Join(placeholders, ","))
-
-		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
-			return fmt.Errorf("rollback %s batch %d: %w", table, i, err)
-		}
-	}
+	n, _ := res.RowsAffected()
 	helpers.LogInfoWithContext(ctx,
 		"SlackImport rollback soft-deleted %d rows from %s for job %s",
-		len(entries), table, importId)
+		n, table, importId)
 	return nil
 }
 
@@ -156,35 +134,20 @@ func softDelete(ctx context.Context, tx *sql.Tx, importId uuid.UUID, entityType,
 // created by THIS import (created_by_this_import=true) so a re-import
 // rollback doesn't touch channels owned by an earlier import.
 func softDeleteEmptyChannels(ctx context.Context, tx *sql.Tx, importId uuid.UUID) error {
-	entries, err := importModels.IdMappingsByTypeOwned(ctx, importId, importModels.EntityChannel)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		var nonImportedCount int
-		if err := tx.QueryRowContext(ctx, `
-			SELECT COUNT(*)
-			FROM posts p
+	// The channels this import made that hold no live post it didn't make,
+	// in one statement: it was two per channel.
+	_, err := tx.ExecContext(ctx, `
+		UPDATE channels c SET deleted_at = NOW(), updated_at = NOW()
+		WHERE c.id IN (
+			SELECT onecamp_uuid FROM import_id_map
+			WHERE import_id = $1 AND entity_type = 'channel' AND created_by_this_import = true)
+		  AND c.deleted_at IS NULL
+		  AND NOT EXISTS (
+			SELECT 1 FROM posts p
 			LEFT JOIN import_id_map m
 			    ON m.import_id = $1 AND m.entity_type = 'message' AND m.onecamp_uuid = p.id
-			WHERE p.post_channel = $2
-			  AND p.deleted_at IS NULL
-			  AND m.onecamp_uuid IS NULL`, importId, e.OnecampUUID).Scan(&nonImportedCount); err != nil {
-			return err
-		}
-		if nonImportedCount > 0 {
-			helpers.LogInfoWithContext(ctx,
-				"SlackImport rollback keeping channel %s (has %d non-imported posts)",
-				e.OnecampUUID, nonImportedCount)
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE channels SET deleted_at = NOW(), updated_at = NOW()
-			WHERE id = $1 AND deleted_at IS NULL`, e.OnecampUUID); err != nil {
-			return err
-		}
-	}
-	return nil
+			WHERE p.post_channel = c.id AND p.deleted_at IS NULL AND m.onecamp_uuid IS NULL)`, importId)
+	return err
 }
 
 // softDeleteExternalUsers tombstones imported external users that have
@@ -198,66 +161,28 @@ func softDeleteEmptyChannels(ctx context.Context, tx *sql.Tx, importId uuid.UUID
 // Tombstoning a user who's authoring messages in another active import
 // would orphan that content.
 func softDeleteExternalUsers(ctx context.Context, tx *sql.Tx, importId uuid.UUID) error {
-	entries, err := importModels.IdMappingsByTypeOwned(ctx, importId, importModels.EntityUser)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		var refsExternal int
-		if err := tx.QueryRowContext(ctx, `
-			SELECT COUNT(*) FROM users WHERE id = $1 AND is_external = true`,
-			e.OnecampUUID).Scan(&refsExternal); err != nil {
-			return err
-		}
-		if refsExternal == 0 {
-			continue // real user, skip
-		}
-
-		// Skip if any other import maps to this same OneCamp user. The
-		// external user is shared and removing it would orphan content
-		// in the other import.
-		var sharedCount int
-		if err := tx.QueryRowContext(ctx, `
-			SELECT COUNT(*) FROM import_id_map
-			WHERE onecamp_uuid = $1 AND import_id <> $2 AND entity_type = 'user'`,
-			e.OnecampUUID, importId).Scan(&sharedCount); err != nil {
-			return err
-		}
-		if sharedCount > 0 {
-			continue
-		}
-
-		// Skip if the user has authored content (post/chat/comment) we
-		// did NOT create in this import. If they've been active beyond
-		// our import we leave them in place.
-		var foreignAuthored int
-		if err := tx.QueryRowContext(ctx, `
-			SELECT
-				(SELECT COUNT(*) FROM posts WHERE created_by = $1 AND id NOT IN (
-					SELECT onecamp_uuid FROM import_id_map
-					WHERE import_id = $2 AND entity_type = 'message'))
-				+
-				(SELECT COUNT(*) FROM chats WHERE created_by = $1 AND id NOT IN (
-					SELECT onecamp_uuid FROM import_id_map
-					WHERE import_id = $2 AND entity_type = 'message'))
-				+
-				(SELECT COUNT(*) FROM comments WHERE created_by = $1 AND id NOT IN (
-					SELECT onecamp_uuid FROM import_id_map
-					WHERE import_id = $2 AND entity_type = 'comment'))`,
-			e.OnecampUUID, importId).Scan(&foreignAuthored); err != nil {
-			return err
-		}
-		if foreignAuthored > 0 {
-			continue
-		}
-
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE users SET deleted_at = NOW(), updated_at = NOW()
-			WHERE id = $1`, e.OnecampUUID); err != nil {
-			return err
-		}
-	}
-	return nil
+	// The external people this import made that no other import maps and
+	// who wrote nothing it didn't bring, in one statement: it was four per
+	// person.
+	_, err := tx.ExecContext(ctx, `
+		UPDATE users u SET deleted_at = NOW(), updated_at = NOW()
+		WHERE u.id IN (
+			SELECT onecamp_uuid FROM import_id_map
+			WHERE import_id = $1 AND entity_type = 'user' AND created_by_this_import = true)
+		  AND u.is_external = true
+		  AND NOT EXISTS (
+			SELECT 1 FROM import_id_map o
+			WHERE o.onecamp_uuid = u.id AND o.import_id <> $1 AND o.entity_type = 'user')
+		  AND NOT EXISTS (
+			SELECT 1 FROM posts p WHERE p.created_by = u.id AND p.id NOT IN (
+				SELECT onecamp_uuid FROM import_id_map WHERE import_id = $1 AND entity_type = 'message'))
+		  AND NOT EXISTS (
+			SELECT 1 FROM chats c WHERE c.created_by = u.id AND c.id NOT IN (
+				SELECT onecamp_uuid FROM import_id_map WHERE import_id = $1 AND entity_type = 'message'))
+		  AND NOT EXISTS (
+			SELECT 1 FROM comments m WHERE m.created_by = u.id AND m.id NOT IN (
+				SELECT onecamp_uuid FROM import_id_map WHERE import_id = $1 AND entity_type = 'comment'))`, importId)
+	return err
 }
 
 // markDeleted is the SET clause that marks a row of table deleted.

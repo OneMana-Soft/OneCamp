@@ -7,6 +7,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/dgraph-io/dgo/v230"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
@@ -27,36 +28,6 @@ func UpsertEmojiStatuses(ctx context.Context, query string, set, del []byte) err
 		helpers.LogErrorWithContext(ctx, "models/UpsertEmojiStatuses failed to write the statuses err: %+v", err)
 	}
 	return err
-}
-
-func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.DgraphUser, query string, deleteJson string) (userUid string, err error) {
-	pb, err := json.Marshal(dgraphUser)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateOrUpdateDgraphUser failed to marshal dgraphUser struct err: %+v",
-			err)
-		return
-	}
-
-	mu := &api.Mutation{
-		SetJson:    pb,
-		DeleteJson: []byte(deleteJson),
-	}
-	// An upsert, so a conflicting concurrent write is retried (DoCommitNow).
-	res, err := dgraphInit.DoCommitNow(ctx, &api.Request{
-		Query:     query,
-		Mutations: []*api.Mutation{mu},
-	})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateOrUpdateDgraphUser failed to create or update dgraph user err: %+v",
-			err)
-		return
-	}
-
-	// will get uid only when new node is created
-	userUid = res.Uids["uid(user)"]
-	return
 }
 
 func GetDgraphUserInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
@@ -91,18 +62,24 @@ func GetDgraphUserInfoInTxn(ctx context.Context, txn *dgo.Txn, query string, var
 
 	if len(usersInfo.UserInfo) == 0 {
 		err = ErrNotFound
-		helpers.LogErrorWithContext(ctx,
+		// Found nothing: an answer its caller handles (a 404, or skipping
+		// the thing), so said at DEBUG, not as a failure.
+		helpers.LogDebugWithContext(ctx,
 			"models/GetDgraphUserInfoByUUID failed to get dgraph user")
 
 		return
 	}
 	dgraphUser = &usersInfo.UserInfo[0]
-
+	// Only the tasks the reader may see (models/taskread).
+	if err = taskread.KeepIn(ctx, dgraphUser); err != nil {
+		return nil, err
+	}
 	return
 }
 
 func GetDgraphUsersList(ctx context.Context, query string, variables map[string]string) (dgraphUsers []*dgraphStruct.DgraphUser, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -125,6 +102,9 @@ func GetDgraphUsersList(ctx context.Context, query string, variables map[string]
 		return
 	}
 	dgraphUsers = usersInfo.UserInfo
+	if err = taskread.KeepIn(ctx, &dgraphUsers); err != nil {
+		return nil, err
+	}
 	return
 }
 

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	models "github.com/akashc777/OneCamp/models/postgres/Integration"
 	"github.com/google/uuid"
 )
@@ -22,7 +23,7 @@ func UpsertIntegration(ctx context.Context, entityType string, entityId uuid.UUI
 			expires_at = EXCLUDED.expires_at,
 			updated_at = EXCLUDED.updated_at
 	`
-	err := models.UpsertIntegration(query, entityType, entityId, provider, accessToken, refreshToken, webhookUrl, metadata, expiresAt, currentTime)
+	_, err := pgexec.Exec(ctx, query, entityType, entityId, provider, accessToken, refreshToken, webhookUrl, metadata, expiresAt, currentTime)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/UpsertIntegration Failed to upsert integration err: %+v", err)
 		return err
@@ -36,7 +37,7 @@ func GetIntegration(ctx context.Context, entityType string, entityId uuid.UUID, 
 		FROM integrations
 		WHERE entity_type = $1 AND entity_id = $2 AND provider = $3
 	`
-	integration, err := models.GetIntegration(query, entityType, entityId, provider)
+	integration, _, err := pgexec.QueryOne(ctx, query, func(r pgexec.Row) (*models.Integration, error) { return models.ScanIntegration(r) }, entityType, entityId, provider)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetIntegration Failed to get integration err: %+v", err)
 		return nil, err
@@ -46,7 +47,7 @@ func GetIntegration(ctx context.Context, entityType string, entityId uuid.UUID, 
 
 func DeleteIntegration(ctx context.Context, entityType string, entityId uuid.UUID, provider string) error {
 	query := `DELETE FROM integrations WHERE entity_type = $1 AND entity_id = $2 AND provider = $3`
-	err := models.DeleteIntegration(query, entityType, entityId, provider)
+	_, err := pgexec.Exec(ctx, query, entityType, entityId, provider)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/DeleteIntegration Failed to delete integration err: %+v", err)
 		return err
@@ -57,7 +58,7 @@ func DeleteIntegration(ctx context.Context, entityType string, entityId uuid.UUI
 // GetIntegrationMetadataByGitHubLogin finds GitHub integration metadata by GitHub login.
 func GetIntegrationMetadataByGitHubLogin(ctx context.Context, githubLogin string) (*string, error) {
 	query := `SELECT metadata FROM integrations WHERE provider = 'github' AND metadata::text LIKE $1 LIMIT 1`
-	metadata, err := models.GetIntegrationMetadataByGitHubLogin(query, githubLogin)
+	metadata, _, err := pgexec.QueryOne(ctx, query, scanMetadata, "%"+githubLogin+"%")
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetIntegrationMetadataByGitHubLogin Failed err: %+v", err)
 		return nil, err
@@ -68,7 +69,7 @@ func GetIntegrationMetadataByGitHubLogin(ctx context.Context, githubLogin string
 // GetIntegrationMetadataByEntityID finds GitHub integration metadata by entity ID.
 func GetIntegrationMetadataByEntityID(ctx context.Context, entityId uuid.UUID) (*string, error) {
 	query := `SELECT metadata FROM integrations WHERE provider = 'github' AND entity_id = $1 LIMIT 1`
-	metadata, err := models.GetIntegrationMetadataByEntityID(query, entityId)
+	metadata, _, err := pgexec.QueryOne(ctx, query, scanMetadata, entityId)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetIntegrationMetadataByEntityID Failed err: %+v", err)
 		return nil, err
@@ -83,7 +84,11 @@ func UpdateTaskSyncEnabled(ctx context.Context, entityType string, entityId uuid
 		SET task_sync_enabled = $1, updated_at = $2
 		WHERE entity_type = $3 AND entity_id = $4 AND provider = $5
 	`
-	return models.UpdateTaskSyncEnabled(query, enabled, currentTime, entityType, entityId, provider)
+	_, err := pgexec.Exec(ctx, query, enabled, currentTime, entityType, entityId, provider)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/UpdateTaskSyncEnabled err: %+v", err)
+	}
+	return err
 }
 
 func UpdateIntegrationToken(ctx context.Context, entityType string, entityId uuid.UUID, provider string, accessToken *string, refreshToken *string, expiresAt *time.Time) error {
@@ -93,5 +98,12 @@ func UpdateIntegrationToken(ctx context.Context, entityType string, entityId uui
 		SET access_token = $1, refresh_token = $2, expires_at = $3, updated_at = $4
 		WHERE entity_type = $5 AND entity_id = $6 AND provider = $7
 	`
-	return models.UpdateIntegrationToken(query, accessToken, refreshToken, expiresAt, currentTime, entityType, entityId, provider)
+	_, err := pgexec.Exec(ctx, query, accessToken, refreshToken, expiresAt, currentTime, entityType, entityId, provider)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/UpdateIntegrationToken err: %+v", err)
+	}
+	return err
 }
+
+// scanMetadata reads an integration's metadata (nil for none).
+func scanMetadata(r pgexec.Row) (m *string, err error) { err = r.Scan(&m); return }

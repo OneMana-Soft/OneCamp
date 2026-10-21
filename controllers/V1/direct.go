@@ -28,6 +28,8 @@ import (
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
+	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
@@ -93,6 +95,7 @@ func asJSON(v interface{}) string {
 // apiTask is one task as a list answers it (the AI tools' TaskRow).
 type apiTask struct {
 	UUID     string `json:"uuid"`
+	Key      string `json:"key,omitempty"`
 	Name     string `json:"name"`
 	Status   string `json:"status"`
 	Priority string `json:"priority,omitempty"`
@@ -142,7 +145,7 @@ func taskRows(tasks []*dgraphStruct.DgraphTask, total int, now time.Time) apiTas
 		if t == nil {
 			continue
 		}
-		row := apiTask{UUID: t.Uuid, Name: strings.TrimSpace(t.Name), Status: t.Status, Priority: t.Priority, URL: base + "/app/task/" + t.Uuid}
+		row := apiTask{UUID: t.Uuid, Key: t.Key, Name: strings.TrimSpace(t.Name), Status: t.Status, Priority: t.Priority, URL: base + "/app/task/" + t.Uuid}
 		if row.Name == "" {
 			row.Name = "(untitled task)"
 		}
@@ -191,7 +194,11 @@ func ListTasksV1(w http.ResponseWriter, r *http.Request) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Your tasks (%d shown):", len(list.Tasks))
 	for _, t := range list.Tasks {
-		fmt.Fprintf(&b, "\n- %s [%s", t.Name, t.Status)
+		if t.Key != "" {
+			fmt.Fprintf(&b, "\n- %s %s [%s", t.Key, t.Name, t.Status)
+		} else {
+			fmt.Fprintf(&b, "\n- %s [%s", t.Name, t.Status)
+		}
 		if t.Due != "" {
 			fmt.Fprintf(&b, ", due %s", t.Due[:10])
 		}
@@ -245,12 +252,11 @@ func CreateTaskV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	priority := strings.ToLower(strings.TrimSpace(params["priority"]))
-	switch priority {
-	case "":
+	if priority == "" {
 		priority = dgraphStruct.TASK_PRIORITY_MEDIUM
-	case dgraphStruct.TASK_PRIORITY_LOW, dgraphStruct.TASK_PRIORITY_MEDIUM, dgraphStruct.TASK_PRIORITY_HIGH:
-	default:
-		refuse(w, http.StatusBadRequest, "priority is low, medium or high")
+	}
+	if !taskPriority.Is(priority) {
+		refuse(w, http.StatusBadRequest, "priority is urgent, high, medium or low")
 		return
 	}
 	var assignee *dgraphStruct.DgraphUser
@@ -291,8 +297,9 @@ func CreateTaskV1(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// UpdateTaskStatusV1 POST /v1/tasks/{id}/status — scope tasks:write. Body:
-// status (built-in, or one of the project's own by name).
+// UpdateTaskStatusV1 POST /v1/tasks/{id}/status — scope tasks:write. {id} is
+// the task's id or its key (Q4-12). Body: status (built-in, or one of the
+// project's own by name).
 func UpdateTaskStatusV1(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := apiUser(r)
@@ -306,9 +313,14 @@ func UpdateTaskStatusV1(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusBadRequest, "status is required")
 		return
 	}
-	taskID, err := uuid.Parse(chi.URLParam(r, "id"))
+	// The task's id, or its key ("Q4-12").
+	taskID, err := taskKeys.Ref(ctx, chi.URLParam(r, "id"))
+	if errors.Is(err, taskKeys.ErrNoTask) {
+		refuse(w, http.StatusNotFound, "task not found or you don't have access")
+		return
+	}
 	if err != nil {
-		refuse(w, http.StatusBadRequest, "invalid task id")
+		refuse(w, http.StatusServiceUnavailable, "couldn't look the task up; try again")
 		return
 	}
 	task, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskID.String(), user.UserDgraphInfo.Uid)

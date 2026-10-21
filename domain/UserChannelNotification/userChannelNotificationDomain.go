@@ -127,3 +127,25 @@ func GetLevelsInChannel(ctx context.Context, channelId string, userIds []string)
 	}
 	return levels, nil
 }
+
+// MemberIDs is the user ids of the people in a channel now, up to limit, by
+// the same rows GetLevelsInChannel reads: each member has a setting for the
+// channel from joining until they leave. For who a broadcast reaches
+// (business/Reach) and the "@" list's "Not in #launch".
+func MemberIDs(ctx context.Context, channelID string, limit int) ([]string, error) {
+	query := `
+		SELECT lower(user_id::text)
+		FROM users_channel_notification
+		WHERE channel_id = $1
+		ORDER BY user_id
+		LIMIT $2
+	`
+	ids, err := models.GetMemberIDs(ctx, query, channelID, limit)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/MemberIDs Failed to get the channel's members err: %+v",
+			err)
+		return nil, err
+	}
+	return ids, nil
+}

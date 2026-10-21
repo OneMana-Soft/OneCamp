@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	readStateModels "github.com/akashc777/OneCamp/models/postgres/ReadState"
 	"strconv"
 	"time"
 
+	messageDomain "github.com/akashc777/OneCamp/domain/Message"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Chat"
@@ -14,6 +16,7 @@ import (
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	OpenSearchBulkModels "github.com/akashc777/OneCamp/models/openSearch/Bulk"
 	OpenSearchModels "github.com/akashc777/OneCamp/models/openSearch/Chat"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	models "github.com/akashc777/OneCamp/models/postgres/Chat"
 	"github.com/google/uuid"
 )
@@ -21,11 +24,11 @@ import (
 const CHAT_COUNT = 10
 
 func CreateChat(ctx context.Context, chatId uuid.UUID, createdBy uuid.UUID, grpId string) (err error) {
-	query := `
-		INSERT INTO chats (id, created_by,  grp_id)
-		VALUES ($1, $2, $3)
-	`
-	err = models.CreateChat(query, chatId, createdBy, grpId)
+	// An imported message keeps its original time (helpers.WithImportTimestamp).
+	_, err = pgexec.Exec(ctx, `
+		INSERT INTO chats (id, created_by, grp_id, created_at, updated_at)
+		VALUES ($1, $2, $3, COALESCE($4, NOW()), COALESCE($4, NOW()))`,
+		chatId, createdBy, grpId, helpers.GetImportTimestamp(ctx))
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -103,13 +106,12 @@ func GetLatestChatMessageCountByUserID(ctx context.Context, userID uuid.UUID) (c
 	//
 	//   >  rather than >=      The marker is set to the moment of reading, so a
 	//     message stamped at exactly that instant is one you just saw.
+	// The rule above is the read state's (models/postgres/ReadState), so the
+	// count, the first unread and Mark unread agree.
 	query := `
-		SELECT lsc.grp_id, COUNT(c.id) AS chat_count
+		SELECT lsc.grp_id, COUNT(m.id) AS chat_count
 		FROM last_seen_chat lsc
-		LEFT JOIN chats c ON c.grp_id = lsc.grp_id
-			AND c.created_at > lsc.user_last_seen
-			AND c.deleted_at IS NULL
-			AND c.created_by <> lsc.user_id
+		LEFT JOIN chats m ON ` + readStateModels.Chat.Unread() + `
 		WHERE lsc.user_id = $1
 		GROUP BY lsc.grp_id;
 	`
@@ -466,6 +468,16 @@ func GetUserChatListWithLatestChat(ctx context.Context, userUUID string) (dgraph
 	return
 }
 
+// pageChats reads a page of a DM's or group's messages, each with its
+// thread's people (domain/Message KeepChatRepliers): every page query's one read.
+func pageChats(ctx context.Context, query string, variables map[string]string) ([]*dgraphStruct.DgraphChat, error) {
+	chats, err := dgraphModels.GetDgraphDmsInfoByGrpId(ctx, query, variables)
+	if err == nil {
+		messageDomain.KeepChatRepliers(ctx, chats)
+	}
+	return chats, err
+}
+
 func GetDgraphOldChatFromDgraph(ctx context.Context, groupingId string, lastChatTime time.Time) (dgraphChats []*dgraphStruct.DgraphChat, err error) {
 
 	variables := make(map[string]string)
@@ -498,9 +510,7 @@ func GetDgraphOldChatFromDgraph(ctx context.Context, groupingId string, lastChat
 							}
 						}
 						chat_comment_count : count(chat_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						chat_comments (orderdesc: comment_created_at, first: 1){
-							comment_created_at
-						}
+						` + messageDomain.RepliersSelection("chat_comments") + `
 						chat_to {
 							user_uuid
 							user_name
@@ -538,7 +548,7 @@ func GetDgraphOldChatFromDgraph(ctx context.Context, groupingId string, lastChat
 				}
 			}`
 
-	dgraphChats, err = dgraphModels.GetDgraphDmsInfoByGrpId(ctx, query, variables)
+	dgraphChats, err = pageChats(ctx, query, variables)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -584,9 +594,7 @@ func GetDgraphNewChatFromDgraph(ctx context.Context, groupingId string, lastChat
 							}
 						}
 						chat_comment_count : count(chat_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						chat_comments (orderdesc: comment_created_at, first: 1){
-							comment_created_at
-						}
+						` + messageDomain.RepliersSelection("chat_comments") + `
 						chat_to {
 							user_uuid
 							user_name
@@ -624,7 +632,7 @@ func GetDgraphNewChatFromDgraph(ctx context.Context, groupingId string, lastChat
 				}
 			}`
 
-	dgraphChats, err = dgraphModels.GetDgraphDmsInfoByGrpId(ctx, query, variables)
+	dgraphChats, err = pageChats(ctx, query, variables)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -825,9 +833,7 @@ func GetDgraphNewChatIncludingChatFromDgraph(ctx context.Context, groupingId str
 							}
 						}
 						chat_comment_count : count(chat_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						chat_comments (orderdesc: comment_created_at, first: 1){
-							comment_created_at
-						}
+						` + messageDomain.RepliersSelection("chat_comments") + `
 						chat_to {
 							user_uuid
 							user_name
@@ -865,7 +871,7 @@ func GetDgraphNewChatIncludingChatFromDgraph(ctx context.Context, groupingId str
 				}
 			}`
 
-	dgraphChats, err = dgraphModels.GetDgraphDmsInfoByGrpId(ctx, query, variables)
+	dgraphChats, err = pageChats(ctx, query, variables)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -901,9 +907,7 @@ func GetDgraphLatestChatFromDgraph(ctx context.Context, groupingId string) (dgra
 							user_deleted_at
 						}
 						chat_comment_count : count(chat_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
-						chat_comments (orderdesc: comment_created_at, first: 1){
-							comment_created_at
-						}
+						` + messageDomain.RepliersSelection("chat_comments") + `
 						chat_to {
 							user_uuid
 							user_name
@@ -949,67 +953,11 @@ func GetDgraphLatestChatFromDgraph(ctx context.Context, groupingId string) (dgra
 				}
 			}`
 
-	dgraphChats, err = dgraphModels.GetDgraphDmsInfoByGrpId(ctx, query, variables)
+	dgraphChats, err = pageChats(ctx, query, variables)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/GetDgraphLatestPostFromDgraph Failed to get chats in dgraph err: %+v",
-			err,
-		)
-		return
-	}
-
-	return
-}
-
-func CreateOrUpdateChatReaction(ctx context.Context, dgraphChat *dgraphStruct.DgraphChat) (reactionUID string, err error) {
-	query := fmt.Sprintf(`query {
-									  cha as var(func: eq(chat_uuid, "%+v"))
-								  }`, dgraphChat.Uuid)
-
-	reactionUID, err = dgraphModels.CreateOrUpdateChatReaction(ctx, query, dgraphChat)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/CreateOrUpdateChatReaction Failed to get chats in dgraph err: %+v",
-			err,
-		)
-		return
-	}
-	return
-}
-
-func DeleteChatReaction(ctx context.Context, chatDgraphUUID string, reactionDgraphUUID string) (err error) {
-	delStringJSON := fmt.Sprintf(`
-		[
-			
-			{
-				"uid": "%s",
-				"chat_reactions": [
-					{
-						"uid": "%s"
-					}
-				]
-			},
-			{
-				"uid": "%s",
-				"reaction_added_by": null,
-				"reaction_on_content_added_by": null,
-				"reaction_added_at": null,
-				"reaction_emoji_id": null
-			
-			},
-			{
-				"uid": "%s"
-			}
-		]
-	`, chatDgraphUUID, reactionDgraphUUID, reactionDgraphUUID, reactionDgraphUUID)
-
-	err = dgraphModels.DeleteNodeOrEdgesRelatedToChats(ctx, delStringJSON)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/DeleteChannelMemberEdge Failed to remove channel member in dgraph err: %+v",
 			err,
 		)
 		return

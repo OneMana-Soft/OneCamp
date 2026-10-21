@@ -4,9 +4,21 @@ import (
 	"net/http"
 
 	aiBusiness "github.com/akashc777/OneCamp/business/AI"
+	apiTokenBusiness "github.com/akashc777/OneCamp/business/ApiToken"
+	v1api "github.com/akashc777/OneCamp/business/PublicAPI"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 )
+
+// /attention is the AI edition's (routes.go registers the rest of /v1).
+func init() {
+	v1api.Register(v1api.Resource{
+		Name: "attention", Owner: "platform",
+		Routes: []v1api.Route{
+			{Method: http.MethodGet, Path: "/attention", Summary: "What needs you: approvals, overdue tasks, commitments, today", Scope: apiTokenBusiness.ScopeAttentionRead, Legacy: true, Handler: Attention},
+		},
+	})
+}
 
 // Attention GET /v1/attention, scope attention:read: the Home "what needs me"
 // queue (approvals waiting, overdue tasks, commitments, today's calendar) for

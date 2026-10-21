@@ -154,11 +154,11 @@ func (app *Application) Serve(ctx context.Context) error {
 	}
 
 	// Start server in a goroutine so the main goroutine can wait for the signal
-	go func() {
+	helpers.GoSafeLoop("http.server", func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			helpers.LogErrorWithContext(ctx, "Server error: %v", err)
 		}
-	}()
+	})
 
 	helpers.MessageLogs.InfoLog.Printf("Server started on port %s", port)
 
@@ -220,6 +220,9 @@ func startBackgroundLoops(ctx context.Context) {
 	// Every start: an @handle for each member who has none (accounts from
 	// before handles), derived from their name.
 	userBusiness.StartHandleBackfill(ctx)
+	// Every start: a search name for each person who has none (people saved
+	// before there were search names), so people searches find them.
+	userBusiness.StartSearchNameBackfill(ctx)
 	// Every start: the default notification setting for anyone in a direct or
 	// group conversation who has none (groups someone was added to, and
 	// direct conversations, before the fix), or they are never told of it.

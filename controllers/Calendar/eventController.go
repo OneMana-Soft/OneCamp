@@ -33,7 +33,7 @@ func CreateEventController(w http.ResponseWriter, r *http.Request) {
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(model.UserInfo)
 	if !ok {
 		helpers.LogErrorWithContext(ctx, "controllers/CreateEventController Failed getting user from context")
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 
@@ -62,7 +62,7 @@ func UpdateEventController(w http.ResponseWriter, r *http.Request) {
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(model.UserInfo)
 	if !ok {
 		helpers.LogErrorWithContext(ctx, "controllers/UpdateEventController Failed getting user from context")
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 
@@ -108,7 +108,7 @@ func DeleteEventController(w http.ResponseWriter, r *http.Request) {
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(model.UserInfo)
 	if !ok {
 		helpers.LogErrorWithContext(ctx, "controllers/DeleteEventController Failed getting user from context")
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 
@@ -149,7 +149,7 @@ func GetEventsListController(w http.ResponseWriter, r *http.Request) {
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(model.UserInfo)
 	if !ok {
 		helpers.LogErrorWithContext(ctx, "controllers/GetEventsListController Failed getting user from context")
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 
@@ -198,7 +198,7 @@ func GetEventController(w http.ResponseWriter, r *http.Request) {
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(model.UserInfo)
 	if !ok {
 		helpers.LogErrorWithContext(ctx, "controllers/GetEventController Failed getting user from context")
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	eventID := chi.URLParam(r, "eventId")
@@ -257,7 +257,7 @@ func LeaveEventController(w http.ResponseWriter, r *http.Request) {
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(model.UserInfo)
 	if !ok {
 		helpers.LogErrorWithContext(ctx, "controllers/LeaveEventController Failed getting user from context")
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 

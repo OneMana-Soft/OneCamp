@@ -68,6 +68,10 @@ var ErrSlotTaken = errors.New("slot taken")
 // ErrSlugTaken is a page address another page already uses.
 var ErrSlugTaken = errors.New("slug taken")
 
+// slugConstraint is the unique constraint on a page's address: the one
+// duplicate SavePage reads as ErrSlugTaken. Any other is the server's.
+const slugConstraint = "booking_pages_slug_key"
+
 func withTimeout() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 }
@@ -166,7 +170,7 @@ func SavePage(p Page) (*Page, error) {
 			p.BufferMinutes, p.MinNoticeMinutes, p.MaxDaysAhead, p.Active)
 	}
 	saved, err := scanPage(row)
-	if err != nil && helpers.IsUniqueViolation(err) {
+	if err != nil && helpers.IsUniqueViolationOn(err, slugConstraint) {
 		return nil, ErrSlugTaken
 	}
 	if err == nil && saved == nil && p.Id == uuid.Nil {

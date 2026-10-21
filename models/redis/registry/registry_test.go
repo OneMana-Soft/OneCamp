@@ -45,12 +45,12 @@ func TestBuildArity(t *testing.T) {
 
 // Pattern returns the SCAN-friendly wildcard.
 func TestPattern(t *testing.T) {
-	got := ProjectTasks.Pattern("p")
-	want := "project:tasks:p:*"
+	got := UserRefreshToken.Pattern("u")
+	want := "auth:refresh:u:*"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
-	if got := ProjectTasks.PatternAll(); got != "project:tasks:*" {
+	if got := UserRefreshToken.PatternAll(); got != "auth:refresh:*" {
 		t.Fatalf("PatternAll mismatch: %q", got)
 	}
 }
@@ -72,6 +72,9 @@ func all() []Spec {
 		UserRefreshToken,
 		LoginRate,
 		PublicReadRate,
+		PublishPage,
+		PublishPageRate,
+		PublishUnlockRate,
 		SSOState,
 		UserProfile,
 		UserDgraphProfile,
@@ -79,7 +82,7 @@ func all() []Spec {
 		UserChannels,
 		UserProjects,
 		ChannelBasicInfo,
-		ProjectTasks,
+		ChannelBasicInfoKeys,
 		AISession,
 		AIPlanDraft,
 		AIRate,
@@ -103,6 +106,8 @@ func all() []Spec {
 		TranscriptionAdminRate,
 		WebhookRateLimit,
 		ApiTokenRate,
+		ApiRouteRate,
+		ApiIdempotency,
 		InviterDailyInvites,
 		MCPToolReadRate,
 		MCPToolWriteRate,
@@ -123,14 +128,20 @@ func all() []Spec {
 		CommandCatalogVersion,
 		CommandRate,
 		CommandInteraction,
+		CardTrigger,
+		CommandResponse,
 		CommandOAuthState,
 		ConnectorOAuthState,
 		PasskeyCeremony,
 		ConnectorBriefingDay,
 		CollabStateSize,
+		ViewSalt,
 		SweepClaim,
 		SendOnce,
 		OutboxOnce,
+		DraftWriteRate,
+		WorkGraphRefsCursor,
+		WorkGraphRefsReport,
 		DocUpdatedWebhooksDue,
 		UnfurlCard,
 		UnfurlRate,

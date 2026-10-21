@@ -60,13 +60,14 @@ func IsNotFound(err error) bool  { return err == errNotFound }
 // canQuery reports whether the actor may QUERY (read/introspect) a source:
 // admin, the creator, or any member when the source is workspace-visible.
 func canQuery(d *model.DataSource, a Actor) bool {
-	return a.IsAdmin || d.CreatedBy == a.UserID || d.Visibility == model.VisibilityWorkspace
+	return d.Visibility == model.VisibilityWorkspace || helpers.OwnerOrAdmin(&d.CreatedBy, a.UserID, a.IsAdmin)
 }
 
 // canManage reports whether the actor may change a source's config: admin or
-// its creator. (The router already gates all config routes with agent.manage.)
+// its creator, by helpers.OwnerOrAdmin. (The router already gates all config
+// routes with agent.manage.)
 func canManage(d *model.DataSource, a Actor) bool {
-	return a.IsAdmin || d.CreatedBy == a.UserID
+	return helpers.OwnerOrAdmin(&d.CreatedBy, a.UserID, a.IsAdmin)
 }
 
 // Input is the create/update payload from the controller. Password is a pointer

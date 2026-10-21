@@ -394,7 +394,7 @@ func DeleteWorkspaceMemory(ctx context.Context, userInfo *userModels.UserInfo, i
 	// recall or graph reads. Best-effort, async.
 	ai.DeleteMemoryProjectionsAsync(id.String())
 	// A deleted commitment must also clear any open nudge for it immediately.
-	go ClearNudgeForMemoryItem(context.WithoutCancel(ctx), id.String())
+	helpers.GoSafeNamed("ClearNudgeForMemoryItem", func() { ClearNudgeForMemoryItem(context.WithoutCancel(ctx), id.String()) })
 	return nil
 }
 

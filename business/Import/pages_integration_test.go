@@ -28,6 +28,7 @@ import (
 	contentIOBusiness "github.com/akashc777/OneCamp/business/ContentIO"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
+	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
@@ -75,6 +76,7 @@ func (s *pageSeeds) Seed(_ context.Context, id, html string, _ collab.Options) (
 // Writer faked, and Ada, who imports Acme's Notion.
 type pagesWorld struct {
 	env       *integration.Env
+	dg        *integration.DgraphEnv
 	seeds     *pageSeeds
 	admin     uuid.UUID
 	uid       string
@@ -108,7 +110,7 @@ func newPagesWorld(t *testing.T) *pagesWorld {
 		t.Fatal(err)
 	}
 	opensearchInit.OpenSearchClient = client
-	w := &pagesWorld{env: env, seeds: &pageSeeds{seeded: map[string]string{}}, admin: uuid.New()}
+	w := &pagesWorld{env: env, dg: dg, seeds: &pageSeeds{seeded: map[string]string{}}, admin: uuid.New()}
 	savedLive := collab.Live
 	collab.Live = w.seeds
 	t.Cleanup(func() { collab.Live = savedLive })
@@ -264,5 +266,109 @@ func TestATreeHalfMadeIsTakenAwayAndMadeAgainWhole(t *testing.T) {
 	childDoc, _ := importModels.LookupIdMapping(ctx, job.Id, importModels.EntityDoc, treeChild)
 	if rows, err := docBusiness.DocRows(ctx, []string{rootDoc.String(), childDoc.String()}, w.uid); err != nil || len(rows) != 2 {
 		t.Fatalf("tried again, the tree is %+v (%v)", rows, err)
+	}
+}
+
+// busTap records what the bus is told, and passes it on.
+type busTap struct {
+	next  resourceEventBusiness.Emitter
+	mu    sync.Mutex
+	kinds []string
+}
+
+func (b *busTap) Emit(ctx context.Context, e resourceEventBusiness.Event) {
+	b.mu.Lock()
+	b.kinds = append(b.kinds, string(e.Kind))
+	b.mu.Unlock()
+	b.next.Emit(ctx, e)
+}
+
+// Docs N1: a page's comments come across as its doc's comments, by their
+// author when the import knows them as a person here (Maya), by the person
+// importing when not, at the time they were made, once each, telling nobody;
+// and a rollback takes them with the import.
+func TestAPagesCommentsComeAcrossQuietly(t *testing.T) {
+	ctx := context.Background()
+	w := newPagesWorld(t)
+	job, chunk := w.job(t)
+
+	maya := uuid.New()
+	if _, err := w.env.PG.Exec(`INSERT INTO users (id, email_id, username, display_name, created_at, updated_at) VALUES ($1, $2, 'maya', 'Maya', NOW(), NOW())`,
+		maya, maya.String()+"@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	w.dg.Mutate(t, []map[string]any{{"uid": "_:maya", "dgraph.type": "User", "user_uuid": maya.String(), "user_name": "maya",
+		"user_full_name": "Maya", "user_deleted_at": "0001-01-01T00:00:00Z"}})
+	if err := importModels.UpsertIdMappingWithOwnership(ctx, job.Id, importModels.EntityUser, "u-maya", maya, nil, nil, false); err != nil {
+		t.Fatal(err)
+	}
+
+	asked := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	answered := asked.Add(90 * time.Minute)
+	withComments := pagesFrom{pages: []importProvider.SourcePage{
+		{SourceID: treeRoot, Title: "Engineering", HTML: `<p>Ship on Friday.</p>`, Comments: []importProvider.SourceComment{
+			{SourceID: "cm-1", Body: "<p>Can we ship on <strong>Friday</strong>?</p>", AuthorSourceID: "u-maya", Created: asked},
+			{SourceID: "cm-2", Body: "<p>Yes, after the review.</p>", AuthorSourceID: "u-someone-not-here", Created: answered},
+		}},
+	}}
+	tap := &busTap{next: resourceEventBusiness.Bus}
+	resourceEventBusiness.Bus = tap
+	t.Cleanup(func() { resourceEventBusiness.Bus = tap.next })
+
+	if err := processPageChunk(ctx, withComments, job, importProvider.JobOptions{}, chunk, w.importing); err != nil {
+		t.Fatal(err)
+	}
+	rootDoc, _ := importModels.LookupIdMapping(ctx, job.Id, importModels.EntityDoc, treeRoot)
+	first, _ := importModels.LookupIdMapping(ctx, job.Id, importModels.EntityComment, "cm-1")
+	second, _ := importModels.LookupIdMapping(ctx, job.Id, importModels.EntityComment, "cm-2")
+	if rootDoc == uuid.Nil || first == uuid.Nil || second == uuid.Nil {
+		t.Fatalf("recorded doc %s, comments %s and %s", rootDoc, first, second)
+	}
+	for id, want := range map[uuid.UUID]struct {
+		by uuid.UUID
+		at time.Time
+	}{first: {maya, asked}, second: {w.admin, answered}} {
+		var by uuid.UUID
+		var at time.Time
+		if err := w.env.PG.QueryRow(`SELECT created_by, created_at FROM comments WHERE id = $1`, id).Scan(&by, &at); err != nil {
+			t.Fatal(err)
+		}
+		if by != want.by || !at.Equal(want.at) {
+			t.Errorf("comment %s by %s at %s, want %s at %s", id, by, at, want.by, want.at)
+		}
+	}
+	doc, err := docBusiness.GetDocCommentList(ctx, rootDoc.String(), w.uid)
+	if err != nil || doc == nil || len(doc.Comments) != 2 {
+		t.Fatalf("the doc's comments: %+v %v", doc, err)
+	}
+	texts := map[string]string{}
+	for _, c := range doc.Comments {
+		texts[c.Uuid] = c.Text
+	}
+	if texts[first.String()] != "<p>Can we ship on <strong>Friday</strong>?</p>" || texts[second.String()] != "<p>Yes, after the review.</p>" {
+		t.Fatalf("the comments read %v", texts)
+	}
+	for _, kind := range tap.kinds {
+		if kind == string(resourceEventBusiness.DocCommentCreated) {
+			t.Fatalf("an imported comment told someone: %v", tap.kinds)
+		}
+	}
+
+	// Written once: the page's comments again add nothing.
+	pageComments(ctx, job, chunk, w.importing, rootDoc.String(), withComments.pages[0])
+	if doc, _ := docBusiness.GetDocCommentList(ctx, rootDoc.String(), w.uid); doc == nil || len(doc.Comments) != 2 {
+		t.Fatal("a page's comments came across twice")
+	}
+
+	// A rollback takes them with the import.
+	if _, err := w.env.PG.Exec(`UPDATE import_jobs SET status = 'completed' WHERE id = $1`, job.Id); err != nil {
+		t.Fatal(err)
+	}
+	if err := RollbackImport(ctx, job.Id); err != nil {
+		t.Fatal(err)
+	}
+	var left int
+	if err := w.env.PG.QueryRow(`SELECT COUNT(*) FROM comments WHERE id IN ($1, $2) AND deleted_at IS NULL`, first, second).Scan(&left); err != nil || left != 0 {
+		t.Fatalf("%d comments outlived the rollback (%v)", left, err)
 	}
 }

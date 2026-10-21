@@ -167,6 +167,8 @@ func enqueueEvent(ctx context.Context, eventType string, data map[string]interfa
 type namedListener struct {
 	name string
 	fn   EventListener
+	// seesRestricted: it is told of a restricted task's events too.
+	seesRestricted bool
 }
 
 // currentListeners is the listeners registered now, each named by its
@@ -176,7 +178,7 @@ func currentListeners() []namedListener {
 	defer listenerMu.RUnlock()
 	out := make([]namedListener, 0, len(listeners))
 	seen := map[string]int{}
-	for _, l := range listeners {
+	for i, l := range listeners {
 		name := "listener"
 		if f := runtime.FuncForPC(reflect.ValueOf(l).Pointer()); f != nil {
 			name = f.Name()
@@ -185,7 +187,7 @@ func currentListeners() []namedListener {
 		if n := seen[name]; n > 1 {
 			name += "#" + strconv.Itoa(n)
 		}
-		out = append(out, namedListener{name: name, fn: l})
+		out = append(out, namedListener{name: name, fn: l, seesRestricted: i < len(seesRestricted) && seesRestricted[i]})
 	}
 	return out
 }
@@ -211,7 +213,7 @@ func StartEventDrain(ctx context.Context) {
 		return
 	}
 	d := &eventDrain{c: c, consumer: drainConsumerName(), inFlight: map[string]bool{}, slots: make(chan struct{}, handoffSlots)}
-	go d.run(ctx)
+	helpers.GoSafeLoop("webhook.event-drain", func() { d.run(ctx) })
 }
 
 func drainConsumerName() string {
@@ -239,7 +241,7 @@ func (d *eventDrain) run(ctx context.Context) {
 			sleepCtx(ctx, handoffBlock)
 		}
 	}
-	go d.sweepLoop(ctx)
+	helpers.GoSafeLoop("d.sweepLoop", func() { d.sweepLoop(ctx) })
 	for ctx.Err() == nil {
 		res, err := d.c.XReadGroup(ctx, &redis.XReadGroupArgs{
 			Group: handoffGroup, Consumer: d.consumer,
@@ -290,7 +292,7 @@ func (d *eventDrain) take(ctx context.Context, m redis.XMessage) {
 	d.mu.Unlock()
 
 	d.slots <- struct{}{}
-	go func() {
+	helpers.GoSafeNamed("business/Webhook/eventHandoff:take", func() {
 		defer func() {
 			<-d.slots
 			d.mu.Lock()
@@ -298,7 +300,7 @@ func (d *eventDrain) take(ctx context.Context, m redis.XMessage) {
 			d.mu.Unlock()
 		}()
 		d.handle(ctx, m)
-	}()
+	})
 }
 
 func (d *eventDrain) running(id string) bool {
@@ -327,14 +329,17 @@ func (d *eventDrain) handle(ctx context.Context, m redis.XMessage) {
 		return
 	}
 	evCtx := ev.Origin.context()
+	// A restricted task's events reach only the listeners that may be told
+	// of them (RegisterEventListenerSeeingRestricted), as in-process.
+	restricted := restrictedTaskEvent(evCtx, ev.Data)
 	var wg sync.WaitGroup
 	var failed atomic.Int32
 	for _, l := range currentListeners() {
-		if done[l.name] != "" {
+		if done[l.name] != "" || (restricted && !l.seesRestricted) {
 			continue
 		}
 		wg.Add(1)
-		go func() {
+		helpers.GoSafeNamed("business/Webhook/eventHandoff:handle", func() {
 			defer wg.Done()
 			if !runListener(evCtx, l, ev) {
 				failed.Add(1)
@@ -346,10 +351,10 @@ func (d *eventDrain) handle(ctx context.Context, m redis.XMessage) {
 			if _, err := pipe.Exec(ctx); err != nil {
 				helpers.LogErrorWithContext(ctx, "business/Webhook event drain could not record that %s had %s err: %+v", l.name, m.ID, err)
 			}
-		}()
+		})
 	}
 	all := make(chan struct{})
-	go func() { wg.Wait(); close(all) }()
+	helpers.GoSafeNamed("business/Webhook/eventHandoff:handle", func() { wg.Wait(); close(all) })
 	select {
 	case <-all:
 	case <-time.After(handoffWaitMax):
@@ -392,7 +397,7 @@ func (d *eventDrain) finish(ctx context.Context, id string) {
 // count as a delivery.
 func (d *eventDrain) keepClaimed(ctx context.Context, id string) (stop func()) {
 	quit := make(chan struct{})
-	go func() {
+	helpers.GoSafeLoop("business/Webhook/eventHandoff:keepClaimed", func() {
 		t := time.NewTicker(handoffHeartbeat)
 		defer t.Stop()
 		for {
@@ -407,7 +412,7 @@ func (d *eventDrain) keepClaimed(ctx context.Context, id string) (stop func()) {
 				}).Err()
 			}
 		}
-	}()
+	})
 	return func() { close(quit) }
 }
 

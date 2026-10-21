@@ -69,8 +69,13 @@ func VerifyApiToken(next http.Handler) http.Handler {
 		userDBInfo, err := domain.GetActiveUserWithAdminFlagByUserUUID(ctx, auth.UserID)
 		emptyUUID := uuidNil()
 		// A member's: an external person or a bot never signs in, so a token
-		// one holds (minted while it wrongly could) acts for nobody.
-		if err != nil || userDBInfo == nil || userDBInfo.Id == emptyUUID || !userDBInfo.IsMember() {
+		// one holds (minted while it wrongly could) acts for nobody. One bot is
+		// the exception, and only for one kind of credential: an installed app's
+		// own user holds its app's credentials (business/App), so what the app
+		// does is the app's, never the admin's who installed it. Any other
+		// credential a bot holds still acts for nobody.
+		appsOwn := auth.AppID != nil && auth.AppBotUserID != nil && *auth.AppBotUserID == auth.UserID
+		if err != nil || userDBInfo == nil || userDBInfo.Id == emptyUUID || !(userDBInfo.IsMember() || appsOwn) {
 			unauthorizedJSON(w, "token owner is not an active user")
 			return
 		}
@@ -90,6 +95,11 @@ func VerifyApiToken(next http.Handler) http.Handler {
 		ctx = context.WithValue(ctx, helpers.ApiTokenIDContextKey, auth.TokenID.String())
 		if auth.AgentID != nil {
 			ctx = context.WithValue(ctx, helpers.ApiAgentIDContextKey, auth.AgentID.String())
+		}
+		// An app's credential (business/App): the app it acts for, beside the
+		// token mark set above, so the app is only ever narrowed (R1).
+		if auth.AppID != nil {
+			ctx = context.WithValue(ctx, helpers.ApiAppIDContextKey, auth.AppID.String())
 		}
 		helpers.ServeHidingEmails(next, w, r.WithContext(ctx), userInfo.UserPostgresInfo.EmailID)
 	})

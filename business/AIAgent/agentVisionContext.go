@@ -145,20 +145,25 @@ func CollectImageRefs(media []*dgraphStruct.DgraphAttachment, comments []*dgraph
 // stored (fileAccessBusiness.FileOf); any other is left out. Only someone who
 // may read the conversation sees what the agent says of them.
 func PlaceImageRefs(ctx context.Context, place fileAccessBusiness.Place, refs []aiBusiness.ImageRef) []aiBusiness.ImageRef {
+	// The place's files among them in one read, where each was one.
+	ids := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		ids = append(ids, ref.ID)
+	}
+	files, err := fileAccessBusiness.FilesOf(ctx, place, ids)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/AIAgent PlaceImageRefs %q %q err: %+v", place.Kind, place.ID, err)
+		return nil
+	}
 	var out []aiBusiness.ImageRef
 	for _, ref := range refs {
 		if len(out) == agentImageContextMaxImages {
 			break
 		}
-		att, err := fileAccessBusiness.FileOf(ctx, place, ref.ID)
-		if err != nil {
-			if !fileAccessBusiness.IsRefusal(err) {
-				helpers.LogErrorWithContext(ctx, "business/AIAgent PlaceImageRefs %q %q %s err: %+v", place.Kind, place.ID, ref.ID, err)
-			}
-			continue
+		if att := files[ref.ID]; att != nil {
+			ref.ObjKey = att.ObjKey
+			out = append(out, ref)
 		}
-		ref.ObjKey = att.ObjKey
-		out = append(out, ref)
 	}
 	return out
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	docDomain "github.com/akashc777/OneCamp/domain/Doc"
@@ -18,9 +19,11 @@ import (
 )
 
 func CreateComment(ctx context.Context, commentUUID uuid.UUID, userUUID uuid.UUID, currentTime time.Time) (err error) {
+	// updated_at too, so an imported reply (currentTime its original time)
+	// isn't "edited" the moment it lands.
 	query := `
-		INSERT INTO comments (id, created_by, created_at)
-		VALUES ($1, $2, $3)
+		INSERT INTO comments (id, created_by, created_at, updated_at)
+		VALUES ($1, $2, $3, $3)
 	`
 	err = models.CreateComment(query, commentUUID, userUUID, currentTime)
 
@@ -201,23 +204,6 @@ func UpdateDgraphCommentAndResetMentions(ctx context.Context, dgraphPost *dgraph
 	return
 }
 
-func CreateOrUpdateDgraphCommentReaction(ctx context.Context, dgraphComment *dgraphStruct.DgraphComment) (reactionUid string, err error) {
-
-	query := fmt.Sprintf(`query {
-									  co as var(func: eq(comment_uuid, "%+v"))
-								  }`, dgraphComment.Uuid)
-
-	reactionUid, err = dgraphModels.CreateOrUpdateCommentReaction(ctx, query, dgraphComment)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/CreateOrUpdateDgraphPostCommentReaction Failed to create/update comment reaction in post err: %+v",
-			err)
-		return
-	}
-	return
-}
-
 func GetDgraphPostCommentsInfoByUUID(ctx context.Context, postUUID string) (dgraphPost *dgraphStruct.DgraphPost, err error) {
 	variables := make(map[string]string)
 	variables["$id"] = postUUID
@@ -287,6 +273,7 @@ func GetDgraphTaskCommentInfoByUUID(ctx context.Context, commentUUID string, use
 	query := `query CommentInfo($id: string, $userId: string){
 				commentInfo(func: eq(comment_uuid, $id)) {
 					uid
+					comment_uuid
 					comment_by {
 						uid
 						user_uuid
@@ -328,6 +315,7 @@ func GetDgraphDocCommentInfoByUUID(ctx context.Context, commentUUID string, user
 	query := `query CommentInfo($id: string, $userId: string){` + docDomain.AccessPrelude("$userId") + `
 				commentInfo(func: eq(comment_uuid, $id)) {
 					uid
+					comment_uuid
 					comment_created_at
 					comment_by {
 						uid
@@ -358,14 +346,27 @@ func GetDgraphDocCommentInfoByUUID(ctx context.Context, commentUUID string, user
 	return
 }
 
-func GetDgraphPostCommentInfoByUUID(ctx context.Context, commentUUID string, userDraphUid string) (dgraphComment *dgraphStruct.DgraphComment, err error) {
+// forViewer is a comment read's query and variables for the person reading
+// (userUID): with nobody (an import reads as nobody) its per-viewer counts
+// (counts) go, with the $userId they need, since the graph refuses uid("").
+// Pure.
+func forViewer(query, commentUUID, userUID string, counts ...string) (string, map[string]string) {
+	variables := map[string]string{"$id": commentUUID}
+	if userUID != "" {
+		variables["$userId"] = userUID
+		return query, variables
+	}
+	for _, c := range counts {
+		query = strings.Replace(query, c, "", 1)
+	}
+	return strings.Replace(query, ", $userId: string", "", 1), variables
+}
 
-	variables := make(map[string]string)
-	variables["$id"] = commentUUID
-	variables["$userId"] = userDraphUid
-	query := `query CommentInfo($id: string, $userId: string){
+func GetDgraphPostCommentInfoByUUID(ctx context.Context, commentUUID string, userDraphUid string) (dgraphComment *dgraphStruct.DgraphComment, err error) {
+	query, variables := forViewer(`query CommentInfo($id: string, $userId: string){
 				commentInfo(func: eq(comment_uuid, $id)) {
 					uid
+					comment_uuid
 					comment_by {
 						uid
 						user_uuid
@@ -385,7 +386,9 @@ func GetDgraphPostCommentInfoByUUID(ctx context.Context, commentUUID string, use
 						}
 					}
 				}
-			}`
+			}`, commentUUID, userDraphUid,
+		"ch_is_member: count(ch_members @filter(uid($userId)))",
+		"ch_is_admin: count(ch_moderators @filter(uid($userId)))")
 
 	dgraphComment, err = dgraphModels.GetDgraphCommentInfoByUUID(ctx, query, variables)
 
@@ -401,14 +404,10 @@ func GetDgraphPostCommentInfoByUUID(ctx context.Context, commentUUID string, use
 }
 
 func GetDgraphChatCommentInfoByUUID(ctx context.Context, commentUUID string, userDgraphUID string) (dgraphComment *dgraphStruct.DgraphComment, err error) {
-
-	variables := make(map[string]string)
-	variables["$id"] = commentUUID
-	variables["$userId"] = userDgraphUID
-
-	query := `query CommentInfo($id: string, $userId: string){
+	query, variables := forViewer(`query CommentInfo($id: string, $userId: string){
 				commentInfo(func: eq(comment_uuid, $id)) {
 					uid
+					comment_uuid
 					comment_deleted_at
 					comment_by {
 						uid
@@ -436,7 +435,8 @@ func GetDgraphChatCommentInfoByUUID(ctx context.Context, commentUUID string, use
 						}
 					}
 				}
-			}`
+			}`, commentUUID, userDgraphUID,
+		"dm_is_member: count(dm_participants @filter(uid($userId)))")
 
 	dgraphComment, err = dgraphModels.GetDgraphCommentInfoByUUID(ctx, query, variables)
 
@@ -543,44 +543,6 @@ func UpdateDgraphCommentInAPost(ctx context.Context, dgraphComment *dgraphStruct
 		helpers.LogErrorWithContext(ctx,
 			"domain/UpdateDgraphCommentInAPost Failed to update comment in post err: %+v",
 			err)
-		return
-	}
-	return
-}
-
-func DeleteCommentReaction(ctx context.Context, commentDgraphUID string, reactionDgraphUID string) (err error) {
-	delStringJSON := fmt.Sprintf(`
-		[
-			
-			{
-				"uid": "%s",
-				"comment_reactions": [
-					{
-						"uid": "%s"
-					}
-				]
-			},
-			{
-				"uid": "%s",
-				"reaction_added_by": null,
-				"reaction_on_content_added_by": null,
-					"reaction_added_at": null,
-					"reaction_emoji_id": null
-			
-			},
-			{
-				"uid": "%s"
-			}
-		]
-	`, commentDgraphUID, reactionDgraphUID, reactionDgraphUID, reactionDgraphUID)
-
-	err = dgraphModels.DeleteReactionNodeOrEdges(ctx, delStringJSON)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/DeleteCommentReaction Failed to remove channel member in dgraph err: %+v",
-			err,
-		)
 		return
 	}
 	return

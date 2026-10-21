@@ -302,7 +302,7 @@ func SettleWrite(ctx context.Context, claimID string, applied bool, result strin
 // path exactly as much as this one, which is why the sweep is generic housekeeping
 // rather than something MCP-specific.
 func StartPendingActionHousekeeping() {
-	go func() {
+	helpers.GoSafeLoop("business/MCPServer/claim:StartPendingActionHousekeeping", func() {
 		t := time.NewTicker(5 * time.Minute)
 		defer t.Stop()
 		for range t.C {
@@ -323,5 +323,5 @@ func StartPendingActionHousekeeping() {
 					"reclaimed %d abandoned action execution(s); a retry of those calls is now permitted again", n)
 			}
 		}
-	}()
+	})
 }

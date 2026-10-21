@@ -197,6 +197,9 @@ const CategoryAgent = auditModel.CategoryAgent
 // deletes, restores, purges, exports, publishes, transfers and recoveries.
 const CategoryDocs = auditModel.CategoryDocs
 
+// CategoryCalls is what the people running a call did in it.
+const CategoryCalls = auditModel.CategoryCalls
+
 // CategoryCalendar is what happened to the calendar's events.
 const CategoryCalendar = auditModel.CategoryCalendar
 

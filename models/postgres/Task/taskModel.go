@@ -1,3 +1,7 @@
+// Package models (Task) is a task's Postgres row: its project, its Google
+// Calendar event and its GitHub link. Statements run through models/pgexec,
+// with the caller's ctx (the BE audit's style-B executors, PR3); the ones
+// domain/Task writes come in as text.
 package models
 
 import (
@@ -7,23 +11,10 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
-
-//
-//CREATE TABLE IF NOT EXISTS tasks(
-//"id" uuid PRIMARY KEY NOT NULL DEFAULT uuid_generate_v4(),
-//"task_name" varchar NOT NULL,
-//"project_id" uuid REFERENCES teams(id),
-//"created_by" uuid REFERENCES users(id),
-//"task_assignee" uuid REFERENCES users(id),
-//"created_at" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-//"updated_at" TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-//"deleted_at" TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-//);
-//
 
 type Task struct {
 	Id                   uuid.UUID `gorm:"type:uuid;default:uuid_generate_v4()"`
@@ -44,341 +35,148 @@ type Task struct {
 	GitHubSyncAttempts   *int
 }
 
-func CreateTask(query string, taskUUID uuid.UUID, projectUUID uuid.UUID, createdByUUID uuid.UUID, createdAt time.Time) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		taskUUID,
-		projectUUID,
-		createdByUUID,
-		createdAt,
-	)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateTask Failed to create new task err: %+v",
-			err)
-		return
+// exec runs a write and says its failure in the log as where.
+func exec(ctx context.Context, where, query string, args ...any) error {
+	if _, err := pgexec.Exec(ctx, query, args...); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/%s Failed err: %+v", where, err)
+		return err
 	}
-
-	return
+	return nil
 }
 
-// func CreateTaskWithAssignee(query string, taskUUID uuid.UUID, projectUUID uuid.UUID, taskAssignee uuid.UUID, createdByUUID uuid.UUID, createdAt time.Time) (err error) {
-// 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-// 	defer cancel()
-// 	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-// 		ctx,
-// 		query,
-// 		taskUUID,
-// 		projectUUID,
-// 		taskAssignee,
-// 		createdByUUID,
-// 		createdAt,
-// 	)
-// 	if err != nil {
-// 		helpers.LogErrorWithContext(ctx,
-// 			"models/CreateTaskWithAssignee Failed to create new task err: %+v",
-// 			err)
-// 		return
-// 	}
-
-// 	return
-// }
-
-//func CheckIfTaskExistByTaskNameAndProjectUUID(query string, projectName string, teamId uuid.UUID) (exist bool, err error) {
-//	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-//	defer cancel()
-//	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, projectName, teamId).Scan(&exist)
-//	if err != nil {
-//		helpers.LogErrorWithContext(ctx,
-//			"models/CheckIfTaskExistByTaskNameAndTeamUUID Failed to check if project name exist in given team ID err: %+v",
-//			err)
-//		return
-//	}
-//
-//	return
-//}
-
-func GetTaskByUUID(query string, uuid uuid.UUID) (task *Task, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var taskInfo Task
-	var createdAt sql.NullTime
-	var updatedAt sql.NullTime
-	var deletedAt sql.NullTime
-	var taskGoogleCalendarId sql.NullString
-
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, uuid)
-	err = row.Scan(
-		&taskInfo.Id,
-		&taskInfo.CreatedBy,
-		&taskInfo.ProjectId,
-		&taskInfo.TaskAssignee,
-		&createdAt,
-		&updatedAt,
-		&deletedAt,
-		&taskGoogleCalendarId,
-	)
-
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetTaskByUUID Failed to get task err: %+v",
-			err)
-		return
+// scalarOrZero is query's one value, the zero value when it returns no row.
+func scalarOrZero[T any](ctx context.Context, query string, args ...any) (T, error) {
+	v, err := pgexec.Scalar[T](ctx, query, args...)
+	if errors.Is(err, sql.ErrNoRows) {
+		var zero T
+		return zero, nil
 	}
-
-	if createdAt.Valid {
-		taskInfo.CreatedAt = createdAt.Time
-	}
-
-	if updatedAt.Valid {
-		taskInfo.UpdatedAt = updatedAt.Time
-	}
-
-	if deletedAt.Valid {
-		taskInfo.DeletedAt = deletedAt.Time
-	}
-
-	if taskGoogleCalendarId.Valid {
-		taskInfo.TaskGoogleCalendarId = &taskGoogleCalendarId.String
-	}
-
-	return &taskInfo, nil
-
+	return v, err
 }
 
-func UpdateTaskNameByTaskUUID(query string, currentTime time.Time, projectUUID uuid.UUID) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		currentTime,
-		projectUUID,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/UpdateTaskNameByTaskUUID Failed to update task name err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
-func UpdateTaskDeletedTimeByUUID(query string, projectUUID uuid.UUID, deleteTime *time.Time, updateTime *time.Time) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		deleteTime,
-		updateTime,
-		projectUUID,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/UpdateTaskDeletedTimeByUUID Failed to update task's delete time err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
-func UpdateTaskDeletedTimeToNullByUUID(query string, updateTime *time.Time, projectUUID uuid.UUID) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		updateTime,
-		projectUUID,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/UpdateTaskDeletedTimeToNullByUUID Failed to update task's delete time to null err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
-func UpdateTaskGoogleCalendarId(query string, googleEventId *string, updatedAt time.Time, taskUUID uuid.UUID) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		googleEventId,
-		updatedAt,
-		taskUUID,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/UpdateTaskGoogleCalendarId Failed to update task gcal id err: %+v", err)
-		return
-	}
-
-	return
-}
-
-func GetSyncedTaskGCalIds(ctx context.Context, userUID uuid.UUID) ([]string, error) {
-	ctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	query := `
-		SELECT task_google_calendar_id 
-		FROM tasks 
-		WHERE task_assignee = $1 AND task_google_calendar_id IS NOT NULL AND task_google_calendar_id != '' AND deleted_at IS NULL
-	`
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query, userUID)
-	if err != nil {
+// scanTask reads query's task row: id, created_by, project_id, task_assignee,
+// created_at, updated_at, deleted_at, task_google_calendar_id.
+func scanTask(r pgexec.Row) (*Task, error) {
+	var t Task
+	var createdAt, updatedAt, deletedAt sql.NullTime
+	var calendarID sql.NullString
+	if err := r.Scan(&t.Id, &t.CreatedBy, &t.ProjectId, &t.TaskAssignee, &createdAt, &updatedAt, &deletedAt, &calendarID); err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err == nil {
-			ids = append(ids, id)
-		}
+	t.CreatedAt, t.UpdatedAt, t.DeletedAt = createdAt.Time, updatedAt.Time, deletedAt.Time
+	if calendarID.Valid {
+		t.TaskGoogleCalendarId = &calendarID.String
 	}
-	// Iteration can stop on a mid-query failure (dropped connection, server-side
-	// error) rather than on end-of-rows. Without it this returns a PARTIAL result
-	// with a nil error, and the caller cannot tell truncated data from a short list.
-	if err := rows.Err(); err != nil {
-		helpers.LogErrorWithContext(ctx, "models/Task rows iteration failed err: %+v", err)
+	return &t, nil
+}
+
+// GetTaskByUUID is the task query reads by id; an empty Task when there is
+// none (callers check its Id).
+func GetTaskByUUID(ctx context.Context, query string, id uuid.UUID) (*Task, error) {
+	t, found, err := pgexec.QueryOne(ctx, query, scanTask, id)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/GetTaskByUUID Failed to get task err: %+v", err)
+		return nil, err
+	}
+	if !found {
+		return &Task{}, nil
+	}
+	return t, nil
+}
+
+func UpdateTaskNameByTaskUUID(ctx context.Context, query string, currentTime time.Time, taskUUID uuid.UUID) error {
+	return exec(ctx, "UpdateTaskNameByTaskUUID", query, currentTime, taskUUID)
+}
+
+func UpdateTaskDeletedTimeByUUID(ctx context.Context, query string, taskUUID uuid.UUID, deleteTime *time.Time, updateTime *time.Time) error {
+	return exec(ctx, "UpdateTaskDeletedTimeByUUID", query, deleteTime, updateTime, taskUUID)
+}
+
+func UpdateTaskDeletedTimeToNullByUUID(ctx context.Context, query string, updateTime *time.Time, taskUUID uuid.UUID) error {
+	return exec(ctx, "UpdateTaskDeletedTimeToNullByUUID", query, updateTime, taskUUID)
+}
+
+func UpdateTaskGoogleCalendarId(ctx context.Context, query string, googleEventId *string, updatedAt time.Time, taskUUID uuid.UUID) error {
+	return exec(ctx, "UpdateTaskGoogleCalendarId", query, googleEventId, updatedAt, taskUUID)
+}
+
+// GetSyncedTaskGCalIds is the Google Calendar events of the live tasks
+// assigned to a person.
+func GetSyncedTaskGCalIds(ctx context.Context, userUID uuid.UUID) ([]string, error) {
+	ids, err := pgexec.Query(ctx, `
+		SELECT task_google_calendar_id
+		FROM tasks
+		WHERE task_assignee = $1 AND task_google_calendar_id IS NOT NULL AND task_google_calendar_id != '' AND deleted_at IS NULL
+	`, func(r pgexec.Row) (string, error) {
+		var s string
+		err := r.Scan(&s)
+		return s, err
+	}, userUID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/GetSyncedTaskGCalIds Failed err: %+v", err)
 		return nil, err
 	}
 	return ids, nil
 }
 
 // SetGitHubPRFieldsOnTask sets PR fields on a specific task by UUID.
-func SetGitHubPRFieldsOnTask(query string, taskUUID uuid.UUID, prNumber int, prURL string, branch string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, prNumber, prURL, branch, taskUUID)
-	return err
+func SetGitHubPRFieldsOnTask(ctx context.Context, query string, taskUUID uuid.UUID, prNumber int, prURL string, branch string) error {
+	return exec(ctx, "SetGitHubPRFieldsOnTask", query, prNumber, prURL, branch, taskUUID)
 }
 
-// FindTaskUUIDByPRURL finds a task by its GitHub PR URL.
-func FindTaskUUIDByPRURL(query string, prURL string) (taskUUID string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, prURL).Scan(&taskUUID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", err
-	}
-	return taskUUID, nil
+// FindTaskUUIDByPRURL finds a task by its GitHub PR URL ("" for none).
+func FindTaskUUIDByPRURL(ctx context.Context, query string, prURL string) (string, error) {
+	return scalarOrZero[string](ctx, query, prURL)
 }
 
 // SetGitHubIssueFieldsOnTask sets GitHub issue metadata on a specific task.
-func SetGitHubIssueFieldsOnTask(query string, taskUUID uuid.UUID, issueNumber int, issueURL string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, issueNumber, issueURL, taskUUID)
-	return err
+func SetGitHubIssueFieldsOnTask(ctx context.Context, query string, taskUUID uuid.UUID, issueNumber int, issueURL string) error {
+	return exec(ctx, "SetGitHubIssueFieldsOnTask", query, issueNumber, issueURL, taskUUID)
 }
 
-// FindTaskUUIDByGitHubIssueURL finds a task UUID by its GitHub issue URL.
-func FindTaskUUIDByGitHubIssueURL(query string, issueURL string) (taskUUID string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, issueURL).Scan(&taskUUID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", err
-	}
-	return taskUUID, nil
+// FindTaskUUIDByGitHubIssueURL finds a task UUID by its GitHub issue URL ("" for none).
+func FindTaskUUIDByGitHubIssueURL(ctx context.Context, query string, issueURL string) (string, error) {
+	return scalarOrZero[string](ctx, query, issueURL)
 }
 
-// FindTasksUUIDByGitHubURLs returns the subset of urls that are
-// already linked to a task. Used by the import paths to do
-// idempotency checks for hundreds or thousands of URLs in a single
-// round trip instead of one query per URL.
-//
-// Returns a set of URLs that exist (deleted_at IS NULL) plus an
-// owner-attribution map (url -> task UUID) so callers can log skipped
-// items with the existing task they're already linked to.
-func FindTasksUUIDByGitHubURLs(query string, urls []string) (map[string]string, error) {
+// FindTasksUUIDByGitHubURLs is which of urls are already linked to a task,
+// url to task id, in one round trip: the import paths' check of hundreds or
+// thousands of addresses, so that what is skipped can name the task it is
+// already linked to.
+func FindTasksUUIDByGitHubURLs(ctx context.Context, query string, urls []string) (map[string]string, error) {
 	if len(urls) == 0 {
 		return nil, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query, pq.Array(urls))
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	out := make(map[string]string, len(urls))
-	for rows.Next() {
-		var url, taskUUID string
-		if err := rows.Scan(&url, &taskUUID); err != nil {
-			return nil, err
-		}
-		out[url] = taskUUID
-	}
-	return out, rows.Err()
+	return pgexec.Pairs[string, string](ctx, query, pq.Array(urls))
 }
 
 // GetTaskLastSyncedAtByIssueURL returns the github_last_synced_at for a task by issue URL.
-func GetTaskLastSyncedAtByIssueURL(query string, issueURL string) (lastSyncedAt *time.Time, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, issueURL).Scan(&lastSyncedAt)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
-	}
-	return lastSyncedAt, nil
+func GetTaskLastSyncedAtByIssueURL(ctx context.Context, query string, issueURL string) (*time.Time, error) {
+	return scalarOrZero[*time.Time](ctx, query, issueURL)
 }
 
 // GetTaskLastSyncedAtByPRURL returns the github_last_synced_at for a task by PR URL.
-func GetTaskLastSyncedAtByPRURL(query string, prURL string) (lastSyncedAt *time.Time, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, prURL).Scan(&lastSyncedAt)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
-	}
-	return lastSyncedAt, nil
+func GetTaskLastSyncedAtByPRURL(ctx context.Context, query string, prURL string) (*time.Time, error) {
+	return scalarOrZero[*time.Time](ctx, query, prURL)
 }
 
 // ClearGitHubIssueFieldsFromTask clears GitHub issue fields from a task.
-func ClearGitHubIssueFieldsFromTask(query string, taskUUID uuid.UUID) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, taskUUID)
-	return err
+func ClearGitHubIssueFieldsFromTask(ctx context.Context, query string, taskUUID uuid.UUID) error {
+	return exec(ctx, "ClearGitHubIssueFieldsFromTask", query, taskUUID)
 }
 
 // GetTaskGitHubURLs returns the GitHub issue and PR URLs for a task.
-func GetTaskGitHubURLs(query string, taskUUID uuid.UUID) (issueURL, prURL *string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, taskUUID).Scan(&issueURL, &prURL)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+func GetTaskGitHubURLs(ctx context.Context, query string, taskUUID uuid.UUID) (issueURL, prURL *string, err error) {
+	type urls struct{ issue, pr *string }
+	u, _, err := pgexec.QueryOne(ctx, query, func(r pgexec.Row) (urls, error) {
+		var u urls
+		err := r.Scan(&u.issue, &u.pr)
+		return u, err
+	}, taskUUID)
+	if err != nil {
 		return nil, nil, err
 	}
-	return issueURL, prURL, nil
+	return u.issue, u.pr, nil
 }
 
 // TaskGitHubLink is a task's stored GitHub issue and pull request addresses
@@ -391,89 +189,47 @@ type TaskGitHubLink struct {
 }
 
 // SetGitHubLastSyncedAt updates the github_last_synced_at timestamp for a task.
-func SetGitHubLastSyncedAt(query string, taskUUID uuid.UUID, t time.Time) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, t, taskUUID)
-	return err
+func SetGitHubLastSyncedAt(ctx context.Context, query string, taskUUID uuid.UUID, t time.Time) error {
+	return exec(ctx, "SetGitHubLastSyncedAt", query, t, taskUUID)
 }
 
 // SetGitHubBranchOnTaskByTaskID sets the github_branch on a specific task by its UUID.
-func SetGitHubBranchOnTaskByTaskID(query string, branchName string, taskUUID uuid.UUID) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, branchName, taskUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/SetGitHubBranchOnTaskByTaskID Failed err: %+v", err)
-	}
-	return err
+func SetGitHubBranchOnTaskByTaskID(ctx context.Context, query string, branchName string, taskUUID uuid.UUID) error {
+	return exec(ctx, "SetGitHubBranchOnTaskByTaskID", query, branchName, taskUUID)
 }
 
 // FindTaskUUIDByGitHubBranch finds a task UUID by its linked GitHub branch in
 // a project linking the repository owner/name: query takes owner, name and
-// branch, in that order.
-func FindTaskUUIDByGitHubBranch(query string, owner, name, branch string) (taskUUID string, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, owner, name, branch).Scan(&taskUUID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", err
-	}
-	return taskUUID, nil
+// branch, in that order ("" for none).
+func FindTaskUUIDByGitHubBranch(ctx context.Context, query string, owner, name, branch string) (string, error) {
+	return scalarOrZero[string](ctx, query, owner, name, branch)
 }
 
 // UpdateTaskPRState updates the GitHub PR state fields on a task.
-func UpdateTaskPRState(query string, taskUUID uuid.UUID, prState string, checkStatus string, reviewState string, isDraft *bool) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, prState, checkStatus, reviewState, isDraft, taskUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/UpdateTaskPRState Failed err: %+v", err)
-	}
-	return err
+func UpdateTaskPRState(ctx context.Context, query string, taskUUID uuid.UUID, prState string, checkStatus string, reviewState string, isDraft *bool) error {
+	return exec(ctx, "UpdateTaskPRState", query, prState, checkStatus, reviewState, isDraft, taskUUID)
 }
 
 // UpdateTaskPRInfo updates only PR number and URL for a task.
-func UpdateTaskPRInfo(query string, taskUUID uuid.UUID, prNumber int, prURL string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, prNumber, prURL, taskUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/UpdateTaskPRInfo Failed err: %+v", err)
-	}
-	return err
+func UpdateTaskPRInfo(ctx context.Context, query string, taskUUID uuid.UUID, prNumber int, prURL string) error {
+	return exec(ctx, "UpdateTaskPRInfo", query, prNumber, prURL, taskUUID)
 }
 
-// GetTaskProjectID returns the project_id for a given task UUID.
-func GetTaskProjectID(taskUUID uuid.UUID, deletedToo bool) (uuid.UUID, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var projectID uuid.UUID
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `
+// GetTaskProjectID returns the project_id for a given task UUID (uuid.Nil for none).
+func GetTaskProjectID(ctx context.Context, taskUUID uuid.UUID, deletedToo bool) (uuid.UUID, error) {
+	id, err := scalarOrZero[uuid.UUID](ctx, `
 		SELECT project_id FROM tasks WHERE id = $1 AND ($2 OR deleted_at IS NULL)
-	`, taskUUID, deletedToo).Scan(&projectID)
+	`, taskUUID, deletedToo)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return uuid.Nil, nil
-		}
 		helpers.LogErrorWithContext(ctx, "models/GetTaskProjectID Failed err: %+v", err)
 		return uuid.Nil, err
 	}
-	return projectID, nil
+	return id, nil
 }
 
 // SetGitHubSyncStatus updates the sync status, error, and attempt count for a task.
-func SetGitHubSyncStatus(taskUUID uuid.UUID, status string, errMsg *string, attempts int) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `
+func SetGitHubSyncStatus(ctx context.Context, taskUUID uuid.UUID, status string, errMsg *string, attempts int) error {
+	return exec(ctx, "SetGitHubSyncStatus", `
 		UPDATE tasks
 		SET github_sync_status = $1,
 			github_sync_error = $2,
@@ -481,47 +237,34 @@ func SetGitHubSyncStatus(taskUUID uuid.UUID, status string, errMsg *string, atte
 			updated_at = NOW()
 		WHERE id = $4
 	`, status, errMsg, attempts, taskUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/SetGitHubSyncStatus Failed err: %+v", err)
-	}
-	return err
 }
 
 // GetGitHubSyncStatus returns the current sync status fields for a task.
-func GetGitHubSyncStatus(taskUUID uuid.UUID) (status string, errMsg *string, attempts int, err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var s sql.NullString
-	var e sql.NullString
-	var a sql.NullInt32
-
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `
+func GetGitHubSyncStatus(ctx context.Context, taskUUID uuid.UUID) (status string, errMsg *string, attempts int, err error) {
+	type sync struct {
+		s, e sql.NullString
+		a    sql.NullInt32
+	}
+	got, _, err := pgexec.QueryOne(ctx, `
 		SELECT github_sync_status, github_sync_error, github_sync_attempts
 		FROM tasks WHERE id = $1
-	`, taskUUID).Scan(&s, &e, &a)
+	`, func(r pgexec.Row) (sync, error) {
+		var v sync
+		err := r.Scan(&v.s, &v.e, &v.a)
+		return v, err
+	}, taskUUID)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", nil, 0, nil
-		}
 		helpers.LogErrorWithContext(ctx, "models/GetGitHubSyncStatus Failed err: %+v", err)
 		return "", nil, 0, err
 	}
-
-	if s.Valid {
-		status = s.String
-	}
-	if e.Valid {
-		str := e.String
+	if got.e.Valid {
+		str := got.e.String
 		errMsg = &str
 	}
-	if a.Valid {
-		attempts = int(a.Int32)
-	}
-	return
+	return got.s.String, errMsg, int(got.a.Int32), nil
 }
 
-// GetGitHubMetaForTask returns all GitHub metadata fields for a task.
+// GitHubMeta is all GitHub metadata fields for a task.
 type GitHubMeta struct {
 	IssueNumber   *int
 	IssueURL      *string
@@ -538,159 +281,147 @@ type GitHubMeta struct {
 	LastSyncedAt  *time.Time
 }
 
-func GetGitHubMetaForTask(taskUUID uuid.UUID) (*GitHubMeta, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
+// linkDest is where a task's GitHub link columns land (github_issue_number,
+// github_issue_url, github_pr_number, github_pr_url, github_branch,
+// github_pr_state, github_pr_check_status, github_pr_review_state,
+// github_pr_is_draft, in that order); fill copies them into a GitHubMeta.
+type linkDest struct {
+	in, pn                 sql.NullInt32
+	iu, pu, b, ps, pcs, rs sql.NullString
+	draft                  sql.NullBool
+}
 
-	var m GitHubMeta
-	var in sql.NullInt32
-	var iu sql.NullString
-	var pn sql.NullInt32
-	var pu sql.NullString
-	var b sql.NullString
-	var ps sql.NullString
-	var pcs sql.NullString
-	var prs sql.NullString
-	var pid sql.NullBool
-	var ss sql.NullString
-	var se sql.NullString
-	var sa sql.NullInt32
-	var lsa sql.NullTime
+func (d *linkDest) fill(m *GitHubMeta) {
+	str := func(s sql.NullString) *string {
+		if !s.Valid {
+			return nil
+		}
+		v := s.String
+		return &v
+	}
+	num := func(n sql.NullInt32) *int {
+		if !n.Valid {
+			return nil
+		}
+		v := int(n.Int32)
+		return &v
+	}
+	m.IssueNumber, m.PRNumber = num(d.in), num(d.pn)
+	m.IssueURL, m.PRURL, m.Branch = str(d.iu), str(d.pu), str(d.b)
+	m.PRState, m.PRCheckStatus, m.PRReviewState = str(d.ps), str(d.pcs), str(d.rs)
+	if d.draft.Valid {
+		v := d.draft.Bool
+		m.PRIsDraft = &v
+	}
+}
 
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `
+// GetGitHubMetaForTask is a task's GitHub link and sync state (nil for no task).
+func GetGitHubMetaForTask(ctx context.Context, taskUUID uuid.UUID) (*GitHubMeta, error) {
+	m, found, err := pgexec.QueryOne(ctx, `
 		SELECT github_issue_number, github_issue_url, github_pr_number, github_pr_url, github_branch,
 			   github_pr_state, github_pr_check_status, github_pr_review_state, github_pr_is_draft,
 			   github_sync_status, github_sync_error, github_sync_attempts, github_last_synced_at
 		FROM tasks WHERE id = $1
-	`, taskUUID).Scan(&in, &iu, &pn, &pu, &b, &ps, &pcs, &prs, &pid, &ss, &se, &sa, &lsa)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
+	`, func(r pgexec.Row) (*GitHubMeta, error) {
+		var d linkDest
+		var ss, se sql.NullString
+		var sa sql.NullInt32
+		var lsa sql.NullTime
+		if err := r.Scan(&d.in, &d.iu, &d.pn, &d.pu, &d.b, &d.ps, &d.pcs, &d.rs, &d.draft, &ss, &se, &sa, &lsa); err != nil {
+			return nil, err
 		}
+		m := &GitHubMeta{SyncStatus: ss.String, SyncAttempts: int(sa.Int32)}
+		d.fill(m)
+		if se.Valid {
+			m.SyncError = &se.String
+		}
+		if lsa.Valid {
+			m.LastSyncedAt = &lsa.Time
+		}
+		return m, nil
+	}, taskUUID)
+	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/GetGitHubMetaForTask Failed err: %+v", err)
 		return nil, err
 	}
-
-	if in.Valid {
-		n := int(in.Int32)
-		m.IssueNumber = &n
+	if !found {
+		return nil, nil
 	}
-	if iu.Valid {
-		m.IssueURL = &iu.String
-	}
-	if pn.Valid {
-		n := int(pn.Int32)
-		m.PRNumber = &n
-	}
-	if pu.Valid {
-		m.PRURL = &pu.String
-	}
-	if b.Valid {
-		m.Branch = &b.String
-	}
-	if ps.Valid {
-		m.PRState = &ps.String
-	}
-	if pcs.Valid {
-		m.PRCheckStatus = &pcs.String
-	}
-	if prs.Valid {
-		m.PRReviewState = &prs.String
-	}
-	if pid.Valid {
-		m.PRIsDraft = &pid.Bool
-	}
-	if ss.Valid {
-		m.SyncStatus = ss.String
-	}
-	if se.Valid {
-		m.SyncError = &se.String
-	}
-	if sa.Valid {
-		m.SyncAttempts = int(sa.Int32)
-	}
-	if lsa.Valid {
-		m.LastSyncedAt = &lsa.Time
-	}
-	return &m, nil
+	return m, nil
 }
 
 // GetGitHubMetaForTasks returns GitHub metadata for multiple tasks in a single query.
-func GetGitHubMetaForTasks(taskUUIDs []uuid.UUID) (map[uuid.UUID]*GitHubMeta, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout*5)
-	defer cancel()
-
+func GetGitHubMetaForTasks(ctx context.Context, taskUUIDs []uuid.UUID) (map[uuid.UUID]*GitHubMeta, error) {
 	if len(taskUUIDs) == 0 {
 		return map[uuid.UUID]*GitHubMeta{}, nil
 	}
-
-	query := `
+	type row struct {
+		id uuid.UUID
+		m  *GitHubMeta
+	}
+	rows, err := pgexec.Query(ctx, `
 		SELECT id, github_issue_number, github_issue_url, github_pr_number, github_pr_url, github_branch,
 			   github_pr_state, github_pr_check_status, github_pr_review_state, github_pr_is_draft
-		FROM tasks WHERE id = ANY($1)
-	`
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query, pq.Array(taskUUIDs))
+		FROM tasks WHERE id = ANY($1)`, func(r pgexec.Row) (row, error) {
+		var d linkDest
+		out := row{m: &GitHubMeta{}}
+		if err := r.Scan(&out.id, &d.in, &d.iu, &d.pn, &d.pu, &d.b, &d.ps, &d.pcs, &d.rs, &d.draft); err != nil {
+			return out, err
+		}
+		d.fill(out.m)
+		return out, nil
+	}, pq.Array(taskUUIDs))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/GetGitHubMetaForTasks Failed err: %+v", err)
 		return nil, err
 	}
-	defer rows.Close()
-
-	result := make(map[uuid.UUID]*GitHubMeta)
-	for rows.Next() {
-		var taskID uuid.UUID
-		var m GitHubMeta
-		var in sql.NullInt32
-		var iu sql.NullString
-		var pn sql.NullInt32
-		var pu sql.NullString
-		var b sql.NullString
-		var ps sql.NullString
-		var pcs sql.NullString
-		var prs sql.NullString
-		var pid sql.NullBool
-
-		if err := rows.Scan(&taskID, &in, &iu, &pn, &pu, &b, &ps, &pcs, &prs, &pid); err != nil {
-			helpers.LogErrorWithContext(ctx, "models/GetGitHubMetaForTasks scan Failed err: %+v", err)
-			continue
-		}
-		if in.Valid {
-			n := int(in.Int32)
-			m.IssueNumber = &n
-		}
-		if iu.Valid {
-			m.IssueURL = &iu.String
-		}
-		if pn.Valid {
-			n := int(pn.Int32)
-			m.PRNumber = &n
-		}
-		if pu.Valid {
-			m.PRURL = &pu.String
-		}
-		if b.Valid {
-			m.Branch = &b.String
-		}
-		if ps.Valid {
-			m.PRState = &ps.String
-		}
-		if pcs.Valid {
-			m.PRCheckStatus = &pcs.String
-		}
-		if prs.Valid {
-			m.PRReviewState = &prs.String
-		}
-		if pid.Valid {
-			m.PRIsDraft = &pid.Bool
-		}
-		result[taskID] = &m
-	}
-	// Iteration can stop on a mid-query failure (dropped connection, server-side
-	// error) rather than on end-of-rows. Without it this returns a PARTIAL result
-	// with a nil error, and the caller cannot tell truncated data from a short list.
-	if err := rows.Err(); err != nil {
-		helpers.LogErrorWithContext(ctx, "models/Task rows iteration failed err: %+v", err)
-		return nil, err
+	result := make(map[uuid.UUID]*GitHubMeta, len(rows))
+	for _, r := range rows {
+		result[r.id] = r.m
 	}
 	return result, nil
+}
+
+// TouchTasks sets updated_at on many tasks, in one statement (PR2).
+func TouchTasks(ctx context.Context, ids []uuid.UUID, at time.Time) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := pgexec.Exec(ctx, `UPDATE tasks SET updated_at = $1 WHERE id = ANY($2::uuid[])`, at, pq.Array(ids))
+	return err
+}
+
+// GitHubIssueLink is a task and the issue it links.
+type GitHubIssueLink struct {
+	Task   uuid.UUID
+	Number int
+	URL    string
+}
+
+// SetGitHubIssueFieldsOnTasks links each task to its issue, in one statement.
+func SetGitHubIssueFieldsOnTasks(ctx context.Context, links []GitHubIssueLink) error {
+	if len(links) == 0 {
+		return nil
+	}
+	ids := make([]uuid.UUID, len(links))
+	numbers := make([]int64, len(links))
+	urls := make([]string, len(links))
+	for i, l := range links {
+		ids[i], numbers[i], urls[i] = l.Task, int64(l.Number), l.URL
+	}
+	_, err := pgexec.Exec(ctx, `UPDATE tasks t SET github_issue_number = l.n, github_issue_url = l.u, github_last_synced_at = NOW()
+		FROM unnest($1::uuid[], $2::bigint[], $3::text[]) AS l(id, n, u) WHERE t.id = l.id`, pq.Array(ids), pq.Array(numbers), pq.Array(urls))
+	return err
+}
+
+// ClearGitHubLinkFromTasks unlinks tasks from GitHub, in one statement.
+func ClearGitHubLinkFromTasks(ctx context.Context, ids []uuid.UUID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := pgexec.Exec(ctx, `UPDATE tasks SET github_issue_number = NULL, github_issue_url = NULL,
+		github_pr_number = NULL, github_pr_url = NULL, github_branch = NULL, github_pr_state = NULL,
+		github_pr_check_status = NULL, github_pr_review_state = NULL, github_pr_is_draft = false,
+		github_last_synced_at = NULL, updated_at = NOW() WHERE id = ANY($1::uuid[])`, pq.Array(ids))
+	return err
 }

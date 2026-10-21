@@ -162,6 +162,8 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 	}
 	steps := []step{
 		{"GET /v1/me", func() (int, map[string]any) { return call("GET", "/v1/me", nil) }},
+		// The reference the registry writes (business/PublicAPI).
+		{"GET /v1/openapi.json", func() (int, map[string]any) { return call("GET", "/v1/openapi.json", nil) }},
 		{"GET /v1/unread", func() (int, map[string]any) { return call("GET", "/v1/unread", nil) }},
 		{"GET /v1/attention", func() (int, map[string]any) { return call("GET", "/v1/attention", nil) }},
 		{"GET /v1/tables", func() (int, map[string]any) { return call("GET", "/v1/tables", nil) }},
@@ -212,7 +214,9 @@ func TestEveryPublicAPIRouteAnswers(t *testing.T) {
 
 	mounted := map[string]bool{}
 	if err := chi.Walk(routes.(chi.Routes), func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
-		if strings.HasPrefix(route, "/v1/") {
+		// The registry's own tests register routes of their own, "/test-…"
+		// (public_api_shape_test.go): they aren't public.
+		if strings.HasPrefix(route, "/v1/") && !strings.HasPrefix(route, "/v1/test-") {
 			mounted[method+" "+strings.TrimSuffix(route, "/")] = true
 		}
 		return nil

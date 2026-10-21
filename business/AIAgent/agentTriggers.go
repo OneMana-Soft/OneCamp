@@ -131,9 +131,9 @@ func StartTriggers(ctx context.Context) {
 
 	loadTriggerCache(ctx)
 	webhookBusiness.RegisterEventListener(handleAgentEvent)
-	go scheduleLoop(ctx)
-	go routineLoop(ctx)
-	go cacheRefreshLoop(ctx)
+	helpers.GoSafeLoop("scheduleLoop", func() { scheduleLoop(ctx) })
+	helpers.GoSafeLoop("routineLoop", func() { routineLoop(ctx) })
+	helpers.GoSafeLoop("cacheRefreshLoop", func() { cacheRefreshLoop(ctx) })
 	helpers.MessageLogs.InfoLog.Println("AI agent triggers started")
 }
 

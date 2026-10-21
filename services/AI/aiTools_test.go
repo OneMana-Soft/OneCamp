@@ -1,6 +1,14 @@
 package ai
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/akashc777/OneCamp/helpers"
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/akashc777/OneCamp/models/taskread"
+	"github.com/google/uuid"
+)
 
 // These tests are the deterministic half of the agent harness: they cover the
 // model-independent logic the agent loop relies on (tool classification, the
@@ -246,5 +254,30 @@ func TestStripReasoning(t *testing.T) {
 				t.Fatalf("StripReasoning(%q) = %q, want %q", c.in, got, c.want)
 			}
 		})
+	}
+}
+
+// A tool reads as the person it acts for, whoever is signed in where it runs
+// (models/taskread): an answer shows no one a task they may not see.
+func TestAToolReadsAsThePersonItActsFor(t *testing.T) {
+	const name = "test_reads_as_asker"
+	var readAs string
+	RegisterExecutor(name, func(ctx context.Context, _ ProposedAction, _ string) (string, map[string]string, error) {
+		readAs = taskread.ReaderOf(ctx)
+		return "", nil, nil
+	})
+	t.Cleanup(func() { delete(Executors, name) })
+	signedIn := userModels.UserInfo{}
+	signedIn.UserPostgresInfo.Id = uuid.MustParse("5a5c00a8-0000-4000-8000-0000000000cc")
+	ctx := context.WithValue(context.Background(), helpers.UserInfoContextKey, signedIn)
+	exec, ok := GetExecutor(name)
+	if !ok {
+		t.Fatal("not registered")
+	}
+	if _, _, err := exec(ctx, ProposedAction{ToolName: name}, "5a5c00a8-0000-4000-8000-0000000000dd"); err != nil {
+		t.Fatal(err)
+	}
+	if readAs != "5a5c00a8-0000-4000-8000-0000000000dd" {
+		t.Fatalf("the tool read as %q, want the person it acts for", readAs)
 	}
 }

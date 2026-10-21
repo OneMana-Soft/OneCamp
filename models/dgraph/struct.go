@@ -162,13 +162,16 @@ type DgraphChannel struct {
 }
 
 type DgraphUser struct {
-	Uid                 string           `json:"uid,omitempty"`
-	Uuid                string           `json:"user_uuid,omitempty"`
-	UserName            string           `json:"user_name,omitempty"`
-	UserFullName        string           `json:"user_full_name,omitempty"`
-	AppLang             string           `json:"user_app_lang,omitempty"`
-	Title               string           `json:"user_job_title,omitempty"`
-	Department          string           `json:"user.department,omitempty"`
+	Uid          string `json:"uid,omitempty"`
+	Uuid         string `json:"user_uuid,omitempty"`
+	UserName     string `json:"user_name,omitempty"`
+	UserFullName string `json:"user_full_name,omitempty"`
+	AppLang      string `json:"user_app_lang,omitempty"`
+	Title        string `json:"user_job_title,omitempty"`
+	Department   string `json:"user_department,omitempty"` // the schema's predicate; user.department matched nothing
+	// SearchName is where people searches start: written with every name
+	// by domain/User (SearchName), never set anywhere else, never read back.
+	SearchName          string           `json:"user_search_name,omitempty"`
 	Hobbies             string           `json:"user_hobbies,omitempty"`
 	EmailID             string           `json:"user_email_id,omitempty"`
 	Teams               []*DgraphTeam    `json:"user_teams,omitempty"`
@@ -487,35 +490,38 @@ type DgraphTaskActivity struct {
 }
 
 type DgraphTask struct {
-	Uid                   string                `json:"uid,omitempty"`
-	Uuid                  string                `json:"task_uuid,omitempty"`
-	DType                 []string              `json:"dgraph.type,omitempty"`
-	Type                  string                `json:"task_type,omitempty"`
-	Id                    string                `json:"id,omitempty"`
-	Name                  string                `json:"task_name,omitempty"`
-	ParentTask            *DgraphTask           `json:"task_parent_task,omitempty"`
-	Status                string                `json:"task_status,omitempty"`
-	Label                 *string               `json:"task_label,omitempty"`
-	Priority              string                `json:"task_priority,omitempty"`
-	Mentions              *DgraphMentions       `json:"task_mentions,omitempty"`
-	Description           *string               `json:"task_description,omitempty"`
-	Assignee              *DgraphUser           `json:"task_assignee,omitempty"`
-	GoogleCalendarEventId *string               `json:"task_google_calendar_id,omitempty"`
-	GitHubIssueNumber     *int                  `json:"task_github_issue_number,omitempty"`
-	GitHubIssueURL        *string               `json:"task_github_issue_url,omitempty"`
-	GitHubPRNumber        *int                  `json:"task_github_pr_number,omitempty"`
-	GitHubPRURL           *string               `json:"task_github_pr_url,omitempty"`
-	GitHubBranch          *string               `json:"task_github_branch,omitempty"`
-	GitHubPRState         *string               `json:"task_github_pr_state,omitempty"`
-	GitHubPRCheckStatus   *string               `json:"task_github_pr_check_status,omitempty"`
-	GitHubPRReviewState   *string               `json:"task_github_pr_review_state,omitempty"`
-	GitHubPRIsDraft       *bool                 `json:"task_github_pr_is_draft,omitempty"`
-	SubTaskCount          uint32                `json:"task_sub_task_count,omitempty"`
-	SubTasks              []*DgraphTask         `json:"task_sub_tasks,omitempty"`
-	DueDate               *time.Time            `json:"task_due_date,omitempty"`
-	StartDate             *time.Time            `json:"task_start_date,omitempty"`
-	Project               *DgraphProject        `json:"task_project,omitempty"`
-	Activity              []*DgraphTaskActivity `json:"task_activities,omitempty"`
+	Uid                   string          `json:"uid,omitempty"`
+	Uuid                  string          `json:"task_uuid,omitempty"`
+	DType                 []string        `json:"dgraph.type,omitempty"`
+	Type                  string          `json:"task_type,omitempty"`
+	Id                    string          `json:"id,omitempty"`
+	Name                  string          `json:"task_name,omitempty"`
+	ParentTask            *DgraphTask     `json:"task_parent_task,omitempty"`
+	Status                string          `json:"task_status,omitempty"`
+	Label                 *string         `json:"task_label,omitempty"`
+	Priority              string          `json:"task_priority,omitempty"`
+	Mentions              *DgraphMentions `json:"task_mentions,omitempty"`
+	Description           *string         `json:"task_description,omitempty"`
+	Assignee              *DgraphUser     `json:"task_assignee,omitempty"`
+	GoogleCalendarEventId *string         `json:"task_google_calendar_id,omitempty"`
+	GitHubIssueNumber     *int            `json:"task_github_issue_number,omitempty"`
+	GitHubIssueURL        *string         `json:"task_github_issue_url,omitempty"`
+	GitHubPRNumber        *int            `json:"task_github_pr_number,omitempty"`
+	GitHubPRURL           *string         `json:"task_github_pr_url,omitempty"`
+	GitHubBranch          *string         `json:"task_github_branch,omitempty"`
+	GitHubPRState         *string         `json:"task_github_pr_state,omitempty"`
+	GitHubPRCheckStatus   *string         `json:"task_github_pr_check_status,omitempty"`
+	GitHubPRReviewState   *string         `json:"task_github_pr_review_state,omitempty"`
+	GitHubPRIsDraft       *bool           `json:"task_github_pr_is_draft,omitempty"`
+	SubTaskCount          uint32          `json:"task_sub_task_count,omitempty"`
+	// SubTaskDone is how many of its live sub-tasks are done or cancelled,
+	// for the progress ring beside the count (the backlog, B3).
+	SubTaskDone uint32                `json:"task_sub_task_done,omitempty"`
+	SubTasks    []*DgraphTask         `json:"task_sub_tasks,omitempty"`
+	DueDate     *time.Time            `json:"task_due_date,omitempty"`
+	StartDate   *time.Time            `json:"task_start_date,omitempty"`
+	Project     *DgraphProject        `json:"task_project,omitempty"`
+	Activity    []*DgraphTaskActivity `json:"task_activities,omitempty"`
 	// How many history lines the task has, and whether lines older than
 	// those in Activity are left: answers only, never stored.
 	ActivityCount   int                 `json:"task_activity_count,omitempty"`
@@ -563,6 +569,30 @@ type DgraphTask struct {
 	// Access is what the person it was read for may do with it (Work Access,
 	// set after the read). Never stored.
 	Access *TaskAccess `json:"task_access,omitempty"`
+	// Key is the task's key, its project's key and its number ("Q4-12"), and
+	// WorkType its type when it isn't a plain Task. Both live in Postgres and
+	// are laid over a task read for the app (business/TaskKeys); never stored
+	// in the graph.
+	Key      string        `json:"task_key,omitempty"`
+	WorkType *TaskWorkType `json:"task_work_type,omitempty"`
+	// Hidden marks what a reader who may not see a restricted task is shown
+	// of it where a link to it stays (a parent, a dependency): its id and
+	// nothing else (models/taskread Stub). Never stored.
+	Hidden bool `json:"task_hidden,omitempty"`
+	// Restricted marks a restricted task the reader may see, for the lock on
+	// its row, card and panel (WA2b): set by models/taskread on every answer
+	// it keeps, never stored, never on a task the reader can't see.
+	Restricted bool `json:"task_restricted,omitempty"`
+}
+
+// TaskWorkType is a task's type as the app shows it: a built-in one (Builtin
+// names it: bug, feature, milestone, approval, request) or its project's own
+// (business/WorkTaxonomy).
+type TaskWorkType struct {
+	ID      string `json:"id"`
+	Builtin string `json:"builtin,omitempty"`
+	Name    string `json:"name"`
+	Icon    string `json:"icon"`
 }
 
 // DgraphMemoryItem is the GraphRAG projection of a workspace_memory_items
@@ -768,11 +798,14 @@ const TASK_LIVE_FILTER = `not gt(task_deleted_at, "1970-01-01T00:00:00Z")`
 // filter keeps the edges without the facet.)
 const TASK_BLOCKED_OPEN = `task_blocked_open: count(task_blocked_by @facets(NOT eq(kind, "ss") AND NOT eq(kind, "ff") AND NOT eq(kind, "sf")) @filter(` + TASK_LIVE_FILTER + ` AND ` + TASK_OPEN_FILTER + `))`
 
+const TASK_PRIORITY_URGENT = "urgent"
 const TASK_PRIORITY_HIGH = "high"
 const TASK_PRIORITY_MEDIUM = "medium"
 const TASK_PRIORITY_LOW = "low"
 
-var VALID_TASK_PRIORITIES = []string{TASK_PRIORITY_LOW, TASK_PRIORITY_MEDIUM, TASK_PRIORITY_HIGH}
+// VALID_TASK_PRIORITIES are the priorities a task can have, from the most
+// pressing; "" is none (priority.go).
+var VALID_TASK_PRIORITIES = []string{TASK_PRIORITY_URGENT, TASK_PRIORITY_HIGH, TASK_PRIORITY_MEDIUM, TASK_PRIORITY_LOW}
 
 const ACTIVITY_TYPE_NAME = "nameUpdate"
 const ACTIVITY_TYPE_LABEL = "labelUpdate"
@@ -801,4 +834,8 @@ const ACTIVITY_TYPE_ESTIMATE = "estimate"
 
 // A custom field's value set or cleared: NextState holds the field's name.
 const ACTIVITY_TYPE_FIELD = "fieldUpdate"
+
+// A task's type changed: PrevState and NextState hold the types' names
+// (business/WorkTaxonomy).
+const ACTIVITY_TYPE_WORK_TYPE = "typeUpdate"
 const ACTIVITY_TYPE_REMOVE_DEPENDENCY = "dependencyRemove"

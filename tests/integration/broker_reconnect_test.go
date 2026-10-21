@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -54,11 +55,19 @@ func TestTheServerComesBackAfterTheBrokerGoes(t *testing.T) {
 	integration.UseMqttClient(t, server)
 	since, _ := broker.Connection(t, clientID)
 	// The client subscribes once it is connected, a moment after ConnectMqtt
-	// returns.
+	// returns: to clients connecting, then to clients disconnecting, one
+	// after the other (mqttInit's subscribeClientEvents). What the first
+	// connection holds is taken only once it holds both. Taken at the first
+	// topic it held, at a load of 45 it was that topic alone, and every
+	// connection after held both and never matched it (21 Oct 2026).
+	clientEvents := []string{
+		"$share/backend/$SYS/brokers/+/clients/+/connected",
+		"$share/backend/$SYS/brokers/+/clients/+/disconnected",
+	}
 	var held []string
-	for deadline := time.Now().Add(30 * time.Second); len(held) == 0; time.Sleep(250 * time.Millisecond) {
-		if held = heldSubscriptions(t, broker, clientID); len(held) == 0 && time.Now().After(deadline) {
-			t.Fatalf("the server's client holds no subscriptions on its first connection; the broker says:\n%s", tail(broker.Logs(t), 40))
+	for deadline := time.Now().Add(30 * time.Second); !holdsEvery(held, clientEvents); time.Sleep(250 * time.Millisecond) {
+		if held = heldSubscriptions(t, broker, clientID); !holdsEvery(held, clientEvents) && time.Now().After(deadline) {
+			t.Fatalf("on its first connection the server's client holds %v, not both of %v; the broker says:\n%s", held, clientEvents, tail(broker.Logs(t), 40))
 		}
 	}
 	realtimeLine(t, "ok", "once connected")
@@ -133,6 +142,16 @@ func heldSubscriptions(t *testing.T, broker *integration.BrokerEnv, clientID str
 	topics := broker.Subscriptions(t, clientID)
 	sort.Strings(topics)
 	return topics
+}
+
+// holdsEvery reports whether held has every one of topics.
+func holdsEvery(held, topics []string) bool {
+	for _, topic := range topics {
+		if !slices.Contains(held, topic) {
+			return false
+		}
+	}
+	return true
 }
 
 // realtimeLine asks /health/ready, as make api-ready does from inside the

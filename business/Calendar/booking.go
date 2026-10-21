@@ -124,7 +124,9 @@ func SaveBookingPage(ctx context.Context, owner uuid.UUID, in PageInput) (*booki
 	}
 	saved, err := bookingModel.SavePage(p)
 	if errors.Is(err, bookingModel.ErrSlugTaken) {
-		return nil, &AvailabilityError{"Someone already uses that address. Try another."}
+		// A clash, the person's to sort out: a 409 naming the address
+		// (helpers.WriteWriteFailure), not a 503 or a bare 400.
+		return nil, helpers.Conflict(fmt.Sprintf("Another booking page already uses the address %q. Pick another.", p.Slug), err)
 	}
 	if err == nil && saved == nil {
 		return nil, &AvailabilityError{"That isn't one of your pages."}

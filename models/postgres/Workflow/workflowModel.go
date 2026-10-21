@@ -28,6 +28,11 @@ const (
 	// acts on a meeting that has been summarised rather than one still being
 	// transcribed.
 	TriggerMeetingEnded = "meeting_ended"
+	// TriggerTaskAssigned fires when a task is given to someone.
+	TriggerTaskAssigned = "task_assigned"
+	// TriggerTaskFieldChanged fires when a task's priority, due date, tags or
+	// name change (trigger_config "fields" narrows which).
+	TriggerTaskFieldChanged = "task_field_changed"
 )
 
 // ValidTriggerType reports whether t is a supported trigger kind (mirrors the
@@ -35,7 +40,8 @@ const (
 func ValidTriggerType(t string) bool {
 	switch t {
 	case TriggerMessagePosted, TriggerReactionAdded, TriggerUserJoinedChannel,
-		TriggerTaskCreated, TriggerTaskStatusChanged, TriggerMeetingEnded:
+		TriggerTaskCreated, TriggerTaskStatusChanged, TriggerMeetingEnded,
+		TriggerTaskAssigned, TriggerTaskFieldChanged:
 		return true
 	default:
 		return false
@@ -62,12 +68,19 @@ type Workflow struct {
 	Keywords      string     `json:"keywords"` // raw JSON array
 	MatchType     string     `json:"match_type"`
 	Actions       string     `json:"actions"` // raw JSON array
-	RunCount      int64      `json:"run_count"`
-	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
-	LastError     *string    `json:"last_error,omitempty"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
-	DeletedAt     *time.Time `json:"deleted_at,omitempty"`
+	// A project rule's project; nil for a workspace workflow.
+	ProjectId *uuid.UUID `json:"project_id,omitempty"`
+	// Raw JSON: {"match":"all|any","items":[{field,op,value}]}.
+	Conditions string `json:"conditions"`
+	// Raw JSON array: what runs when the conditions don't hold.
+	ElseActions  string     `json:"else_actions"`
+	PausedReason *string    `json:"paused_reason,omitempty"`
+	RunCount     int64      `json:"run_count"`
+	LastRunAt    *time.Time `json:"last_run_at,omitempty"`
+	LastError    *string    `json:"last_error,omitempty"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	DeletedAt    *time.Time `json:"deleted_at,omitempty"`
 }
 
 type scanner interface {
@@ -76,12 +89,12 @@ type scanner interface {
 
 const selectColumns = `id, name, is_active, created_by, trigger_type, trigger_config,
 	bot_name, channel_id, keywords, match_type, actions, run_count, last_run_at,
-	last_error, created_at, updated_at, deleted_at`
+	last_error, created_at, updated_at, deleted_at, project_id, conditions, else_actions, paused_reason`
 
 func scanWorkflow(s scanner) (*Workflow, error) {
 	var w Workflow
-	var channelId uuid.NullUUID
-	var botName, lastError sql.NullString
+	var channelId, projectId uuid.NullUUID
+	var botName, lastError, paused sql.NullString
 	var lastRunAt, deletedAt sql.NullTime
 
 	err := s.Scan(
@@ -102,9 +115,19 @@ func scanWorkflow(s scanner) (*Workflow, error) {
 		&w.CreatedAt,
 		&w.UpdatedAt,
 		&deletedAt,
+		&projectId,
+		&w.Conditions,
+		&w.ElseActions,
+		&paused,
 	)
 	if err != nil {
 		return nil, err
+	}
+	if projectId.Valid {
+		w.ProjectId = &projectId.UUID
+	}
+	if paused.Valid {
+		w.PausedReason = &paused.String
 	}
 	if botName.Valid {
 		w.BotName = &botName.String
@@ -124,18 +147,48 @@ func scanWorkflow(s scanner) (*Workflow, error) {
 	return &w, nil
 }
 
+// Fields are a workflow's editable columns, as the business layer validated
+// them (JSON columns already marshalled).
+type Fields struct {
+	Name              string
+	IsActive          bool
+	TriggerType       string
+	TriggerConfigJSON string
+	BotName           *string
+	ChannelId         *uuid.UUID
+	KeywordsJSON      string
+	MatchType         string
+	ActionsJSON       string
+	ProjectId         *uuid.UUID
+	ConditionsJSON    string
+	ElseActionsJSON   string
+}
+
+func (f *Fields) defaults() {
+	if strings.TrimSpace(f.TriggerConfigJSON) == "" {
+		f.TriggerConfigJSON = "{}"
+	}
+	if strings.TrimSpace(f.ConditionsJSON) == "" {
+		f.ConditionsJSON = "{}"
+	}
+	if strings.TrimSpace(f.ElseActionsJSON) == "" {
+		f.ElseActionsJSON = "[]"
+	}
+	if strings.TrimSpace(f.KeywordsJSON) == "" {
+		f.KeywordsJSON = "[]"
+	}
+}
+
 // CreateWorkflow inserts a new workflow and returns the generated id.
-func CreateWorkflow(ctx context.Context, name string, createdBy uuid.UUID, triggerType string, triggerConfigJSON string, botName *string, channelId *uuid.UUID, keywordsJSON string, matchType string, actionsJSON string) (uuid.UUID, error) {
+func CreateWorkflow(ctx context.Context, createdBy uuid.UUID, f Fields) (uuid.UUID, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	if strings.TrimSpace(triggerConfigJSON) == "" {
-		triggerConfigJSON = "{}"
-	}
+	f.defaults()
 	id := uuid.New()
-	const q = `INSERT INTO workflows (id, name, created_by, trigger_type, trigger_config, bot_name, channel_id, keywords, match_type, actions)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, name, createdBy, triggerType, triggerConfigJSON, botName, channelId, keywordsJSON, matchType, actionsJSON)
+	const q = `INSERT INTO workflows (id, name, created_by, trigger_type, trigger_config, bot_name, channel_id, keywords, match_type, actions, is_active, project_id, conditions, else_actions)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, f.Name, createdBy, f.TriggerType, f.TriggerConfigJSON, f.BotName, f.ChannelId, f.KeywordsJSON, f.MatchType, f.ActionsJSON, f.IsActive, f.ProjectId, f.ConditionsJSON, f.ElseActionsJSON)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/CreateWorkflow Failed to insert workflow err: %+v", err)
 		return uuid.Nil, err
@@ -143,19 +196,21 @@ func CreateWorkflow(ctx context.Context, name string, createdBy uuid.UUID, trigg
 	return id, nil
 }
 
-// UpdateWorkflow updates the editable fields of a workflow.
-func UpdateWorkflow(ctx context.Context, id uuid.UUID, name string, isActive bool, triggerType string, triggerConfigJSON string, botName *string, channelId *uuid.UUID, keywordsJSON string, matchType string, actionsJSON string) error {
+// UpdateWorkflow updates the editable fields of a workflow. A workflow keeps
+// its project: moving a rule between projects is making a new one.
+func UpdateWorkflow(ctx context.Context, id uuid.UUID, f Fields) error {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	if strings.TrimSpace(triggerConfigJSON) == "" {
-		triggerConfigJSON = "{}"
-	}
+	f.defaults()
 	const q = `UPDATE workflows
 		SET name = $2, is_active = $3, trigger_type = $4, trigger_config = $5, bot_name = $6,
-		    channel_id = $7, keywords = $8, match_type = $9, actions = $10, updated_at = NOW()
+		    channel_id = $7, keywords = $8, match_type = $9, actions = $10,
+		    conditions = $11, else_actions = $12,
+		    paused_reason = CASE WHEN $3 THEN NULL ELSE paused_reason END,
+		    updated_at = NOW()
 		WHERE id = $1 AND deleted_at IS NULL`
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, name, isActive, triggerType, triggerConfigJSON, botName, channelId, keywordsJSON, matchType, actionsJSON)
+	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, f.Name, f.IsActive, f.TriggerType, f.TriggerConfigJSON, f.BotName, f.ChannelId, f.KeywordsJSON, f.MatchType, f.ActionsJSON, f.ConditionsJSON, f.ElseActionsJSON)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/UpdateWorkflow Failed to update workflow err: %+v", err)
 		return err
@@ -172,7 +227,9 @@ func SetWorkflowActive(ctx context.Context, id uuid.UUID, isActive bool) error {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	const q = `UPDATE workflows SET is_active = $2, updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL`
+	const q = `UPDATE workflows SET is_active = $2,
+		paused_reason = CASE WHEN $2 THEN NULL ELSE paused_reason END, updated_at = NOW()
+		WHERE id = $1 AND deleted_at IS NULL`
 	res, err := postgresInit.DBConn.SqlDB.ExecContext(dbctx, q, id, isActive)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/SetWorkflowActive Failed err: %+v", err)
@@ -226,7 +283,7 @@ func ListWorkflows(ctx context.Context) ([]*Workflow, error) {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	q := `SELECT ` + selectColumns + ` FROM workflows WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 1000`
+	q := `SELECT ` + selectColumns + ` FROM workflows WHERE deleted_at IS NULL AND project_id IS NULL ORDER BY created_at DESC LIMIT 1000`
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/ListWorkflows Failed err: %+v", err)
@@ -253,7 +310,7 @@ func ListWorkflowsByCreator(ctx context.Context, createdBy uuid.UUID) ([]*Workfl
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	q := `SELECT ` + selectColumns + ` FROM workflows WHERE deleted_at IS NULL AND created_by=$1 ORDER BY created_at DESC LIMIT 1000`
+	q := `SELECT ` + selectColumns + ` FROM workflows WHERE deleted_at IS NULL AND project_id IS NULL AND created_by=$1 ORDER BY created_at DESC LIMIT 1000`
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbctx, q, createdBy)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/ListWorkflowsByCreator Failed err: %+v", err)

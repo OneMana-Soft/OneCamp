@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/akashc777/OneCamp/models/taskread"
 )
 
 // ToolDef defines a workspace action that the AI can propose.
@@ -98,7 +100,7 @@ var ToolRegistry = []ToolDef{
 		Name:        "update_task_status",
 		Description: "Change the status of an existing task. Use when the user asks to move/mark a task as done, in progress, in review, todo, backlog, or canceled, or to one of the project's own statuses (shown by name in task lists, e.g. QA (inReview)).",
 		Parameters: []ToolParam{
-			{Name: "task_uuid", Type: "string", Required: true, Description: "UUID of the task to update"},
+			{Name: "task_uuid", Type: "string", Required: true, Description: "The task's id, or its key such as Q4-12"},
 			{Name: "status", Type: "string", Required: true, Description: "New status: one of todo, inProgress, inReview, done, backlog, canceled, or the name of one of the task's project's own statuses"},
 		},
 	},
@@ -106,7 +108,7 @@ var ToolRegistry = []ToolDef{
 		Name:        "assign_task",
 		Description: "Assign an existing task to a user (or unassign it). Use when the user asks to assign, reassign, or unassign a task.",
 		Parameters: []ToolParam{
-			{Name: "task_uuid", Type: "string", Required: true, Description: "UUID of the task to assign"},
+			{Name: "task_uuid", Type: "string", Required: true, Description: "The task's id, or its key such as Q4-12"},
 			{Name: "assignee_uuid", Type: "string", Required: false, Description: "UUID of the user to assign; omit or leave empty to unassign"},
 		},
 	},
@@ -114,7 +116,7 @@ var ToolRegistry = []ToolDef{
 		Name:        "set_task_due_date",
 		Description: "Set or clear the due date of an existing task. Use when the user asks to set, change, or remove a task's deadline/due date.",
 		Parameters: []ToolParam{
-			{Name: "task_uuid", Type: "string", Required: true, Description: "UUID of the task"},
+			{Name: "task_uuid", Type: "string", Required: true, Description: "The task's id, or its key such as Q4-12"},
 			{Name: "due_date", Type: "string", Required: false, Description: "Due date in RFC3339 (e.g. 2026-06-20T17:00:00Z); omit or leave empty to clear"},
 		},
 	},
@@ -206,12 +208,15 @@ var ToolRegistry = []ToolDef{
 	},
 	{
 		Name: "find_people",
-		Description: "Look up workspace members by name, job title or department. Use when the user asks who someone is, " +
-			"how to reach them, or who works on something. Returns each person's name, any title or department that is " +
-			"set, their email and their user id, which you can pass to tools that need one.",
+		Description: "Look up workspace members by name, job title or department, or find who knows about a topic. Use query " +
+			"when the user asks who someone is or how to reach them: it returns each person's name, any title or department " +
+			"that is set, their email and their user id, which you can pass to tools that need one. Use topic when the user " +
+			"asks who knows about, works on or could help with something: it returns the people whose docs, tasks, messages " +
+			"and comments on it the user can open, most first, each with the items that show it (cite them). Give one of the two.",
 		ReadOnly: true,
 		Parameters: []ToolParam{
-			{Name: "query", Type: "string", Required: true, Description: "Name, job title or department to search for"},
+			{Name: "query", Type: "string", Required: false, Description: "Name, job title or department to search for"},
+			{Name: "topic", Type: "string", Required: false, Description: "What to find who knows about, in a few words (e.g. \"the Q4 budget\")"},
 		},
 	},
 	{
@@ -542,6 +547,33 @@ var ToolRegistry = []ToolDef{
 		ReadOnly:    true,
 		Parameters: []ToolParam{
 			{Name: "query", Type: "string", Required: true, Description: "What to search for across the workspace and connected apps"},
+		},
+	},
+	// --- The work graph (DG5), for agents (DG8). Both take a kind and a uuid,
+	// never a graph id or query text, and answer only with what the person the
+	// call is for may see (and, when an agent acts for someone else, what that
+	// person may see too): a path through anything either can't open is left
+	// out whole, so nothing hidden is named or hinted at. ---
+	{
+		Name:        "related_items",
+		Description: "List what one workspace item is connected to: the docs it links or is linked from, its tasks, project, team, board, the messages that share it and their channels, and the people who made, own or are assigned it, each with the path that connects it. Use to answer what something is connected to, what links to a doc, what a task belongs to, or what blocks a task. Name the item by kind and uuid (find a uuid with search_workspace, list_docs or list_tasks first). Read-only.",
+		ReadOnly:    true,
+		Parameters: []ToolParam{
+			{Name: "kind", Type: "string", Required: true, Description: "What the item is: doc, task, project, person, board, channel, message, team"},
+			{Name: "uuid", Type: "string", Required: true, Description: "The item's uuid"},
+			{Name: "depth", Type: "string", Required: false, Description: "1 for what is directly connected (the default), 2 to go one step further"},
+			{Name: "kinds", Type: "string", Required: false, Description: "Only these kinds, comma-separated (for example doc,task); every kind when empty"},
+		},
+	},
+	{
+		Name:        "how_connected",
+		Description: "Find the shortest ways two workspace items are connected (at most three paths of up to four steps), for example how a doc relates to a project, or how a message connects to a task. Name each item by kind and uuid. Read-only.",
+		ReadOnly:    true,
+		Parameters: []ToolParam{
+			{Name: "from_kind", Type: "string", Required: true, Description: "What the first item is: doc, task, project, person, board, channel, message, team"},
+			{Name: "from_uuid", Type: "string", Required: true, Description: "The first item's uuid"},
+			{Name: "to_kind", Type: "string", Required: true, Description: "What the second item is: doc, task, project, person, board, channel, message, team"},
+			{Name: "to_uuid", Type: "string", Required: true, Description: "The second item's uuid"},
 		},
 	},
 	// --- Code understanding (read-only) over the workspace's admin-connected
@@ -1195,6 +1227,10 @@ var toolGroups = []toolGroup{
 		tools:    []string{"list_docs", "read_doc", "create_doc"},
 	},
 	{
+		keywords: []string{"connected", "connection", "connections", "related", "relates", "linked", "links", "link", "blocking", "blocks", "blocked", "belongs", "depends"},
+		tools:    []string{"related_items", "how_connected", "search_workspace"},
+	},
+	{
 		keywords: []string{"message", "send", "post", "dm", "channel", "channels", "notify", "tell", "ping", "announce", "reply"},
 		tools:    []string{"send_message", "send_dm", "send_group_chat"},
 	},
@@ -1548,9 +1584,22 @@ func containsWriteVerb(text string) bool {
 	return containsWholeWord(text, writeActionVerbs)
 }
 
-// RegisterExecutor registers an execution function for a tool.
+// RegisterExecutor registers an execution function for a tool. The tool reads
+// as the person it acts for (userUUID), whoever started it and from wherever:
+// an answer, an agent's step or a call over MCP shows them no task they may
+// not see, and a token's call no more than a member's (models/taskread).
 func RegisterExecutor(toolName string, executor ToolExecutor) {
-	Executors[toolName] = executor
+	Executors[toolName] = actingFor(executor)
+}
+
+// actingFor is executor reading as the person each call acts for.
+func actingFor(executor ToolExecutor) ToolExecutor {
+	if executor == nil {
+		return nil
+	}
+	return func(ctx context.Context, action ProposedAction, userUUID string) (string, map[string]string, error) {
+		return executor(taskread.ActingFor(ctx, userUUID), action, userUUID)
+	}
 }
 
 // actionVerbs are explicit command verbs that signal the user wants the AI to act.

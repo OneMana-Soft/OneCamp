@@ -320,7 +320,7 @@ func (o *OllamaProvider) ChatStream(ctx context.Context, messages []ChatMessage,
 
 	ch := make(chan StreamChunk, 64)
 
-	go func() {
+	helpers.GoSafeNamed("services/AI/ollama:ChatStream", func() {
 		defer close(ch)
 		defer resp.Body.Close()
 
@@ -385,7 +385,7 @@ func (o *OllamaProvider) ChatStream(ctx context.Context, messages []ChatMessage,
 		if err := scanner.Err(); err != nil {
 			ch <- StreamChunk{Done: true, Error: fmt.Errorf("ollama: stream read error: %w", err)}
 		}
-	}()
+	})
 
 	return ch, nil
 }

@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 )
@@ -139,7 +140,7 @@ func newStreamLifetime(client context.Context, sessionID, owner string, timeout 
 	// went away. Every answer starts with a clean slate.
 	stops.clear(gen, sessionID)
 	markStreamLive(gen, sessionID)
-	go l.watch()
+	helpers.GoSafeLoop("l.watch", func() { l.watch() })
 	return l
 }
 

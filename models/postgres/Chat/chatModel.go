@@ -22,26 +22,6 @@ type ChatMessageCount struct {
 	ChatCount uint64
 }
 
-func CreateChat(query string, id uuid.UUID, createdBy uuid.UUID, grpId string) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		id,
-		createdBy,
-		grpId,
-	)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateChat Failed to create new chat err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func UpdateChatByUUID(query string, chatUUID uuid.UUID) (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()

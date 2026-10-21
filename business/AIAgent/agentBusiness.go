@@ -387,7 +387,7 @@ func CreateAgent(ctx context.Context, in AgentInput, createdBy uuid.UUID) (*mode
 		helpers.LogErrorWithContext(ctx, "business/CreateAgent failed err: %+v", err)
 		return nil, fmt.Errorf("failed to create agent")
 	}
-	go ReloadTriggerCache(context.WithoutCancel(ctx))
+	helpers.GoSafeNamed("ReloadTriggerCache", func() { ReloadTriggerCache(context.WithoutCancel(ctx)) })
 	return model.GetAgentByID(ctx, id)
 }
 
@@ -466,7 +466,7 @@ func UpdateAgent(ctx context.Context, id uuid.UUID, in AgentInput, actor Actor) 
 		helpers.LogErrorWithContext(ctx, "business/UpdateAgent failed err: %+v", err)
 		return nil, fmt.Errorf("failed to update agent")
 	}
-	go ReloadTriggerCache(context.WithoutCancel(ctx))
+	helpers.GoSafeNamed("ReloadTriggerCache", func() { ReloadTriggerCache(context.WithoutCancel(ctx)) })
 	return model.GetAgentByID(ctx, id)
 }
 
@@ -489,7 +489,7 @@ func SetActive(ctx context.Context, id uuid.UUID, isActive bool, actor Actor) er
 		// Paused means stopped: its queued and running jobs too.
 		stopAgentWork(ctx, id, actor.UserID)
 	}
-	go ReloadTriggerCache(context.WithoutCancel(ctx))
+	helpers.GoSafeNamed("ReloadTriggerCache", func() { ReloadTriggerCache(context.WithoutCancel(ctx)) })
 	return nil
 }
 
@@ -513,7 +513,7 @@ func DeleteAgent(ctx context.Context, id uuid.UUID, actor Actor) error {
 	// not serve a stale identity (the bot user row is left intact since it owns
 	// the agent's previously authored messages).
 	userBusiness.InvalidateAgentBot(id)
-	go ReloadTriggerCache(context.WithoutCancel(ctx))
+	helpers.GoSafeNamed("ReloadTriggerCache", func() { ReloadTriggerCache(context.WithoutCancel(ctx)) })
 	return nil
 }
 

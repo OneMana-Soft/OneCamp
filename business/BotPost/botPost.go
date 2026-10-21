@@ -21,6 +21,8 @@ import (
 
 	commandAdapter "github.com/akashc777/OneCamp/adapter/Command"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
+	threadIndex "github.com/akashc777/OneCamp/business/ThreadIndex"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	commentDomain "github.com/akashc777/OneCamp/domain/Comment"
@@ -111,6 +113,9 @@ func PostToChannelAsBot(ctx context.Context, channelUUID uuid.UUID, text string,
 	return postBotMessage(ctx, bot, channelUUID, badgeHTML(trimmed, ""), bot.Name)
 }
 
+// recordReply records a reply in its thread's index: a seam for tests.
+var recordReply = threadIndex.Replied
+
 // PostCommentToPostAsBot adds an in-thread reply — a Comment on an existing
 // post — authored by a SPECIFIC bot principal (e.g. an AI agent's own
 // principal). This is the Slack-style "reply in thread" path: an agent that is
@@ -190,6 +195,7 @@ func PostCommentToPostAsBot(ctx context.Context, postUUID uuid.UUID, text string
 		_ = commentDomain.HardDeleteCommentByUUID(ctx, commentUUID) // roll back orphan row
 		return nil, fmt.Errorf("failed to create comment in graph")
 	}
+	refsBusiness.CommentSaved(ctx, dgraphPost.Comments, commentUUID.String(), true)
 
 	// 3. Real-time MQTT so the thread updates live for anyone viewing it. The
 	//    author's name + avatar carry the agent identity (same shape as a human
@@ -211,7 +217,12 @@ func PostCommentToPostAsBot(ctx context.Context, postUUID uuid.UUID, text string
 		UserProfileKey: profileKey,
 		IsBot:          true,
 	}
-	go mqttBusiness.PublishPostComment(&mqttComment, postInfo.Channel.Uuid)
+	helpers.GoSafeNamed("mqttBusiness.PublishPostComment", func() { mqttBusiness.PublishPostComment(&mqttComment, postInfo.Channel.Uuid) })
+
+	// The thread's index (business/ThreadIndex): an agent's reply makes the
+	// thread unread for those who follow it, as anyone's does.
+	reply, detached := threadIndex.Reply{Thread: threadIndex.OfPost(postInfo), By: bot.UUID, At: now}, context.WithoutCancel(ctx)
+	helpers.GoSafeNamed("threadIndex.recordReply", func() { recordReply(detached, reply) })
 
 	// 4. OpenSearch index (plain text), scoped to the post's channel so the
 	//    comment is discoverable by the same permission model as a human one.
@@ -227,7 +238,7 @@ func PostCommentToPostAsBot(ctx context.Context, postUUID uuid.UUID, text string
 		CommentPostUuid:       postUUID.String(),
 		CommentCreatedAt:      now.Unix(),
 	}
-	go commentDomain.CreatePostCommentWithAttachmentsInOpenSearch(osComment, nil)
+	helpers.GoSafeNamed("commentDomain.CreatePostCommentWithAttachmentsInOpenSearch", func() { commentDomain.CreatePostCommentWithAttachmentsInOpenSearch(osComment, nil) })
 
 	return &Result{
 		PostUUID:    postUUID.String(),
@@ -305,6 +316,7 @@ func EditCommentToPostAsBot(ctx context.Context, postUUID, commentUUID uuid.UUID
 		helpers.LogErrorWithContext(ctx, "botpost: edit dgraph comment failed: %+v", err)
 		return nil, fmt.Errorf("failed to update comment in graph")
 	}
+	refsBusiness.Saved(ctx, refsBusiness.Comment, commentUUID.String(), dgraphComment.Text, false)
 
 	// 3. OpenSearch body (keep the indexed text current).
 	plain := helpers.RemoveHTMLTags(formatted)
@@ -320,18 +332,20 @@ func EditCommentToPostAsBot(ctx context.Context, postUUID, commentUUID uuid.UUID
 		pk := bot.ProfileKey
 		profileKey = &pk
 	}
-	go mqttBusiness.PublishPostComment(&mqttStruct.MqttPostComment{
-		Type:           mqttStruct.TYPE_UPDATE,
-		PostUuid:       postUUID.String(),
-		CommentUuid:    commentUUID.String(),
-		HTMLText:       formatted,
-		ChannelUuid:    postInfo.Channel.Uuid,
-		UpdatedAt:      &now,
-		UserUuid:       bot.UUID,
-		UserName:       bot.Name,
-		UserProfileKey: profileKey,
-		IsBot:          true,
-	}, postInfo.Channel.Uuid)
+	helpers.GoSafeNamed("mqttBusiness.PublishPostComment", func() {
+		mqttBusiness.PublishPostComment(&mqttStruct.MqttPostComment{
+			Type:           mqttStruct.TYPE_UPDATE,
+			PostUuid:       postUUID.String(),
+			CommentUuid:    commentUUID.String(),
+			HTMLText:       formatted,
+			ChannelUuid:    postInfo.Channel.Uuid,
+			UpdatedAt:      &now,
+			UserUuid:       bot.UUID,
+			UserName:       bot.Name,
+			UserProfileKey: profileKey,
+			IsBot:          true,
+		}, postInfo.Channel.Uuid)
+	})
 
 	return &Result{
 		PostUUID:    postUUID.String(),
@@ -401,6 +415,7 @@ func postBotMessage(ctx context.Context, bot *userBusiness.BotIdentity, channelU
 		_ = postDomain.HardDeletePostByUUIUD(ctx, postUUID)
 		return nil, fmt.Errorf("failed to create message in graph")
 	}
+	refsBusiness.Saved(ctx, refsBusiness.Message, postUUID.String(), dgraphPost.Text, true)
 
 	// 4. Real-time MQTT — display name carries the identity; avatar is the
 	//    bot's user_profile_object_key; is_bot drives the FE "AI" badge.
@@ -434,7 +449,7 @@ func postBotMessage(ctx context.Context, bot *userBusiness.BotIdentity, channelU
 		PostByUserFullName: displayName,
 		PostChannelName:    channelDgraph.Name,
 	}
-	go postDomain.CreatePostWithAttachmentsInOpenSearch(osPost, nil)
+	helpers.GoSafeNamed("postDomain.CreatePostWithAttachmentsInOpenSearch", func() { postDomain.CreatePostWithAttachmentsInOpenSearch(osPost, nil) })
 
 	return &Result{
 		PostUUID:    postUUID.String(),
@@ -528,7 +543,7 @@ func PostEphemeralToUser(ctx context.Context, targetUserUUID, text, label string
 	token := mqttInit.MqttClient.Publish(topic, 1, false, payload)
 	go func() {
 		defer func() { _ = recover() }()
-		_ = token.Wait()
+		_ = token.WaitTimeout(mqttInit.PublishWait)
 		if token.Error() != nil {
 			helpers.MessageLogs.ErrorLog.Printf("botpost: ephemeral publish failed: %+v", token.Error())
 		}

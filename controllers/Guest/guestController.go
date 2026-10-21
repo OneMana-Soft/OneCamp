@@ -31,6 +31,7 @@ import (
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
+	publishBusiness "github.com/akashc777/OneCamp/business/Publish"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
@@ -100,7 +101,7 @@ func CreateInstantMeeting(w http.ResponseWriter, r *http.Request) {
 
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 
@@ -183,6 +184,9 @@ func JoinGuestMeeting(w http.ResponseWriter, r *http.Request) {
 
 	liveToken, room, err := guestBusiness.IssueGuestMeetingToken(ctx, grant, body.DisplayName, body.Language)
 	if err != nil {
+		if helpers.WriteCallRefusal(w, err) {
+			return
+		}
 		if errors.Is(err, guestBusiness.ErrInvalidName) {
 			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Please enter a display name."})
 			return
@@ -206,33 +210,67 @@ func JoinGuestMeeting(w http.ResponseWriter, r *http.Request) {
 // SetGuestPolicy POST /admin/guest-access — toggle the workspace guest policy.
 func SetGuestPolicy(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	// Each field is changed only when sent: the switch, and its two
+	// sub-options, whether a doc's view link may be published as a web page,
+	// and whether personal meeting rooms answer at their addresses.
 	var body struct {
-		Enabled bool `json:"enabled"`
+		Enabled *bool `json:"enabled"`
+		Publish *bool `json:"publish"`
+		Rooms   *bool `json:"rooms"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || (body.Enabled == nil && body.Publish == nil && body.Rooms == nil) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid request body"})
 		return
 	}
-	if err := settingsBusiness.SetGuestAccessEnabled(body.Enabled); err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/Guest/SetGuestPolicy err: %+v", err)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to update policy"})
-		return
+	if body.Enabled != nil {
+		if err := settingsBusiness.SetGuestAccessEnabled(*body.Enabled); err != nil {
+			helpers.LogErrorWithContext(ctx, "controllers/Guest/SetGuestPolicy err: %+v", err)
+			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to update policy"})
+			return
+		}
+		action := "guest.policy.disable"
+		summary := "Disabled workspace guest access"
+		if *body.Enabled {
+			action = "guest.policy.enable"
+			summary = "Enabled workspace guest access"
+		}
+		auditBusiness.Record(r, action, auditBusiness.CategorySecurity, summary, nil)
+		if !*body.Enabled {
+			// Guests already in a meeting are put out of it: the policy was
+			// re-read only when a guest joined, and nothing put out the ones in.
+			helpers.GoSafeNamed("guest.policy-off", func() {
+				guestBusiness.RemoveAllMeetingGuests(context.WithoutCancel(ctx))
+			})
+		}
 	}
-	action := "guest.policy.disable"
-	summary := "Disabled workspace guest access"
-	if body.Enabled {
-		action = "guest.policy.enable"
-		summary = "Enabled workspace guest access"
+	if body.Publish != nil {
+		if err := settingsBusiness.SetGuestPublishEnabled(*body.Publish); err != nil {
+			helpers.LogErrorWithContext(ctx, "controllers/Guest/SetGuestPolicy publish err: %+v", err)
+			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to update policy"})
+			return
+		}
+		action, summary := "guest.publish.disable", "Stopped pages being published to the web"
+		if *body.Publish {
+			action, summary = "guest.publish.enable", "Let pages be published to the web"
+		}
+		auditBusiness.Record(r, action, auditBusiness.CategorySecurity, summary, nil)
 	}
-	auditBusiness.Record(r, action, auditBusiness.CategorySecurity, summary, nil)
-	if !body.Enabled {
-		// Guests already in a meeting are put out of it: the policy was
-		// re-read only when a guest joined, and nothing put out the ones in.
-		helpers.GoSafeNamed("guest.policy-off", func() {
-			guestBusiness.RemoveAllMeetingGuests(context.WithoutCancel(ctx))
-		})
+	if body.Rooms != nil {
+		if err := settingsBusiness.SetGuestRoomsEnabled(*body.Rooms); err != nil {
+			helpers.LogErrorWithContext(ctx, "controllers/Guest/SetGuestPolicy rooms err: %+v", err)
+			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to update policy"})
+			return
+		}
+		action, summary := "guest.rooms.disable", "Stopped personal meeting rooms"
+		if *body.Rooms {
+			action, summary = "guest.rooms.enable", "Let personal meeting rooms open"
+		}
+		auditBusiness.Record(r, action, auditBusiness.CategorySecurity, summary, nil)
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{"guest_access_enabled": body.Enabled}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{
+		"guest_access_enabled": settingsBusiness.GuestAccessEnabled(), "guest_publish_enabled": settingsBusiness.GuestPublishAllowed(),
+		"guest_rooms_enabled": settingsBusiness.GuestRoomsAllowed(),
+	}})
 }
 
 // ListGuestGrants GET /admin/guest-grants — active grants for the admin view.
@@ -272,7 +310,7 @@ func hostedMeeting(w http.ResponseWriter, r *http.Request) (userModels.UserInfo,
 	ctx := r.Context()
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		helpers.WriteUnauthorized(w)
 		return userInfo, "", time.Time{}, false
 	}
 	room, ok := guestBusiness.MeetingRoom(chi.URLParam(r, "meeting_id"))
@@ -318,15 +356,14 @@ func GetInstantMeeting(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteRetryLater(w, "The call server couldn't answer just now.")
 		return
 	}
-	// The host may put people out of their own meeting.
-	view.CanRemove = true
+	// What the host may do in the call itself, the call tells them
+	// (business/CallControl's participant attributes).
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]interface{}{
 		"room":          view.Room,
 		"active":        view.Active,
 		"recording":     view.Recording,
 		"transcription": view.Transcription,
 		"participants":  view.Participants,
-		"can_remove":    view.CanRemove,
 		"expires_at":    until,
 	}})
 }
@@ -348,8 +385,8 @@ func RejoinInstantMeeting(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	token, err := guestBusiness.RejoinMeeting(r.Context(), room, &userInfo.UserDgraphInfo, body.Language)
 	if err != nil {
-		if errors.Is(err, liveKitBusiness.ErrRemovedFromCall) {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "removed_from_call", "msg": liveKitBusiness.RemovedFromCallMsg})
+		// Put out of it by a host, or it is locked: said in its own words.
+		if helpers.WriteCallRefusal(w, err) {
 			return
 		}
 		helpers.LogErrorWithContext(r.Context(), "controllers/Guest/RejoinInstantMeeting err: %+v", err)
@@ -415,7 +452,7 @@ func CreateResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 	}
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 
@@ -477,9 +514,22 @@ func GuestCollabToken(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body) // body optional
 
-	grant, err := guestBusiness.ValidateCollabGrant(ctx, token)
+	grant, err := collabGrant(ctx, token)
 	if err != nil {
 		guestReadFailed(w, r, "GuestCollabToken", err, "")
+		return
+	}
+	if guestBusiness.ServedAsPage(grant) {
+		// A doc's view link is the server's own script-free page (D-25): no
+		// collaboration token, no editor, for anyone outside. The link's
+		// page says where; every link already sent keeps opening it.
+		recordGuestAccess(r, grant, grant.ResourceType, guestBusiness.SanitizeGuestName(body.DisplayName))
+		writeGuestRead(w, map[string]interface{}{
+			"resource_type": grant.ResourceType,
+			"capability":    grant.Capability,
+			"title":         guestBusiness.SharedTitle(ctx, grant),
+			"page_url":      publishBusiness.PageAddress(publishBusiness.Ref{Token: token}),
+		})
 		return
 	}
 
@@ -530,7 +580,7 @@ func GuestDocColabAuthorize(w http.ResponseWriter, r *http.Request) {
 			notAvailable(w)
 			return
 		}
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Unauthorized"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Authorised", "canEdit": false})
@@ -549,7 +599,7 @@ func GuestBoardColabAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := guestBusiness.AuthorizeGuestCollab(ctx, bearer, "board", body.BoardUUID); err != nil {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Unauthorized"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Authorised", "canEdit": false})
@@ -602,6 +652,23 @@ type guestCommentItem struct {
 	GuestName string    `json:"guest_name"`
 	Body      string    `json:"body"`
 	CreatedAt time.Time `json:"created_at"`
+	// ParentID is the comment a team member's reply answers (docs C5-2).
+	ParentID string `json:"parent_id,omitempty"`
+	// FromTeam is a member's reply; GuestName is then "<name> from <workspace>".
+	FromTeam bool `json:"from_team,omitempty"`
+	// AuthorID is one guest on one link, the same on every comment (B13).
+	AuthorID string `json:"author_id"`
+	// AuthorName is a team member's own name, for their face; never an address.
+	AuthorName string `json:"author_name,omitempty"`
+}
+
+// guestCommentItemOf is a comment as the guest's page and the team's view show it.
+func guestCommentItemOf(c *guestBusiness.GuestCommentView) guestCommentItem {
+	item := guestCommentItem{ID: c.ID.String(), GuestName: c.GuestName, Body: c.Body, CreatedAt: c.CreatedAt, FromTeam: c.FromTeam, AuthorID: c.AuthorID, AuthorName: c.AuthorName}
+	if c.ParentID != nil {
+		item.ParentID = c.ParentID.String()
+	}
+	return item
 }
 
 // GuestDocComments GET /guest/doc-comments/{token} — public. Returns the guest
@@ -618,6 +685,11 @@ func GuestDocComments(w http.ResponseWriter, r *http.Request) {
 		guestReadFailed(w, r, "GuestDocComments", err, "")
 		return
 	}
+	if guestBusiness.ServedAsPage(grant) {
+		// A view link's page shows no comments; a password is never gone round.
+		notAvailable(w)
+		return
+	}
 	comments, err := guestBusiness.ListGuestDocComments(ctx, grant.ResourceID)
 	if err != nil {
 		guestReadFailed(w, r, "GuestDocComments", err, "")
@@ -625,12 +697,7 @@ func GuestDocComments(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]guestCommentItem, 0, len(comments))
 	for _, c := range comments {
-		out = append(out, guestCommentItem{
-			ID:        c.ID.String(),
-			GuestName: c.GuestName,
-			Body:      c.Body,
-			CreatedAt: c.CreatedAt,
-		})
+		out = append(out, guestCommentItemOf(c))
 	}
 	writeGuestRead(w, map[string]interface{}{
 		"capability": grant.Capability,
@@ -686,22 +753,17 @@ func CreateGuestDocComment(w http.ResponseWriter, r *http.Request) {
 		CommentUuid: comment.ID.String(),
 		CreatedAt:   &createdAt,
 		HTMLText:    "<p>" + html.EscapeString(comment.Body) + "</p>",
-		UserUuid:    "guest-" + grant.Id.String(),
+		UserUuid:    guestBusiness.GuestAuthorID(grant.Id, comment.GuestName),
 		UserName:    "Guest: " + comment.GuestName,
 		IsGuest:     true,
 	}
-	go mqttBusiness.PublishDocComment(&mqttGuestComment, grant.ResourceID)
+	helpers.GoSafeNamed("mqttBusiness.PublishDocComment", func() { mqttBusiness.PublishDocComment(&mqttGuestComment, grant.ResourceID) })
 
 	auditBusiness.Record(r, "guest.comment.create", auditBusiness.CategorySecurity,
 		"A guest commented on a shared doc",
 		map[string]interface{}{"resource_type": "doc", "resource_id": grant.ResourceID, "grant_id": grant.Id.String()})
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": guestCommentItem{
-		ID:        comment.ID.String(),
-		GuestName: comment.GuestName,
-		Body:      comment.Body,
-		CreatedAt: comment.CreatedAt,
-	}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": guestCommentItemOf(comment)})
 }
 
 // ─── Channel guests (capability = view | post) ─────────────────────────
@@ -1023,13 +1085,22 @@ func docShareRefusal(ctx context.Context, userInfo userModels.UserInfo, docID st
 	return 0, nil, nil
 }
 
-// GuestLinkView is one live link to a resource, for the people who may share it.
+// GuestLinkView is one live link to a resource, for the people who may share it,
+// with its web page when it is published (docs C6).
 type GuestLinkView struct {
 	ID         uuid.UUID  `json:"id"`
 	Capability string     `json:"capability"`
 	ExpiresAt  *time.Time `json:"expires_at"`
 	CreatedAt  time.Time  `json:"created_at"`
 	Mine       bool       `json:"mine"`
+	// The published page: its address, the one to share (the web app's
+	// /p/<slug>), the page itself, and how it is published.
+	Slug        string `json:"slug,omitempty"`
+	URL         string `json:"url,omitempty"`
+	PageURL     string `json:"page_url,omitempty"`
+	Indexable   bool   `json:"indexable"`
+	AllowCopies bool   `json:"allow_copies"`
+	HasPassword bool   `json:"has_password"`
 }
 
 // ListResourceGuestLinks GET /guest/links?resource_type=&resource_id= — the
@@ -1066,9 +1137,11 @@ func ListResourceGuestLinks(w http.ResponseWriter, r *http.Request) {
 		if onlyMine && !mine {
 			continue
 		}
-		out = append(out, GuestLinkView{ID: g.Id, Capability: g.Capability, ExpiresAt: g.ExpiresAt, CreatedAt: g.CreatedAt, Mine: mine})
+		out = append(out, linkView(g, mine))
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": out})
+	// max_days is the longest a new link may last here (0: no limit of the
+	// workspace's own), so the dialog offers nothing it would be refused.
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": out, "publish_allowed": settingsBusiness.GuestPublishEnabled(), "max_days": guestBusiness.LinkCapDays(r.Context())})
 }
 
 // RevokeResourceGuestLink POST /guest/links/{id}/revoke — turns a link off,

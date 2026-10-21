@@ -17,9 +17,9 @@ import (
 // whose name is in fail fails.
 func fakeStores(t *testing.T, fail ...string) *[]string {
 	t.Helper()
-	sr, kr, ae, de, pp, im, ro := setRow, keepRows, addAdminEdge, dropAdminEdge, projectsPage, invalidateMemberships, rowsOf
+	sr, kr, ae, de, pp, im, ro, rm := setRow, keepRows, addAdminEdge, dropAdminEdge, projectsPage, invalidateMemberships, rowsOf, rowsOfMany
 	t.Cleanup(func() {
-		setRow, keepRows, addAdminEdge, dropAdminEdge, projectsPage, invalidateMemberships, rowsOf = sr, kr, ae, de, pp, im, ro
+		setRow, keepRows, addAdminEdge, dropAdminEdge, projectsPage, invalidateMemberships, rowsOf, rowsOfMany = sr, kr, ae, de, pp, im, ro, rm
 	})
 	var ops []string
 	failing := func(op string) error {
@@ -97,21 +97,25 @@ func TestTheParitySweepGoesTowardTheLower(t *testing.T) {
 		t.Errorf("admin edges taken off: %v", drop)
 	}
 
-	// The pass: every project of every page, and a project that fails is
-	// skipped, not the pass.
+	// The pass: every project of every page, its rows read once for the
+	// page (PR3, the BE audit's #34: a read per project, 15,000 an hour), and
+	// a project already in step writes nothing.
 	ops := fakeStores(t)
-	broken := &dgraphStruct.DgraphProject{Uid: "0xq", Uuid: uuid.NewString()}
+	steady := &dgraphStruct.DgraphProject{Uid: "0xq", Uuid: uuid.NewString(), Members: []*dgraphStruct.DgraphUser{user(ben, "0xben")}}
 	projectsPage = func(_ context.Context, after string, _ int) ([]*dgraphStruct.DgraphProject, error) {
 		if after != "" {
 			t.Errorf("a second page was read after a short one (after %q)", after)
 		}
-		return []*dgraphStruct.DgraphProject{broken, p}, nil
+		return []*dgraphStruct.DgraphProject{steady, p}, nil
 	}
-	rowsOf = func(_ context.Context, id uuid.UUID) (map[uuid.UUID]string, error) {
-		if id.String() == broken.Uuid {
-			return nil, errors.New("rows unreadable")
-		}
-		return rows, nil
+	rowsOf = func(context.Context, uuid.UUID) (map[uuid.UUID]string, error) {
+		t.Error("a project's rows were read on their own")
+		return nil, nil
+	}
+	reads := 0
+	rowsOfMany = func(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]map[uuid.UUID]string, error) {
+		reads++
+		return map[uuid.UUID]map[uuid.UUID]string{uuid.MustParse(p.Uuid): rows, uuid.MustParse(steady.Uuid): {ben: "member"}}, nil
 	}
 	var kept map[uuid.UUID]string
 	keepRows = func(_ context.Context, id uuid.UUID, roles map[uuid.UUID]string) (int, error) {
@@ -120,8 +124,15 @@ func TestTheParitySweepGoesTowardTheLower(t *testing.T) {
 		return 2, nil
 	}
 	changed, err := SettleRoles(context.Background())
-	if err != nil || changed != 3 || !reflect.DeepEqual(*ops, []string{"admin edge off", "keep 3"}) || kept[cy] != "viewer" {
-		t.Errorf("changed %d %v, ops %v, kept %v", changed, err, *ops, kept)
+	if err != nil || reads != 1 || changed != 3 || !reflect.DeepEqual(*ops, []string{"admin edge off", "keep 3"}) || kept[cy] != "viewer" {
+		t.Errorf("reads %d, changed %d %v, ops %v, kept %v", reads, changed, err, *ops, kept)
+	}
+	// A page whose rows can't be read stops the pass; the next starts over.
+	rowsOfMany = func(context.Context, []uuid.UUID) (map[uuid.UUID]map[uuid.UUID]string, error) {
+		return nil, errors.New("rows unreadable")
+	}
+	if _, err := SettleRoles(context.Background()); err == nil {
+		t.Error("an unreadable page didn't stop the pass")
 	}
 }
 

@@ -1,0 +1,6 @@
+[
+  {"id": "G0LEADS01", "name": "leads", "created": 1759000200, "creator": "U0ADA0001", "is_archived": false,
+   "members": ["U0ADA0001", "U0BO00002"],
+   "topic": {"value": "", "creator": "", "last_set": 0},
+   "purpose": {"value": "Leads only", "creator": "U0ADA0001", "last_set": 1759000200}}
+]

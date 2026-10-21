@@ -497,7 +497,7 @@ func SendTestDigest(w http.ResponseWriter, r *http.Request) {
 	}
 	uid := aiAdminUserUUID(r)
 	if uid == "" {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "not authorized"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	if err := business.SendTestMemoryDigest(ctx, uid); err != nil {

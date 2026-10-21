@@ -54,7 +54,7 @@ const (
 // self-gates every tick and is inert when AI is unavailable or when the feature
 // is switched off. ctx drives graceful shutdown.
 func StartEvalWatch(ctx context.Context) {
-	go func() {
+	helpers.GoSafeLoop("business/AIAgent/agentEvalWatch:StartEvalWatch", func() {
 		select {
 		case <-ctx.Done():
 			return
@@ -73,7 +73,7 @@ func StartEvalWatch(ctx context.Context) {
 				runEvalWatchPass(ctx)
 			}
 		}
-	}()
+	})
 }
 
 // evalWatchInterval reads AGENT_EVAL_WATCH_INTERVAL_MIN.

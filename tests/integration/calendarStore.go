@@ -10,10 +10,13 @@ package integration
 // proven before it happens.
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 	"time"
 
+	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/google/uuid"
 )
 
@@ -33,6 +36,26 @@ func ForEachCalendarStore(t *testing.T, fn func(t *testing.T)) {
 			fn(t)
 		})
 	}
+}
+
+// ReadyCalendarStore readies the store CALENDAR_STORE names for a test whose
+// code reads the calendar (busy times, time off, focus) even when the test
+// writes no events: in the one store, a database of its own, connected for
+// the models and with the move recorded, which it returns; in the old stores,
+// nothing, and nil. Since the one store became the default (CAL-DEFAULT), a
+// test that set up only Dgraph reached Postgres through a nil connection
+// asking whether the move had finished, and panicked.
+func ReadyCalendarStore(t *testing.T) *Env {
+	t.Helper()
+	if !helpers.CalendarInPostgres() {
+		return nil
+	}
+	env := SetupEnv(t)
+	if err := postgresInit.ConnectPostgres(context.Background(), env.DSN); err != nil {
+		t.Fatal(err)
+	}
+	MarkCalendarMoved(t, env.PG)
+	return env
 }
 
 // MarkCalendarMoved records in db that the move into the one store is done,

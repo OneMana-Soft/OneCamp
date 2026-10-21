@@ -4,15 +4,14 @@ import (
 	"context"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Board"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Board"
 	commentModels "github.com/akashc777/OneCamp/models/dgraph/Comment"
-	"github.com/google/uuid"
 )
 
 // CreateOrUpdateDgraphBoard upserts a board. For updates, Uid must be
@@ -108,17 +107,12 @@ func GetBasicDgraphBoardByUUID(ctx context.Context, boardUUID string, userUID st
 // they may read. One query for the lot; ids that aren't uuids are left out,
 // and so is any board that doesn't exist.
 func GetBoardsReadAccessFor(ctx context.Context, boardUUIDs []string, userUUID string) ([]*dgraphStruct.DgraphBoard, error) {
-	quoted := make([]string, 0, len(boardUUIDs))
-	for _, id := range boardUUIDs {
-		if parsed, err := uuid.Parse(id); err == nil {
-			quoted = append(quoted, `"`+parsed.String()+`"`)
-		}
-	}
-	if len(quoted) == 0 {
+	list := dgraphquery.UUIDList(boardUUIDs)
+	if list == "" {
 		return nil, nil
 	}
 	query := `query Readable($user: string) {
-				boardInfo(func: eq(board_uuid, [` + strings.Join(quoted, ", ") + `])) {
+				boardInfo(func: eq(board_uuid, [` + list + `])) {
 					board_uuid
 					board_title
 					board_private

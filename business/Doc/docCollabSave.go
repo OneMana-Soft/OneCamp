@@ -91,6 +91,13 @@ func SaveFromCollab(ctx context.Context, in CollabSave) (CollabSaved, error) {
 	}
 	hash := collabBodyHash(in.HTML)
 	previous := plausiblePrevious(ctx, in.DocUUID, len(in.HTML))
+	if previous == "" && SaveHooks.wantsBefore(ctx, in.DocUUID, in.Contributors, in.Agents) {
+		// A hook keeps the body as it was (a doc's history, when its author
+		// changes): read it before this save replaces it.
+		if body, err := readStoredBody(ctx, in.DocUUID); err == nil {
+			previous = body
+		}
+	}
 	w, err := writeCollabSave(ctx, domain.CollabWrite{
 		DocUUID:    in.DocUUID,
 		Body:       in.HTML,
@@ -112,6 +119,7 @@ func SaveFromCollab(ctx context.Context, in CollabSave) (CollabSaved, error) {
 	c := Change{
 		DocUUID: in.DocUUID, Body: in.HTML, Hash: hash, PrevHash: w.PrevHash, Lineage: in.Lineage,
 		Contributors: in.Contributors, Agents: in.Agents, SavedAt: time.Now(), Hosted: w.Hosted,
+		Before: previous,
 	}
 	if previous != "" && massDeletion(len(previous), len(in.HTML)) {
 		c.Previous = previous

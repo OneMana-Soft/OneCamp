@@ -39,6 +39,10 @@ type Change struct {
 	// Previous is the body before the save, read only when the save shrank it
 	// sharply (a mass deletion, which history keeps); "" otherwise.
 	Previous string
+	// Before is the body before the save whenever the save path read it: for
+	// a mass deletion, or because a hook asked for it (AskForBefore); ""
+	// otherwise.
+	Before string
 	// Hash and PrevHash are the body's hashes after and before (collabBodyHash).
 	Hash     string
 	PrevHash string
@@ -64,6 +68,36 @@ type SaveHook func(ctx context.Context, c Change)
 type SaveHookRegistry struct {
 	mu    sync.RWMutex
 	hooks []namedSaveHook
+	asks  []BeforeAsk
+}
+
+// BeforeAsk answers, before a save is written, whether a hook will need the
+// body as it was (Change.Before). It is asked on every changed save, so it is
+// cheap and answers true only when its hook will keep the body: the read it
+// asks for costs a round trip.
+type BeforeAsk func(ctx context.Context, docUUID string, contributors []string, agents []AgentContributor) bool
+
+// AskForBefore adds a BeforeAsk.
+func (r *SaveHookRegistry) AskForBefore(ask BeforeAsk) {
+	if ask == nil {
+		panic("save hooks: AskForBefore needs something to ask")
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.asks = append(r.asks, ask)
+}
+
+// wantsBefore is whether any hook asked for the body before this save.
+func (r *SaveHookRegistry) wantsBefore(ctx context.Context, docUUID string, contributors []string, agents []AgentContributor) bool {
+	r.mu.RLock()
+	asks := append([]BeforeAsk(nil), r.asks...)
+	r.mu.RUnlock()
+	for _, ask := range asks {
+		if ask(ctx, docUUID, contributors, agents) {
+			return true
+		}
+	}
+	return false
 }
 
 type namedSaveHook struct {

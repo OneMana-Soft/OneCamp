@@ -325,7 +325,7 @@ func (a *AnthropicProvider) ChatStream(ctx context.Context, messages []ChatMessa
 
 	ch := make(chan StreamChunk, 64)
 
-	go func() {
+	helpers.GoSafeNamed("services/AI/anthropic:ChatStream", func() {
 		defer close(ch)
 		defer resp.Body.Close()
 
@@ -407,7 +407,7 @@ func (a *AnthropicProvider) ChatStream(ctx context.Context, messages []ChatMessa
 		if err := scanner.Err(); err != nil {
 			ch <- StreamChunk{Done: true, Error: fmt.Errorf("anthropic: stream read error: %w", err)}
 		}
-	}()
+	})
 
 	return ch, nil
 }

@@ -57,7 +57,7 @@ type ProposedTask struct {
 	AssigneeName string `json:"assignee_name,omitempty"` // display name (resolved or as-stated)
 	AssigneeUUID string `json:"assignee_uuid,omitempty"` // resolved user UUID, else empty
 	Due          string `json:"due,omitempty"`           // RFC3339, else empty
-	Priority     string `json:"priority,omitempty"`      // low|medium|high
+	Priority     string `json:"priority,omitempty"`      // urgent|high|medium|low
 }
 
 // ExtractTasksResult is the proposal returned to the batch-approve UI.
@@ -81,7 +81,7 @@ Return ONLY a JSON object (no prose, no markdown fences) of this shape:
     "title": "<short imperative task title>",
     "assignee": "<person name if a specific owner is stated, else empty>",
     "due": "<YYYY-MM-DD if a deadline is stated, else empty>",
-    "priority": "low" | "medium" | "high",
+    "priority": "urgent" | "high" | "medium" | "low",
     "details": "<one short line of context, optional>"
   }
 ]}

@@ -9,7 +9,9 @@ import (
 	"context"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // AddDocTask records that a doc holds a to-do for a task. Recording it again
@@ -61,4 +63,37 @@ func RemoveDocTask(ctx context.Context, docUUID, taskUUID uuid.UUID) error {
 	_, err := postgresInit.DBConn.SqlDB.ExecContext(c,
 		`DELETE FROM doc_task_links WHERE doc_uuid = $1 AND task_uuid = $2`, docUUID, taskUUID)
 	return err
+}
+
+// TasksForDocs is the tasks each of docs holds a to-do for: what the work
+// graph mirrors as each doc's refers_to (business/Refs). One query.
+func TasksForDocs(ctx context.Context, docs []uuid.UUID) (map[uuid.UUID][]uuid.UUID, error) {
+	out := map[uuid.UUID][]uuid.UUID{}
+	if len(docs) == 0 {
+		return out, nil
+	}
+	pairs, err := pgexec.Query(ctx,
+		`SELECT doc_uuid, task_uuid FROM doc_task_links WHERE doc_uuid = ANY($1) ORDER BY doc_uuid, created_at`,
+		func(r pgexec.Row) ([2]uuid.UUID, error) {
+			var p [2]uuid.UUID
+			err := r.Scan(&p[0], &p[1])
+			return p, err
+		}, pq.Array(docs))
+	for _, p := range pairs {
+		out[p[0]] = append(out[p[0]], p[1])
+	}
+	return out, err
+}
+
+// DocsWithTasks is a page of the docs that hold a to-do for any task, in
+// order, after the doc after (uuid.Nil for the first page): the work graph's
+// mirror of doc_task_links walks them. One query.
+func DocsWithTasks(ctx context.Context, after uuid.UUID, limit int) ([]uuid.UUID, error) {
+	return pgexec.Query(ctx,
+		`SELECT DISTINCT doc_uuid FROM doc_task_links WHERE doc_uuid > $1 ORDER BY doc_uuid LIMIT $2`,
+		func(r pgexec.Row) (uuid.UUID, error) {
+			var d uuid.UUID
+			err := r.Scan(&d)
+			return d, err
+		}, after, limit)
 }

@@ -44,6 +44,7 @@ func CreateOrUpdateDgraphChannel(ctx context.Context, dgraphChannel *dgraphStruc
 
 func GetDgraphChannelsInfoByUserUUID(ctx context.Context, query string, variables map[string]string) (dgraphChannel []*dgraphStruct.DgraphChannel, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -80,6 +81,7 @@ func GetDgraphChannelsInfoByUserUUID(ctx context.Context, query string, variable
 
 func GetDgraphChannelsInfoAndCount(ctx context.Context, query string, variables map[string]string) (dgraphChannel []*dgraphStruct.DgraphChannel, totalCount int64, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -124,6 +126,7 @@ func GetDgraphChannelsInfoAndCount(ctx context.Context, query string, variables 
 
 func GetDgraphChannelInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphChannel *dgraphStruct.DgraphChannel, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -148,7 +151,9 @@ func GetDgraphChannelInfoByUUID(ctx context.Context, query string, variables map
 
 	if len(channelInfo.ChannelInfo) == 0 {
 		err = ErrNotFound
-		helpers.LogErrorWithContext(ctx,
+		// Found nothing: an answer its caller handles (a 404, or skipping
+		// the thing), so said at DEBUG, not as a failure.
+		helpers.LogDebugWithContext(ctx,
 			"models/GetDgraphChannelInfoByUUID failed to get channelInfo")
 		return
 	}

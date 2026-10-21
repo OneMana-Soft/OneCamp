@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	model "github.com/akashc777/OneCamp/models/postgres/Invoice"
@@ -177,8 +178,13 @@ var numbered = regexp.MustCompile(`^(.*)-(\d+)$`)
 func Prefix(project string) string {
 	var b strings.Builder
 	for _, w := range strings.Fields(project) {
+		// The word's first letter or digit, past any punctuation before it;
+		// one outside a–z and 0–9 adds nothing.
 		for _, r := range w {
-			if r < 128 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+			if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+				continue
+			}
+			if r < 128 {
 				b.WriteRune(r)
 			}
 			break

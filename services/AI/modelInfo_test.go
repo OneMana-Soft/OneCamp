@@ -61,6 +61,7 @@ func TestSameClientNeverPanics(t *testing.T) {
 	}
 	type valueClient struct {
 		LLMProvider
+		//lint:ignore U1000 a slice field is what makes this client impossible to compare
 		parts []string
 	}
 	if sameClient(valueClient{}, valueClient{}) {

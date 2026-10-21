@@ -12,14 +12,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/akashc777/OneCamp/tests/integration"
 	"github.com/google/uuid"
 )
 
 func TestWorkload(t *testing.T) {
+	integration.ForEachCalendarStore(t, workload)
+}
+
+func workload(t *testing.T) {
+	integration.ReadyCalendarStore(t)
 	ctx := context.Background()
+	// Reads of tasks decide restricted ones from Postgres (WA2): this test's own.
+	integration.ConnectServerPostgres(t)
 	dg := integration.SetupDgraph(t)
 	live, gone := "0001-01-01T00:00:00Z", "2026-09-01T00:00:00Z"
 	id := map[string]string{}
@@ -89,7 +94,7 @@ func TestWorkload(t *testing.T) {
 	}})
 
 	until := time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)
-	w, err := GetWorkload(ctx, uids["me"], id["me"], false, time.Now().AddDate(0, 0, -400), until)
+	w, err := GetWorkload(ctx, uids["me"], id["me"], false, longAgo(), until)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +190,7 @@ func TestWorkload(t *testing.T) {
 	if err := SetCapacity(ctx, id["me"], true, id["alice"], Capacity{Tasks: num(0)}); err != nil {
 		t.Fatal(err)
 	}
-	w, err = GetWorkload(ctx, uids["me"], id["me"], true, time.Now().AddDate(0, 0, -400), until)
+	w, err = GetWorkload(ctx, uids["me"], id["me"], true, longAgo(), until)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +211,14 @@ func TestWorkload(t *testing.T) {
 // A project with 3,000 old tasks and one task that starts today, with no due
 // date: the cap must not cut today's for last year's.
 func TestWorkloadStartOnlyTasksSurviveTheCap(t *testing.T) {
+	integration.ForEachCalendarStore(t, workloadStartOnlyTasksSurviveTheCap)
+}
+
+func workloadStartOnlyTasksSurviveTheCap(t *testing.T) {
+	integration.ReadyCalendarStore(t)
 	ctx := context.Background()
+	// Reads of tasks decide restricted ones from Postgres (WA2): this test's own.
+	integration.ConnectServerPostgres(t)
 	dg := integration.SetupDgraph(t)
 	me := uuid.NewString()
 	var tasks []map[string]any
@@ -219,7 +231,7 @@ func TestWorkloadStartOnlyTasksSurviveTheCap(t *testing.T) {
 		"user_projects": []map[string]any{{"uid": "_:p", "dgraph.type": "Project", "project_uuid": uuid.NewString(), "project_name": "P",
 			"project_admins": []map[string]any{{"uid": "_:me"}}, "project_tasks": tasks}},
 	})
-	w, err := GetWorkload(ctx, uids["me"], me, false, time.Now().AddDate(0, 0, -400), time.Now().AddDate(0, 0, 91))
+	w, err := GetWorkload(ctx, uids["me"], me, false, longAgo(), time.Now().AddDate(0, 0, 91))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +249,14 @@ func TestWorkloadStartOnlyTasksSurviveTheCap(t *testing.T) {
 // Tasks without dates count as dated ones do: a deleted account's is
 // nobody's, and someone taken off the project keeps theirs.
 func TestWorkloadUndatedOfFormerPeople(t *testing.T) {
+	integration.ForEachCalendarStore(t, workloadUndatedOfFormerPeople)
+}
+
+func workloadUndatedOfFormerPeople(t *testing.T) {
+	integration.ReadyCalendarStore(t)
 	ctx := context.Background()
+	// Reads of tasks decide restricted ones from Postgres (WA2): this test's own.
+	integration.ConnectServerPostgres(t)
 	dg := integration.SetupDgraph(t)
 	live, gone := "0001-01-01T00:00:00Z", "2026-09-01T00:00:00Z"
 	me, left, ex := uuid.NewString(), uuid.NewString(), uuid.NewString()
@@ -260,7 +279,7 @@ func TestWorkloadUndatedOfFormerPeople(t *testing.T) {
 			},
 		}},
 	})
-	w, err := GetWorkload(ctx, uids["me"], me, false, time.Now().AddDate(0, 0, -400), time.Now().AddDate(0, 0, 91))
+	w, err := GetWorkload(ctx, uids["me"], me, false, longAgo(), time.Now().AddDate(0, 0, 91))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,6 +301,9 @@ func TestWorkloadAway(t *testing.T) {
 
 func workloadAway(t *testing.T) {
 	ctx := context.Background()
+	// Reads of tasks decide restricted ones from Postgres (WA2): this test's
+	// own.
+	integration.ConnectServerPostgres(t)
 	dg := integration.SetupDgraph(t)
 	live, gone := "0001-01-01T00:00:00Z", "2026-09-01T00:00:00Z"
 	me, alice, stranger := uuid.NewString(), uuid.NewString(), uuid.NewString()
@@ -307,12 +329,7 @@ func workloadAway(t *testing.T) {
 		{stranger, "2026-10-12T00:00:00Z", "2026-10-15T00:00:00Z", false, false},
 		{alice, "2026-10-26T00:00:00Z", "2026-10-26T00:00:00Z", false, false},
 	}
-	if helpers.CalendarInPostgres() {
-		env := integration.SetupEnv(t)
-		if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
-			t.Fatal(err)
-		}
-		integration.MarkCalendarMoved(t, env.PG)
+	if env := integration.ReadyCalendarStore(t); env != nil {
 		for _, id := range []string{alice, stranger} {
 			if _, err := env.PG.Exec(`INSERT INTO users (id, email_id, username, display_name, created_at, updated_at) VALUES ($1, $2, $3, $4, NOW(), NOW())`,
 				id, id+"@example.test", "u"+id[:6], "u"+id[:6]); err != nil {
@@ -352,3 +369,9 @@ func workloadAway(t *testing.T) {
 		t.Fatalf("only Alice's live time off in the weeks shown: %+v", w.Away)
 	}
 }
+
+// longAgo is the start of a wide workload window: far enough back for every
+// task these tests date, near enough that the whole window stays within the
+// 400 days the calendar's one store reads at a time (the app asks for 28
+// weeks at most).
+func longAgo() time.Time { return time.Now().AddDate(0, 0, -300) }

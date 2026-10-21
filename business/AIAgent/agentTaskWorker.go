@@ -211,7 +211,7 @@ func startAgentTaskLease(ctx context.Context, taskID, token uuid.UUID) (*agentTa
 		done:   make(chan struct{}),
 	}
 	l.wg.Add(1)
-	go l.heartbeat(ctx)
+	helpers.GoSafeLoop("l.heartbeat", func() { l.heartbeat(ctx) })
 	return l, runCtx
 }
 
@@ -376,12 +376,12 @@ func StartAgentTaskWorker(ctx context.Context) {
 	agentTaskStarted = true
 	agentTaskMu.Unlock()
 
-	webhookBusiness.RegisterEventListener(handleTaskAssignedForAgent)
-	webhookBusiness.RegisterEventListener(handleTaskCommentForAgent)
+	webhookBusiness.RegisterEventListenerSeeingRestricted(handleTaskAssignedForAgent)
+	webhookBusiness.RegisterEventListenerSeeingRestricted(handleTaskCommentForAgent)
 	// Wire the code_pr tool → durable coding-job executor (gated: the tool is
 	// only offered to the model when an admin has enabled code PRs).
 	RegisterCodePRExecutor()
-	go agentTaskLoop(ctx)
+	helpers.GoSafeLoop("agentTaskLoop", func() { agentTaskLoop(ctx) })
 	helpers.MessageLogs.InfoLog.Println("AI agent task worker started")
 }
 

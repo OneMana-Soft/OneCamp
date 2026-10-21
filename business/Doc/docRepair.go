@@ -213,7 +213,7 @@ func repairDocs(ctx context.Context, apply bool, out io.Writer, render collabRen
 // latestGoodSnapshotBody is the newest version in a doc's history that is a
 // real body, not the placeholder.
 func latestGoodSnapshotBody(ctx context.Context, docUUID string) (string, error) {
-	snaps, err := snapshotModels.ListSnapshots(ctx, docUUID, 30)
+	snaps, err := snapshotModels.ListSnapshots(ctx, docUUID, time.Time{}, 30)
 	if err != nil {
 		return "", err
 	}

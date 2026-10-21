@@ -9,7 +9,10 @@
 // person must be able to change the task, or for a deletion delete it
 // (business/Task TaskFor, Work Access's one check), and each op is the
 // business function its handler calls. Only the ops whose whole rule already lives in those functions are
-// here: status, estimate, delete and restore. The others answer
+// here: status, estimate, rank, delete and restore, and the three rules make
+// (package 9, R1): priority (one of the priorities), assignee (a project
+// member, or nobody) and due (a time, or none), whose handlers' checks moved
+// here. The others answer
 // ErrUnavailable, because their rules still live in the handlers
 // (controllers/Task), and a copy here would be a second rule: A3 moves them
 // behind this interface and makes the handlers thin adapters over it.
@@ -22,9 +25,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
+	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -79,33 +86,92 @@ var ErrUnavailable = errors.New("tasks: that change isn't available here yet")
 // ErrBadValue is an op whose value isn't one its kind takes.
 var ErrBadValue = errors.New("tasks: that value doesn't fit")
 
+// ErrNotInProject is an assignee who isn't in the task's project.
+var ErrNotInProject = errors.New("tasks: that person isn't in the task's project")
+
 // Tasks is the writer every source calls.
 var Tasks Writer = todaysWrites{}
 
 // Seams for tests: today's check and business functions.
 var (
-	taskFor     = taskBusiness.TaskFor
-	setStatus   = taskBusiness.UpdateTaskStatusByTaskUUID
-	setEstimate = taskBusiness.UpdateTaskEstimate
-	deleteTask  = taskBusiness.ArchiveTaskByTaskUUID
-	restoreTask = taskBusiness.UnArchiveTaskByTaskUUID
+	taskFor      = taskBusiness.TaskFor
+	setStatus    = taskBusiness.UpdateTaskStatusByTaskUUID
+	setEstimate  = taskBusiness.UpdateTaskEstimate
+	deleteTask   = taskBusiness.ArchiveTaskByTaskUUID
+	restoreTask  = taskBusiness.UnArchiveTaskByTaskUUID
+	setPriority  = taskBusiness.UpdateTaskPriorityByTaskUUID
+	setAssignee  = taskBusiness.UpdateTaskAssigneeByTaskUUID
+	setDates     = taskBusiness.UpdateTaskDates
+	isMember     = projectBusiness.HasMember
+	personByUUID = userDomain.GetActiveDgraphUserInfoByUUID
+	reorder      = taskBusiness.Reorder
 )
 
 // todaysWrites makes the ops today's handlers make, with their check.
 type todaysWrites struct{}
 
 // made is the ops the default makes.
-var made = map[OpKind]bool{OpStatus: true, OpEstimate: true, OpDelete: true, OpRestore: true}
+var made = map[OpKind]bool{OpStatus: true, OpEstimate: true, OpDelete: true, OpRestore: true,
+	OpRank: true, OpPriority: true, OpAssignee: true, OpDue: true}
+
+// prepared is an op's value read and checked before anything is changed.
+type prepared struct {
+	priority string
+	assignee *dgraphStruct.DgraphUser // nil: nobody
+	due      time.Time                // zero: none
+}
+
+// prepare reads the values of the ops whose checks don't need the task.
+func prepare(op Op) (prepared, error) {
+	var p prepared
+	switch op.Kind {
+	case OpPriority:
+		if json.Unmarshal(op.Value, &p.priority) != nil || !taskPriority.Is(p.priority) {
+			return p, fmt.Errorf("%w: a priority is urgent, high, medium or low", ErrBadValue)
+		}
+	case OpDue:
+		var s *string
+		if json.Unmarshal(op.Value, &s) != nil {
+			return p, fmt.Errorf("%w: a due date is a time or null", ErrBadValue)
+		}
+		if s != nil && *s != "" {
+			t, err := time.Parse(time.RFC3339, *s)
+			if err != nil {
+				return p, fmt.Errorf("%w: a due date is a time or null", ErrBadValue)
+			}
+			p.due = t
+		}
+	case OpAssignee:
+		var s string
+		if json.Unmarshal(op.Value, &s) != nil {
+			return p, fmt.Errorf("%w: an assignee is a person's id or empty", ErrBadValue)
+		}
+		if s != "" {
+			if _, err := uuid.Parse(s); err != nil {
+				return p, fmt.Errorf("%w: an assignee is a person's id or empty", ErrBadValue)
+			}
+			p.assignee = &dgraphStruct.DgraphUser{Uuid: s}
+		}
+	}
+	return p, nil
+}
 
 func (todaysWrites) Apply(ctx context.Context, who *userModels.UserInfo, taskID uuid.UUID, ops []Op, _ int64) (*dgraphStruct.DgraphTask, []Change, error) {
 	if who == nil {
 		return nil, nil, taskBusiness.ErrTaskNotVisible
 	}
-	// Every op is one the default makes, or none is made.
-	for _, op := range ops {
+	// Every op is one the default makes, with a value it takes, or none is
+	// made.
+	values := make([]prepared, len(ops))
+	for i, op := range ops {
 		if !made[op.Kind] {
 			return nil, nil, fmt.Errorf("%w: %s", ErrUnavailable, op.Kind)
 		}
+		p, err := prepare(op)
+		if err != nil {
+			return nil, nil, err
+		}
+		values[i] = p
 	}
 	// One check for the batch, by the most it asks (deleting asks more of a
 	// member than changing: only the tasks they made).
@@ -124,9 +190,33 @@ func (todaysWrites) Apply(ctx context.Context, who *userModels.UserInfo, taskID 
 			return nil, nil, err
 		}
 	}
+	// An assignee is someone in the task's project, checked for them all
+	// before anything changes.
+	projectID := ""
+	if task != nil && task.Project != nil {
+		projectID = task.Project.Uuid
+	}
+	for i := range values {
+		a := values[i].assignee
+		if a == nil {
+			continue
+		}
+		ok, err := isMember(ctx, a.Uuid, projectID)
+		if err != nil {
+			return task, nil, err
+		}
+		if !ok {
+			return task, nil, ErrNotInProject
+		}
+		person, err := personByUUID(ctx, a.Uuid)
+		if err != nil || person == nil {
+			return task, nil, ErrNotInProject
+		}
+		values[i].assignee = person
+	}
 	me := &who.UserDgraphInfo
 	changes := make([]Change, 0, len(ops))
-	for _, op := range ops {
+	for i, op := range ops {
 		var err error
 		switch op.Kind {
 		case OpStatus:
@@ -141,10 +231,36 @@ func (todaysWrites) Apply(ctx context.Context, who *userModels.UserInfo, taskID 
 				return task, changes, fmt.Errorf("%w: an estimate is whole minutes", ErrBadValue)
 			}
 			err = setEstimate(ctx, taskID, minutes, task, me)
+		case OpRank:
+			// Its place in the project's one order (business/Task Reorder),
+			// between the tasks named; either may be "" at an end.
+			var place struct {
+				Before string `json:"before"`
+				After  string `json:"after"`
+			}
+			if json.Unmarshal(op.Value, &place) != nil {
+				return task, changes, fmt.Errorf("%w: a place is {before, after}", ErrBadValue)
+			}
+			project := ""
+			if task != nil && task.Project != nil {
+				project = task.Project.Uuid
+			}
+			err = reorder(ctx, project, []*dgraphStruct.DgraphTask{{Uuid: taskID.String()}}, place.Before, place.After)
 		case OpDelete:
 			err = deleteTask(ctx, taskID, task, me)
 		case OpRestore:
 			err = restoreTask(ctx, taskID, task, me)
+		case OpPriority:
+			err = setPriority(ctx, taskID, values[i].priority, task, me)
+		case OpAssignee:
+			old := ""
+			if task.Assignee != nil {
+				old = task.Assignee.Uid
+			}
+			err = setAssignee(ctx, taskID, values[i].assignee, old, task.Uid, task, me)
+		case OpDue:
+			due := values[i].due
+			err = setDates(ctx, taskID, taskBusiness.TaskDates{Due: &due}, task, me)
 		}
 		if err != nil {
 			return task, changes, err

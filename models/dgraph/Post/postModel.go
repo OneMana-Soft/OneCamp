@@ -50,39 +50,9 @@ func CreateOrUpdatePost(ctx context.Context, query string, dgraphPost *dgraphStr
 	return
 }
 
-func CreateOrUpdatePostReaction(ctx context.Context, query string, dgraphPost *dgraphStruct.DgraphPost) (reactionUID string, err error) {
-	pb, err := json.Marshal(dgraphPost)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateOrUpdatePostReaction failed to marshal dgraphPost struct err: %+v",
-			err)
-		return
-	}
-
-	mu := &api.Mutation{
-		SetJson: pb,
-	}
-	req := &api.Request{
-		Query:     query,
-		Mutations: []*api.Mutation{mu},
-	}
-
-	res, err := dgraphInit.DoCommitNow(ctx, req)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateOrUpdatePostReactiont failed to create or update dgraph post reaction err: %+v",
-			err)
-		return
-	}
-
-	for _, v := range res.Uids {
-		reactionUID = v
-	}
-	return
-}
-
 func GetDgraphPostInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphUser *dgraphStruct.DgraphPost, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -107,7 +77,9 @@ func GetDgraphPostInfoByUUID(ctx context.Context, query string, variables map[st
 
 	if len(postsInfo.PostInfo) == 0 {
 		err = ErrNotFound
-		helpers.LogErrorWithContext(ctx,
+		// Found nothing: an answer its caller handles (a 404, or skipping
+		// the thing), so said at DEBUG, not as a failure.
+		helpers.LogDebugWithContext(ctx,
 			"models/GetDgraphPostInfoByUUID failed to get dgraph post")
 
 		return
@@ -121,6 +93,7 @@ func GetDgraphPostInfoByUUID(ctx context.Context, query string, variables map[st
 
 func GetDgraphPosts(ctx context.Context, query string, variables map[string]string) (dgraphPost []*dgraphStruct.DgraphPost, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {

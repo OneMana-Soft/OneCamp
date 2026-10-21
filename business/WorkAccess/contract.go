@@ -36,6 +36,8 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	roleModel "github.com/akashc777/OneCamp/models/postgres/ProjectRole"
+	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -136,13 +138,21 @@ type TaskFacts struct {
 	Assignee, Creator bool
 	// Deleted is whether the task is in the trash.
 	Deleted bool
+	// Restricted is whether its project keeps the task to a few people
+	// (WA2), and Granted whether they are one of the people let in by name.
+	// Its project's admins, its assignee and its creator are always let in.
+	Restricted, Granted bool
 }
 
-// Seams for tests: the role rows and the policies.
+// Seams for tests: the role rows, the restrictions and the policies.
 var (
-	rolesIn = roleModel.RolesIn
-	editWho = func(ctx context.Context, projectUUID string) string {
+	rolesIn        = roleModel.RolesIn
+	restrictionsOf = restrictionModel.OfMany
+	editWho        = func(ctx context.Context, projectUUID string) string {
 		return policyBusiness.Policies.ChoiceIn(ctx, policyBusiness.ProjectsEditWho, policyBusiness.Scope{Kind: policyBusiness.ScopeProject, ID: projectUUID})
+	}
+	primeEditWho = func(ctx context.Context, projects []string) {
+		policyBusiness.Policies.PrimeScopes(ctx, policyBusiness.ScopeProject, projects)
 	}
 	makeWho = func(ctx context.Context) string {
 		return policyBusiness.Policies.Choice(ctx, policyBusiness.ProjectsCreateWho)
@@ -217,6 +227,16 @@ func OfMany(ctx context.Context, userUUID string, ps []*dgraphStruct.DgraphProje
 			out[key] = s
 		}
 	}
+	// Their projects' own policies, read together (PR1, the BE audit's #2).
+	var in []string
+	for key, s := range out {
+		if s.Role != RoleNone {
+			in = append(in, key)
+		}
+	}
+	if len(in) > 1 {
+		primeEditWho(ctx, in)
+	}
 	for key, s := range out {
 		if s.Role != RoleNone {
 			s.EditWho = editWho(ctx, key)
@@ -249,10 +269,14 @@ func (s Standing) asToken() Standing {
 	return s
 }
 
-// OfTask is how the person stands to t, as read for them (by graph uid userUID):
-// its project's standing, and the task's facts.
+// OfTask is how the person stands to t, as read for them (by uuid userUUID
+// and graph uid userUID): its project's standing, and the task's facts, its
+// restriction included.
 func OfTask(ctx context.Context, userUUID, userUID string, t *dgraphStruct.DgraphTask) (Standing, TaskFacts, error) {
-	facts := FactsOf(t, userUID)
+	facts, err := FactsFor(ctx, userUUID, userUID, t)
+	if err != nil {
+		return Standing{}, facts, err
+	}
 	if t == nil || t.Project == nil || (t.Project.Uuid == "" && t.Project.Uid == "") {
 		return Standing{}, facts, nil
 	}
@@ -260,7 +284,80 @@ func OfTask(ctx context.Context, userUUID, userUID string, t *dgraphStruct.Dgrap
 	return s, facts, err
 }
 
-// FactsOf is how the person (by graph uid) stands to t beyond its project.
+// FactsFor is how the person (by uuid and graph uid) stands to t beyond its
+// project, its restriction included: one read of it. Every decision on a task
+// asks this, or FactsForMany, so none can miss that a task is restricted.
+func FactsFor(ctx context.Context, userUUID, userUID string, t *dgraphStruct.DgraphTask) (TaskFacts, error) {
+	if t == nil {
+		return TaskFacts{}, nil
+	}
+	many, err := FactsForMany(ctx, userUUID, userUID, t)
+	if err != nil {
+		return TaskFacts{}, err
+	}
+	return many[strings.ToLower(t.Uuid)], nil
+}
+
+// FactsForMany is FactsFor for many tasks, by lower-case task uuid, with one
+// read of their restrictions.
+func FactsForMany(ctx context.Context, userUUID, userUID string, ts ...*dgraphStruct.DgraphTask) (map[string]TaskFacts, error) {
+	out := make(map[string]TaskFacts, len(ts))
+	var ids []uuid.UUID
+	for _, t := range ts {
+		if t == nil {
+			continue
+		}
+		out[strings.ToLower(t.Uuid)] = FactsOf(t, userUID)
+		if id, err := uuid.Parse(t.Uuid); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	restrictions, err := restrictionsOf(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	me, _ := uuid.Parse(userUUID)
+	var through []string // restricted with a task above it, not let in by name
+	for id, r := range restrictions {
+		key := id.String()
+		f, ok := out[key]
+		if !ok || !r.Restricted {
+			continue
+		}
+		f.Restricted = true
+		for _, g := range r.Grants {
+			if me != uuid.Nil && g == me {
+				f.Granted = true
+			}
+		}
+		if !f.Granted && r.Via != uuid.Nil && me != uuid.Nil {
+			through = append(through, key)
+		}
+		out[key] = f
+	}
+	// Whoever may see the task one is restricted with (its assignee, its
+	// creator) is let into it: the one filter says so (models/taskread).
+	if len(through) > 0 {
+		tr, err := taskread.ForReader(ctx, me.String())
+		if err != nil {
+			return nil, err
+		}
+		for _, key := range through {
+			if !tr.Hides(key) {
+				f := out[key]
+				f.Granted = true
+				out[key] = f
+			}
+		}
+	}
+	return out, nil
+}
+
+// FactsOf is how the person (by graph uid) stands to t beyond its project, as
+// the graph alone says: not whether it is restricted, which FactsFor reads.
 // Pure.
 func FactsOf(t *dgraphStruct.DgraphTask, userUID string) TaskFacts {
 	if t == nil {

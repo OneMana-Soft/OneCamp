@@ -158,7 +158,7 @@ func (o *OllamaProvider) PullModel(ctx context.Context, model string) (<-chan Pu
 
 	ch := make(chan PullProgress, 64)
 
-	go func() {
+	helpers.GoSafeNamed("services/AI/ollama_models:PullModel", func() {
 		defer close(ch)
 		defer resp.Body.Close()
 
@@ -207,7 +207,7 @@ func (o *OllamaProvider) PullModel(ctx context.Context, model string) (<-chan Pu
 
 		// Ollama signals completion with a final {"status":"success"} line.
 		ch <- PullProgress{Status: "success", Done: true}
-	}()
+	})
 
 	return ch, nil
 }

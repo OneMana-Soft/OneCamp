@@ -50,4 +50,8 @@ func newChatRouters(root, admin, channel, post, dm, group chi.Router) chatRouter
 // line per package, in merge order, and nothing else.
 func mountChatProgramme(rt chatRouters) {
 	mountConversations(rt) // A9: the conversation service and group conversations
+	mountPins(rt)          // B25: pinned messages
+	mountDrafts(rt)        // P5: drafts kept on the server
+	mountChatThreads(rt)   // P2: threads you follow
+	mountChatReach(rt)     // P3: mentions that reach
 }

@@ -5,8 +5,12 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
-	models "github.com/akashc777/OneCamp/models/postgres/UserFCMToken"
+	"github.com/akashc777/OneCamp/models/pgexec"
+	"github.com/lib/pq"
 )
+
+// scanToken reads one device's token.
+func scanToken(r pgexec.Row) (t string, err error) { err = r.Scan(&t); return }
 
 func CreateOrUpdateUserFCMToken(ctx context.Context, userID string, deviceId string, fcmToken string, updatedAt time.Time) (err error) {
 	query := `
@@ -16,7 +20,7 @@ func CreateOrUpdateUserFCMToken(ctx context.Context, userID string, deviceId str
 		DO UPDATE SET fcm_token = EXCLUDED.fcm_token,
 		updated_at = EXCLUDED.updated_at;
 	`
-	err = models.CreateOrUpdateUserFCMToken(query, userID, deviceId, fcmToken, updatedAt)
+	_, err = pgexec.Exec(ctx, query, userID, deviceId, fcmToken, updatedAt)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -33,7 +37,7 @@ func DeleteByUserId(ctx context.Context, userId string) (err error) {
         WHERE user_id = $1
 	`
 
-	err = models.DeleteByUserId(query, userId)
+	_, err = pgexec.Exec(ctx, query, userId)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -51,7 +55,7 @@ func DeleteByUserIdAndDeviceId(ctx context.Context, userId string, deviceId stri
 		AND device_id = $2;
 	`
 
-	err = models.DeleteByUserIdAndDeviceId(query, userId, deviceId)
+	_, err = pgexec.Exec(ctx, query, userId, deviceId)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -74,7 +78,7 @@ func tokensOfPersonQuery() string {
 }
 
 func GetFCMTokenByUserId(ctx context.Context, userId string) (tokens []string, err error) {
-	tokens, err = models.GetFCMTokenByUserId(tokensOfPersonQuery(), userId)
+	tokens, err = pgexec.Query(ctx, tokensOfPersonQuery(), scanToken, userId)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/GetFCMTokenByUserId Failed to get user's fcm token err: %+v",
@@ -98,7 +102,11 @@ func GetFCMTokenByListOfUserId(ctx context.Context, userIds []string) (tokens []
 		return []string{}, nil
 	}
 
-	tokens, err = models.GetFCMTokenByListOfUserId(tokensOfPeopleQuery(len(userIds)), userIds)
+	args := make([]any, len(userIds))
+	for i, id := range userIds {
+		args[i] = id
+	}
+	tokens, err = pgexec.Query(ctx, tokensOfPeopleQuery(len(userIds)), scanToken, args...)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -115,7 +123,7 @@ func DeleteFromListOfFCMToken(ctx context.Context, tokens []string) (err error) 
 		WHERE fcm_token = ANY($1)
 	`
 
-	err = models.DeleteFromListOfFCMToken(query, tokens)
+	_, err = pgexec.Exec(ctx, query, pq.Array(tokens))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/DeleteFromListOfFCMToken Failed to delete user's fcm token err: %+v",

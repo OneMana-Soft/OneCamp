@@ -100,7 +100,7 @@ func RetentionDays() int {
 // is configured, and it re-reads the setting every tick so turning retention on
 // does not need a restart.
 func StartRetentionSweep(ctx context.Context) {
-	go func() {
+	helpers.GoSafeLoop("business/AdminAudit/retention:StartRetentionSweep", func() {
 		ticker := time.NewTicker(retentionSweepInterval)
 		defer ticker.Stop()
 		for {
@@ -111,7 +111,7 @@ func StartRetentionSweep(ctx context.Context) {
 				runRetentionSweep(ctx)
 			}
 		}
-	}()
+	})
 }
 
 func runRetentionSweep(ctx context.Context) {

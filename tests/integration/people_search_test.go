@@ -62,6 +62,11 @@ func TestPeopleSearchByEveryName(t *testing.T) {
 		{"uid": "_:me", "dgraph.type": "User", "user_uuid": searcher.String(), "user_name": "Me"},
 		{"uid": "_:ana", "dgraph.type": "User", "user_uuid": ana.String(), "user_name": "Ana", "user_full_name": "Ana Rivera", "user_email_id": "ana@example.test"},
 	})
+	// Saved raw, as before search names: the start's backfill gives them
+	// theirs, where the search starts.
+	if _, err := userDomain.BackfillSearchNames(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	found := func(term string) map[string]string {
 		users, err := userDomain.GetUserListWithSearchText(ctx, searcher.String(), term)
@@ -120,6 +125,27 @@ func TestPeopleSearchByEveryName(t *testing.T) {
 		if u.Uuid == sam.String() && (u.Handle != "sam.r" || u.UserFullName != "Samuel Rivera") {
 			t.Errorf("mention list has Sam as handle %q, full name %q", u.Handle, u.UserFullName)
 		}
+	}
+
+	// The goal owner picker (GET /user/allUsers?q=&limit=): the people
+	// matching what is typed, with their handles, at most limit; with nothing
+	// typed, the first limit people. It read everyone to search in the browser.
+	riveras, err := userBusiness.PickerPeople(ctx, "rivera", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, u := range riveras {
+		got[u.Uuid] = u.Handle
+	}
+	if len(got) != 2 || got[sam.String()] != "sam.r" || got[ana.String()] != "ana.rivera" {
+		t.Errorf("picker search for rivera: %v", got)
+	}
+	if one, _ := userBusiness.PickerPeople(ctx, "rivera", 1); len(one) != 1 {
+		t.Errorf("picker search past its limit: %d", len(one))
+	}
+	if first, _ := userBusiness.PickerPeople(ctx, "", 2); len(first) != 2 {
+		t.Errorf("picker with nothing typed: %d people, want 2", len(first))
 	}
 
 	// A direct message the model addresses to "Rivera", Sam's full name and

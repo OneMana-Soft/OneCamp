@@ -110,7 +110,11 @@ func Apply(ctx context.Context, t Template, project *dgraphStruct.DgraphProject,
 		out.Fields++
 	}
 
-	var made []string // in the order the template reads: each task, then its subtasks
+	// Every task and sub-task in one batch, in the order the template reads:
+	// each task, then its sub-tasks under it (the BE audit's #30: one
+	// statement, one graph write, one search write, not a whole CreateTask
+	// each).
+	var batch []taskBusiness.NewTask
 	for _, task := range t.Tasks {
 		in := taskAdapter.CreateOrUpdateTaskInput{
 			TaskName:        task.Name,
@@ -129,18 +133,24 @@ func Apply(ctx context.Context, t Template, project *dgraphStruct.DgraphProject,
 		if task.DueDay != nil {
 			in.DueDate = start.At(*task.DueDay, dueHour)
 		}
-		taskID, err := taskBusiness.CreateTask(ctx, projectID, user, project, nil, in, nil)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/ProjectTemplate/Apply task %q err: %+v", task.Name, err)
-			out.Failed += 1 + len(task.Subtasks)
-			continue
+		parent := len(batch)
+		batch = append(batch, taskBusiness.NewTask{Input: in, Parent: -1})
+		for _, sub := range task.Subtasks {
+			sin := taskAdapter.CreateOrUpdateTaskInput{TaskName: sub.Name, ProjectUuid: project.Uuid}
+			if sub.DueDay != nil {
+				sin.DueDate = start.At(*sub.DueDay, dueHour)
+			}
+			batch = append(batch, taskBusiness.NewTask{Input: sin, Parent: parent})
 		}
-		made = append(made, taskID.String())
-		if len(task.Subtasks) > 0 {
-			subs, failed := applySubtasks(ctx, task.Subtasks, projectID, taskID, user, start)
-			made = append(made, subs...)
-			out.Failed += failed
-		}
+	}
+	var made []string
+	ids, err := taskBusiness.CreateTasks(ctx, projectID, user, project, batch)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/ProjectTemplate/Apply tasks err: %+v", err)
+		out.Failed += len(batch)
+	}
+	for _, id := range ids {
+		made = append(made, id.String())
 	}
 	out.Tasks = len(made)
 	// A project's list and board show the newest first, and tasks made one
@@ -174,29 +184,4 @@ func ApplyTo(ctx context.Context, t Template, projectUUID string, user *userMode
 		return Applied{Failed: t.Size()}
 	}
 	return Apply(ctx, t, project, user, start)
-}
-
-// applySubtasks makes a task's subtasks, in order, under it, and says which
-// it made.
-func applySubtasks(ctx context.Context, subs []Subtask, projectID, parentID uuid.UUID, user *userModels.UserInfo, start Start) (made []string, failed int) {
-	// A subtask is made under the task as the project reads it back.
-	parent, err := projectBusiness.GetBasicDgraphProjectInfoWithTaskUUID(ctx, projectID.String(), user.UserDgraphInfo.Uid, parentID.String())
-	if err != nil || parent == nil || len(parent.Tasks) == 0 {
-		helpers.LogErrorWithContext(ctx, "business/ProjectTemplate/Apply parent %s not found err: %+v", parentID, err)
-		return nil, len(subs)
-	}
-	for _, sub := range subs {
-		in := taskAdapter.CreateOrUpdateTaskInput{Uuid: parentID.String(), TaskName: sub.Name, ProjectUuid: projectID.String()}
-		if sub.DueDay != nil {
-			in.DueDate = start.At(*sub.DueDay, dueHour)
-		}
-		task, err := taskBusiness.CreateSubTask(ctx, projectID, user, parent, nil, in)
-		if err != nil || task == nil {
-			helpers.LogErrorWithContext(ctx, "business/ProjectTemplate/Apply subtask %q err: %+v", sub.Name, err)
-			failed++
-			continue
-		}
-		made = append(made, task.Uuid)
-	}
-	return made, failed
 }

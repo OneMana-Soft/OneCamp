@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -112,38 +111,21 @@ var invokeSlackRollback = func(ctx context.Context, jobId uuid.UUID) error {
 // = true) are touched. Imports that re-mapped an existing entity from a
 // prior import don't tombstone it.
 func softDelete(ctx context.Context, tx *sql.Tx, importId uuid.UUID, entityType, table string) error {
-	entries, err := importModels.IdMappingsByTypeOwned(ctx, importId, entityType)
+	// One statement for all of them, where it read every mapping row and
+	// wrote 500 at a time.
+	res, err := tx.ExecContext(ctx, fmt.Sprintf(`
+		UPDATE %s SET %s
+		WHERE id IN (
+			SELECT onecamp_uuid FROM import_id_map
+			WHERE import_id = $1 AND entity_type = $2 AND created_by_this_import = true)
+		  AND deleted_at IS NULL`, tableNameWhitelist(table), markDeleted(table)), importId, entityType)
 	if err != nil {
-		return err
+		return fmt.Errorf("rollback %s: %w", table, err)
 	}
-	if len(entries) == 0 {
-		return nil
-	}
-	const batchSize = 500
-	for i := 0; i < len(entries); i += batchSize {
-		end := i + batchSize
-		if end > len(entries) {
-			end = len(entries)
-		}
-		batch := entries[i:end]
-		placeholders := make([]string, 0, len(batch))
-		args := make([]interface{}, 0, len(batch))
-		for j, e := range batch {
-			placeholders = append(placeholders, fmt.Sprintf("$%d", j+1))
-			args = append(args, e.OnecampUUID)
-		}
-		query := fmt.Sprintf(`
-			UPDATE %s SET %s
-			WHERE id IN (%s) AND deleted_at IS NULL`,
-			tableNameWhitelist(table), markDeleted(table),
-			strings.Join(placeholders, ","))
-		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
-			return fmt.Errorf("rollback %s batch %d: %w", table, i, err)
-		}
-	}
+	n, _ := res.RowsAffected()
 	helpers.LogInfoWithContext(ctx,
 		"Import rollback soft-deleted %d rows from %s for job %s",
-		len(entries), table, importId)
+		n, table, importId)
 	return nil
 }
 
@@ -174,122 +156,61 @@ func deleteUnusedFields(ctx context.Context, tx *sql.Tx, importId uuid.UUID) err
 // have zero non-imported tasks. Real-user activity inside an imported
 // project keeps it alive.
 func softDeleteEmptyProjects(ctx context.Context, tx *sql.Tx, importId uuid.UUID) error {
-	entries, err := importModels.IdMappingsByTypeOwned(ctx, importId, importModels.EntityProject)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		var nonImportedCount int
-		if err := tx.QueryRowContext(ctx, `
-			SELECT COUNT(*)
-			FROM tasks t
+	// One statement, where it was two a project.
+	_, err := tx.ExecContext(ctx, `
+		UPDATE projects p SET deleted_at = NOW(), updated_at = NOW()
+		WHERE p.id IN (
+			SELECT onecamp_uuid FROM import_id_map
+			WHERE import_id = $1 AND entity_type = 'project' AND created_by_this_import = true)
+		  AND p.deleted_at IS NULL
+		  AND NOT EXISTS (
+			SELECT 1 FROM tasks t
 			LEFT JOIN import_id_map m
-			    ON m.import_id = $1
-			   AND m.entity_type IN ('task','subtask')
-			   AND m.onecamp_uuid = t.id
-			WHERE t.project_id = $2
-			  AND t.deleted_at IS NULL
-			  AND m.onecamp_uuid IS NULL`, importId, e.OnecampUUID).Scan(&nonImportedCount); err != nil {
-			return err
-		}
-		if nonImportedCount > 0 {
-			helpers.LogInfoWithContext(ctx,
-				"Import rollback keeping project %s (has %d non-imported tasks)",
-				e.OnecampUUID, nonImportedCount)
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE projects SET deleted_at = NOW(), updated_at = NOW()
-			WHERE id = $1 AND deleted_at IS NULL`, e.OnecampUUID); err != nil {
-			return err
-		}
-	}
-	return nil
+			    ON m.import_id = $1 AND m.entity_type IN ('task','subtask') AND m.onecamp_uuid = t.id
+			WHERE t.project_id = p.id AND t.deleted_at IS NULL AND m.onecamp_uuid IS NULL)`, importId)
+	return err
 }
 
 // softDeleteEmptyTeams tombstones teams created by this import that
 // have zero non-imported projects.
 func softDeleteEmptyTeams(ctx context.Context, tx *sql.Tx, importId uuid.UUID) error {
-	entries, err := importModels.IdMappingsByTypeOwned(ctx, importId, importModels.EntityTeam)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		var nonImportedCount int
-		if err := tx.QueryRowContext(ctx, `
-			SELECT COUNT(*)
-			FROM projects p
+	// One statement, where it was two a team.
+	_, err := tx.ExecContext(ctx, `
+		UPDATE teams tm SET deleted_at = NOW(), updated_at = NOW()
+		WHERE tm.id IN (
+			SELECT onecamp_uuid FROM import_id_map
+			WHERE import_id = $1 AND entity_type = 'team' AND created_by_this_import = true)
+		  AND tm.deleted_at IS NULL
+		  AND NOT EXISTS (
+			SELECT 1 FROM projects p
 			LEFT JOIN import_id_map m
-			    ON m.import_id = $1
-			   AND m.entity_type = 'project'
-			   AND m.onecamp_uuid = p.id
-			WHERE p.team_id = $2
-			  AND p.deleted_at IS NULL
-			  AND m.onecamp_uuid IS NULL`, importId, e.OnecampUUID).Scan(&nonImportedCount); err != nil {
-			return err
-		}
-		if nonImportedCount > 0 {
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE teams SET deleted_at = NOW(), updated_at = NOW()
-			WHERE id = $1 AND deleted_at IS NULL`, e.OnecampUUID); err != nil {
-			return err
-		}
-	}
-	return nil
+			    ON m.import_id = $1 AND m.entity_type = 'project' AND m.onecamp_uuid = p.id
+			WHERE p.team_id = tm.id AND p.deleted_at IS NULL AND m.onecamp_uuid IS NULL)`, importId)
+	return err
 }
 
 // softDeleteExternalUsers tombstones imported external users that have
 // no posts/chats/comments/tasks outside this import.
 func softDeleteExternalUsers(ctx context.Context, tx *sql.Tx, importId uuid.UUID) error {
-	entries, err := importModels.IdMappingsByTypeOwned(ctx, importId, importModels.EntityUser)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		var refsExternal int
-		if err := tx.QueryRowContext(ctx, `
-			SELECT
-			    (SELECT COUNT(*) FROM tasks    WHERE created_by = $1 AND id NOT IN (
-			        SELECT onecamp_uuid FROM import_id_map
-			        WHERE import_id = $2 AND entity_type IN ('task','subtask')))
-			    +
-			    (SELECT COUNT(*) FROM comments WHERE created_by = $1 AND id NOT IN (
-			        SELECT onecamp_uuid FROM import_id_map
-			        WHERE import_id = $2 AND entity_type = 'comment'))
-			    +
-			    (SELECT COUNT(*) FROM posts    WHERE created_by = $1 AND id NOT IN (
-			        SELECT onecamp_uuid FROM import_id_map
-			        WHERE import_id = $2 AND entity_type = 'message'))
-			    +
-			    (SELECT COUNT(*) FROM chats    WHERE created_by = $1 AND id NOT IN (
-			        SELECT onecamp_uuid FROM import_id_map
-			        WHERE import_id = $2 AND entity_type = 'message'))`,
-			e.OnecampUUID, importId).Scan(&refsExternal); err != nil {
-			return err
-		}
-		if refsExternal > 0 {
-			continue
-		}
-		// Cross-import safety: if any other import mapped this user, leave them.
-		var otherImports int
-		if err := tx.QueryRowContext(ctx, `
-			SELECT COUNT(*) FROM import_id_map
-			WHERE onecamp_uuid = $1 AND import_id <> $2 AND entity_type = 'user'`,
-			e.OnecampUUID, importId).Scan(&otherImports); err != nil {
-			return err
-		}
-		if otherImports > 0 {
-			continue
-		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE users SET deleted_at = NOW(), updated_at = NOW()
-			WHERE id = $1 AND deleted_at IS NULL`, e.OnecampUUID); err != nil {
-			return err
-		}
-	}
-	return nil
+	// One statement, where it was three a person: those this import made who
+	// wrote nothing it didn't bring and no other import maps.
+	_, err := tx.ExecContext(ctx, `
+		UPDATE users u SET deleted_at = NOW(), updated_at = NOW()
+		WHERE u.id IN (
+			SELECT onecamp_uuid FROM import_id_map
+			WHERE import_id = $1 AND entity_type = 'user' AND created_by_this_import = true)
+		  AND u.deleted_at IS NULL
+		  AND NOT EXISTS (SELECT 1 FROM tasks x WHERE x.created_by = u.id AND x.id NOT IN (
+			SELECT onecamp_uuid FROM import_id_map WHERE import_id = $1 AND entity_type IN ('task','subtask')))
+		  AND NOT EXISTS (SELECT 1 FROM comments x WHERE x.created_by = u.id AND x.id NOT IN (
+			SELECT onecamp_uuid FROM import_id_map WHERE import_id = $1 AND entity_type = 'comment'))
+		  AND NOT EXISTS (SELECT 1 FROM posts x WHERE x.created_by = u.id AND x.id NOT IN (
+			SELECT onecamp_uuid FROM import_id_map WHERE import_id = $1 AND entity_type = 'message'))
+		  AND NOT EXISTS (SELECT 1 FROM chats x WHERE x.created_by = u.id AND x.id NOT IN (
+			SELECT onecamp_uuid FROM import_id_map WHERE import_id = $1 AND entity_type = 'message'))
+		  AND NOT EXISTS (SELECT 1 FROM import_id_map o
+			WHERE o.onecamp_uuid = u.id AND o.import_id <> $1 AND o.entity_type = 'user')`, importId)
+	return err
 }
 
 // markDeleted is the SET clause that marks a row deleted. attachments has no

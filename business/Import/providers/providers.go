@@ -7,6 +7,11 @@
 //  1. Creating its package under business/Import/providers/<name>.
 //  2. Calling importProvider.Register(New()) from its init().
 //  3. Adding `_ "…/providers/<name>"` to the import block below.
+//
+// RELEASE-LINE ONLY (v2.75.0 / v1.60.0): basecamp is left out. It signs in
+// through Basecamp's Launchpad, which this release's web can't do yet (B-1's
+// web, b9094d680); beta imports it here. releaseLine_test.go holds this until
+// the release that carries B-1's web.
 package providers
 
 import (

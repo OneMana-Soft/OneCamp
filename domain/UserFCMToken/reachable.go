@@ -2,10 +2,12 @@ package domain
 
 import (
 	"context"
+	"database/sql"
 
 	"github.com/akashc777/OneCamp/helpers"
-	models "github.com/akashc777/OneCamp/models/postgres/UserFCMToken"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // Who is told, by person rather than by device.
@@ -60,12 +62,27 @@ func ReachableThroughPause(ctx context.Context, userIds []string) (users []strin
 	return reachable(ctx, reachableThroughPauseQuery, userIds)
 }
 
+// reachableRow is one person the query let through, with one of their
+// devices' tokens, or "" when they have none.
+type reachableRow struct {
+	UserID string
+	Token  string
+}
+
 func reachable(ctx context.Context, query string, userIds []string) (users []string, tokens []string, err error) {
 	ids := WellFormedUserIDs(userIds)
 	if len(ids) == 0 {
 		return nil, nil, nil
 	}
-	rows, err := models.GetReachableUsersAndTokens(ctx, query, ids)
+	// Not cancelled with the caller: a notice decided must reach whom it
+	// was decided for. A read that stops part way is an error (pgexec), never
+	// a short list that would tell some people and quietly drop the rest.
+	rows, err := pgexec.Query(context.WithoutCancel(ctx), query, func(r pgexec.Row) (row reachableRow, err error) {
+		var token sql.NullString
+		err = r.Scan(&row.UserID, &token)
+		row.Token = token.String
+		return
+	}, pq.Array(ids))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/ReachableNow Failed to read who may be told err: %+v", err)
 		return nil, nil, err

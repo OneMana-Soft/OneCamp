@@ -93,7 +93,7 @@ func ListDocSnapshots(ctx context.Context, docUUID string, userUID string) ([]*D
 		return nil, errors.New("unauthorized")
 	}
 
-	rows, err := snapshotModels.ListSnapshots(ctx, docUUID, 50)
+	rows, err := snapshotModels.ListSnapshots(ctx, docUUID, time.Time{}, 50)
 	if err != nil {
 		return nil, err
 	}

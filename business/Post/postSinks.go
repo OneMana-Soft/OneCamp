@@ -184,7 +184,7 @@ func notifySink(ctx context.Context, ev outboxBusiness.Event) error {
 		replyTo = r.PostBy.Uuid
 	}
 	title := fmt.Sprintf("#%s - %s", ch.Name, a.DisplayName())
-	notifyPost(ctx, title, helpers.HTMLToPlainText(p.Text), ch.Uuid, mentions, ch, p.Uuid, a, replyTo, func(how, recipient string) bool {
+	notifyPost(ctx, title, helpers.HTMLToPlainText(p.Text), p.Text, ch.Uuid, mentions, ch, p.Uuid, a, replyTo, func(how, recipient string) bool {
 		return firstTime(ctx, ev, sinkNotify+":"+how, recipient)
 	})
 	return nil

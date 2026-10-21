@@ -183,9 +183,9 @@ func fakeEditWorld(t *testing.T, html string, who map[string]accessBusiness.Leve
 	doc := newLiveDoc(html)
 	log := &auditLog{}
 	savedLive, savedRead, savedRec, savedList, savedRes, savedPerson, savedAgent, savedVer, savedName :=
-		collab.Live, collab.Read, recordEntry, listDocAIEntries, resolveDoc, personByUUID, agentNameOf, versionHTML, personName
+		collab.Live, collab.Read, recordEntry, listDocAIEntries, resolveDoc, personByUUID, agentNameOf, versionHTML, personNames
 	t.Cleanup(func() {
-		collab.Live, collab.Read, recordEntry, listDocAIEntries, resolveDoc, personByUUID, agentNameOf, versionHTML, personName =
+		collab.Live, collab.Read, recordEntry, listDocAIEntries, resolveDoc, personByUUID, agentNameOf, versionHTML, personNames =
 			savedLive, savedRead, savedRec, savedList, savedRes, savedPerson, savedAgent, savedVer, savedName
 	})
 	collab.Live = doc
@@ -216,7 +216,13 @@ func fakeEditWorld(t *testing.T, html string, who map[string]accessBusiness.Leve
 		}
 		return v, nil
 	}
-	personName = func(_ context.Context, id string) string { return "Person " + id[:2] }
+	personNames = func(_ context.Context, ids []string) map[string]string {
+		out := map[string]string{}
+		for _, id := range ids {
+			out[id] = "Person " + id[:2]
+		}
+		return out
+	}
 	return doc, log
 }
 

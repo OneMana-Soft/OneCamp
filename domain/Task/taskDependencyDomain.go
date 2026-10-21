@@ -8,6 +8,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/dgraph-io/dgo/v230"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
@@ -159,15 +160,23 @@ func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID
 	if err := json.Unmarshal(resp.Json, &out); err != nil {
 		return nil, err
 	}
+	// A task the person may not see isn't there to link, from either end
+	// (models/taskread); upstream ids only find a loop, and show nothing.
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
 	pair := &DependencyPair{Upstream: map[string]bool{}}
-	if len(out.T) > 0 {
+	if len(out.T) > 0 && !tr.Hides(out.T[0].Uuid) {
 		pair.Task = &out.T[0].DgraphTask
 		if link := out.T[0].Link; len(link) > 0 {
 			pair.Linked, pair.Kind, pair.Lag = true, link[0].Kind, link[0].Lag
 		}
+		tr.Keep(pair.Task)
 	}
-	if len(out.B) > 0 {
+	if len(out.B) > 0 && !tr.Hides(out.B[0].Uuid) {
 		pair.Blocker = out.B[0]
+		tr.Keep(pair.Blocker)
 	}
 	for _, n := range out.Up {
 		n.collect(pair.Upstream)
@@ -201,5 +210,11 @@ func DownstreamSchedule(ctx context.Context, movedUUID string) ([]*dgraphStruct.
 	if err := json.Unmarshal(resp.Json, &out); err != nil {
 		return nil, err
 	}
-	return append(out.Moved, out.Down...), nil
+	// Moving tasks along changes only those the person may see
+	// (models/taskread).
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return tr.KeepTasks(append(out.Moved, out.Down...)), nil
 }

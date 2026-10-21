@@ -205,11 +205,11 @@ func (p *Provider) IterUsers(ctx context.Context, j *importModels.Job, opts impo
 func (p *Provider) IterTeams(ctx context.Context, j *importModels.Job, opts importProvider.JobOptions) (<-chan importProvider.SourceTeam, <-chan error) {
 	out := make(chan importProvider.SourceTeam)
 	errCh := make(chan error, 1)
-	go func() {
+	helpers.GoSafeNamed("business/Import/providers/trello/provider:IterTeams", func() {
 		// Empty stream: orchestrator falls back to the synthetic default team.
 		close(out)
 		close(errCh)
-	}()
+	})
 	return out, errCh
 }
 
@@ -491,8 +491,7 @@ func (p *Provider) FetchAttachment(ctx context.Context, j *importModels.Job, opt
 	if err != nil {
 		return "", 0, err
 	}
-	att.URL = trelloDownloadURL(att.URL, tok)
-	return importProvider.DefaultFetchAttachment(ctx, att, dest)
+	return importProvider.DefaultFetchAttachment(ctx, trelloFile(att, tok), dest)
 }
 
 // trelloHost serves the files uploaded to Trello, which need the importing
@@ -501,17 +500,14 @@ func (p *Provider) FetchAttachment(ctx context.Context, j *importModels.Job, opt
 // got both.
 const trelloHost = "trello.com"
 
-// trelloDownloadURL is raw with the key and token added when it is a Trello
-// URL, and as it is when it isn't.
-func trelloDownloadURL(raw string, tok *trelloToken) string {
-	if tok == nil || !importProvider.CredentialAllowed(raw, trelloHost) {
-		return raw
+// trelloFile is att with the key and token in an OAuth Authorization header
+// when it is a Trello file, and with none when it isn't. Trello stopped taking
+// them in a /download/ URL's query on 25 Jan 2021 (I1).
+func trelloFile(att importProvider.SourceAttachment, tok *trelloToken) importProvider.SourceAttachment {
+	if tok == nil {
+		return importProvider.WithAuthorization(att, "")
 	}
-	sep := "?"
-	if strings.Contains(raw, "?") {
-		sep = "&"
-	}
-	return raw + fmt.Sprintf("%skey=%s&token=%s", sep, tok.APIKey, tok.Token)
+	return importProvider.WithAuthorization(att, fmt.Sprintf(`OAuth oauth_consumer_key=%q, oauth_token=%q`, tok.APIKey, tok.Token), trelloHost)
 }
 
 // DefaultStatusMap returns the proposed Trello-list-name → OneCamp
@@ -547,8 +543,8 @@ func (p *Provider) DefaultPriorityMap() map[string]string {
 		"high":     "high",
 		"medium":   "medium",
 		"low":      "low",
-		"urgent":   "high",
-		"critical": "high",
+		"urgent":   "urgent",
+		"critical": "urgent",
 	}
 }
 

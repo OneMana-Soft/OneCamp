@@ -8,6 +8,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
 
@@ -135,6 +136,7 @@ func UpdateComment(ctx context.Context, query string, dgraphPost *dgraphStruct.D
 
 func GetDgraphTaskCommentInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphTask *dgraphStruct.DgraphTask, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -165,12 +167,22 @@ func GetDgraphTaskCommentInfoByUUID(ctx context.Context, query string, variables
 		return
 	}
 	dgraphTask = &tasksInfo.TaskInfo[0]
-
+	// A task the reader may not see has no comments for them
+	// (models/taskread); of one they may, only what they may see.
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if tr.Hides(dgraphTask.Uuid) {
+		return nil, errors.New("failed to get dgraph task")
+	}
+	tr.Keep(dgraphTask)
 	return
 }
 
 func GetDgraphPostCommentsInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphUser *dgraphStruct.DgraphPost, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -201,12 +213,15 @@ func GetDgraphPostCommentsInfoByUUID(ctx context.Context, query string, variable
 		return
 	}
 	dgraphUser = &postsInfo.PostInfo[0]
-
+	if err = taskread.KeepIn(ctx, dgraphUser); err != nil {
+		return nil, err
+	}
 	return
 }
 
 func GetDgraphCommentInfoByUUID(ctx context.Context, query string, variables map[string]string) (dgraphUser *dgraphStruct.DgraphComment, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -237,46 +252,14 @@ func GetDgraphCommentInfoByUUID(ctx context.Context, query string, variables map
 		return
 	}
 	dgraphUser = &commentsInfo.CommentInfo[0]
-
-	return
-}
-
-func CreateOrUpdateCommentReaction(ctx context.Context, query string, dgraphPost *dgraphStruct.DgraphComment) (reactionUID string, err error) {
-	pb, err := json.Marshal(dgraphPost)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateOrUpdatePostCommentReaction failed to marshal dgraphPost struct err: %+v",
-			err)
-		return
+	// A comment on a task the reader may not see isn't there for them.
+	if err = taskread.KeepIn(ctx, dgraphUser); err != nil {
+		return nil, err
 	}
-
-	mu := &api.Mutation{
-		SetJson: pb,
-	}
-	req := &api.Request{
-		Query:     query,
-		Mutations: []*api.Mutation{mu},
-	}
-
-	res, err := dgraphInit.DoCommitNow(ctx, req)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreateOrUpdatePostCommentReaction failed to create or update dgraph post reaction err: %+v",
-			err)
-		return
-	}
-
-	for _, v := range res.Uids {
-		reactionUID = v
+	if dgraphUser.Task != nil && dgraphUser.Task.Hidden {
+		return nil, errors.New("failed to get dgraph user")
 	}
 	return
-}
-
-func DeleteReactionNodeOrEdges(ctx context.Context, delStringJSON string) (err error) {
-	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{
-		Mutations: []*api.Mutation{{DeleteJson: []byte(delStringJSON)}},
-	})
-	return err
 }
 
 func CreateOrUpdateCommentInChat(ctx context.Context, query string, dgraphChat *dgraphStruct.DgraphChat) (commentUID string, err error) {

@@ -138,7 +138,7 @@ down; they never widen it. A token with `docs:read` held by someone who cannot o
 | `calendar:write` | create reminders and events |
 | `data_sources:read` | read and query connected external data sources |
 | `attention:read` | read what is waiting for you: unread counts (`GET /v1/unread`) and, in the AI edition, approvals and overdue tasks (`GET /v1/attention`); nothing else |
-| `search:read` | search across the workspace, memory, and connected apps |
+| `search:read` | search across the workspace, memory, and connected apps; ask what an item is connected to and how two items connect |
 
 Grant the narrowest set that does the job. A read-only agent should hold only `:read`
 scopes — that alone makes the whole write path unreachable for it.
@@ -147,7 +147,7 @@ scopes — that alone makes the whole write path unreachable for it.
 
 ## Governed tools
 
-All 33 of the 33 public tools are **governed**: before the tool runs, the server resolves
+All 35 of the 35 public tools are **governed**: before the tool runs, the server resolves
 exactly what the call will touch and checks the authorising person's live permission on
 it.
 
@@ -158,7 +158,7 @@ it.
 | `docs` | `list_docs`, `read_doc` | `create_doc`, `append_to_doc` |
 | `messages` | `summarize_channel`, `summarize_dm`, `summarize_group_chat` | `send_message`, `send_dm`, `send_group_chat` |
 | `tables` | `list_tables`, `read_table`, `query_table`, `query_plan` | `create_table_row`, `update_table_row`, `link_table_rows` |
-| `search` | `search_workspace` | — |
+| `search` | `search_workspace`, `related_items`, `how_connected` | — |
 | `data_sources` | `list_data_sources`, `read_data_source`, `query_data_source`, `query_data_source_plan` | — |
 | `calendar` | — | `set_reminder` |
 
@@ -179,6 +179,14 @@ requires:
 - **Project** — membership to read.
 - **Team** — membership to read; team **admin** to create a project in it. A deleted team
   is refused, even though it still lists its admins.
+- **Connected items** (`related_items`, `how_connected`) — the item named first is checked
+  by its own kind's rule above (a document, task, project, channel or team); a person, a
+  whiteboard, a channel message, a comment or a memory item by whether the person may see
+  it at all. Then every item in the answer, and every item on every path, is decided
+  again for that person: a path through anything they can't open is left out whole, so
+  a private document in the middle of a path is never named and no gap stands in for it.
+  `how_connected`'s second item is decided the same way. Items are named by kind and
+  uuid only.
 - **External data source** — the source's own query rule: an admin, its creator, or the
   source being marked workspace-visible. A source an admin has disabled is refused. The
   connectors are read-only by construction, and a write request against one is refused

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -14,6 +15,7 @@ import (
 	OpenSearchBulkModels "github.com/akashc777/OneCamp/models/openSearch/Bulk"
 	TeamOSModel "github.com/akashc777/OneCamp/models/openSearch/Team"
 	models "github.com/akashc777/OneCamp/models/postgres/Team"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -203,7 +205,9 @@ func GetDgraphTeamInfoByUUIDForArchivingAndUnarchivingTeam(ctx context.Context, 
 				}
 			}`
 
-	dgraphTeam, err = dgraphModels.GetDgraphTeamInfoByUUID(ctx, query, variables)
+	// Archiving a team archives every task of its projects, restricted ones
+	// too: ids for the archive, never shown (models/taskread).
+	dgraphTeam, err = dgraphModels.GetDgraphTeamInfoByUUID(taskread.WithSystem(ctx), query, variables)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -865,4 +869,62 @@ func HardDeleteTeam(ctx context.Context, teamUUID uuid.UUID) (err error) {
 		return
 	}
 	return
+}
+
+// teamsWithMembersFields is what a team's mention needs of each team: its
+// name, whether it was archived, and its members' uuids (chat P3).
+const teamsWithMembersFields = `
+					uid
+					team_uuid
+					team_name
+					team_deleted_at
+					team_members(first: 5000) { uid user_uuid }`
+
+// TeamsWithMembers is the live teams uuids name, with their members, for who a
+// team's mention reaches. Ids that aren't uuids are left out; an archived team
+// is missing from the answer (team_deleted_at has no index, so it's left out
+// here).
+func TeamsWithMembers(ctx context.Context, uuids []string) ([]*dgraphStruct.DgraphTeam, error) {
+	var quoted []string
+	for _, id := range uuids {
+		if u, err := uuid.Parse(id); err == nil {
+			quoted = append(quoted, strconv.Quote(u.String()))
+		}
+	}
+	if len(quoted) == 0 {
+		return nil, nil
+	}
+	return liveTeams(ctx, fmt.Sprintf(`query Teams { teamInfo(func: eq(team_uuid, [%s]), first: 100) @filter(type(Team)) {%s
+				} }`, strings.Join(quoted, ", "), teamsWithMembersFields), nil)
+}
+
+// TeamsWithMembersOf is the live teams the person userDgraphUID is in, with
+// their members; with all, every live team in the workspace (for its admins).
+// For the "@" list's teams (chat P3), which are a person's own: a team's
+// people are its members' and admins' to see (GetDgraphTeamMemberListByTeamUUID).
+func TeamsWithMembersOf(ctx context.Context, userDgraphUID string, all bool) ([]*dgraphStruct.DgraphTeam, error) {
+	if all {
+		return liveTeams(ctx, `query Teams { teamInfo(func: type(Team), first: 500) {`+teamsWithMembersFields+`
+				} }`, nil)
+	}
+	return liveTeams(ctx, `query Teams($user_id: string) {
+				var(func: uid($user_id)) { user_teams { t as uid } }
+				teamInfo(func: uid(t), first: 500) {`+teamsWithMembersFields+`
+				} }`, map[string]string{"$user_id": userDgraphUID})
+}
+
+// liveTeams runs query and leaves out the archived teams.
+func liveTeams(ctx context.Context, query string, variables map[string]string) ([]*dgraphStruct.DgraphTeam, error) {
+	teams, err := dgraphModels.GetDgraphTeamList(ctx, query, variables)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/Team liveTeams err: %+v", err)
+		return nil, err
+	}
+	live := teams[:0]
+	for _, t := range teams {
+		if t != nil && t.Uuid != "" && !helpers.IsSoftDeleted(t.DeletedAt) {
+			live = append(live, t)
+		}
+	}
+	return live, nil
 }

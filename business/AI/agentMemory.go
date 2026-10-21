@@ -78,21 +78,27 @@ func ForgetFacts(ctx context.Context, channelUUID, chatGrpID, query, onlyBy stri
 		return 0, nil
 	}
 	q := strings.ToLower(strings.TrimSpace(query))
-	removed := 0
+	var match []uuid.UUID
 	for _, it := range items {
-		if q != "" && !strings.Contains(strings.ToLower(it.Content), q) {
-			continue
-		}
-		if derr := memoryModels.SoftDelete(ctx, it.ID); derr == nil {
-			removed++
-			// "Forget" must mean forget everywhere: drop the semantic (OpenSearch)
-			// + graph (Dgraph) projections too, so a forgotten instruction can't
-			// resurface via AskAI recall. Best-effort, async — mirrors the memory
-			// dismiss path.
-			ai.DeleteMemoryProjectionsAsync(it.ID.String())
+		if q == "" || strings.Contains(strings.ToLower(it.Content), q) {
+			match = append(match, it.ID)
 		}
 	}
-	return removed, nil
+	// One statement for all of them, where each was one with a goroutine.
+	gone, err := memoryModels.SoftDeleteMany(ctx, match)
+	if err != nil {
+		return 0, err
+	}
+	// "Forget" must mean forget everywhere: drop the semantic (OpenSearch)
+	// + graph (Dgraph) projections too, so a forgotten instruction can't
+	// resurface via AskAI recall. Best-effort, async — mirrors the memory
+	// dismiss path.
+	ids := make([]string, len(gone))
+	for i, id := range gone {
+		ids[i] = id.String()
+	}
+	ai.DeleteMemoryProjectionsManyAsync(ids)
+	return len(gone), nil
 }
 
 // AgentScopedMemoryBlock renders the agent-remembered standing instructions for a

@@ -101,7 +101,7 @@ func StartWorker(ctx context.Context) {
 		workerID = resolveWorkerID()
 	})
 
-	go func() {
+	helpers.GoSafeLoop("business/Scheduler/schedulerBusiness:StartWorker", func() {
 		// Small initial delay so the DB pool is warm and migrations have run.
 		select {
 		case <-ctx.Done():
@@ -125,7 +125,7 @@ func StartWorker(ctx context.Context) {
 				DrainDueJobs(ctx, workerID)
 			}
 		}
-	}()
+	})
 }
 
 // DrainDueJobs runs every job that is due, as worker, claiming each one just

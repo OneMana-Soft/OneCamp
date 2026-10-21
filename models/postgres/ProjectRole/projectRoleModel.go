@@ -81,6 +81,39 @@ func Roles(ctx context.Context, projectID uuid.UUID) (map[uuid.UUID]string, erro
 	return out, rows.Err()
 }
 
+// RolesOfMany is everyone's role in each of projects, by project then person,
+// in one statement (the parity sweep reads a page at a time); a project with
+// no rows is missing.
+func RolesOfMany(ctx context.Context, projects []uuid.UUID) (map[uuid.UUID]map[uuid.UUID]string, error) {
+	if !connected() {
+		return nil, ErrNoDatabase
+	}
+	out := map[uuid.UUID]map[uuid.UUID]string{}
+	if len(projects) == 0 {
+		return out, nil
+	}
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c,
+		`SELECT project_id, user_id, role FROM project_roles WHERE project_id = ANY($1)`, projects)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p, u uuid.UUID
+		var role string
+		if err := rows.Scan(&p, &u, &role); err != nil {
+			return nil, err
+		}
+		if out[p] == nil {
+			out[p] = map[uuid.UUID]string{}
+		}
+		out[p][u] = role
+	}
+	return out, rows.Err()
+}
+
 // Set gives someone a role in a project, by whom (uuid.Nil for nobody: the
 // parity sweep). A project with no row of its own (one the graph has and
 // Postgres doesn't) takes no role: the graph's answer stands for it.

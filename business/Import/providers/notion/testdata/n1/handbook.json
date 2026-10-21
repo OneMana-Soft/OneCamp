@@ -1,0 +1,1661 @@
+{
+ "label": "unverified against a real export",
+ "source": "Built 20 Oct 2026 from Notion's documented API block and rich-text shapes (developers.notion.com/reference/block, /rich-text, /page), Notion-Version 2026-03-11. Replace with the owner's test workspace when it arrives; no personal content.",
+ "answers": {
+  "GET /pages/a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": {
+   "object": "page",
+   "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+   "in_trash": false,
+   "icon": {
+    "type": "emoji",
+    "emoji": "📘"
+   },
+   "parent": {
+    "type": "workspace",
+    "workspace": true
+   },
+   "properties": {
+    "title": {
+     "id": "title",
+     "type": "title",
+     "title": [
+      {
+       "type": "text",
+       "plain_text": "Handbook",
+       "text": {
+        "content": "Handbook",
+        "link": null
+       },
+       "annotations": {
+        "bold": false,
+        "italic": false,
+        "strikethrough": false,
+        "underline": false,
+        "code": false,
+        "color": "default"
+       },
+       "href": null
+      }
+     ]
+    }
+   }
+  },
+  "GET /blocks/a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1/children?page_size=100": {
+   "object": "list",
+   "results": [
+    {
+     "object": "block",
+     "id": "h1",
+     "type": "heading_2",
+     "has_children": false,
+     "in_trash": false,
+     "heading_2": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "Welcome",
+        "text": {
+         "content": "Welcome",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ],
+      "color": "default",
+      "is_toggleable": false
+     }
+    },
+    {
+     "object": "block",
+     "id": "p1",
+     "type": "paragraph",
+     "has_children": false,
+     "in_trash": false,
+     "paragraph": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "Read ",
+        "text": {
+         "content": "Read ",
+         "link": null
+        },
+        "annotations": {
+         "bold": true,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       },
+       {
+        "type": "text",
+        "plain_text": "this",
+        "text": {
+         "content": "this",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": true,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       },
+       {
+        "type": "text",
+        "plain_text": " ",
+        "text": {
+         "content": " ",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       },
+       {
+        "type": "text",
+        "plain_text": "now",
+        "text": {
+         "content": "now",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": true,
+         "color": "default"
+        },
+        "href": null
+       },
+       {
+        "type": "text",
+        "plain_text": " ",
+        "text": {
+         "content": " ",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       },
+       {
+        "type": "text",
+        "plain_text": "old",
+        "text": {
+         "content": "old",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": true,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       },
+       {
+        "type": "text",
+        "plain_text": " ",
+        "text": {
+         "content": " ",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       },
+       {
+        "type": "text",
+        "plain_text": "key",
+        "text": {
+         "content": "key",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": true,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       },
+       {
+        "type": "text",
+        "plain_text": " ",
+        "text": {
+         "content": " ",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       },
+       {
+        "type": "text",
+        "plain_text": "red",
+        "text": {
+         "content": "red",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "red"
+        },
+        "href": null
+       },
+       {
+        "type": "text",
+        "plain_text": " ",
+        "text": {
+         "content": " ",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       },
+       {
+        "type": "text",
+        "plain_text": "the guide",
+        "text": {
+         "content": "the guide",
+         "link": {
+          "url": "https://example.com/guide"
+         }
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": "https://example.com/guide"
+       },
+       {
+        "type": "text",
+        "plain_text": " by ",
+        "text": {
+         "content": " by ",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       },
+       {
+        "type": "mention",
+        "plain_text": "October 20, 2026",
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "mention": {
+         "type": "date",
+         "date": {
+          "start": "2026-10-20",
+          "end": null
+         }
+        },
+        "href": null
+       },
+       {
+        "type": "text",
+        "plain_text": ", see ",
+        "text": {
+         "content": ", see ",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       },
+       {
+        "type": "mention",
+        "plain_text": "Policies",
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "mention": {
+         "type": "page",
+         "page": {
+          "id": "b2b2b2b2-b2b2-b2b2-b2b2-b2b2b2b2b2b2"
+         }
+        },
+        "href": "https://www.notion.so/b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+       },
+       {
+        "type": "text",
+        "plain_text": ", ask ",
+        "text": {
+         "content": ", ask ",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       },
+       {
+        "type": "mention",
+        "plain_text": "@Maya Patel",
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "mention": {
+         "type": "user",
+         "user": {
+          "object": "user",
+          "id": "u-maya"
+         }
+        },
+        "href": null
+       },
+       {
+        "type": "text",
+        "plain_text": " ",
+        "text": {
+         "content": " ",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       },
+       {
+        "type": "equation",
+        "plain_text": "a^2",
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "equation": {
+         "expression": "a^2"
+        },
+        "href": null
+       }
+      ],
+      "color": "default"
+     }
+    },
+    {
+     "object": "block",
+     "id": "cl",
+     "type": "column_list",
+     "has_children": true,
+     "in_trash": false,
+     "column_list": {}
+    },
+    {
+     "object": "block",
+     "id": "so",
+     "type": "synced_block",
+     "has_children": true,
+     "in_trash": false,
+     "synced_block": {
+      "synced_from": null
+     }
+    },
+    {
+     "object": "block",
+     "id": "sr",
+     "type": "synced_block",
+     "has_children": true,
+     "in_trash": false,
+     "synced_block": {
+      "synced_from": {
+       "type": "block_id",
+       "block_id": "so"
+      }
+     }
+    },
+    {
+     "object": "block",
+     "id": "em",
+     "type": "embed",
+     "has_children": false,
+     "in_trash": false,
+     "embed": {
+      "url": "https://www.youtube.com/watch?v=abc123",
+      "caption": []
+     }
+    },
+    {
+     "object": "block",
+     "id": "bm",
+     "type": "bookmark",
+     "has_children": false,
+     "in_trash": false,
+     "bookmark": {
+      "url": "https://example.com/handbook",
+      "caption": [
+       {
+        "type": "text",
+        "plain_text": "Old handbook",
+        "text": {
+         "content": "Old handbook",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ]
+     }
+    },
+    {
+     "object": "block",
+     "id": "lp",
+     "type": "link_preview",
+     "has_children": false,
+     "in_trash": false,
+     "link_preview": {
+      "url": "https://github.com/acme/app/pull/7"
+     }
+    },
+    {
+     "object": "block",
+     "id": "pf",
+     "type": "pdf",
+     "has_children": false,
+     "in_trash": false,
+     "pdf": {
+      "type": "file",
+      "file": {
+       "url": "https://prod-files-secure.s3.us-west-2.amazonaws.com/ws/policy.pdf?X-Amz-Signature=x",
+       "expiry_time": "2026-10-20T10:00:00.000Z"
+      },
+      "caption": [
+       {
+        "type": "text",
+        "plain_text": "The policy",
+        "text": {
+         "content": "The policy",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ]
+     }
+    },
+    {
+     "object": "block",
+     "id": "vd",
+     "type": "video",
+     "has_children": false,
+     "in_trash": false,
+     "video": {
+      "type": "external",
+      "external": {
+       "url": "https://example.com/intro.mp4"
+      },
+      "caption": []
+     }
+    },
+    {
+     "object": "block",
+     "id": "au",
+     "type": "audio",
+     "has_children": false,
+     "in_trash": false,
+     "audio": {
+      "type": "file",
+      "file": {
+       "url": "https://prod-files-secure.s3.us-west-2.amazonaws.com/ws/standup.m4a?X-Amz-Signature=x",
+       "expiry_time": "2026-10-20T10:00:00.000Z"
+      },
+      "caption": []
+     }
+    },
+    {
+     "object": "block",
+     "id": "fl",
+     "type": "file",
+     "has_children": false,
+     "in_trash": false,
+     "file": {
+      "type": "file",
+      "file": {
+       "url": "https://prod-files-secure.s3.us-west-2.amazonaws.com/ws/budget.xlsx?X-Amz-Signature=x",
+       "expiry_time": "2026-10-20T10:00:00.000Z"
+      },
+      "name": "Budget 2026.xlsx",
+      "caption": []
+     }
+    },
+    {
+     "object": "block",
+     "id": "qt",
+     "type": "quote",
+     "has_children": true,
+     "in_trash": false,
+     "quote": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "Be kind",
+        "text": {
+         "content": "Be kind",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ],
+      "color": "default"
+     }
+    },
+    {
+     "object": "block",
+     "id": "co",
+     "type": "callout",
+     "has_children": false,
+     "in_trash": false,
+     "callout": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "Ask first",
+        "text": {
+         "content": "Ask first",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ],
+      "icon": {
+       "type": "emoji",
+       "emoji": "💬"
+      },
+      "color": "yellow_background"
+     }
+    },
+    {
+     "object": "block",
+     "id": "th",
+     "type": "heading_3",
+     "has_children": true,
+     "in_trash": false,
+     "heading_3": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "Details",
+        "text": {
+         "content": "Details",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ],
+      "color": "default",
+      "is_toggleable": true
+     }
+    },
+    {
+     "object": "block",
+     "id": "n1",
+     "type": "numbered_list_item",
+     "has_children": true,
+     "in_trash": false,
+     "numbered_list_item": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "First",
+        "text": {
+         "content": "First",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ],
+      "color": "default"
+     }
+    },
+    {
+     "object": "block",
+     "id": "n2",
+     "type": "numbered_list_item",
+     "has_children": false,
+     "in_trash": false,
+     "numbered_list_item": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "Second",
+        "text": {
+         "content": "Second",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ],
+      "color": "default"
+     }
+    },
+    {
+     "object": "block",
+     "id": "td",
+     "type": "to_do",
+     "has_children": false,
+     "in_trash": false,
+     "to_do": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "Sign the form",
+        "text": {
+         "content": "Sign the form",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ],
+      "checked": false,
+      "color": "default"
+     }
+    },
+    {
+     "object": "block",
+     "id": "tb",
+     "type": "table",
+     "has_children": true,
+     "in_trash": false,
+     "table": {
+      "table_width": 2,
+      "has_column_header": false,
+      "has_row_header": true
+     }
+    },
+    {
+     "object": "block",
+     "id": "tc",
+     "type": "table_of_contents",
+     "has_children": false,
+     "in_trash": false,
+     "table_of_contents": {
+      "color": "default"
+     }
+    },
+    {
+     "object": "block",
+     "id": "b2b2b2b2-b2b2-b2b2-b2b2-b2b2b2b2b2b2",
+     "type": "child_page",
+     "has_children": false,
+     "in_trash": false,
+     "child_page": {
+      "title": "Policies"
+     }
+    },
+    {
+     "object": "block",
+     "id": "lk",
+     "type": "link_to_page",
+     "has_children": false,
+     "in_trash": false,
+     "link_to_page": {
+      "type": "page_id",
+      "page_id": "b2b2b2b2-b2b2-b2b2-b2b2-b2b2b2b2b2b2"
+     }
+    },
+    {
+     "object": "block",
+     "id": "cd",
+     "type": "code",
+     "has_children": false,
+     "in_trash": false,
+     "code": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "go test ./...",
+        "text": {
+         "content": "go test ./...",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ],
+      "language": "go",
+      "caption": []
+     }
+    },
+    {
+     "object": "block",
+     "id": "dv",
+     "type": "divider",
+     "has_children": false,
+     "in_trash": false,
+     "divider": {}
+    },
+    {
+     "object": "block",
+     "id": "im",
+     "type": "image",
+     "has_children": false,
+     "in_trash": false,
+     "image": {
+      "type": "file",
+      "file": {
+       "url": "https://prod-files-secure.s3.us-west-2.amazonaws.com/ws/team.png?X-Amz-Signature=x",
+       "expiry_time": "2026-10-20T10:00:00.000Z"
+      },
+      "caption": [
+       {
+        "type": "text",
+        "plain_text": "The team",
+        "text": {
+         "content": "The team",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ]
+     }
+    }
+   ],
+   "has_more": false,
+   "next_cursor": null
+  },
+  "GET /blocks/cl/children?page_size=100": {
+   "object": "list",
+   "results": [
+    {
+     "object": "block",
+     "id": "c1",
+     "type": "column",
+     "has_children": true,
+     "in_trash": false,
+     "column": {
+      "width_ratio": 0.6
+     }
+    },
+    {
+     "object": "block",
+     "id": "c2",
+     "type": "column",
+     "has_children": true,
+     "in_trash": false,
+     "column": {
+      "width_ratio": 0.4
+     }
+    }
+   ],
+   "has_more": false,
+   "next_cursor": null
+  },
+  "GET /blocks/c1/children?page_size=100": {
+   "object": "list",
+   "results": [
+    {
+     "object": "block",
+     "id": "c1p",
+     "type": "paragraph",
+     "has_children": false,
+     "in_trash": false,
+     "paragraph": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "Left",
+        "text": {
+         "content": "Left",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ],
+      "color": "default"
+     }
+    }
+   ],
+   "has_more": false,
+   "next_cursor": null
+  },
+  "GET /blocks/c2/children?page_size=100": {
+   "object": "list",
+   "results": [
+    {
+     "object": "block",
+     "id": "c2p",
+     "type": "paragraph",
+     "has_children": false,
+     "in_trash": false,
+     "paragraph": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "Right",
+        "text": {
+         "content": "Right",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ],
+      "color": "default"
+     }
+    }
+   ],
+   "has_more": false,
+   "next_cursor": null
+  },
+  "GET /blocks/so/children?page_size=100": {
+   "object": "list",
+   "results": [
+    {
+     "object": "block",
+     "id": "sop",
+     "type": "paragraph",
+     "has_children": false,
+     "in_trash": false,
+     "paragraph": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "Shared everywhere",
+        "text": {
+         "content": "Shared everywhere",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ],
+      "color": "default"
+     }
+    }
+   ],
+   "has_more": false,
+   "next_cursor": null
+  },
+  "GET /blocks/qt/children?page_size=100": {
+   "object": "list",
+   "results": [
+    {
+     "object": "block",
+     "id": "qtp",
+     "type": "paragraph",
+     "has_children": false,
+     "in_trash": false,
+     "paragraph": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "and brief",
+        "text": {
+         "content": "and brief",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ],
+      "color": "default"
+     }
+    }
+   ],
+   "has_more": false,
+   "next_cursor": null
+  },
+  "GET /blocks/th/children?page_size=100": {
+   "object": "list",
+   "results": [
+    {
+     "object": "block",
+     "id": "thp",
+     "type": "paragraph",
+     "has_children": false,
+     "in_trash": false,
+     "paragraph": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "Hidden until opened",
+        "text": {
+         "content": "Hidden until opened",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ],
+      "color": "default"
+     }
+    }
+   ],
+   "has_more": false,
+   "next_cursor": null
+  },
+  "GET /blocks/n1/children?page_size=100": {
+   "object": "list",
+   "results": [
+    {
+     "object": "block",
+     "id": "n1a",
+     "type": "bulleted_list_item",
+     "has_children": false,
+     "in_trash": false,
+     "bulleted_list_item": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "Inside",
+        "text": {
+         "content": "Inside",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       }
+      ],
+      "color": "default"
+     }
+    }
+   ],
+   "has_more": false,
+   "next_cursor": null
+  },
+  "GET /blocks/tb/children?page_size=100": {
+   "object": "list",
+   "results": [
+    {
+     "object": "block",
+     "id": "r1",
+     "type": "table_row",
+     "has_children": false,
+     "in_trash": false,
+     "table_row": {
+      "cells": [
+       [
+        {
+         "type": "text",
+         "plain_text": "Leave",
+         "text": {
+          "content": "Leave",
+          "link": null
+         },
+         "annotations": {
+          "bold": false,
+          "italic": false,
+          "strikethrough": false,
+          "underline": false,
+          "code": false,
+          "color": "default"
+         },
+         "href": null
+        }
+       ],
+       [
+        {
+         "type": "text",
+         "plain_text": "25 days",
+         "text": {
+          "content": "25 days",
+          "link": null
+         },
+         "annotations": {
+          "bold": false,
+          "italic": false,
+          "strikethrough": false,
+          "underline": false,
+          "code": false,
+          "color": "default"
+         },
+         "href": null
+        }
+       ]
+      ]
+     }
+    },
+    {
+     "object": "block",
+     "id": "r2",
+     "type": "table_row",
+     "has_children": false,
+     "in_trash": false,
+     "table_row": {
+      "cells": [
+       [
+        {
+         "type": "text",
+         "plain_text": "Notice",
+         "text": {
+          "content": "Notice",
+          "link": null
+         },
+         "annotations": {
+          "bold": false,
+          "italic": false,
+          "strikethrough": false,
+          "underline": false,
+          "code": false,
+          "color": "default"
+         },
+         "href": null
+        }
+       ],
+       [
+        {
+         "type": "text",
+         "plain_text": "30 days",
+         "text": {
+          "content": "30 days",
+          "link": null
+         },
+         "annotations": {
+          "bold": false,
+          "italic": false,
+          "strikethrough": false,
+          "underline": false,
+          "code": false,
+          "color": "default"
+         },
+         "href": null
+        }
+       ]
+      ]
+     }
+    }
+   ],
+   "has_more": false,
+   "next_cursor": null
+  },
+  "GET /pages/b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": {
+   "object": "page",
+   "id": "b2b2b2b2-b2b2-b2b2-b2b2-b2b2b2b2b2b2",
+   "in_trash": false,
+   "icon": {
+    "type": "emoji",
+    "emoji": "📜"
+   },
+   "parent": {
+    "type": "page_id",
+    "page_id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+   },
+   "properties": {
+    "title": {
+     "id": "title",
+     "type": "title",
+     "title": [
+      {
+       "type": "text",
+       "plain_text": "Policies",
+       "text": {
+        "content": "Policies",
+        "link": null
+       },
+       "annotations": {
+        "bold": false,
+        "italic": false,
+        "strikethrough": false,
+        "underline": false,
+        "code": false,
+        "color": "default"
+       },
+       "href": null
+      }
+     ]
+    }
+   }
+  },
+  "GET /blocks/b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2/children?page_size=100": {
+   "object": "list",
+   "results": [
+    {
+     "object": "block",
+     "id": "pp",
+     "type": "paragraph",
+     "has_children": false,
+     "in_trash": false,
+     "paragraph": {
+      "rich_text": [
+       {
+        "type": "text",
+        "plain_text": "Back to ",
+        "text": {
+         "content": "Back to ",
+         "link": null
+        },
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "href": null
+       },
+       {
+        "type": "mention",
+        "plain_text": "Handbook",
+        "annotations": {
+         "bold": false,
+         "italic": false,
+         "strikethrough": false,
+         "underline": false,
+         "code": false,
+         "color": "default"
+        },
+        "mention": {
+         "type": "page",
+         "page": {
+          "id": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+         }
+        },
+        "href": null
+       }
+      ],
+      "color": "default"
+     }
+    }
+   ],
+   "has_more": false,
+   "next_cursor": null
+  },
+  "GET /comments?block_id=a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1&page_size=100": {
+   "object": "list",
+   "results": [
+    {
+     "object": "comment",
+     "id": "cm-1",
+     "discussion_id": "d-1",
+     "created_time": "2026-09-01T10:00:00.000Z",
+     "created_by": {
+      "object": "user",
+      "id": "u-maya"
+     },
+     "rich_text": [
+      {
+       "type": "text",
+       "plain_text": "Can we ship on ",
+       "text": {
+        "content": "Can we ship on ",
+        "link": null
+       },
+       "annotations": {
+        "bold": false,
+        "italic": false,
+        "strikethrough": false,
+        "underline": false,
+        "code": false,
+        "color": "default"
+       },
+       "href": null
+      },
+      {
+       "type": "text",
+       "plain_text": "Friday",
+       "text": {
+        "content": "Friday",
+        "link": null
+       },
+       "annotations": {
+        "bold": true,
+        "italic": false,
+        "strikethrough": false,
+        "underline": false,
+        "code": false,
+        "color": "default"
+       },
+       "href": null
+      },
+      {
+       "type": "text",
+       "plain_text": "?",
+       "text": {
+        "content": "?",
+        "link": null
+       },
+       "annotations": {
+        "bold": false,
+        "italic": false,
+        "strikethrough": false,
+        "underline": false,
+        "code": false,
+        "color": "default"
+       },
+       "href": null
+      }
+     ]
+    },
+    {
+     "object": "comment",
+     "id": "cm-2",
+     "discussion_id": "d-1",
+     "created_time": "2026-09-01T11:30:00.000Z",
+     "created_by": {
+      "object": "user",
+      "id": "u-sam"
+     },
+     "rich_text": [
+      {
+       "type": "text",
+       "plain_text": "Yes, after the review.",
+       "text": {
+        "content": "Yes, after the review.",
+        "link": null
+       },
+       "annotations": {
+        "bold": false,
+        "italic": false,
+        "strikethrough": false,
+        "underline": false,
+        "code": false,
+        "color": "default"
+       },
+       "href": null
+      }
+     ]
+    },
+    {
+     "object": "comment",
+     "id": "cm-3",
+     "discussion_id": "d-2",
+     "created_time": "2026-09-02T09:00:00.000Z",
+     "created_by": {
+      "object": "user",
+      "id": "u-maya"
+     },
+     "rich_text": []
+    }
+   ],
+   "has_more": false,
+   "next_cursor": null
+  },
+  "GET /comments?block_id=b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2&page_size=100": {
+   "object": "list",
+   "results": [],
+   "has_more": false,
+   "next_cursor": null
+  }
+ },
+ "files": {
+  "policy.pdf": "%PDF-1.4 policy",
+  "standup.m4a": "m4a sound",
+  "budget.xlsx": "PK sheet",
+  "team.png": "PNG team"
+ },
+ "expect": {
+  "Handbook": [
+   {
+    "type": "heading",
+    "attrs": {
+     "level": 2
+    },
+    "text": "Welcome"
+   },
+   {
+    "type": "paragraph",
+    "marks": [
+     "bold",
+     "italic",
+     "code",
+     "strike",
+     "underline",
+     "textStyle",
+     "link"
+    ],
+    "inline": [
+     "dateMention",
+     "inlineMath"
+    ],
+    "links": [
+     "https://example.com/guide",
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ]
+   },
+   {
+    "type": "columnList",
+    "columns": [
+     60,
+     40
+    ]
+   },
+   {
+    "type": "paragraph",
+    "text": "Shared everywhere"
+   },
+   {
+    "type": "paragraph",
+    "text": "Shared everywhere"
+   },
+   {
+    "type": "webEmbed",
+    "attrs": {
+     "src": "https://www.youtube.com/watch?v=abc123"
+    }
+   },
+   {
+    "type": "bookmark",
+    "attrs": {
+     "href": "https://example.com/handbook",
+     "title": "Old handbook"
+    }
+   },
+   {
+    "type": "bookmark",
+    "attrs": {
+     "href": "https://github.com/acme/app/pull/7"
+    }
+   },
+   {
+    "type": "fileBlock",
+    "attrs": {
+     "kind": "pdf",
+     "src": "files/pf.pdf",
+     "name": "policy.pdf",
+     "caption": "The policy"
+    }
+   },
+   {
+    "type": "fileBlock",
+    "attrs": {
+     "kind": "video",
+     "src": "https://example.com/intro.mp4",
+     "name": "intro.mp4"
+    }
+   },
+   {
+    "type": "fileBlock",
+    "attrs": {
+     "kind": "audio",
+     "src": "files/au.m4a",
+     "name": "standup.m4a"
+    }
+   },
+   {
+    "type": "fileBlock",
+    "attrs": {
+     "kind": "file",
+     "src": "files/fl.xlsx",
+     "name": "Budget 2026.xlsx"
+    }
+   },
+   {
+    "type": "blockquote",
+    "text": "Be kind and brief"
+   },
+   {
+    "type": "callout",
+    "attrs": {
+     "emoji": "💬",
+     "color": "yellow"
+    }
+   },
+   {
+    "type": "collapsible",
+    "text": "Details Hidden until opened"
+   },
+   {
+    "type": "orderedList",
+    "text": "First Inside Second"
+   },
+   {
+    "type": "taskList",
+    "text": "Sign the form"
+   },
+   {
+    "type": "table",
+    "text": "Leave 25 days Notice 30 days"
+   },
+   {
+    "type": "toc"
+   },
+   {
+    "type": "paragraph",
+    "links": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "text": "Policies"
+   },
+   {
+    "type": "paragraph",
+    "links": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "text": "Policies"
+   },
+   {
+    "type": "codeBlock",
+    "attrs": {
+     "language": "go"
+    },
+    "text": "go test ./..."
+   },
+   {
+    "type": "horizontalRule"
+   },
+   {
+    "type": "image",
+    "attrs": {
+     "src": "files/im.png",
+     "caption": "The team"
+    }
+   }
+  ],
+  "Policies": [
+   {
+    "type": "paragraph",
+    "links": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "text": "Back to Handbook"
+   }
+  ]
+ },
+ "gaps": [
+  {
+   "gap": "A person mentioned (@Maya Patel) comes across as their name in text, not a mention: a doc's mention tells the person, and an import must not tell anyone.",
+   "plan": ""
+  },
+  {
+   "gap": "Comments on a line inside a page stay in Notion: the API reads them one block at a time.",
+   "plan": "comments on a line inside a page stay in Notion"
+  },
+  {
+   "gap": "What is written inside a database row's own page stays in Notion; the row's values come across in its table.",
+   "plan": "what is written inside a row's own page stays in Notion"
+  },
+  {
+   "gap": "An empty comment (no words) is left out.",
+   "plan": ""
+  }
+ ],
+ "expect_comments": {
+  "Handbook": [
+   {
+    "id": "cm-1",
+    "author": "u-maya",
+    "created": "2026-09-01T10:00:00Z",
+    "body": "<p>Can we ship on <strong>Friday</strong>?</p>"
+   },
+   {
+    "id": "cm-2",
+    "author": "u-sam",
+    "created": "2026-09-01T11:30:00Z",
+    "body": "<p>Yes, after the review.</p>"
+   }
+  ],
+  "Policies": []
+ }
+}

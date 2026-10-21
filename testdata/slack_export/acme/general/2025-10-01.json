@@ -1,0 +1,23 @@
+[
+  {"type": "message", "subtype": "channel_join", "ts": "1759309200.000100", "user": "U0BO00002", "text": "<@U0BO00002> has joined the channel"},
+  {"type": "message", "ts": "1759309260.000200", "user": "U0ADA0001", "team": "T0ACME001",
+   "text": "Welcome <@U0BO00002>! :wave:\nHouse rules:\n• be kind\n• ship on Fridays\n\n&gt; Slack is gone, long live OneCamp",
+   "reactions": [{"name": "wave", "users": ["U0BO00002"], "count": 1}]},
+  {"type": "message", "ts": "1759309320.000300", "user": "U0BO00002", "text": "Where's the plan for `deploy_v2`?",
+   "thread_ts": "1759309320.000300", "reply_count": 3, "reply_users_count": 2, "latest_reply": "1759309500.000330",
+   "reply_users": ["U0ADA0001", "U0BO00002"]},
+  {"type": "message", "ts": "1759309380.000310", "user": "U0ADA0001", "text": "Here: <https://docs.acme.test/plans/deploy_v2_plan|the deploy_v2 plan>",
+   "thread_ts": "1759309320.000300", "parent_user_id": "U0BO00002"},
+  {"type": "message", "ts": "1759309440.000320", "user": "U0BO00002", "text": "Thanks *Ada*",
+   "thread_ts": "1759309320.000300", "parent_user_id": "U0BO00002",
+   "reactions": [{"name": "+1", "users": ["U0ADA0001"], "count": 1}]},
+  {"type": "message", "subtype": "thread_broadcast", "ts": "1759309500.000330", "user": "U0ADA0001",
+   "text": "Also: <!channel> we launch on Friday", "thread_ts": "1759309320.000300"},
+  {"type": "message", "subtype": "bot_message", "ts": "1759309560.000400", "bot_id": "B0GITHUB1", "username": "GitHub",
+   "bot_profile": {"id": "B0GITHUB1", "name": "GitHub", "app_id": "A0GITHUB1"}, "text": "PR #12 merged by <@U0ADA0001>"},
+  {"type": "message", "subtype": "me_message", "ts": "1759309620.000500", "user": "U0BO00002", "text": "is out this afternoon"},
+  {"type": "message", "ts": "1759309680.000600", "user": "U0ADA0001", "text": "Standup moved to 10:30",
+   "edited": {"user": "U0ADA0001", "ts": "1759309700.000000"}},
+  {"type": "message", "subtype": "channel_topic", "ts": "1759309740.000700", "user": "U0ADA0001", "topic": "Company-wide news",
+   "text": "set the channel topic: Company-wide news"}
+]

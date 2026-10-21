@@ -179,7 +179,7 @@ func SetAgentChannelMembership(ctx context.Context, actor Actor, channelAdmin bo
 		}
 	}
 
-	go ReloadTriggerCache(context.WithoutCancel(ctx))
+	helpers.GoSafeNamed("ReloadTriggerCache", func() { ReloadTriggerCache(context.WithoutCancel(ctx)) })
 	return nil
 }
 

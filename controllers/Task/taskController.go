@@ -21,6 +21,7 @@ import (
 	reactionBusiness "github.com/akashc777/OneCamp/business/Reaction"
 	business "github.com/akashc777/OneCamp/business/Task"
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
+	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
@@ -443,7 +444,7 @@ func CreateTask(w http.ResponseWriter, r *http.Request) {
 		createTaskInfoInput.Priority = dgraphStruct.TASK_PRIORITY_MEDIUM
 	}
 
-	if createTaskInfoInput.Priority != dgraphStruct.TASK_PRIORITY_LOW && createTaskInfoInput.Priority != dgraphStruct.TASK_PRIORITY_MEDIUM && createTaskInfoInput.Priority != dgraphStruct.TASK_PRIORITY_HIGH {
+	if !taskPriority.Is(createTaskInfoInput.Priority) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "Invalid priority",
 			"err": err,
@@ -617,12 +618,6 @@ func AddAttachmentsToTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var objKeys []string
-
-	for _, attachment := range createTaskInfoInput.Attachments {
-		objKeys = append(objKeys, attachment.ObjectKey)
-	}
-
 	err = business.AddAttachmentToTask(ctx, taskUUID, dgraphTaskInfo, &createTaskInfoInput, &userInfo.UserDgraphInfo)
 
 	if errors.Is(err, business.ErrTaskDeleted) {
@@ -775,8 +770,15 @@ func GetTaskInfo(w http.ResponseWriter, r *http.Request) {
 		// (task_access, project_access). Without them the app keeps to the
 		// project's admins changing it, so a failed read of roles is said in
 		// the log and the task still opens.
-		if err := workAccess.DecorateTasks(ctx, userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.Uid, dgraphTaskInfo); err != nil {
+		standing, err := workAccess.DecorateTask(ctx, userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.Uid, dgraphTaskInfo)
+		if err != nil {
 			helpers.LogErrorWithContext(ctx, "controllers/GetTaskInfo couldn't read what the reader may do with task %s err: %+v", taskUUID, err)
+		}
+		// The panel's other reads, when it asks for them (taskInfoInclude.go).
+		if names := includeNames(r); len(names) > 0 {
+			helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Got task info", "data": dgraphTaskInfo,
+				"included": panelParts(r, names, taskUUID, dgraphTaskInfo, userInfo, standing)})
+			return
 		}
 	}
 
@@ -1375,14 +1377,8 @@ func CreateOrUpdateReactionOnCommentTask(w http.ResponseWriter, r *http.Request)
 	commentTaskReactionInfo.ReactionDgraphUid, err = business.CreateOrUpdateTaskCommentReaction(ctx, &commentTaskReactionInfo, dgraphComment, &userInfo.UserDgraphInfo)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/CreateOrUpdateReactionOnCommentTask Failed to create/update reaction on post comment req err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse the body of the req",
-			"err": err,
-		})
+		status, msg := reactionBusiness.Answer(err, "Couldn't add the reaction. Try again.")
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
 
@@ -1433,20 +1429,15 @@ func DeleteTaskCommentReaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = business.DeleteReactionOnCommentTask(ctx, commentInfo, reactionDgraph.Uid)
+	err = business.DeleteReactionOnCommentTask(ctx, commentInfo, reactionDgraph.Uid, &userInfo.UserDgraphInfo)
 
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"controllers/DeleteTaskCommentReaction Failed to delete task on the comment req err: %+v",
-			err)
-
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Failed to parse the body of the req",
-			"err": err,
-		})
+		status, msg := reactionBusiness.Answer(err, "Couldn't remove the reaction. Try again.")
+		helpers.WriteJSON(w, status, helpers.Envolope{"msg": msg})
 		return
 	}
 
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "removed reaction successfully!"})
 }
 
 func UpdateTaskStatus(w http.ResponseWriter, r *http.Request) {
@@ -1607,18 +1598,10 @@ func UpdateTaskPriority(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isValidPriority := false
-
-	for _, taskPriority := range dgraphStruct.VALID_TASK_PRIORITIES {
-		if taskPriority == createTaskInfoInput.Priority {
-			isValidPriority = true
-			break
-		}
-	}
-
-	if !isValidPriority {
+	// None takes the priority off ("No priority", key 0).
+	if !taskPriority.IsOrNone(createTaskInfoInput.Priority) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
-			"msg": "Not authorised invalid priority",
+			"msg": "That isn't a priority. Pick urgent, high, medium, low or none.",
 		})
 		return
 	}
@@ -2337,7 +2320,9 @@ func GetGitHubTaskActivity(w http.ResponseWriter, r *http.Request) {
 
 	activities, err := githubTaskActivityDomain.GetGitHubTaskActivitiesByTaskID(ctx, taskUUID)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
+		// A 503 with a sentence: a bare 500 carrying only the driver's error
+		// gave the app nothing to say but "The server hit a problem".
+		helpers.WriteReadFailure(w, r, err, "GitHub activity", "controllers/GetGitHubTaskActivity")
 		return
 	}
 
@@ -2572,26 +2557,37 @@ func BulkUnlinkTasksFromGitHub(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var successCount int
 	var errors []string
-
+	var ids []uuid.UUID
 	for _, taskUUIDStr := range input.TaskUUIDs {
 		taskUUID, err := uuid.Parse(taskUUIDStr)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("Invalid task UUID: %s", taskUUIDStr))
 			continue
 		}
-		if refusal := changeRefusal(ctx, taskUUID, &userInfo); refusal != "" {
-			errors = append(errors, refusal)
-			continue
+		ids = append(ids, taskUUID)
+	}
+	// One read and one check for all of them, then one statement (PR2, #13).
+	refusals, err := changeRefusals(ctx, ids, &userInfo)
+	var mayUnlink []uuid.UUID
+	for _, id := range ids {
+		switch {
+		case err != nil:
+			errors = append(errors, fmt.Sprintf("Couldn't check task %s. Try again.", id))
+		case refusals[id] != "":
+			errors = append(errors, refusals[id])
+		default:
+			mayUnlink = append(mayUnlink, id)
 		}
-
-		// Postgres holds the link, laid over the graph's copy on every read.
-		if err := taskDomain.ClearGitHubLinkFromTask(ctx, taskUUID); err != nil {
-			errors = append(errors, fmt.Sprintf("Couldn't unlink task %s. Try again.", taskUUIDStr))
-			continue
+	}
+	successCount := 0
+	// Postgres holds the link, laid over the graph's copy on every read.
+	if err := taskDomain.ClearGitHubLinkFromTasks(ctx, mayUnlink); err != nil {
+		for _, id := range mayUnlink {
+			errors = append(errors, fmt.Sprintf("Couldn't unlink task %s. Try again.", id))
 		}
-		successCount++
+	} else {
+		successCount = len(mayUnlink)
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
@@ -2640,6 +2636,14 @@ func BulkLinkTasksToGitHub(w http.ResponseWriter, r *http.Request) {
 	}
 	refusals := make([]string, len(input.Links))
 	var mayLink []checked
+	// What the person may change, asked for all the tasks at once (PR2, #13).
+	var askIDs []uuid.UUID
+	for _, link := range input.Links {
+		if id, err := uuid.Parse(link.TaskUUID); err == nil {
+			askIDs = append(askIDs, id)
+		}
+	}
+	changeable, checkErr := changeRefusals(ctx, askIDs, &userInfo)
 	for i, link := range input.Links {
 		taskUUID, err := uuid.Parse(link.TaskUUID)
 		if err != nil {
@@ -2651,7 +2655,11 @@ func BulkLinkTasksToGitHub(w http.ResponseWriter, r *http.Request) {
 			refusals[i] = fmt.Sprintf("Invalid issue data for task %s", link.TaskUUID)
 			continue
 		}
-		if refusal := changeRefusal(ctx, taskUUID, &userInfo); refusal != "" {
+		if checkErr != nil {
+			refusals[i] = fmt.Sprintf("Couldn't check task %s. Try again.", taskUUID)
+			continue
+		}
+		if refusal := changeable[taskUUID]; refusal != "" {
 			refusals[i] = refusal
 			continue
 		}
@@ -2674,7 +2682,8 @@ func BulkLinkTasksToGitHub(w http.ResponseWriter, r *http.Request) {
 		helpers.LogErrorWithContext(ctx, "controllers/BulkLinkTasksToGitHub couldn't read the tasks' projects' repositories err: %+v", linkedErr)
 	}
 
-	var successCount int
+	var writes []taskDomain.GitHubIssueLink
+	var wrote []int
 	for _, c := range mayLink {
 		link := input.Links[c.at]
 		switch {
@@ -2684,12 +2693,17 @@ func BulkLinkTasksToGitHub(w http.ResponseWriter, r *http.Request) {
 			refusals[c.at] = fmt.Sprintf("The issue for task %s isn't in a repository linked to its project", link.TaskUUID)
 		default:
 			// The number stored is the address's own, so the two always agree.
-			if err := taskDomain.SetGitHubIssueFieldsOnTask(ctx, c.ask.Task, c.number, link.IssueURL); err != nil {
-				refusals[c.at] = fmt.Sprintf("Couldn't link task %s. Try again.", link.TaskUUID)
-				continue
-			}
-			successCount++
+			writes = append(writes, taskDomain.GitHubIssueLink{Task: c.ask.Task, Number: c.number, URL: link.IssueURL})
+			wrote = append(wrote, c.at)
 		}
+	}
+	successCount := 0
+	if err := taskDomain.SetGitHubIssueFieldsOnTasks(ctx, writes); err != nil {
+		for _, at := range wrote {
+			refusals[at] = fmt.Sprintf("Couldn't link task %s. Try again.", input.Links[at].TaskUUID)
+		}
+	} else {
+		successCount = len(writes)
 	}
 	var errors []string
 	for _, refusal := range refusals {
@@ -2706,21 +2720,24 @@ func BulkLinkTasksToGitHub(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// changeRefusal is why the person may not change the task, as a bulk answer
-// lists it, or "" when they may (Work Access's rule).
-func changeRefusal(ctx context.Context, taskID uuid.UUID, who *userModels.UserInfo) string {
-	_, _, err := business.TaskFor(ctx, taskID, who, workAccess.NeedEditTask)
-	switch {
-	case err == nil:
-		return ""
-	case errors.Is(err, business.ErrNotAllowed):
-		return fmt.Sprintf("Task %s: %s", taskID, err)
-	case errors.Is(err, business.ErrTaskNotVisible):
-		return fmt.Sprintf("Task not found: %s", taskID)
-	default:
-		helpers.LogErrorWithContext(ctx, "controllers/changeRefusal couldn't read task %s err: %+v", taskID, err)
-		return fmt.Sprintf("Couldn't check task %s. Try again.", taskID)
+// changeRefusals is why the person may not change each of ids, as a bulk
+// answer lists it ("Task …: …", "Task not found: …"); a task missing from
+// the map they may change. One read and one check for all (PR2, #13).
+func changeRefusals(ctx context.Context, ids []uuid.UUID, who *userModels.UserInfo) (map[uuid.UUID]string, error) {
+	got, err := business.ChangeRefusals(ctx, who, ids, workAccess.NeedEditTask)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/changeRefusals couldn't read %d tasks err: %+v", len(ids), err)
+		return nil, err
 	}
+	out := make(map[uuid.UUID]string, len(got))
+	for id, why := range got {
+		if why == "That task doesn't exist or you can't see it." {
+			out[id] = fmt.Sprintf("Task not found: %s", id)
+			continue
+		}
+		out[id] = fmt.Sprintf("Task %s: %s", id, why)
+	}
+	return out, nil
 }
 
 // CreateGitHubPRForTask creates a draft PR on GitHub for a task.

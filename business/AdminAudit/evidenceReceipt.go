@@ -86,13 +86,18 @@ func StartEvidenceReceipts(ctx context.Context) {
 // testable without waiting for one.
 func RecordDueReceipts(ctx context.Context, now time.Time) int {
 	written := 0
-	for _, p := range duePeriods(now, receiptBackfillMonths) {
-		has, err := auditModel.HasReceiptFor(ctx, p.From, p.To)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "evidence receipts: checking %s: %+v", p.Label(), err)
-			continue
-		}
-		if has {
+	periods := duePeriods(now, receiptBackfillMonths)
+	if len(periods) == 0 {
+		return 0
+	}
+	// Which months have a receipt, in one read where each month was one.
+	have, err := auditModel.ReceiptStartsSince(ctx, periods[0].From)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "evidence receipts: checking from %s: %+v", periods[0].Label(), err)
+		return 0
+	}
+	for _, p := range periods {
+		if have[p.From.UTC()] {
 			continue
 		}
 		if ok := recordReceipt(ctx, p); ok {

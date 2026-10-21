@@ -34,15 +34,15 @@ func CreateBoardInOpenSearch(ctx context.Context, openSearchBoard *openSearchStr
 
 // UpdateBoardFieldsInOpenSearch applies a partial field update (used for title,
 // privacy, and access changes). A map is used so a `false` boolean is written
-// rather than dropped by struct omitempty. doc_as_upsert keeps it resilient if
-// the board was never indexed.
+// rather than dropped by struct omitempty. A board the index doesn't have is
+// left for its whole document (opensearchInit.UpdateDocument): created from
+// these fields alone it held a title and its privacy and none of its access.
 func UpdateBoardFieldsInOpenSearch(ctx context.Context, boardUUID string, fields map[string]interface{}) (err error) {
 	if len(fields) == 0 {
 		return nil
 	}
 	doc := openSearchStruct.BulkUpdate{
-		Doc:         fields,
-		DocAsUpsert: true,
+		Doc: fields,
 	}
 	jsonData, err := json.Marshal(doc)
 	if err != nil {

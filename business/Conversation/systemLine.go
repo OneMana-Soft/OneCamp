@@ -45,6 +45,8 @@ const (
 	LineGroupBecameChannel = "group.channel"
 	// In a channel: Actor made it from the conversation From, with Targets.
 	LineChannelFromGroup = "channel.from_group"
+	// In any conversation: Actor pinned the message To (chat B25).
+	LineMessagePinned = "message.pinned"
 	// In a group: Actor left it.
 	LineGroupLeft = "group.left"
 )
@@ -132,6 +134,11 @@ func writeGroupLine(ctx context.Context, groupingID string, actor *dgraphStruct.
 	if _, _, err := writeChatNode(ctx, &dm, id); err != nil {
 		return "", err
 	}
+	// An import writes history: nobody is watching it arrive, so nothing is
+	// published (helpers.IsBulkImport), as the import's messages aren't.
+	if helpers.IsBulkImport(ctx) {
+		return id, nil
+	}
 	helpers.GoSafeNamed("conversation.line", func() {
 		publishChat(&mqttStruct.MqttChat{
 			Type: mqttStruct.TYPE_CREATE, ChatUuid: id, ChatHtmlText: body, ChatCreatedAt: &now,
@@ -145,12 +152,21 @@ func writeGroupLine(ctx context.Context, groupingID string, actor *dgraphStruct.
 // writeChannelLine is writeGroupLine for a channel (channelUID is its graph
 // node).
 func writeChannelLine(ctx context.Context, channelUUID, channelUID string, actor *dgraphStruct.DgraphUser, l Line, text string) (string, error) {
+	return writeChannelLineAt(ctx, channelUUID, channelUID, actor, l, text, systemLineTime())
+}
+
+// writeChannelLineAt is writeChannelLine at the time of what it says (a zero
+// time is now).
+func writeChannelLineAt(ctx context.Context, channelUUID, channelUID string, actor *dgraphStruct.DgraphUser, l Line, text string, at time.Time) (string, error) {
 	facts, err := json.Marshal(l)
 	if err != nil {
 		return "", err
 	}
 	id := uuid.NewString()
-	now := systemLineTime()
+	now := at
+	if now.IsZero() {
+		now = systemLineTime()
+	}
 	zero := time.Time{}
 	body := lineHTML(text)
 	post := dgraphStruct.DgraphPost{
@@ -171,6 +187,11 @@ func writeChannelLine(ctx context.Context, channelUUID, channelUID string, actor
 	if _, err := writePostNode(ctx, &post); err != nil {
 		return "", err
 	}
+	// An import writes history: nobody is watching it arrive, so nothing is
+	// published (helpers.IsBulkImport), as the import's messages aren't.
+	if helpers.IsBulkImport(ctx) {
+		return id, nil
+	}
 	helpers.GoSafeNamed("conversation.line", func() {
 		publishPost(&mqttStruct.MqttPost{
 			Type: mqttStruct.TYPE_CREATE, PostUuid: id, PostHtmlText: body, PostCreatedAt: &now,
@@ -179,4 +200,25 @@ func writeChannelLine(ctx context.Context, channelUUID, channelUID string, actor
 		}, channelUUID)
 	})
 	return id, nil
+}
+
+// WriteLine writes l into the conversation ref as actor, with text as its
+// words, for a package beside this one (chat B25's pins; B28's joins and
+// renames come the same way). It answers the line's id; ErrNotFound when
+// there is no such conversation.
+func WriteLine(ctx context.Context, ref Ref, actor *dgraphStruct.DgraphUser, l Line, text string) (string, error) {
+	switch ref.Kind {
+	case KindChannel:
+		ch, err := channelOf(ctx, ref.ID, actor.Uid)
+		if err != nil {
+			return "", err
+		}
+		if ch == nil {
+			return "", ErrNotFound
+		}
+		return writeChannelLine(ctx, ref.ID, ch.Uid, actor, l, text)
+	case KindDM, KindGroup:
+		return writeGroupLine(ctx, ref.ID, actor, l, text, nil)
+	}
+	return "", ErrNotFound
 }

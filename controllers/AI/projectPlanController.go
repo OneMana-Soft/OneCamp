@@ -25,7 +25,7 @@ func StartProjectPlan(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user, ok := userModels.FromContext(ctx)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	may, err := templateBusiness.MayCreateProjects(ctx, user)
@@ -67,7 +67,7 @@ func ProjectPlan(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user, ok := userModels.FromContext(ctx)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	d, err := business.ProjectPlan(ctx, user.UserDgraphInfo.Uuid, chi.URLParam(r, "draft_id"))

@@ -622,7 +622,7 @@ func (o *OpenAIProvider) ChatStream(ctx context.Context, messages []ChatMessage,
 
 	ch := make(chan StreamChunk, 64)
 
-	go func() {
+	helpers.GoSafeNamed("services/AI/openai:ChatStream", func() {
 		defer close(ch)
 		defer resp.Body.Close()
 
@@ -689,7 +689,7 @@ func (o *OpenAIProvider) ChatStream(ctx context.Context, messages []ChatMessage,
 		if err := scanner.Err(); err != nil {
 			ch <- StreamChunk{Done: true, Error: fmt.Errorf("openai: stream read error: %w", err)}
 		}
-	}()
+	})
 
 	return ch, nil
 }

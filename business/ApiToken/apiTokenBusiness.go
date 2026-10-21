@@ -13,10 +13,12 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	agentModel "github.com/akashc777/OneCamp/models/postgres/AIAgent"
 	model "github.com/akashc777/OneCamp/models/postgres/ApiToken"
+	appModel "github.com/akashc777/OneCamp/models/postgres/SlashCommand"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 	"github.com/google/uuid"
@@ -109,6 +111,11 @@ var ToolScope = map[string]string{
 	"search_workspace": ScopeSearchRead,
 	// The docs a person can open, as GET /v1/docs lists them.
 	"list_docs": ScopeDocsRead,
+	// The work graph: what a thing is connected to, and how two things
+	// connect. Like search, an answer can name any kind the person may see,
+	// so it answers to the same scope.
+	"related_items": ScopeSearchRead,
+	"how_connected": ScopeSearchRead,
 }
 
 // ScopeForTool returns the scope required to call a tool and whether the tool
@@ -139,7 +146,27 @@ func validScope(s string) bool {
 			return true
 		}
 	}
-	return false
+	declaredMu.RLock()
+	defer declaredMu.RUnlock()
+	return declared[s]
+}
+
+var (
+	declaredMu sync.RWMutex
+	declared   = map[string]bool{}
+)
+
+// RegisterScope adds a scope a package's public routes declare
+// (business/PublicAPI's Register calls it), so a token may be made with it
+// without this file listing every programme's scopes.
+func RegisterScope(scope string) {
+	scope = strings.TrimSpace(scope)
+	if scope == "" {
+		return
+	}
+	declaredMu.Lock()
+	declared[scope] = true
+	declaredMu.Unlock()
 }
 
 // hashToken returns the SHA-256 hex of a token's plaintext.
@@ -155,6 +182,88 @@ func generateSecret() (string, error) {
 		return "", err
 	}
 	return tokenPlainPrefix + hex.EncodeToString(buf), nil
+}
+
+// appTokenPlainPrefix begins an app's credential ("oc_app_…"), so a person can
+// tell one from their own in a log or a leak report. It is an "oc_" token like
+// every other: one hash lookup, one middleware.
+const appTokenPlainPrefix = tokenPlainPrefix + "app_"
+
+// generateAppSecret is generateSecret for an app's credential.
+func generateAppSecret() (string, error) {
+	s, err := generateSecret()
+	if err != nil {
+		return "", err
+	}
+	return appTokenPlainPrefix + strings.TrimPrefix(s, tokenPlainPrefix), nil
+}
+
+// MintAppToken mints a credential for an installed app (platform P-API, §3.1):
+// it acts as the app's bot user, carries the scopes given (business/App keeps
+// them within the app's own) and is bound to the app, so turning the app off
+// or removing it stops it. The plaintext is returned once.
+func MintAppToken(ctx context.Context, name string, scopes []string, expiresAt *time.Time, botUser, appID uuid.UUID) (*CreatedToken, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	if len(name) > maxNameLen {
+		return nil, fmt.Errorf("name is too long")
+	}
+	clean, err := cleanScopes(scopes)
+	if err != nil {
+		return nil, err
+	}
+	plaintext, err := generateAppSecret()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate token")
+	}
+	scopesJSON, _ := json.Marshal(clean)
+	prefix := displayPrefix(plaintext)
+	id, err := model.CreateAppToken(ctx, name, hashToken(plaintext), prefix, string(scopesJSON), botUser, expiresAt, appID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create token")
+	}
+	row := &model.ApiToken{
+		Id: id, Name: name, TokenPrefix: prefix, Scopes: string(scopesJSON),
+		CreatedBy: botUser, ExpiresAt: expiresAt, AppId: &appID,
+		CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}
+	return &CreatedToken{Token: row, Plaintext: plaintext}, nil
+}
+
+// RotateAppSecret is RotateSecret for an app's credential: a new secret with
+// the app's prefix, the same id, name and scopes.
+func RotateAppSecret(ctx context.Context, id uuid.UUID, expiresAt time.Time) (string, error) {
+	plaintext, err := generateAppSecret()
+	if err != nil {
+		return "", fmt.Errorf("failed to generate token")
+	}
+	if err := model.RotateSecret(ctx, id, hashToken(plaintext), displayPrefix(plaintext), expiresAt); err != nil {
+		return "", err
+	}
+	return plaintext, nil
+}
+
+// cleanScopes de-duplicates scopes and refuses an unknown one or none at all.
+func cleanScopes(scopes []string) ([]string, error) {
+	seen := map[string]bool{}
+	clean := make([]string, 0, len(scopes))
+	for _, s := range scopes {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		if !validScope(s) {
+			return nil, fmt.Errorf("unknown scope: %s", s)
+		}
+		seen[s] = true
+		clean = append(clean, s)
+	}
+	if len(clean) == 0 {
+		return nil, fmt.Errorf("select at least one scope")
+	}
+	return clean, nil
 }
 
 // CreateToken validates scopes, mints a token, persists its hash, and returns
@@ -217,21 +326,9 @@ func MintToken(ctx context.Context, name string, scopes []string, expiresAt *tim
 	}
 
 	// De-dupe + validate scopes.
-	seen := map[string]bool{}
-	clean := make([]string, 0, len(scopes))
-	for _, s := range scopes {
-		s = strings.TrimSpace(s)
-		if s == "" || seen[s] {
-			continue
-		}
-		if !validScope(s) {
-			return nil, fmt.Errorf("unknown scope: %s", s)
-		}
-		seen[s] = true
-		clean = append(clean, s)
-	}
-	if len(clean) == 0 {
-		return nil, fmt.Errorf("select at least one scope")
+	clean, err := cleanScopes(scopes)
+	if err != nil {
+		return nil, err
 	}
 
 	existing, err := model.ListByUser(ctx, createdBy)
@@ -285,6 +382,13 @@ type AuthResult struct {
 	UserID  uuid.UUID
 	TokenID uuid.UUID
 	Scopes  []string
+	// AppID is the installed app this credential belongs to (migration 360),
+	// nil for a person's or an agent's. The app acts as its bot user (UserID),
+	// and whether it is still on is asked per call (business/App).
+	AppID *uuid.UUID
+	// AppBotUserID is that app's own user, as the app's record names it: the one
+	// bot that may hold a credential (VerifyApiToken), and only its app's.
+	AppBotUserID *uuid.UUID
 	// AgentID is the AGENT IDENTITY this credential authenticates, when it is bound
 	// to one (migration 138). Nil for a plain integration credential.
 	//
@@ -311,6 +415,21 @@ func Validate(ctx context.Context, plaintext string) (*AuthResult, error) {
 	if row == nil {
 		return nil, nil
 	}
+	var appBot *uuid.UUID
+	var appScopes []string
+	// An app's credential works only while its app does (migration 360): turned
+	// off or removed, every one of its credentials stops on the next call.
+	if row.AppId != nil {
+		app, aerr := appModel.GetAppIdentity(ctx, *row.AppId)
+		if aerr != nil {
+			return nil, aerr
+		}
+		if app == nil || app.Deleted || !app.Enabled {
+			return nil, nil
+		}
+		appBot = app.BotUserId
+		_ = json.Unmarshal([]byte(app.Scopes), &appScopes)
+	}
 	// Best-effort last-used touch, throttled to at most once/min/token so a
 	// busy integration doesn't issue a DB UPDATE on every request. The window
 	// gate fails open (Redis down → we still touch), and the touch itself is
@@ -321,7 +440,27 @@ func Validate(ctx context.Context, plaintext string) (*AuthResult, error) {
 
 	var scopes []string
 	_ = json.Unmarshal([]byte(row.Scopes), &scopes)
-	return &AuthResult{UserID: row.CreatedBy, TokenID: row.Id, Scopes: scopes, AgentID: row.AgentId}, nil
+	if row.AppId != nil {
+		// An app's credential carries only what its app may still carry:
+		// taking a scope from the app takes it from its tokens on their next call.
+		scopes = within(scopes, appScopes)
+	}
+	return &AuthResult{UserID: row.CreatedBy, TokenID: row.Id, Scopes: scopes, AgentID: row.AgentId, AppID: row.AppId, AppBotUserID: appBot}, nil
+}
+
+// within keeps, in order, the scopes that allowed holds too.
+func within(scopes, allowed []string) []string {
+	ok := make(map[string]bool, len(allowed))
+	for _, s := range allowed {
+		ok[s] = true
+	}
+	out := make([]string, 0, len(scopes))
+	for _, s := range scopes {
+		if ok[s] {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // shouldTouchLastUsed returns true at most once per token per minute (when
@@ -374,11 +513,16 @@ func BoundAgent(ctx context.Context, agentID uuid.UUID) (agent *agentModel.AiAge
 	return a, ""
 }
 
-// displayPrefix is "oc_" plus the first 8 secret characters: enough to
-// recognise a credential in a list without revealing it.
+// displayPrefix is "oc_" plus the first 8 secret characters ("oc_app_" plus 8
+// for an app's): enough to recognise a credential in a list without
+// revealing it.
 func displayPrefix(plaintext string) string {
-	if len(plaintext) > 11 {
-		return plaintext[:11]
+	n := 11
+	if strings.HasPrefix(plaintext, appTokenPlainPrefix) {
+		n = len(appTokenPlainPrefix) + 8
+	}
+	if len(plaintext) > n {
+		return plaintext[:n]
 	}
 	return plaintext
 }

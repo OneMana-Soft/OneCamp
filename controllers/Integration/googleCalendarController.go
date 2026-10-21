@@ -25,7 +25,7 @@ func GetGoogleCalendarAuthUrl(w http.ResponseWriter, r *http.Request) {
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(model.UserInfo)
 	if !ok {
 		helpers.LogErrorWithContext(ctx, "controllers/GetGoogleCalendarAuthUrl Failed getting user from context")
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 
@@ -49,7 +49,7 @@ func GetGoogleCalendarStatus(w http.ResponseWriter, r *http.Request) {
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(model.UserInfo)
 	if !ok {
 		helpers.LogErrorWithContext(ctx, "controllers/GetGoogleCalendarStatus Failed getting user from context")
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 
@@ -88,7 +88,7 @@ func UpdateGoogleCalendarSyncTask(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(model.UserInfo)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 
@@ -115,7 +115,7 @@ func UnlinkGoogleCalendar(w http.ResponseWriter, r *http.Request) {
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(model.UserInfo)
 	if !ok {
 		helpers.LogErrorWithContext(ctx, "controllers/UnlinkGoogleCalendar Failed getting user from context")
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not authorised"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 

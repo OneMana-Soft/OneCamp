@@ -50,9 +50,7 @@ func TestTaskStatusTriggerResolvesTheProjectsOwnStatus(t *testing.T) {
 }
 
 // The whole path: a saved workflow is loaded, a move into its status runs it,
-// and a move elsewhere does not. Its action is create_task, whose executor is
-// not registered in this test binary, so a run records that error rather than
-// reaching the bot and search, which the test has no server for.
+// and a move elsewhere does not.
 func TestTaskStatusWorkflowRunsOnTheMoveItNames(t *testing.T) {
 	ctx := context.Background()
 	env := integration.SetupEnv(t)
@@ -84,13 +82,15 @@ func TestTaskStatusWorkflowRunsOnTheMoveItNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Each run is a row in its history (runs.go); this one stops at the
+	// task, which the test makes up, so it is recorded as skipped.
 	runs := func() int64 {
 		t.Helper()
-		got, err := workflowModel.GetWorkflowByID(ctx, w.Id)
+		rs, err := workflowModel.ListRuns(ctx, nil, &w.Id, nil, 100)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return got.RunCount
+		return int64(len(rs))
 	}
 	move := func(newStatus, newCustom string) {
 		handleEvent(ctx, "task.status_changed", map[string]interface{}{

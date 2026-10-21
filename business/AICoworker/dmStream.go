@@ -59,7 +59,7 @@ func streamDMReply(ctx context.Context, bot *userBusiness.BotIdentity, userInfo 
 	stopTyping := make(chan struct{})
 	var once sync.Once
 	stop := func() { once.Do(func() { close(stopTyping) }) }
-	go runBotChatTyping(ctx, bot, groupID, stopTyping)
+	helpers.GoSafeLoop("runBotChatTyping", func() { runBotChatTyping(ctx, bot, groupID, stopTyping) })
 
 	resp, aerr := aiBusiness.AskAIStream(ctx, userInfo, question, "dm:"+groupID, nil, func(running string) {
 		stop() // first content: the live message itself is now the indicator
@@ -109,7 +109,7 @@ func streamDMReply(ctx context.Context, bot *userBusiness.BotIdentity, userInfo 
 // the rare case the stream cannot be initialized.
 func streamlessDMReply(ctx context.Context, bot *userBusiness.BotIdentity, userInfo *userModels.UserInfo, groupID, senderID, question string) {
 	stopTyping := make(chan struct{})
-	go runBotChatTyping(ctx, bot, groupID, stopTyping)
+	helpers.GoSafeLoop("runBotChatTyping", func() { runBotChatTyping(ctx, bot, groupID, stopTyping) })
 	resp, aerr := aiBusiness.AskAI(ctx, userInfo, question, "dm:"+groupID, nil)
 	close(stopTyping)
 

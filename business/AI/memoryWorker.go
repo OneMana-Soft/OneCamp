@@ -90,7 +90,7 @@ const (
 // inert until an admin enables the memory layer. ctx drives graceful
 // shutdown.
 func StartMemoryExtractionLoop(ctx context.Context) {
-	go func() {
+	helpers.GoSafeLoop("business/AI/memoryWorker:StartMemoryExtractionLoop", func() {
 		select {
 		case <-ctx.Done():
 			return
@@ -111,7 +111,7 @@ func StartMemoryExtractionLoop(ctx context.Context) {
 				runMemoryExtractionPass(ctx)
 			}
 		}
-	}()
+	})
 }
 
 // runMemoryExtractionPass performs a single sweep: gate → discover active

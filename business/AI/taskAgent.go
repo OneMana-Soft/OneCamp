@@ -176,6 +176,7 @@ func executeListTasks(ctx context.Context, action ai.ProposedAction, userUUID st
 // TaskRow is one task as a screen shows it: the structured twin of formatTaskLine.
 type TaskRow struct {
 	UUID     string `json:"uuid"`
+	Key      string `json:"key,omitempty"`
 	Name     string `json:"name"`
 	Status   string `json:"status"`
 	Priority string `json:"priority,omitempty"`
@@ -210,7 +211,7 @@ func taskList(title string, tasks []*dgraphStruct.DgraphTask, total int, base st
 		if t == nil {
 			continue
 		}
-		row := TaskRow{UUID: t.Uuid, Name: strings.TrimSpace(t.Name), Status: t.Status, Priority: t.Priority, URL: base + "/app/task/" + t.Uuid}
+		row := TaskRow{UUID: t.Uuid, Key: t.Key, Name: strings.TrimSpace(t.Name), Status: t.Status, Priority: t.Priority, URL: base + "/app/task/" + t.Uuid}
 		if row.Name == "" {
 			row.Name = "(untitled task)"
 		}

@@ -206,49 +206,68 @@ func budgetDayKey() string { return time.Now().UTC().Format("20060102") }
 // (more specific) then the workspace cap. Fail-open: returns (false, none) when
 // no cap is configured or Redis is unavailable.
 func TokenBudgetExceeded(ctx context.Context) (bool, BudgetScope) {
+	// Every cap that applies is read in one MGET (backend audit #33): it was
+	// a round trip each, four to eight on every AI call. They are judged in
+	// the order they were: the user, each extra dimension (more specific),
+	// then the workspace.
+	type check struct {
+		limit int
+		scope BudgetScope
+	}
+	var keys []redisStore.CounterKey
+	var checks []check
+	day := budgetDayKey()
 	if ub := userTokenBudget(); ub > 0 {
 		if actor := actorFromContext(ctx); actor != "" {
-			if count, found, err := redisStore.GetInt64(ctx, registry.AIUserTokenBudget, []string{actor, budgetDayKey()}); err == nil && found && count >= int64(ub) {
-				return true, BudgetScopeUser
-			}
+			keys = append(keys, redisStore.CounterKey{Spec: registry.AIUserTokenBudget, Args: []string{actor, day}})
+			checks = append(checks, check{ub, BudgetScopeUser})
 		}
 	}
-
-	// Extra dimensions (per-agent, per-channel, ...) are more specific than the
-	// workspace cap, so they are checked before it. Each is independent.
 	for _, d := range budgetDimensions(ctx) {
 		if d.Limit <= 0 || d.ID == "" {
 			continue
 		}
-		if count, found, err := redisStore.GetInt64(ctx, d.Spec, []string{d.ID, budgetDayKey()}); err == nil && found && count >= int64(d.Limit) {
-			return true, d.Scope
-		}
+		keys = append(keys, redisStore.CounterKey{Spec: d.Spec, Args: []string{d.ID, day}})
+		checks = append(checks, check{d.Limit, d.Scope})
 	}
-
 	if wb := workspaceTokenBudget(); wb > 0 {
-		if count, found, err := redisStore.GetInt64(ctx, registry.AITokenBudget, []string{budgetDayKey()}); err == nil && found && count >= int64(wb) {
-			return true, BudgetScopeWorkspace
+		keys = append(keys, redisStore.CounterKey{Spec: registry.AITokenBudget, Args: []string{day}})
+		checks = append(checks, check{wb, BudgetScopeWorkspace})
+	}
+	if len(keys) == 0 {
+		return false, BudgetScopeNone
+	}
+	counts, found, err := redisStore.GetInt64Many(ctx, keys)
+	if err != nil {
+		return false, BudgetScopeNone // fail-open
+	}
+	for i, c := range checks {
+		if found[i] && counts[i] >= int64(c.limit) {
+			return true, c.scope
 		}
 	}
-
 	return false, BudgetScopeNone
 }
 
 // RecordTokenSpend adds consumed tokens to the workspace meter and, when the
-// call can be attributed to a user, that user's meter too. Best-effort.
+// call can be attributed to a user, that user's meter too, and to every extra
+// dimension's: one pipeline, where each meter was a round trip or two.
+// Best-effort.
 func RecordTokenSpend(ctx context.Context, tokens int) {
 	if tokens <= 0 {
 		return
 	}
 	day := budgetDayKey()
+	n := int64(tokens)
 	// Always meter the workspace so the cap and reporting are accurate even
 	// when no per-user cap is set.
-	_, _ = redisStore.IncrByWithTTL(ctx, registry.AITokenBudget, []string{day}, int64(tokens))
+	counters := []redisStore.CounterIncr{{Key: redisStore.CounterKey{Spec: registry.AITokenBudget, Args: []string{day}}, Delta: n}}
+	var scores []redisStore.ScoreIncr
 	if actor := actorFromContext(ctx); actor != "" {
-		_, _ = redisStore.IncrByWithTTL(ctx, registry.AIUserTokenBudget, []string{actor, day}, int64(tokens))
+		counters = append(counters, redisStore.CounterIncr{Key: redisStore.CounterKey{Spec: registry.AIUserTokenBudget, Args: []string{actor, day}}, Delta: n})
 		// Also fold into the per-day leaderboard so an admin can see today's
 		// top consumers without SCANning the per-user counter keyspace.
-		redisStore.ZIncrBy(ctx, registry.AITokenUserLeaderboard, []string{day}, actor, float64(tokens))
+		scores = append(scores, redisStore.ScoreIncr{Key: redisStore.CounterKey{Spec: registry.AITokenUserLeaderboard, Args: []string{day}}, Member: actor, Delta: float64(tokens)})
 	}
 	// Meter every extra dimension (agent, channel, ...) so its cap and usage
 	// breakdown stay accurate even when no cap is set (Limit 0 still meters).
@@ -256,11 +275,12 @@ func RecordTokenSpend(ctx context.Context, tokens int) {
 		if d.ID == "" {
 			continue
 		}
-		_, _ = redisStore.IncrByWithTTL(ctx, d.Spec, []string{d.ID, day}, int64(tokens))
+		counters = append(counters, redisStore.CounterIncr{Key: redisStore.CounterKey{Spec: d.Spec, Args: []string{d.ID, day}}, Delta: n})
 		if d.Leaderboard.Namespace != "" {
-			redisStore.ZIncrBy(ctx, d.Leaderboard, []string{day}, d.ID, float64(tokens))
+			scores = append(scores, redisStore.ScoreIncr{Key: redisStore.CounterKey{Spec: d.Leaderboard, Args: []string{day}}, Member: d.ID, Delta: float64(tokens)})
 		}
 	}
+	redisStore.IncrMany(ctx, counters, scores)
 }
 
 // UserTokenSpend is one user's token spend for the current day, for the admin

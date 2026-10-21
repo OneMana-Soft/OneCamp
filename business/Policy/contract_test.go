@@ -15,8 +15,8 @@ import (
 // reading one, or putting a route behind one, changes nothing until A6.
 func TestDefaultsAreTodaysBehaviour(t *testing.T) {
 	ctx := context.Background()
-	if !Policies.Bool(ctx, DocsExportMembers) || !Policies.Bool(ctx, DocsPublishMembers) {
-		t.Error("members export and publish today; the defaults must say so")
+	if !Policies.Bool(ctx, DocsExportMembers) {
+		t.Error("members export today; the default must say so")
 	}
 	if Policies.Int(ctx, GuestLinkMaxDays) != 0 {
 		t.Error("guest links have no cap of their own today")

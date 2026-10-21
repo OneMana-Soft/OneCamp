@@ -17,7 +17,7 @@ import (
 func Notices(w http.ResponseWriter, r *http.Request) {
 	me, ok := userModels.FromContext(r.Context())
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	got, err := noticeBusiness.For(r.Context(), noticeBusiness.Person{
@@ -38,7 +38,7 @@ func Notices(w http.ResponseWriter, r *http.Request) {
 func DismissNotice(w http.ResponseWriter, r *http.Request) {
 	me, ok := userModels.FromContext(r.Context())
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	err := noticeBusiness.Dismiss(r.Context(), me.UserPostgresInfo.Id, chi.URLParam(r, "key"))

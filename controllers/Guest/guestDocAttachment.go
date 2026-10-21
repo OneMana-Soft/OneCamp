@@ -69,6 +69,12 @@ func guestAttachment(kind, srcKey, name string) http.HandlerFunc {
 			notAvailable(w)
 			return
 		}
+		if guestBusiness.ServedAsPage(grant) {
+			// A doc's view link shows its pictures through its page alone
+			// (/public/d/<token>/files/...), behind its password if it has one.
+			notAvailable(w)
+			return
+		}
 		url, err := guestAttachmentURL(ctx, att.ObjKey)
 		if err != nil {
 			guestReadFailed(w, r, name, err, "")

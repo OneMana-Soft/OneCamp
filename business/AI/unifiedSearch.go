@@ -195,6 +195,20 @@ func UnifiedSearch(ctx context.Context, userInfo *userModels.UserInfo, query str
 		})
 	}
 
+	// What the workspace hits connect to, one step along the work graph
+	// (DG7), as the asker may see it: after the fan-out, because it starts
+	// from the workspace's hits, and waited on for at most 800 ms.
+	var workspace []UnifiedHit
+	for _, g := range resp.Groups {
+		if g.Source == UnifiedSourceWorkspace {
+			workspace = g.Hits
+			break
+		}
+	}
+	if hits := connectedHits(ctx, userInfo, workspace); len(hits) > 0 {
+		resp.Groups = append(resp.Groups, UnifiedSearchGroup{Source: UnifiedSourceConnected, Label: "Connected", Connected: true, Hits: hits})
+	}
+
 	// Cache the assembled response (best-effort; nil Redis is a no-op).
 	_ = redisStore.SetJSON(ctx, registry.AIUnifiedSearch, cacheArgs, resp)
 	return resp, nil

@@ -21,6 +21,11 @@ import (
 // as NDJSON in the domain layer, so it would otherwise be the one way around the
 // guard.
 func BulkCreateInOpenSearch(bulkCreateString string) (err error) {
+	// Search not connected (a tool, a test): say so, rather than panic in the
+	// caller's goroutine, as the single-document writes do.
+	if opensearchInit.OpenSearchClient == nil {
+		return errors.New("search is not connected")
+	}
 
 	_, err = opensearchInit.OpenSearchClient.Bulk(
 		context.Background(),

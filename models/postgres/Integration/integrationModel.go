@@ -150,72 +150,34 @@ func DeleteIntegration(query string, entityType string, entityId uuid.UUID, prov
 	return nil
 }
 
-func UpdateTaskSyncEnabled(query string, enabled bool, updatedAt time.Time, entityType string, entityId uuid.UUID, provider string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		enabled,
-		updatedAt,
-		entityType,
-		entityId,
-		provider,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/UpdateTaskSyncEnabled Failed to update task sync enabled err: %+v", err)
-		return err
-	}
-	return nil
-}
-
-func UpdateIntegrationToken(query string, accessToken *string, refreshToken *string, expiresAt *time.Time, updatedAt time.Time, entityType string, entityId uuid.UUID, provider string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		accessToken,
-		refreshToken,
-		expiresAt,
-		updatedAt,
-		entityType,
-		entityId,
-		provider,
-	)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/UpdateIntegrationToken Failed to update integration token err: %+v", err)
-		return err
-	}
-	return nil
-}
-
-// GetIntegrationMetadataByGitHubLogin finds integration metadata matching a GitHub login.
-func GetIntegrationMetadataByGitHubLogin(query string, githubLogin string) (*string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var metadataStr *string
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, "%"+githubLogin+"%").Scan(&metadataStr)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+// ScanIntegration reads one integrations row in the order domain/Integration
+// selects it.
+func ScanIntegration(row interface{ Scan(dest ...any) error }) (*Integration, error) {
+	var integration Integration
+	var accessToken, refreshToken, syncToken, webhookUrl, metadata sql.NullString
+	var expiresAt sql.NullTime
+	if err := row.Scan(&integration.Id, &integration.EntityType, &integration.EntityId, &integration.Provider,
+		&accessToken, &refreshToken, &syncToken, &webhookUrl, &metadata, &expiresAt,
+		&integration.TaskSyncEnabled, &integration.CreatedAt, &integration.UpdatedAt); err != nil {
 		return nil, err
 	}
-	return metadataStr, nil
-}
-
-// GetIntegrationMetadataByEntityID finds integration metadata by entity ID.
-func GetIntegrationMetadataByEntityID(query string, entityId uuid.UUID) (*string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var metadataStr *string
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, entityId).Scan(&metadataStr)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, err
+	if accessToken.Valid {
+		integration.AccessToken = &accessToken.String
 	}
-	return metadataStr, nil
+	if refreshToken.Valid {
+		integration.RefreshToken = &refreshToken.String
+	}
+	if syncToken.Valid {
+		integration.SyncToken = &syncToken.String
+	}
+	if webhookUrl.Valid {
+		integration.WebhookUrl = &webhookUrl.String
+	}
+	if metadata.Valid {
+		integration.Metadata = &metadata.String
+	}
+	if expiresAt.Valid {
+		integration.ExpiresAt = &expiresAt.Time
+	}
+	return &integration, nil
 }

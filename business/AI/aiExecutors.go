@@ -17,6 +17,8 @@ import (
 	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
 	savedItemBusiness "github.com/akashc777/OneCamp/business/SavedItem"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
+	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
@@ -63,6 +65,10 @@ func RegisterToolExecutors() {
 	ai.RegisterExecutor("run_analysis", executeRunAnalysis)
 	RegisterSearchExecutors()
 	ai.RegisterExecutor("list_docs", executeListDocs)
+
+	// The work graph: what a thing is connected to, and how two connect.
+	ai.RegisterExecutor("related_items", executeRelatedItems)
+	ai.RegisterExecutor("how_connected", executeHowConnected)
 
 	// Tables (first-class structured data): list / read / create row / update row.
 	registerTableExecutors()
@@ -235,6 +241,9 @@ func executeSendDM(ctx context.Context, action ai.ProposedAction, userUUID strin
 	}
 
 	mentionsDgraphUsersList, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, mentions)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read the people mentioned: %w", err)
+	}
 	if len(mentionsDgraphUsersList) != len(mentions) {
 		return "", nil, fmt.Errorf("invalid users in mentions")
 	}
@@ -303,6 +312,9 @@ func executeSendGroupChat(ctx context.Context, action ai.ProposedAction, userUUI
 	}
 
 	mentionsDgraphUsersList, err := userBusiness.GetDgraphUserInfoByUUIDs(ctx, mentions)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to read the people mentioned: %w", err)
+	}
 	if len(mentionsDgraphUsersList) != len(mentions) {
 		return "", nil, fmt.Errorf("invalid users in mentions")
 	}
@@ -418,18 +430,14 @@ func executeCreateTask(ctx context.Context, action ai.ProposedAction, userUUID s
 }
 
 // normalizeTaskPriority maps whatever the model emits for a task priority onto
-// OneCamp's three valid values (low/medium/high), absorbing common synonyms
-// (urgent, p1, ...) so a hallucinated priority can never reach the task layer.
-// Unknown/empty values default to medium.
+// a priority a task can have (dgraphStruct.TaskPriorityFromWords), so a
+// hallucinated priority can never reach the task layer. Unknown and empty
+// values are medium.
 func normalizeTaskPriority(p string) string {
-	switch strings.ToLower(strings.TrimSpace(p)) {
-	case "high", "urgent", "critical", "highest", "very high", "p0", "p1":
-		return dgraphStruct.TASK_PRIORITY_HIGH
-	case "low", "lowest", "very low", "minor", "p4", "p5":
-		return dgraphStruct.TASK_PRIORITY_LOW
-	default:
-		return dgraphStruct.TASK_PRIORITY_MEDIUM
+	if got, ok := taskPriority.FromWords(p); ok && got != "" {
+		return got
 	}
+	return dgraphStruct.TASK_PRIORITY_MEDIUM
 }
 
 // resolveAssigneeRef turns an assignee reference the model supplied - a user
@@ -551,14 +559,19 @@ func loadTaskForUpdate(ctx context.Context, taskUUIDStr, userUUID string) (*user
 	if strings.TrimSpace(taskUUIDStr) == "" {
 		return nil, nil, fmt.Errorf("task_uuid is required")
 	}
-	if _, err := uuid.Parse(taskUUIDStr); err != nil {
-		return nil, nil, fmt.Errorf("invalid task UUID")
+	// The task's id, or its key ("Q4-12").
+	taskID, err := taskKeys.Ref(ctx, taskUUIDStr)
+	if errors.Is(err, taskKeys.ErrNoTask) {
+		return nil, nil, fmt.Errorf("task not found or you don't have access")
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("couldn't look the task up: %w", err)
 	}
 	userInfo, err := getUserInfoForExecutor(ctx, userUUID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to look up user: %w", err)
 	}
-	dgraphTask, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskUUIDStr, userInfo.UserDgraphInfo.Uid)
+	dgraphTask, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, taskID.String(), userInfo.UserDgraphInfo.Uid)
 	if err != nil || dgraphTask == nil {
 		return nil, nil, fmt.Errorf("task not found or you don't have access")
 	}
@@ -585,7 +598,8 @@ func executeUpdateTaskStatus(ctx context.Context, action ai.ProposedAction, user
 	if err != nil {
 		return "", nil, err
 	}
-	taskUUID, _ := uuid.Parse(taskUUIDStr)
+	taskUUID, _ := uuid.Parse(dgraphTask.Uuid)
+	taskUUIDStr = dgraphTask.Uuid
 
 	if err := taskBusiness.UpdateTaskStatusByTaskUUID(ctx, taskUUID, status, dgraphTask, &userInfo.UserDgraphInfo); err != nil {
 		if errors.Is(err, taskStatusBusiness.ErrUnknownStatus) {
@@ -619,7 +633,8 @@ func executeAssignTask(ctx context.Context, action ai.ProposedAction, userUUID s
 	if err != nil {
 		return "", nil, err
 	}
-	taskUUID, _ := uuid.Parse(taskUUIDStr)
+	taskUUID, _ := uuid.Parse(dgraphTask.Uuid)
+	taskUUIDStr = dgraphTask.Uuid
 
 	// Resolve the assignee from a uuid or a name (empty clears the assignee).
 	newAssignee, err := resolveAssigneeRef(ctx, userUUID, action.Params["assignee_uuid"], false)
@@ -673,7 +688,8 @@ func executeSetTaskDueDate(ctx context.Context, action ai.ProposedAction, userUU
 	if err != nil {
 		return "", nil, err
 	}
-	taskUUID, _ := uuid.Parse(taskUUIDStr)
+	taskUUID, _ := uuid.Parse(dgraphTask.Uuid)
+	taskUUIDStr = dgraphTask.Uuid
 
 	if err := taskBusiness.UpdateTaskDueDateByTaskUUID(ctx, taskUUID, &due, dgraphTask, &userInfo.UserDgraphInfo); err != nil {
 		return "", nil, fmt.Errorf("failed to update due date: %w", err)
@@ -945,25 +961,11 @@ func getUserInfoForExecutor(ctx context.Context, userUUID string) (*userModels.U
 		return nil, fmt.Errorf("invalid user UUID: %w", err)
 	}
 
-	// Get postgres user info
-	postgresUser, err := userDomain.GetActiveUserWithAdminFlagByUserUUID(ctx, parsedUUID)
+	u, err := userDomain.ActorByUUID(ctx, parsedUUID)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get postgres user: %w", err)
+		return nil, fmt.Errorf("user not found: %s: %w", userUUID, err)
 	}
-	if postgresUser == nil {
-		return nil, fmt.Errorf("user not found in postgres: %s", userUUID)
-	}
-
-	// Get dgraph user info
-	dgraphUser, err := getDgraphUserForExecutor(ctx, userUUID)
-	if err != nil {
-		return nil, err
-	}
-
-	return &userModels.UserInfo{
-		UserPostgresInfo: *postgresUser,
-		UserDgraphInfo:   *dgraphUser,
-	}, nil
+	return u, nil
 }
 
 // getDgraphUserForExecutor looks up a user's basic DGraph info by UUID.

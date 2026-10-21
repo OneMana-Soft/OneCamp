@@ -23,6 +23,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -45,13 +46,22 @@ import (
 	"github.com/akashc777/OneCamp/tests/integration"
 )
 
+var threadsFile = regexp.MustCompile(`^[0-9]+_threads\.`)
+
 // threadsMigration is the threads migration's file for dir ("up" or "down"),
 // found by name: it is reserved as 210 and the integrator renumbers it at
 // merge, which must not break this test.
 func threadsMigration(t *testing.T, dir string) (name, sql string) {
 	t.Helper()
 	_, here, _, _ := runtime.Caller(0)
-	matches, _ := filepath.Glob(filepath.Join(filepath.Dir(here), "..", "..", "migrations", "*_threads."+dir+".sql"))
+	all, _ := filepath.Glob(filepath.Join(filepath.Dir(here), "..", "..", "migrations", "*_threads."+dir+".sql"))
+	// Only <n>_threads: chat's own threads (<n>_chat_threads) end the same way.
+	var matches []string
+	for _, m := range all {
+		if threadsFile.MatchString(filepath.Base(m)) {
+			matches = append(matches, m)
+		}
+	}
 	if len(matches) != 1 {
 		t.Fatalf("want one threads %s migration, found %v", dir, matches)
 	}
@@ -292,7 +302,14 @@ func TestThreads(t *testing.T) {
 	}
 
 	var reply threadBusiness.Comment
-	file := map[string]any{"uid": "0x1", "attachment_uuid": uuid.NewString(), "attachment_file_name": "plan.pdf",
+	// A file bob uploaded to the doc: a comment lists only its writer's own
+	// uploads to its place (business/Attachment OwnFiles).
+	fileID := uuid.NewString()
+	if _, err := env.PG.Exec(`INSERT INTO attachments (id, obj_key, src_key, src_value, created_by) VALUES ($1, 'docComment/plan.pdf', 'doc', $2, $3)`,
+		fileID, docID, people["bob"]); err != nil {
+		t.Fatal(err)
+	}
+	file := map[string]any{"uid": "0x1", "attachment_uuid": fileID, "attachment_file_name": "plan.pdf",
 		"attachment_obj_key": "docComment/plan.pdf", "attachment_type": "file"}
 	if code := call("bob", http.MethodPost, "/threads/"+made.ID+"/replies",
 		map[string]any{"body": "<p>Yes, Thursday.</p>", "attachments": []any{file}}, &reply); code != http.StatusOK {

@@ -51,13 +51,13 @@ func projectMemoryToGraphAsync(in memoryModels.UpsertInput, id string) {
 		projectUUID = in.ProjectUUID.String()
 	}
 
-	go func() {
+	helpers.GoSafeNamed("business/AI/memoryGraph:projectMemoryToGraphAsync", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := memDgraph.UpsertMemoryItem(ctx, node, ownerUUID, channelUUID, projectUUID); err != nil {
 			helpers.LogErrorWithContext(ctx, "memory graph projection failed for %s: %v", id, err)
 		}
-	}()
+	})
 }
 
 // updateGraphMemoryStatusAsync syncs a memory item's status into the Dgraph
@@ -67,13 +67,13 @@ func updateGraphMemoryStatusAsync(id, status string) {
 	if id == "" || status == "" {
 		return
 	}
-	go func() {
+	helpers.GoSafeNamed("business/AI/memoryGraph:updateGraphMemoryStatusAsync", func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := memDgraph.SetMemoryItemStatus(ctx, id, status); err != nil {
 			helpers.LogErrorWithContext(ctx, "memory graph status sync failed for %s: %v", id, err)
 		}
-	}()
+	})
 }
 
 // formatGraphOwnedItemsForLLM renders graph-resolved owned open items into a

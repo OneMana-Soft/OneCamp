@@ -125,22 +125,26 @@ func cancelOpenAgentRunsForSource(ctx context.Context, sourceType, sourceID stri
 		helpers.LogErrorWithContext(ctx, "agentTriggers: list tasks for cancel: %v", err)
 		return
 	}
+	var open []uuid.UUID
 	for _, t := range tasks {
-		open := false
 		for _, s := range model.OpenTaskStates {
 			if t.State == s {
-				open = true
+				open = append(open, t.Id)
 				break
 			}
 		}
-		if !open {
-			continue
+	}
+	// One statement for all of them, where it was one a job.
+	done, cerr := model.RequestAgentTasksCancelByIDs(ctx, open, by)
+	if cerr != nil {
+		helpers.LogErrorWithContext(ctx, "agentTriggers: request cancel for %d tasks: %v", len(open), cerr)
+		return
+	}
+	for _, c := range done {
+		status := model.CancelRequested
+		if c.State == model.TaskCancelled {
+			status = model.CancelStopped
 		}
-		status, cerr := model.RequestAgentTaskCancel(ctx, t.Id, by)
-		if cerr != nil {
-			helpers.LogErrorWithContext(ctx, "agentTriggers: request cancel for task %s: %v", t.Id, cerr)
-			continue
-		}
-		helpers.LogInfoWithContext(ctx, "agentTriggers: dismissed task %s (status=%s)", t.Id, status)
+		helpers.LogInfoWithContext(ctx, "agentTriggers: dismissed task %s (status=%s)", c.ID, status)
 	}
 }

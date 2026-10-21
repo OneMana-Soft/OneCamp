@@ -36,6 +36,7 @@ import (
 	boardController "github.com/akashc777/OneCamp/controllers/Board"
 	docController "github.com/akashc777/OneCamp/controllers/Doc"
 	userController "github.com/akashc777/OneCamp/controllers/User"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	customMiddleware "github.com/akashc777/OneCamp/middleware"
@@ -75,6 +76,12 @@ func TestDemoVisitorSeesNoOtherEmails(t *testing.T) {
 	// Since 11 Oct the visitor's lists leave real accounts out altogether, not
 	// only their addresses: their names must not appear either.
 	otherNames := []string{"Owner Person", "ownerperson", "Member Person", "memberperson"}
+	// Saved raw, as before search names: the start's backfill gives them
+	// theirs, or a search starting from them finds nobody and every "not
+	// shown" below holds for no reason.
+	if _, err := userDomain.BackfillSearchNames(ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	r := chi.NewRouter()
 	r.Use(customMiddleware.VerifyAuth)

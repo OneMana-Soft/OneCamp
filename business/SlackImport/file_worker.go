@@ -1,6 +1,7 @@
 package business
 
 import (
+	"archive/zip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -103,7 +104,7 @@ const (
 //   - parent never imported (e.g., system msg)   → file uploaded, attachment row written
 //     with channel-level src as fallback,
 //     warning logged
-func processFileChunk(ctx context.Context, chunk *importModels.Chunk,
+func processFileChunk(ctx context.Context, src fileSource, chunk *importModels.Chunk,
 	importingUser uuid.UUID, maxBytes int64) error {
 
 	if chunk.ObjectKey == nil {
@@ -137,68 +138,11 @@ func processFileChunk(ctx context.Context, chunk *importModels.Chunk,
 		return importModels.FinishChunk(ctx, chunk.Id, 0, nil)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, meta.URL, nil)
-	if err != nil {
+	body, served, finished, err := src.open(ctx, chunk, meta)
+	if finished || err != nil {
 		return err
 	}
-
-	// Pre-flight SSRF guard. The transport-level guard catches
-	// DNS-rebinding at dial time, but ValidateOutboundURL also rejects
-	// HTTP-only and bare-IP URLs early so a bad export fails fast.
-	if _, err := helpers.ValidateOutboundURL(meta.URL, false); err != nil {
-		importModels.LogImportError(ctx, chunk.ImportId, &chunk.Id,
-			importModels.EntityFile, meta.FileID,
-			importModels.SeverityWarning, "FILE_BLOCKED_URL",
-			fmt.Sprintf("Slack file URL rejected by SSRF guard: %v", err),
-			mustMarshal(map[string]interface{}{"url": meta.URL}))
-		ph := uuid.New()
-		_ = importModels.UpsertIdMapping(ctx, chunk.ImportId, importModels.EntityFile, meta.FileID,
-			ph, nil, mustMarshal(map[string]interface{}{
-				"placeholder": true, "reason": "ssrf_blocked",
-			}))
-		return importModels.FinishChunk(ctx, chunk.Id, 0, nil)
-	}
-
-	resp, err := slackHTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("slack file fetch: %w", err)
-	}
-	defer resp.Body.Close()
-
-	switch {
-	case resp.StatusCode == http.StatusNotFound, resp.StatusCode == http.StatusGone:
-		importModels.LogImportError(ctx, chunk.ImportId, &chunk.Id,
-			importModels.EntityFile, meta.FileID,
-			importModels.SeverityWarning, "FILE_GONE",
-			fmt.Sprintf("Slack returned %d for %s; placeholder created", resp.StatusCode, meta.Name),
-			mustMarshal(map[string]interface{}{"url": meta.URL}))
-		// Map to a placeholder uuid so re-runs don't re-fetch.
-		ph := uuid.New()
-		_ = importModels.UpsertIdMapping(ctx, chunk.ImportId, importModels.EntityFile, meta.FileID,
-			ph, nil, mustMarshal(map[string]interface{}{
-				"placeholder": true, "status_code": resp.StatusCode,
-			}))
-		return importModels.FinishChunk(ctx, chunk.Id, 0, nil)
-
-	case resp.StatusCode == http.StatusTooManyRequests:
-		// Respect Retry-After if present, else default 5s.
-		retryAfter := 5 * time.Second
-		if v := resp.Header.Get("Retry-After"); v != "" {
-			if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-				retryAfter = time.Duration(secs) * time.Second
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(retryAfter):
-		}
-		_ = importModels.ResetChunkForRetry(ctx, chunk.Id, "rate limited; retry-after honoured")
-		return errReaperOnly
-
-	case resp.StatusCode >= 400:
-		return fmt.Errorf("slack returned %d", resp.StatusCode)
-	}
+	defer body.Close()
 
 	// MinIO key shape MUST match UploadUserFile so GetFileURLByObjectName
 	// (which prepends "userFileUpload/" to whatever's in attachments.obj_key)
@@ -211,7 +155,7 @@ func processFileChunk(ctx context.Context, chunk *importModels.Chunk,
 	objKey := fmt.Sprintf("%s/%s_%s", importingUser, attachmentUUID, sanitizedName)
 	fullObjName := fmt.Sprintf("%s/%s", "userFileUpload", objKey)
 
-	contentType := resp.Header.Get("Content-Type")
+	contentType := served
 	if contentType == "" {
 		contentType = helpers.GuessContentTypeFromName(meta.Name)
 	}
@@ -228,14 +172,14 @@ func processFileChunk(ctx context.Context, chunk *importModels.Chunk,
 
 	// Stream-cap reader to maxBytes. If the upstream lies about size,
 	// we cut off at the cap and mark a warning.
-	body := io.LimitReader(resp.Body, maxBytes+1)
+	limited := io.LimitReader(body, maxBytes+1)
 
 	// AV scan in parallel with the upload. We tee the body into both
 	// MinIO (via PutObject on the pipe reader) and the AV scanner
 	// (via the pipe's other branch) so we only read the network
 	// once. If the scanner returns Infected we cancel the MinIO
 	// write and refuse to map the attachment.
-	uploadInfo, scanResult, err := uploadWithAVScan(ctx, bucketName, fullObjName, body,
+	uploadInfo, scanResult, err := uploadWithAVScan(ctx, bucketName, fullObjName, limited,
 		contentType, disposition)
 	if err != nil {
 		return fmt.Errorf("minio put: %w", err)
@@ -253,12 +197,7 @@ func processFileChunk(ctx context.Context, chunk *importModels.Chunk,
 			mustMarshal(map[string]interface{}{
 				"signature": scanResult.Signature, "name": meta.Name, "url": meta.URL,
 			}))
-		ph := uuid.New()
-		_ = importModels.UpsertIdMapping(ctx, chunk.ImportId, importModels.EntityFile, meta.FileID,
-			ph, nil, mustMarshal(map[string]interface{}{
-				"placeholder": true, "reason": "av_infected", "signature": scanResult.Signature,
-			}))
-		return importModels.FinishChunk(ctx, chunk.Id, 0, nil)
+		return filePlaceholder(ctx, chunk, meta, map[string]interface{}{"reason": "av_infected", "signature": scanResult.Signature})
 	}
 
 	if uploadInfo.Size > maxBytes {
@@ -504,7 +443,7 @@ func retrofitFileToParent(ctx context.Context, p *fileParentInfo, att *dgraphStr
 			AttachmentCreatedAt:      safeUnix(att.CreatedAt),
 			AttachmentDeletedAt:      nil,
 		}
-		go attachmentDomain.UpsertAttachmentInOpenSearchSafe(osAttachment)
+		helpers.GoSafeNamed("attachmentDomain.UpsertAttachmentInOpenSearchSafe", func() { attachmentDomain.UpsertAttachmentInOpenSearchSafe(osAttachment) })
 	case "chat":
 		// Dgraph: append MediaObj edge from Chat → Attachment.
 		if err := chatDomain.AddAttachmentToChatInDgraph(ctx, p.ParentUUID.String(), att); err != nil {
@@ -530,7 +469,7 @@ func retrofitFileToParent(ctx context.Context, p *fileParentInfo, att *dgraphStr
 			AttachmentCreatedAt:            safeUnix(att.CreatedAt),
 			AttachmentDeletedAt:            nil,
 		}
-		go attachmentDomain.UpsertAttachmentInOpenSearchSafe(osAttachment)
+		helpers.GoSafeNamed("attachmentDomain.UpsertAttachmentInOpenSearchSafe", func() { attachmentDomain.UpsertAttachmentInOpenSearchSafe(osAttachment) })
 	default:
 		// Channel-level attachment without a post edge. Just index for
 		// search; the Dgraph node already exists.
@@ -543,7 +482,7 @@ func retrofitFileToParent(ctx context.Context, p *fileParentInfo, att *dgraphStr
 			AttachmentCreatedAt:   safeUnix(att.CreatedAt),
 			AttachmentDeletedAt:   nil,
 		}
-		go attachmentDomain.UpsertAttachmentInOpenSearchSafe(osAttachment)
+		helpers.GoSafeNamed("attachmentDomain.UpsertAttachmentInOpenSearchSafe", func() { attachmentDomain.UpsertAttachmentInOpenSearchSafe(osAttachment) })
 	}
 	return nil
 }
@@ -557,6 +496,108 @@ type fileChunkMeta struct {
 	Name     string `json:"name"`
 	Size     int64  `json:"size"`
 	ParentTs string `json:"parent_ts"`
+}
+
+// fileSource is where the file stage reads a file's bytes: from the export,
+// when it carries the file (ParsedExport.Uploads), or from the file's link.
+// An export read through Slack's API (api_reader.go) carries every file its
+// reader could read, and its links open only with the token the reader held
+// for the read: a file it left out isn't fetched, since its link answers
+// anyone else with Slack's sign-in page.
+type fileSource struct {
+	arc       *Archive
+	uploads   map[string]*zip.File
+	linksOpen bool
+}
+
+// open is the file's bytes and the type they were served as ("" when there
+// was none to go by); finished is a chunk it has already finished (a
+// placeholder, or a retry), with err the chunk's answer.
+func (s fileSource) open(ctx context.Context, chunk *importModels.Chunk, meta *fileChunkMeta) (io.ReadCloser, string, bool, error) {
+	if zf := s.uploads[meta.FileID]; zf != nil {
+		rc, err := s.arc.OpenEntry(ctx, zf)
+		if err != nil {
+			return nil, "", false, fmt.Errorf("open %s in the export: %w", zf.Name, err)
+		}
+		return rc, "", false, nil
+	}
+	if !s.linksOpen {
+		importModels.LogImportError(ctx, chunk.ImportId, &chunk.Id,
+			importModels.EntityFile, meta.FileID,
+			importModels.SeverityWarning, "FILE_NOT_READ",
+			fmt.Sprintf("%s wasn't read from Slack with its conversation; placeholder created", meta.Name), nil)
+		return nil, "", true, filePlaceholder(ctx, chunk, meta, map[string]interface{}{"reason": "not_read"})
+	}
+	return fetchFileLink(ctx, chunk, meta)
+}
+
+// filePlaceholder maps the file to a placeholder, so a re-run doesn't try it
+// again, and finishes its chunk with nothing imported; why says what became
+// of it.
+func filePlaceholder(ctx context.Context, chunk *importModels.Chunk, meta *fileChunkMeta, why map[string]interface{}) error {
+	why["placeholder"] = true
+	_ = importModels.UpsertIdMapping(ctx, chunk.ImportId, importModels.EntityFile, meta.FileID,
+		uuid.New(), nil, mustMarshal(why))
+	return importModels.FinishChunk(ctx, chunk.Id, 0, nil)
+}
+
+// fetchFileLink is the file at its link: the body, open, and the type it was
+// served as; or a chunk finished: a placeholder for a link refused or gone, a
+// retry for a rate limit.
+func fetchFileLink(ctx context.Context, chunk *importModels.Chunk, meta *fileChunkMeta) (io.ReadCloser, string, bool, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, meta.URL, nil)
+	if err != nil {
+		return nil, "", false, err
+	}
+
+	// Pre-flight SSRF guard. The transport-level guard catches
+	// DNS-rebinding at dial time, but ValidateOutboundURL also rejects
+	// HTTP-only and bare-IP URLs early so a bad export fails fast.
+	if _, err := helpers.ValidateOutboundURL(meta.URL, false); err != nil {
+		importModels.LogImportError(ctx, chunk.ImportId, &chunk.Id,
+			importModels.EntityFile, meta.FileID,
+			importModels.SeverityWarning, "FILE_BLOCKED_URL",
+			fmt.Sprintf("Slack file URL rejected by SSRF guard: %v", err),
+			mustMarshal(map[string]interface{}{"url": meta.URL}))
+		return nil, "", true, filePlaceholder(ctx, chunk, meta, map[string]interface{}{"reason": "ssrf_blocked"})
+	}
+
+	resp, err := slackHTTPClient.Do(req)
+	if err != nil {
+		return nil, "", false, fmt.Errorf("slack file fetch: %w", err)
+	}
+	if resp.StatusCode < 400 {
+		return resp.Body, resp.Header.Get("Content-Type"), false, nil
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNotFound, http.StatusGone:
+		importModels.LogImportError(ctx, chunk.ImportId, &chunk.Id,
+			importModels.EntityFile, meta.FileID,
+			importModels.SeverityWarning, "FILE_GONE",
+			fmt.Sprintf("Slack returned %d for %s; placeholder created", resp.StatusCode, meta.Name),
+			mustMarshal(map[string]interface{}{"url": meta.URL}))
+		// Map to a placeholder uuid so re-runs don't re-fetch.
+		return nil, "", true, filePlaceholder(ctx, chunk, meta, map[string]interface{}{"status_code": resp.StatusCode})
+
+	case http.StatusTooManyRequests:
+		// Respect Retry-After if present, else default 5s.
+		retryAfter := 5 * time.Second
+		if v := resp.Header.Get("Retry-After"); v != "" {
+			if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
+				retryAfter = time.Duration(secs) * time.Second
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return nil, "", true, ctx.Err()
+		case <-time.After(retryAfter):
+		}
+		_ = importModels.ResetChunkForRetry(ctx, chunk.Id, "rate limited; retry-after honoured")
+		return nil, "", true, errReaperOnly
+	}
+	return nil, "", false, fmt.Errorf("slack returned %d", resp.StatusCode)
 }
 
 // parseFileChunkMeta inverts the encoding used in buildFileChunk.

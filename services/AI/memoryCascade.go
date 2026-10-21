@@ -154,17 +154,10 @@ func DeleteMemoryBySourceAsync(sourceType, sourceUUID string) {
 			helpers.LogErrorWithContext(ctx, "memory cascade delete (%s:%s) failed: %v", sourceType, sourceUUID, err)
 			return
 		}
-		for _, id := range ids {
-			// Drop the OpenSearch semantic projection.
-			if derr := DeleteEmbedding(ctx, "memory", id.String()); derr != nil {
-				helpers.LogErrorWithContext(ctx, "memory cascade: drop embedding %s failed: %v", id, derr)
-			}
-			// Drop the Dgraph GraphRAG projection (best-effort; graph is an
-			// index, not the source of truth).
-			if derr := memDgraph.DeleteMemoryItem(ctx, id.String()); derr != nil {
-				helpers.LogErrorWithContext(ctx, "memory cascade: drop graph node %s failed: %v", id, derr)
-			}
-		}
+		// Drop the OpenSearch semantic and Dgraph GraphRAG projections, one
+		// request to each (best-effort; they are indexes, not the source of
+		// truth).
+		dropMemoryProjections(ctx, ids)
 		if len(ids) > 0 {
 			helpers.LogInfoWithContext(ctx, "memory cascade: removed %d item(s) for %s:%s", len(ids), sourceType, sourceUUID)
 		}
@@ -216,14 +209,24 @@ func RestoreMemoryByScope(ctx context.Context, scope memoryModels.ScopeRef) int 
 // set of memory ids. Best-effort per id so one failure never stalls the
 // rest. Shared by the source- and scope-level delete/archive cascades.
 func dropMemoryProjections(ctx context.Context, ids []uuid.UUID) {
-	for _, id := range ids {
-		if derr := DeleteEmbedding(ctx, "memory", id.String()); derr != nil {
-			helpers.LogErrorWithContext(ctx, "memory cascade: drop embedding %s failed: %v", id, derr)
-		}
-		if derr := memDgraph.DeleteMemoryItem(ctx, id.String()); derr != nil {
-			helpers.LogErrorWithContext(ctx, "memory cascade: drop graph node %s failed: %v", id, derr)
-		}
+	if err := dropMemoryProjectionsMany(ctx, uuidStrings(ids)); err != nil {
+		helpers.LogErrorWithContext(ctx, "memory cascade: drop %d projections failed: %v", len(ids), err)
 	}
+}
+
+// DeleteMemoryProjectionsManyAsync is DeleteMemoryProjectionsAsync for
+// several items, in one goroutine and one request to each store.
+func DeleteMemoryProjectionsManyAsync(memIDs []string) {
+	if len(memIDs) == 0 {
+		return
+	}
+	helpers.GoSafeNamed("ai.memory-forget-items", func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := dropMemoryProjectionsMany(ctx, memIDs); err != nil {
+			helpers.LogErrorWithContext(ctx, "memory projection: drop %d items failed: %v", len(memIDs), err)
+		}
+	})
 }
 
 // it reversibly soft-deletes (reason='archive') every memory item captured
@@ -244,14 +247,7 @@ func ArchiveMemoryBySources(ctx context.Context, sourceType string, sourceUUIDs 
 		helpers.LogErrorWithContext(ctx, "memory archive cascade (%s, %d sources) failed: %v", sourceType, len(sourceUUIDs), err)
 		return 0
 	}
-	for _, id := range ids {
-		if derr := DeleteEmbedding(ctx, "memory", id.String()); derr != nil {
-			helpers.LogErrorWithContext(ctx, "memory archive cascade: drop embedding %s failed: %v", id, derr)
-		}
-		if derr := memDgraph.DeleteMemoryItem(ctx, id.String()); derr != nil {
-			helpers.LogErrorWithContext(ctx, "memory archive cascade: drop graph node %s failed: %v", id, derr)
-		}
-	}
+	dropMemoryProjections(ctx, ids)
 	if len(ids) > 0 {
 		helpers.LogInfoWithContext(ctx, "memory archive cascade: removed %d item(s) for %d %s source(s)", len(ids), len(sourceUUIDs), sourceType)
 	}

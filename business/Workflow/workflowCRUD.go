@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 
+	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	"github.com/akashc777/OneCamp/helpers"
 	workflowModel "github.com/akashc777/OneCamp/models/postgres/Workflow"
 	"github.com/google/uuid"
@@ -35,6 +36,13 @@ type WorkflowInput struct {
 	Keywords      []string
 	MatchType     string // any | all
 	Actions       []WorkflowAction
+	// A project rule's project ("" for a workspace workflow); set by the
+	// project's routes, never by the body.
+	ProjectID string
+	// Conditions are read against the task when a task rule runs; ElseActions
+	// run when they don't hold (task rules only).
+	Conditions  Conditions
+	ElseActions []WorkflowAction
 }
 
 // validate normalizes and checks an input, returning the channel UUID (or nil)
@@ -46,6 +54,18 @@ type validatedWorkflow struct {
 	botName           *string
 	keywordsJSON      string
 	actionsJSON       string
+	elseActionsJSON   string
+	conditionsJSON    string
+	projectID         *uuid.UUID
+}
+
+// fields is the row a validated input saves.
+func (v *validatedWorkflow) fields(in *WorkflowInput) workflowModel.Fields {
+	return workflowModel.Fields{
+		Name: in.Name, IsActive: in.IsActive, TriggerType: v.triggerType, TriggerConfigJSON: v.triggerConfigJSON,
+		BotName: v.botName, ChannelId: v.channelID, KeywordsJSON: v.keywordsJSON, MatchType: in.MatchType,
+		ActionsJSON: v.actionsJSON, ProjectId: v.projectID, ConditionsJSON: v.conditionsJSON, ElseActionsJSON: v.elseActionsJSON,
+	}
 }
 
 // validate normalizes and checks an input, returning the persist-ready form.
@@ -126,80 +146,128 @@ func validate(in *WorkflowInput) (*validatedWorkflow, error) {
 	}
 
 	// Actions.
+	if strings.TrimSpace(in.ProjectID) != "" {
+		id, perr := uuid.Parse(strings.TrimSpace(in.ProjectID))
+		if perr != nil {
+			return nil, fmt.Errorf("invalid project")
+		}
+		out.projectID = &id
+		if !isTaskTrigger(out.triggerType) {
+			return nil, fmt.Errorf("a project's rules start from something that happens to a task")
+		}
+	}
+
+	task := isTaskTrigger(out.triggerType)
+	if !task && (len(in.Conditions.Items) > 0 || len(in.ElseActions) > 0) {
+		return nil, fmt.Errorf("conditions and an otherwise branch are for rules about tasks")
+	}
+	if err := in.Conditions.validate(); err != nil {
+		return nil, err
+	}
 	if len(in.Actions) == 0 {
 		return nil, fmt.Errorf("at least one action is required")
 	}
-	if len(in.Actions) > MaxActionsPerWorkflow {
-		return nil, fmt.Errorf("too many actions (max %d)", MaxActionsPerWorkflow)
+	limit := MaxActionsPerWorkflow
+	if task {
+		limit = MaxActionsPerBranch
 	}
-	for i := range in.Actions {
-		act := &in.Actions[i]
+	if len(in.Actions) > limit || len(in.ElseActions) > limit {
+		return nil, fmt.Errorf("too many actions (max %d)", limit)
+	}
+	if err := validateActions(in.Actions, out.triggerType); err != nil {
+		return nil, err
+	}
+	if err := validateActions(in.ElseActions, out.triggerType); err != nil {
+		return nil, err
+	}
+
+	kwBytes, _ := json.Marshal(cleanKeywords)
+	actBytes, _ := json.Marshal(in.Actions)
+	elseActions := in.ElseActions
+	if elseActions == nil {
+		elseActions = []WorkflowAction{}
+	}
+	elseBytes, _ := json.Marshal(elseActions)
+	condBytes, _ := json.Marshal(in.Conditions)
+	out.keywordsJSON = string(kwBytes)
+	out.actionsJSON = string(actBytes)
+	out.elseActionsJSON = string(elseBytes)
+	out.conditionsJSON = string(condBytes)
+	return out, nil
+}
+
+// validateActions checks one branch's actions for a trigger, tidying them.
+func validateActions(actions []WorkflowAction, triggerType string) error {
+	for i := range actions {
+		act := &actions[i]
+		if isTaskAction(act.Type) {
+			if !isTaskTrigger(triggerType) {
+				return fmt.Errorf("%s works on the task a rule is about; pick a task trigger", act.Type)
+			}
+			if err := validateTaskAction(act); err != nil {
+				return err
+			}
+			continue
+		}
 		switch act.Type {
 		case ActionReply, ActionReplyEphemeral:
 			act.Text = strings.TrimSpace(act.Text)
 			if act.Text == "" {
-				return nil, fmt.Errorf("reply action requires text")
+				return fmt.Errorf("reply action requires text")
 			}
 			if len(act.Text) > maxReplyLen {
-				return nil, fmt.Errorf("reply text too long (max %d)", maxReplyLen)
+				return fmt.Errorf("reply text too long (max %d)", maxReplyLen)
 			}
 		case ActionCreateTask:
 			act.ProjectID = strings.TrimSpace(act.ProjectID)
 			if act.ProjectID == "" {
-				return nil, fmt.Errorf("create_task action requires project_id")
+				return fmt.Errorf("create_task action requires project_id")
 			}
 			if _, perr := uuid.Parse(act.ProjectID); perr != nil {
-				return nil, fmt.Errorf("create_task action has invalid project_id")
+				return fmt.Errorf("create_task action has invalid project_id")
 			}
 			act.TaskName = strings.TrimSpace(act.TaskName)
 			// Only message_posted carries triggering text to default the task
 			// name from. For other triggers an explicit task name is required.
-			if act.TaskName == "" && out.triggerType != workflowModel.TriggerMessagePosted {
-				return nil, fmt.Errorf("create_task action requires a task name for this trigger")
+			if act.TaskName == "" && triggerType != workflowModel.TriggerMessagePosted {
+				return fmt.Errorf("create_task action requires a task name for this trigger")
 			}
 			act.Priority = strings.ToLower(strings.TrimSpace(act.Priority))
-			switch act.Priority {
-			case "", "low", "medium", "high":
-				// ok (empty → engine defaults to medium)
-			default:
-				return nil, fmt.Errorf("create_task priority must be low, medium, or high")
+			// Empty → the engine defaults to medium.
+			if !taskPriority.IsOrNone(act.Priority) {
+				return fmt.Errorf("create_task priority must be urgent, high, medium or low")
 			}
 		case ActionWarnUser:
 			act.Text = strings.TrimSpace(act.Text)
 			if act.Text == "" {
-				return nil, fmt.Errorf("warn_user action requires text")
+				return fmt.Errorf("warn_user action requires text")
 			}
 			if len(act.Text) > maxReplyLen {
-				return nil, fmt.Errorf("warn_user text too long (max %d)", maxReplyLen)
+				return fmt.Errorf("warn_user text too long (max %d)", maxReplyLen)
 			}
 		case ActionDeleteMessage:
 			// Deletes the triggering message — only the message_posted trigger
 			// carries one. Reject on other triggers so the rule isn't a silent
 			// no-op.
-			if out.triggerType != workflowModel.TriggerMessagePosted {
-				return nil, fmt.Errorf("delete_message is only available for the 'message posted' trigger")
+			if triggerType != workflowModel.TriggerMessagePosted {
+				return fmt.Errorf("delete_message is only available for the 'message posted' trigger")
 			}
 		case ActionFlagToChannel:
 			act.TargetChannelID = strings.TrimSpace(act.TargetChannelID)
 			if act.TargetChannelID == "" {
-				return nil, fmt.Errorf("flag_to_channel action requires a target channel")
+				return fmt.Errorf("flag_to_channel action requires a target channel")
 			}
 			if _, perr := uuid.Parse(act.TargetChannelID); perr != nil {
-				return nil, fmt.Errorf("flag_to_channel action has invalid target channel")
+				return fmt.Errorf("flag_to_channel action has invalid target channel")
 			}
-			if out.triggerType != workflowModel.TriggerMessagePosted {
-				return nil, fmt.Errorf("flag_to_channel is only available for the 'message posted' trigger")
+			if triggerType != workflowModel.TriggerMessagePosted {
+				return fmt.Errorf("flag_to_channel is only available for the 'message posted' trigger")
 			}
 		default:
-			return nil, fmt.Errorf("unknown action type %q", act.Type)
+			return fmt.Errorf("unknown action type %q", act.Type)
 		}
 	}
-
-	kwBytes, _ := json.Marshal(cleanKeywords)
-	actBytes, _ := json.Marshal(in.Actions)
-	out.keywordsJSON = string(kwBytes)
-	out.actionsJSON = string(actBytes)
-	return out, nil
+	return nil
 }
 
 // Actor is the user performing a workflow management action, with the
@@ -210,15 +278,10 @@ type Actor struct {
 }
 
 // canManage reports whether the actor may edit/toggle/delete a given workflow.
-// Admins manage any workflow; a non-admin manages only the ones they created.
+// Admins manage any workflow; a non-admin manages only the ones they created
+// (helpers.OwnerOrAdmin: one with no recorded creator is the admins' alone).
 func canManage(a Actor, wf *workflowModel.Workflow) bool {
-	if wf == nil {
-		return false
-	}
-	if a.IsAdmin {
-		return true
-	}
-	return wf.CreatedBy == a.UserID
+	return wf != nil && helpers.OwnerOrAdmin(&wf.CreatedBy, a.UserID, a.IsAdmin)
 }
 
 // errForbidden signals the actor isn't allowed to manage the target workflow.
@@ -229,6 +292,10 @@ var errNotFound = fmt.Errorf("workflow not found")
 
 // CreateWorkflow validates, persists, and hot-reloads a new workflow.
 func CreateWorkflow(ctx context.Context, in WorkflowInput, createdBy uuid.UUID) (*workflowModel.Workflow, error) {
+	if helpers.ActsThroughToken(ctx) {
+		return nil, ErrThroughToken
+	}
+	in.ProjectID = "" // a project's rules are made in the project
 	if err := normalizeTaskStatusTrigger(ctx, &in); err != nil {
 		return nil, err
 	}
@@ -239,15 +306,9 @@ func CreateWorkflow(ctx context.Context, in WorkflowInput, createdBy uuid.UUID) 
 	if err := access.checkScope(ctx, createdBy.String(), v.channelID, v.triggerType, in.TriggerConfig); err != nil {
 		return nil, err
 	}
-	id, err := workflowModel.CreateWorkflow(ctx, in.Name, createdBy, v.triggerType, v.triggerConfigJSON, v.botName, v.channelID, v.keywordsJSON, in.MatchType, v.actionsJSON)
+	id, err := workflowModel.CreateWorkflow(ctx, createdBy, v.fields(&in))
 	if err != nil {
 		return nil, err
-	}
-	// Persist is_active=true default; honor explicit "create disabled".
-	if !in.IsActive {
-		if serr := workflowModel.SetWorkflowActive(ctx, id, false); serr != nil {
-			helpers.LogErrorWithContext(ctx, "Workflow/CreateWorkflow set inactive err: %v", serr)
-		}
 	}
 	_ = reload(ctx)
 	return workflowModel.GetWorkflowByID(ctx, id)
@@ -256,6 +317,10 @@ func CreateWorkflow(ctx context.Context, in WorkflowInput, createdBy uuid.UUID) 
 // UpdateWorkflow validates, persists edits, and hot-reloads. The actor must be
 // allowed to manage the target workflow (admin, or its creator).
 func UpdateWorkflow(ctx context.Context, id uuid.UUID, in WorkflowInput, actor Actor) (*workflowModel.Workflow, error) {
+	if helpers.ActsThroughToken(ctx) {
+		return nil, ErrThroughToken
+	}
+	in.ProjectID = ""
 	existing, err := workflowModel.GetWorkflowByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -265,6 +330,9 @@ func UpdateWorkflow(ctx context.Context, id uuid.UUID, in WorkflowInput, actor A
 	}
 	if !canManage(actor, existing) {
 		return nil, errForbidden
+	}
+	if existing.ProjectId != nil {
+		return nil, errProjectRule
 	}
 	if err := normalizeTaskStatusTrigger(ctx, &in); err != nil {
 		return nil, err
@@ -277,7 +345,7 @@ func UpdateWorkflow(ctx context.Context, id uuid.UUID, in WorkflowInput, actor A
 	if err := access.checkScope(ctx, existing.CreatedBy.String(), v.channelID, v.triggerType, in.TriggerConfig); err != nil {
 		return nil, err
 	}
-	if err := workflowModel.UpdateWorkflow(ctx, id, in.Name, in.IsActive, v.triggerType, v.triggerConfigJSON, v.botName, v.channelID, v.keywordsJSON, in.MatchType, v.actionsJSON); err != nil {
+	if err := workflowModel.UpdateWorkflow(ctx, id, v.fields(&in)); err != nil {
 		return nil, err
 	}
 	_ = reload(ctx)
@@ -295,6 +363,9 @@ func SetActive(ctx context.Context, id uuid.UUID, isActive bool, actor Actor) er
 	}
 	if !canManage(actor, existing) {
 		return errForbidden
+	}
+	if existing.ProjectId != nil {
+		return errProjectRule
 	}
 	if err := workflowModel.SetWorkflowActive(ctx, id, isActive); err != nil {
 		return err
@@ -315,6 +386,9 @@ func DeleteWorkflow(ctx context.Context, id uuid.UUID, actor Actor) error {
 	}
 	if !canManage(actor, existing) {
 		return errForbidden
+	}
+	if existing.ProjectId != nil {
+		return errProjectRule
 	}
 	if err := workflowModel.SoftDeleteWorkflow(ctx, id); err != nil {
 		return err
@@ -343,6 +417,9 @@ func GetWorkflow(ctx context.Context, id uuid.UUID, actor Actor) (*workflowModel
 	}
 	if !canManage(actor, wf) {
 		return nil, errForbidden
+	}
+	if wf.ProjectId != nil {
+		return nil, errProjectRule
 	}
 	return wf, nil
 }

@@ -25,3 +25,26 @@ func TestBackoffDoublesWithinItsCap(t *testing.T) {
 		t.Fatalf("attempt 0 counts as the first, waited %v", d)
 	}
 }
+
+// A fixed schedule's wait: its entry for the try, its last past the end, the
+// first for anything under one, nothing for no schedule, and the jitter on top
+// never more than asked.
+func TestScheduleWaitReadsItsTableAndClamps(t *testing.T) {
+	s := []time.Duration{10 * time.Second, time.Minute, time.Hour}
+	for _, c := range []struct {
+		attempt int
+		want    time.Duration
+	}{{-3, 10 * time.Second}, {0, 10 * time.Second}, {1, 10 * time.Second}, {2, time.Minute}, {3, time.Hour}, {9, time.Hour}} {
+		if got := ScheduleWait(s, c.attempt, 0); got != c.want {
+			t.Errorf("try %d waits %v, want %v", c.attempt, got, c.want)
+		}
+	}
+	if got := ScheduleWait(nil, 2, 0.25); got != 0 {
+		t.Errorf("no schedule waits %v", got)
+	}
+	for i := 0; i < 200; i++ {
+		if got := ScheduleWait(s, 2, 0.25); got < time.Minute || got > time.Minute+15*time.Second {
+			t.Fatalf("a quarter's jitter on a minute gave %v", got)
+		}
+	}
+}

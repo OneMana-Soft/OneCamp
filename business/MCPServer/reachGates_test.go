@@ -113,6 +113,13 @@ func TestEveryResourceBranchChecksLiveness(t *testing.T) {
 			"carries the doc's deletion (invariant I9): a doc in the trash answers Deleted and " +
 			"level none to everyone, and the branch refuses it on Deleted. The resolver reads " +
 			"the deletion with the grants, so it is never a second lookup that could disagree",
+		"ResourceWorkItem": "delegates to business/EntityLink ReadMany, the work graph's " +
+			"reader, which leaves out what is deleted kind by kind: a channel post and a " +
+			"comment once deleted (or in a deleted channel), a whiteboard by " +
+			"ReadableBoardTitles, a memory item by being removed rather than deleted. A " +
+			"person keeps their name after leaving, as every chip does, and the work graph's " +
+			"own read keeps only live people as a starting point (domain/WorkGraph liveOf), " +
+			"so a departed person answers not found",
 		"ResourceDirectMessage": "the only object here is the RECIPIENT, and their liveness " +
 			"is checked — inside principalBusiness.CanReceiveDirectMessage, which calls " +
 			"helpers.IsSoftDeleted on them. The conversation itself has no deleted_at: a DM's " +

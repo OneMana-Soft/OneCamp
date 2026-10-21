@@ -84,10 +84,15 @@ func ArchiveAttachmentByAttachmentUUID(ctx context.Context, attachmentUUID uuid.
 		AttachmentDeletedAt: helpers.Int64Pointer(currentTime.Unix()),
 	}
 
-	go domain.UpdateAttachmentInOpenSearch(opensearchAttachment)
+	helpers.GoSafeNamed("domain.UpdateAttachmentInOpenSearch", func() { domain.UpdateAttachmentInOpenSearch(opensearchAttachment) })
 
 	return
 
+}
+
+// AttachmentsOfPlace is the files with these ids kept at this place, by id.
+func AttachmentsOfPlace(ctx context.Context, ids []string, srcKey, srcValue string) (map[string]*models.Attachment, error) {
+	return domain.AttachmentsOfPlace(ctx, ids, srcKey, srcValue)
 }
 
 func GetAttachmentByObjUUID(ctx context.Context, objUUID string, srcKey string) (attachment *models.Attachment, err error) {

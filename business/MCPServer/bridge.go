@@ -62,6 +62,12 @@ type binding struct {
 	IDArg string
 	// Behaviour is advertised to clients and enforced here.
 	Behaviour ToolBehaviour
+	// KindArg is set for a tool that names its object by a kind AND a uuid (the
+	// work graph's tools): the argument naming the kind, with IDArg naming the
+	// uuid. Kind is then ResourceWorkItem, and each call is checked as the kind
+	// it names (workItemKinds): a doc by the doc's rule, a project by the
+	// project's, and a kind with no rule of its own here by the work graph's.
+	KindArg string
 }
 
 // bridgedTools is the migration frontier: the tools now governed per object.
@@ -306,6 +312,21 @@ var bridgedTools = []binding{
 	{Tool: "send_group_chat", Kind: ResourceChat, IDArg: "grp_id",
 		Behaviour: ToolBehaviour{ReadOnly: false, Destructive: false, Idempotent: false}},
 
+	// THE WORK GRAPH (DG5's allow-list of relationships, for agents: DG8).
+	// Each names where it starts by a kind and a uuid, never a graph id or
+	// query text, and the start is checked as the kind it names, so a call
+	// can't name one kind's rule and read another's thing. Everything the
+	// answer names is then decided again, node by node, by the work graph as
+	// the person (and, for an agent asked by someone else, as that person
+	// too): a path through anything either can't open is dropped whole.
+	// how_connected's other end is decided the same way, by the work graph,
+	// for every reader. Workspace-wide like search_workspace in what it may
+	// name, so it answers to the same scope.
+	{Tool: "related_items", Kind: ResourceWorkItem, KindArg: "kind", IDArg: "uuid",
+		Behaviour: ToolBehaviour{ReadOnly: true, Idempotent: true}},
+	{Tool: "how_connected", Kind: ResourceWorkItem, KindArg: "from_kind", IDArg: "from_uuid",
+		Behaviour: ToolBehaviour{ReadOnly: true, Idempotent: true}},
+
 	// The one an agent reaches for first, and so the one most worth governing.
 	// Workspace-scoped because it names no object: it takes a query and fans out
 	// across messages, docs, tasks, memory and connected apps. Its executor
@@ -520,20 +541,27 @@ func resourceResolver(b binding) (func(map[string]any) (ResourceRef, error), err
 		return nil, fmt.Errorf("mcp: %q is scoped to a %s but names no id argument, so there "+
 			"is nothing to authorise against", b.Tool, kind)
 	}
+	if (kind == ResourceWorkItem) != (strings.TrimSpace(b.KindArg) != "") {
+		return nil, fmt.Errorf("mcp: %q: a kind argument goes with ResourceWorkItem and only with it", b.Tool)
+	}
 	// Confirm the argument actually exists on the tool. Otherwise a typo here would
 	// produce a resolver that always fails, and the tool would be permanently and
 	// silently unusable.
 	def, _ := staticToolDef(b.Tool)
-	found := false
-	for _, p := range def.Parameters {
-		if p.Name == idArg {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !hasParam(def, idArg) {
 		return nil, fmt.Errorf("mcp: %q declares id argument %q, which is not one of its "+
 			"parameters", b.Tool, idArg)
+	}
+
+	if kind == ResourceWorkItem {
+		kindArg := strings.TrimSpace(b.KindArg)
+		if !hasParam(def, kindArg) {
+			return nil, fmt.Errorf("mcp: %q declares kind argument %q, which is not one of its "+
+				"parameters", b.Tool, kindArg)
+		}
+		return func(args map[string]any) (ResourceRef, error) {
+			return workItemRef(asString(args[kindArg]), asString(args[idArg]))
+		}, nil
 	}
 
 	return func(args map[string]any) (ResourceRef, error) {
@@ -546,6 +574,54 @@ func resourceResolver(b binding) (func(map[string]any) (ResourceRef, error), err
 		}
 		return ResourceRef{Kind: kind, ID: id}, nil
 	}, nil
+}
+
+// hasParam is whether a tool declares a parameter by that name.
+func hasParam(def ai.ToolDef, name string) bool {
+	for _, p := range def.Parameters {
+		if p.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// workItemKinds is how each kind of the work graph is checked here: the
+// kinds this surface already has a rule for keep it (a doc by the Access
+// Resolver, a task and a project by their project, a channel by membership,
+// a team by being in it), so a work-graph call is never looser than the
+// tool that reads the thing itself; the others (a person, a board, a channel
+// post, a comment, a memory) by the work graph's own rule, ResourceWorkItem.
+var workItemKinds = map[string]ResourceKind{
+	"doc":     ResourceDoc,
+	"task":    ResourceTask,
+	"project": ResourceProject,
+	"channel": ResourceChannel,
+	"team":    ResourceTeam,
+	"person":  ResourceWorkItem,
+	"board":   ResourceWorkItem,
+	"message": ResourceWorkItem,
+	"comment": ResourceWorkItem,
+	"memory":  ResourceWorkItem,
+}
+
+// workItemRef is the object a work-graph call starts at: its kind's own
+// resource, or a ResourceWorkItem whose id is "kind:uuid". A kind the work
+// graph doesn't have, or an id that isn't a uuid (a graph uid, query text),
+// is a refusal, never a fallback.
+func workItemRef(kind, id string) (ResourceRef, error) {
+	kind, id = strings.ToLower(strings.TrimSpace(kind)), strings.ToLower(strings.TrimSpace(id))
+	rk, ok := workItemKinds[kind]
+	if !ok {
+		return ResourceRef{}, fmt.Errorf("the kind must be one of doc, task, project, person, board, channel, message, team")
+	}
+	if !helpers.IsCanonicalUUID(id) {
+		return ResourceRef{}, fmt.Errorf("the item must be named by its uuid")
+	}
+	if rk == ResourceWorkItem {
+		id = kind + ":" + id
+	}
+	return ResourceRef{Kind: rk, ID: id}, nil
 }
 
 // handlerFor adapts the existing executor to the governed handler signature.

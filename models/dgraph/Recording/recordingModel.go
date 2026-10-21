@@ -49,6 +49,7 @@ var ErrNotFound = errors.New("failed to get dgraph recording")
 
 func GetDgraphRecordingInfo(ctx context.Context, query string, variables map[string]string) (dgraphRecoridng *dgraphStruct.DgraphRecording, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -81,6 +82,7 @@ func GetDgraphRecordingInfo(ctx context.Context, query string, variables map[str
 }
 func GetDgraphRecordingsList(ctx context.Context, query string, variables map[string]string) (dgraphRecordings []*dgraphStruct.DgraphRecording, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -111,6 +113,7 @@ func GetDgraphRecordingsList(ctx context.Context, query string, variables map[st
 // GetDgraphRecordingsWithCount returns recordings plus a count block in one query.
 func GetDgraphRecordingsWithCount(ctx context.Context, query string, variables map[string]string) (*dgraphStruct.DgraphRecordingList, error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {

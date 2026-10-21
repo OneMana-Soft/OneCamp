@@ -54,16 +54,23 @@ type spec struct {
 var specs = []spec{
 	{key: DocsExportMembers.Key, kind: KindBool, def: DocsExportMembers.Default,
 		label: "Members can export docs", help: "Admins can always export."},
-	{key: DocsPublishMembers.Key, kind: KindBool, def: DocsPublishMembers.Default,
-		label: "Members can publish docs to the web", help: "Admins can always publish."},
 	{key: GuestLinkMaxDays.Key, kind: KindInt, def: GuestLinkMaxDays.Default, min: 0, max: 3650,
 		label: "Longest a guest link lasts, in days", help: "0 sets no limit of its own."},
 	{key: EmbedAllowlist.Key, kind: KindList, def: EmbedAllowlist.Default,
 		label: "Sites docs can embed", help: "With no list, docs can embed any site they could before."},
+	{key: DocsHistoryDays.Key, kind: KindInt, def: DocsHistoryDays.Default, min: 30, max: 3650,
+		label: "Keep doc history, in days",
+		help:  "Versions older than this are removed at the next tidy, within six hours. Named and pinned versions are always kept."},
 	{key: ProjectsEditWho.Key, kind: KindChoice, def: ProjectsEditWho.Default, choices: ProjectsEditWho.Choices, scopes: []string{ScopeProject},
 		label: "Who can change tasks", help: "Members, members on the tasks assigned to them, or admins only. Each project can choose its own."},
 	{key: ProjectsCreateWho.Key, kind: KindChoice, def: ProjectsCreateWho.Default, choices: ProjectsCreateWho.Choices,
 		label: "Who can make projects", help: "A team's admins, or everyone in the team."},
+	{key: ChatBroadcastMembers.Key, kind: KindBool, def: ChatBroadcastMembers.Default, scopes: []string{ScopeChannel},
+		label: "Members can notify a whole channel", help: "@channel, @here and @everyone. A channel's managers and admins always can. Each channel can choose its own."},
+	{key: ChatBroadcastConfirmAt.Key, kind: KindInt, def: ChatBroadcastConfirmAt.Default, min: 0, max: 100000,
+		label: "Ask before notifying this many people", help: "Notifying a channel this size or larger asks first. 0 never asks."},
+	{key: ChatBroadcastAdminsOnlyAt.Key, kind: KindInt, def: ChatBroadcastAdminsOnlyAt.Default, min: 0, max: 100000,
+		label: "Only admins notify channels larger than", help: "In a channel with more members than this, only its managers and admins can notify all of it. 0 sets no limit."},
 }
 
 // Info is one policy as an admin sees it.

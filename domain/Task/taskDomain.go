@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Task"
@@ -17,6 +18,8 @@ import (
 	OpenSearchBulkModels "github.com/akashc777/OneCamp/models/openSearch/Bulk"
 	OpenSearchModels "github.com/akashc777/OneCamp/models/openSearch/Task"
 	models "github.com/akashc777/OneCamp/models/postgres/Task"
+	taskKeyModel "github.com/akashc777/OneCamp/models/postgres/TaskKey"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -35,21 +38,28 @@ const TASK_COUNT = 10
 const TASK_STATUS_COMPLETED = "completed"
 const TASK_STATUS_UNCOMPLETED = "uncompleted"
 
-func CreateTask(ctx context.Context, taskUUID uuid.UUID, projectUUID uuid.UUID, createdByUUID uuid.UUID, createdAt time.Time) (err error) {
-
-	query := `
-		INSERT INTO tasks (id, project_id, created_by, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $4)
-	`
-	err = models.CreateTask(query, taskUUID, projectUUID, createdByUUID, createdAt)
-
+// CreateTask makes a task's row in its project and gives it the project's
+// next number (business/TaskKeys): answers the number, or 0 when the project
+// has no key yet, which the caller settles (business/TaskKeys Settle).
+func CreateTask(ctx context.Context, taskUUID uuid.UUID, projectUUID uuid.UUID, createdByUUID uuid.UUID, createdAt time.Time) (number int, err error) {
+	number, err = taskKeyModel.InsertTask(ctx, taskUUID, projectUUID, createdByUUID, createdAt)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/CreateTask Failed to create new task err: %+v",
 			err)
-		return
+		return 0, err
 	}
-	return
+	return number, nil
+}
+
+// CreateTaskNumbered is CreateTask keeping a number the task had in another
+// tool (an import's ENG-123) when the project hasn't used it.
+func CreateTaskNumbered(ctx context.Context, taskUUID, projectUUID, createdByUUID uuid.UUID, createdAt time.Time, number int) (int, error) {
+	n, err := taskKeyModel.InsertTaskNumbered(ctx, taskUUID, projectUUID, createdByUUID, createdAt, number)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/CreateTaskNumbered Failed to create new task err: %+v", err)
+	}
+	return n, err
 }
 
 // func CreateTaskWithAssignee(taskUUID uuid.UUID, taskAssigneeUUID uuid.UUID, projectUUID uuid.UUID, createdByUUID uuid.UUID, createdAt time.Time) (err error) {
@@ -97,7 +107,7 @@ func GetTaskByUUID(ctx context.Context, taskUUID uuid.UUID) (taskInfo *models.Ta
         WHERE id = $1
     `
 
-	taskInfo, err = models.GetTaskByUUID(query, taskUUID)
+	taskInfo, err = models.GetTaskByUUID(ctx, query, taskUUID)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -115,7 +125,7 @@ func UpdateTaskByTaskUUID(ctx context.Context, taskUUID uuid.UUID, currentTime t
         SET updated_at = $1
 		WHERE id = $2`
 
-	err = models.UpdateTaskNameByTaskUUID(query, currentTime, taskUUID)
+	err = models.UpdateTaskNameByTaskUUID(ctx, query, currentTime, taskUUID)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -132,7 +142,7 @@ func UpdateTaskDeletedTimeByUUID(ctx context.Context, taskUUID uuid.UUID, delete
         UPDATE tasks
         SET deleted_at = $1, updated_at = $2
 		WHERE id = $3`
-	err = models.UpdateTaskDeletedTimeByUUID(query, taskUUID, deleteTime, updateTime)
+	err = models.UpdateTaskDeletedTimeByUUID(ctx, query, taskUUID, deleteTime, updateTime)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/UpdateTaskDeletedTimeByUUID Failed to update task delete time by task uuid err: %+v",
@@ -152,7 +162,7 @@ func UpdateTaskGoogleCalendarId(ctx context.Context, taskUUID uuid.UUID, googleE
 	// I'll reuse UpdateTaskNameByTaskUUID model or add a new one.
 	// Since UpdateTaskNameByTaskUUID takes projectUUID but queries by id, it's actually a generic update.
 	// No, wait, let's look at taskModel.go:138. It takes projectUUID but uses it as $2.
-	return models.UpdateTaskGoogleCalendarId(query, googleEventId, currentTime, taskUUID)
+	return models.UpdateTaskGoogleCalendarId(ctx, query, googleEventId, currentTime, taskUUID)
 }
 
 func GetSyncedTaskGCalIds(ctx context.Context, userUUID uuid.UUID) ([]string, error) {
@@ -164,7 +174,7 @@ func UpdateTaskDeletedTimeToNullByUUID(ctx context.Context, projectUUID uuid.UUI
         UPDATE tasks
         SET updated_at = $1, deleted_at = null
 		WHERE id = $2`
-	err = models.UpdateTaskDeletedTimeToNullByUUID(query, updatedTime, projectUUID)
+	err = models.UpdateTaskDeletedTimeToNullByUUID(ctx, query, updatedTime, projectUUID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/UpdateTaskDeletedTimeToNullByUUID Failed to update delete time to null err: %+v",
@@ -960,7 +970,7 @@ func GetDgraphTaskInfoByUUID(ctx context.Context, teamUUID string, userDgraphUID
 // SetGitHubPRFieldsOnTask sets PR metadata on a specific task.
 func SetGitHubPRFieldsOnTask(ctx context.Context, taskUUID uuid.UUID, prNumber int, prURL string, branch string) error {
 	query := `UPDATE tasks SET github_pr_number = $1, github_pr_url = $2, github_branch = $3, github_last_synced_at = NOW(), updated_at = NOW() WHERE id = $4`
-	err := models.SetGitHubPRFieldsOnTask(query, taskUUID, prNumber, prURL, branch)
+	err := models.SetGitHubPRFieldsOnTask(ctx, query, taskUUID, prNumber, prURL, branch)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/SetGitHubPRFieldsOnTask Failed err: %+v", err)
 		return err
@@ -971,7 +981,7 @@ func SetGitHubPRFieldsOnTask(ctx context.Context, taskUUID uuid.UUID, prNumber i
 // UpdateTaskPRInfo updates only PR number and URL for a task.
 func UpdateTaskPRInfo(ctx context.Context, taskUUID uuid.UUID, prNumber int, prURL string) error {
 	query := `UPDATE tasks SET github_pr_number = $1, github_pr_url = $2, github_last_synced_at = NOW(), updated_at = NOW() WHERE id = $3`
-	err := models.UpdateTaskPRInfo(query, taskUUID, prNumber, prURL)
+	err := models.UpdateTaskPRInfo(ctx, query, taskUUID, prNumber, prURL)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/UpdateTaskPRInfo Failed err: %+v", err)
 		return err
@@ -982,7 +992,7 @@ func UpdateTaskPRInfo(ctx context.Context, taskUUID uuid.UUID, prNumber int, prU
 // FindTaskUUIDByPRURL finds a task by its GitHub PR URL.
 func FindTaskUUIDByPRURL(ctx context.Context, prURL string) (taskUUID string, err error) {
 	query := `SELECT id::text FROM tasks WHERE github_pr_url = $1 AND deleted_at IS NULL LIMIT 1`
-	taskUUID, err = models.FindTaskUUIDByPRURL(query, prURL)
+	taskUUID, err = models.FindTaskUUIDByPRURL(ctx, query, prURL)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/FindTaskUUIDByPRURL Failed err: %+v", err)
 		return "", err
@@ -993,7 +1003,7 @@ func FindTaskUUIDByPRURL(ctx context.Context, prURL string) (taskUUID string, er
 // SetGitHubIssueFieldsOnTask sets GitHub issue metadata on a specific task.
 func SetGitHubIssueFieldsOnTask(ctx context.Context, taskUUID uuid.UUID, issueNumber int, issueURL string) error {
 	query := `UPDATE tasks SET github_issue_number = $1, github_issue_url = $2, github_last_synced_at = NOW() WHERE id = $3`
-	err := models.SetGitHubIssueFieldsOnTask(query, taskUUID, issueNumber, issueURL)
+	err := models.SetGitHubIssueFieldsOnTask(ctx, query, taskUUID, issueNumber, issueURL)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/SetGitHubIssueFieldsOnTask Failed err: %+v", err)
 		return err
@@ -1004,7 +1014,7 @@ func SetGitHubIssueFieldsOnTask(ctx context.Context, taskUUID uuid.UUID, issueNu
 // FindTaskUUIDByGitHubIssueURL finds a task by its GitHub issue URL.
 func FindTaskUUIDByGitHubIssueURL(ctx context.Context, issueURL string) (string, error) {
 	query := `SELECT id::text FROM tasks WHERE github_issue_url = $1 AND deleted_at IS NULL LIMIT 1`
-	taskUUID, err := models.FindTaskUUIDByGitHubIssueURL(query, issueURL)
+	taskUUID, err := models.FindTaskUUIDByGitHubIssueURL(ctx, query, issueURL)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/FindTaskUUIDByGitHubIssueURL Failed err: %+v", err)
 		return "", err
@@ -1027,7 +1037,7 @@ func FindTasksByGitHubIssueURLs(ctx context.Context, urls []string) (map[string]
 		return map[string]string{}, nil
 	}
 	query := `SELECT github_issue_url, id::text FROM tasks WHERE github_issue_url = ANY($1) AND deleted_at IS NULL`
-	res, err := models.FindTasksUUIDByGitHubURLs(query, urls)
+	res, err := models.FindTasksUUIDByGitHubURLs(ctx, query, urls)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/FindTasksByGitHubIssueURLs Failed err: %+v", err)
 		return nil, err
@@ -1041,7 +1051,7 @@ func FindTasksByGitHubPRURLs(ctx context.Context, urls []string) (map[string]str
 		return map[string]string{}, nil
 	}
 	query := `SELECT github_pr_url, id::text FROM tasks WHERE github_pr_url = ANY($1) AND deleted_at IS NULL`
-	res, err := models.FindTasksUUIDByGitHubURLs(query, urls)
+	res, err := models.FindTasksUUIDByGitHubURLs(ctx, query, urls)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/FindTasksByGitHubPRURLs Failed err: %+v", err)
 		return nil, err
@@ -1052,7 +1062,7 @@ func FindTasksByGitHubPRURLs(ctx context.Context, urls []string) (map[string]str
 // GetTaskLastSyncedAtByIssueURL returns the last sync time for a task by issue URL.
 func GetTaskLastSyncedAtByIssueURL(ctx context.Context, issueURL string) (*time.Time, error) {
 	query := `SELECT github_last_synced_at FROM tasks WHERE github_issue_url = $1 LIMIT 1`
-	lastSyncedAt, err := models.GetTaskLastSyncedAtByIssueURL(query, issueURL)
+	lastSyncedAt, err := models.GetTaskLastSyncedAtByIssueURL(ctx, query, issueURL)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetTaskLastSyncedAtByIssueURL Failed err: %+v", err)
 		return nil, err
@@ -1063,7 +1073,7 @@ func GetTaskLastSyncedAtByIssueURL(ctx context.Context, issueURL string) (*time.
 // GetTaskLastSyncedAtByPRURL returns the last sync time for a task by PR URL.
 func GetTaskLastSyncedAtByPRURL(ctx context.Context, prURL string) (*time.Time, error) {
 	query := `SELECT github_last_synced_at FROM tasks WHERE github_pr_url = $1 LIMIT 1`
-	lastSyncedAt, err := models.GetTaskLastSyncedAtByPRURL(query, prURL)
+	lastSyncedAt, err := models.GetTaskLastSyncedAtByPRURL(ctx, query, prURL)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetTaskLastSyncedAtByPRURL Failed err: %+v", err)
 		return nil, err
@@ -1074,7 +1084,7 @@ func GetTaskLastSyncedAtByPRURL(ctx context.Context, prURL string) (*time.Time, 
 // ClearGitHubIssueFieldsFromTask clears GitHub issue fields from a task.
 func ClearGitHubIssueFieldsFromTask(ctx context.Context, taskUUID uuid.UUID) error {
 	query := `UPDATE tasks SET github_issue_number = NULL, github_issue_url = NULL, github_last_synced_at = NULL, updated_at = NOW() WHERE id = $1`
-	err := models.ClearGitHubIssueFieldsFromTask(query, taskUUID)
+	err := models.ClearGitHubIssueFieldsFromTask(ctx, query, taskUUID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/ClearGitHubIssueFieldsFromTask Failed err: %+v", err)
 		return err
@@ -1090,7 +1100,7 @@ func ClearGitHubLinkFromTask(ctx context.Context, taskUUID uuid.UUID) error {
 		github_pr_number = NULL, github_pr_url = NULL, github_branch = NULL, github_pr_state = NULL,
 		github_pr_check_status = NULL, github_pr_review_state = NULL, github_pr_is_draft = false,
 		github_last_synced_at = NULL, updated_at = NOW() WHERE id = $1`
-	err := models.ClearGitHubIssueFieldsFromTask(query, taskUUID)
+	err := models.ClearGitHubIssueFieldsFromTask(ctx, query, taskUUID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/ClearGitHubLinkFromTask Failed err: %+v", err)
 		return err
@@ -1101,7 +1111,7 @@ func ClearGitHubLinkFromTask(ctx context.Context, taskUUID uuid.UUID) error {
 // GetTaskGitHubURLs returns the GitHub issue and PR URLs for a task.
 func GetTaskGitHubURLs(ctx context.Context, taskUUID uuid.UUID) (issueURL, prURL *string, err error) {
 	query := `SELECT github_issue_url, github_pr_url FROM tasks WHERE id = $1`
-	issueURL, prURL, err = models.GetTaskGitHubURLs(query, taskUUID)
+	issueURL, prURL, err = models.GetTaskGitHubURLs(ctx, query, taskUUID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetTaskGitHubURLs Failed err: %+v", err)
 		return nil, nil, err
@@ -1120,7 +1130,7 @@ func FindTaskUUIDByGitHubBranch(ctx context.Context, owner, name, branch string)
 		AND t.project_id IN (SELECT l.project_id FROM github_links l
 			WHERE lower(l.repo_owner) = lower($1) AND lower(l.repo_name) = lower($2) AND l.deleted_at IS NULL)
 		LIMIT 1`
-	taskUUID, err := models.FindTaskUUIDByGitHubBranch(query, owner, name, branch)
+	taskUUID, err := models.FindTaskUUIDByGitHubBranch(ctx, query, owner, name, branch)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/FindTaskUUIDByGitHubBranch Failed err: %+v", err)
 		return "", err
@@ -1131,7 +1141,7 @@ func FindTaskUUIDByGitHubBranch(ctx context.Context, owner, name, branch string)
 // SetGitHubLastSyncedAt updates the last sync timestamp for a task.
 func SetGitHubLastSyncedAt(ctx context.Context, taskUUID uuid.UUID, t time.Time) error {
 	query := `UPDATE tasks SET github_last_synced_at = $1 WHERE id = $2`
-	err := models.SetGitHubLastSyncedAt(query, taskUUID, t)
+	err := models.SetGitHubLastSyncedAt(ctx, query, taskUUID, t)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/SetGitHubLastSyncedAt Failed err: %+v", err)
 		return err
@@ -1142,7 +1152,7 @@ func SetGitHubLastSyncedAt(ctx context.Context, taskUUID uuid.UUID, t time.Time)
 // SetGitHubBranchOnTaskByTaskID sets the github_branch on a specific task by UUID.
 func SetGitHubBranchOnTaskByTaskID(ctx context.Context, branchName string, taskUUID uuid.UUID) error {
 	query := `UPDATE tasks SET github_branch = $1, updated_at = NOW() WHERE id = $2`
-	err := models.SetGitHubBranchOnTaskByTaskID(query, branchName, taskUUID)
+	err := models.SetGitHubBranchOnTaskByTaskID(ctx, query, branchName, taskUUID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/SetGitHubBranchOnTaskByTaskID Failed err: %+v", err)
 		return err
@@ -1162,7 +1172,7 @@ func UpdateTaskPRState(ctx context.Context, taskUUID uuid.UUID, prState string, 
 			updated_at = NOW()
 		WHERE id = $5
 	`
-	err := models.UpdateTaskPRState(query, taskUUID, prState, checkStatus, reviewState, isDraft)
+	err := models.UpdateTaskPRState(ctx, query, taskUUID, prState, checkStatus, reviewState, isDraft)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/UpdateTaskPRState Failed err: %+v", err)
 		return err
@@ -1172,7 +1182,7 @@ func UpdateTaskPRState(ctx context.Context, taskUUID uuid.UUID, prState string, 
 
 // GetTaskProjectID returns the project UUID for a task.
 func GetTaskProjectID(ctx context.Context, taskUUID uuid.UUID) (uuid.UUID, error) {
-	projectID, err := models.GetTaskProjectID(taskUUID, false)
+	projectID, err := models.GetTaskProjectID(ctx, taskUUID, false)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetTaskProjectID Failed err: %+v", err)
 		return uuid.Nil, err
@@ -1183,7 +1193,7 @@ func GetTaskProjectID(ctx context.Context, taskUUID uuid.UUID) (uuid.UUID, error
 // GetTaskProjectIDDeletedToo is GetTaskProjectID for a task that may have
 // been deleted: the project it is, or was, in.
 func GetTaskProjectIDDeletedToo(ctx context.Context, taskUUID uuid.UUID) (uuid.UUID, error) {
-	projectID, err := models.GetTaskProjectID(taskUUID, true)
+	projectID, err := models.GetTaskProjectID(ctx, taskUUID, true)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetTaskProjectIDDeletedToo Failed err: %+v", err)
 		return uuid.Nil, err
@@ -1193,7 +1203,7 @@ func GetTaskProjectIDDeletedToo(ctx context.Context, taskUUID uuid.UUID) (uuid.U
 
 // SetGitHubSyncStatus updates the sync status for a task.
 func SetGitHubSyncStatus(ctx context.Context, taskUUID uuid.UUID, status string, errMsg *string, attempts int) error {
-	err := models.SetGitHubSyncStatus(taskUUID, status, errMsg, attempts)
+	err := models.SetGitHubSyncStatus(ctx, taskUUID, status, errMsg, attempts)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/SetGitHubSyncStatus Failed err: %+v", err)
 		return err
@@ -1203,7 +1213,7 @@ func SetGitHubSyncStatus(ctx context.Context, taskUUID uuid.UUID, status string,
 
 // GetGitHubSyncStatus returns the sync status for a task.
 func GetGitHubSyncStatus(ctx context.Context, taskUUID uuid.UUID) (status string, errMsg *string, attempts int, err error) {
-	status, errMsg, attempts, err = models.GetGitHubSyncStatus(taskUUID)
+	status, errMsg, attempts, err = models.GetGitHubSyncStatus(ctx, taskUUID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetGitHubSyncStatus Failed err: %+v", err)
 		return "", nil, 0, err
@@ -1213,7 +1223,7 @@ func GetGitHubSyncStatus(ctx context.Context, taskUUID uuid.UUID) (status string
 
 // GetGitHubMetaForTask returns all GitHub metadata for a task from PostgreSQL.
 func GetGitHubMetaForTask(ctx context.Context, taskUUID uuid.UUID) (*models.GitHubMeta, error) {
-	meta, err := models.GetGitHubMetaForTask(taskUUID)
+	meta, err := models.GetGitHubMetaForTask(ctx, taskUUID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetGitHubMetaForTask Failed err: %+v", err)
 		return nil, err
@@ -1223,7 +1233,7 @@ func GetGitHubMetaForTask(ctx context.Context, taskUUID uuid.UUID) (*models.GitH
 
 // GetGitHubMetaForTasks returns GitHub metadata for multiple tasks in one query.
 func GetGitHubMetaForTasks(ctx context.Context, taskUUIDs []uuid.UUID) (map[uuid.UUID]*models.GitHubMeta, error) {
-	meta, err := models.GetGitHubMetaForTasks(taskUUIDs)
+	meta, err := models.GetGitHubMetaForTasks(ctx, taskUUIDs)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetGitHubMetaForTasks Failed err: %+v", err)
 		return nil, err
@@ -1339,21 +1349,20 @@ func GetDgraphTaskRanks(ctx context.Context, taskUUIDs []string) (tasks []*dgrap
 	return dgraphModels.QueryDgraphTasks(ctx, query, nil)
 }
 
-// GetDgraphProjectColumnRanks returns every live task in one column of a
-// project's board, for renumbering it. Unsorted, so Dgraph sends them all: it
-// was sorted by creation with no first, which stops at 1,000, and renumbering
-// a bigger column left the rest out of order. The order is business/TaskRank's.
-func GetDgraphProjectColumnRanks(ctx context.Context, projectUUID string, status string) (tasks []*dgraphStruct.DgraphTask, err error) {
-	query := `query Column($project: string, $status: string){
+// GetDgraphProjectRanks is every live task of a project with its rank, for
+// renumbering the project's one order (business/Task Reorder). Unsorted, so
+// Dgraph sends them all; the order is business/TaskRank's.
+func GetDgraphProjectRanks(ctx context.Context, projectUUID string) ([]*dgraphStruct.DgraphTask, error) {
+	query := `query Ranks($project: string){
 				project(func: eq(project_uuid, $project)) {
-					tasks: project_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND eq(task_status, $status)) {
+					tasks: project_tasks @filter(` + dgraphquery.Live("task_deleted_at") + `) {
 						task_uuid
 						task_rank
 						task_created_at
 					}
 				}
 			}`
-	return dgraphModels.QueryDgraphTasks(ctx, query, map[string]string{"$project": projectUUID, "$status": status})
+	return dgraphModels.QueryDgraphTasks(ctx, query, map[string]string{"$project": projectUUID})
 }
 
 // SetDgraphTaskRanks writes each task's rank in one transaction.
@@ -1404,7 +1413,9 @@ func GetDgraphTasksWithoutStatusSince(ctx context.Context, n int) ([]*dgraphStru
 					}
 				}
 			}`, n)
-	return dgraphModels.QueryDgraphTasks(ctx, query, nil)
+	// The backfill writes every task's time, restricted ones too, and shows
+	// nothing to anyone (models/taskread).
+	return dgraphModels.QueryDgraphTasks(taskread.WithSystem(ctx), query, nil)
 }
 
 // clearJSON is a Dgraph delete for the named predicates of the nodes in var v.
@@ -1468,7 +1479,7 @@ func RestatusTasksInCustomStatus(ctx context.Context, fromID string, category st
 	}
 	// Search keeps each task's category. It changes when the status moves to
 	// another one, or its tasks move on its deletion.
-	go syncTaskStatusToOpenSearch(uuids, category)
+	helpers.GoSafeNamed("syncTaskStatusToOpenSearch", func() { syncTaskStatusToOpenSearch(uuids, category) })
 	return nil
 }
 
@@ -1476,8 +1487,20 @@ func RestatusTasksInCustomStatus(ctx context.Context, fromID string, category st
 // Best effort, as every other search write here: the graph is the record.
 func syncTaskStatusToOpenSearch(uuids []string, category string) {
 	now := time.Now().Unix()
+	docs := make([]*openSearchStruct.OpenSearchTask, 0, len(uuids))
 	for _, id := range uuids {
-		UpdateTaskInOpenSearch(&openSearchStruct.OpenSearchTask{Uuid: id, TaskStatus: category, TaskUpdatedAt: now})
+		docs = append(docs, &openSearchStruct.OpenSearchTask{Uuid: id, TaskStatus: category, TaskUpdatedAt: now})
+	}
+	// One bulk request for them all (PR2, the BE audit's #32), not one each.
+	UpdateTasksInOpenSearch(docs)
+}
+
+// UpdateTasksInOpenSearch updates many tasks' search documents in one bulk
+// request. Best effort, as every search write here.
+func UpdateTasksInOpenSearch(docs []*openSearchStruct.OpenSearchTask) {
+	ctx := context.Background()
+	if err := OpenSearchModels.UpdateTasksInOpenSearch(ctx, docs); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/UpdateTasksInOpenSearch couldn't update %d tasks err: %+v", len(docs), err)
 	}
 }
 

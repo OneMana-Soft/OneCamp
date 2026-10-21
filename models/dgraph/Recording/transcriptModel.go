@@ -40,6 +40,7 @@ func GetDgraphTranscriptsByRoom(ctx context.Context, query string, variables map
 	}
 
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

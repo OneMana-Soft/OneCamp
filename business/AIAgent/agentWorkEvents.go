@@ -56,9 +56,40 @@ func publishAgentWorkChanged(ctx context.Context, taskID uuid.UUID) {
 	if err != nil || t == nil {
 		return
 	}
+	var a *model.AiAgent
+	if got, aerr := model.GetAgentByID(ctx, t.AgentId); aerr == nil {
+		a = got
+	}
+	announceAgentWork(ctx, t, a)
+}
+
+// publishAgentWorkChangedMany is publishAgentWorkChanged for several jobs:
+// the jobs in one read and their agents in another, where each job read
+// itself and its agent (backend audit U2a: stopping a paused agent's jobs).
+func publishAgentWorkChangedMany(ctx context.Context, taskIDs []uuid.UUID) {
+	if len(taskIDs) == 0 {
+		return
+	}
+	ctx = context.WithoutCancel(ctx)
+	tasks, err := model.GetAgentTasksByIDs(ctx, taskIDs)
+	if err != nil {
+		return
+	}
+	agentIDs := make([]uuid.UUID, 0, len(tasks))
+	for _, t := range tasks {
+		agentIDs = append(agentIDs, t.AgentId)
+	}
+	agents, _ := model.GetAgentsByIDs(ctx, agentIDs)
+	for _, t := range tasks {
+		announceAgentWork(ctx, t, agents[t.AgentId])
+	}
+}
+
+// announceAgentWork publishes one job's state to whoever watches it.
+func announceAgentWork(ctx context.Context, t *model.AgentTask, a *model.AiAgent) {
 	agentName := ""
 	var agentOwner uuid.UUID
-	if a, aerr := model.GetAgentByID(ctx, t.AgentId); aerr == nil && a != nil {
+	if a != nil {
 		agentName = strings.TrimSpace(a.Name)
 		agentOwner = a.CreatedBy
 	}

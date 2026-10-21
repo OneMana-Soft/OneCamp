@@ -7,6 +7,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/dgraph-io/dgo/v230"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 )
@@ -86,18 +87,24 @@ func GetDgraphProjectInfoInTxn(ctx context.Context, txn *dgo.Txn, query string, 
 
 	if len(projectsInfo.ProjectInfo) == 0 {
 		err = ErrNotFound
-		helpers.LogErrorWithContext(ctx,
+		// Found nothing: an answer its caller handles (a 404, or skipping
+		// the thing), so said at DEBUG, not as a failure.
+		helpers.LogDebugWithContext(ctx,
 			"models/GetDgraphProjectInfoByUUID failed to get dgraph project variables: %+v", variables)
 
 		return
 	}
 	dgraphProject = &projectsInfo.ProjectInfo[0]
-
+	// Only the tasks the reader may see (models/taskread).
+	if err = taskread.KeepIn(ctx, dgraphProject); err != nil {
+		return nil, err
+	}
 	return
 }
 
 func GetDgraphProjectList(ctx context.Context, query string, variables map[string]string) (dgraphProjects []*dgraphStruct.DgraphProject, err error) {
 	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
+	defer func() { _ = txn.Discard(ctx) }()
 
 	resp, err := txn.QueryWithVars(ctx, query, variables)
 	if err != nil {
@@ -120,6 +127,9 @@ func GetDgraphProjectList(ctx context.Context, query string, variables map[strin
 		return
 	}
 	dgraphProjects = projectsInfo.ProjectInfo
+	if err = taskread.KeepIn(ctx, &dgraphProjects); err != nil {
+		return nil, err
+	}
 	return
 }
 

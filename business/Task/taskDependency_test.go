@@ -1,11 +1,13 @@
 package business
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
 
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/google/uuid"
 )
 
 // at is a time in loc; zero is an unset date.
@@ -280,6 +282,54 @@ func TestPlanShiftsByKindAndLag(t *testing.T) {
 		}
 		if !moved || !got.Start.Equal(*at(loc, 2026, 10, c.wantStart, 9)) || !got.Due.Equal(*at(loc, 2026, 10, c.wantDue, 17)) {
 			t.Errorf("%s: B at %v–%v, want the %d–%d", c.name, got.Start, got.Due, c.wantStart, c.wantDue)
+		}
+	}
+}
+
+// PR2 (#14): moving a task pushes its chain along with one Postgres statement
+// and one graph mutation for all of it, each task keeping its history line;
+// only the project's tasks move.
+func TestShiftingAChainWritesOnce(t *testing.T) {
+	loc := time.UTC
+	a := waits("7a5c0000-0000-4000-8000-00000000000a", at(loc, 2026, 10, 1, 9), at(loc, 2026, 10, 10, 9))
+	b := waits("7a5c0000-0000-4000-8000-00000000000b", at(loc, 2026, 10, 5, 9), at(loc, 2026, 10, 6, 9), a.Uuid)
+	c := waits("7a5c0000-0000-4000-8000-00000000000c", at(loc, 2026, 10, 7, 9), at(loc, 2026, 10, 8, 9), b.Uuid)
+	other := waits("7a5c0000-0000-4000-8000-00000000000d", at(loc, 2026, 10, 5, 9), at(loc, 2026, 10, 6, 9), a.Uuid)
+	for i, x := range []*dgraphStruct.DgraphTask{a, b, c} {
+		x.Uid = fmt.Sprintf("0x%d", i+1)
+		x.Project = &dgraphStruct.DgraphProject{Uuid: "p"}
+	}
+	other.Uid, other.Project = "0x9", &dgraphStruct.DgraphProject{Uuid: "q"}
+	old := shiftSeams
+	t.Cleanup(func() { shiftSeams = old })
+	touched, written := 0, 0
+	var wrote []*dgraphStruct.DgraphTask
+	shiftSeams.schedule = func(context.Context, string) ([]*dgraphStruct.DgraphTask, error) {
+		return []*dgraphStruct.DgraphTask{a, b, c, other}, nil
+	}
+	shiftSeams.touch = func(_ context.Context, ids []uuid.UUID, _ time.Time) error {
+		touched++
+		if len(ids) != 2 {
+			t.Fatalf("touched %d", len(ids))
+		}
+		return nil
+	}
+	shiftSeams.write = func(_ context.Context, ts []*dgraphStruct.DgraphTask) error {
+		written++
+		wrote = ts
+		return nil
+	}
+	shiftSeams.after = func(context.Context, *dgraphStruct.DgraphTask, TaskDates, *dgraphStruct.DgraphUser) {}
+	moved, err := ShiftDependents(context.Background(), "p", a.Uuid, loc, &dgraphStruct.DgraphUser{Uid: "0x7"})
+	if err != nil || len(moved) != 2 {
+		t.Fatalf("moved %+v %v", moved, err)
+	}
+	if touched != 1 || written != 1 || len(wrote) != 2 {
+		t.Fatalf("one Postgres statement (%d) and one graph write (%d) for both: %+v", touched, written, wrote)
+	}
+	for _, w := range wrote {
+		if w.Uid != "0x2" && w.Uid != "0x3" || len(w.Activity) == 0 {
+			t.Fatalf("each moved task by its uid, with its history: %+v", w)
 		}
 	}
 }

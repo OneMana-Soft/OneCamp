@@ -162,15 +162,3 @@ func htmlToMrkdwn(src string) string {
 		}
 	}
 }
-
-// paragraphs turns the importer's rendered HTML, which keeps Slack's raw
-// newlines, into paragraphs the OneCamp editor shows as lines.
-func paragraphs(rendered string) string {
-	rendered = strings.TrimSpace(rendered)
-	if rendered == "" || strings.Contains(rendered, "<pre>") {
-		// A code block owns its newlines; wrapping would break it.
-		return rendered
-	}
-	lines := strings.Split(rendered, "\n")
-	return "<p>" + strings.Join(lines, "<br/>") + "</p>"
-}

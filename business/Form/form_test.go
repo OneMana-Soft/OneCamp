@@ -38,7 +38,7 @@ func TestCheckForm(t *testing.T) {
 		{Title: "x", Fields: []Field{{Label: "a", Type: "file"}}},
 		{Title: "x", Fields: []Field{{Label: "a", Type: Select, Options: []string{"only"}}}},
 		{Title: "x", Fields: []Field{{Id: "a", Label: "a", Type: ShortText}, {Id: "a", Label: "b", Type: ShortText}}},
-		{Title: "x", Fields: []Field{{Label: "a", Type: ShortText}}, Priority: "urgent"},
+		{Title: "x", Fields: []Field{{Label: "a", Type: ShortText}}, Priority: "someday"},
 	}
 	for i, in := range bad {
 		if _, err := CheckForm(in); err == nil {

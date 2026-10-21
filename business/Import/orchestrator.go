@@ -123,13 +123,13 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 	// Cancellation registration so CancelImport can interrupt mid-stage.
 	cancelCh := make(chan struct{})
 	registerActiveJob(jobId, cancelCh)
-	go func() {
+	helpers.GoSafeNamed("business/Import/orchestrator:RunImport", func() {
 		select {
 		case <-cancelCh:
 			cancel()
 		case <-ctx.Done():
 		}
-	}()
+	})
 
 	opts := decodeOptions(job.Options)
 
@@ -203,6 +203,20 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 			}); err != nil {
 			helpers.LogWarnWithContext(ctx,
 				"Import subtasks stage errors job=%s err=%+v", jobId, err)
+		}
+		if cancelledOrCtxDone(ctx, jobId) {
+			return
+		}
+	}
+
+	// ── Stage 5b: dependencies, once every task and subtask has landed ──
+	if prov.Capabilities()&importProvider.CapTasks != 0 {
+		if err := setStage(ctx, jobId, "dependencies"); err != nil {
+			return
+		}
+		if err := runDependenciesStage(ctx, job, importingUser); err != nil {
+			helpers.LogWarnWithContext(ctx,
+				"Import dependencies stage errors job=%s err=%+v", jobId, err)
 		}
 		if cancelledOrCtxDone(ctx, jobId) {
 			return
@@ -356,7 +370,7 @@ func discardWaiting(ctx context.Context, job *importModels.Job) error {
 
 // StartReaperLoop runs every 60s and resets stuck claims.
 func StartReaperLoop() {
-	go func() {
+	helpers.GoSafeLoop("business/Import/orchestrator:StartReaperLoop", func() {
 		t := time.NewTicker(60 * time.Second)
 		defer t.Stop()
 		for range t.C {
@@ -371,7 +385,7 @@ func StartReaperLoop() {
 					"Import reaper reset %d stuck chunk(s)", n)
 			}
 		}
-	}()
+	})
 }
 
 // runWorkerPool spins up N goroutines that each pull chunks of the
@@ -490,9 +504,10 @@ func progressPublisher(ctx context.Context, job *importModels.Job, stage string,
 }
 
 func publishProgress(ctx context.Context, job *importModels.Job, status, stage, errMsg string) {
-	total, done, failed, _ := importModels.CountChunks(ctx, job.Id)
-	items, _ := importModels.SumItemsImported(ctx, job.Id)
-	errCount, _ := importModels.CountErrors(ctx, job.Id)
+	// One statement for the three counts, where it was three.
+	counts, _ := importModels.JobCounts(ctx, []uuid.UUID{job.Id})
+	c := counts[job.Id]
+	total, done, failed, items, errCount := c.ChunksTotal, c.ChunksDone, c.ChunksFailed, c.ItemsImported, c.ErrorsTotal
 
 	mqttBusiness.PublishSlackImportProgress(&mqttStruct.MqttSlackImportProgress{
 		JobId:              job.Id.String(),

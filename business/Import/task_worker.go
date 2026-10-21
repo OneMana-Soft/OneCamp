@@ -9,6 +9,7 @@ import (
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
+	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -59,6 +60,7 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 	defaultPriority := prov.DefaultPriorityMap()
 
 	fields := newProjectFields(job, &chunk.Id, projectSrcId, projectUUID, importingUser.UserPostgresInfo.Id)
+	who := newPeople(job)
 	taskCh, errCh := prov.IterTasksOfProject(ctx, job, opts, projectSrcId)
 
 	committed := 0
@@ -102,7 +104,7 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 			if st.ParentTaskID == "" {
 				if err := importOneTask(ctx, job, &st, projectUUID, projectInfo,
 					statusMap, priorityMap, defaultStatus, defaultPriority,
-					importingUser, fields, &pendingChunks); err != nil {
+					importingUser, fields, &pendingChunks, who); err != nil {
 					importModels.LogImportError(ctx, job.Id, &chunk.Id,
 						importModels.EntityTask, st.SourceID,
 						importModels.SeverityError, "TASK_IMPORT_FAILED",
@@ -139,6 +141,7 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 	projectUUID uuid.UUID, projectInfo *dgraphStruct.DgraphProject,
 	statusMap, priorityMap, defaultStatus, defaultPriority map[string]string,
 	importingUser *userModels.UserInfo, fields *projectFields, pendingChunks *[]*importModels.Chunk,
+	who *people,
 ) error {
 	if existing, _ := importModels.LookupIdMapping(ctx, job.Id,
 		importModels.EntityTask, st.SourceID); existing != uuid.Nil {
@@ -155,7 +158,7 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 
 	creator := importingUser
 	if st.CreatedBy != "" {
-		if _, info := resolveUserUUID(ctx, job, st.CreatedBy); info != nil {
+		if _, info := who.resolve(ctx, st.CreatedBy); info != nil {
 			creator = info
 		}
 	}
@@ -163,29 +166,22 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 	var assigneeDg *dgraphStruct.DgraphUser
 	extraAssignees := []string{}
 	if len(st.AssigneeIds) > 0 {
-		_, info := resolveUserUUID(ctx, job, st.AssigneeIds[0])
+		_, info := who.resolve(ctx, st.AssigneeIds[0])
 		if info != nil {
 			a := info.UserDgraphInfo
 			assigneeDg = &a
 		}
-		for _, ex := range st.AssigneeIds[1:] {
-			if _, exInfo := resolveUserUUID(ctx, job, ex); exInfo != nil {
-				extraAssignees = append(extraAssignees, exInfo.UserDgraphInfo.DisplayName())
-			}
-		}
+		extraAssignees = coAssigneeNames(ctx, who, st.AssigneeIds[1:])
 	}
 
-	finalStatus := importProvider.ApplyStatusMap(st.Status, statusMap, defaultStatus)
+	finalStatus := closedIfCompleted(importProvider.ApplyStatusMap(st.Status, statusMap, defaultStatus), st.Completed)
 	finalPriority := importProvider.ApplyPriorityMap(st.Priority, priorityMap, defaultPriority)
 
 	// Field values are read first: one no field can keep goes into the
 	// description, which is written with the task.
 	values, lost := fields.prepare(ctx, st.Fields)
 	descHTML := renderTaskDescription(st, extraAssignees) + renderLostValues(lost)
-	label := ""
-	if len(st.Labels) > 0 {
-		label = st.Labels[0]
-	}
+	label := taskLabel(st.Labels)
 
 	createdAt := st.Created
 	if createdAt.IsZero() {
@@ -197,19 +193,21 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 	}
 
 	taskUUID, err := writeTask(ctx, job, importTaskInput{
-		ProjectUUID: projectUUID,
-		Project:     projectInfo,
-		Creator:     creator,
-		Assignee:    assigneeDg,
-		Name:        truncate(st.Name, 256),
-		Description: descHTML,
-		Status:      finalStatus,
-		Priority:    finalPriority,
-		Label:       label,
-		StartDate:   st.StartDate,
-		DueDate:     st.DueDate,
-		CreatedAt:   createdAt,
-		UpdatedAt:   updatedAt,
+		ProjectUUID:     projectUUID,
+		Project:         projectInfo,
+		Creator:         creator,
+		Assignee:        assigneeDg,
+		Name:            truncate(st.Name, 256),
+		Description:     descHTML,
+		Status:          finalStatus,
+		Priority:        finalPriority,
+		Label:           label,
+		StartDate:       st.StartDate,
+		DueDate:         st.DueDate,
+		CreatedAt:       createdAt,
+		UpdatedAt:       updatedAt,
+		Number:          sourceNumber(st),
+		EstimateMinutes: st.EstimateMinutes,
 	})
 	if err != nil {
 		return err
@@ -217,42 +215,44 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 	// Before the task is recorded as imported: a retry skips recorded tasks.
 	fields.write(ctx, taskUUID, values)
 
-	if err := importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
+	// Mapped for this import and the workspace in one statement.
+	if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 		importModels.EntityTask, st.SourceID, taskUUID, nil,
-		mustMarshal(map[string]any{
-			"name":              st.Name,
-			"project_source_id": st.ProjectSourceID,
-			"author":            st.CreatedBy,
-			"final_status":      finalStatus,
-			"final_priority":    finalPriority,
-		}), true); err != nil {
+		mustMarshal(taskMapMetadata(st, finalStatus, finalPriority)), true); err != nil {
 		return err
 	}
-	_ = importModels.UpsertWorkspaceMapping(ctx,
-		job.Provider, job.SourceWorkspaceName,
-		importModels.EntityTask, st.SourceID, taskUUID, job.Id)
 
 	*pendingChunks = append(*pendingChunks, followUpChunks(job, st)...)
 	return nil
 }
 
 // followUpChunks are the chunks a task or subtask needs once it exists: its
-// comments, and each of its files.
+// comments (when it has some, or the source can't say), and each of its files.
 func followUpChunks(job *importModels.Job, st *importProvider.SourceTask) []*importModels.Chunk {
 	var out []*importModels.Chunk
-	if st.CommentCount > 0 {
-		out = append(out, &importModels.Chunk{
+	if st.CommentCount > 0 || st.CommentCount == importProvider.CommentsUnknown {
+		c := &importModels.Chunk{
 			Id:             uuid.New(),
 			ImportId:       job.Id,
 			ChunkType:      importModels.ChunkTaskComments,
 			ParentSourceId: strPtr(st.SourceID),
 			Status:         importModels.ChunkStatusPending,
-			ItemsTotal:     intPtr(st.CommentCount),
 			MaxAttempts:    5,
-		})
+		}
+		if st.CommentCount > 0 {
+			c.ItemsTotal = intPtr(st.CommentCount)
+		}
+		out = append(out, c)
 	}
-	for _, ar := range st.AttachmentRefs {
-		ck := encodeAttachmentMeta(ar, st.SourceID, "task")
+	return append(out, fileChunks(job, st.SourceID, "task", st.AttachmentRefs)...)
+}
+
+// fileChunks are the chunks that fetch files of one task or comment (kind),
+// one each.
+func fileChunks(job *importModels.Job, parentSourceID, kind string, refs []importProvider.SourceAttachment) []*importModels.Chunk {
+	var out []*importModels.Chunk
+	for _, ar := range refs {
+		ck := encodeAttachmentMeta(ar, parentSourceID, kind)
 		if ck == "" {
 			continue
 		}
@@ -260,7 +260,7 @@ func followUpChunks(job *importModels.Job, st *importProvider.SourceTask) []*imp
 			Id:             uuid.New(),
 			ImportId:       job.Id,
 			ChunkType:      importModels.ChunkAttachment,
-			ParentSourceId: strPtr(st.SourceID),
+			ParentSourceId: strPtr(parentSourceID),
 			ObjectKey:      &ck,
 			Status:         importModels.ChunkStatusPending,
 			MaxAttempts:    5,
@@ -381,6 +381,7 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 	defaultPriority := prov.DefaultPriorityMap()
 
 	fields := newProjectFields(job, &chunk.Id, parentProjectSrc, projectUUID, importingUser.UserPostgresInfo.Id)
+	who := newPeople(job)
 	subCh, errCh := prov.IterSubtasksOfTask(ctx, job, opts, parentSrc)
 	committed := 0
 	var pending []*importModels.Chunk
@@ -418,43 +419,43 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 			}
 			creator := importingUser
 			if st.CreatedBy != "" {
-				if _, info := resolveUserUUID(ctx, job, st.CreatedBy); info != nil {
+				if _, info := who.resolve(ctx, st.CreatedBy); info != nil {
 					creator = info
 				}
 			}
 			var assigneeDg *dgraphStruct.DgraphUser
+			extraAssignees := []string{}
 			if len(st.AssigneeIds) > 0 {
-				if _, info := resolveUserUUID(ctx, job, st.AssigneeIds[0]); info != nil {
+				if _, info := who.resolve(ctx, st.AssigneeIds[0]); info != nil {
 					a := info.UserDgraphInfo
 					assigneeDg = &a
 				}
+				extraAssignees = coAssigneeNames(ctx, who, st.AssigneeIds[1:])
 			}
-			finalStatus := importProvider.ApplyStatusMap(st.Status, statusMap, defaultStatus)
+			finalStatus := closedIfCompleted(importProvider.ApplyStatusMap(st.Status, statusMap, defaultStatus), st.Completed)
 			finalPriority := importProvider.ApplyPriorityMap(st.Priority, priorityMap, defaultPriority)
-			label := ""
-			if len(st.Labels) > 0 {
-				label = st.Labels[0]
-			}
+			label := taskLabel(st.Labels)
 			createdAt := st.Created
 			if createdAt.IsZero() {
 				createdAt = time.Now()
 			}
 			values, lost := fields.prepare(ctx, st.Fields)
 			subUUID, err := writeTask(ctx, job, importTaskInput{
-				ProjectUUID: projectUUID,
-				Project:     projectInfo,
-				ParentTask:  parentDgraphTask,
-				Creator:     creator,
-				Assignee:    assigneeDg,
-				Name:        truncate(st.Name, 256),
-				Description: renderTaskDescription(&st, nil) + renderLostValues(lost),
-				Status:      finalStatus,
-				Priority:    finalPriority,
-				Label:       label,
-				StartDate:   st.StartDate,
-				DueDate:     st.DueDate,
-				CreatedAt:   createdAt,
-				UpdatedAt:   ifZeroNow(st.Updated),
+				ProjectUUID:     projectUUID,
+				Project:         projectInfo,
+				ParentTask:      parentDgraphTask,
+				Creator:         creator,
+				Assignee:        assigneeDg,
+				Name:            truncate(st.Name, 256),
+				Description:     renderTaskDescription(&st, extraAssignees) + renderLostValues(lost),
+				Status:          finalStatus,
+				Priority:        finalPriority,
+				Label:           label,
+				StartDate:       st.StartDate,
+				DueDate:         st.DueDate,
+				CreatedAt:       createdAt,
+				UpdatedAt:       ifZeroNow(st.Updated),
+				EstimateMinutes: st.EstimateMinutes,
 			})
 			if err != nil {
 				importModels.LogImportError(ctx, job.Id, &chunk.Id,
@@ -464,7 +465,7 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 				continue
 			}
 			fields.write(ctx, subUUID, values)
-			_ = importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
+			_ = importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 				importModels.EntitySubtask, st.SourceID, subUUID, &parentSrc,
 				mustMarshal(map[string]any{
 					"parent_task_uuid":  parentUUID.String(),
@@ -472,9 +473,6 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 					"project_source_id": parentProjectSrc,
 					"name":              st.Name,
 				}), true)
-			_ = importModels.UpsertWorkspaceMapping(ctx,
-				job.Provider, job.SourceWorkspaceName,
-				importModels.EntitySubtask, st.SourceID, subUUID, job.Id)
 			pending = append(pending, followUpChunks(job, &st)...)
 			committed++
 		}
@@ -573,6 +571,11 @@ type importTaskInput struct {
 	DueDate     *time.Time
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	// Number is the task's number in the source (ENG-123's 123), kept when the
+	// project hasn't used it; 0 numbers it as it's made.
+	Number int
+	// EstimateMinutes is the source's estimate; 0 is none.
+	EstimateMinutes int
 }
 
 // writeTask is the import-side equivalent of taskBusiness.CreateTask
@@ -600,9 +603,17 @@ func writeTask(ctx context.Context, job *importModels.Job, in importTaskInput) (
 	// so we don't need a follow-up UPDATE for the common case where
 	// the source has a single timestamp. Only when updated_at differs
 	// (the source had a real edit history) do we patch it.
-	if err := taskDomain.CreateTask(ctx, taskUUID, in.ProjectUUID,
-		in.Creator.UserPostgresInfo.Id, in.CreatedAt); err != nil {
+	number, err := taskDomain.CreateTaskNumbered(ctx, taskUUID, in.ProjectUUID,
+		in.Creator.UserPostgresInfo.Id, in.CreatedAt, in.Number)
+	if err != nil {
 		return uuid.Nil, fmt.Errorf("pg create task: %w", err)
+	}
+	// The import's project made before keys existed gets its key with its
+	// first task; the rest are numbered as they're made.
+	if number == 0 {
+		if err := taskKeys.Settle(ctx, in.ProjectUUID); err != nil {
+			helpers.LogWarnWithContext(ctx, "writeTask couldn't number the task yet (the sweep will): %+v", err)
+		}
 	}
 	if !in.UpdatedAt.IsZero() && !in.UpdatedAt.Equal(in.CreatedAt) {
 		if _, err := importModels.Exec(ctx,
@@ -654,6 +665,9 @@ func writeTask(ctx context.Context, job *importModels.Job, in importTaskInput) (
 		UpdatedAt: &updatedAt,
 		DeletedAt: &zeroUnixTime,
 		DType:     []string{"Task"},
+	}
+	if m := estimateMinutes(in.EstimateMinutes); m > 0 {
+		dgraphTask.EstimateMinutes = &m
 	}
 	if in.ParentTask != nil {
 		dgraphTask.ParentTask = &dgraphStruct.DgraphTask{

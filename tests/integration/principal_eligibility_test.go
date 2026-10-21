@@ -35,6 +35,8 @@ import (
 )
 
 func TestPrincipalEligibilityAgainstRealGraph(t *testing.T) {
+	// Whether the person may act on a task turns on its restriction, read from Postgres (models/taskread).
+	integration.ConnectServerPostgres(t)
 	dg := integration.SetupDgraph(t)
 
 	// A real deletion timestamp, in the format the schema stores.
@@ -207,6 +209,8 @@ func TestPrincipalEligibilityAgainstRealGraph(t *testing.T) {
 //
 // Run: go test -tags=integration ./tests/integration/ -run TestArchiveRestore -v
 func TestArchiveRestoreReGrantsAccessAgainstRealGraph(t *testing.T) {
+	// Whether the person may act on a task turns on its restriction, read from Postgres (models/taskread).
+	integration.ConnectServerPostgres(t)
 	dg := integration.SetupDgraph(t)
 
 	archivedAt := time.Now().UTC().Format(time.RFC3339Nano)

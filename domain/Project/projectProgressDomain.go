@@ -3,12 +3,13 @@ package Domain
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -37,16 +38,7 @@ func (p ProjectProgress) Archived() bool {
 // dqlUUIDList is ids as a DQL list literal: ["…", "…"]. It takes parsed
 // UUIDs only, so nothing from a request reaches the query text unchecked. Pure.
 func dqlUUIDList(ids []uuid.UUID) string {
-	parts := make([]string, 0, len(ids))
-	seen := make(map[uuid.UUID]bool, len(ids))
-	for _, id := range ids {
-		if id == uuid.Nil || seen[id] {
-			continue
-		}
-		seen[id] = true
-		parts = append(parts, `"`+id.String()+`"`)
-	}
-	return "[" + strings.Join(parts, ", ") + "]"
+	return "[" + dgraphquery.UUIDListOf(ids) + "]"
 }
 
 // GetDgraphProjectsProgress reads the given projects' task counts (open, done,
@@ -59,7 +51,13 @@ func GetDgraphProjectsProgress(ctx context.Context, ids []uuid.UUID, readerUID s
 	if list == "[]" {
 		return out, nil
 	}
-	const live = dgraphStruct.TASK_LIVE_FILTER
+	// A project's progress is one number for everyone who sees it: restricted
+	// tasks count for nothing in it (models/taskread Nobody).
+	tr, err := taskread.Nobody(ctx)
+	if err != nil {
+		return nil, err
+	}
+	live := dgraphStruct.TASK_LIVE_FILTER + tr.And()
 	open := live + ` AND ` + dgraphStruct.TASK_OPEN_FILTER
 	query := `query Progress($user: string, $today: string){
 			p(func: eq(project_uuid, ` + list + `)) {

@@ -1,7 +1,6 @@
 package business
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -10,18 +9,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/microcosm-cc/bluemonday"
-
 	botpost "github.com/akashc777/OneCamp/business/BotPost"
+	hooksBusiness "github.com/akashc777/OneCamp/business/Hooks"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	domain "github.com/akashc777/OneCamp/domain/Webhook"
@@ -30,48 +25,26 @@ import (
 	logModel "github.com/akashc777/OneCamp/models/postgres/WebhookLog"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
 const (
-	MaxFailureCount         = 10
 	DefaultLogRetentionDays = 30
 	OutgoingTimeout         = 10 * time.Second
 	MaxResponseBodyLog      = 2048
 	WebhookRateLimitPerMin  = 30
-	SignatureVersionV1      = "v1"
+	SignatureVersionV1      = hooksBusiness.SignatureVersion
 	SignatureTolerance      = 5 * time.Minute
-	MaxConcurrentDispatches = 100
 )
 
 var (
-	// htmlPolicy is a shared UGC policy for sanitizing webhook-generated HTML.
-	htmlPolicy = bluemonday.UGCPolicy()
-
-	// webhookDispatchPool limits concurrent outgoing webhook dispatches.
-	webhookDispatchPool = make(chan struct{}, MaxConcurrentDispatches)
-
-	// sharedWebhookHTTPClient is reused across all outgoing webhook dispatches.
-	// It uses SSRF-safe transport that pins resolved IPs at dial time.
-	sharedWebhookHTTPClient = helpers.SSRFSafeClient(false)
-
 	// triggerWordRegexCache maps webhook ID -> compiled regexes for trigger words.
 	triggerWordRegexCache sync.Map
 
 	// appCtx is the application-level context used by background goroutines.
 	// It is set at startup via SetAppContext.
 	appCtx = context.Background()
-)
-
-// Pre-compiled mrkdwn regexes for block rendering performance.
-var (
-	reMrkdwnBold     = regexp.MustCompile(`\*([^*]+)\*`)
-	reMrkdwnItalic   = regexp.MustCompile(`_([^_]+)_`)
-	reMrkdwnCode     = regexp.MustCompile("`([^`]+)`")
-	reMrkdwnStrike   = regexp.MustCompile(`~([^~]+)~`)
-	reMrkdwnLink     = regexp.MustCompile(`<([^|>]+)\|([^>]+)>`)
-	reMrkdwnPlainURL = regexp.MustCompile(`<([^\s|>]+)>`)
-	reHrefScheme     = regexp.MustCompile(`<a\s+href="([^"]*)"`)
 )
 
 type rateLimitEntry struct {
@@ -128,48 +101,9 @@ var webhookRateLimiter = struct {
 	counters map[string]*rateLimitEntry
 }{counters: make(map[string]*rateLimitEntry)}
 
-// Block represents a Slack-style block for rich messages.
-type Block struct {
-	Type      string                 `json:"type"`
-	Text      *BlockText             `json:"text,omitempty"`
-	Fields    []BlockText            `json:"fields,omitempty"`
-	Accessory map[string]interface{} `json:"accessory,omitempty"`
-	ImageURL  string                 `json:"image_url,omitempty"`
-	AltText   string                 `json:"alt_text,omitempty"`
-	Title     *BlockText             `json:"title,omitempty"`
-	Actions   []BlockAction          `json:"elements,omitempty"`
-}
-
-type BlockText struct {
-	Type  string `json:"type"` // plain_text or mrkdwn
-	Text  string `json:"text"`
-	Emoji bool   `json:"emoji,omitempty"`
-}
-
-// BlockAction represents an interactive button or select in a block.
-type BlockAction struct {
-	Type     string     `json:"type"` // button, static_select, overflow
-	Text     *BlockText `json:"text,omitempty"`
-	ActionID string     `json:"action_id,omitempty"`
-	URL      string     `json:"url,omitempty"`
-	Value    string     `json:"value,omitempty"`
-	Style    string     `json:"style,omitempty"` // primary, danger, default
-}
-
-// InteractivePayload is received when a user clicks an interactive block element.
-type InteractivePayload struct {
-	Type        string        `json:"type"`
-	ActionID    string        `json:"action_id"`
-	BlockID     string        `json:"block_id"`
-	Value       string        `json:"value"`
-	UserID      string        `json:"user_id"`
-	ChannelID   string        `json:"channel_id"`
-	Actions     []BlockAction `json:"actions"`
-	ResponseURL string        `json:"response_url,omitempty"`
-}
-
 // IncomingWebhookPayload is the expected format for incoming webhook messages.
-// Supports both simple text and Slack-style blocks for rich bot/AI messages.
+// Supports simple text and Slack-style blocks, which business/Cards reads
+// (Reduce) and draws as the message's body (HTML).
 // Destination is determined entirely from the payload (Slack-quality flexible routing):
 //   - channel_id or channel → post to channel
 //   - dm_id → direct message
@@ -178,26 +112,27 @@ type InteractivePayload struct {
 //
 // The webhook's target_type is no longer used for routing.
 type IncomingWebhookPayload struct {
-	Text        string       `json:"text"`
-	ChannelId   *string      `json:"channel_id,omitempty"`
-	Channel     string       `json:"channel,omitempty"` // Slack-style alias for channel_id (UUID or #name)
-	DmId        *string      `json:"dm_id,omitempty"`
-	GroupChatId *string      `json:"group_chat_id,omitempty"`
-	BotName     *string      `json:"bot_name,omitempty"`
-	Blocks      []Block      `json:"blocks,omitempty"`
-	Ephemeral   *bool        `json:"ephemeral,omitempty"` // If true, only visible to target user
-	ThreadTs    *string      `json:"thread_ts,omitempty"` // For threading
-	Markdown    *bool        `json:"markdown,omitempty"`  // Parse text as markdown
-	Attachments []Attachment `json:"attachments,omitempty"`
+	Text        string          `json:"text"`
+	ChannelId   *string         `json:"channel_id,omitempty"`
+	Channel     string          `json:"channel,omitempty"` // Slack-style alias for channel_id (UUID or #name)
+	DmId        *string         `json:"dm_id,omitempty"`
+	GroupChatId *string         `json:"group_chat_id,omitempty"`
+	BotName     *string         `json:"bot_name,omitempty"`
+	Blocks      json.RawMessage `json:"blocks,omitempty"`
+	Ephemeral   *bool           `json:"ephemeral,omitempty"` // If true, only visible to target user
+	ThreadTs    *string         `json:"thread_ts,omitempty"` // For threading
+	Markdown    *bool           `json:"markdown,omitempty"`  // Parse text as markdown
+	Attachments []Attachment    `json:"attachments,omitempty"`
 
-	// Slash command fields
-	Command     string `json:"command,omitempty"`
-	CommandText string `json:"command_text,omitempty"`
-	UserID      string `json:"user_id,omitempty"`
-	TeamID      string `json:"team_id,omitempty"`
-	TriggerID   string `json:"trigger_id,omitempty"`
-	ResponseURL string `json:"response_url,omitempty"`
+	// Command is read only to say where slash commands went: an incoming
+	// webhook posts messages, and a slash command is an app's (Admin › Apps).
+	// It used to run the webhook's own registry (/help, /status), which never
+	// answered anything but "Unknown command" (see SlashCommandsMoved).
+	Command string `json:"command,omitempty"`
 }
+
+// SlashCommandsMoved is the answer to a payload that names a command.
+const SlashCommandsMoved = "Incoming webhooks only post messages. Slash commands are made by apps: add one in Admin › Apps."
 
 type Attachment struct {
 	Color     string     `json:"color,omitempty"`
@@ -220,6 +155,10 @@ type OutgoingWebhookPayload struct {
 	Event     string      `json:"event"`
 	Timestamp string      `json:"timestamp"`
 	Data      interface{} `json:"data"`
+	// EventID is the event's id: the same on every try and every replay
+	// (business/Hooks), as X-OneCamp-Delivery says it, so a receiver can tell
+	// a retry from a new event.
+	EventID string `json:"event_id,omitempty"`
 }
 
 // WebhookCreateInput captures creation parameters.
@@ -575,9 +514,9 @@ func ProcessIncomingWebhook(ctx context.Context, token string) (*webhookModel.We
 
 	// Update last triggered
 	now := time.Now()
-	go func() {
+	helpers.GoSafeNamed("business/Webhook/webhookBusiness:ProcessIncomingWebhook", func() {
 		_ = domain.UpdateWebhookTriggerInfo(appCtx, webhook.Id, now, 0)
-	}()
+	})
 
 	return webhook, nil
 }
@@ -607,11 +546,10 @@ func DispatchEventFor(ctx context.Context, eventType string, data map[string]int
 	dispatch(ctx, eventType, data, mayKnow)
 }
 
-// deliver sends one webhook its payload, on its own goroutine; a seam for
-// tests.
-var deliver = func(webhook *webhookModel.Webhook, eventType string, payload []byte) {
-	go dispatchToWebhook(webhook, eventType, payload)
-}
+// queueDeliveries hands the webhooks an event goes to, each with the body cut
+// for it, to business/Hooks, which writes them down before anything is sent
+// and sends them until they arrive; a seam for tests.
+var queueDeliveries = hooksBusiness.Queue
 
 func dispatch(ctx context.Context, eventType string, data interface{}, mayKnow func(ctx context.Context, owner uuid.UUID) bool) {
 	if helpers.IsBulkImport(ctx) {
@@ -638,6 +576,18 @@ func dispatch(ctx context.Context, eventType string, data interface{}, mayKnow f
 	place := placeOf(eventType, m)
 	if place.conversation {
 		return
+	}
+	// A restricted task's events reach only the webhooks whose owners may see
+	// the task (models/taskread), asked once per owner below.
+	if task := taskOfEvent(m); task != "" && restrictedTaskEvent(ctx, m) {
+		inner := mayKnow
+		mayKnow = func(ctx context.Context, owner uuid.UUID) bool {
+			if inner != nil && !inner(ctx, owner) {
+				return false
+			}
+			f, err := taskread.For(ctx, owner.String())
+			return err == nil && !f.Hides(task)
+		}
 	}
 	lookupKind := place.kind
 	if place.id == nil {
@@ -669,12 +619,15 @@ func dispatch(ctx context.Context, eventType string, data interface{}, mayKnow f
 		}
 	}
 
-	// The two payloads a webhook may be sent: the event whole, or its ids.
+	// The two payloads a webhook may be sent: the event whole, or its ids,
+	// each with the event's id, the same on every try.
+	eventID := uuid.New()
 	payloadFor := func(body interface{}) ([]byte, error) {
 		return json.Marshal(OutgoingWebhookPayload{
 			Event:     eventType,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
 			Data:      body,
+			EventID:   eventID.String(),
 		})
 	}
 	allBytes, err := payloadFor(data)
@@ -699,6 +652,7 @@ func dispatch(ctx context.Context, eventType string, data interface{}, mayKnow f
 
 	// Whether each webhook's owner may know of the event, asked once per owner.
 	knows := map[uuid.UUID]bool{}
+	var targets []hooksBusiness.Target
 	for _, webhook := range webhooks {
 		if mayKnow != nil {
 			ok, asked := knows[webhook.CreatedBy]
@@ -720,7 +674,7 @@ func dispatch(ctx context.Context, eventType string, data interface{}, mayKnow f
 			if webhook.TriggerWords != nil && *webhook.TriggerWords != "" && *webhook.TriggerWords != "[]" {
 				continue
 			}
-			deliver(webhook, eventType, idBytes)
+			targets = append(targets, hooksBusiness.Target{WebhookID: webhook.Id, Payload: idBytes})
 			continue
 		}
 		// Trigger word filtering with word boundaries (cached compiled regexes)
@@ -741,7 +695,10 @@ func dispatch(ctx context.Context, eventType string, data interface{}, mayKnow f
 				}
 			}
 		}
-		deliver(webhook, eventType, allBytes)
+		targets = append(targets, hooksBusiness.Target{WebhookID: webhook.Id, Payload: allBytes})
+	}
+	if err := queueDeliveries(ctx, eventID, eventType, targets); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/DispatchEvent %s reached no webhook: %v", eventType, err)
 	}
 }
 
@@ -774,8 +731,7 @@ func getCachedTriggerRegexes(webhookID uuid.UUID, words []string) []*regexp.Rege
 	}
 	regexes := make([]*regexp.Regexp, 0, len(words))
 	for _, word := range words {
-		re, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(word) + `\b`)
-		if err == nil {
+		if re := helpers.KeywordPattern(word); re != nil {
 			regexes = append(regexes, re)
 		}
 	}
@@ -786,129 +742,6 @@ func getCachedTriggerRegexes(webhookID uuid.UUID, words []string) []*regexp.Rege
 // evictTriggerRegexCache removes a webhook's cached trigger regexes.
 func evictTriggerRegexCache(webhookID uuid.UUID) {
 	triggerWordRegexCache.Delete(webhookID.String())
-}
-
-// dispatchToWebhook sends the payload to a single outgoing webhook with retry logic.
-func dispatchToWebhook(webhook *webhookModel.Webhook, eventType string, payloadBytes []byte) {
-	// Acquire semaphore to limit concurrent dispatches
-	webhookDispatchPool <- struct{}{}
-	defer func() { <-webhookDispatchPool }()
-
-	ctx, cancel := context.WithTimeout(appCtx, OutgoingTimeout)
-	defer cancel()
-
-	if webhook.TargetUrl == nil || *webhook.TargetUrl == "" {
-		helpers.LogErrorWithContext(ctx,
-			"business/dispatchToWebhook Webhook %s has no target URL", webhook.Id.String())
-		return
-	}
-
-	// SSRF guard: validate target URL before dispatch
-	if _, err := helpers.ValidateOutboundURL(*webhook.TargetUrl, false); err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/dispatchToWebhook SSRF blocked for webhook %s: %v", webhook.Id.String(), err)
-		return
-	}
-
-	startTime := time.Now()
-	maxRetries := 3
-	var lastErr error
-
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if attempt > 0 {
-			webhookRetriesTotal.WithLabelValues(eventType).Inc()
-			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(backoff):
-			}
-		}
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, *webhook.TargetUrl, bytes.NewReader(payloadBytes))
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", "OneCamp-Webhook/1.0")
-		req.Header.Set("X-OneCamp-Event", eventType)
-		req.Header.Set("X-OneCamp-Webhook-Id", webhook.Id.String())
-		req.Header.Set("X-OneCamp-Delivery", uuid.New().String())
-		req.Header.Set("X-OneCamp-Retry-Num", fmt.Sprintf("%d", attempt))
-
-		if webhook.Secret != nil && *webhook.Secret != "" {
-			ts := strconv.FormatInt(time.Now().Unix(), 10)
-			canonical := fmt.Sprintf("%s:%s:%s", SignatureVersionV1, ts, string(payloadBytes))
-			signature := signPayload(*webhook.Secret, []byte(canonical))
-			req.Header.Set("X-OneCamp-Signature", SignatureVersionV1+"="+signature)
-			req.Header.Set("X-OneCamp-Timestamp", ts)
-		}
-
-		resp, err := sharedWebhookHTTPClient.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-
-		respBodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBodyLog))
-		resp.Body.Close()
-		respBody := string(respBodyBytes)
-
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			webhookDispatchesTotal.WithLabelValues(eventType, "success").Inc()
-			webhookDispatchDuration.WithLabelValues(eventType).Observe(time.Since(startTime).Seconds())
-			now := time.Now()
-			_ = domain.UpdateWebhookTriggerInfo(ctx, webhook.Id, now, 0)
-			logWebhookExecution(ctx, webhook.Id, eventType, payloadBytes, &resp.StatusCode, &respBody, nil, startTime)
-			return
-		}
-
-		lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateString(respBody, 256))
-	}
-
-	// All retries exhausted
-	webhookDispatchesTotal.WithLabelValues(eventType, "failure").Inc()
-	webhookFailuresTotal.WithLabelValues(eventType).Inc()
-	webhookDispatchDuration.WithLabelValues(eventType).Observe(time.Since(startTime).Seconds())
-	incrementFailureAndMaybeDisable(ctx, webhook)
-	logWebhookExecution(ctx, webhook.Id, eventType, payloadBytes, nil, nil, lastErr, startTime)
-}
-
-// incrementFailureAndMaybeDisable atomically increments the failure counter and auto-disables after MaxFailureCount.
-func incrementFailureAndMaybeDisable(ctx context.Context, webhook *webhookModel.Webhook) {
-	now := time.Now()
-
-	newCount, err := domain.IncrementWebhookFailureCount(ctx, webhook.Id, now)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/incrementFailureAndMaybeDisable Failed to increment failure count err: %+v", err)
-		return
-	}
-
-	if newCount >= MaxFailureCount {
-		helpers.MessageLogs.InfoLog.Printf("Webhook %s auto-disabled after %d consecutive failures", webhook.Id.String(), newCount)
-		_ = domain.DisableWebhook(ctx, webhook.Id, now)
-		// Pulled out of dispatch immediately; no point continuing to
-		// serve the cached entry that says is_active=true.
-		bumpDispatchCacheVersion()
-	}
-}
-
-// logWebhookExecution writes an execution log entry.
-func logWebhookExecution(ctx context.Context, webhookId uuid.UUID, eventType string, requestBody []byte, responseStatus *int, responseBody *string, execErr error, startTime time.Time) {
-	duration := int(time.Since(startTime).Milliseconds())
-	success := execErr == nil && responseStatus != nil && *responseStatus >= 200 && *responseStatus < 300
-
-	reqBodyStr := string(requestBody)
-
-	var errMsg *string
-	if execErr != nil {
-		e := execErr.Error()
-		errMsg = &e
-	}
-
-	_ = domain.CreateWebhookLog(ctx, webhookId, eventType, &reqBodyStr, responseStatus, responseBody, errMsg, &duration, success)
 }
 
 // TestWebhook sends a test event to a webhook.
@@ -927,10 +760,12 @@ func TestWebhook(ctx context.Context, webhookId uuid.UUID) error {
 		"message": "This is a test event from OneCamp",
 	}
 
+	eventID := uuid.New()
 	payload := OutgoingWebhookPayload{
 		Event:     "test",
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Data:      testData,
+		EventID:   eventID.String(),
 	}
 
 	payloadBytes, err := json.Marshal(payload)
@@ -938,8 +773,7 @@ func TestWebhook(ctx context.Context, webhookId uuid.UUID) error {
 		return fmt.Errorf("failed to marshal test payload")
 	}
 
-	go dispatchToWebhook(webhook, "test", payloadBytes)
-	return nil
+	return queueDeliveries(ctx, eventID, "test", []hooksBusiness.Target{{WebhookID: webhook.Id, Payload: payloadBytes}})
 }
 
 // GetWebhookLogsGlobal retrieves paginated logs across all webhooks with filters.
@@ -1004,12 +838,14 @@ func ProcessIncomingMessage(ctx context.Context, webhook *webhookModel.Webhook, 
 	// holds the webhook's URL, or whatever wrote the alert or CI text it
 	// relays. Not the webhook's creator, who wrote none of it. So an AI agent
 	// the post reaches acts for nobody identified (business/AIAgent).
-	go DispatchEvent(appCtx, "post.created", map[string]interface{}{
-		"post_id":    res.PostUUID,
-		"channel_id": channelUUID.String(),
-		"text":       res.HTMLText,
-		"bot_name":   botName,
-		"source":     "incoming_webhook",
+	helpers.GoSafeNamed("DispatchEvent", func() {
+		DispatchEvent(appCtx, "post.created", map[string]interface{}{
+			"post_id":    res.PostUUID,
+			"channel_id": channelUUID.String(),
+			"text":       res.HTMLText,
+			"bot_name":   botName,
+			"source":     "incoming_webhook",
+		})
 	})
 
 	return res.PostUUID, nil
@@ -1030,8 +866,7 @@ func VerifySignatureV1(secret string, body []byte, timestamp string, signature s
 		return false
 	}
 
-	canonical := fmt.Sprintf("%s:%s:%s", SignatureVersionV1, timestamp, string(body))
-	expectedSig := signPayload(secret, []byte(canonical))
+	expectedSig := hooksBusiness.Sign(secret, timestamp, body)
 
 	parts := strings.SplitN(signature, "=", 2)
 	if len(parts) != 2 {
@@ -1089,366 +924,12 @@ func VerifySlackSignature(secret string, body []byte, timestamp string, signatur
 	return hmac.Equal([]byte(expectedSig), []byte(parts[1]))
 }
 
-// SlashCommand represents a parsed slash command from an incoming webhook.
-type SlashCommand struct {
-	Command     string `json:"command"`
-	Text        string `json:"text"`
-	ResponseURL string `json:"response_url,omitempty"`
-	UserID      string `json:"user_id,omitempty"`
-	ChannelID   string `json:"channel_id,omitempty"`
-	TeamID      string `json:"team_id,omitempty"`
-	TriggerID   string `json:"trigger_id,omitempty"`
-}
-
-// ParseSlashCommand extracts a slash command from incoming webhook text.
-// Format: "/command arg1 arg2" or payload with explicit command field.
-func ParseSlashCommand(payload IncomingWebhookPayload) *SlashCommand {
-	// Explicit command field takes precedence
-	if payload.Command != "" {
-		chID := ""
-		if payload.ChannelId != nil {
-			chID = *payload.ChannelId
-		}
-		return &SlashCommand{
-			Command:     payload.Command,
-			Text:        payload.CommandText,
-			ResponseURL: payload.ResponseURL,
-			UserID:      payload.UserID,
-			ChannelID:   chID,
-			TeamID:      payload.TeamID,
-			TriggerID:   payload.TriggerID,
+// taskOfEvent is the task an event's data names (task_id, task_uuid), or "".
+func taskOfEvent(data map[string]interface{}) string {
+	for _, key := range []string{"task_id", "task_uuid"} {
+		if raw, _ := data[key].(string); strings.TrimSpace(raw) != "" {
+			return strings.TrimSpace(raw)
 		}
 	}
-
-	// Parse from text field: "/command args..."
-	text := strings.TrimSpace(payload.Text)
-	if !strings.HasPrefix(text, "/") {
-		return nil
-	}
-
-	parts := strings.Fields(text)
-	if len(parts) == 0 {
-		return nil
-	}
-
-	cmd := parts[0]
-	args := ""
-	if len(parts) > 1 {
-		args = strings.Join(parts[1:], " ")
-	}
-
-	chID := ""
-	if payload.ChannelId != nil {
-		chID = *payload.ChannelId
-	}
-	return &SlashCommand{
-		Command:     cmd,
-		Text:        args,
-		ResponseURL: payload.ResponseURL,
-		UserID:      payload.UserID,
-		ChannelID:   chID,
-		TeamID:      payload.TeamID,
-	}
-}
-
-// HandleSlashCommand processes a slash command and returns an immediate response.
-// If ResponseURL is set, the handler may also dispatch an async delayed response.
-func HandleSlashCommand(ctx context.Context, webhook *webhookModel.Webhook, cmd *SlashCommand) (*SlashCommandResponse, error) {
-	// Look up registered commands for this webhook
-	registered := getRegisteredCommands(ctx, webhook)
-
-	// Find matching command
-	var matched *RegisteredCommand
-	for _, rc := range registered {
-		if rc.Command == cmd.Command {
-			matched = &rc
-			break
-		}
-	}
-
-	if matched == nil {
-		return &SlashCommandResponse{
-			Text:         fmt.Sprintf("Unknown command: %s. Type `/help` for available commands.", cmd.Command),
-			ResponseType: "ephemeral",
-		}, nil
-	}
-
-	// If handler_url is set, forward to external handler
-	if matched.HandlerURL != "" {
-		go forwardSlashCommandToHandler(matched.HandlerURL, webhook, cmd)
-		return &SlashCommandResponse{
-			Text:         fmt.Sprintf("Processing `%s`...", cmd.Command),
-			ResponseType: matched.ResponseType,
-		}, nil
-	}
-
-	// Inline handlers for built-in commands
-	switch cmd.Command {
-	case "/help":
-		return handleHelpCommand(registered), nil
-	case "/status":
-		return handleStatusCommand(ctx, webhook, cmd), nil
-	default:
-		return &SlashCommandResponse{
-			Text:         fmt.Sprintf("Command `%s` is registered but has no inline handler.", cmd.Command),
-			ResponseType: "ephemeral",
-		}, nil
-	}
-}
-
-// SlashCommandResponse is the immediate response to a slash command.
-type SlashCommandResponse struct {
-	Text            string  `json:"text"`
-	Blocks          []Block `json:"blocks,omitempty"`
-	ResponseType    string  `json:"response_type,omitempty"` // ephemeral | in_channel
-	ReplaceOriginal bool    `json:"replace_original,omitempty"`
-}
-
-// RegisteredCommand is a command registered on a webhook.
-type RegisteredCommand struct {
-	Command      string `json:"command"`
-	Description  string `json:"description"`
-	HandlerURL   string `json:"handler_url,omitempty"`
-	ResponseType string `json:"response_type"`
-}
-
-func getRegisteredCommands(ctx context.Context, webhook *webhookModel.Webhook) []RegisteredCommand {
-	if webhook.Commands == nil || *webhook.Commands == "" {
-		return defaultCommands()
-	}
-
-	var cmds []RegisteredCommand
-	if err := json.Unmarshal([]byte(*webhook.Commands), &cmds); err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/getRegisteredCommands Failed to parse commands JSON for webhook %s: %+v", webhook.Id, err)
-		return defaultCommands()
-	}
-	return cmds
-}
-
-func defaultCommands() []RegisteredCommand {
-	return []RegisteredCommand{
-		{Command: "/help", Description: "Show available commands", ResponseType: "ephemeral"},
-		{Command: "/status", Description: "Show webhook status", ResponseType: "ephemeral"},
-	}
-}
-
-func handleHelpCommand(registered []RegisteredCommand) *SlashCommandResponse {
-	var sb strings.Builder
-	sb.WriteString("*Available commands:*\n")
-	for _, cmd := range registered {
-		sb.WriteString(fmt.Sprintf("• `%s` — %s\n", cmd.Command, cmd.Description))
-	}
-	return &SlashCommandResponse{
-		Text:         sb.String(),
-		ResponseType: "ephemeral",
-	}
-}
-
-func handleStatusCommand(ctx context.Context, webhook *webhookModel.Webhook, cmd *SlashCommand) *SlashCommandResponse {
-	status := "Active"
-	if !webhook.IsActive {
-		status = "Disabled"
-	}
-
-	lastTriggered := "Never"
-	if webhook.LastTriggeredAt != nil {
-		lastTriggered = webhook.LastTriggeredAt.Format(time.RFC3339)
-	}
-
-	return &SlashCommandResponse{
-		Text: fmt.Sprintf(
-			"*Webhook Status*\n• Name: %s\n• Status: %s\n• Type: %s\n• Failures: %d\n• Last triggered: %s",
-			webhook.Name, status, webhook.Type, webhook.FailureCount, lastTriggered,
-		),
-		ResponseType: "ephemeral",
-	}
-}
-
-// forwardSlashCommandToHandler sends the command to an external handler URL asynchronously.
-func forwardSlashCommandToHandler(handlerURL string, webhook *webhookModel.Webhook, cmd *SlashCommand) {
-	ctx, cancel := context.WithTimeout(appCtx, OutgoingTimeout)
-	defer cancel()
-
-	// SSRF guard
-	if _, err := helpers.ValidateOutboundURL(handlerURL, false); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/forwardSlashCommandToHandler SSRF blocked: %v", err)
-		return
-	}
-
-	payload := map[string]interface{}{
-		"command":      cmd.Command,
-		"text":         cmd.Text,
-		"user_id":      cmd.UserID,
-		"channel_id":   cmd.ChannelID,
-		"team_id":      cmd.TeamID,
-		"trigger_id":   cmd.TriggerID,
-		"response_url": cmd.ResponseURL,
-		"webhook_id":   webhook.Id.String(),
-		"webhook_name": webhook.BotName,
-	}
-
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/forwardSlashCommandToHandler Failed to marshal payload err: %+v", err)
-		return
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, handlerURL, bytes.NewReader(payloadBytes))
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/forwardSlashCommandToHandler Failed to create request err: %+v", err)
-		return
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "OneCamp-Webhook/1.0")
-
-	client := helpers.SSRFSafeClient(false)
-	client.Timeout = 10 * time.Second
-	resp, err := client.Do(req)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/forwardSlashCommandToHandler Failed to forward command err: %+v", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	// If the handler returns a response and we have a response_url, forward it
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 && cmd.ResponseURL != "" {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		go sendResponseURLCallback(ctx, cmd.ResponseURL, respBody)
-	}
-}
-
-// sendResponseURLCallback sends an async response to a response_url.
-func sendResponseURLCallback(ctx context.Context, responseURL string, payload []byte) {
-	// SSRF guard
-	if _, err := helpers.ValidateOutboundURL(responseURL, false); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/sendResponseURLCallback SSRF blocked: %v", err)
-		return
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, responseURL, bytes.NewReader(payload))
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/sendResponseURLCallback Failed to create request err: %+v", err)
-		return
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "OneCamp-Webhook/1.0")
-
-	client := helpers.SSRFSafeClient(false)
-	client.Timeout = 30 * time.Second
-	resp, err := client.Do(req)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/sendResponseURLCallback Failed to send callback err: %+v", err)
-		return
-	}
-	defer resp.Body.Close()
-}
-
-func truncateString(s string, maxLen int) string {
-	if len(s) > maxLen {
-		return s[:maxLen] + "..."
-	}
-	return s
-}
-
-// RenderBlocksToHTML converts Slack-style blocks to HTML for rich messages.
-func RenderBlocksToHTML(blocks []Block) string {
-	var sb strings.Builder
-	for _, block := range blocks {
-		switch block.Type {
-		case "section":
-			if block.Text != nil {
-				if block.Text.Type == "mrkdwn" {
-					sb.WriteString(renderMrkdwn(block.Text.Text))
-				} else {
-					sb.WriteString("<p>" + htmlPolicy.Sanitize(block.Text.Text) + "</p>")
-				}
-			}
-			if len(block.Fields) > 0 {
-				sb.WriteString("<div style='display:flex;gap:16px;flex-wrap:wrap'>")
-				for _, field := range block.Fields {
-					sb.WriteString("<div style='flex:1;min-width:150px'>")
-					if field.Type == "mrkdwn" {
-						sb.WriteString(renderMrkdwn(field.Text))
-					} else {
-						sb.WriteString("<p>" + htmlPolicy.Sanitize(field.Text) + "</p>")
-					}
-					sb.WriteString("</div>")
-				}
-				sb.WriteString("</div>")
-			}
-		case "divider":
-			sb.WriteString("<hr/>")
-		case "header":
-			if block.Text != nil {
-				sb.WriteString("<h3>" + htmlPolicy.Sanitize(block.Text.Text) + "</h3>")
-			}
-		case "context":
-			if block.Text != nil {
-				sb.WriteString("<small style='color:#666'>" + htmlPolicy.Sanitize(block.Text.Text) + "</small>")
-			}
-		case "image":
-			alt := block.AltText
-			if alt == "" {
-				alt = "image"
-			}
-			sb.WriteString(fmt.Sprintf(`<img src="%s" alt="%s" style="max-width:100%%;border-radius:4px"/>`, htmlPolicy.Sanitize(block.ImageURL), htmlPolicy.Sanitize(alt)))
-			if block.Title != nil {
-				sb.WriteString(fmt.Sprintf("<figcaption style='font-size:12px;color:#666'>%s</figcaption>", htmlPolicy.Sanitize(block.Title.Text)))
-			}
-		case "actions":
-			if len(block.Actions) > 0 {
-				sb.WriteString("<div style='display:flex;gap:8px;flex-wrap:wrap;margin:8px 0'>")
-				for _, action := range block.Actions {
-					style := "background:#fff;border:1px solid #ccc;padding:6px 12px;border-radius:4px;cursor:pointer;text-decoration:none;color:#333"
-					if action.Style == "primary" {
-						style = "background:#007bff;border:1px solid #007bff;padding:6px 12px;border-radius:4px;cursor:pointer;text-decoration:none;color:#fff"
-					} else if action.Style == "danger" {
-						style = "background:#dc3545;border:1px solid #dc3545;padding:6px 12px;border-radius:4px;cursor:pointer;text-decoration:none;color:#fff"
-					}
-					label := action.ActionID
-					if action.Text != nil {
-						label = action.Text.Text
-					}
-					if action.URL != "" {
-						sb.WriteString(fmt.Sprintf(`<a href="%s" style="%s">%s</a>`, htmlPolicy.Sanitize(action.URL), style, htmlPolicy.Sanitize(label)))
-					} else {
-						sb.WriteString(fmt.Sprintf(`<button style="%s">%s</button>`, style, htmlPolicy.Sanitize(label)))
-					}
-				}
-				sb.WriteString("</div>")
-			}
-		}
-	}
-	return htmlPolicy.Sanitize(sb.String())
-}
-
-func renderMrkdwn(text string) string {
-	// Convert Slack mrkdwn to basic HTML using pre-compiled regexes.
-	text = reMrkdwnBold.ReplaceAllString(text, `<strong>$1</strong>`)
-	text = reMrkdwnItalic.ReplaceAllString(text, `<em>$1</em>`)
-	text = reMrkdwnCode.ReplaceAllString(text, `<code>$1</code>`)
-	text = reMrkdwnStrike.ReplaceAllString(text, `<del>$1</del>`)
-	text = reMrkdwnLink.ReplaceAllString(text, `<a href="$1">$2</a>`)
-	text = reMrkdwnPlainURL.ReplaceAllString(text, `<a href="$1">$1</a>`)
-
-	// Restrict link schemes to http, https, and mailto
-	text = reHrefScheme.ReplaceAllStringFunc(text, func(match string) string {
-		m := reHrefScheme.FindStringSubmatch(match)
-		if len(m) < 2 {
-			return match
-		}
-		scheme := ""
-		if u, err := url.Parse(m[1]); err == nil && u.Scheme != "" {
-			scheme = strings.ToLower(u.Scheme)
-		}
-		if scheme == "http" || scheme == "https" || scheme == "mailto" {
-			return match
-		}
-		return `<a href="#"`
-	})
-
-	return "<p>" + text + "</p>"
+	return ""
 }

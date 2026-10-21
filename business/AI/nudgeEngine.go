@@ -86,7 +86,7 @@ const (
 // startup; it self-gates on settings every tick and is inert until an admin
 // enables nudges. ctx drives graceful shutdown.
 func StartNudgeLoop(ctx context.Context) {
-	go func() {
+	helpers.GoSafeLoop("business/AI/nudgeEngine:StartNudgeLoop", func() {
 		select {
 		case <-ctx.Done():
 			return
@@ -105,7 +105,7 @@ func StartNudgeLoop(ctx context.Context) {
 				runNudgePass(ctx)
 			}
 		}
-	}()
+	})
 }
 
 // nudgeInterval reads AI_NUDGE_INTERVAL_MIN, defaulting to nudgeDefaultInterval.
@@ -235,6 +235,13 @@ func gatherMemoryNudges(ctx context.Context, now time.Time) []candidateNudge {
 	memberCache := map[string]*dgraphMembership{}
 
 	var out []candidateNudge
+	var stale []uuid.UUID
+	defer func() {
+		// Detached in one statement once the pass has looked at them all.
+		if cerr := memoryModels.ClearOwners(ctx, stale); cerr != nil {
+			helpers.LogErrorWithContext(ctx, "nudge engine: clear %d stale owners failed: %v", len(stale), cerr)
+		}
+	}()
 	for _, di := range items {
 		it := di.Item
 		inScope, resolved := ownerScopeStatus(ctx, di.OwnerID, it, memberCache)
@@ -244,9 +251,7 @@ func gatherMemoryNudges(ctx context.Context, now time.Time) []candidateNudge {
 			// failure (resolved == false) we skip this pass but keep ownership
 			// intact, so a Dgraph blip can't orphan items.
 			if resolved {
-				if cerr := memoryModels.ClearOwner(ctx, it.ID); cerr != nil {
-					helpers.LogErrorWithContext(ctx, "nudge engine: clear stale owner for %s failed: %v", it.ID, cerr)
-				}
+				stale = append(stale, it.ID)
 			}
 			continue
 		}
@@ -389,14 +394,28 @@ func applyUserNudges(ctx context.Context, userID uuid.UUID, list []candidateNudg
 		work = work[:nudgeMaxPerUser]
 	}
 
-	created := 0
+	// The work's recent dismissals in one read, and its nudges written in one
+	// statement, where each was a read and a write (backend audit #36).
+	keys := make([]string, 0, len(work))
+	for _, c := range work {
+		keys = append(keys, c.dedupKey)
+	}
+	handled, err := nudgeModels.RecentlyTerminal(ctx, keys, nudgeSuppressAfterTerminal)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "nudge engine: recent dismissals unread: %v", err)
+		handled = map[string]bool{}
+	}
+	byKey := map[string]candidateNudge{}
+	inputs := make([]nudgeModels.UpsertInput, 0, len(work))
 	for _, c := range work {
 		// Skip signals the user just handled (don't re-surface a dismissed one).
-		if suppressed, _ := nudgeModels.HasRecentTerminal(ctx, c.dedupKey, nudgeSuppressAfterTerminal); suppressed {
+		if handled[c.dedupKey] {
 			continue
 		}
-
-		id, inserted, err := nudgeModels.Upsert(ctx, nudgeModels.UpsertInput{
+		if _, dup := byKey[c.dedupKey]; !dup {
+			byKey[c.dedupKey] = c
+		}
+		inputs = append(inputs, nudgeModels.UpsertInput{
 			UserID:     userID,
 			Kind:       c.kind,
 			Title:      c.title,
@@ -408,13 +427,16 @@ func applyUserNudges(ctx context.Context, userID uuid.UUID, list []candidateNudg
 			Priority:   c.priority,
 			DedupKey:   c.dedupKey,
 		})
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "nudge engine: upsert failed: %v", err)
-			continue
-		}
-		if inserted {
+	}
+	created := 0
+	written, err := nudgeModels.UpsertMany(ctx, userID, inputs)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "nudge engine: upsert failed: %v", err)
+	}
+	for _, u := range written {
+		if u.Inserted {
 			created++
-			publishNudge(ctx, userID, id, c)
+			publishNudge(ctx, userID, u.ID, byKey[u.DedupKey])
 		}
 	}
 

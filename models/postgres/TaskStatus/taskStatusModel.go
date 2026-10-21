@@ -221,3 +221,40 @@ func Delete(ctx context.Context, projectID, id uuid.UUID) error {
 	}
 	return nil
 }
+
+// Order is a project's saved column order (migration 326): built-in keys and
+// custom status ids, as its admins dragged them; nil when it never set one.
+func Order(ctx context.Context, projectID uuid.UUID) ([]string, error) {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	var order []string
+	err := postgresInit.DBConn.SqlDB.QueryRowContext(c,
+		`SELECT statuses FROM project_status_order WHERE project_id = $1::uuid`, projectID).Scan(pq.Array(&order))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/TaskStatus Order err: %+v", err)
+		return nil, err
+	}
+	return order, nil
+}
+
+// SetOrder saves a project's column order, by whom.
+func SetOrder(ctx context.Context, projectID uuid.UUID, order []string, by uuid.UUID) error {
+	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	var setBy any
+	if by != uuid.Nil {
+		setBy = by
+	}
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(c, `
+		INSERT INTO project_status_order (project_id, statuses, set_by, set_at)
+		VALUES ($1::uuid, $2::text[], $3::uuid, NOW())
+		ON CONFLICT (project_id) DO UPDATE SET statuses = EXCLUDED.statuses, set_by = EXCLUDED.set_by, set_at = NOW()`,
+		projectID, pq.Array(order), setBy)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/TaskStatus SetOrder err: %+v", err)
+	}
+	return err
+}

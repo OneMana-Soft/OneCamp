@@ -24,6 +24,7 @@ import (
 	rateModel "github.com/akashc777/OneCamp/models/postgres/ProjectRate"
 	timeModel "github.com/akashc777/OneCamp/models/postgres/TimeEntry"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -100,12 +101,12 @@ func taskProject(w http.ResponseWriter, r *http.Request, raw string) (uuid.UUID,
 		return uuid.Nil, uuid.Nil, false
 	}
 	if task.Project == nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Time goes on a project's tasks."})
+		helpers.WriteBadRequest(w, "Time goes on a project's tasks.")
 		return uuid.Nil, uuid.Nil, false
 	}
 	projectID, err := uuid.Parse(task.Project.Uuid)
 	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Time goes on a project's tasks."})
+		helpers.WriteBadRequest(w, "Time goes on a project's tasks.")
 		return uuid.Nil, uuid.Nil, false
 	}
 	return taskID, projectID, true
@@ -118,10 +119,21 @@ func GetTaskTime(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	entries, err := timeModel.ForTask(taskID)
+	data, err := TaskTime(r, taskID)
 	if err != nil {
 		fail(w, r, "GetTaskTime", err)
 		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": data})
+}
+
+// TaskTime is a task's time and the reader's running timer, as GET
+// /task/time/{task} answers it; the task panel's ?include=time_summary reads
+// the same, so the two never differ.
+func TaskTime(r *http.Request, taskID uuid.UUID) (map[string]any, error) {
+	entries, err := timeModel.ForTask(taskID)
+	if err != nil {
+		return nil, err
 	}
 	now := time.Now()
 	var total, billable int64
@@ -134,15 +146,14 @@ func GetTaskTime(w http.ResponseWriter, r *http.Request) {
 	}
 	running, err := timeModel.Running(me(r).UserPostgresInfo.Id)
 	if err != nil {
-		fail(w, r, "GetTaskTime", err)
-		return
+		return nil, err
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{
+	return map[string]any{
 		"entries":          views(r, entries, now),
 		"seconds":          total,
 		"billable_seconds": billable,
 		"running":          running,
-	}})
+	}, nil
 }
 
 // RunningTimer is the caller's running timer and its task's name, or null.
@@ -203,7 +214,7 @@ type spanInput struct {
 func readSpan(w http.ResponseWriter, r *http.Request) (spanInput, bool) {
 	var in spanInput
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&in); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that request."})
+		helpers.WriteBadRequest(w, "Couldn't read that request.")
 		return in, false
 	}
 	return in, true
@@ -239,9 +250,8 @@ func AddTime(w http.ResponseWriter, r *http.Request) {
 // UpdateTime changes one of the caller's finished entries.
 // POST /task/time/entry/{entry_id}/update {started_at, minutes, note, billable}
 func UpdateTime(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "entry_id"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't an entry."})
+	id, validID := helpers.UUIDParam(w, r, "entry_id")
+	if !validID {
 		return
 	}
 	in, ok := readSpan(w, r)
@@ -259,7 +269,7 @@ func UpdateTime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e == nil {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That entry isn't yours to change, or its timer is still running."})
+		helpers.WriteNotFound(w, "That entry isn't yours to change, or its timer is still running.")
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": e})
@@ -268,9 +278,8 @@ func UpdateTime(w http.ResponseWriter, r *http.Request) {
 // DeleteTime removes one of the caller's entries.
 // POST /task/time/entry/{entry_id}/delete
 func DeleteTime(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "entry_id"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't an entry."})
+	id, validID := helpers.UUIDParam(w, r, "entry_id")
+	if !validID {
 		return
 	}
 	ok, err := timeModel.Delete(id, me(r).UserPostgresInfo.Id)
@@ -279,7 +288,7 @@ func DeleteTime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That entry isn't yours to delete."})
+		helpers.WriteNotFound(w, "That entry isn't yours to delete.")
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Deleted"})
@@ -321,6 +330,20 @@ func ProjectTime(w http.ResponseWriter, r *http.Request) {
 						names.Tasks[id] = t.Name
 					}
 				}
+			}
+		}
+		// Time on a restricted task the reader may not see is named as that,
+		// never by its title, nor as a deleted task, and the notes typed about
+		// it are left out (models/taskread). Not knowing is no report.
+		tr, err := taskread.From(r.Context())
+		if err != nil {
+			fail(w, r, "ProjectTime", err)
+			return
+		}
+		for i := range entries {
+			if tr.Hides(entries[i].TaskUUID.String()) {
+				names.Tasks[entries[i].TaskUUID] = "A task you can't see"
+				entries[i].Note = ""
 			}
 		}
 	}
@@ -420,7 +443,7 @@ func SetProjectRates(w http.ResponseWriter, r *http.Request) {
 	}
 	var in timeBusiness.RatesInput
 	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&in); err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read those rates."})
+		helpers.WriteBadRequest(w, "Couldn't read those rates.")
 		return
 	}
 	rates, err := timeBusiness.CheckRates(in)

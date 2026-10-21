@@ -60,6 +60,8 @@ func delegatedHop(originUserUUID string) agentBusiness.DelegationContext {
 }
 
 func TestDelegationPermissionAgainstRealGraph(t *testing.T) {
+	// Whether the person may act on a task turns on its restriction, read from Postgres (models/taskread).
+	integration.ConnectServerPostgres(t)
 	dg := integration.SetupDgraph(t)
 
 	memberUUID := uuid.NewString()

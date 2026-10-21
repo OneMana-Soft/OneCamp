@@ -14,6 +14,8 @@ package provider
 import (
 	"context"
 	"time"
+
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // Limiter is the minimal interface a provider's rate limiter must
@@ -43,7 +45,7 @@ func NewSleepLimiter(d time.Duration, burst int) *SleepLimiter {
 		burst = 1
 	}
 	l := &SleepLimiter{d: d, ch: make(chan struct{}, burst)}
-	go func() {
+	helpers.GoSafeLoop("business/Import/provider/ratelimit:NewSleepLimiter", func() {
 		t := time.NewTicker(d)
 		defer t.Stop()
 		// Pre-fill burst.
@@ -56,7 +58,7 @@ func NewSleepLimiter(d time.Duration, burst int) *SleepLimiter {
 			default:
 			}
 		}
-	}()
+	})
 	return l
 }
 

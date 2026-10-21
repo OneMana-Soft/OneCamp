@@ -164,8 +164,9 @@ func attachmentsOf(raw json.RawMessage) ([]*dgraphStruct.DgraphAttachment, error
 func tagWithRetry(ctx context.Context, commentID, threadID string) {
 	var err error
 	for _, wait := range tagBackoff {
-		if wait > 0 {
-			time.Sleep(wait)
+		if wait > 0 && !helpers.SleepCtx(ctx, wait) {
+			err = ctx.Err()
+			break
 		}
 		if err = tagDocComment(ctx, commentID, threadID); err == nil {
 			return

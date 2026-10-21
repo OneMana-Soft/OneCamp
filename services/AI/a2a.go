@@ -328,7 +328,7 @@ func (p *A2AProvider) Chat(ctx context.Context, messages []ChatMessage, _ ChatOp
 
 func (p *A2AProvider) ChatStream(ctx context.Context, messages []ChatMessage, _ ChatOptions) (<-chan StreamChunk, error) {
 	out := make(chan StreamChunk, 2)
-	go func() {
+	helpers.GoSafeNamed("services/AI/a2a:ChatStream", func() {
 		defer close(out)
 		text, err := p.send(ctx, messages)
 		if err != nil {
@@ -337,7 +337,7 @@ func (p *A2AProvider) ChatStream(ctx context.Context, messages []ChatMessage, _ 
 		}
 		out <- StreamChunk{Content: text}
 		out <- StreamChunk{Done: true}
-	}()
+	})
 	return out, nil
 }
 

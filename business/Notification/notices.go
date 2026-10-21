@@ -326,7 +326,13 @@ func pushNotice(ctx context.Context, n Notice, recipients []string, deliver func
 	if n.Push != nil && n.Push.Thread != "" {
 		data[firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID] = n.Push.Thread
 	}
-	deliver(ctx, recipients, data, n.DedupKey)
+	// An actor's notice is their words: their VIPs hear through the gate; the
+	// rest as this notice is told (deliver: as usual, or through holds).
+	sender := ""
+	if n.Actor != nil {
+		sender = n.Actor.Uuid
+	}
+	deliverFrom(ctx, sender, recipients, data, n.DedupKey, deliver)
 }
 
 // emailNotice emails the recipients, by every rule an email follows.

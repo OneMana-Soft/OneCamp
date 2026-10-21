@@ -83,7 +83,7 @@ func (l *Lease) Start(ctx context.Context, from []string, run func()) (bool, err
 	l.state.Lock()
 	l.launched = true
 	l.state.Unlock()
-	go l.run(run)
+	helpers.GoSafeNamed("l.run", func() { l.run(run) })
 	return true, nil
 }
 

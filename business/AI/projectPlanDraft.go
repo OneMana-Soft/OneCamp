@@ -23,6 +23,7 @@ import (
 	"unicode/utf8"
 
 	templateBusiness "github.com/akashc777/OneCamp/business/ProjectTemplate"
+	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -39,7 +40,7 @@ const projectPlanPrompt = `You plan projects for a small team. Given what the pe
 Answer with one JSON object and nothing else, in this shape:
 {"name": "a short project name", "description": "one sentence on what the project delivers",
  "statuses": [],
- "tasks": [{"name": "...", "details": "what done looks like, one or two sentences", "priority": "low|medium|high", "start_day": 0, "due_day": 3, "steps": []}]}
+ "tasks": [{"name": "...", "details": "what done looks like, one or two sentences", "priority": "urgent|high|medium|low", "start_day": 0, "due_day": 3, "steps": []}]}
 Rules:
 - 6 to 14 tasks, in the order the work happens. Name each task with a verb ("Book the venue").
 - Days count from 0, the day the project starts. due_day is never before start_day.
@@ -149,7 +150,7 @@ func planFromModel(out, fallbackName string) (templateBusiness.Template, bool) {
 			continue
 		}
 		task := templateBusiness.Task{Name: name, Description: helpers.PlainTextToHTML(rt.Details), StartDay: day(rt.StartDay), DueDay: day(rt.DueDay)}
-		if pr := strings.ToLower(strings.TrimSpace(rt.Priority)); templateBusiness.ValidPriority(pr) {
+		if pr := strings.ToLower(strings.TrimSpace(rt.Priority)); taskPriority.IsOrNone(pr) {
 			task.Priority = pr
 		}
 		if task.StartDay != nil && task.DueDay != nil && *task.StartDay > *task.DueDay {

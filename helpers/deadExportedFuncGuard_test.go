@@ -288,10 +288,11 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"it would force DemoSeed to import the drill, which the AI-free build cannot do.",
 
 	// RELEASE-LINE ONLY (main and without-ai, from v2.73.0). Beta's demo seed
-	// (business/DemoSeed there) calls these seven; the release lines carry the
+	// (business/DemoSeed there) calls eight of these; the release lines carry the
 	// old seeder instead, since the demo's own code never ships to customers.
 	// They stay in their shared packages, identical to beta's, so later ports
-	// apply as they are; deleting them here would fork those packages.
+	// apply as they are; deleting them here would fork those packages. The ninth,
+	// TellAdmins, is the departed sweep the lines leave unregistered (v2.75.0).
 	"MarkProjectArchivedInOpenSearch": "called only by beta's demo seed (a refresh takes every " +
 		"retired copy of a curated project out of search); the release lines don't carry it.",
 	"ChannelIDsWithNamePrefix": "called only by beta's demo seed (the visitor leaves every " +
@@ -304,6 +305,10 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"the release lines don't carry it.",
 	"UpdateDocPermissions": "business/Doc's is called only by beta's demo seed (the docs home's " +
 		"shared and team docs); the share routes don't call it; the release lines don't carry the seed.",
+	"TellAdmins": "business/Departed's sweep, which the release lines don't register until docs " +
+		"C6-2's web (Settings > Docs) ships: its notice would send admins to a page this web lacks.",
+	"TakeOver": "business/TaskKeys' is called only by beta's demo seed (a refreshed project keeps " +
+		"its key); never offered to people; the release lines don't carry the seed.",
 	"CreateRow": "models/postgres/DataTable's is called only by beta's demo seed (the vendors and " +
 		"formula tables' rows); every other row goes through business/DataTable's CreateRow, which " +
 		"checks access; the release lines don't carry the seed.",
@@ -346,6 +351,23 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"precision) and that a row rewritten in the database fails to verify. The runner's own " +
 		"path is unexported and sits behind a live tool call, and signing is only worth having if " +
 		"that round trip is checked.",
+
+	"ObserveDeliveriesForTest": "shows the integration test every delivery an outgoing webhook " +
+		"is sent, in place of sending it, so the walk of a restricted task's surfaces proves a " +
+		"webhook whose owner may not see the task is sent nothing of it. The sender refuses every " +
+		"private address and the test's receiver is on loopback; the choice of whom to send what " +
+		"is made before, and left as it is. It is built only with the integration tag.",
+
+	"ForwardToThisNetworkForTest": "lets the integration test of command response URLs and card " +
+		"presses (business/Command, business/Cards) forward to its app on loopback over plain http, " +
+		"so it can prove an app answers later, as itself in a channel, and that only a checked press " +
+		"reaches it. It is built only with the integration tag; which addresses OneCamp forwards to " +
+		"is tested in helpers/ssrf_test.go.",
+
+	"SendToThisNetworkForTest": "lets the integration test of webhook deliveries (business/Hooks) " +
+		"send to its endpoint on loopback over plain http, so it can prove a delivery survives a " +
+		"failure and a restart with its event id, and pauses, resumes and replays. It is built only " +
+		"with the integration tag; which addresses OneCamp sends to is tested in helpers/ssrf_test.go.",
 
 	"LetRemotesReachThisNetworkForTest": "lets an integration test about what an agent may read " +
 		"for whoever asked it serve its scripted remote brain on loopback, though the agent's " +

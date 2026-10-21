@@ -95,7 +95,7 @@ func TestCheck(t *testing.T) {
 		"no tasks":         {func(t *Template) { t.Tasks = nil }, "at least one task"},
 		"unnamed task":     {func(t *Template) { t.Tasks[1].Name = "" }, "Give task 2 a name"},
 		"unknown status":   {func(t *Template) { t.Tasks[1].Status = "Shipping" }, `"Draft" is in a status the template doesn't have: "Shipping"`},
-		"priority":         {func(t *Template) { t.Tasks[1].Priority = "urgent" }, "Use low, medium or high"},
+		"priority":         {func(t *Template) { t.Tasks[1].Priority = "someday" }, "Use urgent, high, medium or low"},
 		"negative day":     {func(t *Template) { t.Tasks[1].DueDay = on(-1) }, "a template counts from 0"},
 		"far day":          {func(t *Template) { t.Tasks[1].StartDay = on(MaxDay + 1) }, "a template counts from 0"},
 		"starts late":      {func(t *Template) { t.Tasks[1].StartDay, t.Tasks[1].DueDay = on(5), on(2) }, "starts after it's due"},
@@ -156,7 +156,7 @@ func TestFromProject(t *testing.T) {
 		{Name: "Undated idea", Status: "backlog", DueDate: &zero, StartDate: &zero},
 		{Name: "Ship it", Status: "done", Priority: "high", DueDate: at("2026-03-10T11:00:00Z"), Label: ptr("launch"), Description: ptr("<p>Go</p>")},
 		{Name: "Cancelled", Status: "canceled", DueDate: at("2026-01-01T00:00:00Z")},
-		{Name: "In QA", Status: "inReview", CustomStatusName: ptr("QA"), Priority: "urgent", DueDate: at("2026-03-05T20:00:00Z"),
+		{Name: "In QA", Status: "inReview", CustomStatusName: ptr("QA"), Priority: "someday", DueDate: at("2026-03-05T20:00:00Z"),
 			// 20:00 UTC is 01:30 the next day in Kolkata.
 			StartDate: at("2026-03-06T10:00:00Z")},
 		{Name: "To triage", Status: "backlog", CustomStatusName: ptr("Triage"), DueDate: at("2026-03-02T05:00:00Z"),

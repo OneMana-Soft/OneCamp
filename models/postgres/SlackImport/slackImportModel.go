@@ -283,12 +283,7 @@ func SavePlan(ctx context.Context, jobId uuid.UUID, plan json.RawMessage, chunks
 
 // UpdateOptions is called by Run if the operator tweaked knobs after planning.
 func UpdateOptions(ctx context.Context, jobId uuid.UUID, options json.RawMessage) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		UPDATE import_jobs SET options = $2, updated_at = NOW() WHERE id = $1`,
-		jobId, options)
-	return err
+	return jobs.UpdateOptions(ctx, jobId, options)
 }
 
 // UpdateProgress merges a progress JSONB patch into the existing column.
@@ -296,14 +291,7 @@ func UpdateOptions(ctx context.Context, jobId uuid.UUID, options json.RawMessage
 // individual stage counters without reading-modifying-writing the whole
 // blob and racing each other.
 func UpdateProgress(ctx context.Context, jobId uuid.UUID, patch json.RawMessage) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		UPDATE import_jobs
-		SET progress = COALESCE(progress, '{}'::jsonb) || $2::jsonb,
-		    updated_at = NOW()
-		WHERE id = $1`, jobId, patch)
-	return err
+	return jobs.UpdateProgress(ctx, jobId, patch)
 }
 
 // UpdateDigest stores the prose account of what this import brought in.
@@ -320,31 +308,6 @@ func UpdateDigest(ctx context.Context, jobId uuid.UUID, digest string) error {
 		SET digest = $2, updated_at = NOW()
 		WHERE id = $1`, jobId, digest)
 	return err
-}
-
-// CountChunks returns (total, done, failed) for the FE summary.
-func CountChunks(ctx context.Context, jobId uuid.UUID) (int, int, int, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx, `
-		SELECT
-		    COUNT(*) AS total,
-		    COUNT(*) FILTER (WHERE status = 'done') AS done,
-		    COUNT(*) FILTER (WHERE status = 'failed') AS failed
-		FROM import_chunks WHERE import_id = $1`, jobId)
-	var total, done, failed int
-	err := row.Scan(&total, &done, &failed)
-	return total, done, failed, err
-}
-
-// CountErrors returns the total number of error rows for the FE badge.
-func CountErrors(ctx context.Context, jobId uuid.UUID) (int, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx,
-		`SELECT COUNT(*) FROM import_errors WHERE import_id = $1`, jobId)
-	var n int
-	return n, row.Scan(&n)
 }
 
 // SumItemsImported returns the total items_done across all chunks.
@@ -498,60 +461,27 @@ func ClaimNextChunk(ctx context.Context, importId uuid.UUID, chunkTypes []string
 
 // FinishChunk marks the chunk as done with final counts.
 func FinishChunk(ctx context.Context, chunkId uuid.UUID, itemsDone int, lastCursor *string) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		UPDATE import_chunks
-		SET status = 'done', items_done = $2, last_cursor = COALESCE($3, last_cursor),
-		    error = NULL, updated_at = NOW()
-		WHERE id = $1`, chunkId, itemsDone, lastCursor)
-	return err
+	return jobs.FinishChunk(ctx, chunkId, itemsDone, lastCursor)
 }
 
 // FailChunk marks the chunk as failed with an error message. It will be
 // re-claimed if attempts < max_attempts.
 func FailChunk(ctx context.Context, chunkId uuid.UUID, itemsDone int, lastCursor *string, errMsg string) error {
-	errMsg = helpers.WithoutURLQueries(errMsg) // see models/postgres/Import UpdateStatus
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		UPDATE import_chunks
-		SET status = 'failed',
-		    items_done = $2,
-		    last_cursor = COALESCE($3, last_cursor),
-		    error = $4,
-		    updated_at = NOW()
-		WHERE id = $1`, chunkId, itemsDone, lastCursor, errMsg)
-	return err
+	return jobs.FailChunk(ctx, chunkId, itemsDone, lastCursor, errMsg)
 }
 
 // HeartbeatChunk extends the claim while a long-running chunk is being
 // processed. Called periodically by workers; the reaper uses claimed_at
 // to detect stuck chunks so heartbeating prevents false-positive resets.
 func HeartbeatChunk(ctx context.Context, chunkId uuid.UUID, itemsDone int, lastCursor *string) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		UPDATE import_chunks
-		SET items_done = $2,
-		    last_cursor = COALESCE($3, last_cursor),
-		    claimed_at = NOW(),
-		    updated_at = NOW()
-		WHERE id = $1 AND status = 'in_progress'`, chunkId, itemsDone, lastCursor)
-	return err
+	return jobs.HeartbeatChunk(ctx, chunkId, itemsDone, lastCursor)
 }
 
 // CancelAllPendingChunks bulk-cancels every non-terminal chunk for a job.
 // Called when the operator clicks Cancel; in-progress workers detect the
 // job-status change via their periodic check and exit gracefully.
 func CancelAllPendingChunks(ctx context.Context, importId uuid.UUID) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		UPDATE import_chunks
-		SET status = 'cancelled', updated_at = NOW()
-		WHERE import_id = $1 AND status IN ('pending','failed','in_progress')`, importId)
-	return err
+	return jobs.CancelAllPendingChunks(ctx, importId)
 }
 
 // HasPendingWork returns true if any chunk for the job is still runnable.
@@ -591,32 +521,13 @@ func HasPendingWork(ctx context.Context, importId uuid.UUID, chunkTypes []string
 // so a crash mid-write is replayable.
 func UpsertIdMapping(ctx context.Context, importId uuid.UUID, entityType, slackId string,
 	onecampUUID uuid.UUID, parentSlackId *string, metadata json.RawMessage) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		INSERT INTO import_id_map
-		    (import_id, entity_type, source_id, onecamp_uuid, parent_source_id, metadata)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (import_id, entity_type, source_id) DO NOTHING`,
-		importId, entityType, slackId, onecampUUID, parentSlackId, metadata)
-	return err
+	return jobs.UpsertIdMapping(ctx, importId, entityType, slackId, onecampUUID, parentSlackId, metadata)
 }
 
 // LookupIdMapping fetches the OneCamp UUID for a Slack id. Returns
 // uuid.Nil and nil error when not found, so callers can branch cleanly.
 func LookupIdMapping(ctx context.Context, importId uuid.UUID, entityType, slackId string) (uuid.UUID, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx, `
-		SELECT onecamp_uuid FROM import_id_map
-		WHERE import_id = $1 AND entity_type = $2 AND source_id = $3`,
-		importId, entityType, slackId)
-	var u uuid.UUID
-	err := row.Scan(&u)
-	if errors.Is(err, sql.ErrNoRows) {
-		return uuid.Nil, nil
-	}
-	return u, err
+	return jobs.LookupIdMapping(ctx, importId, entityType, slackId)
 }
 
 // LookupIdMappingsBatch resolves N slack_ids in one round-trip. Saves
@@ -695,22 +606,15 @@ func IdMappingsByType(ctx context.Context, importId uuid.UUID, entityType string
 // coverage report.
 func LogImportError(ctx context.Context, importId uuid.UUID, chunkId *uuid.UUID,
 	entityType, slackId, severity, code, message string, errorContext json.RawMessage) {
-	// Best-effort; never block a worker on telemetry.
-	message = helpers.WithoutURLQueries(message)
-	if len(errorContext) > 0 {
-		errorContext = json.RawMessage(helpers.WithoutURLQueries(string(errorContext)))
-	}
-	dbCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		INSERT INTO import_errors
-		    (import_id, chunk_id, entity_type, source_id, severity, code, message, context)
-		VALUES ($1, $2, NULLIF($3,''), NULLIF($4,''), $5, NULLIF($6,''), $7, $8)`,
-		importId, chunkId, entityType, slackId, severity, code, message, errorContext)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/SlackImport.LogImportError swallowed err: %+v", err)
-	}
+	jobs.LogImportError(ctx, importId, chunkId, entityType, slackId, severity, code, message, errorContext)
+}
+
+// ImportError is one entry LogImportErrors writes.
+type ImportError = jobs.ImportError
+
+// LogImportErrors is LogImportError for several entries in one statement.
+func LogImportErrors(ctx context.Context, importId uuid.UUID, chunkId *uuid.UUID, entries []ImportError) {
+	jobs.LogImportErrors(ctx, importId, chunkId, entries)
 }
 
 // ListErrors returns up to limit error rows, optionally filtered by severity.
@@ -817,7 +721,7 @@ func contains(s, sub string) bool {
 // import pipeline (e.g., backdating posts after creation). Centralised
 // here so we keep all SlackImport-related SQL inside the model layer.
 func Exec(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
-	return postgresInit.DBConn.SqlDB.ExecContext(ctx, query, args...)
+	return jobs.Exec(ctx, query, args...)
 }
 
 // UpsertIdMappingThenFinish atomically writes the id_map row and marks
@@ -961,18 +865,7 @@ func UpsertWorkspaceMapping(ctx context.Context, workspaceName, entityType, slac
 func UpsertIdMappingWithOwnership(ctx context.Context, importId uuid.UUID,
 	entityType, slackId string, onecampUUID uuid.UUID, parentSlackId *string,
 	metadata json.RawMessage, createdByThisImport bool) error {
-
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		INSERT INTO import_id_map
-		    (import_id, entity_type, source_id, onecamp_uuid, parent_source_id,
-		     metadata, created_by_this_import)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		ON CONFLICT (import_id, entity_type, source_id) DO NOTHING`,
-		importId, entityType, slackId, onecampUUID, parentSlackId,
-		metadata, createdByThisImport)
-	return err
+	return jobs.UpsertIdMappingWithOwnership(ctx, importId, entityType, slackId, onecampUUID, parentSlackId, metadata, createdByThisImport)
 }
 
 // IdMappingsByTypeOwned returns mapping rows where this import was the
@@ -1021,12 +914,7 @@ func CountChannelPosts(ctx context.Context, channelUUID, author uuid.UUID) (tota
 // staged ZIP has been deleted from MinIO (either by the cleanup loop,
 // rollback, or the manual delete endpoint).
 func ClearRawObjectKey(ctx context.Context, jobId uuid.UUID) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx,
-		`UPDATE import_jobs SET raw_object_key = NULL, updated_at = NOW() WHERE id = $1`,
-		jobId)
-	return err
+	return jobs.ClearRawObjectKey(ctx, jobId)
 }
 
 // ResetChunkForRetry puts a claimed chunk back in 'pending' WITHOUT
@@ -1037,19 +925,7 @@ func ClearRawObjectKey(ctx context.Context, jobId uuid.UUID) error {
 // This also clears the claim so another worker can pick it up
 // immediately rather than waiting for the reaper's stale-claim window.
 func ResetChunkForRetry(ctx context.Context, chunkId uuid.UUID, reason string) error {
-	reason = helpers.WithoutURLQueries(reason)
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		UPDATE import_chunks
-		SET status = 'pending',
-		    attempts = GREATEST(attempts - 1, 0),
-		    claimed_by = NULL,
-		    claimed_at = NULL,
-		    error = $2,
-		    updated_at = NOW()
-		WHERE id = $1`, chunkId, reason)
-	return err
+	return jobs.ResetChunkForRetry(ctx, chunkId, reason)
 }
 
 // LookupSlackEmoji translates a Slack emoji shortcode to a OneCamp
@@ -1103,58 +979,8 @@ func LookupSlackEmoji(ctx context.Context, slackName string) (string, error) {
 // no metadata. Used by the DM/MPIM message worker to recover the
 // grouping_id and member list saved at resolve time.
 func GetIdMapMetadata(ctx context.Context, importId uuid.UUID, entityType, slackId string) (json.RawMessage, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx, `
-		SELECT metadata FROM import_id_map
-		WHERE import_id = $1 AND entity_type = $2 AND source_id = $3`,
-		importId, entityType, slackId)
-	var raw []byte
-	if err := row.Scan(&raw); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	if len(raw) == 0 {
-		return nil, nil
-	}
-	return json.RawMessage(raw), nil
+	return jobs.GetIdMapMetadata(ctx, importId, entityType, slackId)
 }
 
 // (DM/MPIM chunk types are declared at the top of this file alongside
 // the channel chunk types: ChunkDMMessages.)
-
-// HasAnyOwnedMessageForDM returns true if any message in import_id_map
-// for this import was created by THIS import under the given Slack DM/MPIM
-// id (recorded in metadata.grouping_id). Used by the DM worker to decide
-// whether the Dgraph DM node already exists.
-//
-// Implementation: we don't index metadata.grouping_id explicitly, so we
-// check by walking entries with the same slack DM id stored as the
-// channel_slack_id when we created the chunk. Cheaper option: a count
-// over id_map filtered by entity_type='message' AND created_by_this_import,
-// then JOIN against the chunk table to filter on channel_slack_id.
-//
-// The lookup runs once per chunk so we tolerate the small overhead.
-func HasAnyOwnedMessageForDM(ctx context.Context, importId uuid.UUID, slackDMId string) (bool, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx, `
-		SELECT EXISTS(
-		    SELECT 1
-		    FROM import_id_map m
-		    JOIN import_chunks c
-		      ON c.import_id = m.import_id
-		     AND c.channel_slack_id = $2
-		    WHERE m.import_id = $1
-		      AND m.entity_type = 'message'
-		      AND m.created_by_this_import = true
-		)`, importId, slackDMId)
-	var exists bool
-	if err := row.Scan(&exists); err != nil {
-		return false, err
-	}
-	return exists, nil
-}

@@ -37,6 +37,12 @@ type mqttClientConnect struct {
 }
 
 var MqttClient MQTT.Client
+
+// PublishWait bounds how long a publish (or a subscribe) waits for the broker
+// to answer. A bare token.Wait() waits for ever: with the broker slow or gone,
+// every publish's goroutine stayed parked, one per message, until it came back.
+const PublishWait = 10 * time.Second
+
 var userLocks sync.Map
 
 func getUserLock(userID string) *sync.Mutex {
@@ -268,12 +274,12 @@ const (
 // boot: a clean session keeps no subscriptions, so after the broker dropped
 // this client and it reconnected, the counts stopped.
 func subscribeClientEvents(client MQTT.Client) {
-	if token := client.Subscribe(clientConnectedTopic, 0, connectMessageHandler); token.Wait() && token.Error() != nil {
+	if token := client.Subscribe(clientConnectedTopic, 0, connectMessageHandler); !token.WaitTimeout(PublishWait) || token.Error() != nil {
 		helpers.MessageLogs.ErrorLog.Printf("mqttInit/subscribeClientEvents Failed to subscribe to %s err: %+v", clientConnectedTopic, token.Error())
 	} else {
 		helpers.MessageLogs.InfoLog.Println("Subscribed to " + clientConnectedTopic)
 	}
-	if token := client.Subscribe(clientDisconnectedTopic, 0, disconnectMessageHandler); token.Wait() && token.Error() != nil {
+	if token := client.Subscribe(clientDisconnectedTopic, 0, disconnectMessageHandler); !token.WaitTimeout(PublishWait) || token.Error() != nil {
 		helpers.MessageLogs.ErrorLog.Printf("mqttInit/subscribeClientEvents Failed to subscribe to %s err: %+v", clientDisconnectedTopic, token.Error())
 	} else {
 		helpers.MessageLogs.InfoLog.Println("Subscribed to " + clientDisconnectedTopic)
@@ -428,15 +434,15 @@ func PublishUserDevice(mqttUserStatus *mqttStruct.MqttUserDevice) {
 
 	mqttClientRes := MqttClient.Publish(helpers.GetPublicUsersStatusTopic(), 0, false, marshalMqttUserStatus)
 
-	go func() {
-		_ = mqttClientRes.Wait()
+	helpers.GoSafeNamed("initializers/mqttInit/connectMqtt:PublishUserDevice", func() {
+		_ = mqttClientRes.WaitTimeout(PublishWait)
 		if mqttClientRes.Error() != nil {
 			helpers.MessageLogs.ErrorLog.Printf(
 				"mqttInit/PublishUserStatus to publish to mqtt err: %+v",
 				mqttClientRes.Error())
 			return
 		}
-	}()
+	})
 
 }
 

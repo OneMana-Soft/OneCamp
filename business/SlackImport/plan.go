@@ -39,33 +39,53 @@ func BuildPlan(ctx context.Context, jobId uuid.UUID, arc *Archive) (*importAdapt
 
 	// Pre-compute user resolution outcomes against the live OneCamp DB.
 	// We don't write anything; just count.
+	// The members and taken names are read for all at once, where each
+	// person and each channel was a statement.
+	emails := make([]string, 0, len(parsed.Users))
+	for _, u := range parsed.Users {
+		if email := strings.TrimSpace(strings.ToLower(u.Profile.Email)); email != "" {
+			emails = append(emails, email)
+		}
+	}
+	members, _ := userBusiness.MembersByAddress(ctx, emails)
 	for _, u := range parsed.Users {
 		email := strings.TrimSpace(strings.ToLower(u.Profile.Email))
-		if email == "" {
-			resp.UserNew++
-			continue
-		}
-		if existing, _ := userBusiness.GetUserByEmailId(ctx, &email); existing != nil {
+		if email != "" && members[email] != uuid.Nil {
 			resp.UserMerge++
 		} else {
 			resp.UserNew++
 		}
 	}
+	names := make([]string, 0, len(parsed.Channels)+len(parsed.Groups))
+	for _, c := range parsed.Channels {
+		names = append(names, sanitizeChannelName(strings.ToLower(c.Name)))
+	}
+	for _, c := range parsed.Groups {
+		names = append(names, sanitizeChannelName(strings.ToLower(c.Name)))
+	}
+	taken, _ := channelBusiness.TakenChannelNames(ctx, names)
 
 	// Pre-compute channel name conflicts. Cover both public and private.
 	_, generalFolds := seededGeneral(ctx)
+	generalShared := false
+	for _, c := range parsed.Channels {
+		if c.IsGeneral {
+			generalShared = generalSharedWithGuests(ctx)
+			break
+		}
+	}
 	for _, c := range parsed.Channels {
 		if c.IsGeneral && generalFolds {
 			resp.Warnings = append(resp.Warnings,
 				fmt.Sprintf("Slack's #%s goes into this workspace's #general, which only has its welcome post so far.", c.Name))
 			continue
 		}
-		if c.IsGeneral && generalSharedWithGuests(ctx) {
+		if c.IsGeneral && generalShared {
 			resp.Warnings = append(resp.Warnings,
 				fmt.Sprintf("Slack's #%s goes beside this workspace's #general, not into it: #general is shared with guests, who would see its whole history.", c.Name))
 		}
 		desired := sanitizeChannelName(strings.ToLower(c.Name))
-		if exist, _ := channelBusiness.CheckIfChannelExist(ctx, &desired); exist {
+		if taken[desired] {
 			resp.ChannelConflict++
 			resp.Warnings = append(resp.Warnings,
 				fmt.Sprintf("Channel %q exists; will be imported as %q-from-slack", c.Name, desired))
@@ -73,7 +93,7 @@ func BuildPlan(ctx context.Context, jobId uuid.UUID, arc *Archive) (*importAdapt
 	}
 	for _, c := range parsed.Groups {
 		desired := sanitizeChannelName(strings.ToLower(c.Name))
-		if exist, _ := channelBusiness.CheckIfChannelExist(ctx, &desired); exist {
+		if taken[desired] {
 			resp.ChannelConflict++
 			resp.Warnings = append(resp.Warnings,
 				fmt.Sprintf("Private channel %q exists; will be imported as %q-from-slack", c.Name, desired))

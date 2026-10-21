@@ -15,10 +15,12 @@ import (
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Channel"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	OpenSearchModels "github.com/akashc777/OneCamp/models/openSearch/Channel"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	models "github.com/akashc777/OneCamp/models/postgres/Channel"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 func CreateChannel(ctx context.Context, channelName string, userUUID uuid.UUID, channelPrivate bool, channelUUID uuid.UUID) (err error) {
@@ -35,6 +37,25 @@ func CreateChannel(ctx context.Context, channelName string, userUUID uuid.UUID, 
 		return
 	}
 	return
+}
+
+// TakenChannelNames is which of these channel names are taken, in one
+// statement (CheckIfChannelExist asks for one).
+func TakenChannelNames(ctx context.Context, names []string) (map[string]bool, error) {
+	taken := map[string]bool{}
+	if len(names) == 0 {
+		return taken, nil
+	}
+	found, err := pgexec.Query(ctx, `SELECT DISTINCT ch_name FROM channels WHERE ch_name = ANY($1)`,
+		func(r pgexec.Row) (n string, err error) { err = r.Scan(&n); return }, pq.Array(names))
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/TakenChannelNames err: %+v", err)
+		return nil, err
+	}
+	for _, n := range found {
+		taken[n] = true
+	}
+	return taken, nil
 }
 
 func CheckIfChannelExist(ctx context.Context, uname *string) (exist bool, err error) {
@@ -395,6 +416,7 @@ func GetBasicDgraphChannelInfoByUUID(ctx context.Context, channelUUID string, us
 					}
 					ch_icon
 					ch_name
+					ch_about
 					ch_private
 					ch_post_policy
 					ch_created_at
@@ -414,7 +436,7 @@ func GetBasicDgraphChannelInfoByUUID(ctx context.Context, channelUUID string, us
 	}
 
 	if dgraphChannel != nil {
-		_ = redisStore.SetJSON(ctx, registry.ChannelBasicInfo, []string{channelUUID, userDgraphUUID}, dgraphChannel)
+		_ = redisStore.SetJSONIndexed(ctx, registry.ChannelBasicInfo, registry.ChannelBasicInfoKeys, []string{channelUUID, userDgraphUUID}, dgraphChannel)
 	}
 
 	return
@@ -621,8 +643,12 @@ func GetChannelListWithSearchText(ctx context.Context, userUUID string, searchTe
 
 	variables := make(map[string]string)
 	variables["$user_id"] = userUUID
+	// From the trigram index on ch_name when the term is long enough for it,
+	// not from every channel; the filter still decides what matches.
+	vars, root := dgraphquery.RegexpUnionRoot(searchText, "has(ch_name)", "named", []string{"ch_name"})
 	query := fmt.Sprintf(`query ChannelInfo($user_id: string){
-				channelInfo(func: has(ch_name)) @filter((uid_in(~user_channels, $user_id) OR not eq(ch_private, true)) AND regexp(ch_name,  /.*%s.*/i)) {
+				%s
+				channelInfo(func: %s) @filter(has(ch_name) AND (uid_in(~user_channels, $user_id) OR not eq(ch_private, true)) AND regexp(ch_name,  /.*%s.*/i)) {
 					uid
 					ch_uuid
 					ch_icon
@@ -632,7 +658,7 @@ func GetChannelListWithSearchText(ctx context.Context, userUUID string, searchTe
 					ch_deleted_at
 					ch_private
 			  	}
-			}`, searchText)
+			}`, vars, root, searchText)
 
 	dgraphChannels, err = dgraphModels.GetDgraphChannelsInfoByUserUUID(ctx, query, variables)
 
@@ -659,7 +685,7 @@ func GetChannelListWithMemberFlag(ctx context.Context, userDgraphID string, chan
 	variables := make(map[string]string)
 	variables["$userId"] = userDgraphID
 	query := fmt.Sprintf(`query ChannelInfo($userId: string){
-				channelInfo(func: has(ch_uuid)) @filter(uid(%+v)) {
+				channelInfo(func: uid(%+v)) @filter(has(ch_uuid)) {
 					uid
 					ch_uuid
 					ch_name
@@ -922,10 +948,14 @@ func GetUserArchivedChannelListWithLatestPost(ctx context.Context, userDgraphId 
 	variables["$user_id"] = userDgraphId
 
 	query := fmt.Sprintf(`query ChannelInfo($user_id: string){
-			    var(func: has(ch_uuid)) @filter(uid_in(~user_channels, $user_id) AND gt(ch_deleted_at, "1970-01-01T00:00:00Z")) {
+			    # The reader's own channels, from their node, not every channel's.
+			    var(func: uid($user_id)) {
+					mine as user_channels @filter(has(ch_uuid) AND gt(ch_deleted_at, "1970-01-01T00:00:00Z"))
+				}
+			    var(func: uid(mine)) {
                     totalCountVar as count(uid)
                 }
-				channelInfo(func: has(ch_uuid), first: %v, offset: %v) @filter(uid_in(~user_channels, $user_id) AND gt(ch_deleted_at, "1970-01-01T00:00:00Z")) {
+				channelInfo(func: uid(mine), first: %v, offset: %v) {
 					ch_uuid
 					ch_icon
 					ch_name
@@ -980,10 +1010,14 @@ func GetUserActiveChannelListWithLatestPost(ctx context.Context, userDgraphId st
 	variables["$user_id"] = userDgraphId
 
 	query := fmt.Sprintf(`query ChannelInfo($user_id: string){
-				var(func: has(ch_uuid)) @filter(uid_in(~user_channels, $user_id) AND not gt(ch_deleted_at, "1970-01-01T00:00:00Z")) {
+				# The reader's own channels, from their node, not every channel's.
+				var(func: uid($user_id)) {
+					mine as user_channels @filter(has(ch_uuid) AND not gt(ch_deleted_at, "1970-01-01T00:00:00Z"))
+				}
+				var(func: uid(mine)) {
                     totalCountVar as count(uid)
                 }
-				channelInfo(func: has(ch_uuid), first: %v, offset: %v) @filter(uid_in(~user_channels, $user_id) AND not gt(ch_deleted_at, "1970-01-01T00:00:00Z")) {
+				channelInfo(func: uid(mine), first: %v, offset: %v) {
 					ch_uuid
 					ch_icon
 					ch_name
@@ -1072,7 +1106,7 @@ func InvalidateChannelBasicInfo(ctx context.Context, channelUUID string) {
 	if channelUUID == "" {
 		return
 	}
-	_ = redisStore.DeletePattern(ctx, registry.ChannelBasicInfo.Pattern(channelUUID))
+	_ = redisStore.DeleteIndexed(ctx, registry.ChannelBasicInfo, registry.ChannelBasicInfoKeys, channelUUID)
 }
 
 func DeleteChannelMemberEdge(ctx context.Context, channelDgraphUID string, userDgraphUID string) (err error) {
@@ -1164,7 +1198,7 @@ func HardDeleteChannel(ctx context.Context, channelUUID uuid.UUID) (err error) {
 	}
 	// Same invalidation the update path performs. A cached entry for a row that no longer
 	// exists would outlive it for the whole TTL.
-	_ = redisStore.DeletePattern(ctx, registry.ChannelBasicInfo.Pattern(channelUUID.String()))
+	_ = redisStore.DeleteIndexed(ctx, registry.ChannelBasicInfo, registry.ChannelBasicInfoKeys, channelUUID.String())
 	return
 }
 
@@ -1188,7 +1222,7 @@ func RestoreChannelRow(ctx context.Context, channelUUID uuid.UUID, channelName s
 			"domain/RestoreChannelRow Failed to restore channel row err: %+v", err)
 		return
 	}
-	_ = redisStore.DeletePattern(ctx, registry.ChannelBasicInfo.Pattern(channelUUID.String()))
+	_ = redisStore.DeleteIndexed(ctx, registry.ChannelBasicInfo, registry.ChannelBasicInfoKeys, channelUUID.String())
 	return
 }
 

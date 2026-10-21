@@ -522,6 +522,6 @@ func writeCell(ctx context.Context, t *model.DataTable, rw *model.Row, target *m
 	}
 	announce(ctx, t, cs, neither)
 	broadcastRow(t.Id.String(), "updated", updated)
-	go tellLinkedTables(context.WithoutCancel(ctx), t.Id, rw.Id, false)
+	helpers.GoSafeNamed("tellLinkedTables", func() { tellLinkedTables(context.WithoutCancel(ctx), t.Id, rw.Id, false) })
 	return nil
 }

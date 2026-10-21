@@ -78,6 +78,17 @@ type SourceFieldValue struct {
 	InDescription bool
 }
 
+// PointsValue is a task's points (Linear's estimate, ClickUp's sprint points):
+// a number field, Points, as OneCamp's estimates are in time. Every provider
+// names it the same so a team moving from two sources has one field.
+func PointsValue(points float64) SourceFieldValue {
+	return SourceFieldValue{
+		Field: SourceField{SourceID: "points", Name: "Points", Type: FieldNumber},
+		Value: points,
+		Text:  strconv.FormatFloat(points, 'f', -1, 64),
+	}
+}
+
 // palette is OneCamp's option colours (business/TaskStatus.Colors) with the
 // colour each is drawn in, for matching a source's own colours.
 var palette = []struct {

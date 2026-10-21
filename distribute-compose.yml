@@ -1079,8 +1079,17 @@ services:
       - --certificatesresolvers.le.acme.storage=/certificates/acme.json
       # Use the TLS Challenge for Let's Encrypt
       - --certificatesresolvers.le.acme.tlschallenge=true
-      # Enable the access log, with HTTP requests
-      - --accesslog
+      # The access log, as JSON: each request's status, duration, method, host,
+      # router and service, so an operator sees what failed where. NEVER ITS
+      # PATH: a path can be a private link (a calendar's feed, a guest's
+      # booking or invitation), a bearer secret the log would keep for anyone
+      # who reads it. Headers stay dropped (Traefik's default): they carry
+      # cookies and authorisation. helpers/proxyAccessLogGuard_test.go holds this.
+      - --accesslog=true
+      - --accesslog.format=json
+      - --accesslog.fields.defaultmode=keep
+      - --accesslog.fields.names.RequestPath=drop
+      - --accesslog.fields.headers.defaultmode=drop
       # Enable the Traefik log, for configurations and errors
       - --log
       # Enable the Dashboard and API

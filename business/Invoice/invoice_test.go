@@ -87,3 +87,15 @@ func TestPrefixAndNextNumber(t *testing.T) {
 		t.Errorf("after the highest of its own, whatever the case: %s", got)
 	}
 }
+
+// A word's first letter or digit starts the prefix even behind punctuation:
+// the loop broke after the first character, so "(Beta) launch" lost its B.
+// A word that starts with a letter outside a–z still adds nothing.
+func TestPrefixLooksPastPunctuation(t *testing.T) {
+	cases := map[string]string{"(Beta) launch": "BL", "#ops — \"night\" shift": "ONS", "Über app": "A", "--- ": "INV"}
+	for name, want := range cases {
+		if got := Prefix(name); got != want {
+			t.Errorf("Prefix(%q) = %q, want %q", name, got, want)
+		}
+	}
+}

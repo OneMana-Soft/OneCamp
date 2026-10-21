@@ -261,20 +261,19 @@ func mergeRepeats(kids []querySpec.Filter, fields []*Field) []querySpec.Filter {
 	}
 	first := map[key]int{}
 	var out []querySpec.Filter
-	var outFields []*Field
 	for i, f := range kids {
 		field := fields[i]
 		pos := f.Operator == querySpec.OperatorIs || f.Operator == querySpec.OperatorIn
 		neg := f.Operator == querySpec.OperatorIsNot || f.Operator == querySpec.OperatorNotIn
 		if f.Op != "" || f.Form != querySpec.FormModifier || field == nil || !mergeFamilies[field.Family] || !(pos || neg) {
-			out, outFields = append(out, f), append(outFields, field)
+			out = append(out, f)
 			continue
 		}
 		k := key{f.Field, neg}
 		at, seen := first[k]
 		if !seen {
 			first[k] = len(out)
-			out, outFields = append(out, f), append(outFields, field)
+			out = append(out, f)
 			continue
 		}
 		m := &out[at]

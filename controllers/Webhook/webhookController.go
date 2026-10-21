@@ -11,6 +11,8 @@ import (
 	"time"
 
 	rootBusiness "github.com/akashc777/OneCamp/business"
+	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
+	cardsBusiness "github.com/akashc777/OneCamp/business/Cards"
 	business "github.com/akashc777/OneCamp/business/Webhook"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	"github.com/akashc777/OneCamp/helpers"
@@ -77,6 +79,8 @@ func HandleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	auditBusiness.Record(r, "webhook.created", auditBusiness.CategoryIntegration, "Added a webhook: "+webhook.Name,
+		map[string]interface{}{"webhook_id": webhook.Id.String(), "type": webhook.Type})
 	helpers.WriteJSON(w, http.StatusCreated, helpers.Envolope{"webhook": webhook})
 }
 
@@ -175,6 +179,8 @@ func HandleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	auditBusiness.Record(r, "webhook.updated", auditBusiness.CategoryIntegration, "Changed a webhook: "+webhook.Name,
+		map[string]interface{}{"webhook_id": webhook.Id.String()})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"webhook": webhook})
 }
 
@@ -195,6 +201,8 @@ func HandleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	auditBusiness.Record(r, "webhook.deleted", auditBusiness.CategoryIntegration, "Removed a webhook",
+		map[string]interface{}{"webhook_id": webhookId.String()})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Webhook deleted successfully"})
 }
 
@@ -215,6 +223,8 @@ func HandleRegenerateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	auditBusiness.Record(r, "webhook.token_regenerated", auditBusiness.CategoryIntegration, "Gave a webhook a new token",
+		map[string]interface{}{"webhook_id": webhookId.String()})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"token": token})
 }
 
@@ -235,6 +245,8 @@ func HandleRegenerateSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	auditBusiness.Record(r, "webhook.secret_regenerated", auditBusiness.CategoryIntegration, "Gave a webhook a new signing secret",
+		map[string]interface{}{"webhook_id": webhookId.String()})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"secret": secret})
 }
 
@@ -320,6 +332,9 @@ var EventTypes = []string{
 	"post.created", "post.updated", "post.deleted",
 	"chat.created", "chat.updated", "chat.deleted",
 	"task.created", "task.deleted", "task.status_changed", "task.restored",
+	// A task's priority, due date, tags or name changed (business/Task
+	// taskChanged.go), with the field, what it was and what it is.
+	"task.changed",
 	"channel.created", "channel.archived",
 	"user.joined", "user.left",
 	// Docs (business/Follow's webhook sink): doc.updated is at most one a
@@ -446,16 +461,10 @@ func HandleIncomingWebhook(w http.ResponseWriter, r *http.Request) {
 	// Always use the webhook's configured bot name; ignore payload override to prevent impersonation.
 	botName := webhook.BotName
 
-	// Check for slash commands first
-	cmd := business.ParseSlashCommand(payload)
-	if cmd != nil {
-		response, err := business.HandleSlashCommand(ctx, webhook, cmd)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "controllers/HandleIncomingWebhook Slash command failed err: %+v", err)
-			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"ok": false, "error": "Command failed"})
-			return
-		}
-		helpers.WriteJSON(w, http.StatusOK, response)
+	// A slash command is an app's now; this webhook only posts messages. A
+	// text that starts with "/" is a message like any other.
+	if strings.TrimSpace(payload.Command) != "" {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"ok": false, "error": business.SlashCommandsMoved})
 		return
 	}
 
@@ -464,11 +473,12 @@ func HandleIncomingWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build rich text from blocks if provided
+	// Blocks are a card (business/Cards): read within the card subset and
+	// drawn as the message's body; the text stays the fallback.
 	messageText := payload.Text
 	if len(payload.Blocks) > 0 {
-		richText := business.RenderBlocksToHTML(payload.Blocks)
-		if richText != "" {
+		card, _ := cardsBusiness.Reduce(payload.Blocks)
+		if richText := cardsBusiness.HTML(card); richText != "" {
 			messageText = richText
 		}
 	}

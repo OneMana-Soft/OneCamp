@@ -34,9 +34,18 @@ import (
 )
 
 // tokenReachableRoots is the code a token's call runs: the public API, the MCP
-// surface, the AI executors MCP runs (and agent runs a token asks for), and the
-// shared send rule the public API posts through.
-var tokenReachableRoots = []string{"../controllers/V1", "../business/MCPServer", "../business/AI", "../business/Send"}
+// surface, the AI executors MCP runs (and agent runs a token asks for), the
+// shared send rule the public API posts through, and who a message reaches,
+// which that rule asks (chat P3: a channel's managers broadcast in the app,
+// never through a token).
+// business/App and business/PublicAPI (platform P-API, 17 Oct 2026): every app's
+// call is an API token's call, and the public API's one shape is what every
+// /v1 route runs through, so both act as a member at most, with no exceptions.
+// business/Hooks (P-API part 2, 18 Oct): an app's own webhook subscriptions
+// arrive there, so it decides nothing by an admin role either.
+// Who knows (DG9): the AI's find_people asks it for whoever MCP or an agent
+// acts for.
+var tokenReachableRoots = []string{"../controllers/V1", "../business/MCPServer", "../business/AI", "../business/Send", "../business/Reach", "../business/App", "../business/PublicAPI", "../business/Hooks", "../business/WhoKnows", "../controllers/WhoKnows"}
 
 // reachFunc is MCP's reach, which asks viaToken once at its top: its cases are
 // checked one by one (reachWritesByRoleWithoutTheToken), not as one function.
@@ -372,18 +381,33 @@ func exprName(e ast.Expr) string {
 func announcementPostsWithoutTheToken(t *testing.T) []string {
 	t.Helper()
 	src := strippedSource(t, "../business/Send/send.go")
-	start := strings.Index(src, "func PrepareChannelPost(")
-	if start < 0 {
+	body, ok := funcBody(src, "PrepareChannelPost")
+	if !ok {
 		return []string{"business/Send has no PrepareChannelPost; this guard has gone stale"}
 	}
-	body := src[start:]
-	if end := strings.Index(body, "\nfunc "); end > 0 {
-		body = body[:end]
+	// Since chat P3 the rule lives in prepareChannelPost, which
+	// PrepareChannelPost and PrepareReplyCopy both run: follow it there.
+	if !strings.Contains(body, "ActsThroughToken(") && strings.Contains(body, "prepareChannelPost(") {
+		body, _ = funcBody(src, "prepareChannelPost")
 	}
 	if !strings.Contains(body, "ActsThroughToken(") {
 		return []string{"business/Send's PrepareChannelPost lets an announcement channel's admin post through a token: ask helpers.ActsThroughToken"}
 	}
 	return nil
+}
+
+// funcBody is the source of the function name declares in src, up to the next
+// function. Pure.
+func funcBody(src, name string) (string, bool) {
+	start := strings.Index(src, "func "+name+"(")
+	if start < 0 {
+		return "", false
+	}
+	body := src[start:]
+	if end := strings.Index(body[1:], "\nfunc "); end > 0 {
+		body = body[:end+1]
+	}
+	return body, true
 }
 
 // typeName is a composite literal's type name, package dropped.

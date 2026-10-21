@@ -122,11 +122,19 @@ func (cb *CircuitBreaker) RecordFailure() {
 // breaker and block every user even though nothing is actually down. Behaviour:
 //   - nil error            -> RecordSuccess (closes/keeps the circuit closed)
 //   - provider rate limit  -> no-op (neither success nor failure)
+//   - call called off      -> no-op: the caller stopped waiting (a panel
+//     closed, a question asked again), which says nothing about the provider
 //   - any other error      -> RecordFailure (counts toward opening)
+//
+// Counting the called-off ones opened the breaker on the demo on 11 Oct:
+// five cancelled embeddings in one second, and the next person to ask was
+// refused 503 for half a minute with nothing wrong.
 func (cb *CircuitBreaker) RecordResult(err error) {
 	switch {
 	case err == nil:
 		cb.RecordSuccess()
+	case errors.Is(err, context.Canceled):
+		// The caller went away; the provider may be fine. Neither outcome.
 	case errors.Is(err, ErrProviderRateLimited):
 		// Healthy provider, just throttling. Don't penalize the breaker.
 	case errors.Is(err, ErrWorkspaceTokenBudgetExceeded), errors.Is(err, ErrUserTokenBudgetExceeded), errors.Is(err, ErrAgentTokenBudgetExceeded), errors.Is(err, ErrChannelTokenBudgetExceeded):

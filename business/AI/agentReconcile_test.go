@@ -188,7 +188,7 @@ func TestReconcileWithSources_ChannelByName(t *testing.T) {
 
 func TestNormalizeTaskPriority(t *testing.T) {
 	cases := map[string]string{
-		"high": "high", "urgent": "high", "critical": "high", "P1": "high", "highest": "high",
+		"high": "high", "urgent": "urgent", "critical": "urgent", "P1": "high", "highest": "urgent",
 		"low": "low", "lowest": "low", "p5": "low", "minor": "low",
 		"medium": "medium", "normal": "medium", "": "medium", "banana": "medium", "P2": "medium",
 	}

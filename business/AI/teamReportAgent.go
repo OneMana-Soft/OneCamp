@@ -77,7 +77,7 @@ Rules:
 // StartTeamReportLoop launches the team-report agent. Self-gates on
 // settings every tick; inert until enabled. ctx drives shutdown.
 func StartTeamReportLoop(ctx context.Context) {
-	go func() {
+	helpers.GoSafeLoop("business/AI/teamReportAgent:StartTeamReportLoop", func() {
 		select {
 		case <-ctx.Done():
 			return
@@ -94,7 +94,7 @@ func StartTeamReportLoop(ctx context.Context) {
 				maybeRunTeamReports(ctx)
 			}
 		}
-	}()
+	})
 }
 
 // maybeRunTeamReports fires weekly on the configured local hour/weekday.

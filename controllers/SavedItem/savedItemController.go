@@ -41,7 +41,7 @@ func fail(w http.ResponseWriter, r *http.Request, err error) {
 func List(w http.ResponseWriter, r *http.Request) {
 	userID, ok := member(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not signed in"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	res, err := business.List(r.Context(), userID, r.URL.Query().Get("state") == "done")
@@ -56,7 +56,7 @@ func List(w http.ResponseWriter, r *http.Request) {
 func Save(w http.ResponseWriter, r *http.Request) {
 	userID, ok := member(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not signed in"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	var in business.SaveInput
@@ -84,7 +84,7 @@ type updateInput struct {
 func Update(w http.ResponseWriter, r *http.Request) {
 	userID, ok := member(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not signed in"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	var in updateInput
@@ -119,7 +119,7 @@ func Update(w http.ResponseWriter, r *http.Request) {
 func Delete(w http.ResponseWriter, r *http.Request) {
 	userID, ok := member(r)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Not signed in"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	var in struct {

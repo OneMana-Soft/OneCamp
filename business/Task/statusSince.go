@@ -34,7 +34,7 @@ const statusSinceBatch = 200
 // task_status_since, once, in the background. New tasks and every status
 // change set it as they happen, so after the first start this finds nothing.
 func StartStatusSinceBackfill(ctx context.Context) {
-	go func() {
+	helpers.GoSafeLoop("business/Task/statusSince:StartStatusSinceBackfill", func() {
 		done := 0
 		// A ceiling, so a write that silently does not apply cannot loop forever.
 		for round := 0; round < 10_000; round++ {
@@ -63,5 +63,5 @@ func StartStatusSinceBackfill(ctx context.Context) {
 		if done > 0 {
 			helpers.MessageLogs.InfoLog.Printf("time in status: backfilled %d tasks", done)
 		}
-	}()
+	})
 }

@@ -229,7 +229,7 @@ func (p *AGUIProvider) Chat(ctx context.Context, messages []ChatMessage, opts Ch
 // ChatStream runs the remote and emits its text as it arrives.
 func (p *AGUIProvider) ChatStream(ctx context.Context, messages []ChatMessage, opts ChatOptions) (<-chan StreamChunk, error) {
 	out := make(chan StreamChunk, 16)
-	go func() {
+	helpers.GoSafeNamed("services/AI/agui:ChatStream", func() {
 		defer close(out)
 		_, _, err := p.run(ctx, messages, nil, func(delta string) {
 			select {
@@ -242,7 +242,7 @@ func (p *AGUIProvider) ChatStream(ctx context.Context, messages []ChatMessage, o
 			return
 		}
 		out <- StreamChunk{Done: true}
-	}()
+	})
 	return out, nil
 }
 

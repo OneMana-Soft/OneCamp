@@ -1,7 +1,12 @@
 // Mapping helpers shared by every provider.
 package provider
 
-import "strings"
+import (
+	"strings"
+
+	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+)
 
 // Valid OneCamp task statuses (mirrors models/dgraph/struct.go).
 var validStatuses = map[string]struct{}{
@@ -11,13 +16,6 @@ var validStatuses = map[string]struct{}{
 	"inReview":   {},
 	"canceled":   {},
 	"done":       {},
-}
-
-// Valid OneCamp task priorities.
-var validPriorities = map[string]struct{}{
-	"low":    {},
-	"medium": {},
-	"high":   {},
 }
 
 // ApplyStatusMap clamps a source status to the OneCamp vocabulary using
@@ -73,39 +71,19 @@ func StatusFromHeuristic(s string) string {
 	return ""
 }
 
-// ApplyPriorityMap clamps a source priority to {low|medium|high}.
+// ApplyPriorityMap is a source priority as a task holds it (one scale:
+// urgent, high, medium, low or none): the import's map, then the provider's,
+// then what the words mean. A source with no priority gives none; words that
+// name none of them give medium.
 func ApplyPriorityMap(source string, mapping, defaults map[string]string) string {
 	src := strings.TrimSpace(strings.ToLower(source))
-	if src == "" {
-		return "medium"
-	}
-	if v, ok := mapping[src]; ok {
-		if _, valid := validPriorities[v]; valid {
+	for _, m := range []map[string]string{mapping, defaults} {
+		if v, ok := m[src]; ok && taskPriority.IsOrNone(v) {
 			return v
 		}
 	}
-	if v, ok := defaults[src]; ok {
-		if _, valid := validPriorities[v]; valid {
-			return v
-		}
-	}
-	if v := PriorityFromHeuristic(src); v != "" {
+	if v, ok := taskPriority.FromWords(src); ok {
 		return v
 	}
-	return "medium"
-}
-
-// PriorityFromHeuristic covers Jira's Highest/High/…, Asana's High/Medium/Low,
-// Trello's stars-as-priority, etc.
-func PriorityFromHeuristic(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
-	switch s {
-	case "highest", "very high", "p0", "p1", "urgent", "critical", "high":
-		return "high"
-	case "lowest", "very low", "p4", "p5", "low":
-		return "low"
-	case "medium", "normal", "moderate", "p2", "p3":
-		return "medium"
-	}
-	return ""
+	return dgraphStruct.TASK_PRIORITY_MEDIUM
 }

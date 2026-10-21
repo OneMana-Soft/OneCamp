@@ -76,7 +76,7 @@ const (
 // once at startup; it self-gates on settings every tick and is inert until
 // the memory layer is enabled (and email configured). ctx drives shutdown.
 func StartMemoryDigestLoop(ctx context.Context) {
-	go func() {
+	helpers.GoSafeLoop("business/AI/memoryDigest:StartMemoryDigestLoop", func() {
 		select {
 		case <-ctx.Done():
 			return
@@ -93,7 +93,7 @@ func StartMemoryDigestLoop(ctx context.Context) {
 				maybeRunDigest(ctx)
 			}
 		}
-	}()
+	})
 }
 
 // maybeRunDigest fires the digest exactly once on the configured local hour

@@ -768,11 +768,6 @@ func scanRow(s scanner) (*Row, error) {
 
 const rowColumns = `id, table_id, values, position, row_no, created_by, created_at, updated_at, deleted_at, version, position_key, updated_by, deleted_by`
 
-// nextRowNoSQL takes the next number of a table ($2) for a new row: the
-// table's counter, moved on in the same statement, so two rows made at once
-// never share one.
-const nextRowNoSQL = `UPDATE data_tables SET next_row_no = next_row_no + 1 WHERE id = $2 RETURNING next_row_no - 1 AS no`
-
 // wholeRowCellsSQL is a whole row's cells as written ($3, over the row's
 // values as they were, c.old), the AI columns' among them ($6) as stored
 // unless one of them is the only cell the row changes. The web released

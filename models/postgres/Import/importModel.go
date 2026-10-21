@@ -30,20 +30,24 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
 
-// Provider names — keep in sync with migration 60 CHECK constraints.
+// Provider names — keep in sync with import_oauth_tokens' provider CHECK
+// (migrations 60, 187 and the Basecamp one).
 const (
-	ProviderSlack   = "slack"
-	ProviderAsana   = "asana"
-	ProviderJira    = "jira"
-	ProviderTrello  = "trello"
-	ProviderNotion  = "notion"
-	ProviderTodoist = "todoist"
-	ProviderLinear  = "linear"
-	ProviderClickUp = "clickup"
+	ProviderSlack    = "slack"
+	ProviderAsana    = "asana"
+	ProviderJira     = "jira"
+	ProviderTrello   = "trello"
+	ProviderNotion   = "notion"
+	ProviderTodoist  = "todoist"
+	ProviderLinear   = "linear"
+	ProviderClickUp  = "clickup"
+	ProviderMonday   = "monday"
+	ProviderBasecamp = "basecamp"
 )
 
 // Job statuses. Aligned with the CHECK constraint in migration 60.
@@ -615,41 +619,6 @@ func ClearRawObjectKey(ctx context.Context, jobId uuid.UUID) error {
 	return err
 }
 
-// CountChunks returns (total, done, failed) for FE summary.
-func CountChunks(ctx context.Context, jobId uuid.UUID) (int, int, int, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx, `
-		SELECT
-		    COUNT(*) AS total,
-		    COUNT(*) FILTER (WHERE status = 'done') AS done,
-		    COUNT(*) FILTER (WHERE status = 'failed') AS failed
-		FROM import_chunks WHERE import_id = $1`, jobId)
-	var total, done, failed int
-	err := row.Scan(&total, &done, &failed)
-	return total, done, failed, err
-}
-
-// CountErrors counts error rows for the FE badge.
-func CountErrors(ctx context.Context, jobId uuid.UUID) (int, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx,
-		`SELECT COUNT(*) FROM import_errors WHERE import_id = $1`, jobId)
-	var n int
-	return n, row.Scan(&n)
-}
-
-// SumItemsImported returns the total items_done across all chunks.
-func SumItemsImported(ctx context.Context, jobId uuid.UUID) (int, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(dbCtx,
-		`SELECT COALESCE(SUM(items_done),0) FROM import_chunks WHERE import_id = $1`, jobId)
-	var n int
-	return n, row.Scan(&n)
-}
-
 // ─── Chunks ───────────────────────────────────────────────────────────
 
 // CreateChunks bulk-inserts chunks, idempotent on the logical key.
@@ -999,6 +968,32 @@ func IdMappingsByTypeOwned(ctx context.Context, importId uuid.UUID, entityType s
 	return out, rows.Err()
 }
 
+// IdMapValue is a mapping and one value of its metadata.
+type IdMapValue struct {
+	SourceId    string
+	OnecampUUID uuid.UUID
+	Value       json.RawMessage
+}
+
+// IdMappingsWithMetadata is this import's mappings of a kind whose metadata
+// has key, with its value (a task's "blocked_by"), in one read.
+func IdMappingsWithMetadata(ctx context.Context, importId uuid.UUID, entityType, key string) ([]IdMapValue, error) {
+	return pgexec.Query(ctx, `
+		SELECT source_id, onecamp_uuid, metadata->$3 FROM import_id_map
+		WHERE import_id = $1 AND entity_type = $2 AND metadata ? $3
+		ORDER BY source_id`,
+		func(r pgexec.Row) (IdMapValue, error) {
+			var v IdMapValue
+			err := r.Scan(&v.SourceId, &v.OnecampUUID, &v.Value)
+			return v, err
+		}, importId, entityType, key)
+}
+
+// IdMapOf is this import's mappings of a kind, source id to OneCamp id, in one read.
+func IdMapOf(ctx context.Context, importId uuid.UUID, entityType string) (map[string]uuid.UUID, error) {
+	return pgexec.Pairs[string, uuid.UUID](ctx, `SELECT source_id, onecamp_uuid FROM import_id_map WHERE import_id = $1 AND entity_type = $2`, importId, entityType)
+}
+
 // SourceIdsFor is the source ids this import mapped to one OneCamp entity.
 func SourceIdsFor(ctx context.Context, importId uuid.UUID, entityType string, onecampUUID uuid.UUID) ([]string, error) {
 	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
@@ -1104,6 +1099,34 @@ func LogImportError(ctx context.Context, importId uuid.UUID, chunkId *uuid.UUID,
 		importId, chunkId, entityType, sourceId, severity, code, message, errorContext)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/Import.LogImportError swallowed err: %+v", err)
+	}
+}
+
+// ImportError is one entry LogImportErrors writes.
+type ImportError struct {
+	EntityType, SourceID, Severity, Code, Message string
+	Context                                       json.RawMessage
+}
+
+// LogImportErrors is LogImportError for several entries in one statement.
+// Best-effort, as it is: a failure is logged, never a worker's.
+func LogImportErrors(ctx context.Context, importId uuid.UUID, chunkId *uuid.UUID, entries []ImportError) {
+	if len(entries) == 0 || postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
+		return
+	}
+	n := len(entries)
+	entity, source, severity, code, message, errContext := make([]string, n), make([]string, n), make([]string, n), make([]string, n), make([]string, n), make([]string, n)
+	for i, e := range entries {
+		entity[i], source[i], severity[i], code[i] = e.EntityType, e.SourceID, e.Severity, e.Code
+		message[i] = helpers.WithoutURLQueries(e.Message)
+		errContext[i] = string(contextWithoutURLQueries(e.Context))
+	}
+	if _, err := pgexec.Exec(ctx, `
+		INSERT INTO import_errors (import_id, chunk_id, entity_type, source_id, severity, code, message, context)
+		SELECT $1, $2, NULLIF(e.entity, ''), NULLIF(e.source, ''), e.severity, NULLIF(e.code, ''), e.message, NULLIF(e.context, '')::jsonb
+		FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[]) AS e(entity, source, severity, code, message, context)`,
+		importId, chunkId, pq.Array(entity), pq.Array(source), pq.Array(severity), pq.Array(code), pq.Array(message), pq.Array(errContext)); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/Import.LogImportErrors swallowed err: %+v", err)
 	}
 }
 

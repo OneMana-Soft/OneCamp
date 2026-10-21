@@ -475,7 +475,7 @@ func DropConversation(kind, id, userUUID string) {
 	}
 	ForgetMemberTopics(userUUID)
 	topics := topicsOf(kind, id)
-	go PublishConversationAccess(kind, id, mqttStruct.CONVERSATION_DROPPED, userUUID)
+	helpers.GoSafeNamed("PublishConversationAccess", func() { PublishConversationAccess(kind, id, mqttStruct.CONVERSATION_DROPPED, userUUID) })
 	atTheBroker("take "+kind+" "+id+" from "+userUUID, func(ctx context.Context, a *brokerAdmin) error {
 		return a.cutFromTopics(ctx, userUUID, topics)
 	})

@@ -54,7 +54,7 @@ type parseAnswer struct {
 func ParseQuery(w http.ResponseWriter, r *http.Request) {
 	user, subject := accessBusiness.RequestSubject(r)
 	if subject.UserUUID == "" {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	var req parseRequest

@@ -364,8 +364,9 @@ func docMarkdownToHTML(md string) string {
 // has to be rewritten when the data arrives.
 func executeFindPeople(ctx context.Context, action ai.ProposedAction, userUUID string) (string, map[string]string, error) {
 	query := strings.TrimSpace(action.Params["query"])
-	if query == "" {
-		return "", nil, fmt.Errorf("query is required (a name, job title or team to look for)")
+	topic := strings.TrimSpace(action.Params["topic"])
+	if query == "" && topic == "" {
+		return "", nil, fmt.Errorf("query or topic is required (a name, job title or team to look for, or what to find who knows about)")
 	}
 
 	// Proves the caller is a real member before reading the directory, and gives
@@ -373,6 +374,15 @@ func executeFindPeople(ctx context.Context, action ai.ProposedAction, userUUID s
 	caller, err := getUserInfoForExecutor(ctx, userUUID)
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to look up user: %w", err)
+	}
+	// "Who knows about X" (DG9): the shared Who knows, as the caller (a member
+	// at most through a token), from work they can open (whoKnows.go).
+	if topic != "" {
+		text, err := whoKnowsText(ctx, caller, topic)
+		if err != nil {
+			return "", nil, fmt.Errorf("could not find who knows: %w", err)
+		}
+		return text, nil, nil
 	}
 	// The demo's shared visitor is anyone at all; the model would read other
 	// people's addresses out to them (helpers.ServeHidingEmails).

@@ -19,7 +19,8 @@ import (
 
 // writeAvailabilityError answers a request the person can fix with its text,
 // a missing page with 404, a calendar that couldn't be checked with a retry
-// that says so, and anything else with a retry.
+// that says so, a clash (an address another page uses) with a 409 that names
+// it, and anything else with a retry.
 func writeAvailabilityError(w http.ResponseWriter, r *http.Request, where string, err error) {
 	var ae *business.AvailabilityError
 	var busy *business.PageBusyError
@@ -33,8 +34,7 @@ func writeAvailabilityError(w http.ResponseWriter, r *http.Request, where string
 	case errors.Is(err, business.ErrCalendarUnread):
 		helpers.WriteRetryLater(w, "Couldn't check the calendar.")
 	default:
-		helpers.LogErrorWithContext(r.Context(), "controllers/Calendar/%s err: %+v", where, err)
-		helpers.WriteRetryLater(w, "Something went wrong.")
+		helpers.WriteWriteFailure(w, r, err, "Something went wrong.", "controllers/Calendar/"+where)
 	}
 }
 

@@ -43,11 +43,10 @@ type messageContext struct {
 	// Slack user id -> resolved OneCamp user info. Populated lazily.
 	userCache map[string]*userModels.UserInfo
 
-	// Slack user id -> display name (for mention rendering fallback).
-	userNameCache map[string]string
-
-	// Slack channel id -> {uuid, name} (for <#C123> resolution).
-	channelCache map[string]channelRef
+	// Each Slack user's name, by id (slackNameBook), and what message text
+	// mentions, read a message at a time (textNames).
+	slackNames map[string]string
+	text       *textNames
 
 	// Last successfully imported Slack ts (high water mark for resume).
 	lastCursor string
@@ -66,11 +65,9 @@ type messageContext struct {
 	// of N. Safe because the chunks-table unique index swallows any
 	// duplicates we might race with another worker.
 	pendingFileChunks []*importModels.Chunk
-}
 
-type channelRef struct {
-	uuid uuid.UUID
-	name string
+	// The batch's mappings (batch.go).
+	maps *messageMaps
 }
 
 // processMessageChunk imports every top-level message in a single
@@ -89,7 +86,7 @@ type channelRef struct {
 // Heartbeat: every 250 messages we call HeartbeatChunk so the reaper
 // knows we're alive on a multi-thousand-message daily file.
 func processMessageChunk(ctx context.Context, arc *Archive, chunk *importModels.Chunk,
-	skipSubtypes bool, importingUser *userModels.UserInfo, workspaceName string) error {
+	skipSubtypes bool, importingUser *userModels.UserInfo, workspaceName string, names map[string]string) error {
 
 	if chunk.ObjectKey == nil || chunk.ChannelSlackId == nil {
 		return fmt.Errorf("message chunk missing object_key/channel_slack_id")
@@ -104,6 +101,7 @@ func processMessageChunk(ctx context.Context, arc *Archive, chunk *importModels.
 	if err != nil {
 		return err
 	}
+	mc.slackNames = names
 	defer flushMessageContext(ctx, mc)
 
 	// Resume cursor: skip messages with ts <= last_cursor on retry.
@@ -112,23 +110,15 @@ func processMessageChunk(ctx context.Context, arc *Archive, chunk *importModels.
 		resumeCursor = *chunk.LastCursor
 	}
 
-	count := 0
 	heartbeatEvery := 250
 	committed := 0
 
-	err = IterMessages(ctx, arc, zf, func(m *SlackMessage) bool {
-		count++
-
+	handle := func(m *SlackMessage) bool {
 		// Cooperative cancellation check (cheap).
 		select {
 		case <-ctx.Done():
 			return false
 		default:
-		}
-
-		// Skip resumed messages.
-		if resumeCursor != "" && tsLE(m.Ts, resumeCursor) {
-			return true
 		}
 
 		// Skip system noise.
@@ -178,10 +168,7 @@ func processMessageChunk(ctx context.Context, arc *Archive, chunk *importModels.
 		if mc.chunkType == importModels.ChunkChannelThreads {
 			entityType = importModels.EntityComment
 		}
-		alreadyMapped := false
-		if existing, _ := importModels.LookupIdMapping(ctx, mc.importId, entityType, m.Ts); existing != uuid.Nil {
-			alreadyMapped = true
-		}
+		alreadyMapped := mc.maps.ownMapping(ctx, entityType, m.Ts) != uuid.Nil
 
 		// Enqueue file chunks for any attachments referenced by this
 		// message. Done EARLY so retries after a partial-success message
@@ -218,7 +205,7 @@ func processMessageChunk(ctx context.Context, arc *Archive, chunk *importModels.
 		// silently and just record the per-import mapping for activity
 		// counting + rollback safety.
 		if mc.workspaceName != "" {
-			if existing, _ := importModels.LookupWorkspaceMapping(ctx, mc.workspaceName, entityType, m.Ts); existing != uuid.Nil {
+			if existing := mc.maps.workspaceMapping(ctx, entityType, m.Ts); existing != uuid.Nil {
 				_ = importModels.UpsertIdMappingWithOwnership(ctx, mc.importId, entityType, m.Ts,
 					existing, nil, mustMarshal(map[string]interface{}{"matched_by": "workspace_map"}),
 					false /* not created by this import */)
@@ -228,7 +215,11 @@ func processMessageChunk(ctx context.Context, arc *Archive, chunk *importModels.
 		}
 
 		var importErr error
-		if mc.chunkType == importModels.ChunkChannelMessages {
+		if mc.chunkType == importModels.ChunkChannelMessages && isChannelLine(m.Subtype) {
+			// A channel's own history (a join, a topic, a rename): a quiet
+			// line, as OneCamp writes one, not a message (chat B28).
+			importErr = importChannelLine(ctx, mc, m, importingUser)
+		} else if mc.chunkType == importModels.ChunkChannelMessages {
 			importErr = importTopLevelMessage(ctx, mc, m, importingUser)
 		} else {
 			importErr = importThreadReply(ctx, mc, m, importingUser)
@@ -257,8 +248,14 @@ func processMessageChunk(ctx context.Context, arc *Archive, chunk *importModels.
 		}
 
 		return true
-	})
+	}
 
+	entityType := importModels.EntityMessage
+	if mc.chunkType == importModels.ChunkChannelThreads {
+		entityType = importModels.EntityComment
+	}
+	err = iterBatches(ctx, arc, zf, resumeCursor,
+		func(batch []*SlackMessage) { mc.maps.prefetch(ctx, entityType, batch) }, handle)
 	if err != nil {
 		return err
 	}
@@ -297,10 +294,8 @@ func importTopLevelMessage(ctx context.Context, mc *messageContext, m *SlackMess
 		ChannelUUID: mc.channelUUID,
 	}
 
-	// Backdate context so CreatePost stamps Dgraph + OpenSearch with the
-	// original Slack ts instead of time.Now(). The Postgres backfill below
-	// covers the PG row separately because INSERT … DEFAULT NOW() ignores
-	// the ctx-scoped override.
+	// Backdated: CreatePost stamps Postgres, Dgraph and OpenSearch with
+	// the Slack ts instead of time.Now() (helpers.WithImportTimestamp).
 	slackTime := slackTsToTime(m.Ts)
 	ctxBackdated := helpers.WithImportTimestamp(ctx, slackTime)
 
@@ -314,29 +309,14 @@ func importTopLevelMessage(ctx context.Context, mc *messageContext, m *SlackMess
 		return fmt.Errorf("parse new post uuid: %w", err)
 	}
 
-	// Postgres-only backfill. Dgraph + OpenSearch were already stamped
-	// with the slack ts via the backdated context above.
-	if err := backdatePost(ctx, postUUID, slackTime); err != nil {
-		// Non-fatal — the post exists, the timestamp is just slightly off.
-		helpers.LogWarnWithContext(ctx,
-			"SlackImport could not backdate post %s ts=%s: %+v", postUUID, m.Ts, err)
-	}
-
-	if err := importModels.UpsertIdMappingWithOwnership(ctx, mc.importId, importModels.EntityMessage, m.Ts,
-		postUUID, nil,
+	// Mapped for this import and for the workspace, so a retry and the
+	// next re-import skip it.
+	return mc.maps.recordCreated(ctx, importModels.EntityMessage, m.Ts, postUUID, nil,
 		mustMarshal(map[string]interface{}{
 			"channel_slack_id": mc.channelSlackId,
 			"author_slack":     m.User,
 			"subtype":          m.Subtype,
-		}), true /* physically created */); err != nil {
-		return err
-	}
-	// Promote into workspace map so the next re-import skips this message.
-	if mc.workspaceName != "" {
-		_ = importModels.UpsertWorkspaceMapping(ctx, mc.workspaceName,
-			importModels.EntityMessage, m.Ts, postUUID, mc.importId)
-	}
-	return nil
+		}))
 }
 
 // importThreadReply attaches the message as a comment to its parent
@@ -351,7 +331,7 @@ func importTopLevelMessage(ctx context.Context, mc *messageContext, m *SlackMess
 func importThreadReply(ctx context.Context, mc *messageContext, m *SlackMessage,
 	importingUser *userModels.UserInfo) error {
 
-	parentUUID, err := importModels.LookupIdMapping(ctx, mc.importId, importModels.EntityMessage, m.ThreadTs)
+	parentUUID, err := mc.maps.parentMapping(ctx, m.ThreadTs)
 	if err != nil {
 		return err
 	}
@@ -386,7 +366,7 @@ func importThreadReply(ctx context.Context, mc *messageContext, m *SlackMessage,
 		PostUuid: parentUUID.String(),
 	}
 
-	// Backdate Dgraph + OpenSearch via context; Postgres handled below.
+	// Backdated in Postgres, Dgraph and OpenSearch alike.
 	slackTime := slackTsToTime(m.Ts)
 	ctxBackdated := helpers.WithImportTimestamp(ctx, slackTime)
 
@@ -403,85 +383,61 @@ func importThreadReply(ctx context.Context, mc *messageContext, m *SlackMessage,
 			uuid.New(), &m.ThreadTs, mustMarshal(map[string]interface{}{"unparsed_uuid": created.Uuid}))
 	}
 
-	if err := backdateComment(ctx, commentUUID, slackTime); err != nil {
-		helpers.LogWarnWithContext(ctx,
-			"SlackImport could not backdate comment %s ts=%s: %+v", commentUUID, m.Ts, err)
-	}
-
-	if err := importModels.UpsertIdMappingWithOwnership(ctx, mc.importId, importModels.EntityComment, m.Ts,
-		commentUUID, &m.ThreadTs,
+	if err := mc.maps.recordCreated(ctx, importModels.EntityComment, m.Ts, commentUUID, &m.ThreadTs,
 		mustMarshal(map[string]interface{}{
 			"author_slack": m.User,
 			"thread_ts":    m.ThreadTs,
-		}), true); err != nil {
+		})); err != nil {
 		return err
 	}
-	if mc.workspaceName != "" {
-		_ = importModels.UpsertWorkspaceMapping(ctx, mc.workspaceName,
-			importModels.EntityComment, m.Ts, commentUUID, mc.importId)
+	if m.Subtype == "thread_broadcast" {
+		copyThreadReply(ctxBackdated, mc, m, html, commentUUID, authorInfo)
 	}
 	return nil
 }
 
-// renderMessageHTML produces the final HTML for a Slack message,
-// resolving mentions/channel-links via the message context cache.
-//
-// Bot prefixing: messages posted by bots (subtype="bot_message" or any
-// message with a non-empty bot_id and no real user) get a "[bot:<name>]"
-// chip prepended so the imported timeline preserves the distinction
-// between human and bot content. Slack's exports include the bot's
-// display name in either bot_profile.name or username.
-func renderMessageHTML(ctx context.Context, mc *messageContext, m *SlackMessage) string {
-	resolvers := mrkdwnResolvers{
-		resolveUser: func(slackId string) (string, string, bool) {
-			ocUUID, err := importModels.LookupIdMapping(ctx, mc.importId, importModels.EntityUser, slackId)
-			if err != nil || ocUUID == uuid.Nil {
-				if name, ok := mc.userNameCache[slackId]; ok {
-					return "", name, false
-				}
-				return "", "", false
-			}
-			name := mc.userNameCache[slackId]
-			return ocUUID.String(), name, true
-		},
-		resolveChannel: func(slackId string) (string, string, bool) {
-			if r, ok := mc.channelCache[slackId]; ok {
-				return r.uuid.String(), r.name, true
-			}
-			ocUUID, err := importModels.LookupIdMapping(ctx, mc.importId, importModels.EntityChannel, slackId)
-			if err != nil || ocUUID == uuid.Nil {
-				return "", "", false
-			}
-			// Resolve the human-readable channel name from id_map metadata so
-			// we don't fall back to a bare # symbol. Cached on the context so
-			// repeated mentions in the same chunk don't re-query Postgres.
-			name := ""
-			if md, _ := importModels.GetIdMapMetadata(ctx, mc.importId, importModels.EntityChannel, slackId); len(md) > 0 {
-				var meta struct {
-					FinalName string `json:"final_name"`
-				}
-				_ = jsonUnmarshalRaw(md, &meta)
-				name = meta.FinalName
-			}
-			mc.channelCache[slackId] = channelRef{uuid: ocUUID, name: name}
-			return ocUUID.String(), name, true
-		},
+// copyThreadReply posts a reply Slack sent to its channel too (a
+// thread_broadcast) in the channel as well, as "Also send to #channel" does:
+// a copy of the reply that follows its edits and deletion (business/Post
+// LinkReplyCopy). Best effort, as there: the reply stands without it, and a
+// copy that wasn't made is noted.
+func copyThreadReply(ctx context.Context, mc *messageContext, m *SlackMessage, html string, reply uuid.UUID, author *userModels.UserInfo) {
+	copied, err := postBusiness.CreatePost(ctx, &postAdapter.InputCreateOrUpdatePostInfo{
+		HTMLText: html, ChannelUuid: mc.channelUUID.String(), ChannelUUID: mc.channelUUID,
+	}, author, nil, mc.dgraphChannel)
+	if err == nil {
+		err = postBusiness.LinkReplyCopy(ctx, reply.String(), copied.Uuid)
 	}
-	body := RenderSlackText(ctx, m, resolvers)
+	if err != nil {
+		importModels.LogImportError(ctx, mc.importId, &mc.chunkId, importModels.EntityComment, m.Ts,
+			importModels.SeverityWarning, "THREAD_BROADCAST_NOT_COPIED",
+			"a reply sent to the channel too came across in its thread only", nil)
+	}
+}
 
-	// Bot attribution prefix. We add it as a styled <span> so the FE can
-	// render it visually distinct without a schema change. Empty string
-	// stays empty so the "no body, no files" branch in the caller still
-	// fires correctly.
-	if isBotMessage(m) && body != "" {
-		botName := pickBotName(m)
-		if botName == "" {
-			botName = "bot"
-		}
-		body = `<span class="mention bot-attrib" data-id="bot@` +
-			htmlEscape(botName) + `">[bot: ` + htmlEscape(botName) + `]</span> ` + body
+// renderMessageHTML is a Slack message's text as a OneCamp post's HTML
+// (mrkdwn.go): its people and channels as this import brought them across
+// (textNames), and an app's message led by the app's name (withBotLead).
+func renderMessageHTML(ctx context.Context, mc *messageContext, m *SlackMessage) string {
+	if mc.text == nil {
+		mc.text = newTextNames(mc.importId, mc.maps, mc.slackNames)
 	}
-	return body
+	return withBotLead(m, asMeMessage(m, RenderSlackText(ctx, m, mc.text.of(ctx, m))))
+}
+
+// slackNameBook is each Slack user's name as the export has it, by Slack id: the
+// display name, else the real name, else the handle. Pure.
+func slackNameBook(users []SlackUser) map[string]string {
+	out := make(map[string]string, len(users))
+	for _, u := range users {
+		for _, name := range []string{u.Profile.DisplayName, u.Profile.RealName, u.RealName, u.Name} {
+			if name = strings.TrimSpace(name); name != "" {
+				out[u.ID] = name
+				break
+			}
+		}
+	}
+	return out
 }
 
 // isBotMessage detects bot-authored messages across the various shapes
@@ -517,49 +473,54 @@ func pickBotName(m *SlackMessage) string {
 //
 // Bot attribution: messages with only a bot_id and no `user` are
 // attributed to the importing admin in the Postgres/Dgraph `created_by`
-// edge, with the bot's name surfaced via a "[bot: <name>]" prefix in
-// the rendered HTML body (see renderMessageHTML.isBotMessage). This
+// edge, with the bot's name surfaced via a "[bot: <name>]" lead in
+// the rendered HTML body (mrkdwn.go withBotLead). This
 // keeps the schema simple — we don't need a synthetic user per bot —
 // while preserving the visual distinction in the timeline.
 func (mc *messageContext) resolveAuthor(ctx context.Context, m *SlackMessage, importingUser *userModels.UserInfo) (*userModels.UserInfo, error) {
 	authorId := m.User
 	if authorId == "" && m.BotID != "" {
 		// Bot message with no human user id. Attribute to importing user;
-		// the bot's name appears in the rendered body via the prefix
-		// chip injected in renderMessageHTML.
+		// the bot's name leads the rendered body (withBotLead).
 		return importingUser, nil
 	}
-	if authorId == "" {
-		return importingUser, nil
-	}
+	return mc.resolveUser(ctx, authorId, importingUser)
+}
 
-	if cached, ok := mc.userCache[authorId]; ok {
-		return cached, nil
+// resolveUser is the OneCamp person a Slack user id was imported as, or
+// importingUser for one that wasn't (or none).
+func (mc *messageContext) resolveUser(ctx context.Context, authorId string, importingUser *userModels.UserInfo) (*userModels.UserInfo, error) {
+	if who := importedPerson(ctx, mc.maps, mc.userCache, authorId); who != nil {
+		return who, nil
 	}
+	return importingUser, nil
+}
 
-	ocUUID, err := importModels.LookupIdMapping(ctx, mc.importId, importModels.EntityUser, authorId)
-	if err != nil {
-		return importingUser, nil
+// importedPerson is the OneCamp person a Slack user came across as, nil for
+// one who didn't (or no id): read once a chunk and kept in cache. The one
+// lookup a channel's and a DM's messages share.
+func importedPerson(ctx context.Context, maps *messageMaps, cache map[string]*userModels.UserInfo, slackID string) *userModels.UserInfo {
+	if slackID == "" {
+		return nil
 	}
-	if ocUUID == uuid.Nil {
-		return importingUser, nil
+	if cached, ok := cache[slackID]; ok {
+		return cached
 	}
-
+	ocUUID, err := maps.userId(ctx, slackID)
+	if err != nil || ocUUID == uuid.Nil {
+		return nil
+	}
 	pgUser, err := userBusiness.GetUserByUUID(ctx, ocUUID)
 	if err != nil || pgUser == nil {
-		return importingUser, nil
+		return nil
 	}
 	dgUser, err := userBusiness.GetDgraphUserInfoByUUID(ctx, ocUUID.String())
 	if err != nil || dgUser == nil {
-		return importingUser, nil
+		return nil
 	}
-
-	info := &userModels.UserInfo{
-		UserPostgresInfo: *pgUser,
-		UserDgraphInfo:   *dgUser,
-	}
-	mc.userCache[authorId] = info
-	return info, nil
+	info := &userModels.UserInfo{UserPostgresInfo: *pgUser, UserDgraphInfo: *dgUser}
+	cache[slackID] = info
+	return info
 }
 
 // newMessageContext fetches channel info and primes caches.
@@ -588,9 +549,8 @@ func newMessageContext(ctx context.Context, chunk *importModels.Chunk, workspace
 		dgraphChannel:  dgraphChannel,
 		channelName:    dgraphChannel.Name,
 		userCache:      make(map[string]*userModels.UserInfo, 32),
-		userNameCache:  make(map[string]string, 32),
-		channelCache:   make(map[string]channelRef, 8),
 		enqueuedFiles:  make(map[string]struct{}, 16),
+		maps:           newMessageMaps(chunk.ImportId, workspaceName),
 	}, nil
 }
 
@@ -720,28 +680,6 @@ func slackTsToTime(ts string) time.Time {
 		usec = usec*10 + int64(c-'0')
 	}
 	return time.Unix(sec, usec*1000)
-}
-
-// backdatePost rewrites the created_at on a posts row so the imported
-// content is timestamped correctly. The Postgres INSERT in
-// domain.CreatePost uses DEFAULT NOW(); Dgraph + OpenSearch are already
-// stamped via WithImportTimestamp in the calling context, so this
-// UPDATE is what aligns the relational store with the rest. Idempotent
-// — re-running pins to the same value.
-func backdatePost(ctx context.Context, postUUID uuid.UUID, t time.Time) error {
-	dbCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	_, err := importModels.Exec(dbCtx, `
-		UPDATE posts SET created_at = $2, updated_at = $2 WHERE id = $1`, postUUID, t)
-	return err
-}
-
-func backdateComment(ctx context.Context, commentUUID uuid.UUID, t time.Time) error {
-	dbCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-	_, err := importModels.Exec(dbCtx, `
-		UPDATE comments SET created_at = $2, updated_at = $2 WHERE id = $1`, commentUUID, t)
-	return err
 }
 
 // applyMessageEdit updates an already-imported post or comment with

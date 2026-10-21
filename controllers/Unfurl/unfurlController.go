@@ -79,7 +79,7 @@ func limited(w http.ResponseWriter, err error) bool {
 func who(w http.ResponseWriter, r *http.Request) (accessBusiness.Subject, bool) {
 	_, s := accessBusiness.RequestSubject(r)
 	if s.UserUID == "" || s.UserUUID == "" {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Sign in again."})
+		helpers.WriteUnauthorized(w)
 		return accessBusiness.Subject{}, false
 	}
 	return s, true

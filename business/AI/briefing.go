@@ -74,9 +74,9 @@ func GetBriefing(ctx context.Context, userInfo *userModels.UserInfo) (*adapter.B
 	// external API calls; the home screen still never blocks because the
 	// final join below is bounded.
 	dayCh := make(chan []adapter.BriefingDayItem, 1)
-	go func() {
+	helpers.GoSafeNamed("business/AI/briefing:GetBriefing", func() {
 		dayCh <- gatherConnectorDay(ctx, userInfo)
-	}()
+	})
 
 	channels, projects := getAccessibleResourceUUIDs(userInfo)
 	grpIDs := accessibleGroupingIDs(userInfo)
@@ -85,7 +85,7 @@ func GetBriefing(ctx context.Context, userInfo *userModels.UserInfo) (*adapter.B
 
 	// Open items the user OWNS — only when the memory layer is enabled.
 	if settings.memoryEnabled {
-		go func() {
+		helpers.GoSafeNamed("business/AI/briefing:GetBriefing", func() {
 			items, lerr := memoryModels.List(bctx, memoryModels.QueryFilter{
 				Statuses: []string{memoryModels.StatusOpen},
 				OwnerID:  &ownerID,
@@ -97,14 +97,14 @@ func GetBriefing(ctx context.Context, userInfo *userModels.UserInfo) (*adapter.B
 				return
 			}
 			itemsCh <- itemsResult{items: items}
-		}()
+		})
 	} else {
 		itemsCh <- itemsResult{}
 	}
 
 	// Recent highlights across accessible content (same permission model as
 	// AskAI recall). Best-effort.
-	go func() {
+	helpers.GoSafeNamed("business/AI/briefing:GetBriefing", func() {
 		res, rerr := searchRecentGlobal(bctx, userInfo, channels, projects, grpIDs, briefingMaxHighlights)
 		if rerr != nil {
 			helpers.LogInfoWithContext(bctx, "briefing: highlights failed: %v", rerr)
@@ -112,7 +112,7 @@ func GetBriefing(ctx context.Context, userInfo *userModels.UserInfo) (*adapter.B
 			return
 		}
 		hlCh <- hlResult{results: res}
-	}()
+	})
 
 	// Collect both, each bounded by the shared deadline.
 	resolver := newScopeResolver(userInfo)

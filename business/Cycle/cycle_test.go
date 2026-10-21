@@ -5,6 +5,7 @@ import (
 	"time"
 
 	cycleModel "github.com/akashc777/OneCamp/models/postgres/Cycle"
+	"github.com/google/uuid"
 )
 
 func TestState(t *testing.T) {
@@ -44,5 +45,29 @@ func TestWindow(t *testing.T) {
 	}
 	if _, _, err := Window(time.Time{}, 2); err == nil {
 		t.Error("no start accepted")
+	}
+}
+
+// PR1 (#15): a list filtered by many cycles asks for their tasks once, for
+// this project's cycles only; ids that aren't uuids are dropped, and no task
+// matches nothing.
+func TestAFilterByCyclesReadsTheirTasksOnce(t *testing.T) {
+	old := tasksInProjectCycles
+	t.Cleanup(func() { tasksInProjectCycles = old })
+	calls := 0
+	tasksInProjectCycles = func(project uuid.UUID, cycles []uuid.UUID) ([]string, error) {
+		calls++
+		if len(cycles) != 3 {
+			t.Fatalf("asked for %d cycles", len(cycles))
+		}
+		return []string{"7a5c0000-0000-4000-8000-000000000001"}, nil
+	}
+	got, err := FilterClause(uuid.NewString(), []string{uuid.NewString(), "nope", uuid.NewString(), uuid.NewString()})
+	if err != nil || calls != 1 || got != `eq(task_uuid, ["7a5c0000-0000-4000-8000-000000000001"])` {
+		t.Fatalf("%d reads: %s %v", calls, got, err)
+	}
+	tasksInProjectCycles = func(uuid.UUID, []uuid.UUID) ([]string, error) { return nil, nil }
+	if got, _ := FilterClause(uuid.NewString(), []string{uuid.NewString()}); got != `eq(task_uuid, "00000000-0000-0000-0000-000000000000")` {
+		t.Fatalf("no task: %s", got)
 	}
 }

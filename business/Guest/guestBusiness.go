@@ -178,6 +178,11 @@ func IssueGuestMeetingToken(ctx context.Context, grant *guestModel.GuestGrant, d
 	if !settingsBusiness.GuestAccessEnabled() {
 		return "", "", ErrGuestDisabled
 	}
+	// A meeting its host locked lets nobody new in, and a guest's every join
+	// is someone new (liveKitBusiness.ErrCallLocked, said in its own words).
+	if err := liveKitBusiness.GuestMayEnter(ctx, grant.ResourceID); err != nil {
+		return "", "", err
+	}
 
 	suffix, err := randomShort()
 	if err != nil {
@@ -398,13 +403,6 @@ func NewMeetingLink(ctx context.Context, room string, host *dgraphStruct.DgraphU
 // instant meetings from channel/DM/group rooms.
 func IsMeetingRoom(roomName string) bool {
 	return strings.HasPrefix(roomName, MeetingRoomPrefix)
-}
-
-// MeetingRoomExists reports whether an instant-meeting room belongs to this
-// instance (a guest grant row exists for it). Used by the webhook router's
-// multi-tenant ownership check.
-func MeetingRoomExists(ctx context.Context, roomName string) (bool, error) {
-	return guestModel.ResourceExists(ctx, roomName)
 }
 
 // --- helpers ---

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
+	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	"github.com/akashc777/OneCamp/helpers"
@@ -57,7 +58,7 @@ func FromProject(name, description string, statuses []*statusModel.TaskStatus, t
 	zero := earliest(keep)
 	for _, task := range keep {
 		out := Task{Name: taskName(task.Name), Status: restart(task)}
-		if ValidPriority(task.Priority) {
+		if taskPriority.IsOrNone(task.Priority) {
 			out.Priority = task.Priority
 		}
 		if task.Description != nil {

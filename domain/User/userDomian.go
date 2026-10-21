@@ -19,16 +19,18 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/dgexec"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	recordingDgraphModels "github.com/akashc777/OneCamp/models/dgraph/Recording"
 	dgraphTaskModels "github.com/akashc777/OneCamp/models/dgraph/Task"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/User"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	OpenSearchModels "github.com/akashc777/OneCamp/models/openSearch/User"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -89,22 +91,81 @@ func GetUserByEmailId(ctx context.Context, emailId *string) (userInfo *models.Us
 	return
 }
 
+// graphUID is a Dgraph node uid as Dgraph writes one.
+var graphUID = regexp.MustCompile(`^0x[0-9a-f]+$`)
+
+// UserNamesByDgraphUIDs is each person's display name by their graph uid,
+// for a call's speakers (LiveKit identities are graph uids): one narrow read
+// for all of them, where each was a read of the whole person (backend audit
+// #22). Anything that isn't a uid is left out; so is anything that isn't a
+// person.
+func UserNamesByDgraphUIDs(ctx context.Context, uids []string) (map[string]string, error) {
+	// A transcript names its speaker on every line: each uid goes into the
+	// read once, however many lines carry it.
+	keep := make([]string, 0, len(uids))
+	seen := make(map[string]bool, len(uids))
+	for _, u := range uids {
+		if graphUID.MatchString(u) && !seen[u] {
+			seen[u] = true
+			keep = append(keep, u)
+		}
+	}
+	out := make(map[string]string, len(keep))
+	if len(keep) == 0 {
+		return out, nil
+	}
+	people, err := dgexec.List[struct {
+		UID  string `json:"uid"`
+		Name string `json:"user_name"`
+	}](ctx, `{ people(func: uid(`+strings.Join(keep, ", ")+`)) @filter(has(user_uuid)) { uid user_name } }`, nil, "people")
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/UserNamesByDgraphUIDs err: %+v", err)
+		return nil, err
+	}
+	for _, p := range people {
+		out[p.UID] = p.Name
+	}
+	return out, nil
+}
+
+// MembersByAddress is the member (live, not external) each of these
+// addresses belongs to, by address in lower case, chosen as GetUserByEmailId
+// chooses for a lower-case address: the all-lowercase account, else the
+// oldest. One statement for an import's people, where each was one.
+func MembersByAddress(ctx context.Context, emails []string) (map[string]uuid.UUID, error) {
+	if len(emails) == 0 {
+		return map[string]uuid.UUID{}, nil
+	}
+	lower := make([]string, len(emails))
+	for i, e := range emails {
+		lower[i] = strings.ToLower(e)
+	}
+	out, err := pgexec.Pairs[string, uuid.UUID](ctx, `
+		SELECT DISTINCT ON (LOWER(email_id)) LOWER(email_id), id
+		FROM users
+		WHERE LOWER(email_id) = ANY($1) AND deleted_at IS NULL AND is_external = false
+		ORDER BY LOWER(email_id), (email_id = LOWER(email_id)) DESC, created_at ASC`, pq.Array(lower))
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/MembersByAddress err: %+v", err)
+	}
+	return out, err
+}
+
 // GetUserSignInFlags reads whether a person is an admin and whether single
 // sign-on manages their account: what a directory sign-in needs to keep the
 // admin role in step with the directory's groups.
 func GetUserSignInFlags(ctx context.Context, userID uuid.UUID) (isAdmin, isSSOManaged bool, err error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+	type flags struct{ admin, sso bool }
+	f, err := one(ctx, `
 		SELECT (au.id IS NOT NULL), COALESCE(u.is_sso_managed, false)
 		FROM users u
 		LEFT JOIN admin_users au ON au.email_id = u.email_id
 		WHERE u.id = $1
-		LIMIT 1`, userID).Scan(&isAdmin, &isSSOManaged)
+		LIMIT 1`, func(r pgexec.Row) (f flags, err error) { err = r.Scan(&f.admin, &f.sso); return }, userID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetUserSignInFlags err: %+v", err)
 	}
-	return
+	return f.admin, f.sso, err
 }
 
 // FirstSignInOfProvisioned reports whether this person's account was made
@@ -112,12 +173,9 @@ func GetUserSignInFlags(ctx context.Context, userID uuid.UUID) (isAdmin, isSSOMa
 // first sign-in is when they arrive, as joining is for everyone else. A read
 // failure reads as no.
 func FirstSignInOfProvisioned(ctx context.Context, userID uuid.UUID) bool {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	var first bool
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+	first, err := pgexec.Scalar[bool](ctx, `
 		SELECT COALESCE(signup_method, '') = $2 AND last_login_at IS NULL
-		FROM users WHERE id = $1`, userID, models.AuthMethodSCIM).Scan(&first)
+		FROM users WHERE id = $1`, userID, models.AuthMethodSCIM)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/FirstSignInOfProvisioned err: %+v", err)
 		return false
@@ -178,15 +236,24 @@ func GetUserListWithSearchText(ctx context.Context, userUUID string, searchText 
 	if herr != nil {
 		helpers.LogWarnWithContext(ctx, "domain/GetUserListWithSearchText searching names only, handles unread: %+v", herr)
 	}
+	var handleVar []string
+	handleBlock := ""
 	if len(byHandle) > 0 {
-		quoted := make([]string, len(byHandle))
-		for i, id := range byHandle {
-			quoted[i] = `"` + id.String() + `"`
-		}
-		match += ` OR eq(user_uuid, [` + strings.Join(quoted, ", ") + `])`
+		list := dgraphquery.UUIDListOf(byHandle)
+		match += ` OR eq(user_uuid, [` + list + `])`
+		handleBlock = `byHandle as var(func: eq(user_uuid, [` + list + `]))`
+		handleVar = []string{"byHandle"}
+	}
+	// From the people whose search name matches (and the handles' people)
+	// when the term is long enough for its index, not from every person; the
+	// filter still decides who matches (searchName.go).
+	vars, root := dgraphquery.RegexpUnionRoot(safeSearch, "has(user_uuid)", "named", searchNamePredicates, handleVar...)
+	if root == "has(user_uuid)" {
+		handleBlock = ""
 	}
 	query := fmt.Sprintf(`query UserInfo($user_id: string){
-			userInfo(func: has(user_uuid)) @filter((%s) AND NOT eq(is_external, true)) {
+			%s%s
+			userInfo(func: %s) @filter(has(user_uuid) AND (%s) AND NOT eq(is_external, true)) {
 				uid
 				user_uuid
 				user_name
@@ -196,7 +263,7 @@ func GetUserListWithSearchText(ctx context.Context, userUUID string, searchText 
 				user_email_id
 				user_status
 		  	}
-			}`, match)
+			}`, vars, handleBlock, root, match)
 
 	dgraphUsers, err = dgraphModels.GetDgraphUsersList(ctx, query, variables)
 
@@ -217,54 +284,32 @@ const userSearchHandleLimit = 50
 // MemberIDsWithHandleLike is up to limit members (not external rows, bots or
 // deleted accounts) whose handle contains term, without case.
 func MemberIDsWithHandleLike(ctx context.Context, term string, limit int) ([]uuid.UUID, error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
 	escaped := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(strings.ToLower(term))
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
+	ids, err := pgexec.Query(ctx, `
 		SELECT id FROM users
 		WHERE LOWER(username) LIKE $1 ESCAPE '\'
 		  AND is_external = false AND is_bot = false AND deleted_at IS NULL
-		ORDER BY username LIMIT $2`, "%"+escaped+"%", limit)
+		ORDER BY username LIMIT $2`, scanUUID, "%"+escaped+"%", limit)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/MemberIDsWithHandleLike err: %+v", err)
 		return nil, err
 	}
-	defer rows.Close()
-	var ids []uuid.UUID
-	for rows.Next() {
-		var id uuid.UUID
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
+	return ids, nil
 }
 
 // HandlesByID is the handle of each of these people who has one, by id.
 func HandlesByID(ctx context.Context, ids []string) (map[string]string, error) {
-	out := make(map[string]string, len(ids))
 	if len(ids) == 0 {
-		return out, nil
+		return map[string]string{}, nil
 	}
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
+	out, err := pgexec.Pairs[string, string](ctx, `
 		SELECT id::text, username FROM users
 		WHERE id = ANY($1::uuid[]) AND username IS NOT NULL AND username <> ''`, pq.Array(ids))
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/HandlesByID err: %+v", err)
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, handle string
-		if err := rows.Scan(&id, &handle); err != nil {
-			return nil, err
-		}
-		out[id] = handle
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // AttachHandles sets each user's Handle from Postgres, where handles are, so
@@ -536,52 +581,30 @@ const sameAddressFirst = `ORDER BY (email_id = $1) DESC, created_at ASC LIMIT 1`
 // AddressesWithMoreThanOneAccount lists up to limit addresses that more than
 // one member's account has, compared without case.
 func AddressesWithMoreThanOneAccount(ctx context.Context, limit int) ([]string, error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
+	out, err := pgexec.Query(ctx, `
 		SELECT LOWER(email_id) FROM users
 		WHERE is_external = false AND is_bot = false
 		GROUP BY LOWER(email_id) HAVING count(*) > 1
-		ORDER BY 1 LIMIT $1`, limit)
+		ORDER BY 1 LIMIT $1`, scanString, limit)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/AddressesWithMoreThanOneAccount err: %+v", err)
 		return nil, err
 	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var email string
-		if err := rows.Scan(&email); err != nil {
-			return nil, err
-		}
-		out = append(out, email)
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // TakenHandles is every handle in use that a new one based on base could
 // collide with: base itself and base-<anything>, compared without case.
 func TakenHandles(ctx context.Context, base string) ([]string, error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
 	escaped := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(strings.ToLower(base))
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
+	taken, err := pgexec.Query(ctx, `
 		SELECT LOWER(username) FROM users
-		WHERE LOWER(username) = LOWER($1) OR LOWER(username) LIKE $2 ESCAPE '\'`, base, escaped+"-%")
+		WHERE LOWER(username) = LOWER($1) OR LOWER(username) LIKE $2 ESCAPE '\'`, scanString, base, escaped+"-%")
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/TakenHandles err: %+v", err)
 		return nil, err
 	}
-	defer rows.Close()
-	var taken []string
-	for rows.Next() {
-		var h string
-		if err := rows.Scan(&h); err != nil {
-			return nil, err
-		}
-		taken = append(taken, h)
-	}
-	return taken, rows.Err()
+	return taken, nil
 }
 
 // GetActiveUserIDByHandle is the id of the active member whose handle
@@ -592,16 +615,10 @@ func GetActiveUserIDByHandle(ctx context.Context, handle string) (uuid.UUID, err
 	if handle == "" {
 		return uuid.Nil, nil
 	}
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	var id uuid.UUID
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+	id, _, err := pgexec.QueryOne(ctx, `
 		SELECT id FROM users
 		WHERE LOWER(username) = LOWER($1) AND deleted_at IS NULL AND is_external = false
-		LIMIT 1`, handle).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return uuid.Nil, nil
-	}
+		LIMIT 1`, scanUUID, handle)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetActiveUserIDByHandle err: %+v", err)
 		return uuid.Nil, err
@@ -611,10 +628,7 @@ func GetActiveUserIDByHandle(ctx context.Context, handle string) (uuid.UUID, err
 
 // GetHandle is a person's handle (users.username), or "" when they have none.
 func GetHandle(ctx context.Context, userID uuid.UUID) (string, error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	var handle sql.NullString
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `SELECT username FROM users WHERE id = $1`, userID).Scan(&handle)
+	handle, err := pgexec.Scalar[sql.NullString](ctx, `SELECT username FROM users WHERE id = $1`, userID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetHandle err: %+v", err)
 		return "", err
@@ -639,38 +653,27 @@ type MemberWithoutHandle struct {
 // is @sam: in id order the later one could be. A join time never recorded
 // counts as the earliest.
 func MembersWithoutHandle(ctx context.Context, after MemberWithoutHandle, limit int) ([]MemberWithoutHandle, error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
+	out, err := pgexec.Query(ctx, `
 		SELECT id, email_id, COALESCE(created_at, 'epoch') AS joined FROM users
 		WHERE (username IS NULL OR username = '')
 		  AND is_external = false AND is_bot = false AND deleted_at IS NULL
 		  AND (COALESCE(created_at, 'epoch'), id) > ($1, $2)
-		ORDER BY joined, id LIMIT $3`, after.JoinedAt, after.ID, limit)
+		ORDER BY joined, id LIMIT $3`, func(r pgexec.Row) (m MemberWithoutHandle, err error) {
+		err = r.Scan(&m.ID, &m.Email, &m.JoinedAt)
+		return
+	}, after.JoinedAt, after.ID, limit)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/MembersWithoutHandle err: %+v", err)
 		return nil, err
 	}
-	defer rows.Close()
-	var out []MemberWithoutHandle
-	for rows.Next() {
-		var m MemberWithoutHandle
-		if err := rows.Scan(&m.ID, &m.Email, &m.JoinedAt); err != nil {
-			return nil, err
-		}
-		out = append(out, m)
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // HandleTakenByAnother reports whether someone other than userID has this
 // handle, compared without case.
 func HandleTakenByAnother(ctx context.Context, handle string, userID uuid.UUID) (bool, error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	var taken bool
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `
-		SELECT EXISTS (SELECT 1 FROM users WHERE LOWER(username) = LOWER($1) AND id <> $2)`, handle, userID).Scan(&taken)
+	taken, err := pgexec.Scalar[bool](ctx, `
+		SELECT EXISTS (SELECT 1 FROM users WHERE LOWER(username) = LOWER($1) AND id <> $2)`, handle, userID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/HandleTakenByAnother err: %+v", err)
 	}
@@ -680,41 +683,26 @@ func HandleTakenByAnother(ctx context.Context, handle string, userID uuid.UUID) 
 // SetHandle changes someone's handle. A unique violation means another person
 // has it.
 func SetHandle(ctx context.Context, userID uuid.UUID, handle string) error {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(c,
-		`UPDATE users SET username = $2, updated_at = NOW() WHERE id = $1`, userID, handle)
+	_, err := pgexec.Exec(ctx, `UPDATE users SET username = $2, updated_at = NOW() WHERE id = $1`, userID, handle)
 	return err
 }
 
 // SetHandleIfMissing gives someone without a handle this one, and reports
 // whether it did. A unique violation means another person took it first.
 func SetHandleIfMissing(ctx context.Context, userID uuid.UUID, handle string) (bool, error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(c, `
+	n, err := pgexec.Exec(ctx, `
 		UPDATE users SET username = $2, updated_at = NOW()
 		WHERE id = $1 AND (username IS NULL OR username = '')`, userID, handle)
-	if err != nil {
-		return false, err
-	}
-	n, err := res.RowsAffected()
 	return n > 0, err
 }
 
 // ExternalName is the name an import or a GitHub sync gave the person at
 // this address, on the external row it left for them, or "" for none.
 func ExternalName(ctx context.Context, email string) (string, error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	var name sql.NullString
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+	name, _, err := pgexec.QueryOne(ctx, `
 		SELECT COALESCE(NULLIF(display_name, ''), username) FROM users
 		WHERE LOWER(email_id) = LOWER($1) AND is_external = true AND is_bot = false AND deleted_at IS NULL
-		`+sameAddressFirst, email).Scan(&name)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
+		`+sameAddressFirst, func(r pgexec.Row) (n sql.NullString, err error) { err = r.Scan(&n); return }, email)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/ExternalName err: %+v", err)
 		return "", err
@@ -760,46 +748,55 @@ func UpdateUserInOpenSearch(openSearchUser *openSearchStruct.OpenSearchUser) {
 	}
 }
 
-func GetAllInvitations(ctx context.Context) (invitations []*models.Invitation, err error) {
+// IndexUserInOpenSearch writes a new person's whole search document, so they
+// can be found from the moment they exist, even in an index a reset emptied.
+func IndexUserInOpenSearch(openSearchUser *openSearchStruct.OpenSearchUser) {
+	ctx := context.Background()
+	if err := OpenSearchModels.IndexUserInOpenSearch(ctx, openSearchUser); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/IndexUserInOpenSearch Failed to index user in opensearch err: %+v", err)
+	}
+}
 
-	query := `
+func GetAllInvitations(ctx context.Context) (invitations []*models.Invitation, err error) {
+	invitations, err = pgexec.Query(ctx, `
 		SELECT id, email, invited_by, status, token, token_expires_at, created_at
 		FROM invitations
-		ORDER BY created_at DESC
-	`
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, query)
+		ORDER BY created_at DESC`, scanInvitation)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetAllInvitations Failed to get invitations err: %+v", err)
-		return
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var inv models.Invitation
-		if err = rows.Scan(&inv.Id, &inv.Email, &inv.InvitedBy, &inv.Status, &inv.Token, &inv.TokenExpiresAt, &inv.CreatedAt); err != nil {
-			helpers.LogErrorWithContext(ctx, "domain/GetAllInvitations Failed to scan invitation err: %+v", err)
-			return
-		}
-		invitations = append(invitations, &inv)
 	}
 	return
 }
 
-func DeleteInvitationByEmail(ctx context.Context, email string) (err error) {
-	query := `
-		DELETE FROM invitations
-		WHERE LOWER(email) = LOWER($1)
-	`
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
+// scanInvitation reads an invitation: id, email, invited_by, status, token,
+// token_expires_at, created_at.
+func scanInvitation(r pgexec.Row) (*models.Invitation, error) {
+	var inv models.Invitation
+	err := r.Scan(&inv.Id, &inv.Email, &inv.InvitedBy, &inv.Status, &inv.Token, &inv.TokenExpiresAt, &inv.CreatedAt)
+	return &inv, err
+}
 
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(ctx, query, email)
-	if err != nil {
+// scanUUID and scanString read one row's id or text, for pgexec.
+func scanUUID(r pgexec.Row) (id uuid.UUID, err error) { err = r.Scan(&id); return }
+
+func scanString(r pgexec.Row) (v string, err error) { err = r.Scan(&v); return }
+
+// invitationColumns are what scanInvitation reads, in its order.
+const invitationColumns = `id, email, invited_by, status, token, token_expires_at, created_at`
+
+// one is a single-row read that answers sql.ErrNoRows for no row, as the
+// callers of these functions test for.
+func one[T any](ctx context.Context, q string, scan func(pgexec.Row) (T, error), args ...any) (T, error) {
+	v, found, err := pgexec.QueryOne(ctx, q, scan, args...)
+	if err == nil && !found {
+		err = sql.ErrNoRows
+	}
+	return v, err
+}
+
+func DeleteInvitationByEmail(ctx context.Context, email string) (err error) {
+	if _, err = pgexec.Exec(ctx, `DELETE FROM invitations WHERE LOWER(email) = LOWER($1)`, email); err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/DeleteInvitationByEmail Failed to delete invitation err: %+v", err)
-		return
 	}
 	return
 }
@@ -1030,16 +1027,36 @@ func EndUserEmojiStatuses(ctx context.Context, userUUID string, now time.Time) e
 	return nil
 }
 
+// CreateOrUpdateDgraphUser writes a person's node by their uuid, creating it
+// when there is none, and answers its uid when it was created. Every writer
+// of a person's names comes through here: with them it writes their
+// user_search_name (searchName.go), made from the names the write leaves
+// stored, read in the same transaction, so a concurrent save of the same
+// person either lands first and is read, or aborts this one, which runs
+// again.
 func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.DgraphUser) (newUserUid string, err error) {
 
 	dgraphUser.DType = []string{"User"}
 	dgraphUser.Uid = "uid(user)"
+	vars := map[string]string{"$id": dgraphUser.Uuid}
 
-	query := fmt.Sprintf(`query {
-									  user as var(func: eq(user_uuid, "%+v"))
-								  }`, dgraphUser.Uuid)
-
-	newUserUid, err = dgraphModels.CreateOrUpdateDgraphUser(ctx, dgraphUser, query, "")
+	err = dgexec.InTxn(ctx, func(tx *dgexec.Txn) error {
+		stored, err := dgexec.ReadIn[people](tx, storedNamesQuery, vars)
+		if err != nil {
+			return err
+		}
+		was := &dgraphStruct.DgraphUser{}
+		if len(stored.People) > 0 {
+			was = &stored.People[0]
+		}
+		dgraphUser.SearchName = searchNameOf(dgraphUser, was)
+		res, err := tx.Mutate(`query user($id: string) { user as var(func: eq(user_uuid, $id)) }`, vars, dgexec.Mutation{Set: dgraphUser})
+		if err != nil {
+			return err
+		}
+		newUserUid = res.GetUids()["uid(user)"]
+		return nil
+	})
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1068,7 +1085,7 @@ func GetUserPostsByUserUUID(ctx context.Context, userUUID string, userDgraphUID 
 
 	query := `query UserInfo($user_id: string, $user_uid: string, $first: int, $offset: int){
 				userInfo(func: eq(user_uuid, $user_id))  {
-					user_posts @filter(not gt(post_deleted_at, "1970-01-01T00:00:00Z")) (orderdesc: post_created_at, first: $first, offset: $offset) @cascade(post_channel){
+					user_posts @filter(` + dgraphquery.Live("post_deleted_at") + `) (orderdesc: post_created_at, first: $first, offset: $offset) @cascade(post_channel){
 						post_uuid
 						post_text
 						post_created_at
@@ -1078,7 +1095,7 @@ func GetUserPostsByUserUUID(ctx context.Context, userUUID string, userDgraphUID 
 							user_profile_object_key
 							user_full_name
 						}
-						post_comment_count : count(post_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
+						post_comment_count : count(post_comments @filter(` + dgraphquery.Live("comment_deleted_at") + `))
 						post_channel @filter(uid_in(ch_members, $user_uid)) {
 							ch_name
 							ch_uuid
@@ -1120,15 +1137,14 @@ func GetActiveDgraphUserInfoByUUID(ctx context.Context, userUUID string) (dgraph
 	query := `query UserInfo($id: string, $time: string){
 				# Tasks of archived projects are not the user's work any more.
 				var(func: eq(user_uuid, $id)) {
-					user_projects @filter(gt(project_deleted_at, "1970-01-01T00:00:00Z")) { archivedProjects as uid }
+					user_projects @filter(` + dgraphquery.Deleted("project_deleted_at") + `) { archivedProjects as uid }
 				}
-				userInfo(func: eq(user_uuid, $id)) @filter(not gt(user_deleted_at, "1970-01-01T00:00:00Z")) {
+				userInfo(func: eq(user_uuid, $id)) @filter(` + dgraphquery.Live("user_deleted_at") + `) {
 					uid
 					user_uuid
 					user_name
 					user_full_name
 					user_email_id
-					user_posts
 					user_profile_object_key
 					user_job_title
 					user_hobbies
@@ -1163,9 +1179,9 @@ func GetActiveDgraphUserInfoByUUID(ctx context.Context, userUUID string) (dgraph
 						user_profile_object_key
 					}
 				}
-			user_task_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects))))
-			user_incomplete_task_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND ` + dgraphStruct.TASK_OPEN_FILTER + ` AND not eq(task_status, "canceled")))
-			user_overdue_task_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND ` + dgraphStruct.TASK_OPEN_FILTER + ` AND not eq(task_status, "canceled") AND lt(task_due_date, $time) AND gt(task_due_date, "1970-01-01T00:00:00Z")))
+			user_task_count: count(user_tasks @filter(` + dgraphquery.Live("task_deleted_at") + ` AND not uid_in(task_project, uid(archivedProjects)) @@hidden_tasks@@))
+			user_incomplete_task_count: count(user_tasks @filter(` + dgraphquery.Live("task_deleted_at") + ` AND not uid_in(task_project, uid(archivedProjects)) AND ` + dgraphStruct.TASK_OPEN_FILTER + ` AND not eq(task_status, "canceled") @@hidden_tasks@@))
+			user_overdue_task_count: count(user_tasks @filter(` + dgraphquery.Live("task_deleted_at") + ` AND not uid_in(task_project, uid(archivedProjects)) AND ` + dgraphStruct.TASK_OPEN_FILTER + ` AND not eq(task_status, "canceled") AND lt(task_due_date, $time) AND ` + dgraphquery.Deleted("task_due_date") + ` @@hidden_tasks@@))
 			user_created_at
 			user_updated_at
 			user_deleted_at
@@ -1174,6 +1190,15 @@ func GetActiveDgraphUserInfoByUUID(ctx context.Context, userUUID string) (dgraph
 			user_theme_mode
 		}
 	}`
+
+	// The counts are of the person's own tasks, which they are always let into
+	// (their assignee): for them, and so for anyone, the filter leaves none
+	// out, but the counts ask it all the same (models/taskread).
+	countFilter, err := taskread.For(ctx, userUUID)
+	if err != nil {
+		return nil, err
+	}
+	query = countFilter.Fill(query)
 
 	dgraphUser, err = dgraphModels.GetDgraphUserInfoByUUID(ctx, query, variables)
 
@@ -1252,7 +1277,7 @@ func GetAllUserEmojiStatusList(ctx context.Context, userUUID string) (dgraphUser
 
 // userTaskCardFields is a card on a person's board (My Tasks). It reads
 // $userDgraphUID, for whether they may change the task's project.
-const userTaskCardFields = `
+var userTaskCardFields = `
 						task_uuid
 						id: task_uuid
 						task_name
@@ -1262,7 +1287,6 @@ const userTaskCardFields = `
 						task_due_date
 						task_start_date
 						task_label
-						task_description
 						task_priority
 						task_project {
 							uid
@@ -1277,8 +1301,8 @@ const userTaskCardFields = `
 							user_name
 							user_profile_object_key
 						}
-						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
-						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
+						task_sub_task_count: count(task_sub_tasks @filter(` + dgraphquery.Live("task_deleted_at") + ` @@hidden_tasks@@))
+						task_comment_count: count(task_comments @filter(` + dgraphquery.Live("comment_deleted_at") + `))
 						` + dgraphStruct.TASK_BLOCKED_OPEN + `
 						task_team {
 							team_name
@@ -1293,14 +1317,21 @@ const userTaskCardFields = `
 // leaving out tasks of archived projects. The cards come from
 // GetDgraphUserBoardCards, in the same snapshot.
 func GetDgraphUserBoardPlaces(ctx context.Context, txn *dgo.Txn, userUUID string, filterQuery string, closedLimit int) (*dgraphStruct.DgraphUser, map[string]*dgraphStruct.BoardPlaces, error) {
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	filter := dgraphStruct.TASK_LIVE_FILTER + " AND not uid_in(task_project, uid(archivedProjects))"
 	if len(filterQuery) > 0 {
 		filter += " AND " + filterQuery
 	}
+	// A person's own tasks are theirs to see; anyone else's board leaves out
+	// the restricted ones the reader may not (models/taskread).
+	filter += tr.And()
 	query := `query UserInfo($id: string){
 				# Tasks of archived projects are not the user's work any more.
 				var(func: eq(user_uuid, $id)) {
-					user_projects @filter(gt(project_deleted_at, "1970-01-01T00:00:00Z")) { archivedProjects as uid }
+					user_projects @filter(` + dgraphquery.Deleted("project_deleted_at") + `) { archivedProjects as uid }
 				}
 				userInfo(func: eq(user_uuid, $id)) {
 					user_uuid` + dgraphStruct.BoardPlacesQuery("user_tasks", filter, closedLimit) + `
@@ -1337,10 +1368,14 @@ func GetDgraphUserBoardCards(ctx context.Context, txn *dgo.Txn, userDgraphUID st
 	if !dgraphquery.AllUIDs(uids) {
 		return nil, errors.New("domain/GetDgraphUserBoardCards: not a list of task ids")
 	}
-	query := fmt.Sprintf(`query Cards($userDgraphUID: string){
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
+	query := tr.Fill(fmt.Sprintf(`query Cards($userDgraphUID: string){
 				cards(func: uid(%s)) {%s
 				}
-			}`, strings.Join(uids, ", "), userTaskCardFields)
+			}`, strings.Join(uids, ", "), userTaskCardFields))
 	return dgraphTaskModels.QueryDgraphTasksInTxn(ctx, txn, query, map[string]string{"$userDgraphUID": userDgraphUID})
 }
 
@@ -1348,20 +1383,27 @@ func GetDgraphUserTaskList(ctx context.Context, userUUID string, userDgraphUID s
 	if len(filterQuery) > 0 {
 		filterQuery = "AND " + filterQuery
 	}
+	// A person's own tasks are theirs to see; anyone else's list, its count
+	// and its sub-task counts leave out the restricted ones the reader may not
+	// (models/taskread).
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
 	variables := make(map[string]string)
 	variables["$id"] = userUUID
 	variables["$userDgraphUID"] = userDgraphUID
 	order := dgraphquery.TotalOrder(sortQuery, "task_uuid")
 
 	query := func(page dgraphquery.Page) string {
-		return fmt.Sprintf(`query UserInfo($id: string, $userDgraphUID: string){
+		return tr.Fill(fmt.Sprintf(`query UserInfo($id: string, $userDgraphUID: string){
 				# Tasks of archived projects are not the user's work any more.
 				var(func: eq(user_uuid, $id)) {
-					user_projects @filter(gt(project_deleted_at, "1970-01-01T00:00:00Z")) { archivedProjects as uid }
+					user_projects @filter(`+dgraphquery.Deleted("project_deleted_at")+`) { archivedProjects as uid }
 				}
 				userInfo(func: eq(user_uuid, $id)) {
-					user_task_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) %s))
-					user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) %s) (%s, %s) {
+					user_task_count: count(user_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` AND not uid_in(task_project, uid(archivedProjects)) %s @@hidden_tasks@@))
+					user_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` AND not uid_in(task_project, uid(archivedProjects)) %s @@hidden_tasks@@) (%s, %s) {
 						task_uuid
 						task_name
 						task_status
@@ -1385,8 +1427,8 @@ func GetDgraphUserTaskList(ctx context.Context, userUUID string, userDgraphUID s
 							user_name
 							user_profile_object_key
 						}
-						task_sub_task_count: count(task_sub_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z")))
-						task_comment_count: count(task_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
+						task_sub_task_count: count(task_sub_tasks @filter(`+dgraphquery.Live("task_deleted_at")+` @@hidden_tasks@@))
+						task_comment_count: count(task_comments @filter(`+dgraphquery.Live("comment_deleted_at")+`))
 						`+dgraphStruct.TASK_BLOCKED_OPEN+`
 						task_team {
 							team_name
@@ -1395,7 +1437,7 @@ func GetDgraphUserTaskList(ctx context.Context, userUUID string, userDgraphUID s
 						task_created_at
 					}
 				}
-			}`, filterQuery, filterQuery, order, page.Args())
+			}`, filterQuery, filterQuery, order, page.Args()))
 	}
 
 	if !getAll && pageSize > 0 {
@@ -1442,7 +1484,7 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID string) 
 				sidebarMe as var(func: eq(user_uuid, $id))
 				# Tasks of archived projects are not the user's work any more.
 				var(func: eq(user_uuid, $id)) {
-					user_projects @filter(gt(project_deleted_at, "1970-01-01T00:00:00Z")) { archivedProjects as uid }
+					user_projects @filter(` + dgraphquery.Deleted("project_deleted_at") + `) { archivedProjects as uid }
 				}
 				userInfo(func: eq(user_uuid, $id)) {
 					uid
@@ -1455,13 +1497,13 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID string) 
 				# sidebar lists channels by name, so it reads no channel's newest
 				# post: that read sorted every post of every channel, and counted
 				# deleted ones (F-33).
-				user_channels @filter( not gt(ch_deleted_at, "1970-01-01T00:00:00Z")){
+				user_channels @filter( ` + dgraphquery.Live("ch_deleted_at") + `){
 					ch_uuid
 					ch_name
 					ch_private
 				}
 				# An archived channel leaves Starred as it leaves Channels.
-				user_fav_channels @filter( not gt(ch_deleted_at, "1970-01-01T00:00:00Z")){
+				user_fav_channels @filter( ` + dgraphquery.Live("ch_deleted_at") + `){
 					ch_uuid
 					ch_name
 					ch_private
@@ -1486,22 +1528,22 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID string) 
 						}
 						# The newest live message: a deleted one moved its
 						# conversation up as if someone had just written (F-33).
-						dm_chats @filter(not gt(chat_deleted_at, "1970-01-01T00:00:00Z")) (orderdesc: chat_created_at, first: 1) {
+						dm_chats @filter(` + dgraphquery.Live("chat_deleted_at") + `) (orderdesc: chat_created_at, first: 1) {
 							chat_created_at
 						}
 					}
-				user_task_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects))))
-				user_incomplete_task_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND ` + dgraphStruct.TASK_OPEN_FILTER + ` AND not eq(task_status, "canceled")))
-				user_overdue_task_count: count(user_tasks @filter(not gt(task_deleted_at, "1970-01-01T00:00:00Z") AND not uid_in(task_project, uid(archivedProjects)) AND ` + dgraphStruct.TASK_OPEN_FILTER + ` AND not eq(task_status, "canceled") AND lt(task_due_date, $time) AND gt(task_due_date, "1970-01-01T00:00:00Z")))
-				user_docs: ~doc_created_by(orderdesc: doc_updated_at, first: 8) @filter(not gt(doc_deleted_at, "1970-01-01T00:00:00Z") AND (NOT has(doc_owner) OR uid_in(doc_owner, uid(sidebarMe)))) {
+				user_task_count: count(user_tasks @filter(` + dgraphquery.Live("task_deleted_at") + ` AND not uid_in(task_project, uid(archivedProjects)) @@hidden_tasks@@))
+				user_incomplete_task_count: count(user_tasks @filter(` + dgraphquery.Live("task_deleted_at") + ` AND not uid_in(task_project, uid(archivedProjects)) AND ` + dgraphStruct.TASK_OPEN_FILTER + ` AND not eq(task_status, "canceled") @@hidden_tasks@@))
+				user_overdue_task_count: count(user_tasks @filter(` + dgraphquery.Live("task_deleted_at") + ` AND not uid_in(task_project, uid(archivedProjects)) AND ` + dgraphStruct.TASK_OPEN_FILTER + ` AND not eq(task_status, "canceled") AND lt(task_due_date, $time) AND ` + dgraphquery.Deleted("task_due_date") + ` @@hidden_tasks@@))
+				user_docs: ~doc_created_by(orderdesc: doc_updated_at, first: 8) @filter(` + dgraphquery.Live("doc_deleted_at") + ` AND (NOT has(doc_owner) OR uid_in(doc_owner, uid(sidebarMe)))) {
 					doc_uuid
 					doc_title
 				}
-				user_boards: ~board_created_by(orderdesc: board_updated_at, first: 8) @filter(not gt(board_deleted_at, "1970-01-01T00:00:00Z")) {
+				user_boards: ~board_created_by(orderdesc: board_updated_at, first: 8) @filter(` + dgraphquery.Live("board_deleted_at") + `) {
 					board_uuid
 					board_title
 				}
-				user_projects @filter(not gt(project_deleted_at, "1970-01-01T00:00:00Z")) {
+				user_projects @filter(` + dgraphquery.Live("project_deleted_at") + `) {
 					project_uuid
 					project_name
 				}
@@ -1509,6 +1551,15 @@ func GetDgraphUserInfoByUUIDForSidebarNav(ctx context.Context, userUUID string) 
 				user_theme_mode
 			}
 		}`
+
+	// The counts are of the person's own tasks, which they are always let into
+	// (their assignee): for them, and so for anyone, the filter leaves none
+	// out, but the counts ask it all the same (models/taskread).
+	countFilter, err := taskread.For(ctx, userUUID)
+	if err != nil {
+		return nil, err
+	}
+	query = countFilter.Fill(query)
 
 	dgraphUser, err = dgraphModels.GetDgraphUserInfoByUUID(ctx, query, variables)
 
@@ -1573,7 +1624,6 @@ func GetDgraphUserInfoByUUID(ctx context.Context, userUUID string) (dgraphUser *
 					user_name
 					user_full_name
 					user_email_id
-					user_posts
 					user_profile_object_key
 					user_job_title
 					user_hobbies
@@ -1690,14 +1740,13 @@ func GetDgraphUserInfoByUUIDs(ctx context.Context, userUUIDs []string) (dgraphUs
 	variables := make(map[string]string)
 	dgraphUids := strings.Join(userUUIDs, ", ")
 	query := fmt.Sprintf(`query UserInfo(){
-				userInfo(func: has(user_uuid)) @filter(uid(%+v)) {
+				userInfo(func: uid(%+v)) @filter(has(user_uuid)) {
 					uid
 					user_uuid
 					user_name
 					user_email_id
 					is_external
 					is_bot
-					user_posts
 					user_profile_object_key
 					user_job_title
 					user_hobbies
@@ -1735,7 +1784,6 @@ func DgraphUsersListNotExistInGivenChannel(ctx context.Context, channelUUID stri
 					user_uuid
 					user_name
 					user_email_id
-					user_posts
 					user_profile_object_key
 					user_job_title
 					user_hobbies
@@ -1761,30 +1809,40 @@ func DgraphUsersListNotExistInGivenChannel(ctx context.Context, channelUUID stri
 	return
 }
 
+// allUsersListMax is the most people GetDgraphAllUsersList reads: the
+// @mention picker, the DM picker and the goal owner picker hold the whole list
+// to search it, which a workspace far past this should page instead.
+const allUsersListMax = 5000
+
+// GetDgraphAllUsersList is the workspace's people (bots included, guests not)
+// for the pickers that search them in the browser: what they show and search
+// by, at most allUsersListMax. It also read every post each person had written
+// (user_posts, a uid apiece), their channels, hobbies and timestamps, none of
+// which a picker uses, so the list grew with the workspace's history.
 func GetDgraphAllUsersList(ctx context.Context) (dgraphUsers []*dgraphStruct.DgraphUser, err error) {
+	return GetDgraphUsersFirst(ctx, allUsersListMax)
+}
+
+// GetDgraphUsersFirst is the first of the workspace's people (bots included,
+// guests not), as GetDgraphAllUsersList reads them: what a picker shows and
+// searches by, at most first.
+func GetDgraphUsersFirst(ctx context.Context, first int) (dgraphUsers []*dgraphStruct.DgraphUser, err error) {
 
 	variables := make(map[string]string)
-	query := `query UserInfo(){
+	query := fmt.Sprintf(`query UserInfo(){
 
-				userInfo(func: has(user_uuid)) @filter(NOT eq(is_external, true) OR eq(is_bot, true)) {
+				userInfo(func: has(user_uuid), first: %d) @filter(NOT eq(is_external, true) OR eq(is_bot, true)) {
 					uid
 					user_uuid
 					user_name
 					user_full_name
 					user_email_id
-					user_posts
 					user_profile_object_key
 					user_job_title
-					user_hobbies
 					is_bot
-					user_channels {
-						ch_uuid
-					}
-					user_created_at
-					user_updated_at
 					user_deleted_at
 				}
-			}`
+			}`, first)
 
 	dgraphUsers, err = dgraphModels.GetDgraphUsersList(ctx, query, variables)
 
@@ -1835,6 +1893,81 @@ func GetAllUsersListFromDgraph(ctx context.Context, pageIndex int, pageSize int)
 	return
 }
 
+// MembersFilter narrows the admin's members list: Q is matched against the
+// display name, full name and address (any case); Admins, when set, keeps
+// only workspace admins (true) or only everyone else (false).
+type MembersFilter struct {
+	Q      string
+	Admins *bool
+}
+
+// AdminUserIDs is the account ids of the workspace's admins (admin_users
+// names them by address).
+func AdminUserIDs(ctx context.Context) ([]string, error) {
+	return pgexec.Query(ctx, `
+		SELECT u.id FROM users u
+		JOIN admin_users a ON LOWER(a.email_id) = LOWER(u.email_id)
+		WHERE u.deleted_at IS NULL`, func(r pgexec.Row) (string, error) {
+		var id uuid.UUID
+		err := r.Scan(&id)
+		return id.String(), err
+	})
+}
+
+// GetMembersPage is a page of the members list, newest first, with how many
+// match f in all: the admin's list searched and counted on the server, where
+// the web app walked every page to search and count in the browser.
+func GetMembersPage(ctx context.Context, first, offset int, f MembersFilter) ([]*dgraphStruct.DgraphUser, int, error) {
+	filter := "NOT eq(is_external, true)"
+	if q := escapeForDgraphRegex(f.Q); q != "" {
+		filter += fmt.Sprintf(" AND (regexp(user_name, /.*%[1]s.*/i) OR regexp(user_full_name, /.*%[1]s.*/i) OR regexp(user_email_id, /.*%[1]s.*/i))", q)
+	}
+	if f.Admins != nil {
+		admins, err := AdminUserIDs(ctx)
+		if err != nil {
+			return nil, 0, err
+		}
+		list := dgraphquery.UUIDList(admins)
+		switch {
+		case *f.Admins && list == "":
+			return nil, 0, nil
+		case *f.Admins:
+			filter += " AND eq(user_uuid, [" + list + "])"
+		case list != "":
+			filter += " AND NOT eq(user_uuid, [" + list + "])"
+		}
+	}
+	query := fmt.Sprintf(`query Members($first: int, $offset: int) {
+		matched as var(func: has(user_uuid)) @filter(%s)
+		total(func: uid(matched)) { count(uid) }
+		userInfo(func: uid(matched), first: $first, offset: $offset, orderdesc: user_created_at) {
+			user_uuid
+			user_profile_object_key
+			user_device_connected
+			user_email_id
+			user_status
+			user_name
+			user_full_name
+			user_deleted_at
+		}
+	}`, filter)
+	out, err := dgexec.Read[struct {
+		Users []*dgraphStruct.DgraphUser `json:"userInfo"`
+		Total []struct {
+			Count int `json:"count"`
+		} `json:"total"`
+	}](ctx, query, map[string]string{"$first": strconv.Itoa(first), "$offset": strconv.Itoa(offset)})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetMembersPage err: %+v", err)
+		return nil, 0, err
+	}
+	total := 0
+	if len(out.Total) > 0 {
+		total = out.Total[0].Count
+	}
+	return out.Users, total, nil
+}
+
 func DeleteFavChannelEdge(ctx context.Context, userDgraphUID string, channelDgraphUID string) (err error) {
 
 	delStringJSON := fmt.Sprintf(`{
@@ -1866,14 +1999,11 @@ func DeleteFavChannelEdge(ctx context.Context, userDgraphUID string, channelDgra
 // case they arrived with, so asking it by address would sign nobody in whose
 // provider spells their address differently from the way it was stored.
 func GetDgraphUserInfoByEmailId(ctx context.Context, userEmailId string) (dgraphUser *dgraphStruct.DgraphUser, err error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	var userID uuid.UUID
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+	userID, found, err := pgexec.QueryOne(ctx, `
 		SELECT id FROM users
 		WHERE LOWER(email_id) = LOWER($1) AND deleted_at IS NULL AND is_external = false AND is_bot = false
-		`+sameAddressFirst, userEmailId).Scan(&userID)
-	if errors.Is(err, sql.ErrNoRows) {
+		`+sameAddressFirst, scanUUID, userEmailId)
+	if err == nil && !found {
 		return nil, nil
 	}
 	if err != nil {
@@ -1884,7 +2014,7 @@ func GetDgraphUserInfoByEmailId(ctx context.Context, userEmailId string) (dgraph
 	variables := make(map[string]string)
 	variables["$id"] = userID.String()
 	query := `query UserInfo($id: string){
-				userInfo(func: eq(user_uuid, $id)) @filter(not gt(user_deleted_at, "1970-01-01T00:00:00Z") AND NOT eq(is_external, true) AND NOT eq(is_bot, true)) {
+				userInfo(func: eq(user_uuid, $id)) @filter(` + dgraphquery.Live("user_deleted_at") + ` AND NOT eq(is_external, true) AND NOT eq(is_bot, true)) {
 					uid
 					user_uuid
 					user_name
@@ -1920,10 +2050,10 @@ func GetUserRecordingsList(ctx context.Context, userDgraphUID string, startDate 
 	query := `query UserRecordings($user_uid: string, $startDate: string, $endDate: string, $first: int, $offset: int){
 				var(func: uid($user_uid)) {
 					~ch_members {
-						ch_recs as ch_recording @filter(ge(recording_stared_at, $startDate) AND le(recording_stared_at, $endDate) AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z") AND (NOT eq(recording_transcript_only, true) OR gt(recording_ended_at, "1970-01-01T00:00:00Z")))
+						ch_recs as ch_recording @filter(ge(recording_stared_at, $startDate) AND le(recording_stared_at, $endDate) AND ` + dgraphquery.Live("recording_deleted_at") + ` AND (NOT eq(recording_transcript_only, true) OR ` + dgraphquery.Deleted("recording_ended_at") + `))
 					}
 					~dm_participants {
-						dm_recs as dm_recording @filter(ge(recording_stared_at, $startDate) AND le(recording_stared_at, $endDate) AND not gt(recording_deleted_at, "1970-01-01T00:00:00Z") AND (NOT eq(recording_transcript_only, true) OR gt(recording_ended_at, "1970-01-01T00:00:00Z")))
+						dm_recs as dm_recording @filter(ge(recording_stared_at, $startDate) AND le(recording_stared_at, $endDate) AND ` + dgraphquery.Live("recording_deleted_at") + ` AND (NOT eq(recording_transcript_only, true) OR ` + dgraphquery.Deleted("recording_ended_at") + `))
 					}
 				}
 				recordingInfo(func: uid(ch_recs, dm_recs), orderdesc: recording_stared_at, first: $first, offset: $offset) {
@@ -1976,7 +2106,7 @@ func GetUserRecordingsList(ctx context.Context, userDgraphUID string, startDate 
 // Members only: an external row or a bot's never signs in, even holding a
 // password (accepting an invitation used to set one on an external row).
 func GetUserByEmailIdWithPassword(ctx context.Context, emailID string) (userInfo *models.User, err error) {
-	query := `
+	userInfo, err = one(ctx, `
 		SELECT id, email_id, password_hash, username, created_at, updated_at,
 		       COALESCE(is_sso_managed, false), signup_method, last_login_method
 		FROM users
@@ -1984,58 +2114,33 @@ func GetUserByEmailIdWithPassword(ctx context.Context, emailID string) (userInfo
 		AND deleted_at IS NULL
 		AND is_external = false
 		AND is_bot = false
-		` + sameAddressFirst + `
-	`
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var user models.User
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, emailID).Scan(
-		&user.Id,
-		&user.EmailID,
-		&user.PasswordHash,
-		&user.Username,
-		&user.CreatedAt,
-		&user.UpdatedAt,
-		&user.IsSSOManaged,
-		&user.SignupMethod,
-		&user.LastLoginMethod,
-	)
+		`+sameAddressFirst, func(r pgexec.Row) (*models.User, error) {
+		var user models.User
+		err := r.Scan(&user.Id, &user.EmailID, &user.PasswordHash, &user.Username, &user.CreatedAt, &user.UpdatedAt,
+			&user.IsSSOManaged, &user.SignupMethod, &user.LastLoginMethod)
+		return &user, err
+	}, emailID)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetUserByEmailIdWithPassword Failed to get user err: %+v", err)
-		return
+		helpers.LogErrorWithContext(ctx, "domain/GetUserByEmailIdWithPassword Failed to get user err: %+v", err)
+		return nil, err
 	}
-
-	return &user, nil
+	return userInfo, nil
 }
 
 func UpdatePasswordByUserID(ctx context.Context, userID uuid.UUID, passwordHash *string) (err error) {
-	query := `
+	if _, err = pgexec.Exec(ctx, `
 		UPDATE users
 		SET password_hash = $1, password_generated = false, updated_at = NOW()
-		WHERE id = $2
-	`
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(ctx, query, passwordHash, userID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/UpdatePasswordByUserID Failed to update password err: %+v", err)
-		return
+		WHERE id = $2`, passwordHash, userID); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/UpdatePasswordByUserID Failed to update password err: %+v", err)
 	}
-
 	return
 }
 
 // MarkPasswordGenerated records that the account's password was generated for
 // its owner rather than chosen by them. UpdatePasswordByUserID clears it.
 func MarkPasswordGenerated(ctx context.Context, userID uuid.UUID) error {
-	ctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx,
-		`UPDATE users SET password_generated = true WHERE id = $1`, userID)
+	_, err := pgexec.Exec(ctx, `UPDATE users SET password_generated = true WHERE id = $1`, userID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/MarkPasswordGenerated err: %+v", err)
 	}
@@ -2044,12 +2149,7 @@ func MarkPasswordGenerated(ctx context.Context, userID uuid.UUID) error {
 
 // PasswordGenerated reports whether the account still has a generated password.
 func PasswordGenerated(ctx context.Context, userID uuid.UUID) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	var generated bool
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx,
-		`SELECT password_generated FROM users WHERE id = $1`, userID).Scan(&generated)
-	return generated, err
+	return pgexec.Scalar[bool](ctx, `SELECT password_generated FROM users WHERE id = $1`, userID)
 }
 
 // CreateUserWithMethod inserts a user record with full provenance.
@@ -2075,10 +2175,10 @@ func CreateUserWithMethod(
 		INSERT INTO users (id, email_id, username, password_hash, signup_method, is_sso_managed)
 		VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6)
 	`
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(ctx, query, userUUID, emailID, username, passwordHash, signupMethod, isSSOManaged)
+	// The request's values (its id, for the logs), not its cancellation: a
+	// sign-up the client walked away from still writes both stores, or the
+	// graph node and the row disagree.
+	_, err = pgexec.Exec(context.WithoutCancel(ctx), query, userUUID, emailID, username, passwordHash, signupMethod, isSSOManaged)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"domain/CreateUserWithMethod Failed to create user err: %+v", err)
@@ -2101,42 +2201,44 @@ func CreateUserWithMethod(
 // out anyone the graph marks external), and a sign-up racing this one waits,
 // then finds nothing left to adopt.
 func AdoptExternalUser(ctx context.Context, emailID string, passwordHash *string, signupMethod string, isSSOManaged bool) (userID uuid.UUID, adopted bool, err error) {
-	c, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	tx, err := postgresInit.DBConn.SqlDB.BeginTx(c, nil)
+	// Not cancelled with the request: the row stays locked until both stores
+	// agree, and a half-finished adoption would leave them disagreeing.
+	graphMarked := false
+	err = pgexec.InTx(context.WithoutCancel(ctx), func(tx context.Context) error {
+		id, found, err := pgexec.QueryOne(tx, `
+			SELECT id FROM users
+			WHERE LOWER(email_id) = LOWER($1) AND is_external = true AND is_bot = false AND deleted_at IS NULL
+			`+sameAddressFirst+`
+			FOR UPDATE`, scanUUID, emailID)
+		if err != nil || !found {
+			return err
+		}
+		if err := EnsureSeatAvailable(ctx); err != nil {
+			return err
+		}
+		if _, err := pgexec.Exec(tx, `
+			UPDATE users
+			SET is_external = false, password_hash = $2, signup_method = NULLIF($3, ''),
+				is_sso_managed = $4, updated_at = NOW()
+			WHERE id = $1`, id, passwordHash, signupMethod, isSSOManaged); err != nil {
+			return err
+		}
+		if err := setDgraphExternal(tx, id.String(), false); err != nil {
+			return err
+		}
+		graphMarked, userID = true, id
+		return nil
+	})
 	if err != nil {
+		// Only the commit fails after the graph node is marked a member's.
+		if graphMarked {
+			_ = helpers.CompensateOnFailure(ctx, "the member mark on the graph node of an adopted "+emailID,
+				func(undoCtx context.Context) error { return setDgraphExternal(undoCtx, userID.String(), true) })
+		}
 		return uuid.Nil, false, err
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	err = tx.QueryRowContext(c, `
-		SELECT id FROM users
-		WHERE LOWER(email_id) = LOWER($1) AND is_external = true AND is_bot = false AND deleted_at IS NULL
-		`+sameAddressFirst+`
-		FOR UPDATE`, emailID).Scan(&userID)
-	if errors.Is(err, sql.ErrNoRows) {
+	if userID == uuid.Nil {
 		return uuid.Nil, false, nil
-	}
-	if err != nil {
-		return uuid.Nil, false, err
-	}
-	if err = EnsureSeatAvailable(ctx); err != nil {
-		return uuid.Nil, false, err
-	}
-	if _, err = tx.ExecContext(c, `
-		UPDATE users
-		SET is_external = false, password_hash = $2, signup_method = NULLIF($3, ''),
-			is_sso_managed = $4, updated_at = NOW()
-		WHERE id = $1`, userID, passwordHash, signupMethod, isSSOManaged); err != nil {
-		return uuid.Nil, false, err
-	}
-	if err = setDgraphExternal(c, userID.String(), false); err != nil {
-		return uuid.Nil, false, err
-	}
-	if err = tx.Commit(); err != nil {
-		_ = helpers.CompensateOnFailure(ctx, "the member mark on the graph node of an adopted "+emailID,
-			func(undoCtx context.Context) error { return setDgraphExternal(undoCtx, userID.String(), true) })
-		return uuid.Nil, false, err
 	}
 	forgetProfile(ctx, userID.String())
 	return userID, true, nil
@@ -2223,18 +2325,12 @@ func uniqueViolationTargets(err error, column string) bool {
 // RecordLoginMethod updates last_login_method and last_login_at for audit/UX.
 // Best-effort: callers should log but not fail the login on error.
 func RecordLoginMethod(ctx context.Context, userID uuid.UUID, method string) error {
-	query := `
+	_, err := pgexec.Exec(ctx, `
 		UPDATE users
 		SET last_login_method = $1, last_login_at = NOW(), updated_at = NOW()
-		WHERE id = $2
-	`
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, query, method, userID)
+		WHERE id = $2`, method, userID)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/RecordLoginMethod Failed to record login method err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "domain/RecordLoginMethod Failed to record login method err: %+v", err)
 	}
 	return err
 }
@@ -2243,112 +2339,55 @@ func RecordLoginMethod(ctx context.Context, userID uuid.UUID, method string) err
 // by UUID. Cheaper than the full GetUserByUUID and includes is_sso_managed
 // which the legacy loader doesn't.
 func GetUserAuthFlagsByUUID(ctx context.Context, userID uuid.UUID) (*models.User, error) {
-	query := `
+	user, err := one(ctx, `
 		SELECT id, email_id, COALESCE(is_sso_managed, false), signup_method, last_login_method
 		FROM users
 		WHERE id = $1
-		AND deleted_at IS NULL
-	`
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var user models.User
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, userID).Scan(
-		&user.Id,
-		&user.EmailID,
-		&user.IsSSOManaged,
-		&user.SignupMethod,
-		&user.LastLoginMethod,
-	)
+		AND deleted_at IS NULL`, func(r pgexec.Row) (*models.User, error) {
+		var user models.User
+		err := r.Scan(&user.Id, &user.EmailID, &user.IsSSOManaged, &user.SignupMethod, &user.LastLoginMethod)
+		return &user, err
+	}, userID)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetUserAuthFlagsByUUID err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "domain/GetUserAuthFlagsByUUID err: %+v", err)
 		return nil, err
 	}
-	return &user, nil
+	return user, nil
 }
 
 func GetInvitationByToken(ctx context.Context, token string) (invitation *models.Invitation, err error) {
-	query := `
+	invitation, err = one(ctx, `
 		SELECT id, email, invited_by, status, token, token_expires_at, created_at
 		FROM invitations
-		WHERE token = $1
-	`
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	var inv models.Invitation
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, token).Scan(
-		&inv.Id,
-		&inv.Email,
-		&inv.InvitedBy,
-		&inv.Status,
-		&inv.Token,
-		&inv.TokenExpiresAt,
-		&inv.CreatedAt,
-	)
+		WHERE token = $1`, scanInvitation, token)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetInvitationByToken Failed to get invitation err: %+v", err)
-		return
+		helpers.LogErrorWithContext(ctx, "domain/GetInvitationByToken Failed to get invitation err: %+v", err)
+		return nil, err
 	}
-
-	return &inv, nil
+	return invitation, nil
 }
 
 func UpdateInvitationStatus(ctx context.Context, invitationID uuid.UUID, status string) (err error) {
-	query := `
-		UPDATE invitations
-		SET status = $1
-		WHERE id = $2
-	`
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(ctx, query, status, invitationID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/UpdateInvitationStatus Failed to update invitation status err: %+v", err)
-		return
+	if _, err = pgexec.Exec(ctx, `UPDATE invitations SET status = $1 WHERE id = $2`, status, invitationID); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/UpdateInvitationStatus Failed to update invitation status err: %+v", err)
 	}
-
 	return
 }
 
 func AddInvitationWithToken(ctx context.Context, email string, invitedBy uuid.UUID, token string, expiresAt time.Time) (err error) {
-	query := `
+	if _, err = pgexec.Exec(ctx, `
 		INSERT INTO invitations (email, invited_by, status, token, token_expires_at)
-		VALUES ($1, $2, 'sent', $3, $4)
-	`
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(ctx, query, email, invitedBy, token, expiresAt)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/AddInvitationWithToken Failed to add invitation err: %+v", err)
-		return
+		VALUES ($1, $2, 'sent', $3, $4)`, email, invitedBy, token, expiresAt); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/AddInvitationWithToken Failed to add invitation err: %+v", err)
 	}
-
 	return
 }
 
 func CheckIfAnyAdminExists(ctx context.Context) (exists bool, err error) {
-	query := `
-		SELECT EXISTS (
-			SELECT 1 FROM admin_users LIMIT 1
-		)
-	`
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query).Scan(&exists)
+	exists, err = pgexec.Scalar[bool](ctx, `SELECT EXISTS (SELECT 1 FROM admin_users LIMIT 1)`)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/CheckIfAnyAdminExists Failed to check admin existence err: %+v", err)
-		return
+		helpers.LogErrorWithContext(ctx, "domain/CheckIfAnyAdminExists Failed to check admin existence err: %+v", err)
 	}
-
 	return
 }
 
@@ -2362,9 +2401,7 @@ func CheckIfAnyAdminExists(ctx context.Context) (exists bool, err error) {
 // an invitation again failed. The caller renews the newest
 // (GetInvitationByEmail).
 func UpdateInvitationTokenByID(ctx context.Context, id uuid.UUID, token string, expiresAt time.Time, invitedBy uuid.UUID) error {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(c, `
+	_, err := pgexec.Exec(ctx, `
 		UPDATE invitations
 		SET token = $1, token_expires_at = $2, status = 'sent', invited_by = $4
 		WHERE id = $3`, token, expiresAt, id, invitedBy)
@@ -2378,89 +2415,69 @@ func UpdateInvitationTokenByID(ctx context.Context, id uuid.UUID, token string, 
 // GetInvitationByEmail is the newest invitation for an address, the one that
 // is renewed and judged, or nil when there is none.
 func GetInvitationByEmail(ctx context.Context, email string) (*models.Invitation, error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	var inv models.Invitation
-	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `
-		SELECT id, email, invited_by, status, token, token_expires_at, created_at
+	inv, found, err := pgexec.QueryOne(ctx, `
+		SELECT `+invitationColumns+`
 		FROM invitations
 		WHERE LOWER(email) = LOWER($1)
 		ORDER BY created_at DESC
-		LIMIT 1`, email).Scan(&inv.Id, &inv.Email, &inv.InvitedBy, &inv.Status, &inv.Token, &inv.TokenExpiresAt, &inv.CreatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+		LIMIT 1`, scanInvitation, email)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetInvitationByEmail err: %+v", err)
 		return nil, err
 	}
-	return &inv, nil
+	if !found {
+		return nil, nil
+	}
+	return inv, nil
 }
 
 // HasUsableInvitation reports whether email holds an invitation that can
 // still let someone in, as models.Invitation.LiveAt decides: the rows are
 // read and judged by that one predicate, not by a copy of it in SQL.
 func HasUsableInvitation(ctx context.Context, email string) (bool, error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
-		SELECT id, email, invited_by, status, token, token_expires_at, created_at
+	invs, err := pgexec.Query(ctx, `
+		SELECT `+invitationColumns+`
 		FROM invitations
-		WHERE LOWER(email) = LOWER($1)`, email)
+		WHERE LOWER(email) = LOWER($1)`, scanInvitation, email)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/HasUsableInvitation err: %+v", err)
 		return false, err
 	}
-	defer rows.Close()
 	now := time.Now()
-	usable := false
-	for rows.Next() {
-		var inv models.Invitation
-		if err := rows.Scan(&inv.Id, &inv.Email, &inv.InvitedBy, &inv.Status, &inv.Token, &inv.TokenExpiresAt, &inv.CreatedAt); err != nil {
-			helpers.LogErrorWithContext(ctx, "domain/HasUsableInvitation scan err: %+v", err)
-			return false, err
+	for _, inv := range invs {
+		if inv.LiveAt(now) {
+			return true, nil
 		}
-		usable = usable || inv.LiveAt(now)
 	}
-	if err := rows.Err(); err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/HasUsableInvitation rows err: %+v", err)
-		return false, err
-	}
-	return usable, nil
+	return false, nil
 }
 
 // MarkInvitationJoined records that the person invited at email has joined,
-// however they came in. Nothing to mark is not an error.
-func MarkInvitationJoined(ctx context.Context, email string) error {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(c, `
+// however they came in, and says whether there was an invitation to mark.
+// Nothing to mark is not an error.
+func MarkInvitationJoined(ctx context.Context, email string) (marked bool, err error) {
+	n, err := pgexec.Exec(ctx, `
 		UPDATE invitations SET status = 'joined'
 		WHERE LOWER(email) = LOWER($1) AND status <> 'joined'`, email)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/MarkInvitationJoined err: %+v", err)
 	}
-	return err
+	return n > 0, err
 }
 
 // MemberAccountState reports whether a member's account has this address,
 // and whether it is deactivated. External rows and bots are not members.
 func MemberAccountState(ctx context.Context, email string) (exists bool, deactivated bool, err error) {
-	c, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	err = postgresInit.DBConn.SqlDB.QueryRowContext(c, `
+	deactivated, exists, err = pgexec.QueryOne(ctx, `
 		SELECT deleted_at IS NOT NULL FROM users
 		WHERE LOWER(email_id) = LOWER($1) AND is_external = false AND is_bot = false
 		ORDER BY (deleted_at IS NULL) DESC, created_at ASC
-		LIMIT 1`, email).Scan(&deactivated)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, false, nil
-	}
+		LIMIT 1`, func(r pgexec.Row) (d bool, err error) { err = r.Scan(&d); return }, email)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/MemberAccountState err: %+v", err)
 		return false, false, err
 	}
-	return true, deactivated, nil
+	return exists, deactivated, nil
 }
 
 // GetUserIDByEmail finds a user ID by email address.
@@ -2591,41 +2608,26 @@ func GetActiveDgraphUsersByUUIDsLight(ctx context.Context, userUUIDs []string) (
 	}
 
 	// DQL doesn't support inline list parameters with parameterised
-	// queries for `eq(field, [a, b, c])`, so we build the list as a
-	// quoted string. Each value is a UUID — already validated upstream —
-	// but we apply a defensive char-set filter so a stray non-UUID
-	// caller can't inject DQL.
-	parts := make([]string, 0, len(clean))
-	for _, u := range clean {
-		safe := true
-		for _, r := range u {
-			ok := (r >= 'a' && r <= 'z') ||
-				(r >= 'A' && r <= 'Z') ||
-				(r >= '0' && r <= '9') ||
-				r == '-'
-			if !ok {
-				safe = false
-				break
-			}
-		}
-		if safe {
-			parts = append(parts, `"`+u+`"`)
-		}
-	}
-	if len(parts) == 0 {
+	// queries for `eq(field, [a, b, c])`, so the list is written into the
+	// query: uuids only, lower case, as user_uuid keeps them.
+	list := dgraphquery.UUIDList(clean)
+	if list == "" {
 		return nil, nil
 	}
 
 	query := fmt.Sprintf(`{
-		userInfo(func: eq(user_uuid, [%s])) @filter(not gt(user_deleted_at, "1970-01-01T00:00:00Z")) {
+		userInfo(func: eq(user_uuid, [%s])) @filter(`+dgraphquery.Live("user_deleted_at")+`) {
 			uid
 			user_uuid
 			user_name
 			user_full_name
 			user_email_id
 			user_profile_object_key
+			is_bot
+			user_device_connected
+			user_status
 		}
-	}`, strings.Join(parts, ", "))
+	}`, list)
 
 	users, err := dgraphModels.GetDgraphUsersList(ctx, query, map[string]string{})
 	if err != nil {
@@ -2752,22 +2754,31 @@ func SearchPeople(ctx context.Context, needle string, limit int) (dgraphUsers []
 	// struct with one field tagged `json:"userInfo"`, so any other name parses
 	// cleanly into an empty slice: no error, no rows, a tool that always answers
 	// "nobody found". Named it "people" first and caught it by reading the model.
+	//
+	// It starts from the people whose search name matches when the term is
+	// long enough for its index (searchName.go), not from every person; the
+	// filter below still decides who matches. Not from a trigram index on
+	// user_name: that is @upsert, and the index made each trigram a conflict
+	// key, so people joining at once with like names aborted each other's
+	// sign-up (c925fc70).
+	vars, root := dgraphquery.RegexpUnionRoot(safe, "has(user_uuid)", "people", searchNamePredicates)
 	query := fmt.Sprintf(`{
-			userInfo(func: has(user_uuid), first: %d) @filter(
+			%s
+			userInfo(func: %s, first: %d) @filter(has(user_uuid) AND
 				(regexp(user_name, /.*%s.*/i)
 				 OR regexp(user_full_name, /.*%s.*/i)
 				 OR regexp(user_job_title, /.*%s.*/i)
-				 OR regexp(<user.department>, /.*%s.*/i))
+				 OR regexp(user_department, /.*%s.*/i))
 				AND NOT eq(is_external, true)
 				AND NOT eq(is_bot, true)) {
 				user_uuid
 				user_name
 				user_full_name
 				user_job_title
-				user.department
+				user_department
 				user_email_id
 			}
-			}`, limit, safe, safe, safe, safe)
+			}`, vars, root, limit, safe, safe, safe, safe)
 
 	dgraphUsers, err = dgraphModels.GetDgraphUsersList(ctx, query, map[string]string{})
 	if err != nil {
@@ -2776,6 +2787,10 @@ func SearchPeople(ctx context.Context, needle string, limit int) (dgraphUsers []
 	}
 	return dgraphUsers, nil
 }
+
+// searchNamePredicates is where the people searches start: user_search_name
+// holds every name they match (searchName.go).
+var searchNamePredicates = []string{"user_search_name"}
 
 // peopleSearchMaxResults bounds what a single lookup returns. A directory is not
 // something an agent should be able to page through one tool call at a time.

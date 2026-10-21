@@ -6,6 +6,7 @@ import (
 	"time"
 
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	domain "github.com/akashc777/OneCamp/domain/Comment"
 	docDomain "github.com/akashc777/OneCamp/domain/Doc"
@@ -17,6 +18,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/akashc777/OneCamp/models/taskread"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	"github.com/google/uuid"
 )
@@ -40,6 +42,7 @@ func CreateCommentInTask(ctx context.Context, dgraphTask *dgraphStruct.DgraphTas
 			err)
 		return
 	}
+	refsBusiness.CommentSaved(ctx, dgraphTask.Comments, commentUUID.String(), true)
 
 	// add to openSearch
 	plainText := helpers.HTMLToPlainText(dgraphTask.Comments[0].Text)
@@ -68,7 +71,9 @@ func CreateCommentInTask(ctx context.Context, dgraphTask *dgraphStruct.DgraphTas
 
 	notificationTitle := fmt.Sprintf("Comment - %+v", userInfo.UserDgraphInfo.DisplayName())
 	notificationBody := plainText
-	go sendNewTaskCommentNotification(notificationTitle, notificationBody, commentUUID.String(), mentionList, rawDgraphTaskInfo, &userInfo.UserDgraphInfo)
+	helpers.GoSafeNamed("sendNewTaskCommentNotification", func() {
+		sendNewTaskCommentNotification(notificationTitle, notificationBody, commentUUID.String(), mentionList, rawDgraphTaskInfo, &userInfo.UserDgraphInfo)
+	})
 
 	return
 
@@ -104,8 +109,10 @@ func sendNewTaskCommentNotification(title string, body string, commentUUID strin
 		forThem = append(forThem, dgraphTask.Assignee.Uuid)
 	}
 
-	// The thread: whoever commented on the task before, but its writer.
-	dgraphTaskComment, err := taskCommentThread(ctx, dgraphTask.Uuid)
+	// The thread: whoever commented on the task before, but its writer. Read
+	// with no audience, as a restricted task's own people are told of it too:
+	// who is told is kept below to who may read the task (models/taskread).
+	dgraphTaskComment, err := taskCommentThread(taskread.WithSystem(ctx), dgraphTask.Uuid)
 	if err != nil || dgraphTaskComment == nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/sendNewTaskCommentNotification Failed to get task comment err: %+v",
@@ -167,6 +174,22 @@ func taskCommentPushedTo(ctx context.Context, task *dgraphStruct.DgraphTask, wri
 }
 
 func CreateCommentInADoc(ctx context.Context, dgraphDoc *dgraphStruct.DgraphDoc, userInfo *userModels.UserInfo, commentUUID uuid.UUID, createdTime time.Time, rawDgraphDocInfo *dgraphStruct.DgraphDoc, mentionList []*dgraphStruct.DgraphUser) (commentUid string, err error) {
+	if commentUid, err = StoreDocComment(ctx, dgraphDoc, userInfo, commentUUID, createdTime, rawDgraphDocInfo); err != nil {
+		return
+	}
+	// Who is told, and how, is the bus's: the doc.comment.created sink
+	// (commentParticipants.go) is the one notifier, and the audit, webhooks
+	// and anything else that cares hear of the comment from the same event.
+	emitDocComment(ctx, rawDgraphDocInfo.Uuid, userInfo.UserDgraphInfo.Uuid, commentUUID.String(), createdTime, mentionList)
+	return
+}
+
+// StoreDocComment keeps a doc's comment, its row, its node, its search entry
+// and its AI entry, and tells nobody: CreateCommentInADoc is it and the
+// telling. An import's comments (docs N1), written as they were made
+// elsewhere, are stored this way, so bringing a workspace across notifies no
+// one of what was said there.
+func StoreDocComment(ctx context.Context, dgraphDoc *dgraphStruct.DgraphDoc, userInfo *userModels.UserInfo, commentUUID uuid.UUID, createdTime time.Time, rawDgraphDocInfo *dgraphStruct.DgraphDoc) (commentUid string, err error) {
 
 	err = domain.CreateComment(ctx, commentUUID, userInfo.UserPostgresInfo.Id, createdTime)
 
@@ -185,6 +208,7 @@ func CreateCommentInADoc(ctx context.Context, dgraphDoc *dgraphStruct.DgraphDoc,
 			err)
 		return
 	}
+	refsBusiness.CommentSaved(ctx, dgraphDoc.Comments, commentUUID.String(), true)
 
 	// add to openSearch
 	plainText := helpers.HTMLToPlainText(dgraphDoc.Comments[0].Text)
@@ -224,11 +248,6 @@ func CreateCommentInADoc(ctx context.Context, dgraphDoc *dgraphStruct.DgraphDoc,
 	ai.EmbedDocCommentContent(plainText, commentUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.DisplayName(),
 		rawDgraphDocInfo.Uuid, docPrivate, docCreatedBy,
 		uuidsOf(access.ReadingUser), uuidsOf(access.EditingUser), uuidsOf(access.CommentingUser))
-
-	// Who is told, and how, is the bus's: the doc.comment.created sink
-	// (commentParticipants.go) is the one notifier, and the audit, webhooks
-	// and anything else that cares hear of the comment from the same event.
-	emitDocComment(ctx, rawDgraphDocInfo.Uuid, userInfo.UserDgraphInfo.Uuid, commentUUID.String(), createdTime, mentionList)
 
 	return
 }
@@ -379,6 +398,7 @@ func CreateCommentInAPost(ctx context.Context, dgraphPost *dgraphStruct.DgraphPo
 			err)
 		return
 	}
+	refsBusiness.CommentSaved(ctx, dgraphPost.Comments, commentUUID.String(), true)
 
 	// add to openSearch
 	plainText := helpers.HTMLToPlainText(dgraphPost.Comments[0].Text)
@@ -422,6 +442,9 @@ func UpdateComment(ctx context.Context, dgraphComment *dgraphStruct.DgraphCommen
 			err)
 		return
 	}
+	if dgraphComment.Text != "" {
+		refsBusiness.Saved(ctx, refsBusiness.Comment, commentUUID.String(), dgraphComment.Text, false)
+	}
 
 	plainText := helpers.HTMLToPlainText(dgraphComment.Text)
 	openSearchComment := openSearchStruct.OpenSearchComment{
@@ -430,7 +453,7 @@ func UpdateComment(ctx context.Context, dgraphComment *dgraphStruct.DgraphCommen
 		CommentUpdatedAt: currentTime.Unix(),
 	}
 
-	go domain.UpdateCommentInOpenSearch(openSearchComment)
+	helpers.GoSafeNamed("domain.UpdateCommentInOpenSearch", func() { domain.UpdateCommentInOpenSearch(openSearchComment) })
 
 	// Re-embed updated comment text for AI Second Brain (upsert by content_uuid).
 	// Called in line: StoreEmbeddingAsync is asynchronous itself, and queues the
@@ -449,19 +472,6 @@ func UpdateComment(ctx context.Context, dgraphComment *dgraphStruct.DgraphCommen
 
 	return
 
-}
-
-func CreateOrUpdateDgraphCommentReaction(ctx context.Context, dgraphComment *dgraphStruct.DgraphComment) (reactionUid string, err error) {
-
-	reactionUid, err = domain.CreateOrUpdateDgraphCommentReaction(ctx, dgraphComment)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/CreateOrUpdateDgraphPostCommentReaction Failed to update reaction on comment in post err: %+v",
-			err)
-		return
-	}
-
-	return
 }
 
 func GetDgraphCommentInfoByUUID(ctx context.Context, commentUUID string) (dgraphComment *dgraphStruct.DgraphComment, err error) {
@@ -559,7 +569,9 @@ func DeleteComment(ctx context.Context, dgraphComment *dgraphStruct.DgraphCommen
 	// ("user"), never "cascade": restoring the doc, post, chat or task the
 	// comment was on clears what was marked "cascade", and brought a deleted
 	// comment back to AI search.
-	go domain.DeleteCommentWithAttachmentsInOpenSearch(opensearchComment, rawDgraphComment.Attachments)
+	helpers.GoSafeNamed("domain.DeleteCommentWithAttachmentsInOpenSearch", func() {
+		domain.DeleteCommentWithAttachmentsInOpenSearch(opensearchComment, rawDgraphComment.Attachments)
+	})
 	go globalSearchDomain.SyncCascadingDeletionInOpenSearch(
 		[]string{"attachment_comment_id"},
 		commentUUID.String(),
@@ -584,18 +596,6 @@ func DeleteComment(ctx context.Context, dgraphComment *dgraphStruct.DgraphCommen
 
 }
 
-func DeleteCommentReaction(ctx context.Context, commentDgraphUID string, reactionDgraphUID string) (err error) {
-	err = domain.DeleteCommentReaction(ctx, commentDgraphUID, reactionDgraphUID)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/DeleteCommentReaction Failed to delete reaction on comment err: %+v",
-			err)
-		return
-	}
-	return
-}
-
 func CreateCommentInChat(ctx context.Context, dgraphChat *dgraphStruct.DgraphChat, userInfo *userModels.UserInfo, commentUUID uuid.UUID, createdTime time.Time, chatDgraphInfo *dgraphStruct.DgraphChat, mentionsDgraphUsersList []*dgraphStruct.DgraphUser) (commentUid string, err error) {
 
 	err = domain.CreateComment(ctx, commentUUID, userInfo.UserPostgresInfo.Id, createdTime)
@@ -615,6 +615,7 @@ func CreateCommentInChat(ctx context.Context, dgraphChat *dgraphStruct.DgraphCha
 			err)
 		return
 	}
+	refsBusiness.CommentSaved(ctx, dgraphChat.Comments, commentUUID.String(), true)
 
 	plainText := helpers.HTMLToPlainText(dgraphChat.Comments[0].Text)
 

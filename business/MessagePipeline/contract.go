@@ -54,7 +54,10 @@ type Write struct {
 	To conversationBusiness.Ref
 	// Message is the message an edit, deletion or reaction is to.
 	Message string
-	Draft   Draft
+	// People are a new group's people, the sender among them, when To names
+	// no group yet (KindGroup with no ID): its id is made from them.
+	People []string
+	Draft  Draft
 	// Emoji is a reaction's.
 	Emoji string
 }
@@ -159,7 +162,7 @@ func dmInput(w Write, me string) (*chatAdapter.ChatInfo, bool) {
 // groupInput is a group send as /groupChat/createChat takes it. Pure.
 func groupInput(w Write) *chatAdapter.ChatInfo {
 	return &chatAdapter.ChatInfo{
-		TextHtml: w.Draft.HTML, MediaObjects: w.Draft.Files, GrpUuid: w.To.ID,
+		TextHtml: w.Draft.HTML, MediaObjects: w.Draft.Files, GrpUuid: w.To.ID, Participants: w.People,
 		ReplyToUuid: w.Draft.ReplyTo, ClientMsgID: w.Draft.ClientMsgID,
 	}
 }

@@ -60,7 +60,8 @@ func TestQueryBlockIsNamedUserInfo(t *testing.T) {
 	if end := strings.Index(body, "\n}\n"); end > 0 {
 		body = body[:end]
 	}
-	if !strings.Contains(body, "userInfo(func: has(user_uuid)") {
+	// The root is has(user_uuid) or a union of trigram matches; the name is what matters.
+	if !strings.Contains(body, "userInfo(func: ") {
 		t.Error("the result block is not named userInfo, so nothing will unmarshal")
 	}
 }

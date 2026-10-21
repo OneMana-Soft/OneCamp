@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -37,6 +38,7 @@ import (
 	importBusiness "github.com/akashc777/OneCamp/business/Import"
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	importRun "github.com/akashc777/OneCamp/business/ImportRun"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	importDomain "github.com/akashc777/OneCamp/domain/Import"
 	"github.com/akashc777/OneCamp/helpers"
 	minioInit "github.com/akashc777/OneCamp/initializers/minioInit"
@@ -44,6 +46,7 @@ import (
 	userModel "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
+	authService "github.com/akashc777/OneCamp/services/Auth"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
@@ -74,34 +77,14 @@ func writeRateLimitExceeded(w http.ResponseWriter, retryAfter int) {
 
 // ─── Auth helper ───────────────────────────────────────────────────
 
+// requireAdmin is httpx.RequireAdmin, as the pointer this package's
+// handlers take.
 func requireAdmin(w http.ResponseWriter, r *http.Request) (*userModel.UserInfo, bool) {
-	u := mustUser(r)
-	if u == nil {
-		w.WriteHeader(http.StatusUnauthorized)
+	u, ok := httpx.RequireAdmin(w, r)
+	if !ok {
 		return nil, false
 	}
-	if !u.UserPostgresInfo.IsAdmin {
-		helpers.LogWarnWithContext(r.Context(),
-			"Import %s blocked for non-admin user=%s path=%s",
-			r.Method, u.UserPostgresInfo.Id, r.URL.Path)
-		w.WriteHeader(http.StatusForbidden)
-		return nil, false
-	}
-	return u, true
-}
-
-func mustUser(r *http.Request) *userModel.UserInfo {
-	v := r.Context().Value(helpers.UserInfoContextKey)
-	if v == nil {
-		return nil
-	}
-	if u, ok := v.(userModel.UserInfo); ok {
-		return &u
-	}
-	if u, ok := v.(*userModel.UserInfo); ok {
-		return u
-	}
-	return nil
+	return &u, true
 }
 
 // ─── Providers list ────────────────────────────────────────────────
@@ -119,13 +102,17 @@ func HandleListProviders(w http.ResponseWriter, r *http.Request) {
 		if p == nil {
 			continue
 		}
-		out = append(out, importAdapter.ProviderInfo{
+		info := importAdapter.ProviderInfo{
 			Name:             name,
 			Sources:          p.SupportedSources(),
 			Capabilities:     capabilityNames(p.Capabilities()),
 			DefaultStatusMap: p.DefaultStatusMap(),
 			DefaultPriority:  p.DefaultPriorityMap(),
-		})
+		}
+		if conn := importBusiness.SignInConnector(p); conn != nil {
+			info.SignIn = &importAdapter.SignInInfo{Configured: conn.Configured(), Setup: conn.Setup}
+		}
+		out = append(out, info)
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"providers": out})
 }
@@ -352,9 +339,8 @@ func HandleFinalizeUpload(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "unknown provider"})
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 	job, err := importModels.GetJob(ctx, jobId)
@@ -469,9 +455,8 @@ func HandlePlan(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireAdmin(w, r); !ok {
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 	job, err := importModels.GetJob(ctx, jobId)
@@ -548,9 +533,8 @@ func HandleRun(w http.ResponseWriter, r *http.Request) {
 		writeRateLimitExceeded(w, res.RetryAfterSeconds())
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 	job, err := importModels.GetJob(ctx, jobId)
@@ -649,9 +633,8 @@ func HandleCancel(w http.ResponseWriter, r *http.Request) {
 		writeRateLimitExceeded(w, res.RetryAfterSeconds())
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 	if err := importBusiness.CancelImport(ctx, jobId); err != nil {
@@ -673,9 +656,8 @@ func HandleRollback(w http.ResponseWriter, r *http.Request) {
 		writeRateLimitExceeded(w, res.RetryAfterSeconds())
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 	// The lease first: a run that has just been cancelled may still be ending,
@@ -708,15 +690,12 @@ func HandleListJobs(w http.ResponseWriter, r *http.Request) {
 	if offset < 0 {
 		offset = 0
 	}
-	jobs, err := importDomain.ListJobs(ctx, provider, limit)
+	jobs, err := importDomain.ListJobs(ctx, provider, limit, offset)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
 		return
 	}
-	views := make([]importAdapter.JobView, 0, len(jobs))
-	for _, j := range jobs {
-		views = append(views, jobToView(ctx, j))
-	}
+	views := jobViews(ctx, jobs)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"jobs":   views,
 		"limit":  limit,
@@ -730,9 +709,8 @@ func HandleGetJob(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireAdmin(w, r); !ok {
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 	j, err := importModels.GetJob(ctx, jobId)
@@ -740,7 +718,7 @@ func HandleGetJob(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"error": "job not found"})
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, jobToView(ctx, j))
+	helpers.WriteJSON(w, http.StatusOK, jobViews(ctx, []*importModels.Job{j})[0])
 }
 
 // HandleImportPeople returns who an import brought across that the admin can
@@ -753,9 +731,8 @@ func HandleImportPeople(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireAdmin(w, r); !ok {
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 	if job, err := importModels.GetJob(ctx, jobId); err != nil || job == nil {
@@ -801,9 +778,8 @@ func HandleOutcomeSeen(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 	mine, err := importBusiness.MarkOutcomeSeen(ctx, jobId, user.UserPostgresInfo.Id, time.Now())
@@ -825,9 +801,8 @@ func HandleListErrors(w http.ResponseWriter, r *http.Request) {
 	if _, ok := requireAdmin(w, r); !ok {
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 	severity := r.URL.Query().Get("severity")
@@ -852,9 +827,8 @@ func HandleDeleteStagedZip(w http.ResponseWriter, r *http.Request) {
 		writeRateLimitExceeded(w, res.RetryAfterSeconds())
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 	job, err := importModels.GetJob(ctx, jobId)
@@ -946,24 +920,11 @@ func HandleConnect(w http.ResponseWriter, r *http.Request) {
 	// Ask the provider what the token can see before saving it: a token it
 	// refuses, or a site that can't be reached, is said now, in words, instead
 	// of being saved as "connected" and failing at plan time.
-	items, problem := importBusiness.TestConnection(ctx, importProvider.Get(provName), user.UserPostgresInfo.Id.String(), tok, siteOf(tok.Metadata))
-	if problem != nil {
-		helpers.LogWarnWithContext(ctx, "Import.HandleConnect test failed provider=%s code=%s", provName, problem.Code)
+	if _, problem := importBusiness.SaveConnection(ctx, importProvider.Get(provName), tok, siteOf(tok.Metadata)); problem != nil {
+		helpers.LogWarnWithContext(ctx, "Import.HandleConnect failed provider=%s code=%s", provName, problem.Code)
 		helpers.WriteJSON(w, problem.Status, helpers.Envolope{"error": problem.Msg, "code": problem.Code})
 		return
 	}
-	if err := importModels.SaveToken(ctx, tok); err != nil {
-		helpers.LogErrorWithContext(ctx, "Import.HandleConnect SaveToken err: %+v", err)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": "Couldn't save the connection. Try again."})
-		return
-	}
-	// New token = potentially different scope/account, so the cached
-	// discovery list is stale: replace it with what the test just saw.
-	_ = redisStore.Delete(ctx, registry.ImportDiscover, []string{provName, user.UserPostgresInfo.Id.String()})
-	if items != nil {
-		_ = redisStore.SetJSON(ctx, registry.ImportDiscover, []string{provName, user.UserPostgresInfo.Id.String()}, items)
-	}
-	importProvider.InvalidateImportTokenSource(provName, user.UserPostgresInfo.Id)
 	helpers.WriteJSON(w, http.StatusOK, importAdapter.ConnectResponse{
 		Provider:          provName,
 		SourceAccountName: body.SourceAccountName,
@@ -1008,7 +969,24 @@ func HandleListConnections(w http.ResponseWriter, r *http.Request) {
 
 // ─── helpers ───────────────────────────────────────────────────────
 
-func jobToView(ctx context.Context, j *importModels.Job) importAdapter.JobView {
+// jobViews is the jobs as the screens show them, their counts and mappings
+// read for all of them at once (five statements in all, where it was five a
+// job).
+func jobViews(ctx context.Context, jobs []*importModels.Job) []importAdapter.JobView {
+	ids := make([]uuid.UUID, len(jobs))
+	for i, j := range jobs {
+		ids[i] = j.Id
+	}
+	counts, _ := importModels.JobCounts(ctx, ids)
+	status, priority, _ := importModels.JobMappings(ctx, ids)
+	views := make([]importAdapter.JobView, 0, len(jobs))
+	for _, j := range jobs {
+		views = append(views, jobToView(j, counts[j.Id], status[j.Id], priority[j.Id]))
+	}
+	return views
+}
+
+func jobToView(j *importModels.Job, c importModels.JobCount, status, priority map[string]string) importAdapter.JobView {
 	view := importAdapter.JobView{
 		Id:                  j.Id,
 		Provider:            j.Provider,
@@ -1031,11 +1009,9 @@ func jobToView(ctx context.Context, j *importModels.Job) importAdapter.JobView {
 			view.Plan = &plan
 		}
 	}
-	view.ChunksTotal, view.ChunksDone, view.ChunksFailed, _ = importModels.CountChunks(ctx, j.Id)
-	view.ItemsImported, _ = importModels.SumItemsImported(ctx, j.Id)
-	view.ErrorsTotal, _ = importModels.CountErrors(ctx, j.Id)
-	view.StatusMappings, _ = importModels.GetStatusMappings(ctx, j.Id)
-	view.PriorityMappings, _ = importModels.GetPriorityMappings(ctx, j.Id)
+	view.ChunksTotal, view.ChunksDone, view.ChunksFailed = c.ChunksTotal, c.ChunksDone, c.ChunksFailed
+	view.ItemsImported, view.ErrorsTotal = c.ItemsImported, c.ErrorsTotal
+	view.StatusMappings, view.PriorityMappings = status, priority
 	return view
 }
 
@@ -1173,9 +1149,8 @@ func HandleRetryFailedChunks(w http.ResponseWriter, r *http.Request) {
 		writeRateLimitExceeded(w, res.RetryAfterSeconds())
 		return
 	}
-	jobId, err := uuid.Parse(chi.URLParam(r, "jobId"))
-	if err != nil {
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"error": "invalid jobId"})
+	jobId, validID := helpers.UUIDParam(w, r, "jobId")
+	if !validID {
 		return
 	}
 	job, err := importModels.GetJob(ctx, jobId)
@@ -1219,4 +1194,68 @@ func HandleRetryFailedChunks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	helpers.WriteJSON(w, http.StatusAccepted, helpers.Envolope{"reset": n, "rerun": true})
+}
+
+// importOAuthRedirectURI is where a provider sends an admin back after they
+// sign in: the API itself, so the session cookie comes with them (as the
+// GitHub and apps sign-ins do).
+func importOAuthRedirectURI() string {
+	host := os.Getenv("BACKEND_DOMAIN")
+	if host == "" {
+		return "http://localhost:3000/admin/import/oauth/callback"
+	}
+	return "https://" + host + "/admin/import/oauth/callback"
+}
+
+// HandleOAuthURL handles GET /admin/import/{provider}/oauth-url: the page
+// where the admin signs in to a provider that has no tokens to paste.
+func HandleOAuthURL(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	user, ok := requireAdmin(w, r)
+	if !ok {
+		return
+	}
+	prov := importProvider.Get(chi.URLParam(r, "provider"))
+	if prov == nil {
+		helpers.WriteNotFound(w, "unknown provider")
+		return
+	}
+	if res := checkImportRateLimit(ctx, "connect:"+prov.Name(), user.UserPostgresInfo.Id, 5); !res.Allowed {
+		writeRateLimitExceeded(w, res.RetryAfterSeconds())
+		return
+	}
+	url, problem := importBusiness.StartOAuthConnect(ctx, prov, user.UserPostgresInfo.Id, importOAuthRedirectURI())
+	if problem != nil {
+		// {"msg", "code"}: the one error shape, with what the app acts on.
+		helpers.WriteJSON(w, problem.Status, helpers.Envolope{"msg": problem.Msg, "code": problem.Code})
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"url": url})
+}
+
+// HandleOAuthCallback handles GET /admin/import/oauth/callback, where the
+// provider sends the admin back: the sign-in is saved, and the admin returns
+// to the import page, which says how it went.
+func HandleOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	back := func(q string) {
+		http.Redirect(w, r, authService.FrontendBaseURL()+"/app/admin?tab=import&"+q, http.StatusFound)
+	}
+	user, ok := httpx.UserFrom(r)
+	if !ok || user == nil {
+		back("connect_error=sign_in_expired")
+		return
+	}
+	if r.URL.Query().Get("error") != "" {
+		// The admin said no at the provider.
+		back("connect_error=cancelled")
+		return
+	}
+	prov, problem := importBusiness.FinishOAuthConnect(ctx, r.URL.Query().Get("state"), r.URL.Query().Get("code"), user.UserPostgresInfo.Id, importOAuthRedirectURI())
+	if problem != nil {
+		helpers.LogWarnWithContext(ctx, "Import.HandleOAuthCallback provider=%s code=%s", prov, problem.Code)
+		back("connect_error=" + url.QueryEscape(problem.Code) + "&provider=" + url.QueryEscape(prov))
+		return
+	}
+	back("connected=" + url.QueryEscape(prov))
 }

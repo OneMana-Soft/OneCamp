@@ -69,6 +69,22 @@ func (f *fakeRows) release(_ context.Context, id int64) (bool, error) {
 	return true, nil
 }
 
+func (f *fakeRows) releaseWith(ctx context.Context, id int64, more map[string]string) (bool, error) {
+	f.mu.Lock()
+	if r := f.row(id); r != nil && r.State == models.StateHeld {
+		merged := map[string]string{}
+		for k, v := range r.Entities {
+			merged[k] = v
+		}
+		for k, v := range more {
+			merged[k] = v
+		}
+		r.Entities = merged
+	}
+	f.mu.Unlock()
+	return f.release(ctx, id)
+}
+
 func (f *fakeRows) cancel(_ context.Context, _ models.Execer, id int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -303,7 +319,7 @@ func TestAFailedSinkIsTriedAgainAloneAfterItsBackoff(t *testing.T) {
 	if n := len(rec.calls()); n != 2 {
 		t.Fatalf("%d runs before the backoff ran out, want 2", n)
 	}
-	f.advance(backoffAfter(1))
+	f.advance(helpers.ScheduleWait(backoff, 1, 0))
 	_ = Drain(context.Background())
 	if got := strings.Join(rec.calls(), ","); got != "realtime#m1,notify#m1,notify#m1" {
 		t.Errorf("ran %s: the retry gave the event to the sink that had it", got)
@@ -520,7 +536,7 @@ func TestAnEventInBackoffDoesntHoldBackItsKeysNext(t *testing.T) {
 	if f.stateOf(m1) != models.StateReady || f.stateOf(m2) != models.StateDone {
 		t.Errorf("m1 %s, m2 %s: m1 waits to be tried again, m2 is done", f.stateOf(m1), f.stateOf(m2))
 	}
-	f.advance(backoffAfter(1) + time.Second)
+	f.advance(helpers.ScheduleWait(backoff, 1, 0) + time.Second)
 	_ = Drain(context.Background())
 	if f.stateOf(m1) != models.StateDone {
 		t.Errorf("m1 %s after its backoff: tried again and done", f.stateOf(m1))
@@ -573,5 +589,46 @@ func TestAnEventNeedsATopicAKindAndAKey(t *testing.T) {
 func TestFirstTimeTellsWithoutRedis(t *testing.T) {
 	if !FirstTime(context.Background(), Event{EventID: uuid.NewString()}, "notify", "u1") {
 		t.Error("without Redis a sink should tell (a repeat beats a silence)")
+	}
+}
+
+// Told lets through those a sink hasn't told yet; nil, everyone.
+func TestToldLetsThroughOnlyThoseNotToldYet(t *testing.T) {
+	recipients := []string{"u-sam", "u-jonas", "u-maya"}
+	if got := strings.Join(Told(nil).Only("push", recipients), ","); got != "u-sam,u-jonas,u-maya" {
+		t.Errorf("nil: %s", got)
+	}
+	toldBefore := map[string]bool{"push|u-jonas": true}
+	tell := Told(func(how, r string) bool { return !toldBefore[how+"|"+r] })
+	if got := strings.Join(tell.Only("push", recipients), ","); got != "u-sam,u-maya" {
+		t.Errorf("push: %s", got)
+	}
+	if got := strings.Join(tell.Only("email", recipients), ","); got != "u-sam,u-jonas,u-maya" {
+		t.Errorf("email is its own way: %s", got)
+	}
+}
+
+// A writer releases an event with what it learnt while writing (a DM's first
+// message: whom the new conversation is for), and its sinks are handed it.
+func TestAnEventReleasedWithMoreCarriesItToItsSinks(t *testing.T) {
+	f := withFake(t)
+	var got map[string]string
+	Sinks.Register(Sink{Topic: "test", Name: "access", Run: func(_ context.Context, ev Event) error {
+		got = ev.Entities
+		return nil
+	}})
+	id, err := Add(context.Background(), nil, Entry{Topic: "test", Kind: "test.made", Key: "dm:a b", Entities: map[string]string{"message": "m1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ReleaseWith(context.Background(), id, map[string]string{"opened": "a,b"}); err != nil {
+		t.Fatal(err)
+	}
+	if f.stateOf(id) != models.StateReady {
+		t.Fatalf("state %s: released", f.stateOf(id))
+	}
+	_ = Drain(context.Background())
+	if got["message"] != "m1" || got["opened"] != "a,b" {
+		t.Errorf("the sink was handed %v", got)
 	}
 }

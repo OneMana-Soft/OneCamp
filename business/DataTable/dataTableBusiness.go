@@ -92,11 +92,13 @@ func IsRowNotFound(err error) bool { return err == errRowNotFound }
 func IsUnavailable(err error) bool { return err == errRowsUnavailable }
 
 func canView(t *model.DataTable, a Actor) bool {
-	return a.IsAdmin || t.CreatedBy == a.UserID || t.Visibility == model.VisibilityWorkspace
+	return t.Visibility == model.VisibilityWorkspace || helpers.OwnerOrAdmin(&t.CreatedBy, a.UserID, a.IsAdmin)
 }
 
+// canManage is helpers.OwnerOrAdmin: a table with no recorded creator is the
+// admins' alone, and nobody signed in is never its creator.
 func canManage(t *model.DataTable, a Actor) bool {
-	return a.IsAdmin || t.CreatedBy == a.UserID
+	return helpers.OwnerOrAdmin(&t.CreatedBy, a.UserID, a.IsAdmin)
 }
 
 // Inputs from the controller.
@@ -684,10 +686,10 @@ func loadBundle(ctx context.Context, t *model.DataTable, manage bool, topic stri
 	// Fetch one more than the page size so we can tell the FE/AI whether the
 	// table has more rows than this bundle carries, by the page itself.
 	wg.Add(4)
-	go func() { defer wg.Done(); fields, fErr = model.ListFields(ctx, t.Id) }()
-	go func() { defer wg.Done(); views, vErr = model.ListViews(ctx, t.Id) }()
-	go func() { defer wg.Done(); rows, rErr = model.ListRows(ctx, t.Id, bundleRowPage+1, 0) }()
-	go func() { defer wg.Done(); count, cErr = model.CountRows(ctx, t.Id) }()
+	helpers.GoSafeNamed("business/DataTable/dataTableBusiness:loadBundle", func() { defer wg.Done(); fields, fErr = model.ListFields(ctx, t.Id) })
+	helpers.GoSafeNamed("business/DataTable/dataTableBusiness:loadBundle", func() { defer wg.Done(); views, vErr = model.ListViews(ctx, t.Id) })
+	helpers.GoSafeNamed("business/DataTable/dataTableBusiness:loadBundle", func() { defer wg.Done(); rows, rErr = model.ListRows(ctx, t.Id, bundleRowPage+1, 0) })
+	helpers.GoSafeNamed("business/DataTable/dataTableBusiness:loadBundle", func() { defer wg.Done(); count, cErr = model.CountRows(ctx, t.Id) })
 	wg.Wait()
 
 	if fErr != nil {
@@ -808,7 +810,7 @@ func CreateField(ctx context.Context, tableId uuid.UUID, in FieldInput, actor Ac
 	if err != nil {
 		return nil, err
 	}
-	go tellTablesLinkedWith(context.WithoutCancel(ctx), tableId)
+	helpers.GoSafeNamed("tellTablesLinkedWith", func() { tellTablesLinkedWith(context.WithoutCancel(ctx), tableId) })
 	return f, nil
 }
 
@@ -1117,10 +1119,12 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 	// Reactive triggers: let agents react to new table rows (Notion-DB-style
 	// automation). Loop-safe — DispatchEvent skips in-process listeners for
 	// automation-generated writes, so an agent's own row write can't re-trigger.
-	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "table.row.created", map[string]interface{}{
-		"table_id":   t.Id.String(),
-		"table_name": t.Name,
-		"row_id":     created.Id.String(),
+	helpers.GoSafeNamed("webhookBusiness.DispatchEvent", func() {
+		webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "table.row.created", map[string]interface{}{
+			"table_id":   t.Id.String(),
+			"table_name": t.Name,
+			"row_id":     created.Id.String(),
+		})
 	})
 	return created, nil
 }
@@ -1242,10 +1246,12 @@ func rowUpdated(ctx context.Context, t *model.DataTable, fields []*model.Field, 
 	// Continuous AI autofill: refill the auto AI columns that read a changed
 	// cell. Loop-safe (model-layer write, no event).
 	go AutofillRowOnWrite(context.WithoutCancel(ctx), t, &stored, changed, actor)
-	go webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "table.row.updated", map[string]interface{}{
-		"table_id":   t.Id.String(),
-		"table_name": t.Name,
-		"row_id":     r.Id.String(),
+	helpers.GoSafeNamed("webhookBusiness.DispatchEvent", func() {
+		webhookBusiness.DispatchEvent(context.WithoutCancel(ctx), "table.row.updated", map[string]interface{}{
+			"table_id":   t.Id.String(),
+			"table_name": t.Name,
+			"row_id":     r.Id.String(),
+		})
 	})
 	return r
 }

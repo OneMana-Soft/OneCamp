@@ -25,6 +25,7 @@ type exportOff struct{}
 
 func (exportOff) Bool(_ context.Context, p policyBusiness.BoolPolicy) bool { return false }
 func (exportOff) Int(_ context.Context, p policyBusiness.IntPolicy) int    { return p.Default }
+func (exportOff) PrimeScopes(context.Context, string, []string)            {}
 func (exportOff) List(_ context.Context, p policyBusiness.ListPolicy) []string {
 	return p.Default
 }

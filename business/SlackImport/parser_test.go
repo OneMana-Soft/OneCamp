@@ -93,3 +93,38 @@ func TestParseManifests_RejectsTooManyEntries(t *testing.T) {
 		t.Fatalf("want too-many-entries, got %v", err)
 	}
 }
+
+// A group DM's messages are found in its folder, named as Slack's exports name
+// it (mpdm-ada--bo--cy-1), and a DM's in the folder named after its id.
+func TestParseManifestsFindsAGroupDMsFolderByItsName(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for name, body := range map[string]string{
+		"users.json":                         `[{"id":"U1","name":"ada"}]`,
+		"channels.json":                      `[{"id":"C1","name":"general"}]`,
+		"dms.json":                           `[{"id":"D1","members":["U1","U2"]}]`,
+		"mpims.json":                         `[{"id":"G1","name":"mpdm-ada--bo--cy-1","members":["U1","U2","U3"]}]`,
+		"general/2025-10-01.json":            `[]`,
+		"D1/2025-10-01.json":                 `[]`,
+		"mpdm-ada--bo--cy-1/2025-10-01.json": `[]`,
+	} {
+		w, _ := zw.Create(name)
+		_, _ = w.Write([]byte(body))
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := ParseManifests(zr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for id, file := range map[string]string{"C1": "general/2025-10-01.json", "D1": "D1/2025-10-01.json", "G1": "mpdm-ada--bo--cy-1/2025-10-01.json"} {
+		if got := out.MessageFiles[id]; len(got) != 1 || got[0] != file {
+			t.Errorf("%s's files %v, want [%s]", id, got, file)
+		}
+	}
+}

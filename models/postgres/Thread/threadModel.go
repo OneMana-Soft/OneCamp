@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -296,3 +297,58 @@ func nullText(s string) sql.NullString { return sql.NullString{String: s, Valid:
 // nullJSON stores no JSON as NULL. A []byte would be sent as bytea, which a
 // jsonb column refuses, so it goes as text.
 func nullJSON(b []byte) sql.NullString { return sql.NullString{String: string(b), Valid: len(b) > 0} }
+
+// SetTask ties a thread to the task made from it and returns it as it is now;
+// nil when there is no such thread, or it is tied to another task already.
+func SetTask(ctx context.Context, id, task uuid.UUID, at time.Time) (*Row, error) {
+	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	r, err := scanRow(postgresInit.DBConn.SqlDB.QueryRowContext(cctx,
+		`UPDATE threads SET task_uuid = $2, updated_at = $3
+		  WHERE id = $1 AND (task_uuid IS NULL OR task_uuid = $2)
+		  RETURNING `+rowColumns, id, task, at))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(cctx, "models/Thread SetTask failed: %+v", err)
+		return nil, err
+	}
+	return r, nil
+}
+
+// listWhere is the threads a condition picks, newest change first; at most
+// limit of them when limit > 0.
+func listWhere(ctx context.Context, where string, limit int, args ...any) ([]*Row, error) {
+	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
+	defer cancel()
+	q := `SELECT ` + rowColumns + ` FROM threads WHERE ` + where + ` ORDER BY updated_at DESC, id`
+	if limit > 0 {
+		q += ` LIMIT ` + strconv.Itoa(limit)
+	}
+	rows, err := postgresInit.DBConn.SqlDB.QueryContext(cctx, q, args...)
+	if err != nil {
+		helpers.LogErrorWithContext(cctx, "models/Thread listWhere failed: %+v", err)
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Row
+	for rows.Next() {
+		r, err := scanRow(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ByTask is the threads tied to a task.
+func ByTask(ctx context.Context, task uuid.UUID) ([]*Row, error) {
+	return listWhere(ctx, `task_uuid = $1`, 0, task)
+}
+
+// Tied is up to limit threads tied to a task, the most recently changed first.
+func Tied(ctx context.Context, limit int) ([]*Row, error) {
+	return listWhere(ctx, `task_uuid IS NOT NULL`, limit)
+}

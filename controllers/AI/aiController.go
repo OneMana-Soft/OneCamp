@@ -951,7 +951,7 @@ func ListChatSessions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Unauthorized"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	sessions, err := chatSessionBusiness.List(ctx, userInfo.UserPostgresInfo.Id, 50)
@@ -971,7 +971,7 @@ func GetChatSession(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Unauthorized"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	sessionID, perr := uuid.Parse(chi.URLParam(r, "session_id"))
@@ -999,7 +999,7 @@ func DeleteChatSession(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo, ok := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	if !ok {
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{"msg": "Unauthorized"})
+		helpers.WriteUnauthorized(w)
 		return
 	}
 	sessionID, perr := uuid.Parse(chi.URLParam(r, "session_id"))

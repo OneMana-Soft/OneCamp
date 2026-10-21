@@ -17,6 +17,7 @@ import (
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	postBusiness "github.com/akashc777/OneCamp/business/Post"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	pollModel "github.com/akashc777/OneCamp/models/postgres/Poll"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -333,7 +334,7 @@ func Close(ctx context.Context, user *userModels.UserInfo, pollID string) (*View
 	if err := pollModel.Close(ctx, p.ID); err != nil {
 		return nil, err
 	}
-	go mqttBusiness.PublishPollUpdate(w.topic(p), p.ID.String())
+	helpers.GoSafeNamed("mqttBusiness.PublishPollUpdate", func() { mqttBusiness.PublishPollUpdate(w.topic(p), p.ID.String()) })
 	return Get(ctx, user, pollID)
 }
 

@@ -47,7 +47,9 @@ const (
 	// idleAfter is how long after the last edit a doc gets one.
 	idleAfter = 2 * time.Minute
 	// listLimit is the most versions a list answers.
-	listLimit = 200
+	// ListPage is how many versions one List answers; the next page asks for
+	// those before the oldest (H1: a year of history is reached by paging).
+	ListPage = 100
 )
 
 func init() {
@@ -55,6 +57,11 @@ func init() {
 	// A row's page keeps its versions too (a hosted doc, D-18): they keep the
 	// doc and put it nowhere it is found.
 	docBusiness.SaveHooks.RegisterAlsoHosted("doc.versions", onDocSave)
+	// Every change attributed (H1): a save by someone the ledger doesn't hold
+	// asks for the body before it, which onDocSave keeps for those before.
+	docBusiness.SaveHooks.AskForBefore(func(ctx context.Context, docUUID string, people []string, agents []docBusiness.AgentContributor) bool {
+		return newAuthor(ledger.Members(ctx, docKind, docUUID), contributorsOf(people, agents))
+	})
 	collab.KeepVersion = keepVersionBeforeWrite
 	sweepBusiness.Jobs.Register(sweepBusiness.Job{Name: "doc.versions.idle", Every: 30 * time.Second, Run: takeIdleVersions})
 	sweepBusiness.Jobs.Register(sweepBusiness.Job{Name: "doc.versions.prune", Every: 6 * time.Hour, Run: pruneAllDocVersions})
@@ -66,7 +73,7 @@ type docStore interface {
 	// put keeps a body and its row; the row's ObjectKey and sizes are filled.
 	put(ctx context.Context, row *snapshotModels.DocSnapshot, body string) (uuid.UUID, error)
 	latest(ctx context.Context, docUUID string) (*snapshotModels.DocSnapshot, error)
-	list(ctx context.Context, docUUID string, limit int) ([]*snapshotModels.DocSnapshot, error)
+	list(ctx context.Context, docUUID string, before time.Time, limit int) ([]*snapshotModels.DocSnapshot, error)
 	get(ctx context.Context, docUUID string, id uuid.UUID) (*snapshotModels.DocSnapshot, error)
 	body(ctx context.Context, docUUID string, id uuid.UUID) (string, error)
 	setName(ctx context.Context, docUUID string, id uuid.UUID, name *string, pinned bool) (bool, error)
@@ -160,8 +167,8 @@ func (docVersions) Take(ctx context.Context, t Take) (Version, error) {
 	})
 }
 
-func (docVersions) List(ctx context.Context, docUUID string) ([]Version, error) {
-	rows, err := store.list(ctx, docUUID, listLimit)
+func (docVersions) List(ctx context.Context, docUUID string, before time.Time) ([]Version, error) {
+	rows, err := store.list(ctx, docUUID, before, ListPage)
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +211,7 @@ func (docVersions) Name(ctx context.Context, docUUID, versionID, name string, pi
 		if err != nil {
 			return err
 		}
-		if limit := docPolicy().MaxBytes; limit > 0 && kept+int64(row.StoredBytes) > limit {
+		if limit := docPolicy(ctx).MaxBytes; limit > 0 && kept+int64(row.StoredBytes) > limit {
 			return ErrKeptFull
 		}
 	}
@@ -281,12 +288,14 @@ func keepDocVersion(ctx context.Context, docUUID, body string, k keepAs) (Versio
 // onDocSave is the doc save hook: the ledger, and the interval and mass-delete
 // versions. It runs in the background after a save that changed the body.
 func onDocSave(ctx context.Context, c docBusiness.Change) {
-	who := make([]Contributor, 0, len(c.Contributors)+len(c.Agents))
-	for _, u := range c.Contributors {
-		who = append(who, Contributor{UserUUID: u})
-	}
-	for _, a := range c.Agents {
-		who = append(who, Contributor{AgentUUID: a.AgentUUID, AskerUUID: a.AskerUUID})
+	who := contributorsOf(c.Contributors, c.Agents)
+	if c.Before != "" && c.Previous == "" && newAuthor(ledger.Members(ctx, docKind, c.DocUUID), who) {
+		// The author changed: keep the doc as those before left it, credited
+		// to them alone, so each change in the history is its author's. (The
+		// reason stays "interval": an automatic version; its credits say who.)
+		if _, err := keepDocVersion(ctx, c.DocUUID, c.Before, keepAs{reason: snapshotModels.ReasonInterval, kind: KindDoc, lineage: c.Lineage}); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/Snapshot author version of %s failed: %v", c.DocUUID, err)
+		}
 	}
 	ledger.Add(ctx, docKind, c.DocUUID, who)
 	marks.Mark(ctx, docKind, c.DocUUID, c.SavedAt)
@@ -354,8 +363,13 @@ func keepVersionBeforeWrite(ctx context.Context, v collab.Version) (string, erro
 	return ver.ID, err
 }
 
-// pruneDocVersions applies the policy to one doc.
+// pruneDocVersions applies the docs' own policy to one doc (after a version).
 func pruneDocVersions(ctx context.Context, docUUID string) {
+	pruneDocVersionsBy(ctx, docUUID, docPolicy(ctx))
+}
+
+// pruneDocVersionsBy applies a policy to one doc.
+func pruneDocVersionsBy(ctx context.Context, docUUID string, p Policy) {
 	rows, err := store.retention(ctx, docUUID)
 	if err != nil || len(rows) == 0 {
 		return
@@ -364,7 +378,7 @@ func pruneDocVersions(ctx context.Context, docUUID string) {
 	for _, r := range rows {
 		plan = append(plan, planRow{ID: r.ID, AgentRun: r.Kind == string(KindAgentRun), Kept: r.Kept, Bytes: int64(r.StoredBytes), CreatedAt: r.CreatedAt})
 	}
-	if drop := planPrune(plan, now(), docPolicy()); len(drop) > 0 {
+	if drop := planPrune(plan, now(), p); len(drop) > 0 {
 		if err := store.remove(ctx, drop); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/Snapshot pruning %s failed: %v", docUUID, err)
 		}
@@ -374,6 +388,7 @@ func pruneDocVersions(ctx context.Context, docUUID string) {
 // pruneAllDocVersions applies the policy to every doc with versions old enough
 // to thin: the docs nobody edits any more age out too.
 func pruneAllDocVersions(ctx context.Context) error {
+	p := scheduledDocPolicy(ctx)
 	cutoff := now().Add(-everyVersionFor)
 	after := ""
 	for {
@@ -385,7 +400,7 @@ func pruneAllDocVersions(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			pruneDocVersions(ctx, d)
+			pruneDocVersionsBy(ctx, d, p)
 		}
 		if len(docs) < 200 {
 			return nil
@@ -475,8 +490,8 @@ func (pgStore) latest(ctx context.Context, docUUID string) (*snapshotModels.DocS
 	return snapshotModels.GetLatestSnapshot(ctx, docUUID)
 }
 
-func (pgStore) list(ctx context.Context, docUUID string, limit int) ([]*snapshotModels.DocSnapshot, error) {
-	return snapshotModels.ListSnapshots(ctx, docUUID, limit)
+func (pgStore) list(ctx context.Context, docUUID string, before time.Time, limit int) ([]*snapshotModels.DocSnapshot, error) {
+	return snapshotModels.ListSnapshots(ctx, docUUID, before, limit)
 }
 
 func (pgStore) get(ctx context.Context, docUUID string, id uuid.UUID) (*snapshotModels.DocSnapshot, error) {
@@ -516,4 +531,16 @@ func (pgStore) remove(ctx context.Context, ids []uuid.UUID) error {
 
 func (pgStore) docsBefore(ctx context.Context, cutoff time.Time, after string, limit int) ([]string, error) {
 	return snapshotModels.DocsWithVersionsBefore(ctx, cutoff, after, limit)
+}
+
+// contributorsOf is a save's people and agents as the ledger holds them.
+func contributorsOf(people []string, agents []docBusiness.AgentContributor) []Contributor {
+	who := make([]Contributor, 0, len(people)+len(agents))
+	for _, u := range people {
+		who = append(who, Contributor{UserUUID: u})
+	}
+	for _, a := range agents {
+		who = append(who, Contributor{AgentUUID: a.AgentUUID, AskerUUID: a.AskerUUID})
+	}
+	return who
 }

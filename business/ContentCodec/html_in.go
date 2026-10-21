@@ -17,6 +17,10 @@ type HTMLOptions struct {
 	// images are kept. The editor's own HTML (a stored body, the codec's
 	// output) keeps every attribute the schema has.
 	Foreign bool
+	// Assets is foreign HTML that comes with its own files (an import): a
+	// file block may name one by a relative path, as an image may, for the
+	// import to upload and point at its upload.
+	Assets bool
 	// Schema is what the doc may hold; nil is the shipped schema.
 	Schema *Schema
 }
@@ -33,7 +37,7 @@ func FromHTML(src string, opts HTMLOptions) (*Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	return Normalize(readNodes(nodes, opts.Foreign), opts.Schema), nil
+	return Normalize(readNodesWith(nodes, &htmlParser{foreign: opts.Foreign, assets: opts.Foreign && opts.Assets}), opts.Schema), nil
 }
 
 // parseBody parses HTML as what a <body> holds: how FromHTML and Blocks
@@ -45,7 +49,10 @@ func parseBody(src string) ([]*html.Node, error) {
 
 // readNodes reads parsed HTML as a doc's nodes, not yet normalised.
 func readNodes(nodes []*html.Node, foreign bool) *Node {
-	p := &htmlParser{foreign: foreign}
+	return readNodesWith(nodes, &htmlParser{foreign: foreign})
+}
+
+func readNodesWith(nodes []*html.Node, p *htmlParser) *Node {
 	root := &pnode{node: newNode("doc"), spec: specOf("doc")}
 	p.stack = []*pnode{root}
 	for _, n := range nodes {
@@ -69,6 +76,7 @@ type htmlParser struct {
 	stack   []*pnode
 	marks   []*Mark
 	foreign bool
+	assets  bool // HTMLOptions.Assets
 }
 
 func (p *htmlParser) top() *pnode { return p.stack[len(p.stack)-1] }
@@ -688,7 +696,7 @@ func (p *htmlParser) addNode(n *html.Node, tag string) bool {
 		default:
 			m := readConnectedBlock(dataType, n)
 			if m == nil {
-				m = readMediaBlock(dataType, n, p.foreign)
+				m = readMediaBlock(dataType, n, p.foreign, p.assets)
 			}
 			if m == nil {
 				return false
@@ -740,7 +748,7 @@ func (p *htmlParser) summary(s *html.Node) []*Node {
 	if s == nil {
 		return []*Node{newNode("paragraph")}
 	}
-	sub := &htmlParser{foreign: p.foreign, marks: p.currentMarks()}
+	sub := &htmlParser{foreign: p.foreign, assets: p.assets, marks: p.currentMarks()}
 	root := &pnode{node: newNode("doc"), spec: specOf("doc")}
 	sub.stack = []*pnode{root}
 	sub.addChildren(s)

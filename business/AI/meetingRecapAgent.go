@@ -104,7 +104,7 @@ func composeRecapPrompt(customInstructions string) string {
 // call unconditionally; it self-gates on settings, idempotency, and content.
 // Fire-and-forget: it runs in its own goroutine.
 func MaybeRunMeetingRecap(call liveKitBusiness.FinishedCall) {
-	go func() {
+	helpers.GoSafeNamed("business/AI/meetingRecapAgent:MaybeRunMeetingRecap", func() {
 		// Generous standalone context — call teardown must not be coupled
 		// to recap latency, and local LLMs can be slow.
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -113,7 +113,7 @@ func MaybeRunMeetingRecap(call liveKitBusiness.FinishedCall) {
 		if err := runMeetingRecap(ctx, call); err != nil {
 			helpers.LogErrorWithContext(ctx, "AI meeting recap for room %q: %v", call.Room, err)
 		}
-	}()
+	})
 }
 
 // recapWindowSlack widens the call's window when picking the recordings made
@@ -310,15 +310,19 @@ func acquireRecapLock(ctx context.Context, sessionKey string) bool {
 // resolveParticipantNames maps distinct participant Dgraph UIDs to display
 // names. The transcription agent's own identity (non-human) is skipped.
 func resolveParticipantNames(ctx context.Context, lines []transcriptDomain.TranscriptLine) map[string]string {
-	out := make(map[string]string)
+	// By graph uid (the identity LiveKit tokens carry), every speaker in one
+	// read, where each was a read of the whole person.
+	var uids []string
 	for _, l := range lines {
-		uid := l.ParticipantIdentity
-		if uid == "" || out[uid] != "" {
-			continue
+		if l.ParticipantIdentity != "" {
+			uids = append(uids, l.ParticipantIdentity)
 		}
-		// Resolve by Dgraph node uid (the identity LiveKit tokens carry).
-		if u, err := userDomain.GetDgraphUserInfoByDgraphUID(ctx, uid); err == nil && u != nil && u.UserName != "" {
-			out[uid] = u.UserName
+	}
+	names, _ := userDomain.UserNamesByDgraphUIDs(ctx, uids)
+	out := make(map[string]string)
+	for _, uid := range uids {
+		if n := names[uid]; n != "" {
+			out[uid] = n
 		} else {
 			out[uid] = "participant"
 		}

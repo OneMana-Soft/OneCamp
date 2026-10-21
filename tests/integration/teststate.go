@@ -35,8 +35,11 @@ package integration
 // helpers/integrationHarnessGuard_test.go keeps it from coming back).
 //
 // The project's clients are each a test's own or reach nothing once it ends:
-// the database is dropped, the graph client points nowhere, the search and
-// cache clients are cleared, and MQTT gets an unconnected client again. The
+// the database is dropped, the server's pool points at nothing (from a test's
+// first Setup until it connects one, every statement fails saying the test
+// never connected it: noPostgres in harness.go), the graph client points
+// nowhere, the search and cache clients are cleared, and MQTT gets an
+// unconnected client again. The
 // 46 tests that index in passing point opensearchInit.OpenSearchClient at a
 // stub of their own (an httptest server that answers "ok", holds nothing and
 // is closed when the test ends), so a later test reaching it gets a refused
@@ -84,11 +87,16 @@ func guardTestState(t *testing.T) {
 	if !strings.Contains(t.Name(), "/") {
 		forgetProcessCaches()
 	}
+	serverPostgresNeverNil()
+	reached := noPostgresReached.Load()
 	environ := os.Environ()
 	t.Cleanup(func() {
 		guarded.mu.Lock()
 		delete(guarded.tests, t)
 		guarded.mu.Unlock()
+		if t.Failed() && noPostgresReached.Load() > reached {
+			t.Logf("%v (a read that failed for that may be what the test failed on)", errNeverConnected)
+		}
 		if d := environDiff(environ, os.Environ()); d != "" {
 			t.Errorf("the test left the environment changed: %s", d)
 		}

@@ -1,100 +1,30 @@
 package business
 
-// A minimal Slack Web API client: only the eight methods the bridge calls.
-// Every call is a form POST with the bot token in the Authorization header,
-// which every Slack method accepts. A 429 is retried once after the
-// Retry-After Slack names, capped so a listener goroutine is never parked for
-// long.
+// The bridge's Slack calls, the eight methods it makes, through the one Slack
+// Web API client (services/Slack): a 429 is tried once more after its
+// Retry-After, so a listener goroutine is never parked for long.
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
-	"time"
-)
 
-var (
-	// slackAPIBase is a var so tests can point it at a fake server.
-	slackAPIBase = "https://slack.com/api/"
-	slackHTTP    = &http.Client{Timeout: 10 * time.Second}
-	// maxRetryAfter caps how long one rate-limited call waits before its retry.
-	maxRetryAfter = 30 * time.Second
+	slackapi "github.com/akashc777/OneCamp/services/Slack"
 )
 
 // SlackError is a Slack refusal ({"ok": false, "error": code}).
-type SlackError struct {
-	Method string
-	Code   string
-}
+type SlackError = slackapi.Error
 
-func (e *SlackError) Error() string { return "slack " + e.Method + ": " + e.Code }
+// slackOK is what every Slack reply carries.
+type slackOK = slackapi.OK
 
 type slackClient struct{ token string }
 
-// call POSTs form to method and decodes the reply into out, which must embed
+// call POSTs form to method and decodes the reply into out, which embeds
 // slackOK. A refusal comes back as *SlackError.
-func (c slackClient) call(ctx context.Context, method string, form url.Values, out interface{ okErr() (bool, string) }) error {
-	for attempt := 0; ; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+method, strings.NewReader(form.Encode()))
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
-		req.Header.Set("Authorization", "Bearer "+c.token)
-		resp, err := slackHTTP.Do(req)
-		if err != nil {
-			return fmt.Errorf("slack %s: %w", method, err)
-		}
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-		resp.Body.Close()
-		if err != nil {
-			return fmt.Errorf("slack %s: %w", method, err)
-		}
-		if resp.StatusCode == http.StatusTooManyRequests {
-			if attempt > 0 {
-				return &SlackError{Method: method, Code: "ratelimited"}
-			}
-			wait := time.Second
-			if s, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && s > 0 {
-				wait = time.Duration(s) * time.Second
-			}
-			if wait > maxRetryAfter {
-				wait = maxRetryAfter
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(wait):
-			}
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("slack %s: http %d", method, resp.StatusCode)
-		}
-		if err := json.Unmarshal(body, out); err != nil {
-			return fmt.Errorf("slack %s: %w", method, err)
-		}
-		if ok, code := out.okErr(); !ok {
-			if code == "" {
-				code = "unknown_error"
-			}
-			return &SlackError{Method: method, Code: code}
-		}
-		return nil
-	}
+func (c slackClient) call(ctx context.Context, method string, form url.Values, out slackapi.Reply) error {
+	return slackapi.Client{Token: c.token, Retries: 1}.Call(ctx, method, form, out)
 }
-
-type slackOK struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error"`
-}
-
-func (s slackOK) okErr() (bool, string) { return s.OK, s.Error }
 
 type authTestReply struct {
 	slackOK

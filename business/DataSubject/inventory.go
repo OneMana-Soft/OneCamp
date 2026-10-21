@@ -26,11 +26,10 @@ package business
 import (
 	"context"
 	"fmt"
+	dataSubjectModels "github.com/akashc777/OneCamp/models/postgres/DataSubject"
 
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/google/uuid"
-	"github.com/lib/pq"
 )
 
 // maxScannedColumns bounds one inventory run. Forty-odd columns exist today;
@@ -116,37 +115,13 @@ type userColumn struct{ table, column string }
 // its underlying table, and a non-uuid column of the same name is something else
 // wearing the same word.
 func discoverUserColumns(ctx context.Context) ([]userColumn, error) {
-	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	const q = `
-		SELECT c.table_name, c.column_name
-		FROM information_schema.columns c
-		JOIN information_schema.tables t
-		  ON t.table_schema = c.table_schema AND t.table_name = c.table_name
-		WHERE c.table_schema = current_schema()
-		  AND t.table_type = 'BASE TABLE'
-		  AND c.data_type = 'uuid'
-		  AND c.column_name = ANY($1)
-		ORDER BY c.table_name, c.column_name
-		LIMIT $2`
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(cctx, q, pq.Array(userColumnNames), maxScannedColumns)
+	cols, err := dataSubjectModels.UserColumns(ctx, userColumnNames, maxScannedColumns)
 	if err != nil {
 		return nil, fmt.Errorf("discover user columns: %w", err)
 	}
-	defer rows.Close()
-
-	var out []userColumn
-	for rows.Next() {
-		var c userColumn
-		if err := rows.Scan(&c.table, &c.column); err != nil {
-			return nil, fmt.Errorf("scan user column: %w", err)
-		}
-		out = append(out, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate user columns: %w", err)
+	out := make([]userColumn, len(cols))
+	for i, c := range cols {
+		out[i] = userColumn{table: c.Table, column: c.Column}
 	}
 	return out, nil
 }
@@ -160,15 +135,5 @@ func discoverUserColumns(ctx context.Context) ([]userColumn, error) {
 // being pasted into SQL, and correctness here should not depend on trusting its
 // source. The VALUE is always a bound parameter.
 func countRowsFor(ctx context.Context, table, column string, userID uuid.UUID) (int64, error) {
-	cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	q := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE %s = $1`,
-		pq.QuoteIdentifier(table), pq.QuoteIdentifier(column))
-
-	var n int64
-	if err := postgresInit.DBConn.SqlDB.QueryRowContext(cctx, q, userID).Scan(&n); err != nil {
-		return 0, err
-	}
-	return n, nil
+	return dataSubjectModels.CountRowsFor(ctx, table, column, userID)
 }

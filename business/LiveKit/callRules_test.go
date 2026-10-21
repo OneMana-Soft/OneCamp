@@ -38,17 +38,23 @@ func TestOnlyACallWithAConversationKeepsATranscript(t *testing.T) {
 // What a removed person's client is told, from the server, before LiveKit
 // disconnects them (the CALLS-FE contract's "oc.call" packet).
 func TestRemovedPacketSaysWhoAndWhy(t *testing.T) {
-	var got map[string]any
-	if err := json.Unmarshal(removedPacket("Maya Chen", RemovedByHost), &got); err != nil {
-		t.Fatal(err)
+	packet := func(p CallPacket) map[string]any {
+		t.Helper()
+		b, err := packetBytes(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(b, &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
 	}
+	got := packet(CallPacket{T: "removed", By: "Maya Chen", Reason: RemovedByHost})
 	if got["v"] != float64(1) || got["t"] != "removed" || got["by"] != "Maya Chen" || got["reason"] != "host" {
 		t.Errorf("packet = %v", got)
 	}
-	var revoked map[string]any
-	if err := json.Unmarshal(removedPacket("", RemovedLinkRevoked), &revoked); err != nil {
-		t.Fatal(err)
-	}
+	revoked := packet(CallPacket{T: "removed", Reason: RemovedLinkRevoked})
 	if _, named := revoked["by"]; named || revoked["reason"] != "link_revoked" {
 		t.Errorf("a revoked link names nobody: %v", revoked)
 	}

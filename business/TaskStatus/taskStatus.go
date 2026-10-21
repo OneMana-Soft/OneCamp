@@ -218,19 +218,33 @@ type ProjectStatuses struct {
 	Custom  []*model.TaskStatus `json:"custom"`
 	Colors  []string            `json:"colors"`
 	Max     int                 `json:"max"`
+	// Order is every one of the project's statuses, built-in keys and custom
+	// ids, in the order its board shows them (order.go): what its admins set,
+	// or the default, each built-in followed by its own.
+	Order []string `json:"order"`
 }
 
 // List returns a project's statuses; custom ones grouped by category in board
-// order, then in the order the admins set.
+// order, then in the order the admins set; and the project's column order.
 func List(ctx context.Context, projectID uuid.UUID) (*ProjectStatuses, error) {
 	customs, err := model.List(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
+	sortByCategory(customs)
+	order, err := orderOf(ctx, projectID, customs)
+	if err != nil {
+		return nil, err
+	}
+	return &ProjectStatuses{BuiltIn: BuiltIns, Custom: customs, Colors: Colors, Max: MaxPerProject, Order: order}, nil
+}
+
+// sortByCategory puts custom statuses in their categories' board order,
+// keeping the order given within each.
+func sortByCategory(customs []*model.TaskStatus) {
 	sort.SliceStable(customs, func(i, j int) bool {
 		return categoryOrder(customs[i].Category) < categoryOrder(customs[j].Category)
 	})
-	return &ProjectStatuses{BuiltIn: BuiltIns, Custom: customs, Colors: Colors, Max: MaxPerProject}, nil
 }
 
 // Input is what an admin sends to create or change a custom status.
@@ -378,7 +392,10 @@ func repoint(ctx context.Context, r Repoint) {
 	}
 }
 
-// Reorder sets the order of a project's custom statuses.
+// Reorder sets the order of a project's custom statuses. A project whose
+// admins set its column order (SetOrder) keeps one order: the statuses named
+// take the places they held in it, in the order named, and every other
+// status stays where it was.
 func Reorder(ctx context.Context, projectID uuid.UUID, ids []string) error {
 	parsed := make([]uuid.UUID, 0, len(ids))
 	for _, s := range ids {
@@ -388,7 +405,49 @@ func Reorder(ctx context.Context, projectID uuid.UUID, ids []string) error {
 		}
 		parsed = append(parsed, id)
 	}
-	return model.Reorder(ctx, projectID, parsed)
+	if err := model.Reorder(ctx, projectID, parsed); err != nil {
+		return err
+	}
+	saved, err := savedOrder(ctx, projectID)
+	if err != nil || len(saved) == 0 {
+		return err
+	}
+	customs, err := customsOf(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	named := make([]string, len(parsed))
+	for i, id := range parsed {
+		named[i] = id.String()
+	}
+	next := EffectiveOrder(InPlaces(EffectiveOrder(saved, customs), named), customs)
+	return saveOrder(ctx, projectID, next, uuid.Nil)
+}
+
+// InPlaces is order with the values named put in the places they held, in
+// the order named; what order doesn't hold is left out, and everything else
+// keeps its place. Pure.
+func InPlaces(order, named []string) []string {
+	want := make(map[string]bool, len(named))
+	for _, v := range named {
+		want[canonical(v)] = true
+	}
+	var queue []string
+	for _, v := range named {
+		v = canonical(v)
+		if indexOf(order, v) >= 0 {
+			queue = append(queue, v)
+		}
+	}
+	out := append([]string(nil), order...)
+	k := 0
+	for i, v := range out {
+		if want[v] && k < len(queue) {
+			out[i] = queue[k]
+			k++
+		}
+	}
+	return out
 }
 
 // QueryClause is the Dgraph filter for "tasks in the status someone named",

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	commandAdapter "github.com/akashc777/OneCamp/adapter/Command"
+	cardsBusiness "github.com/akashc777/OneCamp/business/Cards"
 	"github.com/akashc777/OneCamp/helpers"
 	slashModel "github.com/akashc777/OneCamp/models/postgres/SlashCommand"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -143,6 +144,9 @@ func Execute(ctx context.Context, user userModels.UserInfo, req commandAdapter.E
 		if resp != nil && resp.TriggerID == "" {
 			resp.TriggerID = req.TriggerID
 		}
+		if _, interactive := interactionRegistry[name]; interactive {
+			sealAnswer(resp, cardsBusiness.Owner{Kind: cardsBusiness.OwnerBuiltin, ID: name}, user.UserDgraphInfo.Uuid)
+		}
 		return resp, nil
 
 	case slashModel.ExecExternal:
@@ -153,46 +157,14 @@ func Execute(ctx context.Context, user userModels.UserInfo, req commandAdapter.E
 	}
 }
 
-// HandleInteract processes a button/select click on an interactive card.
-func HandleInteract(ctx context.Context, user userModels.UserInfo, ir commandAdapter.InteractRequest) (*commandAdapter.CommandResponse, error) {
-	name := normalizeCommand(ir.Command)
-	if !checkRate(ctx, user.UserDgraphInfo.Uuid) {
-		return errorResponse("Too many actions. Slow down a moment."), nil
-	}
-
-	handler, ok := interactionRegistry[name]
-	if !ok {
-		// Could be an external app — forward the interaction.
-		teamIDs := teamScopeIDs(user)
-		channelIDs := channelScopeIDs(user)
-		cmd, err := slashModel.ResolveCommand(ctx, name, teamIDs, channelIDs)
-		if err == nil && cmd != nil && cmd.ExecMode == slashModel.ExecExternal {
-			cc := CommandContext{User: user, Command: name, TriggerID: ir.TriggerID}
-			if ir.ChannelID != nil {
-				if id, perr := uuid.Parse(*ir.ChannelID); perr == nil {
-					cc.ChannelID = &id
-				}
-			}
-			return dispatchExternalInteraction(ctx, cmd, cc, ir)
-		}
-		return errorResponse("This action is no longer available."), nil
-	}
-
-	cc := CommandContext{User: user, Command: name, TriggerID: ir.TriggerID, DmGroupID: ir.DmGroupID}
-	if ir.ChannelID != nil {
-		if id, perr := uuid.Parse(*ir.ChannelID); perr == nil {
-			cc.ChannelID = &id
-		}
-	}
-	resp, err := handler(ctx, cc, ir)
-	if err != nil {
-		logErr(ctx, "HandleInteract/"+name, err)
-		return errorResponse("That action failed: %v", err), nil
-	}
-	if resp != nil && resp.TriggerID == "" {
-		resp.TriggerID = ir.TriggerID
-	}
-	return resp, nil
+// HandleInteract is POST /command/interact, kept so a tab opened before the
+// cards change gets an answer that names the way forward rather than a 404.
+// Every card is pressed through POST /cards/act now, which checks the press
+// against the card the server sealed (business/Cards): this route ran
+// whatever press a client described. A card from before has no seal, so it
+// asks for a fresh one.
+func HandleInteract(command string) *commandAdapter.CommandResponse {
+	return errorResponse("This card is out of date. Run `/%s` again for a fresh one.", normalizeCommand(command))
 }
 
 // buildContext assembles a CommandContext from the request.
@@ -256,7 +228,7 @@ func dispatchExternal(ctx context.Context, cmd *slashModel.SlashCommand, cc Comm
 
 	// Fire-and-forget: the app replies async; we ACK immediately so the
 	// composer feels instant.
-	go forwardToApp(appCtx, handlerURL, signingSecret, cmd, cc)
+	helpers.GoSafeNamed("forwardToApp", func() { forwardToApp(appCtx, handlerURL, signingSecret, cmd, cc) })
 
 	return &commandAdapter.CommandResponse{
 		ResponseType: "ephemeral",
@@ -264,16 +236,6 @@ func dispatchExternal(ctx context.Context, cmd *slashModel.SlashCommand, cc Comm
 		Ephemeral:    true,
 		TriggerID:    cc.TriggerID,
 	}, nil
-}
-
-func dispatchExternalInteraction(ctx context.Context, cmd *slashModel.SlashCommand, cc CommandContext, ir commandAdapter.InteractRequest) (*commandAdapter.CommandResponse, error) {
-	handlerURL := resolveHandlerURL(ctx, cmd)
-	if handlerURL == "" {
-		return errorResponse("This action is no longer available."), nil
-	}
-	signingSecret := resolveSigningSecret(ctx, cmd)
-	go forwardInteractionToApp(appCtx, handlerURL, signingSecret, cmd, cc, ir)
-	return &commandAdapter.CommandResponse{ResponseType: "ephemeral", Ephemeral: true, TriggerID: cc.TriggerID}, nil
 }
 
 func resolveHandlerURL(ctx context.Context, cmd *slashModel.SlashCommand) string {
@@ -316,7 +278,7 @@ func appSigningSecret(app *slashModel.App) string {
 // URL against SSRF and signing the body. The app's response (if any) is
 // delivered back to the invoker over MQTT.
 func forwardToApp(ctx context.Context, handlerURL, signingSecret string, cmd *slashModel.SlashCommand, cc CommandContext) {
-	if _, err := helpers.ValidateOutboundURL(handlerURL, false); err != nil {
+	if err := forwardCheck(handlerURL); err != nil {
 		logErr(ctx, "forwardToApp/SSRF", err)
 		deliverAsync(ctx, cc, errorResponse("`/%s` could not reach its app.", cc.Command))
 		return
@@ -336,32 +298,30 @@ func forwardToApp(ctx context.Context, handlerURL, signingSecret string, cmd *sl
 	if cc.DmGroupID != nil {
 		payload["dm_group_id"] = *cc.DmGroupID
 	}
+	// Where the app may answer later: up to five times in 30 minutes.
+	if cmd.AppId != nil {
+		if u := newResponseURL(ctx, *cmd.AppId, deref(cmd.AppName), deref(cmd.AppIconUrl), cc); u != "" {
+			payload["response_url"] = u
+		}
+	}
 
 	resp := postSigned(ctx, handlerURL, signingSecret, payload)
 	if resp != nil {
+		if resp.TriggerID == "" {
+			resp.TriggerID = cc.TriggerID
+		}
+		if cmd.AppId != nil {
+			sealAnswer(resp, appOwner(cmd.AppId.String()), cc.User.UserDgraphInfo.Uuid)
+		}
 		deliverAsync(ctx, cc, resp)
 	}
 }
 
-func forwardInteractionToApp(ctx context.Context, handlerURL, signingSecret string, cmd *slashModel.SlashCommand, cc CommandContext, ir commandAdapter.InteractRequest) {
-	if _, err := helpers.ValidateOutboundURL(handlerURL, false); err != nil {
-		logErr(ctx, "forwardInteractionToApp/SSRF", err)
-		return
+func deref(s *string) string {
+	if s == nil {
+		return ""
 	}
-	payload := map[string]interface{}{
-		"type":       "block_action",
-		"command":    "/" + cc.Command,
-		"action_id":  ir.ActionID,
-		"value":      ir.Value,
-		"state":      ir.State,
-		"user_id":    cc.User.UserDgraphInfo.Uuid,
-		"trigger_id": cc.TriggerID,
-	}
-	resp := postSigned(ctx, handlerURL, signingSecret, payload)
-	if resp != nil {
-		resp.ReplaceOriginal = true
-		deliverAsync(ctx, cc, resp)
-	}
+	return *s
 }
 
 // doSignedProbe sends a signed, side-effect-free connectivity probe and returns
@@ -417,7 +377,7 @@ func postSigned(ctx context.Context, url, secret string, payload map[string]inte
 		req.Header.Set("X-OneCamp-Signature", "v1="+signV1(secret, body, ts))
 	}
 
-	client := helpers.SSRFSafeClient(false)
+	client := forwardClient()
 	client.Timeout = externalTimeout
 	httpResp, err := client.Do(req)
 	if err != nil {
@@ -445,6 +405,15 @@ func postSigned(ctx context.Context, url, secret string, payload map[string]inte
 	}
 	return &resp
 }
+
+// forwardCheck and forwardClient are how a command, its answer's card and a
+// press reach an app: an HTTPS address on a public network, through the
+// SSRF-safe client. Seams for the integration test, which serves its app on
+// loopback (forwardToThisNetworkForTest_integration.go).
+var (
+	forwardCheck  = func(raw string) error { _, err := helpers.ValidateOutboundURL(raw, false); return err }
+	forwardClient = func() *http.Client { return helpers.SSRFSafeClient(false) }
+)
 
 // signV1 computes the v1 HMAC-SHA256 signature over "v1:timestamp:body",
 // matching the existing webhook verification scheme.

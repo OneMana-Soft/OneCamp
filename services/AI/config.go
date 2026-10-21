@@ -421,6 +421,32 @@ func openAIEmbedDim(model string) int {
 	return 1536
 }
 
+// GraphContextEnabled reports whether Ask AI follows its search hits one step
+// along the work graph (business/AI graphContext.go, DG7). AI_GRAPH_CONTEXT
+// (true/false, 1/0, yes/no, on/off) decides; unset, graphContextDefault does.
+// Read on every question.
+//
+// ON BY DEFAULT since its evaluation (20 Oct 2026) on the default local model,
+// qwen3:4b-instruct, over sixteen relationship questions
+// (business/AI graphContext_integration_test.go, graphContextAnswers_test.go):
+// answers right 15 of 16 with the graph's lines against 1 of 16 without, a
+// private doc named in none, the context step at p95 269 ms under load,
+// inside its 800 ms wait. A deployment that wants it off sets
+// AI_GRAPH_CONTEXT=false.
+func GraphContextEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AI_GRAPH_CONTEXT"))) {
+	case "true", "1", "yes", "on":
+		return true
+	case "false", "0", "no", "off":
+		return false
+	default:
+		return graphContextDefault
+	}
+}
+
+// graphContextDefault is the switch's setting when the env says nothing.
+const graphContextDefault = true
+
 // --- Env helpers ---
 
 func getEnvStr(key, fallback string) string {

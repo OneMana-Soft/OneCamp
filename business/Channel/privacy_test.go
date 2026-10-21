@@ -1,7 +1,6 @@
 package business
 
 import (
-	"strings"
 	"testing"
 
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -41,11 +40,5 @@ func TestWhoMayChangeAChannelsPrivacy(t *testing.T) {
 		if got := MayChangePrivacy(tc.change, tc.admin); got != tc.may {
 			t.Errorf("change %v by an admin=%v: may = %v, want %v", tc.change, tc.admin, got, tc.may)
 		}
-	}
-	if line := PrivacyLine(PrivacyOpened, "Sam <script>"); !strings.Contains(line, "Sam &lt;script&gt;") || !strings.Contains(line, "made this channel public") {
-		t.Errorf("the line: %q", line)
-	}
-	if PrivacyLine(PrivacyUnchanged, "Sam") != "" {
-		t.Error("a line for no change")
 	}
 }

@@ -1,18 +1,18 @@
 package controllers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	readStateBusiness "github.com/akashc777/OneCamp/business/ReadState"
 	"net/http"
 	"strconv"
 	"strings"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Channel"
-	botpost "github.com/akashc777/OneCamp/business/BotPost"
 	business "github.com/akashc777/OneCamp/business/Channel"
 	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
-	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	userChannelNotificationBusiness "github.com/akashc777/OneCamp/business/UserChannelNotification"
 	"github.com/akashc777/OneCamp/helpers"
@@ -302,6 +302,7 @@ func RestoreChannel(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteRetryLater(w, "Couldn't restore the channel.")
 		return
 	}
+	business.EmitChannelChanges(ctx, userInfo.UserDgraphInfo.Uuid, channelInfo, &adapter.UpdateChannelInfo{ChannelName: channelInfo.Name}, business.PrivacyChangeOf(channelInfo, channelInfo.IsPrivate != nil && *channelInfo.IsPrivate))
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Restored #" + channelInfo.Name + "."})
 }
 
@@ -638,6 +639,11 @@ func MarkChannelSeen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Your other tabs and devices move their line and counts (read.moved).
+	moved := context.WithoutCancel(ctx)
+	helpers.GoSafeNamed("read.moved", func() {
+		readStateBusiness.Moved(moved, &userInfo, conversationBusiness.Ref{Kind: conversationBusiness.KindChannel, ID: channelUUID.String()})
+	})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Channel marked as seen"})
 }
 
@@ -835,13 +841,10 @@ func UpdateChannelInfo(w http.ResponseWriter, r *http.Request) {
 
 	}
 
-	// Everyone in the channel is told who changed its privacy, and what that
-	// means, by a line in it that notifies nobody.
-	if line := business.PrivacyLine(privacy, userInfo.UserDgraphInfo.DisplayName()); line != "" && !updateChannelNameInfo.ChannelArchived {
-		if _, perr := botpost.PostToChannel(ctx, channelUUID, line, ""); perr != nil {
-			helpers.LogErrorWithContext(ctx, "controllers/UpdateChannelInfo Failed to post the privacy line err: %+v", perr)
-		}
-	}
+	// What changed is a line in the channel's history (a privacy change says
+	// what it means), the audit log's and webhooks' (business/Channel
+	// channelEvents.go).
+	business.EmitChannelChanges(ctx, userInfo.UserDgraphInfo.Uuid, channelInfo, &updateChannelNameInfo, privacy)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Updated channel successfully!"})
 }
@@ -1106,6 +1109,7 @@ func RemoveChannelMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	business.EmitMembership(ctx, false, channelInfo.Uuid, userInfo.UserDgraphInfo.Uuid, removeMemberInfo.UserUuid)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Removed member successfully!"})
 }
 
@@ -1286,6 +1290,7 @@ func JoinChannel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	business.EmitMembership(ctx, true, channelUUID.String(), userInfo.UserDgraphInfo.Uuid, userInfo.UserDgraphInfo.Uuid)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Joined channel successfully!"})
 
 }
@@ -1397,6 +1402,7 @@ func AddChannelMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	business.EmitMembership(ctx, true, channelUUID.String(), userInfo.UserDgraphInfo.Uuid, newMemberUUID.String())
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Added member successfully!"})
 
 }
@@ -1498,8 +1504,8 @@ func MakeVideoChannelCall(w http.ResponseWriter, r *http.Request) {
 	uerToken.TokenString, uerToken.AlreadyExisted, err = business.MakeVideoChannelCall(ctx, channelDraphInfo, &userInfo.UserDgraphInfo, false, makeVideoChannelCallInfo.Language)
 
 	if err != nil {
-		if errors.Is(err, liveKitBusiness.ErrRemovedFromCall) {
-			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"code": "removed_from_call", "msg": liveKitBusiness.RemovedFromCallMsg})
+		// Put out of it by a host, or it is locked: said in its own words.
+		if helpers.WriteCallRefusal(w, err) {
 			return
 		}
 

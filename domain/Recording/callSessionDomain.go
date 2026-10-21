@@ -125,7 +125,7 @@ func parseCallSessionNodes(raw []byte) ([]CallSessionNode, error) {
 		if r.EndedAt != nil {
 			n.EndedAt = *r.EndedAt
 		}
-		if r.DeletedAt != nil {
+		if helpers.IsSoftDeleted(r.DeletedAt) {
 			n.DeletedAt = *r.DeletedAt
 		}
 		if len(r.Transcript) > 0 && r.Transcript[0].At > 0 {

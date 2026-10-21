@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
@@ -12,34 +13,31 @@ import (
 	globalSearchModels "github.com/akashc777/OneCamp/models/openSearch/GlobalSearch"
 )
 
+// UpdateUserInOpenSearch changes the fields openSearchUser carries in the
+// person's search document. One that isn't there is left for IndexUserInOpenSearch
+// to write whole (opensearchInit.UpdateDocument).
 func UpdateUserInOpenSearch(ctx context.Context, openSearchUser *openSearchStruct.OpenSearchUser) (err error) {
+	return writeUser(ctx, openSearchUser, opensearchInit.UpdateDocument, "models/UpdateUserInOpenSearch")
+}
 
-	doc := openSearchStruct.BulkUpdate{
-		Doc:         openSearchUser,
-		DocAsUpsert: true,
-	}
-	jsonData, err := json.Marshal(doc)
+// IndexUserInOpenSearch writes a person's whole search document, as when they
+// are created, and creates it when the index has none.
+func IndexUserInOpenSearch(ctx context.Context, openSearchUser *openSearchStruct.OpenSearchUser) (err error) {
+	return writeUser(ctx, openSearchUser, opensearchInit.UpsertDocument, "models/IndexUserInOpenSearch")
+}
 
+func writeUser(ctx context.Context, openSearchUser *openSearchStruct.OpenSearchUser,
+	write func(context.Context, string, string, io.Reader) error, where string) error {
+	jsonData, err := json.Marshal(openSearchStruct.BulkUpdate{Doc: openSearchUser})
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/UpdateUserInOpenSearch Error mashiling strut to json err: %+v",
-			err)
-		return
+		helpers.LogErrorWithContext(ctx, "%s Error marshalling the user to json err: %+v", where, err)
+		return err
 	}
-
-	document := openSearchStruct.IndexReader(jsonData)
-
-	docId := openSearchUser.Uuid
-
-	err = opensearchInit.UpdateDocument(context.Background(), "users", docId, document)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/UpdateUserInOpenSearch failed to update comment document err: %+v",
-			err)
-		return
+	if err := write(context.Background(), "users", openSearchUser.Uuid, openSearchStruct.IndexReader(jsonData)); err != nil {
+		helpers.LogErrorWithContext(ctx, "%s failed to write user document err: %+v", where, err)
+		return err
 	}
-	return
+	return nil
 }
 func PropagateUserInfoChangeInOpenSearch(ctx context.Context, userUUID string, newFullName string, newProfilePic string) (err error) {
 	// Callers run this in a goroutine; with search not connected (a tool, a

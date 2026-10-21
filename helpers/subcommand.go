@@ -23,10 +23,11 @@ const (
 // through runOneShot (cmd/server/oneshot.go), the one path that connects the
 // stores and starts nothing. oneShotGuard_test.go holds main to it.
 var Subcommands = map[string]SubcommandKind{
-	"journey":      ClientSubcommand,
-	"demoseed":     OneShotSubcommand,
-	"repairdocs":   OneShotSubcommand,
-	"calendarmove": OneShotSubcommand,
+	"journey":       ClientSubcommand,
+	"demoseed":      OneShotSubcommand,
+	"repairdocs":    OneShotSubcommand,
+	"calendarmove":  OneShotSubcommand,
+	"workgraphrefs": OneShotSubcommand,
 }
 
 // SubcommandOf is the subcommand args names and its kind, or "" and 0 for the

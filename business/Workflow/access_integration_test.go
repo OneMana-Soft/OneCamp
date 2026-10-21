@@ -5,6 +5,7 @@ package business
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -18,9 +19,10 @@ import (
 // A workflow scoped to "any channel" runs on messages in channels its owner can
 // read, and is skipped, before any step, in a private channel they aren't in;
 // one scoped to "any project" likewise for task moves. The lookups are the real
-// ones, against Postgres and Dgraph. Its steps are create_task, whose executor
-// isn't registered in this test binary, so each run records that error and
-// counts as a run without reaching anything else.
+// ones, against Postgres and Dgraph. Each run is a row in the rule's history
+// (runs.go): a channel event its owner can't read leaves none; a task event
+// in a project its owner left is recorded as skipped, saying so, and one in
+// their project gets past that check (its task, made up here, they can't see).
 //
 // Run: go test -tags=integration ./business/Workflow/ -run TestAWorkflowSkipsWhatItsOwnerCantSee -v
 func TestAWorkflowSkipsWhatItsOwnerCantSee(t *testing.T) {
@@ -68,13 +70,22 @@ func TestAWorkflowSkipsWhatItsOwnerCantSee(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runs := func(id uuid.UUID) int64 {
+	history := func(id uuid.UUID) []*workflowModel.Run {
 		t.Helper()
-		w, err := workflowModel.GetWorkflowByID(ctx, id)
+		rs, err := workflowModel.ListRuns(ctx, nil, &id, nil, 100)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return w.RunCount
+		return rs
+	}
+	runs := func(id uuid.UUID) int64 { return int64(len(history(id))) }
+	// lastSaid is why the newest run of a rule did what it did.
+	lastSaid := func(id uuid.UUID) string {
+		rs := history(id)
+		if len(rs) == 0 {
+			return ""
+		}
+		return rs[0].Error
 	}
 	post := func(channel string) {
 		handleEvent(ctx, "post.created", map[string]interface{}{
@@ -99,14 +110,21 @@ func TestAWorkflowSkipsWhatItsOwnerCantSee(t *testing.T) {
 		{"a private channel the owner isn't in", func() { post(theirs) }, copyAll.Id, false},
 		{"a public channel", func() { post(open) }, copyAll.Id, true},
 		{"a channel that doesn't exist", func() { post(uuid.NewString()) }, copyAll.Id, false},
-		{"a move in the owner's project", func() { move(ours) }, everyMove.Id, true},
-		{"a move in a project the owner isn't in", func() { move(other) }, everyMove.Id, false},
 	} {
 		before := runs(c.wf)
 		c.event()
 		if ran := runs(c.wf) > before; ran != c.wantRun {
 			t.Errorf("%s: ran=%v, want %v", c.name, ran, c.wantRun)
 		}
+	}
+
+	move(ours)
+	if said := lastSaid(everyMove.Id); !strings.Contains(said, "can't see this task") {
+		t.Errorf("a move in the owner's project stopped at the project: %q", said)
+	}
+	move(other)
+	if said := lastSaid(everyMove.Id); !strings.Contains(said, "isn't in the project") {
+		t.Errorf("a move in a project the owner isn't in: %q", said)
 	}
 
 	// Leaving a channel ends it: the check reads membership as it is now.

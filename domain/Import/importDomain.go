@@ -22,9 +22,12 @@ import (
 
 // ListJobs returns up to limit jobs ordered by created_at desc. providerFilter
 // empty means all providers.
-func ListJobs(ctx context.Context, providerFilter string, limit int) ([]*model.Job, error) {
+func ListJobs(ctx context.Context, providerFilter string, limit, offset int) ([]*model.Job, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
 	}
 
 	query := `SELECT ` + model.JobSelectColumns + ` FROM import_jobs `
@@ -33,8 +36,8 @@ func ListJobs(ctx context.Context, providerFilter string, limit int) ([]*model.J
 		args = append(args, providerFilter)
 		query += `WHERE provider = $1 `
 	}
-	args = append(args, limit)
-	query += fmt.Sprintf(`ORDER BY created_at DESC LIMIT $%d`, len(args))
+	args = append(args, limit, offset)
+	query += fmt.Sprintf(`ORDER BY created_at DESC LIMIT $%d OFFSET $%d`, len(args)-1, len(args))
 	return model.ExecJobs(ctx, query, args)
 }
 

@@ -24,26 +24,6 @@ type ChannelPostCount struct {
 	PostCount uint64
 }
 
-func CreatePost(query string, id uuid.UUID, channelUUID uuid.UUID, createdBy uuid.UUID) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(
-		ctx,
-		query,
-		id,
-		channelUUID,
-		createdBy,
-	)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/CreatePost Failed to create new post err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 func GetPostByUUID(query string, postUUID uuid.UUID) (postInfo *Post, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()

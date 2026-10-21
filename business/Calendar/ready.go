@@ -25,6 +25,7 @@ import (
 
 	sweepBusiness "github.com/akashc777/OneCamp/business/Sweep"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	configModel "github.com/akashc777/OneCamp/models/postgres/Config"
 )
 
@@ -52,24 +53,59 @@ const (
 )
 
 // mover runs the move once in this process and tells everyone who waits.
+//
+// What it knows is kept for the database it learned it from (store): a
+// process that connects to another, as each integration test does with a
+// fresh database, asks that one afresh, so a move done for one is never taken
+// as done for the next, and an attempt that failed on one never holds back
+// the next one's move. A server connects once, so for it nothing changes.
 type mover struct {
 	mu      sync.Mutex
-	done    atomic.Bool
-	running chan struct{} // closed when the attempt under way ends; nil when none is
-	tried   time.Time     // when the last attempt started
+	done    atomic.Pointer[storeMark] // the database the move is done for
+	running chan struct{}             // closed when the attempt under way ends; nil when none is
+	runFor  any                       // the database the attempt under way is for
+	tried   time.Time                 // when the last attempt started
+	tryFor  any                       // the database it was for
 	// move moves and checks, and marks the move done; isDone reads the mark.
 	move   func(ctx context.Context) error
 	isDone func() (bool, error)
 	now    func() time.Time
 	wait   time.Duration
+	// store is the database the one store is in now; nil, one for good.
+	store func() any
 }
+
+// storeMark is a database the move is known to be done for.
+type storeMark struct{ store any }
 
 var moves = &mover{
 	move:   moveAndMark,
 	isDone: func() (bool, error) { return configModel.IsDone(movedKey) },
 	now:    time.Now,
 	wait:   moveWait,
+	store:  currentStore,
 }
+
+// currentStore is the database the server is connected to: the one store's,
+// which the move and its record are in.
+func currentStore() any { return postgresInit.DBConn.SqlDB }
+
+// storeNow is the database the one store is in now.
+func (m *mover) storeNow() any {
+	if m.store == nil {
+		return nil
+	}
+	return m.store()
+}
+
+// isDoneNow is whether the move is done for the database in use now.
+func (m *mover) isDoneNow() bool {
+	d := m.done.Load()
+	return d != nil && d.store == m.storeNow()
+}
+
+// markDone keeps that the move is done for store.
+func (m *mover) markDone(store any) { m.done.Store(&storeMark{store: store}) }
 
 // storeReady is whether the one store can be used now.
 func storeReady(ctx context.Context) error {
@@ -80,16 +116,17 @@ func storeReady(ctx context.Context) error {
 }
 
 func (m *mover) ready(ctx context.Context) error {
-	if m.done.Load() {
+	if m.isDoneNow() {
 		return nil
 	}
+	store := m.storeNow()
 	done, err := m.isDone()
 	if err != nil {
 		// A record that can't be read now is no reason to move again.
 		return err
 	}
 	if done {
-		m.done.Store(true)
+		m.markDone(store)
 		return nil
 	}
 	finished := m.start()
@@ -97,7 +134,7 @@ func (m *mover) ready(ctx context.Context) error {
 	defer timer.Stop()
 	select {
 	case <-finished:
-		if m.done.Load() {
+		if m.isDoneNow() {
 			return nil
 		}
 		return ErrMoving
@@ -116,15 +153,16 @@ func (m *mover) ready(ctx context.Context) error {
 // events almost always are, and the old stores, stale once moved, are never
 // shown by mistake. The next read asks again.
 func (m *mover) movedNow() bool {
-	if m.done.Load() {
+	if m.isDoneNow() {
 		return true
 	}
+	store := m.storeNow()
 	done, err := m.isDone()
 	if err != nil {
 		return true
 	}
 	if done {
-		m.done.Store(true)
+		m.markDone(store)
 		return true
 	}
 	m.start()
@@ -139,18 +177,21 @@ var closed = func() chan struct{} { c := make(chan struct{}); close(c); return c
 func (m *mover) start() <-chan struct{} {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.running != nil {
+	store := m.storeNow()
+	if m.running != nil && m.runFor == store {
 		return m.running
 	}
-	if m.done.Load() || (!m.tried.IsZero() && m.now().Sub(m.tried) < moveRetry) {
+	if m.isDoneNow() || (m.tryFor == store && !m.tried.IsZero() && m.now().Sub(m.tried) < moveRetry) {
 		return closed
 	}
 	finished := make(chan struct{})
-	m.running, m.tried = finished, m.now()
+	m.running, m.runFor, m.tried, m.tryFor = finished, store, m.now(), store
 	helpers.GoSafeNamed("business/Calendar/move", func() {
 		defer func() {
 			m.mu.Lock()
-			m.running = nil
+			if m.running == finished {
+				m.running = nil
+			}
 			m.mu.Unlock()
 			close(finished)
 		}()
@@ -160,7 +201,7 @@ func (m *mover) start() <-chan struct{} {
 			helpers.LogErrorWithContext(ctx, "business/Calendar: the move into the one store didn't finish, and is tried again in a minute: %v", err)
 			return
 		}
-		m.done.Store(true)
+		m.markDone(store)
 	})
 	return finished
 }
@@ -172,7 +213,7 @@ func init() {
 	// So the move starts on the switch even when nobody opens the calendar:
 	// the push gate reads the store directly.
 	sweepBusiness.Jobs.Register(sweepBusiness.Job{Name: "calendar.move", Every: time.Minute, Run: func(ctx context.Context) error {
-		if !helpers.CalendarInPostgres() || moves.done.Load() {
+		if !helpers.CalendarInPostgres() || moves.isDoneNow() {
 			return nil
 		}
 		if err := moves.ready(ctx); err != nil && !errors.Is(err, ErrMoving) {

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	configModel "github.com/akashc777/OneCamp/models/postgres/Config"
 )
 
@@ -77,7 +76,7 @@ func resolveGitHubAppConfig(ctx context.Context) *GitHubAppConfig {
 	// Pull the three keys in one query. Guard against an uninitialized DB
 	// (unit tests, early boot) so we degrade gracefully to env-only config
 	// instead of panicking on a nil connection.
-	if postgresInit.DBConn != nil && postgresInit.DBConn.SqlDB != nil {
+	if configModel.Ready() {
 		rows, err := configModel.GetMultipleConfigsByKeys([]string{
 			cfgGitHubClientID, cfgGitHubClientSecret, cfgGitHubWebhookSecret,
 		})

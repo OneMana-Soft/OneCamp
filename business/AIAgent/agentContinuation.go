@@ -92,14 +92,26 @@ func ContinueAgentWork(ctx context.Context, entityID, authorID, followup string)
 		return handled
 	}
 
+	// The jobs' agents in one read, where each job read its own.
+	agentIDs := make([]uuid.UUID, 0, len(tasks))
+	for _, t := range tasks {
+		if t != nil {
+			agentIDs = append(agentIDs, t.AgentId)
+		}
+	}
+	agents, gerr := model.GetAgentsByIDs(ctx, agentIDs)
+	if gerr != nil {
+		return handled
+	}
+
 	// Newest-first (the query orders by created_at DESC): the first job seen for
 	// an agent is its most recent on this surface, which is the one to continue.
 	for _, t := range tasks {
 		if t == nil || handled[t.AgentId] {
 			continue
 		}
-		agent, gerr := model.GetAgentByID(ctx, t.AgentId)
-		if gerr != nil || agent == nil {
+		agent := agents[t.AgentId]
+		if agent == nil {
 			continue
 		}
 		// Written by nobody identified: it may not steer, answer or follow up
