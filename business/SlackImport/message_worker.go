@@ -206,9 +206,8 @@ func processMessageChunk(ctx context.Context, arc *Archive, chunk *importModels.
 		// counting + rollback safety.
 		if mc.workspaceName != "" {
 			if existing := mc.maps.workspaceMapping(ctx, entityType, m.Ts); existing != uuid.Nil {
-				_ = importModels.UpsertIdMappingWithOwnership(ctx, mc.importId, entityType, m.Ts,
-					existing, nil, mustMarshal(map[string]interface{}{"matched_by": "workspace_map"}),
-					false /* not created by this import */)
+				_ = mc.maps.matched(ctx, entityType, m.Ts, existing,
+					mustMarshal(map[string]interface{}{"matched_by": "workspace_map"}))
 				mc.lastCursor = m.Ts
 				return true
 			}
@@ -279,7 +278,7 @@ func importTopLevelMessage(ctx context.Context, mc *messageContext, m *SlackMess
 	html := renderMessageHTML(ctx, mc, m)
 	if html == "" && len(m.Files) == 0 {
 		// Nothing to import. Mark mapped so retry won't re-enter.
-		return importModels.UpsertIdMapping(ctx, mc.importId, importModels.EntityMessage, m.Ts,
+		return mc.maps.placeholder(ctx, importModels.EntityMessage, m.Ts,
 			uuid.New(), nil, mustMarshal(map[string]interface{}{"empty": true}))
 	}
 
@@ -357,7 +356,7 @@ func importThreadReply(ctx context.Context, mc *messageContext, m *SlackMessage,
 
 	html := renderMessageHTML(ctx, mc, m)
 	if html == "" && len(m.Files) == 0 {
-		return importModels.UpsertIdMapping(ctx, mc.importId, importModels.EntityComment, m.Ts,
+		return mc.maps.placeholder(ctx, importModels.EntityComment, m.Ts,
 			uuid.New(), &m.ThreadTs, mustMarshal(map[string]interface{}{"empty": true}))
 	}
 
@@ -379,7 +378,7 @@ func importThreadReply(ctx context.Context, mc *messageContext, m *SlackMessage,
 	commentUUID, err := uuid.Parse(created.Uuid)
 	if err != nil {
 		// Fall back: still record mapping so retry doesn't dupe.
-		return importModels.UpsertIdMapping(ctx, mc.importId, importModels.EntityComment, m.Ts,
+		return mc.maps.placeholder(ctx, importModels.EntityComment, m.Ts,
 			uuid.New(), &m.ThreadTs, mustMarshal(map[string]interface{}{"unparsed_uuid": created.Uuid}))
 	}
 
@@ -550,7 +549,7 @@ func newMessageContext(ctx context.Context, chunk *importModels.Chunk, workspace
 		channelName:    dgraphChannel.Name,
 		userCache:      make(map[string]*userModels.UserInfo, 32),
 		enqueuedFiles:  make(map[string]struct{}, 16),
-		maps:           newMessageMaps(chunk.ImportId, workspaceName),
+		maps:           newMessageMaps(chunk.ImportId, workspaceName, *chunk.ChannelSlackId),
 	}, nil
 }
 
@@ -707,10 +706,7 @@ func applyMessageEdit(ctx context.Context, mc *messageContext, sub *SlackEditedM
 		entityType = importModels.EntityComment
 	}
 
-	ocUUID, _ := importModels.LookupIdMapping(ctx, mc.importId, entityType, originalTs)
-	if ocUUID == uuid.Nil && mc.workspaceName != "" {
-		ocUUID, _ = importModels.LookupWorkspaceMapping(ctx, mc.workspaceName, entityType, originalTs)
-	}
+	ocUUID := mc.maps.find(ctx, entityType, originalTs)
 	if ocUUID == uuid.Nil {
 		return nil
 	}
@@ -791,10 +787,7 @@ func applyMessageEdit(ctx context.Context, mc *messageContext, sub *SlackEditedM
 // gate inside those paths suppresses live MQTT and AI fan-out.
 func applyMessageDelete(ctx context.Context, mc *messageContext, originalTs string) error {
 	for _, et := range []string{importModels.EntityMessage, importModels.EntityComment} {
-		ocUUID, _ := importModels.LookupIdMapping(ctx, mc.importId, et, originalTs)
-		if ocUUID == uuid.Nil && mc.workspaceName != "" {
-			ocUUID, _ = importModels.LookupWorkspaceMapping(ctx, mc.workspaceName, et, originalTs)
-		}
+		ocUUID := mc.maps.find(ctx, et, originalTs)
 		if ocUUID == uuid.Nil {
 			continue
 		}

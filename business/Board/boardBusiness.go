@@ -171,15 +171,20 @@ func UpdateBoard(ctx context.Context, input *adapter.InputUpdateBoard) (err erro
 // the collaboration service, bumping board_updated_at. Idempotent upsert.
 func UpdateBoardFromCollab(ctx context.Context, input *adapter.InputBoardCollabUpdate) (err error) {
 	newBytes := len(input.State)
+	next := saveOf(input.State, input.Snippet)
 
 	// Only read the (potentially large) prior state when a mass-deletion is
-	// plausible. The previous size is cached cheaply in Redis, so a normal edit
-	// skips the full-state read entirely. On a cache miss (first save, expiry,
-	// or Redis unavailable) we fall back to reading it so detection is never
-	// silently lost.
+	// plausible. The previous size and count are cached cheaply in Redis, so a
+	// normal edit skips the full-state read entirely. On a cache miss (first
+	// save, expiry, or Redis unavailable) we fall back to reading it so
+	// detection is never silently lost.
 	needOld := true
 	if cached, ok := resourceViewBusiness.CachedStateSize(ctx, resourceViewBusiness.ResourceBoard, input.BoardUuid); ok {
-		needOld = cached >= snapshotMassDeleteMinBytes && float64(newBytes) < float64(cached)*snapshotMassDeleteRatio
+		prev := boardSave{bytes: cached}
+		if n, counted := resourceViewBusiness.CachedStateSize(ctx, resourceViewBusiness.ResourceBoardElements, input.BoardUuid); counted {
+			prev.elements, prev.counted = n, true
+		}
+		needOld = massDeletion(prev, next)
 	}
 
 	var oldState, oldSnippet string
@@ -215,8 +220,11 @@ func UpdateBoardFromCollab(ctx context.Context, input *adapter.InputBoardCollabU
 		}
 	}
 
-	// Cache the new size for the next save's cheap shrink check.
+	// Cache the new size and count for the next save's cheap shrink check.
 	resourceViewBusiness.SetCachedStateSize(ctx, resourceViewBusiness.ResourceBoard, input.BoardUuid, newBytes)
+	if next.counted {
+		resourceViewBusiness.SetCachedStateSize(ctx, resourceViewBusiness.ResourceBoardElements, input.BoardUuid, next.elements)
+	}
 
 	// Evaluate/capture a snapshot off the persist path (version history +
 	// mass-delete recovery). Never blocks or fails the persist.

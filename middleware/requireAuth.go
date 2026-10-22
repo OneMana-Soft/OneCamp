@@ -6,6 +6,7 @@ import (
 
 	domain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/authcookie"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
@@ -18,33 +19,14 @@ func VerifyAuth(next http.Handler) http.Handler {
 			return
 		}
 		ctx := r.Context()
-		tsc, err := r.Cookie("Authorization")
-		if err != nil {
-			if err == http.ErrNoCookie {
-				// If the cookie is not set, return an unauthorized status
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-			// For any other type of error, return a bad request status
-			w.WriteHeader(http.StatusBadRequest)
+		// This host's own cookies, or this server's from before they moved
+		// (authcookie): never another workspace's sent along on a shared zone.
+		tokenString := authcookie.AccessToken(r)
+		deviceId := authcookie.DeviceID(r)
+		if tokenString == "" || deviceId == "" {
+			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-
-		dsc, err := r.Cookie("DeviceId")
-
-		if err != nil {
-			if err == http.ErrNoCookie {
-				// If the cookie is not set, return an unauthorized status
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-			// For any other type of error, return a bad request status
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		tokenString := tsc.Value
-		deviceId := dsc.Value
 		userUUID, err := helpers.ParseSessionToken(tokenString, helpers.TokenTypeAccess)
 		if err != nil {
 			w.WriteHeader(http.StatusUnauthorized)

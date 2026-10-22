@@ -5,6 +5,7 @@ import (
 	"time"
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
+	slackImportBusiness "github.com/akashc777/OneCamp/business/SlackImport"
 	"github.com/akashc777/OneCamp/helpers"
 	minioInit "github.com/akashc777/OneCamp/initializers/minioInit"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
@@ -19,7 +20,11 @@ const (
 )
 
 // StartCleanupLoop runs every hour and:
-//  1. Deletes staged ZIPs for jobs that finished N+ days ago.
+//  0. Checks the Slack imports not checked yet for replies filed in another
+//     conversation's thread, and puts them right (business/SlackImport
+//     repair.go), before any export they need goes.
+//  1. Deletes staged ZIPs for jobs that finished N+ days ago (a Slack
+//     import's only once it has been checked).
 //  2. Marks abandoned 'pending' jobs (presigned but never finalised)
 //     as failed and deletes their orphaned upload (if any).
 //  3. Sets aside jobs left waiting to be planned or run for a day.
@@ -46,6 +51,12 @@ func runCleanupTick() {
 				"Import cleanup recovered from panic: %v", r)
 		}
 	}()
+	if r, err := slackImportBusiness.RepairMisfiledReplies(ctx); err != nil {
+		helpers.LogWarnWithContext(ctx, "Import cleanup misfiled replies err: %+v", err)
+	} else if r.Checked > 0 {
+		helpers.LogInfoWithContext(ctx, "Import cleanup checked %d Slack import(s): %d replies moved, %d taken out, %d with channels unchecked",
+			r.Checked, r.Moved, r.TakenOut, r.ChannelsUnchecked)
+	}
 	if n, err := reapStaleStagedZips(ctx); err != nil {
 		helpers.LogWarnWithContext(ctx, "Import cleanup reap zips err: %+v", err)
 	} else if n > 0 {

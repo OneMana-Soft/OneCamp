@@ -33,6 +33,7 @@ import (
 	authBusiness "github.com/akashc777/OneCamp/business/Auth"
 	authController "github.com/akashc777/OneCamp/controllers/Auth"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/authcookie"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	ldapService "github.com/akashc777/OneCamp/services/LDAP"
 	"github.com/akashc777/OneCamp/tests/integration"
@@ -111,7 +112,7 @@ func TestDirectorySignInAsksForTheSecondStep(t *testing.T) {
 	}
 	sessionCookie := func(rec *httptest.ResponseRecorder) bool {
 		for _, c := range rec.Result().Cookies() {
-			if c.Name == "Authorization" && c.Value != "" {
+			if c.Name == authcookie.Name(authcookie.Access) && c.Value != "" {
 				return true
 			}
 		}

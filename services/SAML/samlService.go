@@ -68,12 +68,25 @@ func InitSAML() error {
 		return fmt.Errorf("failed to parse SAML root URL: %w", err)
 	}
 
+	// The cookie that tracks a sign-in started here must come back on the
+	// IdP's answer, a cross-site POST to /saml/acs. Without a SameSite, Chrome
+	// takes it as Lax and carries it on a cross-site POST only within 2 minutes
+	// of setting it, so a sign-in that took longer at the IdP (MFA) failed as
+	// an invalid assertion. None carries it however long it takes; it is
+	// host-only on the API and scoped to the ACS path. None needs Secure, so
+	// over plain http (development) it stays Lax.
+	trackerSameSite := http.SameSiteLaxMode
+	if rootURL.Scheme == "https" {
+		trackerSameSite = http.SameSiteNoneMode
+	}
+
 	SAMLMiddleware, err = samlsp.New(samlsp.Options{
 		URL:               *rootURL,
 		Key:               keyPair.PrivateKey.(*rsa.PrivateKey),
 		Certificate:       keyPair.Leaf,
 		IDPMetadata:       idpMetadata,
 		AllowIDPInitiated: true,
+		CookieSameSite:    trackerSameSite,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize SAML service provider: %w", err)

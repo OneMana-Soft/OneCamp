@@ -85,10 +85,12 @@ import (
 // and a page backing off from a 429 or 503 never waited as long as asked.
 func corsFor(origins []string) func(http.Handler) http.Handler {
 	return cors.Handler(cors.Options{
-		AllowedOrigins:   origins,
-		AllowedMethods:   []string{"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Requested-With", "Origin"},
-		ExposedHeaders:   []string{"Link", "Retry-After"},
+		AllowedOrigins: origins,
+		AllowedMethods: []string{"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders: []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Requested-With", "Origin"},
+		// X-CSRF-Token: the web app takes its CSRF token from the answers (the
+		// cookie holding it is the API host's own and HttpOnly).
+		ExposedHeaders:   []string{"Link", "Retry-After", "X-CSRF-Token"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	})
@@ -351,6 +353,9 @@ func Routes() http.Handler {
 		r.Use(customMiddleware.VerifyAuthOnlyPostgres)
 		r.Get("/basicSelfProfile", userController.GetLoggedInUserProfile)
 		r.With(customMiddleware.LoginRateLimit("collab")).Get("/auth/token", authController.GetCollabToken)
+		// The CSRF token alone (in the X-CSRF-Token header), for a write before
+		// any read; every answer in a CSRF group carries it too.
+		r.Get("/auth/csrf", authController.CSRFToken)
 		r.Post("/uploadFile", userController.UploadFile)
 		r.Get("/getFile/{obj_uuid}", userController.GetPublicFile)
 		// A profile picture as a redirect the web app puts in an <img src>,

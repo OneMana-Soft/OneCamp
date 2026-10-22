@@ -295,6 +295,7 @@ var migratesItself = map[string]bool{
 	"TestDocVersionsMigrationUpDownUp":                          true,
 	"TestEditProposalsMigrationUpDownUp":                        true,
 	"TestEmailLookupIndexSurvivesAddressesThatDifferOnlyInCase": true,
+	"TestEarlierSlackImportsMessagesAreKeyedByConversation":     true,
 	"TestMigration204ClosesInvitationsToMembers":                true,
 	"TestOutboxMigrationUpDownUp":                               true,
 	"TestPublishMigrationUpDownUp":                              true,

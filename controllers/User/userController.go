@@ -54,17 +54,6 @@ import (
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 )
 
-// getFrontendCookieDomain delegates to the canonical authcookie helper so
-// all cookie-construction code uses the same domain-resolution logic.
-func getFrontendCookieDomain() string {
-	return authcookie.FrontendDomain()
-}
-
-// getCookieSecureAndSameSite delegates to the canonical authcookie helper.
-func getCookieSecureAndSameSite() (secure bool, sameSite http.SameSite) {
-	return authcookie.SecureAndSameSite()
-}
-
 func GetLoggedInUserProfile(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
@@ -1073,58 +1062,21 @@ func OAuthLogin(w http.ResponseWriter, r *http.Request) {
 func LogOutUser(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
-	feDomain := getFrontendCookieDomain()
-	secure, sameSite := getCookieSecureAndSameSite()
 
-	// Always clear cookies in the browser - moved to top for robustness
-	domainsToClear := []string{"", feDomain}
-	if strings.Count(feDomain, ".") >= 2 {
-		parts := strings.Split(feDomain, ".")
-		parentDomain := "." + strings.Join(parts[len(parts)-2:], ".")
-		domainsToClear = append(domainsToClear, parentDomain)
-	}
+	// Clear the cookies first, whatever happens below: this host's own, and
+	// this server's from before they moved. Only this workspace's: it used to
+	// expire every cookie the request carried, on FE_DOMAIN, which on a shared
+	// zone signed the person out of the other workspaces too and deleted the
+	// storefront's cookies.
+	deviceId := authcookie.DeviceID(r)
+	authcookie.ClearSession(w, r)
 
-	cookieNamesToClear := []string{"Authorization", "AuthToken", "RefreshToken", "DeviceId"}
-
-	for _, domainName := range domainsToClear {
-		for _, cookieName := range cookieNamesToClear {
-			http.SetCookie(w, &http.Cookie{
-				Name:     cookieName,
-				Value:    "",
-				Expires:  time.Now().Add(-time.Hour * 24),
-				Path:     "/",
-				HttpOnly: cookieName == "DeviceId",
-				Secure:   secure,
-				SameSite: sameSite,
-				Domain:   domainName,
-			})
-		}
-	}
-
-	// Also clear whatever cookies were sent (legacy loop)
-	for _, cookie := range r.Cookies() {
-		c := &http.Cookie{
-			Name:     cookie.Name,
-			Value:    "",
-			Path:     "/",
-			Domain:   feDomain,
-			Expires:  time.Unix(0, 0),
-			MaxAge:   -1,
-			SameSite: sameSite,
-			Secure:   secure,
-		}
-		http.SetCookie(w, c)
-	}
-
-	dsc, err := r.Cookie("DeviceId")
-	if err != nil {
+	if deviceId == "" {
 		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 			"msg": "Logged out (DeviceID not found, cookies cleared anyway)",
 		})
 		return
 	}
-
-	deviceId := dsc.Value
 
 	valUserInfo := ctx.Value(helpers.UserInfoContextKey)
 	if valUserInfo == nil {
@@ -1137,7 +1089,7 @@ func LogOutUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = redisStore.Delete(ctx, registry.UserRefreshToken, []string{userInfo.UserPostgresInfo.Id.String(), deviceId})
+	err := redisStore.Delete(ctx, registry.UserRefreshToken, []string{userInfo.UserPostgresInfo.Id.String(), deviceId})
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
@@ -1176,28 +1128,16 @@ func RefreshToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	feDomain := getFrontendCookieDomain()
-	secure, sameSite := getCookieSecureAndSameSite()
-
-	tsc, err := r.Cookie("RefreshToken")
-	if err != nil {
+	// The session VerifyRefreshToken checked: this host's own cookies, or this
+	// server's from before they moved, which this answer moves.
+	presented := authcookie.RefreshToken(r)
+	deviceId := authcookie.DeviceID(r)
+	if presented == "" || deviceId == "" {
 		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
 			"msg": "Not Authorised",
 		})
 		return
 	}
-
-	dsc, err := r.Cookie("DeviceId")
-
-	if err != nil {
-
-		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
-			"msg": "Not Authorised",
-		})
-		return
-	}
-
-	deviceId := dsc.Value
 
 	refreshTokenTTLDuration := registry.UserRefreshToken.TTL
 
@@ -1206,7 +1146,7 @@ func RefreshToken(w http.ResponseWriter, r *http.Request) {
 	refreshExpiryTime := time.Now().Add(refreshTokenTTLDuration)
 
 	authTokenString, newRefreshTokenString, err := business.RotateRefreshToken(ctx, userInfo.UserPostgresInfo.Id.String(), deviceId,
-		tsc.Value, authExpiryTime.Unix(), refreshExpiryTime.Unix())
+		presented, authExpiryTime.Unix(), refreshExpiryTime.Unix())
 	if errors.Is(err, business.ErrRefreshUnknown) || errors.Is(err, business.ErrRefreshReused) {
 		if errors.Is(err, business.ErrRefreshReused) {
 			helpers.LogWarnWithContext(ctx, "controllers/RefreshToken a rotated refresh token was used again; device signed out")
@@ -1229,35 +1169,10 @@ func RefreshToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	http.SetCookie(w, &http.Cookie{
-		Name:     "Authorization",
-		Value:    authTokenString,
-		Expires:  authCookieExpiryTime,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Domain:   feDomain,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     "RefreshToken",
-		Value:    newRefreshTokenString,
-		Expires:  refreshExpiryTime,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Domain:   feDomain,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     "DeviceId",
-		Value:    deviceId,
-		Expires:  refreshExpiryTime,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Domain:   feDomain,
+	authcookie.SetSession(w, r, authcookie.Session{
+		Access: authTokenString, AccessExpires: authCookieExpiryTime,
+		Refresh: newRefreshTokenString, RefreshExpires: refreshExpiryTime,
+		Device: deviceId,
 	})
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{})
@@ -1334,38 +1249,10 @@ func OAuthCallback(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, authService.SignInErrorURL(oauthFailed, oauthFailedMessage), http.StatusFound)
 		return
 	}
-	feDomain := getFrontendCookieDomain()
-	secure, sameSite := getCookieSecureAndSameSite()
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "Authorization",
-		Value:    authTokenString,
-		Expires:  authCookieExpiryTime,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Domain:   feDomain,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     "RefreshToken",
-		Value:    refreshTokenString,
-		Expires:  refreshExpiryTime,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Domain:   feDomain,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     "DeviceId",
-		Value:    deviceId,
-		Expires:  refreshExpiryTime,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Domain:   feDomain,
+	authcookie.SetSession(w, r, authcookie.Session{
+		Access: authTokenString, AccessExpires: authCookieExpiryTime,
+		Refresh: refreshTokenString, RefreshExpires: refreshExpiryTime,
+		Device: deviceId,
 	})
 
 	// Best-effort audit: record which provider this login came through.
@@ -3650,38 +3537,10 @@ func DemoLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 6. Set auth cookies (identical to OAuthCallback)
-	feDomain := getFrontendCookieDomain()
-	secure, sameSite := getCookieSecureAndSameSite()
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "Authorization",
-		Value:    authTokenString,
-		Expires:  authCookieExpiryTime,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Domain:   feDomain,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     "RefreshToken",
-		Value:    refreshTokenString,
-		Expires:  refreshExpiryTime,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Domain:   feDomain,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     "DeviceId",
-		Value:    deviceId,
-		Expires:  refreshExpiryTime,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Domain:   feDomain,
+	authcookie.SetSession(w, r, authcookie.Session{
+		Access: authTokenString, AccessExpires: authCookieExpiryTime,
+		Refresh: refreshTokenString, RefreshExpires: refreshExpiryTime,
+		Device: deviceId,
 	})
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{

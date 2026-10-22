@@ -2,9 +2,7 @@ package firebaseInit
 
 import (
 	"context"
-	"fmt"
 	"maps"
-	"os"
 	"slices"
 	"sync/atomic"
 	"time"
@@ -13,6 +11,7 @@ import (
 	"firebase.google.com/go/v4/messaging"
 	userFCMtokenBusiness "github.com/akashc777/OneCamp/business/UserFCMToken"
 	"github.com/akashc777/OneCamp/helpers"
+	authService "github.com/akashc777/OneCamp/services/Auth"
 	"google.golang.org/api/option"
 	"strings"
 	"sync"
@@ -135,6 +134,13 @@ func ObservePushesForTest(fn func(data map[string]string, tokens []string)) (res
 	return func() { pushObserver.Store(nil) }
 }
 
+// pushLink is where a web push opens when clicked: the workspace's own web
+// app. It was https://$FE_DOMAIN/, which on Cloud is the zone (onemana.dev),
+// the storefront.
+func pushLink() string {
+	return authService.FrontendBaseURL() + "/"
+}
+
 // tokenIsDead says whether a send's error means the token itself is gone, so
 // it is deleted: UNREGISTERED (the app was removed, or the token expired),
 // SENDER_ID_MISMATCH (a token of another project), or an INVALID_ARGUMENT about
@@ -212,7 +218,7 @@ func (f *firebaseAppStruct) MultiCastPush(ctx context.Context, pushData map[stri
 			},
 			Data: pushData,
 			FCMOptions: &messaging.WebpushFCMOptions{
-				Link: fmt.Sprintf("https://%s/", os.Getenv("FE_DOMAIN")),
+				Link: pushLink(),
 			},
 		},
 		Android: &messaging.AndroidConfig{

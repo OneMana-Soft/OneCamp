@@ -513,7 +513,9 @@ func UpdateProgress(ctx context.Context, jobId uuid.UUID, patch json.RawMessage)
 }
 
 // ListJobsForRawCleanup returns terminal jobs older than cutoff that
-// still have a raw_object_key set. Bounded at 200 rows per call.
+// still have a raw_object_key set. Bounded at 200 rows per call. A Slack
+// import whose replies haven't been checked yet keeps its export: the repair
+// of misfiled replies reads it first (business/SlackImport repair.go).
 func ListJobsForRawCleanup(ctx context.Context, cutoff time.Time) ([]*Job, error) {
 	dbCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -521,6 +523,7 @@ func ListJobsForRawCleanup(ctx context.Context, cutoff time.Time) ([]*Job, error
 		SELECT `+JobSelectColumns+` FROM import_jobs
 		WHERE status IN ('completed','failed','cancelled','rolled_back')
 		  AND raw_object_key IS NOT NULL
+		  AND NOT (provider = 'slack' AND replies_checked_at IS NULL)
 		  AND COALESCE(completed_at, updated_at) < $1
 		ORDER BY COALESCE(completed_at, updated_at)
 		LIMIT 200`, cutoff)

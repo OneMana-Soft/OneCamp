@@ -149,9 +149,8 @@ func processDMChunk(ctx context.Context, arc *Archive, chunk *importModels.Chunk
 
 			if dc.workspaceName != "" {
 				if existing := dc.maps.workspaceMapping(ctx, entityType, m.Ts); existing != uuid.Nil {
-					_ = importModels.UpsertIdMappingWithOwnership(ctx, dc.importId, entityType, m.Ts,
-						existing, nil, mustMarshal(map[string]interface{}{"matched_by": "workspace_map"}),
-						false)
+					_ = dc.maps.matched(ctx, entityType, m.Ts, existing,
+						mustMarshal(map[string]interface{}{"matched_by": "workspace_map"}))
 					if !isThreadReply {
 						dc.lastCursor = m.Ts
 					}
@@ -218,7 +217,7 @@ func importDMTopLevel(ctx context.Context, dc *dmContext, m *SlackMessage, impor
 
 	html := renderDMHTML(ctx, dc, m)
 	if html == "" && len(m.Files) == 0 {
-		return importModels.UpsertIdMapping(ctx, dc.importId, importModels.EntityMessage, m.Ts,
+		return dc.maps.placeholder(ctx, importModels.EntityMessage, m.Ts,
 			uuid.New(), nil, mustMarshal(map[string]interface{}{"empty": true}))
 	}
 
@@ -343,7 +342,7 @@ func importDMThreadReply(ctx context.Context, dc *dmContext, m *SlackMessage, im
 	authorInfo, _ := dc.resolveAuthor(ctx, m, importingUser)
 	html := renderDMHTML(ctx, dc, m)
 	if html == "" && len(m.Files) == 0 {
-		return importModels.UpsertIdMapping(ctx, dc.importId, importModels.EntityComment, m.Ts,
+		return dc.maps.placeholder(ctx, importModels.EntityComment, m.Ts,
 			uuid.New(), &m.ThreadTs, mustMarshal(map[string]interface{}{"empty": true}))
 	}
 
@@ -369,7 +368,7 @@ func importDMThreadReply(ctx context.Context, dc *dmContext, m *SlackMessage, im
 	}
 	commentUUID, err := uuid.Parse(created.Uuid)
 	if err != nil {
-		return importModels.UpsertIdMapping(ctx, dc.importId, importModels.EntityComment, m.Ts,
+		return dc.maps.placeholder(ctx, importModels.EntityComment, m.Ts,
 			uuid.New(), &m.ThreadTs, mustMarshal(map[string]interface{}{"unparsed_uuid": created.Uuid}))
 	}
 	return dc.maps.recordCreated(ctx, importModels.EntityComment, m.Ts, commentUUID, &m.ThreadTs,
@@ -430,10 +429,7 @@ func applyDMEdit(ctx context.Context, dc *dmContext, sub *SlackEditedMessage) er
 	if isComment {
 		entityType = importModels.EntityComment
 	}
-	ocUUID, _ := importModels.LookupIdMapping(ctx, dc.importId, entityType, originalTs)
-	if ocUUID == uuid.Nil && dc.workspaceName != "" {
-		ocUUID, _ = importModels.LookupWorkspaceMapping(ctx, dc.workspaceName, entityType, originalTs)
-	}
+	ocUUID := dc.maps.find(ctx, entityType, originalTs)
 	if ocUUID == uuid.Nil {
 		return nil
 	}
@@ -483,7 +479,7 @@ func applyDMEdit(ctx context.Context, dc *dmContext, sub *SlackEditedMessage) er
 	// UpdateChat path. Look it up from the id_map metadata captured at
 	// creation time so we don't re-query Dgraph here.
 	authorUUID := ""
-	if md, _ := importModels.GetIdMapMetadata(ctx, dc.importId, importModels.EntityMessage, originalTs); len(md) > 0 {
+	if md, _ := importModels.GetIdMapMetadata(ctx, dc.importId, importModels.EntityMessage, dc.maps.key(originalTs)); len(md) > 0 {
 		var meta struct {
 			AuthorOC string `json:"author_oc_uuid"`
 		}
@@ -504,10 +500,7 @@ func applyDMEdit(ctx context.Context, dc *dmContext, sub *SlackEditedMessage) er
 
 func applyDMDelete(ctx context.Context, dc *dmContext, originalTs string) error {
 	for _, et := range []string{importModels.EntityMessage, importModels.EntityComment} {
-		ocUUID, _ := importModels.LookupIdMapping(ctx, dc.importId, et, originalTs)
-		if ocUUID == uuid.Nil && dc.workspaceName != "" {
-			ocUUID, _ = importModels.LookupWorkspaceMapping(ctx, dc.workspaceName, et, originalTs)
-		}
+		ocUUID := dc.maps.find(ctx, et, originalTs)
 		if ocUUID == uuid.Nil {
 			continue
 		}

@@ -20,11 +20,11 @@ func TestAChannelsPinsComeAcrossAsTheirPinners(t *testing.T) {
 	launch, quiet := uuid.New(), uuid.New()
 	ada, msg1, msg2 := uuid.New(), uuid.New(), uuid.New()
 	mapped := map[string]uuid.UUID{
-		importModels.EntityChannel + ":C1":    launch,
-		importModels.EntityChannel + ":G1":    quiet,
-		importModels.EntityMessage + ":100.1": msg1,
-		importModels.EntityMessage + ":100.2": msg2,
-		importModels.EntityUser + ":U1":       ada,
+		importModels.EntityChannel + ":C1":       launch,
+		importModels.EntityChannel + ":G1":       quiet,
+		importModels.EntityMessage + ":C1/100.1": msg1, // known by its channel and ts
+		importModels.EntityMessage + ":C1/100.2": msg2,
+		importModels.EntityUser + ":U1":          ada,
 	}
 	wasLookup, wasPins, wasNotes := lookupMappedMany, importPins, notePins
 	t.Cleanup(func() { lookupMappedMany, importPins, notePins = wasLookup, wasPins, wasNotes })

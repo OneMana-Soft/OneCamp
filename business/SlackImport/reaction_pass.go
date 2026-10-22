@@ -46,6 +46,8 @@ func processReactionPass(ctx context.Context, arc *Archive, chunk *importModels.
 		if !ok {
 			continue
 		}
+		// Its messages are known by it and their ts (msgkey.go).
+		rs.conv = slackChannelId
 		for _, dailyPath := range dailyFiles {
 			zf, err := OpenInZip(arc.Reader, dailyPath)
 			if err != nil {
@@ -267,6 +269,8 @@ func (s *reactionState) applyReactions(ctx context.Context, m *SlackMessage, put
 // up in dozens or hundreds of reactions.
 type reactionState struct {
 	importId uuid.UUID
+	// conv is the Slack conversation whose messages the pass is in.
+	conv string
 
 	mu          sync.Mutex
 	dgUsers     map[string]*dgraphStruct.DgraphUser // ocUUID -> dgraph user
@@ -291,9 +295,9 @@ func (s *reactionState) prefetch(ctx context.Context, batch []*SlackMessage) {
 			continue
 		}
 		if m.ThreadTs != "" && m.ThreadTs != m.Ts {
-			replies = append(replies, m.Ts)
+			replies = append(replies, messageKey(s.conv, m.Ts))
 		} else {
-			msgs = append(msgs, m.Ts)
+			msgs = append(msgs, messageKey(s.conv, m.Ts))
 		}
 		for _, r := range m.Reactions {
 			for _, u := range r.Users {
@@ -321,14 +325,15 @@ func (s *reactionState) prefetch(ctx context.Context, batch []*SlackMessage) {
 // mapping is what the import made for a message (EntityMessage) or a
 // reply (EntityComment), or uuid.Nil.
 func (s *reactionState) mapping(ctx context.Context, entityType, ts string) uuid.UUID {
+	key := messageKey(s.conv, ts)
 	m := s.messages
 	if entityType == importModels.EntityComment {
 		m = s.replies
 	}
 	if m != nil {
-		return m[ts]
+		return m[key]
 	}
-	id, _ := importModels.LookupIdMapping(ctx, s.importId, entityType, ts)
+	id, _ := importModels.LookupIdMapping(ctx, s.importId, entityType, key)
 	return id
 }
 

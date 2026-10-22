@@ -387,15 +387,17 @@ func resolveFileParent(ctx context.Context, chunk *importModels.Chunk, meta *fil
 		return out, fmt.Errorf("could not resolve parent conversation for slack_id=%s", slackId)
 	}
 
-	// Resolve the parent message uuid (post for channels, chat for DM/MPIM).
+	// Resolve the parent message uuid (post for channels, chat for DM/MPIM),
+	// known by its conversation and its ts (msgkey.go).
 	if meta.ParentTs != "" {
+		parent := messageKey(slackId, meta.ParentTs)
 		if parentUUID, _ := importModels.LookupIdMapping(ctx, chunk.ImportId,
-			importModels.EntityMessage, meta.ParentTs); parentUUID != uuid.Nil {
+			importModels.EntityMessage, parent); parentUUID != uuid.Nil {
 			out.ParentUUID = parentUUID
 		}
 		// Resolve author for OpenSearch denorm. Cheap: one PG row.
 		if md, _ := importModels.GetIdMapMetadata(ctx, chunk.ImportId,
-			importModels.EntityMessage, meta.ParentTs); len(md) > 0 {
+			importModels.EntityMessage, parent); len(md) > 0 {
 			var m struct {
 				AuthorSlack string `json:"author_slack"`
 			}

@@ -59,6 +59,23 @@ func SignSessionToken(userID string, typ string, exp int64) (string, error) {
 	}).SignedString([]byte(secret))
 }
 
+// SessionTokenSignedHere reports whether raw was signed with this server's key,
+// whatever it says and whenever it runs out. It tells this server's own session
+// cookies from another workspace's that a browser sends along: until 21 Oct
+// 2026 every workspace on a zone wrote its cookies on the zone, so the same
+// names arrive from all of them. It is never a check that a token is a session
+// (ParseSessionToken is).
+func SessionTokenSignedHere(raw string) bool {
+	secret := os.Getenv("JWT_SECRET")
+	if secret == "" || raw == "" {
+		return false
+	}
+	token, err := jwt.Parse(raw, func(t *jwt.Token) (interface{}, error) {
+		return []byte(secret), nil
+	}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithoutClaimsValidation())
+	return err == nil && token.Valid
+}
+
 // ParseSessionToken checks a session token (its signature, algorithm, expiry
 // and kind) and answers the user it was issued to. want is the kind asked for.
 // A token minted for anything else (a two-step challenge, a guest's

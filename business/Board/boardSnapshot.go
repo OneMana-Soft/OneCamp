@@ -49,6 +49,9 @@ const (
 	// snapshotMassDeleteMinBytes, to count as a sharp shrink worth preserving.
 	snapshotMassDeleteRatio    = 0.4
 	snapshotMassDeleteMinBytes = 2048
+	// Below this many elements a person sees, a drop isn't a mass deletion
+	// (two notes are four: a note and its words).
+	snapshotMassDeleteMinElements = 4
 	// Default age retention (days); override with BOARD_SNAPSHOT_RETENTION_DAYS.
 	defaultSnapshotRetentionDays = 30
 )
@@ -63,18 +66,57 @@ func snapshotObjectKey(boardUUID string) string {
 	return fmt.Sprintf("boardSnapshot/%s/%s.gz", boardUUID, uuid.New().String())
 }
 
+// boardSave is what the mass-deletion check reads of a save: the state's
+// size, and how many elements its snippet says it holds (counted false when
+// it says nothing readable).
+type boardSave struct {
+	bytes    int
+	elements int
+	counted  bool
+}
+
+// saveOf reads a save for the mass-deletion check. Pure.
+func saveOf(state, snippet string) boardSave {
+	n, ok := elementCount(snippet)
+	return boardSave{bytes: len(state), elements: n, counted: ok}
+}
+
+// massDeletion reports whether going from prev to next is a sharp shrink, so
+// prev is worth keeping as a version to restore. Pure.
+//
+// What a person sees decides it: the elements a snippet counts (the
+// collaboration service counts the ones not deleted). A deletion only marks
+// elements deleted, so an undo or a select-all delete barely moves the
+// state's size; and when the service prunes deleted elements ten minutes
+// later, the size drops with nothing more deleted, and the board before it
+// was already empty (W-0b). The size still decides on its own for a save
+// that has no count (one saved before counts were kept).
+func massDeletion(prev, next boardSave) bool {
+	if prev.counted && next.counted {
+		return prev.elements >= snapshotMassDeleteMinElements && float64(next.elements) < float64(prev.elements)*snapshotMassDeleteRatio
+	}
+	return prev.bytes >= snapshotMassDeleteMinBytes && float64(next.bytes) < float64(prev.bytes)*snapshotMassDeleteRatio
+}
+
 // parseElementCount extracts the leading integer from a collab snippet such as
 // "42 elements". Returns 0 when not parseable.
 func parseElementCount(snippet string) int {
+	n, _ := elementCount(snippet)
+	return n
+}
+
+// elementCount is a collab snippet's count ("42 elements"), and whether it
+// had one. Pure.
+func elementCount(snippet string) (int, bool) {
 	fields := strings.Fields(strings.TrimSpace(snippet))
 	if len(fields) == 0 {
-		return 0
+		return 0, false
 	}
 	n, err := strconv.Atoi(fields[0])
 	if err != nil || n < 0 {
-		return 0
+		return 0, false
 	}
-	return n
+	return n, true
 }
 
 func gzipBytes(data []byte) ([]byte, error) {
@@ -243,10 +285,9 @@ func MaybeSnapshotBoard(ctx context.Context, boardUUID, oldState, oldSnippet, ne
 		}
 	}()
 
-	oldBytes := len(oldState)
 	newBytes := len(newState)
 
-	if oldBytes >= snapshotMassDeleteMinBytes && float64(newBytes) < float64(oldBytes)*snapshotMassDeleteRatio {
+	if massDeletion(saveOf(oldState, oldSnippet), saveOf(newState, newSnippet)) {
 		if err := storeSnapshot(ctx, boardUUID, oldState, parseElementCount(oldSnippet), snapshotModels.ReasonMassDelete, contributors); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/MaybeSnapshotBoard mass-delete snapshot failed err: %+v", err)
 		}
