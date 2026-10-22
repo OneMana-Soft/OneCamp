@@ -1001,8 +1001,9 @@ func issueAuthCookiesWith(w http.ResponseWriter, r *http.Request, ctx context.Co
 // without writing a response body. Used by SSO redirect flows that follow the
 // 302 success path; issueAuthCookies wraps this and writes JSON.
 //
-// Cookies issued: Authorization (5min), RefreshToken (TTL from Redis config),
-// DeviceId (HttpOnly, refresh TTL).
+// Cookies issued on the API host alone (authcookie.SetSession): the access
+// token (5 min), the refresh token (TTL from Redis config) and the device id
+// (refresh TTL).
 func emitAuthCookiesNoBody(w http.ResponseWriter, r *http.Request, ctx context.Context, userUUID string) error {
 	refreshTokenTTLDuration := registry.UserRefreshToken.TTL
 
@@ -1019,51 +1020,12 @@ func emitAuthCookiesNoBody(w http.ResponseWriter, r *http.Request, ctx context.C
 		return fmt.Errorf("failed to start session: %w", err)
 	}
 
-	feDomain := getFrontendCookieDomain()
-	secure, sameSite := getCookieSecureAndSameSite()
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     "Authorization",
-		Value:    authTokenString,
-		Expires:  authCookieExpiryTime,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Domain:   feDomain,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     "RefreshToken",
-		Value:    refreshTokenString,
-		Expires:  refreshExpiryTime,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Domain:   feDomain,
-	})
-	http.SetCookie(w, &http.Cookie{
-		Name:     "DeviceId",
-		Value:    deviceId,
-		Expires:  refreshExpiryTime,
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   secure,
-		SameSite: sameSite,
-		Domain:   feDomain,
+	authcookie.SetSession(w, r, authcookie.Session{
+		Access: authTokenString, AccessExpires: authCookieExpiryTime,
+		Refresh: refreshTokenString, RefreshExpires: refreshExpiryTime,
+		Device: deviceId,
 	})
 	return nil
-}
-
-// getFrontendCookieDomain delegates to the canonical authcookie helper so
-// all cookie-construction code uses the same domain-resolution logic.
-func getFrontendCookieDomain() string {
-	return authcookie.FrontendDomain()
-}
-
-// getCookieSecureAndSameSite delegates to the canonical authcookie helper.
-func getCookieSecureAndSameSite() (secure bool, sameSite http.SameSite) {
-	return authcookie.SecureAndSameSite()
 }
 
 func generateSecureToken(length int) (string, error) {
@@ -1276,10 +1238,7 @@ func ChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 	// Every other device is signed out; this one, where the password was
 	// changed, stays signed in.
-	keep := ""
-	if dc, err := r.Cookie("DeviceId"); err == nil {
-		keep = dc.Value
-	}
+	keep := authcookie.DeviceID(r)
 	if err := business.EndOtherSessions(ctx, userID.String(), keep); err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/ChangePassword Failed to end other sessions err: %+v", err)
 	}
@@ -1400,16 +1359,18 @@ func UpdateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": oauth.GetOAuthConfigStatus()})
 }
 
-// GetCollabToken returns the Authorization JWT as JSON so the FE can
+// GetCollabToken returns the session's access token as JSON so the FE can
 // pass it to the WebSocket collaboration service. The cookie is HttpOnly
-// and invisible to document.cookie, so the FE must fetch it via API.
+// and invisible to document.cookie, so the FE must fetch it via API. It is
+// the token the middleware in front of it checked (authcookie.AccessToken):
+// this server's own, never another workspace's sent along on a shared zone.
 //
 // Rate-limited to 15 req/min per IP to prevent brute-force token extraction.
 // The token has a 5-min TTL; the FE's onAuthenticationFailed handler
 // re-fetches a fresh token on expiry.
 func GetCollabToken(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie("Authorization")
-	if err != nil || cookie == nil || cookie.Value == "" {
+	token := authcookie.AccessToken(r)
+	if token == "" {
 		helpers.WriteJSON(w, http.StatusUnauthorized, helpers.Envolope{
 			"msg":    "no authorization cookie",
 			"status": "error",
@@ -1418,6 +1379,15 @@ func GetCollabToken(w http.ResponseWriter, r *http.Request) {
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"status": "success",
-		"token":  cookie.Value,
+		"token":  token,
 	})
+}
+
+// CSRFToken answers GET /auth/csrf with nothing: the CSRF middleware in front
+// of it has put the token in force in the X-CSRF-Token header. The web app
+// asks when it must write before it has read anything (its reads carry the
+// token too).
+func CSRFToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusNoContent)
 }

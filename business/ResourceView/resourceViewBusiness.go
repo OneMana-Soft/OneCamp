@@ -21,6 +21,10 @@ import (
 const (
 	ResourceDoc   = viewModels.ResourceDoc
 	ResourceBoard = viewModels.ResourceBoard
+	// ResourceBoardElements keys a board's cached count of the elements a
+	// person sees (its last save's snippet), beside its cached size: the
+	// mass-deletion check reads both without the prior state (W-0b).
+	ResourceBoardElements = "board_elements"
 )
 
 // ViewerInfo is a resolved viewer for the UI: identity (embedded, so its JSON

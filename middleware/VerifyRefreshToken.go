@@ -6,6 +6,7 @@ import (
 
 	domain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/authcookie"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
@@ -18,19 +19,11 @@ func VerifyRefreshToken(next http.Handler) http.Handler {
 			return
 		}
 		ctx := r.Context()
-		tsc, err := r.Cookie("RefreshToken")
-		if err != nil {
-			if err == http.ErrNoCookie {
-				// If the cookie is not set, return an unauthorized status
-				w.WriteHeader(http.StatusUnauthorized)
-				return
-			}
-			// For any other type of error, return a bad request status
-			w.WriteHeader(http.StatusBadRequest)
+		tokenString := authcookie.RefreshToken(r)
+		if tokenString == "" {
+			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-
-		tokenString := tsc.Value
 		userUUID, err := helpers.ParseSessionToken(tokenString, helpers.TokenTypeRefresh)
 		if err != nil {
 			w.WriteHeader(http.StatusUnauthorized)

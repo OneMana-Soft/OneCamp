@@ -25,3 +25,20 @@ func TestTheWebAppCanReadRetryAfter(t *testing.T) {
 		t.Errorf("exposed %q, want Retry-After (and Link)", rec.Header().Get("Access-Control-Expose-Headers"))
 	}
 }
+
+// The web app reads its CSRF token from the X-CSRF-Token header of the API's
+// answers (the cookie that holds it is the API host's own and HttpOnly), so
+// CORS must expose it.
+func TestTheWebAppCanReadItsCSRFToken(t *testing.T) {
+	const app = "https://acme.onemana.dev"
+	h := corsFor([]string{app})(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-CSRF-Token", "token")
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/user/profile", nil)
+	req.Header.Set("Origin", app)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if exposed := strings.ToLower(rec.Header().Get("Access-Control-Expose-Headers")); !strings.Contains(exposed, "x-csrf-token") {
+		t.Errorf("exposed %q, want X-CSRF-Token", rec.Header().Get("Access-Control-Expose-Headers"))
+	}
+}

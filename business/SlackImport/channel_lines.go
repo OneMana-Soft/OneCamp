@@ -70,7 +70,7 @@ var writeImportedLine = conversationBusiness.WriteChannelEventLine
 func importChannelLine(ctx context.Context, mc *messageContext, m *SlackMessage, importingUser *userModels.UserInfo) error {
 	kind, actorID, subjectID, data, ok := channelLineEvent(m)
 	if !ok {
-		return importModels.UpsertIdMapping(ctx, mc.importId, importModels.EntityMessage, m.Ts,
+		return mc.maps.placeholder(ctx, importModels.EntityMessage, m.Ts,
 			uuid.New(), nil, mustMarshal(map[string]interface{}{"line": m.Subtype, "said": false}))
 	}
 	actor, err := mc.resolveUser(ctx, actorID, importingUser)
@@ -95,7 +95,7 @@ func importChannelLine(ctx context.Context, mc *messageContext, m *SlackMessage,
 	}
 	meta := mustMarshal(map[string]interface{}{"channel_slack_id": mc.channelSlackId, "line": string(kind), "said": shown})
 	if !shown {
-		return importModels.UpsertIdMapping(ctx, mc.importId, importModels.EntityMessage, m.Ts, uuid.New(), nil, meta)
+		return mc.maps.placeholder(ctx, importModels.EntityMessage, m.Ts, uuid.New(), nil, meta)
 	}
 	id, err := uuid.Parse(line)
 	if err != nil {

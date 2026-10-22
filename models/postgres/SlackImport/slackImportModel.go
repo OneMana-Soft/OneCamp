@@ -14,6 +14,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	jobs "github.com/akashc777/OneCamp/models/postgres/Import"
 	"github.com/google/uuid"
 )
@@ -984,3 +985,82 @@ func GetIdMapMetadata(ctx context.Context, importId uuid.UUID, entityType, slack
 
 // (DM/MPIM chunk types are declared at the top of this file alongside
 // the channel chunk types: ChunkDMMessages.)
+
+// UncheckedImport is a finished Slack import whose replies the repair of
+// misfiled replies hasn't checked yet: its id, its workspace's label and its
+// export, if it is still kept.
+type UncheckedImport struct {
+	Id           uuid.UUID
+	Workspace    string
+	RawObjectKey *string
+}
+
+// UncheckedImports is the unchecked imports, oldest first, at most limit
+// (business/SlackImport repair.go).
+func UncheckedImports(ctx context.Context, limit int) ([]UncheckedImport, error) {
+	return pgexec.Query(ctx, `SELECT id, source_workspace_name, raw_object_key FROM import_jobs
+		WHERE provider = 'slack' AND replies_checked_at IS NULL
+		  AND status IN ('completed', 'failed', 'cancelled', 'rolled_back')
+		ORDER BY created_at
+		LIMIT $1`, func(r pgexec.Row) (UncheckedImport, error) {
+		var x UncheckedImport
+		return x, r.Scan(&x.Id, &x.Workspace, &x.RawObjectKey)
+	}, limit)
+}
+
+// MarkRepliesChecked records that the repair has checked an import's replies:
+// its export may go now.
+func MarkRepliesChecked(ctx context.Context, jobId uuid.UUID) error {
+	_, err := pgexec.Exec(ctx, `UPDATE import_jobs SET replies_checked_at = NOW() WHERE id = $1`, jobId)
+	return err
+}
+
+// ReplyRow is a reply an import made: its key ("<conversation>/<ts>", or a
+// bare ts written before keys named the conversation) and what it became.
+type ReplyRow struct {
+	Key     string
+	Comment uuid.UUID
+}
+
+// RepliesMade is every reply the import made (not one it found an earlier
+// import had made).
+func RepliesMade(ctx context.Context, importId uuid.UUID) ([]ReplyRow, error) {
+	return pgexec.Query(ctx, `SELECT source_id, onecamp_uuid FROM import_id_map
+		WHERE import_id = $1 AND entity_type = 'comment' AND created_by_this_import`,
+		func(r pgexec.Row) (ReplyRow, error) {
+			var x ReplyRow
+			return x, r.Scan(&x.Key, &x.Comment)
+		}, importId)
+}
+
+// ForgetMapped drops every mapping, the import's and the workspace's, to what
+// became onecampUUID, so an import of the same export finds it missing and
+// brings it again.
+func ForgetMapped(ctx context.Context, importId uuid.UUID, entityType string, onecampUUID uuid.UUID) error {
+	if _, err := pgexec.Exec(ctx, `DELETE FROM import_id_map WHERE import_id = $1 AND entity_type = $2 AND onecamp_uuid = $3`,
+		importId, entityType, onecampUUID); err != nil {
+		return err
+	}
+	_, err := pgexec.Exec(ctx, `DELETE FROM import_workspace_id_map WHERE provider = 'slack' AND entity_type = $1 AND onecamp_uuid = $2`,
+		entityType, onecampUUID)
+	return err
+}
+
+// MessageAt is the one live message a conversation holds at at, an imported
+// message being written at its Slack time: a channel's post (place is its
+// uuid) or a DM's or group's chat (place is its grouping id). uuid.Nil for
+// none, or for more than one.
+func MessageAt(ctx context.Context, place string, channel bool, at time.Time) (uuid.UUID, error) {
+	q := `SELECT id FROM chats WHERE grp_id = $1 AND created_at = $2 AND deleted_at IS NULL LIMIT 2`
+	if channel {
+		q = `SELECT id FROM posts WHERE post_channel = $1::uuid AND created_at = $2 AND deleted_at IS NULL LIMIT 2`
+	}
+	ids, err := pgexec.Query(ctx, q, func(r pgexec.Row) (uuid.UUID, error) {
+		var id uuid.UUID
+		return id, r.Scan(&id)
+	}, place, at)
+	if err != nil || len(ids) != 1 {
+		return uuid.Nil, err
+	}
+	return ids[0], nil
+}

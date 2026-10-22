@@ -44,13 +44,21 @@ export async function persistBoard({ id, document, post, contributors = async ()
     // clobbering content on transient connections. The canvas stores elements
     // in a Y.Map keyed by element id (see BoardCanvas).
     const elements = document.getMap('elements')
-    const elementCount = elements ? elements.size : 0
-    if (elementCount === 0 && stateB64.length < 40) {
+    if ((elements ? elements.size : 0) === 0 && stateB64.length < 40) {
         log.log(`[Collab] Board ${id} is empty, skipping save`)
         return 'skipped'
     }
 
+    // The snippet counts what a person sees: a deleted element stays in the
+    // map, marked, until it is pruned. The backend keeps a version from before
+    // a sharp drop in this count (business/Board/boardSnapshot.go): an undo
+    // that took everything back left the count of all keys where it was.
+    let visible = 0
+    elements?.forEach((val) => {
+        if (val && val.isDeleted !== true) visible++
+    })
+
     log.log(`[Collab] Saving board ${id} to backend...`)
-    await post({ documentId: id, state: stateB64, snippet: `${elementCount} elements`, contributors: await contributors() })
+    await post({ documentId: id, state: stateB64, snippet: `${visible} elements`, contributors: await contributors() })
     return 'saved'
 }

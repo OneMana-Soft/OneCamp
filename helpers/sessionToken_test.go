@@ -84,3 +84,34 @@ func TestASessionTokenIsTheKindItSaysAndNothingElseIs(t *testing.T) {
 		t.Error("an unsigned token was accepted")
 	}
 }
+
+// Whether a session cookie is this server's own, as opposed to another
+// workspace's that the browser sends along (all of a zone's workspaces wrote
+// their cookies on the zone before 21 Oct 2026). It asks only who signed it:
+// an expired token of ours is still ours to expire.
+func TestASessionTokenSignedHereIsKnownByItsKeyAlone(t *testing.T) {
+	secret := "test-secret-with-enough-entropy-0123456789"
+	t.Setenv("JWT_SECRET", secret)
+	user := uuid.New().String()
+	ago := time.Now().Add(-time.Hour).Unix()
+	for name, tc := range map[string]struct {
+		token string
+		ours  bool
+	}{
+		"an access token":     {signClaims(t, secret, jwt.MapClaims{"sub": user, "exp": time.Now().Add(time.Minute).Unix(), "typ": TokenTypeAccess}), true},
+		"an expired one":      {signClaims(t, secret, jwt.MapClaims{"sub": user, "exp": ago, "typ": TokenTypeRefresh}), true},
+		"one from before typ": {signClaims(t, secret, jwt.MapClaims{"sub": user, "exp": ago}), true},
+		"another server's":    {signClaims(t, "another-workspace-secret", jwt.MapClaims{"sub": user, "exp": time.Now().Add(time.Minute).Unix(), "typ": TokenTypeAccess}), false},
+		"not a token":         {"device-1", false},
+		"empty":               {"", false},
+		"unsigned (alg none)": {"eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiJ4In0.", false},
+	} {
+		if got := SessionTokenSignedHere(tc.token); got != tc.ours {
+			t.Errorf("%s: signed here = %v, want %v", name, got, tc.ours)
+		}
+	}
+	t.Setenv("JWT_SECRET", "")
+	if SessionTokenSignedHere(signClaims(t, secret, jwt.MapClaims{"sub": user, "exp": ago})) {
+		t.Error("with no key configured, a token was taken as ours")
+	}
+}

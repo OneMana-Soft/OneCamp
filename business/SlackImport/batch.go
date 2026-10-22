@@ -56,10 +56,14 @@ func iterBatches(ctx context.Context, arc *Archive, zf *zip.File, resumeCursor s
 }
 
 // messageMaps holds the mappings a chunk's current batch needs. A map is
-// nil when its batch read failed, and each mapping is then read alone.
+// nil when its batch read failed, and each mapping is then read alone. Its
+// messages are known by their conversation and their ts (messageKey): the
+// methods take a ts and key it with the chunk's conversation.
 type messageMaps struct {
 	importId      uuid.UUID
 	workspaceName string
+	// conv is the Slack conversation the chunk's messages are in.
+	conv string
 
 	ownType                 string
 	own, workspace, parents map[string]uuid.UUID
@@ -69,8 +73,21 @@ type messageMaps struct {
 	userIds map[string]uuid.UUID
 }
 
-func newMessageMaps(importId uuid.UUID, workspaceName string) *messageMaps {
-	return &messageMaps{importId: importId, workspaceName: workspaceName, userIds: make(map[string]uuid.UUID, 32)}
+func newMessageMaps(importId uuid.UUID, workspaceName, conv string) *messageMaps {
+	return &messageMaps{importId: importId, workspaceName: workspaceName, conv: conv, userIds: make(map[string]uuid.UUID, 32)}
+}
+
+// key is the map key of the message at ts in the chunk's conversation.
+func (mm *messageMaps) key(ts string) string { return messageKey(mm.conv, ts) }
+
+// parentKey is the key of the message a reply's thread_ts names, in the
+// chunk's conversation, for the reply's mapping row.
+func (mm *messageMaps) parentKey(threadTs *string) *string {
+	if threadTs == nil {
+		return nil
+	}
+	k := mm.key(*threadTs)
+	return &k
 }
 
 // prefetch reads, for a batch made as entityType, this import's mappings,
@@ -80,9 +97,9 @@ func (mm *messageMaps) prefetch(ctx context.Context, entityType string, batch []
 	ts := make([]string, 0, len(batch))
 	var threads, authors []string
 	for _, m := range batch {
-		ts = append(ts, m.Ts)
+		ts = append(ts, mm.key(m.Ts))
 		if m.ThreadTs != "" && m.ThreadTs != m.Ts {
-			threads = append(threads, m.ThreadTs)
+			threads = append(threads, mm.key(m.ThreadTs))
 		}
 		if _, known := mm.userIds[m.User]; m.User != "" && !known {
 			mm.userIds[m.User] = uuid.Nil // asked once, below
@@ -118,37 +135,40 @@ func (mm *messageMaps) prefetch(ctx context.Context, entityType string, batch []
 	}
 }
 
-// ownMapping is what this import made for a message, or uuid.Nil.
+// ownMapping is what this import made for the message at ts, or uuid.Nil.
 func (mm *messageMaps) ownMapping(ctx context.Context, entityType, ts string) uuid.UUID {
+	key := mm.key(ts)
 	if mm.own != nil && mm.ownType == entityType {
-		return mm.own[ts]
+		return mm.own[key]
 	}
-	id, _ := importModels.LookupIdMapping(ctx, mm.importId, entityType, ts)
+	id, _ := importModels.LookupIdMapping(ctx, mm.importId, entityType, key)
 	return id
 }
 
-// workspaceMapping is what an earlier import of the workspace made for a message.
+// workspaceMapping is what an earlier import of the workspace made for the message at ts.
 func (mm *messageMaps) workspaceMapping(ctx context.Context, entityType, ts string) uuid.UUID {
+	key := mm.key(ts)
 	if mm.workspace != nil && mm.ownType == entityType {
-		return mm.workspace[ts]
+		return mm.workspace[key]
 	}
-	id, _ := importModels.LookupWorkspaceMapping(ctx, mm.workspaceName, entityType, ts)
+	id, _ := importModels.LookupWorkspaceMapping(ctx, mm.workspaceName, entityType, key)
 	return id
 }
 
 // parentMapping is the message a thread reply answers, or uuid.Nil.
 func (mm *messageMaps) parentMapping(ctx context.Context, threadTs string) (uuid.UUID, error) {
+	key := mm.key(threadTs)
 	if mm.parents != nil {
-		if id, ok := mm.parents[threadTs]; ok {
+		if id, ok := mm.parents[key]; ok {
 			return id, nil
 		}
 		if mm.ownType == importModels.EntityMessage && mm.own != nil {
-			if id, ok := mm.own[threadTs]; ok {
+			if id, ok := mm.own[key]; ok {
 				return id, nil // made earlier in this batch
 			}
 		}
 	}
-	return importModels.LookupIdMapping(ctx, mm.importId, importModels.EntityMessage, threadTs)
+	return importModels.LookupIdMapping(ctx, mm.importId, importModels.EntityMessage, key)
 }
 
 // userId is the OneCamp person a Slack user came across as, or uuid.Nil.
@@ -190,14 +210,41 @@ func (mm *messageMaps) userIdsOf(ctx context.Context, slackIds []string) (map[st
 	return out, nil
 }
 
-// recordCreated records a message this import made, in its map and the
-// workspace's (one statement), and remembers it for the rest of the batch.
-func (mm *messageMaps) recordCreated(ctx context.Context, entityType, ts string, id uuid.UUID, parent *string, metadata json.RawMessage) error {
-	if err := importModels.RecordCreated(ctx, mm.importId, entityType, ts, id, parent, metadata, mm.workspaceName); err != nil {
+// recordCreated records the message at ts this import made (a reply's
+// parent named by its thread_ts), in its map and the workspace's (one
+// statement), and remembers it for the rest of the batch.
+func (mm *messageMaps) recordCreated(ctx context.Context, entityType, ts string, id uuid.UUID, parentTs *string, metadata json.RawMessage) error {
+	key := mm.key(ts)
+	if err := importModels.RecordCreated(ctx, mm.importId, entityType, key, id, mm.parentKey(parentTs), metadata, mm.workspaceName); err != nil {
 		return err
 	}
 	if mm.own != nil && mm.ownType == entityType {
-		mm.own[ts] = id
+		mm.own[key] = id
 	}
 	return nil
+}
+
+// find is what this import, or an earlier import of the workspace, made for
+// the message at ts, read now (an edit or a deletion names a message of any
+// batch), or uuid.Nil.
+func (mm *messageMaps) find(ctx context.Context, entityType, ts string) uuid.UUID {
+	key := mm.key(ts)
+	id, _ := importModels.LookupIdMapping(ctx, mm.importId, entityType, key)
+	if id == uuid.Nil && mm.workspaceName != "" {
+		id, _ = importModels.LookupWorkspaceMapping(ctx, mm.workspaceName, entityType, key)
+	}
+	return id
+}
+
+// placeholder maps the message at ts, for this import alone, to an id it
+// made nothing for (an empty reply, a message that failed), so a retry
+// passes it by. A mapping already there stays.
+func (mm *messageMaps) placeholder(ctx context.Context, entityType, ts string, id uuid.UUID, parentTs *string, metadata json.RawMessage) error {
+	return importModels.UpsertIdMapping(ctx, mm.importId, entityType, mm.key(ts), id, mm.parentKey(parentTs), metadata)
+}
+
+// matched maps the message at ts, for this import, to what an earlier import
+// of the workspace made for it: not this import's to roll back.
+func (mm *messageMaps) matched(ctx context.Context, entityType, ts string, id uuid.UUID, metadata json.RawMessage) error {
+	return importModels.UpsertIdMappingWithOwnership(ctx, mm.importId, entityType, mm.key(ts), id, nil, metadata, false)
 }

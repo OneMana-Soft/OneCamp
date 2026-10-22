@@ -329,7 +329,7 @@ func loadDMContext(ctx context.Context, chunk *importModels.Chunk, workspaceName
 		isMPIM:        meta.IsMPIM,
 		userCache:     make(map[string]*userModels.UserInfo, 8),
 		enqueuedFiles: make(map[string]struct{}, 16),
-		maps:          newMessageMaps(chunk.ImportId, workspaceName),
+		maps:          newMessageMaps(chunk.ImportId, workspaceName, slackId),
 	}
 
 	// A group's node is written with its people by its first message

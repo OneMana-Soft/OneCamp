@@ -51,7 +51,8 @@ func applyPins(ctx context.Context, importID, chunkID uuid.UUID, parsed *ParsedE
 	}
 	var channelIDs, messageIDs, userIDs []string
 	for _, l := range listed {
-		channelIDs, messageIDs, userIDs = append(channelIDs, l.channel), append(messageIDs, l.pin.ID), append(userIDs, l.pin.User)
+		// A pinned message is known by its channel and its ts (msgkey.go).
+		channelIDs, messageIDs, userIDs = append(channelIDs, l.channel), append(messageIDs, messageKey(l.channel, l.pin.ID)), append(userIDs, l.pin.User)
 	}
 	channels, err := lookupMappedMany(ctx, importID, importModels.EntityChannel, unique(channelIDs))
 	if err == nil {
@@ -83,7 +84,7 @@ func pinListed(ctx context.Context, importID, chunkID uuid.UUID, listed []listed
 	var pins []pinBusiness.ImportedPin
 	var from []listedPin
 	for _, l := range listed {
-		channel, message, by := channels[l.channel], messages[l.pin.ID], people[l.pin.User]
+		channel, message, by := channels[l.channel], messages[messageKey(l.channel, l.pin.ID)], people[l.pin.User]
 		switch {
 		case channel == uuid.Nil:
 			skipped++ // the channel's own skip is noted where it was skipped
