@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 
+	adminAuditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	scimBusiness "github.com/akashc777/OneCamp/business/Scim"
 	"github.com/akashc777/OneCamp/helpers"
 	scimModel "github.com/akashc777/OneCamp/models/postgres/Scim"
@@ -52,6 +53,9 @@ func CreateScimTokenHandler(w http.ResponseWriter, r *http.Request) {
 
 	helpers.LogInfoWithContext(ctx, "controllers/CreateScimTokenHandler admin %s created SCIM credential %s",
 		userInfo.UserPostgresInfo.Id, created.Token.Id)
+	adminAuditBusiness.Record(r, "scim_token.create", adminAuditBusiness.CategorySecurity,
+		"Made a directory (SCIM) credential, which can add people and switch accounts off",
+		map[string]interface{}{"scim_token_id": created.Token.Id.String(), "name": created.Token.Name})
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"status": "success",
@@ -113,6 +117,8 @@ func RevokeScimTokenHandler(w http.ResponseWriter, r *http.Request) {
 
 	helpers.LogInfoWithContext(ctx, "controllers/RevokeScimTokenHandler admin %s revoked SCIM credential %s",
 		userInfo.UserPostgresInfo.Id, tokenID)
+	adminAuditBusiness.Record(r, "scim_token.revoke", adminAuditBusiness.CategorySecurity,
+		"Revoked a directory (SCIM) credential", map[string]interface{}{"scim_token_id": tokenID.String()})
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"status": "success",

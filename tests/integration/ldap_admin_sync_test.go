@@ -79,9 +79,15 @@ func TestDirectoryAdminFollowsItsGroups(t *testing.T) {
 	if !isAdmin() {
 		t.Fatal("in the directory's admin group: an admin")
 	}
+	// Each change the directory makes is in the admin audit log (audit C2b),
+	// as the workspace acting on its own.
+	if kinds := audited(t, env.PG, "admin.granted", 1); kinds[0] != "system" {
+		t.Errorf("the grant was written as %q, want the system", kinds[0])
+	}
 	groups = nil
 	signIn()
 	if isAdmin() {
 		t.Fatal("taken out of the directory's admin group, and still an admin")
 	}
+	audited(t, env.PG, "admin.revoked", 1)
 }

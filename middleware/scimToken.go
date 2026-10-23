@@ -21,15 +21,22 @@ import (
 	scimBusiness "github.com/akashc777/OneCamp/business/Scim"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/services"
+	"github.com/google/uuid"
 )
 
-// scimTokenIDKey carries the authenticated credential's id for logging.
+// scimTokenIDKey carries the authenticated credential for logging and the audit log: its id, and the
+// admin who made it.
 //
 // Its own unexported type so it cannot collide with another package's context key — the documented
 // hazard of using a bare string.
 type scimTokenIDKeyType struct{}
 
 var scimTokenIDKey = scimTokenIDKeyType{}
+
+type scimCredential struct {
+	id        string
+	createdBy *uuid.UUID
+}
 
 // VerifyScimToken authenticates a SCIM request by bearer credential.
 //
@@ -74,7 +81,7 @@ func VerifyScimToken(next http.Handler) http.Handler {
 		// written. Using r.Context() here would make the update lose a race with the client disconnecting.
 		go scimBusiness.TouchScimToken(context.WithoutCancel(ctx), row.Id)
 
-		ctx = context.WithValue(ctx, scimTokenIDKey, row.Id.String())
+		ctx = context.WithValue(ctx, scimTokenIDKey, scimCredential{id: row.Id.String(), createdBy: row.CreatedBy})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -85,8 +92,16 @@ func VerifyScimToken(next http.Handler) http.Handler {
 // user to attribute it to, which is the point of the surface, so the credential is the only actor there
 // is to name in a log.
 func ScimTokenIDFromContext(ctx context.Context) string {
-	id, _ := ctx.Value(scimTokenIDKey).(string)
-	return id
+	c, _ := ctx.Value(scimTokenIDKey).(scimCredential)
+	return c.id
+}
+
+// ScimTokenCreatorFromContext returns the admin who made the authenticated credential, or nil when
+// the credential records none: the person accountable for what the directory does through it, whom
+// the admin audit log names beside the credential.
+func ScimTokenCreatorFromContext(ctx context.Context) *uuid.UUID {
+	c, _ := ctx.Value(scimTokenIDKey).(scimCredential)
+	return c.createdBy
 }
 
 // scimUnauthorized answers 401 with a WWW-Authenticate challenge.
