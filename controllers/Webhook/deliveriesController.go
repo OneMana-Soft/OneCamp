@@ -127,8 +127,8 @@ func HandlePauseWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleResumeWebhook is POST /webhooks/{webhookId}/resume: its waiting
-// deliveries go now. An admin who resumes a webhook whose creator left takes
-// it over.
+// deliveries go now. An admin who resumes a webhook whose creator left, or
+// can't read what it's set up for, takes it over if they can read it.
 func HandleResumeWebhook(w http.ResponseWriter, r *http.Request) {
 	id, ok := webhookIDOf(w, r)
 	if !ok {
@@ -141,13 +141,17 @@ func HandleResumeWebhook(w http.ResponseWriter, r *http.Request) {
 			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such webhook; it may have been removed."})
 			return
 		}
+		if errors.Is(err, hooksBusiness.ErrCantTakeOver) {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Its creator can't send it any more, and you can't read the channel or project it's set up for either, so you can't take it over. Someone who can may resume it."})
+			return
+		}
 		helpers.LogErrorWithContext(r.Context(), "controllers/HandleResumeWebhook: %+v", err)
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't resume it. Try again in a moment."})
 		return
 	}
 	summary, msg := "Resumed a webhook", "Resumed. What was waiting is on its way."
 	if tookOver {
-		summary, msg = "Resumed a webhook and took it over from a former member", "Resumed, and it's yours now: its creator is no longer a member. What was waiting is on its way."
+		summary, msg = "Resumed a webhook and took it over", "Resumed, and it's yours now: its creator couldn't send it any more. It sends only what you can read."
 	}
 	auditBusiness.Record(r, "webhook.resumed", auditBusiness.CategoryIntegration, summary,
 		map[string]interface{}{"webhook_id": id.String(), "took_over": tookOver})

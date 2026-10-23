@@ -49,6 +49,7 @@ import (
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	redisInit "github.com/akashc777/OneCamp/initializers/redis"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
+	linkSecretModel "github.com/akashc777/OneCamp/models/postgres/LinkSecret"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	emailService "github.com/akashc777/OneCamp/services/Email"
 	saml "github.com/akashc777/OneCamp/services/SAML"
@@ -607,6 +608,10 @@ func main() {
 	// A request needs the command catalog and the bot identity exactly as much
 	// as a worker does. They are seeds, not loops: each is idempotent and takes
 	// its state from the store.
+	// Links an older server kept in the clear, or wrote after the migrations
+	// ran and before this one started, leave the clear before any request
+	// looks one up by its hash. Idempotent.
+	linkSecretModel.HashLeftInClearAtStart(ctx)
 	// Wire the application context for the command framework's async paths
 	// (deferred reminders, external app callbacks) and seed the built-in
 	// slash command catalog so the composer typeahead has commands to show.

@@ -20,7 +20,7 @@ var reorderSeams = struct {
 	neighbours func(ctx context.Context, ids []string) ([]*dgraphStruct.DgraphTask, error)
 	project    func(ctx context.Context, projectUUID string) ([]*dgraphStruct.DgraphTask, error)
 	write      func(ctx context.Context, ts []*dgraphStruct.DgraphTask) error
-	publish    func(m *mqttStruct.MqttTaskChanged)
+	publish    func(ctx context.Context, m *mqttStruct.MqttTaskChanged)
 }{
 	neighbours: domain.GetDgraphTaskRanks,
 	project:    domain.GetDgraphProjectRanks,
@@ -32,7 +32,9 @@ var reorderSeams = struct {
 // the tasks named beforeUUID (above them) and afterUUID (below them); either
 // may be empty at an end. The caller has checked the person may change them.
 // One read of the neighbours and one write; with no room in the gap the
-// project's tasks are renumbered, in the same write.
+// project's tasks are renumbered, in the same write. The project is told that
+// the first moved task changed, and nothing more: its topic reaches every
+// member, and a renumbering's ranks would name every task.
 func Reorder(ctx context.Context, projectUUID string, moved []*dgraphStruct.DgraphTask, beforeUUID, afterUUID string) error {
 	if len(moved) == 0 {
 		return nil
@@ -80,10 +82,6 @@ func Reorder(ctx context.Context, projectUUID string, moved []*dgraphStruct.Dgra
 	if err := reorderSeams.write(ctx, writes); err != nil {
 		return err
 	}
-	ranks := make(map[string]float64, len(writes))
-	for _, w := range writes {
-		ranks[w.Uuid] = *w.Rank
-	}
-	reorderSeams.publish(&mqttStruct.MqttTaskChanged{TaskUuid: moved[0].Uuid, ProjectUuid: projectUUID, Ranks: ranks})
+	reorderSeams.publish(ctx, &mqttStruct.MqttTaskChanged{TaskUuid: moved[0].Uuid, ProjectUuid: projectUUID})
 	return nil
 }

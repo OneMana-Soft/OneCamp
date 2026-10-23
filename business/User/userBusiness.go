@@ -1890,7 +1890,7 @@ func CreateUserWithMethod(
 	return userUUID, handle, nil
 }
 
-// AddInvitationWithToken invites email with a new link, from invitedBy.
+// AddInvitationWithLink invites email with a new link, from invitedBy.
 //
 // An admin is told why an address can't be invited (InviteRefusal): it has an
 // account here (live or deactivated), or a live invitation, whose link can be
@@ -1903,7 +1903,7 @@ func CreateUserWithMethod(
 // the same refusal (memberInviteRefusal), so inviting can't be used to learn
 // who has an account here, who has been deactivated, or who is invited; and
 // only an admin renews an invitation.
-func AddInvitationWithToken(ctx context.Context, email string, invitedBy uuid.UUID, byAdmin bool, token string, expiresAt time.Time) (renewed bool, err error) {
+func AddInvitationWithLink(ctx context.Context, email string, invitedBy uuid.UUID, byAdmin bool, link userModels.InvitationLink, expiresAt time.Time) (renewed bool, err error) {
 	email = helpers.NormalizeEmail(email)
 	if err = refuseInvitingMember(ctx, email); err != nil {
 		if _, refused := IsInviteRefusal(err); refused && !byAdmin {
@@ -1922,16 +1922,16 @@ func AddInvitationWithToken(ctx context.Context, email string, invitedBy uuid.UU
 		if existing.LiveAt(time.Now()) {
 			return false, &InviteRefusal{Msg: fmt.Sprintf("%s is already invited and the invitation hasn't been used. Copy its link or send it again from the list.", email)}
 		}
-		if err = domain.UpdateInvitationTokenByID(ctx, existing.Id, token, expiresAt, invitedBy); err != nil {
+		if err = domain.UpdateInvitationLinkByID(ctx, existing.Id, link, expiresAt, invitedBy); err != nil {
 			return false, errors.New("failed to add invitation")
 		}
 		return true, nil
 	}
 
-	err = domain.AddInvitationWithToken(ctx, email, invitedBy, token, expiresAt)
+	err = domain.AddInvitationWithLink(ctx, email, invitedBy, link, expiresAt)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"business/AddInvitationWithToken Failed to add invitation err: %+v", err)
+			"business/AddInvitationWithLink Failed to add invitation err: %+v", err)
 		return false, errors.New("failed to add invitation")
 	}
 	return false, nil

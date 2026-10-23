@@ -359,9 +359,10 @@ type MqttTaskDates struct {
 type MqttTaskChanged struct {
 	TaskUuid    string `json:"task_uuid"`
 	ProjectUuid string `json:"project_uuid"`
-	// Ranks are tasks' new places in the project's order (business/Task
-	// Reorder), by task uuid: a view re-sorts them in place.
-	Ranks map[string]float64 `json:"ranks,omitempty"`
+	// Reread says a task only a few may see changed, so the message names
+	// none (business/Mqtt publishToProject). Each view reads its own tasks
+	// again.
+	Reread bool `json:"reread,omitempty"`
 }
 
 // MqttProjectStatuses says which project's statuses changed: the app reads

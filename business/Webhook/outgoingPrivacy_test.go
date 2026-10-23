@@ -125,23 +125,24 @@ func TestIDsOnlyCarryNoWords(t *testing.T) {
 // The scope an admin chooses is checked before anything is written.
 func TestAWebhooksScopeIsChecked(t *testing.T) {
 	ctx := context.Background()
-	if scope, id, err := webhookScope(ctx, "incoming", ScopeChannel, &pubChannel); err != nil || scope != ScopeOrg || id != nil {
+	admin := uuid.New()
+	if scope, id, err := webhookScope(ctx, "incoming", ScopeChannel, &pubChannel, admin, admin); err != nil || scope != ScopeOrg || id != nil {
 		t.Errorf("an incoming webhook (sent no events) got %q %v %v", scope, id, err)
 	}
 	for _, s := range []string{"", ScopeOrg} {
-		if scope, id, err := webhookScope(ctx, "outgoing", s, &pubChannel); err != nil || scope != ScopeOrg || id != nil {
+		if scope, id, err := webhookScope(ctx, "outgoing", s, &pubChannel, admin, admin); err != nil || scope != ScopeOrg || id != nil {
 			t.Errorf("%q: got %q %v %v, want the workspace with no entity", s, scope, id, err)
 		}
 	}
 	for _, s := range []string{"dm", "group_chat", "everything"} {
-		if _, _, err := webhookScope(ctx, "outgoing", s, &pubChannel); err == nil {
+		if _, _, err := webhookScope(ctx, "outgoing", s, &pubChannel, admin, admin); err == nil {
 			t.Errorf("%q was taken", s)
 		}
 	}
 	nilID := uuid.Nil
 	for _, s := range []string{ScopeChannel, ScopeProject} {
 		for _, id := range []*uuid.UUID{nil, &nilID} {
-			_, _, err := webhookScope(ctx, "outgoing", s, id)
+			_, _, err := webhookScope(ctx, "outgoing", s, id, admin, admin)
 			if _, said := err.(ScopeError); !said {
 				t.Errorf("%s with no %s: %v, want the admin told to choose one", s, s, err)
 			}

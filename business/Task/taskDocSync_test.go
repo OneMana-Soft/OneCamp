@@ -54,7 +54,7 @@ func newWorld(t *testing.T) *world {
 		readTask = saved[6].(func(context.Context, string, string) (*dgraphStruct.DgraphTask, error))
 		writeStatus = saved[7].(func(context.Context, uuid.UUID, string, *dgraphStruct.DgraphTask, *dgraphStruct.DgraphUser) error)
 		makeTask = saved[8].(func(context.Context, uuid.UUID, *model.UserInfo, *dgraphStruct.DgraphProject, *dgraphStruct.DgraphUser, adapter.CreateOrUpdateTaskInput, []*dgraphStruct.DgraphUser) (uuid.UUID, error))
-		publishTaskChanged = saved[9].(func(*mqttStruct.MqttTaskChanged))
+		publishTaskChanged = saved[9].(func(context.Context, *mqttStruct.MqttTaskChanged))
 		untieDocTask = saved[10].(func(context.Context, uuid.UUID, uuid.UUID) error)
 	})
 	tieDocTask = func(_ context.Context, doc, task, _ uuid.UUID) error {
@@ -114,7 +114,7 @@ func newWorld(t *testing.T) *world {
 		w.made = &in
 		return syncTask, nil
 	}
-	publishTaskChanged = func(m *mqttStruct.MqttTaskChanged) { w.published = append(w.published, *m) }
+	publishTaskChanged = func(_ context.Context, m *mqttStruct.MqttTaskChanged) { w.published = append(w.published, *m) }
 	return w
 }
 
@@ -237,9 +237,9 @@ func TestAChangeAChipShowsIsToldOnTheTasksProject(t *testing.T) {
 // chip showed a renamed task's old name until the page was read again.
 func TestARenameIsToldOnTheTasksProject(t *testing.T) {
 	w := newWorld(t)
-	taskRenamed(syncTask, &dgraphStruct.DgraphProject{Uuid: syncProj.String()})
-	taskRenamed(syncTask, nil)
-	taskRenamed(syncTask, &dgraphStruct.DgraphProject{})
+	taskRenamed(context.Background(), syncTask, &dgraphStruct.DgraphProject{Uuid: syncProj.String()})
+	taskRenamed(context.Background(), syncTask, nil)
+	taskRenamed(context.Background(), syncTask, &dgraphStruct.DgraphProject{})
 	want := []mqttStruct.MqttTaskChanged{{TaskUuid: syncTask.String(), ProjectUuid: syncProj.String()}}
 	if !reflect.DeepEqual(w.published, want) {
 		t.Fatalf("published %+v, want %+v", w.published, want)

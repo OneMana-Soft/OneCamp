@@ -86,13 +86,22 @@ func IsSSOMethod(m string) bool {
 }
 
 type Invitation struct {
-	Id             uuid.UUID  `json:"id"`
-	Email          string     `json:"email"`
-	InvitedBy      uuid.UUID  `json:"invited_by"`
-	Status         string     `json:"status"`
-	Token          *string    `json:"token,omitempty"`
-	TokenExpiresAt *time.Time `json:"token_expires_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
+	Id             uuid.UUID      `json:"id"`
+	Email          string         `json:"email"`
+	InvitedBy      uuid.UUID      `json:"invited_by"`
+	Status         string         `json:"status"`
+	Link           InvitationLink `json:"-"`
+	TokenExpiresAt *time.Time     `json:"token_expires_at,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+}
+
+// InvitationLink is an invitation's link as it is kept: the hash it is found
+// by (helpers.LinkSecretHash), and the link sealed with the server's key, so
+// the admin's list can copy it. A link from before links were sealed has only
+// its hash; one from before invitations had links, neither.
+type InvitationLink struct {
+	Hash   []byte
+	Sealed string
 }
 
 type UserInfo struct {

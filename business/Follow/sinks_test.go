@@ -2,13 +2,11 @@ package business
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -119,7 +117,7 @@ func TestThirtySavesInAMinuteSendOneWebhook(t *testing.T) {
 	oldD, oldC, oldU, oldP := dispatchWebhook, clock, updates, docPeople
 	t.Cleanup(func() { dispatchWebhook, clock, updates, docPeople = oldD, oldC, oldU, oldP })
 	updates = &pendingUpdates{due: map[string]time.Time{}}
-	dispatchWebhook = func(_ context.Context, kind string, data map[string]interface{}, _ func(context.Context, uuid.UUID) bool) {
+	dispatchWebhook = func(_ context.Context, kind string, data map[string]interface{}) {
 		mu.Lock()
 		defer mu.Unlock()
 		sent = append(sent, kind+" "+data["doc_uuid"].(string))
@@ -169,56 +167,6 @@ func TestAWebhookNamesOnlyAnOpenDoc(t *testing.T) {
 		if !isWebhook(resourceEventBusiness.Event{Kind: k, ResourceKind: "doc"}) {
 			t.Errorf("%s is no webhook", k)
 		}
-	}
-}
-
-// ai-search-io.md P1-9: a doc's event reaches a webhook only when whoever set
-// the webhook up can open the doc (a doc in the trash: could, before), as the
-// Access Resolver decides for them; nobody who has left, and nobody else.
-func TestADocsEventReachesOnlyWebhooksWhoseOwnerCanOpenIt(t *testing.T) {
-	oldD, oldP, oldR, oldU := dispatchWebhook, docPeople, resolve, activeUser
-	t.Cleanup(func() { dispatchWebhook, docPeople, resolve, activeUser = oldD, oldP, oldR, oldU })
-	var mayKnow func(context.Context, uuid.UUID) bool
-	dispatchWebhook = func(_ context.Context, _ string, _ map[string]interface{}, may func(context.Context, uuid.UUID) bool) {
-		mayKnow = may
-	}
-	docPeople = func(context.Context, string) (*dgraphStruct.DgraphDoc, error) { return privateDoc(), nil }
-	reader, stranger, gone, trashReader := uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	activeUser = func(_ context.Context, id string) (*dgraphStruct.DgraphUser, error) {
-		if id == gone.String() {
-			return nil, errors.New("not an active user")
-		}
-		return &dgraphStruct.DgraphUser{Uid: "0x" + id[:4], Uuid: id}, nil
-	}
-	deleted := false
-	resolve = func(_ context.Context, who accessBusiness.Subject, res accessBusiness.Resource) (accessBusiness.Decision, error) {
-		if res.UUID != docID || who.UserUID != "0x"+who.UserUUID[:4] {
-			t.Errorf("asked about %+v for %+v", res, who)
-		}
-		level := accessBusiness.LevelNone
-		if who.UserUUID == reader.String() || who.UserUUID == trashReader.String() {
-			level = accessBusiness.LevelView
-		}
-		if deleted {
-			return accessBusiness.Decision{Deleted: true, Was: level}, nil
-		}
-		return accessBusiness.Decision{Level: level, Was: level}, nil
-	}
-
-	ctx := context.Background()
-	sendWebhook(ctx, resourceEventBusiness.Event{Kind: resourceEventBusiness.DocShared, ResourceKind: "doc", ResourceUUID: docID, At: noon})
-	if mayKnow == nil {
-		t.Fatal("the doc's event went out with no owner check")
-	}
-	for owner, want := range map[uuid.UUID]bool{reader: true, stranger: false, gone: false} {
-		if mayKnow(ctx, owner) != want {
-			t.Errorf("owner %s: may know = %v", owner, !want)
-		}
-	}
-	deleted = true
-	sendWebhook(ctx, resourceEventBusiness.Event{Kind: resourceEventBusiness.DocDeleted, ResourceKind: "doc", ResourceUUID: docID, At: noon})
-	if !mayKnow(ctx, trashReader) || mayKnow(ctx, stranger) {
-		t.Error("a doc in the trash: only someone who could open it hears it went")
 	}
 }
 

@@ -293,6 +293,10 @@ type Target struct {
 	Active    bool
 	Deleted   bool
 	PausedAt  *time.Time
+	// ScopeType and ScopeEntity are what it is set up for: "org" (the whole
+	// workspace, no entity), "channel" or "project", with its id.
+	ScopeType   string
+	ScopeEntity *uuid.UUID
 }
 
 // TargetOf reads a webhook as a try needs it; ok is false when it's gone.
@@ -300,17 +304,21 @@ func TargetOf(ctx context.Context, webhookID uuid.UUID) (Target, bool, error) {
 	cctx, cancel := timeout(ctx)
 	defer cancel()
 	var t Target
-	var url, secret sql.NullString
+	var url, secret, scopeType sql.NullString
+	var scopeEntity uuid.NullUUID
 	var deletedAt *time.Time
-	err := db().QueryRowContext(cctx, `SELECT target_url, secret, created_by, is_active, deleted_at, paused_at FROM webhooks WHERE id = $1`, webhookID).
-		Scan(&url, &secret, &t.CreatedBy, &t.Active, &deletedAt, &t.PausedAt)
+	err := db().QueryRowContext(cctx, `SELECT target_url, secret, created_by, is_active, deleted_at, paused_at, scope_type, scope_entity_id FROM webhooks WHERE id = $1`, webhookID).
+		Scan(&url, &secret, &t.CreatedBy, &t.Active, &deletedAt, &t.PausedAt, &scopeType, &scopeEntity)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Target{}, false, nil
 	}
 	if err != nil {
 		return Target{}, false, err
 	}
-	t.URL, t.Secret, t.Deleted = url.String, secret.String, deletedAt != nil
+	t.URL, t.Secret, t.Deleted, t.ScopeType = url.String, secret.String, deletedAt != nil, scopeType.String
+	if scopeEntity.Valid {
+		t.ScopeEntity = &scopeEntity.UUID
+	}
 	return t, true, nil
 }
 

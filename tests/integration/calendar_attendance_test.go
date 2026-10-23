@@ -155,9 +155,14 @@ func TestCalendarAttendanceOverHTTP(t *testing.T) {
 	maya := seedCalendarPerson(t, env.PG, dg, "Maya")
 	jonas := seedCalendarPerson(t, env.PG, dg, "Jonas")
 
+	// Tomorrow, from the clock: a nudge asks only about a meeting still to
+	// come, and a fixed day failed this test once that day's hour had passed.
+	day := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, 1)
+	at := func(hour int) string { return day.Add(time.Duration(hour) * time.Hour).Format(time.RFC3339) }
+
 	// Sam invites Maya, Jonas (by his address) and Alex (by email).
 	code, body := v2(t, eventController.CreateCalendarEvent, http.MethodPost, "/calendar/events", sam,
-		`{"title":"Design review","start":{"at":"2026-10-22T09:00:00Z","zone":"Europe/London"},"end":{"at":"2026-10-22T10:00:00Z"},`+
+		`{"title":"Design review","start":{"at":"`+at(9)+`","zone":"Europe/London"},"end":{"at":"`+at(10)+`"},`+
 			`"attendees":[{"user_uuid":"`+maya.UserDgraphInfo.Uuid+`"},{"email":"`+strings.ToUpper(jonas.UserPostgresInfo.EmailID)+`"},`+
 			`{"email":"Alex Kim <alex@example.org>"},{"email":"`+sam.UserPostgresInfo.EmailID+`"}]}`, "")
 	if code != http.StatusCreated {
@@ -183,7 +188,7 @@ func TestCalendarAttendanceOverHTTP(t *testing.T) {
 	}
 
 	// The legacy list carries everyone's answers too.
-	from, to := time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC), time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC)
+	from, to := day, day.AddDate(0, 0, 1)
 	listed, err := calendarBusiness.GetEventsList(ctx, sam, &from, &to)
 	if err != nil || len(listed) != 1 || len(listed[0].Guests) != 3 {
 		t.Fatalf("the legacy list: %+v %v", listed, err)

@@ -89,7 +89,10 @@ func CreateTasks(ctx context.Context, projectUUID uuid.UUID, user *model.UserInf
 		}
 	}
 	helpers.GoSafeNamed("Task.CreateTasks:tell", func() { tellOfNewTasks(project.Uuid, top, me) })
-	eventCtx := webhookBusiness.OfOpenTasks(context.WithoutCancel(ctx))
+	// Made outside any restricted task (a copy of one went one by one, above),
+	// so they are open: their events, and what those set going, read no
+	// restriction of theirs.
+	eventCtx := helpers.WithOpenTasks(context.WithoutCancel(ctx), ids...)
 	helpers.GoSafeNamed("Task.CreateTasks:events", func() {
 		for i, t := range tasks {
 			if t.Parent >= 0 {

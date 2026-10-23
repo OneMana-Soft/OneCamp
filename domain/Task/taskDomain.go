@@ -832,8 +832,17 @@ func GetDgraphTaskInfoByUUID(ctx context.Context, teamUUID string, userDgraphUID
 
 	variables := make(map[string]string)
 	variables["$id"] = teamUUID
-	variables["$userUid"] = userDgraphUID
-	query := `query TaskInfo($id: string, $userUid: string){
+	// The asker's standing in the project, which CanViewTask reads. A system
+	// read has nobody asking (userDgraphUID empty) and counts none: Dgraph
+	// refuses uid(""), which failed the read for every such caller.
+	params, standing := "$id: string", ""
+	if userDgraphUID != "" {
+		variables["$userUid"] = userDgraphUID
+		params += ", $userUid: string"
+		standing = `project_is_member: count(project_members @filter(uid($userUid)))
+						project_is_admin: count(project_admins @filter(uid($userUid)))`
+	}
+	query := `query TaskInfo(` + params + `){
 				taskInfo(func: eq(task_uuid, $id)) {
 					uid
 					task_uuid
@@ -868,8 +877,7 @@ func GetDgraphTaskInfoByUUID(ctx context.Context, teamUUID string, userDgraphUID
 						project_uuid
 						project_name
 						project_deleted_at
-						project_is_member: count(project_members @filter(uid($userUid)))
-						project_is_admin: count(project_admins @filter(uid($userUid)))
+						` + standing + `
 						project_members {
 							uid
 							user_uuid

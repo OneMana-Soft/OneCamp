@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+
+	appBusiness "github.com/akashc777/OneCamp/business/App"
 )
 
 // The public API's one shape (design/platform/API_CONTRACT.md §3.2): what
@@ -49,15 +51,20 @@ func TestRegisterRefusesARouteThatIsOpenOrAmbiguous(t *testing.T) {
 		"two ways to be scoped": {Method: "GET", Path: "/x", Scope: "a:read", AnyToken: true, Handler: ok},
 		"no handler":            {Method: "GET", Path: "/x", Scope: "a:read"},
 		"two handlers":          {Method: "GET", Path: "/x", Scope: "a:read", Handler: ok, Serve: func(context.Context, Request) (any, error) { return nil, nil }},
+		// How an app's token is held there: a route never opens to apps by
+		// being forgotten.
+		"no word on apps":    {Method: "GET", Path: "/x", Scope: "a:read", Handler: ok},
+		"two words on apps":  {Method: "GET", Path: "/x", Scope: "a:read", AppsInside: true, AppsRefused: "no", Handler: ok},
+		"a place and a word": {Method: "GET", Path: "/x", Scope: "a:read", Reach: func(*http.Request) (string, string) { return "", "" }, AppsInside: true, Handler: ok},
 	}
 	for name, rt := range cases {
 		if panics(func() { Register(Resource{Name: "x", Routes: []Route{rt}}) }) == "" {
 			t.Errorf("%s: registered", name)
 		}
 	}
-	Register(Resource{Name: "a", Routes: []Route{{Method: "GET", Path: "/a", Scope: "a:read", Handler: ok}}})
+	Register(Resource{Name: "a", Routes: []Route{{Method: "GET", Path: "/a", Scope: "a:read", AppsRefused: "no", Handler: ok}}})
 	if msg := panics(func() {
-		Register(Resource{Name: "b", Routes: []Route{{Method: "GET", Path: "/a", Scope: "b:read", Handler: ok}}})
+		Register(Resource{Name: "b", Routes: []Route{{Method: "GET", Path: "/a", Scope: "b:read", AppsRefused: "no", Handler: ok}}})
 	}); !strings.Contains(msg, "twice") {
 		t.Errorf("a route registered twice was taken: %q", msg)
 	}
@@ -124,7 +131,7 @@ func TestMountGivesEveryRouteTheShape(t *testing.T) {
 	r := mounted(t, Resource{
 		Name: "things", Owner: "test",
 		Routes: []Route{
-			{Method: "GET", Path: "/things/{id}", Scope: "things:read", Versioned: true,
+			{Method: "GET", Path: "/things/{id}", Scope: "things:read", Versioned: true, AppsInside: true,
 				Serve: func(_ context.Context, req Request) (any, error) {
 					if chi.URLParam(req.HTTP, "id") == "gone" {
 						return nil, Errorf(http.StatusNotFound, "not_found", "check the id", "there's no such thing")
@@ -134,16 +141,16 @@ func TestMountGivesEveryRouteTheShape(t *testing.T) {
 					}
 					return versioned{Name: "a thing", V: 7}, nil
 				}},
-			{Method: "POST", Path: "/things", Scope: "things:write", Write: true,
+			{Method: "POST", Path: "/things", Scope: "things:write", Write: true, AppsInside: true,
 				Serve: func(_ context.Context, req Request) (any, error) {
 					return map[string]string{"got": string(req.Body)}, nil
 				}},
-			{Method: "GET", Path: "/old", Scope: "things:read", Legacy: true,
+			{Method: "GET", Path: "/old", Scope: "things:read", Legacy: true, AppsInside: true,
 				Use: []func(http.Handler) http.Handler{func(next http.Handler) http.Handler {
 					return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { gated++; next.ServeHTTP(w, r) })
 				}},
 				Handler: func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"msg":"as it was"}`) }},
-			{Method: "GET", Path: "/me", AnyToken: true, Handler: ok},
+			{Method: "GET", Path: "/me", AnyToken: true, AppsInside: true, Handler: ok},
 		},
 	})
 
@@ -188,7 +195,7 @@ func TestWithoutRedisAWriteStillRuns(t *testing.T) {
 	// No Redis here: the limits and Idempotency-Key fail open, as the token's
 	// own limit does, so an outage never takes the API down.
 	var runs atomic.Int32
-	r := mounted(t, Resource{Name: "w", Routes: []Route{{Method: "POST", Path: "/w", Scope: "w:write", Write: true,
+	r := mounted(t, Resource{Name: "w", Routes: []Route{{Method: "POST", Path: "/w", Scope: "w:write", Write: true, AppsInside: true,
 		Serve: func(context.Context, Request) (any, error) {
 			runs.Add(1)
 			return map[string]int{"n": int(runs.Load())}, nil
@@ -216,12 +223,88 @@ func TestAReachedRouteLetsEveryTokenButAnAppThrough(t *testing.T) {
 	}
 }
 
+// An app is held to the places it was added to on every route (business/App,
+// A10): a route names its place, which may be in the body; or its handler
+// holds the app itself; or the app is refused in the route's own words. A
+// failed read of the app opens nothing, and other tokens are unaffected.
+func TestEveryRouteHoldsAnAppToItsPlaces(t *testing.T) {
+	app := &appBusiness.Identity{Name: "Deploy bot", Audience: appBusiness.Audience{Places: []appBusiness.Place{{Kind: "channel", ID: "general"}}}}
+	acting, readErr := app, error(nil)
+	prev := actsAsApp
+	t.Cleanup(func() { actsAsApp = prev })
+	actsAsApp = func(context.Context) (*appBusiness.Identity, error) { return acting, readErr }
+	ran := 0
+	echo := func(w http.ResponseWriter, r *http.Request) {
+		ran++
+		body, _ := io.ReadAll(r.Body)
+		_, _ = w.Write(body)
+	}
+	inBody := func(r *http.Request) (string, string) {
+		body, _ := PeekBody(r)
+		var b struct {
+			Channel string `json:"channel"`
+		}
+		_ = json.Unmarshal(body, &b)
+		return "channel", b.Channel
+	}
+	r := mounted(t, Resource{Name: "places", Routes: []Route{
+		{Method: "POST", Path: "/post", Scope: "p:write", Write: true, Reach: inBody, Handler: echo},
+		{Method: "GET", Path: "/mine", Scope: "p:read", AppsInside: true, Handler: echo},
+		{Method: "GET", Path: "/unread", Scope: "p:read", AppsRefused: "Unread counts are a person's; an app has none.", Handler: echo},
+	}})
+
+	for _, c := range []struct {
+		name, method, path, body string
+		status                   int
+		code                     string
+	}{
+		{"its own channel, named in the body", "POST", "/post", `{"channel":"general"}`, http.StatusOK, ""},
+		{"another channel", "POST", "/post", `{"channel":"exec"}`, http.StatusForbidden, "not_in_audience"},
+		{"no channel", "POST", "/post", `{}`, http.StatusForbidden, "not_in_audience"},
+		{"a route that holds it itself", "GET", "/mine", "", http.StatusOK, ""},
+		{"a route closed to apps", "GET", "/unread", "", http.StatusForbidden, "not_for_apps"},
+	} {
+		ran = 0
+		w := send(r, c.method, c.path, "p:read,p:write", c.body)
+		if w.Code != c.status || (c.code == "") != (ran == 1) {
+			t.Errorf("%s: %d %s, the handler ran %d times", c.name, w.Code, w.Body, ran)
+			continue
+		}
+		if c.code != "" {
+			if e := errorOf(t, w); e.Code != c.code {
+				t.Errorf("%s: %+v, want %s", c.name, e, c.code)
+			}
+		} else if w.Body.String() != c.body {
+			t.Errorf("%s: the handler read %q, want the whole body %q", c.name, w.Body, c.body)
+		}
+	}
+	if e := errorOf(t, send(r, "GET", "/unread", "p:read", "")); e.Message != "Unread counts are a person's; an app has none." {
+		t.Errorf("a route closed to apps refused with %q, not its own words", e.Message)
+	}
+
+	// The app's record couldn't be read: refused, never let through as "not an app".
+	readErr, acting = errors.New("pq: connection refused"), nil
+	for _, path := range []string{"/mine", "/unread"} {
+		ran = 0
+		if w := send(r, "GET", path, "p:read", ""); w.Code != http.StatusServiceUnavailable || ran != 0 || strings.Contains(w.Body.String(), "pq:") {
+			t.Errorf("%s while the app can't be read: %d %s, the handler ran %d times", path, w.Code, w.Body, ran)
+		}
+	}
+
+	// A person's or an agent's token: no app, nothing held.
+	readErr = nil
+	ran = 0
+	if w := send(r, "GET", "/unread", "p:read", ""); w.Code != http.StatusOK || ran != 1 {
+		t.Errorf("a token that isn't an app's, on a route closed to apps: %d, the handler ran %d times", w.Code, ran)
+	}
+}
+
 func TestOpenAPIDescribesEveryRegisteredRoute(t *testing.T) {
 	resetForTest(t)
 	Register(Resource{Name: "things", Owner: "test", Scopes: []ScopeDecl{{Name: "things:write", Description: "Make things"}},
 		Routes: []Route{
-			{Method: "POST", Path: "/things/{id}/parts", Summary: "Add a part", Scope: "things:write", Write: true, Versioned: true, Handler: ok},
-			{Method: "GET", Path: "/legacy", Scope: "things:read", Legacy: true, Handler: ok},
+			{Method: "POST", Path: "/things/{id}/parts", Summary: "Add a part", Scope: "things:write", Write: true, Versioned: true, AppsInside: true, Handler: ok},
+			{Method: "GET", Path: "/legacy", Scope: "things:read", Legacy: true, AppsInside: true, Handler: ok},
 		}})
 	doc := OpenAPI()
 	paths := doc["paths"].(map[string]any)

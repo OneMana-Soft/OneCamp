@@ -5,8 +5,10 @@
 //   - a bot user, which its credentials act as and its messages are written by
 //     (business/User EnsureAppBot), so what it does reads as the app's;
 //   - scopes, the most any of its credentials may carry;
-//   - an audience, the places it was added to: a route that names what it
-//     reaches (business/PublicAPI's Route.Reach) refuses an app anywhere else;
+//   - an audience, the places it was added to, which every /v1 route holds it
+//     to (business/PublicAPI): a route that names what it reaches (Reach)
+//     refuses it anywhere else, a list or a search is cut to them (Narrow),
+//     and any other route refuses an app;
 //   - credentials, API tokens bound to it ("oc_app_…"), rotated in place.
 //
 // R1: an app's call is an API token's call. The token mark is set, so
@@ -261,17 +263,27 @@ func ownsToken(ctx context.Context, appID, tokenID uuid.UUID) error {
 }
 
 // ActsAsApp is the app a request's credential belongs to, from the context the
-// token middleware made (helpers.ApiAppIDContextKey, set beside the token mark).
-func ActsAsApp(ctx context.Context) (*Identity, bool) {
-	id, err := uuid.Parse(helpers.GetApiAppID(ctx))
+// token middleware made (helpers.ApiAppIDContextKey, set beside the token mark),
+// or nil when the credential isn't an app's. It is an error when the app's
+// record can't be read, or the app was turned off or removed since its token
+// was checked: the caller refuses, so a failed read never opens anything.
+func ActsAsApp(ctx context.Context) (*Identity, error) {
+	raw := helpers.GetApiAppID(ctx)
+	if raw == "" {
+		return nil, nil
+	}
+	id, err := uuid.Parse(raw)
 	if err != nil {
-		return nil, false
+		return nil, fmt.Errorf("the token's app %q: %w", raw, err)
 	}
 	app, err := Get(ctx, id)
-	if err != nil || !app.Enabled {
-		return nil, false
+	if err != nil {
+		return nil, err
 	}
-	return app, true
+	if !app.Enabled {
+		return nil, fmt.Errorf("%s is turned off", app.Name)
+	}
+	return app, nil
 }
 
 // Kinds whose owners add rules beyond the places an app was added to (a public
@@ -291,4 +303,20 @@ func MayReach(_ context.Context, app *Identity, kind, id string) bool {
 		}
 	}
 	return false
+}
+
+// Narrow is what of items an app may reach, as a list or a search answers it:
+// an item is kept when one of the places it sits in (placesOf: a task's own,
+// or its project) is one the app may reach. An item in none is left out.
+func Narrow[T any](ctx context.Context, app *Identity, items []T, placesOf func(T) []Place) []T {
+	kept := make([]T, 0, len(items))
+	for _, item := range items {
+		for _, p := range placesOf(item) {
+			if MayReach(ctx, app, p.Kind, p.ID) {
+				kept = append(kept, item)
+				break
+			}
+		}
+	}
+	return kept
 }

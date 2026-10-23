@@ -76,6 +76,7 @@ func all() []Spec {
 		PublishPageRate,
 		PublishUnlockRate,
 		SSOState,
+		SAMLAssertionUsed,
 		UserProfile,
 		UserDgraphProfile,
 		UserSidebar,

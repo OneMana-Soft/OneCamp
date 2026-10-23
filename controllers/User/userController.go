@@ -2,8 +2,6 @@ package controllers
 
 import (
 	"context"
-	cryptoRand "crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -3257,8 +3255,7 @@ func AddInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate secure invitation token
-	token, err := generateInvitationToken()
+	token, hash, sealed, err := helpers.NewSealedLinkSecret()
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/AddInvitation Failed to generate token err: %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
@@ -3272,8 +3269,9 @@ func AddInvitation(w http.ResponseWriter, r *http.Request) {
 
 	// renewed: an expired invitation to this address was given this new link.
 	// A member (members can be let invite) is refused in one set of words,
-	// and can't renew an expired invitation: AddInvitationWithToken.
-	renewed, err := business.AddInvitationWithToken(ctx, requestBody.Email, userInfo.UserPostgresInfo.Id, userInfo.UserPostgresInfo.IsAdmin, token, expiresAt)
+	// and can't renew an expired invitation: AddInvitationWithLink.
+	renewed, err := business.AddInvitationWithLink(ctx, requestBody.Email, userInfo.UserPostgresInfo.Id, userInfo.UserPostgresInfo.IsAdmin,
+		models.InvitationLink{Hash: hash, Sealed: sealed}, expiresAt)
 	if err != nil {
 		writeInviteRefusal(w, err)
 		return
@@ -3386,8 +3384,7 @@ func ResendInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate new token
-	newToken, err := generateInvitationToken()
+	newToken, hash, sealed, err := helpers.NewSealedLinkSecret()
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{
 			"msg":    "failed to generate new token",
@@ -3400,7 +3397,7 @@ func ResendInvitation(w http.ResponseWriter, r *http.Request) {
 
 	// A new link and expiry, status back to sent; the old link stops working.
 	// Refused for a member, an invitation already used, or none at all.
-	if err = business.RenewInvitation(ctx, requestBody.Email, userInfo.UserPostgresInfo.Id, newToken, expiresAt); err != nil {
+	if err = business.RenewInvitation(ctx, requestBody.Email, userInfo.UserPostgresInfo.Id, models.InvitationLink{Hash: hash, Sealed: sealed}, expiresAt); err != nil {
 		writeInviteRefusal(w, err)
 		return
 	}
@@ -3550,15 +3547,6 @@ func DemoLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Email Invitation Helpers ---
-
-func generateInvitationToken() (string, error) {
-	b := make([]byte, 32)
-	_, err := cryptoRand.Read(b)
-	if err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
 
 // respondInvitation is the one answer both creating and resending give.
 //

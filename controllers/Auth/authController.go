@@ -952,7 +952,7 @@ func ValidateInvitationToken(w http.ResponseWriter, r *http.Request) {
 // cannot be used, in words for the person holding it (naming who to ask for
 // another). One opened past its expiry is marked expired.
 func usableInvitation(ctx context.Context, token string) (*models.Invitation, string) {
-	invitation, err := domain.GetInvitationByToken(ctx, token)
+	invitation, err := domain.GetInvitationByLink(ctx, helpers.LinkSecretHash(token))
 	if err != nil || invitation == nil {
 		return nil, business.InvitationLinkProblem(nil, time.Now(), "")
 	}

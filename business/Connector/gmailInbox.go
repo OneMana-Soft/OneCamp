@@ -217,23 +217,58 @@ func GmailThreadURL(account, threadID string) string {
 	return "https://mail.google.com/mail/?authuser=" + url.QueryEscape(account) + "#all/" + threadID
 }
 
-// emailPolicy is the HTML an email body may keep: text formatting, lists,
-// tables and links. No images from the network, no styles that can position
-// content over the app, no forms or scripts.
+// emailPolicy is the HTML an email body may keep: what bluemonday's UGCPolicy
+// keeps (text formatting, lists, tables and links), and only the images that
+// are inside the email. No styles that can position content over the app, no
+// forms or scripts.
+//
+// It is built as UGCPolicy is (bluemonday v1.0.27 policies.go) rather than
+// from it: a policy can only be added to, and UGCPolicy's images take any
+// http(s) or scheme-less src. An image from the network is fetched from the
+// sender's server when the email is opened, which tells them it was read,
+// when, and from which address. Here an img src is judged on the value the
+// parser read, entities decoded, so no trick in the markup gets one through;
+// a regex over the raw HTML missed a ">" inside an attribute and an encoded
+// scheme (audit package 35). TestAnEmailKeepsWhatUserContentKeeps holds it
+// to UGCPolicy for everything else.
 var emailPolicy = func() *bluemonday.Policy {
-	p := bluemonday.UGCPolicy()
+	p := bluemonday.NewPolicy()
+	p.AllowStandardAttributes()
+	p.AllowStandardURLs()
+	p.AllowElements("article", "aside", "figure", "section", "summary", "hgroup", "h1", "h2", "h3", "h4", "h5", "h6",
+		"br", "div", "hr", "p", "span", "wbr", "abbr", "acronym", "cite", "code", "dfn", "em", "figcaption", "mark",
+		"s", "samp", "strong", "sub", "sup", "var", "b", "i", "pre", "small", "strike", "tt", "u", "rp", "rt", "ruby")
+	p.AllowAttrs("open").Matching(regexp.MustCompile(`(?i)^(|open)$`)).OnElements("details")
+	p.AllowAttrs("cite").OnElements("blockquote", "q")
+	p.AllowAttrs("href").OnElements("a", "area")
+	p.AllowAttrs("name").Matching(regexp.MustCompile(`^([\p{L}\p{N}_-]+)$`)).OnElements("map")
+	p.AllowAttrs("alt").Matching(bluemonday.Paragraph).OnElements("area")
+	p.AllowAttrs("coords").Matching(regexp.MustCompile(`^([0-9]+,)+[0-9]+$`)).OnElements("area")
+	p.AllowAttrs("rel").Matching(bluemonday.SpaceSeparatedTokens).OnElements("area")
+	p.AllowAttrs("shape").Matching(regexp.MustCompile(`(?i)^(default|circle|rect|poly)$`)).OnElements("area")
+	p.AllowAttrs("datetime").Matching(bluemonday.ISO8601).OnElements("time", "del", "ins")
+	p.AllowAttrs("dir").Matching(bluemonday.Direction).OnElements("bdi", "bdo")
+	p.AllowAttrs("cite").Matching(bluemonday.Paragraph).OnElements("del", "ins")
+	p.AllowLists()
+	p.AllowTables()
+	p.AllowAttrs("value", "min", "max", "low", "high", "optimum").Matching(bluemonday.Number).OnElements("meter")
+	p.AllowAttrs("value", "max").Matching(bluemonday.Number).OnElements("progress")
+	// Images: UGCPolicy's, with a src that is a data: image in the email itself.
+	p.AllowAttrs("align").Matching(bluemonday.ImageAlign).OnElements("img")
+	p.AllowAttrs("alt").Matching(bluemonday.Paragraph).OnElements("img")
+	p.AllowAttrs("height", "width").Matching(bluemonday.NumberOrPercent).OnElements("img")
+	p.AllowAttrs("usemap").Matching(regexp.MustCompile(`(?i)^#[\p{L}\p{N}_-]+$`)).OnElements("img")
+	p.AllowAttrs("src").Matching(regexp.MustCompile(`(?i)^data:image/`)).OnElements("img")
 	p.AllowDataURIImages()
 	p.RequireNoReferrerOnLinks(true)
 	p.AddTargetBlankToFullyQualifiedLinks(true)
 	return p
 }()
 
-var reRemoteImg = regexp.MustCompile(`(?is)<img\b[^>]*\bsrc\s*=\s*["']?\s*(https?:)?//[^>]*>`)
-
 // SanitizeEmailHTML makes an email body safe to show inside OneCamp. Exported
 // for its test.
 func SanitizeEmailHTML(raw string) string {
-	return emailPolicy.Sanitize(reRemoteImg.ReplaceAllString(raw, ""))
+	return emailPolicy.Sanitize(raw)
 }
 
 // messageBody prefers the HTML part (sanitised), then plain text.

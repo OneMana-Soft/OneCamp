@@ -15,7 +15,8 @@ func init() {
 	v1api.Register(v1api.Resource{
 		Name: "mcp", Owner: "platform",
 		Routes: []v1api.Route{
-			{Method: http.MethodPost, Path: "/mcp", Summary: "The MCP server: in the AI edition only", ScopeInside: true,
+			// It reaches nothing, so an app's token is answered as anyone's.
+			{Method: http.MethodPost, Path: "/mcp", Summary: "The MCP server: in the AI edition only", ScopeInside: true, AppsInside: true,
 				Limit: v1api.Limit{PerMinute: 1200}, Legacy: true, Handler: mcpNotInThisEdition},
 		},
 	})

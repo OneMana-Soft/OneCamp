@@ -1063,7 +1063,7 @@ func UpdateTaskNameByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskName 
 	helpers.GoSafeNamed("domain.UpdateTaskInOpenSearch", func() { domain.UpdateTaskInOpenSearch(taskOpenSearch) })
 
 	// Chips and task lists in docs read the new name (taskDocSync.go).
-	helpers.GoSafeNamed("taskRenamed", func() { taskRenamed(taskUUID, dgraphTaskInfo.Project) })
+	helpers.GoSafeNamed("taskRenamed", func() { taskRenamed(context.WithoutCancel(ctx), taskUUID, dgraphTaskInfo.Project) })
 
 	assigneeUUID := ""
 	if dgraphTaskInfo.Assignee != nil {

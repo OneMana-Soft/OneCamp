@@ -8,13 +8,16 @@ package controllers
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
+	appBusiness "github.com/akashc777/OneCamp/business/App"
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
 	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
 	"github.com/akashc777/OneCamp/helpers"
+	dataTableModel "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -54,11 +57,18 @@ func Me(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
-// ListTables GET /v1/tables — scope tables:read.
+// ListTables GET /v1/tables — scope tables:read. An app's, only the tables it
+// was added to.
 func ListTables(w http.ResponseWriter, r *http.Request) {
 	items, err := dataTableBusiness.ListTables(r.Context(), actor(r))
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "failed to load tables"})
+		return
+	}
+	items, _, ok := narrowed(w, r, items, func(t *dataTableModel.DataTable) []appBusiness.Place {
+		return []appBusiness.Place{{Kind: "table", ID: t.Id.String()}}
+	})
+	if !ok {
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": items})
@@ -130,11 +140,18 @@ func CreateRow(w http.ResponseWriter, r *http.Request) {
 // decodeParams reads a JSON object body into a string-keyed param map, coercing
 // scalar values the way the tool executors expect.
 func decodeParams(r *http.Request) (map[string]string, error) {
+	if r.Body == nil {
+		return map[string]string{}, nil
+	}
+	return paramsOf(r.Body)
+}
+
+// paramsOf is decodeParams over a body: also what a route's Reach reads its
+// place with (param), so both read one id.
+func paramsOf(body io.Reader) (map[string]string, error) {
 	raw := map[string]interface{}{}
-	if r.Body != nil {
-		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil && err.Error() != "EOF" {
-			return nil, err
-		}
+	if err := json.NewDecoder(body).Decode(&raw); err != nil && err.Error() != "EOF" {
+		return nil, err
 	}
 	out := make(map[string]string, len(raw))
 	for k, v := range raw {

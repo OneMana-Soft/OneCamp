@@ -32,7 +32,7 @@ func TestOneOrderEverywhere(t *testing.T) {
 	old := reorderSeams.publish
 	t.Cleanup(func() { reorderSeams.publish = old })
 	var told *mqttStruct.MqttTaskChanged
-	reorderSeams.publish = func(m *mqttStruct.MqttTaskChanged) { told = m }
+	reorderSeams.publish = func(_ context.Context, m *mqttStruct.MqttTaskChanged) { told = m }
 
 	project := uuid.NewString()
 	live := "0001-01-01T00:00:00Z"
@@ -85,7 +85,7 @@ func TestOneOrderEverywhere(t *testing.T) {
 	if got := order("todo"); got != "t2,t1" {
 		t.Fatalf("To do is %s", got)
 	}
-	if told == nil || told.ProjectUuid != project || len(told.Ranks) != 1 {
+	if told == nil || *told != (mqttStruct.MqttTaskChanged{TaskUuid: id["t2"], ProjectUuid: project}) {
 		t.Fatalf("told %+v", told)
 	}
 
@@ -98,17 +98,30 @@ func TestOneOrderEverywhere(t *testing.T) {
 	}
 
 	// Crowd the gap after t2 until there's no room (each move halves it): the
-	// project is renumbered, and the order holds in the list and each column.
-	renumbered := 0
+	// project is renumbered, t1 with it though it never moves, and the order
+	// holds in the list and each column.
+	rankOfT1 := func() float64 {
+		t.Helper()
+		all, err := reorderSeams.project(ctx, project)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, task := range all {
+			if task.Uuid == id["t1"] && task.Rank != nil {
+				return *task.Rank
+			}
+		}
+		t.Fatal("t1 has no rank")
+		return 0
+	}
+	was := rankOfT1()
 	for i := 0; i < 60; i++ {
 		if err := Reorder(ctx, project, []*dgraphStruct.DgraphTask{{Uuid: id["p1"]}}, id["t2"], id["p2"]); err != nil {
 			t.Fatal(err)
 		}
-		renumbered = max(renumbered, len(told.Ranks))
 		if err := Reorder(ctx, project, []*dgraphStruct.DgraphTask{{Uuid: id["p2"]}}, id["t2"], id["p1"]); err != nil {
 			t.Fatal(err)
 		}
-		renumbered = max(renumbered, len(told.Ranks))
 	}
 	if got := order(""); got != "t2,p2,p1,t1" {
 		t.Fatalf("after crowding, the list is %s", got)
@@ -116,7 +129,7 @@ func TestOneOrderEverywhere(t *testing.T) {
 	if got := order("inProgress"); got != "p2,p1" {
 		t.Fatalf("In progress is %s", got)
 	}
-	if renumbered != 4 {
-		t.Fatalf("a crowded gap renumbered %d tasks, want the project's 4", renumbered)
+	if rankOfT1() == was {
+		t.Fatal("a crowded gap was never renumbered: t1 kept its rank")
 	}
 }

@@ -13,9 +13,10 @@ package business
 //
 // A payload carries ids, never a body, and a private doc's title stays out of
 // it: a webhook's endpoint is outside the workspace. And a webhook is sent a
-// doc's event only when whoever set it up can open the doc (or could, before
-// it went to the trash), by the Access Resolver: a private doc's events reach
-// no webhook of someone it isn't shared with (docs programme C4).
+// doc's event only when its owner can open the doc (or could, before it went
+// to the trash), by the Access Resolver: a private doc's events reach no
+// webhook of someone it isn't shared with (docs programme C4). business/Webhook
+// asks that of every doc's event (reach.go), by the doc_uuid it carries.
 
 import (
 	"context"
@@ -23,16 +24,13 @@ import (
 	"sync"
 	"time"
 
-	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	sweepBusiness "github.com/akashc777/OneCamp/business/Sweep"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
-	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	redisInit "github.com/akashc777/OneCamp/initializers/redis"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/akashc777/OneCamp/models/redis/registry"
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -53,32 +51,14 @@ const updateWindow = time.Minute
 // (Unix milliseconds): the registry's DocUpdatedWebhooksDue.
 var updatesKey = registry.DocUpdatedWebhooksDue.Build()
 
-// Seams for tests: where webhooks go, the clock, and a webhook owner's graph
-// node.
+// Seams for tests: where webhooks go, and the clock.
 var (
-	dispatchWebhook = func(ctx context.Context, kind string, data map[string]interface{}, mayKnow func(context.Context, uuid.UUID) bool) {
-		webhookBusiness.DispatchEventFor(ctx, kind, data, mayKnow)
+	dispatchWebhook = func(ctx context.Context, kind string, data map[string]interface{}) {
+		webhookBusiness.DispatchEvent(ctx, kind, data)
 	}
-	clock      = time.Now
-	updates    = &pendingUpdates{due: map[string]time.Time{}}
-	activeUser = userDomain.GetActiveDgraphUserInfoByUUID
+	clock   = time.Now
+	updates = &pendingUpdates{due: map[string]time.Time{}}
 )
-
-// ownerCanOpen is, for a doc's event, whether a webhook's owner may know of
-// it: they can open the doc, or could before it went to the trash.
-func ownerCanOpen(docUUID string) func(context.Context, uuid.UUID) bool {
-	return func(ctx context.Context, owner uuid.UUID) bool {
-		u, err := activeUser(ctx, owner.String())
-		if err != nil || u == nil || u.Uid == "" {
-			return false
-		}
-		d, err := resolve(ctx, accessBusiness.Subject{UserUID: u.Uid, UserUUID: owner.String()}, accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: docUUID})
-		if err != nil {
-			return false
-		}
-		return d.Level >= accessBusiness.LevelView || d.Deleted && d.Was >= accessBusiness.LevelView
-	}
-}
 
 func isWebhook(e resourceEventBusiness.Event) bool {
 	return webhookKinds[e.Kind] && e.ResourceKind == "doc"
@@ -94,7 +74,7 @@ func sendWebhook(ctx context.Context, e resourceEventBusiness.Event) {
 	if err != nil {
 		doc = nil
 	}
-	dispatchWebhook(ctx, string(e.Kind), webhookPayload(e, doc), ownerCanOpen(e.ResourceUUID))
+	dispatchWebhook(ctx, string(e.Kind), webhookPayload(e, doc))
 }
 
 // webhookPayload is what a doc webhook carries. doc is the doc as read now, nil
@@ -196,7 +176,7 @@ func flushUpdates(ctx context.Context) error {
 		}
 		dispatchWebhook(ctx, string(resourceEventBusiness.DocUpdated), webhookPayload(resourceEventBusiness.Event{
 			Kind: resourceEventBusiness.DocUpdated, ResourceKind: "doc", ResourceUUID: id, At: clock(),
-		}, doc), ownerCanOpen(id))
+		}, doc))
 	}
 	return nil
 }

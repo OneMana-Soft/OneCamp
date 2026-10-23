@@ -10,8 +10,6 @@ package Calendar
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -372,14 +370,6 @@ func CheckGuest(in BookInput) (BookInput, error) {
 	return in, nil
 }
 
-func newToken() (string, error) {
-	b := make([]byte, 24)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
 // FormatWhen writes a meeting's time the way people read it, in a zone:
 // "Tuesday 6 October 2026, 10:00–10:30 (Asia/Kolkata)". Pure.
 func FormatWhen(start, end time.Time, tz string) string {
@@ -429,14 +419,14 @@ func Book(ctx context.Context, slug string, in BookInput, now time.Time) (*Booke
 		return nil, &AvailabilityError{"That time was just taken. Pick another."}
 	}
 
-	token, err := newToken()
+	token, hash, sealed, err := helpers.NewSealedLinkSecret()
 	if err != nil {
 		return nil, err
 	}
 	b, err := bookingModel.Reserve(bookingModel.Booking{
 		PageId: l.page.Id, GuestName: in.Name, GuestEmail: in.Email, Note: in.Note, StartsAt: start, EndsAt: end,
-		GuestTZ: in.TZ,
-	}, token)
+		GuestTZ: in.TZ, CancelHash: hash, CancelSealed: sealed,
+	})
 	if errors.Is(err, bookingModel.ErrSlotTaken) {
 		return nil, &AvailabilityError{"That time was just taken. Pick another."}
 	}
@@ -523,10 +513,7 @@ func (t *tokenBooking) view() *BookingView {
 }
 
 func bookingForToken(ctx context.Context, token string) (*tokenBooking, error) {
-	if len(token) != 48 {
-		return nil, ErrNoPage
-	}
-	b, err := bookingModel.BookingByToken(token)
+	b, err := bookingModel.BookingByLink(helpers.LinkSecretHash(token))
 	if err != nil {
 		return nil, err
 	}

@@ -206,11 +206,7 @@ func withLink(a models.Attendee) (models.Attendee, error) {
 	if a.UserID != nil {
 		return a, nil
 	}
-	raw, hash, err := helpers.NewLinkSecret()
-	if err != nil {
-		return a, err
-	}
-	sealed, err := helpers.EncryptSecret(raw)
+	_, hash, sealed, err := helpers.NewSealedLinkSecret()
 	if err != nil {
 		return a, err
 	}

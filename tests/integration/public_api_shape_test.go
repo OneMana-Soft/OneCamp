@@ -42,12 +42,12 @@ func registerShapeProbes() {
 		v1api.Register(v1api.Resource{
 			Name: "test-shape", Owner: "platform",
 			Routes: []v1api.Route{
-				{Method: http.MethodPost, Path: "/test-echo", Scope: "tasks:write", Write: true,
+				{Method: http.MethodPost, Path: "/test-echo", Scope: "tasks:write", Write: true, AppsInside: true,
 					Serve: func(_ context.Context, req v1api.Request) (any, error) {
 						n := echoRuns.Add(1)
 						return map[string]any{"run": n, "body": string(req.Body)}, nil
 					}},
-				{Method: http.MethodGet, Path: "/test-limited", Scope: "tasks:read", Limit: v1api.Limit{PerMinute: 3},
+				{Method: http.MethodGet, Path: "/test-limited", Scope: "tasks:read", AppsInside: true, Limit: v1api.Limit{PerMinute: 3},
 					Serve: func(context.Context, v1api.Request) (any, error) { return map[string]bool{"ok": true}, nil }},
 			},
 		})

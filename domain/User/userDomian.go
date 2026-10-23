@@ -759,7 +759,7 @@ func IndexUserInOpenSearch(openSearchUser *openSearchStruct.OpenSearchUser) {
 
 func GetAllInvitations(ctx context.Context) (invitations []*models.Invitation, err error) {
 	invitations, err = pgexec.Query(ctx, `
-		SELECT id, email, invited_by, status, token, token_expires_at, created_at
+		SELECT `+invitationColumns+`
 		FROM invitations
 		ORDER BY created_at DESC`, scanInvitation)
 	if err != nil {
@@ -768,11 +768,10 @@ func GetAllInvitations(ctx context.Context) (invitations []*models.Invitation, e
 	return
 }
 
-// scanInvitation reads an invitation: id, email, invited_by, status, token,
-// token_expires_at, created_at.
+// scanInvitation reads an invitation's invitationColumns.
 func scanInvitation(r pgexec.Row) (*models.Invitation, error) {
 	var inv models.Invitation
-	err := r.Scan(&inv.Id, &inv.Email, &inv.InvitedBy, &inv.Status, &inv.Token, &inv.TokenExpiresAt, &inv.CreatedAt)
+	err := r.Scan(&inv.Id, &inv.Email, &inv.InvitedBy, &inv.Status, &inv.Link.Hash, &inv.Link.Sealed, &inv.TokenExpiresAt, &inv.CreatedAt)
 	return &inv, err
 }
 
@@ -782,7 +781,7 @@ func scanUUID(r pgexec.Row) (id uuid.UUID, err error) { err = r.Scan(&id); retur
 func scanString(r pgexec.Row) (v string, err error) { err = r.Scan(&v); return }
 
 // invitationColumns are what scanInvitation reads, in its order.
-const invitationColumns = `id, email, invited_by, status, token, token_expires_at, created_at`
+const invitationColumns = `id, email, invited_by, status, token_hash, token_sealed, token_expires_at, created_at`
 
 // one is a single-row read that answers sql.ErrNoRows for no row, as the
 // callers of these functions test for.
@@ -2355,13 +2354,15 @@ func GetUserAuthFlagsByUUID(ctx context.Context, userID uuid.UUID) (*models.User
 	return user, nil
 }
 
-func GetInvitationByToken(ctx context.Context, token string) (invitation *models.Invitation, err error) {
+// GetInvitationByLink is the invitation a link's hash finds
+// (helpers.LinkSecretHash), or sql.ErrNoRows.
+func GetInvitationByLink(ctx context.Context, hash []byte) (invitation *models.Invitation, err error) {
 	invitation, err = one(ctx, `
-		SELECT id, email, invited_by, status, token, token_expires_at, created_at
+		SELECT `+invitationColumns+`
 		FROM invitations
-		WHERE token = $1`, scanInvitation, token)
+		WHERE token_hash = $1`, scanInvitation, hash)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/GetInvitationByToken Failed to get invitation err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "domain/GetInvitationByLink Failed to get invitation err: %+v", err)
 		return nil, err
 	}
 	return invitation, nil
@@ -2374,11 +2375,11 @@ func UpdateInvitationStatus(ctx context.Context, invitationID uuid.UUID, status 
 	return
 }
 
-func AddInvitationWithToken(ctx context.Context, email string, invitedBy uuid.UUID, token string, expiresAt time.Time) (err error) {
+func AddInvitationWithLink(ctx context.Context, email string, invitedBy uuid.UUID, link models.InvitationLink, expiresAt time.Time) (err error) {
 	if _, err = pgexec.Exec(ctx, `
-		INSERT INTO invitations (email, invited_by, status, token, token_expires_at)
-		VALUES ($1, $2, 'sent', $3, $4)`, email, invitedBy, token, expiresAt); err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/AddInvitationWithToken Failed to add invitation err: %+v", err)
+		INSERT INTO invitations (email, invited_by, status, token_hash, token_sealed, token_expires_at)
+		VALUES ($1, $2, 'sent', $3, $4, $5)`, email, invitedBy, link.Hash, link.Sealed, expiresAt); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/AddInvitationWithLink Failed to add invitation err: %+v", err)
 	}
 	return
 }
@@ -2391,23 +2392,23 @@ func CheckIfAnyAdminExists(ctx context.Context) (exists bool, err error) {
 	return
 }
 
-// UpdateInvitationTokenByID gives one invitation a new link and expiry, from
+// UpdateInvitationLinkByID gives one invitation a new link and expiry, from
 // invitedBy, who renewed it: the invitation is theirs now, and its email
 // names them.
 //
 // By id, not by address: an address can have more than one invitation row
 // (made before inviting a member twice was refused), and setting every one of
-// them to the same new token broke on token's unique index, so sending such
-// an invitation again failed. The caller renews the newest
+// them to the same new link broke on its unique index, so sending such an
+// invitation again failed. The caller renews the newest
 // (GetInvitationByEmail).
-func UpdateInvitationTokenByID(ctx context.Context, id uuid.UUID, token string, expiresAt time.Time, invitedBy uuid.UUID) error {
+func UpdateInvitationLinkByID(ctx context.Context, id uuid.UUID, link models.InvitationLink, expiresAt time.Time, invitedBy uuid.UUID) error {
 	_, err := pgexec.Exec(ctx, `
 		UPDATE invitations
-		SET token = $1, token_expires_at = $2, status = 'sent', invited_by = $4
-		WHERE id = $3`, token, expiresAt, id, invitedBy)
+		SET token_hash = $1, token_sealed = $2, token_expires_at = $3, status = 'sent', invited_by = $5
+		WHERE id = $4`, link.Hash, link.Sealed, expiresAt, id, invitedBy)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
-			"domain/UpdateInvitationTokenByID Failed to update invitation token err: %+v", err)
+			"domain/UpdateInvitationLinkByID Failed to update invitation link err: %+v", err)
 	}
 	return err
 }

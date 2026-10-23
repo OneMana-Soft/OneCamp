@@ -52,4 +52,4 @@ controllers/GitHub/githubController.go 17
 controllers/Import/importController.go 13
 controllers/SlackImport/slackImportController.go 8
 controllers/Task/taskController.go 5
-controllers/Webhook/webhookController.go 8
+controllers/Webhook/webhookController.go 7

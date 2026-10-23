@@ -342,6 +342,9 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"formula tables' rows); every other row goes through business/DataTable's CreateRow, which " +
 		"checks access; the release lines don't carry the seed.",
 
+	"SetStartRetriesForTest": "sets how the server's start tries again to hash links left in the clear " +
+		"(models/postgres/LinkSecret), so the integration test can prove a start whose first try failed " +
+		"hashes them on a later try, in seconds; it exists only in the integration build.",
 	"PointAtSlackForTest": "sends the Slack bridge's Web API calls to a local fake, so the " +
 		"integration test can run the whole bridge (both directions, threads, edits, deletions, " +
 		"echo suppression) against real stores without a Slack workspace.",

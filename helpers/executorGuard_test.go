@@ -20,7 +20,7 @@ import (
 // test reports. The release lines leave out the demo's own code, so theirs is
 // one lower (1,166 on v2.75.0's main). without-ai leaves out the AI edition's
 // packages too, so its own count is 984 (v1.60.0).
-const handExecutorBaseline = 984
+const handExecutorBaseline = 983
 
 // backgroundTimeoutBaseline is how many times models/ starts a statement's
 // timeout from context.Background() instead of the caller's ctx (206 at the

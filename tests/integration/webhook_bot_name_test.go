@@ -49,7 +49,7 @@ func TestAWebhookAlwaysHasAName(t *testing.T) {
 	if padded.BotName != "Deploys" {
 		t.Fatalf("a padded name is stored as %q", padded.BotName)
 	}
-	kept, err := webhookBusiness.UpdateWebhook(ctx, padded.Id, webhookBusiness.WebhookUpdateInput{Name: "Deploys", IsActive: true, BotName: " \t "})
+	kept, _, err := webhookBusiness.UpdateWebhook(ctx, padded.Id, webhookBusiness.WebhookUpdateInput{Name: "Deploys", IsActive: true, BotName: " \t "}, owner)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,11 +10,15 @@ package integration_test
 // frees the slot (CAL-BUG-4); a guest cancelling takes the meeting off both
 // calendars; and without notification email the owner is still told. On
 // beta, a deleted page keeps its bookings and their links (CAL-BUG-3, with
-// migration 212 down and up again).
+// migration 212 down and up again). A cancel link is kept only as its hash
+// and its seal, and a link mailed before that still cancels, through the
+// minute the old server runs on the new schema and the new one's start
+// (audit A1).
 //
 // Run: go test -tags=integration ./tests/integration/ -run TestBookingPages -v
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -41,6 +45,7 @@ import (
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	bookingModel "github.com/akashc777/OneCamp/models/postgres/Booking"
+	linkSecretModel "github.com/akashc777/OneCamp/models/postgres/LinkSecret"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	emailService "github.com/akashc777/OneCamp/services/Email"
 	"github.com/akashc777/OneCamp/tests/integration"
@@ -232,6 +237,18 @@ func TestBookingPages(t *testing.T) {
 			}
 			return v
 		}
+		// keptInClear is how many bookings hold a cancel link anywhere in
+		// their row, where a copy of the table would find it; and whether the
+		// booking is found by the link's hash.
+		keptInClear := func(t *testing.T, id, link string) (n int, hashed bool) {
+			t.Helper()
+			if err := env.PG.QueryRow(`SELECT COUNT(*) FROM bookings b WHERE strpos(b::text, $1) > 0`, link).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			var hash []byte
+			err := env.PG.QueryRow(`SELECT cancel_token_hash FROM bookings WHERE id = $1`, id).Scan(&hash)
+			return n, err == nil && bytes.Equal(hash, helpers.LinkSecretHash(link))
+		}
 		listed := func(t *testing.T, event uuid.UUID) (found bool, booked map[string]any) {
 			t.Helper()
 			from, to := day.Add(-24*time.Hour), day.Add(48*time.Hour)
@@ -279,6 +296,9 @@ func TestBookingPages(t *testing.T) {
 			if strings.Contains(inv, alex.CancelToken) {
 				t.Error("the invite carries the guest's cancel link")
 			}
+			if n, hashed := keptInClear(t, alex.BookingID, alex.CancelToken); n != 0 || !hashed {
+				t.Errorf("%d bookings keep the guest's cancel link in the clear; found by its hash: %v", n, hashed)
+			}
 			if n := ownerNotices("booking.created", alexEvent.String()); n != 1 {
 				t.Errorf("Sam's inbox items: %d", n)
 			}
@@ -309,6 +329,9 @@ func TestBookingPages(t *testing.T) {
 			if !strings.Contains(moved.Subject, "Moved") || !strings.Contains(moved.HTML, "Sam Rivera moved your meeting") ||
 				!strings.Contains(moved.HTML, "(Europe/London)") {
 				t.Errorf("the move's email %q, in the guest's zone:\n%s", moved.Subject, moved.HTML)
+			}
+			if !strings.Contains(moved.HTML, "/booking/"+alex.CancelToken) || !strings.Contains(moved.HTML, "with the button above") {
+				t.Errorf("the move's email doesn't give the guest their own cancel link again:\n%s", moved.HTML)
 			}
 			inv := moved.invite()
 			if !strings.Contains(inv, "METHOD:REQUEST") || !strings.Contains(inv, "UID:"+alex.BookingID+"@onecamp") ||
@@ -526,6 +549,88 @@ func TestBookingPages(t *testing.T) {
 			}
 			if p, err := calendarBusiness.GetPublicPage(ctx, "office-hours", time.Now(), time.Now()); err != nil || p.Title != "Office hours again" {
 				t.Errorf("the page again: %+v, %v", p, err)
+			}
+		})
+
+		t.Run("links from before hashing keep cancelling, through the old server's last minute and the new one's start", func(t *testing.T) {
+			_, file, _, _ := runtime.Caller(0)
+			dir := filepath.Join(filepath.Dir(file), "..", "..", "migrations")
+			matches, err := filepath.Glob(filepath.Join(dir, "*_booking_cancel_link_hash.up.sql"))
+			if err != nil || len(matches) != 1 {
+				t.Fatalf("the migration: %v %v", matches, err)
+			}
+			n, err := strconv.Atoi(strings.SplitN(filepath.Base(matches[0]), "_", 2)[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			kim := book(t, 6, "Kim Lee", "kim.lee@outlook.com")
+			kimEvent := eventOf(t, kim)
+			m, err := migrate.New("file://"+dir, env.DSN)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer m.Close()
+			for v, _, _ := m.Version(); v >= uint(n); v, _, _ = m.Version() {
+				if err := m.Steps(-1); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Kim's link as the server from before mailed it: 48 hex characters, kept as they are.
+			mailed := strings.ReplaceAll(uuid.NewString()+uuid.NewString(), "-", "")[:48]
+			if _, err := env.PG.Exec(`UPDATE bookings SET cancel_token = $2 WHERE id = $1`, kim.BookingID, mailed); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.Up(); err != nil {
+				t.Fatal(err)
+			}
+
+			// The migrations have run and the old server hasn't stopped: it
+			// still finds Kim's booking by the link, and takes Lou's booking
+			// its own way.
+			var found string
+			if err := env.PG.QueryRow(`SELECT id FROM bookings WHERE cancel_token = $1`, mailed).Scan(&found); err != nil || found != kim.BookingID {
+				t.Fatalf("the old server looking Kim's link up: %q, %v", found, err)
+			}
+			lou := strings.ReplaceAll(uuid.NewString()+uuid.NewString(), "-", "")[:48]
+			var louID string
+			if err := env.PG.QueryRow(`INSERT INTO bookings (page_id, guest_name, guest_email, note, starts_at, ends_at, cancel_token, guest_tz)
+				SELECT page_id, 'Lou Park', 'lou.park@outlook.com', '', $2, $3, $4, 'UTC' FROM bookings WHERE id = $1 RETURNING id`,
+				kim.BookingID, at(8), at(8).Add(30*time.Minute), lou).Scan(&louID); err != nil {
+				t.Fatalf("the old server booking: %v", err)
+			}
+
+			// The new server starts.
+			if err := linkSecretModel.HashLeftInClear(ctx); err != nil {
+				t.Fatal(err)
+			}
+			for id, link := range map[string]string{kim.BookingID: mailed, louID: lou} {
+				if n, hashed := keptInClear(t, id, link); n != 0 || !hashed {
+					t.Errorf("%s: %d bookings keep the link in the clear; found by its hash: %v", id, n, hashed)
+				}
+				if v, err := calendarBusiness.GetBooking(ctx, link); err != nil || v.BookingID != id || v.Cancelled {
+					t.Errorf("%s: the link shows %+v, %v", id, v, err)
+				}
+			}
+			if err := linkSecretModel.HashLeftInClear(ctx); err != nil {
+				t.Fatalf("starting again: %v", err)
+			}
+			if v, err := calendarBusiness.GetBooking(ctx, lou); err != nil || v.BookingID != louID {
+				t.Errorf("after starting again, Lou's link shows %+v, %v", v, err)
+			}
+
+			// Kim's link can't be sealed, so a move points Kim back to the link they have.
+			if err := calendarBusiness.UpdateEvent(ctx, kimEvent, adapter.CreateOrUpdateEventInput{
+				Title: "Intro call with Kim Lee", StartTime: at(7).Format(time.RFC3339), EndTime: at(7).Add(30 * time.Minute).Format(time.RFC3339),
+			}, samInfo); err != nil {
+				t.Fatal(err)
+			}
+			bookingEventually(t, "the move's email", func() bool { return len(mailbox.to("kim.lee@outlook.com")) >= 2 })
+			moved := mailbox.to("kim.lee@outlook.com")[1]
+			if strings.Contains(moved.HTML, "/booking/") || !strings.Contains(moved.HTML, "with the link you got when you booked") {
+				t.Errorf("the move's email for a link from before:\n%s", moved.HTML)
+			}
+			if v, err := calendarBusiness.CancelBooking(ctx, mailed); err != nil || !v.Cancelled || !v.Start.Equal(at(7)) {
+				t.Errorf("cancelling by the mailed link: %+v, %v", v, err)
 			}
 		})
 
