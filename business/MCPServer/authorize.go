@@ -123,7 +123,7 @@ func AuthorizeToolCall(ctx context.Context, req ToolCallRequest) Decision {
 	// credential, because a deactivated agent must stop on the NEXT CALL rather
 	// than at the next token rotation — and because everything after this point
 	// should be attributable to a named actor, including the refusals.
-	actor, ok, actorReason := ResolveActor(ctx, tokenID, auth.AgentID, principal)
+	actor, ok, actorReason := ResolveActor(ctx, auth)
 	if !ok {
 		d := deny(actorReason, tokenID, principal)
 		d.Actor = actor

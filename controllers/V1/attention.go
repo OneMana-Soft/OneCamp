@@ -15,7 +15,8 @@ func init() {
 	v1api.Register(v1api.Resource{
 		Name: "attention", Owner: "platform",
 		Routes: []v1api.Route{
-			{Method: http.MethodGet, Path: "/attention", Summary: "What needs you: approvals, overdue tasks, commitments, today", Scope: apiTokenBusiness.ScopeAttentionRead, Legacy: true, Handler: Attention},
+			{Method: http.MethodGet, Path: "/attention", Summary: "What needs you: approvals, overdue tasks, commitments, today", Scope: apiTokenBusiness.ScopeAttentionRead,
+				AppsRefused: "What needs you is a person's list; an app has none.", Legacy: true, Handler: Attention},
 		},
 	})
 }

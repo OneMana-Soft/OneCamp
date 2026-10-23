@@ -18,6 +18,7 @@ import (
 	domain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -155,16 +156,25 @@ const maxShifted = 500
 // ShiftDependents moves the tasks waiting on movedUUID, and the tasks waiting
 // on those, just far enough that each starts the day after the moved tasks it
 // waits on are due (see PlanShifts). Only tasks of projectUUID move: it's the
-// project the person was checked to run. Each move goes into its task's
-// history. Days are in loc.
+// project the person was checked to run. Of those, only the ones the person
+// may change move (Work Access's dependency rule): a task they may not change
+// stays, with the tasks beyond it. Each move goes into its task's history.
+// Days are in loc.
 func ShiftDependents(ctx context.Context, projectUUID, movedUUID string, loc *time.Location, user *dgraphStruct.DgraphUser) ([]ShiftedTask, error) {
+	// The reads are the mover's: what they see, and how they stand to it.
+	ctx = taskread.ActingFor(ctx, user.Uuid)
 	all, err := shiftSeams.schedule(ctx, movedUUID)
+	if err != nil {
+		return nil, err
+	}
+	verdicts, err := shiftSeams.judge(ctx, user.Uuid, user.Uid, all...)
 	if err != nil {
 		return nil, err
 	}
 	tasks := all[:0]
 	for _, t := range all {
-		if t.Project != nil && t.Project.Uuid == projectUUID {
+		mayMove := strings.EqualFold(t.Uuid, movedUUID) || verdicts[strings.ToLower(t.Uuid)].Move
+		if t.Project != nil && t.Project.Uuid == projectUUID && mayMove {
 			tasks = append(tasks, t)
 		}
 	}
@@ -205,14 +215,16 @@ func ShiftDependents(ctx context.Context, projectUUID, movedUUID string, loc *ti
 	return done, nil
 }
 
-// shiftSeams are where a shift reads and writes: seams for tests.
+// shiftSeams are where a shift reads, decides and writes: seams for tests.
 var shiftSeams = struct {
 	schedule func(ctx context.Context, movedUUID string) ([]*dgraphStruct.DgraphTask, error)
+	judge    func(ctx context.Context, userUUID, userUID string, ts ...*dgraphStruct.DgraphTask) (map[string]workAccess.Verdict, error)
 	touch    func(ctx context.Context, ids []uuid.UUID, at time.Time) error
 	write    func(ctx context.Context, ts []*dgraphStruct.DgraphTask) error
 	after    func(ctx context.Context, t *dgraphStruct.DgraphTask, dates TaskDates, user *dgraphStruct.DgraphUser)
 }{
 	schedule: domain.DownstreamSchedule,
+	judge:    workAccess.JudgeTasks,
 	touch:    domain.TouchTasks,
 	write:    domain.SetDgraphTasks,
 	after:    afterDates,

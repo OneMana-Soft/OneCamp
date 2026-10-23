@@ -63,28 +63,20 @@ func register(l EventListener, seesRestrictedTasks bool) {
 	listenerMu.Unlock()
 }
 
-type openTasksKey struct{}
-
-// OfOpenTasks marks the task events dispatched through ctx as of tasks known
-// to be restricted to no one (tasks just made outside any restricted task, a
-// batch of them: business/Task CreateTasks), so each event doesn't read its
-// task's restriction again.
-func OfOpenTasks(ctx context.Context) context.Context {
-	return context.WithValue(ctx, openTasksKey{}, true)
-}
-
 // restrictedTaskEvent is whether an event is a restricted task's: its data
 // names a task (task_id, task_uuid) whose project keeps it to a few people.
-// A restriction that can't be read counts as one. A seam for tests.
+// A restriction that can't be read counts as one; a task ctx marks open
+// (helpers.WithOpenTasks: one of a batch just made) isn't read. A seam for
+// tests.
 var restrictedTaskEvent = func(ctx context.Context, data map[string]interface{}) bool {
-	if open, _ := ctx.Value(openTasksKey{}).(bool); open {
-		return false
-	}
 	for _, key := range []string{"task_id", "task_uuid"} {
 		raw, _ := data[key].(string)
 		id, err := uuid.Parse(strings.TrimSpace(raw))
 		if err != nil {
 			continue
+		}
+		if helpers.TasksOpen(ctx, id.String()) {
+			return false
 		}
 		r, err := restrictionModel.Of(ctx, id)
 		return err != nil || r.Restricted

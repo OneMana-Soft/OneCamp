@@ -202,8 +202,8 @@ func TestWA2ARestrictedTaskIsSeenOnlyByItsPeople(t *testing.T) {
 	hooks := map[string]uuid.UUID{}
 	for _, name := range []string{"ana", "ben"} {
 		hooks[name] = uuid.New()
-		w.exec(`INSERT INTO webhooks (id, name, type, token, target_url, events, created_by, scope_type) VALUES ($1, $2, 'outgoing', $3, $4, '["task.status_changed","task.comment.created"]', $5, 'org')`,
-			hooks[name], name+"-hook", "tok-"+uuid.NewString(), "https://hooks.example.com/"+name, w.people[name])
+		w.exec(`INSERT INTO webhooks (id, name, type, token_hash, target_url, events, created_by, scope_type) VALUES ($1, $2, 'outgoing', $3, $4, '["task.status_changed","task.comment.created"]', $5, 'org')`,
+			hooks[name], name+"-hook", helpers.LinkSecretHash("tok-"+name), "https://hooks.example.com/"+name, w.people[name])
 	}
 	// A rule that posts (it is never told of a restricted task) and a doc's
 	// to-dos (told, as they act inside it).

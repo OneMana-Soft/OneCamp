@@ -7,7 +7,8 @@ package business
 // webhooks and to those set up for its own channel or project
 // (domain/Webhook), and each is sent (deliveryTo):
 //   - a channel's or a project's own webhook: the event whole, a private
-//     channel's too, since whoever set it up for that place chose to send it;
+//     channel's too, since whoever set it up for that place chose to send it
+//     and may read it (reach.go);
 //   - a workspace webhook: a public channel's or a project's event whole, a
 //     private channel's as its ids only (who, which channel, which message,
 //     never what was said); an event of neither whole only when its kind is
@@ -22,12 +23,16 @@ package business
 // And the events of a channel or a task used to reach no webhook at all: they
 // were offered only to webhooks set up for that channel or project, which
 // nothing could set up (SA-BUG-10).
+//
+// Each webhook is then held to what its owner may read (reach.go): none of
+// this sends anyone what they couldn't read in the app.
 
 import (
 	"context"
 	"errors"
 	"strings"
 
+	hooksBusiness "github.com/akashc777/OneCamp/business/Hooks"
 	webhookDomain "github.com/akashc777/OneCamp/domain/Webhook"
 	"github.com/google/uuid"
 )
@@ -161,9 +166,18 @@ type ScopeError struct{ msg string }
 
 func (e ScopeError) Error() string { return e.msg }
 
+// What webhooks look up about a place; seams for tests.
+var (
+	channelIsOpen   = webhookDomain.ChannelIsOpen
+	projectIsOpen   = webhookDomain.ProjectIsOpen
+	channelIsPublic = webhookDomain.ChannelIsPublic
+)
+
 // webhookScope checks what an outgoing webhook is set up for and says it as
-// stored. An incoming webhook isn't sent events, so it is the workspace's.
-func webhookScope(ctx context.Context, webhookType, scope string, entity *uuid.UUID) (string, *uuid.UUID, error) {
+// stored. An incoming webhook isn't sent events, so it is the workspace's. A
+// channel or project its owner can't read is refused (reach.go); actor is who
+// is asking, told "you" when they are its owner.
+func webhookScope(ctx context.Context, webhookType, scope string, entity *uuid.UUID, owner, actor uuid.UUID) (string, *uuid.UUID, error) {
 	if webhookType != "outgoing" {
 		return ScopeOrg, nil, nil
 	}
@@ -177,9 +191,9 @@ func webhookScope(ctx context.Context, webhookType, scope string, entity *uuid.U
 	if entity == nil || *entity == uuid.Nil {
 		return "", nil, ScopeError{"Choose the " + scope + " to send events from."}
 	}
-	open := webhookDomain.ChannelIsOpen
+	open := channelIsOpen
 	if scope == ScopeProject {
-		open = webhookDomain.ProjectIsOpen
+		open = projectIsOpen
 	}
 	ok, err := open(ctx, *entity)
 	if err != nil {
@@ -187,6 +201,19 @@ func webhookScope(ctx context.Context, webhookType, scope string, entity *uuid.U
 	}
 	if !ok {
 		return "", nil, ScopeError{"That " + scope + " doesn't exist, or is archived."}
+	}
+	r, err := reachOf(ctx, owner, scopeNeeds(scope, entity), needs{})
+	if err != nil {
+		return "", nil, errors.New("couldn't check who can read the " + scope + "; try again")
+	}
+	switch {
+	case r == hooksBusiness.Reaches:
+	case owner == actor:
+		return "", nil, ScopeError{"You aren't in that " + scope + ", so you can't send its events anywhere."}
+	case r == hooksBusiness.OwnerGone:
+		return "", nil, ScopeError{"Its owner is no longer a member. Point it at a new address to take it over."}
+	default:
+		return "", nil, ScopeError{"Its owner isn't in that " + scope + ", so it can't send its events."}
 	}
 	return scope, entity, nil
 }

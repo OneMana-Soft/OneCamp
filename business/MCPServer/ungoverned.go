@@ -108,7 +108,7 @@ func AuthorizeUngovernedCall(ctx context.Context, req UngovernedCallRequest) Ung
 	// 2. ACTOR IDENTITY, and the agent kill switch. Immediately after the credential,
 	// because a deactivated agent must stop on the NEXT CALL rather than whenever
 	// someone remembers to hunt down its tokens.
-	actor, ok, actorReason := ResolveActor(ctx, tokenID, auth.AgentID, principal)
+	actor, ok, actorReason := ResolveActor(ctx, auth)
 	base.Actor = actor
 	if !ok {
 		base.Reason = actorReason

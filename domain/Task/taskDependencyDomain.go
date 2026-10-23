@@ -186,11 +186,20 @@ func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID
 
 // DownstreamSchedule is the moved task and every live top-level task that
 // waits on it, however indirectly, with their dates and the tasks each waits
-// on: what moving the tasks waiting on it along reads. Nothing else of the
-// project is read, so a task nothing waits on costs one small query.
+// on: what moving the tasks waiting on it along reads. Each carries how the
+// reader of ctx (taskread.ReaderOf) stands to it and its project, so Work
+// Access can say which they may move. Nothing else of the project is read,
+// so a task nothing waits on costs one small query.
 func DownstreamSchedule(ctx context.Context, movedUUID string) ([]*dgraphStruct.DgraphTask, error) {
-	const fields = `uid task_uuid task_status task_start_date task_due_date task_assignee { user_uuid } task_project { project_uuid }`
-	query := `query q($m: string) {
+	const fields = `uid task_uuid task_name task_status task_start_date task_due_date
+		task_assignee { uid user_uuid }
+		task_created_by { uid user_uuid }
+		task_project {
+			uid project_uuid project_name project_deleted_at
+			project_is_member: count(project_members @filter(eq(user_uuid, $u)))
+			project_is_admin: count(project_admins @filter(eq(user_uuid, $u)))
+		}`
+	query := `query q($m: string, $u: string) {
 		var(func: eq(task_uuid, $m)) @recurse(loop: false) { d as ~task_blocked_by }
 		moved(func: eq(task_uuid, $m)) { ` + fields + ` }
 		down(func: uid(d)) @filter(` + dgraphStruct.TASK_LIVE_FILTER + ` AND NOT has(task_parent_task)) {
@@ -198,7 +207,7 @@ func DownstreamSchedule(ctx context.Context, movedUUID string) ([]*dgraphStruct.
 			task_blocked_by @facets(kind, lag) @filter(` + dgraphStruct.TASK_LIVE_FILTER + `) { task_uuid }
 		}
 	}`
-	resp, err := dgraphInit.DgraphClient.NewReadOnlyTxn().QueryWithVars(ctx, query, map[string]string{"$m": movedUUID})
+	resp, err := dgraphInit.DgraphClient.NewReadOnlyTxn().QueryWithVars(ctx, query, map[string]string{"$m": movedUUID, "$u": taskread.ReaderOf(ctx)})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/DownstreamSchedule err: %+v", err)
 		return nil, err

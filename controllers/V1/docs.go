@@ -9,12 +9,15 @@ package controllers
 // writes are; a read as Markdown is recorded as an export made through the API.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
+	appBusiness "github.com/akashc777/OneCamp/business/App"
 	contentcodec "github.com/akashc777/OneCamp/business/ContentCodec"
 	contentIOBusiness "github.com/akashc777/OneCamp/business/ContentIO"
 	docDomain "github.com/akashc777/OneCamp/domain/Doc"
@@ -83,7 +86,8 @@ func docError(w http.ResponseWriter, r *http.Request, err error, read bool) {
 
 // ListDocsV1 GET /v1/docs?scope=workspace|mine|shared&cursor=&limit= — scope
 // docs:read. One page of the docs the token's owner can open, newest edit
-// first: everyone's (workspace, the default), their own, or shared with them.
+// first: everyone's (workspace, the default), their own, or shared with them;
+// an app's, only the docs it was added to.
 func ListDocsV1(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	scope := q.Get("scope")
@@ -105,6 +109,14 @@ func ListDocsV1(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		helpers.LogErrorWithContext(r.Context(), "controllers/V1 ListDocsV1: %+v", err)
 		helpers.WriteRetryLater(w, "The docs couldn't be listed just now.")
+		return
+	}
+	// An app's page holds only the docs it was added to, so it can come up
+	// short while next_cursor goes on.
+	listed, _, ok = narrowed(w, r, listed, func(d contentIOBusiness.ListedDoc) []appBusiness.Place {
+		return []appBusiness.Place{{Kind: "doc", ID: d.UUID}}
+	})
+	if !ok {
 		return
 	}
 	docs := make([]apiDoc, 0, len(listed))
@@ -131,17 +143,36 @@ func GetDocV1(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": apiDoc{ListedDoc: doc, URL: docURL(doc.UUID), Markdown: md}})
 }
 
+// docCreation is POST /v1/docs's body.
+type docCreation struct {
+	Title      string `json:"title"`
+	Markdown   string `json:"markdown"`
+	ParentUUID string `json:"parent_uuid"`
+}
+
+func readDocCreation(body io.Reader) (docCreation, error) {
+	var d docCreation
+	err := json.NewDecoder(body).Decode(&d)
+	return d, err
+}
+
+// parentOf is the page a new doc goes under, read as CreateDocV1 reads it: the
+// place its Reach names.
+func parentOf(body []byte) string {
+	d, err := readDocCreation(bytes.NewReader(body))
+	if err != nil {
+		return ""
+	}
+	return d.ParentUUID
+}
+
 // CreateDocV1 POST /v1/docs {title, markdown, parent_uuid} — scope docs:write.
 // A new doc made from Markdown: under a page the token's owner can edit, where
 // it takes that page's sharing, or at the top, where it is theirs alone. With
 // no title, the heading 1 the Markdown starts with is its title.
 func CreateDocV1(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Title      string `json:"title"`
-		Markdown   string `json:"markdown"`
-		ParentUUID string `json:"parent_uuid"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	body, err := readDocCreation(r.Body)
+	if err != nil {
 		refuse(w, http.StatusBadRequest, "Send a JSON object: title, markdown, and parent_uuid for a page to put it under.")
 		return
 	}

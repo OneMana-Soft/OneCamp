@@ -51,8 +51,11 @@ type Booking struct {
 	CreatedAt   time.Time `json:"created_at"`
 	// GuestTZ is the zone the guest booked in ("" before migration 212).
 	GuestTZ string `json:"guest_tz"`
-	// CancelToken is the guest's link: theirs alone, never sent anywhere else.
-	CancelToken string `json:"-"`
+	// CancelHash and CancelSealed are the guest's cancel link: the hash it is
+	// found by (helpers.LinkSecretHash), and the link itself sealed with the
+	// server's key, so a move can send it again. Neither is ever sent anywhere.
+	CancelHash   []byte `json:"-"`
+	CancelSealed string `json:"-"`
 }
 
 // Who cancelled a booking: its guest, through their link, or its host, by
@@ -199,7 +202,7 @@ func DeletePage(userID, id uuid.UUID) (bool, int, error) {
 
 // Reserve records a booking unless it overlaps an active one on the page,
 // holding a per-page lock so two guests can't take overlapping slots at once.
-func Reserve(b Booking, cancelToken string) (*Booking, error) {
+func Reserve(b Booking) (*Booking, error) {
 	ctx, cancel := withTimeout()
 	defer cancel()
 	tx, err := postgresInit.DBConn.SqlDB.BeginTx(ctx, nil)
@@ -220,9 +223,9 @@ func Reserve(b Booking, cancelToken string) (*Booking, error) {
 		return nil, ErrSlotTaken
 	}
 	if err := tx.QueryRowContext(ctx, `
-		INSERT INTO bookings (page_id, guest_name, guest_email, note, starts_at, ends_at, cancel_token, guest_tz)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
-		b.PageId, b.GuestName, b.GuestEmail, b.Note, b.StartsAt, b.EndsAt, cancelToken, b.GuestTZ).Scan(&b.Id); err != nil {
+		INSERT INTO bookings (page_id, guest_name, guest_email, note, starts_at, ends_at, cancel_token_hash, cancel_token_sealed, guest_tz)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+		b.PageId, b.GuestName, b.GuestEmail, b.Note, b.StartsAt, b.EndsAt, b.CancelHash, b.CancelSealed, b.GuestTZ).Scan(&b.Id); err != nil {
 		return nil, err
 	}
 	return &b, tx.Commit()
@@ -245,12 +248,12 @@ func Forget(id uuid.UUID) error {
 }
 
 const bookingColumns = `id, page_id, event_uuid, guest_name, guest_email, note, starts_at, ends_at, cancelled_at,
-	cancelled_by, created_at, guest_tz, cancel_token`
+	cancelled_by, created_at, guest_tz, cancel_token_hash, cancel_token_sealed`
 
 func scanBooking(row interface{ Scan(...any) error }) (*Booking, error) {
 	var b Booking
 	err := row.Scan(&b.Id, &b.PageId, &b.EventUUID, &b.GuestName, &b.GuestEmail, &b.Note, &b.StartsAt, &b.EndsAt,
-		&b.CancelledAt, &b.CancelledBy, &b.CreatedAt, &b.GuestTZ, &b.CancelToken)
+		&b.CancelledAt, &b.CancelledBy, &b.CreatedAt, &b.GuestTZ, &b.CancelHash, &b.CancelSealed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -286,9 +289,10 @@ func MoveByEvent(eventUUID uuid.UUID, start, end time.Time) (*Booking, time.Time
 			 FOR UPDATE)
 		UPDATE bookings b SET starts_at = $2, ends_at = $3 FROM was WHERE b.id = was.id
 		RETURNING b.id, b.page_id, b.event_uuid, b.guest_name, b.guest_email, b.note, b.starts_at, b.ends_at,
-		          b.cancelled_at, b.cancelled_by, b.created_at, b.guest_tz, b.cancel_token, was.starts_at, was.ends_at`,
+		          b.cancelled_at, b.cancelled_by, b.created_at, b.guest_tz, b.cancel_token_hash, b.cancel_token_sealed,
+		          was.starts_at, was.ends_at`,
 		eventUUID, start, end).Scan(&b.Id, &b.PageId, &b.EventUUID, &b.GuestName, &b.GuestEmail, &b.Note, &b.StartsAt, &b.EndsAt,
-		&b.CancelledAt, &b.CancelledBy, &b.CreatedAt, &b.GuestTZ, &b.CancelToken,
+		&b.CancelledAt, &b.CancelledBy, &b.CreatedAt, &b.GuestTZ, &b.CancelHash, &b.CancelSealed,
 		&wasStart, &wasEnd)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, time.Time{}, time.Time{}, nil
@@ -330,12 +334,13 @@ func UpcomingBookedEvents(owner uuid.UUID, now time.Time) ([]BookedEvent, error)
 	return out, rows.Err()
 }
 
-// BookingByToken is the booking a cancel link points at, or nil.
-func BookingByToken(token string) (*Booking, error) {
+// BookingByLink is the booking a cancel link points at, found by its
+// secret's hash (helpers.LinkSecretHash), or nil.
+func BookingByLink(hash []byte) (*Booking, error) {
 	ctx, cancel := withTimeout()
 	defer cancel()
 	return scanBooking(postgresInit.DBConn.SqlDB.QueryRowContext(ctx,
-		`SELECT `+bookingColumns+` FROM bookings WHERE cancel_token = $1`, token))
+		`SELECT `+bookingColumns+` FROM bookings WHERE cancel_token_hash = $1`, hash))
 }
 
 // Cancel marks a booking cancelled by its guest; false when it already was.

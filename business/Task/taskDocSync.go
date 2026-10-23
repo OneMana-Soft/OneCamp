@@ -198,11 +198,11 @@ var taskChanges = map[string]bool{
 // taskRenamed tells a renamed task's project topic, so chips and task lists
 // in docs read its name again: a rename dispatches no event (it isn't one of
 // the webhooks'), so taskToDocs never hears of it.
-func taskRenamed(task uuid.UUID, project *dgraphStruct.DgraphProject) {
+func taskRenamed(ctx context.Context, task uuid.UUID, project *dgraphStruct.DgraphProject) {
 	if project == nil || project.Uuid == "" {
 		return
 	}
-	publishTaskChanged(&mqttStruct.MqttTaskChanged{TaskUuid: task.String(), ProjectUuid: project.Uuid})
+	publishTaskChanged(ctx, &mqttStruct.MqttTaskChanged{TaskUuid: task.String(), ProjectUuid: project.Uuid})
 }
 
 // taskToDocs is the listener. Any change a chip shows is told on the task's
@@ -215,7 +215,7 @@ func taskToDocs(ctx context.Context, eventType string, data map[string]interface
 		return
 	}
 	str := func(k string) string { s, _ := data[k].(string); return s }
-	publishTaskChanged(&mqttStruct.MqttTaskChanged{TaskUuid: str("task_id"), ProjectUuid: str("project_id")})
+	publishTaskChanged(ctx, &mqttStruct.MqttTaskChanged{TaskUuid: str("task_id"), ProjectUuid: str("project_id")})
 	if eventType != "task.status_changed" {
 		return
 	}

@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 
+	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	domain "github.com/akashc777/OneCamp/domain/Channel"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -33,6 +34,12 @@ func CanRead(channel *dgraphStruct.DgraphChannel) bool {
 func PostReadableIn(channel *dgraphStruct.DgraphChannel, post *dgraphStruct.DgraphPost) bool {
 	return CanRead(channel) && post != nil && post.Channel != nil &&
 		post.Channel.Uuid == channel.Uuid && !helpers.IsSoftDeleted(post.DeletedAt)
+}
+
+func init() {
+	// A webhook sends a channel's events only when its owner may read them
+	// (business/Webhook reach.go), which can't import this package.
+	webhookBusiness.ReadChannelsWith(ReadableBy)
 }
 
 // ReadableBy reports whether the person with userUUID can read the channel's

@@ -445,15 +445,14 @@ func toldOf(s chatSnapshot) string {
 //
 //	shape                          callers
 //	a person's DM                  /dm/createChat with the switch off (business/Send), AI executors' send_dm
-//	                               (business/AI aiExecutors.go:246), webhooks (business/processIncoming.go:55),
-//	                               meeting recaps (business/AI meetingRecapAgent.go:546)
+//	                               (business/AI aiExecutors.go:246), meeting recaps (business/AI meetingRecapAgent.go:546)
 //	a first DM                     the same, to someone never written to
 //	a bot's DM                     the AI coworker (AICoworker aiCoworker.go:634, agentNote.go:224, dmStream.go:278),
 //	                               ambient private replies (AIAgent agentAmbientPrivate.go:146)
 //	an import's DM                 the demo seed's read receipt (DemoSeed readReceipt.go:45, BulkImport context)
 //	a group message with people    /groupChat/createChat with the switch off, AI executors (aiExecutors.go:314),
 //	                               meeting recaps (meetingRecapAgent.go:512), the AI coworker (aiCoworker.go:609)
-//	a group message without them   webhooks (processIncoming.go:100), agents' group DMs (AICoworker agentDM.go:228)
+//	a group message without them   agents' group DMs (AICoworker agentDM.go:228)
 //	a new group's first message    /groupChat/createChat with participants and the switch off
 func TestTodaysChatWritersTellAsTheyDidForEachCaller(t *testing.T) {
 	ada, sam, jonas := person("8d5f8a8e-0000-4000-8000-00000000000a", "0xa", "ada", false), person("8d5f8a8e-0000-4000-8000-00000000000b", "0xb", "sam", false), person("8d5f8a8e-0000-4000-8000-00000000000c", "0xc", "jonas", false)

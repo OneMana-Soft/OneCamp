@@ -12,11 +12,13 @@ import (
 )
 
 type Webhook struct {
-	Id                  uuid.UUID  `json:"id"`
-	Name                string     `json:"name"`
-	Description         *string    `json:"description,omitempty"`
-	Type                string     `json:"type"`
-	Token               string     `json:"token"`
+	Id          uuid.UUID `json:"id"`
+	Name        string    `json:"name"`
+	Description *string   `json:"description,omitempty"`
+	Type        string    `json:"type"`
+	// Token is set only on the answer that makes it (CreateWebhook,
+	// RegenerateToken): only its hash is kept.
+	Token               string     `json:"token,omitempty"`
 	Secret              *string    `json:"secret,omitempty"`
 	TargetUrl           *string    `json:"target_url,omitempty"`
 	ChannelId           *uuid.UUID `json:"channel_id,omitempty"`
@@ -42,9 +44,13 @@ type Webhook struct {
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
 	DeletedAt           *time.Time `json:"deleted_at,omitempty"`
+	// PausedAt and PausedReason say since when its deliveries wait, and why
+	// (business/Hooks: "admin", "failing", "owner_left", "owner_cant_read").
+	PausedAt     *time.Time `json:"paused_at,omitempty"`
+	PausedReason *string    `json:"paused_reason,omitempty"`
 }
 
-func CreateWebhook(query string, id uuid.UUID, name string, description *string, webhookType string, token string, secret *string, targetUrl *string, channelId *uuid.UUID, events *string, createdBy uuid.UUID, botName string, botAvatarUrl *string, metadata *string, createdAt time.Time) error {
+func CreateWebhook(query string, id uuid.UUID, name string, description *string, webhookType string, tokenHash []byte, secret *string, targetUrl *string, channelId *uuid.UUID, events *string, createdBy uuid.UUID, botName string, botAvatarUrl *string, metadata *string, createdAt time.Time) error {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
@@ -55,7 +61,7 @@ func CreateWebhook(query string, id uuid.UUID, name string, description *string,
 		name,
 		description,
 		webhookType,
-		token,
+		tokenHash,
 		secret,
 		targetUrl,
 		channelId,
@@ -82,12 +88,12 @@ type scanner interface {
 	Scan(dest ...any) error
 }
 
-// scanFullWebhook reads a full webhook row (27 columns) from s and returns it.
+// scanFullWebhook reads a full webhook row (32 columns) from s and returns it.
 func scanFullWebhook(s scanner) (*Webhook, error) {
 	var w Webhook
-	var description, secret, targetUrl, events, botAvatarUrl, metadata, scopeType, targetType, triggerWords, responseUrl, commands sql.NullString
+	var description, secret, targetUrl, events, botAvatarUrl, metadata, scopeType, targetType, triggerWords, responseUrl, commands, pausedReason sql.NullString
 	var channelId, scopeEntityId uuid.NullUUID
-	var lastTriggeredAt, deletedAt sql.NullTime
+	var lastTriggeredAt, deletedAt, pausedAt sql.NullTime
 	var supportsBlocks, supportsEphemeral, signatureRequired, supportsInteractive sql.NullBool
 	var timeoutMs sql.NullInt64
 
@@ -96,7 +102,6 @@ func scanFullWebhook(s scanner) (*Webhook, error) {
 		&w.Name,
 		&description,
 		&w.Type,
-		&w.Token,
 		&secret,
 		&targetUrl,
 		&channelId,
@@ -122,6 +127,8 @@ func scanFullWebhook(s scanner) (*Webhook, error) {
 		&w.CreatedAt,
 		&w.UpdatedAt,
 		&deletedAt,
+		&pausedAt,
+		&pausedReason,
 	)
 	if err != nil {
 		return nil, err
@@ -187,19 +194,25 @@ func scanFullWebhook(s scanner) (*Webhook, error) {
 	if supportsInteractive.Valid {
 		w.SupportsInteractive = supportsInteractive.Bool
 	}
+	if pausedAt.Valid {
+		w.PausedAt = &pausedAt.Time
+	}
+	if pausedReason.Valid {
+		w.PausedReason = &pausedReason.String
+	}
 
 	return &w, nil
 }
 
-func GetWebhookByToken(query string, token string) (*Webhook, error) {
+func GetWebhookByTokenHash(query string, hash []byte) (*Webhook, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()
 
-	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, token)
+	row := postgresInit.DBConn.SqlDB.QueryRowContext(ctx, query, hash)
 	webhook, err := scanFullWebhook(row)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		helpers.LogErrorWithContext(ctx,
-			"models/GetWebhookByToken Failed to get webhook err: %+v",
+			"models/GetWebhookByTokenHash Failed to get webhook err: %+v",
 			err)
 		return nil, err
 	}
@@ -314,7 +327,6 @@ func GetActiveOutgoingWebhooksByEvent(query string, args ...interface{}) ([]*Web
 		if err := rows.Scan(
 			&w.Id,
 			&w.Name,
-			&w.Token,
 			&secret,
 			&targetUrl,
 			&metadata,

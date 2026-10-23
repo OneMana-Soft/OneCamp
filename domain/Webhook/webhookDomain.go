@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const WEBHOOK_SELECT_ALL_COLS = `id, name, description, type, token, secret, target_url, channel_id, events, is_active, created_by, bot_name, bot_avatar_url, metadata, last_triggered_at, failure_count, scope_type, scope_entity_id, target_type, trigger_words, response_url, supports_blocks, supports_ephemeral, timeout_ms, signature_required, commands, supports_interactive, created_at, updated_at, deleted_at`
+const WEBHOOK_SELECT_ALL_COLS = `id, name, description, type, secret, target_url, channel_id, events, is_active, created_by, bot_name, bot_avatar_url, metadata, last_triggered_at, failure_count, scope_type, scope_entity_id, target_type, trigger_words, response_url, supports_blocks, supports_ephemeral, timeout_ms, signature_required, commands, supports_interactive, created_at, updated_at, deleted_at, paused_at, paused_reason`
 
 func logDomainError(ctx context.Context, op string, err error) error {
 	if err != nil {
@@ -19,18 +19,20 @@ func logDomainError(ctx context.Context, op string, err error) error {
 	return err
 }
 
-func CreateWebhook(ctx context.Context, id uuid.UUID, name string, description *string, webhookType string, token string, secret *string, targetUrl *string, channelId *uuid.UUID, events *string, createdBy uuid.UUID, botName string, botAvatarUrl *string, metadata *string, createdAt time.Time) error {
+func CreateWebhook(ctx context.Context, id uuid.UUID, name string, description *string, webhookType string, tokenHash []byte, secret *string, targetUrl *string, channelId *uuid.UUID, events *string, createdBy uuid.UUID, botName string, botAvatarUrl *string, metadata *string, createdAt time.Time) error {
 	query := `
-		INSERT INTO webhooks (id, name, description, type, token, secret, target_url, channel_id, events, created_by, bot_name, bot_avatar_url, metadata, created_at, updated_at)
+		INSERT INTO webhooks (id, name, description, type, token_hash, secret, target_url, channel_id, events, created_by, bot_name, bot_avatar_url, metadata, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $14)
 	`
-	return logDomainError(ctx, "CreateWebhook", models.CreateWebhook(query, id, name, description, webhookType, token, secret, targetUrl, channelId, events, createdBy, botName, botAvatarUrl, metadata, createdAt))
+	return logDomainError(ctx, "CreateWebhook", models.CreateWebhook(query, id, name, description, webhookType, tokenHash, secret, targetUrl, channelId, events, createdBy, botName, botAvatarUrl, metadata, createdAt))
 }
 
-func GetWebhookByToken(ctx context.Context, token string) (*models.Webhook, error) {
-	query := `SELECT ` + WEBHOOK_SELECT_ALL_COLS + ` FROM webhooks WHERE token = $1 AND deleted_at IS NULL`
-	webhook, err := models.GetWebhookByToken(query, token)
-	return webhook, logDomainError(ctx, "GetWebhookByToken", err)
+// GetWebhookByTokenHash is the webhook a token's hash finds
+// (helpers.LinkSecretHash), or nil.
+func GetWebhookByTokenHash(ctx context.Context, hash []byte) (*models.Webhook, error) {
+	query := `SELECT ` + WEBHOOK_SELECT_ALL_COLS + ` FROM webhooks WHERE token_hash = $1 AND deleted_at IS NULL`
+	webhook, err := models.GetWebhookByTokenHash(query, hash)
+	return webhook, logDomainError(ctx, "GetWebhookByTokenHash", err)
 }
 
 func GetWebhookById(ctx context.Context, id uuid.UUID) (*models.Webhook, error) {
@@ -45,18 +47,20 @@ func GetAllWebhooks(ctx context.Context) ([]*models.Webhook, error) {
 	return webhooks, logDomainError(ctx, "GetAllWebhooks", err)
 }
 
-func UpdateWebhook(ctx context.Context, id uuid.UUID, name string, description *string, targetUrl *string, channelId *uuid.UUID, events *string, isActive bool, botName string, botAvatarUrl *string, metadata *string, updatedAt time.Time) error {
+// UpdateWebhook writes a webhook's settings with its owner (created_by) in
+// the same write, so where it sends and whose reads bound it change together.
+func UpdateWebhook(ctx context.Context, id uuid.UUID, owner uuid.UUID, name string, description *string, targetUrl *string, channelId *uuid.UUID, events *string, isActive bool, botName string, botAvatarUrl *string, metadata *string, updatedAt time.Time) error {
 	query := `
 		UPDATE webhooks
-		SET name = $1, description = $2, target_url = $3, channel_id = $4, events = $5, is_active = $6, bot_name = $7, bot_avatar_url = $8, metadata = $9, updated_at = $10
-		WHERE id = $11 AND deleted_at IS NULL
+		SET name = $1, description = $2, target_url = $3, channel_id = $4, events = $5, is_active = $6, bot_name = $7, bot_avatar_url = $8, metadata = $9, updated_at = $10, created_by = $11
+		WHERE id = $12 AND deleted_at IS NULL
 	`
-	return logDomainError(ctx, "UpdateWebhook", models.UpdateWebhook(query, name, description, targetUrl, channelId, events, isActive, botName, botAvatarUrl, metadata, updatedAt, id))
+	return logDomainError(ctx, "UpdateWebhook", models.UpdateWebhook(query, name, description, targetUrl, channelId, events, isActive, botName, botAvatarUrl, metadata, updatedAt, owner, id))
 }
 
-func RegenerateWebhookToken(ctx context.Context, id uuid.UUID, newToken string, updatedAt time.Time) error {
-	query := `UPDATE webhooks SET token = $1, updated_at = $2 WHERE id = $3 AND deleted_at IS NULL`
-	return logDomainError(ctx, "RegenerateWebhookToken", models.UpdateWebhook(query, newToken, updatedAt, id))
+func RegenerateWebhookToken(ctx context.Context, id uuid.UUID, newHash []byte, updatedAt time.Time) error {
+	query := `UPDATE webhooks SET token_hash = $1, updated_at = $2 WHERE id = $3 AND deleted_at IS NULL`
+	return logDomainError(ctx, "RegenerateWebhookToken", models.UpdateWebhook(query, newHash, updatedAt, id))
 }
 
 func RegenerateWebhookSecret(ctx context.Context, id uuid.UUID, newSecret string, updatedAt time.Time) error {
@@ -77,7 +81,7 @@ func SoftDeleteWebhook(ctx context.Context, id uuid.UUID, deletedAt time.Time) e
 // task events reached no webhook at all (SA-BUG-10).
 func GetActiveOutgoingWebhooksByEvent(ctx context.Context, eventType string, scopeType string, scopeEntityId *uuid.UUID) ([]*models.Webhook, error) {
 	query := `
-		SELECT id, name, token, secret, target_url, metadata, scope_type, trigger_words, scope_entity_id, created_by
+		SELECT id, name, secret, target_url, metadata, scope_type, trigger_words, scope_entity_id, created_by
 		FROM webhooks
 		WHERE type = 'outgoing'
 		  AND is_active = true

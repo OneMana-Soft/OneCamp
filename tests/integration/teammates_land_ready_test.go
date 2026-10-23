@@ -190,7 +190,8 @@ func (lr *landReady) joinedProperly(userID, channelID uuid.UUID) bool {
 
 func (lr *landReady) invite(email, token string) {
 	lr.t.Helper()
-	if err := userDomain.AddInvitationWithToken(lr.ctx, email, lr.owner.UserPostgresInfo.Id, token, time.Now().Add(time.Hour)); err != nil {
+	link := userModels.InvitationLink{Hash: helpers.LinkSecretHash(token)}
+	if err := userDomain.AddInvitationWithLink(lr.ctx, email, lr.owner.UserPostgresInfo.Id, link, time.Now().Add(time.Hour)); err != nil {
 		lr.t.Fatal(err)
 	}
 }
@@ -866,13 +867,15 @@ func TestAnInvitationSaysWhetherItWasEmailed(t *testing.T) {
 		}
 		return answer
 	}
+	// linkFor is the invitation's link as the admin's list gives it: its
+	// sealed copy, opened.
 	linkFor := func(email string) string {
 		t.Helper()
-		var token string
-		if err := lr.env.PG.QueryRow(`SELECT token FROM invitations WHERE email = $1`, email).Scan(&token); err != nil {
+		var link userModels.InvitationLink
+		if err := lr.env.PG.QueryRow(`SELECT token_hash, token_sealed FROM invitations WHERE email = $1`, email).Scan(&link.Hash, &link.Sealed); err != nil {
 			t.Fatal(err)
 		}
-		return "https://team.example.test/signup?token=" + token
+		return "https://team.example.test/signup?token=" + helpers.OpenLinkSecret(link.Sealed, link.Hash)
 	}
 
 	// The provider: what it was sent, and what it answers.
@@ -1168,8 +1171,8 @@ func TestAnInvitationWithoutAnExpiryLastsAWeek(t *testing.T) {
 		email, token string
 		age          string
 	}{{"old@example.test", "tok-old-legacy", "8 days"}, {"recent@example.test", "tok-recent-legacy", "2 days"}} {
-		if _, err := lr.env.PG.Exec(`INSERT INTO invitations (email, invited_by, status, token, token_expires_at, created_at)
-			VALUES ($1, $2, 'pending', $3, NULL, NOW() - $4::interval)`, row.email, lr.owner.UserPostgresInfo.Id, row.token, row.age); err != nil {
+		if _, err := lr.env.PG.Exec(`INSERT INTO invitations (email, invited_by, status, token_hash, token_expires_at, created_at)
+			VALUES ($1, $2, 'pending', $3, NULL, NOW() - $4::interval)`, row.email, lr.owner.UserPostgresInfo.Id, helpers.LinkSecretHash(row.token), row.age); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1194,20 +1197,27 @@ func TestRenewingTouchesOnlyTheNewestInvitation(t *testing.T) {
 	lr := setupLandReady(t)
 	asOwner := context.WithValue(lr.ctx, helpers.UserInfoContextKey, lr.owner)
 	for _, row := range []struct{ token, age string }{{"tok-dup-old", "10 days"}, {"tok-dup-new", "9 days"}} {
-		if _, err := lr.env.PG.Exec(`INSERT INTO invitations (email, invited_by, status, token, token_expires_at, created_at)
+		if _, err := lr.env.PG.Exec(`INSERT INTO invitations (email, invited_by, status, token_hash, token_expires_at, created_at)
 			VALUES ('dup@example.test', $1, 'sent', $2, NOW() - interval '2 days', NOW() - $3::interval)`,
-			lr.owner.UserPostgresInfo.Id, row.token, row.age); err != nil {
+			lr.owner.UserPostgresInfo.Id, helpers.LinkSecretHash(row.token), row.age); err != nil {
 			t.Fatal(err)
 		}
 	}
-	tokenOf := func(age string) string {
+	// linkOf is which link the row an age ago is found by: "tok-dup-old",
+	// "tok-dup-new", or "" for a new one.
+	linkOf := func(age string) string {
 		t.Helper()
-		var token string
-		if err := lr.env.PG.QueryRow(`SELECT token FROM invitations WHERE email = 'dup@example.test' AND created_at < NOW() - $1::interval
-			ORDER BY created_at DESC LIMIT 1`, age).Scan(&token); err != nil {
+		var hash []byte
+		if err := lr.env.PG.QueryRow(`SELECT token_hash FROM invitations WHERE email = 'dup@example.test' AND created_at < NOW() - $1::interval
+			ORDER BY created_at DESC LIMIT 1`, age).Scan(&hash); err != nil {
 			t.Fatal(err)
 		}
-		return token
+		for _, token := range []string{"tok-dup-old", "tok-dup-new"} {
+			if bytes.Equal(hash, helpers.LinkSecretHash(token)) {
+				return token
+			}
+		}
+		return ""
 	}
 	for _, h := range []http.HandlerFunc{userController.AddInvitation, userController.ResendInvitation} {
 		rec := httptest.NewRecorder()
@@ -1215,11 +1225,11 @@ func TestRenewingTouchesOnlyTheNewestInvitation(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("sending again: %d %s", rec.Code, rec.Body.String())
 		}
-		if old := tokenOf("9 days 12 hours"); old != "tok-dup-old" {
-			t.Errorf("the older row was renewed too: token %q", old)
+		if old := linkOf("9 days 12 hours"); old != "tok-dup-old" {
+			t.Errorf("the older row was renewed too: link %q", old)
 		}
-		if newest := tokenOf("8 days"); newest == "tok-dup-new" || newest == "tok-dup-old" {
-			t.Errorf("the newest row kept its token %q", newest)
+		if newest := linkOf("8 days"); newest != "" {
+			t.Errorf("the newest row kept its link %q", newest)
 		}
 	}
 }
@@ -1253,8 +1263,8 @@ func TestOnlyAdminsRenewAndMembersLearnNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	lr.invite("live@example.test", "tok-live-10")
-	if _, err := lr.env.PG.Exec(`INSERT INTO invitations (email, invited_by, status, token, token_expires_at)
-		VALUES ('late@example.test', $1, 'sent', 'tok-late-10', NOW() - interval '1 day')`, lr.owner.UserPostgresInfo.Id); err != nil {
+	if _, err := lr.env.PG.Exec(`INSERT INTO invitations (email, invited_by, status, token_hash, token_expires_at)
+		VALUES ('late@example.test', $1, 'sent', $2, NOW() - interval '1 day')`, lr.owner.UserPostgresInfo.Id, helpers.LinkSecretHash("tok-late-10")); err != nil {
 		t.Fatal(err)
 	}
 	invite := func(who userModels.UserInfo, h http.HandlerFunc, email string) (int, string) {
@@ -1268,12 +1278,15 @@ func TestOnlyAdminsRenewAndMembersLearnNothing(t *testing.T) {
 		_ = json.Unmarshal(rec.Body.Bytes(), &answer)
 		return rec.Code, answer.Msg
 	}
-	lateRow := func() (token string, by uuid.UUID) {
+	// lateRow is whether the late invitation still has its first link, and
+	// who it is from.
+	lateRow := func() (first bool, by uuid.UUID) {
 		t.Helper()
-		if err := lr.env.PG.QueryRow(`SELECT token, invited_by FROM invitations WHERE email = 'late@example.test'`).Scan(&token, &by); err != nil {
+		var hash []byte
+		if err := lr.env.PG.QueryRow(`SELECT token_hash, invited_by FROM invitations WHERE email = 'late@example.test'`).Scan(&hash, &by); err != nil {
 			t.Fatal(err)
 		}
-		return
+		return bytes.Equal(hash, helpers.LinkSecretHash("tok-late-10")), by
 	}
 
 	member := lr.info(memberID)
@@ -1288,7 +1301,7 @@ func TestOnlyAdminsRenewAndMembersLearnNothing(t *testing.T) {
 	if len(words) != 1 {
 		t.Errorf("a member is told different things about different addresses: %v", words)
 	}
-	if token, _ := lateRow(); token != "tok-late-10" {
+	if first, _ := lateRow(); !first {
 		t.Error("a member renewed an expired invitation")
 	}
 	if code, msg := invite(member, userController.AddInvitation, "fresh@example.test"); code != http.StatusOK {
@@ -1304,8 +1317,8 @@ func TestOnlyAdminsRenewAndMembersLearnNothing(t *testing.T) {
 	if code, msg := invite(lr.owner, userController.AddInvitation, "late@example.test"); code != http.StatusOK {
 		t.Fatalf("an admin renewing: %d %q", code, msg)
 	}
-	if token, by := lateRow(); token == "tok-late-10" || by != lr.owner.UserPostgresInfo.Id {
-		t.Errorf("renewed: token %q, invited by %s, want a new token from the owner", token, by)
+	if first, by := lateRow(); first || by != lr.owner.UserPostgresInfo.Id {
+		t.Errorf("renewed: first link kept %v, invited by %s, want a new link from the owner", first, by)
 	}
 	if code, msg := invite(lr.info(adminID), userController.ResendInvitation, "late@example.test"); code != http.StatusOK {
 		t.Fatalf("another admin sending it again: %d %q", code, msg)

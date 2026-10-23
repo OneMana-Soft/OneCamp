@@ -37,7 +37,6 @@ import (
 
 	apiTokenBusiness "github.com/akashc777/OneCamp/business/ApiToken"
 	agentModel "github.com/akashc777/OneCamp/models/postgres/AIAgent"
-	"github.com/google/uuid"
 )
 
 // ActorType is what KIND of thing made a call. Recorded so risk can be reasoned
@@ -107,8 +106,13 @@ func ResolveActorForRequest(ctx context.Context, tokenPlaintext string) (ActorId
 	if err != nil || auth == nil {
 		return ActorIdentity{}, false, "invalid or inactive credential"
 	}
-	return ResolveActor(ctx, auth.TokenID.String(), auth.AgentID, auth.UserID.String())
+	return ResolveActor(ctx, auth)
 }
+
+// AppsCantUseMCP is the refusal of an installed app's token (business/App).
+// MCP's tools reach whatever the token's user may, and none is held to the
+// places an app was added to, as the /v1 routes hold it.
+const AppsCantUseMCP = "An app's token can't use MCP yet: MCP's tools aren't held to the places an app was added to. Use the app's /v1 routes."
 
 // ResolveActor turns a validated credential into an actor identity, and enforces the
 // agent kill switch.
@@ -121,12 +125,12 @@ func ResolveActorForRequest(ctx context.Context, tokenPlaintext string) (ActorId
 //
 // A lookup failure is also a refusal. We cannot establish that the agent is active,
 // and proceeding on an unverified identity is exactly what the audit trail exists to
-// make impossible.
-func ResolveActor(ctx context.Context, tokenID string, agentID *uuid.UUID, principalUserID string) (actor ActorIdentity, ok bool, reason string) {
+// make impossible. So is an installed app's credential (AppsCantUseMCP).
+func ResolveActor(ctx context.Context, auth *apiTokenBusiness.AuthResult) (actor ActorIdentity, ok bool, reason string) {
 	base := ActorIdentity{
 		Type:            ActorAPIClient,
-		TokenID:         strings.TrimSpace(tokenID),
-		PrincipalUserID: strings.TrimSpace(principalUserID),
+		TokenID:         auth.TokenID.String(),
+		PrincipalUserID: auth.UserID.String(),
 	}
 
 	// FAIL CLOSED, NEVER CRASH — the third place in this codebase needing this, so
@@ -144,13 +148,17 @@ func ResolveActor(ctx context.Context, tokenID string, agentID *uuid.UUID, princ
 		}
 	}()
 
+	if auth.AppID != nil {
+		return base, false, AppsCantUseMCP
+	}
+
 	// Unbound credential. Legitimate and unchanged — every token predating migration
 	// 138 is one, and a script is honestly an api_client rather than an agent.
-	if agentID == nil {
+	if auth.AgentID == nil {
 		return base, true, "unbound integration credential"
 	}
 
-	agent, why := apiTokenBusiness.BoundAgent(ctx, *agentID)
+	agent, why := apiTokenBusiness.BoundAgent(ctx, *auth.AgentID)
 	if agent == nil {
 		return base, false, why
 	}

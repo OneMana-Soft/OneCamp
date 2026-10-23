@@ -273,6 +273,26 @@ func SAMLCallback(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, authService.SignInErrorURL("saml_invalid", "Invalid SAML assertion from directory provider"), http.StatusFound)
 		return
 	}
+	// Each answer signs in once (the sign-in page's words for signin_expired
+	// say it was already used).
+	if err := samlService.TakeAssertion(ctx, assertion); err != nil {
+		if errors.Is(err, samlService.ErrAssertionUsed) {
+			http.Redirect(w, r, authService.SignInErrorURL("signin_expired", err.Error()), http.StatusFound)
+			return
+		}
+		helpers.LogErrorWithContext(ctx, "controllers/SAMLCallback: %+v", err)
+		http.Redirect(w, r, authService.SignInErrorURL("session_failed", "Failed to start session"), http.StatusFound)
+		return
+	}
+	// The sign-in this answers is done: stop tracking it, as samlsp's own ACS
+	// handler does (RelayState is the tracked request's index).
+	if tracker, index := samlService.SAMLMiddleware.RequestTracker, r.Form.Get("RelayState"); tracker != nil && index != "" {
+		if _, err := tracker.GetTrackedRequest(r, index); err == nil {
+			if err := tracker.StopTrackingRequest(w, r, index); err != nil {
+				helpers.LogErrorWithContext(ctx, "controllers/SAMLCallback stop tracking %q: %+v", index, err)
+			}
+		}
+	}
 
 	email, username, samlGroups, identityErr := extractSAMLIdentity(assertion)
 	if identityErr != nil {

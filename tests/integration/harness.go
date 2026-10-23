@@ -296,6 +296,7 @@ var migratesItself = map[string]bool{
 	"TestEditProposalsMigrationUpDownUp":                        true,
 	"TestEmailLookupIndexSurvivesAddressesThatDifferOnlyInCase": true,
 	"TestEarlierSlackImportsMessagesAreKeyedByConversation":     true,
+	"TestInvitationLinksMigrationUpDownUp":                      true,
 	"TestMigration204ClosesInvitationsToMembers":                true,
 	"TestOutboxMigrationUpDownUp":                               true,
 	"TestPublishMigrationUpDownUp":                              true,
@@ -306,6 +307,7 @@ var migratesItself = map[string]bool{
 	"TestTableRowComments":                                      true,
 	"TestTableRowPages":                                         true,
 	"TestThreadsMigrationUpDownUp":                              true,
+	"TestWebhookTokensMigrationUpDownUp":                        true,
 }
 
 var thePostgres shared[pgServer]

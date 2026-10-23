@@ -54,6 +54,9 @@ func DraftReleaseNotes(ctx context.Context, userUUID, owner, repo string, days i
 	if strings.TrimSpace(owner) == "" || strings.TrimSpace(repo) == "" {
 		return nil, fmt.Errorf("repo owner and name are required")
 	}
+	if err := CodeRepoAllowed(ctx, userUUID, owner, repo); err != nil {
+		return nil, err
+	}
 	if days <= 0 {
 		days = 14
 	}

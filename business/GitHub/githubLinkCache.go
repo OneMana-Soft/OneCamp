@@ -114,6 +114,21 @@ func repositoryLinks(ctx context.Context, owner, name string) ([]*githubLinkMode
 	return links, nil
 }
 
+// ProjectsLinking are the projects that link the repository owner/name, matched
+// in any case as GitHub matches names, from the links the webhooks read; none
+// when no project links it.
+func ProjectsLinking(ctx context.Context, owner, name string) ([]uuid.UUID, error) {
+	links, err := repositoryLinks(ctx, owner, name)
+	if err != nil {
+		return nil, err
+	}
+	projects := make([]uuid.UUID, 0, len(links))
+	for _, l := range links {
+		projects = append(projects, l.ProjectId)
+	}
+	return projects, nil
+}
+
 // parseAutomationRules decodes a link's stored automation rules JSON.
 //
 // We swallow JSON parse errors deliberately: malformed rules are not

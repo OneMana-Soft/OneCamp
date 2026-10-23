@@ -12,8 +12,9 @@
 //     hint}}), one page (Page: items, next_cursor), and an ETag where the
 //     value has a version (the page and If-Match readers arrive with the
 //     first route in the new shape that pages or versions, §3.2);
-//   - for a route that names what it reaches, an app refused anywhere it
-//     wasn't added (business/App);
+//   - an app held to the places it was added to (business/App): a route
+//     names what it reaches (Reach), or holds the app itself (AppsInside), or
+//     refuses it (AppsRefused);
 //   - a request id and the API's version on every answer;
 //
 // and OpenAPI describes them all (/v1/openapi.json). Routes that existed
@@ -98,9 +99,17 @@ type Route struct {
 	// Use runs before the handler, after the scope and the limit (a policy gate).
 	Use []func(http.Handler) http.Handler
 	// Reach names the resource a request touches (its kind and id, from the
-	// path): an app's call is refused unless the app was added there
-	// (business/App MayReach). A person's or an agent's token is unaffected.
+	// path, or from the body through PeekBody): an app's call is refused unless
+	// the app was added there (business/App MayReach). A person's or an agent's
+	// token is unaffected.
 	Reach func(r *http.Request) (kind, id string)
+	// A route with no Reach says how an app's token is held instead, in one of
+	// two ways (Register insists, so no route opens to apps by being forgotten):
+	// AppsInside, when its handler holds the app to its places itself (a list
+	// cut to them, business/App Narrow) or reads only the app's own (/me); or
+	// AppsRefused, the words an app is refused with.
+	AppsInside  bool
+	AppsRefused string
 	// Handler answers the request itself (a legacy route, or one that streams).
 	Handler http.HandlerFunc
 	// Serve answers in the new shape: its value is written as JSON (200, or
@@ -159,20 +168,18 @@ var (
 )
 
 // Register adds a resource, at its package's init. A route with neither a
-// scope nor ScopeInside, or registered twice, panics: the API is a contract,
-// and a route nobody gave a scope would be open to every token.
+// scope nor ScopeInside, one that doesn't say how an app's token is held, or
+// one registered twice, panics: the API is a contract, and a route nobody gave
+// a scope would be open to every token, one nobody held apps on open to apps.
 func Register(r Resource) {
 	mu.Lock()
 	defer mu.Unlock()
 	for _, rt := range r.Routes {
-		open := 0
-		for _, b := range []bool{rt.Scope != "", rt.ScopeInside, rt.AnyToken} {
-			if b {
-				open++
-			}
-		}
-		if open != 1 {
+		if !oneOf(rt.Scope != "", rt.ScopeInside, rt.AnyToken) {
 			panic(fmt.Sprintf("v1api: %s %s (%s) needs exactly one of Scope, ScopeInside or AnyToken", rt.Method, rt.Path, r.Name))
+		}
+		if !oneOf(rt.Reach != nil, rt.AppsInside, rt.AppsRefused != "") {
+			panic(fmt.Sprintf("v1api: %s %s (%s) needs exactly one of Reach, AppsInside or AppsRefused", rt.Method, rt.Path, r.Name))
 		}
 		if (rt.Handler == nil) == (rt.Serve == nil) {
 			panic(fmt.Sprintf("v1api: %s %s (%s) needs one of Handler or Serve", rt.Method, rt.Path, r.Name))
@@ -191,6 +198,17 @@ func Register(r Resource) {
 		apiTokenBusiness.RegisterScope(s.Name)
 	}
 	resources = append(resources, r)
+}
+
+// oneOf is whether exactly one of choices holds.
+func oneOf(choices ...bool) bool {
+	n := 0
+	for _, c := range choices {
+		if c {
+			n++
+		}
+	}
+	return n == 1
 }
 
 // Resources are every registered resource, by name.
@@ -252,9 +270,7 @@ func chain(res Resource, rt Route, mw Middleware) http.Handler {
 	for i := len(rt.Use) - 1; i >= 0; i-- {
 		h = rt.Use[i](h)
 	}
-	if rt.Reach != nil {
-		h = reached(rt, h)
-	}
+	h = reached(rt, h)
 	h = limited(rt, h)
 	if rt.Scope != "" && mw.RequireScope != nil {
 		h = mw.RequireScope(rt.Scope)(h)
@@ -266,20 +282,53 @@ func chain(res Resource, rt Route, mw Middleware) http.Handler {
 	})
 }
 
-// reached refuses an app's call to a resource the app wasn't added to (R1: an
-// app is only ever narrowed). Nothing changes for any other token.
+// actsAsApp is the app a request's token belongs to: a seam for tests, which
+// have no app records.
+var actsAsApp = appBusiness.ActsAsApp
+
+// reached holds an app's call to the places the app was added to (R1: an app
+// is only ever narrowed), on every route: one that names its place asks
+// MayReach, one whose handler holds the app itself lets it through, and any
+// other refuses it in its own words. When what the app may reach can't be
+// read, the call is refused: a failed read never opens a route. Nothing
+// changes for any other token.
 func reached(rt Route, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if app, ok := appBusiness.ActsAsApp(r.Context()); ok {
-			kind, id := rt.Reach(r)
-			if !appBusiness.MayReach(r.Context(), app, kind, id) {
-				writeError(w, Errorf(http.StatusForbidden, "not_in_audience", "an admin can add it to the app in Admin › Apps",
-					"%s wasn't added to this %s", app.Name, kind))
+		app, err := actsAsApp(r.Context())
+		if err != nil {
+			helpers.LogErrorWithContext(r.Context(), "business/PublicAPI reached %s %s: %+v", rt.Method, rt.Path, err)
+			writeError(w, Errorf(http.StatusServiceUnavailable, "unavailable", "try again shortly",
+				"what this app may reach couldn't be checked"))
+			return
+		}
+		if app != nil {
+			switch {
+			case rt.Reach != nil:
+				kind, id := rt.Reach(r)
+				if !appBusiness.MayReach(r.Context(), app, kind, id) {
+					writeError(w, Errorf(http.StatusForbidden, "not_in_audience", "an admin can add it to the app in Admin › Apps",
+						"%s wasn't added to this %s", app.Name, kind))
+					return
+				}
+			case !rt.AppsInside:
+				writeError(w, Errorf(http.StatusForbidden, "not_for_apps", "an app reaches only the places an admin added it to",
+					"%s", rt.AppsRefused))
 				return
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// PeekBody is a request's body, read and put back for the handler, as a Reach
+// that takes its place from a write's body reads it.
+func PeekBody(r *http.Request) ([]byte, error) {
+	if r.Body == nil {
+		return nil, nil
+	}
+	body, err := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return body, err
 }
 
 // stamp puts the API's version and a request id on the answer.
@@ -360,12 +409,11 @@ func idempotent(rt Route, next http.Handler) http.Handler {
 				"an Idempotency-Key is at most %d characters", maxIdempotencyKey))
 			return
 		}
-		body, err := io.ReadAll(r.Body)
+		body, err := PeekBody(r)
 		if err != nil {
 			writeError(w, Errorf(http.StatusBadRequest, "unreadable_body", "", "the request's body couldn't be read: %v", err))
 			return
 		}
-		r.Body = io.NopCloser(bytes.NewReader(body))
 		sum := sha256.Sum256(body)
 		hash := hex.EncodeToString(sum[:])
 		args := []string{token, route, key}

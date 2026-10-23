@@ -36,6 +36,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	customMiddleware "github.com/akashc777/OneCamp/middleware"
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/tests/integration"
 )
 
@@ -130,7 +131,7 @@ func TestExternalPeopleSignInOnlyByJoining(t *testing.T) {
 	}
 	invite := func(email, token string) {
 		t.Helper()
-		if err := userDomain.AddInvitationWithToken(ctx, email, bob, token, time.Now().Add(time.Hour)); err != nil {
+		if err := userDomain.AddInvitationWithLink(ctx, email, bob, userModels.InvitationLink{Hash: helpers.LinkSecretHash(token)}, time.Now().Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 	}

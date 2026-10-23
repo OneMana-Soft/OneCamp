@@ -17,6 +17,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -57,8 +58,8 @@ func TestAnExpiredInvitationsPersonIsOfferedAgain(t *testing.T) {
 		exec(`INSERT INTO users (id, email_id, display_name, is_external) VALUES ($1, $2, $3, true)`, id, row.email, row.email)
 		exec(`INSERT INTO import_id_map (import_id, entity_type, source_id, onecamp_uuid) VALUES ($1, 'user', $2, $3)`,
 			job, "src-"+string(rune('a'+i)), id)
-		exec(`INSERT INTO invitations (email, invited_by, status, token, token_expires_at, created_at)
-			VALUES ($1, $2, $3, $4, `+row.expires+`, `+row.made+`)`, row.email, admin, row.status, "tok-"+row.email)
+		exec(`INSERT INTO invitations (email, invited_by, status, token_hash, token_expires_at, created_at)
+			VALUES ($1, $2, $3, $4, `+row.expires+`, `+row.made+`)`, row.email, admin, row.status, helpers.LinkSecretHash("tok-"+row.email))
 	}
 
 	people, err := importModels.ListImportedPeople(ctx, job)
@@ -85,8 +86,8 @@ func TestInvitationLiveSQLIsLiveAt(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, row := range invitationRows {
-		if _, err := env.PG.Exec(`INSERT INTO invitations (email, status, token, token_expires_at, created_at)
-			VALUES ($1, $2, $3, `+row.expires+`, `+row.made+`)`, row.email, row.status, "tok-"+row.email); err != nil {
+		if _, err := env.PG.Exec(`INSERT INTO invitations (email, status, token_hash, token_expires_at, created_at)
+			VALUES ($1, $2, $3, `+row.expires+`, `+row.made+`)`, row.email, row.status, helpers.LinkSecretHash("tok-"+row.email)); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -31,6 +31,29 @@ func TestAnAppReachesOnlyWhereItWasAdded(t *testing.T) {
 	}
 }
 
+// A list or a search answers an app with only what sits in its places: a task
+// in a project it was added to, or a task it was added to itself.
+func TestAnAppsListHoldsOnlyItsPlaces(t *testing.T) {
+	app := &Identity{Audience: Audience{Places: []Place{{Kind: "project", ID: "p1"}, {Kind: "task", ID: "t9"}}}}
+	type task struct{ id, project string }
+	kept := Narrow(context.Background(), app, []task{{"t1", "p1"}, {"t2", "p2"}, {"t9", "p2"}, {"t3", ""}}, func(t task) []Place {
+		return []Place{{Kind: "task", ID: t.id}, {Kind: "project", ID: t.project}}
+	})
+	if len(kept) != 2 || kept[0].id != "t1" || kept[1].id != "t9" {
+		t.Errorf("kept %v, want t1 (its project) and t9 (itself)", kept)
+	}
+	if got := Narrow(context.Background(), app, []task{{"t1", "p1"}}, func(task) []Place { return nil }); len(got) != 0 {
+		t.Errorf("an item in no place was kept: %v", got)
+	}
+}
+
+// A token that isn't an app's is no app, and nothing is read to say so.
+func TestATokenWithNoAppActsAsNoApp(t *testing.T) {
+	if app, err := ActsAsApp(context.Background()); app != nil || err != nil {
+		t.Errorf("no app on the request: %+v, %v", app, err)
+	}
+}
+
 func TestAnAppsPlacesAndScopesAreChecked(t *testing.T) {
 	if _, err := cleanPlaces([]Place{{Kind: "channel", ID: "general"}}); err == nil || !strings.Contains(err.Error(), "isn't a channel's id") {
 		t.Errorf("a place that isn't an id: %v", err)

@@ -24,6 +24,7 @@ import (
 	postAdapter "github.com/akashc777/OneCamp/adapter/Post"
 	taskAdapter "github.com/akashc777/OneCamp/adapter/Task"
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
+	appBusiness "github.com/akashc777/OneCamp/business/App"
 	globalSearchBusiness "github.com/akashc777/OneCamp/business/GlobalSearch"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
@@ -36,6 +37,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	authService "github.com/akashc777/OneCamp/services/Auth"
 	"github.com/go-chi/chi/v5"
@@ -170,7 +172,17 @@ func taskRows(tasks []*dgraphStruct.DgraphTask, total int, now time.Time) apiTas
 	return out
 }
 
-// ListTasksV1 GET /v1/tasks — scope tasks:read. The token owner's tasks.
+// taskPlaces are the places a task sits in, for an app: the task, and its project.
+func taskPlaces(t *dgraphStruct.DgraphTask) []appBusiness.Place {
+	places := []appBusiness.Place{{Kind: "task", ID: t.Uuid}}
+	if t.Project != nil {
+		places = append(places, appBusiness.Place{Kind: "project", ID: t.Project.Uuid})
+	}
+	return places
+}
+
+// ListTasksV1 GET /v1/tasks — scope tasks:read. The token owner's tasks; an
+// app's, only those in its places, counted alone.
 // Optional query params: status, filter (overdue), search.
 func ListTasksV1(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
@@ -186,11 +198,23 @@ func ListTasksV1(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusInternalServerError, "couldn't list the tasks")
 		return
 	}
-	if got == nil || len(got.Tasks) == 0 {
+	var tasks []*dgraphStruct.DgraphTask
+	total := 0
+	if got != nil {
+		tasks, total = got.Tasks, int(got.TaskCount)
+	}
+	tasks, app, ok := narrowed(w, r, tasks, taskPlaces)
+	if !ok {
+		return
+	}
+	if app != nil {
+		total = len(tasks)
+	}
+	if len(tasks) == 0 {
 		answer(w, http.StatusOK, "You have no tasks matching that.", nil)
 		return
 	}
-	list := taskRows(got.Tasks, int(got.TaskCount), time.Now())
+	list := taskRows(tasks, total, time.Now())
 	var b strings.Builder
 	fmt.Fprintf(&b, "Your tasks (%d shown):", len(list.Tasks))
 	for _, t := range list.Tasks {
@@ -373,7 +397,8 @@ type apiProject struct {
 }
 
 // ListProjectsV1 GET /v1/projects — scope projects:read. The projects the
-// token owner is in, and whether they can create and manage tasks in each.
+// token owner is in (an app's, only those it was added to), and whether they
+// can create and manage tasks in each.
 func ListProjectsV1(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	user := apiUser(r)
@@ -381,6 +406,15 @@ func ListProjectsV1(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		refuse(w, http.StatusInternalServerError, "couldn't list the projects")
 		return
+	}
+	if got != nil {
+		projects, _, ok := narrowed(w, r, got.Projects, func(p *dgraphStruct.DgraphProject) []appBusiness.Place {
+			return []appBusiness.Place{{Kind: "project", ID: p.Uuid}}
+		})
+		if !ok {
+			return
+		}
+		got.Projects = projects
 	}
 	admin := map[string]bool{}
 	if ps, err := projectBusiness.GetDgraphProjectListByAdminDgraphUID(ctx, user.UserDgraphInfo.Uid); err == nil {
@@ -546,5 +580,37 @@ func SearchV1(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusInternalServerError, "couldn't search")
 		return
 	}
+	hits, _, ok := narrowed(w, r, page.Page, hitPlaces)
+	if !ok {
+		return
+	}
+	page.Page = hits
 	answer(w, http.StatusOK, fmt.Sprintf("%d results for %q.", len(page.Page), query), map[string]string{structuredKey: asJSON(page)})
+}
+
+// hitPlaces are the places a search hit sits in, for an app: a message, a
+// comment or a file in its channel or project (or a comment on its doc), a
+// task in itself or its project, a doc, a project, a channel. A DM, a group,
+// a board, a team or a person is no place an app is added to, so an app finds
+// none of them.
+func hitPlaces(h *openSearchStruct.GlobalSearchOpenSearchResp) []appBusiness.Place {
+	switch {
+	case h == nil:
+		return nil
+	case h.Post != nil:
+		return []appBusiness.Place{{Kind: "channel", ID: h.Post.PostChannelUuid}}
+	case h.Comment != nil:
+		return []appBusiness.Place{{Kind: "channel", ID: h.Comment.CommentChannelUuid}, {Kind: "project", ID: h.Comment.CommentProjectUuid}, {Kind: "doc", ID: h.Comment.CommentDocUuid}}
+	case h.Attachment != nil:
+		return []appBusiness.Place{{Kind: "channel", ID: h.Attachment.AttachmentChannelUuid}, {Kind: "project", ID: h.Attachment.AttachmentProjectUuid}}
+	case h.Task != nil:
+		return []appBusiness.Place{{Kind: "task", ID: h.Task.Uuid}, {Kind: "project", ID: h.Task.TaskProjectUuid}}
+	case h.Doc != nil:
+		return []appBusiness.Place{{Kind: "doc", ID: h.Doc.Uuid}}
+	case h.Project != nil:
+		return []appBusiness.Place{{Kind: "project", ID: h.Project.Uuid}}
+	case h.Channel != nil:
+		return []appBusiness.Place{{Kind: "channel", ID: h.Channel.Uuid}}
+	}
+	return nil
 }

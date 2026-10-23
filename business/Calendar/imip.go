@@ -25,7 +25,6 @@ package Calendar
 //     guest's link instead.
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"html"
@@ -242,7 +241,7 @@ func partStatOf(response string) string {
 // linkOf is a guest by email's answer link: theirs, unsealed; or, when it
 // can't be (the server's key changed), a new one, kept for them.
 func (s *service) linkOf(ctx context.Context, e *models.Event, g models.Attendee) (string, error) {
-	if raw, err := helpers.DecryptSecret(g.LinkSealed); err == nil && raw != "" && bytes.Equal(helpers.LinkSecretHash(raw), g.LinkHash) {
+	if raw := helpers.OpenLinkSecret(g.LinkSealed, g.LinkHash); raw != "" {
 		return rsvpURL(raw), nil
 	}
 	fresh, err := withLink(models.Attendee{Email: g.Email})

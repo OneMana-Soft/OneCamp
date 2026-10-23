@@ -3,6 +3,7 @@ package controllers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -1259,6 +1260,10 @@ func AnalyzeCodeIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := business.CodeRepoAllowed(ctx, userInfo.UserDgraphInfo.Uuid, req.Owner, req.Repo); err != nil {
+		helpers.WriteJSON(w, codeReadStatus(err), helpers.Envolope{"msg": err.Error()})
+		return
+	}
 	analysis, err := codeagent.AnalyzeIssue(ctx, req.Owner, req.Repo, req.Title, req.Body, req.Ref, req.Deep)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/AnalyzeCodeIssue failed: %v", err)
@@ -1274,6 +1279,15 @@ func AnalyzeCodeIssue(w http.ResponseWriter, r *http.Request) {
 			Partial:         analysis.Partial,
 		},
 	})
+}
+
+// codeReadStatus is the status a failed read of a repository's code answers
+// with: 403 for one the reader may not read (business.CodeRepoAllowed).
+func codeReadStatus(err error) int {
+	if errors.Is(err, business.ErrRepoNotLinked) {
+		return http.StatusForbidden
+	}
+	return http.StatusInternalServerError
 }
 
 // DraftReleaseNotes handles POST /ai/release-notes
@@ -1298,7 +1312,7 @@ func DraftReleaseNotes(w http.ResponseWriter, r *http.Request) {
 	res, err := business.DraftReleaseNotes(ctx, userInfo.UserDgraphInfo.Uuid, req.Owner, req.Repo, req.Days)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/DraftReleaseNotes failed: %v", err)
-		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": err.Error()})
+		helpers.WriteJSON(w, codeReadStatus(err), helpers.Envolope{"msg": err.Error()})
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{

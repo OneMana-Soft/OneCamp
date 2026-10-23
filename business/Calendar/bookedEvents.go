@@ -158,14 +158,21 @@ func bookingEventUpdated(ctx context.Context, ev *dgraphStruct.DgraphEvent, star
 		return // moved into the past: the record keeps it, nobody is told
 	}
 	host, zone := hostName(ev), guestZone(b, p)
+	// A link from before links were sealed, or one whose seal the server's key
+	// no longer opens, can't be sent again; it still cancels, so the guest is
+	// pointed back to it.
+	link, cancelBy := "", "the link you got when you booked"
+	if raw := helpers.OpenLinkSecret(b.CancelSealed, b.CancelHash); raw != "" {
+		link, cancelBy = cancelURL(raw), "the button above"
+	}
 	tellGuest(ctx, guestMail{
 		to: b.GuestEmail, name: b.GuestName,
 		subject:  fmt.Sprintf("Moved: %s with %s", p.Title, host),
 		title:    host + " moved your meeting",
 		subtitle: p.Title,
 		body:     "Now " + FormatWhen(b.StartsAt, b.EndsAt, zone) + ". It was " + FormatWhen(wasStart, wasEnd, zone) + ".",
-		ctaText:  "Cancel this booking", ctaURL: cancelURL(b.CancelToken),
-		footer: "If the new time doesn't suit you, cancel it with the button above. If it's in your calendar, the update attached moves it.",
+		ctaText:  "Cancel this booking", ctaURL: link,
+		footer: "If the new time doesn't suit you, cancel it with " + cancelBy + ". If it's in your calendar, the update attached moves it.",
 		invite: bookingInvite(inviteRequest, b, p.Title, host, false, time.Now()),
 	})
 }

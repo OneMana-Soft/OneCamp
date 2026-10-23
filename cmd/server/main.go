@@ -55,6 +55,7 @@ import (
 	redisInit "github.com/akashc777/OneCamp/initializers/redis"
 	aiModels "github.com/akashc777/OneCamp/models/postgres/AI"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
+	linkSecretModel "github.com/akashc777/OneCamp/models/postgres/LinkSecret"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
 	emailService "github.com/akashc777/OneCamp/services/Email"
@@ -700,6 +701,10 @@ func main() {
 	// needs the command catalog, the bot identity and the MCP registry exactly
 	// as much as a worker does. They are seeds and registries, not loops: each
 	// is idempotent and takes its state from the store.
+	// Links an older server kept in the clear, or wrote after the migrations
+	// ran and before this one started, leave the clear before any request
+	// looks one up by its hash. Idempotent.
+	linkSecretModel.HashLeftInClearAtStart(ctx)
 	// Wire the application context for the command framework's async paths
 	// (deferred reminders, external app callbacks) and seed the built-in
 	// slash command catalog so the composer typeahead has commands to show.

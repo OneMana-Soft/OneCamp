@@ -26,10 +26,13 @@
 // in a row (its creator is emailed): its rows wait, and go when it's resumed.
 //
 // WHO IS SENT WHAT IS DECIDED AGAIN AS EACH TRY GOES (R2): a webhook removed
-// or turned off since is sent nothing more (its rows are cancelled), and one
-// whose creator is no longer a member is paused, since what it sends goes out
-// on its creator's say-so (the rule API tokens keep: a member's or nobody's).
-// The admin who resumes it takes it over.
+// or turned off since is sent nothing more (its rows are cancelled). What it
+// sends goes out on its creator's say-so (the rule API tokens keep: a
+// member's or nobody's), held to what they may read (business/Webhook
+// reach.go, audit A9). So one whose creator is no longer a member is paused,
+// as is one whose creator can no longer read the channel or project it is set
+// up for, saying why; the admin who resumes it takes it over, if they can
+// read it. A delivery about something its creator can't read isn't sent.
 package business
 
 import (
@@ -102,7 +105,42 @@ const (
 	PausedByAdmin   = "admin"
 	PausedFailing   = "failing"
 	PausedOwnerGone = "owner_left"
+	// PausedOutOfReach is a creator who can't read the channel or project
+	// their webhook is set up for.
+	PausedOutOfReach = "owner_cant_read"
 )
+
+// Reach is how a delivery stands, as it is tried, for the person its webhook
+// sends on behalf of (R2).
+type Reach int
+
+const (
+	// Reaches is a delivery they may be sent.
+	Reaches Reach = iota
+	// OwnerGone is someone no longer a member.
+	OwnerGone
+	// OwnerOutOfScope is someone who can't read the channel or project the
+	// webhook is set up for: the webhook pauses (PausedOutOfReach).
+	OwnerOutOfScope
+	// OwnerOutOfEvent is someone who can't read what this event is about: the
+	// delivery isn't sent, and the webhook goes on.
+	OwnerOutOfEvent
+)
+
+// errNoReach is a try before anything said who may be sent what.
+var errNoReach = errors.New("hooks: nothing says who may be sent what")
+
+// reach is how a delivery (its body; nil for the webhook as it is set up)
+// stands for who. business/Webhook answers it (AnswerReachWith): it imports
+// this package, and what a webhook is set up for, and what an event is about,
+// are read in its terms. Until it answers, nothing is sent.
+var reach = func(context.Context, uuid.UUID, models.Target, []byte) (Reach, error) { return 0, errNoReach }
+
+// AnswerReachWith sets how a delivery stands for someone: business/Webhook's
+// rule.
+func AnswerReachWith(f func(ctx context.Context, who uuid.UUID, t models.Target, payload []byte) (Reach, error)) {
+	reach = f
+}
 
 // SignatureVersion is the outgoing signature's version: "v1=" HMAC-SHA256 of
 // "v1:<unix seconds>:<body>" in X-OneCamp-Signature, with the seconds in
@@ -180,8 +218,6 @@ var (
 	// activeUser reads a person's account as it is now: no rows for one who
 	// was deactivated or removed.
 	activeUser = userDomain.GetActiveUserWithAdminFlagByUserUUID
-	// isMember says whether a webhook's creator is still a member.
-	isMember = memberNow
 	// logTry writes a try into the webhook's log (Admin › Webhooks › Logs).
 	logTry = func(ctx context.Context, d models.Row, o models.Outcome, answer string) {
 		var status *int
@@ -207,10 +243,10 @@ var (
 	startSending = func(ids []int64) { SendNow(ids) }
 )
 
-// memberNow says whether id is a member now: false for someone deactivated or
+// MemberNow says whether id is a member now: false for someone deactivated or
 // removed (their account reads as no rows), an external person or a bot; an
 // error only when it couldn't be read, which decides nothing.
-func memberNow(ctx context.Context, id uuid.UUID) (bool, error) {
+func MemberNow(ctx context.Context, id uuid.UUID) (bool, error) {
 	u, err := activeUser(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -319,12 +355,21 @@ func try(ctx context.Context, d models.Row) {
 		_, _ = rows.retry(ctx, d.ID, instance, now().Add(firstWait), models.Outcome{Error: "The webhook is paused."})
 		return
 	}
-	if member, err := isMember(ctx, t.CreatedBy); err == nil && !member {
-		at := now()
-		if changed, _ := rows.setPaused(ctx, d.WebhookID, &at, PausedOwnerGone); changed {
-			helpers.LogInfoWithContext(ctx, "hooks: webhook %s paused: its creator is no longer a member", d.WebhookID)
-		}
-		_, _ = rows.retry(ctx, d.ID, instance, now().Add(firstWait), models.Outcome{Error: "Its creator is no longer a member: an admin can resume it and take it over."})
+	switch r, err := reach(ctx, t.CreatedBy, t, d.Payload); {
+	case err != nil:
+		// Not known is not sent: the row goes back, untried.
+		_, _ = rows.retry(ctx, d.ID, instance, now().Add(firstWait), models.Outcome{Error: "Couldn't check what its creator may be sent; it will be tried again."})
+		return
+	case r == OwnerGone:
+		pauseWaiting(ctx, d, PausedOwnerGone, "its creator is no longer a member",
+			"Its creator is no longer a member: an admin can resume it and take it over.")
+		return
+	case r == OwnerOutOfScope:
+		pauseWaiting(ctx, d, PausedOutOfReach, "its creator can't read the channel or project it's set up for",
+			"Its creator can't read the channel or project it's set up for: an admin who can may resume it and take it over.")
+		return
+	case r == OwnerOutOfEvent:
+		_, _ = rows.finish(ctx, d.ID, instance, models.StateCancelled, models.Outcome{Error: "Its creator can't read what this is about, so it isn't sent."})
 		return
 	}
 
@@ -352,6 +397,16 @@ func try(ctx context.Context, d models.Row) {
 			tellPaused(ctx, d.WebhookID, t.CreatedBy, failing, o)
 		}
 	}
+}
+
+// pauseWaiting pauses d's webhook for why (said in the log the first time)
+// and puts d back to wait with the rest, saying so.
+func pauseWaiting(ctx context.Context, d models.Row, why, logged, said string) {
+	at := now()
+	if changed, _ := rows.setPaused(ctx, d.WebhookID, &at, why); changed {
+		helpers.LogInfoWithContext(ctx, "hooks: webhook %s paused: %s", d.WebhookID, logged)
+	}
+	_, _ = rows.retry(ctx, d.ID, instance, now().Add(firstWait), models.Outcome{Error: said})
 }
 
 // send posts a row's body to its webhook, signed, and answers how it went and

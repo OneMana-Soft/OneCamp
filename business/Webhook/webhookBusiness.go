@@ -25,7 +25,6 @@ import (
 	logModel "github.com/akashc777/OneCamp/models/postgres/WebhookLog"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
-	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -104,19 +103,15 @@ var webhookRateLimiter = struct {
 // IncomingWebhookPayload is the expected format for incoming webhook messages.
 // Supports simple text and Slack-style blocks, which business/Cards reads
 // (Reduce) and draws as the message's body (HTML).
-// Destination is determined entirely from the payload (Slack-quality flexible routing):
-//   - channel_id or channel → post to channel
-//   - dm_id → direct message
-//   - group_chat_id → group chat message
-//   - none of the above → fallback to webhook's default channel_id
+// It posts in a channel, as the automation bot:
+//   - channel_id or channel → that channel
+//   - neither → the webhook's default channel_id
 //
 // The webhook's target_type is no longer used for routing.
 type IncomingWebhookPayload struct {
 	Text        string          `json:"text"`
 	ChannelId   *string         `json:"channel_id,omitempty"`
-	Channel     string          `json:"channel,omitempty"` // Slack-style alias for channel_id (UUID or #name)
-	DmId        *string         `json:"dm_id,omitempty"`
-	GroupChatId *string         `json:"group_chat_id,omitempty"`
+	Channel     string          `json:"channel,omitempty"` // Slack-style: the channel's name, with or without "#"
 	BotName     *string         `json:"bot_name,omitempty"`
 	Blocks      json.RawMessage `json:"blocks,omitempty"`
 	Ephemeral   *bool           `json:"ephemeral,omitempty"` // If true, only visible to target user
@@ -129,10 +124,19 @@ type IncomingWebhookPayload struct {
 	// It used to run the webhook's own registry (/help, /status), which never
 	// answered anything but "Unknown command" (see SlashCommandsMoved).
 	Command string `json:"command,omitempty"`
+
+	// DmId and GroupChatId are read only to refuse them (DirectMessagesMoved).
+	// They were written as the admin who made the webhook, so whoever held its
+	// URL could message any member from that admin's account.
+	DmId        *string `json:"dm_id,omitempty"`
+	GroupChatId *string `json:"group_chat_id,omitempty"`
 }
 
 // SlashCommandsMoved is the answer to a payload that names a command.
 const SlashCommandsMoved = "Incoming webhooks only post messages. Slash commands are made by apps: add one in Admin › Apps."
+
+// DirectMessagesMoved is the answer to a payload that names a DM or a group chat.
+const DirectMessagesMoved = "Incoming webhooks post to a channel. To message people, use an app."
 
 type Attachment struct {
 	Color     string     `json:"color,omitempty"`
@@ -269,13 +273,12 @@ func CreateWebhook(ctx context.Context, input WebhookCreateInput, createdBy uuid
 	// (channel_id is optional for incoming — can be specified in payload)
 
 	// What it is sent events from, checked before anything is written.
-	scope, scopeEntity, err := webhookScope(ctx, input.Type, input.ScopeType, input.ScopeEntityId)
+	scope, scopeEntity, err := webhookScope(ctx, input.Type, input.ScopeType, input.ScopeEntityId, createdBy, createdBy)
 	if err != nil {
 		return nil, err
 	}
 
-	// Generate secure token (32 bytes = 43 chars base64url)
-	token, err := generateSecureToken(32)
+	token, hash, err := helpers.NewLinkSecret()
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/CreateWebhook Failed to generate token err: %+v", err)
@@ -311,7 +314,7 @@ func CreateWebhook(ctx context.Context, input WebhookCreateInput, createdBy uuid
 
 	input.BotName = botNameOf(input.BotName, defaultBotName)
 
-	err = domain.CreateWebhook(ctx, id, input.Name, input.Description, input.Type, token, secret, input.TargetUrl, input.ChannelId, eventsJson, createdBy, input.BotName, input.BotAvatarUrl, nil, now)
+	err = domain.CreateWebhook(ctx, id, input.Name, input.Description, input.Type, hash, secret, input.TargetUrl, input.ChannelId, eventsJson, createdBy, input.BotName, input.BotAvatarUrl, nil, now)
 	if err != nil {
 		return nil, err
 	}
@@ -334,39 +337,54 @@ func CreateWebhook(ctx context.Context, input WebhookCreateInput, createdBy uuid
 	if err != nil {
 		return nil, err
 	}
-
+	// The one answer that shows the token: only its hash is kept.
+	webhook.Token = token
 	return webhook, nil
 }
 
-// UpdateWebhook updates an existing webhook's configuration.
-func UpdateWebhook(ctx context.Context, webhookId uuid.UUID, input WebhookUpdateInput) (*webhookModel.Webhook, error) {
+// UpdateWebhook updates an existing webhook's configuration, as by. An admin
+// who points another's outgoing webhook at a new address takes it over
+// (tookOver): it was held to its owner's reads and sent to by's server, so
+// what another admin could read reached them. It is held to theirs now.
+func UpdateWebhook(ctx context.Context, webhookId uuid.UUID, input WebhookUpdateInput, by uuid.UUID) (webhook *webhookModel.Webhook, tookOver bool, err error) {
 	existing, err := domain.GetWebhookById(ctx, webhookId)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if existing == nil {
-		return nil, fmt.Errorf("webhook not found")
+		return nil, false, fmt.Errorf("webhook not found")
 	}
 
 	// Validate outgoing webhook has target_url
 	if existing.Type == "outgoing" && (input.TargetUrl == nil || *input.TargetUrl == "") {
-		return nil, fmt.Errorf("outgoing webhook requires a target_url")
+		return nil, false, fmt.Errorf("outgoing webhook requires a target_url")
 	}
 
 	// Validate outgoing webhook target_url is safe
 	if existing.Type == "outgoing" && input.TargetUrl != nil && *input.TargetUrl != "" {
 		if _, err := helpers.ValidateOutboundURL(*input.TargetUrl, false); err != nil {
-			return nil, fmt.Errorf("invalid target_url: %w", err)
+			return nil, false, fmt.Errorf("invalid target_url: %w", err)
 		}
 	}
 
-	// What it is sent events from, when the update says.
+	owner := existing.CreatedBy
+	if existing.Type == "outgoing" && by != owner && (existing.TargetUrl == nil || *input.TargetUrl != *existing.TargetUrl) {
+		owner, tookOver = by, true
+	}
+
+	// What it is sent events from: a new scope, or the one it has when it
+	// changes hands, held to its owner's reads.
+	newScope := input.ScopeType != "" && (input.ScopeType != existing.ScopeType || !sameID(input.ScopeEntityId, existing.ScopeEntityId))
 	var scope string
 	var scopeEntity *uuid.UUID
-	if input.ScopeType != "" {
-		if scope, scopeEntity, err = webhookScope(ctx, existing.Type, input.ScopeType, input.ScopeEntityId); err != nil {
-			return nil, err
-		}
+	switch {
+	case newScope:
+		scope, scopeEntity, err = webhookScope(ctx, existing.Type, input.ScopeType, input.ScopeEntityId, owner, by)
+	case tookOver:
+		_, _, err = webhookScope(ctx, existing.Type, existing.ScopeType, existing.ScopeEntityId, owner, by)
+	}
+	if err != nil {
+		return nil, false, err
 	}
 
 	input.Events = sanitizeEvents(input.Events)
@@ -374,7 +392,7 @@ func UpdateWebhook(ctx context.Context, webhookId uuid.UUID, input WebhookUpdate
 	if len(input.Events) > 0 {
 		evBytes, err := json.Marshal(input.Events)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal events")
+			return nil, false, fmt.Errorf("failed to marshal events")
 		}
 		evStr := string(evBytes)
 		eventsJson = &evStr
@@ -389,13 +407,13 @@ func UpdateWebhook(ctx context.Context, webhookId uuid.UUID, input WebhookUpdate
 		_ = domain.UpdateWebhookTriggerInfo(ctx, webhookId, now, 0)
 	}
 
-	err = domain.UpdateWebhook(ctx, webhookId, input.Name, input.Description, input.TargetUrl, input.ChannelId, eventsJson, input.IsActive, input.BotName, input.BotAvatarUrl, existing.Metadata, now)
+	err = domain.UpdateWebhook(ctx, webhookId, owner, input.Name, input.Description, input.TargetUrl, input.ChannelId, eventsJson, input.IsActive, input.BotName, input.BotAvatarUrl, existing.Metadata, now)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if scope != "" {
+	if newScope {
 		if err := domain.SetWebhookScope(ctx, webhookId, scope, scopeEntity, now); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 
@@ -404,7 +422,16 @@ func UpdateWebhook(ctx context.Context, webhookId uuid.UUID, input WebhookUpdate
 	// diff the input.
 	bumpDispatchCacheVersion()
 
-	return domain.GetWebhookById(ctx, webhookId)
+	webhook, err = domain.GetWebhookById(ctx, webhookId)
+	return webhook, tookOver, err
+}
+
+// sameID is whether two optional ids are the same, none being the same as none.
+func sameID(a, b *uuid.UUID) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // DeleteWebhook soft-deletes a webhook.
@@ -428,13 +455,13 @@ func DeleteWebhook(ctx context.Context, webhookId uuid.UUID) error {
 
 // RegenerateToken generates a new token for the webhook.
 func RegenerateToken(ctx context.Context, webhookId uuid.UUID) (string, error) {
-	token, err := generateSecureToken(32)
+	token, hash, err := helpers.NewLinkSecret()
 	if err != nil {
 		return "", fmt.Errorf("failed to generate token")
 	}
 
 	now := time.Now()
-	err = domain.RegenerateWebhookToken(ctx, webhookId, token, now)
+	err = domain.RegenerateWebhookToken(ctx, webhookId, hash, now)
 	if err != nil {
 		return "", err
 	}
@@ -442,7 +469,8 @@ func RegenerateToken(ctx context.Context, webhookId uuid.UUID) (string, error) {
 	// Reset failure count on token regeneration
 	_ = domain.UpdateWebhookTriggerInfo(ctx, webhookId, now, 0)
 
-	// Cached webhook list embeds the token, so invalidate.
+	// The dispatch cache keeps out webhooks that failed too often, so a reset
+	// one is offered events again at once.
 	bumpDispatchCacheVersion()
 
 	return token, nil
@@ -480,8 +508,9 @@ func GetAllWebhooks(ctx context.Context) ([]*webhookModel.Webhook, error) {
 	return domain.GetAllWebhooks(ctx)
 }
 
-// GetWebhookLogs retrieves paginated logs for a webhook.
-func GetWebhookLogs(ctx context.Context, webhookId uuid.UUID, page int, pageSize int) ([]*logModel.WebhookLog, error) {
+// GetWebhookLogs retrieves paginated logs for a webhook, as viewer may read
+// them (shownTo).
+func GetWebhookLogs(ctx context.Context, viewer, webhookId uuid.UUID, page int, pageSize int) ([]*logModel.WebhookLog, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -489,13 +518,18 @@ func GetWebhookLogs(ctx context.Context, webhookId uuid.UUID, page int, pageSize
 		pageSize = 20
 	}
 	offset := (page - 1) * pageSize
-	return domain.GetWebhookLogs(ctx, webhookId, pageSize, offset)
+	logs, err := domain.GetWebhookLogs(ctx, webhookId, pageSize, offset)
+	if err != nil {
+		return nil, err
+	}
+	shownTo(ctx, viewer, logs)
+	return logs, nil
 }
 
 // ProcessIncomingWebhook validates the token and returns the webhook info.
 // The actual message creation is handled by the controller using existing Post/Chat business logic.
 func ProcessIncomingWebhook(ctx context.Context, token string) (*webhookModel.Webhook, error) {
-	webhook, err := domain.GetWebhookByToken(ctx, token)
+	webhook, err := domain.GetWebhookByTokenHash(ctx, helpers.LinkSecretHash(token))
 	if err != nil {
 		return nil, err
 	}
@@ -533,17 +567,7 @@ func ProcessIncomingWebhook(ctx context.Context, token string) (*webhookModel.We
 // Imported content is recorded directly to PG/Dgraph without any need
 // to notify external systems retroactively.
 func DispatchEvent(ctx context.Context, eventType string, data interface{}) {
-	dispatch(ctx, eventType, data, nil)
-}
-
-// DispatchEventFor is DispatchEvent for an event only some people may know
-// of: an outgoing webhook is sent it only when mayKnow says the person who set
-// the webhook up may. A doc's events go this way (business/Follow
-// webhooks.go), so a private doc's never reach a webhook whose owner can't
-// open the doc. In-process listeners, which act inside the workspace, are
-// told as of any event.
-func DispatchEventFor(ctx context.Context, eventType string, data map[string]interface{}, mayKnow func(ctx context.Context, owner uuid.UUID) bool) {
-	dispatch(ctx, eventType, data, mayKnow)
+	dispatch(ctx, eventType, data)
 }
 
 // queueDeliveries hands the webhooks an event goes to, each with the body cut
@@ -551,7 +575,7 @@ func DispatchEventFor(ctx context.Context, eventType string, data map[string]int
 // and sends them until they arrive; a seam for tests.
 var queueDeliveries = hooksBusiness.Queue
 
-func dispatch(ctx context.Context, eventType string, data interface{}, mayKnow func(ctx context.Context, owner uuid.UUID) bool) {
+func dispatch(ctx context.Context, eventType string, data interface{}) {
 	if helpers.IsBulkImport(ctx) {
 		return
 	}
@@ -577,18 +601,6 @@ func dispatch(ctx context.Context, eventType string, data interface{}, mayKnow f
 	if place.conversation {
 		return
 	}
-	// A restricted task's events reach only the webhooks whose owners may see
-	// the task (models/taskread), asked once per owner below.
-	if task := taskOfEvent(m); task != "" && restrictedTaskEvent(ctx, m) {
-		inner := mayKnow
-		mayKnow = func(ctx context.Context, owner uuid.UUID) bool {
-			if inner != nil && !inner(ctx, owner) {
-				return false
-			}
-			f, err := taskread.For(ctx, owner.String())
-			return err == nil && !f.Hides(task)
-		}
-	}
 	lookupKind := place.kind
 	if place.id == nil {
 		lookupKind = ScopeOrg // a place whose id doesn't read has no webhooks of its own
@@ -612,7 +624,7 @@ func dispatch(ctx context.Context, eventType string, data interface{}, mayKnow f
 	if place.kind == ScopeChannel && place.id != nil {
 		for _, w := range webhooks {
 			if w.ScopeType == "" || w.ScopeType == ScopeOrg {
-				ok, err := domain.ChannelIsPublic(ctx, *place.id)
+				ok, err := channelIsPublic(ctx, *place.id)
 				public = err == nil && ok
 				break
 			}
@@ -650,24 +662,29 @@ func dispatch(ctx context.Context, eventType string, data interface{}, mayKnow f
 		plainText = t
 	}
 
-	// Whether each webhook's owner may know of the event, asked once per owner.
-	knows := map[uuid.UUID]bool{}
+	// What the event names, which each webhook's owner must be able to read
+	// (reach.go), each owner's answers asked once.
+	event := needsOf(ctx, eventType, m)
+	readers := map[uuid.UUID]*reader{}
 	var targets []hooksBusiness.Target
 	for _, webhook := range webhooks {
-		if mayKnow != nil {
-			ok, asked := knows[webhook.CreatedBy]
-			if !asked {
-				ok = mayKnow(ctx, webhook.CreatedBy)
-				knows[webhook.CreatedBy] = ok
-			}
-			if !ok {
-				continue
-			}
-		}
-		switch deliveryTo(webhook.ScopeType, webhook.ScopeEntityId, place, public) {
-		case sendNothing:
+		shape := deliveryTo(webhook.ScopeType, webhook.ScopeEntityId, place, public)
+		if shape == sendNothing {
 			continue
-		case sendIDs:
+		}
+		r, ok := readers[webhook.CreatedBy]
+		if !ok {
+			r = newReader(webhook.CreatedBy)
+			readers[webhook.CreatedBy] = r
+		}
+		// One who can't read this event isn't sent it. One who left, or who
+		// can't read what the webhook is set up for, is still queued: its try
+		// pauses the webhook, says why, and sends nothing (business/Hooks). A
+		// lookup that failed is queued too, and decided as it is tried.
+		if reach, err := r.reach(ctx, scopeNeeds(webhook.ScopeType, webhook.ScopeEntityId), event); err == nil && reach == hooksBusiness.OwnerOutOfEvent {
+			continue
+		}
+		if shape == sendIDs {
 			// Trigger words would be read in the words the webhook isn't
 			// sent: one that has some isn't told of the event at all, or it
 			// would learn which private messages say "salary".
@@ -776,8 +793,9 @@ func TestWebhook(ctx context.Context, webhookId uuid.UUID) error {
 	return queueDeliveries(ctx, eventID, "test", []hooksBusiness.Target{{WebhookID: webhook.Id, Payload: payloadBytes}})
 }
 
-// GetWebhookLogsGlobal retrieves paginated logs across all webhooks with filters.
-func GetWebhookLogsGlobal(ctx context.Context, webhookId *uuid.UUID, success *bool, fromDate *time.Time, toDate *time.Time, page int, pageSize int) ([]*logModel.WebhookLog, error) {
+// GetWebhookLogsGlobal retrieves paginated logs across all webhooks with
+// filters, as viewer may read them (shownTo).
+func GetWebhookLogsGlobal(ctx context.Context, viewer uuid.UUID, webhookId *uuid.UUID, success *bool, fromDate *time.Time, toDate *time.Time, page int, pageSize int) ([]*logModel.WebhookLog, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -785,7 +803,12 @@ func GetWebhookLogsGlobal(ctx context.Context, webhookId *uuid.UUID, success *bo
 		pageSize = 20
 	}
 	offset := (page - 1) * pageSize
-	return domain.GetWebhookLogsGlobal(ctx, webhookId, success, fromDate, toDate, pageSize, offset)
+	logs, err := domain.GetWebhookLogsGlobal(ctx, webhookId, success, fromDate, toDate, pageSize, offset)
+	if err != nil {
+		return nil, err
+	}
+	shownTo(ctx, viewer, logs)
+	return logs, nil
 }
 
 // CleanupOldLogs removes logs older than the retention period.

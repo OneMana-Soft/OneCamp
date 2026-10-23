@@ -31,7 +31,7 @@ import (
 	"strings"
 
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
-	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
@@ -146,8 +146,11 @@ func agentWorkTopics(ctx context.Context, t *model.AgentTask, agentOwner uuid.UU
 		// A task's live topic is its PROJECT's (that is where task comments and
 		// GitHub sync already publish), and the job row only knows the task — so
 		// resolve the project once, best-effort. Skipping it costs the project's
-		// other members a live update, never correctness.
-		if projectID := taskProjectID(ctx, agentTaskEntityID(t)); projectID != "" {
+		// other members a live update, never correctness. Every member hears
+		// that topic, so a task only a few may see is never named there: its
+		// work goes to the people's own topics alone.
+		taskID := agentTaskEntityID(t)
+		if projectID := taskProjectID(ctx, taskID); projectID != "" && mqttBusiness.ProjectTopicHears(taskID) {
 			topics = append(topics, helpers.GetMqttTopicForProjectMessage(projectID))
 		}
 	}
@@ -163,20 +166,19 @@ func agentWorkTopics(ctx context.Context, t *model.AgentTask, agentOwner uuid.UU
 	return topics
 }
 
-// taskProjectID resolves the project a task belongs to. Read with no acting user
-// (this is an internal fan-out decision, not a permission check — every recipient
-// is already scoped by the project topic they subscribe to). Empty on any problem.
+// taskProjectID is the project a task belongs to, from its row: an internal
+// fan-out decision, not a permission check, so it finds a restricted task's
+// project too, and ProjectTopicHears decides who hears. Empty on any problem.
 func taskProjectID(ctx context.Context, taskID string) string {
-	taskID = strings.TrimSpace(taskID)
-	if taskID == "" {
+	id, err := uuid.Parse(strings.TrimSpace(taskID))
+	if err != nil {
 		return ""
 	}
-	// Event feed, no requesting user at all.
-	info, err := taskBusiness.GetDgraphTaskInfo(helpers.WithSystemRead(ctx), taskID, "")
-	if err != nil || info == nil || info.Project == nil {
+	project, err := taskDomain.GetTaskProjectID(ctx, id)
+	if err != nil || project == uuid.Nil {
 		return ""
 	}
-	return strings.TrimSpace(info.Project.Uuid)
+	return project.String()
 }
 
 // agentTaskEntityID is the surface-entity resolver for a full job row — the same

@@ -363,6 +363,9 @@ func TestWhatARunSetsUpIsRecordedForWhoeverAsked(t *testing.T) {
 	}
 }
 
+// codeToolsNarrowed is how each code tool is narrowed.
+const codeToolsNarrowed = "only repositories a project the sponsor is in links, and the asker too (business/AI CodeRepoAllowed)"
+
 // workspaceWideTools are the tools that name no object, so the gate can only
 // check that the person who asked may ask for work at all
 // (mcpServer.ResourceWorkspace), with how each keeps a run for someone else to
@@ -378,15 +381,15 @@ var workspaceWideTools = map[string]string{
 	"list_docs":         "only docs the asker can open too, by the Access Resolver (business/AI docList.go)",
 	"find_people":       "not narrowed: the people directory, which every member sees",
 	"web_search":        "not narrowed: reads nothing of the workspace's",
-	// The code tools read through the workspace's GitHub integration: the
-	// connecting admin's own token, for any owner/repo named, the same for
-	// every member and every run. Not the sponsor's reach, and not narrowed.
-	"code_analyze":        "not narrowed: the workspace's GitHub integration, the same for everyone",
-	"repo_summary":        "not narrowed: the workspace's GitHub integration, the same for everyone",
-	"list_recent_changes": "not narrowed: the workspace's GitHub integration, the same for everyone",
-	"list_commits":        "not narrowed: the workspace's GitHub integration, the same for everyone",
-	"read_repo_file":      "not narrowed: the workspace's GitHub integration, the same for everyone",
-	"search_repo_code":    "not narrowed: the workspace's GitHub integration, the same for everyone",
+	// The code tools read through the workspace's GitHub integration, the
+	// connecting admin's own token, so only a repository a project links,
+	// for a sponsor and an asker who are each in one of those projects.
+	"code_analyze":        codeToolsNarrowed,
+	"repo_summary":        codeToolsNarrowed,
+	"list_recent_changes": codeToolsNarrowed,
+	"list_commits":        codeToolsNarrowed,
+	"read_repo_file":      codeToolsNarrowed,
+	"search_repo_code":    codeToolsNarrowed,
 }
 
 func TestEveryWorkspaceWideToolSaysHowItIsNarrowed(t *testing.T) {

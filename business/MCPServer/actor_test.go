@@ -15,13 +15,15 @@ import (
 	"strings"
 	"testing"
 
+	apiTokenBusiness "github.com/akashc777/OneCamp/business/ApiToken"
 	"github.com/google/uuid"
 )
 
 func TestUnboundCredentialResolvesToAnApiClient(t *testing.T) {
 	// Every token predating migration 138 is unbound, and must keep working exactly
 	// as before. "api_client" is also the honest label for a script.
-	actor, ok, reason := ResolveActor(context.Background(), "tok-1", nil, "person-1")
+	token, person := uuid.New(), uuid.New()
+	actor, ok, reason := ResolveActor(context.Background(), &apiTokenBusiness.AuthResult{TokenID: token, UserID: person})
 	if !ok {
 		t.Fatalf("an unbound credential was refused: %s", reason)
 	}
@@ -31,8 +33,18 @@ func TestUnboundCredentialResolvesToAnApiClient(t *testing.T) {
 	if actor.AgentID != "" || actor.AgentName != "" {
 		t.Error("an unbound credential must not claim an agent identity")
 	}
-	if actor.TokenID != "tok-1" || actor.PrincipalUserID != "person-1" {
+	if actor.TokenID != token.String() || actor.PrincipalUserID != person.String() {
 		t.Errorf("credential and principal must be carried through: %+v", actor)
+	}
+}
+
+// An installed app's credential is refused, plainly, before anything else is asked:
+// MCP's tools aren't held to the places the app was added to, as the /v1 routes are.
+func TestAnAppsCredentialIsRefused(t *testing.T) {
+	app := uuid.New()
+	actor, ok, reason := ResolveActor(context.Background(), &apiTokenBusiness.AuthResult{TokenID: uuid.New(), UserID: uuid.New(), AppID: &app})
+	if ok || reason != AppsCantUseMCP || actor.Type == ActorAgent {
+		t.Errorf("an app's credential resolved to %+v, %v, %q; want refused with %q", actor, ok, reason, AppsCantUseMCP)
 	}
 }
 
@@ -41,7 +53,7 @@ func TestUnboundCredentialResolvesToAnApiClient(t *testing.T) {
 // fall back to an unbound credential.
 func TestAnUnverifiableAgentIsRefusedNotDowngraded(t *testing.T) {
 	id := uuid.New()
-	actor, ok, reason := ResolveActor(context.Background(), "tok-1", &id, "person-1")
+	actor, ok, reason := ResolveActor(context.Background(), &apiTokenBusiness.AuthResult{TokenID: uuid.New(), UserID: uuid.New(), AgentID: &id})
 
 	if ok {
 		t.Fatal("a credential bound to an agent that could not be verified was allowed")

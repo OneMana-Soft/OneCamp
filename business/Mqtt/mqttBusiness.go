@@ -282,8 +282,25 @@ func PublishPostCommentReaction(mqttPostCommentReaction *mqttStruct.MqttPostComm
 	})
 }
 
-// publishToProject sends one message to everyone in a project.
-func publishToProject(ctx context.Context, projectID string, kind int8, data any, what string) {
+// publishToProject sends one message to everyone in a project; tasks are the
+// ones it names. Every member hears a project's topic, so a message naming a
+// task only a few may see (WA2), even by id, isn't sent: the project is told
+// Reread instead, naming nothing, and each member reads its own lists again
+// through the filter (models/taskread). Tasks ctx marks open
+// (helpers.WithOpenTasks: a batch just made) are named without that read.
+func publishToProject(ctx context.Context, projectID string, kind int8, data any, what string, tasks ...string) {
+	if projectID == "" {
+		return
+	}
+	if !helpers.TasksOpen(ctx, tasks...) && !ProjectTopicHears(tasks...) {
+		kind, data = mqttStruct.MESSAGE_TASK_CHANGED, &mqttStruct.MqttTaskChanged{ProjectUuid: projectID, Reread: true}
+	}
+	sendToProject(ctx, projectID, kind, data, what)
+}
+
+// sendToProject puts one message on a project's topic. A var so a test can
+// hear what a project is told.
+var sendToProject = func(ctx context.Context, projectID string, kind int8, data any, what string) {
 	publishToTopic(ctx, helpers.GetMqttTopicForProjectMessage(projectID), kind, data, what)
 }
 
@@ -328,44 +345,48 @@ func PublishCallState(state *mqttStruct.MqttCallState) {
 	publishToTopic(context.Background(), topic, mqttStruct.MESSAGE_CALL_STATE, state, "PublishCallState")
 }
 
-// restrictedTask is whether a task's project keeps it to a few people
-// (WA2): its project's topic, which every member hears, is told only that it
-// changed, never what (onlyChanged). A restriction that can't be read counts
-// as one. A seam for tests.
-var restrictedTask = func(taskUUID string) bool {
-	id, err := uuid.Parse(taskUUID)
-	if err != nil {
-		return false
-	}
-	r, err := restrictionModel.Of(context.Background(), id)
-	return err != nil || r.Restricted
+// ProjectTopicHears is whether a project's topic may name the tasks: not when
+// one of them is restricted (WA2), or its restriction can't be read. The one
+// check for everything said there: publishToProject, and an agent's work on a
+// task (business/AIAgent).
+func ProjectTopicHears(tasks ...string) bool {
+	return len(restrictedAmong(tasks)) == 0
 }
 
-// onlyChanged tells a restricted task's project that the task changed and
-// nothing more; whoever may see it reads what changed with the filter
-// (models/taskread). True when it did, so the caller sends nothing else.
-func onlyChanged(taskUUID, projectUUID string) bool {
-	if taskUUID == "" || projectUUID == "" || !restrictedTask(taskUUID) {
-		return false
+// restrictedAmong is which of the tasks their project keeps to a few people
+// (WA2), by lower-case uuid, in one read. A restriction that can't be read
+// counts as one. A seam for tests.
+var restrictedAmong = func(taskUUIDs []string) map[string]bool {
+	ids := make([]uuid.UUID, 0, len(taskUUIDs))
+	for _, s := range taskUUIDs {
+		if id, err := uuid.Parse(s); err == nil {
+			ids = append(ids, id)
+		}
 	}
-	publishToProject(context.Background(), projectUUID, mqttStruct.MESSAGE_TASK_CHANGED, &mqttStruct.MqttTaskChanged{TaskUuid: taskUUID, ProjectUuid: projectUUID}, "PublishTaskChanged")
-	return true
+	found, err := restrictionModel.OfMany(context.Background(), ids)
+	out := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if err != nil || found[id].Restricted {
+			out[id.String()] = true
+		}
+	}
+	return out
 }
 
 // PublishTaskDates tells a task's project that its dates changed.
 func PublishTaskDates(msg *mqttStruct.MqttTaskDates) {
-	if msg == nil || msg.ProjectUuid == "" || onlyChanged(msg.TaskUuid, msg.ProjectUuid) {
+	if msg == nil {
 		return
 	}
-	publishToProject(context.Background(), msg.ProjectUuid, mqttStruct.MESSAGE_TASK_DATES, msg, "PublishTaskDates")
+	publishToProject(context.Background(), msg.ProjectUuid, mqttStruct.MESSAGE_TASK_DATES, msg, "PublishTaskDates", msg.TaskUuid)
 }
 
 // PublishTaskChanged tells a task's project that the task changed.
-func PublishTaskChanged(msg *mqttStruct.MqttTaskChanged) {
-	if msg == nil || msg.ProjectUuid == "" {
+func PublishTaskChanged(ctx context.Context, msg *mqttStruct.MqttTaskChanged) {
+	if msg == nil {
 		return
 	}
-	publishToProject(context.Background(), msg.ProjectUuid, mqttStruct.MESSAGE_TASK_CHANGED, msg, "PublishTaskChanged")
+	publishToProject(ctx, msg.ProjectUuid, mqttStruct.MESSAGE_TASK_CHANGED, msg, "PublishTaskChanged", msg.TaskUuid)
 }
 
 // PublishProjectStatuses tells a project that its statuses, or their order on
@@ -379,41 +400,19 @@ func PublishProjectStatuses(projectID string) {
 
 // PublishTaskField tells a task's project that one of its field values changed.
 func PublishTaskField(msg *mqttStruct.MqttTaskField) {
-	if msg == nil || msg.ProjectUuid == "" || onlyChanged(msg.TaskUuid, msg.ProjectUuid) {
+	if msg == nil {
 		return
 	}
-	publishToProject(context.Background(), msg.ProjectUuid, mqttStruct.MESSAGE_TASK_FIELD, msg, "PublishTaskField")
+	publishToProject(context.Background(), msg.ProjectUuid, mqttStruct.MESSAGE_TASK_FIELD, msg, "PublishTaskField", msg.TaskUuid)
 }
 
+// PublishTaskCommentReaction tells a task's project that a reaction on one of
+// its comments changed.
 func PublishTaskCommentReaction(mqttTaskCommentReaction *mqttStruct.MqttTaskCommentReaction, projectId string) {
-	ctx := context.Background()
-	if mqttTaskCommentReaction == nil || onlyChanged(mqttTaskCommentReaction.TaskUuid, projectId) {
+	if mqttTaskCommentReaction == nil {
 		return
 	}
-
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_TASK_COMMENT_REACTION,
-		Data: mqttTaskCommentReaction,
-	}
-	marshalMqttCreatePost, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishTaskCommentReaction failed to marshal mqttPostCommentReaction struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForProjectMessage(projectId), 1, false, marshalMqttCreatePost)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishTaskCommentReaction", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishTaskCommentReaction to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToProject(context.Background(), projectId, mqttStruct.MESSAGE_TASK_COMMENT_REACTION, mqttTaskCommentReaction, "PublishTaskCommentReaction", mqttTaskCommentReaction.TaskUuid)
 }
 
 // TypingRepublishInterval is how often a bot still at work says it is typing
@@ -477,38 +476,12 @@ func PublishDocComment(mqttDocComment *mqttStruct.MqttDocComment, docId string) 
 	})
 }
 
+// PublishTaskComment tells a task's project about a comment on the task.
 func PublishTaskComment(mqttTaskComment *mqttStruct.MqttTaskComment, projectId string) {
-
-	ctx := context.Background()
-	// A restricted task's comment isn't said on its project's topic.
-	if mqttTaskComment == nil || onlyChanged(mqttTaskComment.TaskUuid, projectId) {
+	if mqttTaskComment == nil {
 		return
 	}
-
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_TASK_COMMENT,
-		Data: mqttTaskComment,
-	}
-	marshalMqttCreateTaskComment, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishTaskComment failed to marshal mqttTaskComment struct err: %+v",
-			err)
-		return
-	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForProjectMessage(projectId), 1, false, marshalMqttCreateTaskComment)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishTaskComment", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishTaskComment to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
-
+	publishToProject(context.Background(), projectId, mqttStruct.MESSAGE_TASK_COMMENT, mqttTaskComment, "PublishTaskComment", mqttTaskComment.TaskUuid)
 }
 
 func PublishPostComment(mqttPostCommentCount *mqttStruct.MqttPostComment, channelId string) {
@@ -856,32 +829,13 @@ func activityTopics(people []string) []string {
 	return topics
 }
 
+// PublishGitHubSync tells a task's project what GitHub changed on the task,
+// with the new values.
 func PublishGitHubSync(mqttGitHubSync *mqttStruct.MqttGitHubSync, projectId string) {
-	ctx := context.Background()
-
-	mqttMessage := mqttStruct.Message{
-		Type: mqttStruct.MESSAGE_GITHUB_SYNC,
-		Data: mqttGitHubSync,
-	}
-	marshalMqttGitHubSync, err := json.Marshal(mqttMessage)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/PublishGitHubSync failed to marshal mqttGitHubSync struct err: %+v",
-			err)
+	if mqttGitHubSync == nil {
 		return
 	}
-
-	mqttClientRes := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForProjectMessage(projectId), 1, false, marshalMqttGitHubSync)
-
-	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishGitHubSync", func() {
-		_ = mqttClientRes.WaitTimeout(mqttInit.PublishWait)
-		if mqttClientRes.Error() != nil {
-			helpers.LogErrorWithContext(ctx,
-				"business/PublishGitHubSync failed to publish to mqtt err: %+v",
-				mqttClientRes.Error())
-			return
-		}
-	})
+	publishToProject(context.Background(), projectId, mqttStruct.MESSAGE_GITHUB_SYNC, mqttGitHubSync, "PublishGitHubSync", mqttGitHubSync.TaskUuid)
 }
 
 // PublishArchiveJobStatus publishes archive job lifecycle changes to the

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -161,12 +162,18 @@ type fixture struct {
 	// onRequest, when set, runs as the endpoint takes each request (a test
 	// that holds sends in flight). Atomic: the endpoint's goroutines read it.
 	onRequest atomic.Pointer[func()]
+	// outOfScope are people who can't read what the webhook is set up for,
+	// and outOfEvent the bodies its creator can't read (reach).
+	outOfScope map[uuid.UUID]bool
+	outOfEvent map[string]bool
+	reachErr   error
 }
 
 func setup(t *testing.T) *fixture {
 	t.Helper()
 	f := &fixture{mem: newMem(), hook: uuid.New(), creator: uuid.New(), answer: http.StatusOK, at: time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)}
 	f.members = map[uuid.UUID]bool{f.creator: true}
+	f.outOfScope, f.outOfEvent = map[uuid.UUID]bool{}, map[string]bool{}
 	var mu sync.Mutex
 	f.endpoint = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
@@ -191,19 +198,31 @@ func setup(t *testing.T) *fixture {
 			Do(*http.Request) (*http.Response, error)
 		}
 		checkURL     func(string) error
-		isMember     func(context.Context, uuid.UUID) (bool, error)
+		reach        func(context.Context, uuid.UUID, models.Target, []byte) (Reach, error)
 		logTry       func(context.Context, models.Row, models.Outcome, string)
 		tellPaused   func(context.Context, uuid.UUID, uuid.UUID, int, models.Outcome)
 		startSending func([]int64)
-	}{rows, now, client, checkURL, isMember, logTry, tellPaused, startSending}
+	}{rows, now, client, checkURL, reach, logTry, tellPaused, startSending}
 	t.Cleanup(func() {
-		rows, now, client, checkURL, isMember, logTry, tellPaused, startSending = saved.rows, saved.now, saved.client, saved.checkURL, saved.isMember, saved.logTry, saved.tellPaused, saved.startSending
+		rows, now, client, checkURL, reach, logTry, tellPaused, startSending = saved.rows, saved.now, saved.client, saved.checkURL, saved.reach, saved.logTry, saved.tellPaused, saved.startSending
 	})
 	rows = f.mem
 	now = func() time.Time { return f.at }
 	client = http.DefaultClient
 	checkURL = func(string) error { return nil }
-	isMember = func(_ context.Context, id uuid.UUID) (bool, error) { return f.members[id], nil }
+	reach = func(_ context.Context, who uuid.UUID, _ models.Target, payload []byte) (Reach, error) {
+		switch {
+		case f.reachErr != nil:
+			return 0, f.reachErr
+		case !f.members[who]:
+			return OwnerGone, nil
+		case f.outOfScope[who]:
+			return OwnerOutOfScope, nil
+		case payload != nil && f.outOfEvent[string(payload)]:
+			return OwnerOutOfEvent, nil
+		}
+		return Reaches, nil
+	}
 	logTry = func(context.Context, models.Row, models.Outcome, string) {}
 	tellPaused = func(_ context.Context, id, creator uuid.UUID, failing int, _ models.Outcome) {
 		f.told = append(f.told, creator.String())
@@ -370,6 +389,48 @@ func TestWhoIsSentWhatIsAskedAgainAsEachTryGoes(t *testing.T) {
 			t.Fatalf("sent %d, state %s, paused %q", len(f.got), d.State, f.mem.paused[f.hook])
 		}
 	})
+	// Audit A9: what a webhook sends is held to what its creator may read.
+	t.Run("a webhook whose creator can't read what it's set up for is paused, saying so, and what it would send waits", func(t *testing.T) {
+		f := setup(t)
+		d := f.queue(t, `{}`)
+		f.outOfScope[f.creator] = true
+		f.tryNow(t, d.ID)
+		if len(f.got) != 0 || d.State != models.StatePending || f.mem.paused[f.hook] != PausedOutOfReach {
+			t.Fatalf("sent %d, state %s, paused %q", len(f.got), d.State, f.mem.paused[f.hook])
+		}
+		if d.LastError == nil || !strings.Contains(*d.LastError, "can't read the channel or project it's set up for") {
+			t.Fatalf("said %v", d.LastError)
+		}
+	})
+	t.Run("a delivery about something its creator can't read isn't sent, and the webhook goes on", func(t *testing.T) {
+		f := setup(t)
+		secret := f.queue(t, `{"event":"post.created","data":{"channel_id":"private"}}`)
+		f.outOfEvent[`{"event":"post.created","data":{"channel_id":"private"}}`] = true
+		f.tryNow(t, secret.ID)
+		if len(f.got) != 0 || secret.State != models.StateCancelled {
+			t.Fatalf("sent %d, state %s", len(f.got), secret.State)
+		}
+		if _, paused := f.mem.paused[f.hook]; paused {
+			t.Fatal("the webhook paused for one delivery its creator can't read")
+		}
+		open := f.queue(t, `{"event":"post.created","data":{"channel_id":"open"}}`)
+		f.tryNow(t, open.ID)
+		if len(f.got) != 1 || open.State != models.StateDone {
+			t.Fatalf("the next delivery: sent %d, state %s", len(f.got), open.State)
+		}
+	})
+	t.Run("a check that fails sends nothing, and the delivery is tried again", func(t *testing.T) {
+		f := setup(t)
+		d := f.queue(t, `{}`)
+		f.reachErr = errors.New("graph down")
+		f.tryNow(t, d.ID)
+		if len(f.got) != 0 || d.State != models.StatePending {
+			t.Fatalf("sent %d, state %s", len(f.got), d.State)
+		}
+		if _, paused := f.mem.paused[f.hook]; paused {
+			t.Fatal("a check that failed paused the webhook")
+		}
+	})
 	t.Run("an address OneCamp doesn't send to is refused without a request", func(t *testing.T) {
 		f := setup(t)
 		checkURL = func(string) error { return errors.New("it's a private address") }
@@ -413,6 +474,7 @@ func TestResumingAWebhookWhoseCreatorLeftHandsItToTheAdmin(t *testing.T) {
 
 	f.mem.paused[f.hook] = PausedOwnerGone
 	f.members[f.creator] = false
+	f.members[admin] = true
 	tookOver, err := Resume(context.Background(), f.hook, admin)
 	if err != nil || !tookOver || took != admin {
 		t.Fatalf("took over %v (by %s), err %v", tookOver, took, err)
@@ -427,6 +489,39 @@ func TestResumingAWebhookWhoseCreatorLeftHandsItToTheAdmin(t *testing.T) {
 	took = uuid.Nil
 	if tookOver, _ := Resume(context.Background(), f.hook, admin); tookOver || took != uuid.Nil {
 		t.Fatal("a member's webhook was taken over")
+	}
+}
+
+// Audit A9: a webhook paused because its creator can't read what it's set up
+// for goes on only for someone who can: an admin who can't is refused, and
+// one who can takes it over.
+func TestResumingAWebhookItsCreatorCantReadNeedsSomeoneWhoCan(t *testing.T) {
+	f := setup(t)
+	var took uuid.UUID
+	savedTake, savedDue := takeOver, dueNow
+	t.Cleanup(func() { takeOver, dueNow = savedTake, savedDue })
+	takeOver = func(_ context.Context, _ uuid.UUID, owner uuid.UUID) error { took = owner; return nil }
+	dueNow = func(context.Context, uuid.UUID) error { return nil }
+	outsider, insider := uuid.New(), uuid.New()
+	f.members[outsider], f.members[insider] = true, true
+	f.outOfScope[f.creator], f.outOfScope[outsider] = true, true
+	f.mem.paused[f.hook] = PausedOutOfReach
+
+	if _, err := Resume(context.Background(), f.hook, outsider); !errors.Is(err, ErrCantTakeOver) {
+		t.Fatalf("an admin who can't read it either: %v", err)
+	}
+	if f.mem.paused[f.hook] != PausedOutOfReach || took != uuid.Nil {
+		t.Fatalf("paused %q, taken over by %s", f.mem.paused[f.hook], took)
+	}
+	if _, err := Resume(context.Background(), f.hook, uuid.Nil); !errors.Is(err, ErrCantTakeOver) {
+		t.Fatalf("nobody named: %v", err)
+	}
+	tookOver, err := Resume(context.Background(), f.hook, insider)
+	if err != nil || !tookOver || took != insider {
+		t.Fatalf("took over %v (by %s), err %v", tookOver, took, err)
+	}
+	if _, paused := f.mem.paused[f.hook]; paused {
+		t.Fatal("still paused")
 	}
 }
 
@@ -477,7 +572,7 @@ func TestSomeoneDeactivatedIsNoLongerAMemberAndAnUnreadAccountDecidesNothing(t *
 	}
 	for _, c := range cases {
 		activeUser = func(context.Context, uuid.UUID) (*userModels.User, error) { return c.user, c.err }
-		member, err := memberNow(context.Background(), id)
+		member, err := MemberNow(context.Background(), id)
 		if member != c.member || (err != nil) != c.fails {
 			t.Errorf("%s: member %v, err %v", c.name, member, err)
 		}

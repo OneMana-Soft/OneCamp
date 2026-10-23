@@ -16,9 +16,9 @@ func ranked(id string, rank float64) *dgraphStruct.DgraphTask {
 
 // L-1: one order per project. Tasks dropped between two others take ranks in
 // the gap, in their own order: one read of the neighbours, one write, and one
-// live message with the new ranks so other views re-sort in place. With no
-// room the whole project is renumbered, never one column, so the list and
-// every board column keep agreeing.
+// live message that the first moved task changed. With no room the whole
+// project is renumbered, never one column, so the list and every board column
+// keep agreeing.
 func TestReorderPlacesTasksInOneOrder(t *testing.T) {
 	old := reorderSeams
 	t.Cleanup(func() { reorderSeams = old })
@@ -38,7 +38,7 @@ func TestReorderPlacesTasksInOneOrder(t *testing.T) {
 		wrote = ts
 		return nil
 	}
-	reorderSeams.publish = func(m *mqttStruct.MqttTaskChanged) { told = m }
+	reorderSeams.publish = func(_ context.Context, m *mqttStruct.MqttTaskChanged) { told = m }
 
 	moved := []*dgraphStruct.DgraphTask{{Uuid: "m1"}, {Uuid: "m2"}}
 	if err := Reorder(context.Background(), "p", moved, "a", "b"); err != nil {
@@ -47,7 +47,7 @@ func TestReorderPlacesTasksInOneOrder(t *testing.T) {
 	if reads != 1 || writes != 1 || len(wrote) != 2 || *wrote[0].Rank >= *wrote[1].Rank || *wrote[0].Rank <= 0 || *wrote[1].Rank >= 1024 {
 		t.Fatalf("%d reads, %d writes: %+v", reads, writes, wrote)
 	}
-	if told == nil || told.ProjectUuid != "p" || len(told.Ranks) != 2 || told.Ranks["m1"] != *wrote[0].Rank {
+	if told == nil || *told != (mqttStruct.MqttTaskChanged{TaskUuid: "m1", ProjectUuid: "p"}) {
 		t.Fatalf("told %+v", told)
 	}
 

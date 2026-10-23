@@ -94,7 +94,7 @@ type InvitationView struct {
 
 // InvitationViewAt is an invitation as it stands at now: expired once its
 // link has run out, whatever the row still says. link builds the link from
-// its token. Pure.
+// its token, unsealed (none for a link from before links were sealed).
 func InvitationViewAt(inv *userModels.Invitation, now time.Time, link func(token string) string) InvitationView {
 	expires := inv.ExpiresAt()
 	view := InvitationView{
@@ -117,8 +117,8 @@ func InvitationViewAt(inv *userModels.Invitation, now time.Time, link func(token
 	}
 	days := int(math.Ceil(expires.Sub(now).Hours() / 24))
 	view.ExpiresInDays = &days
-	if inv.Token != nil && *inv.Token != "" {
-		view.InviteLink = link(*inv.Token)
+	if token := helpers.OpenLinkSecret(inv.Link.Sealed, inv.Link.Hash); token != "" {
+		view.InviteLink = link(token)
 	}
 	return view
 }
@@ -181,7 +181,7 @@ var memberInviteRefusal = &InviteRefusal{Msg: "That address can't be invited fro
 // sending it again does (an admin's action), and makes it renewedBy's.
 // Refused for a member, for an invitation already used, and for an address
 // with no invitation.
-func RenewInvitation(ctx context.Context, email string, renewedBy uuid.UUID, token string, expiresAt time.Time) error {
+func RenewInvitation(ctx context.Context, email string, renewedBy uuid.UUID, link userModels.InvitationLink, expiresAt time.Time) error {
 	email = helpers.NormalizeEmail(email)
 	if err := refuseInvitingMember(ctx, email); err != nil {
 		return err
@@ -196,8 +196,8 @@ func RenewInvitation(ctx context.Context, email string, renewedBy uuid.UUID, tok
 	if existing.Status == InvitationJoined {
 		return &InviteRefusal{Msg: fmt.Sprintf("%s has already joined with this invitation.", email)}
 	}
-	if err := domain.UpdateInvitationTokenByID(ctx, existing.Id, token, expiresAt, renewedBy); err != nil {
-		helpers.LogErrorWithContext(ctx, "business/RenewInvitation Failed to update invitation token err: %+v", err)
+	if err := domain.UpdateInvitationLinkByID(ctx, existing.Id, link, expiresAt, renewedBy); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/RenewInvitation Failed to update invitation link err: %+v", err)
 		return errors.New("failed to update invitation token")
 	}
 	return nil

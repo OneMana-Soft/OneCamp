@@ -4,7 +4,7 @@ Webhooks let you connect OneCamp to external services. There are two types:
 
 | Type | Direction | Use Case |
 |------|-----------|----------|
-| **Incoming** | External → OneCamp | Post messages to channels, DMs, or group chats from bots, CI/CD, monitoring tools |
+| **Incoming** | External → OneCamp | Post messages to channels from bots, CI/CD, monitoring tools |
 | **Outgoing** | OneCamp → External | Notify your services when events happen (new messages, task changes, etc.) |
 
 ---
@@ -15,7 +15,7 @@ Webhooks let you connect OneCamp to external services. There are two types:
 
 1. An admin creates an incoming webhook in **Admin → Webhooks → Create Webhook**
 2. OneCamp generates a unique URL with a secret token
-3. You `POST` JSON to that URL — the message appears in the target channel/DM/group chat
+3. You `POST` JSON to that URL — the message appears in the target channel
 
 ### Webhook URL
 
@@ -40,23 +40,16 @@ The `{token}` is auto-generated. Keep it secret — anyone with the token can po
 | `text` | Yes* | String | Message body. Supports plain text and HTML. |
 | `blocks` | Yes* | Array | Slack-style rich blocks (see below). If provided, takes precedence over `text`. |
 | `channel_id` | No | UUID | Target channel UUID. Overrides the webhook's default channel. |
-| `dm_id` | No | UUID | Target DM recipient UUID. |
-| `group_chat_id` | No | String | Target group chat grouping_id (not a UUID). |
+| `channel` | No | String | The channel's name, with or without `#` (`#alerts`), when `channel_id` isn't given. |
 | `bot_name` | No | String | Display name for the message. Defaults to the webhook's configured bot name. |
 
 \* Either `text` or `blocks` must be provided.
 
 ### Routing Destinations
 
-Include one of these fields in the payload to determine where the message is posted:
+A message is posted in a channel, as the webhook's bot: the one `channel_id` or `channel` names, or else the webhook's default channel (configured at creation).
 
-| Field | Destination |
-|-------|-------------|
-| `channel_id` | Post in a channel |
-| `dm_id` | Send a direct message |
-| `group_chat_id` | Post in a group chat |
-
-If none are provided, the webhook's default channel (configured at creation) is used.
+An incoming webhook doesn't message people. A payload with `dm_id` or `group_chat_id` is refused with `400`, even beside a channel. To message people, use an app.
 
 ### Example: Send a channel message
 
@@ -66,17 +59,6 @@ curl -X POST https://onecamp.onemana.dev/webhook/incoming/abc123token \
   -d '{
     "text": "Deploy completed successfully 🚀",
     "bot_name": "Deploy Bot"
-  }'
-```
-
-### Example: Send a DM
-
-```bash
-curl -X POST https://onecamp.onemana.dev/webhook/incoming/abc123token \
-  -H "Content-Type: application/json" \
-  -d '{
-    "text": "Hey! Your PR has been approved.",
-    "dm_id": "550e8400-e29b-41d4-a716-446655440000"
   }'
 ```
 
@@ -144,10 +126,10 @@ Commands return an immediate response. If processing takes time, the handler can
 
 | Status | Meaning |
 |--------|---------|
-| `200` | Message posted successfully. Response includes `post_id` or `message_id`. |
-| `400` | Missing `text`/`blocks`, or invalid payload. |
+| `200` | Message posted successfully. Response includes `post_id`. |
+| `400` | Missing `text`/`blocks`, an invalid payload, or a payload naming `dm_id` or `group_chat_id`. |
 | `401` | Invalid or disabled webhook token. |
-| `403` | Permission denied (e.g., DM recipient not in org, or webhook creator not in group chat). |
+| `403` | The webhook's creator isn't a member of the channel. |
 | `429` | Rate limit exceeded (30 requests per minute per token). |
 
 ### Rate Limiting

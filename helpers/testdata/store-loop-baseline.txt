@@ -368,7 +368,6 @@ business/Follow/cleanup.go :: sweepNotices :: deleteNotices
 business/Follow/notify.go :: tellMentioned :: tell
 business/Follow/webhooks.go :: flushUpdates :: dispatchWebhook
 business/Follow/webhooks.go :: flushUpdates :: docPeople
-business/Follow/webhooks.go :: flushUpdates :: ownerCanOpen
 business/GitHub/automationStatus.go :: NormalizeAutomationRules :: taskStatusBusiness.Describe
 business/GitHub/automationStatus.go :: NormalizeAutomationRules :: taskStatusBusiness.Resolve
 business/GitHub/automationStatus.go :: repointAutomationRules :: githubLinkDomain.UpdateAutomationRules
@@ -751,7 +750,10 @@ business/User/handles.go :: claimFreeHandle :: domain.TakenHandles
 business/Webhook/eventHandoff.go :: run :: .take
 business/Webhook/eventHandoff.go :: sweep :: .take
 business/Webhook/eventHandoff.go :: sweepLoop :: .sweep
-business/Webhook/webhookBusiness.go :: dispatch :: domain.ChannelIsPublic
+business/Webhook/reach.go :: shownTo :: .reach
+business/Webhook/reach.go :: shownTo :: needsOf
+business/Webhook/webhookBusiness.go :: dispatch :: .reach
+business/Webhook/webhookBusiness.go :: dispatch :: channelIsPublic
 business/Webhook/webhookScheduler.go :: StartWebhookCleanupScheduler :: runCleanup
 business/WorkAccess/contract.go :: OfMany :: editWho
 business/Workflow/notices.go :: ruleNotices :: getRule

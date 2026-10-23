@@ -388,13 +388,16 @@ type ratesView struct {
 	Set              bool   `json:"set"`
 	Currency         string `json:"currency,omitempty"`
 	DefaultRateCents int64  `json:"default_rate_cents"`
-	People           []struct {
+	// UpdatedAt is the version of the rates read: a save sends it back, and
+	// is refused when they've changed since (rateModel.ErrChanged).
+	UpdatedAt string `json:"updated_at,omitempty"`
+	People    []struct {
 		UserUUID  string `json:"user_uuid"`
 		RateCents int64  `json:"rate_cents"`
 	} `json:"people"`
 }
 
-func viewOf(rates *timeBusiness.Rates) ratesView {
+func viewOf(rates *timeBusiness.Rates, at time.Time) ratesView {
 	v := ratesView{People: []struct {
 		UserUUID  string `json:"user_uuid"`
 		RateCents int64  `json:"rate_cents"`
@@ -402,7 +405,7 @@ func viewOf(rates *timeBusiness.Rates) ratesView {
 	if rates == nil {
 		return v
 	}
-	v.Set, v.Currency, v.DefaultRateCents = true, rates.Currency, rates.Default
+	v.Set, v.Currency, v.DefaultRateCents, v.UpdatedAt = true, rates.Currency, rates.Default, at.Format(time.RFC3339Nano)
 	for id, cents := range rates.People {
 		v.People = append(v.People, struct {
 			UserUUID  string `json:"user_uuid"`
@@ -427,35 +430,54 @@ func ProjectRates(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, "ProjectRates", err)
 		return
 	}
-	var rates *timeBusiness.Rates
-	if b != nil {
-		rates = &timeBusiness.Rates{Currency: b.Currency, Default: b.DefaultRateCents, People: b.People}
+	if b == nil {
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": viewOf(nil, time.Time{})})
+		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": viewOf(rates)})
+	rates := &timeBusiness.Rates{Currency: b.Currency, Default: b.DefaultRateCents, People: b.People}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": viewOf(rates, b.UpdatedAt)})
 }
 
 // SetProjectRates sets the project's currency and rates. Its admins only.
-// POST /project/{project_uuid}/rates {currency, default_rate_cents, people: [{user_uuid, rate_cents}]}
+// POST /project/{project_uuid}/rates {currency, default_rate_cents, people: [{user_uuid, rate_cents}], updated_at}
+// updated_at is the version read ("" when the project had no rates); rates
+// that changed since answer 409, and nothing is written.
 func SetProjectRates(w http.ResponseWriter, r *http.Request) {
 	projectID, _, ok := projectaccess.Require(w, r, workAccess.NeedManage, "Only the project's admins set its rates.")
 	if !ok {
 		return
 	}
-	var in timeBusiness.RatesInput
+	var in struct {
+		timeBusiness.RatesInput
+		UpdatedAt string `json:"updated_at"`
+	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&in); err != nil {
 		helpers.WriteBadRequest(w, "Couldn't read those rates.")
 		return
 	}
-	rates, err := timeBusiness.CheckRates(in)
+	var read time.Time
+	if in.UpdatedAt != "" {
+		var err error
+		if read, err = time.Parse(time.RFC3339Nano, in.UpdatedAt); err != nil {
+			helpers.WriteBadRequest(w, "Couldn't read those rates.")
+			return
+		}
+	}
+	rates, err := timeBusiness.CheckRates(in.RatesInput)
 	if err != nil {
 		fail(w, r, "SetProjectRates", err)
 		return
 	}
-	if err := rateModel.Set(projectID, rates.Currency, rates.Default, rates.People, me(r).UserPostgresInfo.Id); err != nil {
+	at, err := rateModel.Set(projectID, rates.Currency, rates.Default, rates.People, read, me(r).UserPostgresInfo.Id)
+	if errors.Is(err, rateModel.ErrChanged) {
+		helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"msg": "These rates changed after you opened them, so nothing was saved. Look at the latest and make your change again."})
+		return
+	}
+	if err != nil {
 		fail(w, r, "SetProjectRates", err)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": viewOf(rates)})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": viewOf(rates, at)})
 }
 
 // ClearProjectRates stops billing the project. Its admins only.
@@ -469,7 +491,7 @@ func ClearProjectRates(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, "ClearProjectRates", err)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": viewOf(nil)})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": viewOf(nil, time.Time{})})
 }
 
 // safeFileName keeps a project's name usable in a download's file name.

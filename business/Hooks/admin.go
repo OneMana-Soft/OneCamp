@@ -115,9 +115,15 @@ func Pause(ctx context.Context, webhookID uuid.UUID) error {
 	return nil
 }
 
+// ErrCantTakeOver is an admin resuming a webhook its creator can no longer
+// send, who can't read what it is set up for either.
+var ErrCantTakeOver = errors.New("hooks: whoever resumes it can't read what it's set up for")
+
 // Resume lets a paused webhook's deliveries go, at once. When its creator is
-// no longer a member, by (the admin resuming it) takes it over: what it sends
-// goes out on a member's say-so, never on nobody's.
+// no longer a member, or can't read the channel or project it is set up for,
+// by (the admin resuming it) takes it over if they can read it, so what it
+// sends goes out on a member's say-so and within what they may read, never on
+// nobody's (ErrCantTakeOver).
 func Resume(ctx context.Context, webhookID, by uuid.UUID) (tookOver bool, err error) {
 	t, ok, err := rows.target(ctx, webhookID)
 	if err != nil {
@@ -126,7 +132,21 @@ func Resume(ctx context.Context, webhookID, by uuid.UUID) (tookOver bool, err er
 	if !ok || t.Deleted {
 		return false, ErrNotFound
 	}
-	if member, err := isMember(ctx, t.CreatedBy); err == nil && !member && by != uuid.Nil {
+	creator, err := reach(ctx, t.CreatedBy, t, nil)
+	if err != nil {
+		return false, err
+	}
+	if creator != Reaches {
+		if by == uuid.Nil {
+			return false, ErrCantTakeOver
+		}
+		mine, err := reach(ctx, by, t, nil)
+		if err != nil {
+			return false, err
+		}
+		if mine != Reaches {
+			return false, ErrCantTakeOver
+		}
 		if err := takeOver(ctx, webhookID, by); err != nil {
 			return false, err
 		}

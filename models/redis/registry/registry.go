@@ -251,6 +251,17 @@ var SSOState = withArity(Spec{
 	Description: "One-shot OAuth/OIDC state nonce → redirect URL. GETDEL on consume to prevent replay.",
 }, 1) // (state)
 
+// SAMLAssertionUsed marks a SAML assertion as used, so a captured answer
+// can't sign anyone in again. Each key is set with its own TTL, until the
+// assertion expires (services/SAML TakeAssertion); this TTL is unused.
+var SAMLAssertionUsed = withArity(Spec{
+	Namespace:   "sso:saml:used",
+	TTL:         5 * time.Minute,
+	Datatype:    DatatypeString,
+	Category:    CategorySSO,
+	Description: "A SAML assertion ID already used to sign in. SET NX until the assertion expires; a second use is refused.",
+}, 1) // (assertion id)
+
 // USER -----------------------------------------------------------------------
 
 // UserProfile caches the postgres User row by UUID. Hot-path read on

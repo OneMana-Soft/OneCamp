@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
@@ -28,11 +29,16 @@ func TestInvitationLinkHasAScheme(t *testing.T) {
 // nothing to copy once it is expired or used.
 func TestAnInvitationSaysWhereItStands(t *testing.T) {
 	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
-	token := "tok"
+	t.Setenv("APP_SECRET_KEK", "the server's key")
+	token, hash, sealed, err := helpers.NewSealedLinkSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
 	at := func(d time.Duration) *time.Time { t := now.Add(d); return &t }
 	link := func(tok string) string { return "https://team.example/signup?token=" + tok }
 	inv := func(status string, expires *time.Time) *userModels.Invitation {
-		return &userModels.Invitation{Id: uuid.New(), Email: "ana@example.test", Status: status, Token: &token, TokenExpiresAt: expires, CreatedAt: now.Add(-time.Hour)}
+		return &userModels.Invitation{Id: uuid.New(), Email: "ana@example.test", Status: status,
+			Link: userModels.InvitationLink{Hash: hash, Sealed: sealed}, TokenExpiresAt: expires, CreatedAt: now.Add(-time.Hour)}
 	}
 	cases := []struct {
 		name     string
@@ -62,8 +68,32 @@ func TestAnInvitationSaysWhereItStands(t *testing.T) {
 		if got != c.daysLeft {
 			t.Errorf("%s: %d days left, want %d", c.name, got, c.daysLeft)
 		}
-		if (v.InviteLink != "") != c.link {
+		if (v.InviteLink != "") != c.link || c.link && v.InviteLink != link(token) {
 			t.Errorf("%s: link %q, want one: %v", c.name, v.InviteLink, c.link)
+		}
+	}
+}
+
+// A link sent before links were sealed is found by its hash alone, so it
+// still lets its person in, but the list has no link to copy: it is sent
+// again instead. So is one whose seal the server's key no longer opens.
+func TestAnInvitationWhoseLinkCantBeUnsealedHasNoLinkToCopy(t *testing.T) {
+	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
+	week := now.Add(7 * 24 * time.Hour)
+	t.Setenv("APP_SECRET_KEK", "the server's key")
+	_, hash, sealed, err := helpers.NewSealedLinkSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("APP_SECRET_KEK", "the server's new key")
+	for name, link := range map[string]userModels.InvitationLink{
+		"sent before links were sealed":     {Hash: helpers.LinkSecretHash("mailed-before")},
+		"sealed under the server's old key": {Hash: hash, Sealed: sealed},
+	} {
+		inv := &userModels.Invitation{Id: uuid.New(), Email: "ana@example.test", Status: InvitationSent, Link: link,
+			TokenExpiresAt: &week, CreatedAt: now}
+		if v := InvitationViewAt(inv, now, invitationLinkOnTest); v.Status != InvitationSent || v.InviteLink != "" {
+			t.Errorf("%s: %+v", name, v)
 		}
 	}
 }
@@ -73,15 +103,15 @@ func TestAnInvitationSaysWhereItStands(t *testing.T) {
 // userModels.Invitation.LiveAt). The list called it live forever.
 func TestAnInvitationWithoutAnExpiryLastsAWeek(t *testing.T) {
 	now := time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)
-	token := "legacy"
-	old := &userModels.Invitation{Id: uuid.New(), Email: "old@example.test", Status: InvitationPending, Token: &token, CreatedAt: now.Add(-8 * 24 * time.Hour)}
+	link := userModels.InvitationLink{Hash: helpers.LinkSecretHash("legacy")}
+	old := &userModels.Invitation{Id: uuid.New(), Email: "old@example.test", Status: InvitationPending, Link: link, CreatedAt: now.Add(-8 * 24 * time.Hour)}
 	if view := InvitationViewAt(old, now, invitationLinkOnTest); view.Status != InvitationExpired || view.InviteLink != "" {
 		t.Errorf("eight days old, no expiry: %+v", view)
 	}
 	if problem := InvitationLinkProblem(old, now, "Sam"); problem != "This invitation has expired. Ask Sam to send it again." {
 		t.Errorf("its link: %q", problem)
 	}
-	recent := &userModels.Invitation{Id: uuid.New(), Email: "new@example.test", Status: InvitationPending, Token: &token, CreatedAt: now.Add(-2 * 24 * time.Hour)}
+	recent := &userModels.Invitation{Id: uuid.New(), Email: "new@example.test", Status: InvitationPending, Link: link, CreatedAt: now.Add(-2 * 24 * time.Hour)}
 	view := InvitationViewAt(recent, now, invitationLinkOnTest)
 	if view.Status != InvitationPending || view.ExpiresInDays == nil || *view.ExpiresInDays != 5 || view.ExpiresAt == nil {
 		t.Errorf("two days old, no expiry: %+v", view)

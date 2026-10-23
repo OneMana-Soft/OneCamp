@@ -14,24 +14,28 @@ package business
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
 	codeagent "github.com/akashc777/OneCamp/business/CodeAgent"
 	githubBusiness "github.com/akashc777/OneCamp/business/GitHub"
+	"github.com/akashc777/OneCamp/helpers"
 	ai "github.com/akashc777/OneCamp/services/AI"
+	"github.com/google/uuid"
 )
 
-// RegisterCodeExecutors wires the read-only code tools. Called from
+// RegisterCodeExecutors wires the read-only code tools, each held to the
+// repositories the reader's projects link (onLinkedRepos). Called from
 // RegisterToolExecutors alongside the other core tools.
 func RegisterCodeExecutors() {
-	ai.RegisterExecutor("code_analyze", executeCodeAnalyze)
-	ai.RegisterExecutor("repo_summary", executeRepoSummary)
-	ai.RegisterExecutor("list_recent_changes", executeListRecentChanges)
-	ai.RegisterExecutor("list_commits", executeListCommits)
-	ai.RegisterExecutor("read_repo_file", executeReadRepoFile)
-	ai.RegisterExecutor("search_repo_code", executeSearchRepoCode)
+	ai.RegisterExecutor("code_analyze", onLinkedRepos(executeCodeAnalyze))
+	ai.RegisterExecutor("repo_summary", onLinkedRepos(executeRepoSummary))
+	ai.RegisterExecutor("list_recent_changes", onLinkedRepos(executeListRecentChanges))
+	ai.RegisterExecutor("list_commits", onLinkedRepos(executeListCommits))
+	ai.RegisterExecutor("read_repo_file", onLinkedRepos(executeReadRepoFile))
+	ai.RegisterExecutor("search_repo_code", onLinkedRepos(executeSearchRepoCode))
 
 	// Turn on org-context fusion for the read-only code agent: ground analyses
 	// in the workspace's remembered decisions, conventions, and the standing
@@ -40,6 +44,74 @@ func RegisterCodeExecutors() {
 	// codeContextProvider), so this is a no-op unless a workspace has the memory
 	// layer enabled and relevant context to add.
 	codeagent.RegisterOrgContextProvider(codeContextProvider{})
+}
+
+// ErrRepoNotLinked refuses a repository the code tools may not read, in the
+// same words whether no project links it or only projects the reader isn't in,
+// so it says nothing of what other projects link.
+var ErrRepoNotLinked = errors.New("This repository isn't linked to your workspace.")
+
+// errRepoUnchecked answers when who may read a repository couldn't be checked.
+// The cause is logged: a store's error text is no answer for a reader, or for
+// the model a tool's error goes back to.
+var errRepoUnchecked = errors.New("Who may read this repository couldn't be checked just now. Try again.")
+
+// projectsLinking are the projects that link a repository: a seam for tests.
+var projectsLinking = githubBusiness.ProjectsLinking
+
+// onLinkedRepos runs a code tool only on a repository the reader may read
+// (CodeRepoAllowed), refusing any other before anything reaches GitHub. A
+// call naming no owner or repo goes on to the tool, which says what it needs.
+func onLinkedRepos(tool ai.ToolExecutor) ai.ToolExecutor {
+	return func(ctx context.Context, action ai.ProposedAction, userUUID string) (string, map[string]string, error) {
+		owner, repo := strings.TrimSpace(action.Params["owner"]), strings.TrimSpace(action.Params["repo"])
+		if owner != "" && repo != "" {
+			if err := CodeRepoAllowed(ctx, userUUID, owner, repo); err != nil {
+				return "", nil, err
+			}
+		}
+		return tool(ctx, action, userUUID)
+	}
+}
+
+// CodeRepoAllowed refuses owner/repo to userUUID's code reads: the code tools,
+// and the code analysis and release notes routes. They read with the
+// workspace's GitHub connection, the token of the admin who connected it,
+// which reaches every repository that admin can, so the reader's own GitHub
+// access is no bound: a repository is read only when a project links it, for
+// someone in one of those projects. In a run someone else asked for, they must
+// be in one too (askerView), as everything a run answers is narrowed to them.
+func CodeRepoAllowed(ctx context.Context, userUUID, owner, repo string) error {
+	unchecked := func(err error) error {
+		helpers.LogErrorWithContext(ctx, "business/AI CodeRepoAllowed %s/%s for %s: %+v", owner, repo, userUUID, err)
+		return errRepoUnchecked
+	}
+	linking, err := projectsLinking(ctx, owner, repo)
+	if err != nil {
+		return unchecked(err)
+	}
+	reader, err := viewOf(ctx, userUUID)
+	if err != nil {
+		return unchecked(err)
+	}
+	asker, err := askerView(ctx)
+	if err != nil {
+		return unchecked(err)
+	}
+	if !inAnyProject(reader, linking) || (asker != nil && !inAnyProject(asker, linking)) {
+		return ErrRepoNotLinked
+	}
+	return nil
+}
+
+// inAnyProject is whether a person's view holds one of projects.
+func inAnyProject(v *personView, projects []uuid.UUID) bool {
+	for _, p := range projects {
+		if v.projects[p.String()] {
+			return true
+		}
+	}
+	return false
 }
 
 // executeReadRepoFile reads a single file from the connected GitHub repo at an

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	rootBusiness "github.com/akashc777/OneCamp/business"
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	cardsBusiness "github.com/akashc777/OneCamp/business/Cards"
 	business "github.com/akashc777/OneCamp/business/Webhook"
@@ -84,8 +83,8 @@ func HandleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusCreated, helpers.Envolope{"webhook": webhook})
 }
 
-// HandleGetAllWebhooks returns all webhooks (admin only).
-// Tokens are redacted from list responses to prevent leaks.
+// HandleGetAllWebhooks returns all webhooks (admin only). No token is in it:
+// only a token's hash is kept, and it is shown once, when it is made.
 func HandleGetAllWebhooks(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -95,11 +94,6 @@ func HandleGetAllWebhooks(w http.ResponseWriter, r *http.Request) {
 			"controllers/HandleGetAllWebhooks Failed to get webhooks err: %+v", err)
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": "Failed to retrieve webhooks"})
 		return
-	}
-
-	// Redact tokens from list view
-	for _, wh := range webhooks {
-		wh.Token = ""
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"webhooks": webhooks})
@@ -130,9 +124,16 @@ func HandleGetWebhook(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"webhook": webhook})
 }
 
-// HandleUpdateWebhook updates a webhook configuration (admin only).
+// HandleUpdateWebhook updates a webhook configuration (admin only). An admin
+// who points another admin's webhook at a new address takes it over.
 func HandleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	userInfo, ok := userModel.FromContext(ctx)
+	if !ok || userInfo == nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
 
 	webhookIdStr := chi.URLParam(r, "webhookId")
 	webhookId, err := uuid.Parse(webhookIdStr)
@@ -167,7 +168,7 @@ func HandleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	webhook, err := business.UpdateWebhook(ctx, webhookId, input)
+	webhook, tookOver, err := business.UpdateWebhook(ctx, webhookId, input, userInfo.UserPostgresInfo.Id)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if err.Error() == "webhook not found" {
@@ -179,9 +180,14 @@ func HandleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	auditBusiness.Record(r, "webhook.updated", auditBusiness.CategoryIntegration, "Changed a webhook: "+webhook.Name,
-		map[string]interface{}{"webhook_id": webhook.Id.String()})
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"webhook": webhook})
+	summary, out := "Changed a webhook: "+webhook.Name, helpers.Envolope{"webhook": webhook, "took_over": tookOver}
+	if tookOver {
+		summary = "Pointed another admin's webhook at a new address and took it over: " + webhook.Name
+		out["msg"] = "It's yours now: it sends only what you can read."
+	}
+	auditBusiness.Record(r, "webhook.updated", auditBusiness.CategoryIntegration, summary,
+		map[string]interface{}{"webhook_id": webhook.Id.String(), "took_over": tookOver})
+	helpers.WriteJSON(w, http.StatusOK, out)
 }
 
 // HandleDeleteWebhook soft-deletes a webhook (admin only).
@@ -261,10 +267,16 @@ func HandleGetWebhookLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	userInfo, ok := userModel.FromContext(ctx)
+	if !ok || userInfo == nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize := helpers.SizeParam(r.URL.Query(), "page_size", 20, 100)
 
-	logs, err := business.GetWebhookLogs(ctx, webhookId, page, pageSize)
+	logs, err := business.GetWebhookLogs(ctx, userInfo.UserPostgresInfo.Id, webhookId, page, pageSize)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": "Failed to retrieve logs"})
 		return
@@ -318,7 +330,7 @@ func HandleGetGlobalWebhookLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	logs, err := business.GetWebhookLogsGlobal(ctx, webhookId, success, fromDate, toDate, page, pageSize)
+	logs, err := business.GetWebhookLogsGlobal(ctx, userInfo.UserPostgresInfo.Id, webhookId, success, fromDate, toDate, page, pageSize)
 	if err != nil {
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": "Failed to retrieve logs"})
 		return
@@ -371,8 +383,8 @@ func HandleTestWebhook(w http.ResponseWriter, r *http.Request) {
 }
 
 // HandleIncomingWebhook processes an incoming webhook request (public, token-authenticated).
-// Supports signature verification, slash commands, challenge verification, and rich block messages.
-// Destination is determined entirely from the payload (Slack-quality flexible routing).
+// Supports signature verification, challenge verification, and rich block messages,
+// posted in a channel as the automation bot (business.ProcessIncomingMessage).
 func HandleIncomingWebhook(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -468,6 +480,14 @@ func HandleIncomingWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// It posts in a channel, as the bot. A DM or a group post was written as
+	// the admin who made the webhook, so the whole payload is refused, even
+	// one that also names a channel: its sender meant to reach people.
+	if strings.TrimSpace(helpers.Deref(payload.DmId)) != "" || strings.TrimSpace(helpers.Deref(payload.GroupChatId)) != "" {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"ok": false, "error": business.DirectMessagesMoved})
+		return
+	}
+
 	if payload.Text == "" {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"ok": false, "error": "text field is required"})
 		return
@@ -483,99 +503,41 @@ func HandleIncomingWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// -------------------------------------------------------------------------
-	// Slack-quality payload-driven routing
-	// A single webhook URL can post to ANY channel/DM/group chat.
-	// Destination is determined from payload fields, not from webhook.target_type.
-	// -------------------------------------------------------------------------
-
-	// Priority 1: explicit channel destination (channel_id or channel field)
-	if (payload.ChannelId != nil && *payload.ChannelId != "") || payload.Channel != "" {
-		var channelUUID uuid.UUID
-		if payload.ChannelId != nil && *payload.ChannelId != "" {
-			channelUUID, err = uuid.Parse(*payload.ChannelId)
-			if err != nil {
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"ok": false, "error": "Invalid channel_id"})
-				return
-			}
-		} else {
-			// Support #name lookup
-			channelName := strings.TrimPrefix(payload.Channel, "#")
-			channelName = strings.TrimSpace(channelName)
-			ch, err := channelDomain.GetChannelByName(ctx, channelName)
-			if err != nil || ch == nil {
-				helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"ok": false, "error": "Channel not found"})
-				return
-			}
-			channelUUID = ch.Id
-		}
-
-		postId, err := business.ProcessIncomingMessage(ctx, webhook, channelUUID, messageText, botName)
+	// The channel the payload names (channel_id, or channel by its name, with
+	// or without "#"), else the webhook's default; never its target_type.
+	var channelUUID uuid.UUID
+	switch {
+	case payload.ChannelId != nil && *payload.ChannelId != "":
+		channelUUID, err = uuid.Parse(*payload.ChannelId)
 		if err != nil {
-			if err.Error() == "webhook creator is not a member of this channel" {
-				helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"ok": false, "error": err.Error()})
-				return
-			}
-			helpers.LogErrorWithContext(ctx, "controllers/HandleIncomingWebhook Post failed err: %+v", err)
-			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"ok": false, "error": "Failed to create message"})
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"ok": false, "error": "Invalid channel_id"})
 			return
 		}
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"ok": true, "msg": "Message posted successfully", "post_id": postId})
+	case payload.Channel != "":
+		ch, err := channelDomain.GetChannelByName(ctx, strings.TrimSpace(strings.TrimPrefix(payload.Channel, "#")))
+		if err != nil || ch == nil {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"ok": false, "error": "Channel not found"})
+			return
+		}
+		channelUUID = ch.Id
+	case webhook.ChannelId != nil:
+		channelUUID = *webhook.ChannelId
+	default:
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"ok": false, "error": "No destination specified. Provide channel_id or channel, or set a default channel on the webhook."})
 		return
 	}
 
-	// Priority 2: DM destination
-	if payload.DmId != nil && *payload.DmId != "" {
-		dmUUID, err := uuid.Parse(*payload.DmId)
-		if err != nil {
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"ok": false, "error": "Invalid dm_id"})
+	postId, err := business.ProcessIncomingMessage(ctx, webhook, channelUUID, messageText, botName)
+	if err != nil {
+		if err.Error() == "webhook creator is not a member of this channel" {
+			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"ok": false, "error": err.Error()})
 			return
 		}
-		msgID, err := rootBusiness.ProcessIncomingDM(ctx, webhook, dmUUID, messageText, botName)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "controllers/HandleIncomingWebhook DM failed err: %+v", err)
-			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"ok": false, "error": "Failed to create DM message"})
-			return
-		}
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"ok": true, "msg": "DM message posted", "message_id": msgID})
+		helpers.LogErrorWithContext(ctx, "controllers/HandleIncomingWebhook Post failed err: %+v", err)
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"ok": false, "error": "Failed to create message"})
 		return
 	}
-
-	// Priority 3: group chat destination
-	if payload.GroupChatId != nil && *payload.GroupChatId != "" {
-		groupId := strings.TrimSpace(*payload.GroupChatId)
-		if groupId == "" {
-			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"ok": false, "error": "Invalid group_chat_id"})
-			return
-		}
-		msgID, err := rootBusiness.ProcessIncomingGroupChat(ctx, webhook, groupId, messageText, botName)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "controllers/HandleIncomingWebhook GroupChat failed err: %+v", err)
-			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"ok": false, "error": "Failed to create group chat message"})
-			return
-		}
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"ok": true, "msg": "Group chat message posted", "message_id": msgID})
-		return
-	}
-
-	// Priority 4: fallback to webhook's default channel_id
-	if webhook.ChannelId != nil {
-		postId, err := business.ProcessIncomingMessage(ctx, webhook, *webhook.ChannelId, messageText, botName)
-		if err != nil {
-			if err.Error() == "webhook creator is not a member of this channel" {
-				helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"ok": false, "error": err.Error()})
-				return
-			}
-			helpers.LogErrorWithContext(ctx, "controllers/HandleIncomingWebhook Post failed err: %+v", err)
-			helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"ok": false, "error": "Failed to create message"})
-			return
-		}
-		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"ok": true, "msg": "Message posted successfully", "post_id": postId})
-		return
-	}
-
-	// No destination found
-	helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"ok": false, "error": "No destination specified. Provide channel_id, channel, dm_id, group_chat_id, or set a default channel on the webhook."})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"ok": true, "msg": "Message posted successfully", "post_id": postId})
 }
 
 // isWebhookValidationError determines if a webhook business error is a client validation error.

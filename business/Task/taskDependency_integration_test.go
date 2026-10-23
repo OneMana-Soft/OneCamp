@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	policyBusiness "github.com/akashc777/OneCamp/business/Policy"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -335,3 +336,106 @@ func TestTaskDependenciesAtOnce(t *testing.T) {
 }
 
 func ptr(t time.Time) *time.Time { return &t }
+
+// A2-1 (the web audit, released code): in a project where members change only
+// the tasks assigned to them, a member moving their own task with its chain
+// moved other people's tasks too. With the real reads (the chain and the
+// mover's standing from Dgraph, the project's "Who can change tasks" from its
+// policy), only what the mover may change moves: someone else's task stays,
+// and so does what waits only on it.
+func TestAShiftMovesOnlyTheTasksTheMoverMayChange(t *testing.T) {
+	ctx := context.Background()
+	env := integration.SetupEnv(t)
+	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
+		t.Fatal(err)
+	}
+	dg := integration.SetupDgraph(t)
+	live := "0001-01-01T00:00:00Z"
+	project, adaUUID, miaUUID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	id := map[string]string{}
+	for _, k := range []string{"plan", "draft", "review", "send"} {
+		id[k] = uuid.NewString()
+	}
+	if _, err := env.PG.Exec(`INSERT INTO projects (id, project_name) VALUES ($1, 'Newsletter')`, project); err != nil {
+		t.Fatal(err)
+	}
+	for name, u := range map[string]string{"ada": adaUUID, "mia": miaUUID} {
+		if _, err := env.PG.Exec(`INSERT INTO users (id, email_id, username, display_name, created_at, updated_at) VALUES ($1, $2, $3, $4, NOW(), NOW())`, u, name+"@example.test", name, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Mia plans the issue and drafts it; Ada reviews it, and Mia sends it
+	// once it's reviewed.
+	task := func(key, name, start, due, assignee string, waitsOn ...string) map[string]any {
+		m := map[string]any{"uid": "_:" + key, "dgraph.type": "Task", "task_uuid": id[key], "task_name": name, "task_status": "todo",
+			"task_deleted_at": live, "task_project": map[string]any{"uid": "_:p"}, "task_due_date": due,
+			"task_assignee": map[string]any{"uid": "_:" + assignee}}
+		if start != "" {
+			m["task_start_date"] = start
+		}
+		var on []map[string]any
+		for _, w := range waitsOn {
+			on = append(on, map[string]any{"uid": "_:" + w})
+		}
+		if on != nil {
+			m["task_blocked_by"] = on
+		}
+		return m
+	}
+	uids := dg.Mutate(t, map[string]any{
+		"uid": "_:p", "dgraph.type": "Project", "project_uuid": project, "project_name": "Newsletter", "project_deleted_at": live,
+		"project_admins":  []map[string]any{{"uid": "_:ada", "dgraph.type": "User", "user_uuid": adaUUID}},
+		"project_members": []map[string]any{{"uid": "_:ada"}, {"uid": "_:mia", "dgraph.type": "User", "user_uuid": miaUUID}},
+		"project_tasks": []map[string]any{
+			task("plan", "Plan the issue", "", "2026-03-04T17:00:00Z", "mia"),
+			task("draft", "Draft it", "2026-03-05T09:00:00Z", "2026-03-07T17:00:00Z", "mia", "plan"),
+			task("review", "Review it", "2026-03-05T09:00:00Z", "2026-03-06T17:00:00Z", "ada", "plan"),
+			task("send", "Send it", "2026-03-07T09:00:00Z", "2026-03-08T17:00:00Z", "mia", "review"),
+		},
+	})
+	if _, err := policyBusiness.Admin.SetIn(ctx, policyBusiness.ProjectsEditWho.Key, policyBusiness.Scope{Kind: policyBusiness.ScopeProject, ID: project},
+		json.RawMessage(`"assigned"`), policyBusiness.Changer{UserID: uuid.MustParse(adaUUID)}); err != nil {
+		t.Fatal(err)
+	}
+	mia := &dgraphStruct.DgraphUser{Uid: uids["mia"], Uuid: miaUUID}
+	dates := func(key string) (start, due time.Time) {
+		t.Helper()
+		resp, err := dgraphInit.DgraphClient.NewReadOnlyTxn().QueryWithVars(ctx,
+			`query q($id: string) { t(func: eq(task_uuid, $id)) { task_start_date task_due_date } }`, map[string]string{"$id": id[key]})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out struct {
+			T []struct {
+				Start time.Time `json:"task_start_date"`
+				Due   time.Time `json:"task_due_date"`
+			}
+		}
+		if err := json.Unmarshal(resp.Json, &out); err != nil || len(out.T) != 1 {
+			t.Fatalf("read back %s: %v %s", key, err, resp.Json)
+		}
+		return out.T[0].Start, out.T[0].Due
+	}
+
+	// Planning slips to the 9th.
+	newDue := time.Date(2026, 3, 9, 17, 0, 0, 0, time.UTC)
+	before := &dgraphStruct.DgraphTask{DueDate: ptr(time.Date(2026, 3, 4, 17, 0, 0, 0, time.UTC))}
+	if err := UpdateTaskDates(ctx, uuid.MustParse(id["plan"]), TaskDates{Due: &newDue}, before, mia); err != nil {
+		t.Fatal(err)
+	}
+	shifted, err := ShiftDependents(ctx, project, id["plan"], time.UTC, mia)
+	if err != nil || len(shifted) != 1 || shifted[0].UUID != id["draft"] {
+		t.Fatalf("only Mia's own Draft moves along: %+v %v", shifted, err)
+	}
+	if start, due := dates("draft"); !start.Equal(time.Date(2026, 3, 10, 9, 0, 0, 0, time.UTC)) || !due.Equal(time.Date(2026, 3, 12, 17, 0, 0, 0, time.UTC)) {
+		t.Fatalf("Draft starts the day after Planning is due and keeps its 3 days: %v %v", start, due)
+	}
+	for key, was := range map[string][2]time.Time{
+		"review": {time.Date(2026, 3, 5, 9, 0, 0, 0, time.UTC), time.Date(2026, 3, 6, 17, 0, 0, 0, time.UTC)},
+		"send":   {time.Date(2026, 3, 7, 9, 0, 0, 0, time.UTC), time.Date(2026, 3, 8, 17, 0, 0, 0, time.UTC)},
+	} {
+		if start, due := dates(key); !start.Equal(was[0]) || !due.Equal(was[1]) {
+			t.Errorf("%s moved to %v-%v: Ada's Review isn't Mia's to move, and Send waits only on it", key, start, due)
+		}
+	}
+}
