@@ -16,6 +16,7 @@ import (
 	recordingDomain "github.com/akashc777/OneCamp/domain/Recording"
 
 	adapter "github.com/akashc777/OneCamp/adapter/User"
+	adminAuditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
@@ -2708,6 +2709,8 @@ func DeactivateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	adminAuditBusiness.Record(r, "member.deactivated", adminAuditBusiness.CategorySecurity,
+		"Switched a member's account off", map[string]interface{}{"user_uuid": inputUserInfoRaw.UserUuid})
 	helpers.GoSafeNamed("userFCMtokenBusiness.DeleteByUserId", func() { userFCMtokenBusiness.DeleteByUserId(inputUserInfoRaw.UserUuid) })
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
@@ -2774,6 +2777,9 @@ func CreateAdmin(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+
+	adminAuditBusiness.Record(r, "admin.granted", adminAuditBusiness.CategorySecurity,
+		"Made a member a workspace admin", map[string]interface{}{"user_uuid": inputUserInfoRaw.UserUuid})
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":    "Created admin user",
@@ -2907,6 +2913,9 @@ func RemoveAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	adminAuditBusiness.Record(r, "admin.revoked", adminAuditBusiness.CategorySecurity,
+		"Took a member's workspace admin role away", map[string]interface{}{"user_uuid": inputUserInfoRaw.UserUuid})
+
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":    "Deleted admin user",
 		"status": "success",
@@ -3001,6 +3010,9 @@ func ActivateUser(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+
+	adminAuditBusiness.Record(r, "member.reactivated", adminAuditBusiness.CategorySecurity,
+		"Switched a member's account back on", map[string]interface{}{"user_uuid": inputUserInfoRaw.UserUuid})
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"msg":    "Unblocked user",
@@ -3277,8 +3289,20 @@ func AddInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	recordInvitation(r, renewed, requestBody.Email)
 	sendErr := sendInvitation(ctx, requestBody.Email, token, userInfo)
 	respondInvitation(w, renewed, business.InvitationLink(token), sendErr)
+}
+
+// recordInvitation writes an invitation saved (made, or made again for an
+// address already invited) to the admin audit log, before its email goes:
+// the address is invited whether or not the email arrives.
+func recordInvitation(r *http.Request, again bool, email string) {
+	action, summary := "invitation.created", "Invited someone to the workspace"
+	if again {
+		action, summary = "invitation.resent", "Invited someone again, with a new link"
+	}
+	adminAuditBusiness.Record(r, action, adminAuditBusiness.CategorySecurity, summary, map[string]interface{}{"email": email})
 }
 
 // inviteSendTimeout bounds how long inviting someone waits for the email
@@ -3402,6 +3426,7 @@ func ResendInvitation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	recordInvitation(r, true, requestBody.Email)
 	sendErr := sendInvitation(ctx, requestBody.Email, newToken, userInfo)
 	respondInvitation(w, true, business.InvitationLink(newToken), sendErr)
 }
@@ -3425,6 +3450,8 @@ func DeleteInvitation(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	adminAuditBusiness.Record(r, "invitation.deleted", adminAuditBusiness.CategorySecurity,
+		"Withdrew an invitation", map[string]interface{}{"email": email})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{
 		"status": "success",
 		"msg":    "invitation deleted successfully",

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	adminAuditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	business "github.com/akashc777/OneCamp/business/User"
 	domain "github.com/akashc777/OneCamp/domain/User"
@@ -679,7 +680,7 @@ func syncSSOAdmin(ctx context.Context, email string, isSSOManaged, currentlyAdmi
 		if err := domain.CreateAdminUser(ctx, email); err != nil {
 			helpers.LogErrorWithContext(ctx, "controllers/syncSSOAdmin promote err: %+v", err)
 		} else {
-			helpers.MessageLogs.InfoLog.Printf("SSO admin promotion: email=%s groups=%v", email, claimedGroups)
+			recordDirectoryAdmin(ctx, "admin.granted", "The directory made someone a workspace admin", email, claimedGroups)
 		}
 		return
 	}
@@ -691,8 +692,17 @@ func syncSSOAdmin(ctx context.Context, email string, isSSOManaged, currentlyAdmi
 		if err := domain.HardDeleteAdminUserByEmailId(ctx, email); err != nil {
 			helpers.LogErrorWithContext(ctx, "controllers/syncSSOAdmin revoke err: %+v", err)
 		} else {
-			helpers.MessageLogs.InfoLog.Printf("SSO admin revocation: email=%s no longer in groups=%v", email, allowGroups)
+			recordDirectoryAdmin(ctx, "admin.revoked", "The directory took someone's workspace admin role away", email, claimedGroups)
 		}
+	}
+}
+
+// recordDirectoryAdmin writes an admin role the directory's groups gave or took to the admin audit log
+// (audit C2b), as the workspace acting on its own, with the groups the sign-in carried as the reason.
+func recordDirectoryAdmin(ctx context.Context, action, summary, email string, groups []string) {
+	if err := adminAuditBusiness.RecordForPrincipal(ctx, nil, "", adminAuditBusiness.ActorSystem, action,
+		adminAuditBusiness.CategorySecurity, summary, map[string]interface{}{"email": email, "groups": groups}); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/syncSSOAdmin %s for %s wasn't written to the audit log: %v", action, email, err)
 	}
 }
 

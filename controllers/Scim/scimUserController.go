@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 
+	adminAuditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	scimBusiness "github.com/akashc777/OneCamp/business/Scim"
 	"github.com/akashc777/OneCamp/helpers"
 	customMiddleware "github.com/akashc777/OneCamp/middleware"
@@ -178,6 +179,18 @@ func GetScimUser(w http.ResponseWriter, r *http.Request) {
 	writeSCIM(w, r, http.StatusOK, res)
 }
 
+// recordProvisioning writes what the directory did to someone's membership to the admin audit log (audit
+// A6): the workspace acting on its own (ActorSystem) through the credential, named beside the admin who
+// made it. A credential that records no maker still names itself, so no row is anonymous.
+func recordProvisioning(r *http.Request, action, summary, userID string) {
+	ctx := r.Context()
+	if err := adminAuditBusiness.RecordForPrincipal(ctx, customMiddleware.ScimTokenCreatorFromContext(ctx), "",
+		adminAuditBusiness.ActorSystem, action, adminAuditBusiness.CategorySecurity, summary,
+		map[string]interface{}{"user_uuid": userID, "scim_token_id": customMiddleware.ScimTokenIDFromContext(ctx)}); err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/Scim %s for %s wasn't written to the audit log: %v", action, userID, err)
+	}
+}
+
 // CreateScimUser handles POST /scim/v2/Users.
 func CreateScimUser(w http.ResponseWriter, r *http.Request) {
 	var in scimBusiness.ScimUserResource
@@ -194,6 +207,7 @@ func CreateScimUser(w http.ResponseWriter, r *http.Request) {
 	helpers.LogInfoWithContext(r.Context(),
 		"controllers/CreateScimUser provisioned user %s via credential %s",
 		res.Id, customMiddleware.ScimTokenIDFromContext(r.Context()))
+	recordProvisioning(r, "scim.user.created", "The directory added someone to the workspace", res.Id)
 
 	// 201 with a Location header, as RFC 7644 §3.3 requires. Some providers read the header rather than
 	// meta.location to learn the id they must use for every later call about this person.
@@ -239,6 +253,11 @@ func PatchScimUser(w http.ResponseWriter, r *http.Request) {
 		helpers.LogInfoWithContext(ctx,
 			"controllers/PatchScimUser set active=%t for user %s via credential %s",
 			*effect.SetActive, id, customMiddleware.ScimTokenIDFromContext(ctx))
+		if *effect.SetActive {
+			recordProvisioning(r, "scim.user.reactivated", "The directory switched someone's account back on", id)
+		} else {
+			recordProvisioning(r, "scim.user.deactivated", "The directory switched someone's account off", id)
+		}
 		writeSCIM(w, r, http.StatusOK, res)
 		return
 	}
@@ -279,6 +298,7 @@ func DeleteScimUser(w http.ResponseWriter, r *http.Request) {
 	helpers.LogInfoWithContext(r.Context(),
 		"controllers/DeleteScimUser deactivated user %s via credential %s",
 		id, customMiddleware.ScimTokenIDFromContext(r.Context()))
+	recordProvisioning(r, "scim.user.deleted", "The directory removed someone; their account is switched off", id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
