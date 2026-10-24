@@ -7,6 +7,7 @@ import (
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/User"
+	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	lastseenChannelBusiness "github.com/akashc777/OneCamp/business/LastSeenChannel"
 	lastseenBusiness "github.com/akashc777/OneCamp/business/LastSeenChat"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
@@ -36,10 +37,19 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 	var dgraphDMs []*dgraphStruct.DgraphDm
 	var dmCount = 0
 
-	// The files added in the forward box, as new nodes: a file the request
-	// carried was written as it came, so its uid linked (and overwrote) any
-	// node, another member's file or a private doc, into the forward.
-	fwdMessageInput.Attachments = dgraphStruct.NewAttachments(fwdMessageInput.Attachments, userInfo.Uid, currentTime)
+	// The files a place's forward carries: of the files added in the forward
+	// box, the ones the sender uploaded for that place, with the key each
+	// upload stored (business/Attachment OwnUploads, one read for every
+	// place), as new nodes. A file the request carried was written as it
+	// came, so its uid linked (and overwrote) any node, another member's file
+	// or a private doc, into the forward.
+	own, err := attachmentBusiness.OwnUploads(ctx, userInfo.Uuid, fwdMessageInput.Attachments)
+	if err != nil {
+		return err
+	}
+	filesFor := func(kind, place string) []*dgraphStruct.DgraphAttachment {
+		return dgraphStruct.NewAttachments(own.In(kind, place, fwdMessageInput.Attachments), userInfo.Uid, currentTime)
+	}
 
 	var postUUIDs []string
 	var channelUUIDs []string
@@ -64,6 +74,7 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 
 		var chatParticipantsTemp []*openSearchStruct.OpenSearchChatParticipants
 		if postOrChat.ChannelUuid != "" {
+			files := filesFor(postgressStruct.ATTACHMENT_SRC_CHANNEL, postOrChat.ChannelUuid)
 
 			postUUID := uuid.New()
 
@@ -87,7 +98,7 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 				Uuid:     postUUID.String(),
 				DType:    []string{"Post"},
 				Text:     fwdMessageInput.HtmlText,
-				MediaObj: fwdMessageInput.Attachments,
+				MediaObj: files,
 				Mentions: &dgraphStruct.DgraphMentions{
 					DType:     []string{"Mention"},
 					Mentions:  dgraphMentions,
@@ -130,6 +141,7 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 		} else if postOrChat.GrpId != "" {
 
 			// ── Forward to an EXISTING group chat ──
+			files := filesFor(helpers.ConversationFileKind(postOrChat.GrpId), postOrChat.GrpId)
 			chatUUID := uuid.New()
 			grpChatUUIDs = append(grpChatUUIDs, chatUUID.String())
 			grpChatGroupingIDs = append(grpChatGroupingIDs, postOrChat.GrpId)
@@ -148,7 +160,7 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 						From: &dgraphStruct.DgraphUser{
 							Uid: userInfo.Uid,
 						},
-						MediaObj: fwdMessageInput.Attachments,
+						MediaObj: files,
 						Body:     fwdMessageInput.HtmlText,
 						Mentions: &dgraphStruct.DgraphMentions{
 							Mentions:  dgraphMentions,
@@ -193,6 +205,7 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 
 			chatUUID := uuid.New()
 			groupingId := helpers.GetGroupingId(userInfo.Uuid, postOrChat.UserUuid)
+			files := filesFor(helpers.ConversationFileKind(groupingId), groupingId)
 
 			chatGroupingUUIDs = append(chatGroupingUUIDs, groupingId)
 			chatUUIDs = append(chatUUIDs, chatUUID.String())
@@ -229,7 +242,7 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 								},
 							},
 						},
-						MediaObj: fwdMessageInput.Attachments,
+						MediaObj: files,
 						Body:     fwdMessageInput.HtmlText,
 						Mentions: &dgraphStruct.DgraphMentions{
 							Mentions:  dgraphMentions,

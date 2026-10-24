@@ -11,6 +11,8 @@
 # 20 Oct 2026, CHAT-LEAD: an import's pins are read a page of the graph's read limit (MaxRead) at a time.
 # 20 Oct 2026, CHAT-LEAD: the Slack import's reaction pass is one writer for every kind of conversation: a message's
 # target is read once (writerFor), each emoji and each person once a pass (cached), and each reaction is one write by Reaction's rule.
+# 24 Oct 2026, CHAT-LEAD-22: a share reads which files a page of its source conversation's messages
+# holds in one read (= ANY over the page's file ids, keepConversationFiles), once a page of sharePageSize.
 business/Access/audience.go :: ResolvePeople :: .Resolve
 business/Access/contract.go :: ResolveAll :: .Resolve
 business/Access/expiry.go :: EndDueGrants :: endGrant
@@ -174,6 +176,7 @@ business/Conversation/share.go :: copyMessage :: releaseCopy
 business/Conversation/share.go :: fileRows :: attachmentDomain.CreateAttachment
 business/Conversation/share.go :: shareRun :: copyMessage
 business/Conversation/share.go :: shareRun :: enqueueShare
+business/Conversation/share.go :: shareRun :: keepConversationFiles
 business/Conversation/share.go :: shareRun :: sharePage
 business/Cycle/scheduler.go :: RunSchedules :: runSchedule
 business/Cycle/scheduler.go :: runSchedule :: Complete

@@ -144,8 +144,15 @@ func TestAForwardNeverWritesANodeTheRequestNames(t *testing.T) {
 		return out.Ch[0].Posts[0].Files
 	}
 
+	// Ben's own uploads to #open, which a forward carries (business/Attachment
+	// OwnUploads); each entry names one of them beside a node of Ana's.
+	upload, again, added := uuid.New(), uuid.New(), uuid.New()
+	exec(`INSERT INTO attachments (id, obj_key, src_key, src_value, created_by)
+		VALUES ($1, 'ben/upload.pdf', 'channel', $4, $5), ($2, 'ben/x.pdf', 'channel', $4, $5), ($3, 'ben/notes.pdf', 'channel', $4, $5)`,
+		upload, again, added, open, ben)
+
 	// 1. Ben names Ana's file by its uid, renamed, and a nested project.
-	forward("<p>look</p>", []map[string]any{{"uid": got["file"], "attachment_uuid": uuid.NewString(), "attachment_file_name": "pwned.pdf",
+	forward("<p>look</p>", []map[string]any{{"uid": got["file"], "attachment_uuid": upload.String(), "attachment_file_name": "pwned.pdf",
 		"attachment_obj_key": "ben/upload.pdf", "attachment_project": map[string]any{"uid": got["project"], "project_name": "pwned"}}})
 	for _, f := range filesIn("<p>look</p>") {
 		if f.Uid == got["file"] {
@@ -156,7 +163,7 @@ func TestAForwardNeverWritesANodeTheRequestNames(t *testing.T) {
 		}
 	}
 	// 2. Ben names Ana's private doc as a file.
-	forward("<p>again</p>", []map[string]any{{"uid": got["doc"], "attachment_uuid": uuid.NewString(), "attachment_file_name": "x.pdf", "attachment_obj_key": "ben/x.pdf"}})
+	forward("<p>again</p>", []map[string]any{{"uid": got["doc"], "attachment_uuid": again.String(), "attachment_file_name": "x.pdf", "attachment_obj_key": "ben/x.pdf"}})
 	for _, f := range filesIn("<p>again</p>") {
 		if f.Uid == got["doc"] {
 			t.Errorf("the forward links Ana's private doc %s as a file", got["doc"])
@@ -200,10 +207,9 @@ func TestAForwardNeverWritesANodeTheRequestNames(t *testing.T) {
 	}
 
 	// 3. A file Ben added in the forward box still goes with it, as his.
-	added := uuid.NewString()
-	forward("<p>with a file</p>", []map[string]any{{"attachment_uuid": added, "attachment_file_name": "notes.pdf", "attachment_obj_key": "ben/notes.pdf", "attachment_type": "document"}})
+	forward("<p>with a file</p>", []map[string]any{{"attachment_uuid": added.String(), "attachment_file_name": "notes.pdf", "attachment_obj_key": "ben/notes.pdf", "attachment_type": "document"}})
 	files := filesIn("<p>with a file</p>")
-	if len(files) != 1 || files[0].Uuid != added || files[0].Name != "notes.pdf" || files[0].Key != "ben/notes.pdf" || files[0].By == nil || files[0].By.Uid != got["ben"] {
+	if len(files) != 1 || files[0].Uuid != added.String() || files[0].Name != "notes.pdf" || files[0].Key != "ben/notes.pdf" || files[0].By == nil || files[0].By.Uid != got["ben"] {
 		t.Errorf("Ben's own file: %+v, want notes.pdf (%s) as his", files, added)
 	}
 }

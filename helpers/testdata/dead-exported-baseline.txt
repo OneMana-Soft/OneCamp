@@ -22,10 +22,6 @@ CanQuery
 ChartsAsText
 ClaimIdempotencyKey
 ConnectedProviderNames
-# Edition-only, not debt: the place a conversation's files belong to, for the AI's agents
-# reading a message's pictures, which this edition leaves out. Kept so business/FileAccess
-# stays the same in both editions.
-ConversationOf
 CountByScope
 CountOpenForUser
 CreatePendingAction
@@ -165,7 +161,6 @@ models/redis/store.ZRevRangeWithScores
 business/ApiToken.HashToken
 business/ApiToken.ToolsForScopes
 business/Channel.GetDgraphChannelInfoByUUID
-business/FileAccess.FilesOf
 business/LiveKit.MayOpenConversation
 business/WorkGraph.ExpandFor
 domain/User.UserNamesByDgraphUIDs

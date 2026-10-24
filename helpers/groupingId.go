@@ -4,6 +4,7 @@ import (
 	"regexp"
 	"strings"
 
+	postgresStruct "github.com/akashc777/OneCamp/models/postgres"
 	"github.com/google/uuid"
 )
 
@@ -18,6 +19,18 @@ func DMPeople(groupingID string) (first, second string, ok bool) {
 		return "", "", false
 	}
 	return people[0], people[1], true
+}
+
+// ConversationFileKind is the place a conversation's files belong to, by its
+// grouping id: a direct conversation's ("chat") when the id names two people
+// (DMPeople), a group's ("grpChat") otherwise. One rule for the files a
+// message keeps (its writer's own uploads to it), the rows an upload writes,
+// and who may have them (business/FileAccess ConversationOf). Pure.
+func ConversationFileKind(groupingID string) string {
+	if _, _, ok := DMPeople(groupingID); ok {
+		return postgresStruct.ATTACHMENT_SRC_CHAT
+	}
+	return postgresStruct.ATTACHMENT_SRC_GRP_CHAT
 }
 
 // groupIDShape is how GenerateGroupID writes a group conversation's id.

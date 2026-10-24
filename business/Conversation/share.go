@@ -30,6 +30,7 @@ import (
 	"regexp"
 	"time"
 
+	fileAccessBusiness "github.com/akashc777/OneCamp/business/FileAccess"
 	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
 	attachmentDomain "github.com/akashc777/OneCamp/domain/Attachment"
@@ -147,6 +148,9 @@ func shareRun(ctx context.Context, p sharePayload) error {
 		if len(page) == 0 {
 			break
 		}
+		if err := keepConversationFiles(ctx, p.From, page); err != nil {
+			return err
+		}
 		for _, m := range page {
 			if p.Copied >= p.Cap {
 				break
@@ -263,6 +267,62 @@ var pollBlock = regexp.MustCompile(`(?is)<div[^>]*data-type="poll"[^>]*>\s*</div
 // live block, whose votes are the first conversation's. Pure.
 func copiedHTML(s string) string {
 	return pollBlock.ReplaceAllString(s, "")
+}
+
+// keepConversationFiles keeps, of the files each message of page and its
+// replies list, the files of the conversation from, each on the object its
+// row there names, in one read. A message lists its files as its sender sent
+// them, and a file is served through its place's row (business/FileAccess),
+// so a copy's row is written only for a file the conversation itself holds.
+func keepConversationFiles(ctx context.Context, from string, page []conversationDomain.SharedMessage) error {
+	var ids []string
+	for _, m := range page {
+		ids = append(ids, fileIDs(m.Attachments)...)
+		for _, r := range m.Replies {
+			ids = append(ids, fileIDs(r.Attachments)...)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := fileAccessBusiness.FilesOf(ctx, fileAccessBusiness.ConversationOf(from), ids)
+	if err != nil {
+		return err
+	}
+	keep := func(files []*dgraphStruct.DgraphAttachment) []*dgraphStruct.DgraphAttachment {
+		out := make([]*dgraphStruct.DgraphAttachment, 0, len(files))
+		for _, f := range files {
+			if f == nil {
+				continue
+			}
+			id, err := uuid.Parse(f.Uuid)
+			row, ok := rows[id.String()]
+			if err != nil || !ok {
+				continue
+			}
+			f.ObjectKey = row.ObjKey
+			out = append(out, f)
+		}
+		return out
+	}
+	for i := range page {
+		page[i].Attachments = keep(page[i].Attachments)
+		for j := range page[i].Replies {
+			page[i].Replies[j].Attachments = keep(page[i].Replies[j].Attachments)
+		}
+	}
+	return nil
+}
+
+// fileIDs is the ids files names, their nil entries left out.
+func fileIDs(files []*dgraphStruct.DgraphAttachment) []string {
+	ids := make([]string, 0, len(files))
+	for _, f := range files {
+		if f != nil {
+			ids = append(ids, f.Uuid)
+		}
+	}
+	return ids
 }
 
 // copiedFiles is new attachment nodes for files, on the same stored objects.

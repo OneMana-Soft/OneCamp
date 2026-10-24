@@ -54,10 +54,7 @@ type Place struct {
 // grouping id: a direct conversation's ("chat") when the id names two people
 // (helpers.DMPeople), a group's ("grpChat") otherwise.
 func ConversationOf(groupingID string) Place {
-	if _, _, ok := helpers.DMPeople(groupingID); ok {
-		return Place{Kind: postgresStruct.ATTACHMENT_SRC_CHAT, ID: groupingID}
-	}
-	return Place{Kind: postgresStruct.ATTACHMENT_SRC_GRP_CHAT, ID: groupingID}
+	return Place{Kind: helpers.ConversationFileKind(groupingID), ID: groupingID}
 }
 
 // ErrRefused is a no: the person may not have the place's files, or may not
