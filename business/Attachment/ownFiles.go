@@ -9,8 +9,63 @@ import (
 	"github.com/google/uuid"
 )
 
-// ownUploadsIn is where OwnFiles asks which files are whose: a seam.
-var ownUploadsIn = domain.OwnUploadsIn
+// ownUploads is where OwnUploads asks which files are whose: a seam.
+var ownUploads = domain.OwnUploads
+
+// Uploads are, by id, the files of a list its writer uploaded, each with the
+// place its upload went to and the key it stored (OwnUploads).
+type Uploads map[uuid.UUID]domain.Upload
+
+// OwnUploads is, of list, the files the writer (their account id) uploaded,
+// with where each went, in one query: a write that sends one list to several
+// places (a forward) reads it once and keeps each place's with In. Nothing to
+// ask about asks nothing. An error is the lookup's: the write should not go
+// ahead.
+func OwnUploads(ctx context.Context, writer string, list []*dgraphStruct.DgraphAttachment) (Uploads, error) {
+	who, err := uuid.Parse(writer)
+	if err != nil {
+		return Uploads{}, nil
+	}
+	ids := make([]uuid.UUID, 0, len(list))
+	for _, f := range list {
+		if f == nil {
+			continue
+		}
+		if id, err := uuid.Parse(f.Uuid); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return Uploads{}, nil
+	}
+	return ownUploads(ctx, ids, who)
+}
+
+// In is the files of list uploaded to the place srcKey/srcValue, in list's
+// order, each once and with the storage key its upload stored; any other is
+// left out.
+func (u Uploads) In(srcKey, srcValue string, list []*dgraphStruct.DgraphAttachment) []*dgraphStruct.DgraphAttachment {
+	srcValue = strings.ToLower(srcValue)
+	out := make([]*dgraphStruct.DgraphAttachment, 0, len(list))
+	seen := map[uuid.UUID]bool{}
+	for _, f := range list {
+		if f == nil {
+			continue
+		}
+		id, err := uuid.Parse(f.Uuid)
+		if err != nil || seen[id] {
+			continue
+		}
+		up, ok := u[id]
+		if !ok || up.SrcKey != srcKey || up.SrcValue != srcValue {
+			continue
+		}
+		seen[id] = true
+		f.Uuid, f.ObjectKey = id.String(), up.ObjKey
+		out = append(out, f)
+	}
+	return out
+}
 
 // OwnFiles is the files of list that the writer (their account id) uploaded
 // to the place srcKey/srcValue, in list's order, each once and with the
@@ -23,40 +78,9 @@ func OwnFiles(ctx context.Context, writer, srcKey, srcValue string, list []*dgra
 	if len(list) == 0 {
 		return list, nil
 	}
-	who, err := uuid.Parse(writer)
-	if err != nil {
-		return nil, nil
-	}
-	ids := make([]uuid.UUID, 0, len(list))
-	for _, f := range list {
-		if f == nil {
-			continue
-		}
-		if id, err := uuid.Parse(f.Uuid); err == nil {
-			ids = append(ids, id)
-		}
-	}
-	keys, err := ownUploadsIn(ctx, ids, who, srcKey, strings.ToLower(srcValue))
+	own, err := OwnUploads(ctx, writer, list)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*dgraphStruct.DgraphAttachment, 0, len(keys))
-	seen := map[uuid.UUID]bool{}
-	for _, f := range list {
-		if f == nil {
-			continue
-		}
-		id, err := uuid.Parse(f.Uuid)
-		if err != nil || seen[id] {
-			continue
-		}
-		key, ok := keys[id]
-		if !ok {
-			continue
-		}
-		seen[id] = true
-		f.Uuid, f.ObjectKey = id.String(), key
-		out = append(out, f)
-	}
-	return out, nil
+	return own.In(srcKey, srcValue, list), nil
 }

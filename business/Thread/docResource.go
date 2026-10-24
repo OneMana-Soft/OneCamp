@@ -89,12 +89,6 @@ func (docResource) Post(ctx context.Context, who accessBusiness.Subject, res acc
 	if err != nil {
 		return Posted{}, err
 	}
-	// What the comment shows of its files, before the write stamps them.
-	shown, _ := json.Marshal(files)
-	if len(files) == 0 {
-		shown = nil
-	}
-
 	uids, err := helpers.GetMentions(body.HTML)
 	if err != nil {
 		return Posted{}, &Invalid{Msg: "The people mentioned can't be read."}
@@ -107,9 +101,8 @@ func (docResource) Post(ctx context.Context, who accessBusiness.Subject, res acc
 		return Posted{}, err
 	}
 
-	out, err := docBusiness.CreateDocComment(ctx, doc, poster, &docAdapter.CreateOrUpdateDocCommentInput{
-		CommentBody: body.HTML, DocUuid: res.UUID, Attachments: files,
-	}, mentioned)
+	in := &docAdapter.CreateOrUpdateDocCommentInput{CommentBody: body.HTML, DocUuid: res.UUID, Attachments: files}
+	out, err := docBusiness.CreateDocComment(ctx, doc, poster, in, mentioned)
 	if err != nil {
 		return Posted{}, err
 	}
@@ -118,7 +111,7 @@ func (docResource) Post(ctx context.Context, who accessBusiness.Subject, res acc
 	p := Posted{Comment: Comment{
 		ID: out.Uuid, ThreadID: threadID, Text: body.HTML,
 		By:        personOf(&poster.UserDgraphInfo),
-		CreatedAt: out.CommentCreatedAt.UTC(), Attachments: shown,
+		CreatedAt: out.CommentCreatedAt.UTC(), Attachments: shownFiles(in.Attachments),
 	}}
 	for _, m := range mentioned {
 		if m != nil && m.Uuid != "" {
@@ -152,12 +145,33 @@ func attachmentsOf(raw json.RawMessage) ([]*dgraphStruct.DgraphAttachment, error
 		if f == nil || f.ObjectKey == "" {
 			continue
 		}
-		out = append(out, &dgraphStruct.DgraphAttachment{
-			Uuid: f.Uuid, FileName: f.FileName, ObjectKey: f.ObjectKey, Type: f.Type, RawType: f.RawType,
-			Width: f.Width, Hight: f.Hight, Size: f.Size, Duration: f.Duration,
-		})
+		out = append(out, clientFields(f))
 	}
 	return out, nil
+}
+
+// clientFields is the fields of a file the client may say: names, keys,
+// kinds and sizes.
+func clientFields(f *dgraphStruct.DgraphAttachment) *dgraphStruct.DgraphAttachment {
+	return &dgraphStruct.DgraphAttachment{
+		Uuid: f.Uuid, FileName: f.FileName, ObjectKey: f.ObjectKey, Type: f.Type, RawType: f.RawType,
+		Width: f.Width, Hight: f.Hight, Size: f.Size, Duration: f.Duration,
+	}
+}
+
+// shownFiles is what a comment shows of the files it kept (CreateDocComment
+// leaves them in its input: its writer's own uploads to the doc, each with the
+// key its upload stored), with the fields the client may say.
+func shownFiles(kept []*dgraphStruct.DgraphAttachment) json.RawMessage {
+	if len(kept) == 0 {
+		return nil
+	}
+	out := make([]*dgraphStruct.DgraphAttachment, 0, len(kept))
+	for _, f := range kept {
+		out = append(out, clientFields(f))
+	}
+	shown, _ := json.Marshal(out)
+	return shown
 }
 
 // tagWithRetry puts a just-written comment in its thread, trying three times.

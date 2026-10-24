@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"fmt"
+	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	"slices"
 	"strings"
 	"time"
@@ -1381,12 +1382,16 @@ func GetDgraphChatByUUIDWithAllComments(ctx context.Context, chatUUID string) (d
 }
 
 func CreateChatComment(ctx context.Context, commentInfo *adapter.InputCreateOrUpdateCommentToChat, userInfo *userModels.UserInfo, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, grpId string, dgraphUserUid string, chatDgraphInfo *dgraphStruct.DgraphChat) (createdCommentData *adapter.OutputCreateChatCommentForPost, err error) {
-
 	commentUUID := uuid.New()
 	// CreateTimeOrNow respects the Slack-import backdating override; see
 	// helpers.WithImportTimestamp. Falls back to time.Now() natively.
 	currentTime := helpers.CreateTimeOrNow(ctx)
 	zeroUnixTime := time.Time{}
+
+	// A reply keeps only its writer's own uploads to the conversation (F4).
+	if commentInfo.MediaObj, err = attachmentBusiness.OwnFiles(ctx, userInfo.UserPostgresInfo.Id.String(), helpers.ConversationFileKind(grpId), grpId, commentInfo.MediaObj); err != nil {
+		return nil, err
+	}
 
 	var commentMentions []*dgraphStruct.DgraphUser
 

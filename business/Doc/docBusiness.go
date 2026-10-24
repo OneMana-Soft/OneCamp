@@ -439,6 +439,9 @@ func contentAddedBy(doc *dgraphStruct.DgraphDoc) *dgraphStruct.DgraphUser {
 	return &dgraphStruct.DgraphUser{Uid: doc.CreatedBy.Uid}
 }
 
+// CreateDocComment writes a comment on the doc. When it succeeds, the input's
+// Attachments are the files the comment keeps, as written: its writer's own
+// uploads to the doc (business/Attachment OwnFiles).
 func CreateDocComment(ctx context.Context, rawDocDgraph *dgraphStruct.DgraphDoc, createdByUser *model.UserInfo, createTaskCommentInfoInput *adapter.CreateOrUpdateDocCommentInput, mentionsDgraphUsersList []*dgraphStruct.DgraphUser) (commentInfoRes *adapter.OutputCreateCommentForDoc, err error) {
 
 	commentUUID := uuid.New()

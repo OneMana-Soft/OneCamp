@@ -3,6 +3,8 @@ package business
 import (
 	"context"
 	"fmt"
+	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
+	postgresStruct "github.com/akashc777/OneCamp/models/postgres"
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Post"
@@ -528,12 +530,16 @@ func UpdatePostComment(ctx context.Context, commentUUID uuid.UUID, commentInfo *
 }
 
 func CreatePostComment(ctx context.Context, commentInfo *adapter.InputCreateOrUpdateCommentToPost, userInfo *userModels.UserInfo, mentionsDgraphUsersList []*dgraphStruct.DgraphUser, dgraphPostInfo *dgraphStruct.DgraphPost) (createdCommentData *adapter.OutputCreatePostCommentForPost, err error) {
-
 	commentUUID := uuid.New()
 	// CreateTimeOrNow respects the Slack-import backdating override; see
 	// helpers.WithImportTimestamp. Falls back to time.Now() natively.
 	currentTime := helpers.CreateTimeOrNow(ctx)
 	zeroUnixTime := time.Time{}
+
+	// A reply keeps only its writer's own uploads to the channel (F4).
+	if commentInfo.MediaObj, err = attachmentBusiness.OwnFiles(ctx, userInfo.UserPostgresInfo.Id.String(), postgresStruct.ATTACHMENT_SRC_CHANNEL, dgraphPostInfo.Channel.Uuid, commentInfo.MediaObj); err != nil {
+		return nil, err
+	}
 
 	var commentMentions []*dgraphStruct.DgraphUser
 

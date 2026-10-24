@@ -51,21 +51,23 @@ func answerFileAccess(ctx context.Context, w http.ResponseWriter, err error, pla
 }
 
 // placesSentTo are the places a file sent to several at once goes to
-// (channel_uuids, and chat_uuids, which name conversations by grouping id),
-// each once.
+// (channel_uuids, and chat_uuids, which name conversations by grouping id:
+// a DM's or a group's, as ConversationOf tells them apart), each once.
 func placesSentTo(channelUUIDs, chatGroupingIDs []string) []fileAccessBusiness.Place {
 	seen := map[[2]string]bool{}
 	var places []fileAccessBusiness.Place
-	add := func(kind string, ids []string) {
-		for _, id := range ids {
-			if !seen[[2]string{kind, id}] {
-				seen[[2]string{kind, id}] = true
-				places = append(places, fileAccessBusiness.Place{Kind: kind, ID: id})
-			}
+	add := func(p fileAccessBusiness.Place) {
+		if key := [2]string{p.Kind, p.ID}; !seen[key] {
+			seen[key] = true
+			places = append(places, p)
 		}
 	}
-	add(postgressStruct.ATTACHMENT_SRC_CHANNEL, channelUUIDs)
-	add(postgressStruct.ATTACHMENT_SRC_CHAT, chatGroupingIDs)
+	for _, id := range channelUUIDs {
+		add(fileAccessBusiness.Place{Kind: postgressStruct.ATTACHMENT_SRC_CHANNEL, ID: id})
+	}
+	for _, id := range chatGroupingIDs {
+		add(fileAccessBusiness.ConversationOf(id))
+	}
 	return places
 }
 

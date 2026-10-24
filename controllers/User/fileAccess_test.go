@@ -6,9 +6,11 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"testing"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
+	fileAccessBusiness "github.com/akashc777/OneCamp/business/FileAccess"
 	"github.com/akashc777/OneCamp/helpers"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -112,5 +114,22 @@ func TestAnUploadToAPlaceWithNoRuleOrNotTheirsIsRefused(t *testing.T) {
 		if rec.Code != http.StatusForbidden || !bytes.Contains(rec.Body.Bytes(), []byte("You can't add files here.")) {
 			t.Errorf("%s: %d %s", name, rec.Code, rec.Body)
 		}
+	}
+}
+
+// An upload for several places is asked about each place as what it is: a
+// group named among its conversations is a group, whose files are its
+// people's, as the rows the upload writes say (models ConversationFileKind).
+func TestAnUploadsConversationsAreAskedAboutAsWhatTheyAre(t *testing.T) {
+	ann, ben, cat, channel := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	dm := helpers.GetGroupingId(ann, ben)
+	group, err := helpers.GenerateGroupID([]string{ann, ben, cat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := placesSentTo([]string{channel}, []string{dm, group, dm})
+	want := []fileAccessBusiness.Place{{Kind: "channel", ID: channel}, {Kind: "chat", ID: dm}, {Kind: "grpChat", ID: group}}
+	if !slices.EqualFunc(got, want, func(a, b fileAccessBusiness.Place) bool { return a.Kind == b.Kind && a.ID == b.ID }) {
+		t.Errorf("the places asked about: %+v; want %+v", got, want)
 	}
 }

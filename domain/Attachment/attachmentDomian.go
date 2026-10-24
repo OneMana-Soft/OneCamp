@@ -66,7 +66,7 @@ func CreateAttachmentForChannelsAndChats(ctx context.Context, attachmentUUID uui
 
 	for _, chatUUID := range chatUUIDs {
 		placeholders = append(placeholders, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d)", paramIndex, paramIndex+1, paramIndex+2, paramIndex+3, paramIndex+4))
-		values = append(values, attachmentUUID, objKey, postgressStruct.ATTACHMENT_SRC_CHAT, chatUUID, createdByUUID)
+		values = append(values, attachmentUUID, objKey, helpers.ConversationFileKind(chatUUID), chatUUID, createdByUUID)
 		paramIndex += 5
 	}
 
@@ -328,22 +328,42 @@ func UpsertAttachmentInOpenSearchSafe(att *openSearchStruct.OpenSearchAttachment
 	}
 }
 
-// ownUploadsIn is, of the attachments named ($1), the ones $2 uploaded to the
-// place $3/$4, each with the storage key its upload stored.
-const ownUploadsIn = `
-	SELECT DISTINCT id, obj_key FROM attachments
-	WHERE id = ANY($1::uuid[]) AND created_by = $2 AND src_key = $3 AND src_value = $4`
+// ownUploads is, of the attachments named ($1), the ones $2 uploaded, each
+// with the place its upload went to and the storage key it stored.
+const ownUploads = `
+	SELECT id, src_key, src_value, obj_key FROM attachments
+	WHERE id = ANY($1::uuid[]) AND created_by = $2`
 
-// OwnUploadsIn is, by id, the storage key of each of ids that the person
-// with uploader (their account id) uploaded to the place srcKey/srcValue;
-// any other id is missing from the map.
-func OwnUploadsIn(ctx context.Context, ids []uuid.UUID, uploader uuid.UUID, srcKey, srcValue string) (map[uuid.UUID]string, error) {
+// An Upload is where a file was uploaded to (its src_key and src_value) and
+// the storage key its upload stored.
+type Upload struct {
+	SrcKey, SrcValue, ObjKey string
+}
+
+// OwnUploads is, by id, each of ids that the person with uploader (their
+// account id) uploaded, with where it went; any other id is missing from the
+// map. A file is one row (its id is the row's), so one read answers for every
+// place a write sends a list to.
+func OwnUploads(ctx context.Context, ids []uuid.UUID, uploader uuid.UUID) (map[uuid.UUID]Upload, error) {
+	out := map[uuid.UUID]Upload{}
 	if len(ids) == 0 {
-		return map[uuid.UUID]string{}, nil
+		return out, nil
 	}
-	keys, err := pgexec.Pairs[uuid.UUID, string](ctx, ownUploadsIn, ids, uploader, srcKey, srcValue)
+	type row struct {
+		id uuid.UUID
+		up Upload
+	}
+	rows, err := pgexec.Query(ctx, ownUploads, func(r pgexec.Row) (row, error) {
+		var x row
+		err := r.Scan(&x.id, &x.up.SrcKey, &x.up.SrcValue, &x.up.ObjKey)
+		return x, err
+	}, ids, uploader)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/OwnUploadsIn Failed err: %+v", err)
+		helpers.LogErrorWithContext(ctx, "domain/OwnUploads Failed err: %+v", err)
+		return nil, err
 	}
-	return keys, err
+	for _, x := range rows {
+		out[x.id] = x.up
+	}
+	return out, nil
 }

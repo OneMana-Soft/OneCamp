@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -302,29 +303,43 @@ func TestThreads(t *testing.T) {
 	}
 
 	var reply threadBusiness.Comment
-	// A file bob uploaded to the doc: a comment lists only its writer's own
-	// uploads to its place (business/Attachment OwnFiles).
-	fileID := uuid.NewString()
-	if _, err := env.PG.Exec(`INSERT INTO attachments (id, obj_key, src_key, src_value, created_by) VALUES ($1, 'docComment/plan.pdf', 'doc', $2, $3)`,
-		fileID, docID, people["bob"]); err != nil {
+	// A file bob uploaded to the doc, named under another key, and ann's file
+	// of a channel: a comment lists only its writer's own uploads to its
+	// place, each with the key its upload stored (business/Attachment
+	// OwnFiles), and shows its writer what it keeps, as it shows everyone.
+	fileID, annsFile := uuid.NewString(), uuid.NewString()
+	if _, err := env.PG.Exec(`INSERT INTO attachments (id, obj_key, src_key, src_value, created_by)
+		VALUES ($1, 'docComment/plan.pdf', 'doc', $2, $3), ($4, 'ann/salaries.xlsx', 'channel', $5, $6)`,
+		fileID, docID, people["bob"], annsFile, uuid.NewString(), people["ann"]); err != nil {
 		t.Fatal(err)
 	}
 	file := map[string]any{"uid": "0x1", "attachment_uuid": fileID, "attachment_file_name": "plan.pdf",
-		"attachment_obj_key": "docComment/plan.pdf", "attachment_type": "file"}
+		"attachment_obj_key": "ann/salaries.xlsx", "attachment_type": "file"}
+	anns := map[string]any{"attachment_uuid": annsFile, "attachment_file_name": "salaries.xlsx",
+		"attachment_obj_key": "ann/salaries.xlsx", "attachment_type": "file"}
 	if code := call("bob", http.MethodPost, "/threads/"+made.ID+"/replies",
-		map[string]any{"body": "<p>Yes, Thursday.</p>", "attachments": []any{file}}, &reply); code != http.StatusOK {
+		map[string]any{"body": "<p>Yes, Thursday.</p>", "attachments": []any{file, anns}}, &reply); code != http.StatusOK {
 		t.Fatalf("bob replying: %d", code)
+	}
+	type shownFile struct {
+		ID   string `json:"attachment_uuid"`
+		Name string `json:"attachment_file_name"`
+		Key  string `json:"attachment_obj_key"`
+	}
+	only := func(raw json.RawMessage) bool {
+		var files []shownFile
+		_ = json.Unmarshal(raw, &files)
+		return slices.Equal(files, []shownFile{{ID: fileID, Name: "plan.pdf", Key: "docComment/plan.pdf"}})
+	}
+	if !only(reply.Attachments) {
+		t.Errorf("bob's reply shows him %s; want only his own upload, with its key", reply.Attachments)
 	}
 	var mine threadBusiness.View
 	call("ann", http.MethodGet, "/threads/"+made.ID, nil, &mine)
 	if len(mine.Comments) != 2 || !mine.Unread {
 		t.Fatalf("ann's thread after bob's reply: %+v", mine)
 	}
-	var files []struct {
-		Name string `json:"attachment_file_name"`
-	}
-	_ = json.Unmarshal(mine.Comments[1].Attachments, &files)
-	if len(files) != 1 || files[0].Name != "plan.pdf" {
+	if !only(mine.Comments[1].Attachments) {
 		t.Errorf("the reply's file reads back as %s", mine.Comments[1].Attachments)
 	}
 	if code := call("ann", http.MethodPost, "/threads/"+made.ID+"/read", nil, nil); code != http.StatusOK {

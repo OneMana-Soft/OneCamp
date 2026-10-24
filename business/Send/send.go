@@ -24,6 +24,7 @@ import (
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	postgresStruct "github.com/akashc777/OneCamp/models/postgres"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
@@ -116,6 +117,9 @@ func prepareChannelPost(ctx context.Context, user *userModels.UserInfo, in *post
 	// channel's admins post in it in the app, as themselves (helpers.ActsThroughToken).
 	if channel.PostPolicy == "admins_only" && helpers.ActsThroughToken(ctx) {
 		return nil, &Rejection{Status: http.StatusForbidden, Msg: "Only channel admins can post in this announcement channel, in the app: a token posts as a member"}
+	}
+	if in.MediaObj, err = keepOwnFiles(ctx, user, postgresStruct.ATTACHMENT_SRC_CHANNEL, channelUUID.String(), in.MediaObj); err != nil {
+		return nil, err
 	}
 	if !mentioning {
 		return &ChannelPost{in: in, user: user, channel: channel}, nil
@@ -230,6 +234,10 @@ func PrepareDirectMessage(ctx context.Context, user *userModels.UserInfo, in *ch
 	if rj := MayMessage(to); rj != nil {
 		return nil, rj
 	}
+	dm := helpers.GetGroupingId(user.UserPostgresInfo.Id.String(), toUUID.String())
+	if in.MediaObjects, err = keepOwnFiles(ctx, user, helpers.ConversationFileKind(dm), dm, in.MediaObjects); err != nil {
+		return nil, err
+	}
 	mentions, err := Mentions(ctx, user, Where{People: []string{user.UserDgraphInfo.Uuid, to.Uuid}}, &in.TextHtml)
 	if err != nil {
 		return nil, err
@@ -314,6 +322,21 @@ func PrepareGroupMessage(ctx context.Context, user *userModels.UserInfo, in *cha
 	}
 	if len(participants) < 3 {
 		return nil, reject(http.StatusBadRequest, "Minimum 3 participants required for a group", nil)
+	}
+	// A new group's files were uploaded to the id its people make.
+	var err error
+	groupID := in.GrpUuid
+	if groupID == "" {
+		people := make([]string, 0, len(participants))
+		for _, p := range participants {
+			people = append(people, p.Uuid)
+		}
+		if groupID, err = helpers.GenerateGroupID(people); err != nil {
+			return nil, reject(http.StatusBadRequest, "Got unregistered users in participants", err)
+		}
+	}
+	if in.MediaObjects, err = keepOwnFiles(ctx, user, helpers.ConversationFileKind(groupID), groupID, in.MediaObjects); err != nil {
+		return nil, err
 	}
 	mentions, err := Mentions(ctx, user, Where{People: uuidsOf(participants)}, &in.TextHtml)
 	if err != nil {
