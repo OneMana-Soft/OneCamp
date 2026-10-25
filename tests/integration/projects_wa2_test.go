@@ -492,8 +492,12 @@ func TestWA2ARestrictedTaskIsSeenOnlyByItsPeople(t *testing.T) {
 	for _, name := range []string{"the project's list", "the project's board", "the timeline", "the task, opened", "a task below it, opened",
 		"the task's time", "the search", "the API's search", "the mentions feed", "for later", "the workload", "the time report",
 		"the time export", "the assistant's search", "the assistant's project tasks"} {
+		// Search and the assistant's search are written off the request, and
+		// the assistant's once lagged the read under load (v2.75.0, v2.75.2):
+		// what doesn't show it yet is waited for.
 		if !shownBefore[name] {
-			t.Errorf("before it is restricted, %s doesn't show Ben the task: the walk below would prove nothing there", name)
+			s := surfaceNamed(name)
+			eventually(t, "before it is restricted, "+name+" shows Ben the task (or the walk below proves nothing there)", func() bool { return words(s.read("ben")) })
 		}
 	}
 	badgeBefore, err := activityBusiness.UnreadActivityCount(as("ben"), w.people["ben"], uids["ben"])

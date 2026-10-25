@@ -49,6 +49,17 @@ type wa2Scale struct {
 	uids    map[string]string // ana, ben, project: the graph's
 	people  map[string]uuid.UUID
 	tasks   []string
+	// counter, when a test counts Postgres statements, marks each request's
+	// context, so a request's own statements are what it counts (request).
+	counter *integration.PostgresCounter
+}
+
+// request is a request's context: counted, when the test counts.
+func (s *wa2Scale) request(c context.Context) context.Context {
+	if s.counter == nil {
+		return c
+	}
+	return s.counter.Context(c)
 }
 
 func newWA2Scale(t *testing.T, env *integration.Env, dg *integration.DgraphEnv) *wa2Scale {
@@ -159,7 +170,7 @@ func (s *wa2Scale) read(who string, h http.HandlerFunc, query string) (int, stri
 	rc.URLParams.Add("project_uuid", s.project)
 	c := context.WithValue(context.WithValue(ctx, helpers.UserInfoContextKey, userModels.UserInfo{UserPostgresInfo: *pg, UserDgraphInfo: *gr}), chi.RouteCtxKey, rc)
 	rec := httptest.NewRecorder()
-	customMiddleware.RequestIDMiddleware(h).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/"+query, nil).WithContext(c))
+	customMiddleware.RequestIDMiddleware(h).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/"+query, nil).WithContext(s.request(c)))
 	return rec.Code, rec.Body.String()
 }
 
@@ -185,6 +196,7 @@ func TestWA2AReadsAskPostgresAFixedNumberOfTimes(t *testing.T) {
 	integration.StubMqttClient(t)
 	dg := integration.SetupDgraph(t)
 	s := newWA2Scale(t, env, dg)
+	s.counter = counter
 	reads := wa2Reads(s)
 	// Postgres statements each read sends, as each of them: the most any of
 	// them may ever send, whatever is restricted and however many tasks.

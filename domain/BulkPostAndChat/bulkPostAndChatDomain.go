@@ -71,7 +71,7 @@ func BulkRemoveChatAndPostFromPostgres(ctx context.Context, postUUIDs, chatUUIDs
 	return models.BulkDeleteChatsAndPosts(ctx, postUUIDs, chatUUIDs)
 }
 
-func BulkAddChatAndPostToPostgres(postUUIDs []string, channelUUIDs []string, chatUUIDs []string, chatGrpIDs []string, userUUID string) (err error) {
+func BulkAddChatAndPostToPostgres(ctx context.Context, postUUIDs []string, channelUUIDs []string, chatUUIDs []string, chatGrpIDs []string, userUUID string) (err error) {
 
 	// Two independent positional pairings live below: post i with channel i, and chat i with
 	// grouping id i. Both are built by a caller that accumulates them under different
@@ -89,46 +89,23 @@ func BulkAddChatAndPostToPostgres(postUUIDs []string, channelUUIDs []string, cha
 		return err
 	}
 
-	var queries []string
-	var values []interface{}
-	placeholderOffset := 0
-
+	var inserts []models.Insert
 	if len(postUUIDs) > 0 {
-		postsQuery := "INSERT INTO posts (id, post_channel, created_by) VALUES "
-		postsPlaceholders := make([]string, 0, len(postUUIDs))
-		for i := 0; i < len(postUUIDs); i++ {
-			postsPlaceholders = append(postsPlaceholders, fmt.Sprintf("($%d, $%d, $%d)", placeholderOffset+1, placeholderOffset+2, placeholderOffset+3))
-			values = append(values, postUUIDs[i], channelUUIDs[i], userUUID)
-			placeholderOffset += 3
+		in := models.Insert{Query: "INSERT INTO posts (id, post_channel, created_by) VALUES " + helpers.RowPlaceholders(len(postUUIDs), 3)}
+		for i := range postUUIDs {
+			in.Args = append(in.Args, postUUIDs[i], channelUUIDs[i], userUUID)
 		}
-		postsQuery += strings.Join(postsPlaceholders, ",")
-		//+ " RETURNING (SELECT COUNT(*) FROM posts WHERE id IN (" + strings.Join(postsPlaceholders, ",") + "))"
-		queries = append(queries, postsQuery)
+		inserts = append(inserts, in)
 	}
-
 	if len(chatUUIDs) > 0 {
-		chatsQuery := "INSERT INTO chats (id, created_by, grp_id) VALUES "
-		chatsPlaceholders := make([]string, 0, len(chatUUIDs))
-		for i := 0; i < len(chatUUIDs); i++ {
-			chatsPlaceholders = append(chatsPlaceholders, fmt.Sprintf("($%d, $%d, $%d)", placeholderOffset+1, placeholderOffset+2, placeholderOffset+3))
-			values = append(values, chatUUIDs[i], userUUID, chatGrpIDs[i])
-			placeholderOffset += 3
+		in := models.Insert{Query: "INSERT INTO chats (id, created_by, grp_id) VALUES " + helpers.RowPlaceholders(len(chatUUIDs), 3)}
+		for i := range chatUUIDs {
+			in.Args = append(in.Args, chatUUIDs[i], userUUID, chatGrpIDs[i])
 		}
-		chatsQuery += strings.Join(chatsPlaceholders, ",")
-		queries = append(queries, chatsQuery)
+		inserts = append(inserts, in)
 	}
-
-	combinedQuery := strings.Join(queries, "; ")
-
-	err = models.BulkInsertChatsAndPosts(combinedQuery, values)
-
-	if err != nil {
-		helpers.MessageLogs.ErrorLog.Printf(
-			"domain/BulkAddChatAndPostToPostgres Failed to bulk add post and chat to postgres err: %+v",
-			err,
-		)
-		return
+	if err = models.BulkInsertChatsAndPosts(ctx, inserts); err != nil {
+		helpers.MessageLogs.ErrorLog.Printf("domain/BulkAddChatAndPostToPostgres Failed to bulk add post and chat to postgres err: %+v", err)
 	}
-
 	return
 }

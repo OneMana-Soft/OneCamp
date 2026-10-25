@@ -67,6 +67,31 @@ import (
 var guarded struct {
 	mu    sync.Mutex
 	tests map[*testing.T]bool
+	// connected holds the tests that connected the server's pool
+	// (ConnectServerPostgres, CountPostgres).
+	connected map[*testing.T]bool
+}
+
+// markConnected records that t connected the server's pool, so a failure of
+// t's is never put down to a pool it didn't connect.
+func markConnected(t *testing.T) {
+	guarded.mu.Lock()
+	defer guarded.mu.Unlock()
+	if guarded.connected == nil {
+		guarded.connected = map[*testing.T]bool{}
+	}
+	guarded.connected[t] = true
+}
+
+// neverConnectedHint is what a failed test is told when the server's pool
+// was tried while it pointed at nothing: that it never connected the pool,
+// unless it did. Then the tries were a stale handle's, work an earlier test
+// left going, not the test's own reads.
+func neverConnectedHint(connected bool, reachedBefore, reachedAfter int64) string {
+	if connected || reachedAfter <= reachedBefore {
+		return ""
+	}
+	return fmt.Sprintf("%v (a read that failed for that may be what the test failed on)", errNeverConnected)
 }
 
 // guardTestState registers the checks above for t, once. Every Setup calls it
@@ -93,9 +118,11 @@ func guardTestState(t *testing.T) {
 	t.Cleanup(func() {
 		guarded.mu.Lock()
 		delete(guarded.tests, t)
+		connected := guarded.connected[t]
+		delete(guarded.connected, t)
 		guarded.mu.Unlock()
-		if t.Failed() && noPostgresReached.Load() > reached {
-			t.Logf("%v (a read that failed for that may be what the test failed on)", errNeverConnected)
+		if hint := neverConnectedHint(connected, reached, noPostgresReached.Load()); t.Failed() && hint != "" {
+			t.Log(hint)
 		}
 		if d := environDiff(environ, os.Environ()); d != "" {
 			t.Errorf("the test left the environment changed: %s", d)

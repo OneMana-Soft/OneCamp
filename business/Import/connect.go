@@ -21,6 +21,7 @@ import (
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/safefetch"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 )
 
@@ -95,6 +96,8 @@ func DescribeProviderError(provider, site string, err error) ProviderProblem {
 	case isRateLimited(err):
 		return ProviderProblem{Status: http.StatusTooManyRequests, Code: "rate_limited",
 			Msg: name + " is asking us to slow down. Try again in a minute."}
+	case safefetch.Refused(err):
+		return siteRefused(name, site, err)
 	case errors.As(err, &urlErr), errors.Is(err, context.DeadlineExceeded):
 		if site != "" {
 			return ProviderProblem{Status: http.StatusServiceUnavailable, Code: "unreachable",
@@ -105,6 +108,28 @@ func DescribeProviderError(provider, site string, err error) ProviderProblem {
 	}
 	return ProviderProblem{Status: http.StatusServiceUnavailable, Code: "provider_error",
 		Msg: name + " answered with an error: " + helpers.WithoutURLQueries(strings.TrimSpace(err.Error()))}
+}
+
+// siteRefused says why the outbound rules (importProvider.CheckSite) refused
+// the site the admin typed for name, or an address it sent the request on to.
+// Nothing was sent there.
+func siteRefused(name, site string, err error) ProviderProblem {
+	where := site
+	if where == "" {
+		where = "That address"
+	}
+	msg := helpers.EndpointRefusal(err, true)
+	switch {
+	case errors.Is(err, safefetch.ErrBlocked):
+		msg = where + " is on a private or reserved network. " + name + " is read only from a public address."
+	case errors.Is(err, safefetch.ErrHost):
+		msg = where + " isn't an address this server reads from. Use the site's full public name, like https://your-team.atlassian.net."
+	case errors.Is(err, safefetch.ErrNoAddress):
+		msg = "Couldn't find " + where + ". Check the site address."
+	case msg == "":
+		msg = "Couldn't reach " + where + " under this server's rules for outside addresses. Check the site address."
+	}
+	return ProviderProblem{Status: http.StatusBadRequest, Code: "site_refused", Msg: msg}
 }
 
 func isRateLimited(err error) bool {

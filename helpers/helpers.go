@@ -731,6 +731,23 @@ func Placeholders(n int) string {
 	return b.String()
 }
 
+// RowPlaceholders is "($1, $2),($3, $4)" for rows of width values each: the
+// VALUES list of a multi-row INSERT, numbered across the rows.
+func RowPlaceholders(rows, width int) string {
+	if rows <= 0 || width <= 0 {
+		return ""
+	}
+	out := make([]string, rows)
+	for r := range out {
+		cols := make([]string, width)
+		for c := range cols {
+			cols[c] = fmt.Sprintf("$%d", r*width+c+1)
+		}
+		out[r] = "(" + strings.Join(cols, ", ") + ")"
+	}
+	return strings.Join(out, ",")
+}
+
 // workspaceNamePattern is what a channel or team may be called: letters in any
 // script, digits, spaces, hyphens and underscores. The web app's dialogs use
 // the same rule (lib/validation/names.ts), so a name accepted there is never

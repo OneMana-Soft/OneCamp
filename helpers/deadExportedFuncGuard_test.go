@@ -378,6 +378,11 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"built only with the integration tag, so the shipped binary never has it; the address " +
 		"rule itself is tested where it is the subject.",
 
+	"AllowLocalSitesForTest": "lets the import integration tests connect a Jira site served on " +
+		"loopback by an httptest fake, which the site rules (business/Import/provider/site.go) " +
+		"refuse in a server. It is built only with the integration tag, so the shipped binary never " +
+		"has it; the rules themselves are tested where they are the subject.",
+
 	"StartedForTest": "starts the server again, as far as the conversations index is concerned, " +
 		"so the integration test of a restore can prove that a process trusts no comparison older " +
 		"than itself: someone taken out of a private channel between a backup's Postgres dump and " +

@@ -19,12 +19,12 @@ import (
 // down: move a function onto the generics, then lower this to the count the
 // test reports. The release lines leave out the demo's own code, so theirs is
 // one lower (1,166 on v2.75.0's main).
-const handExecutorBaseline = 1165
+const handExecutorBaseline = 1164
 
 // backgroundTimeoutBaseline is how many times models/ starts a statement's
 // timeout from context.Background() instead of the caller's ctx (206 at the
 // audit, 199 when this landed). It only goes down.
-const backgroundTimeoutBaseline = 151
+const backgroundTimeoutBaseline = 150
 
 // executorCalls are the calls that run a statement or a query on a store
 // client, or open a graph transaction to run one in (an HTTP client's Do is

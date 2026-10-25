@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
@@ -104,8 +105,20 @@ func FinishOAuthConnect(ctx context.Context, state, code string, owner uuid.UUID
 
 // SaveConnection asks the provider what tok can see, then saves it and
 // keeps that list as the discovery answer. A token the provider refuses is
-// said, and not saved. For a pasted token and a sign-in alike.
+// said, and not saved. For a pasted token and a sign-in alike. A site the
+// admin typed is held to the outbound rules first (importProvider.CheckSite),
+// and one they refuse is never tried.
 func SaveConnection(ctx context.Context, prov importProvider.Provider, tok *importModels.Token, site string) ([]importProvider.DiscoverItem, *ProviderProblem) {
+	if site != "" {
+		typed := site
+		if !strings.Contains(typed, "://") {
+			typed = "https://" + typed
+		}
+		if err := importProvider.CheckSite(typed); err != nil {
+			p := DescribeProviderError(prov.Name(), site, err)
+			return nil, &p
+		}
+	}
 	items, problem := TestConnection(ctx, prov, tok.OwnerUserId.String(), tok, site)
 	if problem != nil {
 		return nil, problem

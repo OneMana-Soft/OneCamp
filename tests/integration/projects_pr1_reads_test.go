@@ -76,6 +76,7 @@ func TestPR1MyTasksAcrossManyProjectsAsksPostgresAFixedNumberOfTimes(t *testing.
 	integration.StubMqttClient(t)
 	dg := integration.SetupDgraph(t)
 	s := newWA2Scale(t, env, dg)
+	s.counter = counter
 	count := func() int {
 		t.Helper()
 		read := func() {

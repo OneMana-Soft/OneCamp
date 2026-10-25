@@ -49,7 +49,7 @@ func (s *wa2Scale) postAs(who string, h http.HandlerFunc, body any) (int, string
 	rc.URLParams.Add("project_uuid", s.project)
 	c := context.WithValue(context.WithValue(ctx, helpers.UserInfoContextKey, userModels.UserInfo{UserPostgresInfo: *pg, UserDgraphInfo: *gr}), chi.RouteCtxKey, rc)
 	rec := httptest.NewRecorder()
-	customMiddleware.RequestIDMiddleware(h).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(raw)).WithContext(c))
+	customMiddleware.RequestIDMiddleware(h).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(raw)).WithContext(s.request(c)))
 	return rec.Code, rec.Body.String()
 }
 
@@ -86,6 +86,7 @@ func TestB3bTheSchedulerRunsAProjectsCycles(t *testing.T) {
 	integration.StubMqttClient(t)
 	dg := integration.SetupDgraph(t)
 	s := newWA2Scale(t, env, dg)
+	s.counter = counter
 	s.addTasks(6) // statuses go round todo, inProgress, inReview, backlog, done, canceled
 	ctx := context.Background()
 
@@ -152,7 +153,7 @@ func TestB3bTheSchedulerRunsAProjectsCycles(t *testing.T) {
 			t.Fatal(err)
 		}
 		counter.Reset()
-		if err := cycleBusiness.RunSchedules(ctx, later); err != nil {
+		if err := cycleBusiness.RunSchedules(counter.Context(ctx), later); err != nil {
 			t.Fatal(err)
 		}
 		return counter.Count()

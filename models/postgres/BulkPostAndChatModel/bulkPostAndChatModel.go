@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
@@ -41,18 +40,25 @@ func onlyUUIDs(ids []string) []string {
 	return out
 }
 
-func BulkInsertChatsAndPosts(query string, values []interface{}) (err error) {
+// Insert is one INSERT statement and its arguments.
+type Insert struct {
+	Query string
+	Args  []any
+}
 
-	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
-	_, err = postgresInit.DBConn.SqlDB.ExecContext(ctx, query, values...)
+// BulkInsertChatsAndPosts runs the inserts in one transaction. Each is its own
+// statement: Postgres refuses several commands in one parameterised statement.
+func BulkInsertChatsAndPosts(ctx context.Context, inserts []Insert) error {
+	err := pgexec.InTx(ctx, func(ctx context.Context) error {
+		for _, in := range inserts {
+			if _, err := pgexec.Exec(ctx, in.Query, in.Args...); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/BulkInsertChatAndPost Failed to execute bulk insert err: %+v",
-			err)
-		return err
+		helpers.LogErrorWithContext(ctx, "models/BulkInsertChatAndPost Failed to execute bulk insert err: %+v", err)
 	}
-
-	return nil
+	return err
 }

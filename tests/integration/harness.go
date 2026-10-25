@@ -138,6 +138,7 @@ func ConnectServerPostgres(t *testing.T) *Env {
 	if err := postgresInit.ConnectPostgres(context.Background(), env.DSN); err != nil {
 		t.Fatalf("connect the server's pool: %v", err)
 	}
+	markConnected(t)
 	return env
 }
 
