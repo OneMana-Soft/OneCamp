@@ -16,7 +16,7 @@
 
 import { append, insertAfter, replaceAll, replaceBlocks, seed } from './ops/content.js'
 import { read, render } from './ops/read.js'
-import { reauth } from './ops/reauth.js'
+import { closePeople, reauth } from './ops/reauth.js'
 import { applyProposal } from './ops/applyProposal.js' // A9
 import { setTaskChecks } from './ops/taskChecks.js' // C1
 
@@ -31,4 +31,16 @@ export const LIVE_ROUTES = new Map([
     ['render', render],
     ['applyProposal', applyProposal], // A9: edit proposals
     ['setTaskChecks', setTaskChecks], // C1: a task done elsewhere ticks its to-dos
+])
+
+// A board's ops, at /live/boards/<uuid>/<op> (its document is board:<uuid>):
+// only asking again who may be on it, as its canvas is no doc.
+export const BOARD_ROUTES = new Map([
+    ['reauth', reauth],
+])
+
+// Ops about people rather than one doc or board, at /live/people/<op>: who is
+// in the body.
+export const PEOPLE_ROUTES = new Map([
+    ['close', closePeople],
 ])

@@ -49,6 +49,7 @@ func GetDgraphBoardByUUID(ctx context.Context, boardUUID string, userUID string)
 					board_edit_access: count(board_editing_users @filter(uid($userId)))
 					board_comment_access: count(board_commenting_users @filter(uid($userId)))
 					board_private
+					board_deleted_at
 					board_created_at
 					board_updated_at
 					board_created_by {
@@ -85,6 +86,7 @@ func GetBasicDgraphBoardByUUID(ctx context.Context, boardUUID string, userUID st
 					board_comment_access: count(board_commenting_users @filter(uid($userId)))
 					board_private
 					board_title
+					board_deleted_at
 					board_created_by {
 						uid
 						user_uuid

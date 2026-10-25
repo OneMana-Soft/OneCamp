@@ -77,12 +77,19 @@ func HandOverLinks(ctx context.Context, from, to uuid.UUID) (moved, closed int64
 }
 
 // RevokeLiveByPerson turns off every live link a person made or published,
-// pages and rooms with them, and answers how many.
-func RevokeLiveByPerson(ctx context.Context, who uuid.UUID) (int64, error) {
-	q := `UPDATE guest_grants SET revoked_at = NOW() WHERE (created_by = $2 OR published_by = $2) AND ` + liveSQL(1)
-	n, err := pgexec.Exec(ctx, q, LinkCapDays(ctx), who)
+// pages and rooms with them, and answers which, so their guests' live views
+// can be closed too.
+func RevokeLiveByPerson(ctx context.Context, who uuid.UUID) ([]uuid.UUID, error) {
+	q := `UPDATE guest_grants SET revoked_at = NOW() WHERE (created_by = $2 OR published_by = $2) AND ` + liveSQL(1) +
+		` RETURNING ` + grantColumns
+	grants, err := pgexec.Query(ctx, q, grantRow, LinkCapDays(ctx), who)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/Guest/RevokeLiveByPerson err: %+v", err)
+		return nil, err
 	}
-	return n, err
+	ids := make([]uuid.UUID, 0, len(grants))
+	for _, g := range grants {
+		ids = append(ids, g.Id)
+	}
+	return ids, nil
 }

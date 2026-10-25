@@ -17,6 +17,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -99,6 +100,9 @@ type scanner interface {
 
 const grantColumns = `id, resource_type, resource_id, capability, created_by, expires_at, revoked_at, created_at,
 	slug, indexable, allow_copies, password_hash, unlock_version, published_at, published_by`
+
+// grantRow is scanGrant for pgexec's reads.
+func grantRow(r pgexec.Row) (*GuestGrant, error) { return scanGrant(r) }
 
 func scanGrant(s scanner) (*GuestGrant, error) {
 	var g GuestGrant

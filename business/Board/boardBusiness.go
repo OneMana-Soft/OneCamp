@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	openSearchBoardModels "github.com/akashc777/OneCamp/models/openSearch/Board"
+	"github.com/akashc777/OneCamp/services/collab"
 	"github.com/google/uuid"
 )
 
@@ -147,6 +149,11 @@ func UpdateBoard(ctx context.Context, input *adapter.InputUpdateBoard) (err erro
 		helpers.LogErrorWithContext(ctx, "business/UpdateBoard Failed to update board in dgraph err: %+v", err)
 		return
 	}
+	// Made private, it is closed to everyone it isn't shared with: every live
+	// socket on it is authorised afresh (I10).
+	if input.IsPrivate != nil && *input.IsPrivate {
+		collab.ReauthBoardLater(input.BoardId, nil)
+	}
 
 	// Keep the search index in sync for title/privacy changes (map update so a
 	// false privacy boolean is written, not dropped).
@@ -249,6 +256,9 @@ func DeleteBoard(ctx context.Context, boardUUID string) (err error) {
 		helpers.LogErrorWithContext(ctx, "business/DeleteBoard Failed to delete board in dgraph err: %+v", err)
 		return
 	}
+	// Deleted, it opens to nobody: every live socket on it is closed, and the
+	// reconnect is refused (CanRead reads the deletion).
+	collab.ReauthBoardLater(boardUUID, nil)
 	go openSearchBoardModels.DeleteBoardInOpenSearch(context.Background(), boardUUID, currentTime.Unix())
 
 	// Cascade the delete to board comments mirrored for search + AI so they stop
@@ -318,6 +328,17 @@ func UpdateBoardPermissions(ctx context.Context, input adapter.InputUpdateBoardP
 
 	if err := domain.UpdateBoardPermissions(ctx, &input); err != nil {
 		return err
+	}
+	// Whoever's place on it moved is authorised afresh on its live canvas:
+	// taken off it, refused; made a viewer, read-only; made an editor, editing.
+	var moved []string
+	for _, id := range ensureUnique(slices.Concat(input.RemoveEditors, input.RemoveViewers, input.RemoveCommenters)) {
+		if id != "" {
+			moved = append(moved, id)
+		}
+	}
+	if len(moved) > 0 {
+		collab.ReauthBoardLater(input.BoardId, moved)
 	}
 
 	// Sync the search index's access lists so shared boards are findable by the

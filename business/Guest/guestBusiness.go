@@ -29,6 +29,7 @@ import (
 	"github.com/akashc777/OneCamp/initializers/livekitInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
+	"github.com/akashc777/OneCamp/services/collab"
 	"github.com/google/uuid"
 )
 
@@ -203,10 +204,37 @@ func ListActiveGrants(ctx context.Context) ([]*guestModel.GuestGrant, error) {
 	return guestModel.ListActive(ctx)
 }
 
-// RevokeGrant revokes a grant by id (admin-gated upstream). A meeting link's
-// guests still in the meeting are put out of it: revoking used to mark the
-// link revoked and nothing else, and their tokens kept connecting.
+// RevokeGrant revokes a grant by id, for an admin's settings and a link's
+// maker or sharer in its dialog (each checked upstream). A doc's or board's
+// guests lose their live view at once.
 func RevokeGrant(ctx context.Context, id uuid.UUID) error {
+	if err := revoke(ctx, id); err != nil {
+		return err
+	}
+	EndLiveSessions(id)
+	return nil
+}
+
+// RevokeGrants revokes each of these grants as RevokeGrant does, and ends the
+// live views their guests have open in one call: a doc's links turned off as
+// it is made private. It answers which it revoked; one it can't is logged.
+func RevokeGrants(ctx context.Context, ids []uuid.UUID) []uuid.UUID {
+	var done []uuid.UUID
+	for _, id := range ids {
+		if err := revoke(ctx, id); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/Guest/RevokeGrants %s: %+v", id, err)
+			continue
+		}
+		done = append(done, id)
+	}
+	EndLiveSessions(done...)
+	return done
+}
+
+// revoke turns a grant off. A meeting link's guests still in the meeting are
+// put out of it: revoking used to mark the link revoked and nothing else, and
+// their tokens kept connecting.
+func revoke(ctx context.Context, id uuid.UUID) error {
 	if err := guestModel.Revoke(ctx, id); err != nil {
 		return err
 	}
@@ -214,6 +242,43 @@ func RevokeGrant(ctx context.Context, id uuid.UUID) error {
 		removeGuestsOf(ctx, g.ResourceID, map[string]bool{id.String(): true})
 	}
 	return nil
+}
+
+// collabIdentity is who a guest is on the doc or board their link opens live:
+// guest-<grant id>, their collab token's sub, never a member's uuid.
+func collabIdentity(grantID uuid.UUID) string {
+	return "guest-" + grantID.String()
+}
+
+// EndLiveSessions closes the live sockets that guests opened by these links,
+// so a link turned off stops showing its live edits at once: the reconnect
+// asks AuthorizeGuestCollab, which refuses it. Only a doc's or a board's link
+// opens one. In the background; nothing here fails the change.
+func EndLiveSessions(grantIDs ...uuid.UUID) {
+	ids := make([]string, 0, len(grantIDs))
+	for _, id := range grantIDs {
+		ids = append(ids, collabIdentity(id))
+	}
+	collab.ClosePeopleLater(ids...)
+}
+
+// activeGrants is endLinkSessions' read of the live links: a seam for tests.
+var activeGrants = guestModel.ListActive
+
+// endLinkSessions ends the live sessions of every live doc and board link.
+func endLinkSessions(ctx context.Context) {
+	grants, err := activeGrants(ctx)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Guest/endLinkSessions could not list the links: %+v", err)
+		return
+	}
+	var ids []uuid.UUID
+	for _, g := range grants {
+		if g.ResourceType == guestModel.ResourceDoc || g.ResourceType == guestModel.ResourceBoard {
+			ids = append(ids, g.Id)
+		}
+	}
+	EndLiveSessions(ids...)
 }
 
 // guestIdentityPrefix starts the call identity of every guest who joins from
@@ -267,6 +332,9 @@ func GuestMayJoin(ctx context.Context, room, identity string) (bool, error) {
 // guest access being turned off: the policy is re-read when a guest joins, and
 // nothing put out the ones already in.
 func RemoveAllMeetingGuests(ctx context.Context) {
+	// Their open docs and boards first: a link's socket was authorised when it
+	// connected, and the policy is read again only on a reconnect.
+	endLinkSessions(ctx)
 	rooms, err := liveKitBusiness.CallRoomsWithPrefix(ctx, MeetingRoomPrefix)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Guest/RemoveAllMeetingGuests could not list meetings: %+v", err)

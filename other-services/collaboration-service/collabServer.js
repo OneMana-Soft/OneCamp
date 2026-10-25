@@ -29,6 +29,7 @@ import { persistBoard } from './storeBoard.js'
 import { persistDoc } from './storeDoc.js'
 import { createBlockIdsTransform } from './transforms/blockIds.js'
 import { createLegacyContentTransform } from './transforms/legacyContent.js' // B2
+import { closeWhenLinkEnds } from './live/ops/reauth.js'
 
 // Docs connect with the bare doc uuid as the document name. Boards connect with
 // a "board:" prefix so one server routes both to the right backend endpoints.
@@ -325,10 +326,14 @@ export function createCollabServer({
                     }
                     readOnly()
                     log.log(`[Collab] Guest joined ${kind} ${id} read-only`)
+                    // When the link stops working, if it ever does: the
+                    // socket closes then (connected, below).
+                    const linkEndsAt = Date.parse(gResp.data?.until)
                     return {
                         user: { id: decoded.sub || 'guest', name: decoded.name || 'Guest' },
                         schemaOutdated: outdated,
                         access: { level: 'view', canEdit: false, locked: false },
+                        ...(Number.isFinite(linkEndsAt) ? { linkEndsAt } : {}),
                     }
                 }
 
@@ -490,6 +495,10 @@ export function createCollabServer({
         // stored already, so its save dot knows this server says when edits are
         // stored (persisted.js).
         async connected(data) {
+            // A guest's link that runs out while it is open closes the socket
+            // when it does; the reconnect is refused (the API checks a link's
+            // end on every authorisation).
+            if (data.context?.linkEndsAt && data.connection) closeWhenLinkEnds(data.connection, data.context.linkEndsAt)
             if (data.context?.access && parseDocumentName(data.documentName).kind === 'doc') {
                 try {
                     const document = data.connection?.document

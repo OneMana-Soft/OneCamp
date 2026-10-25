@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	globalSearchDomain "github.com/akashc777/OneCamp/domain/GlobalSearch"
 	domain "github.com/akashc777/OneCamp/domain/Team"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -14,6 +15,7 @@ import (
 	projectRoleModel "github.com/akashc777/OneCamp/models/postgres/ProjectRole"
 	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/akashc777/OneCamp/services/collab"
 	"github.com/google/uuid"
 )
 
@@ -284,6 +286,13 @@ func RemoveMemberFromTeam(ctx context.Context, teamDgraph *dgraphStruct.DgraphTe
 	// Their cached profile still lists the team and its projects, and search
 	// covers what it lists.
 	userDomain.InvalidateUserMemberships(ctx, memberUUID)
+	// And the broker: their open apps hold the projects' topics, and the
+	// broker never asks again about a topic a client holds.
+	mqttBusiness.DropTeam(teamDgraph.Uuid, memberUUID, teamProjectIDs(teamDgraph))
+	// And their open docs and boards: a doc the team's grant or space opened
+	// was authorised when its socket connected. Closed, their tabs reconnect
+	// and are authorised afresh.
+	collab.ClosePeopleLater(memberUUID)
 
 	return
 

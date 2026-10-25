@@ -48,6 +48,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
+	"github.com/google/uuid"
 )
 
 var (
@@ -455,9 +456,12 @@ func atTheBroker(what string, cut func(ctx context.Context, a *brokerAdmin) erro
 	}()
 }
 
-// topicsOf is a conversation's topics, by kind.
+// topicsOf is a conversation's or a project's topics, by kind.
 func topicsOf(kind, id string) []string {
-	if kind == mqttStruct.CONVERSATION_KIND_CHANNEL {
+	switch kind {
+	case mqttStruct.ACCESS_KIND_PROJECT:
+		return []string{helpers.GetMqttTopicForProjectMessage(id)}
+	case mqttStruct.CONVERSATION_KIND_CHANNEL:
 		msg, typing := helpers.GetMqttTopicForChannel(id)
 		return []string{msg, typing}
 	}
@@ -465,17 +469,35 @@ func topicsOf(kind, id string) []string {
 	return []string{msg, typing}
 }
 
-// DropConversation ends a person's live access to a conversation they were
-// taken out of: the broker refuses them its topics from now on, the clients
-// they have lose the topics, and their open apps are told (so they let go of
-// it and say so).
+// DropConversation ends a person's live access to a conversation or a
+// project they were taken out of: the broker refuses them its topics from
+// now on, the clients they have lose the topics, and their open apps are told
+// (so they let go of it and say so).
 func DropConversation(kind, id, userUUID string) {
+	drop(kind, id, userUUID, topicsOf(kind, id))
+}
+
+// DropTeam is DropConversation for a team someone was taken off, which takes
+// them off its projects: one message for the team, and every project's topic
+// cut in one go.
+func DropTeam(teamUUID, userUUID string, projects []uuid.UUID) {
+	var topics []string
+	for _, p := range projects {
+		topics = append(topics, topicsOf(mqttStruct.ACCESS_KIND_PROJECT, p.String())...)
+	}
+	drop(mqttStruct.ACCESS_KIND_TEAM, teamUUID, userUUID, topics)
+}
+
+// drop is DropConversation's and DropTeam's work.
+func drop(kind, id, userUUID string, topics []string) {
 	if id == "" || userUUID == "" {
 		return
 	}
 	ForgetMemberTopics(userUUID)
-	topics := topicsOf(kind, id)
 	helpers.GoSafeNamed("PublishConversationAccess", func() { PublishConversationAccess(kind, id, mqttStruct.CONVERSATION_DROPPED, userUUID) })
+	if len(topics) == 0 {
+		return
+	}
 	atTheBroker("take "+kind+" "+id+" from "+userUUID, func(ctx context.Context, a *brokerAdmin) error {
 		return a.cutFromTopics(ctx, userUUID, topics)
 	})

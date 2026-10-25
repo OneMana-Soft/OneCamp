@@ -15,8 +15,8 @@ import (
 // rawGoBaseline is how many go statements business/, controllers/, domain/,
 // initializers/ and services/ still start themselves rather than through
 // GoSafeNamed or GoSafeLoop (427 before F4, 165 after). It only goes down.
-// without-ai's own count, without the AI edition's packages (159 on main).
-const rawGoBaseline = 147
+// without-ai's own count, without the AI edition's packages (158 on main).
+const rawGoBaseline = 146
 
 // unrecoveredGoBaseline is how many of those have no recover at all: a
 // panic on one ends the process (355 before F4). It only goes down.

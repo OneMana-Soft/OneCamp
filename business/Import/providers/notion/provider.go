@@ -174,6 +174,7 @@ func (p *Provider) Plan(ctx context.Context, j *importModels.Job, opts importPro
 	if len(dbIDs) == 0 {
 		return plan, chunks, nil
 	}
+	plan.Warnings = append(plan.Warnings, databasesWarning)
 
 	// Users (all members of the workspace the integration sees).
 	users, err := p.listUsers(ctx, tok)
@@ -273,57 +274,46 @@ func (p *Provider) IterTeams(ctx context.Context, j *importModels.Job, opts impo
 
 // IterProjects emits one project per selected database.
 func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts importProvider.JobOptions) (<-chan importProvider.SourceProject, <-chan error) {
-	out := make(chan importProvider.SourceProject, 4)
-	errCh := make(chan error, 1)
-	go func() {
-		defer close(out)
-		defer close(errCh)
-		defer helpers.RecoverToErr("notion.IterProjects", errCh)
+	return importProvider.Stream(ctx, "notion.IterProjects", func() ([]importProvider.SourceProject, error) {
 		tok, err := p.loadToken(ctx, j)
 		if err != nil {
-			errCh <- err
-			return
+			return nil, err
 		}
 		dbIDs, err := p.resolveDatabases(ctx, j, opts)
 		if err != nil {
-			errCh <- err
-			return
+			return nil, err
 		}
-		// Members: every workspace user. Notion has no per-database
-		// member list exposed via API. Permission filtering is then
-		// the user's responsibility post-import.
-		users, _ := p.listUsers(ctx, tok)
-		members := make([]string, 0, len(users))
-		for _, u := range users {
-			if u.Type == "person" {
-				members = append(members, u.ID)
-			}
+		return p.projectsOf(ctx, tok, dbIDs), nil
+	})
+}
+
+// databasesWarning is what the plan says about the projects databases become.
+const databasesWarning = "Each database comes across as a project for the person importing alone, since Notion doesn't say who a database is shared with; add its people to the project afterwards."
+
+// projectsOf is the project each database becomes; one that can't be read
+// is left out. It names no members: Notion's API doesn't say who a database
+// is shared with, so its project is the importer's alone, as the pages' docs
+// are, and never everyone in the workspace.
+func (p *Provider) projectsOf(ctx context.Context, tok string, dbIDs []string) []importProvider.SourceProject {
+	var out []importProvider.SourceProject
+	for _, dbID := range dbIDs {
+		db, err := p.fetchDatabase(ctx, tok, dbID)
+		if err != nil {
+			continue
 		}
-		for _, dbID := range dbIDs {
-			db, err := p.fetchDatabase(ctx, tok, dbID)
-			if err != nil {
-				continue
-			}
-			schema := schemaOf(db.Properties)
-			created, _ := time.Parse(time.RFC3339, db.CreatedTime)
-			name := databaseTitle(db)
-			select {
-			case <-ctx.Done():
-				return
-			case out <- importProvider.SourceProject{
-				SourceID:    db.ID,
-				Name:        name,
-				Description: "",
-				MemberIds:   members,
-				Created:     created,
-				Archived:    db.Archived,
-				Fields:      schema.fieldList,
-				Metadata:    map[string]any{"notion_url": db.URL},
-			}:
-			}
-		}
-	}()
-	return out, errCh
+		schema := schemaOf(db.Properties)
+		created, _ := time.Parse(time.RFC3339, db.CreatedTime)
+		out = append(out, importProvider.SourceProject{
+			SourceID:    db.ID,
+			Name:        databaseTitle(db),
+			Description: "",
+			Created:     created,
+			Archived:    db.Archived,
+			Fields:      schema.fieldList,
+			Metadata:    map[string]any{"notion_url": db.URL},
+		})
+	}
+	return out
 }
 
 // IterTasksOfProject paginates POST /v1/databases/{id}/query.

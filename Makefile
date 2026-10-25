@@ -355,16 +355,17 @@ endef
 #   make migrate_server_status ONECAMP_PROJECT=onecamp-acme
 ONECAMP_PROJECT ?= onecamp-beta
 
-# Only migrations/ goes in, and the URL by name: see migrate_up above.
+# Only migrations/ goes in, and the URL by name: see migrate_up above. sqlx-cli and
+# its image are pinned as in Makefile-distribute's migrate_up (helpers/sqlxCliPinGuard_test.go).
 migrate_server_up: export DATABASE_URL = postgres://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)?sslmode=disable
 migrate_server_up:
 	$(require_onecamp_net)
-	docker run --rm -e DATABASE_URL -v "$(CURDIR)/migrations":/app/migrations:ro -w /app --network $(ONECAMP_NET) rust:alpine sh -c "cargo install sqlx-cli --no-default-features --features postgres && sqlx migrate run"
+	docker run --rm -e DATABASE_URL -v "$(CURDIR)/migrations":/app/migrations:ro -w /app --network $(ONECAMP_NET) rust:1.99.1-alpine3.24 sh -c "cargo install sqlx-cli --version =0.9.0 --locked --no-default-features --features postgres && sqlx migrate run"
 
 migrate_server_down: export DATABASE_URL = postgres://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)?sslmode=disable
 migrate_server_down:
 	$(require_onecamp_net)
-	docker run --rm -e DATABASE_URL -v "$(CURDIR)/migrations":/app/migrations:ro -w /app --network $(ONECAMP_NET) rust:alpine sh -c "cargo install sqlx-cli --no-default-features --features postgres && sqlx migrate revert"
+	docker run --rm -e DATABASE_URL -v "$(CURDIR)/migrations":/app/migrations:ro -w /app --network $(ONECAMP_NET) rust:1.99.1-alpine3.24 sh -c "cargo install sqlx-cli --version =0.9.0 --locked --no-default-features --features postgres && sqlx migrate revert"
 
 # migrate_server_status shows what the DATABASE believes is applied, against the
 # migrations on disk, so a schema mismatch is diagnosable without reading

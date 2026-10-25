@@ -801,12 +801,13 @@ func PublishToTopics(topics []string, msgType int8, data interface{}) {
 
 // PublishConversationAccess tells each of people, on their own activity topic
 // and nobody else's, that a conversation became theirs (CONVERSATION_ADDED)
-// or stopped being theirs (CONVERSATION_DROPPED).
+// or stopped being theirs (CONVERSATION_DROPPED), or that a project or team
+// stopped being theirs.
 //
 // A client is subscribed only to the topics its settings named when it
 // connected. A conversation started, joined or added to since isn't among
-// them, so nothing in it streamed until a reload; one left or removed from
-// stays among them. This is what makes an open app fetch its settings again
+// them, so nothing in it streamed until a reload; a conversation left or
+// removed from, or a project taken away, stays among them. This is what makes an open app fetch its settings again
 // and subscribe, or let go, without reconnecting. Blank and repeated people
 // are skipped; best-effort, like every publish here.
 func PublishConversationAccess(kind, id, change string, people ...string) {

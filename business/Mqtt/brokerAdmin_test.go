@@ -15,6 +15,8 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
+	"github.com/google/uuid"
 )
 
 // fakeBroker answers as EMQX's admin API does (v5 paths, as EMQX 6 serves
@@ -30,7 +32,7 @@ type fakeBroker struct {
 	subs     map[string][]string
 	logins   int
 	kicked   []string
-	requests []string
+	unsubs   [][]string // each unsubscribe request's topics, in the order they came
 }
 
 func newFakeBroker(t *testing.T) (*fakeBroker, *httptest.Server) {
@@ -43,7 +45,6 @@ func newFakeBroker(t *testing.T) (*fakeBroker, *httptest.Server) {
 func (f *fakeBroker) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.requests = append(f.requests, r.Method+" "+r.URL.Path)
 	if r.URL.Path == "/api/v5/login" {
 		f.logins++
 		var in struct{ Username, Password string }
@@ -93,9 +94,12 @@ func (f *fakeBroker) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		var body []struct{ Topic string }
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		var asked []string
 		for _, b := range body {
+			asked = append(asked, b.Topic)
 			f.subs[id] = slices.DeleteFunc(f.subs[id], func(t string) bool { return t == b.Topic })
 		}
+		f.unsubs = append(f.unsubs, asked)
 		w.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodPost && r.URL.Path == "/api/v5/clients/kickout/bulk":
 		var ids []string
@@ -124,6 +128,13 @@ func (f *fakeBroker) topicsOf(clientID string) []string {
 	return append([]string(nil), f.subs[clientID]...)
 }
 
+// unsubscribes is the topics of each unsubscribe request so far, in order.
+func (f *fakeBroker) unsubscribes() [][]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.unsubs)
+}
+
 func TestARemovedMembersClientsLoseTheConversationsTopics(t *testing.T) {
 	t.Setenv("JWT_SECRET", "broker-admin-test")
 	f, srv := newFakeBroker(t)
@@ -150,6 +161,60 @@ func TestARemovedMembersClientsLoseTheConversationsTopics(t *testing.T) {
 	}
 	if f.logins != 1 {
 		t.Errorf("%d logins for one cut; the token is kept", f.logins)
+	}
+}
+
+// Taken off a project, someone's clients lose its topic, the one the settings
+// named for it, and nothing else. A project has no typing topic, so the broker
+// is asked about its message topic alone, never a DM's typing topic named
+// after the project.
+func TestARemovedMembersClientsLoseTheProjectsTopic(t *testing.T) {
+	t.Setenv("JWT_SECRET", "broker-admin-test")
+	f, srv := newFakeBroker(t)
+	a := newBrokerAdmin(srv.URL, "console", f.password)
+	maya, project := "6f1c3b0e-0d6f-4c56-9a59-3a3f4e1c2b01", "2b7e1c5a-9d3f-4e6b-8a1c-5f4e3d2c1b0a"
+	other := helpers.GetMqttTopicForProjectMessage("8c6d5e4f-3a2b-4c1d-9e8f-7a6b5c4d3e2f")
+	activity := helpers.GetMqttTopicForUserActivity(maya)
+	f.connect("c_dev1_6f1c3b0e_ab12", "user_"+maya, helpers.GetMqttTopicForProjectMessage(project), other, activity)
+
+	if err := a.cutFromTopics(context.Background(), maya, topicsOf(mqttStruct.ACCESS_KIND_PROJECT, project)); err != nil {
+		t.Fatalf("cut: %v", err)
+	}
+	if got := f.topicsOf("c_dev1_6f1c3b0e_ab12"); !slices.Equal(got, []string{other, activity}) {
+		t.Errorf("Maya's tab holds %v; only the other project and her own topic should be left", got)
+	}
+	want := []string{helpers.GetMqttTopicForProjectMessage(project)}
+	if got := f.unsubscribes(); len(got) != 1 || !slices.Equal(got[0], want) {
+		t.Errorf("the broker was asked to drop %v; want one request for the project's topic alone, %v", got, want)
+	}
+}
+
+// Taken off a team, someone is off its projects: each of their clients loses
+// every one of those projects' topics, in one request a client.
+func TestSomeoneTakenOffATeamLosesItsProjectsTopicsInOneGo(t *testing.T) {
+	t.Setenv("JWT_SECRET", "broker-admin-test")
+	f, srv := newFakeBroker(t)
+	t.Setenv("EMQX_API_URL", srv.URL)
+	t.Setenv("EMQX_DASHBOARD_DEFAULT_USERNAME", "console")
+	t.Setenv("EMQX_DASHBOARD_DEFAULT_PASSWORD", f.password)
+	maya := "6f1c3b0e-0d6f-4c56-9a59-3a3f4e1c2b01"
+	launch, budget, elsewhere := uuid.New(), uuid.New(), uuid.New()
+	kept := []string{helpers.GetMqttTopicForProjectMessage(elsewhere.String()), helpers.GetMqttTopicForUserActivity(maya)}
+	f.connect("c_dev1_6f1c3b0e_ab12", "user_"+maya,
+		helpers.GetMqttTopicForProjectMessage(launch.String()), helpers.GetMqttTopicForProjectMessage(budget.String()), kept[0], kept[1])
+
+	DropTeam("5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a", maya, []uuid.UUID{launch, budget})
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !slices.Equal(f.topicsOf("c_dev1_6f1c3b0e_ab12"), kept) && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := f.topicsOf("c_dev1_6f1c3b0e_ab12"); !slices.Equal(got, kept) {
+		t.Fatalf("Maya's tab holds %v, want only %v", got, kept)
+	}
+	want := []string{helpers.GetMqttTopicForProjectMessage(launch.String()), helpers.GetMqttTopicForProjectMessage(budget.String())}
+	if got := f.unsubscribes(); len(got) != 1 || !slices.Equal(got[0], want) {
+		t.Fatalf("the broker was asked to drop %v; want one request for the team's projects' topics, %v", got, want)
 	}
 }
 

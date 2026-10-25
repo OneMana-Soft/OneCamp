@@ -227,22 +227,6 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 			errCh <- err
 			return
 		}
-		// Members = collaborators of the project. The Sync API has
-		// project_collaborators[] (from a separate sync slice). To keep
-		// the implementation scoped, we treat the workspace's full
-		// collaborators list as the project's member set; per-project
-		// permission filtering can be a follow-up.
-		members := make([]string, 0, len(snap.Collaborators))
-		for _, c := range snap.Collaborators {
-			if c.IsDeleted.on() {
-				continue
-			}
-			members = append(members, c.ID)
-		}
-		if snap.User.ID != "" {
-			members = append(members, snap.User.ID)
-		}
-
 		for _, pj := range snap.activeProjects() {
 			select {
 			case <-ctx.Done():
@@ -250,7 +234,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 			case out <- importProvider.SourceProject{
 				SourceID:  pj.ID,
 				Name:      pj.Name,
-				MemberIds: members,
+				MemberIds: snap.peopleOf(pj.ID),
 				AdminIds:  nil,
 				Created:   time.Time{},
 				Archived:  pj.IsArchived.on(),
@@ -425,8 +409,29 @@ type todoistSnapshot struct {
 	Items         []todoistItem    `json:"items"`
 	Notes         []todoistNote    `json:"notes"`
 	Collaborators []todoistCollab  `json:"collaborators"`
-	Labels        []todoistLabel   `json:"labels"`
-	SyncToken     string           `json:"sync_token"`
+	// CollaboratorStates say who shares which project; the "collaborators"
+	// resource sends them beside the people.
+	CollaboratorStates []todoistCollabState `json:"collaborator_states"`
+	Labels             []todoistLabel       `json:"labels"`
+	SyncToken          string               `json:"sync_token"`
+}
+
+// peopleOf is who a project comes with: the person importing, and everyone
+// Todoist shares it with now. Someone who left it, or hasn't taken its
+// invitation yet, doesn't come; a project Todoist names no one for is the
+// importer's alone, never everyone the account works with. Pure.
+func (s *todoistSnapshot) peopleOf(projectID string) []string {
+	var out []string
+	if s.User.ID != "" {
+		out = append(out, s.User.ID)
+	}
+	for _, st := range s.CollaboratorStates {
+		if st.ProjectID != projectID || st.UserID == s.User.ID || st.State != "active" || st.IsDeleted.on() {
+			continue
+		}
+		out = append(out, st.UserID)
+	}
+	return out
 }
 
 func (s *todoistSnapshot) activeProjects() []todoistProject {
@@ -508,6 +513,13 @@ type todoistCollab struct {
 	IsDeleted flag   `json:"is_deleted"`
 }
 
+type todoistCollabState struct {
+	ProjectID string `json:"project_id"`
+	UserID    string `json:"user_id"`
+	State     string `json:"state"`
+	IsDeleted flag   `json:"is_deleted"`
+}
+
 type todoistLabel struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
@@ -525,7 +537,8 @@ func (p *Provider) loadSnapshot(ctx context.Context, j *importModels.Job, opts i
 }
 
 // scoped is the snapshot narrowed to one project: its sections, its items
-// (subtasks included), their notes, and the people who appear in them. A
+// (subtasks included), their notes, who shares it, and the people who appear
+// in them or share it. A
 // pick that isn't an active project any more is an error, never a reason to
 // import everything in its place. "" is the whole account. Pure.
 func (s *todoistSnapshot) scoped(projectID string) (*todoistSnapshot, error) {
@@ -564,6 +577,14 @@ func (s *todoistSnapshot) scoped(projectID string) (*todoistSnapshot, error) {
 			out.Notes = append(out.Notes, n)
 			people[n.PostedUID] = true
 		}
+	}
+	for _, st := range s.CollaboratorStates {
+		if st.ProjectID == projectID {
+			out.CollaboratorStates = append(out.CollaboratorStates, st)
+		}
+	}
+	for _, id := range out.peopleOf(projectID) {
+		people[id] = true
 	}
 	for _, c := range s.Collaborators {
 		if people[c.ID] {

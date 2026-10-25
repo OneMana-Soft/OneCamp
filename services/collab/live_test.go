@@ -170,6 +170,31 @@ func TestReadReauthAndRender(t *testing.T) {
 	}
 }
 
+// A board is asked again at its own address, and the people named go
+// everywhere at once on theirs; naming nobody asks nothing.
+func TestABoardAndPeopleAreClosedAtTheirOwnAddresses(t *testing.T) {
+	calls, bodies := fakeLive(t, func(string, map[string]any) (int, any) {
+		return http.StatusOK, map[string]any{"closed": 1}
+	})
+	ctx := context.Background()
+	if err := ReauthBoard(ctx, "board-1", []string{"sam"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClosePeople(ctx, []string{"sam", "guest-g1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClosePeople(ctx, nil); err != nil || atomic.LoadInt32(calls) != 2 {
+		t.Fatalf("closing nobody asked the service (%d calls), %v", atomic.LoadInt32(calls), err)
+	}
+	board, people := (*bodies)[0], (*bodies)[1]
+	if board["_path"] != "/live/boards/board-1/reauth" || len(board["user_uuids"].([]any)) != 1 {
+		t.Errorf("the board's reauth went as %v", board)
+	}
+	if got := people["user_ids"].([]any); people["_path"] != "/live/people/close" || len(got) != 2 || got[1] != "guest-g1" {
+		t.Errorf("closing people went as %v", people)
+	}
+}
+
 // What edit proposals (A9) build on: the applyProposal op's wire, and a
 // refusal whose message comes back intact behind "live <op>: <status> ", with
 // its status readable through any StatusCode() int.

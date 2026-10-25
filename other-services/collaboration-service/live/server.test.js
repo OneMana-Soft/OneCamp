@@ -1,13 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createLiveServer } from './server.js'
-import { LIVE_ROUTES } from './routes.js'
+import { BOARD_ROUTES, LIVE_ROUTES, PEOPLE_ROUTES } from './routes.js'
 
 const SECRET = 'a-test-secret-long-enough-to-count-0123456789'
 const DOC = '0b6f2f4e-9c1a-4f53-8a57-2c1f0d6e7a11'
 
-async function withServer(routes, run) {
-    const server = createLiveServer({ getSecret: () => SECRET, routes })
+async function withServer(routes, run, peopleRoutes) {
+    const server = createLiveServer({ getSecret: () => SECRET, routes, peopleRoutes })
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
     const base = `http://127.0.0.1:${server.address().port}`
     try {
@@ -25,6 +25,9 @@ function call(base, path, { secret = SECRET, method = 'POST', body = '{}' } = {}
 
 test('the Live Doc Writer answers its ops, and nothing else', async () => {
     assert.deepEqual([...LIVE_ROUTES.keys()].sort(), ['append', 'applyProposal', 'insertAfter', 'read', 'reauth', 'render', 'replaceAll', 'replaceBlocks', 'seed', 'setTaskChecks'])
+    // A board takes no content op: its canvas is no doc.
+    assert.deepEqual([...BOARD_ROUTES.keys()], ['reauth'])
+    assert.deepEqual([...PEOPLE_ROUTES.keys()], ['close'])
     await withServer(LIVE_ROUTES, async (base) => {
         const res = await call(base, `/live/docs/${DOC}/rewriteHistory`)
         assert.equal(res.status, 404)
@@ -32,7 +35,7 @@ test('the Live Doc Writer answers its ops, and nothing else', async () => {
 })
 
 test('every registered op is a function the server can call', () => {
-    for (const [name, op] of LIVE_ROUTES) assert.equal(typeof op, 'function', name)
+    for (const [name, op] of [...LIVE_ROUTES, ...BOARD_ROUTES, ...PEOPLE_ROUTES]) assert.equal(typeof op, 'function', name)
     assert.ok(LIVE_ROUTES.has('applyProposal')) // A9
 })
 
@@ -84,4 +87,17 @@ test('a body over the cap is refused, and the refusal arrives', async () => {
         const res = await call(base, `/live/docs/${DOC}/echo`, { body: JSON.stringify({ html: 'x'.repeat(17 * 1024 * 1024) }) })
         assert.equal(res.status, 413)
     })
+})
+
+test('ops about people are answered on a path of their own, behind the same secret', async () => {
+    const peopleRoutes = new Map([['echo', async ({ body }) => ({ got: body.user_ids })]])
+    await withServer(new Map(), async (base) => {
+        assert.equal((await call(base, '/live/people/echo', { secret: '' })).status, 401)
+        const ok = await call(base, '/live/people/echo', { body: JSON.stringify({ user_ids: ['sam'] }) })
+        assert.equal(ok.status, 200)
+        assert.deepEqual((await ok.json()).data, { got: ['sam'] })
+        assert.equal((await call(base, '/live/people/rewriteHistory')).status, 404)
+        assert.equal((await call(base, `/live/people/${DOC}/echo`)).status, 404)
+        assert.equal((await call(base, `/live/docs/${DOC}/echo`)).status, 404, "a doc's ops are not people's")
+    }, peopleRoutes)
 })

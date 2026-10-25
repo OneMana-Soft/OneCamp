@@ -7,6 +7,7 @@ import (
 
 	adapter "github.com/akashc777/OneCamp/adapter/Project"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
+	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	taskrank "github.com/akashc777/OneCamp/business/TaskRank"
@@ -18,11 +19,13 @@ import (
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
 	roleModel "github.com/akashc777/OneCamp/models/postgres/ProjectRole"
 	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
 	taskStatusModel "github.com/akashc777/OneCamp/models/postgres/TaskStatus"
+	"github.com/akashc777/OneCamp/services/collab"
 	"github.com/dgraph-io/dgo/v230"
 	"github.com/google/uuid"
 )
@@ -242,6 +245,13 @@ func RemoveMemberFromProject(ctx context.Context, userDgraphUID string, userDrga
 	}
 	// Their cached profile still lists the project, and search covers what it lists.
 	userDomain.InvalidateUserMemberships(ctx, userDrgaphUUID)
+	// And the broker: their open apps hold the project's topic, and the broker
+	// never asks again about a topic a client holds.
+	mqttBusiness.DropConversation(mqttStruct.ACCESS_KIND_PROJECT, projectDgraphUUID, userDrgaphUUID)
+	// And their open docs and boards: a doc the project's space opened was
+	// authorised when its socket connected. Closed, their tabs reconnect and
+	// are authorised afresh.
+	collab.ClosePeopleLater(userDrgaphUUID)
 
 	helpers.GoSafeNamed("userProjectNotificationBusiness.DeleteNotificationTypeWhenUserIsRemovedFormProject", func() {
 		userProjectNotificationBusiness.DeleteNotificationTypeWhenUserIsRemovedFormProject(userDrgaphUUID, projectDgraphUUID)

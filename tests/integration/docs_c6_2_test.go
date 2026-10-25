@@ -211,9 +211,9 @@ func TestDepartedLinksMoveOrStop(t *testing.T) {
 	}
 
 	// Turned off: everything made or published by the person, and nothing else.
-	n, err := guestModel.RevokeLiveByPerson(ctx, people["maya"])
-	if err != nil || n != 2 {
-		t.Fatalf("turned off %d, %v", n, err)
+	off, err := guestModel.RevokeLiveByPerson(ctx, people["maya"])
+	if err != nil || len(off) != 2 {
+		t.Fatalf("turned off %v, %v", off, err)
 	}
 	if got := strings.Join(liveNames(t, grants), ","); got != "new-link,old-page,room" {
 		t.Fatalf("after turning Maya's off: %s", got)

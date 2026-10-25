@@ -290,6 +290,7 @@ business/GitHub/taskRepoLink.go :: leadTask :: eventTask
 business/GitHub/webhookRefresh.go :: StartWebhookRefresh :: registerGitHubWebhook
 business/Guest/guestBusiness.go :: NewMeetingLink :: guestModel.Revoke
 business/Guest/guestBusiness.go :: RemoveAllMeetingGuests :: removeGuestsOf
+business/Guest/guestBusiness.go :: RevokeGrants :: revoke
 business/Hooks/admin.go :: purge :: purgeRows
 business/Hooks/deliveries.go :: Drain :: try
 business/Hooks/deliveries.go :: SendNow :: .claimOne
@@ -409,7 +410,6 @@ business/Import/providers/notion/pages.go :: text :: .pageHref
 business/Import/providers/notion/pages.go :: write :: .block
 business/Import/providers/notion/pages.go :: write :: .item
 business/Import/providers/notion/provider.go :: IterCommentsOfTask :: .getJSON
-business/Import/providers/notion/provider.go :: IterProjects :: .fetchDatabase
 business/Import/providers/notion/provider.go :: IterTasksOfProject :: .buildTaskFromPage
 business/Import/providers/notion/provider.go :: IterTasksOfProject :: .postJSON
 business/Import/providers/notion/provider.go :: Plan :: .countDatabaseRows
@@ -418,6 +418,7 @@ business/Import/providers/notion/provider.go :: countDatabaseRows :: .postJSON
 business/Import/providers/notion/provider.go :: fetchBlockChildren :: .fetchBlockChildren
 business/Import/providers/notion/provider.go :: fetchBlockChildren :: .getJSON
 business/Import/providers/notion/provider.go :: listUsers :: .getJSON
+business/Import/providers/notion/provider.go :: projectsOf :: .fetchDatabase
 business/Import/providers/trello/provider.go :: fetchCardActions :: .getJSON
 business/Import/rollback.go :: trashImportedDocs :: trashDoc
 business/Import/taskMapping.go :: coAssigneeNames :: .resolve
@@ -647,7 +648,6 @@ business/Workflow/workflowBusiness.go :: handleMessagePosted :: runWorkflow
 business/Workflow/workflowBusiness.go :: handleUserJoinedChannel :: runWorkflow
 business/Workflow/workflowBusiness.go :: reload :: workflowModel.ListActiveByTrigger
 controllers/Connector/connectorController.go :: ListConnectors :: connectorBusiness.IsConnected
-controllers/Doc/docAccessController.go :: revokeGuestLinks :: guestModel.Revoke
 controllers/Notification/notificationController.go :: ResendWebhook :: suppressionModels.Upsert
 controllers/Public/cspReportController.go :: ReceiveCSPReport :: configModels.RecordCSPViolation
 controllers/User/userController.go :: FwdUserMessage :: business.GetDgraphUserInfoByUUID
