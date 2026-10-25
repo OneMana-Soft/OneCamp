@@ -14,16 +14,48 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // launchpadBase is 37signals' sign-in service; a var so tests can point it at
 // a fake.
 var launchpadBase = "https://launchpad.37signals.com"
+
+// apiOrigins are the only places the token is sent: the sign-in service, and
+// the API ("All URLs start with https://3.basecampapi.com/999999999/. URLs are
+// HTTPS only.", bc3-api README at 8e811073fd, 30 Sep 2026). Basecamp's
+// answers name the addresses read next (an account's API base, a next page, a
+// project's dock), and each is read only on one of these.
+var apiOrigins = []string{"https://launchpad.37signals.com", "https://3.basecampapi.com"}
+
+// sameOrigin reports whether two addresses share a scheme and host:port,
+// ignoring case. Addresses that don't parse never match.
+func sameOrigin(a, b string) bool {
+	ua, err := url.Parse(a)
+	if err != nil || ua.Host == "" {
+		return false
+	}
+	ub, err := url.Parse(b)
+	return err == nil && strings.EqualFold(ua.Scheme, ub.Scheme) && strings.EqualFold(ua.Host, ub.Host)
+}
+
+// onAPI reports whether address is on one of apiOrigins: the same scheme,
+// host and port, exactly.
+func onAPI(address string) bool {
+	for _, o := range apiOrigins {
+		if sameOrigin(address, o) {
+			return true
+		}
+	}
+	return false
+}
 
 const userAgent = "OneCamp importer (https://onemana.dev)"
 
@@ -36,6 +68,9 @@ var nextLink = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)
 // get reads one page of url into out and returns the next page's URL, "" at
 // the last.
 func (p *Provider) get(ctx context.Context, tok, url string, out any) (string, error) {
+	if !onAPI(url) {
+		return "", fmt.Errorf("basecamp: an address off Basecamp's API (%s) isn't read", helpers.WithoutURLQueries(url))
+	}
 	if err := p.rl.Wait(ctx); err != nil {
 		return "", err
 	}

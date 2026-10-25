@@ -46,6 +46,10 @@ const providerName = importModels.ProviderJira
 // runaway loop.
 const maxPages = 200
 
+// siteClient is what Jira's calls go through: the site is the one the admin
+// typed, so it is SiteAPIClient.
+var siteClient = importProvider.SiteAPIClient
+
 // Provider implements the importProvider.Provider interface for Jira.
 type Provider struct {
 	rl importProvider.Limiter
@@ -774,7 +778,7 @@ func (p *Provider) call(ctx context.Context, tok, method, urlStr string, body, o
 	req.Header.Set("Authorization", authorizationHeader(tok))
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := importProvider.SharedAPIClient.Do(req)
+	resp, err := siteClient.Do(req)
 	if err != nil {
 		return err
 	}

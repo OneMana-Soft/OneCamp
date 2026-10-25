@@ -53,7 +53,7 @@ func pr2Bulk(t *testing.T, s *wa2Scale, who string, ids []string, op, value stri
 	body, _ := json.Marshal(map[string]any{"task_uuids": ids, "op": op, "value": value})
 	c := context.WithValue(context.WithValue(ctx, helpers.UserInfoContextKey, userModels.UserInfo{UserPostgresInfo: *pg, UserDgraphInfo: *gr}), chi.RouteCtxKey, chi.NewRouteContext())
 	rec := httptest.NewRecorder()
-	customMiddleware.RequestIDMiddleware(http.HandlerFunc(taskBulkController.Bulk)).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body)).WithContext(c))
+	customMiddleware.RequestIDMiddleware(http.HandlerFunc(taskBulkController.Bulk)).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body)).WithContext(s.request(c)))
 	var a pr2Answer
 	_ = json.Unmarshal(rec.Body.Bytes(), &a)
 	return rec.Code, a
@@ -85,6 +85,7 @@ func TestPR2ABulkChangeIsOneRequestWithAFixedCost(t *testing.T) {
 	integration.StubMqttClient(t)
 	dg := integration.SetupDgraph(t)
 	s := newWA2Scale(t, env, dg)
+	s.counter = counter
 	s.addTasks(10)
 	// A first change warms what is kept a while (the project's policies, keys).
 	pr2Bulk(t, s, "ana", s.tasks, "priority", "medium")

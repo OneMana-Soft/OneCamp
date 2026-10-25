@@ -114,7 +114,7 @@ func importTasksStatements(t *testing.T, n int) int {
 	importer.UserDgraphInfo.Uid, importer.UserDgraphInfo.Uuid = uids["admin"], admin.String()
 
 	counter := integration.CountPostgres(t, env)
-	if err := processTaskChunk(ctx, tasksProvider{n: n}, job, importProvider.JobOptions{}, chunk, importer); err != nil {
+	if err := processTaskChunk(counter.Context(ctx), tasksProvider{n: n}, job, importProvider.JobOptions{}, chunk, importer); err != nil {
 		t.Fatalf("import %d tasks: %v", n, err)
 	}
 	sent := counter.Count()

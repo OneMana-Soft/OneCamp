@@ -38,7 +38,9 @@ func TestTheImportsListIsCountedOnceAndPaged(t *testing.T) {
 	if _, err := env.PG.Exec(`INSERT INTO users (id, email_id) VALUES ($1, 'admin@acme.test')`, admin); err != nil {
 		t.Fatal(err)
 	}
-	asAdmin := context.WithValue(ctx, helpers.UserInfoContextKey, userModels.UserInfo{
+	counter := integration.CountPostgres(t, env)
+	// Only the list's own statements count: its request's context is counted.
+	asAdmin := context.WithValue(counter.Context(ctx), helpers.UserInfoContextKey, userModels.UserInfo{
 		UserPostgresInfo: userModels.User{Id: admin, EmailID: "admin@acme.test", IsAdmin: true},
 	})
 	var ids []uuid.UUID
@@ -68,7 +70,6 @@ func TestTheImportsListIsCountedOnceAndPaged(t *testing.T) {
 		return body.Jobs
 	}
 
-	counter := integration.CountPostgres(t, env)
 	addJobs(3)
 	counter.Reset()
 	if got := list("limit=50"); len(got) != 3 {

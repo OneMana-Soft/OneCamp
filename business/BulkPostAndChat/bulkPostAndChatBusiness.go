@@ -292,7 +292,7 @@ func BulkPostAndChatForward(ctx context.Context, userInfo *dgraphStruct.DgraphUs
 	allChatUUIDs := slices.Concat(chatUUIDs, grpChatUUIDs)
 	allChatGrpIDs := slices.Concat(chatGroupingUUIDs, grpChatGroupingIDs)
 
-	err = domain.BulkAddChatAndPostToPostgres(postUUIDs, channelUUIDs, allChatUUIDs, allChatGrpIDs, userInfo.Uuid)
+	err = domain.BulkAddChatAndPostToPostgres(ctx, postUUIDs, channelUUIDs, allChatUUIDs, allChatGrpIDs, userInfo.Uuid)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,

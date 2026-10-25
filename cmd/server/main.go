@@ -11,6 +11,7 @@ import (
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
+	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 
 	"os/signal"
 	"syscall"
@@ -599,6 +600,18 @@ func main() {
 	// main to this line.
 	if name, ok := helpers.OneShotOf(os.Args); ok {
 		os.Exit(runOneShot(ctx, name, os.Args[2:]))
+	}
+
+	// The hosts on this server's own network an operator lets imports reach
+	// (IMPORT_PRIVATE_HOSTS), read once by the server (a one-shot
+	// imports nothing); a list it can't read stops the start.
+	if warnings, err := importProvider.LoadPrivateHosts(ctx); err != nil {
+		helpers.LogErrorWithContext(ctx, "%v", err)
+		os.Exit(1)
+	} else {
+		for _, w := range warnings {
+			helpers.LogWarnWithContext(ctx, "%s", w)
+		}
 	}
 
 	// Redis's expired-key events, consumed by the server alone.

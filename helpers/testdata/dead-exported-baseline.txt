@@ -109,13 +109,13 @@ IsPublic
 # its AI features, or that only beta's demo seed calls, both of which this edition leaves out.
 # Kept so the shared packages stay the same in both editions.
 #   CheckUserDocEditAccess, ListDocAIEntries: the AI's doc tools and Doc AI's activity panel.
-#   EndpointPolicy, CheckEndpoint: safefetch's endpoint half, for MCP servers and remote
-#   agents. This edition uses its fetch half (link previews, the Notion page import).
+#   EndpointPolicy: safefetch's endpoint rule for MCP servers and remote agents. This
+#   edition uses its fetch half (link previews, the Notion page import) and its client
+#   for an import site (CheckEndpoint, NewClient).
 #   CreateDoc: on beta, the demo seed's; documents are made through the doc tree here.
 CheckUserDocEditAccess
 ListDocAIEntries
 EndpointPolicy
-CheckEndpoint
 CreateDoc
 #   (v1.59.0) TextRefs: an AI column's prompt's references (tableAIColumn.go). RequireID: the
 #   AI project-update routes' project check. WithActsThroughToken: an agent run a token asked
@@ -142,7 +142,6 @@ business/UserFCMToken.GetFCMTokenByUserId
 business/Webhook.SetAppContext
 domain/LastSeenChannel.GetLastSeenChannel
 domain/LastSeenChat.GetLastSeenChat
-helpers/safefetch.NewClient
 initializers/opensearchInit.EnsureAIEmbeddingsIndexDimension
 models/postgres/ApiToken.ListActive
 models/postgres/PendingAction.Finalize

@@ -41,7 +41,7 @@ func pr3dCreate(t *testing.T, s *wa2Scale, who string, names []string) []string 
 	body, _ := json.Marshal(map[string]any{"project_uuid": s.project, "tasks": tasks})
 	c := context.WithValue(context.WithValue(ctx, helpers.UserInfoContextKey, userModels.UserInfo{UserPostgresInfo: *pg, UserDgraphInfo: *gr}), chi.RouteCtxKey, chi.NewRouteContext())
 	rec := httptest.NewRecorder()
-	customMiddleware.RequestIDMiddleware(http.HandlerFunc(taskBulkController.CreateTasks)).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body)).WithContext(c))
+	customMiddleware.RequestIDMiddleware(http.HandlerFunc(taskBulkController.CreateTasks)).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body)).WithContext(s.request(c)))
 	var got struct {
 		Data struct {
 			Made []string `json:"made"`
@@ -59,6 +59,7 @@ func TestPR3dManyTasksAreMadeAtAFixedCost(t *testing.T) {
 	integration.StubMqttClient(t)
 	dg := integration.SetupDgraph(t)
 	s := newWA2Scale(t, env, dg)
+	s.counter = counter
 	s.exec(`INSERT INTO project_keys (project_id, key, next_number) VALUES ($1, 'BIG', 1)`, s.project)
 	names := func(n int, prefix string) []string {
 		out := make([]string, n)
@@ -70,7 +71,8 @@ func TestPR3dManyTasksAreMadeAtAFixedCost(t *testing.T) {
 	pr3dCreate(t, s, "ben", names(1, "Warm")) // what is kept a while: policies, statuses
 
 	// What a batch costs counts what it sets going after it answers too (its
-	// events, its notice), once they have settled.
+	// search, its events, its notice), once they have settled: that work keeps
+	// the request's context (context.WithoutCancel), so it is counted.
 	settled := func() int {
 		last := -1
 		for n := counter.Count(); n != last; n = counter.Count() {
@@ -144,7 +146,7 @@ func TestPR3dManyTasksAreMadeAtAFixedCost(t *testing.T) {
 		user := userModels.UserInfo{UserPostgresInfo: *pg, UserDgraphInfo: *gr}
 		settled()
 		counter.Reset()
-		got := templateBusiness.ApplyTo(ctx, tpl, s.project, &user, templateBusiness.Start{Day: time.Now(), Loc: time.UTC})
+		got := templateBusiness.ApplyTo(counter.Context(ctx), tpl, s.project, &user, templateBusiness.Start{Day: time.Now(), Loc: time.UTC})
 		cost := settled()
 		if got.Tasks != 3*n || got.Failed != 0 {
 			t.Fatalf("applied %+v, want %d tasks", got, 3*n)

@@ -71,7 +71,7 @@ func b3Call(s *wa2Scale, who, method string, h http.HandlerFunc, cycle string) (
 	rc.URLParams.Add("cycle_id", cycle)
 	c := context.WithValue(context.WithValue(ctx, helpers.UserInfoContextKey, userModels.UserInfo{UserPostgresInfo: *pg, UserDgraphInfo: *gr}), chi.RouteCtxKey, rc)
 	rec := httptest.NewRecorder()
-	customMiddleware.RequestIDMiddleware(h).ServeHTTP(rec, httptest.NewRequest(method, "/", nil).WithContext(c))
+	customMiddleware.RequestIDMiddleware(h).ServeHTTP(rec, httptest.NewRequest(method, "/", nil).WithContext(s.request(c)))
 	return rec.Code, rec.Body.String()
 }
 
@@ -94,6 +94,7 @@ func TestB3BacklogIsTheOpenCyclesThenEverythingInNone(t *testing.T) {
 	integration.StubMqttClient(t)
 	dg := integration.SetupDgraph(t)
 	s := newWA2Scale(t, env, dg)
+	s.counter = counter
 	s.addTasks(60) // statuses cycle todo, inProgress, inReview, backlog, done, canceled
 	project := mustUUID(t, s.project)
 	open := func(i int) bool { return i%6 < 4 }

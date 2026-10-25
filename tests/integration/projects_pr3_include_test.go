@@ -49,7 +49,7 @@ func (s *wa2Scale) readWith(who string, h http.HandlerFunc, params map[string]st
 	}
 	c := context.WithValue(context.WithValue(ctx, helpers.UserInfoContextKey, userModels.UserInfo{UserPostgresInfo: *pg, UserDgraphInfo: *gr}), chi.RouteCtxKey, rc)
 	rec := httptest.NewRecorder()
-	customMiddleware.RequestIDMiddleware(h).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/"+query, nil).WithContext(c))
+	customMiddleware.RequestIDMiddleware(h).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/"+query, nil).WithContext(s.request(c)))
 	return rec.Code, rec.Body.String()
 }
 
@@ -59,6 +59,7 @@ func TestPR3TaskInfoIncludesThePanelsReads(t *testing.T) {
 	integration.StubMqttClient(t)
 	dg := integration.SetupDgraph(t)
 	s := newWA2Scale(t, env, dg)
+	s.counter = counter
 	s.addTasks(6)
 	task := s.tasks[0]
 

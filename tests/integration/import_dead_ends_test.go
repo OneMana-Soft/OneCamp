@@ -110,7 +110,9 @@ func TestImportDeadEnds(t *testing.T) {
 	}
 
 	// 1. Connect tests the token first. Jira at a site that refuses it: said
-	// in words, with the classic-token advice, and nothing saved.
+	// in words, with the classic-token advice, and nothing saved. The fake
+	// sites listen on loopback, which a server's site rules refuse.
+	t.Cleanup(importProvider.AllowLocalSitesForTest())
 	var refuse atomic.Bool
 	refuse.Store(true)
 	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -143,6 +145,14 @@ func TestImportDeadEnds(t *testing.T) {
 	l.Close()
 	if code, out := connect(dead); code != http.StatusServiceUnavailable || out["code"] != "unreachable" || !strings.Contains(fmt.Sprint(out["error"]), dead) {
 		t.Fatalf("a site that can't be reached: %d %v", code, out)
+	}
+	// A site on this server's own network is refused before it is tried,
+	// and nothing is saved.
+	if code, out := connect("http://10.20.30.40"); code != http.StatusBadRequest || out["code"] != "site_refused" {
+		t.Fatalf("a site on a private network: %d %v", code, out)
+	}
+	if _, err := importModels.LoadToken(ctx, "jira", admin); !errors.Is(err, importModels.ErrTokenNotFound) {
+		t.Fatalf("a refused site's token was saved: %v", err)
 	}
 	// A good token is saved.
 	refuse.Store(false)

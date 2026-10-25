@@ -88,7 +88,9 @@ func CreateTasks(ctx context.Context, projectUUID uuid.UUID, user *model.UserInf
 			top = append(top, nodes[i])
 		}
 	}
-	helpers.GoSafeNamed("Task.CreateTasks:tell", func() { tellOfNewTasks(project.Uuid, top, me) })
+	// The notice is the request's too (its id, its trace), sent after it answers.
+	tellCtx := context.WithoutCancel(ctx)
+	helpers.GoSafeNamed("Task.CreateTasks:tell", func() { tellOfNewTasks(tellCtx, project.Uuid, top, me) })
 	// Made outside any restricted task (a copy of one went one by one, above),
 	// so they are open: their events, and what those set going, read no
 	// restriction of theirs.
@@ -224,7 +226,7 @@ func createOneByOne(ctx context.Context, projectUUID uuid.UUID, user *model.User
 // tellOfNewTasks tells the project's people who hear of new tasks, once for
 // the batch: one task as CreateTask says it, more as "Sam added 12 tasks"
 // with the first few names.
-func tellOfNewTasks(projectID string, tasks []*dgraphStruct.DgraphTask, maker dgraphStruct.DgraphUser) {
+func tellOfNewTasks(ctx context.Context, projectID string, tasks []*dgraphStruct.DgraphTask, maker dgraphStruct.DgraphUser) {
 	if len(tasks) == 0 {
 		return
 	}
@@ -236,7 +238,6 @@ func tellOfNewTasks(projectID string, tasks []*dgraphStruct.DgraphTask, maker dg
 		sendNewTaskNotification(desc, projectID, tasks[0].Name, nil, tasks[0].Uuid, maker, nil)
 		return
 	}
-	ctx := context.Background()
 	// New tasks are nobody's restricted ones, so who may read the first may read them all.
 	hearers := newTaskHearers(ctx, projectID, tasks[0].Uuid, maker.Uuid, nil)
 	if len(hearers) == 0 {

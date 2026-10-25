@@ -132,6 +132,7 @@ func fakeBasecamp(t *testing.T) (*httptest.Server, *int32) {
 	prev := launchpadBase
 	launchpadBase = srv.URL
 	t.Cleanup(func() { launchpadBase = prev })
+	allowAPI(t, srv.URL)
 	return srv, &calls
 }
 
@@ -293,6 +294,7 @@ func TestBasecampRefusals(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
+	allowAPI(t, srv.URL)
 	p := New()
 	p.rl = importProvider.NewSleepLimiter(1, 100)
 	var people []bcPerson

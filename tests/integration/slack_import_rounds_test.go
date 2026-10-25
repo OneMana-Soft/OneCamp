@@ -117,7 +117,7 @@ func slackImportStatements(t *testing.T, n int) int {
 	done()
 
 	counter := integration.CountPostgres(t, e.Env)
-	slackBusiness.RunImport(ctx, job, &admin)
+	slackBusiness.RunImport(counter.Context(ctx), job, &admin)
 	sent := counter.Count()
 
 	var posts, comments int
