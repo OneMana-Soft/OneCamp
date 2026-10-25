@@ -29,6 +29,7 @@ import (
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
 	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
 	business "github.com/akashc777/OneCamp/business/Doc"
+	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	domain "github.com/akashc777/OneCamp/domain/Doc"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
@@ -512,26 +513,20 @@ func UpdateDocAccess(w http.ResponseWriter, r *http.Request) {
 }
 
 // revokeGuestLinks turns off a doc's links for people outside the workspace,
-// and asks its live sockets again so a guest's closes. Answers how many it
-// turned off.
+// as any revoke does, and closes their guests' live views in one call
+// (guestBusiness.RevokeGrants); the members who lost the doc are reauthorised
+// by the access change itself. Answers how many it turned off.
 func revokeGuestLinks(ctx context.Context, docUUID string) int {
 	links, err := guestModel.ListActiveForResource(ctx, "doc", docUUID)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/revokeGuestLinks %s: %+v", docUUID, err)
 		return 0
 	}
-	n := 0
+	ids := make([]uuid.UUID, 0, len(links))
 	for _, l := range links {
-		if err := guestModel.Revoke(ctx, l.Id); err != nil {
-			helpers.LogErrorWithContext(ctx, "controllers/revokeGuestLinks %s link %s: %+v", docUUID, l.Id, err)
-			continue
-		}
-		n++
+		ids = append(ids, l.Id)
 	}
-	if n > 0 {
-		business.ReauthLater([]string{docUUID}, nil)
-	}
-	return n
+	return len(guestBusiness.RevokeGrants(ctx, ids))
 }
 
 // activeMember says whether a person is someone in the workspace a doc can be

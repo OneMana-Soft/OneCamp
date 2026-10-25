@@ -2,18 +2,22 @@
 //
 // It listens on a port of its own that is never published through Traefik, so
 // only the API can reach it, and it answers only callers that present the shared
-// INTERNAL_SECRET: POST /live/docs/<doc uuid>/<op> with a JSON body. Unlike the
-// public port, nothing here is reachable from a browser.
+// INTERNAL_SECRET: POST /live/docs/<doc uuid>/<op>, /live/boards/<board
+// uuid>/<op> or /live/people/<op> with a JSON body. Unlike the public port,
+// nothing here is reachable from a browser.
 //
 // index.js starts it on LIVE_PORT (1235 unless set). The compose files route only
 // the public port (1234) through Traefik, so this one is reachable on the
 // services' own network alone.
 
 import http from 'node:http'
+import { BOARD_PREFIX } from '../collabServer.js'
 import { internalSecretOK } from './secret.js'
-import { LIVE_ROUTES } from './routes.js'
+import { BOARD_ROUTES, LIVE_ROUTES, PEOPLE_ROUTES } from './routes.js'
 
 export const LIVE_PATH = /^\/live\/docs\/([0-9a-fA-F-]{36})\/([A-Za-z]+)$/
+export const BOARD_PATH = /^\/live\/boards\/([0-9a-fA-F-]{36})\/([A-Za-z]+)$/
+export const PEOPLE_PATH = /^\/live\/people\/([A-Za-z]+)$/
 // A whole doc's HTML (replaceAll, seed) or a saved state (render).
 export const MAX_LIVE_BYTES = 16 * 1024 * 1024
 
@@ -46,18 +50,31 @@ function readBody(request, max) {
     })
 }
 
-// createLiveHandler answers the ops in routes. getSecret returns the configured
-// INTERNAL_SECRET; with none set, every call is refused. deps is what the ops
-// share (collabServer.js `live`: the schema, the contributors, the persistence
-// record).
-export function createLiveHandler({ getSecret, routes = LIVE_ROUTES, hocuspocus = null, deps = {} }) {
+// addressed is what a path names: the op, its name, what it is for (a doc's or
+// a board's uuid, or "people") and the document it runs on (board:<uuid> for a
+// board, none for people's); null for any other path.
+function addressed(path, { routes, boardRoutes, peopleRoutes }) {
+    let m = LIVE_PATH.exec(path)
+    if (m) return { op: routes.get(m[2]), name: m[2], of: m[1], docName: m[1].toLowerCase() }
+    m = BOARD_PATH.exec(path)
+    if (m) return { op: boardRoutes.get(m[2]), name: m[2], of: m[1], docName: BOARD_PREFIX + m[1].toLowerCase() }
+    m = PEOPLE_PATH.exec(path)
+    if (m) return { op: peopleRoutes.get(m[1]), name: m[1], of: 'people', docName: null }
+    return null
+}
+
+// createLiveHandler answers the ops in routes (a doc's), boardRoutes and
+// peopleRoutes. getSecret returns the configured INTERNAL_SECRET; with none
+// set, every call is refused. deps is what the ops share (collabServer.js
+// `live`: the schema, the contributors, the persistence record).
+export function createLiveHandler({ getSecret, routes = LIVE_ROUTES, boardRoutes = BOARD_ROUTES, peopleRoutes = PEOPLE_ROUTES, hocuspocus = null, deps = {} }) {
     return async (request, response) => {
         if (!internalSecretOK(request.headers['x-internal-secret'], getSecret())) {
             send(response, 401, { msg: 'unauthorised' })
             return
         }
-        const match = LIVE_PATH.exec((request.url || '').split('?')[0])
-        const op = match && routes.get(match[2])
+        const target = addressed((request.url || '').split('?')[0], { routes, boardRoutes, peopleRoutes })
+        const op = target?.op
         if (!op) {
             send(response, 404, { msg: 'no such op' })
             return
@@ -79,11 +96,11 @@ export function createLiveHandler({ getSecret, routes = LIVE_ROUTES, hocuspocus 
             return
         }
         try {
-            const data = await op({ docName: match[1].toLowerCase(), body, hocuspocus, deps })
+            const data = await op({ docName: target.docName, body, hocuspocus, deps })
             send(response, 200, { msg: 'ok', data: data ?? null })
         } catch (err) {
             const status = Number.isInteger(err?.status) && err.status >= 400 && err.status < 600 ? err.status : 500
-            if (status >= 500) console.error(`[Live] ${match[2]} failed for ${match[1]}:`, err)
+            if (status >= 500) console.error(`[Live] ${target.name} failed for ${target.of}:`, err)
             send(response, status, { msg: status >= 500 ? 'the op failed' : String(err?.message || 'refused') })
         }
     }

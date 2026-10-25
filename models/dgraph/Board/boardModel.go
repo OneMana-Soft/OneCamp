@@ -137,79 +137,19 @@ func GetDgraphBoards(ctx context.Context, query string, variables map[string]str
 }
 
 // UpdateBoardPermissions adds/removes editors/viewers/commenters on a board in
-// a single upsert, mirroring UpdateDocPermissions. Users are resolved by UUID.
-func UpdateBoardPermissions(ctx context.Context, input *adapter.InputUpdateBoardPermissions) (err error) {
-	query := fmt.Sprintf(`
-		query {
-			board as var(func: eq(board_uuid, "%s"))
-	`, input.BoardId)
-
-	userVarMap := make(map[string]string)
-	varIdx := 0
-	addVars := func(uuids []string) {
-		for _, uuid := range uuids {
-			if _, exists := userVarMap[uuid]; !exists && uuid != "" {
-				varName := fmt.Sprintf("u_%d", varIdx)
-				query += fmt.Sprintf(`%s as var(func: eq(user_uuid, "%s"))
-				`, varName, uuid)
-				userVarMap[uuid] = varName
-				varIdx++
-			}
-		}
-	}
-	addVars(input.AddEditors)
-	addVars(input.RemoveEditors)
-	addVars(input.AddViewers)
-	addVars(input.RemoveViewers)
-	addVars(input.AddCommenters)
-	addVars(input.RemoveCommenters)
-	query += "}"
-
-	setRDF := ""
-	delRDF := ""
-	buildRDF := func(uuids []string, predicate string, isDelete bool) {
-		for _, uuid := range uuids {
-			if varName, ok := userVarMap[uuid]; ok {
-				triple := fmt.Sprintf("uid(board) <%s> uid(%s) .\n", predicate, varName)
-				if isDelete {
-					delRDF += triple
-				} else {
-					setRDF += triple
-				}
-			}
-		}
-	}
-	buildRDF(input.AddEditors, "board_editing_users", false)
-	buildRDF(input.RemoveEditors, "board_editing_users", true)
-	buildRDF(input.AddViewers, "board_reading_users", false)
-	buildRDF(input.RemoveViewers, "board_reading_users", true)
-	buildRDF(input.AddCommenters, "board_commenting_users", false)
-	buildRDF(input.RemoveCommenters, "board_commenting_users", true)
-
-	if len(setRDF) == 0 && len(delRDF) == 0 {
-		return // nothing to do
-	}
-
-	mu := &api.Mutation{}
-	if len(setRDF) > 0 {
-		mu.SetNquads = []byte(setRDF)
-	}
-	if len(delRDF) > 0 {
-		mu.DelNquads = []byte(delRDF)
-	}
-
-	req := &api.Request{
-		Query:     query,
-		Mutations: []*api.Mutation{mu},
-	}
-
-	_, err = dgraphInit.DoCommitNow(ctx, req)
+// a single upsert (dgraphStruct.ChangeRoles), as a doc's sharing does. Users
+// are resolved by UUID.
+func UpdateBoardPermissions(ctx context.Context, input *adapter.InputUpdateBoardPermissions) error {
+	err := dgraphStruct.ChangeRoles(ctx, "board_uuid", input.BoardId, []dgraphStruct.RoleChange{
+		{Predicate: "board_editing_users", Add: input.AddEditors, Remove: input.RemoveEditors},
+		{Predicate: "board_reading_users", Add: input.AddViewers, Remove: input.RemoveViewers},
+		{Predicate: "board_commenting_users", Add: input.AddCommenters, Remove: input.RemoveCommenters},
+	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"models/UpdateBoardPermissions failed to update permissions err: %+v", err)
-		return
 	}
-	return
+	return err
 }
 
 // GetDgraphBoardsWithCount runs a board-list query that returns a "boardList"

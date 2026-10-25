@@ -227,6 +227,7 @@ type wire struct {
 	ProposalID    string          `json:"proposal_id,omitempty"`
 	HunkIDs       []string        `json:"hunk_ids,omitempty"`
 	UserUUIDs     []string        `json:"user_uuids,omitempty"`
+	UserIDs       []string        `json:"user_ids,omitempty"`
 	State         string          `json:"state,omitempty"`
 	TaskChecks    map[string]bool `json:"task_checks,omitempty"`
 	By            *By             `json:"by,omitempty"`
@@ -250,8 +251,14 @@ type writeAnswer struct {
 	} `json:"before"`
 }
 
-// call sends one op and decodes its data into out.
+// call sends one op on a doc and decodes its data into out.
 func call(ctx context.Context, docUUID, op string, body wire, out any) error {
+	return callAt(ctx, "/live/docs/"+docUUID+"/"+op, op, body, out)
+}
+
+// callAt sends one op to its address on the live port and decodes its data
+// into out.
+func callAt(ctx context.Context, path, op string, body wire, out any) error {
 	secret := strings.TrimSpace(os.Getenv("INTERNAL_SECRET"))
 	if secret == "" {
 		return fmt.Errorf("%w: INTERNAL_SECRET is not set on this server", ErrUnavailable)
@@ -263,7 +270,7 @@ func call(ctx context.Context, docUUID, op string, body wire, out any) error {
 	if len(payload) > MaxLiveBytes {
 		return &OpError{Op: op, Status: http.StatusRequestEntityTooLarge, Msg: "too large to write at once"}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, liveURL()+"/live/docs/"+docUUID+"/"+op, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, liveURL()+path, bytes.NewReader(payload))
 	if err != nil {
 		return err
 	}
@@ -361,6 +368,63 @@ func (liveClient) Reauth(ctx context.Context, docUUID string, userUUIDs []string
 
 func (liveClient) ApplyProposal(ctx context.Context, docUUID, proposalID string, hunkIDs []string, o Options) (Result, error) {
 	return write(ctx, docUUID, "applyProposal", wire{ProposalID: proposalID, HunkIDs: hunkIDs}, o)
+}
+
+// ReauthBoard closes the live sockets on a board of the people named
+// (everyone's when none are), so they reconnect and are authorised afresh, as
+// Reauth does a doc's (I10). Like Read, it is not a Writer method; a test may
+// swap it.
+var ReauthBoard = func(ctx context.Context, boardUUID string, userUUIDs []string) error {
+	return callAt(ctx, "/live/boards/"+boardUUID+"/reauth", "reauth", wire{UserUUIDs: userUUIDs}, nil)
+}
+
+// ClosePeople closes every live socket the people named have open, on every
+// doc and board: a member's (their uuid) or a guest's (guest-<grant id>), so
+// their tabs reconnect and are authorised afresh. Naming nobody closes
+// nothing. A test may swap it.
+var ClosePeople = func(ctx context.Context, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return callAt(ctx, "/live/people/close", "close", wire{UserIDs: ids}, nil)
+}
+
+// closeTimeout bounds one close: the change that asked it is made, and a
+// socket the service can't be reached to close is asked again whenever it
+// reconnects anyway.
+const closeTimeout = 5 * time.Second
+
+// ClosePeopleLater is ClosePeople in the background, so a change never waits
+// on the collaboration service.
+func ClosePeopleLater(ids ...string) {
+	if len(ids) == 0 {
+		return
+	}
+	ids = append([]string(nil), ids...)
+	closeLater("collab.close-people", func(ctx context.Context) error { return ClosePeople(ctx, ids) })
+}
+
+// ReauthBoardLater is ReauthBoard in the background.
+func ReauthBoardLater(boardUUID string, userUUIDs []string) {
+	userUUIDs = append([]string(nil), userUUIDs...)
+	closeLater("collab.board-reauth", func(ctx context.Context) error { return ReauthBoard(ctx, boardUUID, userUUIDs) })
+}
+
+// closeLater runs one close in the background, bounded by closeTimeout. With
+// no live port configured there is nothing to close: a socket is authorised
+// again whenever it reconnects anyway.
+func closeLater(name string, op func(ctx context.Context) error) {
+	helpers.GoSafeNamed(name, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
+		defer cancel()
+		switch err := op(ctx); {
+		case err == nil:
+		case errors.Is(err, ErrUnavailable):
+			helpers.LogInfoWithContext(ctx, "services/collab %s: live sockets can't be closed (%v)", name, err)
+		default:
+			helpers.LogErrorWithContext(ctx, "services/collab %s err: %+v", name, err)
+		}
+	})
 }
 
 // Read is a doc as the live copy holds it now, unsaved typing included: what an

@@ -11,6 +11,7 @@ import (
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
+	importBusiness "github.com/akashc777/OneCamp/business/Import"
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 
 	"os/signal"
@@ -734,6 +735,12 @@ func main() {
 	// Idempotent; safe across restarts and replicas.
 	if _, err := userBusiness.EnsureAutomationBot(ctx); err != nil {
 		helpers.MessageLogs.ErrorLog.Printf("Failed to seed automation bot: %v", err)
+	}
+	// Once per install, before any import runs here: when Todoist and Notion
+	// imports began to add only the people each project is shared with, so the
+	// ones first run before can be told apart. Every replica asks; the first wins.
+	if err := importBusiness.ClaimMembershipFixed(ctx); err != nil {
+		helpers.MessageLogs.ErrorLog.Printf("Failed to record when imports' membership became exact: %v", err)
 	}
 	// Build the MCP tool registry from admin-registered external servers and
 	// register their tools into the shared AI tool registry, so agents can call

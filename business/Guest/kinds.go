@@ -163,9 +163,15 @@ func linkLifetime(ctx context.Context, now time.Time, ask time.Duration, never b
 	return &at
 }
 
-// pastCap reports whether a non-standing grant was made the cap's days ago or
-// more. The SQL side is the model's liveSQL.
-func pastCap(ctx context.Context, g *guestModel.GuestGrant, now time.Time) bool {
-	capped := capDays(ctx)
-	return capped > 0 && !guestModel.IsStanding(g) && !g.CreatedAt.Add(capped).After(now)
+// LinkEnds is when a link stops opening what it shares: its own end, or the
+// cap's days after it was made when that comes first (a standing link is never
+// capped); nil for never. The SQL side is the model's liveSQL.
+func LinkEnds(ctx context.Context, g *guestModel.GuestGrant) *time.Time {
+	end := g.ExpiresAt
+	if capped := capDays(ctx); capped > 0 && !guestModel.IsStanding(g) {
+		if c := g.CreatedAt.Add(capped); end == nil || c.Before(*end) {
+			end = &c
+		}
+	}
+	return end
 }

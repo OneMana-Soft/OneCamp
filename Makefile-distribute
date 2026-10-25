@@ -2129,6 +2129,19 @@ create_postgres_db:
 # list and in the container's recorded command. Now only ./migrations is
 # mounted, read-only, and the URL reaches sqlx as DATABASE_URL, exported to this
 # recipe's environment and passed on by name (docker run -e DATABASE_URL).
+#
+# SQLX-CLI IS PINNED, AND BUILT FROM ITS OWN LOCK FILE. The install named no
+# version, so every update compiled whatever crates.io served that day, and a
+# sqlx-cli release that changed how migrations are checked or recorded would
+# have stopped every install's next update at this step, past anything a
+# release of ours could call back. 0.9.0 is the version updates were proven
+# with: it applies every migration the ledger lacks, in order, whatever the
+# highest applied one is, and accepts a ledger 0.8.0 wrote. The image is exact
+# too: with --locked the compiler is the one thing left that moves, and a later
+# Rust that couldn't build a locked dependency would stop the update the same
+# way. rust:1.99.1-alpine3.24 is the image (digest b1d5dd5a22a0) that proof and
+# the v2.75.5 update ran. Moving either is a change to make and prove
+# (helpers/sqlxCliPinGuard_test.go).
 migrate_up: export DATABASE_URL = postgres://$(DB_USER):$(DB_PASSWORD)@postgres:5432/$(DB_NAME)?sslmode=disable
 migrate_up:
 	@net=$$($(COMPOSE) ps -q postgres 2>/dev/null | head -1 \
@@ -2140,7 +2153,7 @@ migrate_up:
 	fi; \
 	docker run --rm -e DATABASE_URL -v "$$(pwd)/migrations":/app/migrations:ro -w /app \
 		--network "$$net" \
-		rust:alpine sh -c "cargo install sqlx-cli --no-default-features --features postgres --quiet && sqlx migrate run"
+		rust:1.99.1-alpine3.24 sh -c "cargo install sqlx-cli --version =0.9.0 --locked --no-default-features --features postgres --quiet && sqlx migrate run"
 
 # migrate_status reports what the DATABASE believes, against the migrations in
 # this install, so a schema mismatch is diagnosable without reading application

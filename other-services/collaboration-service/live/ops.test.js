@@ -21,6 +21,7 @@ process.on('unhandledRejection', onRejection)
 after(() => process.off('unhandledRejection', onRejection))
 
 const ID = '3c1d9b7e-2a4f-4e8b-9c6d-5f7a8b9c0d1e'
+const BOARD = '7e2a9c41-5b3d-4f6e-8a1b-2c3d4e5f6a7b'
 const BODY = '<h1>Launch</h1><p>Ship on Thursday.</p><p>Owners: Sam.</p>'
 const SECRET = 'test-secret'
 
@@ -53,8 +54,8 @@ async function world({ body = BODY, extensions } = {}) {
         live.closeAllConnections()
     }))
     const base = `http://127.0.0.1:${live.address().port}`
-    const op = async (name, payload, doc = ID) => {
-        const res = await fetch(`${base}/live/docs/${doc}/${name}`, {
+    const post = async (path, payload) => {
+        const res = await fetch(`${base}${path}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Internal-Secret': SECRET },
             body: JSON.stringify(payload),
@@ -62,6 +63,10 @@ async function world({ body = BODY, extensions } = {}) {
         const out = await res.json()
         return { status: res.status, ...out }
     }
+    const op = (name, payload, doc = ID) => post(`/live/docs/${doc}/${name}`, payload)
+    // An op on the world's board, and one about people rather than a doc.
+    const board = (name, payload) => post(`/live/boards/${BOARD}/${name}`, payload)
+    const people = (name, payload) => post(`/live/people/${name}`, payload)
     const tabs = []
     const tab = async (token = '{"sub":"user-1"}') => {
         const t = new TestClient({ url: collab.url, name: ID, token })
@@ -77,7 +82,14 @@ async function world({ body = BODY, extensions } = {}) {
         await stopLive()
         await collab.stop()
     }
-    return { redis, backend, collab, op, tab, close, base }
+    // A tab on the world's board (BOARD), opened and synced.
+    const boardTab = async (token) => {
+        if (!backend.boards.has(BOARD)) backend.boards.set(BOARD, { board_state: '' })
+        const t = new TestClient({ url: collab.url, name: `board:${BOARD}`, token })
+        assert.equal(await t.connect(), 'synced')
+        return t
+    }
+    return { redis, backend, collab, op, board, people, tab, boardTab, close, base }
 }
 
 test('each write arrives in an open tab as one transaction, and is stored', async () => {
@@ -314,6 +326,101 @@ test('reauth closes the sockets of the people named, and they come back authoris
     await until(() => sam.ws.readyState === 3 && priya.ws.readyState === 3, 2000, 'both sockets to close')
     sam.ws = null
     priya.ws = null
+    await w.close()
+})
+
+// A person deactivated, or taken out of the team a doc reached them through:
+// every socket they have open closes, on docs and boards alike, and their
+// reconnect is asked again, so the API refuses it.
+test("closing people ends every socket they have open, on docs and boards, and nobody else's", async () => {
+    const w = await world()
+    const samDoc = await w.tab('{"sub":"sam"}')
+    const priya = await w.tab('{"sub":"priya"}')
+    const samBoard = await w.boardTab('{"sub":"sam"}')
+    const out = await w.people('close', { user_ids: ['sam'] })
+    assert.equal(out.status, 200, out.msg)
+    assert.equal(out.data.closed, 2)
+    await until(() => samDoc.ws.readyState === 3 && samBoard.ws.readyState === 3, 2000, "sam's sockets to close")
+    assert.equal(priya.ws.readyState, 1, "priya's stays")
+    w.backend.levels.set('sam', 'none')
+    assert.equal(await samDoc.connect(), 'denied', 'the doc refuses sam now')
+    assert.equal(await samBoard.connect(), 'denied', 'the board refuses sam now')
+    // Naming nobody closes nobody: unlike reauth, this never means everyone.
+    assert.equal((await w.people('close', {})).data.closed, 0)
+    assert.equal((await w.people('close', { user_ids: [] })).data.closed, 0)
+    assert.equal(priya.ws.readyState, 1)
+    await samBoard.close()
+    samBoard.destroy()
+    await w.close()
+})
+
+// A guest link turned off: the guest's live view of the doc or board ends at
+// once, the members' stay, and the reconnect is refused (the API re-reads the
+// grant on every connect).
+test("closing a guest's identity ends that guest's view of a doc or a board, and no member's", async () => {
+    const w = await world()
+    const member = await w.tab('{"sub":"sam"}')
+    const guest = new TestClient({ url: w.collab.url, name: ID, token: '{"guest":true,"sub":"guest-g1"}' })
+    assert.equal(await guest.connect(), 'synced')
+    const boardGuest = await w.boardTab('{"guest":true,"sub":"guest-g2"}')
+    const out = await w.people('close', { user_ids: ['guest-g1', 'guest-g2'] })
+    assert.equal(out.status, 200, out.msg)
+    assert.equal(out.data.closed, 2)
+    await until(() => guest.ws.readyState === 3 && boardGuest.ws.readyState === 3, 2000, "the guests' sockets to close")
+    assert.equal(member.ws.readyState, 1, "the member's stays")
+    w.backend.levels.set('guest-g1', 'none')
+    w.backend.levels.set('guest-g2', 'none')
+    assert.equal(await guest.connect(), 'denied')
+    assert.equal(await boardGuest.connect(), 'denied')
+    for (const t of [guest, boardGuest]) {
+        await t.close()
+        t.destroy()
+    }
+    await w.close()
+})
+
+// A board's sharing changed: reauth reaches the board at its own address (its
+// document is board:<uuid>), so the people named, or everyone, reconnect and
+// are authorised afresh: refused when taken off it, read-only when made a
+// viewer.
+test('reauth reaches a board: the people named reconnect as the board now lets them, everyone when nobody is named', async () => {
+    const w = await world()
+    const sam = await w.boardTab('{"sub":"sam"}')
+    const priya = await w.boardTab('{"sub":"priya"}')
+    const out = await w.board('reauth', { user_uuids: ['sam'] })
+    assert.equal(out.status, 200, out.msg)
+    assert.equal(out.data.closed, 1)
+    await until(() => sam.ws.readyState === 3, 2000, "sam's board socket to close")
+    assert.equal(priya.ws.readyState, 1, "priya's stays")
+    w.backend.levels.set('sam', 'none')
+    assert.equal(await sam.connect(), 'denied', 'taken off the board')
+    w.backend.levels.set('priya', 'view')
+    assert.equal((await w.board('reauth', {})).data.closed, 1, 'everyone, when nobody is named')
+    await until(() => priya.ws.readyState === 3, 2000, "priya's board socket to close")
+    assert.equal(await priya.connect(), 'synced')
+    assert.equal(priya.scope, 'readonly', 'made a viewer')
+    for (const t of [sam, priya]) {
+        await t.close()
+        t.destroy()
+    }
+    await w.close()
+})
+
+// A guest link that runs out while it is open: the socket closes when it
+// does, as the guest authorize answer's 'until' says, and the reconnect is
+// refused.
+test("a guest's socket closes when their link runs out", async () => {
+    const w = await world()
+    const member = await w.tab('{"sub":"sam"}')
+    w.backend.until.set('guest-g1', new Date(Date.now() + 400).toISOString())
+    const guest = new TestClient({ url: w.collab.url, name: ID, token: '{"guest":true,"sub":"guest-g1"}' })
+    assert.equal(await guest.connect(), 'synced')
+    w.backend.levels.set('guest-g1', 'none')
+    await until(() => guest.ws.readyState === 3, 3000, "the guest's socket to close at the link's end")
+    assert.equal(member.ws.readyState, 1, "the member's stays")
+    assert.equal(await guest.connect(), 'denied')
+    await guest.close()
+    guest.destroy()
     await w.close()
 })
 

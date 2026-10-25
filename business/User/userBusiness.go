@@ -39,6 +39,7 @@ import (
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/models/redis/registry"
 	redisStore "github.com/akashc777/OneCamp/models/redis/store"
+	"github.com/akashc777/OneCamp/services/collab"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/dgraph-io/dgo/v230"
 	"github.com/google/uuid"
@@ -814,6 +815,9 @@ func DeactivateUser(ctx context.Context, userUUID uuid.UUID) (err error) {
 	// Their open apps hold every topic they had, and the broker never asks
 	// again about a topic a client holds: disconnect them, sessions and all.
 	mqttBusiness.DisconnectPerson(userUUID.String())
+	// And every doc and board they have open, whose sockets were authorised
+	// when they connected: closed, their tabs reconnect and are refused.
+	collab.ClosePeopleLater(userUUID.String())
 
 	return
 

@@ -9,6 +9,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 )
 
@@ -70,6 +71,15 @@ func UpsertConfig(key string, value string) (err error) {
 	}
 
 	return
+}
+
+// Claim writes key with value only while the install has none for it, and
+// answers whether this call wrote it: the first writer wins, and its value
+// and time (updated_at) stand from then on.
+func Claim(ctx context.Context, key, value string) (bool, error) {
+	n, err := pgexec.Exec(ctx, `INSERT INTO system_configs (key, value, updated_at) VALUES ($1, $2, NOW())
+		ON CONFLICT (key) DO NOTHING`, key, value)
+	return n == 1, err
 }
 
 // IsDone is whether key records a one-off job as done on this install: a

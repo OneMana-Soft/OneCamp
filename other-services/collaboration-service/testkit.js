@@ -112,6 +112,8 @@ export class FakeRedis {
 // The Go API, as the collaboration service sees it
 // ---------------------------------------------------------------------------
 const httpError = (status, msg) => Object.assign(new Error(`Request failed with status code ${status}`), { response: { status, data: { msg } } })
+// The person a test token names (its sub), or null for anything else.
+const subOf = (config) => { try { return JSON.parse(String(config?.headers?.Authorization || '').replace(/^Bearer /, '')).sub } catch { return null } }
 
 export class FakeBackend {
     constructor() {
@@ -124,8 +126,13 @@ export class FakeBackend {
         this.saves = []
         // The Doc Session (session.js): each person's level on every doc, by
         // their token's sub; 'edit' when not set. A level of 'none' is a 403,
-        // 'gone' a 410. legacy: an API from before /docColab/session.
+        // 'gone' a 410. legacy: an API from before /docColab/session. A
+        // board's and a guest's authorize read it too: 'none' refuses them,
+        // and a board's 'view' is read-only.
         this.levels = new Map()
+        // The time each guest's link stops working, by their token's sub, as
+        // the guest authorize answer gives it ('until').
+        this.until = new Map()
         this.legacy = false
         this.sessionAsks = []
         this.saveAttempts = 0 // every save asked for, refused or not
@@ -161,8 +168,7 @@ export class FakeBackend {
             if (this.legacy) throw Object.assign(new Error('Request failed with status code 404'), { response: { status: 404, data: '404 page not found' } })
             const headers = config?.headers || {}
             if (!headers['X-Internal-Secret']) throw httpError(401, 'no secret')
-            let sub = null
-            try { sub = JSON.parse(String(headers.Authorization || '').replace(/^Bearer /, '')).sub } catch { /* not a test token */ }
+            const sub = subOf(config)
             this.sessionAsks.push({ sub, doc: body.doc_uuid })
             // authStatus refuses everyone, as the API does a doc that went to
             // the trash or was never there (410, 404).
@@ -173,14 +179,17 @@ export class FakeBackend {
             return { status: 200, data: { msg: 'Authorised', level, canEdit: level === 'edit' || level === 'full', locked: false } }
         }
         if (this.legacy && path === '/docColab/authorize') {
-            const sub = (() => { try { return JSON.parse(String(config?.headers?.Authorization || '').replace(/^Bearer /, '')).sub } catch { return null } })()
-            const level = this.levels.get(sub) || 'edit'
+            const level = this.levels.get(subOf(config)) || 'edit'
             if (level !== 'edit' && level !== 'full') throw httpError(403, 'Unauthorized doc access')
             return { status: 200, data: { msg: 'Authorised' } }
         }
         if (/\/(docColab|boardColab)\/(authorize|guestAuthorize)$/.test(path)) {
             if (this.authStatus) throw httpError(this.authStatus, 'refused')
-            return { status: 200, data: { canEdit: true } }
+            const sub = subOf(config)
+            const level = this.levels.get(sub) || 'edit'
+            if (level === 'none') throw httpError(403, 'refused')
+            const until = this.until.get(sub)
+            return { status: 200, data: { canEdit: level === 'edit' || level === 'full', ...(until ? { until } : {}) } }
         }
         if (path === '/docColab/updateDoc' || path === '/boardColab/updateBoard') this.saveAttempts++
         if (path === '/docColab/updateDoc') {

@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
+	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
 	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -83,6 +84,8 @@ var (
 	}
 	moveLinks   = guestModel.HandOverLinks
 	revokeLinks = guestModel.RevokeLiveByPerson
+	// endSessions closes the live views guests opened by links turned off.
+	endSessions = guestBusiness.EndLiveSessions
 )
 
 // List is the people who left with docs or live links still under their
@@ -194,7 +197,8 @@ func HandOver(ctx context.Context, admin accessBusiness.Subject, from, to uuid.U
 }
 
 // TurnOffLinks revokes every live link and published page a person who left
-// made or published, and answers how many.
+// made or published, and answers how many. A guest with one open on a doc or
+// board loses it at once.
 func TurnOffLinks(ctx context.Context, admin accessBusiness.Subject, who uuid.UUID) (int, error) {
 	if !admin.ActingAdmin() {
 		return 0, ErrNotAdmin
@@ -206,8 +210,12 @@ func TurnOffLinks(ctx context.Context, admin accessBusiness.Subject, who uuid.UU
 	if gone == nil {
 		return 0, ErrNotDeparted
 	}
-	n, err := revokeLinks(ctx, who)
-	return int(n), err
+	ids, err := revokeLinks(ctx, who)
+	if err != nil {
+		return 0, err
+	}
+	endSessions(ids...)
+	return len(ids), nil
 }
 
 // Summary is a person's work in words: "12 docs and 3 links". Pure.

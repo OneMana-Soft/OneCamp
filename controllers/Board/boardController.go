@@ -570,6 +570,10 @@ func UpdateBoardPermissions(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to parse boardUUID", "err": err})
 		return
 	}
+	if !helpers.AllCanonicalUUIDs(input.AddEditors, input.RemoveEditors, input.AddViewers, input.RemoveViewers, input.AddCommenters, input.RemoveCommenters) {
+		helpers.WriteBadRequest(w, "Share the board with people by their ids.")
+		return
+	}
 
 	if err := business.UpdateBoardPermissions(ctx, input, userInfo.UserDgraphInfo.Uid); err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/UpdateBoardPermissions failed err: %+v", err)

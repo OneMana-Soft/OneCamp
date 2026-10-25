@@ -14,3 +14,17 @@ func IsCanonicalUUID(s string) bool {
 	id, err := uuid.Parse(s)
 	return err == nil && id.String() == strings.ToLower(s)
 }
+
+// AllCanonicalUUIDs says whether every id in the lists is a canonical uuid
+// ("" names no one and is let through), as a request naming people by their
+// uuids must be before it is acted on.
+func AllCanonicalUUIDs(lists ...[]string) bool {
+	for _, ids := range lists {
+		for _, id := range ids {
+			if id != "" && !IsCanonicalUUID(id) {
+				return false
+			}
+		}
+	}
+	return true
+}

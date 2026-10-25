@@ -9,8 +9,9 @@ import (
 // private; for a private one, its creator and the people it's shared with;
 // nobody, once it is deleted. Opening a board, joining its live canvas,
 // recording a view of it and its live updates all ask this. Only a board
-// read with board_deleted_at can be seen to be deleted (ReadableBoardsFor
-// reads it); one read without it reads as live.
+// read with board_deleted_at can be seen to be deleted (ReadableBoardsFor,
+// GetBoardByBoardUUID and GetBasicBoardByUUID read it); one read without it
+// reads as live.
 func CanRead(board *dgraphStruct.DgraphBoard, userUUID string) bool {
 	if board == nil || isDeleted(board) {
 		return false

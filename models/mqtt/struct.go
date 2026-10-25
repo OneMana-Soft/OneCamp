@@ -92,9 +92,11 @@ const (
 	// A conversation became the person's, or stopped being theirs
 	// (MqttConversationAccess): a DM or group chat started or joined, a
 	// channel made, joined or added to; removed from a channel, or left it.
-	// Sent on the person's own activity topic, the one topic a client holds
-	// from the start: an open app fetches its topics again and subscribes to
-	// the new conversation's, or lets the old one's go, without reconnecting.
+	// Taken off a project, or off a team with its projects, the same way: the
+	// settings name a project's topic as they do a conversation's. Sent on the
+	// person's own activity topic, the one topic a client holds from the
+	// start: an open app fetches its topics again and subscribes to the new
+	// conversation's, or lets the old one go, without reconnecting.
 	MESSAGE_CONVERSATION_ACCESS
 	// The desktop app should raise a native notification (MqttDesktopNotice):
 	// sent on the recipient's own activity topic by business/Notification's
@@ -145,12 +147,16 @@ type MqttInvitationAccepted struct {
 	UserID string `json:"user_id"`
 }
 
-// What MESSAGE_CONVERSATION_ACCESS says: which kind of conversation, and
-// whether it was added or dropped.
+// What MESSAGE_CONVERSATION_ACCESS says: which kind of conversation, or a
+// project or team, and whether it was added or dropped.
 const (
 	CONVERSATION_KIND_CHANNEL = "channel"
 	CONVERSATION_KIND_DM      = "dm"
 	CONVERSATION_KIND_GROUP   = "group"
+	// A project's topic is in the settings as a conversation's is. A team is
+	// only ever dropped: taken off a team, a person leaves its projects.
+	ACCESS_KIND_PROJECT = "project"
+	ACCESS_KIND_TEAM    = "team"
 
 	CONVERSATION_ADDED   = "added"
 	CONVERSATION_DROPPED = "dropped"
@@ -380,9 +386,9 @@ type MqttChatSeen struct {
 }
 
 // MqttConversationAccess says a conversation became the person's it's sent
-// to, or stopped being theirs: Kind is a CONVERSATION_KIND_*, Id the
-// channel's uuid or the chat's grouping id, Change CONVERSATION_ADDED or
-// CONVERSATION_DROPPED.
+// to, or stopped being theirs: Kind is a CONVERSATION_KIND_* or an
+// ACCESS_KIND_*, Id the channel's uuid, the chat's grouping id, or the
+// project's or team's uuid, Change CONVERSATION_ADDED or CONVERSATION_DROPPED.
 type MqttConversationAccess struct {
 	Kind   string `json:"kind"`
 	Id     string `json:"id"`

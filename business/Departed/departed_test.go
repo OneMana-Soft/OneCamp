@@ -34,6 +34,7 @@ type world struct {
 	toldWho   [][]notificationBusiness.NoticeRecipient
 	counted   [][]uuid.UUID // who each count read was asked about
 	rooms     map[uuid.UUID]int
+	ended     []uuid.UUID // links whose guests' live views were closed
 }
 
 func newWorld(t *testing.T) *world {
@@ -44,7 +45,7 @@ func newWorld(t *testing.T) *world {
 		rooms:  map[uuid.UUID]int{dana: 1},
 		broken: map[string]bool{},
 	}
-	prev := []any{departedPeople, departedOne, activeMember, docsOwned, linkCounts, names, recoverDoc, moveLinks, revokeLinks, adminUsers, tell, activeAdmin, docCounts}
+	prev := []any{departedPeople, departedOne, activeMember, docsOwned, linkCounts, names, recoverDoc, moveLinks, revokeLinks, adminUsers, tell, activeAdmin, docCounts, endSessions}
 	t.Cleanup(func() {
 		departedPeople = prev[0].(func(context.Context, int) ([]departedModel.Person, error))
 		departedOne = prev[1].(func(context.Context, uuid.UUID) (*departedModel.Person, error))
@@ -54,11 +55,12 @@ func newWorld(t *testing.T) *world {
 		names = prev[5].(func(context.Context, []string) (map[string]string, error))
 		recoverDoc = prev[6].(func(context.Context, accessBusiness.Subject, string, string) error)
 		moveLinks = prev[7].(func(context.Context, uuid.UUID, uuid.UUID) (int64, int64, error))
-		revokeLinks = prev[8].(func(context.Context, uuid.UUID) (int64, error))
+		revokeLinks = prev[8].(func(context.Context, uuid.UUID) ([]uuid.UUID, error))
 		adminUsers = prev[9].(func(context.Context) ([]*userModel.User, error))
 		tell = prev[10].(func(context.Context, notificationBusiness.Notice, []notificationBusiness.NoticeRecipient) []string)
 		activeAdmin = prev[11].(func(context.Context, string) bool)
 		docCounts = prev[12].(func(context.Context, []uuid.UUID) (map[string]int, error))
+		endSessions = prev[13].(func(...uuid.UUID))
 	})
 	left := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
 	people := []departedModel.Person{
@@ -128,11 +130,15 @@ func newWorld(t *testing.T) *world {
 		delete(w.links, from)
 		return int64(n), int64(w.rooms[from]), nil
 	}
-	revokeLinks = func(_ context.Context, id uuid.UUID) (int64, error) {
-		n := w.links[id]
+	revokeLinks = func(_ context.Context, id uuid.UUID) ([]uuid.UUID, error) {
+		ids := make([]uuid.UUID, w.links[id])
+		for i := range ids {
+			ids[i] = uuid.New()
+		}
 		delete(w.links, id)
-		return int64(n), nil
+		return ids, nil
 	}
+	endSessions = func(ids ...uuid.UUID) { w.ended = append(w.ended, ids...) }
 	adminUsers = func(context.Context) ([]*userModel.User, error) {
 		return []*userModel.User{{Id: uuid.MustParse(admin.UserUUID), EmailID: "akash@acme.test"}, {Id: cast, EmailID: "lead" + helpers.DemoCastEmailDomain}}, nil
 	}
@@ -209,7 +215,8 @@ func TestAHandoverLeavesADocItCantMove(t *testing.T) {
 	}
 }
 
-// Turning their links off revokes them all; for an admin, for someone who left.
+// Turning their links off revokes them all, and closes the live view of any
+// guest with one open; for an admin, for someone who left.
 func TestTurningTheirLinksOff(t *testing.T) {
 	w := newWorld(t)
 	if _, err := TurnOffLinks(context.Background(), accessBusiness.Subject{Admin: false}, dana); !errors.Is(err, ErrNotAdmin) {
@@ -218,8 +225,14 @@ func TestTurningTheirLinksOff(t *testing.T) {
 	if _, err := TurnOffLinks(context.Background(), admin, maya); !errors.Is(err, ErrNotDeparted) {
 		t.Fatal(err)
 	}
+	if len(w.ended) != 0 {
+		t.Fatalf("a refused turn-off closed %d guests' views", len(w.ended))
+	}
 	if n, err := TurnOffLinks(context.Background(), admin, dana); err != nil || n != 2 || w.links[dana] != 0 {
 		t.Fatalf("%d %v", n, err)
+	}
+	if len(w.ended) != 2 {
+		t.Fatalf("turning off 2 links closed the guests' views of %d", len(w.ended))
 	}
 }
 

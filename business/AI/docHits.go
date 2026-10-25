@@ -74,8 +74,7 @@ var readDocFor = func(ctx context.Context, docUUID, userUID string) (*dgraphStru
 
 // readableBoards answers which of the boards a person (by uuid) may read now,
 // a deleted board being readable by nobody: boardBusiness.ReadableBoardsFor
-// reads each board's deletion, which its basic read (GetBasicBoardByUUID, used
-// here before) leaves out. A seam for tests.
+// reads them all, deletion included, at once. A seam for tests.
 var readableBoards = boardBusiness.ReadableBoardsFor
 
 // keepReadableDocs returns the results without the hits on a doc, or on a

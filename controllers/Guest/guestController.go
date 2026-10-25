@@ -574,7 +574,8 @@ func GuestDocColabAuthorize(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid request body"})
 		return
 	}
-	if _, err := guestBusiness.AuthorizeGuestCollab(ctx, bearer, "doc", body.DocUUID); err != nil {
+	g, err := guestBusiness.AuthorizeGuestCollab(ctx, bearer, "doc", body.DocUUID)
+	if err != nil {
 		// A doc deleted since the link was made is gone for the guest too.
 		if errors.Is(err, guestBusiness.ErrNotFound) {
 			notAvailable(w)
@@ -583,7 +584,18 @@ func GuestDocColabAuthorize(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteUnauthorized(w)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Authorised", "canEdit": false})
+	helpers.WriteJSON(w, http.StatusOK, guestAuthorised(ctx, g))
+}
+
+// guestAuthorised is the answer to a guest's authorisation: read-only, and
+// until when the link stops working, so the collaboration service closes the
+// socket then (live/ops/reauth.js closeWhenLinkEnds).
+func guestAuthorised(ctx context.Context, g *guestModel.GuestGrant) helpers.Envolope {
+	out := helpers.Envolope{"msg": "Authorised", "canEdit": false}
+	if end := guestBusiness.LinkEnds(ctx, g); end != nil {
+		out["until"] = end.UTC()
+	}
+	return out
 }
 
 // GuestBoardColabAuthorize POST /boardColab/guestAuthorize — board variant.
@@ -598,11 +610,12 @@ func GuestBoardColabAuthorize(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Invalid request body"})
 		return
 	}
-	if _, err := guestBusiness.AuthorizeGuestCollab(ctx, bearer, "board", body.BoardUUID); err != nil {
+	g, err := guestBusiness.AuthorizeGuestCollab(ctx, bearer, "board", body.BoardUUID)
+	if err != nil {
 		helpers.WriteUnauthorized(w)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Authorised", "canEdit": false})
+	helpers.WriteJSON(w, http.StatusOK, guestAuthorised(ctx, g))
 }
 
 // GuestBoardAttachment GET /guest/board-attachment/{token}/{obj_uuid} — public.
@@ -1164,7 +1177,7 @@ func RevokeResourceGuestLink(w http.ResponseWriter, r *http.Request) {
 	if g.CreatedBy != userInfo.UserPostgresInfo.Id && !mayShare(w, r, userInfo, g.ResourceType, g.ResourceID, false) {
 		return
 	}
-	if err := guestModel.Revoke(r.Context(), id); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := guestBusiness.RevokeGrant(r.Context(), id); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't turn the link off. Try again."})
 		return
 	}

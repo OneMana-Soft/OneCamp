@@ -87,8 +87,8 @@ type GuestCollabClaims struct {
 // model's liveSQL says. Lowering the cap stops older links at once; raising
 // it brings them back, since nothing is written.
 func grantExpired(ctx context.Context, g *guestModel.GuestGrant) bool {
-	now := time.Now()
-	return (g.ExpiresAt != nil && !g.ExpiresAt.After(now)) || pastCap(ctx, g, now)
+	end := LinkEnds(ctx, g)
+	return end != nil && !end.After(time.Now())
 }
 
 // CreateResourceGrant mints a scoped, expiring grant for a doc/board/table.
@@ -370,7 +370,7 @@ func IssueGuestCollabToken(ctx context.Context, grant *guestModel.GuestGrant, di
 	claims := jwt.MapClaims{
 		// `sub` lives in the reserved guest namespace so it can never collide
 		// with a member UUID identity in the collab awareness layer.
-		"sub":   "guest-" + grant.Id.String(),
+		"sub":   collabIdentity(grant.Id),
 		"name":  "Guest: " + name,
 		"guest": true,
 		"gid":   grant.Id.String(),
