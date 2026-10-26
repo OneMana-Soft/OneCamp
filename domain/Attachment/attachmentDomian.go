@@ -149,6 +149,26 @@ func UpdateAttachmentDeletedTimeByUUID(ctx context.Context, attachmentUUID uuid.
 	return
 }
 
+// scanAttachment reads a file's row, as its id, storage key, place, maker and
+// times are selected in that order.
+func scanAttachment(r pgexec.Row) (*models.Attachment, error) {
+	var a models.Attachment
+	var createdAt, deletedAt sql.NullTime
+	err := r.Scan(&a.Uuid, &a.ObjKey, &a.SrcKey, &a.SrcValue, &a.CreatedBy, &createdAt, &deletedAt)
+	a.CreatedAt, a.DeletedAt = createdAt.Time, deletedAt.Time
+	return &a, err
+}
+
+// ImportKeptFile is the file with id when an import keeps it under a task or
+// under a comment (business/Import attachment_worker, src_key "task" or
+// "comment"): its row, and false, with no error, when there is none.
+func ImportKeptFile(ctx context.Context, id uuid.UUID) (*models.Attachment, bool, error) {
+	return pgexec.QueryOne(ctx, `
+		SELECT id, obj_key, src_key, src_value, created_by, created_at, deleted_at
+		FROM attachments
+		WHERE id = $1 AND src_key IN ($2, $3)`, scanAttachment, id, postgressStruct.ATTACHMENT_SRC_TASK, postgressStruct.ATTACHMENT_SRC_COMMENT)
+}
+
 // AttachmentsOfPlace is the files with these ids kept at this place (src_key
 // and src_value), live or not, by id: one statement for an agent's images,
 // where each was one (backend audit U2a).
@@ -160,13 +180,7 @@ func AttachmentsOfPlace(ctx context.Context, ids []string, srcKey, srcValue stri
 	rows, err := pgexec.Query(ctx, `
 		SELECT id, obj_key, src_key, src_value, created_by, created_at, deleted_at
 		FROM attachments
-		WHERE id = ANY($1::uuid[]) AND src_key = $2 AND src_value = $3`, func(r pgexec.Row) (*models.Attachment, error) {
-		var a models.Attachment
-		var createdAt, deletedAt sql.NullTime
-		err := r.Scan(&a.Uuid, &a.ObjKey, &a.SrcKey, &a.SrcValue, &a.CreatedBy, &createdAt, &deletedAt)
-		a.CreatedAt, a.DeletedAt = createdAt.Time, deletedAt.Time
-		return &a, err
-	}, pq.Array(ids), srcKey, srcValue)
+		WHERE id = ANY($1::uuid[]) AND src_key = $2 AND src_value = $3`, scanAttachment, pq.Array(ids), srcKey, srcValue)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/AttachmentsOfPlace err: %+v", err)
 		return nil, err

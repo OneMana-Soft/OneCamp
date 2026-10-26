@@ -5,9 +5,12 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/google/uuid"
+
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	"github.com/akashc777/OneCamp/helpers"
 	postgresStruct "github.com/akashc777/OneCamp/models/postgres"
+	attachmentModels "github.com/akashc777/OneCamp/models/postgres/Attachment"
 )
 
 const (
@@ -177,8 +180,9 @@ func TestAProjectsFileOnATaskKeptFromSomeoneIsntThereForThem(t *testing.T) {
 	const keptFile, openFile = "77777777-7777-4777-8777-777777777777", "88888888-8888-4888-8888-888888888888"
 	asked := 0
 	s := fake()
-	s.keepsTaskFile = func(_ context.Context, userUUID, fileID string) (bool, error) {
+	s.keepsTaskFile = func(_ context.Context, userUUID string, file *attachmentModels.Attachment) (bool, error) {
 		asked++
+		fileID := file.Uuid.String()
 		if fileID == broken {
 			return false, errGraph
 		}
@@ -197,18 +201,23 @@ func TestAProjectsFileOnATaskKeptFromSomeoneIsntThereForThem(t *testing.T) {
 		{"a file of a task open to the project, to ben", ben, openFile, nil},
 		{"a file the graph couldn't answer for", ben, broken, errGraph},
 	} {
-		if got := s.taskFile(ctx, c.who, project, c.file); !errors.Is(got, c.want) || (c.want == nil && got != nil) {
+		if got := s.taskFile(ctx, c.who, project, fileOf(c.file)); !errors.Is(got, c.want) || (c.want == nil && got != nil) {
 			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
 	}
 	asked = 0
 	for _, kind := range []string{postgresStruct.ATTACHMENT_SRC_CHANNEL, postgresStruct.ATTACHMENT_SRC_CHAT, postgresStruct.ATTACHMENT_SRC_GRP_CHAT,
 		postgresStruct.ATTACHMENT_SRC_DOC, postgresStruct.ATTACHMENT_SRC_BOARD, postgresStruct.ATTACHMENT_SRC_PUBLIC} {
-		if got := s.taskFile(ctx, ben, Place{Kind: kind, ID: mine}, keptFile); got != nil {
+		if got := s.taskFile(ctx, ben, Place{Kind: kind, ID: mine}, fileOf(keptFile)); got != nil {
 			t.Errorf("a %s's file: %v, want nil", kind, got)
 		}
 	}
 	if asked != 0 {
 		t.Errorf("files of places that aren't projects asked about tasks %d times", asked)
 	}
+}
+
+// fileOf is a project's file row with id, as FileOf answers it.
+func fileOf(id string) *attachmentModels.Attachment {
+	return &attachmentModels.Attachment{Uuid: uuid.MustParse(id), SrcKey: postgresStruct.ATTACHMENT_SRC_PROJECT, SrcValue: mine}
 }

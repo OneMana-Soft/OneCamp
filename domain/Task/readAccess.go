@@ -10,6 +10,7 @@ import (
 	"github.com/akashc777/OneCamp/models/dgexec"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Task"
+	postgresStruct "github.com/akashc777/OneCamp/models/postgres"
 	"github.com/google/uuid"
 )
 
@@ -153,4 +154,33 @@ func AnyHoldsFile(ctx context.Context, taskUUIDs []string, fileUUID string) (boo
 		return false, err
 	}
 	return len(held.Own) > 0 || len(held.OnComment) > 0, nil
+}
+
+// FileHolder is the task, and its project, of what an import keeps a file
+// under (business/Import attachment_worker: src_key "task", or "comment" for
+// a comment's file): the task itself, or the comment's task. Both "" when the
+// graph holds no such task or comment, the comment was deleted (a file an
+// import kept under it went with it), or kind is another place's; the
+// project "" when the task is in none. For whose file it is and who may have
+// it (business/FileAccess importKeptFile and keepsTaskFile): the import's row
+// names the holder whether or not the graph links the holder to the file.
+func FileHolder(ctx context.Context, kind, holderUUID string) (task, project string, err error) {
+	id, perr := uuid.Parse(holderUUID)
+	query := map[string]string{
+		postgresStruct.ATTACHMENT_SRC_TASK: `query Holder($id: string) {
+			h(func: eq(task_uuid, $id)) @normalize { task: task_uuid task_project { project: project_uuid } } }`,
+		postgresStruct.ATTACHMENT_SRC_COMMENT: `query Holder($id: string) {
+			h(func: eq(comment_uuid, $id)) @filter(` + dgraphquery.Live("comment_deleted_at") + `) @normalize { comment_task { task: task_uuid task_project { project: project_uuid } } } }`,
+	}[kind]
+	if perr != nil || query == "" {
+		return "", "", nil
+	}
+	held, err := dgexec.List[struct {
+		Task    string `json:"task"`
+		Project string `json:"project"`
+	}](ctx, query, map[string]string{"$id": id.String()}, "h")
+	if err != nil || len(held) == 0 {
+		return "", "", err
+	}
+	return held[0].Task, held[0].Project, nil
 }

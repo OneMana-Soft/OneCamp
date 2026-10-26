@@ -33,6 +33,7 @@ import (
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
+	attachmentDomain "github.com/akashc777/OneCamp/domain/Attachment"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
@@ -100,7 +101,8 @@ func MayAdd(ctx context.Context, userUUID string, place Place) error {
 
 // ReadFile is the file with id (its attachments row) for the person, as a
 // file of place: MayRead's answer when they may not have the place's files,
-// and ErrNoSuchFile when the file isn't the place's (FileOf) or is on a task
+// and ErrNoSuchFile when the file isn't the place's or was taken off it
+// (FileOf), or is on a task
 // kept from them (taskFile).
 func ReadFile(ctx context.Context, userUUID string, place Place, id string) (*attachmentModels.Attachment, error) {
 	if err := MayRead(ctx, userUUID, place); err != nil {
@@ -110,7 +112,7 @@ func ReadFile(ctx context.Context, userUUID string, place Place, id string) (*at
 	if err != nil {
 		return nil, err
 	}
-	if err := live.taskFile(ctx, userUUID, place, att.Uuid.String()); err != nil {
+	if err := live.taskFile(ctx, userUUID, place, att); err != nil {
 		return nil, err
 	}
 	return att, nil
@@ -122,11 +124,11 @@ func ReadFile(ctx context.Context, userUUID string, place Place, id string) (*at
 // task kept from the person (restricted, and not to them) is ErrNoSuchFile,
 // the answer a file that isn't there gets, which says nothing of the task.
 // Any other place's file is no task's.
-func (s sources) taskFile(ctx context.Context, userUUID string, place Place, fileID string) error {
+func (s sources) taskFile(ctx context.Context, userUUID string, place Place, file *attachmentModels.Attachment) error {
 	if place.Kind != postgresStruct.ATTACHMENT_SRC_PROJECT {
 		return nil
 	}
-	kept, err := s.keepsTaskFile(ctx, userUUID, fileID)
+	kept, err := s.keepsTaskFile(ctx, userUUID, file)
 	switch {
 	case err != nil:
 		return err
@@ -140,17 +142,55 @@ func (s sources) taskFile(ctx context.Context, userUUID string, place Place, fil
 // at upload, names the place. It decides nothing about who is asking. A file
 // is reached through its place, never by an id or a storage key alone: the
 // files a message lists are written as its sender sent them, and could name
-// any file.
+// any file. A project's files include those an import keeps under one of its
+// tasks (importKeptFile).
 func FileOf(ctx context.Context, place Place, id string) (*attachmentModels.Attachment, error) {
-	if _, err := uuid.Parse(id); err != nil {
+	fileID, err := uuid.Parse(id)
+	if err != nil {
 		return nil, ErrNoSuchFile
 	}
 	att, err := attachmentBusiness.GetAttachmentByObjUUID(ctx, id, place.Kind)
+	if errors.Is(err, sql.ErrNoRows) && place.Kind == postgresStruct.ATTACHMENT_SRC_PROJECT {
+		return importKeptFile(ctx, place.ID, fileID)
+	}
 	switch {
-	case errors.Is(err, sql.ErrNoRows), err == nil && (att == nil || att.SrcValue != place.ID || att.ObjKey == ""):
+	case errors.Is(err, sql.ErrNoRows), err == nil && (!stored(att) || att.SrcValue != place.ID):
 		return nil, ErrNoSuchFile
 	case err != nil:
 		return nil, err
+	}
+	return att, nil
+}
+
+// stored is whether a file's row names a file that is there: one with its
+// stored object, not taken off its place. Taking a file off a task or a
+// project stamps its row deleted (ArchiveAttachmentByAttachmentUUID) and the
+// purge removes it later; until then it is no such file to every read by id
+// (FileOf, importKeptFile, FilesOf).
+func stored(att *attachmentModels.Attachment) bool {
+	return att != nil && att.ObjKey != "" && !helpers.IsSoftDeleted(&att.DeletedAt)
+}
+
+// importKeptFile is the file with id when an import keeps it under one of the
+// project's tasks, or under a comment on one (business/Import
+// attachment_worker): the app opens every file a task shows through the
+// task's project, so these are the project's files too, and ReadFile asks the
+// task about them as it does about any project's file. ErrNoSuchFile when it
+// is no such file.
+func importKeptFile(ctx context.Context, projectID string, id uuid.UUID) (*attachmentModels.Attachment, error) {
+	att, found, err := attachmentDomain.ImportKeptFile(ctx, id)
+	switch {
+	case err != nil:
+		return nil, err
+	case !found || !stored(att):
+		return nil, ErrNoSuchFile
+	}
+	_, project, err := taskDomain.FileHolder(ctx, att.SrcKey, att.SrcValue)
+	switch {
+	case err != nil:
+		return nil, err
+	case project != projectID:
+		return nil, ErrNoSuchFile
 	}
 	return att, nil
 }
@@ -169,7 +209,7 @@ func FilesOf(ctx context.Context, place Place, ids []string) (map[string]*attach
 		return nil, err
 	}
 	for id, att := range found {
-		if att == nil || att.ObjKey == "" {
+		if !stored(att) {
 			delete(found, id)
 		}
 	}
@@ -189,7 +229,7 @@ type sources struct {
 	addsToDoc     func(ctx context.Context, userUUID, docID string) error
 	// keepsTaskFile is whether the file is on a task kept from the person,
 	// as its own or on one of its comments.
-	keepsTaskFile func(ctx context.Context, userUUID, fileID string) (bool, error)
+	keepsTaskFile func(ctx context.Context, userUUID string, file *attachmentModels.Attachment) (bool, error)
 }
 
 var live = sources{
@@ -212,13 +252,23 @@ var live = sources{
 // keepsTaskFile is whether the file is on one of the tasks kept from the
 // person (models/taskread, as Work Access decides them: restricted, and not
 // to them, or below one that is), as its own or on one of its comments.
-// Nothing is read of the files when nothing is kept from them.
-func keepsTaskFile(ctx context.Context, userUUID, fileID string) (bool, error) {
+// Nothing is read of the files when nothing is kept from them. A file an
+// import keeps under a task or a comment is the holder's its row names
+// (domain/Task FileHolder), whatever the graph links to it; any other is the
+// task's or the comment's the graph links it to.
+func keepsTaskFile(ctx context.Context, userUUID string, file *attachmentModels.Attachment) (bool, error) {
 	kept, err := taskread.For(ctx, userUUID)
 	if err != nil || kept.Empty() {
 		return false, err
 	}
-	return taskDomain.AnyHoldsFile(ctx, kept.IDs(), fileID)
+	task, _, err := taskDomain.FileHolder(ctx, file.SrcKey, file.SrcValue)
+	switch {
+	case err != nil:
+		return false, err
+	case kept.Hides(task):
+		return true, nil
+	}
+	return taskDomain.AnyHoldsFile(ctx, kept.IDs(), file.Uuid.String())
 }
 
 func (s sources) mayRead(ctx context.Context, userUUID string, p Place) error {
