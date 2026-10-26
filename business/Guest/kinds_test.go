@@ -117,11 +117,11 @@ func TestAnAddressAnswersByItsKindsSwitch(t *testing.T) {
 	slug := "dana-room"
 	room := &guestModel.GuestGrant{ResourceType: guestModel.ResourceMeeting, Slug: &slug, Capability: guestModel.CapabilityJoin, CreatedAt: time.Now()}
 	page := &guestModel.GuestGrant{ResourceType: guestModel.ResourceDoc, Slug: &slug, Capability: guestModel.CapabilityView, CreatedAt: time.Now()}
-	prevSlug, prevGuest, prevPub, prevRooms, prevLive := grantBySlug, guestOn, publishOn, roomsOn, docLive
+	prevSlug, prevGuest, prevPub, prevRooms, prevLive := grantBySlug, guestOn, publishOn, roomsOn, grantLive
 	t.Cleanup(func() {
-		grantBySlug, guestOn, publishOn, roomsOn, docLive = prevSlug, prevGuest, prevPub, prevRooms, prevLive
+		grantBySlug, guestOn, publishOn, roomsOn, grantLive = prevSlug, prevGuest, prevPub, prevRooms, prevLive
 	})
-	docLive = func(context.Context, *guestModel.GuestGrant) error { return nil }
+	grantLive = func(context.Context, *guestModel.GuestGrant) error { return nil }
 	for _, c := range []struct {
 		name                string
 		g                   *guestModel.GuestGrant

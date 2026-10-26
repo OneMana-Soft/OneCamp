@@ -93,6 +93,15 @@ type SourceTask struct {
 	Fields          []SourceFieldValue // custom field values (fields.go)
 	Dependencies    []SourceDependency // the tasks this one waits on
 	Metadata        map[string]any     // source URL, etc.
+	// Restricted is why the source keeps the task to some of its people, as
+	// the import's report says it ("" is a task everyone in its project may
+	// see). It comes in restricted (WA2), never readable more widely here
+	// than there: business/Import restricted.go.
+	Restricted string
+	// Audience are the people (source ids) the source lets see a restricted
+	// task besides its assignee, such as Jira's reporter. Its creator isn't
+	// one for having made it.
+	Audience []string
 }
 
 // SourceDependency is a task this one waits on: by its source id, how it
@@ -125,6 +134,11 @@ type SourceComment struct {
 	Created        time.Time
 	AttachmentRefs []SourceAttachment
 	IsSystem       bool // Asana stories, Jira changelog entries, etc.
+	// Restricted is why the source keeps the comment from some of the people
+	// who see its task, as the import's report says it ("" is a comment
+	// everyone who sees its task may see). It stays in the source: the report
+	// counts it on its task, without its text (restricted.go).
+	Restricted string
 }
 
 // SourceAttachment describes one file referenced from a parent task or

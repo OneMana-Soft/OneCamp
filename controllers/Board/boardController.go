@@ -193,6 +193,19 @@ func GetBoardForCollab(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	boardUUIDString := chi.URLParam(r, "board_uuid")
 
+	// A deleted board opens to nobody, so the service seeds no document from
+	// it, whoever's socket asked: a member's or a guest's.
+	live, err := business.Live(ctx, boardUUIDString)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/GetBoardForCollab couldn't tell whether board %s is live err: %+v", boardUUIDString, err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Failed to get board info"})
+		return
+	}
+	if !live {
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "There's no such board."})
+		return
+	}
+
 	dgraphBoard, err := business.GetSystemBoardByUUID(ctx, boardUUIDString)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetBoardForCollab Failed to get board err: %+v", err)

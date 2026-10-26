@@ -13,6 +13,9 @@
 # target is read once (writerFor), each emoji and each person once a pass (cached), and each reaction is one write by Reaction's rule.
 # 24 Oct 2026, CHAT-LEAD-22: a share reads which files a page of its source conversation's messages
 # holds in one read (= ANY over the page's file ids, keepConversationFiles), once a page of sharePageSize.
+# 22 Oct 2026: Linear's issue lists page from the issue itself after their first page
+# (a cursor per page; only issues with more than the first page ask, since one query with every list was over
+# Linear's complexity cap). They are Linear's API calls, a page at a time by nature, not store reads.
 business/AI/aiBusiness.go :: RunAgentReadLoop :: ai.ChatWithRescue
 business/AI/aiConfigBusiness.go :: SetModelRouting :: aiModels.GetAuthorizedModelByProviderModel
 business/AI/briefing.go :: GetBriefing :: userBusiness.GetAutomationBot
@@ -500,9 +503,11 @@ business/Import/providers/jira/provider.go :: listProjects :: .getJSON
 business/Import/providers/jira/provider.go :: listUsers :: .getJSON
 business/Import/providers/jira/provider.go :: searchIssues :: .getJSON
 business/Import/providers/jira/provider.go :: usersInScope :: .getJSON
+business/Import/providers/linear/pages.go :: issuePages :: .gql
 business/Import/providers/linear/provider.go :: buildSnapshot :: .fetchTeamIssues
 business/Import/providers/linear/provider.go :: fetchProjects :: .gql
 business/Import/providers/linear/provider.go :: fetchTeamIssues :: .gql
+business/Import/providers/linear/provider.go :: fetchTeamIssues :: .restOfIssue
 business/Import/providers/linear/provider.go :: fetchTeams :: .gql
 business/Import/providers/linear/provider.go :: fetchUsers :: .gql
 business/Import/providers/monday/client.go :: gql :: .gqlOnce
@@ -805,3 +810,6 @@ business/DemoSeed/demoSeed.go :: archiveByName :: channelBusiness.GetBasicDgraph
 business/DemoSeed/demoSeed.go :: archiveByName :: channelBusiness.UpdateChannelInfo
 business/DemoSeed/demoSeed.go :: cast :: userDomain.GetDgraphUserInfoByUUID
 business/DemoSeed/demoSeed.go :: cast :: userDomain.GetUserByEmailId
+# 25 Oct 2026, PROJ-LEAD-33 (importer fix markers): a starting server claims each importer fix's moment once,
+# a fixed list of four keys (business/Import importFixes), each one insert that does nothing when the key is held.
+business/Import/importFixes.go :: ClaimImportFixes :: configModel.Claim

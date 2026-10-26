@@ -65,13 +65,19 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 
 	committed := 0
 	pendingChunks := make([]*importModels.Chunk, 0, 64)
+	var notes []importModels.ImportError // the tasks' report lines, written with their chunks
 
 	flush := func() {
-		if len(pendingChunks) == 0 {
+		if len(pendingChunks) == 0 && len(notes) == 0 {
 			return
 		}
 		bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		importModels.LogImportErrors(bg, job.Id, &chunk.Id, notes)
+		notes = notes[:0]
+		if len(pendingChunks) == 0 {
+			return
+		}
 		if err := importModels.CreateChunks(bg, pendingChunks); err != nil {
 			helpers.LogWarnWithContext(ctx,
 				"task_worker.flush chunks insert failed batch=%d err=%+v",
@@ -104,7 +110,7 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 			if st.ParentTaskID == "" {
 				if err := importOneTask(ctx, job, &st, projectUUID, projectInfo,
 					statusMap, priorityMap, defaultStatus, defaultPriority,
-					importingUser, fields, &pendingChunks, who); err != nil {
+					importingUser, fields, &pendingChunks, &notes, who); err != nil {
 					importModels.LogImportError(ctx, job.Id, &chunk.Id,
 						importModels.EntityTask, st.SourceID,
 						importModels.SeverityError, "TASK_IMPORT_FAILED",
@@ -135,13 +141,14 @@ func processTaskChunk(ctx context.Context, prov importProvider.Provider,
 
 // importOneTask creates exactly one task in OneCamp and records its
 // id_map entry. Schedules a comments chunk if hint > 0 and an
-// attachments chunk per attachment ref.
+// attachments chunk per attachment ref, and leaves its report lines in
+// notes; the chunk writes both at once.
 func importOneTask(ctx context.Context, job *importModels.Job,
 	st *importProvider.SourceTask,
 	projectUUID uuid.UUID, projectInfo *dgraphStruct.DgraphProject,
 	statusMap, priorityMap, defaultStatus, defaultPriority map[string]string,
 	importingUser *userModels.UserInfo, fields *projectFields, pendingChunks *[]*importModels.Chunk,
-	who *people,
+	notes *[]importModels.ImportError, who *people,
 ) error {
 	if existing, _ := importModels.LookupIdMapping(ctx, job.Id,
 		importModels.EntityTask, st.SourceID); existing != uuid.Nil {
@@ -192,7 +199,8 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 		updatedAt = createdAt
 	}
 
-	taskUUID, err := writeTask(ctx, job, importTaskInput{
+	why := restrictedWhy(job, st)
+	taskUUID, left, err := writeTask(ctx, job, importTaskInput{
 		ProjectUUID:     projectUUID,
 		Project:         projectInfo,
 		Creator:         creator,
@@ -208,9 +216,17 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 		UpdatedAt:       updatedAt,
 		Number:          sourceNumber(st),
 		EstimateMinutes: st.EstimateMinutes,
+		Restricted:      why,
+		People:          peopleOf(st),
+		Importer:        importingUser,
 	})
 	if err != nil {
 		return err
+	}
+	md := taskMapMetadata(st, finalStatus, finalPriority)
+	if why != "" {
+		*notes = append(*notes, restrictedNote(job, importModels.EntityTask, st.SourceID, why, left))
+		md = restrictedRecord(md, why, left)
 	}
 	// Before the task is recorded as imported: a retry skips recorded tasks.
 	fields.write(ctx, taskUUID, values)
@@ -218,7 +234,7 @@ func importOneTask(ctx context.Context, job *importModels.Job,
 	// Mapped for this import and the workspace in one statement.
 	if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 		importModels.EntityTask, st.SourceID, taskUUID, nil,
-		mustMarshal(taskMapMetadata(st, finalStatus, finalPriority)), true); err != nil {
+		mustMarshal(md), true); err != nil {
 		return err
 	}
 
@@ -276,6 +292,7 @@ type mappedTask struct {
 	TopSourceID     string    // the top-level task it is, or sits under
 	TopUUID         uuid.UUID
 	ProjectSourceID string
+	Why             string // why it came in restricted ("" when open; restricted.go)
 }
 
 // lookupMappedTask finds a source task as a task, else as a subtask; its
@@ -286,9 +303,10 @@ func lookupMappedTask(ctx context.Context, jobID uuid.UUID, src string) mappedTa
 		if md, _ := importModels.GetIdMapMetadata(ctx, jobID, importModels.EntityTask, src); len(md) > 0 {
 			var v struct {
 				ProjectSourceID string `json:"project_source_id"`
+				Restricted      string `json:"restricted"`
 			}
 			_ = json.Unmarshal(md, &v)
-			m.ProjectSourceID = v.ProjectSourceID
+			m.ProjectSourceID, m.Why = v.ProjectSourceID, v.Restricted
 		}
 		return m
 	}
@@ -299,9 +317,10 @@ func lookupMappedTask(ctx context.Context, jobID uuid.UUID, src string) mappedTa
 				ParentTaskUUID  string `json:"parent_task_uuid"`
 				ParentSourceID  string `json:"parent_source_id"`
 				ProjectSourceID string `json:"project_source_id"`
+				Restricted      string `json:"restricted"`
 			}
 			_ = json.Unmarshal(md, &v)
-			m.TopSourceID, m.ProjectSourceID = v.ParentSourceID, v.ProjectSourceID
+			m.TopSourceID, m.ProjectSourceID, m.Why = v.ParentSourceID, v.ProjectSourceID, v.Restricted
 			m.TopUUID, _ = uuid.Parse(v.ParentTaskUUID)
 		}
 		return m
@@ -374,6 +393,10 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 	if err != nil || parentDgraphTask == nil {
 		return fmt.Errorf("dgraph parent task: %w", err)
 	}
+	parentWhy, err := restrictedParent(ctx, parentUUID, parent.Why)
+	if err != nil {
+		return fmt.Errorf("the parent task's restriction: %w", err)
+	}
 
 	statusMap, _ := importModels.GetStatusMappings(ctx, job.Id)
 	priorityMap, _ := importModels.GetPriorityMappings(ctx, job.Id)
@@ -385,6 +408,14 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 	subCh, errCh := prov.IterSubtasksOfTask(ctx, job, opts, parentSrc)
 	committed := 0
 	var pending []*importModels.Chunk
+	var notes []importModels.ImportError // the sub-tasks' report lines, written at once whatever ends the chunk
+	defer func() {
+		if len(notes) > 0 {
+			bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			importModels.LogImportErrors(bg, job.Id, &chunk.Id, notes)
+		}
+	}()
 	finish := func() error {
 		// Their comments and files, as for any task.
 		if len(pending) > 0 {
@@ -440,7 +471,12 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 				createdAt = time.Now()
 			}
 			values, lost := fields.prepare(ctx, st.Fields)
-			subUUID, err := writeTask(ctx, job, importTaskInput{
+			// Under a restricted task it is restricted too, with its own people.
+			why := restrictedWhy(job, &st)
+			if why == "" {
+				why = parentWhy
+			}
+			subUUID, left, err := writeTask(ctx, job, importTaskInput{
 				ProjectUUID:     projectUUID,
 				Project:         projectInfo,
 				ParentTask:      parentDgraphTask,
@@ -456,6 +492,9 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 				CreatedAt:       createdAt,
 				UpdatedAt:       ifZeroNow(st.Updated),
 				EstimateMinutes: st.EstimateMinutes,
+				Restricted:      why,
+				People:          peopleOf(&st),
+				Importer:        importingUser,
 			})
 			if err != nil {
 				importModels.LogImportError(ctx, job.Id, &chunk.Id,
@@ -464,15 +503,20 @@ func processSubtaskChunk(ctx context.Context, prov importProvider.Provider,
 					err.Error(), nil)
 				continue
 			}
+			md := map[string]any{
+				"parent_task_uuid":  parentUUID.String(),
+				"parent_source_id":  parent.TopSourceID,
+				"project_source_id": parentProjectSrc,
+				"name":              st.Name,
+			}
+			if why != "" {
+				notes = append(notes, restrictedNote(job, importModels.EntitySubtask, st.SourceID, why, left))
+				md = restrictedRecord(md, why, left)
+			}
 			fields.write(ctx, subUUID, values)
 			_ = importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 				importModels.EntitySubtask, st.SourceID, subUUID, &parentSrc,
-				mustMarshal(map[string]any{
-					"parent_task_uuid":  parentUUID.String(),
-					"parent_source_id":  parent.TopSourceID,
-					"project_source_id": parentProjectSrc,
-					"name":              st.Name,
-				}), true)
+				mustMarshal(md), true)
 			pending = append(pending, followUpChunks(job, &st)...)
 			committed++
 		}
@@ -562,6 +606,13 @@ type importTaskInput struct {
 	ParentTask  *dgraphStruct.DgraphTask // nil for top-level
 	Creator     *userModels.UserInfo
 	Assignee    *dgraphStruct.DgraphUser
+	// Restricted is why it comes in restricted, in the report's words ("" for
+	// an open task), People who it is in its source, and Importer whoever ran
+	// the import: a restricted task's people are settled by them
+	// (restricted.go).
+	Restricted  string
+	People      sourcePeople
+	Importer    *userModels.UserInfo
 	Name        string
 	Description string
 	Status      string
@@ -593,10 +644,22 @@ type importTaskInput struct {
 //   - Same Dgraph node shape (domain.CreateOrUpdateDgraphTask)
 //   - Same OpenSearch doc shape (CreateTaskWithAttachmentsInOpensearch)
 //
-// Returns the new task UUID.
-func writeTask(ctx context.Context, job *importModels.Job, in importTaskInput) (uuid.UUID, error) {
+// Returns the new task UUID, and who of a restricted task's people in its
+// source isn't let in.
+func writeTask(ctx context.Context, job *importModels.Job, in importTaskInput) (uuid.UUID, []leftOut, error) {
 	taskUUID := uuid.New()
 	zeroUnixTime := time.Time{}
+
+	// A restricted task's people are settled first: its creator and its
+	// assignee are written with it.
+	var grants []uuid.UUID
+	var left []leftOut
+	if in.Restricted != "" {
+		var err error
+		if grants, left, err = takePart(ctx, job, &in); err != nil {
+			return uuid.Nil, nil, fmt.Errorf("the restricted task's people: %w", err)
+		}
+	}
 
 	// 1. Postgres. domain.CreateTask sets both created_at and
 	// updated_at to in.CreatedAt (the SQL is "VALUES ($1,$2,$3,$4,$4)")
@@ -606,7 +669,13 @@ func writeTask(ctx context.Context, job *importModels.Job, in importTaskInput) (
 	number, err := taskDomain.CreateTaskNumbered(ctx, taskUUID, in.ProjectUUID,
 		in.Creator.UserPostgresInfo.Id, in.CreatedAt, in.Number)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("pg create task: %w", err)
+		return uuid.Nil, nil, fmt.Errorf("pg create task: %w", err)
+	}
+	// Restricted before anything can show it: the graph and search have it next.
+	if in.Restricted != "" {
+		if err := keepRestricted(ctx, job, in, taskUUID, grants); err != nil {
+			return uuid.Nil, nil, fmt.Errorf("restrict task: %w", err)
+		}
 	}
 	// The import's project made before keys existed gets its key with its
 	// first task; the rest are numbered as they're made.
@@ -686,7 +755,7 @@ func writeTask(ctx context.Context, job *importModels.Job, in importTaskInput) (
 		}
 	}
 	if _, err := taskDomain.CreateOrUpdateDgraphTask(ctx, dgraphTask); err != nil {
-		return uuid.Nil, fmt.Errorf("dgraph task: %w", err)
+		return uuid.Nil, nil, fmt.Errorf("dgraph task: %w", err)
 	}
 
 	// 3. OpenSearch (async, best-effort).
@@ -713,5 +782,5 @@ func writeTask(ctx context.Context, job *importModels.Job, in importTaskInput) (
 		taskDomain.CreateTaskWithAttachmentsInOpensearch(osTask, nil, &in.Creator.UserDgraphInfo)
 	})
 
-	return taskUUID, nil
+	return taskUUID, left, nil
 }

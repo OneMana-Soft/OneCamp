@@ -34,6 +34,7 @@ import (
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -54,6 +55,18 @@ var (
 // errReaperOnly is used when a worker can't make progress but doesn't
 // want to bump the chunk's attempts counter.
 var errReaperOnly = errors.New("transient; let the reaper retry")
+
+// importContext is what an import's work runs in. The bulk-import flag
+// suppresses MQTT/AI/webhook fan-out for every downstream business call:
+// without it an import would publish thousands of "task_created" /
+// "comment_created" events, blast FCM, and queue thousands of webhook
+// deliveries. And it reads every task, restricted ones too
+// (taskread.WithSystem): it reads the tasks it makes to write the rest of
+// them (a sub-task's parent, a comment's task) and shows them to no one, and
+// a read with no reader would find none of the restricted ones it made.
+func importContext(ctx context.Context) context.Context {
+	return taskread.WithSystem(context.WithValue(ctx, helpers.BulkImportContextKey, true))
+}
 
 // RunImport is the orchestration entry point. The controller starts it
 // in a goroutine; this function survives the request context.
@@ -113,12 +126,7 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 	// Detached context surviving the HTTP request.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	// Bulk-import flag suppresses MQTT/AI/webhook fan-out for every
-	// downstream business call. Without this the import would publish
-	// thousands of "task_created" / "comment_created" events, blast
-	// FCM, and queue thousands of webhook deliveries.
-	ctx = context.WithValue(ctx, helpers.BulkImportContextKey, true)
+	ctx = importContext(ctx)
 
 	// Cancellation registration so CancelImport can interrupt mid-stage.
 	cancelCh := make(chan struct{})

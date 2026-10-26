@@ -58,7 +58,7 @@ func (e *PublishInvalid) Error() string { return "guest: " + e.Reason }
 // starting and ending with a letter or number (migration 350's CHECK).
 var slugShape = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$`)
 
-// Seams for tests: the grant reads and writes, and the doc.
+// Seams for tests: the grant reads and writes, and the doc or board it opens.
 var (
 	grantByHash    = guestModel.GetActiveByHash
 	grantBySlug    = guestModel.GetLiveBySlug
@@ -71,7 +71,7 @@ var (
 		}
 		return ""
 	}
-	docLive = grantedDocLive
+	grantLive = grantedLive
 	// The one switch and its one sub-option (business/Settings).
 	guestOn        = settingsBusiness.GuestAccessEnabled
 	publishOn      = settingsBusiness.GuestPublishEnabled
@@ -128,7 +128,7 @@ func ResolveExternal(ctx context.Context, ref External) (*guestModel.GuestGrant,
 	if g == nil || g.RevokedAt != nil || grantExpired(ctx, g) {
 		return nil, ErrInvalidGrant
 	}
-	if err := docLive(ctx, g); err != nil {
+	if err := grantLive(ctx, g); err != nil {
 		return nil, err
 	}
 	return g, nil
@@ -210,7 +210,7 @@ func PublishLink(ctx context.Context, by uuid.UUID, grantID uuid.UUID, in Publis
 	if g.ResourceType != guestModel.ResourceDoc || g.Capability != guestModel.CapabilityView {
 		return nil, ErrNotPublishable
 	}
-	if err := docLive(ctx, g); err != nil {
+	if err := grantLive(ctx, g); err != nil {
 		return nil, err
 	}
 

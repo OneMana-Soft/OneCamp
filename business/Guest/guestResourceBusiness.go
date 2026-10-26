@@ -312,20 +312,32 @@ func ValidateResourceGrant(ctx context.Context, rawToken, expectedType string) (
 	return g, nil
 }
 
-// grantedDocLive refuses a doc grant whose doc has been deleted (or is gone):
-// a link outlives nothing its doc doesn't, so it opens nothing, takes no
-// comment and joins no live session until the doc is restored, when it works
-// again. ErrNotFound reads to the guest as the uniform "no longer available";
-// a read that failed is kept, for the 503 their page retries.
-func grantedDocLive(ctx context.Context, g *guestModel.GuestGrant) error {
-	if g == nil || g.ResourceType != guestModel.ResourceDoc {
+// grantedLive refuses a doc or board grant whose doc or board has been deleted
+// (or is gone): a link outlives nothing it opens, so it opens nothing, takes no
+// comment and joins no live session until the doc or board is restored, when
+// it works again. ErrNotFound reads to the guest as the uniform "no longer
+// available"; a read that failed is kept, for the 503 their page retries.
+func grantedLive(ctx context.Context, g *guestModel.GuestGrant) error {
+	if g == nil {
 		return nil
 	}
-	err := docBusiness.CheckDocLive(ctx, g.ResourceID)
-	if errors.Is(err, docBusiness.ErrNotFound) || errors.Is(err, docBusiness.ErrDocDeleted) {
-		return ErrNotFound
+	switch g.ResourceType {
+	case guestModel.ResourceDoc:
+		err := docBusiness.CheckDocLive(ctx, g.ResourceID)
+		if errors.Is(err, docBusiness.ErrNotFound) || errors.Is(err, docBusiness.ErrDocDeleted) {
+			return ErrNotFound
+		}
+		return err
+	case guestModel.ResourceBoard:
+		live, err := boardBusiness.Live(ctx, g.ResourceID)
+		if err != nil {
+			return err
+		}
+		if !live {
+			return ErrNotFound
+		}
 	}
-	return err
+	return nil
 }
 
 // ValidateCollabGrant resolves a raw link token to an active grant for a LIVE
@@ -431,7 +443,7 @@ func AuthorizeGuestCollab(ctx context.Context, bearerToken, kind, resourceID str
 	}
 	// Every (re)connect, so a doc deleted while a guest has it open takes
 	// them out at their next one.
-	if err := grantedDocLive(ctx, g); err != nil {
+	if err := grantedLive(ctx, g); err != nil {
 		return nil, err
 	}
 	return g, nil

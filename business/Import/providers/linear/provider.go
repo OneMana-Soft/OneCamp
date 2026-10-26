@@ -188,7 +188,7 @@ func (p *Provider) Validate(ctx context.Context, j *importModels.Job, opts impor
 			Email string `json:"email"`
 		} `json:"viewer"`
 	}
-	if err := p.gql(ctx, tok, `query { viewer { id name email } }`, nil, &resp); err != nil {
+	if err := p.gql(ctx, tok, viewerQuery, nil, &resp); err != nil {
 		return fmt.Errorf("linear auth: %w", err)
 	}
 	if resp.Viewer.ID == "" {
@@ -419,7 +419,7 @@ func (p *Provider) IterTasksOfProject(ctx context.Context, j *importModels.Job, 
 			if ctx.Err() != nil {
 				return
 			}
-			task := p.issueToSourceTask(iss, projectSourceID)
+			task := snap.task(p, iss, projectSourceID)
 			select {
 			case <-ctx.Done():
 				return
@@ -439,10 +439,11 @@ func (p *Provider) IterSubtasksOfTask(ctx context.Context, j *importModels.Job, 
 	// The task worker turns an issue with a parent into a subtask chunk for
 	// that parent and asks for its sub-issues here; the snapshot has them.
 	// A sub-issue belongs to its own project, or to its team's inbox.
+	var snap *workspaceSnapshot
 	return importProvider.StreamTasks(ctx, "linear.IterSubtasksOfTask",
 		func() ([]linearIssue, error) {
-			snap, err := p.snapshotFor(ctx, j)
-			if err != nil {
+			var err error
+			if snap, err = p.snapshotFor(ctx, j); err != nil {
 				return nil, err
 			}
 			return snap.Issues, nil
@@ -453,7 +454,7 @@ func (p *Provider) IterSubtasksOfTask(ctx context.Context, j *importModels.Job, 
 			if project == "" {
 				project = inboxProjectIDPrefix + iss.TeamID
 			}
-			return p.issueToSourceTask(iss, project)
+			return snap.task(p, iss, project)
 		})
 }
 
@@ -540,6 +541,7 @@ type workspaceSnapshot struct {
 
 	issueByID    map[string]*linearIssue
 	teamHasInbox map[string]bool
+	keptTeams    map[string]keptTeam // by team, those Linear doesn't show everyone
 }
 
 func (s *workspaceSnapshot) IssueByID(id string) *linearIssue {
@@ -547,6 +549,46 @@ func (s *workspaceSnapshot) IssueByID(id string) *linearIssue {
 		return nil
 	}
 	return s.issueByID[id]
+}
+
+// task is iss as a task of projectID, kept to its team's members when Linear
+// doesn't show its team to everyone (SourceTask.Restricted).
+func (s *workspaceSnapshot) task(p *Provider, iss linearIssue, projectID string) importProvider.SourceTask {
+	st := p.issueToSourceTask(iss, projectID)
+	if k, kept := s.keptTeams[iss.TeamID]; kept {
+		st.Restricted, st.Audience = k.why, k.members
+	}
+	return st
+}
+
+// keptTeam is a team Linear doesn't show everyone: why, in the report's
+// words, and its members, who see its issues.
+type keptTeam struct {
+	why     string
+	members []string
+}
+
+// keptTeams are the teams whose issues Linear shows to some people only: a
+// private team's to its members, and a restricted team's (a team inside a
+// private one) to that private team's, of whom only its own members are
+// known here. A visibility this doesn't know is kept too. Their members are
+// those Linear lists first (teamsQuery's hundred): any more are left for the
+// admin to share with. Pure.
+func keptTeams(teams []linearTeam) map[string]keptTeam {
+	out := map[string]keptTeam{}
+	for _, t := range teams {
+		why := "a team that isn't public"
+		switch t.Visibility {
+		case "public":
+			continue
+		case "private":
+			why = "a private team"
+		case "restricted":
+			why = "a team inside a private team"
+		}
+		out[t.ID] = keptTeam{why: why, members: t.MemberIDs}
+	}
+	return out
 }
 
 func (s *workspaceSnapshot) TeamHasInbox(teamID string) bool {
@@ -629,6 +671,7 @@ func (p *Provider) buildSnapshot(ctx context.Context, j *importModels.Job) (*wor
 		Issues:       allIssues,
 		issueByID:    make(map[string]*linearIssue, len(allIssues)),
 		teamHasInbox: make(map[string]bool, len(teams)),
+		keptTeams:    keptTeams(teams),
 	}
 	for i := range snap.Issues {
 		snap.issueByID[snap.Issues[i].ID] = &snap.Issues[i]
@@ -657,6 +700,18 @@ func (p *Provider) snapshotFor(ctx context.Context, j *importModels.Job) (*works
 }
 
 // ─── GraphQL fetchers ─────────────────────────────────────────────
+
+// viewerQuery is the cheapest authenticated read: whose token this is.
+const viewerQuery = `query { viewer { id name email } }`
+
+// discoverQuery is what the token can see: its workspace and teams.
+const discoverQuery = `
+query {
+  organization { id name urlKey }
+  teams(first: 100) {
+    nodes { id key name description }
+  }
+}`
 
 const usersQuery = `
 query ($cursor: String) {
@@ -696,9 +751,9 @@ func (p *Provider) fetchUsers(ctx context.Context, tok string) ([]linearUser, er
 
 const teamsQuery = `
 query ($cursor: String) {
-  teams(first: 100, after: $cursor) {
+  teams(first: 50, after: $cursor) {
     nodes {
-      id key name description
+      id key name description visibility
       members(first: 100) { nodes { id } }
     }
     pageInfo { hasNextPage endCursor }
@@ -711,6 +766,7 @@ func (p *Provider) fetchTeams(ctx context.Context, tok string) ([]linearTeam, er
 		Key         string `json:"key"`
 		Name        string `json:"name"`
 		Description string `json:"description"`
+		Visibility  string `json:"visibility"`
 		Members     struct {
 			Nodes []struct {
 				ID string `json:"id"`
@@ -735,7 +791,7 @@ func (p *Provider) fetchTeams(ctx context.Context, tok string) ([]linearTeam, er
 		}
 		for _, t := range resp.Teams.Nodes {
 			lt := linearTeam{
-				ID: t.ID, Key: t.Key, Name: t.Name, Description: t.Description,
+				ID: t.ID, Key: t.Key, Name: t.Name, Description: t.Description, Visibility: t.Visibility,
 			}
 			for _, m := range t.Members.Nodes {
 				lt.MemberIDs = append(lt.MemberIDs, m.ID)
@@ -755,11 +811,12 @@ func (p *Provider) fetchTeams(ctx context.Context, tok string) ([]linearTeam, er
 
 const projectsQuery = `
 query ($cursor: String) {
-  projects(first: 100, after: $cursor) {
+  projects(first: 50, after: $cursor) {
     nodes {
-      id name description state url
-      teams { nodes { id } }
-      members { nodes { id } }
+      id name description url
+      status { type }
+      teams(first: 20) { nodes { id } }
+      members(first: 50) { nodes { id } }
     }
     pageInfo { hasNextPage endCursor }
   }
@@ -770,9 +827,13 @@ func (p *Provider) fetchProjects(ctx context.Context, tok string) ([]linearProje
 		ID          string `json:"id"`
 		Name        string `json:"name"`
 		Description string `json:"description"`
-		State       string `json:"state"`
-		URL         string `json:"url"`
-		Teams       struct {
+		// status is the project's ProjectStatus; Project.state is deprecated
+		// (schema_test.go keeps the import off deprecated fields).
+		Status struct {
+			Type string `json:"type"`
+		} `json:"status"`
+		URL   string `json:"url"`
+		Teams struct {
 			Nodes []struct {
 				ID string `json:"id"`
 			} `json:"nodes"`
@@ -802,7 +863,7 @@ func (p *Provider) fetchProjects(ctx context.Context, tok string) ([]linearProje
 		for _, pr := range resp.Projects.Nodes {
 			lp := linearProject{
 				ID: pr.ID, Name: pr.Name, Description: pr.Description,
-				State: pr.State, URL: pr.URL,
+				State: pr.Status.Type, URL: pr.URL,
 			}
 			// A Linear project can span multiple teams (rare). We pin
 			// it to the first team for the OneCamp shape; secondary
@@ -843,17 +904,17 @@ query ($teamId: String!, $cursor: String) {
         project  { id }
         estimate
         labels(first: 20) { nodes { name } }
-        inverseRelations(first: 20) { nodes { type issue { id } } }
-        comments(first: 50) {
-          nodes {
-            id body createdAt
-            user { id }
-          }
+        inverseRelations(first: 10) {
+          nodes { type issue { id } }
+          pageInfo { hasNextPage endCursor }
         }
-        attachments(first: 20) {
-          nodes {
-            id title url subtitle metadata
-          }
+        comments(first: 20) {
+          nodes { id body createdAt user { id } }
+          pageInfo { hasNextPage endCursor }
+        }
+        attachments(first: 10) {
+          nodes { id title url subtitle }
+          pageInfo { hasNextPage endCursor }
         }
       }
       pageInfo { hasNextPage endCursor }
@@ -862,20 +923,6 @@ query ($teamId: String!, $cursor: String) {
 }`
 
 func (p *Provider) fetchTeamIssues(ctx context.Context, tok, teamID string) ([]linearIssue, error) {
-	type rawComment struct {
-		ID        string    `json:"id"`
-		Body      string    `json:"body"`
-		CreatedAt time.Time `json:"createdAt"`
-		User      *struct {
-			ID string `json:"id"`
-		} `json:"user"`
-	}
-	type rawAttachment struct {
-		ID       string `json:"id"`
-		Title    string `json:"title"`
-		URL      string `json:"url"`
-		Subtitle string `json:"subtitle"`
-	}
 	type rawIssue struct {
 		ID            string     `json:"id"`
 		Identifier    string     `json:"identifier"`
@@ -917,18 +964,16 @@ func (p *Provider) fetchTeamIssues(ctx context.Context, tok, teamID string) ([]l
 		} `json:"labels"`
 		Comments struct {
 			Nodes []rawComment `json:"nodes"`
+			Page  pageInfo     `json:"pageInfo"`
 		} `json:"comments"`
 		Attachments struct {
 			Nodes []rawAttachment `json:"nodes"`
+			Page  pageInfo        `json:"pageInfo"`
 		} `json:"attachments"`
 		Estimate         *float64 `json:"estimate"`
 		InverseRelations struct {
-			Nodes []struct {
-				Type  string `json:"type"`
-				Issue *struct {
-					ID string `json:"id"`
-				} `json:"issue"`
-			} `json:"nodes"`
+			Nodes []rawRelation `json:"nodes"`
+			Page  pageInfo      `json:"pageInfo"`
 		} `json:"inverseRelations"`
 	}
 
@@ -993,40 +1038,18 @@ func (p *Provider) fetchTeamIssues(ctx context.Context, tok, teamID string) ([]l
 					iss.Labels = append(iss.Labels, l.Name)
 				}
 			}
-			// An inverse "blocks" relation is an issue that blocks this one.
-			for _, rel := range r.InverseRelations.Nodes {
-				if rel.Type == "blocks" && rel.Issue != nil && rel.Issue.ID != "" {
-					iss.BlockedBy = append(iss.BlockedBy, rel.Issue.ID)
-				}
-			}
 			iss.Estimate = r.Estimate
+			for _, rel := range r.InverseRelations.Nodes {
+				iss.addRelation(rel)
+			}
 			for _, c := range r.Comments.Nodes {
-				lc := linearComment{
-					ID:        c.ID,
-					Body:      c.Body,
-					CreatedAt: c.CreatedAt,
-				}
-				if c.User != nil {
-					lc.UserID = c.User.ID
-				}
-				iss.Comments = append(iss.Comments, lc)
+				iss.Comments = append(iss.Comments, c.comment())
 			}
 			for _, a := range r.Attachments.Nodes {
-				if a.URL == "" {
-					continue
-				}
-				name := a.Title
-				if name == "" {
-					name = a.Subtitle
-				}
-				if name == "" {
-					name = "attachment"
-				}
-				iss.Attachments = append(iss.Attachments, linearAttachment{
-					ID:   a.ID,
-					Name: name,
-					URL:  a.URL,
-				})
+				iss.addAttachment(a)
+			}
+			if err := p.restOfIssue(ctx, tok, &iss, r.Comments.Page, r.Attachments.Page, r.InverseRelations.Page); err != nil {
+				return nil, err
 			}
 			out = append(out, iss)
 		}
@@ -1091,7 +1114,10 @@ func (p *Provider) gql(ctx context.Context, tok, query string, vars map[string]a
 		// Read a small slice of the body for diagnostics; full body
 		// would be unbounded under malicious upstreams.
 		buf := make([]byte, 1024)
-		n, _ := resp.Body.Read(buf)
+		n, _ := io.ReadFull(resp.Body, buf)
+		if wait := rateLimited(resp.Header, buf[:n]); wait != nil {
+			return wait
+		}
 		return fmt.Errorf("linear http %d: %s", resp.StatusCode, string(buf[:n]))
 	}
 
@@ -1103,6 +1129,9 @@ func (p *Provider) gql(ctx context.Context, tok, query string, vars map[string]a
 		return fmt.Errorf("linear decode: %w", err)
 	}
 	if len(env.Errors) > 0 {
+		if wait := limitOf(resp.Header, env.Errors); wait != nil {
+			return wait
+		}
 		return fmt.Errorf("linear graphql: %s", env.Errors[0].Message)
 	}
 	if len(env.Data) == 0 {
@@ -1294,6 +1323,9 @@ type linearTeam struct {
 	Description string
 	MemberIDs   []string
 	AdminIDs    []string
+	// Visibility is who Linear shows the team and its issues to: everyone
+	// ("public"), or some people only (keptTeams).
+	Visibility string
 }
 
 type linearProject struct {
@@ -1378,13 +1410,6 @@ func (p *Provider) Discover(ctx context.Context, ownerUserID string, token *impo
 		}
 	}
 
-	const q = `
-query {
-  organization { id name urlKey }
-  teams(first: 100) {
-    nodes { id key name description }
-  }
-}`
 	var resp struct {
 		Organization struct {
 			ID     string `json:"id"`
@@ -1400,7 +1425,7 @@ query {
 			} `json:"nodes"`
 		} `json:"teams"`
 	}
-	if err := p.gql(ctx, access, q, nil, &resp); err != nil {
+	if err := p.gql(ctx, access, discoverQuery, nil, &resp); err != nil {
 		return nil, err
 	}
 

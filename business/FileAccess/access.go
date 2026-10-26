@@ -33,11 +33,13 @@ import (
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
+	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	projectModels "github.com/akashc777/OneCamp/models/dgraph/Project"
 	postgresStruct "github.com/akashc777/OneCamp/models/postgres"
 	attachmentModels "github.com/akashc777/OneCamp/models/postgres/Attachment"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -98,12 +100,40 @@ func MayAdd(ctx context.Context, userUUID string, place Place) error {
 
 // ReadFile is the file with id (its attachments row) for the person, as a
 // file of place: MayRead's answer when they may not have the place's files,
-// and ErrNoSuchFile when the file isn't the place's (FileOf).
+// and ErrNoSuchFile when the file isn't the place's (FileOf) or is on a task
+// kept from them (taskFile).
 func ReadFile(ctx context.Context, userUUID string, place Place, id string) (*attachmentModels.Attachment, error) {
 	if err := MayRead(ctx, userUUID, place); err != nil {
 		return nil, err
 	}
-	return FileOf(ctx, place, id)
+	att, err := FileOf(ctx, place, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := live.taskFile(ctx, userUUID, place, att.Uuid.String()); err != nil {
+		return nil, err
+	}
+	return att, nil
+}
+
+// taskFile answers whether the person may have a file of place as far as
+// a task decides it: a task's files and its comments' are stored as its
+// project's, and go to whoever may read the task, so a project's file on a
+// task kept from the person (restricted, and not to them) is ErrNoSuchFile,
+// the answer a file that isn't there gets, which says nothing of the task.
+// Any other place's file is no task's.
+func (s sources) taskFile(ctx context.Context, userUUID string, place Place, fileID string) error {
+	if place.Kind != postgresStruct.ATTACHMENT_SRC_PROJECT {
+		return nil
+	}
+	kept, err := s.keepsTaskFile(ctx, userUUID, fileID)
+	switch {
+	case err != nil:
+		return err
+	case kept:
+		return ErrNoSuchFile
+	}
+	return nil
 }
 
 // FileOf is the file with id when it is place's: its attachments row, written
@@ -157,6 +187,9 @@ type sources struct {
 	editsBoard    func(ctx context.Context, userUUID, boardID string) (bool, error)
 	readsDoc      func(ctx context.Context, userUUID, docID string) error
 	addsToDoc     func(ctx context.Context, userUUID, docID string) error
+	// keepsTaskFile is whether the file is on a task kept from the person,
+	// as its own or on one of its comments.
+	keepsTaskFile func(ctx context.Context, userUUID, fileID string) (bool, error)
 }
 
 var live = sources{
@@ -171,8 +204,21 @@ var live = sources{
 	editsBoard: func(ctx context.Context, userUUID, boardID string) (bool, error) {
 		return boardBusiness.EditableBy(ctx, boardID, userUUID)
 	},
-	readsDoc:  readsDoc,
-	addsToDoc: addsToDoc,
+	readsDoc:      readsDoc,
+	addsToDoc:     addsToDoc,
+	keepsTaskFile: keepsTaskFile,
+}
+
+// keepsTaskFile is whether the file is on one of the tasks kept from the
+// person (models/taskread, as Work Access decides them: restricted, and not
+// to them, or below one that is), as its own or on one of its comments.
+// Nothing is read of the files when nothing is kept from them.
+func keepsTaskFile(ctx context.Context, userUUID, fileID string) (bool, error) {
+	kept, err := taskread.For(ctx, userUUID)
+	if err != nil || kept.Empty() {
+		return false, err
+	}
+	return taskDomain.AnyHoldsFile(ctx, kept.IDs(), fileID)
 }
 
 func (s sources) mayRead(ctx context.Context, userUUID string, p Place) error {

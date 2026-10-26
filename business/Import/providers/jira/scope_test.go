@@ -47,7 +47,8 @@ func TestAPickedJiraProjectIsTheOnlyOneImported(t *testing.T) {
 
 // A picked project brings its own people (who can be assigned its issues,
 // and who its issues name), not every account on the site, and only its own
-// category as a team.
+// category as a team. A comment Jira keeps from some people stays there, so
+// it brings nobody.
 func TestAPickedJiraProjectBringsOnlyItsPeopleAndCategory(t *testing.T) {
 	siteListed, issuesWalked := false, false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -78,7 +79,9 @@ func TestAPickedJiraProjectBringsOnlyItsPeopleAndCategory(t *testing.T) {
 				"assignee":{"accountId":"b2","accountType":"atlassian","displayName":"Bo"},
 				"reporter":{"accountId":"a1","accountType":"atlassian","displayName":"Ada"},
 				"creator":{"accountId":"bot","accountType":"app","displayName":"Automation"},
-				"comment":{"comments":[{"author":{"accountId":"c3","accountType":"atlassian","displayName":"Cy"}}]}}}]}`)
+				"comment":{"comments":[{"author":{"accountId":"c3","accountType":"atlassian","displayName":"Cy"}},
+					{"author":{"accountId":"d4","accountType":"atlassian","displayName":"Di"},"visibility":{"type":"role","value":"Administrators"}},
+					{"author":{"accountId":"e5","accountType":"atlassian","displayName":"Ed"},"jsdPublic":false}]}}}]}`)
 		default:
 			t.Errorf("asked %s", r.URL.Path)
 		}

@@ -50,6 +50,24 @@ func readableBy(ctx context.Context, boardUUID, userUUID string) bool {
 	return readable[strings.ToLower(boardUUID)]
 }
 
+// Live is whether a board is there and not deleted, asked as no one in
+// particular: what a guest's link to it and the collaboration service's read
+// of it ask before it opens, since a deleted board opens to nobody. One light
+// read, no canvas. An error is the graph not answering, and says nothing
+// about the board.
+func Live(ctx context.Context, boardUUID string) (bool, error) {
+	boards, err := readBoardsAccess(ctx, []string{boardUUID}, "")
+	if err != nil {
+		return false, err
+	}
+	for _, b := range boards {
+		if b != nil && strings.EqualFold(b.Uuid, boardUUID) {
+			return !isDeleted(b), nil
+		}
+	}
+	return false, nil
+}
+
 // ReadableBoardsFor answers, of the named boards, which the person (by uuid)
 // may read now, by CanRead, keyed by lower-case uuid: a board that is private
 // and not theirs to see, deleted, or not there at all is false (or absent).
