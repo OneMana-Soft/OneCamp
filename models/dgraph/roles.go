@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/models/dgexec"
 )
 
@@ -70,14 +71,14 @@ func roleUpsert(nodePred, nodeUUID string, changes []RoleChange) (string, map[st
 					byID[id] = p
 					people = append(people, p)
 				}
-				side := &p.set
+				side, target := &p.set, p.name
 				if i == 1 {
-					side = &p.del
+					side, target = &p.del, p.name+"all"
 				}
 				if *side == nil {
 					*side = map[string]any{"uid": "uid(node)"}
 				}
-				(*side)[c.Predicate] = []map[string]string{{"uid": "uid(" + p.name + ")"}}
+				(*side)[c.Predicate] = []map[string]string{{"uid": "uid(" + target + ")"}}
 			}
 		}
 	}
@@ -85,7 +86,12 @@ func roleUpsert(nodePred, nodeUUID string, changes []RoleChange) (string, map[st
 	for _, p := range people {
 		vars["$"+p.name] = p.id
 		params = append(params, "$"+p.name+": string")
-		blocks = append(blocks, p.name+" as var(func: eq(user_uuid, $"+p.name+"))")
+		blocks = append(blocks, p.name+" as var(func: "+dgraphquery.PersonByUUID("$"+p.name)+")")
+		if p.del != nil {
+			// A removal reaches every node holding the uuid: imports made more of
+			// them, and adds went through each of those before they named the first.
+			blocks = append(blocks, p.name+"all as var(func: eq(user_uuid, $"+p.name+"))")
+		}
 		m := dgexec.Mutation{Cond: "@if(eq(len(node), 1) AND gt(len(" + p.name + "), 0))"}
 		if p.set != nil {
 			m.Set = p.set

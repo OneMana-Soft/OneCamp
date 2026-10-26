@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Doc"
 	"github.com/dgraph-io/dgo/v230/protos/api"
@@ -92,8 +93,8 @@ const collabUpsertQuery = `query q($id: string, $hash: string%s) {%s
 }`
 
 // collabEditorLine finds the last editor's node by their uuid.
-const collabEditorLine = `
-	editor as var(func: eq(user_uuid, $editor))`
+var collabEditorLine = `
+	editor as var(func: ` + dgraphquery.PersonByUUID("$editor") + `)`
 
 // WriteCollabSave stores one save (see the top of this file).
 func WriteCollabSave(ctx context.Context, w CollabWrite) (CollabWritten, error) {

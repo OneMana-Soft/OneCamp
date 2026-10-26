@@ -27,9 +27,11 @@ import (
 	taskWriter "github.com/akashc777/OneCamp/business/TaskWriter"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	configModels "github.com/akashc777/OneCamp/models/postgres/Config"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/akashc777/OneCamp/tests/integration"
 )
 
@@ -226,6 +228,14 @@ func (w *workWorld) account(name string) userModels.UserInfo {
 		w.t.Fatalf("load %s's node: %v", name, err)
 	}
 	return userModels.UserInfo{UserPostgresInfo: *pg, UserDgraphInfo: *gr}
+}
+
+// signedIn is the person's request context as the middleware leaves it, and
+// the person. Reads through it see the restricted tasks they're let into
+// (models/taskread); a bare context reads as nobody, who sees none.
+func (w *workWorld) signedIn(name string) (context.Context, userModels.UserInfo) {
+	u := w.account(name)
+	return context.WithValue(taskread.Install(context.Background()), helpers.UserInfoContextKey, u), u
 }
 
 // subject is the person as the Access Resolver names them.

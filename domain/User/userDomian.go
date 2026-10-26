@@ -945,7 +945,7 @@ func statusOwner(userUUID string) (string, error) {
 	if _, err := uuid.Parse(userUUID); err != nil {
 		return "", fmt.Errorf("not a person's id %q: %w", userUUID, err)
 	}
-	return fmt.Sprintf(`user as var(func: eq(user_uuid, %q))`, userUUID), nil
+	return "user as var(func: " + dgraphquery.PersonByUUID(strconv.Quote(userUUID)) + ")", nil
 }
 
 // SetUserEmojiStatus makes status the person's status, in one transaction:
@@ -1049,7 +1049,7 @@ func CreateOrUpdateDgraphUser(ctx context.Context, dgraphUser *dgraphStruct.Dgra
 			was = &stored.People[0]
 		}
 		dgraphUser.SearchName = searchNameOf(dgraphUser, was)
-		res, err := tx.Mutate(`query user($id: string) { user as var(func: eq(user_uuid, $id)) }`, vars, dgexec.Mutation{Set: dgraphUser})
+		res, err := tx.Mutate(`query user($id: string) { user as var(func: `+dgraphquery.PersonByUUID("$id")+`) }`, vars, dgexec.Mutation{Set: dgraphUser})
 		if err != nil {
 			return err
 		}
@@ -2251,7 +2251,7 @@ func setDgraphExternal(ctx context.Context, userUUID string, external bool) erro
 		mu = &api.Mutation{Cond: "@if(eq(len(u), 1))", SetJson: []byte(`{"uid": "uid(u)", "is_external": true}`)}
 	}
 	_, err := dgraphInit.DoCommitNow(ctx, &api.Request{
-		Query:     `query q($id: string) { found(func: eq(user_uuid, $id)) { u as uid } }`,
+		Query:     `query q($id: string) { found(func: ` + dgraphquery.PersonByUUID("$id") + `) { u as uid } }`,
 		Vars:      map[string]string{"$id": userUUID},
 		Mutations: []*api.Mutation{mu},
 	})

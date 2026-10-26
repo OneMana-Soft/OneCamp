@@ -52,8 +52,16 @@ func TestARoleChangeNamesItsPeopleByVariablesOnly(t *testing.T) {
 	if got := asJSON(t, ed.Set); got != `{"board_editing_users":[{"uid":"uid(p0)"}],"uid":"uid(node)"}` {
 		t.Errorf("Ed's edit: %s", got)
 	}
-	if got := asJSON(t, ed.Delete); got != `{"board_reading_users":[{"uid":"uid(p0)"}],"uid":"uid(node)"}` {
+	if got := asJSON(t, ed.Delete); got != `{"board_reading_users":[{"uid":"uid(p0all)"}],"uid":"uid(node)"}` {
 		t.Errorf("Ed off reading: %s", got)
+	}
+	// An edge is added to the person's own node, the first holding their uuid;
+	// one is taken off every node holding it.
+	for _, block := range []string{"p0 as var(func: eq(user_uuid, $p0), first: 1)", "p0all as var(func: eq(user_uuid, $p0))",
+		"p1 as var(func: eq(user_uuid, $p1), first: 1)", "p1all as var(func: eq(user_uuid, $p1))"} {
+		if !strings.Contains(q, block) {
+			t.Errorf("the query has no %q:\n%s", block, q)
+		}
 	}
 	if vi.Set != nil {
 		t.Errorf("Vi is only taken off, but is given %s", asJSON(t, vi.Set))

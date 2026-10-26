@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -34,7 +35,15 @@ func TestEveryCascadeLeavesAnEntryDeletedAlreadyAsItIs(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var got []request
+	var paths []string
 	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		paths = append(paths, r.URL.Path)
+		mu.Unlock()
+		if strings.HasSuffix(r.URL.Path, "/_refresh") {
+			fmt.Fprint(w, `{"_shards":{"total":1,"successful":1,"failed":0}}`)
+			return
+		}
 		raw, _ := io.ReadAll(r.Body)
 		var body struct {
 			Script struct {
@@ -70,7 +79,14 @@ func TestEveryCascadeLeavesAnEntryDeletedAlreadyAsItIs(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	if len(got) != 3 {
-		t.Fatalf("%d requests for three cascades: %+v", len(got), got)
+		t.Fatalf("%d update-by-queries for three cascades: %+v", len(got), got)
+	}
+	// Each refreshes its index first: an update-by-query matches only what the
+	// last refresh made visible.
+	want := []string{"/comments/_refresh", "/comments/_update_by_query", "/attachments/_refresh", "/attachments/_update_by_query",
+		"/ai_embeddings/_refresh", "/ai_embeddings/_update_by_query"}
+	if !slices.Equal(paths, want) {
+		t.Errorf("requests %v; want each cascade's index refreshed right before its update-by-query", paths)
 	}
 	for i, index := range []string{"comments", "attachments", "ai_embeddings"} {
 		r := got[i]

@@ -5,17 +5,19 @@ package integration_test
 
 // A restricted task's files go only to the people who may read the task (its
 // project's admins, its assignee, its maker and the people let in): its own
-// files and its comments', uploaded in the app or brought by an import. Those
-// people find them in search and nobody else in the project does; the
-// project's file route (by id, and as the picture a page shows, ?redirect=1)
-// gives nobody else any of them; and the project's Files tab doesn't list
-// them.
+// files and its comments', uploaded in the app or brought by an import. They
+// are found in search and served through the project's file route (by id,
+// and as the picture a page shows, ?redirect=1) to those people and to nobody
+// else in the project, and the project's Files tab doesn't list them. An
+// import's task file its task doesn't link in the graph goes by the task its
+// row names, the same way.
 //
 // seedWorkWorld's "Write the launch post" is ana's, in Website, which she
 // runs with fay; ben is a member, and cy is in the team but not the project.
 // Ben gets the task's files until ana keeps the task to its admins and its
 // maker; from then on he gets what a file that isn't there gets. "Send the
-// newsletter", open to the project, is the control: ben still gets its file.
+// newsletter", open to the project, is the control: ben still gets its
+// files, the one uploaded in the app and the one an import brought.
 //
 // Run: go test -tags=integration ./tests/integration/ -run TestARestrictedTasksFilesGoOnlyToItsReaders -v
 
@@ -84,30 +86,39 @@ func TestARestrictedTasksFilesGoOnlyToItsReaders(t *testing.T) {
 	}
 	nodes = append(nodes, map[string]any{"uid": person("cy"), "user_teams": []map[string]any{{"uid": team}}})
 
-	// The files: the task's own, one on its comment, one an import brought (an
-	// import keeps a task's files under the task), and the open task's.
+	// The files: the task's own and one on its comment, uploaded in the app
+	// (kept under the project) and brought by an import (kept under the task
+	// and the comment), and the open task's two.
 	type file struct{ id, name, kind, src string }
+	comment := uuid.NewString()
 	own := file{uuid.NewString(), "zephyr-pay-bands.xlsx", "project", w.project}
 	onComment := file{uuid.NewString(), "zephyr-offer-letter.pdf", "project", w.project}
 	imported := file{uuid.NewString(), "zephyr-import-notes.docx", "task", w.task}
+	importedOnComment := file{uuid.NewString(), "zephyr-import-reply.pdf", "comment", comment}
 	open := file{uuid.NewString(), "newsletter-draft.pdf", "project", w.project}
-	kept := []file{own, onComment, imported}
+	importedOpen := file{uuid.NewString(), "newsletter-import.pdf", "task", w.mine}
+	kept := []file{own, onComment, imported, importedOnComment}
+	opened := []file{open, importedOpen}
+	// An import's task file that isn't linked to its task in the graph, as
+	// imports leave them: only its row says which task keeps it. Asked for by
+	// id only (it has no search entry).
+	unlinked := file{uuid.NewString(), "zephyr-import-unlinked.pdf", "task", w.task}
+	byID := append(append([]file{}, kept...), unlinked)
 	live := "0001-01-01T00:00:00Z"
 	now := time.Now().UTC()
 	node := func(f file) map[string]any {
 		return map[string]any{"dgraph.type": "Attachment", "attachment_uuid": f.id, "attachment_file_name": f.name,
 			"attachment_obj_key": "userFileUpload/" + f.name, "attachment_deleted_at": live}
 	}
-	comment := uuid.NewString()
 	nodes = append(nodes,
 		map[string]any{"uid": launch, "task_attachments": []map[string]any{node(own), node(imported)},
 			"task_comments": []map[string]any{{"dgraph.type": "Comment", "comment_uuid": comment,
 				"comment_text": "<p>The letters are attached.</p>", "comment_task": map[string]any{"uid": launch},
 				"comment_by": map[string]any{"uid": person("ana")}, "comment_created_at": now.Format(time.RFC3339),
-				"comment_deleted_at": live, "comment_attachments": []map[string]any{node(onComment)}}}},
-		map[string]any{"uid": newsletter, "task_attachments": []map[string]any{node(open)}})
+				"comment_deleted_at": live, "comment_attachments": []map[string]any{node(onComment), node(importedOnComment)}}}},
+		map[string]any{"uid": newsletter, "task_attachments": []map[string]any{node(open), node(importedOpen)}})
 	w.dg.Mutate(t, nodes)
-	for _, f := range append(kept, open) {
+	for _, f := range append(byID, opened...) {
 		w.exec(`INSERT INTO attachments (id, obj_key, src_key, src_value, created_by) VALUES ($1, $2, $3, $4, $5)`,
 			f.id, "userFileUpload/"+f.name, f.kind, f.src, w.people["ana"])
 	}
@@ -122,11 +133,11 @@ func TestARestrictedTasksFilesGoOnlyToItsReaders(t *testing.T) {
 		return &dgraphStruct.DgraphTask{Uuid: task, Project: &dgraphStruct.DgraphProject{Uuid: w.project, Name: "Website"}}
 	}
 	taskDomain.CreateTaskAttachmentsInOpensearch(&now, inWebsite(w.task), []*dgraphStruct.DgraphAttachment{attachment(own), attachment(imported)}, ana)
-	taskDomain.CreateTaskAttachmentsInOpensearch(&now, inWebsite(w.mine), []*dgraphStruct.DgraphAttachment{attachment(open)}, ana)
+	taskDomain.CreateTaskAttachmentsInOpensearch(&now, inWebsite(w.mine), []*dgraphStruct.DgraphAttachment{attachment(open), attachment(importedOpen)}, ana)
 	commentDomain.CreateTaskCommentWithAttachmentsInOpenSearch(&openSearchStruct.OpenSearchComment{Uuid: comment,
 		CommentBody: "The letters are attached.", CommentByUserUuid: ana.Uuid, CommentByUserFullName: "ana",
 		CommentProjectUuid: w.project, CommentProjectName: "Website", CommentTaskUuid: w.task, CommentCreatedAt: now.Unix()},
-		[]*dgraphStruct.DgraphAttachment{attachment(onComment)})
+		[]*dgraphStruct.DgraphAttachment{attachment(onComment), attachment(importedOnComment)})
 
 	// as is who, signed in, as the first middleware leaves a request.
 	as := func(who string) context.Context {
@@ -195,7 +206,7 @@ func TestARestrictedTasksFilesGoOnlyToItsReaders(t *testing.T) {
 	for name, run := range searches {
 		eventually("ben finds the task's files through "+name, func() bool { return len(found(run("ben"), kept...)) == len(kept) })
 	}
-	for _, f := range []file{own, onComment} {
+	for _, f := range byID {
 		if code, out := fetch("ben", f, ""); code != http.StatusOK {
 			t.Fatalf("before the task is restricted, ben gets %s: %d %s", f.name, code, out)
 		}
@@ -217,32 +228,31 @@ func TestARestrictedTasksFilesGoOnlyToItsReaders(t *testing.T) {
 				t.Errorf("ben finds %v through %s", got, name)
 			}
 		}
-		for _, f := range kept {
+		for _, f := range byID {
 			for _, query := range []string{"", "?redirect=1"} {
 				if code, out := fetch("ben", f, query); code != missingCode || out != missing {
 					t.Errorf("ben asks for %s%s: %d %s; want what a file that isn't there gets: %d %s", f.name, query, code, out, missingCode, missing)
 				}
 			}
 		}
-		if code, out := fetch("ben", open, ""); code != http.StatusOK {
-			t.Errorf("ben is refused the open task's file: %d %s", code, out)
+		for _, f := range opened {
+			if code, out := fetch("ben", f, ""); code != http.StatusOK {
+				t.Errorf("ben is refused the open task's %s: %d %s", f.name, code, out)
+			}
 		}
 		if _, tab := get("ben", projectController.GetDgraphProjectAttachmentList, map[string]string{"project_uuid": w.project}, ""); len(found(tab, kept...)) != 0 {
 			t.Errorf("the project's Files tab lists %v to ben", found(tab, kept...))
 		}
 	})
 
-	// The project's file route serves the files of the project's own kind; an
-	// import stores a task's files under the task, which it never serves, so
-	// its readers are asked for the files uploaded in the app.
-	t.Run("its readers get its files", func(t *testing.T) {
+	t.Run("its readers get every one of them", func(t *testing.T) {
 		for _, who := range []string{"ana", "fay"} {
 			for name, run := range searches {
 				if got := found(run(who), kept...); len(got) != len(kept) {
 					t.Errorf("%s finds only %v through %s", who, got, name)
 				}
 			}
-			for _, f := range []file{own, onComment} {
+			for _, f := range byID {
 				if code, out := fetch(who, f, ""); code != http.StatusOK {
 					t.Errorf("%s asks for %s: %d %s", who, f.name, code, out)
 				}
@@ -259,7 +269,7 @@ func TestARestrictedTasksFilesGoOnlyToItsReaders(t *testing.T) {
 				t.Errorf("cy finds %v through %s", got, name)
 			}
 		}
-		for _, f := range append(kept, open) {
+		for _, f := range append(byID, opened...) {
 			if code, _ := fetch("cy", f, ""); code != http.StatusForbidden {
 				t.Errorf("cy asks for %s: %d, want 403", f.name, code)
 			}

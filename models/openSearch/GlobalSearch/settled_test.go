@@ -3,7 +3,9 @@ package models
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -12,19 +14,29 @@ import (
 )
 
 // fakeUpdates answers update-by-query runs from a script of responses, and
-// records the body each run sent.
+// records the body each run sent. Each run must come right after a refresh of
+// its own indices.
 func fakeUpdates(t *testing.T, answers ...opensearchapi.UpdateByQueryResp) *[]string {
 	t.Helper()
 	sent := []string{}
-	oldRun, oldWait := updateByQuery, conflictBackoff
-	t.Cleanup(func() { updateByQuery, conflictBackoff = oldRun, oldWait })
+	var refreshed []string
+	oldRun, oldRefresh, oldWait := updateByQuery, refresh, conflictBackoff
+	t.Cleanup(func() { updateByQuery, refresh, conflictBackoff = oldRun, oldRefresh, oldWait })
 	conflictBackoff = func(int) time.Duration { return 0 }
+	refresh = func(_ context.Context, indices ...string) error {
+		refreshed = indices
+		return nil
+	}
 	updateByQuery = func(_ context.Context, req opensearchapi.UpdateByQueryReq) (*opensearchapi.UpdateByQueryResp, error) {
 		b, _ := io.ReadAll(req.Body)
 		sent = append(sent, string(b))
 		if req.Params.Conflicts != "proceed" || req.Params.Refresh == nil || !*req.Params.Refresh {
 			t.Errorf("a run without conflicts=proceed and refresh: %+v", req.Params)
 		}
+		if !slices.Equal(refreshed, req.Indices) {
+			t.Errorf("run %d over %v came after a refresh of %v; want its own indices refreshed first", len(sent), req.Indices, refreshed)
+		}
+		refreshed = nil
 		i := len(sent) - 1
 		if i >= len(answers) {
 			i = len(answers) - 1
@@ -74,6 +86,34 @@ func TestAnUpdateByQueryWithFailuresIsAnErrorAtOnce(t *testing.T) {
 	}
 	if updated != 1 || len(*sent) != 1 {
 		t.Errorf("updated %d after %d runs; want 1 after 1", updated, len(*sent))
+	}
+}
+
+// An update-by-query matches only what the last refresh made visible, and a
+// write (a bulk one, an import's) doesn't refresh: each run refreshes its own
+// indices first (fakeUpdates checks it), so an entry written a moment before
+// is matched too.
+func TestEachRunOfAnUpdateByQueryRefreshesItsIndicesFirst(t *testing.T) {
+	sent := fakeUpdates(t,
+		opensearchapi.UpdateByQueryResp{VersionConflicts: 1},
+		opensearchapi.UpdateByQueryResp{Updated: 1},
+	)
+	if _, err := updateByQuerySettled(context.Background(), []string{"comments", "attachments"}, `{}`); err != nil {
+		t.Fatal(err)
+	}
+	if len(*sent) != 2 {
+		t.Errorf("%d runs, want the held one run again", len(*sent))
+	}
+}
+
+func TestARefreshThatFailsStopsTheUpdateByQueryBeforeItRuns(t *testing.T) {
+	sent := fakeUpdates(t, opensearchapi.UpdateByQueryResp{Updated: 1})
+	refresh = func(context.Context, ...string) error { return errors.New("search is down") }
+	if _, err := updateByQuerySettled(context.Background(), []string{"comments"}, `{}`); err == nil || !strings.Contains(err.Error(), "search is down") {
+		t.Fatalf("err = %v; want the refresh's error", err)
+	}
+	if len(*sent) != 0 {
+		t.Errorf("%d runs after the refresh failed; want none", len(*sent))
 	}
 }
 

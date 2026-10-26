@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	"github.com/dgraph-io/dgo/v230/protos/api"
 	"github.com/google/uuid"
@@ -83,7 +84,7 @@ func WriteDocAccess(ctx context.Context, docUUIDs []string, w AccessWrite) error
 			return ErrNoSuchPrincipal
 		}
 		v := name("p", i)
-		fmt.Fprintf(&q, "\t\t%s as var(func: eq(user_uuid, %q))\n", v, parsed.String())
+		fmt.Fprintf(&q, "\t\t%s as var(func: %s)\n", v, dgraphquery.PersonByUUID(fmt.Sprintf("%q", parsed.String())))
 		checks = append(checks, "eq(len("+v+"), 1)")
 		for _, list := range sortedValues(personLists) {
 			fmt.Fprintf(&del, "uid(docs) <%s> uid(%s) .\n", list, v)
@@ -139,7 +140,7 @@ func WriteDocAccess(ctx context.Context, docUUIDs []string, w AccessWrite) error
 		if err != nil {
 			return ErrNoSuchPrincipal
 		}
-		fmt.Fprintf(&q, "\t\towner as var(func: eq(user_uuid, %q))\n", parsed.String())
+		fmt.Fprintf(&q, "\t\towner as var(func: %s)\n", dgraphquery.PersonByUUID(fmt.Sprintf("%q", parsed.String())))
 		checks = append(checks, "eq(len(owner), 1)")
 		set.WriteString("uid(docs) <doc_owner> uid(owner) .\n")
 	}
@@ -152,7 +153,7 @@ func WriteDocAccess(ctx context.Context, docUUIDs []string, w AccessWrite) error
 			fmt.Fprintf(&set, "uid(docs) <doc_lock_level> %s .\nuid(docs) <doc_locked_at> %s .\n", lockJSON, at)
 			del.WriteString("uid(docs) <doc_locked_by> * .\n")
 			if parsed, err := uuid.Parse(w.LockedByUUID); err == nil {
-				fmt.Fprintf(&q, "\t\tlocker as var(func: eq(user_uuid, %q))\n", parsed.String())
+				fmt.Fprintf(&q, "\t\tlocker as var(func: %s)\n", dgraphquery.PersonByUUID(fmt.Sprintf("%q", parsed.String())))
 				set.WriteString("uid(docs) <doc_locked_by> uid(locker) .\n")
 			}
 		}

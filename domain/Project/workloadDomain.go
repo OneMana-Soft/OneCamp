@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/akashc777/OneCamp/models/taskread"
@@ -151,7 +152,7 @@ func SetDgraphCapacity(ctx context.Context, userUUID, predicate string, value in
 		mu = &api.Mutation{Cond: "@if(eq(len(u), 1))", DelNquads: []byte(fmt.Sprintf(`uid(u) <%s> * .`, predicate))}
 	}
 	resp, err := dgraphInit.DoCommitNow(ctx, &api.Request{
-		Query:     `query q($id: string) { found(func: eq(user_uuid, $id)) { u as uid } }`,
+		Query:     `query q($id: string) { found(func: ` + dgraphquery.PersonByUUID("$id") + `) { u as uid } }`,
 		Vars:      map[string]string{"$id": userUUID},
 		Mutations: []*api.Mutation{mu},
 	})

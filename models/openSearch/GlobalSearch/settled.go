@@ -26,25 +26,36 @@ var updateByQuery = func(ctx context.Context, req opensearchapi.UpdateByQueryReq
 	return opensearchInit.OpenSearchClient.UpdateByQuery(ctx, req)
 }
 
+// refresh makes every write to some indices so far visible to the next
+// search, a seam for tests.
+var refresh = opensearchInit.RefreshIndices
+
 // UpdateByQuerySettled is updateByQuerySettled for the other search models:
 // every update-by-query goes through it.
 func UpdateByQuerySettled(ctx context.Context, indices []string, body string) (updated int, err error) {
 	return updateByQuerySettled(ctx, indices, body)
 }
 
-// updateByQuerySettled runs an update-by-query (refreshed, waited for) whose
-// script leaves an entry already right as it is, and runs it again while some
-// of the entries it matched were being written by something else at the same
-// moment. With conflicts "proceed" those entries are skipped: not written and
-// not counted. So the startup repair recorded itself done with a comment's
-// sharing still unwritten (its doc's delete cascade was writing the comment
-// as the repair ran), and nothing wrote it again; a cascade skipped the same
-// way would have left an entry of a deleted doc live. It answers how many
-// entries it changed over every run, and an error when any failed, or when
-// some were still in conflict after the last run.
+// updateByQuerySettled runs an update-by-query (refreshed before and after,
+// waited for) whose script leaves an entry already right as it is, and runs
+// it again while some of the entries it matched were being written by
+// something else at the same moment. With conflicts "proceed" those entries
+// are skipped: not written and not counted. So the startup repair recorded
+// itself done with a comment's sharing still unwritten (its doc's delete
+// cascade was writing the comment as the repair ran), and nothing wrote it
+// again; a cascade skipped the same way would have left an entry of a deleted
+// doc live. An update-by-query matches only what the last refresh made
+// visible, and a write (a bulk one, an import's) doesn't refresh, so each run
+// refreshes its indices first: a task trashed within a second of its
+// comments' writing left them findable. It answers how many entries it
+// changed over every run, and an error when any failed, or when some were
+// still in conflict after the last run.
 func updateByQuerySettled(ctx context.Context, indices []string, body string) (updated int, err error) {
 	yes := true
 	for attempt := 1; ; attempt++ {
+		if err := refresh(ctx, indices...); err != nil {
+			return updated, err
+		}
 		resp, err := updateByQuery(ctx, opensearchapi.UpdateByQueryReq{
 			Indices: indices,
 			Body:    strings.NewReader(body),

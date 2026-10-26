@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/dgraph-io/dgo/v230/protos/api"
@@ -72,7 +73,7 @@ func UpsertMemoryItem(ctx context.Context, item *dgraphStruct.DgraphMemoryItem,
 	qb.WriteString("query {\n")
 	fmt.Fprintf(&qb, "\t\tm as var(func: eq(mem_uuid, \"%s\"))\n", item.Uuid)
 	if ownerUUID != "" {
-		fmt.Fprintf(&qb, "\t\to as var(func: eq(user_uuid, \"%s\"))\n", ownerUUID)
+		fmt.Fprintf(&qb, "\t\to as var(func: %s)\n", dgraphquery.PersonByUUID(strconv.Quote(ownerUUID)))
 		mut["mem_owner"] = map[string]string{"uid": "uid(o)"}
 	}
 	if channelUUID != "" {
