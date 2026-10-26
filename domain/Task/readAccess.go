@@ -7,6 +7,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
+	"github.com/akashc777/OneCamp/models/dgexec"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Task"
 	"github.com/google/uuid"
@@ -121,4 +122,35 @@ func GetTasksBelow(ctx context.Context, taskUUID string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// AnyHoldsFile is whether any of the tasks named holds the file (by its
+// uuid), as one of its own files or on one of its comments: a yes, and
+// nothing of the tasks, for deciding who gets the file (business/FileAccess).
+// Ids that aren't uuids are left out.
+func AnyHoldsFile(ctx context.Context, taskUUIDs []string, fileUUID string) (bool, error) {
+	tasks := dgraphquery.UUIDList(taskUUIDs)
+	file, err := uuid.Parse(fileUUID)
+	if tasks == "" || err != nil {
+		return false, nil
+	}
+	held, err := dgexec.Read[struct {
+		Own []struct {
+			UUID string `json:"task_uuid"`
+		} `json:"own"`
+		OnComment []struct {
+			UUID string `json:"task_uuid"`
+		} `json:"on_comment"`
+	}](ctx, `query Held($file: string) {
+		var(func: eq(attachment_uuid, $file)) { file as uid }
+		own(func: eq(task_uuid, [`+tasks+`])) @filter(uid_in(task_attachments, uid(file))) { task_uuid }
+		on_comment(func: eq(task_uuid, [`+tasks+`])) @cascade {
+			task_uuid
+			task_comments @filter(uid_in(comment_attachments, uid(file))) { uid }
+		}
+	}`, map[string]string{"$file": file.String()})
+	if err != nil {
+		return false, err
+	}
+	return len(held.Own) > 0 || len(held.OnComment) > 0, nil
 }

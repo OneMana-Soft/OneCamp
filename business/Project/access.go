@@ -21,3 +21,9 @@ func HasMember(ctx context.Context, userUUID, projectID string) (bool, error) {
 	}
 	return p != nil && p.Uuid == projectID && (p.IsProjectMember > 0 || p.IsProjectAdmin > 0), nil
 }
+
+// MembersAmong is which of these people are in the project (members or
+// admins, still active), read at once: HasMember for a list.
+func MembersAmong(ctx context.Context, projectID string, userUUIDs []string) (map[string]bool, error) {
+	return domain.MembersAmong(ctx, projectID, userUUIDs)
+}

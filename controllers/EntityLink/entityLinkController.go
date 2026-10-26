@@ -196,7 +196,7 @@ func GetSourceLinks(w http.ResponseWriter, r *http.Request) {
 	docs, boards, isMember, err := business.GetLinksForSource(ctx, sourceType, sourceUUID, userInfo.UserDgraphInfo.Uid, userInfo.UserDgraphInfo.Uuid)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetSourceLinks failed err: %+v", err)
-		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to get links", "err": err.Error()})
+		helpers.WriteRetryLater(w, "Couldn't read the links.")
 		return
 	}
 	if !isMember {

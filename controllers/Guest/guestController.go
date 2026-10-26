@@ -987,13 +987,15 @@ func mayShare(w http.ResponseWriter, r *http.Request, userInfo userModels.UserIn
 			return false
 		}
 	case "board":
+		// The board's own rules: one the caller may not read, deleted or not
+		// there is not found; one they may read but not change is refused,
+		// since only its creator and its editors share it.
 		b, err := boardBusiness.GetBasicBoardByUUID(ctx, resourceID, userInfo.UserDgraphInfo.Uid)
-		if err != nil || b == nil {
+		if err != nil || !boardBusiness.CanRead(b, userInfo.UserDgraphInfo.Uuid) {
 			helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "Board not found"})
 			return false
 		}
-		isOwner := b.CreatedBy != nil && b.CreatedBy.Uuid == userInfo.UserDgraphInfo.Uuid
-		if b.HasEditAccess == 0 && !isOwner {
+		if !boardBusiness.CanEdit(b, userInfo.UserDgraphInfo.Uuid) {
 			helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "You need edit access to share this board."})
 			return false
 		}

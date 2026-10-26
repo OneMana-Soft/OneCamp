@@ -1,0 +1,2944 @@
+{
+ "note": "Only the types the import's queries reach. Regenerate with testdata/extract_schema.py <schema.graphql> <out> <commit> <types...> when a query reaches a new type.",
+ "source": "github.com/linear/linear packages/sdk/src/schema.graphql @ 618a737a4e",
+ "types": {
+  "Attachment": {
+   "archivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "bodyData": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "createdAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "creator": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "externalUserCreator": {
+    "deprecated": false,
+    "type": "ExternalUser"
+   },
+   "groupBySource": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "id": {
+    "deprecated": false,
+    "type": "ID"
+   },
+   "issue": {
+    "deprecated": false,
+    "type": "Issue"
+   },
+   "metadata": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "originalIssue": {
+    "deprecated": false,
+    "type": "Issue"
+   },
+   "source": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "sourceType": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "subtitle": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "title": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "updatedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "url": {
+    "deprecated": false,
+    "type": "String"
+   }
+  },
+  "AttachmentConnection": {
+   "edges": {
+    "deprecated": false,
+    "type": "AttachmentEdge"
+   },
+   "nodes": {
+    "deprecated": false,
+    "type": "Attachment"
+   },
+   "pageInfo": {
+    "deprecated": false,
+    "type": "PageInfo"
+   }
+  },
+  "Comment": {
+   "agentSession": {
+    "deprecated": false,
+    "type": "AgentSession"
+   },
+   "agentSessions": {
+    "deprecated": false,
+    "type": "AgentSessionConnection"
+   },
+   "aiPromptProgresses": {
+    "deprecated": false,
+    "type": "AiPromptProgressConnection"
+   },
+   "archivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "body": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "bodyData": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "botActor": {
+    "deprecated": false,
+    "type": "ActorBot"
+   },
+   "children": {
+    "deprecated": false,
+    "type": "CommentConnection"
+   },
+   "createdAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "createdIssues": {
+    "deprecated": false,
+    "type": "IssueConnection"
+   },
+   "documentContent": {
+    "deprecated": false,
+    "type": "DocumentContent"
+   },
+   "documentContentId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "editedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "externalThread": {
+    "deprecated": false,
+    "type": "SyncedExternalThread"
+   },
+   "externalUser": {
+    "deprecated": false,
+    "type": "ExternalUser"
+   },
+   "hideInLinear": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "id": {
+    "deprecated": false,
+    "type": "ID"
+   },
+   "initiative": {
+    "deprecated": false,
+    "type": "Initiative"
+   },
+   "initiativeId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "initiativeUpdate": {
+    "deprecated": false,
+    "type": "InitiativeUpdate"
+   },
+   "initiativeUpdateId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "isArtificialAgentSessionRoot": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "issue": {
+    "deprecated": false,
+    "type": "Issue"
+   },
+   "issueId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "onBehalfOf": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "parent": {
+    "deprecated": false,
+    "type": "Comment"
+   },
+   "parentId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "post": {
+    "deprecated": false,
+    "type": "Post"
+   },
+   "project": {
+    "deprecated": false,
+    "type": "Project"
+   },
+   "projectId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "projectUpdate": {
+    "deprecated": false,
+    "type": "ProjectUpdate"
+   },
+   "projectUpdateId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "quotedText": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "reactionData": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "reactions": {
+    "deprecated": false,
+    "type": "Reaction"
+   },
+   "resolvedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "resolvingComment": {
+    "deprecated": false,
+    "type": "Comment"
+   },
+   "resolvingCommentId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "resolvingUser": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "spawnedAgentSessions": {
+    "deprecated": false,
+    "type": "AgentSessionConnection"
+   },
+   "syncedWith": {
+    "deprecated": false,
+    "type": "ExternalEntityInfo"
+   },
+   "threadSummary": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "updatedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "url": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "user": {
+    "deprecated": false,
+    "type": "User"
+   }
+  },
+  "CommentConnection": {
+   "edges": {
+    "deprecated": false,
+    "type": "CommentEdge"
+   },
+   "nodes": {
+    "deprecated": false,
+    "type": "Comment"
+   },
+   "pageInfo": {
+    "deprecated": false,
+    "type": "PageInfo"
+   }
+  },
+  "Issue": {
+   "activitySummary": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "addedToCycleAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "addedToProjectAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "addedToTeamAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "agentSessions": {
+    "deprecated": false,
+    "type": "AgentSessionConnection"
+   },
+   "aiAnalysis": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "aiPromptProgresses": {
+    "deprecated": false,
+    "type": "AiPromptProgressConnection"
+   },
+   "archivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "asksExternalUserRequester": {
+    "deprecated": false,
+    "type": "ExternalUser"
+   },
+   "asksRequester": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "assignee": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "attachments": {
+    "deprecated": false,
+    "type": "AttachmentConnection"
+   },
+   "autoArchivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "autoClosedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "boardOrder": {
+    "deprecated": true,
+    "type": "Float"
+   },
+   "botActor": {
+    "deprecated": false,
+    "type": "ActorBot"
+   },
+   "branchName": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "canceledAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "children": {
+    "deprecated": false,
+    "type": "IssueConnection"
+   },
+   "comments": {
+    "deprecated": false,
+    "type": "CommentConnection"
+   },
+   "completedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "createdAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "creator": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "customerTicketCount": {
+    "deprecated": false,
+    "type": "Int"
+   },
+   "cycle": {
+    "deprecated": false,
+    "type": "Cycle"
+   },
+   "delegate": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "description": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "descriptionState": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "documentContent": {
+    "deprecated": false,
+    "type": "DocumentContent"
+   },
+   "documents": {
+    "deprecated": false,
+    "type": "DocumentConnection"
+   },
+   "dueDate": {
+    "deprecated": false,
+    "type": "TimelessDate"
+   },
+   "estimate": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "externalUserCreator": {
+    "deprecated": false,
+    "type": "ExternalUser"
+   },
+   "favorite": {
+    "deprecated": false,
+    "type": "Favorite"
+   },
+   "formerAttachments": {
+    "deprecated": false,
+    "type": "AttachmentConnection"
+   },
+   "formerNeeds": {
+    "deprecated": false,
+    "type": "CustomerNeedConnection"
+   },
+   "history": {
+    "deprecated": false,
+    "type": "IssueHistoryConnection"
+   },
+   "id": {
+    "deprecated": false,
+    "type": "ID"
+   },
+   "identifier": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "incomingSuggestions": {
+    "deprecated": false,
+    "type": "IssueSuggestionConnection"
+   },
+   "inheritsSharedAccess": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "integrationSourceType": {
+    "deprecated": false,
+    "type": "IntegrationService"
+   },
+   "inverseRelations": {
+    "deprecated": false,
+    "type": "IssueRelationConnection"
+   },
+   "labelIds": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "labels": {
+    "deprecated": false,
+    "type": "IssueLabelConnection"
+   },
+   "lastAppliedTemplate": {
+    "deprecated": false,
+    "type": "Template"
+   },
+   "needs": {
+    "deprecated": false,
+    "type": "CustomerNeedConnection"
+   },
+   "number": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "parent": {
+    "deprecated": false,
+    "type": "Issue"
+   },
+   "previousIdentifiers": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "priority": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "priorityLabel": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "prioritySortOrder": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "project": {
+    "deprecated": false,
+    "type": "Project"
+   },
+   "projectMilestone": {
+    "deprecated": false,
+    "type": "ProjectMilestone"
+   },
+   "reactionData": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "reactions": {
+    "deprecated": false,
+    "type": "Reaction"
+   },
+   "recurringIssueTemplate": {
+    "deprecated": false,
+    "type": "Template"
+   },
+   "relations": {
+    "deprecated": false,
+    "type": "IssueRelationConnection"
+   },
+   "releases": {
+    "deprecated": false,
+    "type": "ReleaseConnection"
+   },
+   "sharedAccess": {
+    "deprecated": false,
+    "type": "IssueSharedAccess"
+   },
+   "slaBreachesAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "slaHighRiskAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "slaMediumRiskAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "slaStartedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "slaType": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "snoozedBy": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "snoozedUntilAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "sortOrder": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "sourceComment": {
+    "deprecated": false,
+    "type": "Comment"
+   },
+   "startedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "startedTriageAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "state": {
+    "deprecated": false,
+    "type": "WorkflowState"
+   },
+   "stateHistory": {
+    "deprecated": false,
+    "type": "IssueStateSpanConnection"
+   },
+   "subIssueSortOrder": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "subscribers": {
+    "deprecated": false,
+    "type": "UserConnection"
+   },
+   "suggestions": {
+    "deprecated": false,
+    "type": "IssueSuggestionConnection"
+   },
+   "suggestionsGeneratedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "summary": {
+    "deprecated": false,
+    "type": "Summary"
+   },
+   "syncedWith": {
+    "deprecated": false,
+    "type": "ExternalEntityInfo"
+   },
+   "team": {
+    "deprecated": false,
+    "type": "Team"
+   },
+   "title": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "trashed": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "triagedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "trusted": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "updatedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "url": {
+    "deprecated": false,
+    "type": "String"
+   }
+  },
+  "IssueConnection": {
+   "edges": {
+    "deprecated": false,
+    "type": "IssueEdge"
+   },
+   "nodes": {
+    "deprecated": false,
+    "type": "Issue"
+   },
+   "pageInfo": {
+    "deprecated": false,
+    "type": "PageInfo"
+   }
+  },
+  "IssueLabel": {
+   "archivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "children": {
+    "deprecated": false,
+    "type": "IssueLabelConnection"
+   },
+   "color": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "createdAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "creator": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "description": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "groupType": {
+    "deprecated": false,
+    "type": "LabelGroupType"
+   },
+   "id": {
+    "deprecated": false,
+    "type": "ID"
+   },
+   "inheritedFrom": {
+    "deprecated": false,
+    "type": "IssueLabel"
+   },
+   "isGroup": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "issues": {
+    "deprecated": false,
+    "type": "IssueConnection"
+   },
+   "lastAppliedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "name": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "organization": {
+    "deprecated": true,
+    "type": "Organization"
+   },
+   "parent": {
+    "deprecated": false,
+    "type": "IssueLabel"
+   },
+   "retiredAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "retiredBy": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "team": {
+    "deprecated": false,
+    "type": "Team"
+   },
+   "updatedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   }
+  },
+  "IssueLabelConnection": {
+   "edges": {
+    "deprecated": false,
+    "type": "IssueLabelEdge"
+   },
+   "nodes": {
+    "deprecated": false,
+    "type": "IssueLabel"
+   },
+   "pageInfo": {
+    "deprecated": false,
+    "type": "PageInfo"
+   }
+  },
+  "IssueRelation": {
+   "archivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "createdAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "id": {
+    "deprecated": false,
+    "type": "ID"
+   },
+   "issue": {
+    "deprecated": false,
+    "type": "Issue"
+   },
+   "relatedIssue": {
+    "deprecated": false,
+    "type": "Issue"
+   },
+   "type": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "updatedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   }
+  },
+  "IssueRelationConnection": {
+   "edges": {
+    "deprecated": false,
+    "type": "IssueRelationEdge"
+   },
+   "nodes": {
+    "deprecated": false,
+    "type": "IssueRelation"
+   },
+   "pageInfo": {
+    "deprecated": false,
+    "type": "PageInfo"
+   }
+  },
+  "Organization": {
+   "agentAutomationEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "aiAddonEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "aiDiscussionSummariesEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "aiProviderConfiguration": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "aiTelemetryEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "aiThreadSummariesEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "allowMembersToInvite": {
+    "deprecated": true,
+    "type": "Boolean"
+   },
+   "allowedAiProviders": {
+    "deprecated": true,
+    "type": "String"
+   },
+   "allowedAuthServices": {
+    "deprecated": true,
+    "type": "String"
+   },
+   "allowedFileUploadContentTypes": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "archivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "authSettings": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "codeIntelligenceEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "codeIntelligenceRepository": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "codingAgentEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "codingAgentSettings": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "createdAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "createdIssueCount": {
+    "deprecated": false,
+    "type": "Int"
+   },
+   "customerCount": {
+    "deprecated": false,
+    "type": "Int"
+   },
+   "customersConfiguration": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "customersEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "defaultFeedSummarySchedule": {
+    "deprecated": false,
+    "type": "FeedSummarySchedule"
+   },
+   "defaultHomeView": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "defaultHomeViewTargetId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "deletionRequestedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "facets": {
+    "deprecated": false,
+    "type": "Facet"
+   },
+   "feedEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "fiscalYearStartMonth": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "generatedUpdatesEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "gitBranchFormat": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "gitLinkbackDescriptionsEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "gitLinkbackMessagesEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "gitPublicLinkbackMessagesEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "hideNonPrimaryOrganizations": {
+    "deprecated": true,
+    "type": "Boolean"
+   },
+   "hipaaComplianceEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "id": {
+    "deprecated": false,
+    "type": "ID"
+   },
+   "initiativeUpdateReminderFrequencyInWeeks": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "initiativeUpdateRemindersDay": {
+    "deprecated": false,
+    "type": "Day"
+   },
+   "initiativeUpdateRemindersHour": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "integrations": {
+    "deprecated": false,
+    "type": "IntegrationConnection"
+   },
+   "ipRestrictions": {
+    "deprecated": false,
+    "type": "OrganizationIpRestriction"
+   },
+   "labels": {
+    "deprecated": false,
+    "type": "IssueLabelConnection"
+   },
+   "linearAgentEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "linearAgentSettings": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "logoUrl": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "loops": {
+    "deprecated": false,
+    "type": "WorkflowDefinitionConnection"
+   },
+   "managedTeamFeatures": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "name": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "periodUploadVolume": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "previousUrlKeys": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "projectLabels": {
+    "deprecated": false,
+    "type": "ProjectLabelConnection"
+   },
+   "projectStatuses": {
+    "deprecated": false,
+    "type": "ProjectStatus"
+   },
+   "projectUpdateReminderFrequencyInWeeks": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "projectUpdateRemindersDay": {
+    "deprecated": false,
+    "type": "Day"
+   },
+   "projectUpdateRemindersHour": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "projectUpdatesReminderFrequency": {
+    "deprecated": false,
+    "type": "ProjectUpdateReminderFrequency"
+   },
+   "pullRequestIssueMode": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "pullRequestTourEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "releaseChannel": {
+    "deprecated": false,
+    "type": "ReleaseChannel"
+   },
+   "releasesEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "restrictAgentInvocationToMembers": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "restrictLabelManagementToAdmins": {
+    "deprecated": true,
+    "type": "Boolean"
+   },
+   "restrictTeamCreationToAdmins": {
+    "deprecated": true,
+    "type": "Boolean"
+   },
+   "roadmapEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "samlEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "samlSettings": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "scimEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "scimSettings": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "securitySettings": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "slaDayCount": {
+    "deprecated": true,
+    "type": "SLADayCountType"
+   },
+   "slackAutoCreateProjectChannel": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "slackProjectChannelIntegration": {
+    "deprecated": false,
+    "type": "Integration"
+   },
+   "slackProjectChannelPrefix": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "slackProjectChannelsEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "subscription": {
+    "deprecated": false,
+    "type": "PaidSubscription"
+   },
+   "suggestedBranchNameEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "teamSecuritySettings": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "teams": {
+    "deprecated": false,
+    "type": "TeamConnection"
+   },
+   "templates": {
+    "deprecated": false,
+    "type": "TemplateConnection"
+   },
+   "themeSettings": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "trialEndsAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "trialStartsAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "updatedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "urlKey": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "userCount": {
+    "deprecated": false,
+    "type": "Int"
+   },
+   "users": {
+    "deprecated": false,
+    "type": "UserConnection"
+   },
+   "workingDays": {
+    "deprecated": false,
+    "type": "Float"
+   }
+  },
+  "PageInfo": {
+   "endCursor": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "hasNextPage": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "hasPreviousPage": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "startCursor": {
+    "deprecated": false,
+    "type": "String"
+   }
+  },
+  "Project": {
+   "archivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "attachments": {
+    "deprecated": false,
+    "type": "ProjectAttachmentConnection"
+   },
+   "autoArchivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "canceledAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "color": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "comments": {
+    "deprecated": false,
+    "type": "CommentConnection"
+   },
+   "completedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "completedIssueCountHistory": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "completedScopeHistory": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "content": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "contentState": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "convertedFromIssue": {
+    "deprecated": false,
+    "type": "Issue"
+   },
+   "createdAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "creator": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "currentProgress": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "description": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "documentContent": {
+    "deprecated": false,
+    "type": "DocumentContent"
+   },
+   "documents": {
+    "deprecated": false,
+    "type": "DocumentConnection"
+   },
+   "externalLinks": {
+    "deprecated": false,
+    "type": "EntityExternalLinkConnection"
+   },
+   "facets": {
+    "deprecated": false,
+    "type": "Facet"
+   },
+   "favorite": {
+    "deprecated": false,
+    "type": "Favorite"
+   },
+   "frequencyResolution": {
+    "deprecated": false,
+    "type": "FrequencyResolutionType"
+   },
+   "health": {
+    "deprecated": false,
+    "type": "ProjectUpdateHealthType"
+   },
+   "healthUpdatedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "history": {
+    "deprecated": false,
+    "type": "ProjectHistoryConnection"
+   },
+   "icon": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "id": {
+    "deprecated": false,
+    "type": "ID"
+   },
+   "identifier": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "inProgressScopeHistory": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "initiativeToProjects": {
+    "deprecated": false,
+    "type": "InitiativeToProjectConnection"
+   },
+   "initiatives": {
+    "deprecated": false,
+    "type": "InitiativeConnection"
+   },
+   "integrationsSettings": {
+    "deprecated": false,
+    "type": "IntegrationsSettings"
+   },
+   "inverseRelations": {
+    "deprecated": false,
+    "type": "ProjectRelationConnection"
+   },
+   "issueCountHistory": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "issues": {
+    "deprecated": false,
+    "type": "IssueConnection"
+   },
+   "labelIds": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "labels": {
+    "deprecated": false,
+    "type": "ProjectLabelConnection"
+   },
+   "lastAppliedTemplate": {
+    "deprecated": false,
+    "type": "Template"
+   },
+   "lastUpdate": {
+    "deprecated": false,
+    "type": "ProjectUpdate"
+   },
+   "lead": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "leadTeam": {
+    "deprecated": false,
+    "type": "Team"
+   },
+   "leadTeamId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "members": {
+    "deprecated": false,
+    "type": "UserConnection"
+   },
+   "microsoftTeamsChannelId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "name": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "needs": {
+    "deprecated": false,
+    "type": "CustomerNeedConnection"
+   },
+   "previousIdentifiers": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "priority": {
+    "deprecated": false,
+    "type": "Int"
+   },
+   "priorityLabel": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "prioritySortOrder": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "progress": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "progressHistory": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "projectMilestones": {
+    "deprecated": false,
+    "type": "ProjectMilestoneConnection"
+   },
+   "projectUpdateRemindersPausedUntilAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "projectUpdates": {
+    "deprecated": false,
+    "type": "ProjectUpdateConnection"
+   },
+   "relations": {
+    "deprecated": false,
+    "type": "ProjectRelationConnection"
+   },
+   "resourceCount": {
+    "deprecated": false,
+    "type": "Int"
+   },
+   "scope": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "scopeHistory": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "slackChannelId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "slackIssueComments": {
+    "deprecated": true,
+    "type": "Boolean"
+   },
+   "slackIssueStatuses": {
+    "deprecated": true,
+    "type": "Boolean"
+   },
+   "slackNewIssue": {
+    "deprecated": true,
+    "type": "Boolean"
+   },
+   "slugId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "sortOrder": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "startDate": {
+    "deprecated": false,
+    "type": "TimelessDate"
+   },
+   "startDateResolution": {
+    "deprecated": false,
+    "type": "DateResolutionType"
+   },
+   "startedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "state": {
+    "deprecated": true,
+    "type": "String"
+   },
+   "status": {
+    "deprecated": false,
+    "type": "ProjectStatus"
+   },
+   "syncedWith": {
+    "deprecated": false,
+    "type": "ExternalEntityInfo"
+   },
+   "targetDate": {
+    "deprecated": false,
+    "type": "TimelessDate"
+   },
+   "targetDateResolution": {
+    "deprecated": false,
+    "type": "DateResolutionType"
+   },
+   "teams": {
+    "deprecated": false,
+    "type": "TeamConnection"
+   },
+   "trashed": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "updateReminderFrequency": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "updateReminderFrequencyInWeeks": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "updateRemindersDay": {
+    "deprecated": false,
+    "type": "Day"
+   },
+   "updateRemindersHour": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "updatedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "url": {
+    "deprecated": false,
+    "type": "String"
+   }
+  },
+  "ProjectConnection": {
+   "edges": {
+    "deprecated": false,
+    "type": "ProjectEdge"
+   },
+   "nodes": {
+    "deprecated": false,
+    "type": "Project"
+   },
+   "pageInfo": {
+    "deprecated": false,
+    "type": "PageInfo"
+   }
+  },
+  "ProjectStatus": {
+   "archivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "color": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "createdAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "description": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "id": {
+    "deprecated": false,
+    "type": "ID"
+   },
+   "indefinite": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "inheritedFrom": {
+    "deprecated": false,
+    "type": "ProjectStatus"
+   },
+   "name": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "position": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "team": {
+    "deprecated": false,
+    "type": "Team"
+   },
+   "teamId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "type": {
+    "deprecated": false,
+    "type": "ProjectStatusType"
+   },
+   "updatedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   }
+  },
+  "Query": {
+   "_dummy": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "administrableTeams": {
+    "deprecated": false,
+    "type": "TeamConnection"
+   },
+   "agentActivities": {
+    "deprecated": false,
+    "type": "AgentActivityConnection"
+   },
+   "agentActivity": {
+    "deprecated": false,
+    "type": "AgentActivity"
+   },
+   "agentSession": {
+    "deprecated": false,
+    "type": "AgentSession"
+   },
+   "agentSessionSandbox": {
+    "deprecated": false,
+    "type": "CodingAgentSandboxPayload"
+   },
+   "agentSessionSshAddress": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "agentSessions": {
+    "deprecated": false,
+    "type": "AgentSessionConnection"
+   },
+   "agentSkill": {
+    "deprecated": false,
+    "type": "AgentSkill"
+   },
+   "agentSkills": {
+    "deprecated": false,
+    "type": "AgentSkillConnection"
+   },
+   "applicationInfo": {
+    "deprecated": false,
+    "type": "Application"
+   },
+   "archivedIntegrations": {
+    "deprecated": false,
+    "type": "ArchivedIntegrationPayload"
+   },
+   "archivedTeams": {
+    "deprecated": false,
+    "type": "Team"
+   },
+   "attachment": {
+    "deprecated": false,
+    "type": "Attachment"
+   },
+   "attachmentIssue": {
+    "deprecated": false,
+    "type": "Issue"
+   },
+   "attachmentSources": {
+    "deprecated": false,
+    "type": "AttachmentSourcesPayload"
+   },
+   "attachments": {
+    "deprecated": false,
+    "type": "AttachmentConnection"
+   },
+   "attachmentsForURL": {
+    "deprecated": false,
+    "type": "AttachmentConnection"
+   },
+   "auditEntries": {
+    "deprecated": false,
+    "type": "AuditEntryConnection"
+   },
+   "auditEntryTypes": {
+    "deprecated": false,
+    "type": "AuditEntryType"
+   },
+   "auditLogWebhookFailureEvents": {
+    "deprecated": false,
+    "type": "WebhookFailureEvent"
+   },
+   "authenticationSessions": {
+    "deprecated": false,
+    "type": "AuthenticationSessionResponse"
+   },
+   "availableUsers": {
+    "deprecated": false,
+    "type": "AuthResolverResponse"
+   },
+   "comment": {
+    "deprecated": false,
+    "type": "Comment"
+   },
+   "comments": {
+    "deprecated": false,
+    "type": "CommentConnection"
+   },
+   "customView": {
+    "deprecated": false,
+    "type": "CustomView"
+   },
+   "customViewDetailsSuggestion": {
+    "deprecated": false,
+    "type": "CustomViewSuggestionPayload"
+   },
+   "customViewHasSubscribers": {
+    "deprecated": false,
+    "type": "CustomViewHasSubscribersPayload"
+   },
+   "customViews": {
+    "deprecated": false,
+    "type": "CustomViewConnection"
+   },
+   "customer": {
+    "deprecated": false,
+    "type": "Customer"
+   },
+   "customerNeed": {
+    "deprecated": false,
+    "type": "CustomerNeed"
+   },
+   "customerNeeds": {
+    "deprecated": false,
+    "type": "CustomerNeedConnection"
+   },
+   "customerStatus": {
+    "deprecated": false,
+    "type": "CustomerStatus"
+   },
+   "customerStatuses": {
+    "deprecated": false,
+    "type": "CustomerStatusConnection"
+   },
+   "customerTier": {
+    "deprecated": false,
+    "type": "CustomerTier"
+   },
+   "customerTiers": {
+    "deprecated": false,
+    "type": "CustomerTierConnection"
+   },
+   "customers": {
+    "deprecated": false,
+    "type": "CustomerConnection"
+   },
+   "cycle": {
+    "deprecated": false,
+    "type": "Cycle"
+   },
+   "cycles": {
+    "deprecated": false,
+    "type": "CycleConnection"
+   },
+   "dependencyPackageMetadata": {
+    "deprecated": false,
+    "type": "DependencyPackageMetadataResult"
+   },
+   "diff": {
+    "deprecated": false,
+    "type": "Diff"
+   },
+   "document": {
+    "deprecated": false,
+    "type": "Document"
+   },
+   "documentContentHistory": {
+    "deprecated": false,
+    "type": "DocumentContentHistoryPayload"
+   },
+   "documentContentHistoryEntries": {
+    "deprecated": false,
+    "type": "DocumentContentHistoryPayload"
+   },
+   "documentContentHistoryTimeline": {
+    "deprecated": false,
+    "type": "DocumentContentHistoryTimelinePayload"
+   },
+   "documents": {
+    "deprecated": false,
+    "type": "DocumentConnection"
+   },
+   "emailIntakeAddress": {
+    "deprecated": false,
+    "type": "EmailIntakeAddress"
+   },
+   "emoji": {
+    "deprecated": false,
+    "type": "Emoji"
+   },
+   "emojis": {
+    "deprecated": false,
+    "type": "EmojiConnection"
+   },
+   "entityExternalLink": {
+    "deprecated": false,
+    "type": "EntityExternalLink"
+   },
+   "externalUser": {
+    "deprecated": false,
+    "type": "ExternalUser"
+   },
+   "externalUsers": {
+    "deprecated": false,
+    "type": "ExternalUserConnection"
+   },
+   "failuresForOauthWebhooks": {
+    "deprecated": false,
+    "type": "WebhookFailureEvent"
+   },
+   "favorite": {
+    "deprecated": false,
+    "type": "Favorite"
+   },
+   "favorites": {
+    "deprecated": false,
+    "type": "FavoriteConnection"
+   },
+   "inboxNotifications": {
+    "deprecated": false,
+    "type": "NotificationConnection"
+   },
+   "initiative": {
+    "deprecated": false,
+    "type": "Initiative"
+   },
+   "initiativeFilterSuggestion": {
+    "deprecated": false,
+    "type": "InitiativeFilterSuggestionPayload"
+   },
+   "initiativeLabel": {
+    "deprecated": false,
+    "type": "InitiativeLabel"
+   },
+   "initiativeLabels": {
+    "deprecated": false,
+    "type": "InitiativeLabelConnection"
+   },
+   "initiativeLeadTeamChangeImpact": {
+    "deprecated": false,
+    "type": "InitiativeLeadTeamChangeImpact"
+   },
+   "initiativeRelation": {
+    "deprecated": false,
+    "type": "InitiativeRelation"
+   },
+   "initiativeRelations": {
+    "deprecated": false,
+    "type": "InitiativeRelationConnection"
+   },
+   "initiativeToProject": {
+    "deprecated": false,
+    "type": "InitiativeToProject"
+   },
+   "initiativeToProjects": {
+    "deprecated": false,
+    "type": "InitiativeToProjectConnection"
+   },
+   "initiativeUpdate": {
+    "deprecated": false,
+    "type": "InitiativeUpdate"
+   },
+   "initiativeUpdates": {
+    "deprecated": false,
+    "type": "InitiativeUpdateConnection"
+   },
+   "initiatives": {
+    "deprecated": false,
+    "type": "InitiativeConnection"
+   },
+   "integration": {
+    "deprecated": false,
+    "type": "Integration"
+   },
+   "integrationHasScopes": {
+    "deprecated": false,
+    "type": "IntegrationHasScopesPayload"
+   },
+   "integrationJiraProjectStatuses": {
+    "deprecated": false,
+    "type": "JiraProjectStatusesPayload"
+   },
+   "integrationSyncResourceIds": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "integrationTemplate": {
+    "deprecated": false,
+    "type": "IntegrationTemplate"
+   },
+   "integrationTemplates": {
+    "deprecated": false,
+    "type": "IntegrationTemplateConnection"
+   },
+   "integrations": {
+    "deprecated": false,
+    "type": "IntegrationConnection"
+   },
+   "integrationsSettings": {
+    "deprecated": false,
+    "type": "IntegrationsSettings"
+   },
+   "issue": {
+    "deprecated": false,
+    "type": "Issue"
+   },
+   "issueFigmaFileKeySearch": {
+    "deprecated": false,
+    "type": "IssueConnection"
+   },
+   "issueFilterSuggestion": {
+    "deprecated": false,
+    "type": "IssueFilterSuggestionPayload"
+   },
+   "issueImportCheckCSV": {
+    "deprecated": false,
+    "type": "IssueImportCheckPayload"
+   },
+   "issueImportCheckSync": {
+    "deprecated": false,
+    "type": "IssueImportSyncCheckPayload"
+   },
+   "issueImportJqlCheck": {
+    "deprecated": false,
+    "type": "IssueImportJqlCheckPayload"
+   },
+   "issueLabel": {
+    "deprecated": false,
+    "type": "IssueLabel"
+   },
+   "issueLabels": {
+    "deprecated": false,
+    "type": "IssueLabelConnection"
+   },
+   "issuePriorityValues": {
+    "deprecated": false,
+    "type": "IssuePriorityValue"
+   },
+   "issueRelation": {
+    "deprecated": false,
+    "type": "IssueRelation"
+   },
+   "issueRelations": {
+    "deprecated": false,
+    "type": "IssueRelationConnection"
+   },
+   "issueRepositorySuggestions": {
+    "deprecated": false,
+    "type": "RepositorySuggestionsPayload"
+   },
+   "issueSearch": {
+    "deprecated": false,
+    "type": "IssueConnection"
+   },
+   "issueTitleSuggestionFromCustomerRequest": {
+    "deprecated": false,
+    "type": "IssueTitleSuggestionFromCustomerRequestPayload"
+   },
+   "issueToRelease": {
+    "deprecated": false,
+    "type": "IssueToRelease"
+   },
+   "issueToReleases": {
+    "deprecated": false,
+    "type": "IssueToReleaseConnection"
+   },
+   "issueVcsBranchSearch": {
+    "deprecated": false,
+    "type": "Issue"
+   },
+   "issues": {
+    "deprecated": false,
+    "type": "IssueConnection"
+   },
+   "latestReleaseByAccessKey": {
+    "deprecated": false,
+    "type": "AccessKeyRelease"
+   },
+   "microsoftTeamsChannels": {
+    "deprecated": false,
+    "type": "MicrosoftTeamsChannelsPayload"
+   },
+   "notification": {
+    "deprecated": false,
+    "type": "Notification"
+   },
+   "notificationSubscription": {
+    "deprecated": false,
+    "type": "NotificationSubscription"
+   },
+   "notificationSubscriptions": {
+    "deprecated": false,
+    "type": "NotificationSubscriptionConnection"
+   },
+   "notifications": {
+    "deprecated": false,
+    "type": "NotificationConnection"
+   },
+   "notificationsUnreadCount": {
+    "deprecated": false,
+    "type": "Int"
+   },
+   "oauthApplication": {
+    "deprecated": false,
+    "type": "OAuthApplication"
+   },
+   "oauthApplicationCodingSessionTrustedSource": {
+    "deprecated": false,
+    "type": "OAuthApplicationCodingSessionTrustedSource"
+   },
+   "oauthApplications": {
+    "deprecated": false,
+    "type": "OAuthApplication"
+   },
+   "organization": {
+    "deprecated": false,
+    "type": "Organization"
+   },
+   "organizationDomainClaimRequest": {
+    "deprecated": false,
+    "type": "OrganizationDomainClaimPayload"
+   },
+   "organizationExists": {
+    "deprecated": false,
+    "type": "OrganizationExistsPayload"
+   },
+   "organizationInvite": {
+    "deprecated": false,
+    "type": "OrganizationInvite"
+   },
+   "organizationInviteDetails": {
+    "deprecated": false,
+    "type": "OrganizationInviteDetailsPayload"
+   },
+   "organizationInvites": {
+    "deprecated": false,
+    "type": "OrganizationInviteConnection"
+   },
+   "organizationMeta": {
+    "deprecated": false,
+    "type": "OrganizationMeta"
+   },
+   "originInstallUrl": {
+    "deprecated": false,
+    "type": "OriginInstallUrlPayload"
+   },
+   "originInstallation": {
+    "deprecated": false,
+    "type": "OriginInstallationDetails"
+   },
+   "originPendingInstallations": {
+    "deprecated": false,
+    "type": "OriginInstallationDetails"
+   },
+   "partnerOfferDetails": {
+    "deprecated": false,
+    "type": "PartnerOfferDetailsPayload"
+   },
+   "partnerOfferWorkspaces": {
+    "deprecated": false,
+    "type": "PartnerOfferWorkspacesPayload"
+   },
+   "partnerProgramPartners": {
+    "deprecated": false,
+    "type": "PartnerProgramPartnerPayload"
+   },
+   "project": {
+    "deprecated": false,
+    "type": "Project"
+   },
+   "projectFilterSuggestion": {
+    "deprecated": false,
+    "type": "ProjectFilterSuggestionPayload"
+   },
+   "projectLabel": {
+    "deprecated": false,
+    "type": "ProjectLabel"
+   },
+   "projectLabels": {
+    "deprecated": false,
+    "type": "ProjectLabelConnection"
+   },
+   "projectMilestone": {
+    "deprecated": false,
+    "type": "ProjectMilestone"
+   },
+   "projectMilestones": {
+    "deprecated": false,
+    "type": "ProjectMilestoneConnection"
+   },
+   "projectRelation": {
+    "deprecated": false,
+    "type": "ProjectRelation"
+   },
+   "projectRelations": {
+    "deprecated": false,
+    "type": "ProjectRelationConnection"
+   },
+   "projectStatus": {
+    "deprecated": false,
+    "type": "ProjectStatus"
+   },
+   "projectStatusProjectCount": {
+    "deprecated": false,
+    "type": "ProjectStatusCountPayload"
+   },
+   "projectStatuses": {
+    "deprecated": false,
+    "type": "ProjectStatusConnection"
+   },
+   "projectUpdate": {
+    "deprecated": false,
+    "type": "ProjectUpdate"
+   },
+   "projectUpdates": {
+    "deprecated": false,
+    "type": "ProjectUpdateConnection"
+   },
+   "projects": {
+    "deprecated": false,
+    "type": "ProjectConnection"
+   },
+   "pushSubscriptionTest": {
+    "deprecated": false,
+    "type": "PushSubscriptionTestPayload"
+   },
+   "quotas": {
+    "deprecated": false,
+    "type": "OrganizationQuotaConnection"
+   },
+   "rateLimitStatus": {
+    "deprecated": false,
+    "type": "RateLimitPayload"
+   },
+   "recentReleasesByAccessKey": {
+    "deprecated": false,
+    "type": "AccessKeyRelease"
+   },
+   "release": {
+    "deprecated": false,
+    "type": "Release"
+   },
+   "releaseNote": {
+    "deprecated": false,
+    "type": "ReleaseNote"
+   },
+   "releaseNotes": {
+    "deprecated": false,
+    "type": "ReleaseNoteConnection"
+   },
+   "releasePipeline": {
+    "deprecated": false,
+    "type": "ReleasePipeline"
+   },
+   "releasePipelineByAccessKey": {
+    "deprecated": false,
+    "type": "AccessKeyReleasePipeline"
+   },
+   "releasePipelines": {
+    "deprecated": false,
+    "type": "ReleasePipelineConnection"
+   },
+   "releaseSearch": {
+    "deprecated": false,
+    "type": "Release"
+   },
+   "releaseStage": {
+    "deprecated": false,
+    "type": "ReleaseStage"
+   },
+   "releaseStages": {
+    "deprecated": false,
+    "type": "ReleaseStageConnection"
+   },
+   "releases": {
+    "deprecated": false,
+    "type": "ReleaseConnection"
+   },
+   "roadmap": {
+    "deprecated": true,
+    "type": "Roadmap"
+   },
+   "roadmapToProject": {
+    "deprecated": false,
+    "type": "RoadmapToProject"
+   },
+   "roadmapToProjects": {
+    "deprecated": true,
+    "type": "RoadmapToProjectConnection"
+   },
+   "roadmaps": {
+    "deprecated": true,
+    "type": "RoadmapConnection"
+   },
+   "searchDocuments": {
+    "deprecated": false,
+    "type": "DocumentSearchPayload"
+   },
+   "searchIssues": {
+    "deprecated": false,
+    "type": "IssueSearchPayload"
+   },
+   "searchProjects": {
+    "deprecated": false,
+    "type": "ProjectSearchPayload"
+   },
+   "semanticSearch": {
+    "deprecated": false,
+    "type": "SemanticSearchPayload"
+   },
+   "slaConfigurations": {
+    "deprecated": false,
+    "type": "SlaConfiguration"
+   },
+   "ssoUrlFromEmail": {
+    "deprecated": false,
+    "type": "SsoUrlFromEmailResponse"
+   },
+   "team": {
+    "deprecated": false,
+    "type": "Team"
+   },
+   "teamMembership": {
+    "deprecated": false,
+    "type": "TeamMembership"
+   },
+   "teamMemberships": {
+    "deprecated": false,
+    "type": "TeamMembershipConnection"
+   },
+   "teams": {
+    "deprecated": false,
+    "type": "TeamConnection"
+   },
+   "template": {
+    "deprecated": false,
+    "type": "Template"
+   },
+   "templateSearch": {
+    "deprecated": false,
+    "type": "Template"
+   },
+   "templates": {
+    "deprecated": false,
+    "type": "Template"
+   },
+   "templatesForIntegration": {
+    "deprecated": false,
+    "type": "Template"
+   },
+   "timeSchedule": {
+    "deprecated": false,
+    "type": "TimeSchedule"
+   },
+   "timeSchedules": {
+    "deprecated": false,
+    "type": "TimeScheduleConnection"
+   },
+   "triageResponsibilities": {
+    "deprecated": false,
+    "type": "TriageResponsibilityConnection"
+   },
+   "triageResponsibility": {
+    "deprecated": false,
+    "type": "TriageResponsibility"
+   },
+   "usageAlert": {
+    "deprecated": false,
+    "type": "UsageAlert"
+   },
+   "usageAlerts": {
+    "deprecated": false,
+    "type": "UsageAlertConnection"
+   },
+   "user": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "userSessions": {
+    "deprecated": false,
+    "type": "AuthenticationSessionResponse"
+   },
+   "userSettings": {
+    "deprecated": false,
+    "type": "UserSettings"
+   },
+   "userViewPreferences": {
+    "deprecated": false,
+    "type": "ViewPreferences"
+   },
+   "users": {
+    "deprecated": false,
+    "type": "UserConnection"
+   },
+   "verifyGitHubEnterpriseServerInstallation": {
+    "deprecated": false,
+    "type": "GitHubEnterpriseServerInstallVerificationPayload"
+   },
+   "viewer": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "webhook": {
+    "deprecated": false,
+    "type": "Webhook"
+   },
+   "webhooks": {
+    "deprecated": false,
+    "type": "WebhookConnection"
+   },
+   "workflowState": {
+    "deprecated": false,
+    "type": "WorkflowState"
+   },
+   "workflowStates": {
+    "deprecated": false,
+    "type": "WorkflowStateConnection"
+   }
+  },
+  "Team": {
+   "activeCycle": {
+    "deprecated": false,
+    "type": "Cycle"
+   },
+   "agentAutomationEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "aiDiscussionSummariesEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "aiThreadSummariesEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "allMembersCanJoin": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "ancestors": {
+    "deprecated": false,
+    "type": "Team"
+   },
+   "archivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "autoArchivePeriod": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "autoCloseChildIssues": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "autoCloseParentIssues": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "autoClosePeriod": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "autoCloseStateId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "children": {
+    "deprecated": false,
+    "type": "Team"
+   },
+   "codingAgentEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "color": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "createdAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "currentProgress": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "cycleCalenderUrl": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "cycleCooldownTime": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "cycleDuration": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "cycleIssueAutoAssignCompleted": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "cycleIssueAutoAssignStarted": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "cycleLockToActive": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "cycleStartDay": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "cycles": {
+    "deprecated": false,
+    "type": "CycleConnection"
+   },
+   "cyclesEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "defaultIssueEstimate": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "defaultIssueState": {
+    "deprecated": false,
+    "type": "WorkflowState"
+   },
+   "defaultProjectTemplate": {
+    "deprecated": false,
+    "type": "Template"
+   },
+   "defaultTemplateForMembers": {
+    "deprecated": false,
+    "type": "Template"
+   },
+   "defaultTemplateForMembersId": {
+    "deprecated": true,
+    "type": "String"
+   },
+   "defaultTemplateForNonMembers": {
+    "deprecated": false,
+    "type": "Template"
+   },
+   "defaultTemplateForNonMembersId": {
+    "deprecated": true,
+    "type": "String"
+   },
+   "description": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "displayName": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "draftWorkflowState": {
+    "deprecated": true,
+    "type": "WorkflowState"
+   },
+   "facets": {
+    "deprecated": false,
+    "type": "Facet"
+   },
+   "gitAutomationStates": {
+    "deprecated": false,
+    "type": "GitAutomationStateConnection"
+   },
+   "groupIssueHistory": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "icon": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "id": {
+    "deprecated": false,
+    "type": "ID"
+   },
+   "inheritIssueEstimation": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "inheritProjectStatuses": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "inheritSlackAutoCreateProjectChannel": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "inheritWorkflowStatuses": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "initiativesEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "integrationsSettings": {
+    "deprecated": false,
+    "type": "IntegrationsSettings"
+   },
+   "inviteHash": {
+    "deprecated": true,
+    "type": "String"
+   },
+   "issueCount": {
+    "deprecated": false,
+    "type": "Int"
+   },
+   "issueEstimationAllowZero": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "issueEstimationExtended": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "issueEstimationType": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "issueOrderingNoPriorityFirst": {
+    "deprecated": true,
+    "type": "Boolean"
+   },
+   "issueSortOrderDefaultToBottom": {
+    "deprecated": true,
+    "type": "Boolean"
+   },
+   "issues": {
+    "deprecated": false,
+    "type": "IssueConnection"
+   },
+   "joinByDefault": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "key": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "labels": {
+    "deprecated": false,
+    "type": "IssueLabelConnection"
+   },
+   "ledInitiativeCount": {
+    "deprecated": false,
+    "type": "Int"
+   },
+   "loops": {
+    "deprecated": false,
+    "type": "WorkflowDefinitionConnection"
+   },
+   "markedAsDuplicateWorkflowState": {
+    "deprecated": false,
+    "type": "WorkflowState"
+   },
+   "members": {
+    "deprecated": false,
+    "type": "UserConnection"
+   },
+   "membership": {
+    "deprecated": false,
+    "type": "TeamMembership"
+   },
+   "memberships": {
+    "deprecated": false,
+    "type": "TeamMembershipConnection"
+   },
+   "mergeWorkflowState": {
+    "deprecated": true,
+    "type": "WorkflowState"
+   },
+   "mergeableWorkflowState": {
+    "deprecated": true,
+    "type": "WorkflowState"
+   },
+   "name": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "organization": {
+    "deprecated": false,
+    "type": "Organization"
+   },
+   "parent": {
+    "deprecated": false,
+    "type": "Team"
+   },
+   "pinnedResources": {
+    "deprecated": false,
+    "type": "TeamPinnedResource"
+   },
+   "posts": {
+    "deprecated": false,
+    "type": "Post"
+   },
+   "private": {
+    "deprecated": true,
+    "type": "Boolean"
+   },
+   "progressHistory": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "projects": {
+    "deprecated": false,
+    "type": "ProjectConnection"
+   },
+   "protectedBy": {
+    "deprecated": true,
+    "type": "Team"
+   },
+   "protectedById": {
+    "deprecated": true,
+    "type": "String"
+   },
+   "releasePipelines": {
+    "deprecated": false,
+    "type": "ReleasePipelineConnection"
+   },
+   "requirePriorityToLeaveTriage": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "resourceSections": {
+    "deprecated": false,
+    "type": "TeamResourceSection"
+   },
+   "restrictedBy": {
+    "deprecated": false,
+    "type": "Team"
+   },
+   "restrictedById": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "retiredAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "reviewWorkflowState": {
+    "deprecated": true,
+    "type": "WorkflowState"
+   },
+   "scimGroupName": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "scimManaged": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "securitySettings": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "setIssueSortOrderOnStateChange": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "slackAutoCreateProjectChannel": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "slackIssueComments": {
+    "deprecated": true,
+    "type": "Boolean"
+   },
+   "slackIssueStatuses": {
+    "deprecated": true,
+    "type": "Boolean"
+   },
+   "slackNewIssue": {
+    "deprecated": true,
+    "type": "Boolean"
+   },
+   "startWorkflowState": {
+    "deprecated": true,
+    "type": "WorkflowState"
+   },
+   "states": {
+    "deprecated": false,
+    "type": "WorkflowStateConnection"
+   },
+   "templates": {
+    "deprecated": false,
+    "type": "TemplateConnection"
+   },
+   "timezone": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "triageEnabled": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "triageIssueState": {
+    "deprecated": false,
+    "type": "WorkflowState"
+   },
+   "triageResponsibility": {
+    "deprecated": false,
+    "type": "TriageResponsibility"
+   },
+   "upcomingCycleCount": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "updatedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "viewerCanJoin": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "viewerCanLeave": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "viewerMembership": {
+    "deprecated": false,
+    "type": "TeamMembership"
+   },
+   "visibility": {
+    "deprecated": false,
+    "type": "TeamVisibility"
+   },
+   "webhooks": {
+    "deprecated": false,
+    "type": "WebhookConnection"
+   }
+  },
+  "TeamConnection": {
+   "edges": {
+    "deprecated": false,
+    "type": "TeamEdge"
+   },
+   "nodes": {
+    "deprecated": false,
+    "type": "Team"
+   },
+   "pageInfo": {
+    "deprecated": false,
+    "type": "PageInfo"
+   }
+  },
+  "User": {
+   "active": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "admin": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "app": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "archivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "assignedIssues": {
+    "deprecated": false,
+    "type": "IssueConnection"
+   },
+   "avatarBackgroundColor": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "avatarUrl": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "calendarHash": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "canAccessAnyPublicTeam": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "createdAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "createdIssueCount": {
+    "deprecated": false,
+    "type": "Int"
+   },
+   "createdIssues": {
+    "deprecated": false,
+    "type": "IssueConnection"
+   },
+   "delegatedIssues": {
+    "deprecated": false,
+    "type": "IssueConnection"
+   },
+   "description": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "disableReason": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "displayName": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "drafts": {
+    "deprecated": false,
+    "type": "DraftConnection"
+   },
+   "email": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "feedFacets": {
+    "deprecated": false,
+    "type": "FacetConnection"
+   },
+   "gitHubUserId": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "guest": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "hasGitHubCodeAccess": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "id": {
+    "deprecated": false,
+    "type": "ID"
+   },
+   "identityProvider": {
+    "deprecated": false,
+    "type": "IdentityProvider"
+   },
+   "initials": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "inviteHash": {
+    "deprecated": true,
+    "type": "String"
+   },
+   "isAssignable": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "isMe": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "isMentionable": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "issueDrafts": {
+    "deprecated": false,
+    "type": "IssueDraftConnection"
+   },
+   "lastSeen": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "name": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "organization": {
+    "deprecated": false,
+    "type": "Organization"
+   },
+   "owner": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "statusEmoji": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "statusLabel": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "statusUntilAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "supportsAgentSessions": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "teamMemberships": {
+    "deprecated": false,
+    "type": "TeamMembershipConnection"
+   },
+   "teams": {
+    "deprecated": false,
+    "type": "TeamConnection"
+   },
+   "timezone": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "title": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "updatedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "url": {
+    "deprecated": false,
+    "type": "String"
+   }
+  },
+  "UserConnection": {
+   "edges": {
+    "deprecated": false,
+    "type": "UserEdge"
+   },
+   "nodes": {
+    "deprecated": false,
+    "type": "User"
+   },
+   "pageInfo": {
+    "deprecated": false,
+    "type": "PageInfo"
+   }
+  },
+  "WorkflowState": {
+   "archivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "color": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "createdAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "description": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "id": {
+    "deprecated": false,
+    "type": "ID"
+   },
+   "inheritedFrom": {
+    "deprecated": false,
+    "type": "WorkflowState"
+   },
+   "issues": {
+    "deprecated": false,
+    "type": "IssueConnection"
+   },
+   "name": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "position": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "team": {
+    "deprecated": false,
+    "type": "Team"
+   },
+   "type": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "updatedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   }
+  }
+ }
+}

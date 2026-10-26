@@ -50,16 +50,21 @@ func processTaskCommentChunk(ctx context.Context, prov importProvider.Provider,
 	who := newPeople(job)
 	commentCh, errCh := prov.IterCommentsOfTask(ctx, job, opts, taskSrcId)
 	committed := 0
+	var kept []string                    // why, for each comment its source keeps from some people
+	var notes []importModels.ImportError // the task's report lines, written with its chunks
 	pendingChunks := make([]*importModels.Chunk, 0, 8)
 
 	flush := func() {
-		if len(pendingChunks) == 0 {
+		if len(pendingChunks) == 0 && len(notes) == 0 {
 			return
 		}
 		bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_ = importModels.CreateChunks(bg, pendingChunks)
-		pendingChunks = pendingChunks[:0]
+		importModels.LogImportErrors(bg, job.Id, &chunk.Id, notes)
+		if len(pendingChunks) > 0 {
+			_ = importModels.CreateChunks(bg, pendingChunks)
+		}
+		pendingChunks, notes = pendingChunks[:0], notes[:0]
 	}
 	defer flush()
 
@@ -79,6 +84,7 @@ func processTaskCommentChunk(ctx context.Context, prov importProvider.Provider,
 			errCh = nil
 		case sc, ok := <-commentCh:
 			if !ok {
+				notes = append(notes, commentsKeptNote(job, taskSrcId, kept)...)
 				// A source whose task files come apart from the task lists
 				// them here, with the task's comments (TaskFileLister).
 				if lister, isLister := prov.(importProvider.TaskFileLister); isLister {
@@ -91,6 +97,12 @@ func processTaskCommentChunk(ctx context.Context, prov importProvider.Provider,
 					pendingChunks = append(pendingChunks, fileChunks(job, taskSrcId, "task", refs)...)
 				}
 				return importModels.FinishChunk(ctx, chunk.Id, committed, nil)
+			}
+			// Kept from some of the people who see its task, it stays in its
+			// source: here everyone who sees the task would read it.
+			if sc.Restricted != "" {
+				kept = append(kept, sc.Restricted)
+				continue
 			}
 			if sc.IsSystem && !keepSystem {
 				continue

@@ -122,6 +122,41 @@ func TestReadableBoardsFor(t *testing.T) {
 	}
 }
 
+// A board is live, for a guest's link and the collaboration service, while
+// it's there and not deleted, private or not, and asked as no one in
+// particular; a graph that doesn't answer says nothing about it.
+func TestABoardIsLiveUntilItIsDeleted(t *testing.T) {
+	yes := true
+	zero, deleted := time.Time{}, time.Now().Add(-time.Hour)
+	old := readBoardsAccess
+	t.Cleanup(func() { readBoardsAccess = old })
+	readBoardsAccess = func(_ context.Context, ids []string, userUUID string) ([]*dgraphStruct.DgraphBoard, error) {
+		if userUUID != "" {
+			t.Errorf("asked for %q, want no one", userUUID)
+		}
+		switch ids[0] {
+		case "aaaa-down":
+			return nil, errors.New("graph down")
+		case "aaaa-gone":
+			return nil, nil
+		}
+		boards := map[string]*dgraphStruct.DgraphBoard{
+			"aaaa-live":    {Uuid: "AAAA-live", DeletedAt: &zero},
+			"aaaa-private": {Uuid: "aaaa-private", IsPrivate: &yes},
+			"aaaa-binned":  {Uuid: "aaaa-binned", DeletedAt: &deleted},
+		}
+		return []*dgraphStruct.DgraphBoard{boards[ids[0]]}, nil
+	}
+	for id, want := range map[string]bool{"aaaa-live": true, "aaaa-private": true, "aaaa-binned": false, "aaaa-gone": false} {
+		if got, err := Live(context.Background(), id); err != nil || got != want {
+			t.Errorf("%s: live %v (%v), want %v", id, got, err, want)
+		}
+	}
+	if got, err := Live(context.Background(), "aaaa-down"); err == nil || got {
+		t.Errorf("a graph that didn't answer gave %v, %v; want an error and not live", got, err)
+	}
+}
+
 // Making a board private, or changing who it's shared with, writes the
 // board's privacy and sharing onto its comments' search entries, which held
 // a copy from when each comment was written.

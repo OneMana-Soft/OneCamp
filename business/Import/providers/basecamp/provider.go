@@ -9,7 +9,8 @@
 //
 //	Person               → user; a client is external, an agent a bot, a
 //	                       tombstone (someone deleted) nobody
-//	Project              → project, with its people; archived stays archived
+//	Project              → project, with its people but its clients (the
+//	                       report counts them); archived stays archived
 //	To-do                → task, open or done; its list (and group) as tags
 //	                       until named lists land (basecamp-03)
 //	Card                 → task, its column as its status; the Done column
@@ -452,14 +453,15 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 			return nil, err
 		}
 		out := make([]importProvider.SourceProject, 0, len(projects))
+		var notes []importModels.ImportError
 		for _, pr := range projects {
 			people, err := p.people(ctx, tok, fmt.Sprintf("%s/projects/%d/people.json", base, pr.ID))
 			if err != nil {
 				return nil, err
 			}
-			members := make([]string, 0, len(people))
-			for _, m := range people {
-				members = append(members, id(m.ID))
+			members, clients := projectPeople(people)
+			if clients > 0 {
+				notes = append(notes, clientsNote(pr.ID, clients))
 			}
 			out = append(out, importProvider.SourceProject{
 				SourceID:    id(pr.ID),
@@ -471,8 +473,34 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 				Metadata:    map[string]any{"basecamp_url": pr.AppURL},
 			})
 		}
+		importModels.LogImportErrors(ctx, j.Id, nil, notes)
 		return out, nil
 	})
+}
+
+// projectPeople is who of a project's people join it here (source ids), and
+// how many are its clients, who don't: a client sees only what's shared with
+// clients in Basecamp, and everything in a project here. Pure.
+func projectPeople(people []bcPerson) ([]string, int) {
+	members := make([]string, 0, len(people))
+	clients := 0
+	for _, m := range people {
+		if m.Client {
+			clients++
+			continue
+		}
+		members = append(members, id(m.ID))
+	}
+	return members, clients
+}
+
+// clientsNote is the import's report line counting the clients a project
+// left out (projectPeople), so the admin can add them on purpose. Pure.
+func clientsNote(projectID int64, clients int) importModels.ImportError {
+	return importModels.ImportError{EntityType: importModels.EntityProject, SourceID: id(projectID),
+		Severity: importModels.SeverityWarning, Code: "PROJECT_CLIENTS_LEFT_OUT",
+		Message: fmt.Sprintf("Basecamp's clients on this project weren't added to it: there they see only what's shared with clients, "+
+			"and here they'd see everything in it. Add them on purpose. Left out: %d.", clients)}
 }
 
 // IterTasksOfProject streams a project's to-dos and cards.

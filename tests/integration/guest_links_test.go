@@ -579,7 +579,12 @@ func TestGuestLinks(t *testing.T) {
 			t.Fatal(err)
 		}
 		projectRaw, _ := link(t, guestModel.ResourceProject, project.String(), guestModel.CapabilityComment)
-		boardRaw, _ := link(t, guestModel.ResourceBoard, uuid.NewString(), guestModel.CapabilityView)
+		// The board link's legs below open an image on its board, so the link
+		// names a board that is there.
+		board := uuid.NewString()
+		dg.Mutate(t, map[string]any{"uid": "_:board", "dgraph.type": "Board", "board_uuid": board, "board_title": "Launch retro",
+			"board_private": false, "board_deleted_at": zero})
+		boardRaw, _ := link(t, guestModel.ResourceBoard, board, guestModel.CapabilityView)
 		open := func(handler http.HandlerFunc, params ...string) (int, string) {
 			t.Helper()
 			rc := chi.NewRouteContext()

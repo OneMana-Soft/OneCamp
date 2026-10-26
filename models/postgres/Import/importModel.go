@@ -918,6 +918,54 @@ func LookupIdMapping(ctx context.Context, importId uuid.UUID, entityType, source
 	return u, err
 }
 
+// PersonMatch is how a source's person came across: who they are here, their
+// name here, and whether they were matched by their address, in this import
+// or in the earlier import of the same source that first matched them. A
+// match by name alone isn't, nor a placeholder made for them.
+type PersonMatch struct {
+	ID      uuid.UUID
+	Name    string
+	ByEmail bool
+}
+
+// PeopleMatched is how each of these people (source ids) came across in the
+// import, read at once; one it didn't map isn't in the answer. A person
+// matched through the workspace's map is matched as that map's first import
+// matched them.
+func PeopleMatched(ctx context.Context, importId uuid.UUID, provider, workspace string, sourceIds []string) (map[string]PersonMatch, error) {
+	out := make(map[string]PersonMatch, len(sourceIds))
+	if len(sourceIds) == 0 {
+		return out, nil
+	}
+	type row struct {
+		source string
+		match  PersonMatch
+	}
+	rows, err := pgexec.Query(ctx, `
+		SELECT m.source_id, m.onecamp_uuid, COALESCE(NULLIF(u.display_name, ''), u.username, ''),
+		       COALESCE(COALESCE(o.metadata, m.metadata)->>'matched_by' = 'email', false)
+		FROM import_id_map m
+		LEFT JOIN import_workspace_id_map w
+		       ON m.metadata->>'matched_by' = 'workspace_map' AND w.provider = $3 AND w.source_workspace_name = $4
+		      AND w.entity_type = m.entity_type AND w.source_id = m.source_id
+		LEFT JOIN import_id_map o
+		       ON o.import_id = w.origin_import_id AND o.entity_type = m.entity_type AND o.source_id = m.source_id
+		LEFT JOIN users u ON u.id = m.onecamp_uuid
+		WHERE m.import_id = $1 AND m.entity_type = $5 AND m.source_id = ANY($2::text[])`,
+		func(r pgexec.Row) (row, error) {
+			var v row
+			err := r.Scan(&v.source, &v.match.ID, &v.match.Name, &v.match.ByEmail)
+			return v, err
+		}, importId, pq.Array(sourceIds), provider, workspace, EntityUser)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		out[r.source] = r.match
+	}
+	return out, nil
+}
+
 // ExecSourceIdMap runs a pre-built (source_id, onecamp_uuid) lookup query (see
 // domain/Import, which owns the dynamic source_id IN(...) placeholder set) and
 // scans it into a source_id -> OneCamp uuid map. Shared by the per-import and

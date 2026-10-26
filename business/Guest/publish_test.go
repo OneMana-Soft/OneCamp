@@ -22,10 +22,10 @@ func withLinks(t *testing.T) *links {
 	t.Helper()
 	l := &links{byID: map[uuid.UUID]*guestModel.GuestGrant{}, tokens: map[string]uuid.UUID{}}
 	oldHash, oldSlug, oldID, oldPub, oldUnpub := grantByHash, grantBySlug, grantByID, publishGrant, unpublishGrant
-	oldTitle, oldLive, oldOn, oldPubOn, oldAllowed := docTitle, docLive, guestOn, publishOn, publishAllowed
+	oldTitle, oldLive, oldOn, oldPubOn, oldAllowed := docTitle, grantLive, guestOn, publishOn, publishAllowed
 	t.Cleanup(func() {
 		grantByHash, grantBySlug, grantByID, publishGrant, unpublishGrant = oldHash, oldSlug, oldID, oldPub, oldUnpub
-		docTitle, docLive, guestOn, publishOn, publishAllowed = oldTitle, oldLive, oldOn, oldPubOn, oldAllowed
+		docTitle, grantLive, guestOn, publishOn, publishAllowed = oldTitle, oldLive, oldOn, oldPubOn, oldAllowed
 	})
 	grantByHash = func(_ context.Context, hash []byte) (*guestModel.GuestGrant, error) {
 		id, ok := l.tokens[string(hash)]
@@ -77,7 +77,7 @@ func withLinks(t *testing.T) *links {
 		return g, nil
 	}
 	docTitle = func(context.Context, string) string { return "Launch Notes" }
-	docLive = func(context.Context, *guestModel.GuestGrant) error { return nil }
+	grantLive = func(context.Context, *guestModel.GuestGrant) error { return nil }
 	guestOn = func() bool { return true }
 	publishOn = func() bool { return true }
 	publishAllowed = func() bool { return true }
@@ -145,7 +145,7 @@ func TestOneAccessCheckForTokenAndAddress(t *testing.T) {
 		t.Errorf("a revoked link's address: %v", err)
 	}
 	g.RevokedAt = nil
-	docLive = func(context.Context, *guestModel.GuestGrant) error { return ErrNotFound }
+	grantLive = func(context.Context, *guestModel.GuestGrant) error { return ErrNotFound }
 	if _, err := ResolveExternal(ctx, External{Token: "tok-view"}); !errors.Is(err, ErrNotFound) {
 		t.Errorf("a doc that's gone: %v", err)
 	}

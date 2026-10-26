@@ -47,7 +47,7 @@ controllers/Archive/archiveController.go 12
 controllers/Board/boardController.go 9
 controllers/Channel/channelController.go 1
 controllers/Doc/docController.go 6
-controllers/EntityLink/entityLinkController.go 4
+controllers/EntityLink/entityLinkController.go 3
 controllers/GitHub/githubController.go 17
 controllers/Import/importController.go 13
 controllers/SlackImport/slackImportController.go 8

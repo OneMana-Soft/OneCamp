@@ -511,7 +511,7 @@ func (p *Provider) IterCommentsOfTask(ctx context.Context, j *importModels.Job, 
 		page := 0
 		for page < maxPages {
 			page++
-			endpoint := fmt.Sprintf("%s/rest/api/3/issue/%s/comment?startAt=%d&maxResults=100&expand=renderedBody",
+			endpoint := fmt.Sprintf("%s/rest/api/3/issue/%s/comment?startAt=%d&maxResults=100&expand=renderedBody,properties",
 				site, url.PathEscape(taskSourceId), startAt)
 			var resp jiraCommentsResp
 			if err := p.getJSON(ctx, tok, endpoint, &resp); err != nil {
@@ -533,6 +533,7 @@ func (p *Provider) IterCommentsOfTask(ctx context.Context, j *importModels.Job, 
 					Body:           body,
 					AuthorSourceID: safeAccountID(c.Author),
 					Created:        created,
+					Restricted:     c.keptBy(),
 				}:
 				}
 			}
@@ -668,13 +669,18 @@ type jiraIssueFields struct {
 	IssueLinks  []jiraIssueLink  `json:"issuelinks"`
 	// Estimate is the original estimate, in seconds.
 	Estimate int `json:"timeoriginalestimate"`
+	// Security is the issue's security level, set when Jira lets only some
+	// people see the issue (restrictedBy).
+	Security *jiraNamed `json:"security"`
 	// Comment is the comments a search carries with an issue (the first page
-	// of them); only their authors are read (usersInScope).
+	// of them); only their authors are read (usersInScope), of those that
+	// come across.
 	// Total is all of them, which the comments stage reads in pages.
 	Comment *struct {
 		Total    int `json:"total"`
 		Comments []struct {
 			Author *jiraUser `json:"author"`
+			jiraCommentAccess
 		} `json:"comments"`
 	} `json:"comment"`
 }
@@ -722,6 +728,43 @@ type jiraComment struct {
 	Body         any       `json:"body"`         // ADF JSON
 	RenderedBody string    `json:"renderedBody"` // HTML (with expand=renderedBody)
 	Created      string    `json:"created"`
+	jiraCommentAccess
+}
+
+// jiraCommentAccess is whether Jira shows a comment to fewer people than its
+// issue: Visibility names the project role or group it is kept to, and a
+// service desk's internal note, which its customers never see, says so in
+// jsdPublic (Cloud) or in its sd.public.comment property (with
+// expand=properties; Data Center has only this).
+type jiraCommentAccess struct {
+	Visibility *struct {
+		Type string `json:"type"`
+	} `json:"visibility"`
+	JSDPublic  *bool `json:"jsdPublic"`
+	Properties []struct {
+		Key   string `json:"key"`
+		Value struct {
+			Internal json.RawMessage `json:"internal"`
+		} `json:"value"`
+	} `json:"properties"`
+}
+
+// keptBy is why Jira keeps a comment from some of the people who see its
+// issue, in the report's words, or "" for one they all see. Such a comment
+// stays in Jira (SourceComment.Restricted). Pure.
+func (a jiraCommentAccess) keptBy() string {
+	if a.Visibility != nil && a.Visibility.Type != "" {
+		return "a project role or group"
+	}
+	if a.JSDPublic != nil && !*a.JSDPublic {
+		return "an internal note"
+	}
+	for _, p := range a.Properties {
+		if v := string(p.Value.Internal); p.Key == "sd.public.comment" && (v == "true" || v == `"true"`) {
+			return "an internal note"
+		}
+	}
+	return ""
 }
 
 type jiraCommentsResp struct {
@@ -907,7 +950,9 @@ func (p *Provider) usersInScope(ctx context.Context, tok, site string, opts impo
 		add(iss.Fields.Creator)
 		if iss.Fields.Comment != nil {
 			for _, c := range iss.Fields.Comment.Comments {
-				add(c.Author)
+				if c.keptBy() == "" {
+					add(c.Author)
+				}
 			}
 		}
 		return true
@@ -1159,7 +1204,7 @@ func commentTotal(iss *jiraIssue) int {
 
 // buildSourceTask converts a Jira issue to the generic SourceTask.
 // issueFields are the fields a search asks for, besides custom ones.
-const issueFields = "summary,description,status,priority,assignee,reporter,creator,issuetype,labels,duedate,created,updated,parent,subtasks,attachment,comment,issuelinks,timeoriginalestimate"
+const issueFields = "summary,description,status,priority,assignee,reporter,creator,issuetype,labels,duedate,created,updated,parent,subtasks,attachment,comment,issuelinks,timeoriginalestimate,security"
 
 func buildSourceTask(iss *jiraIssue, projectKey, site string, fields siteFields) importProvider.SourceTask {
 	created := parseJiraTime(iss.Fields.Created)
@@ -1205,6 +1250,7 @@ func buildSourceTask(iss *jiraIssue, projectKey, site string, fields siteFields)
 		})
 	}
 
+	restricted, audience := restrictedBy(iss)
 	return importProvider.SourceTask{
 		SourceID:        iss.Key,
 		SourceKey:       iss.Key,
@@ -1226,7 +1272,26 @@ func buildSourceTask(iss *jiraIssue, projectKey, site string, fields siteFields)
 		Dependencies:    blockedBy(iss),
 		Fields:          issueFieldValues(iss.Custom, fields),
 		Metadata:        map[string]any{"jira_url": site + "/browse/" + iss.Key, "type": iss.Fields.IssueType.Name},
+		Restricted:      restricted,
+		Audience:        audience,
 	}
+}
+
+// restrictedBy is why an issue comes in restricted, and who besides its
+// assignee may see it: an issue with a security level is kept to the people
+// its level names, which a token can't read reliably (groups, project roles,
+// people named in fields), so here it is kept to its reporter too, and the
+// admin shares it with the rest. A level has no place for who created an
+// issue. "" for an issue anyone in its project may see. Pure.
+func restrictedBy(iss *jiraIssue) (string, []string) {
+	if iss.Fields.Security == nil {
+		return "", nil
+	}
+	var audience []string
+	if r := safeAccountID(iss.Fields.Reporter); r != "" {
+		audience = append(audience, r)
+	}
+	return "an issue security level", audience
 }
 
 func projectKeyFromIssue(iss *jiraIssue) string {

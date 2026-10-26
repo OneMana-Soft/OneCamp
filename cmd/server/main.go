@@ -643,11 +643,11 @@ func main() {
 	if _, err := userBusiness.EnsureAutomationBot(ctx); err != nil {
 		helpers.MessageLogs.ErrorLog.Printf("Failed to seed automation bot: %v", err)
 	}
-	// Once per install, before any import runs here: when Todoist and Notion
-	// imports began to add only the people each project is shared with, so the
-	// ones first run before can be told apart. Every replica asks; the first wins.
-	if err := importBusiness.ClaimMembershipFixed(ctx); err != nil {
-		helpers.MessageLogs.ErrorLog.Printf("Failed to record when imports' membership became exact: %v", err)
+	// Once per install, before any import runs here: when each importer fix
+	// (business/Import importFixes) first ran, so the imports first run before
+	// can be told apart. Every replica asks; the first wins.
+	if err := importBusiness.ClaimImportFixes(ctx); err != nil {
+		helpers.MessageLogs.ErrorLog.Printf("Failed to record when the importer fixes first ran: %v", err)
 	}
 
 	// The loops. Only a replica that runs workers starts them; see

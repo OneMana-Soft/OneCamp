@@ -272,6 +272,15 @@ func GetLinksForSource(ctx context.Context, sourceType, sourceUUID, userDgraphUI
 	membershipBlock := "project_is_member: count(project_members @filter(uid($userId))) project_is_admin: count(project_admins @filter(uid($userId)))"
 	if sourceType == SourceTask {
 		membershipBlock = "task_project { project_is_member: count(project_members @filter(uid($userId))) project_is_admin: count(project_admins @filter(uid($userId))) }"
+		// A task kept from the reader is no task to them, and neither are its
+		// links (models/taskread).
+		f, err := taskread.From(ctx)
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if f.Hides(sourceUUID) {
+			return nil, nil, false, nil
+		}
 	}
 
 	query := fmt.Sprintf(`query Links($uid: string, $userId: string) {

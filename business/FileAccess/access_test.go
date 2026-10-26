@@ -168,3 +168,47 @@ func TestOnlyAnswersAreRefusals(t *testing.T) {
 		t.Error("a lookup that failed, or a yes, is no refusal")
 	}
 }
+
+// A task's files and its comments' are stored as its project's, and go to
+// whoever may read the task: a project's file on a task kept from someone is,
+// to them, a file that isn't there. A file of any other place is no task's,
+// and nothing is asked about it.
+func TestAProjectsFileOnATaskKeptFromSomeoneIsntThereForThem(t *testing.T) {
+	const keptFile, openFile = "77777777-7777-4777-8777-777777777777", "88888888-8888-4888-8888-888888888888"
+	asked := 0
+	s := fake()
+	s.keepsTaskFile = func(_ context.Context, userUUID, fileID string) (bool, error) {
+		asked++
+		if fileID == broken {
+			return false, errGraph
+		}
+		return userUUID == ben && fileID == keptFile, nil
+	}
+	ctx := context.Background()
+	project := Place{Kind: postgresStruct.ATTACHMENT_SRC_PROJECT, ID: mine}
+	for _, c := range []struct {
+		name string
+		who  string
+		file string
+		want error
+	}{
+		{"a file of a task kept from ben, to ben", ben, keptFile, ErrNoSuchFile},
+		{"the same file, to someone who may read the task", me, keptFile, nil},
+		{"a file of a task open to the project, to ben", ben, openFile, nil},
+		{"a file the graph couldn't answer for", ben, broken, errGraph},
+	} {
+		if got := s.taskFile(ctx, c.who, project, c.file); !errors.Is(got, c.want) || (c.want == nil && got != nil) {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
+	}
+	asked = 0
+	for _, kind := range []string{postgresStruct.ATTACHMENT_SRC_CHANNEL, postgresStruct.ATTACHMENT_SRC_CHAT, postgresStruct.ATTACHMENT_SRC_GRP_CHAT,
+		postgresStruct.ATTACHMENT_SRC_DOC, postgresStruct.ATTACHMENT_SRC_BOARD, postgresStruct.ATTACHMENT_SRC_PUBLIC} {
+		if got := s.taskFile(ctx, ben, Place{Kind: kind, ID: mine}, keptFile); got != nil {
+			t.Errorf("a %s's file: %v, want nil", kind, got)
+		}
+	}
+	if asked != 0 {
+		t.Errorf("files of places that aren't projects asked about tasks %d times", asked)
+	}
+}

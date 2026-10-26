@@ -20,7 +20,9 @@ package helpers
 //     filter;
 //   - taskread.WithSystem anywhere but the reads named below, which have no
 //     audience: the decision's own reads, a backfill, an archive, a cleanup,
-//     a template.
+//     a template;
+//   - a use of one of those that only makes a context to read in, by anyone
+//     but the callers named for it.
 
 import (
 	"go/ast"
@@ -28,8 +30,10 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,6 +89,14 @@ var systemReads = map[string]bool{
 	"domain/Team/teamDomain.go:GetDgraphTeamInfoByUUIDForArchivingAndUnarchivingTeam":    true, // a team's archive
 	"business/Comment/commentBusiness.go:sendNewTaskCommentNotification":                 true, // whom a comment is told to, kept to its readers
 	"business/Cycle/scheduler.go:runSchedule":                                            true, // the Cycle Scheduler completes a cycle, restricted tasks and all
+	"business/Import/orchestrator.go:importContext":                                      true, // an import reads the tasks it makes, restricted ones too, to write the rest (a sub-task's parent, a comment's task)
+}
+
+// systemReadHelpers are the reads with no audience above that only make a
+// context for others to read in, each with the only functions that may use
+// it, so no new caller reads every task unnoticed.
+var systemReadHelpers = map[string][]string{
+	"business/Import/orchestrator.go:importContext": {"business/Import/orchestrator.go:RunImport"},
 }
 
 // systemSearches are the searches of those indexes with no audience: what
@@ -136,6 +148,7 @@ func TestEveryReadOfTasksGoesThroughTheFilter(t *testing.T) {
 
 	var findings []string
 	readers := 0
+	foundHelpers := map[string]bool{} // the system read helpers found, still reading as the system
 	for _, pkg := range files {
 		strs := trPackageStrings(pkg)
 		for _, pf := range pkg {
@@ -150,8 +163,18 @@ func TestEveryReadOfTasksGoesThroughTheFilter(t *testing.T) {
 				asks := trMentions(fd, "taskread")
 				where := pf.rel + ":" + name
 
-				if trMentions(fd, "WithSystem") && trSelectorCalls(fd, "taskread", "WithSystem") && !systemReads[where] {
+				system := trMentions(fd, "WithSystem") && trSelectorCalls(fd, "taskread", "WithSystem")
+				if system && !systemReads[where] {
 					findings = append(findings, at+": "+name+" reads every task (taskread.WithSystem) and isn't one of the reads with no audience this guard names")
+				}
+				if _, ok := systemReadHelpers[where]; ok && system {
+					foundHelpers[where] = true
+				}
+				for helper, callers := range systemReadHelpers {
+					file, fn, _ := strings.Cut(helper, ":")
+					if where != helper && path.Dir(pf.rel) == path.Dir(file) && trMentions(fd, fn) && !slices.Contains(callers, where) {
+						findings = append(findings, at+": "+name+" uses "+fn+", which reads every task (taskread.WithSystem), and isn't one of the callers this guard names for it")
+					}
 				}
 				if strings.Contains(text, "@@hidden_tasks@@") && !trCallsMethod(fd, "Fill") {
 					findings = append(findings, at+": "+name+" leaves room for the filter (taskread.Mark) and never fills it")
@@ -176,6 +199,11 @@ func TestEveryReadOfTasksGoesThroughTheFilter(t *testing.T) {
 	}
 	if readers == 0 {
 		t.Fatal("found no read of tasks; this guard has gone stale")
+	}
+	for helper := range systemReadHelpers {
+		if !foundHelpers[helper] {
+			findings = append(findings, helper+" is gone or no longer reads as the system; update systemReadHelpers")
+		}
 	}
 
 	// Each filtering model still filters.
