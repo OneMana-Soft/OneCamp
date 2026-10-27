@@ -507,43 +507,55 @@ func (p *Provider) IterCommentsOfTask(ctx context.Context, j *importModels.Job, 
 			errCh <- err
 			return
 		}
-		startAt := 0
-		page := 0
-		for page < maxPages {
-			page++
-			endpoint := fmt.Sprintf("%s/rest/api/3/issue/%s/comment?startAt=%d&maxResults=100&expand=renderedBody,properties",
-				site, url.PathEscape(taskSourceId), startAt)
-			var resp jiraCommentsResp
-			if err := p.getJSON(ctx, tok, endpoint, &resp); err != nil {
-				errCh <- err
-				return
+		err = p.commentPages(ctx, tok, site, taskSourceId, "renderedBody,properties", func(c jiraComment) bool {
+			body := c.RenderedBody
+			if body == "" {
+				body = htmlEscape(extractAtlassianText(c.Body))
 			}
-			for _, c := range resp.Comments {
-				body := c.RenderedBody
-				if body == "" {
-					body = htmlEscape(extractAtlassianText(c.Body))
-				}
-				created := parseJiraTime(c.Created)
-				select {
-				case <-ctx.Done():
-					return
-				case out <- importProvider.SourceComment{
-					SourceID:       c.ID,
-					TaskSourceID:   taskSourceId,
-					Body:           body,
-					AuthorSourceID: safeAccountID(c.Author),
-					Created:        created,
-					Restricted:     c.keptBy(),
-				}:
-				}
+			select {
+			case <-ctx.Done():
+				return false
+			case out <- importProvider.SourceComment{
+				SourceID:       c.ID,
+				TaskSourceID:   taskSourceId,
+				Body:           body,
+				AuthorSourceID: safeAccountID(c.Author),
+				Created:        parseJiraTime(c.Created),
+				Restricted:     c.keptBy(),
+			}:
+				return true
 			}
-			startAt += len(resp.Comments)
-			if len(resp.Comments) == 0 || startAt >= resp.Total {
-				return
-			}
+		})
+		if err != nil {
+			errCh <- err
 		}
 	}()
 	return out, errCh
+}
+
+// commentPages calls each for every comment of an issue, a page of 100 at a
+// time, with what expand asks each to carry besides its body's ADF, until the
+// last page or until each says to stop.
+func (p *Provider) commentPages(ctx context.Context, tok, site, key, expand string, each func(jiraComment) bool) error {
+	startAt := 0
+	for page := 0; page < maxPages; page++ {
+		endpoint := fmt.Sprintf("%s/rest/api/3/issue/%s/comment?startAt=%d&maxResults=100&expand=%s",
+			site, url.PathEscape(key), startAt, expand)
+		var resp jiraCommentsResp
+		if err := p.getJSON(ctx, tok, endpoint, &resp); err != nil {
+			return err
+		}
+		for _, c := range resp.Comments {
+			if !each(c) {
+				return nil
+			}
+		}
+		startAt += len(resp.Comments)
+		if len(resp.Comments) == 0 || startAt >= resp.Total {
+			return nil
+		}
+	}
+	return nil
 }
 
 // FetchAttachment streams /rest/api/3/attachment/content/{id}.
@@ -1072,7 +1084,12 @@ func (p *Provider) loadAuth(ctx context.Context, j *importModels.Job) (string, e
 	if j.TriggeredBy == nil {
 		return "", errors.New("job has no triggered_by user")
 	}
-	t, err := importModels.LoadToken(ctx, providerName, *j.TriggeredBy)
+	return authFor(ctx, *j.TriggeredBy)
+}
+
+// authFor is loadAuth's header for owner's stored connection.
+func authFor(ctx context.Context, owner uuid.UUID) (string, error) {
+	t, err := importModels.LoadToken(ctx, providerName, owner)
 	if err != nil {
 		return "", err
 	}
@@ -1096,7 +1113,7 @@ func (p *Provider) loadAuth(ctx context.Context, j *importModels.Job) (string, e
 		// import doesn't 401 mid-run. Falls back to the stored token
 		// when JIRA_OAUTH_CLIENT_ID/SECRET aren't configured (PAT-only
 		// deployments) or when refresh fails.
-		fresh, err := importProvider.FreshAccessToken(ctx, jiraOAuthConfig(), providerName, *j.TriggeredBy)
+		fresh, err := importProvider.FreshAccessToken(ctx, jiraOAuthConfig(), providerName, owner)
 		if err == nil && fresh != "" {
 			return "Bearer " + fresh, nil
 		}
@@ -1122,7 +1139,20 @@ func (p *Provider) resolveSite(ctx context.Context, j *importModels.Job) (string
 	if j.TriggeredBy == nil {
 		return "", errors.New("job has no triggered_by user")
 	}
-	t, err := importModels.LoadToken(ctx, providerName, *j.TriggeredBy)
+	site, err := siteFor(ctx, *j.TriggeredBy)
+	if err != nil {
+		return "", err
+	}
+	p.mu.Lock()
+	p.siteCache[j.Id] = site
+	p.mu.Unlock()
+	return site, nil
+}
+
+// siteFor is owner's stored connection's Jira site (metadata.site_url), read
+// from the connection now: where its API is reached and its issues browsed.
+func siteFor(ctx context.Context, owner uuid.UUID) (string, error) {
+	t, err := importModels.LoadToken(ctx, providerName, owner)
 	if err != nil {
 		return "", err
 	}
@@ -1134,9 +1164,6 @@ func (p *Provider) resolveSite(ctx context.Context, j *importModels.Job) (string
 	if site == "" {
 		return "", errors.New("jira token missing metadata.site_url; reconnect with the Atlassian site URL")
 	}
-	p.mu.Lock()
-	p.siteCache[j.Id] = site
-	p.mu.Unlock()
 	return site, nil
 }
 

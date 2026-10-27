@@ -8,17 +8,17 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
-// CreateOrUpdateDgraphAttachment upserts dgraphAttachment over query (whose
-// variable is attachment) and returns the new node's uid, "" when it updated
-// one. An aborted write is tried again.
-func CreateOrUpdateDgraphAttachment(ctx context.Context, dgraphAttachment *dgraphStruct.DgraphAttachment, query string) (userUid string, err error) {
-	uids, err := dgexec.Upsert(ctx, query, nil, dgraphAttachment)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "models/CreateOrUpdateDgraphAttachment failed to create or update dgraph attachment err: %+v", err)
-		return "", err
+// UpdateDgraphAttachment sets dgraphAttachment on the nodes query finds (its
+// variable is attachment), and writes nothing when it finds none. The update
+// names its file, so writing it on a query that found nothing made a node
+// naming the file with no time, and a node with no time holds its file
+// (business/Attachment ArchiveFilesOf). An aborted write is tried again.
+func UpdateDgraphAttachment(ctx context.Context, dgraphAttachment *dgraphStruct.DgraphAttachment, query string) error {
+	if _, err := dgexec.Mutate(ctx, query, nil, dgexec.Mutation{Cond: "@if(gt(len(attachment), 0))", Set: dgraphAttachment}); err != nil {
+		helpers.LogErrorWithContext(ctx, "models/UpdateDgraphAttachment failed to update dgraph attachment err: %+v", err)
+		return err
 	}
-	// will get uid only when new node is created
-	return uids[dgexec.Var("attachment")], nil
+	return nil
 }
 
 // BulkAddAttachmentsToDgraph sets the attachments in one mutation and returns

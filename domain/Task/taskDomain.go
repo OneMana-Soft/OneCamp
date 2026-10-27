@@ -603,6 +603,7 @@ func GetDgraphBasicTaskInfoByUUID(ctx context.Context, teamUUID string, userDgra
 						uid
 						project_uuid
 						project_name
+						project_deleted_at
 						project_is_member: count(project_members @filter(uid($userUid)))
 						project_is_admin: count(project_admins @filter(uid($userUid))) 
 

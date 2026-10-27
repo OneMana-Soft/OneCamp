@@ -771,6 +771,11 @@ func GetProfileByUserId(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteReadFailure(w, r, err, "person", where)
 		return
 	}
+	// Which channels someone is in is theirs: another person's profile says
+	// who they are, never where they talk (their private channels included).
+	if !strings.EqualFold(otherUserInfo.Uuid, userInfo.UserDgraphInfo.Uuid) {
+		otherUserInfo.Channels = nil
+	}
 
 	grpId := helpers.GetGroupingId(userInfo.UserDgraphInfo.Uuid, otherUserInfo.Uuid)
 
@@ -1336,6 +1341,17 @@ func UsersListNotBelongToChannelId(w http.ResponseWriter, r *http.Request) {
 			"msg": "Failed to parse channel string to uuid",
 			"err": err,
 		})
+		return
+	}
+
+	// Who isn't in a channel is for the people who can read it: anyone else,
+	// told who isn't in a private channel, would know who is.
+	readable, err := channelBusiness.ReadableBy(ctx, userInfo.UserDgraphInfo.Uuid, channelUUID.String())
+	if err == nil && !readable {
+		err = helpers.ErrNotFound
+	}
+	if err != nil {
+		helpers.WriteReadFailure(w, r, err, "channel", "controllers/UsersListNotBelongToChannelId")
 		return
 	}
 

@@ -3,11 +3,11 @@
 
 package integration_test
 
-// A file taken off a task or a project, and a file kept under a comment that
-// was deleted, open for nobody: every read of it by id answers what a file
-// that isn't there answers (404), to the project's members as to its admins,
-// as a link and as the picture a page shows (?redirect=1). A file nobody
-// removed still opens.
+// A file taken off a task or a project, a file kept under a comment that was
+// deleted, and a deleted comment's own file open for nobody: every read of it
+// by id answers what a file that isn't there answers (404), to the project's
+// members as to its admins, as a link and as the picture a page shows
+// (?redirect=1). A file nobody removed still opens.
 //
 // seedWorkWorld's Website: ana runs it, ben is its member, cy is in its team
 // but not the project. "Write the launch post" is ana's.
@@ -67,13 +67,15 @@ func TestARemovedFileOpensForNobody(t *testing.T) {
 	ana := uidOf("user_uuid", w.people["ana"].String())
 
 	// The launch post's file and the project's, uploaded in the app (kept
-	// under the project), a file an import kept under a comment on the post,
+	// under the project), a comment on the post with a file of its own (a task
+	// comment's upload is the project's too) and one an import kept under it,
 	// and one more of the post's that nobody removes.
 	type file struct{ id, name, kind, src string }
 	comment := uuid.NewString()
 	onTask := file{uuid.NewString(), "wrong-draft.pdf", "project", w.project}
 	onProject := file{uuid.NewString(), "old-brief.pdf", "project", w.project}
 	onComment := file{uuid.NewString(), "imported-reply.pdf", "comment", comment}
+	commentsOwn := file{uuid.NewString(), "reply-sketch.png", "project", w.project}
 	kept := file{uuid.NewString(), "final-draft.pdf", "project", w.project}
 	live := "0001-01-01T00:00:00Z"
 	node := func(f file) map[string]any {
@@ -85,10 +87,10 @@ func TestARemovedFileOpensForNobody(t *testing.T) {
 			"task_comments": []map[string]any{{"dgraph.type": "Comment", "comment_uuid": comment,
 				"comment_text": "<p>Attached, from the old tracker.</p>", "comment_task": map[string]any{"uid": launch},
 				"comment_by": map[string]any{"uid": ana}, "comment_created_at": time.Now().UTC().Format(time.RFC3339),
-				"comment_deleted_at": live, "comment_attachments": []map[string]any{node(onComment)}}}},
+				"comment_deleted_at": live, "comment_attachments": []map[string]any{node(onComment), node(commentsOwn)}}}},
 		{"uid": website, "project_attachments": []map[string]any{node(onProject)}},
 	})
-	for _, f := range []file{onTask, onProject, onComment, kept} {
+	for _, f := range []file{onTask, onProject, onComment, commentsOwn, kept} {
 		w.exec(`INSERT INTO attachments (id, obj_key, src_key, src_value, created_by) VALUES ($1, $2, $3, $4, $5)`,
 			f.id, "userFileUpload/"+f.name, f.kind, f.src, w.people["ana"])
 	}
@@ -115,8 +117,8 @@ func TestARemovedFileOpensForNobody(t *testing.T) {
 		return call(who, userController.GetProjectFile, map[string]string{"project_uuid": w.project, "obj_uuid": f.id}, "/"+query, nil)
 	}
 
-	// Before: the project's people open all four; cy, outside it, none.
-	for _, f := range []file{onTask, onProject, onComment, kept} {
+	// Before: the project's people open all five; cy, outside it, none.
+	for _, f := range []file{onTask, onProject, onComment, commentsOwn, kept} {
 		for _, who := range []string{"ana", "ben"} {
 			if code, body := fetch(who, f, ""); code != http.StatusOK {
 				t.Fatalf("before: %s opening %s: %d %s", who, f.name, code, body)
@@ -144,7 +146,7 @@ func TestARemovedFileOpensForNobody(t *testing.T) {
 
 	// After: each removed file is no such file, to its member and its admin,
 	// as a link and as a picture; the file nobody removed still opens.
-	for _, f := range []file{onTask, onProject, onComment} {
+	for _, f := range []file{onTask, onProject, onComment, commentsOwn} {
 		for _, who := range []string{"ben", "ana"} {
 			for _, query := range []string{"", "?redirect=1"} {
 				if code, body := fetch(who, f, query); code != http.StatusNotFound {

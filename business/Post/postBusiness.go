@@ -756,6 +756,16 @@ func DeletePost(ctx context.Context, rawDgraphPost *dgraphStruct.DgraphPost, cha
 		return
 	}
 
+	// Its files and its replies' go with it, before it leaves the graph: a
+	// failure leaves the post there to delete again.
+	_, err = attachmentBusiness.ArchiveFilesOf(ctx, attachmentBusiness.PostFiles, postUUID, currentTime)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/DeletePost Failed to take its files off with it err: %+v",
+			err)
+		return
+	}
+
 	// add delete time in dgraph
 	dgraphPost := dgraphStruct.DgraphPost{
 		Uid:       "uid(po)",

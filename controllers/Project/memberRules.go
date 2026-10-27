@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	business "github.com/akashc777/OneCamp/business/Project"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
@@ -73,7 +74,7 @@ func memberChangeRefusal(p *dgraphStruct.DgraphProject, manages bool, change mem
 	if len(p.Members) == 0 {
 		return http.StatusNotFound, "They aren't in this project."
 	}
-	if p.CreatedBy != nil && p.CreatedBy.Uid == p.Members[0].Uid {
+	if business.IsCreatorOf(p, p.Members[0].Uid) {
 		switch change {
 		case takeOff:
 			return http.StatusForbidden, "The project's creator can't be taken off it."

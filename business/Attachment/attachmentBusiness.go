@@ -43,7 +43,7 @@ func ArchiveAttachmentByAttachmentUUID(ctx context.Context, attachmentUUID uuid.
 	currentTime := time.Now()
 	activityUUID := uuid.New()
 
-	err = domain.UpdateAttachmentDeletedTimeByUUID(ctx, attachmentUUID, &currentTime)
+	_, err = domain.ArchiveRows(ctx, []uuid.UUID{attachmentUUID}, currentTime)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/ArchiveAttachmentByAttachmentUUID failed to update delete time in postgres err: %+v", err)
@@ -71,7 +71,7 @@ func ArchiveAttachmentByAttachmentUUID(ctx context.Context, attachmentUUID uuid.
 		}
 	}
 
-	_, err = domain.CreateOrUpdateDgraphAttachment(ctx, dgraphAttachment)
+	err = domain.UpdateDgraphAttachment(ctx, dgraphAttachment)
 
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/ArchiveAttachmentByAttachmentUUID failed to update delete time in dgraph err: %+v", err)

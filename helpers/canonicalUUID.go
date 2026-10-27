@@ -28,3 +28,14 @@ func AllCanonicalUUIDs(lists ...[]string) bool {
 	}
 	return true
 }
+
+// UUIDStrings is ids as text, in their order, each as uuids are written. No
+// ids is an empty list, never nil: pq.Array binds nil as NULL, and nothing
+// compares true or false with NULL.
+func UUIDStrings(ids []uuid.UUID) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out
+}

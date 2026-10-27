@@ -14,8 +14,8 @@ import (
 const (
 	// A handler asserting the request's user: ctx.Value(UserInfoContextKey).(m.UserInfo)
 	// panics when there is none. httpx.MustUser answers 401 (428 at the audit).
-	// without-ai's own count: the AI edition's controllers aren't here (350 on main).
-	bareUserAssertionBaseline = 258
+	// without-ai's own count: the AI edition's controllers aren't here (349 on main).
+	bareUserAssertionBaseline = 257
 	// A page index parsed by hand; PageParam reads it (12 before F5).
 	handPageIndexBaseline = 3
 	// http.Error writes a text/plain body the web app can't read (13).

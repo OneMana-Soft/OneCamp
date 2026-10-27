@@ -372,7 +372,7 @@ business/Import/providers/clickup/provider.go :: buildSnapshot :: .fetchListTask
 business/Import/providers/clickup/provider.go :: buildSnapshot :: .fetchTaskComments
 business/Import/providers/clickup/provider.go :: fetchListTasks :: .getJSON
 business/Import/providers/clickup/provider.go :: fetchTaskComments :: .getJSON
-business/Import/providers/jira/provider.go :: IterCommentsOfTask :: .getJSON
+business/Import/providers/jira/provider.go :: commentPages :: .getJSON
 business/Import/providers/jira/provider.go :: IterSubtasksOfTask :: .getJSON
 business/Import/providers/jira/provider.go :: Plan :: .countIssues
 business/Import/providers/jira/provider.go :: Plan :: .listProjectStatuses
@@ -459,6 +459,7 @@ business/Import/team_project_stages.go :: uniqueTeamName :: teamBusiness.CheckIf
 business/Import/user_resolver.go :: runUsersStage :: importModels.LogImportError
 business/Import/user_resolver.go :: runUsersStage :: importModels.UpdateProgress
 business/Import/user_resolver.go :: runUsersStage :: resolveOneUser
+business/ImportReview/review.go :: RemoveAll :: takeOff
 business/Integration/googleCalendarBusiness.go :: googleBusy :: .Do
 business/Integration/googleCalendarBusiness.go :: listGoogleEvents :: .Do
 business/LiveKit/callRemoval.go :: RemoveGuestsWhere :: RemoveFromCall
@@ -685,3 +686,62 @@ business/DemoSeed/demoSeed.go :: cast :: userDomain.GetUserByEmailId
 # 25 Oct 2026, PROJ-LEAD-33 (importer fix markers): a starting server claims each importer fix's moment once,
 # a fixed list of four keys (business/Import importFixes), each one insert that does nothing when the key is held.
 business/Import/importFixes.go :: ClaimImportFixes :: configModel.Claim
+# 26 Oct 2026, PERMISSIONS-AUDIT-LEAD-15 (the deleted files' once-per-install repair): pages through each kind's items
+# deleted in Postgres, 200 at a time (id > the last, the page's place kept after it), and takes each deleted item's
+# files off through the delete path's own ArchiveFilesOf: one upsert by the item's edges, then one read each of
+# the rows and the nodes left. Items stay one at a time: an item's pair deleted in the same batch would still be
+# read as showing its files. A run that stops keeps where it stopped.
+business/Attachment/deletedFilesRepair.go :: RepairDeletedFiles :: archiveFilesOf
+business/Attachment/deletedFilesRepair.go :: RepairDeletedFiles :: deletedItems
+business/Attachment/deletedFilesRepair.go :: RepairDeletedFiles :: saveAfter
+business/Attachment/deletedFilesRepair.go :: RepairDeletedFiles :: saveProgress
+# 25 Oct 2026, PROJ-LEAD-35 (R1, old Jira imports re-checked against Jira): per item by nature. The re-check works
+# an import at a time (each its own lock, job and connection) and in it a project at a time and a page of 50 tasks
+# at a time: one read of the page's comments, restrictions and matched people, one read of the source, one write
+# of the counts. Each task is its own change through the app's one change of a restriction (SetRestriction, with
+# its audit record and event) after its own graph read; each comment Jira keeps from some is hidden on its own
+# (graph, search, memory, then Postgres), its change recorded first so an admin can undo it. Undo puts each change
+# back on its own, checking it is still as it was left, and records them in one write. Containment is per task too.
+# The reviews are written once per provider, each with its own fix moment.
+business/Import/recheck.go :: containImport :: containProject
+business/Import/recheck.go :: containProject :: importModels.MappedTasksIn
+business/Import/recheck.go :: containProject :: restrictionModel.OfMany
+business/Import/recheck.go :: containProject :: reviewModel.AddAccessChange
+business/Import/recheck.go :: hideKept :: reviewModel.AddAccessChange
+business/Import/recheck.go :: project :: importModels.MappedTasksIn
+business/Import/recheck.go :: recheckImport :: .failed
+business/Import/recheck.go :: recheckImport :: .project
+business/Import/recheck.go :: recheckPending :: importModels.GetJob
+business/Import/recheck.go :: recheckPending :: recheckImport
+business/Import/recheck.go :: undoRecheck :: undoChange
+business/Import/recheck.go :: writeRecheckCandidates :: FixedBefore
+business/Import/recheck.go :: writeRecheckCandidates :: reviewModel.AccessCandidates
+business/Import/recheck.go :: writeRecheckCandidates :: reviewModel.AddAccessReviews
+# 25 Oct 2026, PROJ-LEAD-37 (R1's fixes in e05d2a735: CR-44's MF1-MF6 and main's ruling G): bounded, and per item
+# by design. A project is re-checked a page of 50 tasks at a time (project :: .page), its counts, cursor and the tasks to
+# try again written once after each page (.writeAfter), and in a page each task is its own change (page :: .task).
+# Containment changes each task on its own too: its graph read (readTask, which also finds one in the trash or in an
+# archived project), the app's one change of a restriction (setRestriction, with its audit record and event), and the
+# change marked made (SettleAccessChange) only once it is, so a crash between leaves it pending, never read as someone's
+# choice. retryLater returns, so it runs once a pass.
+business/Import/recheck.go :: containProject :: readTask
+business/Import/recheck.go :: containProject :: reviewModel.SettleAccessChange
+business/Import/recheck.go :: containProject :: setRestriction
+business/Import/recheck.go :: page :: .task
+business/Import/recheck.go :: project :: .page
+business/Import/recheck.go :: project :: .writeAfter
+business/Import/recheck.go :: recheckImport :: .retryLater
+# 26 Oct 2026, PROJ-LEAD-47 (R1's port to the release lines): this line's Jira provider reads through its own getJSON,
+# which this guard counts as a store call. Bounded, and per item by nature: a re-check reads each issue of its page of
+# 50 by key, one GET apiece (Jira reads an issue by its key alone), and an issue's comments' pages only when some of
+# its comments are asked about (commentsKept, through commentPages, the import's own paging).
+business/Import/providers/jira/recheck.go :: recheck :: .commentsKept
+business/Import/providers/jira/recheck.go :: recheck :: .getJSON
+# 25 Oct 2026, PROJ-LEAD-37 (R1, CR-45's nit): a kept comment is still hidden on its own (hideComment, the seam for
+# taskBusiness.HideTaskComment), and its change, recorded pending, is settled on its own once it is hidden, so a retry of
+# its task counts it once.
+business/Import/recheck.go :: hideKept :: hideComment
+business/Import/recheck.go :: hideKept :: reviewModel.SettleAccessChange
+# 25 Oct 2026, PROJ-LEAD-35 (R2, old Linear imports re-checked against Linear): Linear's re-check reads the import's
+# issues by id, fifty a page, following Linear's cursor: one GraphQL read a page, as the provider pages everywhere.
+business/Import/providers/linear/recheck.go :: recheck :: .gql

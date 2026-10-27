@@ -388,6 +388,23 @@ func Routes() http.Handler {
 		r.Post("/removeAdmin", userController.RemoveAdmin)
 		r.Post("/deactivateUser", userController.DeactivateUser)
 		r.Post("/activateUser", userController.ActivateUser)
+		// Who old Todoist and Notion imports added to projects, for admins to
+		// review (import_member_reviews): nobody goes without an admin's say.
+		r.Get("/import-reviews", importController.ListImportReviews)
+		r.Get("/import-reviews/projects/{project_uuid}", importController.ListImportReviewPeople)
+		r.Post("/import-reviews/{id}/remove", importController.RemoveImportReview)
+		r.Post("/import-reviews/projects/{project_uuid}/remove-all", importController.RemoveAllImportReviews)
+		r.Post("/import-reviews/projects/{project_uuid}/keep", importController.KeepImportReviews)
+		// What old Jira imports let every project member read, re-checked
+		// against the source (import_access_reviews): an admin re-checks one
+		// with their own connection, undoes a re-check, or keeps an import's
+		// tasks to its projects' admins until then.
+		r.Post("/import-access/{import_id}/recheck", importController.RecheckImportAccess)
+		r.Post("/import-access/{import_id}/undo", importController.UndoImportAccessRecheck)
+		r.Post("/import-access/{import_id}/contain", importController.ContainImportAccess)
+		// The admins' card of those imports, and keeping one as it is.
+		r.Get("/import-access", importController.ListImportAccess)
+		r.Post("/import-access/{import_id}/keep", importController.KeepImportAccess)
 		// SCIM provisioning credentials. Managed HERE — admin, session-authenticated — and never on the
 		// /scim/v2 surface itself: a credential able to mint its own replacement would make revoking a
 		// leaked one pointless.

@@ -58,7 +58,7 @@ var connectsOnly = map[string]string{
 	"aiModels.ValidateAIKeyEncryptionAtStartup":     "checks a key",
 	"userModels.ValidateTOTPKeyEncryptionAtStartup": "checks a key",
 	"postgresInit.ConnectPostgres":                  "a client",
-	"postgresInit.VerifySchemaAtStartup":            "reads the migration ledger",
+	"postgresInit.VerifySchemaAtStartup":            "reads the migration ledger (a fresh database's until the migrations are in)",
 	"emailService.IsEmailEnabled":                   "reads the email setting",
 	"emailService.SenderAddress":                    "reads the email setting",
 	"minioInit.ConnectMinio":                        "a client",

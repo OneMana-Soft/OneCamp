@@ -77,7 +77,7 @@ func SetMemberRole(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteRetryLater(w, "Couldn't change their role.")
 		return
 	}
-	recordMemberChange(r, resourceEventBusiness.ProjectChanged, "project.member.role", "Changed what someone can do in a project", p.Uuid, target.Uuid, to)
+	business.RecordMemberChange(r, resourceEventBusiness.ProjectChanged, "project.member.role", "Changed what someone can do in a project", p.Uuid, target.Uuid, to)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": doneWords[changeRole], "data": map[string]string{"user_uuid": target.Uuid, "role": string(to)}})
 }
 

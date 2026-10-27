@@ -554,8 +554,14 @@ func (s *workspaceSnapshot) IssueByID(id string) *linearIssue {
 // task is iss as a task of projectID, kept to its team's members when Linear
 // doesn't show its team to everyone (SourceTask.Restricted).
 func (s *workspaceSnapshot) task(p *Provider, iss linearIssue, projectID string) importProvider.SourceTask {
-	st := p.issueToSourceTask(iss, projectID)
-	if k, kept := s.keptTeams[iss.TeamID]; kept {
+	return keptToTeam(p.issueToSourceTask(iss, projectID), s.keptTeams, iss.TeamID)
+}
+
+// keptToTeam is st kept to its team's members when Linear doesn't show its
+// team (teamID) to everyone (kept, keptTeams'): the import's rule, and a
+// re-check's (recheck.go). Pure.
+func keptToTeam(st importProvider.SourceTask, kept map[string]keptTeam, teamID string) importProvider.SourceTask {
+	if k, ok := kept[teamID]; ok {
 		st.Restricted, st.Audience = k.why, k.members
 	}
 	return st
@@ -1170,7 +1176,12 @@ func (p *Provider) loadToken(ctx context.Context, j *importModels.Job) (string, 
 	if j.TriggeredBy == nil {
 		return "", errors.New("job has no triggered_by user")
 	}
-	t, err := importModels.LoadToken(ctx, providerName, *j.TriggeredBy)
+	return tokenFor(ctx, *j.TriggeredBy)
+}
+
+// tokenFor is loadToken's token for owner's stored connection.
+func tokenFor(ctx context.Context, owner uuid.UUID) (string, error) {
+	t, err := importModels.LoadToken(ctx, providerName, owner)
 	if err != nil {
 		return "", err
 	}
@@ -1178,7 +1189,7 @@ func (p *Provider) loadToken(ctx context.Context, j *importModels.Job) (string, 
 		return "", errors.New("empty linear token")
 	}
 	if t.RefreshToken != "" {
-		fresh, ferr := importProvider.FreshAccessToken(ctx, linearOAuthConfig(), providerName, *j.TriggeredBy)
+		fresh, ferr := importProvider.FreshAccessToken(ctx, linearOAuthConfig(), providerName, owner)
 		if ferr == nil && fresh != "" {
 			return fresh, nil
 		}
