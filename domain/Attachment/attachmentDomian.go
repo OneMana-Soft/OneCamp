@@ -133,22 +133,6 @@ func UpdateAttachmentInOpenSearch(openSearchAttachment *openSearchStruct.OpenSea
 //	return
 //}
 
-func UpdateAttachmentDeletedTimeByUUID(ctx context.Context, attachmentUUID uuid.UUID, deleteTime *time.Time) (err error) {
-	query := `
-        UPDATE attachments
-        SET deleted_at = $1
-		WHERE id = $2`
-	err = models.UpdateAttachmentDeletedTimeByUUID(query, deleteTime, attachmentUUID)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/UpdateAttachmentDeletedTimeByUUID Failed to update attachment delete time by attachment uuid err: %+v",
-			err)
-		return
-	}
-
-	return
-}
-
 // scanAttachment reads a file's row, as its id, storage key, place, maker and
 // times are selected in that order.
 func scanAttachment(r pgexec.Row) (*models.Attachment, error) {
@@ -208,21 +192,18 @@ func GetAttachmentByObjUUID(ctx context.Context, objUUID string, srcKey string) 
 	return
 }
 
-func CreateOrUpdateDgraphAttachment(ctx context.Context, dgraphAttachment *dgraphStruct.DgraphAttachment) (attachmentUid string, err error) {
+// UpdateDgraphAttachment sets dgraphAttachment on the nodes of its file (its
+// Uuid), and writes nothing when the graph holds none.
+func UpdateDgraphAttachment(ctx context.Context, dgraphAttachment *dgraphStruct.DgraphAttachment) error {
 	dgraphAttachment.DType = []string{"Attachment"}
 	query := fmt.Sprintf(`query {
-									  attachment as var(func: eq(attachment_uuid, "%+v"))
-								  }`, dgraphAttachment.Uuid)
-
-	attachmentUid, err = dgraphModels.CreateOrUpdateDgraphAttachment(ctx, dgraphAttachment, query)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/CreateOrUpdateDgraphAttachment Failed to create/update attachment err: %+v",
-			err)
-		return
+		attachment as var(func: eq(attachment_uuid, "%+v"))
+	}`, dgraphAttachment.Uuid)
+	if err := dgraphModels.UpdateDgraphAttachment(ctx, dgraphAttachment, query); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/UpdateDgraphAttachment Failed to update attachment err: %+v", err)
+		return err
 	}
-	return
+	return nil
 }
 
 func BulkAddAttachmentsToDgraph(ctx context.Context, dgraphAttachments []*dgraphStruct.DgraphAttachment) (dgraphAttachmentUUID []string, err error) {

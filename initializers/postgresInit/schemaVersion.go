@@ -31,7 +31,9 @@ package postgresInit
 //   - it only refuses to start when it can POSITIVELY establish the database is
 //     behind. Anything indeterminate — no migrations table, an unreadable table, a
 //     query error — warns and continues, because a broken check must never take
-//     down a healthy server.
+//     down a healthy server. The one exception is a database no migration has
+//     reached at all, a fresh install's: it waits for the migrations
+//     (awaitMigrations.go), since nothing can start on an empty schema.
 //   - a database AHEAD of the binary warns but continues, so rolling a release
 //     back is still possible.
 //   - ALLOW_SCHEMA_DRIFT=true overrides the refusal, because an operator in an
@@ -303,12 +305,17 @@ func AllowSchemaDrift() bool {
 }
 
 // VerifySchemaAtStartup returns an error ONLY when the database is positively
-// behind and the operator has not opted out. Every other outcome returns a
-// (possibly empty) advisory message for the caller to log.
+// behind and the operator has not opted out, or when ctx ends while it waits.
+// Every other outcome returns a (possibly empty) advisory message for the
+// caller to log. On a database no migration has reached yet (a fresh install's
+// first start) it first waits for the migrations (awaitMigrations.go).
 //
 // Mirrors the existing startup validators (import/AI key encryption): the caller
 // logs and exits, so boot policy stays visible in main.
 func VerifySchemaAtStartup(ctx context.Context) (advisory string, err error) {
+	if err := awaitMigrations(ctx, DBConn.SqlDB, RequiredMigrations); err != nil {
+		return "", err
+	}
 	return schemaVerdict(InspectSchema(ctx, DBConn.SqlDB, RequiredMigrations), AllowSchemaDrift())
 }
 

@@ -18,6 +18,7 @@ import (
 	activityBusiness "github.com/akashc777/OneCamp/business/Activity"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
+	userModel "github.com/akashc777/OneCamp/models/postgres/User"
 	"strings"
 	"time"
 
@@ -357,4 +358,18 @@ func emailNotice(ctx context.Context, n Notice, recipients []string) {
 		DedupKeyParts: []string{n.DedupKey},
 		Recipients:    recipientsFromStrings(recipients),
 	})
+}
+
+// InboxAdmins is how a notice for admins reaches them: in each one's Inbox
+// only, and never to the demo's own people, whose visitor and cast never
+// reach a real person's Inbox nor are told about real people
+// (helpers.IsDemoPerson).
+func InboxAdmins(admins []*userModel.User) []NoticeRecipient {
+	var out []NoticeRecipient
+	for _, u := range admins {
+		if u != nil && u.Id != uuid.Nil && !helpers.IsDemoPerson(u.EmailID) {
+			out = append(out, NoticeRecipient{UserUUID: u.Id.String(), Reason: "admin", InboxOnly: true})
+		}
+	}
+	return out
 }

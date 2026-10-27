@@ -90,6 +90,7 @@ var systemReads = map[string]bool{
 	"business/Comment/commentBusiness.go:sendNewTaskCommentNotification":                 true, // whom a comment is told to, kept to its readers
 	"business/Cycle/scheduler.go:runSchedule":                                            true, // the Cycle Scheduler completes a cycle, restricted tasks and all
 	"business/Import/orchestrator.go:importContext":                                      true, // an import reads the tasks it makes, restricted ones too, to write the rest (a sub-task's parent, a comment's task)
+	"business/Import/recheck.go:recheckContext":                                          true, // an old import's re-check narrows the tasks it brought for everyone else, restricted ones too, and an admin's undo or containment of it
 }
 
 // systemReadHelpers are the reads with no audience above that only make a
@@ -97,6 +98,8 @@ var systemReads = map[string]bool{
 // it, so no new caller reads every task unnoticed.
 var systemReadHelpers = map[string][]string{
 	"business/Import/orchestrator.go:importContext": {"business/Import/orchestrator.go:RunImport"},
+	"business/Import/recheck.go:recheckContext": {"business/Import/recheck.go:recheckImport", "business/Import/recheck.go:RecheckWithConnection",
+		"business/Import/recheck.go:undoRecheck", "business/Import/recheck.go:containImport"},
 }
 
 // systemSearches are the searches of those indexes with no audience: what

@@ -1102,61 +1102,7 @@ func UpdateTaskAssigneeByTaskUUID(ctx context.Context, taskUUID uuid.UUID, newAs
 		return ErrTaskDeleted
 	}
 
-	currentTime := time.Now()
-	activityUUID := uuid.New()
-
-	// err = domain.UpdateTaskAssigneeByTaskUUID(taskUUID, taskAssigneeUUID, &currentTime)
-
-	// if err != nil {
-	// 	helpers.LogErrorWithContext(ctx,"business/UpdateTaskAssigneeByTaskUUID failed to update task assignee in postgres err: %+v", err)
-	// 	return
-	// }
-
-	zeroUnixTime := time.Time{}
-
-	dgraphTask := &dgraphStruct.DgraphTask{
-		Uid:  "uid(task)",
-		Uuid: taskUUID.String(),
-		Activity: []*dgraphStruct.DgraphTaskActivity{{
-			Uuid: activityUUID.String(),
-			Type: dgraphStruct.ACTIVITY_TYPE_ASSIGNEE,
-			CreatedBy: &dgraphStruct.DgraphUser{
-				Uid: userInfo.Uid,
-			},
-			LogTime: &currentTime,
-		}},
-		UpdatedAt: &currentTime,
-		DeletedAt: &zeroUnixTime,
-	}
-
-	emptyString := ""
-
-	taskOpenSearch := &openSearchStruct.OpenSearchTask{
-		Uuid:             dgraphTask.Uuid,
-		TaskUpdatedAt:    currentTime.Unix(),
-		TaskAssigneeUuid: &emptyString,
-	}
-
-	if dgraphTaskInfo.Assignee != nil {
-
-		dgraphTask.Activity[0].PrevState = dgraphTaskInfo.Assignee.DisplayName()
-
-	}
-
-	if newAssigneeDgraphInfo != nil {
-		dgraphTask.Assignee = &dgraphStruct.DgraphUser{
-			Uid: newAssigneeDgraphInfo.Uid,
-			Tasks: []*dgraphStruct.DgraphTask{{
-				Uid: "uid(task)",
-			}},
-		}
-
-		dgraphTask.Activity[0].NextState = newAssigneeDgraphInfo.DisplayName()
-
-		taskOpenSearch.TaskAssigneeUuid = &newAssigneeDgraphInfo.Uuid
-		taskOpenSearch.TaskAssigneeFullName = newAssigneeDgraphInfo.DisplayName()
-	}
-
+	dgraphTask, taskOpenSearch := assigneeWrite(taskUUID.String(), dgraphTaskInfo.Assignee, newAssigneeDgraphInfo, userInfo, time.Now(), time.Time{})
 	_, err = domain.UpdateDgraphTaskAssignee(ctx, dgraphTask, dgraphOldUserUID, dgraphTaskUID)
 
 	if err != nil {

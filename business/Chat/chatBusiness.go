@@ -880,6 +880,17 @@ func DeleteChat(ctx context.Context, chatInfo *adapter.ChatInfo, chatUUID uuid.U
 
 	currentTime := time.Now()
 
+	// Its files and its replies' go with it, before it leaves the graph: a
+	// failure leaves the message there to delete again (a deleted one can't
+	// be).
+	_, err = attachmentBusiness.ArchiveFilesOf(ctx, attachmentBusiness.ChatFiles, chatUUID, currentTime)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/DeleteChat Failed to take its files off with it err: %+v",
+			err)
+		return
+	}
+
 	dgraphChat := dgraphStruct.DgraphChat{
 		Uid:       "uid(cha)",
 		Uuid:      chatInfo.Uuid,

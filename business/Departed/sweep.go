@@ -8,9 +8,7 @@ import (
 	followBusiness "github.com/akashc777/OneCamp/business/Follow"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
-	"github.com/akashc777/OneCamp/helpers"
 	userModel "github.com/akashc777/OneCamp/models/postgres/User"
-	"github.com/google/uuid"
 )
 
 // The Inbox notice an admin gets about someone who left with work under their
@@ -38,10 +36,7 @@ var (
 		return users, err
 	}
 	tell        = notificationBusiness.Tell
-	activeAdmin = func(ctx context.Context, id string) bool {
-		u, err := uuid.Parse(id)
-		return err == nil && userDomain.IsActiveAdmin(ctx, &u)
-	}
+	activeAdmin = userDomain.IsActiveAdminUUID
 )
 
 // TellAdmins tells each admin, once in their Inbox, about each person who
@@ -58,13 +53,9 @@ func TellAdmins(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	ids := realPeople(users)
-	if len(ids) == 0 {
+	recipients := notificationBusiness.InboxAdmins(users)
+	if len(recipients) == 0 {
 		return nil
-	}
-	recipients := make([]notificationBusiness.NoticeRecipient, 0, len(ids))
-	for _, id := range ids {
-		recipients = append(recipients, notificationBusiness.NoticeRecipient{UserUUID: id, Reason: "admin", InboxOnly: true})
 	}
 	for _, p := range people {
 		tell(ctx, notificationBusiness.Notice{
@@ -82,20 +73,6 @@ func TellAdmins(ctx context.Context) error {
 		}, recipients)
 	}
 	return nil
-}
-
-// realPeople are the ids of users who aren't the demo's own people: the
-// demo's visitor and cast never reach a real person's Inbox, and are never
-// told about real people (helpers.IsDemoPerson). Pure but for who the
-// visitor is.
-func realPeople(users []*userModel.User) []string {
-	var out []string
-	for _, u := range users {
-		if u != nil && u.Id != uuid.Nil && !helpers.IsDemoPerson(u.EmailID) {
-			out = append(out, u.Id.String())
-		}
-	}
-	return out
 }
 
 // noticeNames is how an admin's Inbox names a notice about someone who left:

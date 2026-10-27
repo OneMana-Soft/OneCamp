@@ -43,7 +43,11 @@ type CreateOrUpdateTaskCommentInput struct {
 	TaskUuid       string                           `json:"task_uuid,omitempty"`
 	Attachments    []*dgraphStruct.DgraphAttachment `json:"task_comment_attachments,omitempty"`
 	SkipGitHubSync bool                             `json:"skip_github_sync,omitempty"`
-	CreatedAt      *time.Time                       `json:"created_at,omitempty"` // Override creation time (e.g. for backfill from GitHub)
+	// CreatedAt is a backfill's time for the comment and its files, which
+	// only the server sets (business/GitHub's sync); a request never sets it
+	// (TestACommentRequestNeverSetsItsTime, and helpers
+	// TestEveryAttachmentNodeTheServerWritesSaysWhenItWasWritten).
+	CreatedAt *time.Time `json:"-"`
 }
 
 type RemoveTaskAttachmentInput struct {

@@ -40,7 +40,7 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 	gormPostgres "gorm.io/driver/postgres"
@@ -74,6 +74,25 @@ type Env struct {
 // before.
 func SetupEnv(t *testing.T) *Env {
 	t.Helper()
+	newDB := (*pgServer).newDatabase
+	if migratesItself[strings.SplitN(t.Name(), "/", 2)[0]] {
+		newDB = (*pgServer).newMigratedDatabase
+	}
+	return setupEnv(t, newDB)
+}
+
+// SetupUnmigratedEnv is SetupEnv with a database no migration has reached:
+// the extensions production's bootstrap creates and nothing else, what a
+// fresh install's server first connects to. MigrateAsTheInstallDoes migrates
+// it.
+func SetupUnmigratedEnv(t *testing.T) *Env {
+	t.Helper()
+	return setupEnv(t, (*pgServer).newBlankDatabase)
+}
+
+// setupEnv is SetupEnv with the test's database made by newDB.
+func setupEnv(t *testing.T, newDB func(*pgServer) (string, error)) *Env {
+	t.Helper()
 	guardTestState(t)
 	// Required before any test wires the project's own pool at this database.
 	//
@@ -88,14 +107,8 @@ func SetupEnv(t *testing.T) *Env {
 	ensureLoggers()
 
 	var name string
-	fromBlank := migratesItself[strings.SplitN(t.Name(), "/", 2)[0]]
 	srv, err := thePostgres.prepared(startPostgres, func(s *pgServer) (err error) {
-		if fromBlank {
-			name, err = s.newMigratedDatabase()
-		} else {
-			name, err = s.newDatabase()
-		}
-		if err != nil {
+		if name, err = newDB(s); err != nil {
 			return fmt.Errorf("make the test's database: %w", err)
 		}
 		return nil
@@ -297,6 +310,7 @@ var migratesItself = map[string]bool{
 	"TestEditProposalsMigrationUpDownUp":                        true,
 	"TestEmailLookupIndexSurvivesAddressesThatDifferOnlyInCase": true,
 	"TestEarlierSlackImportsMessagesAreKeyedByConversation":     true,
+	"TestImportAccessReviewsMigrationUpDownUp":                  true,
 	"TestInvitationLinksMigrationUpDownUp":                      true,
 	"TestMigration204ClosesInvitationsToMembers":                true,
 	"TestOutboxMigrationUpDownUp":                               true,
@@ -434,9 +448,22 @@ func (s *pgServer) newDatabase() (string, error) {
 	}
 }
 
-// newMigratedDatabase makes an empty database, with the extensions
-// production's bootstrap creates, and applies every migration to it.
+// newMigratedDatabase makes a blank database and applies every migration to
+// it.
 func (s *pgServer) newMigratedDatabase() (string, error) {
+	name, err := s.newBlankDatabase()
+	if err != nil {
+		return name, err
+	}
+	if err := applyMigrations(s.dsn(name)); err != nil {
+		return name, fmt.Errorf("apply migrations: %w", err)
+	}
+	return name, nil
+}
+
+// newBlankDatabase makes an empty database with the extensions production's
+// bootstrap creates, and nothing else.
+func (s *pgServer) newBlankDatabase() (string, error) {
 	name := fmt.Sprintf("test_%d", s.made.Add(1))
 	if _, err := s.admin.Exec(`CREATE DATABASE ` + name + ` TEMPLATE template0`); err != nil {
 		return name, err
@@ -446,17 +473,34 @@ func (s *pgServer) newMigratedDatabase() (string, error) {
 	if err != nil {
 		return name, err
 	}
+	defer func() { _ = db.Close() }()
 	for _, ext := range []string{`"uuid-ossp"`, `pgcrypto`} {
 		if _, err := db.Exec(`CREATE EXTENSION IF NOT EXISTS ` + ext); err != nil {
-			_ = db.Close()
 			return name, fmt.Errorf("create extension %s: %w", ext, err)
 		}
 	}
-	_ = db.Close()
-	if err := applyMigrations(s.dsn(name)); err != nil {
-		return name, fmt.Errorf("apply migrations: %w", err)
-	}
 	return name, nil
+}
+
+// MigrateAsTheInstallDoes applies every migration to the test's database as
+// `make migrate_up` does on an install: each migration's SQL (with
+// golang-migrate, as every test database is migrated), and sqlx-cli's ledger
+// recording each version as applied, which is what the server's schema check
+// reads (postgresInit.InspectSchema).
+func (e *Env) MigrateAsTheInstallDoes(t *testing.T) {
+	t.Helper()
+	if err := applyMigrations(e.DSN); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	if _, err := e.PG.Exec(`CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL,
+		installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), success BOOLEAN NOT NULL, checksum BYTEA NOT NULL,
+		execution_time BIGINT NOT NULL)`); err != nil {
+		t.Fatalf("sqlx's ledger: %v", err)
+	}
+	if _, err := e.PG.Exec(`INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+		SELECT v, 'migration', true, '\x00', 0 FROM unnest($1::bigint[]) AS v`, pq.Array(postgresInit.RequiredMigrations)); err != nil {
+		t.Fatalf("sqlx's ledger rows: %v", err)
+	}
 }
 
 // held records that a test holds the database, or no longer does.

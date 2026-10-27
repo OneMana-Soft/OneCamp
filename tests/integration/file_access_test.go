@@ -39,6 +39,7 @@ import (
 // in none of them; Zed is in nothing at all.
 type placesForFiles struct {
 	env                              *integration.Env
+	dg                               *integration.DgraphEnv
 	people                           map[string]uuid.UUID
 	uids                             map[string]string
 	channel, archived, project       string
@@ -56,7 +57,7 @@ func setUpPlacesForFiles(t *testing.T) *placesForFiles {
 	dg := integration.SetupDgraph(t)
 	startMinio(t)
 
-	p := &placesForFiles{env: env, people: map[string]uuid.UUID{}}
+	p := &placesForFiles{env: env, dg: dg, people: map[string]uuid.UUID{}}
 	var nodes []map[string]any
 	for _, name := range []string{"mia", "oli", "ann", "ben", "zed"} {
 		id := uuid.New()

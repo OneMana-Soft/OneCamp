@@ -25,29 +25,87 @@ func exactClauses(field string, ids []string) []string {
 	}
 }
 
+// entryDeletedPainless is true, in an update-by-query's script, for an entry
+// deleted already. A deletion time below 1 was never a deletion (a doc's new
+// comments were once written with -1, and a team's restore writes -1): such
+// an entry is live, and is marked like one.
+const entryDeletedPainless = `(ctx._source.deleted_date != null && !(ctx._source.deleted_date instanceof Number && ((Number) ctx._source.deleted_date).longValue() < 1))`
+
 // cascadeDeleteScript marks an entry deleted by a cascade from its parent (a
 // doc, post, chat, task, channel or project going away), unless the entry is
 // deleted already: then its deletion time and marker stay as they are. The
 // cascade wrote its own over them, so a comment its author had deleted was
 // marked "cascade", and restoring the parent, which clears what the cascade
 // marked, brought the comment back to search for everyone who may read the
-// parent. A deletion time below 1 was never a deletion (a doc's new comments
-// were once written with -1, and a team's restore writes -1): such an entry is
-// live, and is marked like one.
-const cascadeDeleteScript = `def d = ctx._source.deleted_date;
-if (d != null && !(d instanceof Number && ((Number) d).longValue() < 1)) { ctx.op = 'noop'; return; }
+// parent.
+const cascadeDeleteScript = `if ` + entryDeletedPainless + ` { ctx.op = 'noop'; return; }
+ctx._source.deleted_date = params.deleted_at;
+ctx._source.deleted_by = params.deleted_by;`
+
+// hideScript marks an entry hidden by its own marker. Like
+// cascadeDeleteScript it leaves an entry a person deleted as it is, but it
+// takes over a cascade's mark: a comment of a trashed task is marked
+// "cascade", which restoring the task clears, and that would bring back what
+// was hidden under it. entryDeletedPainless is one parenthesised expression,
+// so the whole condition gets the if's own parentheses.
+const hideScript = `if (` + entryDeletedPainless + ` && ctx._source.deleted_by != 'cascade') { ctx.op = 'noop'; return; }
+ctx._source.deleted_date = params.deleted_at;
+ctx._source.deleted_by = params.deleted_by;`
+
+// handOverScript passes an entry marked by params.from to another marker,
+// params.deleted_by, at params.deleted_at: what a hide took from under a
+// trashed task or an archived project, handed back to that cascade, whose
+// restore then brings it back with the rest.
+const handOverScript = `if (ctx._source.deleted_by != params.from) { ctx.op = 'noop'; return; }
 ctx._source.deleted_date = params.deleted_at;
 ctx._source.deleted_by = params.deleted_by;`
 
 // cascadeDeleteBody is the update-by-query body that has cascadeDeleteScript
 // mark what query matches as deleted at deletedAt by deletedBy. Pure.
 func cascadeDeleteBody(query string, deletedAt int64, deletedBy string) string {
-	script, _ := json.Marshal(map[string]any{
-		"source": cascadeDeleteScript,
-		"lang":   "painless",
-		"params": map[string]any{"deleted_at": deletedAt, "deleted_by": deletedBy},
-	})
-	return fmt.Sprintf(`{"script": %s, "query": %s}`, script, query)
+	return markBody(cascadeDeleteScript, query, map[string]any{"deleted_at": deletedAt, "deleted_by": deletedBy})
+}
+
+// markBody is the update-by-query body that runs script, with params, over
+// what query matches. Pure.
+func markBody(script, query string, params map[string]any) string {
+	raw, _ := json.Marshal(map[string]any{"source": script, "lang": "painless", "params": params})
+	return fmt.Sprintf(`{"script": %s, "query": %s}`, raw, query)
+}
+
+// HideInOpenSearch marks hidden, at hiddenAt by hiddenBy, the entries in
+// indices that name id in any of fields (hideScript):
+// SyncCascadingUnarchiveInOpenSearch with the same marker brings them back,
+// or HandOverInOpenSearch hands them to a cascade.
+func HideInOpenSearch(ctx context.Context, fields []string, id string, hiddenAt int64, indices []string, hiddenBy string) error {
+	if len(fields) == 0 || id == "" || len(indices) == 0 {
+		return nil
+	}
+	_, err := updateByQuerySettled(ctx, indices, markBody(hideScript, naming(fields, id),
+		map[string]any{"deleted_at": hiddenAt, "deleted_by": hiddenBy}))
+	return err
+}
+
+// HandOverInOpenSearch passes the entries in indices that name id in any of
+// fields, and that from marked, to the marker to at at (handOverScript), in
+// one write: a comment that comes back under a trashed task or an archived
+// project stays out of search until that restore.
+func HandOverInOpenSearch(ctx context.Context, fields []string, id, from string, at int64, indices []string, to string) error {
+	if len(fields) == 0 || id == "" || len(indices) == 0 {
+		return nil
+	}
+	_, err := updateByQuerySettled(ctx, indices, markBody(handOverScript, naming(fields, id),
+		map[string]any{"from": from, "deleted_at": at, "deleted_by": to}))
+	return err
+}
+
+// naming is the query for the entries that name id in any of fields. Pure.
+func naming(fields []string, id string) string {
+	var should []string
+	for _, field := range fields {
+		should = append(should, exactClauses(field, []string{id})...)
+	}
+	return anyOf(should)
 }
 
 // anyOf is a query matching what any of the clauses matches. Pure.

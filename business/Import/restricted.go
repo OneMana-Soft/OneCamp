@@ -163,7 +163,20 @@ func keepRestricted(ctx context.Context, job *importModels.Job, in importTaskInp
 	if job.TriggeredBy != nil {
 		by = *job.TriggeredBy
 	}
-	seen := map[uuid.UUID]bool{uuid.Nil: true, in.Creator.UserPostgresInfo.Id: true}
+	granted, err := letIn(ctx, in.ProjectUUID, in.Creator.UserPostgresInfo.Id, by, grants)
+	if err != nil {
+		return err
+	}
+	return restrictionModel.Restrict(ctx, taskID, in.ProjectUUID, by, granted, nil, time.Now())
+}
+
+// letIn is whom a restricted task is kept to by name: whoever ran the import
+// (by) and grants, once each, but its creator, whom the rule lets in, and
+// only those in its project (projectBusiness.MembersAmong), as every grant
+// must be. The import keeps a task it makes so (keepRestricted), and an old
+// import's re-check one it made before its fix (recheck.go).
+func letIn(ctx context.Context, project, creator, by uuid.UUID, grants []uuid.UUID) ([]uuid.UUID, error) {
+	seen := map[uuid.UUID]bool{uuid.Nil: true, creator: true}
 	var people []uuid.UUID
 	var asked []string
 	for _, id := range append([]uuid.UUID{by}, grants...) {
@@ -173,9 +186,12 @@ func keepRestricted(ctx context.Context, job *importModels.Job, in importTaskInp
 			asked = append(asked, id.String())
 		}
 	}
-	inProject, err := projectBusiness.MembersAmong(ctx, in.ProjectUUID.String(), asked)
+	if len(asked) == 0 {
+		return nil, nil
+	}
+	inProject, err := projectBusiness.MembersAmong(ctx, project.String(), asked)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var granted []uuid.UUID
 	for i, id := range people {
@@ -183,7 +199,7 @@ func keepRestricted(ctx context.Context, job *importModels.Job, in importTaskInp
 			granted = append(granted, id)
 		}
 	}
-	return restrictionModel.Restrict(ctx, taskID, in.ProjectUUID, by, granted, nil, time.Now())
+	return granted, nil
 }
 
 // restrictedRecord is what a restricted task's import record keeps of it:

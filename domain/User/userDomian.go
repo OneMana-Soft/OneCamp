@@ -1786,9 +1786,6 @@ func DgraphUsersListNotExistInGivenChannel(ctx context.Context, channelUUID stri
 					user_profile_object_key
 					user_job_title
 					user_hobbies
-					user_channels {
-						ch_uuid
-					}
 					user_created_at
 					user_updated_at
 					user_deleted_at
@@ -2806,4 +2803,11 @@ func IsActiveAdmin(ctx context.Context, id *uuid.UUID) bool {
 	}
 	u, err := GetActiveUserWithAdminFlagByUserUUID(ctx, *id)
 	return err == nil && u != nil && u.Id == *id && u.IsAdmin
+}
+
+// IsActiveAdminUUID is IsActiveAdmin for an id as text: anything that isn't
+// a uuid is false.
+func IsActiveAdminUUID(ctx context.Context, id string) bool {
+	u, err := uuid.Parse(id)
+	return err == nil && IsActiveAdmin(ctx, &u)
 }

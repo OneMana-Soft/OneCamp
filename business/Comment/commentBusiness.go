@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
@@ -547,6 +548,16 @@ func DeleteComment(ctx context.Context, dgraphComment *dgraphStruct.DgraphCommen
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"business/DeleteComment Failed to soft delete post err: %+v",
+			err)
+		return
+	}
+
+	// Its files go with it, before it leaves the graph: a failure leaves the
+	// comment there to delete again.
+	_, err = attachmentBusiness.ArchiveFilesOf(ctx, attachmentBusiness.CommentFiles, commentUUID, currentTime)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/DeleteComment Failed to take its files off with it err: %+v",
 			err)
 		return
 	}

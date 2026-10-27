@@ -14,7 +14,7 @@ import (
 	"time"
 
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
-	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
+	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
 	"github.com/akashc777/OneCamp/controllers/httpx"
@@ -34,8 +34,6 @@ const maxPeople = 200
 // Seams for tests.
 var (
 	restrictionOf = restrictionModel.Of
-	restrictTask  = workAccess.Restrict
-	openTask      = workAccess.Unrestrict
 	now           = time.Now
 )
 
@@ -149,15 +147,12 @@ func SetRestriction(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Only this project's admins, or whoever made the task, can choose who sees it."})
 		return
 	}
-	by := caller.UserPostgresInfo.Id
-	at := now()
-	var changed bool
-	if in.Restricted {
-		err = restrictTask(r.Context(), task, by, people, at)
-		changed = err == nil
-	} else {
-		changed, err = openTask(r.Context(), task)
-	}
+	_, err = taskBusiness.SetRestriction(r.Context(), task, in.Restricted, people, taskBusiness.Changer{
+		By: caller.UserPostgresInfo.Id, UserUUID: caller.UserDgraphInfo.Uuid,
+		Record: func(action, summary string, meta map[string]any) {
+			auditBusiness.Record(r, action, auditBusiness.CategorySecurity, summary, meta)
+		},
+	}, now())
 	var notPeople *workAccess.NotProjectPeopleError
 	switch {
 	case errors.As(err, &notPeople):
@@ -170,23 +165,6 @@ func SetRestriction(w http.ResponseWriter, r *http.Request) {
 		helpers.LogErrorWithContext(r.Context(), "controllers/TaskRestriction.SetRestriction err: %+v", err)
 		helpers.WriteRetryLater(w, "Couldn't change who can see this task.")
 		return
-	}
-	if changed {
-		project := ""
-		if task.Project != nil {
-			project = task.Project.Uuid
-		}
-		action, summary := "task.restricted", "Kept a task to a few people"
-		if !in.Restricted {
-			action, summary = "task.unrestricted", "Opened a restricted task to its project"
-		}
-		meta := map[string]interface{}{"task_uuid": id.String(), "project_uuid": project, "people": len(people)}
-		auditBusiness.Record(r, action, auditBusiness.CategorySecurity, summary, meta)
-		resourceEventBusiness.Bus.Emit(r.Context(), resourceEventBusiness.Event{
-			Kind: resourceEventBusiness.TaskChanged, ResourceKind: workAccess.KindTask, ResourceUUID: id.String(),
-			Actor: resourceEventBusiness.Actor{UserUUID: caller.UserDgraphInfo.Uuid}, At: at,
-			Data: map[string]string{"restricted": boolWord(in.Restricted)},
-		})
 	}
 	got, err := restrictionOf(r.Context(), id)
 	if err != nil {
@@ -211,11 +189,4 @@ func parsePeople(raw []string) (people []uuid.UUID, bad string) {
 		}
 	}
 	return people, ""
-}
-
-func boolWord(b bool) string {
-	if b {
-		return "true"
-	}
-	return "false"
 }

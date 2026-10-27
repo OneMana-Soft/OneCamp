@@ -490,6 +490,20 @@ func SyncCascadingDeletionInOpenSearch(parentFields []string, parentID string, d
 	return
 }
 
+// HideInOpenSearch marks hidden by hiddenBy the entries in indices that name
+// id in any of fields, a cascade's mark included, never a person's
+// deletion; SyncCascadingUnarchiveInOpenSearch with hiddenBy brings them back.
+func HideInOpenSearch(fields []string, id string, hiddenAt int64, indices []string, hiddenBy string) error {
+	return opensearchModels.HideInOpenSearch(context.Background(), fields, id, hiddenAt, indices, hiddenBy)
+}
+
+// HandOverInOpenSearch passes the entries in indices that name id in any of
+// fields, and that from marked, to the marker to at at, so to's restore
+// brings them back.
+func HandOverInOpenSearch(fields []string, id, from string, at int64, indices []string, to string) error {
+	return opensearchModels.HandOverInOpenSearch(context.Background(), fields, id, from, at, indices, to)
+}
+
 func SyncCascadingUnarchiveInOpenSearch(parentFields []string, parentID string, indices []string, deletedBy string) (err error) {
 	err = opensearchModels.SyncCascadingUnarchiveInOpenSearch(context.Background(), parentFields, parentID, indices, deletedBy)
 	if err != nil {

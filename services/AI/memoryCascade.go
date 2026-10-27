@@ -275,3 +275,34 @@ func RestoreMemoryBySources(ctx context.Context, sourceType string, sourceUUIDs 
 	}
 	return len(items)
 }
+
+// HideMemoryBySources takes the memory items captured from the sources out
+// of sight with its caller's own reason (memoryModels.HideBySource), those an
+// archive took already too, so only ShowMemoryBySources with that reason
+// brings them back, and drops their projections. Unlike the archive cascade
+// it answers its errors, so the caller tries again rather than leave a fact
+// readable.
+func HideMemoryBySources(ctx context.Context, sourceType string, sourceUUIDs []string, reason string) error {
+	ids, err := memoryModels.HideBySource(ctx, sourceType, sourceUUIDs, reason)
+	if err != nil {
+		return err
+	}
+	return dropMemoryProjectionsMany(ctx, uuidStrings(ids))
+}
+
+// ShowMemoryBySources brings back what HideMemoryBySources hid with reason:
+// in sight again, re-projected, or, toArchive (its project archived since),
+// handed to the archive, so the project's restore brings it back.
+func ShowMemoryBySources(ctx context.Context, sourceType string, sourceUUIDs []string, reason string, toArchive bool) error {
+	if toArchive {
+		return memoryModels.ArchiveHiddenBySource(ctx, sourceType, sourceUUIDs, reason)
+	}
+	items, err := memoryModels.ReviveBySource(ctx, sourceType, sourceUUIDs, reason)
+	if err != nil {
+		return err
+	}
+	for _, it := range items {
+		reprojectMemoryItem(ctx, it)
+	}
+	return nil
+}

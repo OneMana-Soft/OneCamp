@@ -12,7 +12,6 @@ import (
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Project"
-	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	cycleBusiness "github.com/akashc777/OneCamp/business/Cycle"
 	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
@@ -411,7 +410,7 @@ func RemoveAdminRoleFromMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	recordMemberChange(r, resourceEventBusiness.ProjectChanged, "project.member.role", "Changed someone's role in a project", dgraphProject.Uuid, dgraphProject.Members[0].Uuid, workAccess.RoleMember)
+	business.RecordMemberChange(r, resourceEventBusiness.ProjectChanged, "project.member.role", "Changed someone's role in a project", dgraphProject.Uuid, dgraphProject.Members[0].Uuid, workAccess.RoleMember)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": doneWords[removeAdmin]})
 
 }
@@ -460,7 +459,7 @@ func RemoveMemberFromProject(w http.ResponseWriter, r *http.Request) {
 	if strings.EqualFold(userInfo.UserDgraphInfo.Uuid, addProjectMemberInputInfo.UserUuid) {
 		summary = "Left a project"
 	}
-	recordMemberChange(r, resourceEventBusiness.ProjectMemberRemoved, "project.member.remove", summary, dgraphProject.Uuid, dgraphProject.Members[0].Uuid, workAccess.RoleNone)
+	business.RecordMemberChange(r, resourceEventBusiness.ProjectMemberRemoved, "project.member.remove", summary, dgraphProject.Uuid, dgraphProject.Members[0].Uuid, workAccess.RoleNone)
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": doneWords[takeOff]})
 
@@ -752,7 +751,7 @@ func AddMemberToProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	recordMemberChange(r, resourceEventBusiness.ProjectMemberAdded, "project.member.add", "Added someone to a project", dgraphProject.Uuid, dgraphProject.Team.Members[0].Uuid, workAccess.RoleMember)
+	business.RecordMemberChange(r, resourceEventBusiness.ProjectMemberAdded, "project.member.add", "Added someone to a project", dgraphProject.Uuid, dgraphProject.Team.Members[0].Uuid, workAccess.RoleMember)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": doneWords[addMember]})
 
 }
@@ -824,7 +823,7 @@ func AddAdminMemberToProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	recordMemberChange(r, resourceEventBusiness.ProjectChanged, "project.member.role", "Made someone an admin of a project", dgraphProject.Uuid, dgraphProject.Members[0].Uuid, workAccess.RoleAdmin)
+	business.RecordMemberChange(r, resourceEventBusiness.ProjectChanged, "project.member.role", "Made someone an admin of a project", dgraphProject.Uuid, dgraphProject.Members[0].Uuid, workAccess.RoleAdmin)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": doneWords[makeAdmin]})
 
 }
@@ -844,24 +843,6 @@ func managesPeople(w http.ResponseWriter, r *http.Request, p *dgraphStruct.Dgrap
 		return false, false
 	}
 	return s.Can(workAccess.NeedManagePeople), true
-}
-
-// recordMemberChange keeps a change to a project's people in the audit log
-// and tells its Resource Event (project.member.added, project.member.removed,
-// or project.changed with the person and their role).
-func recordMemberChange(r *http.Request, kind resourceEventBusiness.Kind, action, summary, projectUUID, memberUUID string, role workAccess.Role) {
-	auditBusiness.Record(r, action, auditBusiness.CategorySecurity, summary,
-		map[string]interface{}{"project_uuid": projectUUID, "user_uuid": memberUUID, "role": string(role)})
-	u, _ := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
-	data := map[string]string{"member": memberUUID}
-	if role != workAccess.RoleNone {
-		data["role"] = string(role)
-	}
-	resourceEventBusiness.Bus.Emit(r.Context(), resourceEventBusiness.Event{
-		Kind: kind, ResourceKind: workAccess.KindProject, ResourceUUID: projectUUID,
-		Actor: resourceEventBusiness.Actor{UserUUID: u.UserDgraphInfo.Uuid}, At: time.Now(),
-		Subjects: []string{memberUUID}, Data: data,
-	})
 }
 
 func ArchiveProject(w http.ResponseWriter, r *http.Request) {

@@ -579,6 +579,7 @@ func RestoreByScope(ctx context.Context, scope ScopeRef) ([]*MemoryItem, error) 
 	return out, rows.Err()
 }
 
+// ArchiveBySource soft-deletes (deleted_reason='archive') every memory
 // item whose source is in sourceUUIDs for the given sourceType. Mirrors
 // DeleteBySource but is REVERSIBLE via RestoreBySource: the reason marker
 // lets restore revive only what the archive cascade removed, never an item
@@ -587,41 +588,13 @@ func RestoreByScope(ctx context.Context, scope ScopeRef) ([]*MemoryItem, error) 
 // operates over many ids at once); a nil/empty input is a no-op. The id
 // list is chunked so a huge archive job can't exceed PG's bind-param limit.
 func ArchiveBySource(ctx context.Context, sourceType string, sourceUUIDs []string) ([]uuid.UUID, error) {
-	if sourceType == "" || len(sourceUUIDs) == 0 {
-		return nil, nil
-	}
-
-	var all []uuid.UUID
-	err := chunkStrings(sourceUUIDs, memorySourceChunkSize, func(batch []string) error {
-		cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout*10)
-		defer cancel()
-
-		// $1=sourceType, $2=reason, then the source_uuid IN-list from $3.
-		ph, args := inClauseFrom(3, batch)
-		args = append([]any{sourceType, DeleteReasonArchive}, args...)
-
-		q := `
+	return bySources(ctx, "ArchiveBySource", sourceType, DeleteReasonArchive, sourceUUIDs, func(in string) string {
+		return `
 			UPDATE workspace_memory_items
 			SET deleted_at = NOW(), deleted_reason = $2, updated_at = NOW()
-			WHERE source_type = $1 AND source_uuid IN (` + ph + `) AND deleted_at IS NULL
+			WHERE source_type = $1 AND source_uuid IN (` + in + `) AND deleted_at IS NULL
 			RETURNING id`
-
-		rows, qerr := postgresInit.DBConn.SqlDB.QueryContext(cctx, q, args...)
-		if qerr != nil {
-			helpers.LogErrorWithContext(cctx, "models/workspaceMemory ArchiveBySource failed: %+v", qerr)
-			return qerr
-		}
-		defer rows.Close()
-		for rows.Next() {
-			var id uuid.UUID
-			if serr := rows.Scan(&id); serr != nil {
-				return serr
-			}
-			all = append(all, id)
-		}
-		return rows.Err()
-	})
-	return all, err
+	}, scanID)
 }
 
 // RestoreBySource revives memory items previously removed by the ARCHIVE
@@ -632,44 +605,94 @@ func ArchiveBySource(ctx context.Context, sourceType string, sourceUUIDs []strin
 // caller can re-project them to OpenSearch + Dgraph. Chunked like the
 // archive twin.
 func RestoreBySource(ctx context.Context, sourceType string, sourceUUIDs []string) ([]*MemoryItem, error) {
-	if sourceType == "" || len(sourceUUIDs) == 0 {
-		return nil, nil
-	}
+	return ReviveBySource(ctx, sourceType, sourceUUIDs, DeleteReasonArchive)
+}
 
-	var out []*MemoryItem
-	err := chunkStrings(sourceUUIDs, memorySourceChunkSize, func(batch []string) error {
-		cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout*10)
-		defer cancel()
+// HideBySource soft-deletes, with its own reason, the memory items captured
+// from the sources: live ones, and those an archive cascade removed, so their
+// scope's restore (RestoreByScope) never brings them back; never one a user
+// deleted. Only ReviveBySource with the same reason brings them back. Returns
+// the ids so the caller can drop their projections.
+func HideBySource(ctx context.Context, sourceType string, sourceUUIDs []string, reason string) ([]uuid.UUID, error) {
+	return bySources(ctx, "HideBySource", sourceType, reason, sourceUUIDs, func(in string) string {
+		return `
+			UPDATE workspace_memory_items
+			SET deleted_at = COALESCE(deleted_at, NOW()), deleted_reason = $2, updated_at = NOW()
+			WHERE source_type = $1 AND source_uuid IN (` + in + `)
+			  AND (deleted_at IS NULL OR deleted_reason = '` + DeleteReasonArchive + `')
+			RETURNING id`
+	}, scanID)
+}
 
-		ph, args := inClauseFrom(3, batch)
-		args = append([]any{sourceType, DeleteReasonArchive}, args...)
-
-		q := `
+// ReviveBySource brings back the memory items removed with reason for the
+// sources, and returns them so the caller can re-project them.
+func ReviveBySource(ctx context.Context, sourceType string, sourceUUIDs []string, reason string) ([]*MemoryItem, error) {
+	return bySources(ctx, "ReviveBySource", sourceType, reason, sourceUUIDs, func(in string) string {
+		return `
 			UPDATE workspace_memory_items
 			SET deleted_at = NULL, deleted_reason = NULL, updated_at = NOW()
 			WHERE source_type = $1 AND deleted_reason = $2
-			  AND source_uuid IN (` + ph + `) AND deleted_at IS NOT NULL
+			  AND source_uuid IN (` + in + `) AND deleted_at IS NOT NULL
 			RETURNING id, kind, content, status, owner_user_id, due_at,
 			          channel_uuid, project_uuid, chat_grp_id, team_uuid,
 			          source_type, source_uuid, confidence, created_by_user_id,
 			          created_at, updated_at`
+	}, func(r *sql.Rows) (*MemoryItem, error) { return scanItem(r) })
+}
 
-		rows, qerr := postgresInit.DBConn.SqlDB.QueryContext(cctx, q, args...)
+// ArchiveHiddenBySource hands the memory items removed with reason for the
+// sources to the archive cascade: still out of sight, until their scope's
+// restore (RestoreByScope) brings them back. For what comes back while its
+// project is archived.
+func ArchiveHiddenBySource(ctx context.Context, sourceType string, sourceUUIDs []string, reason string) error {
+	_, err := bySources(ctx, "ArchiveHiddenBySource", sourceType, reason, sourceUUIDs, func(in string) string {
+		return `
+			UPDATE workspace_memory_items
+			SET deleted_reason = '` + DeleteReasonArchive + `', updated_at = NOW()
+			WHERE source_type = $1 AND deleted_reason = $2
+			  AND source_uuid IN (` + in + `) AND deleted_at IS NOT NULL
+			RETURNING id`
+	}, scanID)
+	return err
+}
+
+// bySources runs, over sourceUUIDs a chunk at a time, the UPDATE … RETURNING
+// that query writes for the chunk's IN-list (in, from $3), with the source type
+// as $1 and reason as $2, and collects what scan reads of each row returned.
+// A nil or empty input is a no-op.
+func bySources[T any](ctx context.Context, what, sourceType, reason string, sourceUUIDs []string,
+	query func(in string) string, scan func(*sql.Rows) (T, error)) ([]T, error) {
+	if sourceType == "" || len(sourceUUIDs) == 0 {
+		return nil, nil
+	}
+	var out []T
+	err := chunkStrings(sourceUUIDs, memorySourceChunkSize, func(batch []string) error {
+		cctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout*10)
+		defer cancel()
+		in, args := inClauseFrom(3, batch)
+		rows, qerr := postgresInit.DBConn.SqlDB.QueryContext(cctx, query(in), append([]any{sourceType, reason}, args...)...)
 		if qerr != nil {
-			helpers.LogErrorWithContext(cctx, "models/workspaceMemory RestoreBySource failed: %+v", qerr)
+			helpers.LogErrorWithContext(cctx, "models/workspaceMemory %s failed: %+v", what, qerr)
 			return qerr
 		}
 		defer rows.Close()
 		for rows.Next() {
-			it, serr := scanItem(rows)
+			v, serr := scan(rows)
 			if serr != nil {
 				return serr
 			}
-			out = append(out, it)
+			out = append(out, v)
 		}
 		return rows.Err()
 	})
 	return out, err
+}
+
+// scanID reads a returned row's id.
+func scanID(r *sql.Rows) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := r.Scan(&id)
+	return id, err
 }
 
 // memorySourceChunkSize bounds how many source ids go into a single IN-list

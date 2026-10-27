@@ -23,12 +23,14 @@ import (
 	aicoworker "github.com/akashc777/OneCamp/business/AICoworker"
 	mcpBusiness "github.com/akashc777/OneCamp/business/AIMCP"
 	archiveBusiness "github.com/akashc777/OneCamp/business/Archive"
+	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 	checkInBusiness "github.com/akashc777/OneCamp/business/CheckIn"
 	commandBusiness "github.com/akashc777/OneCamp/business/Command"
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
 	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	githubBusiness "github.com/akashc777/OneCamp/business/GitHub"
+	importReviewBusiness "github.com/akashc777/OneCamp/business/ImportReview"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
 	mcpServerBusiness "github.com/akashc777/OneCamp/business/MCPServer"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
@@ -217,9 +219,25 @@ func startBackgroundLoops(ctx context.Context) {
 	// Once per install: every doc's global search entries rewritten from the
 	// doc (who may find it, whether it is deleted), and its comments' too.
 	docBusiness.StartDocSearchRepair(ctx)
+	// Once per install: the files of posts, messages and comments deleted
+	// before a delete took them off with the item.
+	attachmentBusiness.DeletedFilesRepair.Start(ctx)
 	// Once per install: a group's messages left in search under an id it had
 	// before someone was added, moved to the id it has now.
 	chatBusiness.StartChatGroupingRepair(ctx)
+	// Once per install: who old Todoist and Notion imports added, for admins to review.
+	importReviewBusiness.StartScan(ctx)
+	// Once per install, at once: a review of what each import from before its
+	// provider's fix let every project member read, before the admins' notice
+	// looks for them. Then, every start, those reviews re-checked against the
+	// source in the background until none is left (business/Import recheck.go).
+	if _, _, err := importBusiness.RecheckCandidates.Run(ctx); err != nil {
+		helpers.MessageLogs.ErrorLog.Printf("Old imports' access reviews (the re-check tries again): %v", err)
+	}
+	importBusiness.StartRechecks(ctx)
+	// Once per install, once that re-check has gone through every old import:
+	// the admins' notice of what it did (business/ImportReview accessNotice.go).
+	importReviewBusiness.AccessNotice.Start(ctx)
 	// Every start: an @handle for each member who has none (accounts from
 	// before handles), derived from their name.
 	userBusiness.StartHandleBackfill(ctx)
@@ -482,6 +500,11 @@ func main() {
 	// This only refuses when the database is POSITIVELY behind; an unreadable or
 	// absent migration ledger warns and continues, so the check itself can never
 	// take down a healthy server. ALLOW_SCHEMA_DRIFT=true overrides it.
+	//
+	// On a database no migration has reached yet it first waits for them: a
+	// fresh install brings this server up before it migrates, and every seed
+	// and claim below (the automation bot, the importer fixes' moment) would
+	// otherwise fail once against the missing tables and never run again.
 	if advisory, serr := postgresInit.VerifySchemaAtStartup(ctx); serr != nil {
 		helpers.LogErrorWithContext(ctx, "Database schema check failed: %v", serr)
 		os.Exit(1)

@@ -6,6 +6,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 )
 
@@ -74,4 +75,23 @@ func HardDeleteCommentByUUID(query string, commentUUID uuid.UUID) (err error) {
 	}
 
 	return
+}
+
+// Hide marks a comment deleted at at, and answers whether it is hidden at at
+// now: it was live, or this hid it before (a retry). A comment deleted
+// otherwise is left as it is. at is kept to the microsecond, as Postgres
+// keeps it, so Show finds it.
+func Hide(ctx context.Context, id uuid.UUID, at time.Time) (bool, error) {
+	n, err := pgexec.Exec(ctx, `UPDATE comments SET deleted_at = $2 WHERE id = $1 AND (deleted_at IS NULL OR deleted_at = $2)`,
+		id, at.Truncate(time.Microsecond))
+	return n == 1, err
+}
+
+// Show brings back a comment Hide hid at at, and answers whether it is live
+// now: it was still hidden as Hide left it, or this brought it back before (a
+// retry). One deleted otherwise since stays deleted.
+func Show(ctx context.Context, id uuid.UUID, at time.Time) (bool, error) {
+	n, err := pgexec.Exec(ctx, `UPDATE comments SET deleted_at = NULL WHERE id = $1 AND (deleted_at = $2 OR deleted_at IS NULL)`,
+		id, at.Truncate(time.Microsecond))
+	return n == 1, err
 }
