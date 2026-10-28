@@ -101,6 +101,7 @@ var (
 	restoreTask  = taskBusiness.UnArchiveTaskByTaskUUID
 	setPriority  = taskBusiness.UpdateTaskPriorityByTaskUUID
 	setAssignee  = taskBusiness.UpdateTaskAssigneeByTaskUUID
+	unseeing     = taskBusiness.Unseeing
 	setDates     = taskBusiness.UpdateTaskDates
 	isMember     = projectBusiness.HasMember
 	personByUUID = userDomain.GetActiveDgraphUserInfoByUUID
@@ -190,8 +191,9 @@ func (todaysWrites) Apply(ctx context.Context, who *userModels.UserInfo, taskID 
 			return nil, nil, err
 		}
 	}
-	// An assignee is someone in the task's project, checked for them all
-	// before anything changes.
+	// An assignee is someone in the task's project who may see the task (its
+	// restriction may keep one of its people out), checked for them all before
+	// anything changes.
 	projectID := ""
 	if task != nil && task.Project != nil {
 		projectID = task.Project.Uuid
@@ -211,6 +213,10 @@ func (todaysWrites) Apply(ctx context.Context, who *userModels.UserInfo, taskID 
 		person, err := personByUUID(ctx, a.Uuid)
 		if err != nil || person == nil {
 			return task, nil, ErrNotInProject
+		}
+		// One of its people may still be one its restriction keeps out.
+		if err = unseeing(ctx, taskID.String(), task, person); err != nil {
+			return task, nil, err
 		}
 		values[i].assignee = person
 	}

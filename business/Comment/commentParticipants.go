@@ -32,7 +32,6 @@ import (
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	domain "github.com/akashc777/OneCamp/domain/Comment"
-	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
@@ -178,21 +177,11 @@ func docCommentRecipients(doc *dgraphStruct.DgraphDoc, mentioned []string, autho
 	return out
 }
 
-// takingPart is who takes part in a doc, in order: its owner (after a
-// hand-over, its new one: docDomain.OwnerOf), its full-access people and
-// editors, and whoever commented on it. Pure.
+// takingPart is who takes part in a doc, in order: its keepers (docKeepers:
+// its owner, its full-access people and editors) and whoever commented on it.
+// Pure.
 func takingPart(doc *dgraphStruct.DgraphDoc) []string {
-	var out []string
-	if o := docDomain.OwnerOf(doc); o != nil {
-		out = append(out, o.Uuid)
-	}
-	for _, list := range [][]*dgraphStruct.DgraphUser{doc.FullAccessUsers, doc.EditingUser} {
-		for _, u := range list {
-			if u != nil {
-				out = append(out, u.Uuid)
-			}
-		}
-	}
+	out := docKeepers(doc)
 	for _, c := range doc.Comments {
 		if c != nil && c.CommentBy != nil {
 			out = append(out, c.CommentBy.Uuid)

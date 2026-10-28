@@ -307,6 +307,11 @@ func CreateTaskV1(w http.ResponseWriter, r *http.Request) {
 		input.AssigneeUuid = assignee.Uuid
 	}
 	taskID, err := taskBusiness.CreateTask(ctx, projectID, &user, project, assignee, input, nil)
+	if errors.Is(err, helpers.ErrConflict) {
+		// The app's answer: an assignee who can't see the task, by name.
+		refuse(w, http.StatusConflict, err.Error())
+		return
+	}
 	if err != nil {
 		refuse(w, http.StatusInternalServerError, "couldn't create the task")
 		return

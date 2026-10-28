@@ -140,7 +140,16 @@ func TestSlackBridgeCarriesAConversationBothWays(t *testing.T) {
 		channelUUID, "bridge-"+channelUUID.String()[:8]); err != nil {
 		t.Fatal(err)
 	}
-	dg.Mutate(t, []map[string]any{{"uid": "_:ch", "dgraph.type": "Channel", "ch_uuid": channelUUID.String(), "ch_name": "general"}})
+	// Sam, who links it, is in it: the bridge carries only what whoever
+	// linked it may read (slack_bridge_reach_test.go).
+	sam := uuid.New()
+	if _, err := env.PG.Exec(`INSERT INTO users (id, email_id, username, display_name, created_at, updated_at) VALUES ($1, 'sam@acme.test', 'sam', 'Sam', NOW(), NOW())`, sam); err != nil {
+		t.Fatal(err)
+	}
+	dg.Mutate(t, []map[string]any{
+		{"uid": "_:sam", "dgraph.type": "User", "user_uuid": sam.String(), "user_name": "sam"},
+		{"uid": "_:ch", "dgraph.type": "Channel", "ch_uuid": channelUUID.String(), "ch_name": "general", "ch_members": []map[string]any{{"uid": "_:sam"}}},
+	})
 
 	tokenEnc, _ := helpers.EncryptSecret("xoxb-test")
 	secretEnc, _ := helpers.EncryptSecret(bridgeSecret)
@@ -148,7 +157,7 @@ func TestSlackBridgeCarriesAConversationBothWays(t *testing.T) {
 		BotTokenEnc: tokenEnc, SigningSecretEnc: secretEnc}); err != nil {
 		t.Fatal(err)
 	}
-	if err := model.CreateLink(ctx, model.Link{ID: uuid.New(), SlackChannelID: "C1", SlackChannelName: "general", ChannelUUID: channelUUID}); err != nil {
+	if err := model.CreateLink(ctx, model.Link{ID: uuid.New(), SlackChannelID: "C1", SlackChannelName: "general", ChannelUUID: channelUUID, CreatedBy: &sam}); err != nil {
 		t.Fatal(err)
 	}
 	slackBridge.ForgetStateForTest()

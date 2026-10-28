@@ -15,8 +15,12 @@ import (
 // The ops rules make: priority, assignee and due, through the same check.
 func (c *calls) useRuleOps(t *testing.T, members ...string) {
 	t.Helper()
-	oldP, oldA, oldD, oldM, oldU := setPriority, setAssignee, setDates, isMember, personByUUID
-	t.Cleanup(func() { setPriority, setAssignee, setDates, isMember, personByUUID = oldP, oldA, oldD, oldM, oldU })
+	oldP, oldA, oldD, oldM, oldU, oldS := setPriority, setAssignee, setDates, isMember, personByUUID, unseeing
+	t.Cleanup(func() {
+		setPriority, setAssignee, setDates, isMember, personByUUID, unseeing = oldP, oldA, oldD, oldM, oldU, oldS
+	})
+	// The project's people see its unrestricted tasks.
+	unseeing = func(context.Context, string, *dgraphStruct.DgraphTask, *dgraphStruct.DgraphUser) error { return nil }
 	setPriority = func(_ context.Context, _ uuid.UUID, p string, _ *dgraphStruct.DgraphTask, _ *dgraphStruct.DgraphUser) error {
 		c.made = append(c.made, "priority "+p)
 		return nil

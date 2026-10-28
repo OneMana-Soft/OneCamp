@@ -1125,7 +1125,7 @@ func syncTaskFieldsFromGitHub(ctx context.Context, taskUUID uuid.UUID, dgraphTas
 					if dgraphTaskInfo.Assignee != nil {
 						oldUID = dgraphTaskInfo.Assignee.Uid
 					}
-					if err := taskBusiness.UpdateTaskAssigneeByTaskUUID(ctx, taskUUID, assigneeDgraphInfo, oldUID, dgraphTaskInfo.Uid, dgraphTaskInfo, actor); err != nil {
+					if err := taskBusiness.UpdateTaskAssigneeByTaskUUID(taskBusiness.DataMove(ctx), taskUUID, assigneeDgraphInfo, oldUID, dgraphTaskInfo.Uid, dgraphTaskInfo, actor); err != nil {
 						helpers.LogErrorWithContext(ctx, "RefreshFromGitHub assignee sync failed: %v", err)
 					}
 				}

@@ -8,6 +8,7 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/Doc"
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	business "github.com/akashc777/OneCamp/business/Doc"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 )
@@ -37,7 +38,14 @@ type docSession struct {
 	Level   string `json:"level"`
 	CanEdit bool   `json:"canEdit"`
 	Locked  bool   `json:"locked"`
+	// Name is who opens it, as their presence names them to everyone on the
+	// doc: a session token carries no name. Never an address (NameForGuests).
+	Name string `json:"name,omitempty"`
 }
+
+// presenceName names who opens a doc on their presence (NameForGuests: never
+// an address); a variable so the handler's tests need no stores.
+var presenceName = userDomain.NameForGuests
 
 // sessionFor is a decision as the session states it. A hard lock leaves only
 // full access able to write (D-12).
@@ -90,5 +98,7 @@ func DocCollabSession(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Unauthorized doc access"})
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, sessionFor(d))
+	s := sessionFor(d)
+	s.Name = presenceName(ctx, userInfo.UserPostgresInfo.Id)
+	helpers.WriteJSON(w, http.StatusOK, s)
 }

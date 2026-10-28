@@ -133,6 +133,9 @@ export class FakeBackend {
         // The time each guest's link stops working, by their token's sub, as
         // the guest authorize answer gives it ('until').
         this.until = new Map()
+        // Each member's name, by their token's sub, as the API's authorize
+        // answers give it (a session token carries no name).
+        this.names = new Map()
         this.legacy = false
         this.sessionAsks = []
         this.saveAttempts = 0 // every save asked for, refused or not
@@ -176,7 +179,8 @@ export class FakeBackend {
             const level = this.levels.get(sub) || 'edit'
             if (level === 'none') throw httpError(403, 'Unauthorized doc access')
             if (level === 'gone') throw httpError(410, 'This doc was deleted.')
-            return { status: 200, data: { msg: 'Authorised', level, canEdit: level === 'edit' || level === 'full', locked: false } }
+            const name = this.names.get(sub)
+            return { status: 200, data: { msg: 'Authorised', level, canEdit: level === 'edit' || level === 'full', locked: false, ...(name ? { name } : {}) } }
         }
         if (this.legacy && path === '/docColab/authorize') {
             const level = this.levels.get(subOf(config)) || 'edit'
@@ -189,7 +193,8 @@ export class FakeBackend {
             const level = this.levels.get(sub) || 'edit'
             if (level === 'none') throw httpError(403, 'refused')
             const until = this.until.get(sub)
-            return { status: 200, data: { canEdit: level === 'edit' || level === 'full', ...(until ? { until } : {}) } }
+            const name = path.endsWith('/guestAuthorize') ? undefined : this.names.get(sub)
+            return { status: 200, data: { canEdit: level === 'edit' || level === 'full', ...(until ? { until } : {}), ...(name ? { name } : {}) } }
         }
         if (path === '/docColab/updateDoc' || path === '/boardColab/updateBoard') this.saveAttempts++
         if (path === '/docColab/updateDoc') {
@@ -289,6 +294,9 @@ export class TestClient {
         this.events = []
         this.stateless = []
         this.statuses = []
+        // Everyone's presence this tab has heard (awareness: client id -> state).
+        this.others = new Map()
+        this.presenceClock = 0
         this.onUpdate = (update, origin) => {
             if (origin === this) return
             this.send(0, 2, update)
@@ -363,7 +371,42 @@ export class TestClient {
             this.stateless.push(r.string())
         } else if (type === 8) {
             this.statuses.push(r.uint() === 1)
+        } else if (type === 1) {
+            // An awareness update: each client's id, clock and state, "null"
+            // for one that left.
+            const u = new Reader(r.bytes())
+            for (let n = u.uint(); n > 0; n--) {
+                const id = u.uint()
+                u.uint()
+                const state = JSON.parse(u.string())
+                if (state === null) this.others.delete(id)
+                else this.others.set(id, state)
+            }
         }
+    }
+    // presence sets this tab's awareness state, as the provider does for its
+    // person (y-protocols' encoding of one client's state). A crafted one may
+    // speak for another client (clientId) at a clock of its choosing.
+    presence(state, { clientId = this.doc.clientID, clock } = {}) {
+        const update = []
+        writeVarUint(update, 1)
+        writeVarUint(update, clientId)
+        writeVarUint(update, clock ?? ++this.presenceClock)
+        writeVarString(update, JSON.stringify(state))
+        const out = []
+        writeVarString(out, this.name)
+        writeVarUint(out, 1)
+        writeVarBytes(out, update)
+        if (this.ws?.readyState === WebSocket.OPEN && this.authenticated) this.ws.send(Buffer.from(out))
+    }
+    // broadcast asks the server to pass a stateless message to every tab on
+    // the doc (Hocuspocus' BroadcastStateless, type 6), as a crafted client can.
+    broadcast(payload) {
+        const out = []
+        writeVarString(out, this.name)
+        writeVarUint(out, 6)
+        writeVarString(out, payload)
+        if (this.ws?.readyState === WebSocket.OPEN && this.authenticated) this.ws.send(Buffer.from(out))
     }
     async close() {
         const release = this.release

@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModel "github.com/akashc777/OneCamp/models/postgres/User"
@@ -110,7 +111,34 @@ func (s *stubDocRestore) install(t *testing.T) {
 	docSearchRestore = func([]string) {}
 	tellOwnerLinksOff = func(_ context.Context, d *dgraphStruct.DgraphDoc, n int64, byName string) {
 		_, body := linksOffNotice(byName, d.Title, n)
-		s.told = append(s.told, d.CreatedBy.Uuid+": "+body)
+		s.told = append(s.told, docDomain.OwnerOf(d).Uuid+": "+body)
+	}
+}
+
+// A doc handed on is its new owner's: they deleted it, and restoring it
+// themselves tells nobody, its maker included.
+func TestRestoringAHandedOnDocTellsItsOwnerNotItsMaker(t *testing.T) {
+	at := time.Now().Add(-time.Hour)
+	maker, owner := &dgraphStruct.DgraphUser{Uuid: "dana"}, &dgraphStruct.DgraphUser{Uuid: "bea"}
+	doc := uuid.MustParse("44444444-4444-4444-8444-444444444444")
+	docs := []*dgraphStruct.DgraphDoc{{Uuid: doc.String(), Title: "Q4 plan", CreatedBy: maker, Owner: owner, DeletedAt: &at}}
+
+	s := &stubDocRestore{docs: docs, links: map[string]int64{doc.String(): 1}}
+	s.install(t)
+	if _, err := restoreDocs(asAdmin("bea", "Bea Ortiz"), []uuid.UUID{doc}, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.told) != 0 {
+		t.Errorf("the owner's own restore told %q, want nobody: the maker handed it on", s.told)
+	}
+
+	s = &stubDocRestore{docs: docs, links: map[string]int64{doc.String(): 1}}
+	s.install(t)
+	if _, err := restoreDocs(asAdmin("sam", "Sam Rivera"), []uuid.UUID{doc}, false); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.told) != 1 || !strings.HasPrefix(s.told[0], "bea: ") {
+		t.Errorf("an admin's restore told %q, want the owner it was handed to", s.told)
 	}
 }
 

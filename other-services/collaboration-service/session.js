@@ -40,10 +40,12 @@ export const REFUSED = {
 
 const LEVELS = new Set(['none', 'view', 'comment', 'edit', 'full'])
 
-// accessFrom is the API's answer as the session holds it.
+// accessFrom is the API's answer as the session holds it, with the person's
+// name when the API gives it (presence wears it).
 export function accessFrom(data) {
     const level = LEVELS.has(data?.level) ? data.level : 'view'
-    return { level, canEdit: data?.canEdit === true, locked: data?.locked === true }
+    const name = typeof data?.name === 'string' && data.name ? { name: data.name } : {}
+    return { level, canEdit: data?.canEdit === true, locked: data?.locked === true, ...name }
 }
 
 const refused = (reason, message) => Object.assign(new Error(message || `refused: ${reason}`), { reason })

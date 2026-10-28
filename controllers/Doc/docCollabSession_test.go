@@ -13,6 +13,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/google/uuid"
 )
 
 // fixedRules answers one decision, or one error, for every doc.
@@ -31,6 +32,9 @@ func askSession(t *testing.T, rules accessBusiness.Resolver) (int, map[string]an
 	old := accessBusiness.Rules
 	accessBusiness.Rules = rules
 	t.Cleanup(func() { accessBusiness.Rules = old })
+	oldName := presenceName
+	presenceName = func(context.Context, uuid.UUID) string { return "Sam Rivera" }
+	t.Cleanup(func() { presenceName = oldName })
 	r := httptest.NewRequest(http.MethodPost, "/docColab/session", strings.NewReader(`{"doc_uuid":"doc-1"}`))
 	who := userModels.UserInfo{UserDgraphInfo: dgraphStruct.DgraphUser{Uid: "0x1", Uuid: "u-1"}}
 	r = r.WithContext(context.WithValue(r.Context(), helpers.UserInfoContextKey, who))
@@ -58,7 +62,8 @@ func TestDocSessionAnswersEveryReaderWithTheirLevel(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("%s: answered %d, want 200", c.level, code)
 		}
-		if body["level"] != c.level.String() || body["canEdit"] != c.canEdit || body["locked"] != false {
+		// And who opens it, as their presence names them (presenceName).
+		if body["level"] != c.level.String() || body["canEdit"] != c.canEdit || body["locked"] != false || body["name"] != "Sam Rivera" {
 			t.Errorf("%s: answered %v", c.level, body)
 		}
 	}

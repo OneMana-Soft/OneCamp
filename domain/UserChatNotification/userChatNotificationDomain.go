@@ -8,6 +8,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	models "github.com/akashc777/OneCamp/models/postgres/UserChatNotification"
 )
 
@@ -208,7 +209,9 @@ func GetLevelsInConversation(ctx context.Context, grpId string, userIds []string
 // conversation's two settings were one insert that failed whole when either
 // was already there. Either way, nobody missing one was told of anything in
 // it. Safe to run again and alongside itself: a setting already there, or
-// given meanwhile, is kept.
+// given meanwhile, is kept. last_seen_chat outlives someone's place in a
+// group, so nobody the conversations index has as having left the group is
+// given one (ForgetLeaversChatSettings).
 func GiveMissingChatSettings(ctx context.Context) (int64, error) {
 	c, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -220,10 +223,47 @@ func GiveMissingChatSettings(ctx context.Context) (int64, error) {
 			SELECT 1 FROM users_chat_notification ucn
 			WHERE ucn.user_id = lsc.user_id AND ucn.grp_id = lsc.grp_id
 		)
+		AND NOT EXISTS (
+			SELECT 1 FROM conversations c
+			JOIN conversation_members cm ON cm.conversation_id = c.id
+			WHERE c.kind = 'group' AND c.ref = lsc.grp_id
+				AND cm.user_id = lsc.user_id AND cm.left_at IS NOT NULL
+		)
 		ON CONFLICT (user_id, grp_id) DO NOTHING`)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GiveMissingChatSettings err: %+v", err)
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// ForgetChatSetting takes away the person's setting for the DM or group grpID:
+// Leave's, as they go. Who hears of a group's messages is read from these
+// settings, so a setting kept told a leaver of everything said there after.
+func ForgetChatSetting(ctx context.Context, userID, grpID string) error {
+	_, err := pgexec.Exec(ctx, `DELETE FROM users_chat_notification WHERE user_id = $1 AND grp_id = $2`, userID, grpID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/ForgetChatSetting err: %+v", err)
+	}
+	return err
+}
+
+// ForgetLeaversChatSettings takes away the setting of everyone who has left the
+// group it is for, and answers how many it took. The conversations index keeps
+// when each person left a group: Leave records it (it fails when it can't),
+// and only taking them back in clears it. Leave kept the leaver's setting
+// before it took it away itself, so installs from then still hold some. Safe
+// to run again and alongside itself.
+func ForgetLeaversChatSettings(ctx context.Context) (int64, error) {
+	forgot, err := pgexec.Exec(ctx, `
+		DELETE FROM users_chat_notification ucn
+		USING conversations c, conversation_members cm
+		WHERE c.kind = 'group' AND c.ref = ucn.grp_id
+			AND cm.conversation_id = c.id AND cm.user_id = ucn.user_id
+			AND cm.left_at IS NOT NULL`)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/ForgetLeaversChatSettings err: %+v", err)
+		return 0, err
+	}
+	return forgot, nil
 }

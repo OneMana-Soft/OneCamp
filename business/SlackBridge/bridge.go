@@ -108,13 +108,17 @@ func invalidate() {
 	stateMu.Unlock()
 }
 
-// Errors an admin can act on. The controller maps them to 400s.
+// Errors an admin can act on. The controller maps them to 400s, and
+// ErrChannelUnreadable to a 403.
 var (
 	ErrNotConnected   = errors.New("Slack is not connected")
 	ErrBadToken       = errors.New("that is not a bot token: it starts with xoxb-")
 	ErrBadSecret      = errors.New("paste the Signing Secret from the app's Basic Information page")
 	ErrChannelMissing = errors.New("that OneCamp channel does not exist")
 	ErrLinkTaken      = errors.New("one of those channels is already linked")
+	// ErrChannelUnreadable names no channel: the one asked for may be a
+	// private channel the admin isn't in.
+	ErrChannelUnreadable = errors.New("You can only link a channel you can read. Join it first, or ask someone in it to link it.")
 )
 
 // UserError is a Slack refusal explained in words an admin can act on.
@@ -162,12 +166,31 @@ type Status struct {
 
 // LinkView is one link as the admin page shows it.
 type LinkView struct {
-	ID               string    `json:"id"`
-	SlackChannelID   string    `json:"slack_channel_id"`
-	SlackChannelName string    `json:"slack_channel_name"`
-	ChannelUUID      string    `json:"channel_uuid"`
-	ChannelName      string    `json:"channel_name"`
-	CreatedAt        time.Time `json:"created_at"`
+	ID               string `json:"id"`
+	SlackChannelID   string `json:"slack_channel_id"`
+	SlackChannelName string `json:"slack_channel_name"`
+	ChannelUUID      string `json:"channel_uuid"`
+	// ChannelName is the OneCamp channel's name: "" once it is deleted, and
+	// "private channel (linked by <name>)" to an admin who can't read it
+	// (ChannelHidden, shownName).
+	ChannelName   string `json:"channel_name"`
+	ChannelHidden bool   `json:"channel_hidden,omitempty"`
+	// LinkedBy is the name of whoever linked it, when that is known.
+	LinkedBy  string    `json:"linked_by,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	// private is whether the OneCamp channel is private: the audit log never
+	// names one (AuditLine).
+	private bool
+}
+
+// AuditLine is the audit log's line for a new link. Every admin reads the
+// audit log, so it never names a private OneCamp channel.
+func (l *LinkView) AuditLine() string {
+	onecamp := "#" + l.ChannelName
+	if l.private {
+		onecamp = "a private channel"
+	}
+	return "Linked Slack #" + l.SlackChannelName + " with " + onecamp
 }
 
 // eventsURL is the Request URL the Slack app must deliver events to.
@@ -215,8 +238,10 @@ func manifestURL() string {
 	return "https://api.slack.com/apps?new_app=1&manifest_json=" + url.QueryEscape(Manifest())
 }
 
-// GetStatus returns the connection, its links and the setup material.
-func GetStatus(ctx context.Context) (*Status, error) {
+// GetStatus returns the connection, its links and the setup material, as the
+// admin viewer may see them: a private channel is named only to someone who
+// can read it (shownName).
+func GetStatus(ctx context.Context, viewer *uuid.UUID) (*Status, error) {
 	st := &Status{EventsURL: eventsURL(), Manifest: Manifest(), ManifestURL: manifestURL(), Links: []LinkView{}}
 	b, err := model.GetBridge(ctx)
 	if err != nil {
@@ -231,27 +256,38 @@ func GetStatus(ctx context.Context) (*Status, error) {
 	if err != nil {
 		return nil, err
 	}
+	seen, seenErr := linkedChannels(ctx, viewer, links)
+	linkers := linkersOf(ctx, links)
 	for _, l := range links {
-		st.Links = append(st.Links, LinkView{
+		v := LinkView{
 			ID: l.ID.String(), SlackChannelID: l.SlackChannelID, SlackChannelName: l.SlackChannelName,
-			ChannelUUID: l.ChannelUUID.String(), ChannelName: channelName(ctx, l.ChannelUUID),
-			CreatedAt: l.CreatedAt,
-		})
+			ChannelUUID: l.ChannelUUID.String(), CreatedAt: l.CreatedAt,
+		}
+		if l.CreatedBy != nil {
+			v.LinkedBy = linkers[l.CreatedBy.String()]
+		}
+		// A channel the read left out is gone ("" as before); when the read
+		// failed, none is named.
+		if ch, ok := seen[l.ChannelUUID.String()]; ok || seenErr != nil {
+			v.ChannelName, v.ChannelHidden = shownName(ch, v.LinkedBy)
+		}
+		st.Links = append(st.Links, v)
 	}
 	return st, nil
 }
 
-// channelName resolves a OneCamp channel's name, "" when it is gone.
-func channelName(ctx context.Context, channelUUID uuid.UUID) string {
+// channelOf resolves a OneCamp channel's name, "" when it is gone, and whether
+// it is private (a channel whose privacy didn't load is).
+func channelOf(ctx context.Context, channelUUID uuid.UUID) (string, bool) {
 	bot, err := userBusiness.EnsureSlackBridgeBot(ctx)
 	if err != nil {
-		return ""
+		return "", true
 	}
 	ch, err := channelDomain.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID.String(), bot.DgraphUID)
 	if err != nil || ch == nil {
-		return ""
+		return "", true
 	}
-	return ch.Name
+	return ch.Name, ch.IsPrivate == nil || *ch.IsPrivate
 }
 
 // Connect validates the credentials with Slack and stores them sealed.
@@ -285,7 +321,7 @@ func Connect(ctx context.Context, botToken, signingSecret string, by *uuid.UUID)
 		return nil, err
 	}
 	invalidate()
-	return GetStatus(ctx)
+	return GetStatus(ctx, by)
 }
 
 // Disconnect forgets the Slack workspace and every link. Bridged messages
@@ -322,8 +358,13 @@ func SlackChannels(ctx context.Context) ([]SlackChannel, error) {
 }
 
 // Link joins a Slack channel to a OneCamp channel. The app joins a public
-// Slack channel itself; a private one must have invited it already.
+// Slack channel itself; a private one must have invited it already. Only a
+// channel by can read is linked (mayLink): everything said there goes to
+// Slack while they still can (outbound.go).
 func Link(ctx context.Context, slackChannelID string, channelUUID uuid.UUID, by *uuid.UUID) (*LinkView, error) {
+	if err := mayLink(ctx, by, channelUUID); err != nil {
+		return nil, err
+	}
 	st, err := loadState(ctx)
 	if err != nil {
 		return nil, err
@@ -331,7 +372,7 @@ func Link(ctx context.Context, slackChannelID string, channelUUID uuid.UUID, by 
 	if st == nil {
 		return nil, ErrNotConnected
 	}
-	name := channelName(ctx, channelUUID)
+	name, private := channelOf(ctx, channelUUID)
 	if name == "" {
 		return nil, ErrChannelMissing
 	}
@@ -361,7 +402,7 @@ func Link(ctx context.Context, slackChannelID string, channelUUID uuid.UUID, by 
 	invalidate()
 	return &LinkView{
 		ID: l.ID.String(), SlackChannelID: l.SlackChannelID, SlackChannelName: l.SlackChannelName,
-		ChannelUUID: channelUUID.String(), ChannelName: name, CreatedAt: time.Now(),
+		ChannelUUID: channelUUID.String(), ChannelName: name, CreatedAt: time.Now(), private: private,
 	}, nil
 }
 

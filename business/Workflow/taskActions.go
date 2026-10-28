@@ -212,6 +212,9 @@ var (
 	nextTurn   = workflowModel.NextTurn
 	tell       = notificationBusiness.Tell
 	clock      = time.Now
+	// readersOf is which of the people may read a task now, its restriction
+	// included: the one rule for it (domain/Task Readers).
+	readersOf = taskDomain.Readers
 )
 
 // runCtx is what a task rule's actions share: who acts, and the task as the
@@ -341,7 +344,10 @@ func (cw *compiledWorkflow) runTaskAction(ctx context.Context, act WorkflowActio
 		}
 		step.Detail = "added a sub-task"
 	case ActionNotify:
-		people := cw.whomToTell(act, ev, rc)
+		people, err := readersAmong(ctx, rc.task.Uuid, cw.whomToTell(act, ev, rc))
+		if err != nil {
+			return fail(err)
+		}
 		if len(people) == 0 {
 			step.Status, step.Detail = "skipped", "nobody to tell"
 			return step
@@ -458,6 +464,26 @@ func (cw *compiledWorkflow) whomToTell(act WorkflowAction, ev triggerEvent, rc *
 		return act.UserIDs
 	}
 	return nil
+}
+
+// readersAmong is the people, in order and once each, who may open the task
+// now. A rule's notice carries the task's name and the rule's words about it,
+// so it reaches no one else, whoever the rule names.
+func readersAmong(ctx context.Context, taskID string, people []string) ([]string, error) {
+	if len(people) == 0 {
+		return nil, nil
+	}
+	may, err := readersOf(ctx, taskID, people)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(people))
+	for _, p := range people {
+		if may[p] && !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }
 
 // wireTime is a time as a step keeps it, "" for none.
