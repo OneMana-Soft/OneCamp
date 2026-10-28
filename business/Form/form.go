@@ -408,10 +408,19 @@ func Submit(ctx context.Context, token string, raw map[string]any, signs formula
 	}
 	sys := helpers.WithSystemRead(ctx)
 	owner, project := l.owner, l.project
+	// The form's assignee, while they may see its tasks. One taken off the
+	// project since leaves the task unassigned: the visitor can do nothing
+	// about whom the form gives it to, so their answers are never refused for
+	// it.
 	var assignee *dgraphStruct.DgraphUser
 	if f.AssigneeUUID != nil {
 		if a, err := userBusiness.GetDgraphUserInfoByUUID(sys, f.AssigneeUUID.String()); err == nil && a != nil {
-			assignee = a
+			switch err := taskBusiness.UnseeingNew(ctx, f.ProjectUUID.String(), "", a); {
+			case err == nil:
+				assignee = a
+			case !errors.Is(err, helpers.ErrConflict):
+				return err
+			}
 		}
 	}
 	name, desc := TaskFrom(f.Title, l.fields, f.TitleField, answers)

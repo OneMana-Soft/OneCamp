@@ -798,10 +798,11 @@ func DocsCouldReadFor(ctx context.Context, docUUIDs []string, userUUID string) (
 	return out, nil
 }
 
-// GetDocsDeletion reads the named docs' deletion and archive marks, title and
-// maker: what tells a doc its owner deleted from one the workspace's retention
-// archived, before a restore clears both. One query for the lot; ids that
-// aren't uuids are left out, and so is any doc that doesn't exist.
+// GetDocsDeletion reads the named docs' deletion and archive marks, title,
+// maker and owner (after a hand-over: OwnerOf): what tells a doc its owner
+// deleted from one the workspace's retention archived, before a restore clears
+// both, and whom to tell. One query for the lot; ids that aren't uuids are left
+// out, and so is any doc that doesn't exist.
 func GetDocsDeletion(ctx context.Context, docUUIDs []string) ([]*dgraphStruct.DgraphDoc, error) {
 	quoted := quoteUUIDs(docUUIDs)
 	if len(quoted) == 0 {
@@ -818,6 +819,9 @@ func GetDocsDeletion(ctx context.Context, docUUIDs []string) ([]*dgraphStruct.Dg
 						user_name
 						user_full_name
 						user_email_id
+					}
+					doc_owner {
+						user_uuid
 					}
 				}
 			}`, map[string]string{})

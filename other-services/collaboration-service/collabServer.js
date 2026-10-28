@@ -27,6 +27,7 @@ import { SCHEMA_HASH, SCHEMA_OUTDATED_MESSAGE, schemaVerdict } from './schemaGat
 import { authorizeDoc, sessionMessage } from './session.js'
 import { persistBoard } from './storeBoard.js'
 import { persistDoc } from './storeDoc.js'
+import { guardIncoming } from './presenceGuard.js'
 import { createBlockIdsTransform } from './transforms/blockIds.js'
 import { createLegacyContentTransform } from './transforms/legacyContent.js' // B2
 import { closeWhenLinkEnds } from './live/ops/reauth.js'
@@ -331,6 +332,8 @@ export function createCollabServer({
                     const linkEndsAt = Date.parse(gResp.data?.until)
                     return {
                         user: { id: decoded.sub || 'guest', name: decoded.name || 'Guest' },
+                        // A guest publishes no presence (presenceGuard.js).
+                        guest: true,
                         schemaOutdated: outdated,
                         access: { level: 'view', canEdit: false, locked: false },
                         ...(Number.isFinite(linkEndsAt) ? { linkEndsAt } : {}),
@@ -343,7 +346,8 @@ export function createCollabServer({
                     const access = await authorizeDoc({ api, backendUrl, token, id, secret: getSecret() })
                     if (!access.canEdit) readOnly()
                     log.log(`[Collab] ${id}: user ${decoded?.sub} joined as ${access.level}${access.canEdit && !outdated ? '' : ' (read-only)'}`)
-                    return { user: { id: decoded?.sub || 'unknown', name: decoded?.name || 'Anonymous' }, schemaOutdated: outdated, access }
+                    // Named as the API answers (a session token carries no name): presence wears it (presenceGuard.js).
+                    return { user: { id: decoded?.sub || 'unknown', name: access.name || decoded?.name || 'Anonymous' }, schemaOutdated: outdated, access }
                 }
 
                 log.log(`[Collab] Authorizing user ${decoded?.sub} for ${kind} ${id}...`)
@@ -362,7 +366,8 @@ export function createCollabServer({
                     log.log(`[Collab] Board ${id} joined read-only for user ${decoded?.sub}`)
                 }
                 if (outdated) log.log(`[Collab] ${id}: a tab with an older editor schema joined read-only (user ${decoded?.sub})`)
-                return { user: { id: decoded?.sub || 'unknown', name: decoded?.name || 'Anonymous' }, schemaOutdated: outdated }
+                const named = typeof response.data?.name === 'string' && response.data.name ? response.data.name : null
+                return { user: { id: decoded?.sub || 'unknown', name: named || decoded?.name || 'Anonymous' }, schemaOutdated: outdated }
             } catch (error) {
                 log.error('[Collab] Auth failed:', error.message)
                 // The tab is told why (session.js REFUSED), so it can fetch a
@@ -533,6 +538,10 @@ export function createCollabServer({
         // earlier lineage: lineage.js) may not write: its edits are dropped
         // from then on and it is told to drop its copy and open the doc again.
         async beforeHandleMessage(data) {
+            // Presence and broadcasts first, on every doc and board: who a tab
+            // is comes from its sign-in, a guest who may only look publishes
+            // nothing, and a client's broadcast reaches no tab (presenceGuard.js).
+            guardIncoming(data)
             if (parseDocumentName(data.documentName).kind !== 'doc') return
             // Opened with nothing in it: no earlier copy to double (see
             // startedEmpty above).

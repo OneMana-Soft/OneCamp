@@ -7,6 +7,8 @@ import (
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/User"
+	models "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/google/uuid"
 )
 
 // GetPeopleByUUIDs reads what an inbox item shows of the people in it: their
@@ -34,4 +36,34 @@ func GetPeopleByUUIDs(ctx context.Context, userUUIDs []string) ([]*dgraphStruct.
 		helpers.LogErrorWithContext(ctx, "domain/GetPeopleByUUIDs err: %+v", err)
 	}
 	return people, err
+}
+
+// NameForGuests is how a member is named to people outside the workspace (a
+// meeting's guests, a room's public address), never an address
+// (MemberName): their users.display_name when one is set (written for bots,
+// imported and provisioned people), else the name they go by in the app, as
+// a call's own tiles show it (the graph's). "" when there is neither, or
+// neither can be read. The admin screens' read of display_name falls back to
+// the address, and most members have none, so that read alone named them by
+// their email.
+func NameForGuests(ctx context.Context, id uuid.UUID) string {
+	if names, err := models.DisplayNamesByUUIDs(ctx, []uuid.UUID{id}); err == nil {
+		if n := MemberName(names[id]); n != "" {
+			return n
+		}
+	}
+	people, err := GetPeopleByUUIDs(ctx, []string{id.String()})
+	if err != nil {
+		return ""
+	}
+	// The person's own node comes first; an import's later copies may hold no name.
+	for _, p := range people {
+		if p == nil {
+			continue
+		}
+		if n := MemberName(p.UserName, p.UserFullName); n != "" {
+			return n
+		}
+	}
+	return ""
 }

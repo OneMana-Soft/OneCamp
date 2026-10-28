@@ -15,6 +15,7 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/Board"
 	aiBusiness "github.com/akashc777/OneCamp/business/AI"
 	business "github.com/akashc777/OneCamp/business/Board"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	ai "github.com/akashc777/OneCamp/services/AI"
@@ -184,7 +185,10 @@ func BoardCollabAuthorize(w http.ResponseWriter, r *http.Request) {
 	// their document writes are rejected. Adding a picture asks the same rule.
 	canEdit := business.CanEdit(boardDgraph, userInfo.UserDgraphInfo.Uuid)
 
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Authorised", "canEdit": canEdit})
+	// name is who opens it, as their presence names them to everyone on the
+	// board: a session token carries no name, so the service takes this one.
+	// Never an address (NameForGuests).
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Authorised", "canEdit": canEdit, "name": userDomain.NameForGuests(ctx, userInfo.UserPostgresInfo.Id)})
 }
 
 // GetBoardForCollab GET /boardColab/getBoard/{board_uuid} - internal-service

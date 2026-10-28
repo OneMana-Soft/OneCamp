@@ -352,6 +352,17 @@ func ArchiveCommentByCommentUUID(ctx context.Context, commentUUID uuid.UUID, raw
 }
 
 func CreateSubTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.UserInfo, projectDgraphInfo *dgraphStruct.DgraphProject, assigneeDgraphInfo *dgraphStruct.DgraphUser, taskInfo adapter.CreateOrUpdateTaskInput) (dgraphTask *dgraphStruct.DgraphTask, err error) {
+	// Given only to someone who sees it (whoever sees its parent), before
+	// anything is written.
+	if assigneeDgraphInfo != nil {
+		parent := ""
+		if len(projectDgraphInfo.Tasks) > 0 && projectDgraphInfo.Tasks[0] != nil {
+			parent = projectDgraphInfo.Tasks[0].Uuid
+		}
+		if err = UnseeingNew(ctx, projectUUID.String(), parent, assigneeDgraphInfo); err != nil {
+			return
+		}
+	}
 
 	currentTime := time.Now()
 	taskUUID := uuid.New()
@@ -589,6 +600,13 @@ func AddAttachmentToTask(ctx context.Context, taskUUID uuid.UUID, dgraphTaskInfo
 }
 
 func CreateTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.UserInfo, projectDgraphInfo *dgraphStruct.DgraphProject, assigneeDgraphInfo *dgraphStruct.DgraphUser, taskInfo adapter.CreateOrUpdateTaskInput, mentionsUsers []*dgraphStruct.DgraphUser) (taskUUIDRes uuid.UUID, err error) {
+	// Given only to someone who sees it (one of the project's people:
+	// UnseeingNew), whichever path makes it, before anything is written.
+	if assigneeDgraphInfo != nil {
+		if err = UnseeingNew(ctx, projectUUID.String(), "", assigneeDgraphInfo); err != nil {
+			return
+		}
+	}
 
 	taskInfo.Label = helpers.NormaliseTags(taskInfo.Label)
 	// A built-in status or one of the project's own; none given is Todo.
@@ -1100,6 +1118,13 @@ func UpdateTaskAssigneeByTaskUUID(ctx context.Context, taskUUID uuid.UUID, newAs
 	// brought it back in the graph while Postgres still had it deleted.
 	if dgraphTaskInfo != nil && helpers.IsSoftDeleted(dgraphTaskInfo.DeletedAt) {
 		return ErrTaskDeleted
+	}
+	// Handed only to someone who may read it already (Unseeing), from every
+	// path that assigns; GitHub's sync and an import's re-check as data moves.
+	if newAssigneeDgraphInfo != nil {
+		if err = Unseeing(ctx, taskUUID.String(), dgraphTaskInfo, newAssigneeDgraphInfo); err != nil {
+			return err
+		}
 	}
 
 	dgraphTask, taskOpenSearch := assigneeWrite(taskUUID.String(), dgraphTaskInfo.Assignee, newAssigneeDgraphInfo, userInfo, time.Now(), time.Time{})

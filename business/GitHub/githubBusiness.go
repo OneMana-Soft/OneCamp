@@ -848,7 +848,7 @@ func handleIssueEvent(ctx context.Context, body []byte) error {
 		if dgraphTaskInfo.Assignee != nil {
 			oldAssigneeUID = dgraphTaskInfo.Assignee.Uid
 		}
-		if err := taskBusiness.UpdateTaskAssigneeByTaskUUID(ctx, taskUUID, userDgraphInfo, oldAssigneeUID, dgraphTaskInfo.Uid, dgraphTaskInfo, userDgraphInfo); err != nil {
+		if err := taskBusiness.UpdateTaskAssigneeByTaskUUID(taskBusiness.DataMove(ctx), taskUUID, userDgraphInfo, oldAssigneeUID, dgraphTaskInfo.Uid, dgraphTaskInfo, userDgraphInfo); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/handleIssueEvent Failed to update assignee: %v", err)
 		}
 		publishGitHubSyncMqtt(taskUUIDStr, own.ProjectId.String(), "assignee_synced", map[string]interface{}{
@@ -1224,7 +1224,7 @@ func handlePullRequestEvent(ctx context.Context, body []byte) error {
 						if dgraphTaskInfo.Assignee != nil {
 							oldAssigneeUID = dgraphTaskInfo.Assignee.Uid
 						}
-						_ = taskBusiness.UpdateTaskAssigneeByTaskUUID(ctx, taskUUID, assigneeDgraphInfo, oldAssigneeUID, dgraphTaskInfo.Uid, dgraphTaskInfo, assigneeDgraphInfo)
+						_ = taskBusiness.UpdateTaskAssigneeByTaskUUID(taskBusiness.DataMove(ctx), taskUUID, assigneeDgraphInfo, oldAssigneeUID, dgraphTaskInfo.Uid, dgraphTaskInfo, assigneeDgraphInfo)
 						publishGitHubSyncMqtt(taskUUIDStr, link.ProjectId.String(), "assignee_synced", map[string]interface{}{
 							"assignee_uuid":  assigneeDgraphInfo.Uuid,
 							"assignee_name":  assigneeDgraphInfo.DisplayName(),

@@ -1324,6 +1324,23 @@ func reactionPushTo(ctx context.Context, grpID, authorUUID, reactorUUID string) 
 	return userFCMtokenBusiness.GetFCMTokenByListOfUserId(ctx, told)
 }
 
+// reactionAuthorStillIn is whether the author of what was reacted to may be
+// told of the reaction: they are in the DM or group grpID now
+// (InConversationNow). An author who has left the group hears nothing of it,
+// on their activity either, and nobody is told when who is in it can't be
+// read. A reaction with no conversation is told as before.
+func reactionAuthorStillIn(ctx context.Context, grpID, authorUUID string) bool {
+	if grpID == "" {
+		return true
+	}
+	in, err := chatNotificationBusiness.InConversationNow(ctx, grpID, []string{authorUUID})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Chat a reaction's notice could not read who is in %s now: %+v", grpID, err)
+		return false
+	}
+	return len(in) > 0
+}
+
 func sendNewChatReactionNotification(title string, body string, grpId string, chatDgraph *dgraphStruct.DgraphChat, userDgraph *dgraphStruct.DgraphUser, reactionID string) {
 
 	if chatDgraph.From.Uuid == userDgraph.Uuid {
@@ -1331,6 +1348,10 @@ func sendNewChatReactionNotification(title string, body string, grpId string, ch
 	}
 
 	ctx := context.Background()
+
+	if !reactionAuthorStillIn(ctx, grpId, chatDgraph.From.Uuid) {
+		return
+	}
 
 	activityItem := &dgraphModels.UnifiedActivityItem{
 		ActivityType: mqttStruct.MESSAGE_ACTIVITY_REACTION, // In chats, it's either a mention or a new message (which we'll treat as a notification)
@@ -1825,6 +1846,14 @@ func sendNewChatCommentReactionNotification(title string, body string, commentDg
 
 	ctx := context.Background()
 
+	grpID := commentDgraph.ChatGroupingId
+	if grpID == "" && commentDgraph.Chat != nil && commentDgraph.Chat.DM != nil {
+		grpID = commentDgraph.Chat.DM.GroupingId
+	}
+	if !reactionAuthorStillIn(ctx, grpID, commentDgraph.CommentBy.Uuid) {
+		return
+	}
+
 	activityItem := &dgraphModels.UnifiedActivityItem{
 		ActivityType: mqttStruct.MESSAGE_ACTIVITY_REACTION, // In chats, it's either a mention or a new message (which we'll treat as a notification)
 		Time:         time.Now().UTC().Format(time.RFC3339Nano),
@@ -1834,10 +1863,6 @@ func sendNewChatCommentReactionNotification(title string, body string, commentDg
 
 	// The push goes to the reply's author, as their setting for the
 	// conversation allows (reactionPushTo). It went to whoever reacted.
-	grpID := commentDgraph.ChatGroupingId
-	if grpID == "" && commentDgraph.Chat != nil && commentDgraph.Chat.DM != nil {
-		grpID = commentDgraph.Chat.DM.GroupingId
-	}
 	tokens, err := reactionPushTo(ctx, grpID, commentDgraph.CommentBy.Uuid, userDgraph.Uuid)
 
 	if err != nil {

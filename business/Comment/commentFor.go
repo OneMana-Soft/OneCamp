@@ -14,16 +14,25 @@ import (
 	"slices"
 
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	docDomain "github.com/akashc777/OneCamp/domain/Doc"
+	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
-// NotifyDocCommentFor tells whoever made a doc, and those who can edit it,
-// about a comment someone left on it through a share link: a push to their
-// devices and an email, as a member's comment would. who is the name to show
-// ("Priya (guest)").
+// NotifyDocCommentFor tells the people who look after a doc (docKeepers) about
+// a comment someone left on it through a share link: a push to their devices
+// and an email, as a member's comment would. who is the name to show ("Priya
+// (guest)"). Only keepers who may read the doc now are told, by the rule a
+// member's comment asks (docCommentReadable): not its maker once it was handed
+// on and they were taken off it, nor someone whose grant on it has ended. When
+// that can't be said, nobody is.
 func NotifyDocCommentFor(ctx context.Context, doc *dgraphStruct.DgraphDoc, who, commentID, plainText string) {
-	recipients := docKeepers(doc)
+	recipients, err := keepersWhoRead(ctx, doc.Uuid)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/NotifyDocCommentFor could not decide who may read doc %s, so nobody is told: %+v", doc.Uuid, err)
+		return
+	}
 	if len(recipients) == 0 {
 		return
 	}
@@ -44,8 +53,29 @@ func NotifyDocCommentFor(ctx context.Context, doc *dgraphStruct.DgraphDoc, who, 
 	notificationBusiness.DispatchDocComment("", who, "", doc.Uuid, title, plainText, commentID, recipients)
 }
 
-// docKeepers is who looks after a doc: whoever made it and those who can edit
-// it, each once. Pure.
+// keepersWhoRead is the doc's keepers, read afresh as a member's comment reads
+// its people (docCommentParticipants), that may read it now.
+func keepersWhoRead(ctx context.Context, docUUID string) ([]string, error) {
+	doc, err := docCommentParticipants(ctx, docUUID)
+	if err != nil || doc == nil {
+		return nil, err
+	}
+	readable, err := docCommentReadable(ctx, doc, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, id := range docKeepers(doc) {
+		if readable(id) {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+// docKeepers is who looks after a doc: its owner (after a hand-over, the new
+// one: docDomain.OwnerOf), its full-access people and its editors, each once.
+// Pure.
 func docKeepers(d *dgraphStruct.DgraphDoc) []string {
 	if d == nil {
 		return nil
@@ -56,9 +86,11 @@ func docKeepers(d *dgraphStruct.DgraphDoc) []string {
 			out = append(out, u.Uuid)
 		}
 	}
-	add(d.CreatedBy)
-	for _, u := range d.EditingUser {
-		add(u)
+	add(docDomain.OwnerOf(d))
+	for _, list := range [][]*dgraphStruct.DgraphUser{d.FullAccessUsers, d.EditingUser} {
+		for _, u := range list {
+			add(u)
+		}
 	}
 	return out
 }

@@ -652,7 +652,6 @@ business/Refs/reconcile.go :: passKind :: fixPage
 business/Scheduler/schedulerBusiness.go :: DrainDueJobs :: jobModel.ClaimDueJobs
 business/Scheduler/schedulerBusiness.go :: DrainDueJobs :: runJob
 business/Scheduler/schedulerBusiness.go :: StartWorker :: DrainDueJobs
-business/SlackBridge/bridge.go :: GetStatus :: channelName
 business/SlackImport/channel_resolver.go :: resolveChannels :: addChannelMembersBulk
 business/SlackImport/channel_resolver.go :: resolveChannels :: backdateChannel
 business/SlackImport/channel_resolver.go :: resolveChannels :: channelBusiness.CreateChannel
@@ -750,6 +749,7 @@ business/TaskWriter/contract.go :: Apply :: setDates
 business/TaskWriter/contract.go :: Apply :: setEstimate
 business/TaskWriter/contract.go :: Apply :: setPriority
 business/TaskWriter/contract.go :: Apply :: setStatus
+business/TaskWriter/contract.go :: Apply :: unseeing
 business/Thread/docResource.go :: tagWithRetry :: tagDocComment
 business/Thread/service.go :: joinAll :: .join
 business/Tree/hierarchy.go :: Move :: level
@@ -801,7 +801,7 @@ domain/Post/postDomain.go :: BulkRestorePostsInDgraph :: dgraphModels.BulkSoftDe
 domain/Recording/recordingDomian.go :: setRecordingsDeletedAt :: dgraphModels.SetDgraphRecordingsDeletedAt
 domain/Task/taskDomain.go :: BulkArchiveTasksInDgraph :: dgraphModels.BulkSoftDeleteDgraphTasks
 domain/Task/taskDomain.go :: BulkRestoreTasksInDgraph :: dgraphModels.BulkSoftDeleteDgraphTasks
-domain/Task/taskReaders.go :: Readers :: taskread.For
+domain/Task/taskReaders.go :: readersOf :: taskread.For
 domain/User/searchName.go :: BackfillSearchNames :: .Mutate
 domain/User/searchName.go :: BackfillSearchNames :: dgexec.InTxn
 domain/User/userDomian.go :: forgetProfile :: redisStore.Delete

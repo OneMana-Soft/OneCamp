@@ -51,10 +51,12 @@ import (
 	userAdapter "github.com/akashc777/OneCamp/adapter/User"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	commentBusiness "github.com/akashc777/OneCamp/business/Comment"
+	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	sendBusiness "github.com/akashc777/OneCamp/business/Send"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
+	docController "github.com/akashc777/OneCamp/controllers/Doc"
 	userController "github.com/akashc777/OneCamp/controllers/User"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	fcmDomain "github.com/akashc777/OneCamp/domain/UserFCMToken"
@@ -62,7 +64,6 @@ import (
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
-	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/tests/integration"
@@ -219,8 +220,15 @@ func TestDesktopNoticesReachWhomAPushWould(t *testing.T) {
 	id := func(name string) uuid.UUID { return people[name].UserPostgresInfo.Id }
 	exec(`UPDATE users_notification_preferences SET notifications_paused_until = NOW() + INTERVAL '1 hour' WHERE user_id = $1`, id("paul"))
 	heldEvent(t, env.PG, id("fay"), "Deep work", time.Now().Add(-10*time.Minute), time.Now().Add(50*time.Minute), true)
-	// dex was deactivated: their settings and their phone's token stay, as
-	// deactivation leaves them.
+	// Ana's doc, which bo and dex edit, for a guest's comment on it.
+	boardPack := str(postAs(t, ctx, people["ana"], "ana makes a doc", docController.CreateDocInTree,
+		map[string]any{"doc_title": "Board pack", "parent_uuid": "", "doc_private": true}).data()["doc_uuid"])
+	postAs(t, ctx, people["ana"], "ana shares it", docController.UpdateDocAccess, map[string]any{"doc_uuid": boardPack, "adds": []any{
+		map[string]any{"kind": "user", "uuid": people["bo"].UserDgraphInfo.Uuid, "level": "edit"},
+		map[string]any{"kind": "user", "uuid": people["dex"].UserDgraphInfo.Uuid, "level": "edit"},
+	}})
+	// dex was deactivated: their settings, their phone's token and their
+	// grants stay, as deactivation leaves them.
 	if err := userBusiness.DeactivateUser(ctx, id("dex")); err != nil {
 		t.Fatalf("deactivate dex: %v", err)
 	}
@@ -417,13 +425,17 @@ func TestDesktopNoticesReachWhomAPushWould(t *testing.T) {
 	// the doc (business/Comment NotifyDocCommentFor). It looked up devices
 	// and pushed them itself, so a desktop-only owner heard of nothing.
 	t.Run("a guest's comment on a doc reaches its keepers' desktop app, never someone deactivated", func(t *testing.T) {
-		doc, comment := uuid.NewString(), uuid.NewString()
-		commentBusiness.NotifyDocCommentFor(ctx, &dgraphStruct.DgraphDoc{
-			Uuid: doc, Title: "Board pack",
-			CreatedBy:   &dgraphStruct.DgraphUser{Uuid: id("ana").String()},
-			EditingUser: []*dgraphStruct.DgraphUser{{Uuid: id("bo").String()}, {Uuid: id("dex").String()}},
-		}, "Priya (guest)", comment, "Can the launch move to Friday?")
-		key := firebaseInit.FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT + ":" + doc + ":" + comment
+		bot, err := userBusiness.EnsureGuestBot(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc, err := docBusiness.GetBasicDgraphDocByUUID(ctx, boardPack, bot.DgraphUID)
+		if err != nil || doc == nil {
+			t.Fatalf("read the doc as the guests: %v", err)
+		}
+		comment := uuid.NewString()
+		commentBusiness.NotifyDocCommentFor(ctx, doc, "Priya (guest)", comment, "Can the launch move to Friday?")
+		key := firebaseInit.FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT + ":" + boardPack + ":" + comment
 		if got := broker.notices(key, all); !slices.Equal(got, []string{"ana", "bo"}) {
 			t.Errorf("the comment's desktop notice reached %v, want ana and bo: ana uses only the desktop app, dex is deactivated", got)
 		}

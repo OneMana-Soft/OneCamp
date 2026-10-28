@@ -46,6 +46,11 @@ func handleEvent(ctx context.Context, eventType string, data map[string]interfac
 	if !linked {
 		return
 	}
+	// Only while whoever linked it can still read the channel (reach.go). A
+	// deletion carries nothing out, so it still takes down what went before.
+	if eventType != "post.deleted" && !creatorReads(ctx, link) {
+		return
+	}
 	postUUID, err := uuid.Parse(str(data, "post_id"))
 	if err != nil {
 		return

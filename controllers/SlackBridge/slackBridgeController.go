@@ -40,10 +40,13 @@ func actor(r *http.Request) *uuid.UUID {
 }
 
 // fail answers an admin request: a mistake the admin can fix is a 400 with
-// the reason, anything else a logged 500.
+// the reason, a channel they can't read a 403 in words that name none,
+// anything else a logged 500.
 func fail(w http.ResponseWriter, r *http.Request, err error) {
 	var ue *business.UserError
 	switch {
+	case errors.Is(err, business.ErrChannelUnreadable):
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"status": "failed", "msg": err.Error()})
 	case errors.As(err, &ue),
 		errors.Is(err, business.ErrNotConnected), errors.Is(err, business.ErrBadToken),
 		errors.Is(err, business.ErrBadSecret), errors.Is(err, business.ErrChannelMissing):
@@ -56,9 +59,9 @@ func fail(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
-// GetStatus handles GET /admin/slack-bridge.
+// GetStatus handles GET /admin/slack-bridge, as the admin asking may see it.
 func GetStatus(w http.ResponseWriter, r *http.Request) {
-	st, err := business.GetStatus(r.Context())
+	st, err := business.GetStatus(r.Context(), actor(r))
 	if err != nil {
 		fail(w, r, err)
 		return
@@ -126,8 +129,7 @@ func CreateLink(w http.ResponseWriter, r *http.Request) {
 		fail(w, r, err)
 		return
 	}
-	adminAudit.Record(r, "slack_bridge.linked", adminAudit.CategoryIntegration,
-		"Linked Slack #"+link.SlackChannelName+" with #"+link.ChannelName,
+	adminAudit.Record(r, "slack_bridge.linked", adminAudit.CategoryIntegration, link.AuditLine(),
 		map[string]interface{}{"slack_channel_id": link.SlackChannelID, "channel_uuid": link.ChannelUUID})
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"status": "success", "data": link})
 }

@@ -10,6 +10,7 @@ package business
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -172,6 +173,15 @@ func repeatIfRecurring(ctx context.Context, taskUUID uuid.UUID, by *dgraphStruct
 	if task.Assignee != nil && task.Assignee.Uuid != "" {
 		if assignee, err = userBusiness.GetDgraphUserInfoByUUID(ctx, task.Assignee.Uuid); err != nil {
 			putBack("read assignee", err)
+			return
+		}
+		// Someone who can't see the next one (taken off the project:
+		// UnseeingNew) isn't given it: it comes unassigned, for someone to pick
+		// up, rather than not at all.
+		if err := UnseeingNew(ctx, project.Uuid, "", assignee); errors.Is(err, helpers.ErrConflict) {
+			assignee = nil
+		} else if err != nil {
+			putBack("read who sees it", err)
 			return
 		}
 	}

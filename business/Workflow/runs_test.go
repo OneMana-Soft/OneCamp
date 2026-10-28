@@ -32,11 +32,12 @@ type fakeStore struct {
 	members   map[string]bool
 	turn      int64
 	counts    map[string]int
+	keptOut   map[string]bool // people the task's restriction keeps out
 }
 
 func newStore(t *testing.T) *fakeStore {
 	t.Helper()
-	f := &fakeStore{runs: map[string]*workflowModel.Run{}, members: map[string]bool{}, counts: map[string]int{},
+	f := &fakeStore{runs: map[string]*workflowModel.Run{}, members: map[string]bool{}, counts: map[string]int{}, keptOut: map[string]bool{},
 		task: &dgraphStruct.DgraphTask{Uuid: uuid.NewString(), Name: "Fix SSO", Priority: "low", Status: "todo",
 			Project: &dgraphStruct.DgraphProject{Uuid: uuid.NewString()}, CreatedBy: &dgraphStruct.DgraphUser{Uuid: "creator"}}}
 	type saved struct {
@@ -54,11 +55,13 @@ func newStore(t *testing.T) *fakeStore {
 		tell    func(context.Context, notificationBusiness.Notice, []notificationBusiness.NoticeRecipient) []string
 		reload  func(context.Context) error
 		access  ownerAccess
+		readers func(context.Context, string, []string) (map[string]bool, error)
 	}
-	old := saved{claimRun, finishRun, runsSince, pauseRule, recordRun, loadActor, readTask, applyOps, membersOf, openCounts, nextTurn, tell, reloadRules, access}
+	old := saved{claimRun, finishRun, runsSince, pauseRule, recordRun, loadActor, readTask, applyOps, membersOf, openCounts, nextTurn, tell, reloadRules, access, readersOf}
 	t.Cleanup(func() {
 		claimRun, finishRun, runsSince, pauseRule, recordRun = old.claim, old.finish, old.since, old.pause, old.record
 		loadActor, readTask, applyOps, membersOf, openCounts, nextTurn, tell, reloadRules, access = old.actor, old.read, old.apply, old.members, old.counts, old.turn, old.tell, old.reload, old.access
+		readersOf = old.readers
 	})
 	claimRun = func(_ context.Context, r *workflowModel.Run, key string) (bool, error) {
 		f.mu.Lock()
@@ -118,6 +121,13 @@ func newStore(t *testing.T) *fakeStore {
 		return nil
 	}
 	reloadRules = func(context.Context) error { return nil }
+	readersOf = func(_ context.Context, _ string, ids []string) (map[string]bool, error) {
+		out := map[string]bool{}
+		for _, id := range ids {
+			out[id] = !f.keptOut[id]
+		}
+		return out, nil
+	}
 	access = ownerAccess{
 		readsChannel: func(context.Context, string, string) (bool, error) { return true, nil },
 		inProject:    func(context.Context, string, string) (bool, error) { return true, nil },
@@ -183,6 +193,29 @@ func TestAnOwnerWhoCantSeeTheTaskIsSkipped(t *testing.T) {
 	r := f.runs["e1"]
 	if r == nil || r.Status != workflowModel.RunSkipped || !strings.Contains(r.Error, "can't see") || len(f.ops) != 0 {
 		t.Fatalf("%+v %v", r, f.ops)
+	}
+}
+
+// A rule's notice reaches only people who may open the task now: one the
+// task keeps out isn't told, whoever the rule names, and a rule left with
+// nobody to tell says so; a read that fails tells no one.
+func TestARulesNoticeReachesOnlyPeopleWhoMayOpenTheTask(t *testing.T) {
+	f := newStore(t)
+	f.keptOut["ben"] = true
+	tellThem := []WorkflowAction{{Type: ActionNotify, Notify: NotifyPeople, UserIDs: []string{"ben", "cy", "cy"}, Text: "{task} is new"}}
+	runWorkflow(context.Background(), rule(Conditions{}, tellThem, nil), f.event("e1"))
+	if len(f.told) != 1 || f.told[0] != "cy: Fix SSO is new" {
+		t.Fatalf("told %v, want cy alone, once", f.told)
+	}
+	f.keptOut["cy"] = true
+	runWorkflow(context.Background(), rule(Conditions{}, tellThem, nil), f.event("e2"))
+	if r := f.runs["e2"]; len(f.told) != 1 || r == nil || r.Steps[0].Status != "skipped" {
+		t.Fatalf("with everyone kept out: told %v, run %+v", f.told, r)
+	}
+	readersOf = func(context.Context, string, []string) (map[string]bool, error) { return nil, errors.New("down") }
+	runWorkflow(context.Background(), rule(Conditions{}, tellThem, nil), f.event("e3"))
+	if r := f.runs["e3"]; len(f.told) != 1 || r == nil || r.Steps[0].Status != "failed" {
+		t.Fatalf("with the read down: told %v, run %+v", f.told, r)
 	}
 }
 

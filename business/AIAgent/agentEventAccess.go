@@ -29,6 +29,8 @@ import (
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	tableBusiness "github.com/akashc777/OneCamp/business/DataTable"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
+	chatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
+	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/AIAgent"
@@ -132,18 +134,36 @@ func writtenOutside(ctx context.Context) bool {
 	return helpers.IsGitHubOrigin(ctx) || helpers.IsPublicSubmission(ctx)
 }
 
-// sponsorReach answers what the person an agent works for can see: the graph
-// and the tables in production, fakes in tests.
+// sponsorReach answers what the person an agent works for, or whoever set a run
+// going, can see: the graph and the tables in production, fakes in tests.
 type sponsorReach struct {
-	readsChannel func(ctx context.Context, userUUID, channelID string) (bool, error)
-	inProject    func(ctx context.Context, userUUID, projectID string) (bool, error)
-	viewsTable   func(ctx context.Context, userUUID, tableID string) (bool, error)
+	readsChannel   func(ctx context.Context, userUUID, channelID string) (bool, error)
+	inProject      func(ctx context.Context, userUUID, projectID string) (bool, error)
+	viewsTable     func(ctx context.Context, userUUID, tableID string) (bool, error)
+	readsTask      func(ctx context.Context, userUUID, taskID string) (bool, error)
+	inConversation func(ctx context.Context, userUUID, grpID string) (bool, error)
 }
 
 var reach = sponsorReach{
-	readsChannel: channelBusiness.ReadableBy,
-	inProject:    projectBusiness.HasMember,
-	viewsTable:   tableViewableBy,
+	readsChannel:   channelBusiness.ReadableBy,
+	inProject:      projectBusiness.HasMember,
+	viewsTable:     tableViewableBy,
+	readsTask:      taskReadableBy,
+	inConversation: inConversationNow,
+}
+
+// seesWhereAsked reports whether the person with userUUID can see, now, the
+// channel or the conversation a run's surface names. A run can outlast their
+// place there (they left the channel, or the group), and its moments carry the
+// agent's words. Any other surface is a no; a lookup that fails, its error.
+func (r sponsorReach) seesWhereAsked(ctx context.Context, userUUID string, s Surface) (bool, error) {
+	switch s.Kind {
+	case SurfaceChannelPost:
+		return r.readsChannel(ctx, userUUID, s.ChannelID)
+	case SurfaceGroupChat, SurfaceDM:
+		return r.inConversation(ctx, userUUID, s.GroupID)
+	}
+	return false, nil
 }
 
 // sees reports whether the person with sponsorUUID could see this occurrence
@@ -233,6 +253,24 @@ func (r sponsorReach) checkReachKeeping(ctx context.Context, sponsorUUID, keptEv
 		}
 	}
 	return nil
+}
+
+// taskReadableBy reports whether the person with userUUID may read a task now
+// (taskDomain.Readers: its project's people, or a restricted task's own).
+func taskReadableBy(ctx context.Context, userUUID, taskID string) (bool, error) {
+	readers, err := taskDomain.Readers(ctx, taskID, []string{userUUID})
+	return readers[userUUID], err
+}
+
+// inConversationNow reports whether the person with userUUID is in the DM or
+// group grpID now: one of a DM's two people, or one of a group's participants
+// as the graph has them, which leaving takes them out of
+// (chatNotificationBusiness.InConversationNow, what every notice from a DM or
+// group is held to). Their setting for it is no place in it: a leaver's
+// outlived them.
+func inConversationNow(ctx context.Context, userUUID, grpID string) (bool, error) {
+	in, err := chatNotificationBusiness.InConversationNow(ctx, grpID, []string{userUUID})
+	return len(in) == 1, err
 }
 
 // tableViewableBy reports whether the person with userUUID can view a table

@@ -70,6 +70,16 @@ func GetNotificationTypeByUserIdAndToUserId(ctx context.Context, userId string, 
 	return
 }
 
+// ForgetChatSetting takes away the person's setting for the DM or group grpID,
+// as they leave it.
+func ForgetChatSetting(ctx context.Context, userID, grpID string) error {
+	return domain.ForgetChatSetting(ctx, userID, grpID)
+}
+
+// GetEligibleUsersForChatActivity is who hears of something in the DM or group
+// grpId by their setting for it, of those in it now (InConversationNow): a
+// setting can outlive someone's place in a group. When who is in it can't be
+// read, it is an error and nobody is told.
 func GetEligibleUsersForChatActivity(ctx context.Context, grpId string, userId string, mentionsList []string, limitToMentions bool) (userIds []string, err error) {
 	userIds, err = domain.GetEligibleUsersForChatActivity(ctx, grpId, userId, mentionsList, limitToMentions)
 	if err != nil {
@@ -78,11 +88,36 @@ func GetEligibleUsersForChatActivity(ctx context.Context, grpId string, userId s
 			err)
 		return
 	}
+	if userIds, err = InConversationNow(ctx, grpId, userIds); err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/GetEligibleUsersForChatActivity couldn't read who is in %s now, so nobody is told err: %+v",
+			grpId, err)
+		return nil, err
+	}
 	return
 }
 
 // GetLevelsInConversation is each of userIds' setting for the conversation
-// grpId, by lower-case user id, for those in it.
+// grpId, by lower-case user id, for those in it now (InConversationNow). When
+// who is in it can't be read, it is an error.
 func GetLevelsInConversation(ctx context.Context, grpId string, userIds []string) (map[string]string, error) {
-	return domain.GetLevelsInConversation(ctx, grpId, userIds)
+	levels, err := domain.GetLevelsInConversation(ctx, grpId, userIds)
+	if err != nil || len(levels) == 0 {
+		return levels, err
+	}
+	ids := make([]string, 0, len(levels))
+	for id := range levels {
+		ids = append(ids, id)
+	}
+	in, err := InConversationNow(ctx, grpId, ids)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"business/GetLevelsInConversation couldn't read who is in %s now err: %+v", grpId, err)
+		return nil, err
+	}
+	kept := make(map[string]string, len(in))
+	for _, id := range in {
+		kept[id] = levels[id]
+	}
+	return kept, nil
 }

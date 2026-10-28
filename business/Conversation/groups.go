@@ -412,7 +412,10 @@ func SetHidden(ctx context.Context, who *userModels.UserInfo, ref Ref, hidden bo
 const minGroupPeople = 3
 
 // Seam for tests: where someone is taken out of a group in the graph.
-var leaveGroupNode = chatDomain.LeaveGroup
+var (
+	leaveGroupNode    = chatDomain.LeaveGroup
+	forgetChatSetting = chatNotificationBusiness.ForgetChatSetting
+)
 
 // Leave takes who out of the group ref, as Microsoft Teams lets a group chat
 // be left (Slack only closes one; hiding is that, SetHidden): out of the
@@ -444,6 +447,13 @@ func Leave(ctx context.Context, who *userModels.UserInfo, ref Ref) error {
 		return leaveGroupNode(ctx, ref.ID, me.Uid)
 	}); err != nil {
 		return err
+	}
+	// Their setting for the group goes with them: who hears of its messages is
+	// read from those settings. One that can't be taken away now is logged:
+	// nobody out of the group is told of it (InConversationNow), and the next
+	// start's repair takes it away.
+	if err := forgetChatSetting(ctx, me.Uuid, ref.ID); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Conversation Leave %s: their setting: %+v", ref.ID, err)
 	}
 	mqttBusiness.PublishConversationAccess(mqttStruct.CONVERSATION_KIND_GROUP, ref.ID, mqttStruct.CONVERSATION_DROPPED, me.Uuid)
 	// They have left either way: a line that couldn't be written is logged.

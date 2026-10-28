@@ -24,20 +24,44 @@ import (
 // granted on it (business/WorkAccess LetIn), so a notice about it reaches no
 // one else.
 func Readers(ctx context.Context, taskUUID string, userUUIDs []string) (map[string]bool, error) {
+	_, readers, _, err := readersOf(ctx, taskUUID, userUUIDs)
+	return readers, err
+}
+
+// Seeing is how one person stands to reading a task as it is: whether they
+// may (Readers), whether it is in a project, and whether its restriction is
+// what keeps them out (one of its project's people it isn't let in to).
+type Seeing struct {
+	Sees, InProject, Restricted bool
+}
+
+// SeeingOf is Seeing for one person (a user id), in the reads Readers makes.
+// A task that isn't there is seen by no one.
+func SeeingOf(ctx context.Context, taskUUID, userUUID string) (Seeing, error) {
+	task, readers, kept, err := readersOf(ctx, taskUUID, []string{userUUID})
+	if err != nil || task == nil {
+		return Seeing{}, err
+	}
+	return Seeing{Sees: readers[userUUID], InProject: task.Project != nil, Restricted: kept[userUUID]}, nil
+}
+
+// readersOf is Readers, with the task as read and who of the people its
+// restriction kept out.
+func readersOf(ctx context.Context, taskUUID string, userUUIDs []string) (*dgraphStruct.DgraphTask, map[string]bool, map[string]bool, error) {
 	task, readers, err := projectReaders(ctx, taskUUID, userUUIDs)
 	if err != nil || task == nil || len(readers) == 0 {
-		return readers, err
+		return task, readers, nil, err
 	}
 	id, err := uuid.Parse(task.Uuid)
 	if err != nil {
-		return readers, nil
+		return task, readers, nil, nil
 	}
 	r, err := restrictionOf(ctx, id)
 	if err != nil {
-		return nil, err
+		return task, nil, nil, err
 	}
 	if !r.Restricted {
-		return readers, nil
+		return task, readers, nil, nil
 	}
 	granted := make(map[string]bool, len(r.Grants))
 	for _, g := range r.Grants {
@@ -46,6 +70,7 @@ func Readers(ctx context.Context, taskUUID string, userUUIDs []string) (map[stri
 	is := func(u *dgraphStruct.DgraphUser, who string) bool {
 		return u != nil && u.Uuid != "" && strings.EqualFold(u.Uuid, who)
 	}
+	kept := map[string]bool{}
 	for who := range readers {
 		key := strings.ToLower(who)
 		if granted[key] || is(task.Assignee, who) || is(task.CreatedBy, who) {
@@ -55,13 +80,14 @@ func Readers(ctx context.Context, taskUUID string, userUUIDs []string) (map[stri
 		// (a role row can say less than the graph's admin edge).
 		f, err := taskread.For(ctx, who)
 		if err != nil {
-			return nil, err
+			return task, nil, nil, err
 		}
 		if f.Hides(task.Uuid) {
 			delete(readers, who)
+			kept[who] = true
 		}
 	}
-	return readers, nil
+	return task, readers, kept, nil
 }
 
 // InProject is which of the people are the task's project's people, or its

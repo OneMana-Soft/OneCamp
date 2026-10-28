@@ -40,6 +40,8 @@ import (
 // The agent's own badged principal is the "from" so the ping reads as coming
 // from the teammate. If the triggerer IS the agent's principal (shouldn't
 // happen — an agent can't @mention itself into a durable run), it is skipped.
+// Only someone who can still see where they asked (reach.seesWhereAsked) is
+// pinged: the moment carries the agent's words from there.
 func notifyTriggerer(ctx context.Context, agent *model.AiAgent, surface Surface, triggeredBy, text string) {
 	triggeredBy = strings.TrimSpace(triggeredBy)
 	text = strings.TrimSpace(text)
@@ -55,6 +57,14 @@ func notifyTriggerer(ctx context.Context, agent *model.AiAgent, surface Surface,
 	}
 	item := buildTriggererActivity(agent, bot, surface, text)
 	if item == nil {
+		return
+	}
+	sees, err := reach.seesWhereAsked(ctx, triggeredBy, surface)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/AIAgent notifyTriggerer could not check whether %s can still see where they asked, so they aren't told: %v", triggeredBy, err)
+		return
+	}
+	if !sees {
 		return
 	}
 	activityBusiness.PublishActivityToUser(triggeredBy, item)
@@ -171,8 +181,10 @@ func delegatorPushData(agentName, taskID, taskName, text string) map[string]stri
 }
 
 // notifyTaskDelegator pushes a delegated task's moment (a question, or the
-// result) to the person who assigned it. Detached and best-effort: a failed
-// push never touches the job.
+// result) to the person who assigned it, while they may still read the task
+// (reach.readsTask): the push names it and carries the agent's words, and a
+// run outlasts someone taken off the project or kept out by a restriction
+// since. Detached and best-effort: a failed push never touches the job.
 func notifyTaskDelegator(agent *model.AiAgent, taskID, delegatorUUID, text string) {
 	delegatorUUID, taskID, text = strings.TrimSpace(delegatorUUID), strings.TrimSpace(taskID), strings.TrimSpace(text)
 	if agent == nil || delegatorUUID == "" || taskID == "" || text == "" {
@@ -185,6 +197,14 @@ func notifyTaskDelegator(agent *model.AiAgent, taskID, delegatorUUID, text strin
 			}
 		}()
 		ctx := context.Background()
+		reads, err := reach.readsTask(ctx, delegatorUUID, taskID)
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "business/AIAgent notifyTaskDelegator could not check whether %s may read task %s, so they aren't told: %v", delegatorUUID, taskID, err)
+			return
+		}
+		if !reads {
+			return
+		}
 		data := delegatorPushData(agent.Name, taskID, delegatedTaskName(ctx, agent, taskID), text)
 		if err := pushToDelegator(ctx, delegatorUUID, data); err != nil {
 			helpers.LogErrorWithContext(ctx, "agentNotify: push to delegator failed (task=%s): %v", taskID, err)

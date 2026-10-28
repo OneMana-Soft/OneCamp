@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	docBusiness "github.com/akashc777/OneCamp/business/Doc"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	attachmentDomain "github.com/akashc777/OneCamp/domain/Attachment"
@@ -955,6 +956,8 @@ var (
 		return guestModel.RevokeLiveForResource(ctx, guestModel.ResourceDoc, docUUID)
 	}
 	tellOwnerLinksOff = pushLinksOffNotice
+	// ownerReads is the doc read rule, of many people at once.
+	ownerReads = docBusiness.Readers
 )
 
 // restoreDocs brings deleted docs back, in the graph and then in search, and
@@ -1012,9 +1015,12 @@ func restoreDocs(ctx context.Context, entityIds []uuid.UUID, archivedOnly bool) 
 		byID, byName := askingUser(ctx)
 		for _, id := range restored {
 			id = strings.ToLower(id)
-			d := ownerDeleted[id]
-			if d == nil || linksOff[id] == 0 || d.CreatedBy == nil || d.CreatedBy.Uuid == "" || d.CreatedBy.Uuid == byID {
-				continue // no link went, or no one but who restored it to tell
+			d, ok := ownerDeleted[id]
+			if !ok || linksOff[id] == 0 {
+				continue // no link went
+			}
+			if o := docDomain.OwnerOf(d); o == nil || o.Uuid == "" || o.Uuid == byID {
+				continue // no one but who restored it to tell
 			}
 			tellOwnerLinksOff(ctx, d, linksOff[id], byName)
 		}
@@ -1025,19 +1031,34 @@ func restoreDocs(ctx context.Context, entityIds []uuid.UUID, archivedOnly bool) 
 	return len(restored), err
 }
 
-// pushLinksOffNotice tells a doc's owner, on their devices, that someone
-// restored the doc they deleted and turned its guest links off (linksOffNotice
-// says what). Nothing told an owner about a restore; push is the notice this
-// package can send (email, comments and the activity feed are in packages that
-// depend on it). It opens the doc, as a push about a doc's comment does, and
-// goes as every push does (notification.Deliver): through the push gate, with
-// the desktop app's notice beside it, which a desktop-only owner had none of.
+// pushLinksOffNotice tells a doc's owner (after a hand-over, the new one:
+// docDomain.OwnerOf), on their devices, that someone restored the doc they
+// deleted and turned its guest links off (linksOffNotice says what), when they
+// may read it now (business/Doc Readers): its title goes to nobody else, and
+// to nobody when that can't be said. Nothing told an owner about a restore;
+// push is the notice this package can send (email, comments and the activity
+// feed are in packages that depend on it). It opens the doc, as a push about a
+// doc's comment does, and goes as every push does (notification.Deliver):
+// through the push gate, with the desktop app's notice beside it, which a
+// desktop-only owner had none of.
 func pushLinksOffNotice(ctx context.Context, doc *dgraphStruct.DgraphDoc, links int64, byName string) {
-	if doc == nil || doc.CreatedBy == nil || doc.CreatedBy.Uuid == "" {
+	if doc == nil {
+		return
+	}
+	owner := docDomain.OwnerOf(doc)
+	if owner == nil || owner.Uuid == "" {
+		return
+	}
+	can, err := ownerReads(ctx, doc.Uuid, []string{owner.Uuid})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/pushLinksOffNotice could not decide whether the owner of doc %s may read it, so nobody is told: %v", doc.Uuid, err)
+		return
+	}
+	if !can[owner.Uuid] {
 		return
 	}
 	title, body := linksOffNotice(byName, doc.Title, links)
-	notificationBusiness.Deliver(ctx, []string{doc.CreatedBy.Uuid}, map[string]string{
+	notificationBusiness.Deliver(ctx, []string{owner.Uuid}, map[string]string{
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE:    firebaseInit.FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT,
 		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID: doc.Uuid,
 		firebaseInit.FIREBASE_PUSH_DATA_TITLE:   title,

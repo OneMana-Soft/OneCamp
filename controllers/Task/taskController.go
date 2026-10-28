@@ -525,6 +525,12 @@ func CreateTask(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	// Someone who can't see the task is a 409 that names them, so the person
+	// picks someone else.
+	if errors.Is(err, helpers.ErrConflict) {
+		helpers.WriteWriteFailure(w, r, err, "Couldn't create the task.", "controllers/CreateTask")
+		return
+	}
 	if err != nil {
 
 		helpers.LogErrorWithContext(ctx,
@@ -1098,6 +1104,12 @@ func UpdateTaskAssignee(w http.ResponseWriter, r *http.Request) {
 
 	if errors.Is(err, business.ErrTaskDeleted) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "That task was deleted."})
+		return
+	}
+	// Someone who can't see the task is a 409 that names them, so the person
+	// picks someone else.
+	if errors.Is(err, helpers.ErrConflict) {
+		helpers.WriteWriteFailure(w, r, err, "Couldn't reassign the task.", "controllers/UpdateTaskAssignee")
 		return
 	}
 
@@ -1811,6 +1823,12 @@ func CreateSubTask(w http.ResponseWriter, r *http.Request) {
 
 	subTaskDgraph, err := business.CreateSubTask(ctx, projectUUID, &userInfo, dgraphProjectInfo, assigneeDgraphInfo, createSubTaskInfoInput)
 
+	// Someone who can't see the sub-task is a 409 that names them, so the
+	// person picks someone else.
+	if errors.Is(err, helpers.ErrConflict) {
+		helpers.WriteWriteFailure(w, r, err, "Couldn't add the subtask.", "controllers/CreateSubTask")
+		return
+	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx,
 			"controllers/CreateSubTask Failed to create sub task err: %+v",
