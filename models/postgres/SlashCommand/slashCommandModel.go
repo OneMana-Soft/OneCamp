@@ -12,7 +12,9 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // Exec modes.
@@ -342,6 +344,13 @@ func ListApps(ctx context.Context) ([]*App, error) {
 	return out, rows.Err()
 }
 
+// RemovedAppSlugs answers, as a set, every slug an admin has removed an app
+// of, so the "/" menu tells an app taken away on purpose from one never
+// installed. A slug installed again is also in ListApps, and that app wins.
+func RemovedAppSlugs(ctx context.Context) (map[string]bool, error) {
+	return pgexec.Pairs[string, bool](ctx, `SELECT DISTINCT slug, true FROM apps WHERE deleted_at IS NOT NULL`)
+}
+
 // SetAppEnabled toggles an app on/off.
 func SetAppEnabled(ctx context.Context, id uuid.UUID, enabled bool) error {
 	dbctx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
@@ -440,6 +449,16 @@ func DeleteCommandsByApp(ctx context.Context, appID uuid.UUID) error {
 		helpers.LogErrorWithContext(ctx, "models/DeleteCommandsByApp err: %+v", err)
 	}
 	return err
+}
+
+// RetireBuiltinCommandsExcept soft-deletes the built-in commands that are not
+// in seeded, the names the running build seeds, and says how many it took.
+// A build that seeds one again inserts it afresh (the unique index covers
+// live rows only).
+func RetireBuiltinCommandsExcept(ctx context.Context, seeded []string) (int64, error) {
+	return pgexec.Exec(ctx, `UPDATE slash_commands SET deleted_at = NOW(), updated_at = NOW()
+		WHERE is_builtin = true AND app_id IS NULL AND deleted_at IS NULL
+		  AND NOT (command = ANY($1::text[]))`, pq.Array(seeded))
 }
 
 // CreateAppCommand inserts a command linked to an app.

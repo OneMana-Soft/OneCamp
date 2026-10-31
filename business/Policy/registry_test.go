@@ -132,8 +132,9 @@ func TestARoutesPolicyIsAskedAtEachRequest(t *testing.T) {
 func TestEveryPolicyIsListed(t *testing.T) {
 	r := withStore(t, &store{values: map[string]string{GuestLinkMaxDays.Key: "14"}})
 	all := r.ListAll(context.Background())
-	// Six of the docs' and projects' programmes, and chat P3's three.
-	if len(all) != len(specs) || len(all) != 9 {
+	// Six of the docs' and projects' programmes, chat P3's three, and the
+	// calendar's two.
+	if len(all) != len(specs) || len(all) != 11 {
 		t.Fatalf("listed %d", len(all))
 	}
 	for _, in := range all {
@@ -142,6 +143,10 @@ func TestEveryPolicyIsListed(t *testing.T) {
 		}
 		if in.Key == DocsExportMembers.Key && (in.Value != true || in.IsSet) {
 			t.Errorf("export: %+v", in)
+		}
+		// Calendar A6: members see when others are busy unless an admin says no (O7).
+		if in.Key == CalendarFreeBusy.Key && (in.Value != true || in.IsSet || in.Kind != KindBool) {
+			t.Errorf("free and busy: %+v", in)
 		}
 	}
 }

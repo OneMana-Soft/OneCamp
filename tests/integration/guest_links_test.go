@@ -634,6 +634,21 @@ func TestGuestLinks(t *testing.T) {
 			}
 		}
 
+		// The board's own picture opens by its link, whether or not this
+		// server has its JWT secret: the call's path hands a token that names
+		// no call back to the link's. With the secret, a board shared by link
+		// showed none of its pictures (27 Oct 2026).
+		startMinio(t)
+		picture := uuid.New()
+		exec(`INSERT INTO attachments (id, obj_key, src_key, src_value, created_by) VALUES ($1, $2, 'board', $3, $4)`,
+			picture, people["olu"].String()+"/"+picture.String()+"_plan.png", board, people["olu"])
+		for _, secret := range []string{"guest-links-board-secret", ""} {
+			t.Setenv("JWT_SECRET", secret)
+			if code, body := open(guestController.GuestBoardAttachment, "token", boardRaw.Token, "obj_uuid", picture.String()); code != http.StatusTemporaryRedirect {
+				t.Errorf("the board's picture by its link, secret set %v: %d %s, want the picture", secret != "", code, body)
+			}
+		}
+
 		// A board image whose record can't be read just then (here, its table
 		// away for a moment): retried, not given up on.
 		image := func() (int, string) {

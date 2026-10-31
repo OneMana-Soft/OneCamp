@@ -127,7 +127,10 @@ func TestWhatMayRepeat(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	block, err := h.s.Create(ctx, sam, EventInput{Kind: EventTaskBlock, Title: "Write-up", Start: st, End: en, Recurrence: &Recurrence{Rule: "FREQ=DAILY;COUNT=2"}})
+	// A task block is time for a task Sam may read (taskBlocks_test.go).
+	stubTasks(t)
+	withGraphUID(sam, "0xsam")
+	block, err := h.s.Create(ctx, sam, EventInput{Kind: EventTaskBlock, TaskUUID: briefTask, Title: "Write-up", Start: st, End: en, Recurrence: &Recurrence{Rule: "FREQ=DAILY;COUNT=2"}})
 	if err != nil || block.Recurrence == nil {
 		t.Fatalf("a task block repeats: %+v %v", block, err)
 	}

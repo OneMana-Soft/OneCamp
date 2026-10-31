@@ -18,42 +18,24 @@ import (
 // at once: the OneCamp uuid a previous import of the workspace made for each
 // one it made.
 func LookupWorkspaceMappingsBatch(ctx context.Context, workspaceName, entityType string, slackIds []string) (map[string]uuid.UUID, error) {
-	if len(slackIds) == 0 || workspaceName == "" {
-		return map[string]uuid.UUID{}, nil
-	}
-	return pgexec.Pairs[string, uuid.UUID](ctx, `
-		SELECT source_id, onecamp_uuid FROM import_workspace_id_map
-		WHERE provider = 'slack' AND source_workspace_name = $1 AND entity_type = $2
-		  AND source_id = ANY($3)`, workspaceName, entityType, pq.Array(slackIds))
+	return importModels.LookupWorkspaceMappingsBatch(ctx, importModels.ProviderSlack, workspaceName, entityType, slackIds)
 }
 
 // RecordCreated records what this import made for a Slack id, in this
 // import's map (as made by it) and, when workspaceName is set, in the
 // workspace's map, so the next import of the workspace skips it: one
-// statement, where UpsertIdMappingWithOwnership and UpsertWorkspaceMapping
-// were two. Both are idempotent.
+// statement, where an upsert into each map was two. Both are idempotent.
 func RecordCreated(ctx context.Context, importId uuid.UUID, entityType, slackId string,
 	onecampUUID uuid.UUID, parentSlackId *string, metadata json.RawMessage, workspaceName string) error {
 	return RecordMapping(ctx, importId, entityType, slackId, onecampUUID, parentSlackId, metadata, true, workspaceName)
 }
 
 // RecordMapping is RecordCreated for something this import made
-// (createdHere) or found already there, such as a member matched by address.
+// (createdHere) or found already there, such as a member matched by address:
+// the importers' RecordMapping, for Slack.
 func RecordMapping(ctx context.Context, importId uuid.UUID, entityType, slackId string,
 	onecampUUID uuid.UUID, parentSlackId *string, metadata json.RawMessage, createdHere bool, workspaceName string) error {
-	_, err := pgexec.Exec(ctx, `
-		WITH mapped AS (
-			INSERT INTO import_id_map
-			    (import_id, entity_type, source_id, onecamp_uuid, parent_source_id, metadata, created_by_this_import)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			ON CONFLICT (import_id, entity_type, source_id) DO NOTHING
-		)
-		INSERT INTO import_workspace_id_map
-		    (provider, source_workspace_name, entity_type, source_id, onecamp_uuid, origin_import_id)
-		SELECT 'slack', $8::varchar, $2, $3, $4, $1 WHERE $8::varchar <> ''
-		ON CONFLICT (provider, source_workspace_name, entity_type, source_id) DO NOTHING`,
-		importId, entityType, slackId, onecampUUID, parentSlackId, metadata, createdHere, workspaceName)
-	return err
+	return importModels.RecordMapping(ctx, importId, importModels.ProviderSlack, workspaceName, entityType, slackId, onecampUUID, parentSlackId, metadata, createdHere)
 }
 
 // LookupIdMappingsMany is LookupIdMappingsBatch for any number of ids, a
@@ -75,6 +57,26 @@ func LookupIdMappingsMany(ctx context.Context, importId uuid.UUID, entityType st
 		slackIds = slackIds[n:]
 	}
 	return out, nil
+}
+
+// LookupConversationMapping is what this import mapped a Slack conversation
+// id as, in one statement: its kind (EntityDM, EntityMPIM or EntityChannel)
+// and OneCamp id, or "" and uuid.Nil for none. A conversation's id is mapped
+// as one kind.
+func LookupConversationMapping(ctx context.Context, importId uuid.UUID, slackId string) (string, uuid.UUID, error) {
+	type mapping struct {
+		kind string
+		id   uuid.UUID
+	}
+	m, _, err := pgexec.QueryOne(ctx, `
+		SELECT entity_type, onecamp_uuid FROM import_id_map
+		WHERE import_id = $1 AND source_id = $2 AND entity_type IN ($3, $4, $5)`,
+		func(r pgexec.Row) (mapping, error) {
+			var m mapping
+			err := r.Scan(&m.kind, &m.id)
+			return m, err
+		}, importId, slackId, EntityDM, EntityMPIM, EntityChannel)
+	return m.kind, m.id, err
 }
 
 // IdMapMetadataMany is GetIdMapMetadata for several Slack ids in one

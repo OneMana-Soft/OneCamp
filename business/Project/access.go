@@ -27,3 +27,9 @@ func HasMember(ctx context.Context, userUUID, projectID string) (bool, error) {
 func MembersAmong(ctx context.Context, projectID string, userUUIDs []string) (map[string]bool, error) {
 	return domain.MembersAmong(ctx, projectID, userUUIDs)
 }
+
+// MembersAmongEach is MembersAmong for many projects at once, keyed by
+// project as asked: a read a page of projects, not one per project.
+func MembersAmongEach(ctx context.Context, asked map[string][]string) (map[string]map[string]bool, error) {
+	return domain.MembersAmongEach(ctx, asked)
+}

@@ -47,6 +47,10 @@ const MaxTokensPerApp = 3
 // ErrNotFound is an app that doesn't exist or was removed.
 var ErrNotFound = errors.New("there's no such app")
 
+// ErrStale is a change made from an access version the app no longer has:
+// someone changed what it may do since it was read.
+var ErrStale = errors.New("the app's access changed since it was read")
+
 // Place is somewhere an app was added: a channel, a project, a table.
 type Place struct {
 	Kind string `json:"kind"`
@@ -71,6 +75,9 @@ type Identity struct {
 	BotUserID *uuid.UUID `json:"bot_user_id,omitempty"`
 	Scopes    []string   `json:"scopes"`
 	Audience  Audience   `json:"audience"`
+	// AccessVersion is the version of Scopes and Audience read here, which a
+	// change is made from (SetAccess).
+	AccessVersion string `json:"access_version"`
 }
 
 // Get reads an app's identity, or ErrNotFound.
@@ -82,7 +89,7 @@ func Get(ctx context.Context, appID uuid.UUID) (*Identity, error) {
 	if row == nil || row.Deleted {
 		return nil, ErrNotFound
 	}
-	id := &Identity{AppID: row.Id, Slug: row.Slug, Name: row.Name, Enabled: row.Enabled, BotUserID: row.BotUserId}
+	id := &Identity{AppID: row.Id, Slug: row.Slug, Name: row.Name, Enabled: row.Enabled, BotUserID: row.BotUserId, AccessVersion: row.AccessVersion}
 	if row.IconUrl != nil {
 		id.IconURL = *row.IconUrl
 	}
@@ -100,7 +107,11 @@ func Get(ctx context.Context, appID uuid.UUID) (*Identity, error) {
 // SetAccess sets what an app's credentials may carry and where it may reach.
 // Credentials already made keep their scopes only as far as these allow
 // (MayCarry, asked per call by ActsAsApp's callers through the token's scopes).
-func SetAccess(ctx context.Context, appID uuid.UUID, scopes []string, audience Audience) (*Identity, error) {
+// from is the AccessVersion the change was made from: once someone has changed
+// the app since, nothing changes and the answer is ErrStale, so of two admins
+// changing it from one read, the second doesn't silently undo the first. ""
+// changes it whatever it is.
+func SetAccess(ctx context.Context, appID uuid.UUID, scopes []string, audience Audience, from string) (*Identity, error) {
 	if _, err := Get(ctx, appID); err != nil {
 		return nil, err
 	}
@@ -115,11 +126,15 @@ func SetAccess(ctx context.Context, appID uuid.UUID, scopes []string, audience A
 	audience.Places = places
 	sj, _ := json.Marshal(clean)
 	aj, _ := json.Marshal(audience)
-	if err := appModel.SetAppAccess(ctx, appID, string(sj), string(aj)); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrNotFound
+	if err := appModel.SetAppAccess(ctx, appID, string(sj), string(aj), from); err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
 		}
-		return nil, err
+		// Nothing changed: the app went, or its access moved on from `from`.
+		if _, err := Get(ctx, appID); err != nil {
+			return nil, err
+		}
+		return nil, ErrStale
 	}
 	return Get(ctx, appID)
 }

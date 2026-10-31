@@ -399,7 +399,7 @@ func fieldValue(cv mondayColumnValue, f importProvider.SourceField) (v any, whol
 		if d == "" {
 			d = firstField(text)
 		}
-		if parseDay(d) == nil {
+		if _, ok := importProvider.ParseDay(d); !ok {
 			return nil, false
 		}
 		return d, true

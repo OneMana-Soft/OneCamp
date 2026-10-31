@@ -6,7 +6,10 @@ package controllers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 
 	commandAdapter "github.com/akashc777/OneCamp/adapter/Command"
 	business "github.com/akashc777/OneCamp/business/Command"
@@ -27,6 +30,37 @@ func GetCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": catalog})
+}
+
+// GiphyPicker handles GET /command/giphy?q=&offset= — a page of the
+// composer's GIF picker: trending with no q, else a search. Giphy failing
+// answers 503, which Cloudflare passes on as itself (a 502 reaches the app as
+// a network error).
+func GiphyPicker(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	offset := 0
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "offset must be a whole number"})
+			return
+		}
+		offset = n
+	}
+
+	page, err := business.GiphyPicker(ctx, strings.TrimSpace(r.URL.Query().Get("q")), offset)
+	switch {
+	case errors.Is(err, business.ErrGiphyBadRequest):
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Giphy can serve a search of up to 50 characters, from offset 0 to 4999"})
+	case errors.Is(err, business.ErrGiphyUnavailable):
+		helpers.LogErrorWithContext(ctx, "controllers/Command/GiphyPicker err: %+v", err)
+		helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Giphy didn't answer. Try again in a moment."})
+	case err != nil:
+		helpers.LogErrorWithContext(ctx, "controllers/Command/GiphyPicker err: %+v", err)
+		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"msg": "Failed to load GIFs"})
+	default:
+		helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": page})
+	}
 }
 
 // Execute handles POST /command/execute.

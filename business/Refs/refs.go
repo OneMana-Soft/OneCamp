@@ -28,6 +28,9 @@
 //     and walked by the work graph already), and the tasks it holds a to-do
 //     for (doc_task_links, migration 340). A to-do's data-task-id alone is no
 //     link: only the conversion that checked the person's rights makes one.
+//   - A meeting: every doc, task and project its notes link to, kept with
+//     its node (nodes.go) from the calendar's projector, which reads them by
+//     these rules (BodyLinks).
 //   - Never itself.
 //
 // WHO SEES AN EDGE. No one by its existence: every node the work graph reads
@@ -44,7 +47,6 @@ import (
 	domain "github.com/akashc777/OneCamp/domain/WorkGraph"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/bodyrefs"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	linkModels "github.com/akashc777/OneCamp/models/postgres/EntityLink"
 	"github.com/google/uuid"
@@ -65,54 +67,60 @@ const (
 	Chat    = domain.KindChat
 	Comment = domain.KindComment
 	Doc     = domain.KindDoc
+	Task    = domain.KindTask
 )
 
 // Seams for tests: the outbox, the graph and doc_task_links.
 var (
-	enqueueReady = func(ctx context.Context, e outboxBusiness.Entry) error {
-		if postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
-			return errNoOutbox
-		}
-		id, err := outboxBusiness.Add(ctx, postgresInit.DBConn.SqlDB, e)
-		if err != nil {
-			return err
-		}
-		if err := outboxBusiness.Release(ctx, id); err != nil {
-			// Held, it is released by the drain once its time is up: the
-			// topic has no resolver, because the body was saved before this.
-			return nil
-		}
-		outboxBusiness.Deliver(id)
-		return nil
-	}
+	enqueueReady = outboxBusiness.Enqueue
 	readSource   = domain.ReadSource
 	writeFixes   = domain.WriteFixes
 	tasksForDocs = linkModels.TasksForDocs
 )
-
-type outboxError string
-
-func (e outboxError) Error() string { return string(e) }
-
-const errNoOutbox = outboxError("refs: no outbox (Postgres isn't connected)")
 
 func init() {
 	outboxBusiness.Sinks.Register(outboxBusiness.Sink{Topic: Topic, Name: SinkName, Run: runSink})
 }
 
 // Saved tells the work graph that a source's body was written: created is a
-// new one, whose event is skipped when its body links to nothing (it has no
-// edge to take off); an edit always goes, since it may have taken a link out.
-// It never fails the save: an event that couldn't be written is the nightly
-// reconciler's.
+// new one, told as SavedMany tells new ones; an edit always goes, since it may
+// have taken a link out. It never fails the save: an event that couldn't be
+// written is the nightly reconciler's.
 func Saved(ctx context.Context, kind domain.Kind, id, body string, created bool) {
-	if !domain.IsRefSource(kind) || !helpers.IsCanonicalUUID(id) {
-		return
-	}
-	if created && len(bodyLinks(kind, id, body)) == 0 {
+	if created {
+		SavedMany(ctx, kind, []Body{{ID: id, Text: body}})
 		return
 	}
 	Changed(ctx, kind, id)
+}
+
+// Body is a source and its body, for SavedMany.
+type Body struct {
+	ID   string
+	Text string
+}
+
+// SavedMany tells the work graph of new sources of one kind (one, or many
+// made together: CreateTasks' tasks): the events of those whose bodies link
+// something, written in one statement and released in one. A new source whose
+// body links nothing costs no event, since it has no edge to take off. It
+// never fails the save.
+func SavedMany(ctx context.Context, kind domain.Kind, bodies []Body) {
+	if !domain.IsRefSource(kind) {
+		return
+	}
+	var es []outboxBusiness.Entry
+	for _, b := range bodies {
+		if helpers.IsCanonicalUUID(b.ID) && len(BodyLinks(kind, b.ID, b.Text)) > 0 {
+			es = append(es, changedEntry(kind, b.ID))
+		}
+	}
+	if len(es) == 0 {
+		return
+	}
+	if err := enqueueReady(ctx, es...); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Refs: the link events of %d new %s sources weren't written, so tonight's reconcile keeps them: %v", len(es), kind, err)
+	}
 }
 
 // Changed writes the event that keeps a source's edges, released and
@@ -122,14 +130,19 @@ func Changed(ctx context.Context, kind domain.Kind, id string) {
 	if !domain.IsRefSource(kind) || !helpers.IsCanonicalUUID(id) {
 		return
 	}
+	if err := enqueueReady(ctx, changedEntry(kind, id)); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Refs %s %s: its links' event wasn't written, so tonight's reconcile keeps them: %v", kind, id, err)
+	}
+}
+
+// changedEntry is the event that keeps one source's edges: it names the
+// source by kind and uuid, never its body. Pure.
+func changedEntry(kind domain.Kind, id string) outboxBusiness.Entry {
 	id = strings.ToLower(id)
-	err := enqueueReady(ctx, outboxBusiness.Entry{
+	return outboxBusiness.Entry{
 		Topic: Topic, Kind: KindChanged, Key: "refs:" + string(kind) + ":" + id,
 		Entities: map[string]string{"kind": string(kind), "uuid": id},
 		Sinks:    []string{SinkName},
-	})
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/Refs %s %s: its links' event wasn't written, so tonight's reconcile keeps them: %v", kind, id, err)
 	}
 }
 
@@ -169,10 +182,10 @@ func Reconcile(ctx context.Context, kind domain.Kind, id string) (domain.Fix, er
 	return fix, writeFixes(ctx, []domain.Fix{fix})
 }
 
-// Want is what a source should link to: its body's links (bodyLinks) and,
+// Want is what a source should link to: its body's links (BodyLinks) and,
 // for a doc, the tasks it holds a to-do for. Pure.
 func Want(s domain.Source, docTasks []string) []domain.Ref {
-	out := bodyLinks(s.Kind, s.UUID, s.Body)
+	out := BodyLinks(s.Kind, s.UUID, s.Body)
 	seen := map[domain.Ref]bool{}
 	for _, r := range out {
 		seen[r] = true
@@ -191,9 +204,9 @@ func Want(s domain.Source, docTasks []string) []domain.Ref {
 	return out
 }
 
-// bodyLinks is what a source's body links to, by the rules in the package
-// comment. Pure.
-func bodyLinks(kind domain.Kind, self, body string) []domain.Ref {
+// BodyLinks is what a body of kind (self, by its uuid) links to, by the
+// rules in the package comment. Pure.
+func BodyLinks(kind domain.Kind, self, body string) []domain.Ref {
 	if body == "" {
 		return nil
 	}

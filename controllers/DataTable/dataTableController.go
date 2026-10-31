@@ -11,10 +11,12 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"time"
 
 	adminAuditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	business "github.com/akashc777/OneCamp/business/DataTable"
 	"github.com/akashc777/OneCamp/helpers"
+	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -42,8 +44,12 @@ func writeErr(w http.ResponseWriter, err error) {
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "table not found"})
 	case business.IsRowNotFound(err):
 		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "row not found"})
+	case business.IsViewNotFound(err):
+		helpers.WriteJSON(w, http.StatusNotFound, helpers.Envolope{"msg": "view not found"})
 	case business.IsUnavailable(err):
 		helpers.WriteRetryLater(w, "Couldn't load the rows.")
+	case business.IsViewsUnavailable(err):
+		helpers.WriteRetryLater(w, "Couldn't reach the table's views.")
 	default:
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": err.Error()})
 	}
@@ -150,7 +156,9 @@ func DeleteTable(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "deleted"})
 }
 
-// ListRows GET /tables/{id}/rows?limit&offset
+// ListRows GET /tables/{id}/rows?limit&offset, or ?ids= (comma-separated,
+// at most 500) for the rows a live message named, in that order, without
+// those deleted since.
 func ListRows(w http.ResponseWriter, r *http.Request) {
 	ctx := readerCtx(r)
 	id, ok := idParam(r, "id")
@@ -158,9 +166,20 @@ func ListRows(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
 		return
 	}
-	limit := helpers.LimitParam(r.URL.Query(), 500, 1000)
-	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	rows, err := business.ListRows(ctx, id, actorFrom(r), limit, offset)
+	var rows []*model.Row
+	var err error
+	if q := r.URL.Query(); q.Has("ids") {
+		ids, perr := business.ParseRowIDs(q.Get("ids"))
+		if perr != nil {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": perr.Error()})
+			return
+		}
+		rows, err = business.RowsByID(ctx, id, actorFrom(r), ids)
+	} else {
+		limit := helpers.LimitParam(q, 500, 1000)
+		offset, _ := strconv.Atoi(q.Get("offset"))
+		rows, err = business.ListRows(ctx, id, actorFrom(r), limit, offset)
+	}
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -168,6 +187,35 @@ func ListRows(w http.ResponseWriter, r *http.Request) {
 	business.WithCommentCounts(ctx, rows)
 	business.WithPages(ctx, rows)
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": rows})
+}
+
+// SetPresence POST /tables/{id}/presence {row_id?, field_id?, editing?, gone?}
+// says where the caller is on a table (gone: that they left) and answers who
+// is on it now (tables A7). An open table sends it every 20 s and when its
+// selection changes.
+func SetPresence(w http.ResponseWriter, r *http.Request) {
+	ctx := readerCtx(r)
+	id, ok := idParam(r, "id")
+	if !ok {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid table id"})
+		return
+	}
+	var in struct {
+		Row     string `json:"row_id"`
+		Field   string `json:"field_id"`
+		Editing bool   `json:"editing"`
+		Gone    bool   `json:"gone"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
+		return
+	}
+	people, err := business.SetPresence(ctx, id, actorFrom(r), business.Here{Row: in.Row, Field: in.Field, Editing: in.Editing}, in.Gone, time.Now())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": people})
 }
 
 // AggregateTable POST /tables/{id}/aggregate — read-only. Computes a grouped
@@ -264,7 +312,7 @@ func UpdateRow(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": row})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.RowAsRead(ctx, id, actorFrom(r), row)})
 }
 
 // PatchRow POST /tables/{id}/rows/{rowId}/patch {values: {fieldId: value|null}}
@@ -289,7 +337,8 @@ func PatchRow(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": row})
+	// As a read answers it, so the grid puts it back with no fetch.
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.RowAsRead(ctx, id, actorFrom(r), row)})
 }
 
 // DeleteRow DELETE /tables/{id}/rows/{rowId}
@@ -312,6 +361,19 @@ func DeleteRow(w http.ResponseWriter, r *http.Request) {
 // column's prompt over each row (or the given subset) and write the cells.
 // Body: { "row_ids"?: ["..."] }.
 func FillAIColumn(w http.ResponseWriter, r *http.Request) {
+	helpers.WriteJSON(w, http.StatusNotImplemented, helpers.Envolope{"msg": "AI features are not supported on this build"})
+}
+
+// StopAIFill POST /tables/{id}/fields/{fieldId}/ai-fill/stop — stop the column's
+// running fill (its person, or one who manages the table). Answers the fill
+// as it now is, or null when none ran.
+func StopAIFill(w http.ResponseWriter, r *http.Request) {
+	helpers.WriteJSON(w, http.StatusNotImplemented, helpers.Envolope{"msg": "AI features are not supported on this build"})
+}
+
+// ListAIFills GET /tables/{id}/ai-fills — the table's running fills, and
+// those that ended in the last day, newest first.
+func ListAIFills(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusNotImplemented, helpers.Envolope{"msg": "AI features are not supported on this build"})
 }
 
@@ -463,6 +525,30 @@ func DeleteView(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "deleted"})
 }
 
+// LockView POST /tables/{id}/views/{viewId}/lock {locked}: a manager locks a
+// shared view against change, or unlocks it.
+func LockView(w http.ResponseWriter, r *http.Request) {
+	ctx := readerCtx(r)
+	id, ok := idParam(r, "id")
+	viewId, ok2 := idParam(r, "viewId")
+	if !ok || !ok2 {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid id"})
+		return
+	}
+	var in struct {
+		Locked bool `json:"locked"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "invalid request body"})
+		return
+	}
+	if err := business.LockView(ctx, id, viewId, in.Locked, actorFrom(r)); err != nil {
+		writeErr(w, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "updated"})
+}
+
 // PreviewFormula POST /tables/{id}/formula/preview {formula, field_id} — a
 // formula being written, checked against the table's fields without saving
 // it: what it gives, its values in the first rows, or why it can't be read.
@@ -558,3 +644,10 @@ func ChangeLinks(w http.ResponseWriter, r *http.Request) {
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": row})
 }
+
+// ActorFrom is the signed-in member as tables' business layer acts for them,
+// for the controllers beside this one (Row Query's).
+func ActorFrom(r *http.Request) business.Actor { return actorFrom(r) }
+
+// ReaderCtx is the request's context with the reader's zone (?tz=).
+func ReaderCtx(r *http.Request) context.Context { return readerCtx(r) }

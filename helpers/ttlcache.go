@@ -15,9 +15,13 @@ import (
 // ------------
 //   - The cache is intentionally simple. It does not track LRU order
 //     and does not run a background sweeper. Entries are evicted lazily
-//     on access, plus an opportunistic sweep happens whenever Set is
-//     called and the map has grown past sweepThreshold. This keeps the
-//     cache predictable and avoids leaking goroutines.
+//     on access, plus a Set sweeps out expired entries once the map has
+//     doubled since the last sweep (and holds over minSweepAt). A sweep
+//     scans the whole map, so it waits for as many inserts as it scans:
+//     a Set costs O(1) amortised, and expired entries nobody reads again
+//     never make the map more than twice what was live at the last
+//     sweep. This keeps the cache predictable and avoids leaking
+//     goroutines.
 //   - Negative results (e.g. "no link for this repo", "GitHub user has
 //     no OneCamp mapping") should be cached too — typically with a
 //     shorter TTL via SetWithTTL — to avoid hammering the DB on
@@ -28,11 +32,15 @@ import (
 //     needs sharded buckets, swap the implementation here without
 //     changing the surface.
 type TTLCache[V any] struct {
-	mu             sync.RWMutex
-	items          map[string]ttlEntry[V]
-	defaultTTL     time.Duration
-	sweepThreshold int
+	mu         sync.RWMutex
+	items      map[string]ttlEntry[V]
+	defaultTTL time.Duration
+	// sweepAt is the size past which the next Set sweeps.
+	sweepAt int
 }
+
+// minSweepAt keeps small caches from sweeping every few inserts.
+const minSweepAt = 1024
 
 type ttlEntry[V any] struct {
 	value     V
@@ -47,9 +55,9 @@ type ttlEntry[V any] struct {
 // directly to make intent obvious at the call site.
 func NewTTLCache[V any](defaultTTL time.Duration) *TTLCache[V] {
 	return &TTLCache[V]{
-		items:          make(map[string]ttlEntry[V]),
-		defaultTTL:     defaultTTL,
-		sweepThreshold: 1024,
+		items:      make(map[string]ttlEntry[V]),
+		defaultTTL: defaultTTL,
+		sweepAt:    minSweepAt,
 	}
 }
 
@@ -102,7 +110,7 @@ func (c *TTLCache[V]) SetWithTTL(key string, value V, ttl time.Duration) {
 	}
 	c.mu.Lock()
 	c.items[key] = ttlEntry[V]{value: value, expiresAt: expiresAt}
-	if len(c.items) > c.sweepThreshold {
+	if len(c.items) > c.sweepAt {
 		c.sweepLocked()
 	}
 	c.mu.Unlock()
@@ -118,9 +126,8 @@ func (c *TTLCache[V]) Delete(key string) {
 	c.mu.Unlock()
 }
 
-// sweepLocked removes expired entries. Must be called with the write
-// lock held. Bounded by map size; runs O(n) once per sweepThreshold
-// inserts so amortised cost per Set is O(1).
+// sweepLocked removes expired entries and sets the next sweep for when
+// the map has doubled. Must be called with the write lock held.
 func (c *TTLCache[V]) sweepLocked() {
 	now := time.Now()
 	for k, v := range c.items {
@@ -128,6 +135,7 @@ func (c *TTLCache[V]) sweepLocked() {
 			delete(c.items, k)
 		}
 	}
+	c.sweepAt = max(minSweepAt, 2*len(c.items))
 }
 
 // Purge drops every entry. Used on disconnect / re-connect flows
@@ -138,6 +146,7 @@ func (c *TTLCache[V]) Purge() {
 	}
 	c.mu.Lock()
 	c.items = make(map[string]ttlEntry[V])
+	c.sweepAt = minSweepAt
 	c.mu.Unlock()
 }
 

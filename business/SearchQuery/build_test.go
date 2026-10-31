@@ -20,6 +20,8 @@ const (
 	designID  = "44444444-4444-4444-8444-444444444444"
 	secretID  = "55555555-5555-4555-8555-555555555555"
 	visitorID = "66666666-6666-4666-8666-666666666666"
+	q4ID      = "77777777-7777-4777-8777-777777777777"
+	financeID = "88888888-8888-4888-8888-888888888888"
 )
 
 var sam = Asker{Subject: accessBusiness.Subject{UserUID: "0x1", UserUUID: samID}, Email: "sam@example.com"}
@@ -31,10 +33,26 @@ func fakeWorld(t *testing.T, extra ...Field) {
 	t.Helper()
 	saved := Fields
 	savedHandle, savedEmail, savedChannel, savedReadable, savedHandleOf, savedNames := userIDByHandle, userEmail, channelIDByName, readable, handleOf, channelNames
+	savedProjects, savedTeams := myProjects, myTeams
 	t.Cleanup(func() {
 		Fields = saved
 		userIDByHandle, userEmail, channelIDByName, readable, handleOf, channelNames = savedHandle, savedEmail, savedChannel, savedReadable, savedHandleOf, savedNames
+		myProjects, myTeams = savedProjects, savedTeams
 	})
+	// Sam is in the Q4 launch project and the Finance team; nobody else the
+	// tests ask as is in either.
+	myProjects = func(_ context.Context, who accessBusiness.Subject) ([]named, error) {
+		if who.UserUUID == samID {
+			return []named{{ID: q4ID, Name: "Q4 launch"}}, nil
+		}
+		return nil, nil
+	}
+	myTeams = func(_ context.Context, who accessBusiness.Subject) ([]named, error) {
+		if who.UserUUID == samID {
+			return []named{{ID: financeID, Name: "Finance"}}, nil
+		}
+		return nil, nil
+	}
 	Fields = &registry{byName: map[string]*Field{}, scopes: map[string]ScopeFields{}}
 	registerCore(Fields)
 	Fields.Register(Field{Name: "status", Family: FamilyOption, Sortable: true, Choices: []Choice{{Value: "open"}, {Value: "done", Synonyms: []string{"closed"}}, {Value: "review", Label: "In review"}}})
@@ -543,5 +561,43 @@ func TestANameIsRegisteredOnce(t *testing.T) {
 			}()
 			register()
 		}()
+	}
+}
+
+// A plain name in in: is every place of the asker's called that: a channel
+// they may read, a project or team they're in. One they aren't in reads
+// exactly as a name nothing has.
+func TestAPlainPlaceNameFindsTheAskersPlaces(t *testing.T) {
+	fakeWorld(t)
+	for text, want := range map[string]querySpec.Value{
+		"in:launch":       {ID: launchID, Type: "channel"},
+		`in:"q4 launch"`:  {ID: q4ID, Type: "project"},
+		"in:Finance":      {ID: financeID, Type: "team"},
+		`in:"Q4 launch" `: {ID: q4ID, Type: "project"},
+	} {
+		spec, issues := search(t, text)
+		f := spec.Filter
+		if len(issues) != 0 || f == nil || f.Field != "in" || len(f.Values) != 1 || f.Values[0].ID != want.ID || f.Values[0].Type != want.Type {
+			t.Errorf("%s: %+v %+v; want the %s", text, f, issues, want.Type)
+		}
+	}
+	_, secret := search(t, "in:secret")
+	_, nothing := search(t, "in:nosuch")
+	if len(secret) != 1 || len(nothing) != 1 ||
+		strings.ReplaceAll(secret[0].Message, "secret", "X") != strings.ReplaceAll(nothing[0].Message, "nosuch", "X") || secret[0].Code != nothing[0].Code {
+		t.Errorf("a channel the asker can't read reads differently from none: %+v / %+v", secret, nothing)
+	}
+
+	spec, _ := search(t, `in:"Q4 launch"`)
+	if got := Format(context.Background(), sam, spec); got != `in:"Q4 launch"` {
+		t.Errorf("formatted for Sam: %s", got)
+	}
+	ana := Asker{Subject: accessBusiness.Subject{UserUUID: anaID}, Email: "ana@example.com"}
+	if got := Format(context.Background(), ana, spec); got != `in:"(hidden)"` {
+		t.Errorf("formatted for someone not in the project: %s", got)
+	}
+	// For anyone else the name is its words, as a name nothing has is.
+	if spec, issues := Build(context.Background(), ana, `in:"Q4 launch"`, querySpec.Scope{Kind: querySpec.ScopeSearch}, ModeSearch); len(issues) != 1 || shapeOf(spec.Filter) != "text contains(Q4 launch)" {
+		t.Errorf("someone not in the project: %s %+v", shapeOf(spec.Filter), issues)
 	}
 }

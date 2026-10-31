@@ -32,12 +32,13 @@ const (
 	MqttKindDoc      = "doc"
 	MqttKindBoard    = "board"
 	MqttKindTable    = "table"
+	MqttKindHere     = "here"  // who is on a table, and where (tables A7)
 	MqttKindAdmin    = "admin" // the system admins' broadcast
 )
 
 var mqttKinds = map[string]bool{
 	MqttKindMessage: true, MqttKindTyping: true, MqttKindActivity: true,
-	MqttKindDoc: true, MqttKindBoard: true, MqttKindTable: true, MqttKindAdmin: true,
+	MqttKindDoc: true, MqttKindBoard: true, MqttKindTable: true, MqttKindHere: true, MqttKindAdmin: true,
 }
 
 // fixedIV keeps a thing's topic the same every time it's written. It is also
@@ -149,6 +150,13 @@ func GetMqttTopicForBoard(boardId string) (messageTopicName string) {
 // GetMqttTopicForDoc.
 func GetMqttTopicForTable(tableId string) (messageTopicName string) {
 	return mqttTopic(MqttKindTable, tableId)
+}
+
+// GetMqttTopicForTablePresence returns the topic of who is on a table and
+// where (tables A7): a topic of its own, so a page that doesn't show presence
+// never hears it, and readers of the table may subscribe to it.
+func GetMqttTopicForTablePresence(tableId string) string {
+	return mqttTopic(MqttKindHere, tableId)
 }
 
 // GetMqttTopicForAdminBroadcast returns the topic for system-wide admin

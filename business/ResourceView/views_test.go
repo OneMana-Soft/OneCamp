@@ -15,10 +15,7 @@ type dayRow struct{ kind, id, source, key, day string }
 func fakeViews(t *testing.T, records bool) (*[]string, *[]dayRow) {
 	t.Helper()
 	prev := []any{now, recordsViews, recordView, recordDay, daySalt, pruneDays}
-	byDay := recordsByDay
-	recordsByDay = true // the per-day rules themselves, as beta runs them
 	t.Cleanup(func() {
-		recordsByDay = byDay
 		now = prev[0].(func() time.Time)
 		recordsViews = prev[1].(func(context.Context, string) bool)
 		recordView = prev[2].(func(context.Context, string, string, string) error)

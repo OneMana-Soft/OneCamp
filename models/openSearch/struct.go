@@ -207,6 +207,43 @@ type OpenSearchBoard struct {
 	BoardDeletedAt         *int64   `json:"deleted_date"`
 }
 
+// OpenSearchEvent is a calendar event's entry in global search, written whole
+// from the calendar's one store (business/Calendar searchEntries.go): a series
+// once, never its changed instances, and no event in the trash. The notes, the people it is theirs to see
+// and its guests' names are matched, and never sent back in a hit
+// (business/GlobalSearch engine.go leaves them out of what a search returns).
+type OpenSearchEvent struct {
+	Uuid          string `json:"event_uuid,omitempty"`
+	EventTitle    string `json:"event_title,omitempty"`
+	EventNotes    string `json:"event_notes,omitempty"`
+	EventLocation string `json:"event_location,omitempty"`
+	EventKind     string `json:"event_kind,omitempty"`
+	// When it starts and ends: a timed event's instants, in seconds, kept in
+	// its zone EventZone; an all-day event's dates ("2026-10-29", the end the
+	// day after its last). A series says when its first instance is.
+	EventStart     int64  `json:"event_start,omitempty"`
+	EventEnd       int64  `json:"event_end,omitempty"`
+	EventStartDate string `json:"event_start_date,omitempty"`
+	EventEndDate   string `json:"event_end_date,omitempty"`
+	EventZone      string `json:"event_tz,omitempty"`
+	EventRepeats   bool   `json:"event_repeats"`
+	// Its organiser, or the person whose subscribed calendar it is on.
+	EventOrganiserUuid     string `json:"event_organiser_id,omitempty"`
+	EventOrganiserFullName string `json:"event_organiser_full_name,omitempty"`
+	// EventPeople are those it is theirs to see: its organiser and its member
+	// guests. EventGuestNames are its guests' names, kept only while its
+	// guests may see one another, so a name never tells anyone who else is
+	// invited.
+	EventPeople     []string `json:"event_people"`
+	EventGuestNames []string `json:"event_guest_names"`
+	// The calendar it is on, and the project that calendar is, if any.
+	EventCalendarUuid string `json:"event_calendar_id,omitempty"`
+	EventProjectUuid  string `json:"event_project_id,omitempty"`
+	EventPrivate      bool   `json:"event_private"`
+	EventCreatedAt    int64  `json:"created_date,omitempty"`
+	EventUpdatedAt    int64  `json:"updated_date,omitempty"`
+}
+
 type OpenSearchProject struct {
 	Uuid             string `json:"project_id,omitempty"`
 	ProjectName      string `json:"project_name,omitempty"`
@@ -274,6 +311,7 @@ type GlobalSearchOpenSearchResp struct {
 	Task       *OpenSearchTask       `json:"task,omitempty"`
 	Doc        *OpenSearchDoc        `json:"doc,omitempty"`
 	Board      *OpenSearchBoard      `json:"board,omitempty"`
+	Event      *OpenSearchEvent      `json:"event,omitempty"`
 	User       *OpenSearchUser       `json:"user,omitempty"`
 	Project    *OpenSearchProject    `json:"project,omitempty"`
 	Team       *OpenSearchTeam       `json:"team,omitempty"`
@@ -301,6 +339,8 @@ const (
 	DOC_TYPE         = "doc"
 	BOARD_INDEX      = "boards"
 	BOARD_TYPE       = "board"
+	EVENT_INDEX      = "events"
+	EVENT_TYPE       = "event"
 	CHAT_INDEX       = "chats"
 	CHAT_TYPE        = "chat"
 	POST_INDEX       = "posts"

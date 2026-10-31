@@ -28,6 +28,7 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"net/url"
 	"strings"
 	"time"
 
@@ -54,9 +55,11 @@ var (
 type inviteKind int
 
 const (
-	inviteNew     inviteKind = iota // put on the event
-	inviteChanged                   // the meeting changed
-	inviteAgain                     // asked again for an answer
+	inviteNew         inviteKind = iota // put on the event
+	inviteChanged                       // the meeting changed
+	inviteAgain                         // asked again for an answer
+	inviteCallAdded                     // the meeting changed: its call was added
+	inviteCallRemoved                   // the meeting changed: its call was taken off
 )
 
 // maxNotesInMail is the most of an event's notes an invitation quotes.
@@ -102,7 +105,7 @@ func (s *service) tellOutsiders(ctx context.Context, t telling, send bool) {
 		}
 		s.invite(ctx, t.event, added, inviteNew)
 		if toldAbout(t.changed) {
-			s.invite(ctx, t.event, kept, inviteChanged)
+			s.invite(ctx, t.event, kept, changeKind(t.changed, t.event))
 		}
 		if !t.splitTail {
 			s.cancelFor(ctx, t.event, removed)
@@ -152,6 +155,19 @@ func (s *service) organiserAddress(ctx context.Context, e *models.Event) ICS.Add
 	return a
 }
 
+// changeKind is why a change's invitation is sent: the call added or taken
+// off when that is the change (Add and Remove call), any other change
+// otherwise. Pure.
+func changeKind(changed []string, e *models.Event) inviteKind {
+	if len(changed) != 1 || changed[0] != "call" {
+		return inviteChanged
+	}
+	if e.CallRoom != "" {
+		return inviteCallAdded
+	}
+	return inviteCallRemoved
+}
+
 // mailSequence is an invitation's SEQUENCE at now: 0 for the first, then
 // the seconds since the event was made, so each is newer than the last. Pure.
 func mailSequence(e *models.Event, kind inviteKind, now time.Time) int {
@@ -164,8 +180,18 @@ func mailSequence(e *models.Event, kind inviteKind, now time.Time) int {
 	return 1
 }
 
-// plainNotes is an event's notes as text, for a calendar file and an email.
+// plainNotes is an event's notes as text, for an invitation's calendar file
+// and email: as much as an email quotes.
 func plainNotes(e *models.Event) string {
+	notes := notesAsText(e)
+	if len([]rune(notes)) > maxNotesInMail {
+		notes = string([]rune(notes)[:maxNotesInMail]) + "…"
+	}
+	return notes
+}
+
+// notesAsText is an event's notes as text, all of them.
+func notesAsText(e *models.Event) string {
 	notes := strings.TrimSpace(e.Notes)
 	if e.NotesFormat == notesHTML && notes != "" {
 		doc, err := contentcodec.FromHTML(notes, contentcodec.HTMLOptions{Foreign: true})
@@ -174,21 +200,23 @@ func plainNotes(e *models.Event) string {
 		}
 		notes = strings.TrimSpace(contentcodec.PlainText(doc))
 	}
-	if len([]rune(notes)) > maxNotesInMail {
-		notes = string([]rune(notes)[:maxNotesInMail]) + "…"
-	}
 	return notes
 }
 
 // calendarFile is the event as an iCalendar message for one guest: a single
 // event, or a series with its changed instances, each its own VEVENT; the
-// guest as its one attendee, with their answer.
-func (s *service) calendarFile(ctx context.Context, method string, e *models.Event, guest models.Attendee, organiser ICS.Address, seq int, now time.Time) ([]byte, error) {
+// guest as its one attendee, with their answer. conference is the event's
+// call's plain link (no key: a calendar file is shared and synced), "" for none.
+func (s *service) calendarFile(ctx context.Context, method string, e *models.Event, guest models.Attendee, organiser ICS.Address, seq int, now time.Time, conference string) ([]byte, error) {
 	attendee := ICS.Attendee{Address: ICS.Address{Name: guest.Name, Email: guest.Email}, Optional: guest.Role == roleOptional,
 		PartStat: partStatOf(guest.Response), RSVP: guest.Response == responseNeedsAction}
 	base := func(row *models.Event) ICS.Event {
 		ev := ICS.Event{UID: e.ICalUID, Sequence: seq, Stamp: now, Summary: row.Title, Description: plainNotes(row), Location: row.Location,
-			Organizer: organiser, Attendees: []ICS.Attendee{attendee}, Transparent: row.Transparency == transparencyTransparent}
+			Organizer: organiser, Attendees: []ICS.Attendee{attendee}, Transparent: row.Transparency == transparencyTransparent, Conference: conference}
+		if conference != "" && !strings.Contains(ev.Description, conference) {
+			// Calendars that don't show CONFERENCE still show the notes.
+			ev.Description = strings.TrimSpace(ev.Description + "\n\nJoin the call: " + conference)
+		}
 		if row.AllDay() {
 			ev.StartDate, ev.EndDate = row.StartDate, row.EndDate
 		} else {
@@ -196,33 +224,44 @@ func (s *service) calendarFile(ctx context.Context, method string, e *models.Eve
 		}
 		return ev
 	}
-	master := base(e)
-	msg := ICS.Message{Method: method, Events: []ICS.Event{master}}
 	if e.RRule == "" || method == ICS.Cancel {
-		return ICS.WriteMessage(msg), nil
+		return ICS.WriteMessage(ICS.Message{Method: method, Events: []ICS.Event{base(e)}}), nil
 	}
-	master.RRule, master.Zone = e.RRule, e.TZ
-	master.ExDates = append([]time.Time(nil), e.Exdates...)
 	overrides, err := s.store.overridesOfSeries(ctx, e.ID)
 	if err != nil {
 		return nil, err
 	}
-	var changed []ICS.Event
+	return ICS.WriteMessage(ICS.Message{Method: method, Events: seriesEvents(e, overrides, base)}), nil
+}
+
+// seriesEvents is an event as VEVENTs: a single event alone, or a series in
+// its zone with the instances skipped in it and added to it, and each
+// instance changed on its own (an instance cancelled on its own is skipped).
+// base says what each row holds. Invitations and exports both write events
+// through it. Pure.
+func seriesEvents(e *models.Event, overrides []*models.Event, base func(row *models.Event) ICS.Event) []ICS.Event {
+	master := base(e)
+	if e.RRule == "" {
+		return []ICS.Event{master}
+	}
+	master.RRule, master.Zone = e.RRule, e.TZ
+	master.ExDates = append([]time.Time(nil), e.Exdates...)
+	master.RDates = append([]time.Time(nil), e.Rdates...)
+	out := []ICS.Event{master}
 	for _, o := range overrides {
-		if o.RecurrenceID == nil {
+		if o.RecurrenceID == nil || o.SeriesID == nil || *o.SeriesID != e.ID {
 			continue
 		}
 		if !live(o) {
-			master.ExDates = append(master.ExDates, *o.RecurrenceID)
+			out[0].ExDates = append(out[0].ExDates, *o.RecurrenceID)
 			continue
 		}
 		ov := base(o)
 		rid := *o.RecurrenceID
 		ov.RecurrenceID, ov.Zone = &rid, e.TZ
-		changed = append(changed, ov)
+		out = append(out, ov)
 	}
-	msg.Events = append([]ICS.Event{master}, changed...)
-	return ICS.WriteMessage(msg), nil
+	return out
 }
 
 // partStatOf is a stored answer as iCalendar says it. Pure.
@@ -238,28 +277,42 @@ func partStatOf(response string) string {
 	return ICS.NeedsAction
 }
 
-// linkOf is a guest by email's answer link: theirs, unsealed; or, when it
-// can't be (the server's key changed), a new one, kept for them.
-func (s *service) linkOf(ctx context.Context, e *models.Event, g models.Attendee) (string, error) {
+// linkOf is a guest by email's answer link and its secret, the key that
+// also lets them into the event's call (meet-02): theirs, unsealed; or, when
+// it can't be (the server's key changed), a new one, kept for them.
+func (s *service) linkOf(ctx context.Context, e *models.Event, g models.Attendee) (link, key string, err error) {
 	if raw := helpers.OpenLinkSecret(g.LinkSealed, g.LinkHash); raw != "" {
-		return rsvpURL(raw), nil
+		return rsvpURL(raw), raw, nil
 	}
 	fresh, err := withLink(models.Attendee{Email: g.Email})
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := s.store.setLink(ctx, e.ID, g.Email, fresh.LinkHash, fresh.LinkSealed); err != nil {
-		return "", err
+		return "", "", err
 	}
 	raw, err := helpers.DecryptSecret(fresh.LinkSealed)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return rsvpURL(raw), nil
+	return rsvpURL(raw), raw, nil
 }
 
 // rsvpURL is the guest's page for an answer link's secret.
 func rsvpURL(raw string) string { return authService.FrontendBaseURL() + "/rsvp/" + raw }
+
+// callURL is where an event's call at address (its "/r/<slug>") is joined.
+// With a guest's key it lets them in without knocking: the key rides in the
+// fragment, as the web's lib/calls/invitationKey.ts writes and reads it, so it
+// reaches no server log. Without one (the calendar file, which never carries
+// the key) it is the call's plain link. Pure.
+func callURL(address, key string) string {
+	u := authService.FrontendBaseURL() + address
+	if key == "" {
+		return u
+	}
+	return u + "#invitation=" + url.QueryEscape(key)
+}
 
 // mailWhen is an event's time in an invitation: in its own zone, said ("Thursday
 // 16 October 2026, 10:00–11:00 (Europe/London)"), or its days. Pure.
@@ -281,6 +334,10 @@ func mailWhen(e *models.Event) string {
 func invitationWords(kind inviteKind, organiser string, e *models.Event) (subject, title string) {
 	when := mailWhen(e)
 	switch kind {
+	case inviteCallAdded:
+		return "Updated invitation: " + e.Title + " · " + when, organiser + " added a call to " + e.Title
+	case inviteCallRemoved:
+		return "Updated invitation: " + e.Title + " · " + when, organiser + " removed the call from " + e.Title
 	case inviteChanged:
 		return "Updated invitation: " + e.Title + " · " + when, organiser + " changed " + e.Title
 	case inviteAgain:
@@ -311,14 +368,28 @@ func (s *service) invite(ctx context.Context, e *models.Event, guests []models.A
 			repeats = recurrence.Rules.Describe(r, start, loc)
 		}
 	}
+	// The event's own call while it answers (meet-02): the email's Join call
+	// carries each guest's key, the calendar file the plain link.
+	address := ""
+	if call := s.liveCall(ctx, e.CallRoom); call != nil {
+		address = call.Address
+	}
+	conference := ""
+	if address != "" {
+		conference = callURL(address, "")
+	}
 	for _, g := range guests {
-		link, err := s.linkOf(ctx, e, g)
+		link, key, err := s.linkOf(ctx, e, g)
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "business/Calendar: an invitation's answer link couldn't be made: %v", err)
 			s.inviteState(ctx, e, g.Email, models.InviteFailed)
 			continue
 		}
-		file, err := s.calendarFile(ctx, ICS.Request, e, g, organiser, seq, now)
+		join := ""
+		if address != "" {
+			join = callURL(address, key)
+		}
+		file, err := s.calendarFile(ctx, ICS.Request, e, g, organiser, seq, now, conference)
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "business/Calendar: an invitation's calendar file couldn't be written: %v", err)
 			s.inviteState(ctx, e, g.Email, models.InviteFailed)
@@ -326,7 +397,7 @@ func (s *service) invite(ctx context.Context, e *models.Event, guests []models.A
 		}
 		subject, title := invitationWords(kind, organiser.Name, e)
 		state := models.InviteSent
-		if err := s.mailGuest(ctx, g, organiser, ICS.Request, file, subject, title, e, repeats, link); err != nil {
+		if err := s.mailGuest(ctx, g, organiser, ICS.Request, file, subject, title, e, repeats, link, join); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/Calendar: an invitation wasn't sent: %v", err)
 			state = models.InviteFailed
 		}
@@ -348,14 +419,14 @@ func (s *service) cancelFor(ctx context.Context, e *models.Event, guests []model
 		if g.InviteState != models.InviteSent {
 			continue
 		}
-		file, err := s.calendarFile(ctx, ICS.Cancel, e, g, organiser, seq, now)
+		file, err := s.calendarFile(ctx, ICS.Cancel, e, g, organiser, seq, now, "")
 		if err != nil {
 			helpers.LogErrorWithContext(ctx, "business/Calendar: a cancellation's calendar file couldn't be written: %v", err)
 			continue
 		}
 		subject := "Cancelled: " + e.Title + " · " + mailWhen(e)
 		title := organiser.Name + " cancelled " + e.Title
-		if err := s.mailGuest(ctx, g, organiser, ICS.Cancel, file, subject, title, e, "", ""); err != nil {
+		if err := s.mailGuest(ctx, g, organiser, ICS.Cancel, file, subject, title, e, "", "", ""); err != nil {
 			helpers.LogErrorWithContext(ctx, "business/Calendar: a cancellation wasn't sent: %v", err)
 		}
 	}
@@ -372,7 +443,7 @@ func (s *service) inviteState(ctx context.Context, e *models.Event, email, state
 // mailGuest sends one guest an invitation or a cancellation, with its
 // calendar file, and the answers when link is set.
 func (s *service) mailGuest(ctx context.Context, g models.Attendee, organiser ICS.Address, method string, file []byte,
-	subject, title string, e *models.Event, repeats, link string) error {
+	subject, title string, e *models.Event, repeats, link, join string) error {
 	var b strings.Builder
 	line := func(s string) {
 		if b.Len() > 0 {
@@ -388,6 +459,9 @@ func (s *service) mailGuest(ctx context.Context, g models.Attendee, organiser IC
 	}
 	if notes := plainNotes(e); notes != "" && method != ICS.Cancel {
 		line("<br>" + strings.ReplaceAll(html.EscapeString(notes), "\n", "<br>"))
+	}
+	if join != "" {
+		line(`<br><a href="` + html.EscapeString(join) + `"><strong>Join the call</strong></a>`)
 	}
 	cta := ""
 	if link != "" {

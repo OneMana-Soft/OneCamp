@@ -1,6 +1,6 @@
 package business
 
-// Making tasks, sub-tasks and comments for sources without a request: rules
+// Making tasks, subtasks and comments for sources without a request: rules
 // today, forms and intake after them. Each checks what the person may do in
 // the project or on the task (Work Access's one check, as the handlers do),
 // then makes it through business/Task's own function, so it is logged,
@@ -8,16 +8,21 @@ package business
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Task"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	taskFieldModel "github.com/akashc777/OneCamp/models/postgres/TaskField"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 )
@@ -33,8 +38,24 @@ type NewTask struct {
 	Name        string
 	Description string
 	Priority    string
-	Status      string
-	Label       string
+	// Status is its first status, which meets the project's status rules as
+	// the app's create does (CreateTask): a rule on who or on required fields
+	// refuses in words, and nothing is made. One that wants approval makes it
+	// in the default and asks, and nobody is told so here, so every caller
+	// passes the default (forms To do, a rule's create task none).
+	Status string
+	Label  string
+	// Due is when it is due; nil for no due date.
+	Due *time.Time
+	// Assignee gets the task when they are in the project; someone who isn't
+	// (any more) leaves it unassigned rather than failing whoever sent it.
+	Assignee *dgraphStruct.DgraphUser
+	// Fields are values of the project's task fields, each as the field keeps
+	// it (TaskField Normalize), set as the task is made.
+	Fields map[uuid.UUID]json.RawMessage
+	// Attachments are files the maker uploaded to the project, which go on
+	// the task as it is made; any other is left out (CreateTask's OwnFiles).
+	Attachments []*dgraphStruct.DgraphAttachment
 }
 
 // Seams for tests.
@@ -51,7 +72,22 @@ var (
 	createTask    = taskBusiness.CreateTask
 	createSubTask = taskBusiness.CreateSubTask
 	createComment = taskBusiness.CreateTaskComment
+	inProject     = projectBusiness.HasMember
+	isAgent       = userDomain.IsAgentPrincipal
+	setNewFields  = taskFieldModel.SetNew
 )
+
+// Assignable says whether someone may be given a project's task: one of its
+// people, or an AI teammate (an agent's principal), given work as it is
+// assigned in the app.
+func Assignable(ctx context.Context, userUUID, projectID string) (bool, error) {
+	ok, err := inProject(ctx, userUUID, projectID)
+	if err != nil || ok {
+		return ok, err
+	}
+	id, err := uuid.Parse(userUUID)
+	return err == nil && isAgent(ctx, id), nil
+}
 
 // mayIn checks who may do need in the project.
 func mayIn(ctx context.Context, who *userModels.UserInfo, p *dgraphStruct.DgraphProject, need workAccess.Need) error {
@@ -98,20 +134,45 @@ func MakeTask(ctx context.Context, who *userModels.UserInfo, projectID uuid.UUID
 	if err := mayIn(ctx, who, p, workAccess.NeedCreateTask); err != nil {
 		return uuid.Nil, err
 	}
-	return createTask(ctx, projectID, who, p, nil, adapter.CreateOrUpdateTaskInput{
+	input := adapter.CreateOrUpdateTaskInput{
 		TaskName: name, TaskDescription: in.Description, Priority: in.Priority,
-		Status: in.Status, Label: in.Label, ProjectUuid: projectID.String(),
-	}, nil)
+		Status: in.Status, Label: in.Label, ProjectUuid: projectID.String(), Attachments: in.Attachments,
+	}
+	if in.Due != nil {
+		input.DueDate = in.Due.Format(time.RFC3339)
+	}
+	assignee := in.Assignee
+	if assignee != nil {
+		ok, err := Assignable(ctx, assignee.Uuid, projectID.String())
+		if err != nil {
+			return uuid.Nil, err
+		}
+		if !ok {
+			assignee = nil
+		} else {
+			input.AssigneeUuid = assignee.Uuid
+		}
+	}
+	taskID, err := createTask(ctx, projectID, who, p, assignee, input, nil)
+	if err != nil || len(in.Fields) == 0 {
+		return taskID, err
+	}
+	// The task is made; a field value that didn't stick is logged, not turned
+	// into a failure that would make the task twice on a retry.
+	if err := setNewFields(ctx, taskID, in.Fields, who.UserPostgresInfo.Id); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/TaskWriter MakeTask fields err: %+v", err)
+	}
+	return taskID, nil
 }
 
-// MakeSubTask makes a sub-task under a task as who.
+// MakeSubTask makes a subtask under a task as who.
 func MakeSubTask(ctx context.Context, who *userModels.UserInfo, parent *dgraphStruct.DgraphTask, name string) (*dgraphStruct.DgraphTask, error) {
 	if who == nil || parent == nil || parent.Project == nil {
 		return nil, taskBusiness.ErrTaskNotVisible
 	}
 	name = cleanName(name)
 	if name == "" {
-		return nil, fmt.Errorf("%w: a sub-task needs a name", ErrBadValue)
+		return nil, fmt.Errorf("%w: a subtask needs a name", ErrBadValue)
 	}
 	p, err := projectWithTask(ctx, parent.Project.Uuid, parent.Uuid, who)
 	if err != nil {
@@ -137,6 +198,16 @@ var ErrEmptyComment = errors.New("tasks: a comment needs words")
 
 // Comment comments on a task as who, and answers the comment's id.
 func Comment(ctx context.Context, who *userModels.UserInfo, taskID uuid.UUID, body string) (string, error) {
+	return CommentAs(ctx, who, who, taskID, body)
+}
+
+// CommentAs comments on a task with who's right to (Work Access, as Comment),
+// written as by: a bot that speaks for the work, such as the workspace's
+// assistant answering a rule's question. by never widens what who may do.
+func CommentAs(ctx context.Context, who, by *userModels.UserInfo, taskID uuid.UUID, body string) (string, error) {
+	if by == nil {
+		by = who
+	}
 	body = strings.TrimSpace(body)
 	if body == "" {
 		return "", ErrEmptyComment
@@ -148,7 +219,7 @@ func Comment(ctx context.Context, who *userModels.UserInfo, taskID uuid.UUID, bo
 	if err != nil {
 		return "", err
 	}
-	out, err := createComment(ctx, taskID, task, who, &adapter.CreateOrUpdateTaskCommentInput{
+	out, err := createComment(ctx, taskID, task, by, &adapter.CreateOrUpdateTaskCommentInput{
 		TaskUuid: taskID.String(), CommentBody: body,
 	}, nil)
 	if err != nil {

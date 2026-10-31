@@ -149,6 +149,7 @@ func TestTableRowComments(t *testing.T) {
 	rt.Post("/threads/{thread_id}/comments/{comment_id}/edit", threadController.EditThreadComment)
 	rt.Post("/threads/{thread_id}/comments/{comment_id}/remove", threadController.RemoveThreadComment)
 	rt.Post("/threads/{thread_id}/comments/{comment_id}/react", threadController.ReactToThreadComment)
+	rt.Post("/threads/{thread_id}/comments/{comment_id}/unreact", threadController.UnreactToThreadComment)
 	call := func(who, method, path string, body any, out any) int {
 		t.Helper()
 		raw, _ := json.Marshal(body)
@@ -283,8 +284,15 @@ func TestTableRowComments(t *testing.T) {
 		if code := call("maya", http.MethodPost, edit, map[string]any{"body": "<p>Bo, can you take Acme?</p>"}, &edited); code != http.StatusOK || edited.UpdatedAt == nil {
 			t.Errorf("Maya editing her comment: %d %+v", code, edited)
 		}
-		if code := call("bo", http.MethodPost, "/threads/"+first.ID+"/comments/"+c+"/react", map[string]any{"emoji_id": "thumbs_up"}, nil); code != http.StatusOK {
+		var reacted struct {
+			ID string `json:"reaction_id"`
+		}
+		if code := call("bo", http.MethodPost, "/threads/"+first.ID+"/comments/"+c+"/react", map[string]any{"emoji_id": "thumbs_up"}, &reacted); code != http.StatusOK {
 			t.Errorf("Bo reacting: %d", code)
+		}
+		// His reaction stays: the check after the removal below still finds it.
+		if code := call("maya", http.MethodPost, "/threads/"+first.ID+"/comments/"+c+"/unreact", map[string]any{"reaction_id": reacted.ID}, nil); code != http.StatusNotFound {
+			t.Errorf("Maya taking back Bo's reaction: %d", code)
 		}
 		var reply comment
 		if code := call("bo", http.MethodPost, "/threads/"+first.ID+"/replies", map[string]any{"body": "<p>On it</p>"}, &reply); code != http.StatusOK {

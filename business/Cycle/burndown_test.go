@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	estimateScale "github.com/akashc777/OneCamp/business/EstimateScale"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	cycleModel "github.com/akashc777/OneCamp/models/postgres/Cycle"
 	"github.com/google/uuid"
@@ -30,7 +31,7 @@ func TestBuildBurndown(t *testing.T) {
 		// Done with no record of when: done since it joined.
 		"e": {Status: dgraphStruct.TASK_STATUS_DONE},
 	}
-	b := BuildBurndown(c, members, tasks, at("2026-10-08 12:00"), ist)
+	b := BuildBurndown(c, members, tasks, at("2026-10-08 12:00"), ist, nil)
 
 	if len(b.Days) != 14 || b.Days[0] != "2026-10-05" || b.Days[13] != "2026-10-18" {
 		t.Fatalf("days %v", b.Days)
@@ -66,7 +67,7 @@ func TestBurndownOfACompletedCycleEndsWithWhatItLeft(t *testing.T) {
 		"done":    {Status: dgraphStruct.TASK_STATUS_DONE, Since: &completed},
 		"carried": {Status: dgraphStruct.TASK_STATUS_DONE, Since: &later},
 	}
-	b := BuildBurndown(c, members, tasks, time.Date(2026, 10, 8, 0, 0, 0, 0, utc), utc)
+	b := BuildBurndown(c, members, tasks, time.Date(2026, 10, 8, 0, 0, 0, 0, utc), utc, nil)
 	if len(b.Remaining) != 14 || b.Remaining[13] != 2 {
 		t.Fatalf("remaining %v: both tasks were still open on the last day", b.Remaining)
 	}
@@ -76,7 +77,7 @@ func TestBurndownOfACompletedCycleEndsWithWhatItLeft(t *testing.T) {
 	// Completed early: nothing after the day it was completed.
 	early := start.AddDate(0, 0, 3).Add(9 * time.Hour)
 	c.CompletedAt = &early
-	if b := BuildBurndown(c, members, tasks, time.Date(2026, 10, 8, 0, 0, 0, 0, utc), utc); len(b.Remaining) != 4 {
+	if b := BuildBurndown(c, members, tasks, time.Date(2026, 10, 8, 0, 0, 0, 0, utc), utc, nil); len(b.Remaining) != 4 {
 		t.Errorf("completed on its fourth day: %d days of remaining work, want 4", len(b.Remaining))
 	}
 }
@@ -86,7 +87,7 @@ func TestBurndownBeforeTheCycleStarts(t *testing.T) {
 	c := cycleModel.Cycle{StartsAt: start, EndsAt: start.AddDate(0, 0, 7)}
 	members := []cycleModel.Member{{TaskUUID: "a", AddedAt: start.Add(-time.Hour)}, {TaskUUID: "b", AddedAt: start.Add(-time.Hour)}}
 	tasks := map[string]TaskProgress{"a": {Status: dgraphStruct.TASK_STATUS_TODO}, "b": {Status: dgraphStruct.TASK_STATUS_TODO}}
-	b := BuildBurndown(c, members, tasks, start.Add(-24*time.Hour), time.UTC)
+	b := BuildBurndown(c, members, tasks, start.Add(-24*time.Hour), time.UTC, nil)
 	if len(b.Days) != 7 || len(b.Remaining) != 0 || len(b.Scope) != 0 {
 		t.Fatalf("days %d remaining %v scope %v", len(b.Days), b.Remaining, b.Scope)
 	}
@@ -107,7 +108,7 @@ func TestBurndownDaysAcrossClockChanges(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		b := BuildBurndown(cycleModel.Cycle{StartsAt: s, EndsAt: e}, nil, nil, s, ny)
+		b := BuildBurndown(cycleModel.Cycle{StartsAt: s, EndsAt: e}, nil, nil, s, ny, nil)
 		want := start.AddDate(0, 0, 13).Format(time.DateOnly)
 		if len(b.Days) != 14 || b.Days[0] != start.Format(time.DateOnly) || b.Days[13] != want {
 			t.Errorf("cycle from %s: %d days, %s to %s, want 14 to %s", start.Format(time.DateOnly), len(b.Days), b.Days[0], b.Days[len(b.Days)-1], want)
@@ -141,7 +142,7 @@ func TestBuildVelocity(t *testing.T) {
 	}
 	// Given out of order, as a list might be.
 	cycles[0], cycles[7] = cycles[7], cycles[0]
-	v := BuildVelocity(cycles, members, tasks)
+	v := BuildVelocity(cycles, members, tasks, nil)
 	var numbers, doneCounts []int
 	for _, d := range v.Cycles {
 		numbers = append(numbers, d.Number)
@@ -153,7 +154,7 @@ func TestBuildVelocity(t *testing.T) {
 	if v.Typical == nil || *v.Typical != 7 || v.TypicalHours == nil || *v.TypicalHours != 7 || v.Cycles[0].Unfinished != 2 {
 		t.Errorf("typical %v hours %v unfinished %d", v.Typical, v.TypicalHours, v.Cycles[0].Unfinished)
 	}
-	if v := BuildVelocity(nil, nil, nil); v.Typical != nil || v.Cycles == nil {
+	if v := BuildVelocity(nil, nil, nil, nil); v.Typical != nil || v.Cycles == nil {
 		t.Errorf("no completed cycles: %+v", v)
 	}
 }
@@ -168,7 +169,7 @@ func TestBurndownForAReaderInAnotherZone(t *testing.T) {
 	done := time.Date(2026, 10, 18, 10, 0, 0, 0, london) // still inside the cycle there
 	members := []cycleModel.Member{{TaskUUID: "a", AddedAt: start.Add(-time.Hour)}, {TaskUUID: "b", AddedAt: start.Add(-time.Hour)}}
 	tasks := map[string]TaskProgress{"a": {Status: dgraphStruct.TASK_STATUS_DONE, Since: &done}, "b": {Status: dgraphStruct.TASK_STATUS_TODO}}
-	b := BuildBurndown(c, members, tasks, time.Date(2026, 10, 18, 12, 0, 0, 0, london), london)
+	b := BuildBurndown(c, members, tasks, time.Date(2026, 10, 18, 12, 0, 0, 0, london), london, nil)
 	if len(b.Days) != 15 || b.Days[0] != "2026-10-04" || b.Days[14] != "2026-10-18" {
 		t.Fatalf("%d days, %s to %s, want 15 from 4 to 18 October", len(b.Days), b.Days[0], b.Days[len(b.Days)-1])
 	}
@@ -178,7 +179,7 @@ func TestBurndownForAReaderInAnotherZone(t *testing.T) {
 	// The demo's cycles start at midnight UTC: in New York, a Sunday evening.
 	utc := time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
 	ny, _ := time.LoadLocation("America/New_York")
-	b = BuildBurndown(cycleModel.Cycle{StartsAt: utc, EndsAt: utc.AddDate(0, 0, 14)}, nil, nil, utc, ny)
+	b = BuildBurndown(cycleModel.Cycle{StartsAt: utc, EndsAt: utc.AddDate(0, 0, 14)}, nil, nil, utc, ny, nil)
 	if len(b.Days) != 15 || b.Days[0] != "2026-10-04" || b.Days[14] != "2026-10-18" {
 		t.Errorf("New York: %d days, %s to %s", len(b.Days), b.Days[0], b.Days[len(b.Days)-1])
 	}
@@ -189,7 +190,7 @@ func TestBurndownForAReaderInAnotherZone(t *testing.T) {
 func TestBurndownDaysWhereClocksChangeAtMidnight(t *testing.T) {
 	santiago, _ := time.LoadLocation("America/Santiago")
 	start := time.Date(2026, 8, 31, 0, 0, 0, 0, santiago)
-	b := BuildBurndown(cycleModel.Cycle{StartsAt: start, EndsAt: start.AddDate(0, 0, 14)}, nil, nil, start, santiago)
+	b := BuildBurndown(cycleModel.Cycle{StartsAt: start, EndsAt: start.AddDate(0, 0, 14)}, nil, nil, start, santiago, nil)
 	seen := map[string]bool{}
 	for _, d := range b.Days {
 		if seen[d] {
@@ -219,7 +220,78 @@ func TestVelocityHoursOnlyFromTheCyclesAveraged(t *testing.T) {
 			tasks[id] = TaskProgress{Status: dgraphStruct.TASK_STATUS_DONE}
 		}
 	}
-	if v := BuildVelocity(cycles, members, tasks); v.TypicalHours != nil || v.Typical == nil || *v.Typical != 1 {
+	if v := BuildVelocity(cycles, members, tasks, nil); v.TypicalHours != nil || v.Typical == nil || *v.Typical != 1 {
 		t.Errorf("typical %v, hours %v: no hours from cycles outside the average", v.Typical, v.TypicalHours)
+	}
+}
+
+// linear-05: a project that estimates in points burns them down, a task with
+// none counting as its scale says; one in hours has no point series.
+func TestBurndownCountsPointsOnTheProjectsScale(t *testing.T) {
+	ist, _ := time.LoadLocation("Asia/Kolkata")
+	at := func(s string) time.Time { v, _ := time.ParseInLocation("2006-01-02 15:04", s, ist); return v }
+	ptr := func(v time.Time) *time.Time { return &v }
+	pts := func(v float64) *float64 { return &v }
+	c := cycleModel.Cycle{StartsAt: at("2026-10-05 00:00"), EndsAt: at("2026-10-19 00:00")}
+	members := []cycleModel.Member{
+		{TaskUUID: "a", AddedAt: at("2026-10-01 09:00")},
+		{TaskUUID: "b", AddedAt: at("2026-10-05 10:00")},
+		{TaskUUID: "c", AddedAt: at("2026-10-07 09:00")},
+		{TaskUUID: "e", AddedAt: at("2026-10-05 09:00")},
+	}
+	tasks := map[string]TaskProgress{
+		"a": {Status: dgraphStruct.TASK_STATUS_DONE, Since: ptr(at("2026-10-06 15:00")), Points: pts(3), Hours: 2, HasEstimate: true},
+		"b": {Status: dgraphStruct.TASK_STATUS_INPROGRESS, Points: pts(5)},
+		"c": {Status: dgraphStruct.TASK_STATUS_CANCELED, Since: ptr(at("2026-10-08 10:00"))},
+		"e": {Status: dgraphStruct.TASK_STATUS_DONE},
+	}
+	now := at("2026-10-08 12:00")
+
+	b := BuildBurndown(c, members, tasks, now, ist, &estimateScale.Scale{Kind: "fibonacci", CountUnestimated: true})
+	if !reflect.DeepEqual(b.ScopePoints, []float64{9, 9, 10, 10}) || !reflect.DeepEqual(b.RemainingPoints, []float64{8, 5, 6, 5}) {
+		t.Errorf("points counting the unestimated as one: scope %v remaining %v, want [9 9 10 10] [8 5 6 5]", b.ScopePoints, b.RemainingPoints)
+	}
+	if len(b.IdealPoints) != 14 || b.IdealPoints[0] != 8.4 || b.IdealPoints[13] != 0 || b.Points != 10 || b.Pointed != 2 {
+		t.Errorf("ideal %v points %v pointed %d, want 8.4 down to 0, 10, 2", b.IdealPoints, b.Points, b.Pointed)
+	}
+	// Hours are counted beside points, as before.
+	if !reflect.DeepEqual(b.ScopeHours, []float64{2, 2, 2, 2}) {
+		t.Errorf("hours %v beside the points", b.ScopeHours)
+	}
+
+	b = BuildBurndown(c, members, tasks, now, ist, &estimateScale.Scale{Kind: "fibonacci"})
+	if !reflect.DeepEqual(b.ScopePoints, []float64{8, 8, 8, 8}) || !reflect.DeepEqual(b.RemainingPoints, []float64{8, 5, 5, 5}) || b.Points != 8 {
+		t.Errorf("points with the unestimated counting nothing: scope %v remaining %v total %v", b.ScopePoints, b.RemainingPoints, b.Points)
+	}
+
+	if b := BuildBurndown(c, members, tasks, now, ist, nil); b.ScopePoints != nil || b.RemainingPoints != nil || b.IdealPoints != nil || b.Points != 0 {
+		t.Errorf("a project in hours has no point series: %v %v %v", b.ScopePoints, b.RemainingPoints, b.IdealPoints)
+	}
+}
+
+func TestVelocityCountsPointsOnTheProjectsScale(t *testing.T) {
+	done := func(n int) cycleModel.Cycle {
+		at := time.Date(2026, 9, 7*n, 0, 0, 0, 0, time.UTC)
+		return cycleModel.Cycle{Id: uuid.New(), Number: n, CompletedAt: &at}
+	}
+	pts := func(v float64) *float64 { return &v }
+	one, two := done(1), done(2)
+	members := map[uuid.UUID][]string{one.Id: {"x", "y"}, two.Id: {"z", "w"}}
+	tasks := map[string]TaskProgress{
+		"x": {Status: dgraphStruct.TASK_STATUS_DONE, Points: pts(2)},
+		"y": {Status: dgraphStruct.TASK_STATUS_DONE},
+		"z": {Status: dgraphStruct.TASK_STATUS_DONE, Points: pts(5)},
+		// Cancelled work isn't velocity.
+		"w": {Status: dgraphStruct.TASK_STATUS_CANCELED, Points: pts(8)},
+	}
+	v := BuildVelocity([]cycleModel.Cycle{two, one}, members, tasks, &estimateScale.Scale{Kind: "fibonacci", CountUnestimated: true})
+	if len(v.Cycles) != 2 || v.Cycles[0].DonePoints == nil || *v.Cycles[0].DonePoints != 3 || *v.Cycles[1].DonePoints != 5 {
+		t.Fatalf("done points %+v, want 3 then 5", v.Cycles)
+	}
+	if v.TypicalPoints == nil || *v.TypicalPoints != 4 {
+		t.Fatalf("typical points %v, want 4", v.TypicalPoints)
+	}
+	if v := BuildVelocity([]cycleModel.Cycle{two, one}, members, tasks, nil); v.TypicalPoints != nil || v.Cycles[0].DonePoints != nil {
+		t.Fatal("a project in hours has no points in its velocity")
 	}
 }

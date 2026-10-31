@@ -116,8 +116,7 @@ func TestAPersonsChangesReachTheirOwnNode(t *testing.T) {
 	if o := read().Doc[0].Owner; o.Uid != own {
 		t.Errorf("the doc's owner: %s; want Pia's own node %s", o.Uid, own)
 	}
-	if _, err := docDomain.WriteCollabSave(ctx, docDomain.CollabWrite{DocUUID: doc.String(), Body: "<p>Ship on Friday</p>",
-		Snippet: "Ship on Friday", State: "c3RhdGU=", Hash: "h1", Lineage: "L1", EditorUUID: pia.String(), At: time.Now()}); err != nil {
+	if err := docDomain.TouchDoc(ctx, doc.String(), pia.String(), time.Now()); err != nil {
 		t.Fatalf("Pia's change to the doc: %v", err)
 	}
 	if by := read().Doc[0].By; by.Uid != own {

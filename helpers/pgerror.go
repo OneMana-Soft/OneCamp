@@ -26,6 +26,9 @@ const pgUniqueViolation = "23505"
 // message you wrote.
 func IsUniqueViolation(err error) bool { return pgErrorCodeIs(err, pgUniqueViolation) }
 
+// IsQueryCanceled is whether Postgres stopped a statement: its statement_timeout, or a cancel.
+func IsQueryCanceled(err error) bool { return pgErrorCodeIs(err, "57014") }
+
 // IsUniqueViolationOn reports whether err is Postgres refusing a duplicate
 // value for the one unique constraint named (booking_pages_slug_key), so a
 // handler names the clash it knows ("another page uses that address") and

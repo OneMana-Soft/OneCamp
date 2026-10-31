@@ -19,6 +19,8 @@ import { read, render } from './ops/read.js'
 import { closePeople, reauth } from './ops/reauth.js'
 import { applyProposal } from './ops/applyProposal.js' // A9
 import { setTaskChecks } from './ops/taskChecks.js' // C1
+import { placeSubpage, removeSubpage } from './ops/subpages.js' // C7a
+import { guestsBegin, guestsSnapshot, undoGuests } from './ops/guestStrokes.js' // calls B
 
 export const LIVE_ROUTES = new Map([
     ['append', append],
@@ -31,12 +33,17 @@ export const LIVE_ROUTES = new Map([
     ['render', render],
     ['applyProposal', applyProposal], // A9: edit proposals
     ['setTaskChecks', setTaskChecks], // C1: a task done elsewhere ticks its to-dos
+    ['removeSubpage', removeSubpage], // C7a: a moved page's block leaves the parent it left
+    ['placeSubpage', placeSubpage], // C7a: and lands at the end of the one it went to
 ])
 
 // A board's ops, at /live/boards/<uuid>/<op> (its document is board:<uuid>):
-// only asking again who may be on it, as its canvas is no doc.
+// asking again who may be on it, and a call's guests' drawing (calls B).
 export const BOARD_ROUTES = new Map([
     ['reauth', reauth],
+    ['guestsSnapshot', guestsSnapshot],
+    ['guestsBegin', guestsBegin],
+    ['undoGuests', undoGuests],
 ])
 
 // Ops about people rather than one doc or board, at /live/people/<op>: who is

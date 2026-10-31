@@ -90,7 +90,7 @@ func replyIn(t *testing.T, levels map[string]string, repliers []string, message 
 	for _, m := range mentioned {
 		ms = append(ms, &dgraphStruct.DgraphUser{Uuid: m})
 	}
-	notifyChatThreadReply(time.Now(), "c1", "<p>on it</p>", &dgraphStruct.DgraphUser{Uuid: writer, UserName: "w"}, "grp", ms, message)
+	notifyChatThreadReply(time.Now(), "c1", "<p>on it</p>", &dgraphStruct.DgraphUser{Uuid: writer, UserName: "w"}, "grp", ms, message, false)
 	return got
 }
 
@@ -154,7 +154,7 @@ func TestAThreadReplyWhoseAudienceFailsTellsNobody(t *testing.T) {
 	threadLevels = func(context.Context, string, []string) (map[string]string, error) { return nil, errors.New("down") }
 	var pushed bool
 	deliverTo = func(context.Context, []string, map[string]string, string) { pushed = true }
-	notifyChatThreadReply(time.Now(), "c1", "<p>x</p>", &dgraphStruct.DgraphUser{Uuid: jonas}, "grp", nil, group(maya, maya, jonas))
+	notifyChatThreadReply(time.Now(), "c1", "<p>x</p>", &dgraphStruct.DgraphUser{Uuid: jonas}, "grp", nil, group(maya, maya, jonas), false)
 	if pushed {
 		t.Error("told someone with no audience")
 	}

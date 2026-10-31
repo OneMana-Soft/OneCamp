@@ -94,17 +94,44 @@ func TestAutomationRulesFollowCustomStatuses(t *testing.T) {
 		if err := UpdateAutomationRulesAndInvalidate(ctx, link.Id, `{"approved":"`+qa.ID.String()+`","changes_requested":"`+blocked.ID.String()+`"}`); err != nil {
 			t.Fatal(err)
 		}
-		if err := taskStatusBusiness.Delete(ctx, project, qa.ID, blocked.ID.String()); err != nil {
+		if err := taskStatusBusiness.Delete(ctx, project, qa.ID, blocked.ID.String(), uuid.Nil); err != nil {
 			t.Fatal(err)
 		}
 		if got := rulesOf(); got["approved"] != blocked.ID.String() || got["changes_requested"] != blocked.ID.String() {
 			t.Fatalf("after deleting QA into Blocked: %v", got)
 		}
-		if err := taskStatusBusiness.Delete(ctx, project, blocked.ID, ""); err != nil {
+		if err := taskStatusBusiness.Delete(ctx, project, blocked.ID, "", uuid.Nil); err != nil {
 			t.Fatal(err)
 		}
 		if got := rulesOf(); got["approved"] != "inProgress" || got["changes_requested"] != "inProgress" {
 			t.Fatalf("after deleting Blocked back to its category: %v", got)
+		}
+	})
+
+	t.Run("restoring the status points back the rules its delete moved, unless they moved on", func(t *testing.T) {
+		review, err := taskStatusBusiness.Create(ctx, project, user, taskStatusBusiness.Input{Name: "Review", Category: "inReview"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Two rules on Review, and one already where its tasks will go.
+		if err := UpdateAutomationRulesAndInvalidate(ctx, link.Id, `{"approved":"`+review.ID.String()+`","review_requested":"`+review.ID.String()+`","pr_merged":"inReview"}`); err != nil {
+			t.Fatal(err)
+		}
+		if err := taskStatusBusiness.Delete(ctx, project, review.ID, "", user); err != nil {
+			t.Fatal(err)
+		}
+		if got := rulesOf(); got["approved"] != "inReview" || got["review_requested"] != "inReview" || got["pr_merged"] != "inReview" {
+			t.Fatalf("after deleting Review: %v", got)
+		}
+		// Someone points one of them elsewhere before the restore.
+		if err := UpdateAutomationRulesAndInvalidate(ctx, link.Id, `{"approved":"inReview","review_requested":"done","pr_merged":"inReview"}`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := taskStatusBusiness.Restore(ctx, review.ID); err != nil {
+			t.Fatal(err)
+		}
+		if got := rulesOf(); got["approved"] != review.ID.String() || got["review_requested"] != "done" || got["pr_merged"] != "inReview" {
+			t.Fatalf("after its restore the rule its delete moved is back on Review; the one moved on since and the one already there stay: %v", got)
 		}
 	})
 }

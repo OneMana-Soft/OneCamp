@@ -18,26 +18,17 @@ import (
 // anyone else is refused in words, before anything is written.
 //
 // Three things keep their ways. A task in no project is its maker's own, with
-// no admin's boundary: it goes to any member of the workspace, not to an
-// identity that can't sign in. A bot is given work by assignment, as before.
-// And a data move (DataMove: GitHub's sync, an import's re-check), made by
-// someone with the right to make it, brings its people with it.
+// no admin's boundary: it goes to any active member of the workspace, not to an
+// identity that can't sign in. A bot is given work by assignment (an AI
+// teammate picks up what it's given), as before. And a data move (DataMove: an
+// import, a template's apply, the demo's seed, GitHub's sync), made by someone
+// with the right to make it, brings its people with it.
 
 // Seams for tests.
 var (
 	seeingOf     = domain.SeeingOf
 	membersAmong = projectDomain.MembersAmong
 )
-
-type dataMoveKey struct{}
-
-// DataMove marks an assignment made as a move of data that has its people
-// already (GitHub's sync, an import's re-check), by someone with the right to
-// make it: the assignee it brings isn't a person's hand-over, so Unseeing
-// isn't asked.
-func DataMove(ctx context.Context) context.Context {
-	return context.WithValue(ctx, dataMoveKey{}, true)
-}
 
 // Unseeing is the refusal (a conflict, in words) for giving the task (taskID,
 // as task has it now) to to: nil when to may read it already, is its assignee
@@ -98,9 +89,9 @@ func refusalFor(s domain.Seeing, to *dgraphStruct.DgraphUser) error {
 	return helpers.Conflict(nameOf(to)+" can't see this task. Add them to the project first.", nil)
 }
 
-// outsideProjects is a task in no project: a member of the workspace may be
-// given it; an identity that can't sign in (an imported author, an unmapped
-// GitHub account) isn't one.
+// outsideProjects is a task in no project: an active member of the workspace
+// may be given it (a deactivated one is refused by Unassignable); an identity
+// that can't sign in (an imported author, an unmapped GitHub account) isn't one.
 func outsideProjects(to *dgraphStruct.DgraphUser) error {
 	if to.IsExternal {
 		return helpers.Conflict(nameOf(to)+" can't be given a task outside a project: they aren't a member of this workspace.", nil)

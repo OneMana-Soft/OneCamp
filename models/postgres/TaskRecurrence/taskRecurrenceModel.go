@@ -7,7 +7,9 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // TaskRecurrence is how a task repeats (migrations 175, 200).
@@ -66,6 +68,30 @@ func Set(taskUUID uuid.UUID, rule, mode, timeZone string, anchorDay int, created
 		   SET rule = EXCLUDED.rule, mode = EXCLUDED.mode, time_zone = EXCLUDED.time_zone,
 		       anchor_day = EXCLUDED.anchor_day, updated_at = NOW()
 		RETURNING `+columns, taskUUID, rule, mode, timeZone, anchorDay, createdBy))
+}
+
+// ScheduledFor is the repeats on a schedule of these tasks, in one read: the
+// asker's open tasks that a calendar can show ahead (calendar head 9). A
+// repeat after completion has no dates until its task is done.
+func ScheduledFor(tasks []string) ([]TaskRecurrence, error) {
+	if len(tasks) == 0 {
+		return []TaskRecurrence{}, nil
+	}
+	ctx, cancel := withTimeout()
+	defer cancel()
+	out, err := pgexec.Query(ctx,
+		`SELECT `+columns+` FROM task_recurrences WHERE mode = $1 AND task_uuid = ANY($2::uuid[])`,
+		func(row pgexec.Row) (TaskRecurrence, error) {
+			r, err := scan(row)
+			if err != nil {
+				return TaskRecurrence{}, err
+			}
+			return *r, nil
+		}, ModeSchedule, pq.Array(tasks))
+	if out == nil && err == nil {
+		out = []TaskRecurrence{}
+	}
+	return out, err
 }
 
 // Delete stops the task repeating.

@@ -17,7 +17,9 @@ var graphUID = regexp.MustCompile(`^0x[0-9a-f]+$`)
 // GetDgraphEventsPage is the next first Event nodes after the node uid after
 // ("" from the start), in uid order: every event the graph holds, a page at a
 // time, for the move into the calendar's one store. Each comes with its
-// organiser's and guests' uuids.
+// organiser's and guests' uuids, and its deletion time: the move skips a
+// deleted one, whose row takes it to the trash. The page isn't filtered, so
+// Dgraph still stops at first.
 func GetDgraphEventsPage(ctx context.Context, after string, first int) ([]*dgraphStruct.DgraphEvent, error) {
 	from := ""
 	if after != "" {
@@ -39,6 +41,7 @@ func GetDgraphEventsPage(ctx context.Context, after string, first int) ([]*dgrap
 			event_is_away
 			event_created_at
 			event_updated_at
+			event_deleted_at
 			event_created_by { user_uuid }
 			event_participants { user_uuid }
 		}

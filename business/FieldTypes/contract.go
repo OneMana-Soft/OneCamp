@@ -44,6 +44,27 @@ type Kind struct {
 	Convert func(v any, signs formula.NumberSigns) (out any, kept bool, cleared int)
 	// NoDefault is a kind whose cells a new row can't start with.
 	NoDefault bool
+	// Config is the kind's settings in a field's config as stored, or why
+	// they can't be (a rating's most stars, an id's prefix, a duration's
+	// format, a status's options in their groups): it is given the config as
+	// sent, before its options are planned, and gives it back as kept. Nil
+	// for a kind with no settings of its own.
+	Config func(cfg map[string]any) (map[string]any, error)
+	// FromRow is, for a kind worked out from the row itself and never stored
+	// (its number, when it was made and changed, and by whom), the cell a
+	// row shows: a number, a time (RFC 3339), or a person as a link
+	// ([]ItemRef of one), which each read names.
+	FromRow func(f *model.Field, r *model.Row) any
+}
+
+// ConfigFor is a field's config as its kind keeps it (Kind.Config), or the
+// config as it is for a kind with no settings.
+func (r *Registry) ConfigFor(kind string, cfg map[string]any) (map[string]any, error) {
+	k, ok := r.Lookup(kind)
+	if !ok || k.Config == nil {
+		return cfg, nil
+	}
+	return k.Config(cfg)
 }
 
 // Input is how a write's cells came.
@@ -61,6 +82,10 @@ type Input struct {
 	// a cell edit as its copy of the whole row, and a cell stored before
 	// writes were checked mustn't make that edit fail.
 	Unchanged map[string]any
+	// Files says which of ids are files of the row's table (an attachment
+	// whose place is the table); nil refuses every file, as a writer that
+	// can't ask mustn't name another place's.
+	Files func(ids []string) (map[string]bool, error)
 }
 
 func (in Input) signs() formula.NumberSigns {

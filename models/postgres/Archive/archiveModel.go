@@ -45,6 +45,9 @@ type ArchiveJob struct {
 	ErrorMessage   *string    `json:"error_message,omitempty"`
 	TriggeredBy    *uuid.UUID `json:"triggered_by,omitempty"`
 	CreatedAt      time.Time  `json:"created_at"`
+	// Undoing is whether its undo is at work now (beingUndone): the card shows
+	// it restoring and offers no Undo.
+	Undoing bool `json:"undoing,omitempty"`
 }
 
 const policyColumns = `id, entity_type, retention_days, auto_archive, archive_completed_tasks, archive_inactive_channels_days, compress_attachments, purge_after_days, purged_count, purged_bytes, last_purged_at, created_at, updated_at`
@@ -142,21 +145,61 @@ func UndoJob(ctx context.Context, jobId uuid.UUID) (entityType, status string, m
 	return r.t, r.s, r.m, found, err
 }
 
-// MarkJobUndone records that a run was undone.
-func MarkJobUndone(ctx context.Context, jobId uuid.UUID) error {
-	_, err := pgexec.Exec(ctx, `UPDATE archive_jobs SET status = 'cancelled', metadata = jsonb_build_object('restored', true) WHERE id = $1`, jobId)
+// UndoDeadline bounds an undo once it has begun (business/Archive
+// UndoArchiveJob): past it, the undo's own context ends.
+const UndoDeadline = 30 * time.Minute
+
+// beingUndone is the SQL for "its undo is at work now": partial, with an undo
+// that began less than UndoDeadline ago and hasn't finished. deadline is the
+// placeholder that carries UndoDeadline in seconds. An undo that stopped has
+// no start (FinishUndo clears it), or an older one when its server went down
+// mid-way.
+func beingUndone(deadline string) string {
+	return `(status = 'partial' AND COALESCE(undo_started_at > NOW() - ` + deadline + `::float8 * INTERVAL '1 second', false))`
+}
+
+// ClaimUndo marks a run as being undone ("partial": part of it may be back
+// from here on), when it is completed, or partly undone and not being undone
+// now. claimed is false otherwise: being undone by another request (see
+// UndoUnderWay), undone meanwhile, or never completed.
+func ClaimUndo(ctx context.Context, jobId uuid.UUID) (claimed bool, err error) {
+	_, claimed, err = pgexec.QueryOne(ctx, `
+		UPDATE archive_jobs SET status = 'partial', error_message = NULL, undo_started_at = NOW()
+		WHERE id = $1 AND status IN ('completed', 'partial') AND NOT `+beingUndone("$2")+` RETURNING id`,
+		func(r pgexec.Row) (id uuid.UUID, err error) { err = r.Scan(&id); return }, jobId, UndoDeadline.Seconds())
+	return claimed, err
+}
+
+// UndoUnderWay is whether the run's undo is at work now: what a refused claim
+// waits for.
+func UndoUnderWay(ctx context.Context, jobId uuid.UUID) (bool, error) {
+	return pgexec.Scalar[bool](ctx, `SELECT EXISTS(SELECT 1 FROM archive_jobs WHERE id = $1 AND `+beingUndone("$2")+`)`, jobId, UndoDeadline.Seconds())
+}
+
+// FinishUndo records how an undo claimed by ClaimUndo ended: undone
+// ("cancelled", restored), or, on failure, still partly undone with why, and
+// no longer at work, so Undo can finish it.
+func FinishUndo(ctx context.Context, jobId uuid.UUID, failure error) error {
+	if failure != nil {
+		_, err := pgexec.Exec(ctx, `UPDATE archive_jobs SET error_message = $2, undo_started_at = NULL WHERE id = $1 AND status = 'partial'`, jobId, failure.Error())
+		return err
+	}
+	_, err := pgexec.Exec(ctx, `
+		UPDATE archive_jobs SET status = 'cancelled', error_message = NULL, undo_started_at = NULL, metadata = jsonb_build_object('restored', true)
+		WHERE id = $1 AND status = 'partial'`, jobId)
 	return err
 }
 
 // ListJobs is the 50 newest runs.
 func ListJobs(ctx context.Context) ([]*ArchiveJob, error) {
 	return pgexec.Query(ctx, `
-		SELECT id, entity_type, status, started_at, completed_at, items_processed, items_archived, items_failed, error_message, triggered_by, created_at
+		SELECT id, entity_type, status, started_at, completed_at, items_processed, items_archived, items_failed, error_message, triggered_by, created_at,
+			`+beingUndone("$1")+`
 		FROM archive_jobs ORDER BY created_at DESC LIMIT 50`, func(r pgexec.Row) (*ArchiveJob, error) {
 		var j ArchiveJob
-		err := r.Scan(&j.Id, &j.EntityType, &j.Status, &j.StartedAt, &j.CompletedAt, &j.ItemsProcessed, &j.ItemsArchived, &j.ItemsFailed, &j.ErrorMessage, &j.TriggeredBy, &j.CreatedAt)
+		err := r.Scan(&j.Id, &j.EntityType, &j.Status, &j.StartedAt, &j.CompletedAt, &j.ItemsProcessed, &j.ItemsArchived, &j.ItemsFailed, &j.ErrorMessage, &j.TriggeredBy, &j.CreatedAt, &j.Undoing)
 		return &j, err
-	})
+	}, UndoDeadline.Seconds())
 }
 
 // ArchivedCounts is how many posts, chats, tasks and attachments are
@@ -185,8 +228,6 @@ var restoreSet = map[string]string{
 	"attachments": "deleted_at = NULL",
 }
 
-func scanText(r pgexec.Row) (s string, err error) { err = r.Scan(&s); return }
-
 // ArchiveBefore soft-deletes a table's live rows made before cutoff and
 // answers the ids it took, in one statement: it read the ids and then
 // updated by the same predicate, so a row deleted (or restored) between the
@@ -196,7 +237,7 @@ func ArchiveBefore(ctx context.Context, table string, cutoff time.Time) ([]strin
 	if !ok {
 		return nil, fmt.Errorf("archive: no such table %q", table)
 	}
-	return pgexec.Query(ctx, fmt.Sprintf(`UPDATE %s SET %s WHERE created_at < $1 AND deleted_at IS NULL RETURNING id::text`, table, set), scanText, cutoff)
+	return pgexec.Query(ctx, fmt.Sprintf(`UPDATE %s SET %s WHERE created_at < $1 AND deleted_at IS NULL RETURNING id::text`, table, set), pgexec.Text, cutoff)
 }
 
 // ArchiveTasksIn soft-deletes these live tasks made before cutoff.
@@ -204,7 +245,7 @@ func ArchiveTasksIn(ctx context.Context, cutoff time.Time, ids []string) ([]stri
 	return pgexec.Query(ctx, `
 		UPDATE tasks SET deleted_at = NOW(), updated_at = NOW()
 		WHERE id = ANY($2::uuid[]) AND created_at < $1 AND deleted_at IS NULL
-		RETURNING id::text`, scanText, cutoff, pq.Array(ids))
+		RETURNING id::text`, pgexec.Text, cutoff, pq.Array(ids))
 }
 
 // Restore brings these soft-deleted rows of a table back and answers which.
@@ -213,7 +254,16 @@ func Restore(ctx context.Context, table string, ids []string) ([]string, error) 
 	if !ok {
 		return nil, fmt.Errorf("restore: no such table %q", table)
 	}
-	return pgexec.Query(ctx, fmt.Sprintf(`UPDATE %s SET %s WHERE id = ANY($1::uuid[]) AND deleted_at IS NOT NULL RETURNING id::text`, table, set), scanText, pq.Array(ids))
+	return pgexec.Query(ctx, fmt.Sprintf(`UPDATE %s SET %s WHERE id = ANY($1::uuid[]) AND deleted_at IS NOT NULL RETURNING id::text`, table, set), pgexec.Text, pq.Array(ids))
+}
+
+// Live is which of these rows of a table are live (not soft-deleted): what a
+// restore of them has brought back, by this call or an earlier one.
+func Live(ctx context.Context, table string, ids []string) ([]string, error) {
+	if !Archivable(table) {
+		return nil, fmt.Errorf("restore: no such table %q", table)
+	}
+	return pgexec.Query(ctx, fmt.Sprintf(`SELECT id::text FROM %s WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`, table), pgexec.Text, pq.Array(ids))
 }
 
 // Archived is one soft-deleted row and when.

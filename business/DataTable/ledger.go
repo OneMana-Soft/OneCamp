@@ -248,7 +248,7 @@ func rowsChanged(t *model.DataTable, cs *model.ChangeSet) map[string]interface{}
 // (more: open views read the table again), and whether rows moved (moved:
 // they read it again too, as rows changed places). Pure.
 func liveChanged(cs *model.ChangeSet) map[string]interface{} {
-	created, updated, deleted, restored, _ := rowsByEvent(cs)
+	created, updated, deleted, restored, fieldsOf := rowsByEvent(cs)
 	left := rowsTold
 	take := func(rows []uuid.UUID) []string {
 		out := []string{}
@@ -272,6 +272,19 @@ func liveChanged(cs *model.ChangeSet) map[string]interface{} {
 	if len(created)+len(updated)+len(deleted)+len(restored) > rowsTold {
 		msg["more"] = true
 	}
+	// Each named changed row's fields, so an open view fetches those rows
+	// alone (GET rows?ids=) and knows which cells to mark; ids only, never
+	// values, as every reader of the topic gets the same message. By and at
+	// say who made the change and when, the version a reader holds it at.
+	fields := map[string][]string{}
+	for _, id := range msg["updated"].([]string) {
+		if f := fieldsOf[uuid.MustParse(id)]; len(f) > 0 {
+			fields[id] = f
+		}
+	}
+	msg["fields"] = fields
+	msg["by"] = actorUUID(cs)
+	msg["at"] = cs.At.UTC().Format(time.RFC3339Nano)
 	// Rows moved: their places changed, which open views read again whole.
 	for _, c := range cs.Changes {
 		if c.Field == model.FieldPosition {

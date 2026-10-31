@@ -99,6 +99,19 @@ ThreadText
 # Shared with the AI edition, called there only by AI features (synced from
 # main by scripts/aistrip on 6 Oct 2026). Kept so the shared files stay
 # identical to main's; deleting them here would re-create the drift.
+# The AI column fill's shared model (models/postgres/DataTable/aiFills.go; table 509 is
+# on both lines): only the AI edition's fill calls these (v1.61.0, 30 Oct 2026).
+AdvanceAIFill
+CountRowsToFill
+RecentAIFills
+RowsToFill
+RowsToFillAfter
+StartAIFill
+StartChangeSet
+StopAIFill
+# Read only by the AI edition's agents (business/AIAgent agentEventAccess, and the webhook hand-off's
+# origin for them; this edition's hand-off carries GitHub alone) (v1.61.0, 30 Oct 2026).
+IsPublicSubmission
 DispatchMemoryDigestTestNow
 SearchPeople
 RotateSecret
@@ -121,7 +134,6 @@ CreateDoc
 #   AI project-update routes' project check. WithActsThroughToken: an agent run a token asked
 #   for (agentRequester.go). WriteAICell: an AI column's fill.
 TextRefs
-RequireID
 WithActsThroughToken
 WriteAICell
 
@@ -138,7 +150,6 @@ business/CodeSandbox.Run
 business/ContentCodec.Blocks
 business/Onboarding.Register
 business/Poll.Summary
-business/UserFCMToken.GetFCMTokenByUserId
 business/Webhook.SetAppContext
 domain/LastSeenChannel.GetLastSeenChannel
 domain/LastSeenChat.GetLastSeenChat
@@ -160,10 +171,8 @@ models/redis/store.ZRevRangeWithScores
 business/ApiToken.HashToken
 business/ApiToken.ToolsForScopes
 business/Channel.GetDgraphChannelInfoByUUID
-business/LiveKit.MayOpenConversation
 business/WorkGraph.ExpandFor
 domain/User.UserNamesByDgraphUIDs
-helpers.LoadMap
 models/dgraph/WorkspaceMemory.DeleteMemoryItems
 models/postgres/WorkspaceMemory.ClearOwners
 models/postgres/WorkspaceMemory.SoftDeleteMany

@@ -8,7 +8,6 @@ package business
 import (
 	"bytes"
 	"context"
-	"encoding/csv"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -134,18 +133,32 @@ func ExportEntries(ctx context.Context, category string, from, to *time.Time) ([
 	return auditModel.ListForExport(ctx, category, from, to)
 }
 
-// EntriesToCSV renders audit entries as CSV, including the chain hash per row so
-// the export is independently verifiable.
+// EntriesToCSV renders audit entries as CSV for reading in a spreadsheet. Each
+// row carries its hash and the one before it, so the chain's order can be
+// followed, but the chain is verified from the JSON export: the CSV cuts
+// created_at to seconds, leaves actor_id out, and marks a cell that starts like
+// a formula. It starts with the byte order mark, and every cell goes through
+// helpers.CSVCell: a summary, an email or metadata someone else wrote that
+// starts like a formula reads as text when an admin opens the file, never runs.
 func EntriesToCSV(entries []*auditModel.AuditEntry) ([]byte, error) {
 	var buf bytes.Buffer
-	cw := csv.NewWriter(&buf)
-	_ = cw.Write([]string{"seq", "id", "created_at", "actor_email", "action", "category", "summary", "metadata", "ip_address", "entry_hash", "prev_hash"})
+	cw, err := helpers.NewCSVWriter(&buf)
+	if err != nil {
+		return nil, err
+	}
+	write := func(cells ...string) {
+		for i, c := range cells {
+			cells[i] = helpers.CSVCell(c)
+		}
+		_ = cw.Write(cells)
+	}
+	write("seq", "id", "created_at", "actor_email", "action", "category", "summary", "metadata", "ip_address", "entry_hash", "prev_hash")
 	for _, e := range entries {
 		meta := ""
 		if e.Metadata != nil {
 			meta = *e.Metadata
 		}
-		_ = cw.Write([]string{
+		write(
 			strconv.FormatInt(e.Seq, 10),
 			e.Id.String(),
 			e.CreatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
@@ -157,7 +170,7 @@ func EntriesToCSV(entries []*auditModel.AuditEntry) ([]byte, error) {
 			e.IPAddress,
 			e.EntryHash,
 			e.PrevHash,
-		})
+		)
 	}
 	cw.Flush()
 	if err := cw.Error(); err != nil {

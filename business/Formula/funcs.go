@@ -23,6 +23,10 @@ type function struct {
 	lazy        func(e *env, args []node) Value
 	eager       func(e *env, args []Value) Value
 	takesErrors bool
+	// cost is the steps a call takes beyond its arguments and the text it
+	// goes through: the fixed work of reading a date on a clock, or a
+	// layout (measured, as TestNewFunctionsAreCharged holds).
+	cost int
 }
 
 func (f *function) arity() string {
@@ -89,15 +93,15 @@ var functions = map[string]*function{
 	"REPT":        {min: 2, max: 2, result: KindText, eager: fnRept},
 
 	// Dates
-	"TODAY":         {min: 0, max: 0, result: KindDate, eager: func(e *env, _ []Value) Value { return Date(e.now.In(e.loc), true) }},
-	"NOW":           {min: 0, max: 0, result: KindDate, eager: func(e *env, _ []Value) Value { return e.local(Date(e.now, false)) }},
-	"YEAR":          {min: 1, max: 1, result: KindNumber, eager: datePart("YEAR", func(t time.Time) int { return t.Year() })},
-	"MONTH":         {min: 1, max: 1, result: KindNumber, eager: datePart("MONTH", func(t time.Time) int { return int(t.Month()) })},
-	"DAY":           {min: 1, max: 1, result: KindNumber, eager: datePart("DAY", func(t time.Time) int { return t.Day() })},
-	"WEEKDAY":       {min: 1, max: 1, result: KindNumber, eager: datePart("WEEKDAY", func(t time.Time) int { return int(t.Weekday()) })},
-	"DATEADD":       {min: 3, max: 3, result: KindDate, eager: fnDateAdd},
-	"DATETIME_DIFF": {min: 2, max: 3, result: KindNumber, eager: fnDatetimeDiff},
-	"WORKDAY_DIFF":  {min: 2, max: 2, result: KindNumber, eager: fnWorkdayDiff},
+	"TODAY":         {min: 0, max: 0, result: KindDate, cost: dateCost, eager: func(e *env, _ []Value) Value { return Date(e.now.In(e.loc), true) }},
+	"NOW":           {min: 0, max: 0, result: KindDate, cost: dateCost, eager: func(e *env, _ []Value) Value { return e.local(Date(e.now, false)) }},
+	"YEAR":          {min: 1, max: 1, result: KindNumber, cost: dateCost, eager: datePart("YEAR", func(t time.Time) int { return t.Year() })},
+	"MONTH":         {min: 1, max: 1, result: KindNumber, cost: dateCost, eager: datePart("MONTH", func(t time.Time) int { return int(t.Month()) })},
+	"DAY":           {min: 1, max: 1, result: KindNumber, cost: dateCost, eager: datePart("DAY", func(t time.Time) int { return t.Day() })},
+	"WEEKDAY":       {min: 1, max: 1, result: KindNumber, cost: dateCost, eager: datePart("WEEKDAY", func(t time.Time) int { return int(t.Weekday()) })},
+	"DATEADD":       {min: 3, max: 3, result: KindDate, cost: dateCost, eager: fnDateAdd},
+	"DATETIME_DIFF": {min: 2, max: 3, result: KindNumber, cost: dateCost, eager: fnDatetimeDiff},
+	"WORKDAY_DIFF":  {min: 2, max: 3, result: KindNumber, cost: dateCost, eager: fnWorkdayDiff},
 }
 
 func fnIf(e *env, a []node) Value {
@@ -165,10 +169,19 @@ func fnOr(e *env, a []Value) Value {
 	return Bool(false)
 }
 
-// numbersOf reads the numbers a function was given, leaving out blanks. bad
+// numbersOf reads the numbers a function was given, a list's items among
+// them (SUM({Link}.{Spend}) adds the linked rows'), leaving out blanks. bad
 // is the error when one isn't a number.
 func numbersOf(name string, a []Value) (nums []float64, bad Value, ok bool) {
+	var flat []Value
 	for _, v := range a {
+		if v.list != nil {
+			flat = append(flat, *v.list...)
+		} else {
+			flat = append(flat, v)
+		}
+	}
+	for _, v := range flat {
 		if v.Kind == KindBlank {
 			continue
 		}
@@ -523,7 +536,7 @@ func date(e *env, name string, v Value) (Value, Value, bool) {
 // calendar is the date as a calendar shows it: a day as is, a moment in the
 // workspace's time zone.
 func calendar(e *env, d Value) time.Time {
-	if d.Day {
+	if d.Day || d.Zoned {
 		return d.Time
 	}
 	return d.Time.In(e.loc)
@@ -670,8 +683,9 @@ func clock(t time.Time) time.Duration {
 	return t.Sub(time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location()))
 }
 
-// WORKDAY_DIFF(start, end) counts the weekdays from start to end, both
-// included, as Airtable's does; negative when end is earlier.
+// WORKDAY_DIFF(start, end, [holidays]) counts the weekdays from start to end,
+// both included, less the holidays, as Airtable's does; negative when end is
+// earlier.
 func fnWorkdayDiff(e *env, a []Value) Value {
 	if a[0].Kind == KindBlank || a[1].Kind == KindBlank {
 		return Blank()
@@ -694,6 +708,18 @@ func fnWorkdayDiff(e *env, a []Value) Value {
 	for i, wd := 0, from.Weekday(); i < days%7; i, wd = i+1, (wd+1)%7 {
 		if wd != time.Saturday && wd != time.Sunday {
 			n++
+		}
+	}
+	// Holidays on a weekday between the two, as Airtable's third value.
+	if len(a) == 3 && a[2].Kind != KindBlank {
+		off, bad, ok := holidays(e, "WORKDAY_DIFF", a[2])
+		if !ok {
+			return bad
+		}
+		for d := range off {
+			if wd := d.Weekday(); wd != time.Saturday && wd != time.Sunday && !d.Before(from) && !d.After(to) {
+				n--
+			}
 		}
 	}
 	return Number(sign * float64(n))

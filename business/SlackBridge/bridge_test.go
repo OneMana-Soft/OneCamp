@@ -205,3 +205,30 @@ func TestClientReturnsSlackRefusals(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+// A busy bridge keeps the names it knows for their hour: past ten thousand
+// people it forgot every name at once, and asked Slack for each again
+// (audit B9).
+func TestSenderNamesOutlastABusyBridge(t *testing.T) {
+	var asked int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&asked, 1)
+		_ = r.ParseForm()
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "user": map[string]any{"name": "name-" + r.Form.Get("user")}})
+	}))
+	defer srv.Close()
+	defer PointAtSlackForTest(srv.URL + "/")()
+	t.Cleanup(names.Purge)
+	ctx, st := context.Background(), &state{token: "xoxb-t"}
+	// One past where it forgot them all.
+	for i := 0; i <= 10001; i++ {
+		senderName(ctx, st, "U"+strconv.Itoa(i))
+	}
+	before := atomic.LoadInt32(&asked)
+	if got := senderName(ctx, st, "U1"); got != "name-U1" {
+		t.Fatalf("U1 is %q", got)
+	}
+	if atomic.LoadInt32(&asked) != before {
+		t.Fatal("asked Slack again for a name it had an hour to keep")
+	}
+}

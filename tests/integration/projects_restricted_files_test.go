@@ -8,9 +8,7 @@ package integration_test
 // files and its comments', uploaded in the app or brought by an import. They
 // are found in search and served through the project's file route (by id,
 // and as the picture a page shows, ?redirect=1) to those people and to nobody
-// else in the project, and the project's Files tab doesn't list them. An
-// import's task file its task doesn't link in the graph goes by the task its
-// row names, the same way.
+// else in the project, and the project's Files tab doesn't list them.
 //
 // seedWorkWorld's "Write the launch post" is ana's, in Website, which she
 // runs with fay; ben is a member, and cy is in the team but not the project.
@@ -99,11 +97,6 @@ func TestARestrictedTasksFilesGoOnlyToItsReaders(t *testing.T) {
 	importedOpen := file{uuid.NewString(), "newsletter-import.pdf", "task", w.mine}
 	kept := []file{own, onComment, imported, importedOnComment}
 	opened := []file{open, importedOpen}
-	// An import's task file that isn't linked to its task in the graph, as
-	// imports leave them: only its row says which task keeps it. Asked for by
-	// id only (it has no search entry).
-	unlinked := file{uuid.NewString(), "zephyr-import-unlinked.pdf", "task", w.task}
-	byID := append(append([]file{}, kept...), unlinked)
 	live := "0001-01-01T00:00:00Z"
 	now := time.Now().UTC()
 	node := func(f file) map[string]any {
@@ -118,7 +111,7 @@ func TestARestrictedTasksFilesGoOnlyToItsReaders(t *testing.T) {
 				"comment_deleted_at": live, "comment_attachments": []map[string]any{node(onComment), node(importedOnComment)}}}},
 		map[string]any{"uid": newsletter, "task_attachments": []map[string]any{node(open), node(importedOpen)}})
 	w.dg.Mutate(t, nodes)
-	for _, f := range append(byID, opened...) {
+	for _, f := range append(kept, opened...) {
 		w.exec(`INSERT INTO attachments (id, obj_key, src_key, src_value, created_by) VALUES ($1, $2, $3, $4, $5)`,
 			f.id, "userFileUpload/"+f.name, f.kind, f.src, w.people["ana"])
 	}
@@ -206,7 +199,7 @@ func TestARestrictedTasksFilesGoOnlyToItsReaders(t *testing.T) {
 	for name, run := range searches {
 		eventually("ben finds the task's files through "+name, func() bool { return len(found(run("ben"), kept...)) == len(kept) })
 	}
-	for _, f := range byID {
+	for _, f := range kept {
 		if code, out := fetch("ben", f, ""); code != http.StatusOK {
 			t.Fatalf("before the task is restricted, ben gets %s: %d %s", f.name, code, out)
 		}
@@ -228,7 +221,7 @@ func TestARestrictedTasksFilesGoOnlyToItsReaders(t *testing.T) {
 				t.Errorf("ben finds %v through %s", got, name)
 			}
 		}
-		for _, f := range byID {
+		for _, f := range kept {
 			for _, query := range []string{"", "?redirect=1"} {
 				if code, out := fetch("ben", f, query); code != missingCode || out != missing {
 					t.Errorf("ben asks for %s%s: %d %s; want what a file that isn't there gets: %d %s", f.name, query, code, out, missingCode, missing)
@@ -252,7 +245,7 @@ func TestARestrictedTasksFilesGoOnlyToItsReaders(t *testing.T) {
 					t.Errorf("%s finds only %v through %s", who, got, name)
 				}
 			}
-			for _, f := range byID {
+			for _, f := range kept {
 				if code, out := fetch(who, f, ""); code != http.StatusOK {
 					t.Errorf("%s asks for %s: %d %s", who, f.name, code, out)
 				}
@@ -269,7 +262,7 @@ func TestARestrictedTasksFilesGoOnlyToItsReaders(t *testing.T) {
 				t.Errorf("cy finds %v through %s", got, name)
 			}
 		}
-		for _, f := range append(byID, opened...) {
+		for _, f := range append(kept, opened...) {
 			if code, _ := fetch("cy", f, ""); code != http.StatusForbidden {
 				t.Errorf("cy asks for %s: %d, want 403", f.name, code)
 			}

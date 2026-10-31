@@ -26,6 +26,7 @@ import (
 	formula "github.com/akashc777/OneCamp/business/Formula"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
+	rowQuery "github.com/akashc777/OneCamp/business/RowQuery"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
 	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
@@ -37,6 +38,9 @@ const (
 	maxDescriptionLen = 2000
 	maxIconLen        = 64
 	maxValuesBytes    = 100 * 1024 // 100 KiB per row values blob
+	// maxViewConfigBytes bounds a saved view's config: its rules and how it
+	// draws, kilobytes even for a table of hundreds of fields.
+	maxViewConfigBytes = 64 * 1024
 )
 
 // tooLong is whether a name or a description is over max characters. People
@@ -69,6 +73,9 @@ var (
 	errForbidden   = fmt.Errorf("not authorized for this table")
 	errNotFound    = fmt.Errorf("table not found")
 	errRowNotFound = fmt.Errorf("row not found")
+	// errViewNotFound is a view the table hasn't, or another person's own.
+	errViewNotFound = fmt.Errorf("view not found")
+	errViewLocked   = fmt.Errorf("This view is locked. Unlock it to change it.")
 	// errFieldNotFound is a field that isn't in the table, or no longer is.
 	errFieldNotFound = fmt.Errorf("that field isn't in this table")
 	// errFieldChanged is a field whose type changed while a save was planned
@@ -83,6 +90,9 @@ var (
 	// errRowsUnavailable is a page of rows that couldn't be read, or worked
 	// out for its reader, just now: no row goes out as it's stored.
 	errRowsUnavailable = fmt.Errorf("couldn't load the rows")
+	// errViewsUnavailable is a saved view the store couldn't read or write
+	// just now: its failure, not the request's, so the caller tries again.
+	errViewsUnavailable = fmt.Errorf("couldn't reach the table's views")
 )
 
 // IsForbidden / IsNotFound / IsRowNotFound / IsUnavailable let controllers map
@@ -91,6 +101,12 @@ func IsForbidden(err error) bool   { return err == errForbidden }
 func IsNotFound(err error) bool    { return err == errNotFound }
 func IsRowNotFound(err error) bool { return err == errRowNotFound }
 func IsUnavailable(err error) bool { return err == errRowsUnavailable }
+
+// IsViewNotFound is errViewNotFound, a 404 of its own words.
+func IsViewNotFound(err error) bool { return err == errViewNotFound }
+
+// IsViewsUnavailable is errViewsUnavailable, a 503 to try again.
+func IsViewsUnavailable(err error) bool { return err == errViewsUnavailable }
 
 func canView(t *model.DataTable, a Actor) bool {
 	return t.Visibility == model.VisibilityWorkspace || helpers.OwnerOrAdmin(&t.CreatedBy, a.UserID, a.IsAdmin)
@@ -229,6 +245,8 @@ type ViewInput struct {
 	Type     string                 `json:"type"`
 	Config   map[string]interface{} `json:"config"`
 	Position float64                `json:"position"`
+	// Personal makes a new view the actor's own; a view stays whose it is.
+	Personal bool `json:"personal"`
 }
 
 // TableBundle is the one-call payload for opening a table: header + structure +
@@ -240,6 +258,8 @@ type TableBundle struct {
 	Rows      []*model.Row     `json:"rows"`
 	CanManage bool             `json:"can_manage"`
 	MqttTopic string           `json:"mqtt_topic"`
+	// PresenceTopic is who is on the table and where (tables A7), for a member's page.
+	PresenceTopic string `json:"presence_topic,omitempty"`
 	// RowsTruncated is true when the table has more rows than the bundle's
 	// first page (bundleRowPage). The FE/AI should page the rest via the rows
 	// endpoint rather than assume Rows is the whole table.
@@ -247,6 +267,10 @@ type TableBundle struct {
 	// RowCount is how many rows the table has, not deleted: what a reader
 	// holding the first page says it holds of, and pages towards.
 	RowCount int `json:"row_count"`
+	// RowQuery is what the server answers for the table's views past the
+	// first page (POST /tables/{id}/query, tables T5c), for a member's page:
+	// a reader asks it only that, and keeps the rest in the browser.
+	RowQuery *rowQuery.Answers `json:"row_query,omitempty"`
 }
 
 func optStr(s string) *string {
@@ -335,7 +359,7 @@ func CreateTableFromTemplate(ctx context.Context, in TableInput, fields []FieldI
 			formulas = nil
 		}
 		try := func(fi FieldInput) error {
-			cfg, err := formulaConfigWith(made, uuid.Nil, fi.Config)
+			cfg, err := formulaConfigWith(made, uuid.Nil, fi.Config, nil)
 			if err != nil {
 				return err
 			}
@@ -415,7 +439,41 @@ func createTableRow(ctx context.Context, in TableInput, actor Actor) (uuid.UUID,
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("failed to create table")
 	}
+	indexSoon(ctx, id, 0)
 	return id, nil
+}
+
+// indexSoon makes a table's cell index whole in the background: a table just
+// made, or filled at once by an import, so Row Query answers its views now,
+// not at the repair sweep's next pass (tables.cellindex.repair, every 5
+// minutes). Until then a big table was read in the browser, 10,000 rows at
+// most. The sweep stays the repair for a table this couldn't index.
+//
+// filled is how many rows were just written to it. A table whose index kept
+// up with them isn't walked, but a big fill is still counted for the planner,
+// as a walk's would be (rowQuery.CountAfterFill, V-48).
+func indexSoon(ctx context.Context, table uuid.UUID, filled int) {
+	helpers.GoSafeNamed("business/DataTable:indexSoon", func() {
+		ctx := context.WithoutCancel(ctx)
+		if !indexWanted(ctx, table) {
+			if err := rowQuery.CountAfterFill(ctx, filled); err != nil {
+				helpers.LogErrorWithContext(ctx, "business/DataTable indexSoon %s: counting %d rows for the planner: %v", table, filled, err)
+			}
+			return
+		}
+		if err := rowQuery.IndexTable(ctx, table); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/DataTable indexSoon %s: %v", table, err)
+		}
+	})
+}
+
+// indexWanted is whether a table's cell index isn't whole at this version: a
+// table already whole (an import into one the index kept up with, row by row
+// as each was written) has nothing to make whole, and walking its every row
+// again was a waste (CR-64). A state it can't read asks for the walk.
+func indexWanted(ctx context.Context, table uuid.UUID) bool {
+	whole, version, err := model.CellIndexState(ctx, table)
+	return err != nil || !whole || version < rowQuery.IndexVersion
 }
 
 // seedDefaults adds a default "Name" text column and a grid view (best-effort).
@@ -657,17 +715,22 @@ func GetBundle(ctx context.Context, id uuid.UUID, actor Actor) (*TableBundle, er
 		return nil, err
 	}
 
-	return loadBundle(ctx, t, canManage(t, actor), helpers.GetMqttTopicForTable(t.Id.String()))
+	b, err := loadBundle(ctx, t, actor.UserID, canManage(t, actor), helpers.GetMqttTopicForTable(t.Id.String()), true)
+	if b != nil {
+		b.PresenceTopic = helpers.GetMqttTopicForTablePresence(t.Id.String())
+	}
+	return b, err
 }
 
 // bundleRowPage is how many rows a bundle carries; more are paged with the
 // rows endpoint.
 const bundleRowPage = 500
 
-// loadBundle reads a table's fields, views and first page of rows, with its
-// formulas worked out: the one loader behind the member's and the guest's
-// bundle.
-func loadBundle(ctx context.Context, t *model.DataTable, manage bool, topic string) (*TableBundle, error) {
+// loadBundle reads a table's fields, the views reader sees (uuid.Nil, a
+// guest: the shared ones) and first page of rows, with its formulas worked
+// out: the one loader behind the member's and the guest's bundle; and, for a
+// member's (answers), what Row Query answers for it.
+func loadBundle(ctx context.Context, t *model.DataTable, reader uuid.UUID, manage bool, topic string, answers bool) (*TableBundle, error) {
 	// Fields, views, rows and the row count are mutually independent (each only
 	// scopes by table_id) and back the single most-hit table read (the app's
 	// table view, GET /v1/tables/{id}, and the AI read_table tool). Fetch them
@@ -688,9 +751,21 @@ func loadBundle(ctx context.Context, t *model.DataTable, manage bool, topic stri
 	// table has more rows than this bundle carries, by the page itself.
 	wg.Add(4)
 	helpers.GoSafeNamed("business/DataTable/dataTableBusiness:loadBundle", func() { defer wg.Done(); fields, fErr = model.ListFields(ctx, t.Id) })
-	helpers.GoSafeNamed("business/DataTable/dataTableBusiness:loadBundle", func() { defer wg.Done(); views, vErr = model.ListViews(ctx, t.Id) })
+	helpers.GoSafeNamed("business/DataTable/dataTableBusiness:loadBundle", func() { defer wg.Done(); views, vErr = model.ListViews(ctx, t.Id, reader) })
 	helpers.GoSafeNamed("business/DataTable/dataTableBusiness:loadBundle", func() { defer wg.Done(); rows, rErr = model.ListRows(ctx, t.Id, bundleRowPage+1, 0) })
 	helpers.GoSafeNamed("business/DataTable/dataTableBusiness:loadBundle", func() { defer wg.Done(); count, cErr = model.CountRows(ctx, t.Id) })
+	// What the server answers: none said is none asked (the reader keeps its
+	// views in the browser), so a failed read costs the bundle nothing.
+	var asked *rowQuery.Answers
+	if answers {
+		wg.Add(1)
+		helpers.GoSafeNamed("business/DataTable/dataTableBusiness:loadBundle", func() {
+			defer wg.Done()
+			if a, err := rowQuery.AnswersFor(ctx, t.Id); err == nil {
+				asked = &a
+			}
+		})
+	}
 	wg.Wait()
 
 	if fErr != nil {
@@ -709,7 +784,7 @@ func loadBundle(ctx context.Context, t *model.DataTable, manage bool, topic stri
 	}
 	presentComputedFields(fields, withComputed(ctx, fields, rows))
 	return &TableBundle{Table: t, Fields: fields, Views: views, Rows: rows, CanManage: manage, MqttTopic: topic,
-		RowsTruncated: truncated, RowCount: count}, nil
+		RowsTruncated: truncated, RowCount: count, RowQuery: asked}, nil
 }
 
 // GetGuestBundle returns the open-payload for a table for an EXTERNAL guest,
@@ -727,7 +802,7 @@ func GetGuestBundle(ctx context.Context, id uuid.UUID) (*TableBundle, error) {
 		return nil, errNotFound // gone, unlike a load that failed (IsNotFound)
 	}
 
-	b, err := loadBundle(ctx, t, false, "")
+	b, err := loadBundle(ctx, t, uuid.Nil, false, "", false)
 	if err != nil {
 		return nil, err
 	}
@@ -810,6 +885,12 @@ func CreateField(ctx context.Context, tableId uuid.UUID, in FieldInput, actor Ac
 	}
 	if err != nil {
 		return nil, err
+	}
+	// Its entries for the rows already there (Row Query walks a field's
+	// empty cells along its index too).
+	if err := rowQuery.IndexField(ctx, tableId, f.Id); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/DataTable CreateField index %s: %v", f.Id, err)
+		_ = model.MarkCellIndexStale(ctx, tableId)
 	}
 	helpers.GoSafeNamed("tellTablesLinkedWith", func() { tellTablesLinkedWith(context.WithoutCancel(ctx), tableId) })
 	return f, nil
@@ -904,6 +985,15 @@ func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, p FieldPatch, 
 	if err != nil {
 		return 0, err
 	}
+	// A choice's options reordered, added or taken away with no cell changed:
+	// the ledger's observer, which reindexes a field whose cells changed,
+	// heard nothing, and Row Query sorts by the places its entries hold.
+	if other == nil && changed == 0 && optionsMoved(was, f) {
+		if err := rowQuery.IndexOptions(ctx, tableId, fieldId); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/DataTable UpdateField options of %s: %v", fieldId, err)
+			_ = model.MarkCellIndexStale(ctx, tableId)
+		}
+	}
 	if p.Primary != nil && *p.Primary && !was.Primary {
 		if err := model.SetPrimary(ctx, tableId, fieldId); err != nil {
 			return 0, fmt.Errorf("failed to make it the primary field")
@@ -913,6 +1003,30 @@ func UpdateField(ctx context.Context, tableId, fieldId uuid.UUID, p FieldPatch, 
 	go tellTablesLinkedWith(context.WithoutCancel(ctx), tableId)
 	announce(ctx, t, cs, hooksOnly)
 	return changed, nil
+}
+
+// optionsMoved is whether a save made a select or a status field's options
+// sort differently: their labels, as a choice's place reads them (ignoring
+// case and the spaces around), aren't the same in the same order, or the
+// field became a choice.
+func optionsMoved(was, now *model.Field) bool {
+	choice := func(f *model.Field) bool { return f.Type == model.FieldSelect || f.Type == model.FieldStatus }
+	if !choice(now) {
+		return false
+	}
+	if !choice(was) {
+		return true
+	}
+	a, b := fieldTypes.OptionsOf(was), fieldTypes.OptionsOf(now)
+	if len(a) != len(b) {
+		return true
+	}
+	for i := range a {
+		if strings.ToLower(strings.TrimSpace(a[i].Label)) != strings.ToLower(strings.TrimSpace(b[i].Label)) {
+			return true
+		}
+	}
+	return false
 }
 
 // errPrimaryKept is a field asked to stop being the primary: one becomes the
@@ -962,22 +1076,24 @@ func DeleteField(ctx context.Context, tableId, fieldId uuid.UUID, actor Actor) e
 			field = f
 		}
 	}
-	if field != nil && field.Primary {
+	if field == nil {
+		return errFieldNotFound
+	}
+	if field.Primary {
 		return errPrimaryDeleted
 	}
 	// The tables told are those linking with this one before the field goes.
 	linked, _ := model.TablesLinkedWith(ctx, tableId)
-	if field != nil {
-		// A relation linking to a table goes with the field showing its links
-		// there.
-		err = unlinkPair(ctx, field, actor.UserID)
-	} else {
-		err = model.DeleteField(ctx, tableId, fieldId, actor.UserID)
+	// A relation linking to a table goes with the field showing its links
+	// there.
+	switch err := unlinkPair(ctx, field, actor.UserID); {
+	case errors.Is(err, sql.ErrNoRows):
+		return errFieldNotFound
+	case err != nil:
+		return fmt.Errorf("failed to delete field")
 	}
-	if err == nil {
-		tellTables(linked...)
-	}
-	return err
+	tellTables(ctx, linked...)
+	return nil
 }
 
 // buildField checks a field being saved, and gives a select field's options
@@ -1014,6 +1130,12 @@ func buildField(tableId uuid.UUID, in FieldInput, was *model.Field, whole bool) 
 	_ = json.Unmarshal([]byte(sent), &cfg)
 	removed := removedOptions(cfg)
 	delete(cfg, removedOptionsKey)
+	// The kind's own settings (a status's groups and the options a new one
+	// starts with, a rating's most stars, an id's prefix), before its
+	// options are planned.
+	if cfg, err = fieldTypes.Kinds.ConfigFor(ftype, cfg); err != nil {
+		return nil, nil, err
+	}
 	var relabel map[string]string
 	if hasOptions(ftype) {
 		var stored []map[string]interface{}
@@ -1092,7 +1214,7 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 	if lerr != nil {
 		return nil, lerr
 	}
-	valuesJSON, verr := storedCells(fields, values, fieldTypes.Input{New: true, Complete: completeWrite(actor)})
+	valuesJSON, verr := storedCells(fields, values, fieldTypes.Input{New: true, Complete: completeWrite(actor), Files: filesOf(ctx, tableId)})
 	if verr != nil {
 		return nil, verr
 	}
@@ -1111,7 +1233,7 @@ func CreateRow(ctx context.Context, tableId uuid.UUID, in RowInput, actor Actor)
 	stored := *created // as written: what its AI columns read
 	withComputed(ctx, fields, []*model.Row{created})
 	broadcastRow(t.Id.String(), "created", created)
-	tellTables(linkedTables...)
+	tellTables(ctx, linkedTables...)
 	announce(ctx, t, cs, hooksOnly)
 	// Continuous AI autofill: fill the new row's auto AI columns it wasn't
 	// given, as the creator, off the request path. Loop-safe (writes via the
@@ -1160,7 +1282,7 @@ func UpdateRow(ctx context.Context, tableId, rowId uuid.UUID, in RowInput, actor
 	if stored == nil {
 		return nil, errRowNotFound
 	}
-	valuesJSON, verr := storedCells(fields, values, fieldTypes.Input{Unchanged: parseRowValues(stored.Values)})
+	valuesJSON, verr := storedCells(fields, values, fieldTypes.Input{Unchanged: parseRowValues(stored.Values), Files: filesOf(ctx, tableId)})
 	if verr != nil {
 		return nil, verr
 	}
@@ -1199,7 +1321,7 @@ func PatchRow(ctx context.Context, tableId, rowId uuid.UUID, values map[string]i
 		values = map[string]interface{}{}
 	}
 	// Links change through ChangeLinks, as for UpdateRow.
-	patchJSON, verr := storedCells(fields, values, fieldTypes.Input{})
+	patchJSON, verr := storedCells(fields, values, fieldTypes.Input{Files: filesOf(ctx, tableId)})
 	if verr != nil {
 		return nil, verr
 	}
@@ -1350,26 +1472,38 @@ func broadcastRow(tableID, action string, r *model.Row) {
 
 // ───────────────────────── views ─────────────────────────
 
-// CreateView adds a saved view (manage only).
+// CreateView adds a saved view: one of the actor's own (in.Personal), which
+// anyone who reads the table may make, or one shared with everyone who reads
+// it, which only its managers make.
 func CreateView(ctx context.Context, tableId uuid.UUID, in ViewInput, actor Actor) (*model.View, error) {
-	if _, err := loadManageable(ctx, tableId, actor); err != nil {
+	load := loadManageable
+	if in.Personal {
+		load = loadViewable
+	}
+	if _, err := load(ctx, tableId, actor); err != nil {
 		return nil, err
 	}
 	v, err := buildView(tableId, in)
 	if err != nil {
 		return nil, err
 	}
+	if in.Personal {
+		owner := actor.UserID
+		v.Owner = &owner
+	}
 	id, err := model.CreateView(ctx, v)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create view")
+		return nil, errViewsUnavailable
 	}
 	v.Id = id
 	return v, nil
 }
 
-// UpdateView edits a saved view (manage only).
+// UpdateView edits a saved view the actor may change (viewToChange) that
+// isn't locked. The store holds the lock (viewWriteErr), so a lock that
+// lands after the check still holds.
 func UpdateView(ctx context.Context, tableId, viewId uuid.UUID, in ViewInput, actor Actor) error {
-	if _, err := loadManageable(ctx, tableId, actor); err != nil {
+	if _, err := viewToChange(ctx, tableId, viewId, actor); err != nil {
 		return err
 	}
 	v, err := buildView(tableId, in)
@@ -1378,17 +1512,81 @@ func UpdateView(ctx context.Context, tableId, viewId uuid.UUID, in ViewInput, ac
 	}
 	v.Id = viewId
 	if err := model.UpdateView(ctx, v); err != nil {
-		return fmt.Errorf("failed to update view")
+		return viewWriteErr(ctx, tableId, viewId, err)
 	}
 	return nil
 }
 
-// DeleteView removes a saved view (manage only).
+// DeleteView removes a saved view the actor may change that isn't locked.
 func DeleteView(ctx context.Context, tableId, viewId uuid.UUID, actor Actor) error {
-	if _, err := loadManageable(ctx, tableId, actor); err != nil {
+	if _, err := viewToChange(ctx, tableId, viewId, actor); err != nil {
 		return err
 	}
-	return model.DeleteView(ctx, tableId, viewId)
+	if err := model.DeleteView(ctx, tableId, viewId); err != nil {
+		return viewWriteErr(ctx, tableId, viewId, err)
+	}
+	return nil
+}
+
+// viewWriteErr says why the store changed no view once viewToChange let the
+// actor at it. It writes only a live, unlocked view, so a delete or a lock
+// may have landed in between; anything else is the store failing.
+func viewWriteErr(ctx context.Context, tableId, viewId uuid.UUID, err error) error {
+	if !errors.Is(err, sql.ErrNoRows) {
+		return errViewsUnavailable
+	}
+	v, err := model.GetView(ctx, tableId, viewId)
+	switch {
+	case err != nil:
+		return errViewsUnavailable
+	case v == nil:
+		return errViewNotFound
+	case v.Locked:
+		return errViewLocked
+	}
+	// Locked and unlocked again in between: the change may go now.
+	return errViewsUnavailable
+}
+
+// LockView locks a shared view against change, or unlocks it: its managers'
+// to do. A view of one's own is no one else's to change, so it isn't locked.
+func LockView(ctx context.Context, tableId, viewId uuid.UUID, locked bool, actor Actor) error {
+	v, err := viewToChange(ctx, tableId, viewId, actor)
+	if err != nil {
+		return err
+	}
+	if v.Owner != nil {
+		return fmt.Errorf("A view of your own can't be locked")
+	}
+	switch err := model.LockView(ctx, tableId, viewId, locked); {
+	case errors.Is(err, sql.ErrNoRows):
+		return errViewNotFound
+	case err != nil:
+		return errViewsUnavailable
+	}
+	return nil
+}
+
+// viewToChange is the table's view by viewId if the actor may change it: one
+// of their own, or a shared one when they manage the table. Another person's
+// own view is never listed for them, so it isn't found.
+func viewToChange(ctx context.Context, tableId, viewId uuid.UUID, actor Actor) (*model.View, error) {
+	if _, err := loadViewable(ctx, tableId, actor); err != nil {
+		return nil, err
+	}
+	v, err := model.GetView(ctx, tableId, viewId)
+	if err != nil {
+		return nil, errViewsUnavailable
+	}
+	if v == nil || (v.Owner != nil && *v.Owner != actor.UserID) {
+		return nil, errViewNotFound
+	}
+	if v.Owner == nil {
+		if _, err := loadManageable(ctx, tableId, actor); err != nil {
+			return nil, err
+		}
+	}
+	return v, nil
 }
 
 func buildView(tableId uuid.UUID, in ViewInput) (*model.View, error) {
@@ -1409,6 +1607,9 @@ func buildView(tableId uuid.UUID, in ViewInput) (*model.View, error) {
 	cfg, err := jsonObject(in.Config)
 	if err != nil {
 		return nil, fmt.Errorf("invalid view config")
+	}
+	if len(cfg) > maxViewConfigBytes {
+		return nil, fmt.Errorf("view config is too large")
 	}
 	return &model.View{TableId: tableId, Name: name, Type: vtype, Config: cfg, Position: in.Position}, nil
 }

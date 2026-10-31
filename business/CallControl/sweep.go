@@ -50,11 +50,13 @@ func Reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	dueBreakouts(ctx, open)
 	seen := make(map[string]bool, len(open))
 	for _, s := range open {
 		seen[s.Room] = true
 		reconcileRoom(ctx, s.Room, live[s.Room], s)
 	}
+	endLeftInRooms(ctx, open)
 	// A room nobody recorded a call in, with people in it by LiveKit's count.
 	// LiveKit refreshes the count every 5 s, so a call that began in the last
 	// seconds is the next pass's; reading the count first spares a shared
@@ -66,6 +68,42 @@ func Reconcile(ctx context.Context) error {
 		reconcileRoom(ctx, name, r, nil)
 	}
 	return nil
+}
+
+// endLeftInRooms ends each call that goes on in its breakout rooms with
+// nobody in it, its own room or any of its rooms, for longer than the word to
+// come back takes. Its rooms end with it, and whoever joins later starts a
+// call of their own, which nothing of the old one, its recording included,
+// carries on into.
+func endLeftInRooms(ctx context.Context, open []*callStateBusiness.Session) {
+	now := time.Now()
+	rooms := map[uuid.UUID]string{}
+	var calls []uuid.UUID
+	for _, s := range open {
+		if s.Parent == "" && s.GoesOnInRooms(now) {
+			id := uuid.MustParse(s.ID)
+			calls = append(calls, id)
+			rooms[id] = s.Room
+		}
+	}
+	left, err := model.LeftInRooms(ctx, calls, now.Add(-model.BreakoutReturnGrace))
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/CallControl could not read which calls were left in their rooms: %+v", err)
+		return
+	}
+	// Each end is the call's own: its events, its rooms. Under the room's lock
+	// it is checked again, in case someone came back since the read.
+	for id := range left {
+		room := rooms[id]
+		roomLocks.Acquire(room, 0)
+		ended, err := callStateBusiness.EndLeftInRooms(ctx, room, now)
+		roomLocks.Release(room)
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "business/CallControl could not end the call left in its rooms in %s: %+v", room, err)
+		} else if ended {
+			helpers.LogInfoWithContext(ctx, "calls.session.reconcile ended the call in %s: nobody in it or its rooms since the grace to come back", room)
+		}
+	}
 }
 
 // reconcileRoom makes a room's call record what LiveKit says is going on in
@@ -88,7 +126,7 @@ func reconcileRoom(ctx context.Context, room string, lk *livekit.Room, s *callSt
 	}
 	var humans []*livekit.ParticipantInfo
 	for _, p := range people {
-		if human(p) {
+		if livekitInit.IsPerson(p) {
 			humans = append(humans, p)
 		}
 	}
@@ -97,7 +135,8 @@ func reconcileRoom(ctx context.Context, room string, lk *livekit.Room, s *callSt
 		endReconciled(ctx, room, s.RoomSID)
 		s = nil
 	}
-	if len(humans) == 0 {
+	// Ends a call only when nobody is in it, asked as the leave webhook asks.
+	if anyone, _ := stillHere(people, nil); !anyone {
 		if s != nil && time.Since(s.StartedAt) > emptyGrace {
 			endReconciled(ctx, room, lk.Sid)
 		}
@@ -118,12 +157,13 @@ func reconcileRoom(ctx context.Context, room string, lk *livekit.Room, s *callSt
 			continue
 		}
 		if person != nil {
-			tellPart(room, got.Resource.Kind, person.Identity, person.Role)
+			seat(got, p, person)
 		}
 	}
 	if s == nil {
 		return
 	}
+	var after *callStateBusiness.Session
 	for _, q := range s.InCall() {
 		if present[q.Identity] {
 			continue
@@ -132,9 +172,23 @@ func reconcileRoom(ctx context.Context, room string, lk *livekit.Room, s *callSt
 		if id, err := uuid.Parse(q.UserUUID); err == nil {
 			e.UserUUID = &id
 		}
-		if _, _, err := callStateBusiness.Left(ctx, e); err != nil {
+		left, changed, err := callStateBusiness.Left(ctx, e)
+		if err != nil {
 			helpers.LogErrorWithContext(ctx, "business/CallControl could not record %s leaving %s: %+v", q.Identity, room, err)
+			continue
 		}
+		if changed && left != nil {
+			after = left
+		}
+	}
+	// A presenter the sweep found gone takes their board off the stage, as
+	// their leave's webhook would have. after is read once the leaves (and
+	// this pass's joins) are written, never the call as the pass began.
+	if after == nil {
+		return
+	}
+	if err := settleStage(ctx, after); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/CallControl could not settle the board on %s's stage: %+v", room, err)
 	}
 }
 

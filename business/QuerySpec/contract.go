@@ -203,13 +203,30 @@ type Sort struct {
 	Desc  bool   `json:"desc,omitempty"`
 }
 
-// Group is one level of grouping, by a field, with the groups shown
-// collapsed. A date field's groups are by Granularity.
+// Group is one level of grouping, by a field. A date field's groups are by
+// Granularity. Collapsed are the groups of this level the reader closed,
+// each the path of keys from the top level down to it, as a JSON list
+// (`["Won","2026-10-01"]` at the second level): a window leaves their rows
+// out, a count never does.
 type Group struct {
 	Field       string   `json:"field"`
 	Desc        bool     `json:"desc,omitempty"`
 	Collapsed   []string `json:"collapsed,omitempty"`
 	Granularity string   `json:"granularity,omitempty"`
+}
+
+// CollapsedPaths is the level's collapsed groups as paths: level+1 keys
+// each, the top level's first.
+func (g Group) CollapsedPaths(level int) ([][]string, error) {
+	paths := make([][]string, 0, len(g.Collapsed))
+	for _, c := range g.Collapsed {
+		var path []string
+		if err := json.Unmarshal([]byte(c), &path); err != nil || len(path) != level+1 {
+			return nil, fmt.Errorf("a collapsed group of %s is a list of %d keys from the top level down, not %s", g.Field, level+1, c)
+		}
+		paths = append(paths, path)
+	}
+	return paths, nil
 }
 
 // The granularities of a date group.
@@ -284,6 +301,9 @@ const (
 	MaxValues = 50
 	// MaxSummaries bounds the fields a spec asks summaries of.
 	MaxSummaries = 50
+	// MaxGroupCounts bounds the groups a spec's counts answer, every level's
+	// together, and the groups a level holds collapsed.
+	MaxGroupCounts = 1000
 	// MaxPage is the largest page.
 	MaxPage = 500
 )
@@ -333,12 +353,18 @@ func (s Spec) Validate() error {
 	if len(s.Groups) > MaxGroups {
 		return bad("group by at most %d fields", MaxGroups)
 	}
-	for _, g := range s.Groups {
+	for i, g := range s.Groups {
 		if strings.TrimSpace(g.Field) == "" {
 			return bad("a group names its field")
 		}
 		if !granularities[g.Granularity] {
 			return bad("a date group is by day, week, month, quarter or year, not %q", g.Granularity)
+		}
+		if len(g.Collapsed) > MaxGroupCounts {
+			return bad("collapse at most %d groups a level", MaxGroupCounts)
+		}
+		if _, err := g.CollapsedPaths(i); err != nil {
+			return bad("%s", err)
 		}
 	}
 	if len(s.Summaries) > MaxSummaries {

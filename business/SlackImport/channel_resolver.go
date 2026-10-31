@@ -50,7 +50,7 @@ type ChannelResolveStats struct {
 // access it post-import.
 func resolveChannels(ctx context.Context, importId uuid.UUID, workspaceName string,
 	publicChannels, privateGroups []SlackChannel,
-	importingUser *userModels.UserInfo, prefix string) (ChannelResolveStats, error) {
+	importingUser *userModels.UserInfo, prefix string, memberRead bool) (ChannelResolveStats, error) {
 
 	stats := ChannelResolveStats{Total: len(publicChannels) + len(privateGroups)}
 
@@ -109,17 +109,15 @@ func resolveChannels(ctx context.Context, importId uuid.UUID, workspaceName stri
 		// so a rollback takes away the messages and leaves the channel.
 		if sc.IsGeneral && !e.isPrivate {
 			if general, ok := seededGeneral(ctx); ok {
-				if err := importModels.UpsertIdMappingWithOwnership(ctx, importId,
+				if err := importModels.RecordMapping(ctx, importId,
 					importModels.EntityChannel, sc.ID, general, nil,
 					mustMarshal(map[string]interface{}{
 						"matched_by": "seeded_general",
 						"slack_name": sc.Name,
 					}),
-					false); err != nil {
+					false, workspaceName); err != nil {
 					return stats, err
 				}
-				_ = importModels.UpsertWorkspaceMapping(ctx, workspaceName,
-					importModels.EntityChannel, sc.ID, general, importId)
 				addChannelMembersBulk(ctx, importId, general, sc.Members, userCache)
 				stats.IntoGeneral = sc.Name
 				continue
@@ -184,22 +182,20 @@ func resolveChannels(ctx context.Context, importId uuid.UUID, workspaceName stri
 			"is_general":  sc.IsGeneral,
 			"is_private":  e.isPrivate,
 		})
-		if err := importModels.UpsertIdMappingWithOwnership(ctx, importId,
-			importModels.EntityChannel, sc.ID, channelUUID, nil, md,
-			true /* physically created */); err != nil {
+		// In the workspace's map too, so a later import of this workspace finds it.
+		if err := importModels.RecordCreated(ctx, importId,
+			importModels.EntityChannel, sc.ID, channelUUID, nil, md, workspaceName); err != nil {
 			return stats, err
 		}
-		// Promote so a subsequent re-import of this workspace finds it.
-		_ = importModels.UpsertWorkspaceMapping(ctx, workspaceName,
-			importModels.EntityChannel, sc.ID, channelUUID, importId)
 
 		// Wire membership inline (after the channel mapping is recorded
 		// so a crash mid-membership can still resume cleanly).
 		addChannelMembersBulk(ctx, importId, channelUUID, sc.Members, userCache)
 
 		// Creating it made the importing admin a member and its admin; a
-		// channel they weren't in is handed on and left (tidy.go).
-		leaveChannel(ctx, importId, channelUUID, sc, e.isPrivate, importingUser, userCache)
+		// channel they weren't in is handed on and left, and a member's own
+		// is handed on unless they made it (tidy.go).
+		leaveChannel(ctx, importId, channelUUID, sc, e.isPrivate, importingUser, userCache, memberRead)
 	}
 
 	patch := mustMarshal(map[string]interface{}{"channels": stats})

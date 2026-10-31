@@ -44,7 +44,7 @@ func TestALinkLastsNoLongerThanTheWorkspaceAllows(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			withCap(t, c.cap)
-			got := linkLifetime(ctx, now, c.ask, c.never)
+			got := linkLifetime(ctx, KindLink, now, c.ask, c.never)
 			switch {
 			case c.want == 0 && got != nil:
 				t.Fatalf("want until revoked, got %v", got)

@@ -142,6 +142,16 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 	// Decode per-job options.
 	options := decodeOptions(job.Options)
 
+	// A member's own read is brought in as that member and nobody else
+	// (member_read.go): run as an admin, its private channels would be made
+	// as theirs. The routes refuse it first; this is the last word.
+	if options.MemberDMs && (job.TriggeredBy == nil || *job.TriggeredBy != importingUser.UserPostgresInfo.Id) {
+		helpers.LogWarnWithContext(ctx, "SlackImport job %s: a member's read run as %s, not its member", jobId, importingUser.UserPostgresInfo.Id)
+		msg := MemberReadRefused
+		_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusFailed, strPtr("failed"), &msg)
+		return
+	}
+
 	_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusRunning, strPtr("users"), nil)
 	publishProgress(ctx, jobId, job.SlackWorkspaceName, "running", "users", "")
 
@@ -159,7 +169,7 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 	publishProgress(ctx, jobId, job.SlackWorkspaceName, "running", "channels", "")
 	if _, err := resolveChannels(ctx, jobId, job.SlackWorkspaceName,
 		parsed.Channels, parsed.Groups,
-		importingUser, options.ChannelPrefix); err != nil {
+		importingUser, options.ChannelPrefix, options.MemberDMs); err != nil {
 		failJob(ctx, jobId, job.SlackWorkspaceName, fmt.Errorf("channels: %w", err))
 		return
 	}
@@ -192,7 +202,7 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 	if err := runWorkerPool(ctx, jobId, job.SlackWorkspaceName, "messages", messageWorkers,
 		[]string{importModels.ChunkChannelMessages},
 		func(workerCtx context.Context, c *importModels.Chunk) error {
-			return processMessageChunk(workerCtx, arc, c, isTrue(options.SkipSubtypes), importingUser, job.SlackWorkspaceName, names)
+			return processMessageChunk(workerCtx, arc, c, skipsSystemMessages(options.SkipSubtypes), importingUser, job.SlackWorkspaceName, names)
 		}); err != nil {
 		failJob(ctx, jobId, job.SlackWorkspaceName, err)
 		return
@@ -206,7 +216,7 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 	if err := runWorkerPool(ctx, jobId, job.SlackWorkspaceName, "threads", messageWorkers,
 		[]string{importModels.ChunkChannelThreads},
 		func(workerCtx context.Context, c *importModels.Chunk) error {
-			return processMessageChunk(workerCtx, arc, c, isTrue(options.SkipSubtypes), importingUser, job.SlackWorkspaceName, names)
+			return processMessageChunk(workerCtx, arc, c, skipsSystemMessages(options.SkipSubtypes), importingUser, job.SlackWorkspaceName, names)
 		}); err != nil {
 		failJob(ctx, jobId, job.SlackWorkspaceName, err)
 		return
@@ -224,7 +234,7 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 	if err := runWorkerPool(ctx, jobId, job.SlackWorkspaceName, "dm_messages", messageWorkers,
 		[]string{importModels.ChunkDMMessages},
 		func(workerCtx context.Context, c *importModels.Chunk) error {
-			return processDMChunk(workerCtx, arc, c, isTrue(options.SkipSubtypes), importingUser, job.SlackWorkspaceName, names)
+			return processDMChunk(workerCtx, arc, c, skipsSystemMessages(options.SkipSubtypes), importingUser, job.SlackWorkspaceName, names)
 		}); err != nil {
 		// Non-fatal: DM failures should not abort the whole import.
 		// The error log surfaces specific issues; channels remain useful.
@@ -244,7 +254,7 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 	if err := runWorkerPool(ctx, jobId, job.SlackWorkspaceName, "files", fileWorkers,
 		[]string{importModels.ChunkFile},
 		func(workerCtx context.Context, c *importModels.Chunk) error {
-			return processFileChunk(workerCtx, files, c, importingUser.UserPostgresInfo.Id, options.MaxFileBytes)
+			return processFileChunk(workerCtx, files, c, importingUser, options.MaxFileBytes)
 		}); err != nil {
 		// Files are best-effort: a single failed file should not fail
 		// the whole import. We log and proceed to reactions.
@@ -286,6 +296,11 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 	// ctx rather than a fresh background context: an operator who cancelled, or a
 	// server shutting down, has said they want this to stop, and a summary is the
 	// first thing that should be given up.
+	// A member's own conversations get no digest: the job is in the admins'
+	// history, and what's in it is the member's (member_read.go).
+	if options.MemberDMs {
+		return
+	}
 	imported, _ := importModels.SumItemsImported(ctx, jobId)
 	writeDigest(ctx, DigestRequest{
 		JobID:            jobId,
@@ -478,7 +493,13 @@ func failJob(ctx context.Context, jobId uuid.UUID, workspaceName string, err err
 		"SlackImport job %s failed: %s", jobId, msg)
 	_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusFailed,
 		strPtr("failed"), &msg)
-	publishProgress(ctx, jobId, workspaceName, "failed", "failed", msg)
+	// The broadcast goes to every admin: a member's own read's failure is
+	// theirs to read, as its words can name their conversations.
+	shown := &msg
+	if j, err := importModels.GetJob(ctx, jobId); err == nil && j != nil && MemberRead(j.Options) {
+		shown = HiddenFailure(shown)
+	}
+	publishProgress(ctx, jobId, workspaceName, "failed", "failed", *shown)
 }
 
 // CancelImport signals a running import to stop. Workers see ctx.Done()
@@ -600,11 +621,13 @@ func decodeOptions(raw json.RawMessage) struct {
 	SkipSubtypes  *bool
 	ChannelPrefix string
 	MaxFileBytes  int64
+	MemberDMs     bool
 } {
 	out := struct {
 		SkipSubtypes  *bool
 		ChannelPrefix string
 		MaxFileBytes  int64
+		MemberDMs     bool
 	}{}
 	if len(raw) == 0 {
 		return out
@@ -613,6 +636,7 @@ func decodeOptions(raw json.RawMessage) struct {
 		SkipSubtypes  *bool  `json:"skip_subtypes,omitempty"`
 		ChannelPrefix string `json:"channel_prefix,omitempty"`
 		MaxFileBytes  int64  `json:"max_file_bytes,omitempty"`
+		MemberDMs     bool   `json:"member_dms,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &holder); err != nil {
 		return out
@@ -620,6 +644,7 @@ func decodeOptions(raw json.RawMessage) struct {
 	out.SkipSubtypes = holder.SkipSubtypes
 	out.ChannelPrefix = holder.ChannelPrefix
 	out.MaxFileBytes = holder.MaxFileBytes
+	out.MemberDMs = holder.MemberDMs
 	return out
 }
 
@@ -649,11 +674,10 @@ func envIntDefault(key string, def int) int {
 
 func strPtr(s string) *string { return &s }
 
-func isTrue(b *bool) bool {
-	if b == nil {
-		// Default true for skip_subtypes; we don't import "X joined" noise
-		// unless the operator explicitly turns the option off.
-		return true
-	}
-	return *b
+// skipsSystemMessages is the job's skip_subtypes. A job that leaves it out
+// keeps a channel's history (joins, leaves, topics, renames, archives), as the
+// plan's options do: quiet lines that never notify anyone or count as unread.
+// Slack's other notices never come across (leftOut).
+func skipsSystemMessages(skip *bool) bool {
+	return skip != nil && *skip
 }

@@ -4,15 +4,13 @@
 package business
 
 import (
-	"encoding/csv"
-	"fmt"
 	"io"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/akashc777/OneCamp/helpers"
 	timeModel "github.com/akashc777/OneCamp/models/postgres/TimeEntry"
 	"github.com/google/uuid"
 )
@@ -287,33 +285,13 @@ func Summarise(entries []timeModel.Entry, names Names, from, to, now time.Time, 
 	return r
 }
 
-// Hours is seconds as hours to two places, the way an invoice reads them.
-func Hours(secs int64) string {
-	return strconv.FormatFloat(float64(secs)/3600, 'f', 2, 64)
-}
-
-// csvCell keeps a cell from being read as a formula by a spreadsheet: a note
-// is typed by a person, and a leading = + - or @ would run when opened.
-func csvCell(s string) string {
-	if s != "" && strings.ContainsRune("=+-@\t\r", rune(s[0])) {
-		return "'" + s
-	}
-	return s
-}
-
-// Money is minor units as a decimal amount: 123456 is "1234.56". Pure.
-func Money(cents int64) string {
-	sign := ""
-	if cents < 0 {
-		sign, cents = "-", -cents
-	}
-	return fmt.Sprintf("%s%d.%02d", sign, cents/100, cents%100)
-}
-
 // WriteCSV writes one row per entry, oldest first, in the time zone given.
 // With rates, each row also has the rate and what its billable time comes to.
 func WriteCSV(w io.Writer, entries []timeModel.Entry, names Names, loc *time.Location, now time.Time, rates *Rates) error {
-	cw := csv.NewWriter(w)
+	cw, err := helpers.NewCSVWriter(w)
+	if err != nil {
+		return err
+	}
 	head := []string{"Date", "Start", "End", "Person", "Task", "Hours", "Billable", "Note"}
 	if rates != nil {
 		head = append(head, "Rate ("+rates.Currency+")", "Amount ("+rates.Currency+")")
@@ -334,15 +312,15 @@ func WriteCSV(w io.Writer, entries []timeModel.Entry, names Names, loc *time.Loc
 		start := e.StartedAt.In(loc)
 		row := []string{
 			start.Format("2006-01-02"), start.Format("15:04"), end,
-			csvCell(names.person(e.UserID)), csvCell(names.task(e.TaskUUID)),
-			Hours(e.Seconds(now)), billable, csvCell(e.Note),
+			helpers.CSVCell(names.person(e.UserID)), helpers.CSVCell(names.task(e.TaskUUID)),
+			helpers.Hours(e.Seconds(now)), billable, helpers.CSVCell(e.Note),
 		}
 		if rates != nil {
 			rate, cents := rates.For(e.UserID), int64(0)
 			if e.Billable {
 				cents = amount(e.Seconds(now), rate)
 			}
-			row = append(row, Money(rate), Money(cents))
+			row = append(row, helpers.Money(rate), helpers.Money(cents))
 		}
 		if err := cw.Write(row); err != nil {
 			return err

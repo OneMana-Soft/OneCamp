@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
+	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/akashc777/OneCamp/models/taskread"
 )
 
@@ -94,4 +96,76 @@ func TaskNames(ctx context.Context, ids []string) (map[string]string, error) {
 		names[strings.ToLower(t.UUID)] = t.Name
 	}
 	return names, nil
+}
+
+// MaxOpenTasks bounds the open tasks one OpenTasks read answers for a project.
+const MaxOpenTasks = 2000
+
+// OpenTasks is these projects' open tasks (not done, not cancelled, not
+// deleted), by project, in one read: in each, soonest due first and those
+// with no due date last, at most perProject (and at most MaxOpenTasks). With
+// a due window, only the tasks due in it, both ends counted in. A restricted
+// task the reader of ctx may not see isn't in it (models/taskread): a rule's
+// time triggers read as nobody, so what they name and count is what every
+// member may see. Each task carries what a rule reads of it: its name,
+// status, priority, tags, due date, assignee, creator and project.
+func OpenTasks(ctx context.Context, projectUUIDs []string, dueFrom, dueTo *time.Time, perProject int) (map[string][]*dgraphStruct.DgraphTask, error) {
+	out := make(map[string][]*dgraphStruct.DgraphTask, len(projectUUIDs))
+	if len(projectUUIDs) == 0 {
+		return out, nil
+	}
+	if perProject <= 0 || perProject > MaxOpenTasks {
+		perProject = MaxOpenTasks
+	}
+	ids, err := json.Marshal(projectUUIDs)
+	if err != nil {
+		return nil, err
+	}
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filter := dgraphquery.Live("task_deleted_at") + ` AND ` + dgraphStruct.TASK_OPEN_FILTER
+	if dueFrom != nil {
+		filter += fmt.Sprintf(` AND ge(task_due_date, "%s")`, dueFrom.UTC().Format(time.RFC3339))
+	}
+	if dueTo != nil {
+		filter += fmt.Sprintf(` AND le(task_due_date, "%s")`, dueTo.UTC().Format(time.RFC3339))
+	}
+	query := tr.Fill(fmt.Sprintf(`{
+		project(func: eq(project_uuid, %s)) {
+			project_uuid
+			tasks: project_tasks(first: %d, orderasc: task_due_date) @filter(%s %s) {
+				task_uuid
+				task_name
+				task_status
+				task_custom_status
+				task_custom_status_name
+				task_priority
+				task_label
+				task_due_date
+				task_assignee { user_uuid }
+				task_created_by { user_uuid }
+			}
+		}
+	}`, ids, perProject, filter, taskread.Mark))
+	var res struct {
+		Project []struct {
+			UUID  string                     `json:"project_uuid"`
+			Tasks []*dgraphStruct.DgraphTask `json:"tasks"`
+		} `json:"project"`
+	}
+	if err := dgraphInit.ReadInto(ctx, query, nil, &res); err != nil {
+		return nil, err
+	}
+	for _, p := range res.Project {
+		for _, t := range p.Tasks {
+			if t == nil || t.Uuid == "" || len(out[p.UUID]) == perProject {
+				continue
+			}
+			t.Project = &dgraphStruct.DgraphProject{Uuid: p.UUID}
+			out[p.UUID] = append(out[p.UUID], t)
+		}
+	}
+	return out, nil
 }

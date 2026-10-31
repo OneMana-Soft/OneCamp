@@ -75,3 +75,11 @@ func TestHostsAreDecidedForTheResolversSubject(t *testing.T) {
 		t.Errorf("a doc hosted a doc: %+v, %v", got, err)
 	}
 }
+
+// The resolver's decision carries a doc's kind as the doc's rule decided it
+// (docs F1), so the live session can refuse a folder, a file or a link.
+func TestADecisionCarriesTheNodesKind(t *testing.T) {
+	if got := decisionOf(docBusiness.DocDecision{NodeKind: "file"}); got.NodeKind != "file" {
+		t.Errorf("a file's decision: %+v", got)
+	}
+}

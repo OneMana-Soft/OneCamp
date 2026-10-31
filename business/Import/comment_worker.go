@@ -10,7 +10,6 @@ import (
 	commentDomain "github.com/akashc777/OneCamp/domain/Comment"
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
-	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -60,7 +59,7 @@ func processTaskCommentChunk(ctx context.Context, prov importProvider.Provider,
 		}
 		bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		importModels.LogImportErrors(bg, job.Id, &chunk.Id, notes)
+		importModels.LogImportErrors(bg, job.Id, notes)
 		if len(pendingChunks) > 0 {
 			_ = importModels.CreateChunks(bg, pendingChunks)
 		}
@@ -84,7 +83,7 @@ func processTaskCommentChunk(ctx context.Context, prov importProvider.Provider,
 			errCh = nil
 		case sc, ok := <-commentCh:
 			if !ok {
-				notes = append(notes, commentsKeptNote(job, taskSrcId, kept)...)
+				notes = append(notes, commentsKeptNote(job, &chunk.Id, taskSrcId, kept)...)
 				// A source whose task files come apart from the task lists
 				// them here, with the task's comments (TaskFileLister).
 				if lister, isLister := prov.(importProvider.TaskFileLister); isLister {
@@ -114,9 +113,14 @@ func processTaskCommentChunk(ctx context.Context, prov importProvider.Provider,
 			if existing, _ := importModels.LookupWorkspaceMapping(ctx,
 				job.Provider, job.SourceWorkspaceName,
 				importModels.EntityComment, sc.SourceID); existing != uuid.Nil {
-				_ = importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
+				if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 					importModels.EntityComment, sc.SourceID, existing, &taskSrcId,
-					mustMarshal(map[string]any{"matched_by": "workspace_map"}), false)
+					mustMarshal(map[string]any{"matched_by": "workspace_map"}), false); err != nil {
+					importModels.LogImportError(ctx, job.Id, &chunk.Id,
+						importModels.EntityComment, sc.SourceID,
+						importModels.SeverityError, "COMMENT_IMPORT_FAILED",
+						err.Error(), nil)
+				}
 				continue
 			}
 
@@ -152,12 +156,18 @@ func processTaskCommentChunk(ctx context.Context, prov importProvider.Provider,
 				continue
 			}
 
-			_ = importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
+			if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 				importModels.EntityComment, sc.SourceID, commentUUID, &taskSrcId,
 				mustMarshal(map[string]any{
 					"task_source_id": taskSrcId,
 					"author":         sc.AuthorSourceID,
-				}), true)
+				}), true); err != nil {
+				importModels.LogImportError(ctx, job.Id, &chunk.Id,
+					importModels.EntityComment, sc.SourceID,
+					importModels.SeverityError, "COMMENT_IMPORT_FAILED",
+					err.Error(), nil)
+				continue
+			}
 
 			pendingChunks = append(pendingChunks, fileChunks(job, sc.SourceID, "comment", sc.AttachmentRefs)...)
 
@@ -215,16 +225,8 @@ func writeTaskComment(ctx context.Context, dgTask *dgraphStruct.DgraphTask,
 		return uuid.Nil, fmt.Errorf("dgraph comment: %w", err)
 	}
 
-	// 3. OpenSearch (async, best-effort).
-	osComment := &openSearchStruct.OpenSearchComment{
-		Uuid:                  commentUUID.String(),
-		CommentBody:           body,
-		CommentTaskUuid:       dgTask.Uuid,
-		CommentByUserUuid:     author.UserDgraphInfo.Uuid,
-		CommentByUserFullName: author.UserDgraphInfo.DisplayName(),
-		CommentByProfile:      author.UserDgraphInfo.ProfileKey,
-		CommentCreatedAt:      createdAt.Unix(),
-	}
+	// 3. OpenSearch (async, best-effort), the entry a person's comment gets.
+	osComment := commentDomain.TaskCommentInSearch(dgTask, commentUUID.String(), &author.UserDgraphInfo, body, createdAt)
 	goSafe(ctx, "comment_opensearch", func() {
 		commentDomain.CreateTaskCommentWithAttachmentsInOpenSearch(osComment, nil)
 	})

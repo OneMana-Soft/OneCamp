@@ -27,7 +27,7 @@ func TestTheContractsAreThisPackages(t *testing.T) {
 	if _, ok := rowQuery.Rows.(keyedRows); !ok {
 		t.Errorf("row query's engine is %T", rowQuery.Rows)
 	}
-	if _, ok := computedStore.Values.(readTime); !ok {
+	if _, ok := computedStore.Values.(computedValues); !ok {
 		t.Errorf("the computed store is %T", computedStore.Values)
 	}
 	if _, ok := tableAccess.Tables.(todaysRule); !ok {

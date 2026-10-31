@@ -26,13 +26,11 @@ func (p *Provider) Recheck(ctx context.Context, owner uuid.UUID, tasks []string,
 	if err != nil {
 		return nil, err
 	}
-	// The connection's one site is both where the API is reached and where
-	// issues are browsed.
-	site, err := siteFor(ctx, owner)
+	api, browse, err := sitesFor(ctx, owner)
 	if err != nil {
 		return nil, err
 	}
-	return p.recheck(ctx, tok, site, site, tasks, comments)
+	return p.recheck(ctx, tok, api, browse, tasks, comments)
 }
 
 // recheck is Recheck with the connection read: its Authorization header
@@ -42,7 +40,7 @@ func (p *Provider) recheck(ctx context.Context, tok, api, browse string, tasks [
 	for _, key := range tasks {
 		var iss jiraIssue
 		err := p.getJSON(ctx, tok, api+"/rest/api/3/issue/"+url.PathEscape(key)+"?fields="+recheckFields, &iss)
-		var gone *statusError
+		var gone *importProvider.StatusError
 		if errors.As(err, &gone) && gone.Code == http.StatusNotFound {
 			out[key] = importProvider.RecheckedTask{Gone: true}
 			continue

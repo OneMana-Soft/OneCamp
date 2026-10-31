@@ -13,6 +13,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 )
 
@@ -60,6 +61,31 @@ type Type struct {
 type Facts struct {
 	Key  string
 	Type *Type
+}
+
+// ProjectKeys is the key of each of projects that has one, in one read.
+// With no database at all (a unit test) none has one.
+func ProjectKeys(ctx context.Context, projects []uuid.UUID) (map[uuid.UUID]string, error) {
+	out := make(map[uuid.UUID]string, len(projects))
+	if len(projects) == 0 || !connected() {
+		return out, nil
+	}
+	type keyed struct {
+		id  uuid.UUID
+		key string
+	}
+	rows, err := pgexec.Query(ctx, `SELECT project_id, key FROM project_keys WHERE project_id = ANY($1)`, func(r pgexec.Row) (keyed, error) {
+		var k keyed
+		err := r.Scan(&k.id, &k.key)
+		return k, err
+	}, projects)
+	if err != nil {
+		return nil, err
+	}
+	for _, k := range rows {
+		out[k.id] = k.key
+	}
+	return out, nil
 }
 
 // FactsFor reads the facts of each of tasks that has a row, in one read.
@@ -124,6 +150,12 @@ func KeyOf(projectKey string, number int) string {
 // with no key yet gives no number (0); the projects.keys sweep numbers it
 // once the key exists.
 func InsertTask(ctx context.Context, taskID, projectID, createdBy uuid.UUID, createdAt time.Time) (int, error) {
+	return insertTask(ctx, taskID, projectID, createdBy, createdAt, nil)
+}
+
+// insertTask is InsertTask for a task of a type (nil: a Task), set in the
+// same statement.
+func insertTask(ctx context.Context, taskID, projectID, createdBy uuid.UUID, createdAt time.Time, typeID *uuid.UUID) (int, error) {
 	if !connected() {
 		return 0, ErrNoDatabase
 	}
@@ -136,9 +168,9 @@ func InsertTask(ctx context.Context, taskID, projectID, createdBy uuid.UUID, cre
 			WHERE project_id = $2
 			RETURNING next_number - 1 AS n
 		)
-		INSERT INTO tasks (id, project_id, created_by, created_at, updated_at, task_number)
-		VALUES ($1, $2, $3, $4, $4, (SELECT n FROM k))
-		RETURNING task_number`, taskID, projectID, createdBy, createdAt).Scan(&number)
+		INSERT INTO tasks (id, project_id, created_by, created_at, updated_at, task_number, task_type_id)
+		VALUES ($1, $2, $3, $4, $4, (SELECT n FROM k), $5)
+		RETURNING task_number`, taskID, projectID, createdBy, createdAt, typeID).Scan(&number)
 	if err != nil {
 		return 0, err
 	}
@@ -181,6 +213,7 @@ func EnsureKey(ctx context.Context, projectID uuid.UUID, candidates []string) (s
 			FROM (SELECT COALESCE(MAX(task_number), 0) + 1 AS n FROM tasks WHERE project_id = $1::uuid) s
 			WHERE EXISTS (SELECT 1 FROM projects WHERE id = $1::uuid)
 			  AND NOT EXISTS (SELECT 1 FROM project_key_aliases a WHERE a.key = $2::varchar AND a.project_id <> $1::uuid)
+			  AND NOT `+aliasHeld("$2::varchar", "$1::uuid")+`
 			ON CONFLICT DO NOTHING
 			RETURNING key`, projectID, candidate).Scan(&got)
 		cancel()
@@ -220,7 +253,9 @@ func Taken(ctx context.Context, projectID uuid.UUID, keys []string) (map[string]
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(c, `
 		SELECT key FROM project_keys WHERE key = ANY($1) AND project_id <> $2
 		UNION
-		SELECT key FROM project_key_aliases WHERE key = ANY($1) AND project_id <> $2`, keys, projectID)
+		SELECT key FROM project_key_aliases WHERE key = ANY($1) AND project_id <> $2
+		UNION
+		SELECT k FROM unnest($1::varchar[]) k WHERE `+aliasHeld("k", "$2")+``, keys, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +321,8 @@ func SetKey(ctx context.Context, projectID uuid.UUID, key string, by uuid.UUID) 
 	var taken bool
 	if err := tx.QueryRowContext(c, `
 		SELECT EXISTS (SELECT 1 FROM project_keys WHERE key = $1 AND project_id <> $2)
-		    OR EXISTS (SELECT 1 FROM project_key_aliases WHERE key = $1 AND project_id <> $2)`, key, projectID).Scan(&taken); err != nil {
+		    OR EXISTS (SELECT 1 FROM project_key_aliases WHERE key = $1 AND project_id <> $2)
+		    OR `+aliasHeld("$1", "$2")+``, key, projectID).Scan(&taken); err != nil {
 		return "", err
 	}
 	if taken {
@@ -384,7 +420,9 @@ func Aliases(ctx context.Context, projectID uuid.UUID) ([]string, error) {
 	return out, rows.Err()
 }
 
-// Resolve is the task a project key, current or old, and a number name.
+// Resolve is the task a project key, current or old, and a number name; else
+// the task that had that key in the source it was imported from (KeepAlias).
+// A project's key comes first: a project never takes a key an alias uses.
 func Resolve(ctx context.Context, projectKey string, number int) (uuid.UUID, error) {
 	if !connected() {
 		return uuid.Nil, ErrNoDatabase
@@ -393,14 +431,87 @@ func Resolve(ctx context.Context, projectKey string, number int) (uuid.UUID, err
 	defer cancel()
 	var id uuid.UUID
 	err := postgresInit.DBConn.SqlDB.QueryRowContext(c, `
-		SELECT t.id FROM tasks t
-		WHERE t.task_number = $2 AND t.project_id = COALESCE(
-			(SELECT project_id FROM project_keys WHERE key = $1),
-			(SELECT project_id FROM project_key_aliases WHERE key = $1))`, projectKey, number).Scan(&id)
+		SELECT id FROM (
+			SELECT t.id, 0 AS rank FROM tasks t
+			WHERE t.task_number = $2 AND t.project_id = COALESCE(
+				(SELECT project_id FROM project_keys WHERE key = $1),
+				(SELECT project_id FROM project_key_aliases WHERE key = $1))
+			UNION ALL
+			SELECT a.task_id, 1 FROM task_key_aliases a
+			JOIN tasks t ON t.id = a.task_id AND t.deleted_at IS NULL
+			WHERE a.key = $1 AND a.number = $2
+		) r ORDER BY rank LIMIT 1`, projectKey, number).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return uuid.Nil, ErrNoTask
 	}
 	return id, err
+}
+
+// aliasHeld is the SQL condition that a task imported from elsewhere answers
+// to key (an alias, KeepAlias) in a way the project giving that key to its own
+// tasks would break: the task is in another project, or has another number
+// there. A project whose own tasks already carry those numbers may take it,
+// and a task in the trash (an import rolled back) holds nothing.
+func aliasHeld(key, project string) string {
+	return `EXISTS (SELECT 1 FROM task_key_aliases ta JOIN tasks tt ON tt.id = ta.task_id AND tt.deleted_at IS NULL
+		WHERE ta.key = ` + key + ` AND (tt.project_id IS DISTINCT FROM ` + project + ` OR tt.task_number IS DISTINCT FROM ta.number))`
+}
+
+// AliasKey is a key a task had in the source it was imported from, as
+// business/TaskKeys SourceKey checks it: its prefix and number.
+type AliasKey struct {
+	Key    string
+	Number int
+}
+
+// KeepAliases makes each of keys find taskID from now on, beside its own key:
+// keys the task had in the source importID brought it from (O-L2). It leaves
+// out, and answers as held, a key a project here uses or used, and one another
+// live task answers to; the task's own key needs nothing and isn't answered.
+// A row whose task is gone is taken over, so an import made again after a
+// rollback keeps its keys. One statement for all of them.
+func KeepAliases(ctx context.Context, keys []AliasKey, taskID, importID uuid.UUID) (held []AliasKey, err error) {
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	prefixes, numbers := make([]string, 0, len(keys)), make([]int64, 0, len(keys))
+	seen := map[AliasKey]bool{}
+	for _, k := range keys {
+		if !seen[k] {
+			seen[k] = true
+			prefixes, numbers = append(prefixes, k.Key), append(numbers, int64(k.Number))
+		}
+	}
+	var imp any
+	if importID != uuid.Nil {
+		imp = importID
+	}
+	return pgexec.Query(ctx, `
+		WITH want AS (
+			SELECT w.key, w.number,
+				EXISTS (SELECT 1 FROM tasks t JOIN project_keys pk ON pk.project_id = t.project_id
+					WHERE t.id = $3::uuid AND pk.key = w.key AND t.task_number = w.number) AS own_key
+			FROM unnest($1::varchar[], $2::int[]) AS w(key, number)
+		), kept AS (
+			INSERT INTO task_key_aliases (key, number, task_id, import_id)
+			SELECT w.key, w.number, $3::uuid, $4::uuid FROM want w
+			WHERE NOT w.own_key
+			  AND NOT EXISTS (SELECT 1 FROM project_keys pk WHERE pk.key = w.key)
+			  AND NOT EXISTS (SELECT 1 FROM project_key_aliases pa WHERE pa.key = w.key)
+			ON CONFLICT (key, number) DO UPDATE
+				SET task_id = EXCLUDED.task_id, import_id = EXCLUDED.import_id, created_at = NOW()
+				WHERE task_key_aliases.task_id = EXCLUDED.task_id
+				   OR NOT EXISTS (SELECT 1 FROM tasks t WHERE t.id = task_key_aliases.task_id AND t.deleted_at IS NULL)
+			RETURNING key, number
+		)
+		SELECT w.key, w.number FROM want w
+		WHERE NOT w.own_key AND NOT EXISTS (SELECT 1 FROM kept k WHERE k.key = w.key AND k.number = w.number)
+		ORDER BY w.key, w.number`,
+		func(r pgexec.Row) (AliasKey, error) {
+			var k AliasKey
+			err := r.Scan(&k.Key, &k.Number)
+			return k, err
+		}, prefixes, numbers, taskID, imp)
 }
 
 // Unkeyed is a project with no key yet: its id and name.

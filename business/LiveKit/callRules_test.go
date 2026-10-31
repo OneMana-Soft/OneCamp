@@ -267,3 +267,20 @@ func TestTheSwitchNeedsTheWorkspaceAndThePerson(t *testing.T) {
 		t.Errorf("no call: got %v", err)
 	}
 }
+
+// A call's transcript session, which a browser's capability report and its
+// lines are kept under, is answered only for someone connected to that call:
+// not for someone else, nor for a room with no call.
+func TestOnlySomeoneInTheCallHasATranscriptSession(t *testing.T) {
+	const room = "4f0c2a1e-3b7d-4c55-9a51-0d8b1f6a2c33"
+	fakeLiveKit(t, room, "RM_one", "0x1")
+	if key, err := ResolveTranscriptSession(context.Background(), room, "0x1"); err != nil || key == "" {
+		t.Fatalf("someone in the call: %q %v", key, err)
+	}
+	if key, err := ResolveTranscriptSession(context.Background(), room, "0x2"); err == nil {
+		t.Errorf("someone not in the call got the session %q", key)
+	}
+	if key, err := ResolveTranscriptSession(context.Background(), "no-such-room", "0x1"); err == nil {
+		t.Errorf("a room with no call answered %q", key)
+	}
+}

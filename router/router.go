@@ -2,8 +2,6 @@ package router
 
 import (
 	"net/http"
-	"os"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -23,6 +21,7 @@ import (
 	authzController "github.com/akashc777/OneCamp/controllers/Authz"
 	boardController "github.com/akashc777/OneCamp/controllers/Board"
 	eventController "github.com/akashc777/OneCamp/controllers/Calendar"
+	callsController "github.com/akashc777/OneCamp/controllers/Calls"
 	cardsController "github.com/akashc777/OneCamp/controllers/Cards"
 	channelController "github.com/akashc777/OneCamp/controllers/Channel"
 	chatController "github.com/akashc777/OneCamp/controllers/Chat"
@@ -35,6 +34,7 @@ import (
 	dataTableController "github.com/akashc777/OneCamp/controllers/DataTable"
 	docController "github.com/akashc777/OneCamp/controllers/Doc"
 	entityLinkController "github.com/akashc777/OneCamp/controllers/EntityLink"
+	estimateScaleController "github.com/akashc777/OneCamp/controllers/EstimateScale"
 	formController "github.com/akashc777/OneCamp/controllers/Form"
 	githubController "github.com/akashc777/OneCamp/controllers/GitHub"
 	globalSearchController "github.com/akashc777/OneCamp/controllers/GlobalSearch"
@@ -45,14 +45,17 @@ import (
 	invoiceController "github.com/akashc777/OneCamp/controllers/Invoice"
 	livekitController "github.com/akashc777/OneCamp/controllers/LiveKit"
 	marketplaceController "github.com/akashc777/OneCamp/controllers/Marketplace"
+	milestoneController "github.com/akashc777/OneCamp/controllers/Milestone"
 	notificationController "github.com/akashc777/OneCamp/controllers/Notification"
 	pollController "github.com/akashc777/OneCamp/controllers/Poll"
 	postController "github.com/akashc777/OneCamp/controllers/Post"
+	preferencesController "github.com/akashc777/OneCamp/controllers/Preferences"
 	projectController "github.com/akashc777/OneCamp/controllers/Project"
 	projectTemplateController "github.com/akashc777/OneCamp/controllers/ProjectTemplate"
 	projectUpdateController "github.com/akashc777/OneCamp/controllers/ProjectUpdate"
 	publicController "github.com/akashc777/OneCamp/controllers/Public"
 	recordingController "github.com/akashc777/OneCamp/controllers/Recording"
+	rowQueryController "github.com/akashc777/OneCamp/controllers/RowQuery"
 	savedItemController "github.com/akashc777/OneCamp/controllers/SavedItem"
 	scheduledMessageController "github.com/akashc777/OneCamp/controllers/ScheduledMessage"
 	scimController "github.com/akashc777/OneCamp/controllers/Scim"
@@ -87,10 +90,15 @@ func corsFor(origins []string) func(http.Handler) http.Handler {
 	return cors.Handler(cors.Options{
 		AllowedOrigins: origins,
 		AllowedMethods: []string{"GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders: []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Requested-With", "Origin"},
+		// If-Match: an app's access is changed from the version it was read at
+		// (PUT /admin/apps/{id}/access). Idempotency-Key: the web app sends one
+		// with each import (docs W3).
+		AllowedHeaders: []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Requested-With", "Origin", "If-Match", "Idempotency-Key"},
 		// X-CSRF-Token: the web app takes its CSRF token from the answers (the
 		// cookie holding it is the API host's own and HttpOnly).
-		ExposedHeaders:   []string{"Link", "Retry-After", "X-CSRF-Token"},
+		// Content-Disposition names a download; X-Total-Count and X-Export-Rows
+		// say when a task list's CSV holds only the first part of the list.
+		ExposedHeaders:   []string{"Link", "Retry-After", "X-CSRF-Token", "Content-Disposition", "X-Total-Count", "X-Export-Rows"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	})
@@ -115,6 +123,8 @@ func useBaseMiddleware(router chi.Router, origins []string) {
 	router.Use(customMiddleware.SecurityHeaders)
 	router.Use(customMiddleware.RequestIDMiddleware)
 
+	// Before the tracing, which records a Basic user name as enduser.id.
+	router.Use(customMiddleware.DropBasicAuth)
 	router.Use(otelchi.Middleware(
 		"onecamp-backend",
 		otelchi.WithTracerProvider(otel.GetTracerProvider()),
@@ -130,28 +140,41 @@ func useBaseMiddleware(router chi.Router, origins []string) {
 	router.Use(customMiddleware.ClientGone)
 }
 
+// allowedOrigins are the origins credentialed CORS answers: the CSRF check's
+// own (middleware.OwnOrigins) and, on a development backend, the web's dev
+// servers (middleware.DevOrigins).
+func allowedOrigins() []string {
+	return append(customMiddleware.OwnOrigins(), customMiddleware.DevOrigins()...)
+}
+
+// Routes is the server's handler, with the background loops its routes rely
+// on started.
 func Routes() http.Handler {
-	var allowedOrigins []string
-	if feHost := strings.TrimSpace(os.Getenv("FE_HOST_DOMAIN")); feHost != "" {
-		allowedOrigins = append(allowedOrigins, "https://"+feHost)
-		if strings.Contains(feHost, "localhost") || strings.HasPrefix(feHost, "127.0.0.1") {
-			allowedOrigins = append(allowedOrigins, "http://"+feHost)
-		}
-	}
-	if beHost := strings.TrimSpace(os.Getenv("BACKEND_DOMAIN")); beHost != "" {
-		allowedOrigins = append(allowedOrigins, "https://"+beHost)
-		if strings.Contains(beHost, "localhost") || strings.HasPrefix(beHost, "127.0.0.1") {
-			allowedOrigins = append(allowedOrigins, "http://"+beHost)
-		}
-	}
-	// Hard-coded dev origins so local development works even when env vars
-	// are missing or point elsewhere.
-	allowedOrigins = append(allowedOrigins,
-		"http://localhost:3000", "http://localhost:3001",
-		"https://localhost:3000", "https://localhost:3001",
-	)
+	router := routes()
+	startBackgroundLoops()
+	return router
+}
+
+// startBackgroundLoops starts the webhook log cleanup, the import reaper
+// (resets stuck chunk claims) and the staged-source cleanup loop (reclaims
+// MinIO storage after retention), and the board snapshots' age prune.
+// Provider-agnostic: both legacy Slack imports and the new
+// Trello/Asana/Jira/Notion/Todoist pipeline share the same chunk queue and
+// storage backend after migration 60, so one reaper and one cleanup loop
+// cover everything. Doc versions are kept by the Snapshot Service's sweeps
+// (A4).
+func startBackgroundLoops() {
+	webhookBusiness.StartWebhookCleanupScheduler()
+	importBusiness.StartReaperLoop()
+	importBusiness.StartCleanupLoop()
+	boardBusiness.StartBoardSnapshotCleanupLoop()
+}
+
+// routes is every route the server serves, with nothing started: what a test
+// walks.
+func routes() *chi.Mux {
 	router := chi.NewRouter()
-	useBaseMiddleware(router, allowedOrigins)
+	useBaseMiddleware(router, allowedOrigins())
 
 	globalSearchRouter := chi.NewRouter()
 	channelRouter := chi.NewRouter()
@@ -236,7 +259,7 @@ func Routes() http.Handler {
 	// for an uploaded app icon (a PUBLIC-scoped attachment). Public because
 	// icons are non-sensitive branding assets that must render in the command
 	// menu before auth context is established; only resolves PUBLIC attachments.
-	router.Get("/public/app-icon/{obj_uuid}", commandController.ServeAppIcon)
+	router.With(customMiddleware.FileReadLimit("app-icon")).Get("/public/app-icon/{obj_uuid}", commandController.ServeAppIcon)
 
 	// Public unsubscribe (no auth — token in query string is the credential).
 	// Rate-limited per IP to blunt token-flooding scans. The token is
@@ -296,9 +319,13 @@ func Routes() http.Handler {
 	// cancelling are limited per address. Looking is limited per address and
 	// per page, every GET counted, and its answer is cached per page and day.
 	// Intake forms: anyone with the link fills one in; each answer set
-	// becomes a task. Sending is limited per address.
-	router.Get("/public/form/{token}", formController.GetPublicForm)
+	// becomes a task or a table row. Sending is limited per address, and so
+	// are the files a visitor adds before sending (10 MB at most, scanned,
+	// refused when they could run in a browser).
+	router.With(customMiddleware.LinkReadLimit("form")).Get("/public/form/{token}", formController.GetPublicForm)
+	router.With(customMiddleware.LinkReadLimit("form")).Get("/public/form/{token}/{kind:cover|logo}", formController.GetPublicFormPicture)
 	router.With(customMiddleware.IPRateLimit("form", 20, "Too many forms sent from here. Try again later.")).With(customMiddleware.BodyLimit(64<<10)).Post("/public/form/{token}", formController.SubmitPublicForm)
+	router.With(customMiddleware.IPRateLimit("form-file", 60, "Too many files sent from here. Try again later.")).With(customMiddleware.BodyLimit(10<<20+64<<10)).Post("/public/form/{token}/file", formController.UploadPublicFormFile)
 	// An app's answer at its command's response URL: the token is the credential.
 	router.With(customMiddleware.IPRateLimit("command-respond", 600, "Too many answers from here. Try again later.")).With(customMiddleware.BodyLimit(256<<10)).Post("/command-responses/{token}", commandController.Respond)
 	router.With(customMiddleware.BookingPageReadLimit()).Get("/public/book/{slug}", eventController.GetPublicBookingPage)
@@ -311,17 +338,50 @@ func Routes() http.Handler {
 	// available" is the same 404.
 	router.With(customMiddleware.InvitationReadLimit()).Get("/public/rsvp/{token}", eventController.GetPublicInvitation)
 	router.With(customMiddleware.IPRateLimit("rsvp", 20, "Too many answers sent from here. Try again later.")).With(customMiddleware.BodyLimit(8<<10)).Post("/public/rsvp/{token}", eventController.AnswerPublicInvitation)
+	// A calendar's secret link (calendar B8), read by another calendar app:
+	// limited per link, and loosely per address, since Google's and Apple's
+	// readers fetch many people's links from the same few addresses.
+	router.With(customMiddleware.CalendarFeedReadLimit()).Get("/public/calendar/{file}", eventController.PublicCalendarFeed)
+	// A project's cycles as a calendar (linear-12): a person's secret link, limited as a calendar's.
+	router.With(customMiddleware.CalendarFeedReadLimit()).Get("/public/cycles/{file}", cycleController.PublicCycleFeed)
 	router.With(customMiddleware.LoginRateLimit("guest")).Get("/guest/meet/{token}", guestController.GetGuestMeeting)
 	router.With(customMiddleware.GuestRateLimit(customMiddleware.GuestJoin)).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/meet/{token}/join", guestController.JoinGuestMeeting)
+	// A guest's own hand and feedback in a call, proved by their call token
+	// (calls CALLS-3a); a member's token is refused.
+	router.With(customMiddleware.IPRateLimit("call-act", 120, "Too many requests from here. Wait a few minutes and try again.")).With(customMiddleware.BodyLimit(1<<12)).Post("/guest/calls/act", callsController.GuestActInCall)
+	router.With(customMiddleware.IPRateLimit("call-board", 120, "Too many requests from here. Wait a few minutes and try again.")).Post("/guest/calls/board-token", callsController.GuestCallBoardToken)
+	// A guest's token for a breakout room of their call (calls package C).
+	router.With(customMiddleware.IPRateLimit("call-room", 120, "Too many requests from here. Wait a few minutes and try again.")).With(customMiddleware.BodyLimit(1<<12)).Post("/guest/calls/breakout-token", callsController.GuestCallBreakoutToken)
+	router.With(customMiddleware.CallThreadReadLimit()).Get("/guest/calls/thread", callsController.GuestCallThread)
+	// A guest's polls and questions in a call, proved by their call token
+	// (calls package A): read, vote, ask and upvote; nothing else.
+	router.With(customMiddleware.CallActivitiesReadLimit()).Get("/guest/calls/activities", callsController.GuestCallActivities)
+	router.With(customMiddleware.IPRateLimit("call-activities", 240, "Too many requests from here. Wait a few minutes and try again.")).With(customMiddleware.BodyLimit(1<<12)).Post("/guest/calls/activities", callsController.GuestDoCallActivity)
+	router.With(customMiddleware.IPRateLimit("call-thread", 120, "Too many messages from here. Wait a few minutes and try again.")).With(customMiddleware.BodyLimit(1<<15)).Post("/guest/calls/thread", callsController.GuestReplyInCallThread)
+	router.With(customMiddleware.IPRateLimit("call-quality", 120, "Too many requests from here. Wait a few minutes and try again.")).With(customMiddleware.BodyLimit(1<<13)).Post("/guest/calls/quality", callsController.GuestRecordCallQuality)
+	// A guest waiting in a meeting's lobby (calls CALLS-2): each ask waits up to
+	// 25 s for an answer, so a waiting page asks about twice a minute.
+	router.With(customMiddleware.IPRateLimit("knock", 120, "Too many requests from here. Wait a few minutes and try again.")).Get("/guest/meet/{token}/knock/{ticket}", guestController.GuestKnockAnswer)
+	router.With(customMiddleware.IPRateLimit("knock", 120, "Too many requests from here. Wait a few minutes and try again.")).Delete("/guest/meet/{token}/knock/{ticket}", guestController.GuestKnockAnswer)
+	// A personal room's address (calls CALLS-2): what it answers, its
+	// passcode's unlock, joining, and the lobby's answer, as the meeting link's
+	// token routes above but by the room's address (business/Guest KindRoom's
+	// Path). Each handler counts its asks per address by the room kind's
+	// surfaces, and a passcode's tries per room too.
+	router.Get("/public/r/{slug}", guestController.RoomAtAddress)
+	router.With(customMiddleware.BodyLimit(4<<10)).Post("/public/r/{slug}/unlock", guestController.UnlockRoom)
+	router.With(customMiddleware.BodyLimit(1<<16)).Post("/public/r/{slug}/join", guestController.JoinRoom)
+	router.Get("/public/r/{slug}/knock/{ticket}", guestController.RoomKnockAnswer)
+	router.Delete("/public/r/{slug}/knock/{ticket}", guestController.RoomKnockAnswer)
 	// Phase 2: exchange a doc/board share-link token for a short-lived,
 	// read-only collab JWT. Public + rate-limited; a link that is off, invalid,
 	// expired or revoked gets the uniform not-available (no oracle), and a
 	// server that couldn't answer a 503 the page retries.
 	router.With(customMiddleware.GuestRateLimit(customMiddleware.GuestOpenLive)).With(customMiddleware.BodyLimit(1<<16)).Post("/guest/collab/{token}", guestController.GuestCollabToken)
 	// Public board image fetch for a guest, authorized by the share-link grant
-	// (the attachment must belong to the grant's board). Not rate-limited: a
-	// board can load many images and the endpoint requires a valid grant token.
-	router.Get("/guest/board-attachment/{token}/{obj_uuid}", guestController.GuestBoardAttachment)
+	// (the attachment must belong to the grant's board). A board can load many
+	// images, so an address has a file's budget.
+	router.With(customMiddleware.FileReadLimit("guest-board")).Get("/guest/board-attachment/{token}/{obj_uuid}", guestController.GuestBoardAttachment)
 	// The same for a picture or file in a doc shared through a guest link (B4).
 	mountGuestDocAttachment(router)
 	// Docs published to the web (C6, D-25): public, each route protected in
@@ -352,7 +412,7 @@ func Routes() http.Handler {
 		r.Use(customMiddleware.CSRFMiddleware)
 		r.Use(customMiddleware.VerifyAuthOnlyPostgres)
 		r.Get("/basicSelfProfile", userController.GetLoggedInUserProfile)
-		r.With(customMiddleware.LoginRateLimit("collab")).Get("/auth/token", authController.GetCollabToken)
+		r.With(customMiddleware.CollabTokenReadLimit()).Get("/auth/token", authController.GetCollabToken)
 		// The CSRF token alone (in the X-CSRF-Token header), for a write before
 		// any read; every answer in a CSRF group carries it too.
 		r.Get("/auth/csrf", authController.CSRFToken)
@@ -994,6 +1054,10 @@ func Routes() http.Handler {
 		r.Get("/{id}/rows/pick", dataTableController.PickRows)
 		r.Get("/{id}/fields", dataTableController.ListFields)
 		r.Post("/{id}/aggregate", dataTableController.AggregateTable)
+		r.Post("/{id}/presence", dataTableController.SetPresence)
+		r.Post("/{id}/query", rowQueryController.QueryRows)
+		r.Post("/{id}/export", dataTableController.ExportTable)
+		r.Get("/{id}/files/{obj_uuid}", userController.GetTableFile)
 		r.Post("/{id}/query-plan", dataTableController.QueryPlan)
 		r.Post("/{id}/rows", dataTableController.CreateRow)
 		r.Post("/{id}/rows/{rowId}/update", dataTableController.UpdateRow)
@@ -1005,10 +1069,13 @@ func Routes() http.Handler {
 		r.Post("/{id}/fields/{fieldId}/convert-preview", dataTableController.PreviewConversion)
 		r.Post("/{id}/fields/{fieldId}/delete", dataTableController.DeleteField)
 		r.Post("/{id}/fields/{fieldId}/ai-fill", dataTableController.FillAIColumn)
+		r.Post("/{id}/fields/{fieldId}/ai-fill/stop", dataTableController.StopAIFill)
+		r.Get("/{id}/ai-fills", dataTableController.ListAIFills)
 		r.Post("/{id}/formula/preview", dataTableController.PreviewFormula)
 		r.Post("/{id}/views", dataTableController.CreateView)
 		r.Post("/{id}/views/{viewId}/update", dataTableController.UpdateView)
 		r.Post("/{id}/views/{viewId}/delete", dataTableController.DeleteView)
+		r.Post("/{id}/views/{viewId}/lock", dataTableController.LockView)
 	})
 
 	// External, read-only data sources (migration 126). CONFIG routes are
@@ -1376,6 +1443,9 @@ func Routes() http.Handler {
 
 	userRouter.Group(func(r chi.Router) {
 		r.Get("/profile", userController.GetLoggedInUserProfile)
+		// Person Preferences (design #37): the signed-in person's own.
+		r.Get("/preferences", preferencesController.GetMine)
+		r.Put("/preferences/{key}", preferencesController.SetMine)
 		r.Get("/sidebarNav", userController.GetDgraphUserInfoByUUIDForSidebarNav)
 		r.Get("/profile/{user_id}", userController.GetProfileByUserId)
 		r.Get("/botKinds", userController.GetBotKinds)
@@ -1440,6 +1510,12 @@ func Routes() http.Handler {
 	projectRouter.Group(func(r chi.Router) {
 		r.Post("/createProject", projectController.CreateProject)
 		r.Get("/overview", projectUpdateController.ProjectsOverview)
+		// The milestones of every project the caller is in (linear-16).
+		r.Get("/milestones", milestoneController.MyMilestones)
+		// The listed projects' forecasts in one read (linear-20): the overview and the goal rows.
+		r.Get("/forecasts", taskController.ProjectForecasts)
+		// Every project's running cycle, for the caller: business/Cycle/running.go.
+		r.Get("/cycles/running", cycleController.RunningCycles)
 		// Who has how much each week, across the person's projects: business/Project/workload.go.
 		r.Get("/workload", projectController.Workload)
 		r.Post("/workload/capacity", projectController.SetWorkloadCapacity)
@@ -1487,8 +1563,20 @@ func Routes() http.Handler {
 		r.Post("/{project_uuid}/invoices/{invoice_id}/delete", invoiceController.DeleteInvoice)
 		r.Get("/{project_uuid}/tags", taskController.ProjectTags)
 		r.Get("/{project_uuid}/timeline", projectController.ProjectTimeline)
+		// Its critical path and slack, with linked tasks of other projects (DG10).
+		r.Get("/{project_uuid}/critical-path", taskController.CriticalPath)
+		r.Get("/{project_uuid}/forecast", taskController.ProjectForecast)
 		// Project updates: see business/ProjectUpdate.
 		r.Get("/{project_uuid}/goals", goalController.ProjectGoals)
+		// Milestones (linear-16): members read, admins change; a shared one is
+		// changed by its home project's admins. See business/Milestone.
+		r.Get("/{project_uuid}/milestones", milestoneController.ListMilestones)
+		r.Post("/{project_uuid}/milestones", milestoneController.CreateMilestone)
+		r.Post("/{project_uuid}/milestones/reorder", milestoneController.ReorderMilestones)
+		r.Post("/{project_uuid}/milestones/{milestone_id}/edit", milestoneController.EditMilestone)
+		r.Post("/{project_uuid}/milestones/{milestone_id}/delete", milestoneController.DeleteMilestone)
+		r.Post("/{project_uuid}/milestones/{milestone_id}/share", milestoneController.ShareMilestone)
+		r.Post("/{project_uuid}/milestones/{milestone_id}/unshare", milestoneController.UnshareMilestone)
 		r.Get("/{project_uuid}/updates", projectUpdateController.ListUpdates)
 		r.Get("/{project_uuid}/updates/draft", projectUpdateController.DraftUpdate)
 		r.Post("/{project_uuid}/updates", projectUpdateController.PostUpdate)
@@ -1498,9 +1586,14 @@ func Routes() http.Handler {
 		r.Get("/{project_uuid}/cycles/{cycle_id}/burndown", cycleController.CycleBurndown)
 		r.Post("/{project_uuid}/cycles", cycleController.CreateCycle)
 		r.Post("/{project_uuid}/cycles/{cycle_id}/rename", cycleController.RenameCycle)
+		r.Post("/{project_uuid}/cycles/{cycle_id}/capacity", cycleController.SetCycleCapacity)
 		r.Post("/{project_uuid}/cycles/{cycle_id}/complete", cycleController.CompleteCycle)
 		r.Post("/{project_uuid}/cycles/{cycle_id}/start", cycleController.StartCycle)
 		r.Post("/{project_uuid}/cycles/schedule", cycleController.SetCycleSchedule)
+		// The caller's own calendar link to the project's cycles (linear-12 part 4).
+		r.Get("/{project_uuid}/cycles/feed", cycleController.CycleFeed)
+		r.Post("/{project_uuid}/cycles/feed", cycleController.MakeCycleFeed)
+		r.Post("/{project_uuid}/cycles/feed/stop", cycleController.StopCycleFeed)
 		r.Post("/{project_uuid}/cycles/schedule/stop", cycleController.StopCycleSchedule)
 		r.Get("/{project_uuid}/backlog", cycleController.Backlog)
 		r.Post("/{project_uuid}/cycles/{cycle_id}/delete", cycleController.DeleteCycle)
@@ -1509,6 +1602,10 @@ func Routes() http.Handler {
 		r.Post("/{project_uuid}/statuses/reorder", taskStatusController.Reorder)
 		r.Post("/{project_uuid}/statuses/{status_id}", taskStatusController.Update)
 		r.Post("/{project_uuid}/statuses/{status_id}/delete", taskStatusController.Delete)
+		// How a project estimates, in hours or in points on a scale (linear-05):
+		// members read, admins change. See business/EstimateScale.
+		r.Get("/{project_uuid}/estimates", estimateScaleController.GetScale)
+		r.Post("/{project_uuid}/estimates", estimateScaleController.SetScale)
 		// A project's custom task fields: members read, admins change.
 		r.Get("/{project_uuid}/fields", taskFieldController.ListFields)
 		r.Post("/{project_uuid}/fields", taskFieldController.CreateField)
@@ -1579,7 +1676,8 @@ func Routes() http.Handler {
 	})
 
 	taskRouter.Group(func(r chi.Router) {
-		r.Post("/createTask", taskController.CreateTask)
+		// A task, a sub-task and a comment are made once per Idempotency-Key (P7-1b).
+		TaskCreates(r)
 		r.Get("/info/{task_uuid}", taskController.GetTaskInfo)
 		r.Post("/updateTaskName", taskController.UpdateTaskName)
 		r.Post("/updateTaskDesc", taskController.UpdateTaskDesc)
@@ -1588,8 +1686,11 @@ func Routes() http.Handler {
 		r.Post("/updateTaskDueDate", taskController.UpdateTaskDueDate)
 		r.Post("/updateTaskDates", taskController.UpdateTaskDates)
 		r.Post("/updateTaskEstimate", taskController.UpdateTaskEstimate)
+		r.Post("/updateTaskPoints", taskController.UpdateTaskPoints)
 		r.Post("/field", taskFieldController.SetTaskField)
 		r.Post("/dependency", taskController.AddTaskDependency)
+		// What a move would push along, before it's made (DG10).
+		r.Get("/{task_uuid}/impact", taskController.TaskImpact)
 		r.Post("/dependency/delete", taskController.RemoveTaskDependency)
 		r.Post("/updateTaskStatus", taskController.UpdateTaskStatus)
 		r.Get("/recurrence/{task_uuid}", taskController.GetTaskRecurrence)
@@ -1605,15 +1706,15 @@ func Routes() http.Handler {
 		r.Post("/time/entry/{entry_id}/delete", timeEntryController.DeleteTime)
 		r.Post("/cycle", cycleController.SetTaskCycle)
 		r.Post("/recurrence", taskController.SetTaskRecurrence)
+		r.Get("/milestone/{task_uuid}", milestoneController.GetTaskMilestone)
+		r.Post("/milestone", milestoneController.SetTaskMilestone)
 		r.Get("/views", taskController.GetTaskViews)
 		r.Post("/views", taskController.SaveTaskView)
 		r.Post("/views/delete", taskController.DeleteTaskView)
 		r.Post("/moveTask", taskController.MoveTask)
 		r.Post("/updateTaskPriority", taskController.UpdateTaskPriority)
 		r.Post("/updateTaskLabel", taskController.UpdateTaskLabel)
-		r.Post("/createSubTask", taskController.CreateSubTask)
 		r.Post("/addAttachmentToTask", taskController.AddAttachmentsToTask)
-		r.Post("/createCommentTask", taskController.CreateTaskComment)
 		r.Post("/updateComment", taskController.UpdateTaskCommentBody)
 		r.Post("/deleteTaskComment", taskController.DeleteTaskComment)
 		r.Post("/deleteTaskAttachment", taskController.RemoveAttachmentFromTask)
@@ -1771,9 +1872,14 @@ func Routes() http.Handler {
 		r.Get("/getEvent/{eventId}", eventController.GetEventController)
 		r.Post("/createEvent", eventController.CreateEventController)
 		r.Post("/updateEvent/{eventId}", eventController.UpdateEventController)
+		r.Post("/endFocus", eventController.EndFocusController)
 		r.Delete("/deleteEvent/{eventId}", eventController.DeleteEventController)
 		r.Post("/leaveEvent/{eventId}", eventController.LeaveEventController)
 		r.Post("/findTime", eventController.FindTime)
+		r.Post("/suggestTimes", eventController.SuggestTimes)
+		r.Post("/hours", eventController.PeopleHours)
+		r.Post("/explain", eventController.ExplainTime)
+		r.Get("/status/{user_uuid}", eventController.PersonStatus)
 		r.Get("/bookingPages", eventController.GetMyBookingPages)
 		r.Post("/bookingPages", eventController.SaveMyBookingPage)
 		r.Post("/bookingPages/delete", eventController.DeleteMyBookingPage)
@@ -2025,25 +2131,11 @@ func Routes() http.Handler {
 	// execute, and interactive Block Kit round-trips).
 	commandRouter.Group(func(r chi.Router) {
 		r.Get("/catalog", commandController.GetCatalog)
+		// The composer's GIF picker: a page of trending GIFs, or of a search.
+		r.Get("/giphy", commandController.GiphyPicker)
 		r.Post("/execute", commandController.Execute)
 		r.Post("/interact", commandController.Interact)
 	})
-
-	// Start background webhook log cleanup scheduler
-	webhookBusiness.StartWebhookCleanupScheduler()
-
-	// Start the import reaper (resets stuck chunk claims) and the
-	// staged-source cleanup loop (reclaims MinIO storage after retention).
-	// Provider-agnostic: both legacy Slack imports and the new
-	// Trello/Asana/Jira/Notion/Todoist pipeline share the same chunk
-	// queue and storage backend after migration 60, so one reaper +
-	// one cleanup loop covers everything.
-	importBusiness.StartReaperLoop()
-	importBusiness.StartCleanupLoop()
-
-	// Age-prune board snapshots (version history) past the retention window.
-	boardBusiness.StartBoardSnapshotCleanupLoop()
-	// Doc versions are kept by the Snapshot Service's sweeps (A4).
 
 	// The docs programme's routes, last (docsProgramme.go). Its only line here.
 	mountDocsProgramme(newDocsRouters(router, docRouter, adminUserRouter, docColabRouter, v1Router))

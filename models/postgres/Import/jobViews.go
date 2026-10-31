@@ -5,7 +5,10 @@ package models
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
+	"time"
 
 	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
@@ -92,23 +95,101 @@ func mappingsOf(ctx context.Context, q string, jobIds []uuid.UUID) (map[uuid.UUI
 	return out, nil
 }
 
-// RecordMapping records what an import made (createdHere) or found for a
-// source id, in its own map and in the workspace's, in one statement where
-// UpsertIdMappingWithOwnership and UpsertWorkspaceMapping were two. Both are
-// idempotent.
+// RecordMapping is RecordMappings for one source id. Its error names what it
+// couldn't remember, for the item's own.
 func RecordMapping(ctx context.Context, importId uuid.UUID, provider, workspace, entityType, sourceId string,
 	onecampUUID uuid.UUID, parentSourceId *string, metadata json.RawMessage, createdHere bool) error {
+	if err := RecordMappings(ctx, importId, provider, workspace, entityType, []Mapped{{
+		SourceID: sourceId, OnecampUUID: onecampUUID, ParentSourceID: parentSourceId, Metadata: metadata, CreatedHere: createdHere,
+	}}); err != nil {
+		return fmt.Errorf("remember %s %s: %w", entityType, sourceId, err)
+	}
+	return nil
+}
+
+// Mapped is a source id and what an import made (CreatedHere) or found for
+// it, with its parent's source id and its metadata when it has them.
+type Mapped struct {
+	SourceID       string
+	OnecampUUID    uuid.UUID
+	ParentSourceID *string
+	Metadata       json.RawMessage
+	CreatedHere    bool
+}
+
+// RecordMappings records what an import made or found for source ids of one
+// entity type, in its own map and, when it names its workspace, in the
+// workspace's, so the next import of the workspace skips them: one statement
+// where an upsert into each map was two a row. Both are idempotent.
+func RecordMappings(ctx context.Context, importId uuid.UUID, provider, workspace, entityType string, rows []Mapped) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	sources := make([]string, len(rows))
+	ids := make([]string, len(rows))
+	parents := make([]sql.NullString, len(rows))
+	metadata := make([]sql.NullString, len(rows))
+	made := make([]bool, len(rows))
+	for i, r := range rows {
+		sources[i], ids[i], made[i] = r.SourceID, r.OnecampUUID.String(), r.CreatedHere
+		if r.ParentSourceID != nil {
+			parents[i] = sql.NullString{String: *r.ParentSourceID, Valid: true}
+		}
+		if len(r.Metadata) > 0 {
+			metadata[i] = sql.NullString{String: string(r.Metadata), Valid: true}
+		}
+	}
 	_, err := pgexec.Exec(ctx, `
-		WITH mapped AS (
+		WITH rows AS (
+			SELECT * FROM unnest($3::varchar[], $4::uuid[], $5::varchar[], $6::text[], $7::boolean[])
+			    AS r(source_id, onecamp_uuid, parent_source_id, metadata, made)
+		), mapped AS (
 			INSERT INTO import_id_map
 			    (import_id, entity_type, source_id, onecamp_uuid, parent_source_id, metadata, created_by_this_import)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			SELECT $1, $2, source_id, onecamp_uuid, parent_source_id, metadata::jsonb, made FROM rows
 			ON CONFLICT (import_id, entity_type, source_id) DO NOTHING
 		)
 		INSERT INTO import_workspace_id_map
 		    (provider, source_workspace_name, entity_type, source_id, onecamp_uuid, origin_import_id)
-		SELECT $8::varchar, $9::varchar, $2, $3, $4, $1
+		SELECT $8::varchar, $9::varchar, $2, source_id, onecamp_uuid, $1 FROM rows WHERE $9::varchar <> ''
 		ON CONFLICT (provider, source_workspace_name, entity_type, source_id) DO NOTHING`,
-		importId, entityType, sourceId, onecampUUID, parentSourceId, metadata, createdHere, provider, workspace)
+		importId, entityType, pq.Array(sources), pq.Array(ids), pq.Array(parents), pq.Array(metadata), pq.Array(made), provider, workspace)
 	return err
+}
+
+// CommentImport is an import that brought a comment in: the import, its
+// provider, and when its first run started (At is nil when the job has no
+// time at all).
+type CommentImport struct {
+	Comment  uuid.UUID
+	Import   uuid.UUID
+	Provider string
+	At       *time.Time
+}
+
+// CommentImports are the imports that brought in each of comments, as their
+// id maps recorded them: none for a comment no import recorded.
+func CommentImports(ctx context.Context, comments []uuid.UUID) ([]CommentImport, error) {
+	if len(comments) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, len(comments))
+	for i, c := range comments {
+		ids[i] = c.String()
+	}
+	return pgexec.Query(ctx, `
+		SELECT m.onecamp_uuid, m.import_id, j.provider, COALESCE(j.started_at, j.created_at)
+		FROM import_id_map m JOIN import_jobs j ON j.id = m.import_id
+		WHERE m.entity_type = $1 AND m.onecamp_uuid = ANY($2::uuid[])`,
+		func(r pgexec.Row) (CommentImport, error) {
+			var c CommentImport
+			var at sql.NullTime
+			if err := r.Scan(&c.Comment, &c.Import, &c.Provider, &at); err != nil {
+				return c, err
+			}
+			if at.Valid {
+				c.At = &at.Time
+			}
+			return c, nil
+		}, EntityComment, pq.Array(ids))
 }

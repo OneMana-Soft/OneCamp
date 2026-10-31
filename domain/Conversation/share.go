@@ -22,7 +22,7 @@ import (
 
 // The filters a shareable message and a live reply pass.
 const (
-	shareableChat = `not gt(chat_deleted_at, "1970-01-01T00:00:00Z") AND not has(chat_fwd_msg_post) AND not has(chat_fwd_msg_chat) AND not eq(chat_kind, "system")`
+	shareableChat = `not gt(chat_deleted_at, "1970-01-01T00:00:00Z") AND not has(chat_fwd_msg_post) AND not has(chat_fwd_msg_chat) AND not eq(chat_kind, "system") AND not eq(chat_kind, "huddle")`
 	liveComment   = `not gt(comment_deleted_at, "1970-01-01T00:00:00Z")`
 )
 

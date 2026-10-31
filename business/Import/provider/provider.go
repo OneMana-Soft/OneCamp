@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 )
 
@@ -31,7 +32,11 @@ type SourceUser struct {
 	AvatarURL   string
 	IsBot       bool
 	IsExternal  bool
-	Metadata    map[string]any
+	// Left is someone who left the source (deactivated or deleted): they come
+	// as a placeholder, so their history keeps their name, and are never
+	// offered an invitation (people.go).
+	Left     bool
+	Metadata map[string]any
 }
 
 // SourceTeam is the provider's "team" / "workspace tier" shape. Trello
@@ -64,16 +69,69 @@ type SourceProject struct {
 	// SourceKey is the source's own project key (Jira's ENG): the project
 	// keeps it when no other project has it, so ENG-123 still finds its task.
 	SourceKey string
-	Fields    []SourceField  // custom fields, in the source's order (fields.go)
-	Metadata  map[string]any // includes per-provider URL, color, etc.
+	// HighestNumber is the highest number the project's tasks keep from their
+	// source keys (ENG-123's 123), sub-tasks' included, or 0. The project
+	// numbers a task made with no number of its own after it (Linear's
+	// milestones), so it takes none a task still to come keeps.
+	HighestNumber int
+	Fields        []SourceField  // custom fields, in the source's order (fields.go)
+	Metadata      map[string]any // includes per-provider URL, color, etc.
+	// Cycles are the source's cycles that hold the project's tasks, and
+	// CycleSchedule is how the source makes them (cycles.go).
+	Cycles        []SourceCycle
+	CycleSchedule *SourceCycleSchedule
+	// EstimateScale is the scale its team estimates on in the source; nil,
+	// hours (or no estimates).
+	EstimateScale *SourceEstimateScale
 }
+
+// SourceEstimateScale is a source's estimate scale, which the project keeps
+// here (business/EstimateScale): Kind is exponential, fibonacci, linear or
+// tshirt.
+type SourceEstimateScale struct {
+	Kind             string
+	Extended         bool // the scale's two larger sizes
+	AllowZero        bool // zero is a size
+	CountUnestimated bool // a task with no points counts as one
+}
+
+// SourceCycle is a time-boxed stretch of the source's work that held some of
+// a project's tasks (Linear's cycle).
+type SourceCycle struct {
+	SourceID    string
+	Name        string // as the source shows it, so Linear's unnamed 12th is "Cycle 12"
+	StartsAt    time.Time
+	EndsAt      time.Time
+	CompletedAt *time.Time // when the source closed it
+	Done        int        // the project's tasks it finished, for a closed one
+}
+
+// SourceCycleSchedule is how the source makes a team's cycles, which the
+// project keeps doing here (business/Cycle's schedule).
+type SourceCycleSchedule struct {
+	Weeks         int
+	CooldownWeeks int
+	Upcoming      int
+	RollOver      bool      // a cycle's unfinished tasks move on to the next
+	Anchor        time.Time // a cycle's start: the others fall on its weeks
+}
+
+// TaskType is a built-in kind of work a source's task comes as
+// (business/WorkTaxonomy). A task with none is a Task.
+type TaskType string
+
+// TaskMilestone marks a point in a project, on the task's due day (Linear's
+// project milestones).
+const TaskMilestone TaskType = "milestone"
 
 // SourceTask covers tasks/issues/cards/database-rows.
 type SourceTask struct {
 	SourceID        string
-	SourceKey       string // the source's own key (ENG-123): the task keeps its number
-	ParentTaskID    string // empty for top-level
+	SourceKey       string   // the source's own key (ENG-123): the task keeps its number
+	FormerKeys      []string // keys the task had before in the source (Linear's previousIdentifiers)
+	ParentTaskID    string   // empty for top-level
 	ProjectSourceID string
+	Type            TaskType // the built-in kind it comes as; "" is a Task
 	Name            string
 	Description     string // HTML; provider must render its native rich text
 	Status          string // raw — clamped via per-import status map
@@ -81,17 +139,21 @@ type SourceTask struct {
 	Labels          []string
 	AssigneeIds     []string // first becomes task_assignee, rest → @mentions
 	CreatedBy       string
-	StartDate       *time.Time
-	DueDate         *time.Time
+	StartDate       *time.Time // a time the source gave; a date with no time is StartDay
+	DueDate         *time.Time // a time the source gave; a date with no time is DueDay
+	StartDay        Day        // a date the source keeps with no time (day.go); never set with StartDate
+	DueDay          Day        // a date the source keeps with no time (day.go); never set with DueDate
 	Created         time.Time
 	Updated         time.Time
 	Completed       bool
 	EstimateMinutes int                // how long the source says it takes; 0 is none
+	EstimatePoints  *float64           // how big it is on its project's scale; nil is none
 	AttachmentRefs  []SourceAttachment // queued lazily by worker
 	CommentCount    int                // hint; CommentsUnknown when the source can't say
 	SubtaskCount    int                // hint
 	Fields          []SourceFieldValue // custom field values (fields.go)
 	Dependencies    []SourceDependency // the tasks this one waits on
+	CycleSourceID   string             // the cycle it is in: one of its project's Cycles
 	Metadata        map[string]any     // source URL, etc.
 	// Restricted is why the source keeps the task to some of its people, as
 	// the import's report says it ("" is a task everyone in its project may
@@ -193,6 +255,67 @@ type PageSource interface {
 	PagesOf(ctx context.Context, j *importModels.Job, opts JobOptions, root string, read func(pages int)) ([]SourcePage, error)
 }
 
+// SourceBoard is one board a provider brings, drawn: its elements as the
+// board's canvas keeps them (business/Board/scene), the pictures they show,
+// and what the import's report says about it.
+type SourceBoard struct {
+	SourceID    string
+	Title       string
+	Description string
+	// Elements are Excalidraw elements, in the order they're drawn. An image
+	// names its picture by fileId.
+	Elements []map[string]any
+	// Pictures are the board's images, each read through FetchAttachment.
+	// One that can't be read or kept becomes a labelled placeholder.
+	Pictures []BoardPicture
+	// Notes say what came over approximated and what couldn't come.
+	Notes []BoardNote
+	// Items is how many of the source's items were read.
+	Items int
+}
+
+// BoardPicture is one picture on a board: the fileId its image elements name,
+// and where the provider reads it.
+type BoardPicture struct {
+	FileID     string
+	Attachment SourceAttachment
+}
+
+// BoardNote is one line of a board's report: a code, what it says, and how
+// many items it is about.
+type BoardNote struct {
+	Code  string
+	Msg   string
+	Count int
+}
+
+// BoardSource is a provider that brings boards (CapBoards). Its Plan queues
+// one ChunkBoards chunk per board, the board's id as the chunk's
+// ParentSourceId.
+type BoardSource interface {
+	// BoardOf reads one board and draws it; read says how many of its items
+	// have been read so far, as it goes.
+	BoardOf(ctx context.Context, j *importModels.Job, opts JobOptions, boardID string, read func(items int)) (*SourceBoard, error)
+}
+
+// TableSource is a provider that brings bases of tables (CapTables): their
+// tables, fields of OneCamp's kinds, rows and views, in OneCamp's terms
+// (dataTableBusiness.ImportBase), which the tables worker makes through the
+// one importer of every source's tables. Its Plan queues one ChunkTableBase
+// chunk per base, the base as the chunk's ParentSourceId.
+type TableSource interface {
+	// BaseOf reads the base: its tables and fields at once, its rows as the
+	// importer asks for them (a page at a time); read says how many rows it
+	// has read so far, as it goes.
+	BaseOf(ctx context.Context, j *importModels.Job, opts JobOptions, base string, read func(rows int)) (dataTableBusiness.ImportBase, error)
+}
+
+// PersonRef is a person in a people cell a TableSource brings, by email:
+// the tables stage matches it to a member of the workspace before the row is
+// written, and leaves out one who isn't a member. It is the tables'
+// PersonRef, which a sheet's people chips are guessed into too.
+type PersonRef = dataTableBusiness.PersonRef
+
 // ─── Plan DTO ────────────────────────────────────────────────────────
 
 // Plan is what BuildPlan returns. The orchestrator persists it in
@@ -204,7 +327,10 @@ type Plan struct {
 	TeamCount    int      `json:"team_count"`
 	ProjectCount int      `json:"project_count"`
 	TaskCount    int      `json:"task_count"`
-	PageCount    int      `json:"page_count,omitempty"` // pages that become docs (CapPages)
+	PageCount    int      `json:"page_count,omitempty"`  // pages that become docs (CapPages)
+	BoardCount   int      `json:"board_count,omitempty"` // boards that come over (CapBoards)
+	ItemCount    int      `json:"item_count,omitempty"`  // what is on them
+	TableCount   int      `json:"table_count,omitempty"` // tables of the bases brought (CapTables)
 	SubtaskCount int      `json:"subtask_count"`
 	CommentCount int      `json:"comment_count"`
 	FileCount    int      `json:"file_count"`
@@ -216,11 +342,57 @@ type Plan struct {
 	// DefaultStatusMap()) is pre-filled.
 	StatusValues   []string `json:"status_values,omitempty"`
 	PriorityValues []string `json:"priority_values,omitempty"`
+	// StatusKinds is each status's own class in the source, by its lower-cased
+	// name (Linear's state type, Jira's status category), so a status with a
+	// name of the team's own is proposed by its class, not as To do.
+	StatusKinds map[string]string `json:"status_kinds,omitempty"`
+	// StatusProposals is the OneCamp status the plan proposes for each value
+	// (StatusDefaults), for the operator to confirm.
+	StatusProposals map[string]string `json:"status_proposals,omitempty"`
+	// Columns are an uploaded table's columns (a CSV's), each with what it is
+	// read as: a task's own property, or a field of the kind its values
+	// suggest, which the admin can change before the import runs.
+	Columns []PlanColumn `json:"columns,omitempty"`
+	// People are the people a file names, each with how they will be matched
+	// to someone here (BuildPlan says), so the admin sees who becomes whom
+	// before anything is written.
+	People []PlanPerson `json:"people,omitempty"`
 	// Slack-shape fields kept for backward-compat with the existing FE.
 	ChannelCount    int `json:"channel_count,omitempty"`
 	ChannelConflict int `json:"channel_conflict,omitempty"`
 	MessageCount    int `json:"message_count,omitempty"`
 	ThreadCount     int `json:"thread_count,omitempty"`
+}
+
+// PlanColumn is one column of an uploaded table.
+type PlanColumn struct {
+	Name string `json:"name"` // as the file's header has it
+	// Property is the task's own property it fills (title, status, due…), or
+	// "" for a column that becomes a field.
+	Property string `json:"property,omitempty"`
+	// Kind is the field it becomes (a Field* type, or KindSkip), and Guess the
+	// kind its values suggest. A field column only.
+	Kind     string `json:"kind,omitempty"`
+	Guess    string `json:"guess,omitempty"`
+	Currency string `json:"currency,omitempty"` // a money field's code
+	Values   int    `json:"values"`             // its cells with something in them
+}
+
+// KindSkip is a column the admin chose not to bring.
+const KindSkip = "skip"
+
+// PlanPerson is someone a file names (a task's assignee or maker, a person
+// field's value).
+type PlanPerson struct {
+	SourceID string `json:"source_id"`
+	Name     string `json:"name"`
+	Email    string `json:"email,omitempty"`
+	Rows     int    `json:"rows"` // the rows that name them
+	// MatchedBy is how they were matched: "email", "name", or an earlier
+	// import's "workspace_map"; "" is no one, and they come as a placeholder.
+	MatchedBy string `json:"matched_by,omitempty"`
+	Member    string `json:"member,omitempty"`    // whom they matched, by name
+	SameName  int    `json:"same_name,omitempty"` // members who share their name, when that is why no one matched
 }
 
 // ─── Provider interface ─────────────────────────────────────────────
@@ -244,6 +416,10 @@ const (
 	CapReactions
 	// CapPages is a provider that brings pages, which become docs (PageSource).
 	CapPages
+	// CapBoards is a provider that brings boards (BoardSource).
+	CapBoards
+	// CapTables is a provider that brings bases of tables (TableSource).
+	CapTables
 )
 
 // JobOptions are per-import operator knobs. The orchestrator and

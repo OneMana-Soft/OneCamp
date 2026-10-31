@@ -16,12 +16,7 @@ import (
 	business "github.com/akashc777/OneCamp/business/Unfurl"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/models/redis/registry"
-	redisStore "github.com/akashc777/OneCamp/models/redis/store"
 )
-
-// fetchesPerMinute is how many previews and stored pictures one person's
-// browser may make the server fetch a minute. A cached preview costs nothing.
-const fetchesPerMinute = 30
 
 // Seams for tests: the business calls, the admin's embed list and the
 // person's fetch window.
@@ -31,10 +26,8 @@ var (
 	embedHosts  = func(ctx context.Context) []string {
 		return policyBusiness.Policies.List(ctx, policyBusiness.EmbedAllowlist)
 	}
-	allowFetch = func(ctx context.Context, action, userUUID string) (bool, int) {
-		res := redisStore.AllowFixedWindowOrLocal(ctx, registry.UnfurlRate, []string{action, userUUID}, fetchesPerMinute)
-		return res.Allowed, res.RetryAfterSeconds()
-	}
+	// The person's fetch window (business.AllowFetch, FetchesPerMinute).
+	allowFetch = business.AllowFetch
 )
 
 // errLimited is a person over their fetches for the minute.

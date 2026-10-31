@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 )
 
@@ -77,8 +78,8 @@ func list(query string, args ...any) ([]Entry, error) {
 
 // stopRunning ends a person's running timer at now. A timer stopped in the
 // second it started still lasts a second, so the row stays valid.
-const stopRunning = `UPDATE task_time_entries SET ended_at = GREATEST($2, started_at + interval '1 second')
-	WHERE user_id = $1 AND ended_at IS NULL RETURNING ` + columns
+var stopRunning = `UPDATE task_time_entries SET ended_at = GREATEST($2, started_at + interval '1 second')
+	WHERE user_id = $1 AND ended_at IS NULL AND ` + softDelete.Live("") + ` RETURNING ` + columns
 
 // Start runs a timer on a task for a person, stopping the one they had
 // running, which it returns (nil when there was none).
@@ -121,7 +122,7 @@ func Running(userID uuid.UUID) (*Entry, error) {
 	ctx, cancel := withTimeout()
 	defer cancel()
 	e, err := scan(postgresInit.DBConn.SqlDB.QueryRowContext(ctx,
-		`SELECT `+columns+` FROM task_time_entries WHERE user_id = $1 AND ended_at IS NULL`, userID))
+		`SELECT `+columns+` FROM task_time_entries WHERE user_id = $1 AND ended_at IS NULL AND `+softDelete.Live(""), userID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -143,28 +144,23 @@ func Update(id, userID uuid.UUID, startedAt, endedAt time.Time, note string, bil
 	defer cancel()
 	e, err := scan(postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `UPDATE task_time_entries
 		SET started_at = $3, ended_at = $4, note = $5, billable = $6
-		WHERE id = $1 AND user_id = $2 AND ended_at IS NOT NULL RETURNING `+columns, id, userID, startedAt, endedAt, note, billable))
+		WHERE id = $1 AND user_id = $2 AND ended_at IS NOT NULL AND `+softDelete.Live("")+` RETURNING `+columns, id, userID, startedAt, endedAt, note, billable))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	return e, err
 }
 
-// Delete removes one of the person's entries; false when it wasn't theirs.
-func Delete(id, userID uuid.UUID) (bool, error) {
-	ctx, cancel := withTimeout()
-	defer cancel()
-	res, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `DELETE FROM task_time_entries WHERE id = $1 AND user_id = $2`, id, userID)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+// Delete deletes one of the person's entries softly (V-78): reports and
+// billing leave it out, and its restore brings it back. False when it wasn't
+// theirs, or was deleted already.
+func Delete(ctx context.Context, id, userID uuid.UUID) (bool, error) {
+	return softDelete.Delete(ctx, softDelete.TimeEntry, id, userID, "user_id = $3", userID)
 }
 
 // ForTask is a task's entries, newest first.
 func ForTask(taskID uuid.UUID) ([]Entry, error) {
-	return list(`SELECT `+columns+` FROM task_time_entries WHERE task_uuid = $1 ORDER BY started_at DESC LIMIT 500`, taskID)
+	return list(`SELECT `+columns+` FROM task_time_entries WHERE task_uuid = $1 AND `+softDelete.Live("")+` ORDER BY started_at DESC LIMIT 500`, taskID)
 }
 
 // MaxReportRows bounds one report; a range past it is cut, and the report says so.
@@ -172,7 +168,7 @@ const MaxReportRows = 20000
 
 // ForProject is a project's entries that started in [from, to), oldest first.
 func ForProject(projectID uuid.UUID, from, to time.Time) ([]Entry, error) {
-	return list(`SELECT `+columns+` FROM task_time_entries WHERE project_uuid = $1 AND started_at >= $2 AND started_at < $3
+	return list(`SELECT `+columns+` FROM task_time_entries WHERE project_uuid = $1 AND started_at >= $2 AND started_at < $3 AND `+softDelete.Live("")+`
 		ORDER BY started_at LIMIT $4`, projectID, from, to, MaxReportRows+1)
 }
 
@@ -201,7 +197,7 @@ func SecondsByWeek(projectIDs []uuid.UUID, from, now time.Time, zone string) ([]
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `SELECT project_uuid,
 		date_trunc('week', started_at AT TIME ZONE $3)::date AS week,
 		SUM(GREATEST(EXTRACT(EPOCH FROM (COALESCE(ended_at, $4) - started_at)), 0))::bigint
-		FROM task_time_entries WHERE project_uuid = ANY($1::uuid[]) AND started_at >= $2
+		FROM task_time_entries WHERE project_uuid = ANY($1::uuid[]) AND started_at >= $2 AND `+softDelete.Live("")+`
 		GROUP BY 1, 2`, "{"+strings.Join(ids, ",")+"}", from, zone, now)
 	if err != nil {
 		return nil, err

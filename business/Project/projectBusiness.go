@@ -22,6 +22,7 @@ import (
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
+	approvalsModel "github.com/akashc777/OneCamp/models/postgres/Approvals"
 	roleModel "github.com/akashc777/OneCamp/models/postgres/ProjectRole"
 	restrictionModel "github.com/akashc777/OneCamp/models/postgres/TaskRestriction"
 	taskStatusModel "github.com/akashc777/OneCamp/models/postgres/TaskStatus"
@@ -125,8 +126,20 @@ func CreateProject(ctx context.Context, projectName string, createdByUserDgraphU
 	}
 
 	helpers.GoSafeNamed("domain.CreateProjectInOpenSearch", func() { domain.CreateProjectInOpenSearch(opensearchProject) })
+	joined(ctx, projectUUID, createdByUserUUID.String())
 
 	return
+}
+
+// joined tells someone's open apps that a project became theirs, made by
+// them or added to: they subscribe to its topic and show it without
+// reconnecting. A bulk import's people are told nothing, as a channel's
+// aren't.
+func joined(ctx context.Context, projectUUID uuid.UUID, userUUID string) {
+	if helpers.IsBulkImport(ctx) {
+		return
+	}
+	mqttBusiness.PublishConversationAccess(mqttStruct.ACCESS_KIND_PROJECT, projectUUID.String(), mqttStruct.CONVERSATION_ADDED, userUUID)
 }
 
 func UpdateProjectName(ctx context.Context, projectName string, projectUUID uuid.UUID) (err error) {
@@ -195,6 +208,7 @@ func AddMemberToProject(ctx context.Context, projectUUID uuid.UUID, userDgraphUI
 	helpers.GoSafeNamed("userProjectNotificationBusiness.CreateProjectNotificationType", func() {
 		userProjectNotificationBusiness.CreateProjectNotificationType(userDgraphUUID, projectUUID.String(), postgressStruct.NOTIFICATION_TYPE_ALL)
 	})
+	joined(ctx, projectUUID, userDgraphUUID)
 
 	return
 }
@@ -320,6 +334,14 @@ func ArchiveProjectByProjectUUID(ctx context.Context, projectUUID uuid.UUID, dgr
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/ArchiveProjectByProjectUUID failed to update delete time in postgres err: %+v", err)
 		return
+	}
+
+	// Its tasks go on without their open requests for approval, as a deleted
+	// task does (business/Task WentOn): each closes as moved on, so no waiting
+	// list keeps it and a late answer is told it's closed. A failure leaves
+	// them open: logged.
+	if cerr := approvalsModel.CloseOpenForProject(ctx, projectUUID, approvalsModel.MovedOn); cerr != nil {
+		helpers.LogErrorWithContext(ctx, "business/ArchiveProjectByProjectUUID: closing the open requests of %s's tasks: %v", projectUUID, cerr)
 	}
 
 	prID, archivedAt := projectUUID.String(), helpers.Int64Pointer(currentTime.Unix())
@@ -656,6 +678,7 @@ func GetProjectTimeline(ctx context.Context, projectUUID, userDgraphUID string) 
 		return p, err
 	}
 	if p != nil {
+		keepOwnBlockers(p.Tasks)
 		taskKeys.Lay(ctx, p.Tasks...)
 	}
 	return p, nil

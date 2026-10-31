@@ -10,19 +10,31 @@
 //    synchronous step, so the doc cannot move between the check and the write.
 // 3. It is attributed from what the API sends, never from a client (I11): the
 //    person, or the agent and the person who asked it, goes into the doc's
-//    contributors for the save that stores the change (contributors.js).
+//    contributors for the save that stores the change (contributors.js). With
+//    quiet (a copy's body, an import's), they go in marked quiet, and the save
+//    says so: the API keeps whom the body mentions and tells nobody. A quiet
+//    write that is refused takes its mark back (runWrite). A quiet write also
+//    hands the store the doc as it left it, taken in the same synchronous step
+//    as the write (deps.quiet.hold): its save stores exactly that, so nothing
+//    that reaches the doc while the save waits on Redis joins it
+//    (collabServer.js, "A quiet write's own save").
 // 4. With snapshot_first, the doc's body as it was just before the change is
 //    returned, taken in the same step, so the version the API stores from it is
 //    exactly what the change replaced.
 // 5. With agent_edit, the range the agent wrote is recorded beside the body (the
 //    doc's `agentEdits` map, below), for the web app to mark and offer Revert.
-// 6. The doc is stored at once (the direct connection's transact saves), and the
-//    answer says whether the store succeeded: a save that failed is retried by
-//    saveFailures.js, and the answer says `persisted: false` until then.
+// 6. The doc is stored at once (the direct connection's transact saves, on no
+//    debounce), and the answer says whether the store succeeded: a save that
+//    failed is retried by saveFailures.js, and the answer says
+//    `persisted: false` until then. It is read while the op still holds the
+//    doc: letting go of a doc nobody else has open unloads it, and with it the
+//    record of what is stored, so until 21 Oct 2026 every write to such a doc
+//    answered `persisted: false` and logged a retry that never was.
 
 import { randomUUID } from 'node:crypto'
 import * as Y from 'yjs'
 import { TiptapTransformer } from '@hocuspocus/transformer'
+import { contributorMember } from '../../contributors.js'
 import { bodyHash } from '../../docState.js'
 import { epochIn } from '../../lineage.js'
 import { renderDocHTML } from '../../preserved.js'
@@ -62,6 +74,7 @@ export function writeOptions(body) {
         agentEdit: body?.agent_edit === true && agent !== '',
         snapshotFirst: body?.snapshot_first === true,
         run: str(body?.run_id),
+        quiet: body?.quiet === true,
     }
 }
 
@@ -138,25 +151,45 @@ export async function runWrite({ docName, body, hocuspocus, deps }, { build, loc
     let before = null
     let stateVector = null
     let lineage = ''
+    // What the API last stored of the doc, once that holds the write.
+    const storedNow = () => (deps.persistence.covers(id, stateVector) ? deps.persistence.get(id) : null)
+    let stored = null
     try {
         // Refused before anyone is credited with a change: the check runs again
         // with the write, in case the doc moved while the credit was recorded.
         locate(connection.document, built)
-        await deps.contributors.record(id, { user: o.user, agent: o.agent })
-        await connection.transact((doc) => {
-            const at = locate(doc, built)
-            if (o.snapshotFirst) before = { html: currentHTML(doc, deps.extensions), lineage: epochIn(doc) || '' }
-            doc.transact(() => {
-                result = apply(doc, built, at)
-                if (o.agentEdit && result.to > result.from) result.editId = recordAgentEdit(doc, o, result.from, result.to)
-            }, LIVE_ORIGIN)
-            stateVector = Y.encodeStateVector(doc)
-            lineage = epochIn(doc) || ''
-        })
+        await deps.contributors.record(id, { user: o.user, agent: o.agent, quiet: o.quiet })
+        try {
+            await connection.transact((doc) => {
+                const at = locate(doc, built)
+                if (o.snapshotFirst) before = { html: currentHTML(doc, deps.extensions), lineage: epochIn(doc) || '' }
+                doc.transact(() => {
+                    result = apply(doc, built, at)
+                    if (o.agentEdit && result.to > result.from) result.editId = recordAgentEdit(doc, o, result.from, result.to)
+                }, LIVE_ORIGIN)
+                stateVector = Y.encodeStateVector(doc)
+                lineage = epochIn(doc) || ''
+                // The doc as this quiet write left it, for the write's own
+                // save, taken before anything else can reach it.
+                if (o.quiet) deps.quiet?.hold(id, doc, contributorMember({ user: o.user, agent: o.agent, quiet: true }))
+            })
+        } catch (e) {
+            // A quiet write that was refused takes its quiet mark back before
+            // the doc is let go, which stores it at once: that save holds only
+            // what others wrote, and must tell as theirs.
+            if (o.quiet && result === null) await deps.contributors.ack(id, [contributorMember({ user: o.user, agent: o.agent, quiet: true })])
+            throw e
+        }
+        // transact stored the doc. Whether that holds the write is read while
+        // the op still holds the doc: letting go of a doc nobody else has open
+        // unloads it, and the record of what is stored goes with it.
+        stored = storedNow()
     } finally {
         await connection.disconnect()
     }
-    const stored = deps.persistence.covers(id, stateVector) ? deps.persistence.get(id) : null
+    // Letting go stores the doc again, so a save that had just failed may be
+    // in now.
+    if (!stored) stored = storedNow()
     if (!stored) deps.log?.error?.(`[Live] ${id}: the write is in the live doc, but its save has not succeeded yet; it is being retried`)
     // The op's own fields (applyProposal's `applied`), then the write's.
     const own = { ...result }

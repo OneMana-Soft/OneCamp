@@ -27,17 +27,16 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	repairBusiness "github.com/akashc777/OneCamp/business/Repair"
 	domain "github.com/akashc777/OneCamp/domain/Doc"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	openSearchGlobalSearchModels "github.com/akashc777/OneCamp/models/openSearch/GlobalSearch"
-	configModel "github.com/akashc777/OneCamp/models/postgres/Config"
 )
 
 const (
@@ -75,36 +74,10 @@ func (r DocSearchRepair) String() string {
 		r.Docs, r.Live, r.Deleted, r.Children, r.Revived, r.Skipped)
 }
 
-// StartDocSearchRepair runs RunDocSearchRepair in the background until it
-// succeeds, ctx ends, or the tries run out.
-func StartDocSearchRepair(ctx context.Context) {
-	helpers.RetryInBackground(ctx, "doc.search-repair",
-		helpers.Retries{First: 30 * time.Second, Cap: 30 * time.Minute, Tries: docSearchRepairTries},
-		func(ctx context.Context) error {
-			rep, ran, err := RunDocSearchRepair(ctx)
-			if err != nil {
-				helpers.MessageLogs.ErrorLog.Printf("Docs search repair failed (will retry): %v (so far: %s)", err, rep)
-				return err
-			}
-			if ran {
-				helpers.MessageLogs.InfoLog.Printf("Docs search repair: %s", rep)
-			}
-			return nil
-		})
-}
-
-// RunDocSearchRepair rewrites every doc's search entries, unless that has
-// been done, and then records that it has, with what it did. ran is whether
-// it ran this time.
-func RunDocSearchRepair(ctx context.Context) (rep DocSearchRepair, ran bool, err error) {
-	if done, derr := configModel.IsDone(docSearchRepairKey); derr != nil || done {
-		return rep, false, derr
-	}
-	rep, err = RepairDocSearch(ctx)
-	if err != nil {
-		return rep, true, err
-	}
-	return rep, true, configModel.UpsertConfig(docSearchRepairKey, "done: "+rep.String())
+// SearchRepair rewrites every doc's search entries (RepairDocSearch) once per
+// install.
+var SearchRepair = repairBusiness.Once[DocSearchRepair]{
+	Key: docSearchRepairKey, Name: "doc.search-repair", Tries: docSearchRepairTries, Repair: RepairDocSearch,
 }
 
 // RepairDocSearch rewrites every doc's search entries from the docs, a page at
@@ -174,11 +147,15 @@ func writeDocSearchRepairPage(ctx context.Context, rep *DocSearchRepair, docs []
 			continue
 		}
 		e := domain.DocSearchEntryOf(d)
-		entries = append(entries, e)
-		if e.DocDeletedAt != nil {
-			rep.Deleted++
-		} else {
-			rep.Live++
+		// A file has no doc entry either (docs F1); its versions' entries in
+		// the attachments index carry its fields, which are repaired below.
+		if domain.OwnSearchEntry(d) {
+			entries = append(entries, e)
+			if e.DocDeletedAt != nil {
+				rep.Deleted++
+			} else {
+				rep.Live++
+			}
 		}
 		children[d.Uuid] = openSearchGlobalSearchModels.DocChildFields{
 			Title: e.DocTitle, Private: e.DocPrivate, Reading: e.DocReadingUsers, Editing: e.DocEditingUsers,

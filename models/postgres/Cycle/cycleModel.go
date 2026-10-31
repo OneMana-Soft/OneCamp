@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	"github.com/akashc777/OneCamp/models/pgexec"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 )
@@ -24,24 +26,55 @@ type Cycle struct {
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 	DoneCount    *int       `json:"done_count,omitempty"`
 	CarriedCount *int       `json:"carried_count,omitempty"`
+	// CapacityMinutes is the capacity a person set for this cycle; nil is the
+	// project's own, what its recent cycles finished (business/Cycle/backlog.go).
+	// CapacityPoints is the same in points, for a project that estimates in
+	// them (migration 933).
+	CapacityMinutes *int `json:"capacity_minutes,omitempty"`
+	CapacityPoints  *int `json:"capacity_points,omitempty"`
 }
 
 // ErrOverlap is a cycle that would share days with another of the project's.
 var ErrOverlap = errors.New("cycles overlap")
 
+// OverlapError is ErrOverlap naming the live cycle In the way.
+type OverlapError struct{ In Cycle }
+
+func (e *OverlapError) Error() string { return ErrOverlap.Error() + ": " + e.In.Label() }
+
+// Unwrap makes an OverlapError ErrOverlap to errors.Is.
+func (e *OverlapError) Unwrap() error { return ErrOverlap }
+
+// Label is how people know the cycle: its name, or "Cycle <number>". Pure.
+func (c Cycle) Label() string {
+	if c.Name != "" {
+		return c.Name
+	}
+	return fmt.Sprintf("Cycle %d", c.Number)
+}
+
 func withTimeout() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 }
 
-const columns = `id, project_uuid, number, name, starts_at, ends_at, completed_at, done_count, carried_count`
+const columns = `id, project_uuid, number, name, starts_at, ends_at, completed_at, done_count, carried_count, capacity_minutes, capacity_points`
 
 func scan(row interface{ Scan(...any) error }) (*Cycle, error) {
 	var c Cycle
-	err := row.Scan(&c.Id, &c.ProjectUUID, &c.Number, &c.Name, &c.StartsAt, &c.EndsAt, &c.CompletedAt, &c.DoneCount, &c.CarriedCount)
+	err := row.Scan(&c.Id, &c.ProjectUUID, &c.Number, &c.Name, &c.StartsAt, &c.EndsAt, &c.CompletedAt, &c.DoneCount, &c.CarriedCount, &c.CapacityMinutes, &c.CapacityPoints)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	return &c, err
+}
+
+// scanRow is scan for pgexec.Query, which keeps cycles by value.
+func scanRow(r pgexec.Row) (Cycle, error) {
+	c, err := scan(r)
+	if c == nil {
+		return Cycle{}, err
+	}
+	return *c, err
 }
 
 // List is a project's cycles in order.
@@ -49,7 +82,7 @@ func List(project uuid.UUID) ([]Cycle, error) {
 	ctx, cancel := withTimeout()
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx,
-		`SELECT `+columns+` FROM project_cycles WHERE project_uuid = $1 ORDER BY number`, project)
+		`SELECT `+columns+` FROM project_cycles WHERE project_uuid = $1 AND `+softDelete.Live("")+` ORDER BY number`, project)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +102,7 @@ func List(project uuid.UUID) ([]Cycle, error) {
 func Get(id uuid.UUID) (*Cycle, error) {
 	ctx, cancel := withTimeout()
 	defer cancel()
-	return scan(postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `SELECT `+columns+` FROM project_cycles WHERE id = $1`, id))
+	return scan(postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `SELECT `+columns+` FROM project_cycles WHERE id = $1 AND `+softDelete.Live(""), id))
 }
 
 // Create numbers the cycle after the project's last and refuses overlaps,
@@ -87,7 +120,7 @@ func Create(project uuid.UUID, name string, startsAt, endsAt time.Time, by uuid.
 	}
 	var clash bool
 	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM project_cycles
-		WHERE project_uuid = $1 AND starts_at < $3 AND ends_at > $2)`, project, startsAt, endsAt).Scan(&clash); err != nil {
+		WHERE project_uuid = $1 AND starts_at < $3 AND ends_at > $2 AND `+softDelete.Live("")+`)`, project, startsAt, endsAt).Scan(&clash); err != nil {
 		return nil, err
 	}
 	if clash {
@@ -116,7 +149,7 @@ func Start(ctx context.Context, project, id uuid.UUID, startsAt, endsAt time.Tim
 			return err
 		}
 		clash, err := pgexec.Scalar[bool](ctx, `SELECT EXISTS (SELECT 1 FROM project_cycles
-			WHERE project_uuid = $1 AND id <> $4 AND completed_at IS NULL AND starts_at < $3 AND ends_at > $2)`, project, startsAt, endsAt, id)
+			WHERE project_uuid = $1 AND id <> $4 AND completed_at IS NULL AND starts_at < $3 AND ends_at > $2 AND `+softDelete.Live("")+`)`, project, startsAt, endsAt, id)
 		if err != nil {
 			return err
 		}
@@ -124,11 +157,11 @@ func Start(ctx context.Context, project, id uuid.UUID, startsAt, endsAt time.Tim
 			return ErrOverlap
 		}
 		if _, err := pgexec.Exec(ctx, `UPDATE project_cycles SET ends_at = $2
-			WHERE project_uuid = $1 AND completed_at IS NOT NULL AND ends_at > $2 AND starts_at < $2`, project, startsAt); err != nil {
+			WHERE project_uuid = $1 AND completed_at IS NOT NULL AND ends_at > $2 AND starts_at < $2 AND `+softDelete.Live(""), project, startsAt); err != nil {
 			return err
 		}
 		c, _, err := pgexec.QueryOne(ctx, `UPDATE project_cycles SET starts_at = $3, ends_at = $4
-			WHERE id = $1 AND project_uuid = $2 RETURNING `+columns, func(r pgexec.Row) (*Cycle, error) { return scan(r) }, id, project, startsAt, endsAt)
+			WHERE id = $1 AND project_uuid = $2 AND `+softDelete.Live("")+` RETURNING `+columns, func(r pgexec.Row) (*Cycle, error) { return scan(r) }, id, project, startsAt, endsAt)
 		started = c
 		return err
 	})
@@ -149,16 +182,55 @@ func lockProject(ctx context.Context, project uuid.UUID) error {
 func Rename(id uuid.UUID, name string) error {
 	ctx, cancel := withTimeout()
 	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `UPDATE project_cycles SET name = $2 WHERE id = $1`, id, name)
+	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `UPDATE project_cycles SET name = $2 WHERE id = $1 AND `+softDelete.Live(""), id, name)
 	return err
 }
 
 // Delete removes a cycle; its tasks simply leave it.
-func Delete(id uuid.UUID) error {
-	ctx, cancel := withTimeout()
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(ctx, `DELETE FROM project_cycles WHERE id = $1`, id)
+func Delete(ctx context.Context, id, by uuid.UUID) error {
+	_, err := softDelete.Delete(ctx, softDelete.Cycle, id, by, "")
 	return err
+}
+
+// Restore brings a deleted cycle back with its tasks (their links stayed),
+// and answers whether it was deleted, under the project's lock as Create and
+// Start take it. A deleted cycle keeps its dates, so its restore makes the
+// room Start would have made: a completed one ends where a live cycle that
+// begins within its dates starts. An *OverlapError (ErrOverlap) names a live
+// cycle that still covers some of its dates, as a new cycle may not either.
+func Restore(ctx context.Context, id uuid.UUID) (bool, error) {
+	var restored bool
+	err := pgexec.InTx(ctx, func(ctx context.Context) error {
+		project, found, err := pgexec.QueryOne(ctx, `SELECT project_uuid FROM project_cycles WHERE id = $1 AND deleted_at IS NOT NULL`,
+			func(r pgexec.Row) (uuid.UUID, error) {
+				var p uuid.UUID
+				return p, r.Scan(&p)
+			}, id)
+		if err != nil || !found {
+			return err
+		}
+		if err := lockProject(ctx, project); err != nil {
+			return err
+		}
+		if _, err := pgexec.Exec(ctx, `UPDATE project_cycles d SET ends_at = COALESCE((SELECT MIN(c.starts_at) FROM project_cycles c
+			WHERE c.project_uuid = d.project_uuid AND c.id <> d.id AND `+softDelete.Live("c")+` AND c.starts_at > d.starts_at AND c.starts_at < d.ends_at), d.ends_at)
+			WHERE d.id = $1 AND d.completed_at IS NOT NULL AND d.deleted_at IS NOT NULL`, id); err != nil {
+			return err
+		}
+		// scan answers no row as nil, so QueryOne's found is always true here.
+		in, _, err := pgexec.QueryOne(ctx, `SELECT `+columns+` FROM project_cycles WHERE id = (SELECT c.id FROM project_cycles c JOIN project_cycles d ON d.id = $1
+			WHERE c.project_uuid = d.project_uuid AND c.id <> d.id AND `+softDelete.Live("c")+` AND c.starts_at < d.ends_at AND c.ends_at > d.starts_at
+			ORDER BY c.starts_at LIMIT 1)`, func(r pgexec.Row) (*Cycle, error) { return scan(r) }, id)
+		if err != nil {
+			return err
+		}
+		if in != nil {
+			return &OverlapError{In: *in}
+		}
+		restored, err = softDelete.Restore(ctx, softDelete.Cycle, id)
+		return err
+	})
+	return restored, err
 }
 
 // Members maps each cycle of the project to its tasks.
@@ -167,7 +239,7 @@ func Members(project uuid.UUID) (map[uuid.UUID][]string, error) {
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `
 		SELECT tc.cycle_id, tc.task_uuid FROM task_cycles tc
-		  JOIN project_cycles c ON c.id = tc.cycle_id WHERE c.project_uuid = $1`, project)
+		  JOIN project_cycles c ON c.id = tc.cycle_id AND `+softDelete.Live("c")+` WHERE c.project_uuid = $1`, project)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +285,7 @@ func TasksInProjectCycles(project uuid.UUID, cycles []uuid.UUID) ([]string, erro
 	ctx, cancel := withTimeout()
 	defer cancel()
 	rows, err := postgresInit.DBConn.SqlDB.QueryContext(ctx, `SELECT tc.task_uuid FROM task_cycles tc
-		JOIN project_cycles c ON c.id = tc.cycle_id
+		JOIN project_cycles c ON c.id = tc.cycle_id AND `+softDelete.Live("c")+`
 		WHERE c.project_uuid = $1 AND c.id = ANY($2::uuid[])`, project, pq.Array(cycles))
 	if err != nil {
 		return nil, err
@@ -272,23 +344,51 @@ func CycleOf(task uuid.UUID) (*Cycle, error) {
 	ctx, cancel := withTimeout()
 	defer cancel()
 	return scan(postgresInit.DBConn.SqlDB.QueryRowContext(ctx, `
-		SELECT `+prefixed+` FROM project_cycles c JOIN task_cycles tc ON tc.cycle_id = c.id WHERE tc.task_uuid = $1`, task))
+		SELECT `+prefixed+` FROM project_cycles c JOIN task_cycles tc ON tc.cycle_id = c.id WHERE tc.task_uuid = $1 AND `+softDelete.Live("c"), task))
 }
 
-const prefixed = `c.id, c.project_uuid, c.number, c.name, c.starts_at, c.ends_at, c.completed_at, c.done_count, c.carried_count`
+const prefixed = `c.id, c.project_uuid, c.number, c.name, c.starts_at, c.ends_at, c.completed_at, c.done_count, c.carried_count, c.capacity_minutes, c.capacity_points`
 
 // SetTask puts a task in a cycle, or takes it out (cycle nil).
 func SetTask(task uuid.UUID, cycle *uuid.UUID) error {
 	ctx, cancel := withTimeout()
 	defer cancel()
-	var err error
-	if cycle == nil {
-		_, err = postgresInit.DBConn.SqlDB.ExecContext(ctx, `DELETE FROM task_cycles WHERE task_uuid = $1`, task)
-	} else {
-		_, err = postgresInit.DBConn.SqlDB.ExecContext(ctx, `
-			INSERT INTO task_cycles (task_uuid, cycle_id) VALUES ($1, $2)
-			ON CONFLICT (task_uuid) DO UPDATE SET cycle_id = EXCLUDED.cycle_id, added_at = NOW()`, task, *cycle)
+	_, err := SetTasks(ctx, []uuid.UUID{task}, cycle)
+	return err
+}
+
+// SetTasks puts tasks in a cycle, or takes them out of theirs (cycle nil), in
+// one statement however many, and answers the ids it moved. A task already
+// there keeps when it joined: the burndown reads its scope from added_at.
+func SetTasks(ctx context.Context, tasks []uuid.UUID, cycle *uuid.UUID) ([]string, error) {
+	if len(tasks) == 0 {
+		return nil, nil
 	}
+	ids := make([]string, len(tasks))
+	for i, t := range tasks {
+		ids[i] = t.String()
+	}
+	if cycle == nil {
+		return pgexec.Query(ctx, `DELETE FROM task_cycles WHERE task_uuid = ANY($1::uuid[]) RETURNING task_uuid::text`, pgexec.Text, pq.Array(ids))
+	}
+	return pgexec.Query(ctx, `
+		INSERT INTO task_cycles (task_uuid, cycle_id) SELECT unnest($1::uuid[]), $2
+		ON CONFLICT (task_uuid) DO UPDATE SET cycle_id = EXCLUDED.cycle_id, added_at = NOW()
+		 WHERE task_cycles.cycle_id IS DISTINCT FROM EXCLUDED.cycle_id
+		RETURNING task_uuid::text`, pgexec.Text, pq.Array(ids), *cycle)
+}
+
+// SetCapacity sets a cycle's own capacity in minutes, or clears it (nil) so
+// the project's applies again.
+func SetCapacity(ctx context.Context, id uuid.UUID, minutes *int) error {
+	_, err := pgexec.Exec(ctx, `UPDATE project_cycles SET capacity_minutes = $2 WHERE id = $1 AND `+softDelete.Live(""), id, minutes)
+	return err
+}
+
+// SetCapacityPoints sets a cycle's own capacity in points, or clears it (nil)
+// so the project's applies again.
+func SetCapacityPoints(ctx context.Context, id uuid.UUID, points *int) error {
+	_, err := pgexec.Exec(ctx, `UPDATE project_cycles SET capacity_points = $2 WHERE id = $1 AND `+softDelete.Live(""), id, points)
 	return err
 }
 
@@ -304,7 +404,7 @@ func Complete(id uuid.UUID, done int, carry []string, next *uuid.UUID) (bool, er
 	}
 	defer tx.Rollback() //nolint:errcheck // a no-op after Commit
 	res, err := tx.ExecContext(ctx, `UPDATE project_cycles SET completed_at = NOW(), done_count = $2, carried_count = $3
-		WHERE id = $1 AND completed_at IS NULL`, id, done, len(carry))
+		WHERE id = $1 AND completed_at IS NULL AND `+softDelete.Live(""), id, done, len(carry))
 	if err != nil {
 		return false, err
 	}
@@ -337,5 +437,42 @@ func ProjectsOf(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]uuid.UUID, 
 	if len(ids) == 0 {
 		return map[uuid.UUID]uuid.UUID{}, nil
 	}
-	return pgexec.Pairs[uuid.UUID, uuid.UUID](ctx, `SELECT id, project_uuid FROM project_cycles WHERE id = ANY($1)`, ids)
+	return pgexec.Pairs[uuid.UUID, uuid.UUID](ctx, `SELECT id, project_uuid FROM project_cycles WHERE id = ANY($1) AND `+softDelete.Live(""), ids)
+}
+
+// RunningIn is the cycle running at at (begun, not ended, not completed) in
+// each of the projects, soonest to end first: the cycles across a person's
+// projects (business/Cycle/running.go), which names only projects they may view.
+func RunningIn(ctx context.Context, projects []uuid.UUID, at time.Time) ([]Cycle, error) {
+	if len(projects) == 0 {
+		return []Cycle{}, nil
+	}
+	return pgexec.Query(ctx, `SELECT `+columns+` FROM project_cycles
+		WHERE project_uuid = ANY($1::uuid[]) AND completed_at IS NULL AND starts_at <= $2 AND ends_at > $2 AND `+softDelete.Live("")+`
+		ORDER BY ends_at, project_uuid`, scanRow, pq.Array(projects), at)
+}
+
+// MembersOfMany maps each of the cycles to its tasks, in one statement.
+func MembersOfMany(ctx context.Context, cycles []uuid.UUID) (map[uuid.UUID][]string, error) {
+	out := make(map[uuid.UUID][]string, len(cycles))
+	if len(cycles) == 0 {
+		return out, nil
+	}
+	type pair struct {
+		cycle uuid.UUID
+		task  uuid.UUID
+	}
+	rows, err := pgexec.Query(ctx, `SELECT cycle_id, task_uuid FROM task_cycles WHERE cycle_id = ANY($1::uuid[])`,
+		func(r pgexec.Row) (pair, error) {
+			var p pair
+			err := r.Scan(&p.cycle, &p.task)
+			return p, err
+		}, pq.Array(cycles))
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range rows {
+		out[p.cycle] = append(out[p.cycle], p.task.String())
+	}
+	return out, nil
 }

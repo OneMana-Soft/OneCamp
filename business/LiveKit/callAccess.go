@@ -76,16 +76,28 @@ func conversationMember(ctx context.Context, roomName string, u *dgraphStruct.Dg
 
 // MemberMayBeInCall reports whether a member may be in the call in a room
 // now: someone who can open its conversation, or, in an instant meeting, the
-// person who started it (everyone else there is a guest).
+// person who started it, or someone let in through a link they opened as
+// themselves (HU13: a meeting's link, a room's address, a call's invite).
 func MemberMayBeInCall(ctx context.Context, roomName, uid string) (bool, error) {
 	u, err := ActiveMember(ctx, uid)
 	if err != nil || u == nil {
 		return false, err
 	}
+	var ok bool
 	if strings.HasPrefix(roomName, meetingRoomPrefix) {
-		return isMeetingHost(ctx, roomName, u)
+		ok, err = isMeetingHost(ctx, roomName, u)
+	} else {
+		ok, err = conversationMember(ctx, roomName, u)
 	}
-	return conversationMember(ctx, roomName, u)
+	if err != nil || ok {
+		return ok, err
+	}
+	id, perr := uuid.Parse(u.Uuid)
+	if perr != nil {
+		return false, nil
+	}
+	rooms, err := RoomsAdmittedTo(ctx, id)
+	return rooms[roomName], err
 }
 
 func isMeetingHost(ctx context.Context, roomName string, u *dgraphStruct.DgraphUser) (bool, error) {

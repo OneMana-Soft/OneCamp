@@ -6,7 +6,8 @@ package integration_test
 // Calendar events against real Postgres and Dgraph: taking a guest off an
 // event (CAL-BUG-1), clearing its notes (CAL-BUG-17), who may change it
 // (CAL-BUG-16) and who may open it (CAL-BUG-7); and, with Redis, how Google
-// Calendar is linked (CAL-BUG-8).
+// Calendar is linked (CAL-BUG-8); and a gone Google copy forgotten without
+// undoing a newer edit (audit C7).
 //
 // Run: go test -tags=integration ./tests/integration/ -run 'TestTakingAGuestOff|TestClearedNotes|TestOnlyThePeopleOnAnEvent|TestGoogleCalendarLinks' -v
 
@@ -26,10 +27,13 @@ import (
 	"github.com/google/uuid"
 
 	calendarAdapter "github.com/akashc777/OneCamp/adapter/Calendar"
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	calendarBusiness "github.com/akashc777/OneCamp/business/Calendar"
 	connectorBusiness "github.com/akashc777/OneCamp/business/Connector"
+	integrationBusiness "github.com/akashc777/OneCamp/business/Integration"
 	eventController "github.com/akashc777/OneCamp/controllers/Calendar"
 	integrationController "github.com/akashc777/OneCamp/controllers/Integration"
+	calendarDomain "github.com/akashc777/OneCamp/domain/Calendar"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	redisInit "github.com/akashc777/OneCamp/initializers/redis"
@@ -220,6 +224,227 @@ func TestClearedNotesStayCleared(t *testing.T) {
 			t.Fatalf("the rest of the event changed: %+v", ev)
 		}
 	})
+}
+
+// Google says an event's copy is gone after a newer edit has landed: only the
+// copy is forgotten, and the newer edit stays (audit C7). The old store's
+// cleanup wrote the older edit's title, notes and times back over it.
+func TestAGoneGoogleCopyIsForgottenWithoutUndoingANewerEdit(t *testing.T) {
+	t.Setenv("CALENDAR_STORE", "graph")
+	ctx := context.Background()
+	env, dg := calendarStores(t)
+	sam := seedCalendarPerson(t, env.PG, dg, "Sam")
+	start := time.Now().Add(24 * time.Hour).Truncate(time.Hour)
+	in := calendarAdapter.CreateOrUpdateEventInput{Title: "Planning", StartTime: rfc(start), EndTime: rfc(start.Add(time.Hour))}
+	out, err := calendarBusiness.CreateEvent(ctx, sam, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.MustParse(out.EventUuid)
+	// Its copy on Google, in both of the old store's places.
+	if _, err := env.PG.Exec(`UPDATE calendar_events SET google_calendar_event_id = 'gone-1' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	var found struct {
+		E []struct{ UID string } `json:"e"`
+	}
+	if err := json.Unmarshal(dg.Query(t, `{ e(func: eq(event_uuid, "`+out.EventUuid+`")) { uid } }`), &found); err != nil || len(found.E) != 1 {
+		t.Fatalf("the event in the graph: %+v, %v", found, err)
+	}
+	dg.Mutate(t, map[string]any{"uid": found.E[0].UID, "event_google_calendar_id": "gone-1"})
+
+	// The first edit's write to Google answers "gone" only once the second
+	// edit has landed.
+	release, first := make(chan struct{}), make(chan struct{}, 1)
+	first <- struct{}{}
+	defer calendarBusiness.SwapGoogleEventUpdateForTest(func(_ context.Context, gid string, _ calendarAdapter.CreateOrUpdateEventInput, _ *userModels.UserInfo, _ bool) error {
+		select {
+		case <-first:
+			<-release
+			return &integrationBusiness.GCalEventGoneError{GoogleEventId: gid}
+		default:
+			return nil
+		}
+	})()
+	in.Title = "Planning (first edit)"
+	if err := calendarBusiness.UpdateEvent(ctx, id, in, sam); err != nil {
+		t.Fatal(err)
+	}
+	in.Title, in.Description = "Planning (second edit)", "Agenda attached"
+	if err := calendarBusiness.UpdateEvent(ctx, id, in, sam); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	bookingEventually(t, "the gone copy forgotten", func() bool {
+		var gone bool
+		return env.PG.QueryRow(`SELECT google_calendar_event_id IS NULL FROM calendar_events WHERE id = $1`, id).Scan(&gone) == nil && gone
+	})
+	var title, notes string
+	if err := env.PG.QueryRow(`SELECT title, description FROM calendar_events WHERE id = $1`, id).Scan(&title, &notes); err != nil {
+		t.Fatal(err)
+	}
+	if title != "Planning (second edit)" || notes != "Agenda attached" {
+		t.Errorf("forgetting the copy put back an older edit: %q, %q", title, notes)
+	}
+	bookingEventually(t, "the gone copy forgotten in the graph too", func() bool {
+		return graphGoogleCopy(t, dg, found.E[0].UID) == ""
+	})
+}
+
+// Google says a copy is gone after a newer one was made: the graph forgets
+// only the gone one, as the row does (audit C7).
+func TestTheGraphForgetsAGoogleCopyOnlyWhileItNamesTheGoneOne(t *testing.T) {
+	t.Setenv("CALENDAR_STORE", "graph")
+	ctx := context.Background()
+	env, dg := calendarStores(t)
+	sam := seedCalendarPerson(t, env.PG, dg, "Sam")
+	start := time.Now().Add(24 * time.Hour).Truncate(time.Hour)
+	out, err := calendarBusiness.CreateEvent(ctx, sam, calendarAdapter.CreateOrUpdateEventInput{Title: "Planning", StartTime: rfc(start), EndTime: rfc(start.Add(time.Hour))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found struct {
+		E []struct{ UID string } `json:"e"`
+	}
+	if err := json.Unmarshal(dg.Query(t, `{ e(func: eq(event_uuid, "`+out.EventUuid+`")) { uid } }`), &found); err != nil || len(found.E) != 1 {
+		t.Fatalf("the event in the graph: %+v, %v", found, err)
+	}
+	uid := found.E[0].UID
+	dg.Mutate(t, map[string]any{"uid": uid, "event_google_calendar_id": "copy-2"})
+
+	if err := calendarDomain.ForgetDgraphEventGoogleCopy(ctx, uid, "gone-1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := graphGoogleCopy(t, dg, uid); got != "copy-2" {
+		t.Errorf("forgetting the gone copy took the newer one: the graph names %q", got)
+	}
+	if err := calendarDomain.ForgetDgraphEventGoogleCopy(ctx, uid, "copy-2"); err != nil {
+		t.Fatal(err)
+	}
+	if got := graphGoogleCopy(t, dg, uid); got != "" {
+		t.Errorf("forgetting the copy it names left %q", got)
+	}
+}
+
+// Item 11 (V-78, the owner: every delete soft): with CALENDAR_STORE=graph an
+// event's delete kept its row (calendar_events.deleted_at) but took its graph
+// node away. The node stays now, marked deleted, and every read of the old
+// stores leaves it out: its maker's and its guest's calendars and busy times,
+// opening it, who may open it, and changing, leaving or deleting it.
+func TestADeletedEventKeepsItsGraphNodeOutOfEveryRead(t *testing.T) {
+	t.Setenv("CALENDAR_STORE", "graph")
+	ctx := context.Background()
+	env, dg := calendarStores(t)
+	sam := seedCalendarPerson(t, env.PG, dg, "Sam")
+	maya := seedCalendarPerson(t, env.PG, dg, "Maya")
+	start := time.Now().Add(48 * time.Hour).Truncate(time.Hour)
+	end := start.Add(time.Hour)
+	from, to := start.Add(-time.Hour), end.Add(time.Hour)
+	in := calendarAdapter.CreateOrUpdateEventInput{Title: "Offsite", StartTime: rfc(start), EndTime: rfc(end), Participants: []string{maya.UserDgraphInfo.Uuid}}
+	out, err := calendarBusiness.CreateEvent(ctx, sam, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.MustParse(out.EventUuid)
+	res := accessBusiness.Resource{Kind: calendarBusiness.KindEvent, UUID: out.EventUuid}
+	mayOpen := func(who *userModels.UserInfo) bool {
+		d, err := accessBusiness.ResolveAll(ctx, accessBusiness.Subject{UserUID: who.UserDgraphInfo.Uid, UserUUID: who.UserDgraphInfo.Uuid}, []accessBusiness.Resource{res})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d[res].Level > accessBusiness.LevelNone
+	}
+	people := []*userModels.UserInfo{sam, maya}
+	// Over the routes too: the calendar's list, opening it, and its delete.
+	listedOver := func(who *userModels.UserInfo) bool {
+		q := url.Values{"startDate": {rfc(from)}, "endDate": {rfc(to)}}
+		rec := call(t, eventController.GetEventsListController, http.MethodGet, "/event/getEvents?"+q.Encode(), who, "", nil)
+		var body struct {
+			Data []dgraphStruct.DgraphEvent `json:"data"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); rec.Code != http.StatusOK || err != nil {
+			t.Fatalf("%s's calendar over the route: %d %q (%v)", who.UserDgraphInfo.UserName, rec.Code, msgOf(rec), err)
+		}
+		for _, e := range body.Data {
+			if e.Uuid == out.EventUuid {
+				return true
+			}
+		}
+		return false
+	}
+	open := func(who *userModels.UserInfo) *httptest.ResponseRecorder {
+		return call(t, eventController.GetEventController, http.MethodGet, "/event/getEvent/"+out.EventUuid, who, "", map[string]string{"eventId": out.EventUuid})
+	}
+	del := func() *httptest.ResponseRecorder {
+		return call(t, eventController.DeleteEventController, http.MethodDelete, "/event/deleteEvent/"+out.EventUuid, sam, "", map[string]string{"eventId": out.EventUuid})
+	}
+	for _, who := range people {
+		if listed, busy := onCalendar(t, who, out.EventUuid, from, to); !listed || !busy || !mayOpen(who) || !listedOver(who) || open(who).Code != http.StatusOK {
+			t.Fatalf("before: %s's calendar lists it %v, busy %v; the seed is wrong", who.UserDgraphInfo.UserName, listed, busy)
+		}
+	}
+
+	if rec := del(); rec.Code != http.StatusOK {
+		t.Fatalf("its maker's delete: %d %q", rec.Code, msgOf(rec))
+	}
+	var node struct {
+		E []struct {
+			Deleted time.Time `json:"event_deleted_at"`
+		} `json:"e"`
+	}
+	if err := json.Unmarshal(dg.Query(t, `{ e(func: eq(event_uuid, "`+out.EventUuid+`")) { event_deleted_at } }`), &node); err != nil {
+		t.Fatal(err)
+	}
+	if len(node.E) != 1 {
+		t.Fatal("its graph node is gone: the delete is hard")
+	}
+	if !node.E[0].Deleted.After(time.Unix(0, 0)) {
+		t.Fatalf("its graph node isn't marked deleted: %v", node.E[0].Deleted)
+	}
+	for _, who := range people {
+		name := who.UserDgraphInfo.UserName
+		if listed, busy := onCalendar(t, who, out.EventUuid, from, to); listed || busy {
+			t.Errorf("deleted, yet %s's calendar lists it %v, busy %v", name, listed, busy)
+		}
+		if _, err := calendarBusiness.GetEvent(ctx, who, out.EventUuid); !errors.Is(err, calendarBusiness.ErrEventNotFound) {
+			t.Errorf("deleted, yet %s opens it: %v", name, err)
+		}
+		if mayOpen(who) {
+			t.Errorf("deleted, yet %s may open it", name)
+		}
+		if listedOver(who) {
+			t.Errorf("deleted, yet %s's calendar lists it over the route", name)
+		}
+		if rec := open(who); rec.Code != http.StatusNotFound || msgOf(rec) != "This event isn't available." {
+			t.Errorf("deleted, yet %s opening it hears %d %q", name, rec.Code, msgOf(rec))
+		}
+	}
+	if err := calendarBusiness.UpdateEvent(ctx, id, in, sam); !errors.Is(err, calendarBusiness.ErrEventNotFound) {
+		t.Errorf("deleted, yet changed: %v", err)
+	}
+	if err := calendarBusiness.LeaveEvent(ctx, id, maya); !errors.Is(err, calendarBusiness.ErrEventNotFound) {
+		t.Errorf("deleted, yet left: %v", err)
+	}
+	if rec := del(); rec.Code != http.StatusNotFound {
+		t.Errorf("deleted again: %d %q", rec.Code, msgOf(rec))
+	}
+}
+
+// graphGoogleCopy is the Google copy an event's graph node names, or "".
+func graphGoogleCopy(t *testing.T, dg *integration.DgraphEnv, uid string) string {
+	t.Helper()
+	var got struct {
+		E []struct {
+			ID string `json:"event_google_calendar_id"`
+		} `json:"e"`
+	}
+	if err := json.Unmarshal(dg.Query(t, `{ e(func: uid(`+uid+`)) { event_google_calendar_id } }`), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.E) == 0 {
+		return ""
+	}
+	return got.E[0].ID
 }
 
 // call runs a handler as someone, with chi's URL parameters.

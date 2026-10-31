@@ -37,6 +37,7 @@ import (
 	"time"
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // graphqlEndpoint is monday's single GraphQL endpoint. A var so tests
@@ -339,9 +340,7 @@ func rateLimitFrom(resp *http.Response, env envelope, errs []gqlError) *importPr
 		return nil
 	}
 	if retry == 0 {
-		if s := parseRetryAfter(resp.Header.Get("Retry-After")); s > 0 {
-			retry = time.Duration(s) * time.Second
-		}
+		retry = helpers.RetryAfter(resp.Header, 0)
 	}
 	if normCode(reason) == "DAILYLIMITEXCEEDED" {
 		reason = "daily API limit for this plan is used up"
@@ -367,23 +366,6 @@ func secondsFromMessage(m string) time.Duration {
 	if mm := resetInRe.FindStringSubmatch(m); len(mm) == 2 {
 		if s, err := strconv.Atoi(mm[1]); err == nil && s > 0 {
 			return time.Duration(s) * time.Second
-		}
-	}
-	return 0
-}
-
-// parseRetryAfter handles numeric seconds and the HTTP-date form.
-func parseRetryAfter(h string) int64 {
-	h = strings.TrimSpace(h)
-	if h == "" {
-		return 0
-	}
-	if secs, err := strconv.ParseInt(h, 10, 64); err == nil && secs > 0 {
-		return secs
-	}
-	if t, err := http.ParseTime(h); err == nil {
-		if d := time.Until(t); d > 0 {
-			return int64(d.Seconds()) + 1
 		}
 	}
 	return 0

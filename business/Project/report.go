@@ -125,8 +125,6 @@ func BuildReport(projects []domain.ReportProject, hours []timeModels.WeekSeconds
 		}
 		return i
 	}
-	dated := func(t *time.Time) bool { return t != nil && t.Year() > 1970 }
-
 	people := map[string]*ReportPersonRow{}
 	priorities := map[string]*ReportPriorityRow{}
 	var doneWithDue, doneOnTime int
@@ -349,3 +347,6 @@ func ownStatuses(ctx context.Context, ids []uuid.UUID) map[string]map[string]str
 	}
 	return out
 }
+
+// dated says a task's date is set: the graph keeps an unset one as its zero.
+func dated(t *time.Time) bool { return t != nil && t.Year() > 1970 }

@@ -81,3 +81,38 @@ func OptionsOf(f *model.Field) []Option {
 	}
 	return out
 }
+
+// NotOptions is the labels a select's or a multi-select's value names that
+// aren't among its field's options (by label, or by id), when they are all
+// that keeps a write of the value out (coerceSelect, coerceMultiSelect): made
+// options, they let it through. None for a value its options take, for an
+// empty one, for one no option would let through (a number, a list for a
+// select), and for another kind's. Pure.
+func NotOptions(f *model.Field, v any) []string {
+	v = asJSON(v)
+	if IsEmpty(v) {
+		return nil
+	}
+	items := []any{v}
+	switch f.Type {
+	case model.FieldSelect:
+	case model.FieldMultiSelect:
+		if list, ok := v.([]any); ok {
+			items = list
+		}
+	default:
+		return nil
+	}
+	opts := OptionsOf(f)
+	var out []string
+	for _, it := range items {
+		s, ok := it.(string)
+		if !ok {
+			return nil
+		}
+		if _, found := option(opts, s); !found {
+			out = append(out, s)
+		}
+	}
+	return out
+}

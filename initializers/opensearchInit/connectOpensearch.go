@@ -271,6 +271,33 @@ func ConnectOpenSearch(config *OpenSearchConfig) (err error) {
 				}
 			}
 		}`,
+		"events": `{
+			"settings": { "index": { "number_of_shards": 1, "number_of_replicas": 0 } },
+			"mappings": {
+				"properties": {
+					"event_uuid": { "type": "keyword", "index": true },
+					"event_title": { "type": "text", "index": true },
+					"event_notes": { "type": "text", "index": true },
+					"event_location": { "type": "text", "index": true },
+					"event_kind": { "type": "keyword", "index": false },
+					"event_start": { "type": "date", "format": "epoch_second", "index": false },
+					"event_end": { "type": "date", "format": "epoch_second", "index": false },
+					"event_start_date": { "type": "keyword", "index": false },
+					"event_end_date": { "type": "keyword", "index": false },
+					"event_tz": { "type": "keyword", "index": false },
+					"event_repeats": { "type": "boolean", "index": false },
+					"event_organiser_id": { "type": "keyword", "index": true },
+					"event_organiser_full_name": { "type": "text", "index": true },
+					"event_people": { "type": "keyword", "index": true },
+					"event_guest_names": { "type": "text", "index": true },
+					"event_calendar_id": { "type": "keyword", "index": true },
+					"event_project_id": { "type": "keyword", "index": true },
+					"event_private": { "type": "boolean", "index": true },
+					"created_date": { "type": "date", "format": "epoch_second", "index": true },
+					"updated_date": { "type": "date", "format": "epoch_second", "index": false }
+				}
+			}
+		}`,
 		"tasks": `{
 			"settings": { "index": { "number_of_shards": 1, "number_of_replicas": 0 } },
 			"mappings": {
@@ -370,6 +397,7 @@ func ConnectOpenSearch(config *OpenSearchConfig) (err error) {
 	}
 
 	ensureDocAccessMapping(ctx)
+	ensureQueryCopies(ctx)
 
 	helpers.GoSafeNamed("ensureAuditLogRetention", func() { ensureAuditLogRetention(context.Background()) })
 

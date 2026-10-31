@@ -18,7 +18,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -34,6 +36,7 @@ import (
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	eventController "github.com/akashc777/OneCamp/controllers/Calendar"
 	calendarDomain "github.com/akashc777/OneCamp/domain/Calendar"
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/tests/integration"
@@ -55,33 +58,75 @@ func calendarStoreMigration(t *testing.T, dir string) (string, string) {
 	return filepath.Base(matches[0]), string(b)
 }
 
+// laterMigrationsOn are the migrations after the one named, in one direction
+// and newest first, whose SQL builds on any of these tables, or on a table one
+// of them made: a key that references one, a change to one, or an index,
+// trigger or view on one. They come down before the one named can drop its
+// tables. They are judged by their SQL, not their names: 524_event_ooo_rules
+// keys to events without "_calendar_" in its name, and the store's down
+// couldn't drop events.
+func laterMigrationsOn(t *testing.T, after, dir string, tables ...string) []struct{ name, sql string } {
+	t.Helper()
+	version := func(file string) int {
+		n, _ := strconv.Atoi(strings.SplitN(file, "_", 2)[0])
+		return n
+	}
+	named := regexp.MustCompile(`(?i)\b(REFERENCES|ON|TABLE|FROM|JOIN)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:ONLY\s+)?(?:"?public"?\.)?"?([a-z_][a-z0-9_]*)"?`)
+	on := map[string]bool{}
+	for _, table := range tables {
+		on[strings.ToLower(table)] = true
+	}
+	_, here, _, _ := runtime.Caller(0)
+	dirOf := filepath.Join(filepath.Dir(here), "..", "..", "migrations")
+	ups, _ := filepath.Glob(filepath.Join(dirOf, "*.up.sql"))
+	sort.Slice(ups, func(i, j int) bool { return version(filepath.Base(ups[i])) < version(filepath.Base(ups[j])) })
+	var out []struct{ name, sql string }
+	for _, f := range ups {
+		if version(filepath.Base(f)) <= version(after) {
+			continue
+		}
+		up, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		uses := named.FindAllStringSubmatch(sqlCode(string(up)), -1)
+		if !slices.ContainsFunc(uses, func(m []string) bool { return on[strings.ToLower(m[2])] }) {
+			continue
+		}
+		// What it makes is built on in turn.
+		for _, m := range uses {
+			if strings.EqualFold(m[1], "TABLE") {
+				on[strings.ToLower(m[2])] = true
+			}
+		}
+		name := strings.TrimSuffix(filepath.Base(f), "up.sql") + dir + ".sql"
+		b, err := os.ReadFile(filepath.Join(dirOf, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append([]struct{ name, sql string }{{name, string(b)}}, out...)
+	}
+	return out
+}
+
 // The migration goes up, down and up again on Postgres 12, makes no ids of
 // its own, and its rules hold: an event is timed or all-day, never both, and
 // never ends before it starts; a guest is someone.
 func TestCalendarStoreMigrationUpDownUp(t *testing.T) {
 	name, up := calendarStoreMigration(t, "up")
 	_, down := calendarStoreMigration(t, "down")
-	var sqlOnly []string
-	for _, line := range strings.Split(up, "\n") {
-		if !strings.HasPrefix(strings.TrimSpace(line), "--") {
-			sqlOnly = append(sqlOnly, line)
-		}
-	}
-	for _, banned := range []string{"gen_random_uuid", "uuid_generate"} {
-		if strings.Contains(strings.Join(sqlOnly, "\n"), banned) {
-			t.Fatalf("%s uses %s; ids are made in Go", name, banned)
-		}
-	}
+	makesNoIDs(t, name, up)
 	env := integration.SetupEnv(t)
-	// Calendar A5's (reminders) and A2's (answers, guests by email) build on
-	// these tables: they come down first, so this one can.
-	if _, err := env.PG.Exec(remindersMigration(t, "down")); err != nil {
-		t.Fatalf("calendar A5's down migration: %v", err)
-	}
-	if _, err := env.PG.Exec(attendanceMigration(t, "down")); err != nil {
-		t.Fatalf("calendar A2's down migration: %v", err)
-	}
 	tables := []string{"calendars", "events", "event_attendees"}
+	// Later migrations build on these tables (A2's answers and guests by
+	// email, A5's reminders, A4's imports, B6's sync ledger, A6's shares, the
+	// out-of-office rules, their indexes, and whatever comes next): they come
+	// down first, newest first, so this one can.
+	for _, later := range laterMigrationsOn(t, name, "down", tables...) {
+		if _, err := env.PG.Exec(later.sql); err != nil {
+			t.Fatalf("%s: %v", later.name, err)
+		}
+	}
 	for i, step := range []struct {
 		sql  string
 		want bool
@@ -581,7 +626,7 @@ func TestTheMoveBringsEveryEventAcrossOnce(t *testing.T) {
 	if _, err := env.PG.Exec(`DELETE FROM calendar_events WHERE id = $1`, ids["away"]); err != nil {
 		t.Fatal(err)
 	}
-	if err := calendarDomain.DeleteDgraphEvent(ctx, ids["away"].String()); err != nil {
+	if err := calendarDomain.DeleteDgraphEvent(ctx, ids["away"].String(), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	// The deleted one comes back through its row, deleted: to the trash, as
@@ -640,7 +685,7 @@ func TestMovingFiftyThousandEvents(t *testing.T) {
 	}
 	if _, err := env.PG.Exec(`INSERT INTO calendar_events (id, title, start_time, end_time, created_by)
 		SELECT * FROM unnest($1::uuid[], $2::text[], $3::timestamptz[], $4::timestamptz[], $5::uuid[])`,
-		pq.Array(uuidStrings(ids)), pq.Array(titles), pq.Array(starts), pq.Array(ends), pq.Array(creators)); err != nil {
+		pq.Array(helpers.UUIDStrings(ids)), pq.Array(titles), pq.Array(starts), pq.Array(ends), pq.Array(creators)); err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("seeded %d events in the old stores in %v", events, time.Since(seeded).Round(time.Second))
@@ -661,12 +706,4 @@ func TestMovingFiftyThousandEvents(t *testing.T) {
 		t.Fatalf("the second run: %s %v", second, err)
 	}
 	t.Logf("the second run: %s", second)
-}
-
-func uuidStrings(ids []uuid.UUID) []string {
-	out := make([]string, len(ids))
-	for i, id := range ids {
-		out[i] = id.String()
-	}
-	return out
 }

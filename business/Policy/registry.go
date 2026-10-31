@@ -55,7 +55,7 @@ var specs = []spec{
 	{key: DocsExportMembers.Key, kind: KindBool, def: DocsExportMembers.Default,
 		label: "Members can export docs", help: "Admins can always export."},
 	{key: GuestLinkMaxDays.Key, kind: KindInt, def: GuestLinkMaxDays.Default, min: 0, max: 3650,
-		label: "Longest a guest link lasts, in days", help: "0 sets no limit of its own."},
+		label: "Longest a guest link lasts, in days", help: "0 sets no limit of its own. Personal rooms stay open until their owner closes them or you turn rooms off."},
 	{key: EmbedAllowlist.Key, kind: KindList, def: EmbedAllowlist.Default,
 		label: "Sites docs can embed", help: "With no list, docs can embed any site they could before."},
 	{key: DocsHistoryDays.Key, kind: KindInt, def: DocsHistoryDays.Default, min: 30, max: 3650,
@@ -71,6 +71,10 @@ var specs = []spec{
 		label: "Ask before notifying this many people", help: "Notifying a channel this size or larger asks first. 0 never asks."},
 	{key: ChatBroadcastAdminsOnlyAt.Key, kind: KindInt, def: ChatBroadcastAdminsOnlyAt.Default, min: 0, max: 100000,
 		label: "Only admins notify channels larger than", help: "In a channel with more members than this, only its managers and admins can notify all of it. 0 sets no limit."},
+	{key: CalendarFreeBusy.Key, kind: KindBool, def: CalendarFreeBusy.Default,
+		label: "Members see when others are busy", help: "Only when, never what. A calendar shared with someone shows what it's shared to show."},
+	{key: CalendarFeedsAllowed.Key, kind: KindBool, def: CalendarFeedsAllowed.Default,
+		label: "Members can show a calendar in another app", help: "A secret link per calendar for Google Calendar, Apple Calendar or Outlook. Off, every link stops working at once."},
 }
 
 // Info is one policy as an admin sees it.

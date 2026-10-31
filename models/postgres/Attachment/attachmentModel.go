@@ -7,8 +7,10 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 //CREATE TABLE IF NOT EXISTS attachment(
@@ -120,4 +122,32 @@ func GetAttachmentByObjUUID(query string, objUUID string, srcKey string) (return
 	returnAttachment = &attachment
 
 	return
+}
+
+// FilesOfPlace is which of ids are files of the place src (src_key, src_value)
+// that aren't deleted: a write naming files of a place checks them here.
+func FilesOfPlace(ctx context.Context, srcKey, srcValue string, ids []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(ids))
+	var want []uuid.UUID
+	for _, id := range ids {
+		if u, err := uuid.Parse(id); err == nil {
+			want = append(want, u)
+		}
+	}
+	if len(want) == 0 {
+		return out, nil
+	}
+	found, err := pgexec.Query(ctx, `SELECT id FROM attachments
+		WHERE id = ANY($1) AND src_key = $2 AND src_value = $3 AND deleted_at IS NULL`,
+		func(r pgexec.Row) (id uuid.UUID, err error) {
+			err = r.Scan(&id)
+			return id, err
+		}, pq.Array(want), srcKey, srcValue)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range found {
+		out[id.String()] = true
+	}
+	return out, nil
 }

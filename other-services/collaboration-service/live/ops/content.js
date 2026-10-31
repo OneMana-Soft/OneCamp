@@ -16,7 +16,7 @@ function blocksFor(html, extensions, { allowNone = false } = {}) {
 }
 
 // insert writes blocks at `at` and says what it wrote.
-function insert(doc, blocks, at, removed = 0) {
+export function insert(doc, blocks, at, removed = 0) {
     if (blocks.length) fragmentOf(doc).insert(at, blocks.map((b) => b.node))
     return { from: at, to: at + blocks.length, blocks: blocks.length, removed, blockIds: blocks.map((b) => b.id).filter(Boolean) }
 }

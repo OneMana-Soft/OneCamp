@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/akashc777/OneCamp/business/Import/providers/jira"
+	"github.com/akashc777/OneCamp/helpers/safefetch"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 )
 
@@ -32,5 +35,19 @@ func TestConnectingJiraAtAnAddressInsideIsRefused(t *testing.T) {
 	}
 	if n := reached.Load(); n != 0 {
 		t.Errorf("the site was reached %d times", n)
+	}
+}
+
+// A name that only resolves inside, refused as the connection is made, is
+// said the same way, not as a site that can't be reached.
+func TestASiteRefusedAtConnectionIsSaidAsRefused(t *testing.T) {
+	err := &url.Error{Op: "Get", URL: "https://jira.corp.example/rest/api/3/project/search", Err: safefetch.ErrResolvesInside}
+	p := DescribeProviderError(importModels.ProviderJira, "https://jira.corp.example", err)
+	if p.Code != "site_refused" || !strings.Contains(p.Msg, "https://jira.corp.example is on a private or reserved network") {
+		t.Errorf("%+v", p)
+	}
+	p = DescribeProviderError(importModels.ProviderJira, "https://acme.example", &url.Error{Op: "Get", URL: "https://acme.example/x", Err: safefetch.ErrOffOrigin})
+	if p.Code != "site_refused" || !strings.Contains(p.Msg, "another address") {
+		t.Errorf("%+v", p)
 	}
 }

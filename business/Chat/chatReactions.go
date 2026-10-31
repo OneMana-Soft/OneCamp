@@ -9,12 +9,19 @@ package business
 import (
 	"context"
 	"fmt"
+	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Chat"
+	activityBusiness "github.com/akashc777/OneCamp/business/Activity"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
+	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	reactionBusiness "github.com/akashc777/OneCamp/business/Reaction"
+	userBusiness "github.com/akashc777/OneCamp/business/User"
+	chatNotificationBusiness "github.com/akashc777/OneCamp/business/UserChatNotification"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Activity"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
 )
 
@@ -59,10 +66,14 @@ func CreateOrUpdateChatReaction(ctx context.Context, reactionInfo *adapter.Input
 	if added.First {
 		title := fmt.Sprintf("%s reacted", userDgraph.DisplayName())
 		body := fmt.Sprintf("Reacted to: \"%s\"", reactedSnippet(chatDgraph.Body))
-		emoji := reactionInfo.EmojiReactionUuid
-		helpers.GoSafeNamed("sendNewChatReactionNotification", func() {
-			sendNewChatReactionNotification(title, body, grpId, chatDgraph, userDgraph, emoji)
-		})
+		told := reactionTold{
+			kind: firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_REACTION, grpID: grpId, thread: chatDgraph.Uuid, on: chatDgraph.Uuid,
+			by: userDgraph, emoji: reactionInfo.EmojiReactionUuid, title: title, body: body,
+		}
+		if chatDgraph.From != nil {
+			told.author = chatDgraph.From.Uuid
+		}
+		helpers.GoSafeNamed("tellOfReaction", func() { tellOfReaction(told) })
 	}
 	return added.UID, nil
 }
@@ -137,10 +148,20 @@ func CreateOrUpdateChatCommentReaction(ctx context.Context, reactionInfo *adapte
 	if added.First {
 		title := fmt.Sprintf("%s reacted", userDgraph.DisplayName())
 		body := fmt.Sprintf("Reacted to: \"%s\"", reactedSnippet(dgraphCommentRaw.Text))
-		emoji := reactionInfo.EmojiReactionUuid
-		helpers.GoSafeNamed("sendNewChatCommentReactionNotification", func() {
-			sendNewChatCommentReactionNotification(title, body, dgraphCommentRaw, userDgraph, emoji)
-		})
+		// A reply's conversation, read from its root where the reply doesn't
+		// name it (chatCommentTopic has read the root above).
+		grpID := dgraphCommentRaw.ChatGroupingId
+		if grpID == "" {
+			grpID = dgraphCommentRaw.Chat.DM.GroupingId
+		}
+		told := reactionTold{
+			kind: firebaseInit.FIREBASE_PUSH_DATA_TYPE_CHAT_COMMENT_REACTION, grpID: grpID, thread: dgraphCommentRaw.Chat.Uuid, on: dgraphCommentRaw.Uuid,
+			by: userDgraph, emoji: reactionInfo.EmojiReactionUuid, title: title, body: body,
+		}
+		if dgraphCommentRaw.CommentBy != nil {
+			told.author = dgraphCommentRaw.CommentBy.Uuid
+		}
+		helpers.GoSafeNamed("tellOfReaction", func() { tellOfReaction(told) })
 	}
 	return added.UID, nil
 }
@@ -172,4 +193,65 @@ func DeleteReactionOnCommentChat(ctx context.Context, commentDgraph *dgraphStruc
 	}
 	tellChatCommentReactionsGone(commentDgraph, userDgraph.Uuid, removed)
 	return nil
+}
+
+// reactionTold is someone's first reaction to a message or a reply in a DM or
+// a group, as its author is told of it.
+type reactionTold struct {
+	kind   string // the push's type: a reaction to a message or to a reply
+	grpID  string // the conversation's grouping id
+	thread string // the thread the push opens: the message, or the reply's root
+	on     string // what was reacted to
+	author string
+	by     *dgraphStruct.DgraphUser
+	emoji  string
+	title  string
+	body   string
+}
+
+// tellOfReaction tells the author of a message or a reply of a reaction to it,
+// never their own: on their activity, and by push and desktop notice through
+// the one way a push goes out (notificationBusiness.Deliver: their devices,
+// the desktop app, and pause, quiet hours and focus time). The push goes as
+// their setting for the conversation allows: "all" or "mention" (a reaction
+// to their message is addressed to them), never "block" or no setting. An
+// author who has left the group hears nothing of it, on their activity
+// either; when who is in it can't be read, nobody is told.
+func tellOfReaction(r reactionTold) {
+	if r.author == "" || r.author == r.by.Uuid {
+		return
+	}
+	ctx := context.Background()
+	if r.grpID != "" {
+		in, err := chatNotificationBusiness.InConversationNow(ctx, r.grpID, []string{r.author})
+		if err != nil {
+			helpers.LogErrorWithContext(ctx, "business/Chat tellOfReaction could not read who is in %s now: %+v", r.grpID, err)
+			return
+		}
+		if len(in) == 0 {
+			return
+		}
+	}
+	activityBusiness.PublishActivityToUser(r.author, &dgraphModels.UnifiedActivityItem{
+		ActivityType: mqttStruct.MESSAGE_ACTIVITY_REACTION,
+		Time:         time.Now().UTC().Format(time.RFC3339Nano),
+	})
+	if r.grpID == "" {
+		return
+	}
+	hearers, err := chatNotificationBusiness.GetEligibleUsersForChatActivity(ctx, r.grpID, r.by.Uuid, []string{r.author}, true)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Chat tellOfReaction could not read who hears of %s: %+v", r.on, err)
+		return
+	}
+	notificationBusiness.Deliver(ctx, hearers, map[string]string{
+		firebaseInit.FIREBASE_PUSH_DATA_TYPE:        r.kind,
+		firebaseInit.FIREBASE_PUSH_DATA_TYPE_ID:     r.grpID,
+		firebaseInit.FIREBASE_PUSH_DATA_TITLE:       r.title,
+		firebaseInit.FIREBASE_PUSH_DATA_BODY:        r.body,
+		firebaseInit.FIREBASE_PUSH_DATA_THREAD_ID:   r.thread,
+		firebaseInit.FIREBASE_PUSH_DATA_USERNAME:    r.by.DisplayName(),
+		firebaseInit.FIREBASE_PUSH_DATA_ICON:        userBusiness.GetSignedProfileURL(ctx, r.by.ProfileKey),
+		firebaseInit.FIREBASE_PUSH_DATA_REACTION_ID: r.emoji,
+	}, fmt.Sprintf("%s:%s:%s:%s", r.kind, r.grpID, r.on, r.by.Uuid)) // one notice per person who reacted
 }

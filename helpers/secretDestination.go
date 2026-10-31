@@ -125,6 +125,14 @@ func secretOrigin(raw string) (origin, bool) {
 	return o, true
 }
 
+// SameOrigin reports whether two addresses share a scheme, host and port, by
+// the rule above. Addresses that don't parse never match.
+func SameOrigin(a, b string) bool {
+	oa, okA := secretOrigin(a)
+	ob, okB := secretOrigin(b)
+	return okA && okB && oa == ob
+}
+
 // sameHow compares two attachment descriptions, entry by entry, ignoring case
 // and surrounding space.
 func sameHow(a, b []string) bool {

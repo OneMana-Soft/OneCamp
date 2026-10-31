@@ -12,12 +12,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
 	"regexp"
-	"strconv"
-	"strings"
 	"time"
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
@@ -35,22 +31,11 @@ var launchpadBase = "https://launchpad.37signals.com"
 // project's dock), and each is read only on one of these.
 var apiOrigins = []string{"https://launchpad.37signals.com", "https://3.basecampapi.com"}
 
-// sameOrigin reports whether two addresses share a scheme and host:port,
-// ignoring case. Addresses that don't parse never match.
-func sameOrigin(a, b string) bool {
-	ua, err := url.Parse(a)
-	if err != nil || ua.Host == "" {
-		return false
-	}
-	ub, err := url.Parse(b)
-	return err == nil && strings.EqualFold(ua.Scheme, ub.Scheme) && strings.EqualFold(ua.Host, ub.Host)
-}
-
 // onAPI reports whether address is on one of apiOrigins: the same scheme,
 // host and port, exactly.
 func onAPI(address string) bool {
 	for _, o := range apiOrigins {
-		if sameOrigin(address, o) {
+		if helpers.SameOrigin(address, o) {
 			return true
 		}
 	}
@@ -62,6 +47,9 @@ const userAgent = "OneCamp importer (https://onemana.dev)"
 // maxPages bounds a listing so a runaway one can't hang a worker: past the
 // first pages Basecamp gives 100 a page, so about 20,000 items.
 const maxPages = 200
+
+// statusRules reads Basecamp's answers: 50 requests per 10 seconds.
+var statusRules = importProvider.StatusRules{Name: "Basecamp", Wait: 10 * time.Second}
 
 var nextLink = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)
 
@@ -86,18 +74,8 @@ func (p *Provider) get(ctx context.Context, tok, url string, out any) (string, e
 		return "", err
 	}
 	defer resp.Body.Close()
-	switch {
-	case resp.StatusCode == http.StatusTooManyRequests:
-		wait := 10 * time.Second
-		if secs, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && secs > 0 {
-			wait = time.Duration(secs) * time.Second
-		}
-		return "", &importProvider.ErrRateLimited{RetryAfter: wait, Reason: "Basecamp 429"}
-	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return "", &importProvider.TokenRejected{Msg: fmt.Sprintf("Basecamp refused the sign-in (HTTP %d); reconnect Basecamp", resp.StatusCode)}
-	case resp.StatusCode >= 400:
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return "", fmt.Errorf("basecamp HTTP %d: %s", resp.StatusCode, raw)
+	if err := statusRules.Check(resp); err != nil {
+		return "", err
 	}
 	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 		return "", fmt.Errorf("basecamp %s: %w", req.URL.Path, err)

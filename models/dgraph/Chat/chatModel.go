@@ -26,6 +26,7 @@ func CreateChat(ctx context.Context, query string, dgraphDm *dgraphStruct.Dgraph
 		Query:     query,
 		Mutations: []*api.Mutation{mu},
 	}
+	dgraphStruct.StampLastChats(req, dgraphDm)
 
 	res, err := dgraphInit.DoCommitNow(ctx, req)
 	if err != nil {

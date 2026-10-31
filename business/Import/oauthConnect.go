@@ -25,6 +25,7 @@ import (
 type oauthState struct {
 	Provider string    `json:"p"`
 	Owner    uuid.UUID `json:"o"`
+	Site     string    `json:"s,omitempty"` // the address the admin named (Jira), if any
 }
 
 // SignInConnector is the provider's sign-in when it offers one, nil when it
@@ -40,8 +41,9 @@ func SignInConnector(prov importProvider.Provider) *importProvider.OAuthConnect 
 }
 
 // StartOAuthConnect is the authorize page that begins owner's sign-in at
-// prov, coming back to redirectURI.
-func StartOAuthConnect(ctx context.Context, prov importProvider.Provider, owner uuid.UUID, redirectURI string) (string, *ProviderProblem) {
+// prov, coming back to redirectURI. site is the address the admin named, for
+// a provider whose sign-in reaches several (Jira); "" is none.
+func StartOAuthConnect(ctx context.Context, prov importProvider.Provider, owner uuid.UUID, redirectURI, site string) (string, *ProviderProblem) {
 	conn := SignInConnector(prov)
 	name := providerName(prov.Name())
 	if conn == nil {
@@ -55,7 +57,7 @@ func StartOAuthConnect(ctx context.Context, prov importProvider.Provider, owner 
 		return "", &ProviderProblem{Status: http.StatusServiceUnavailable, Code: "provider_error", Msg: "Couldn't start signing in to " + name + ". Try again."}
 	}
 	state := hex.EncodeToString(buf)
-	val, _ := json.Marshal(oauthState{Provider: prov.Name(), Owner: owner})
+	val, _ := json.Marshal(oauthState{Provider: prov.Name(), Owner: owner, Site: site})
 	if err := redisStore.SetString(ctx, registry.ImportOAuthState, []string{state}, string(val)); err != nil {
 		return "", &ProviderProblem{Status: http.StatusServiceUnavailable, Code: "provider_error", Msg: "Couldn't start signing in to " + name + ". Try again."}
 	}
@@ -97,7 +99,15 @@ func FinishOAuthConnect(ctx context.Context, state, code string, owner uuid.UUID
 		e := t.Expiry
 		tok.ExpiresAt = &e
 	}
-	if _, problem := SaveConnection(ctx, prov, tok, ""); problem != nil {
+	// A token that needs one more step (Atlassian's: which site) takes it here.
+	if c, ok := prov.(importProvider.OAuthCompleter); ok {
+		md, err := c.CompleteOAuth(ctx, t.AccessToken, st.Site)
+		if err != nil {
+			return st.Provider, &ProviderProblem{Status: http.StatusBadRequest, Code: "sign_in_incomplete", Msg: err.Error()}
+		}
+		tok.Metadata = md
+	}
+	if _, problem := SaveConnection(ctx, prov, tok, st.Site); problem != nil {
 		return st.Provider, problem
 	}
 	return st.Provider, nil
@@ -134,4 +144,16 @@ func SaveConnection(ctx context.Context, prov importProvider.Provider, tok *impo
 	}
 	importProvider.InvalidateImportTokenSource(tok.Provider, tok.OwnerUserId)
 	return items, nil
+}
+
+// OfferedSignIn is the sign-in the providers list offers: nil for a provider
+// connected only with a token, and for one that also takes a token (Jira)
+// on a server without its app, where the token form is the way in. The web
+// shows the sign-in alone when it is offered.
+func OfferedSignIn(prov importProvider.Provider) *importProvider.OAuthConnect {
+	conn := SignInConnector(prov)
+	if conn == nil || (conn.Optional && !conn.Configured()) {
+		return nil
+	}
+	return conn
 }

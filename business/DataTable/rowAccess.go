@@ -195,7 +195,7 @@ func rowNames(ctx context.Context, table uuid.UUID, ids []uuid.UUID) (map[uuid.U
 		pr := newPageRow(r)
 		var v formula.Value
 		if program != nil {
-			v = program.Run(func(id string) (formula.Value, int) { return pr.cell(id, types[id]) }, now, time.UTC)[label.Id.String()]
+			v = program.RunRow(formulaRow(r), func(id string) (formula.Value, int) { return pr.cell(id, types[id]) }, now, time.UTC)[label.Id.String()]
 		} else {
 			v, _ = pr.cell(label.Id.String(), label.Type)
 		}

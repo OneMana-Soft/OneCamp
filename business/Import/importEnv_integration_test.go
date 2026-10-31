@@ -6,33 +6,64 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"sync"
 	"testing"
+	"time"
 
+	MQTT "github.com/eclipse/paho.mqtt.golang"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
 	globalSearchController "github.com/akashc777/OneCamp/controllers/GlobalSearch"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/akashc777/OneCamp/tests/integration"
+	"github.com/opensearch-project/opensearch-go/v4"
+	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
+// importEnv starts what an import's stages write to: Postgres, the graph,
+// Redis, a stubbed MQTT client, and a search server that takes every write.
+func importEnv(t *testing.T) (*integration.Env, *integration.DgraphEnv) {
+	t.Helper()
+	env := integration.SetupEnv(t)
+	if err := postgresInit.ConnectPostgres(context.Background(), env.DSN); err != nil {
+		t.Fatal(err)
+	}
+	integration.SetupRedis(t)
+	integration.StubMqttClient(t)
+	dg := integration.SetupDgraph(t)
+	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"took":1,"errors":false,"items":[],"updated":0,"failures":[],"result":"updated","_id":"x"}`)
+	}))
+	t.Cleanup(search.Close)
+	client, err := opensearchapi.NewClient(opensearchapi.Config{Client: opensearch.Config{Addresses: []string{search.URL}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opensearchInit.OpenSearchClient = client
+	return env, dg
+}
+
 // seen is an import's world as people see and hear it: Postgres, Redis, the
-// graph and a real search, with every realtime message the server sends kept
-// as it goes out (keptBroker).
+// graph and a real search, with every realtime message and push the server
+// sends kept as it goes out.
 type seen struct {
 	env    *integration.Env
 	dg     *integration.DgraphEnv
 	broker *keptBroker
+	mu     sync.Mutex
+	pushes []string
 }
 
 func seenWorld(t *testing.T) *seen {
@@ -43,6 +74,12 @@ func seenWorld(t *testing.T) *seen {
 	}
 	integration.SetupRedis(t)
 	integration.UseMqttClient(t, w.broker)
+	t.Cleanup(firebaseInit.ObservePushesForTest(func(data map[string]string, _ []string) {
+		raw, _ := json.Marshal(data)
+		w.mu.Lock()
+		w.pushes = append(w.pushes, string(raw))
+		w.mu.Unlock()
+	}))
 	w.dg = integration.SetupDgraph(t)
 	search := integration.SetupOpenSearch(t)
 	if err := opensearchInit.ConnectOpenSearch(&opensearchInit.OpenSearchConfig{Host: search.URL}); err != nil {
@@ -57,6 +94,35 @@ func (w *seen) live() []string {
 	defer w.broker.mu.Unlock()
 	return slices.Clone(w.broker.got)
 }
+
+// pushed is every push sent so far, as JSON.
+func (w *seen) pushed() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Clone(w.pushes)
+}
+
+// keptBroker keeps every realtime message the server publishes.
+type keptBroker struct {
+	MQTT.Client
+	mu  sync.Mutex
+	got []string
+}
+
+func (b *keptBroker) Publish(topic string, _ byte, _ bool, payload interface{}) MQTT.Token {
+	p, _ := payload.([]byte)
+	b.mu.Lock()
+	b.got = append(b.got, topic+" "+string(p))
+	b.mu.Unlock()
+	return keptToken{}
+}
+
+type keptToken struct{}
+
+func (keptToken) Wait() bool                     { return true }
+func (keptToken) WaitTimeout(time.Duration) bool { return true }
+func (keptToken) Done() <-chan struct{}          { c := make(chan struct{}); close(c); return c }
+func (keptToken) Error() error                   { return nil }
 
 // signedIn is ctx with id signed in, as the first middleware leaves a request.
 func signedIn(t *testing.T, ctx context.Context, id uuid.UUID) context.Context {
@@ -88,42 +154,6 @@ func callAs(t *testing.T, ctx context.Context, id uuid.UUID, h http.HandlerFunc,
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodPost, "/"+query, rd).WithContext(context.WithValue(signedIn(t, ctx, id), chi.RouteCtxKey, rc)))
 	return rec.Code, rec.Body.String()
-}
-
-// searchMarks is the deleted_by of each search entry naming a comment, as
-// HideComment marks them: its own entry, its files' and its AI entry, each
-// matched whole (by the field or its .keyword), in whichever of those indexes
-// the install has.
-func searchMarks(ctx context.Context, comment string) ([]string, error) {
-	var should []map[string]any
-	for _, field := range []string{"comment_id", "attachment_comment_id", "content_uuid"} {
-		for _, f := range []string{field, field + ".keyword"} {
-			should = append(should, map[string]any{"term": map[string]any{f: comment}})
-		}
-	}
-	body, err := json.Marshal(map[string]any{"size": 100,
-		"query": map[string]any{"bool": map[string]any{"should": should, "minimum_should_match": 1}}})
-	if err != nil {
-		return nil, err
-	}
-	ignore := true
-	resp, err := opensearchInit.OpenSearchClient.Search(ctx, &opensearchapi.SearchReq{
-		Indices: []string{"comments", "attachments", "ai_embeddings"}, Body: bytes.NewReader(body),
-		Params: opensearchapi.SearchParams{IgnoreUnavailable: &ignore}})
-	if err != nil {
-		return nil, err
-	}
-	marks := make([]string, len(resp.Hits.Hits))
-	for i, h := range resp.Hits.Hits {
-		var e struct {
-			By string `json:"deleted_by"`
-		}
-		if err := json.Unmarshal(h.Source, &e); err != nil {
-			return nil, err
-		}
-		marks[i] = e.By
-	}
-	return marks, nil
 }
 
 // searchAs is id's global search for text: its answer, and how many hits its

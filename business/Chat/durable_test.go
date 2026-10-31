@@ -197,7 +197,7 @@ func TestADurableSendTriedAgainAnswersItsFirstTryOnceItsNodeIsThere(t *testing.T
 func TestAMessagesLiveEventIsInItsConversationsOrderAndTheRestInItsOwn(t *testing.T) {
 	chat := uuid.New()
 	for _, kind := range []string{mqttStruct.CONVERSATION_KIND_DM, mqttStruct.CONVERSATION_KIND_GROUP} {
-		events := chatEvents(kind, "grp-1", chat, "u-ada", false)
+		events := chatEvents(kind, "grp-1", chat, "u-ada", false, "")
 		if len(events) != 2 {
 			t.Fatalf("%s: %d events", kind, len(events))
 		}
@@ -214,7 +214,7 @@ func TestAMessagesLiveEventIsInItsConversationsOrderAndTheRestInItsOwn(t *testin
 			}
 		}
 	}
-	imported := chatEvents(mqttStruct.CONVERSATION_KIND_DM, "grp-1", chat, "u-ada", true)
+	imported := chatEvents(mqttStruct.CONVERSATION_KIND_DM, "grp-1", chat, "u-ada", true, "")
 	if len(imported) != 1 || imported[0].Key != "chat:"+chat.String() || strings.Join(imported[0].Sinks, ",") != "chat.search" {
 		t.Errorf("an imported message's events: %+v", imported)
 	}
@@ -231,5 +231,14 @@ func TestAChatClientIDOnceDoesntTakeIsntKept(t *testing.T) {
 		if got := chatClientID(id); got != want {
 			t.Errorf("chatClientID(%q) = %v, want %v", id, got, want)
 		}
+	}
+}
+
+// A call's message in a DM or a group (calls CALLS-3b) reaches open apps and
+// search and tells nobody, as a channel's call's post.
+func TestACallsMessageIsLiveAndIndexedAndTellsNobody(t *testing.T) {
+	events := chatEvents(mqttStruct.CONVERSATION_KIND_DM, "grp-1", uuid.New(), "u-ada", false, helpers.KindHuddle)
+	if len(events) != 2 || strings.Join(events[0].Sinks, ",") != strings.Join(chatLiveSinks, ",") || strings.Join(events[1].Sinks, ",") != sinkChatSearch+","+sinkChatEvents {
+		t.Errorf("a call's message's events: %+v", events)
 	}
 }

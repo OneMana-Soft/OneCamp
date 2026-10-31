@@ -9,6 +9,7 @@ import (
 	business "github.com/akashc777/OneCamp/business/Task"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	estimateScaleController "github.com/akashc777/OneCamp/controllers/EstimateScale"
 	taskFieldController "github.com/akashc777/OneCamp/controllers/TaskField"
 	timeEntryController "github.com/akashc777/OneCamp/controllers/TimeEntry"
 	"github.com/akashc777/OneCamp/helpers"
@@ -29,7 +30,8 @@ import (
 //	client_review  GET /task/clientReview/{task}
 //	time_summary   GET /task/time/{task}
 //	sync_status    GET /task/github-sync-status/{task}, for a linked task only
-//	project_meta   statuses and fields: GET /project/{p}/statuses, /fields
+//	project_meta   statuses, fields and estimates: GET /project/{p}/statuses,
+//	               /fields, /estimates
 //
 // The task is already read and visible to the reader, which is all the
 // task's own parts ask; the project's parts ask what their endpoints ask of
@@ -89,8 +91,8 @@ func panelParts(r *http.Request, names map[string]bool, taskID uuid.UUID, task *
 	return out
 }
 
-// projectParts are the project's statuses and fields, as their endpoints
-// answer them, for a reader those endpoints would answer.
+// projectParts are the project's statuses, fields and estimate scale, as
+// their endpoints answer them, for a reader those endpoints would answer.
 func projectParts(ctx context.Context, put func(string, any, error), p *dgraphStruct.DgraphProject, user userModels.UserInfo, standing workAccess.Standing) {
 	projectID, err := uuid.Parse(p.Uuid)
 	if err != nil {
@@ -105,6 +107,9 @@ func projectParts(ctx context.Context, put func(string, any, error), p *dgraphSt
 	if standing.Can(workAccess.NeedView) {
 		fields, err := taskFieldController.Fields(ctx, projectID, standing)
 		put("fields", fields, err)
+		// GET /project/{p}/estimates: the scale the task's Points row sizes on.
+		estimates, err := estimateScaleController.Answer(ctx, projectID, standing)
+		put("estimates", estimates, err)
 	}
 }
 
@@ -112,6 +117,7 @@ func projectParts(ctx context.Context, put func(string, any, error), p *dgraphSt
 var partWords = map[string]string{
 	"cycle": "the cycle", "recurrence": "the repeat", "client_review": "the client review",
 	"time_summary": "the time", "sync_status": "the GitHub link", "statuses": "the statuses", "fields": "the fields",
+	"estimates": "the estimates",
 }
 
 // partOf is one part as the include answers it: {"data": …}, or for a part

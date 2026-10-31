@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/akashc777/OneCamp/business/Access/level"
+	"github.com/akashc777/OneCamp/models/dgexec"
 	"strconv"
 	"strings"
 	"time"
@@ -111,15 +112,17 @@ func docUpdateRequest(dgraphDoc *dgraphStruct.DgraphDoc, filter string) (*api.Re
 	}, nil
 }
 
-// GetDocDeletion reads whether a doc exists and whether it is deleted, and
-// nothing else: for the paths that hold a doc's id without reading the doc
-// (a guest's link). ErrNotFound when no doc has the uuid.
+// GetDocDeletion reads whether a doc exists, whether it is deleted and what
+// kind of node it is, and nothing else: for the paths that hold a doc's id
+// without reading the doc (a guest's link). ErrNotFound when no doc has the
+// uuid.
 func GetDocDeletion(ctx context.Context, docUUID string) (*dgraphStruct.DgraphDoc, error) {
 	return dgraphModels.GetDgraphDocInfoByUUID(ctx, `query DocInfo($id: string){
 				docInfo(func: eq(doc_uuid, $id)) {
 					uid
 					doc_uuid
 					doc_deleted_at
+					doc_node_kind
 				}
 			}`, map[string]string{"$id": docUUID})
 }
@@ -212,11 +215,11 @@ func GetDgraphDocByUUID(ctx context.Context, docUUID string, userUID string) (dg
 				docInfo(func: eq(doc_uuid, $id)) {
 					uid
 					doc_uuid
-					doc_title` + accessFactsBut + lookFields + `
+					doc_title` + accessFactsBut + lookFields + nodeLook + `
 					doc_owner_named: doc_owner { uid user_uuid user_name user_full_name user_profile_object_key }
 					doc_locked_at
 					doc_locked_by { uid user_uuid user_name user_full_name }
-					doc_backlink_count: count(~doc_mentions @filter(` + liveDocFilter + ` AND NOT eq(doc_uuid, $id)))
+					doc_backlink_count: count(~doc_mentions @filter(` + liveDocFilter + ` AND ` + pageOnly + ` AND NOT eq(doc_uuid, $id)))
 					doc_comment_count: count(doc_comments @filter(not gt(comment_deleted_at, "1970-01-01T00:00:00Z")))
 					doc_body
 					doc_created_at
@@ -257,6 +260,7 @@ func GetSystemDocByUUID(ctx context.Context, docUUID string) (dgraphDoc *dgraphS
 					doc_deleted_at
 					doc_host_kind
 					doc_host_uuid
+					doc_node_kind
 					doc_created_by {
 						uid
 						user_uuid
@@ -278,7 +282,8 @@ func GetSystemDocByUUID(ctx context.Context, docUUID string) (dgraphDoc *dgraphS
 
 // GetCollabDocByUUID is a doc as the collaboration service opens it: its body,
 // the Yjs state saved with the hash of the body it matches, and when its body
-// was last stored (what a tab opening it hears as "saved at").
+// was last stored (what a tab opening it hears as "saved at"); and its kind,
+// since only a page opens in the editor (IsPage).
 func GetCollabDocByUUID(ctx context.Context, docUUID string) (*dgraphStruct.DgraphDoc, error) {
 	query := `query DocInfo($id: string){
 				docInfo(func: eq(doc_uuid, $id)) {
@@ -290,6 +295,7 @@ func GetCollabDocByUUID(ctx context.Context, docUUID string) (*dgraphStruct.Dgra
 					doc_yjs_body_hash
 					doc_updated_at
 					doc_deleted_at
+					doc_node_kind
 				}
 			}`
 	doc, err := dgraphModels.GetDgraphDocInfoByUUID(ctx, query, map[string]string{"$id": docUUID})
@@ -299,12 +305,13 @@ func GetCollabDocByUUID(ctx context.Context, docUUID string) (*dgraphStruct.Dgra
 	return doc, err
 }
 
-// GetDocBodyPage reads one page of every doc's body and the hash its saved Yjs
-// state was stored with, deleted docs included, in uid order (business/Doc
-// RepairDocs). The states themselves are read one doc at a time.
+// GetDocBodyPage reads one page of every page's body and the hash its saved
+// Yjs state was stored with, deleted pages included, in uid order
+// (business/Doc RepairDocs): a folder, a file or a link has no body to repair
+// (pageOnly). The states themselves are read one doc at a time.
 func GetDocBodyPage(ctx context.Context, offset, first int) ([]*dgraphStruct.DgraphDoc, error) {
 	query := fmt.Sprintf(`{
-				docInfo(func: has(doc_uuid), first: %d, offset: %d) {
+				docInfo(func: has(doc_uuid), first: %d, offset: %d) @filter(`+pageOnly+`) {
 					uid
 					doc_uuid
 					doc_body
@@ -633,6 +640,7 @@ const docSearchFields = `
 					uid
 					doc_uuid
 					doc_host_kind
+					doc_node_kind
 					doc_title
 					doc_body
 					doc_snippet
@@ -674,6 +682,25 @@ func GetDocSearchEntry(ctx context.Context, docUUID string) (*dgraphStruct.Dgrap
 			}`, map[string]string{"$id": docUUID})
 }
 
+// GetDocSearchEntries reads the named docs as GetDocSearchEntry reads one,
+// in one query: what a doc's files' entries carry of it (business/Doc
+// IndexFiles). Ids that aren't uuids are left out, and so is any doc that
+// isn't there.
+func GetDocSearchEntries(ctx context.Context, docUUIDs []string) ([]*dgraphStruct.DgraphDoc, error) {
+	quoted := quoteUUIDs(docUUIDs)
+	if len(quoted) == 0 {
+		return nil, nil
+	}
+	docs, err := dgraphModels.GetDgraphDocs(ctx, `{
+				docInfo(func: eq(doc_uuid, [`+strings.Join(quoted, ", ")+`])) {`+docSearchFields+`
+				}
+			}`, map[string]string{})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetDocSearchEntries err: %+v", err)
+	}
+	return docs, err
+}
+
 // GetDocSearchEntryPage reads one page of every doc, deleted ones included,
 // as GetDocSearchEntry reads one: for rewriting every entry (business/Doc's
 // search repair). The graph returns them in uid order, so offsets page
@@ -693,22 +720,11 @@ func GetDocSearchEntryPage(ctx context.Context, offset, first int) ([]*dgraphStr
 // GetDocSearchEntryPage reads at the same offset: for naming a doc whose
 // entry is too large to read (business/Doc's search repair).
 func GetDocUUIDPage(ctx context.Context, offset, first int) ([]string, error) {
-	docs, err := dgraphModels.GetDgraphDocs(ctx, fmt.Sprintf(`{
-				docInfo(func: has(doc_uuid), first: %d, offset: %d) {
-					doc_uuid
-				}
-			}`, first, offset), map[string]string{})
+	ids, err := dgexec.UUIDPage(ctx, "doc_uuid", "", offset, first)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/GetDocUUIDPage err: %+v", err)
-		return nil, err
 	}
-	ids := make([]string, len(docs))
-	for i, d := range docs {
-		if d != nil {
-			ids[i] = d.Uuid
-		}
-	}
-	return ids, nil
+	return ids, err
 }
 
 // GetDocsReadAccessFor reads, for one person (by uuid), what CanRead decides
@@ -815,9 +831,13 @@ func BulkIndexDocEntries(ctx context.Context, entries []*openSearchStruct.OpenSe
 // creation time alone. A restore leaves the last edit as it was, so a doc an
 // admin restored, or a run's undo brought back, was archived again by the
 // next hourly run; it now waits out the retention period from its restore.
-// A hosted doc (D-18) is never one: it is kept, and goes, with its host.
+// A hosted doc (D-18) is never one: it is kept, and goes, with its host. Nor
+// is a folder, a file or a link (pageOnly): nobody edits a file, so it is kept
+// until someone removes it, and since the archive takes whole subtrees only
+// (business/Archive docTree.go), a folder keeps the pages in it and a file
+// keeps the page it is under.
 func inactiveDocFilter(cutoff string) string {
-	return fmt.Sprintf(`(lt(doc_updated_at, %[1]s) OR (NOT has(doc_updated_at) AND lt(doc_created_at, %[1]s))) AND NOT ge(doc_restored_at, %[1]s) AND NOT has(doc_host_kind)`, cutoff)
+	return fmt.Sprintf(`(lt(doc_updated_at, %[1]s) OR (NOT has(doc_updated_at) AND lt(doc_created_at, %[1]s))) AND NOT ge(doc_restored_at, %[1]s) AND NOT has(doc_host_kind) AND `+pageOnly, cutoff)
 }
 
 // GetDocsInactiveSince returns up to limit live docs nobody has changed or

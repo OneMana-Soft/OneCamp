@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"time"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
@@ -420,7 +421,9 @@ func (s *service) sendReminder(ctx context.Context, person uuid.UUID, e *models.
 		helpers.LogInfoWithContext(ctx, "business/Calendar: a reminder for %s came %s late and wasn't sent", inst.ref, now.Sub(at).Round(time.Minute))
 		return nil
 	}
-	title, body := reminderWords(inst.Event, p.Minutes, p.Kind == models.ReminderSnooze, now, zone)
+	// A task block is called by its task as the person may read it (titleOf).
+	called := s.titler(ctx, accessBusiness.Subject{UserUUID: person.String()}, []*models.Event{inst.Event})(inst.Event)
+	title, body := reminderWords(inst.Event, called, p.Minutes, p.Kind == models.ReminderSnooze, now, zone)
 	data := whenData(inst.Event)
 	data["minutes"] = strconv.Itoa(p.Minutes)
 	if inst.ref != e.ID.String() {
@@ -434,7 +437,7 @@ func (s *service) sendReminder(ctx context.Context, person uuid.UUID, e *models.
 	}
 	recipient := notificationBusiness.NoticeRecipient{UserUUID: person.String(), Reason: "reminder", Listed: true, ThroughHolds: through}
 	tellNotice(ctx, notificationBusiness.Notice{
-		Kind: noticeReminder, ResourceKind: KindEvent, ResourceUUID: e.ID.String(), ResourceTitle: inst.Event.Title,
+		Kind: noticeReminder, ResourceKind: KindEvent, ResourceUUID: e.ID.String(), ResourceTitle: called,
 		Data: data, DedupKey: noticeReminder + "|" + inst.ref + "|" + strconv.Itoa(p.Minutes) + "|" + p.Kind + "|" + at.UTC().Format(time.RFC3339),
 		Title: title, Body: body, Path: eventPath(inst.ref),
 		Push: &notificationBusiness.Push{Type: firebaseInit.FIREBASE_PUSH_DATA_TYPE_CALENDAR, ID: inst.ref, Tag: "reminder:" + inst.ref},
@@ -449,33 +452,33 @@ func absDuration(d time.Duration) time.Duration {
 	return d
 }
 
-// reminderWords is a reminder's title and line, on a clock in loc: "Launch
-// review in 10 minutes", "Launch review is starting", "Offsite is
-// tomorrow", with when it is under it. Pure.
-func reminderWords(e *models.Event, minutes int, snoozed bool, now time.Time, loc *time.Location) (string, string) {
+// reminderWords is a reminder's title and line for e, called title, on a
+// clock in loc: "Launch review in 10 minutes", "Launch review is starting",
+// "Offsite is tomorrow", with when it is under it. Pure.
+func reminderWords(e *models.Event, title string, minutes int, snoozed bool, now time.Time, loc *time.Location) (string, string) {
 	when := whenWords(e, loc)
 	if e.AllDay() {
 		first, _ := parseDate(e.StartDate)
 		today := time.Date(now.In(loc).Year(), now.In(loc).Month(), now.In(loc).Day(), 0, 0, 0, 0, time.UTC)
 		switch days := int(first.Sub(today).Hours() / 24); {
 		case days <= 0:
-			return e.Title + " is today", when
+			return title + " is today", when
 		case days == 1:
-			return e.Title + " is tomorrow", when
+			return title + " is tomorrow", when
 		default:
-			return fmt.Sprintf("%s is in %d days", e.Title, days), when
+			return fmt.Sprintf("%s is in %d days", title, days), when
 		}
 	}
 	left := e.StartAt.Sub(now).Round(time.Minute)
 	switch {
 	case left <= 0:
-		return e.Title + " is starting", when
+		return title + " is starting", when
 	case left < time.Hour:
-		return fmt.Sprintf("%s in %s", e.Title, plural(int(left.Minutes()), "minute")), when
+		return fmt.Sprintf("%s in %s", title, plural(int(left.Minutes()), "minute")), when
 	case left < 24*time.Hour:
-		return fmt.Sprintf("%s in %s", e.Title, plural(int(left.Round(time.Hour).Hours()), "hour")), when
+		return fmt.Sprintf("%s in %s", title, plural(int(left.Round(time.Hour).Hours()), "hour")), when
 	default:
-		return fmt.Sprintf("%s in %s", e.Title, plural(int(left.Hours()/24), "day")), when
+		return fmt.Sprintf("%s in %s", title, plural(int(left.Hours()/24), "day")), when
 	}
 }
 

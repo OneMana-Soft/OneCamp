@@ -22,6 +22,13 @@ const (
 	space     = "66666666-6666-4666-8666-666666666666"
 	editDoc   = "77777777-7777-4777-8777-777777777777"
 	talkDoc   = "88888888-8888-4888-8888-888888888888"
+	// nestedDoc is a page the reader may open inside privateDir, a folder they may not.
+	nestedDoc  = "99999999-9999-4999-8999-999999999999"
+	privateDir = "12121212-1212-4121-8121-121212121212"
+	// sharedOut is a page shared with the reader out of privateProject, a
+	// project space they aren't in.
+	sharedOut      = "13131313-1313-4131-8131-131313131313"
+	privateProject = "14141414-1414-4141-8141-141414141414"
 )
 
 // reader is who reads in these tests, and maya someone else in the workspace.
@@ -30,11 +37,13 @@ var (
 	maya   = &dgraphStruct.DgraphUser{Uid: "0x2", Uuid: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", UserName: "Maya"}
 )
 
-// rules decides by a table: each person's level on each doc, and the docs in the trash.
+// rules decides by a table: each person's level on each doc, the docs whose
+// space they're in (the decision's "space" reason), and the docs in the trash.
 type rules struct {
 	accessBusiness.Resolver
-	levels map[string]map[string]accessBusiness.Level // person uuid -> doc -> level
-	gone   map[string]bool
+	levels  map[string]map[string]accessBusiness.Level // person uuid -> doc -> level
+	inSpace map[string]map[string]bool                 // person uuid -> doc -> in its space
+	gone    map[string]bool
 }
 
 func (r rules) Resolve(_ context.Context, who accessBusiness.Subject, res accessBusiness.Resource) (accessBusiness.Decision, error) {
@@ -45,7 +54,11 @@ func (r rules) Resolve(_ context.Context, who accessBusiness.Subject, res access
 	if r.gone[res.UUID] {
 		return accessBusiness.Decision{Level: accessBusiness.LevelNone, Deleted: true, Was: l}, nil
 	}
-	return accessBusiness.Decision{Level: l, Was: l}, nil
+	d := accessBusiness.Decision{Level: l, Was: l}
+	if r.inSpace[who.UserUUID][res.UUID] {
+		d.Reasons = []string{"space"}
+	}
+	return d, nil
 }
 
 func withRules(t *testing.T) {
@@ -54,16 +67,21 @@ func withRules(t *testing.T) {
 	accessBusiness.Rules = rules{
 		levels: map[string]map[string]accessBusiness.Level{
 			reader.UserUUID: {openDoc: accessBusiness.LevelView, hereDoc: accessBusiness.LevelFull, closedDoc: accessBusiness.LevelNone, goneDoc: accessBusiness.LevelEdit,
-				editDoc: accessBusiness.LevelEdit, talkDoc: accessBusiness.LevelComment},
+				editDoc: accessBusiness.LevelEdit, talkDoc: accessBusiness.LevelComment, nestedDoc: accessBusiness.LevelView, privateDir: accessBusiness.LevelNone,
+				sharedOut: accessBusiness.LevelView},
 			maya.Uuid: {openDoc: accessBusiness.LevelView, hereDoc: accessBusiness.LevelNone, editDoc: accessBusiness.LevelNone, talkDoc: accessBusiness.LevelNone},
 		},
-		gone: map[string]bool{goneDoc: true, wasNever: true},
+		inSpace: map[string]map[string]bool{reader.UserUUID: {openDoc: true}},
+		gone:    map[string]bool{goneDoc: true, wasNever: true},
 	}
 	all := map[string]*dgraphStruct.DgraphDoc{
-		openDoc:   {Uuid: openDoc, Title: "Launch plan", Icon: "🚀", Parent: &dgraphStruct.DgraphDoc{Uuid: hereDoc}, SpaceKind: "project", SpaceUUID: space},
-		closedDoc: {Uuid: closedDoc, Title: "Salaries"},
-		goneDoc:   {Uuid: goneDoc, Title: "Old notes"},
-		hereDoc:   {Uuid: hereDoc, Title: "Here"},
+		openDoc:    {Uuid: openDoc, Title: "Launch plan", Icon: "🚀", Parent: &dgraphStruct.DgraphDoc{Uuid: hereDoc}, SpaceKind: "project", SpaceUUID: space},
+		closedDoc:  {Uuid: closedDoc, Title: "Salaries"},
+		goneDoc:    {Uuid: goneDoc, Title: "Old notes"},
+		hereDoc:    {Uuid: hereDoc, Title: "Here"},
+		nestedDoc:  {Uuid: nestedDoc, Title: "Offer letter", Parent: &dgraphStruct.DgraphDoc{Uuid: privateDir}},
+		privateDir: {Uuid: privateDir, Title: "Hiring"},
+		sharedOut:  {Uuid: sharedOut, Title: "Budget", SpaceKind: "project", SpaceUUID: privateProject},
 	}
 	readDocChips = func(_ context.Context, ids []string) (map[string]*dgraphStruct.DgraphDoc, error) {
 		out := map[string]*dgraphStruct.DgraphDoc{}
@@ -97,6 +115,40 @@ func TestADocChipNeverShowsWhatItsReaderCantOpen(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got  %+v\nwant %+v", got, want)
+	}
+}
+
+// A chip names its doc's parent only to a reader who may open that parent: a
+// page shared out of a private folder must not carry the folder's id, which
+// would tell its reader the folder exists and which one it is.
+func TestADocChipNamesOnlyAParentItsReaderMayOpen(t *testing.T) {
+	withRules(t)
+	got, err := ReadEntities(context.Background(), reader, []Ref{{Kind: "doc", ID: nestedDoc}, {Kind: "doc", ID: openDoc}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, named := got[0].Data["parent_id"]; got[0].Access != AccessOK || named {
+		t.Errorf("a page inside a folder its reader can't open: %+v", got[0])
+	}
+	if got[1].Data["parent_id"] != hereDoc {
+		t.Errorf("a page inside a doc its reader may open names it: %+v", got[1])
+	}
+}
+
+// A chip names its doc's project or team space only to a reader in that
+// space: a page shared out of a private project must not carry the project's
+// id. The reader's own space keeps it (the doc's project for a new task).
+func TestADocChipNamesOnlyASpaceItsReaderIsIn(t *testing.T) {
+	withRules(t)
+	got, err := ReadEntities(context.Background(), reader, []Ref{{Kind: "doc", ID: sharedOut}, {Kind: "doc", ID: openDoc}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, named := got[0].Data["space_id"]; got[0].Access != AccessOK || named || got[0].Data["space_kind"] != nil {
+		t.Errorf("a page shared out of a project its reader isn't in: %+v", got[0])
+	}
+	if got[1].Data["space_id"] != space || got[1].Data["space_kind"] != "project" {
+		t.Errorf("a page in its reader's own project names it: %+v", got[1])
 	}
 }
 
@@ -162,6 +214,51 @@ func TestATaskChipFollowsTheTaskViewsRule(t *testing.T) {
 	}
 	if e := byID[archived]; e.Access != AccessGone || e.Data != nil || e.Title != "" {
 		t.Errorf("a task in a deleted project: %+v", e)
+	}
+}
+
+// A task's chip names it by its key, as its rows, cards and page do (Linear's
+// ENG-123 in a mention): laid in one read over the chips' tasks. A task with
+// no key yet says none.
+func TestATaskChipCarriesItsKey(t *testing.T) {
+	const (
+		keyed   = "a0000000-0000-4000-8000-000000000011"
+		unkeyed = "a0000000-0000-4000-8000-000000000012"
+		proj    = "b0000000-0000-4000-8000-000000000001"
+	)
+	savedRead, savedLay := readTaskChips, layTaskKeys
+	t.Cleanup(func() { readTaskChips, layTaskKeys = savedRead, savedLay })
+	readTaskChips = func(context.Context, []string, string) ([]*dgraphStruct.DgraphTask, error) {
+		return []*dgraphStruct.DgraphTask{
+			{Uuid: keyed, Name: "Write the post", Status: dgraphStruct.TASK_STATUS_TODO, Project: project(proj, 1, 0)},
+			{Uuid: unkeyed, Name: "Ship it", Status: dgraphStruct.TASK_STATUS_TODO, Project: project(proj, 1, 0)},
+		}, nil
+	}
+	laid := 0
+	layTaskKeys = func(_ context.Context, tasks ...*dgraphStruct.DgraphTask) {
+		laid++
+		for _, task := range tasks {
+			if task.Uuid == keyed {
+				task.Key = "Q4-12"
+			}
+		}
+	}
+	got, err := ReadEntities(context.Background(), reader, []Ref{{"task", keyed}, {"task", unkeyed}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]Entity{}
+	for _, e := range got {
+		byID[e.ID] = e
+	}
+	if laid != 1 {
+		t.Errorf("keys were laid %d times for one read", laid)
+	}
+	if e := byID[keyed]; e.Access != AccessOK || e.Data["key"] != "Q4-12" {
+		t.Errorf("a keyed task's chip: %+v", e)
+	}
+	if _, has := byID[unkeyed].Data["key"]; has {
+		t.Errorf("a task with no key yet named one: %+v", byID[unkeyed])
 	}
 }
 

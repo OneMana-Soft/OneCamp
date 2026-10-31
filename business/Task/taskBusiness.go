@@ -15,6 +15,8 @@ import (
 	integrationBusiness "github.com/akashc777/OneCamp/business/Integration"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
+	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	userProjectNotificationBusiness "github.com/akashc777/OneCamp/business/UserProjectNotification"
@@ -33,6 +35,7 @@ import (
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -351,9 +354,13 @@ func ArchiveCommentByCommentUUID(ctx context.Context, commentUUID uuid.UUID, raw
 }
 
 func CreateSubTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.UserInfo, projectDgraphInfo *dgraphStruct.DgraphProject, assigneeDgraphInfo *dgraphStruct.DgraphUser, taskInfo adapter.CreateOrUpdateTaskInput) (dgraphTask *dgraphStruct.DgraphTask, err error) {
-	// Given only to someone who sees it (whoever sees its parent), before
+	// As a task (CreateTask): given only to someone who can be given work and
+	// who sees it (whoever sees its parent), with dates that are dates, before
 	// anything is written.
 	if assigneeDgraphInfo != nil {
+		if err = principalBusiness.Unassignable(assigneeDgraphInfo, principalBusiness.Assigned); err != nil {
+			return
+		}
 		parent := ""
 		if len(projectDgraphInfo.Tasks) > 0 && projectDgraphInfo.Tasks[0] != nil {
 			parent = projectDgraphInfo.Tasks[0].Uuid
@@ -361,6 +368,10 @@ func CreateSubTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.U
 		if err = UnseeingNew(ctx, projectUUID.String(), parent, assigneeDgraphInfo); err != nil {
 			return
 		}
+	}
+	due, start, err := newTaskDates(taskInfo)
+	if err != nil {
+		return
 	}
 
 	currentTime := time.Now()
@@ -427,25 +438,7 @@ func CreateSubTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.U
 		DeletedAt: &zeroUnixTime,
 	}
 
-	if len(taskInfo.DueDate) > 0 {
-		var dueDate time.Time
-		dueDate, err = time.Parse(time.RFC3339, taskInfo.DueDate)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/CreateSubTask Failed parse due date err: %+v", err)
-			return
-		}
-		dgraphTask.DueDate = &dueDate
-	}
-
-	if len(taskInfo.StartDate) > 0 {
-		var startDate time.Time
-		startDate, err = time.Parse(time.RFC3339, taskInfo.StartDate)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/CreateSubTask Failed parse start date err: %+v", err)
-			return
-		}
-		dgraphTask.StartDate = &startDate
-	}
+	putNewDates(dgraphTask, due, start)
 
 	emptyString := ""
 
@@ -593,13 +586,72 @@ func AddAttachmentToTask(ctx context.Context, taskUUID uuid.UUID, dgraphTaskInfo
 
 }
 
-func CreateTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.UserInfo, projectDgraphInfo *dgraphStruct.DgraphProject, assigneeDgraphInfo *dgraphStruct.DgraphUser, taskInfo adapter.CreateOrUpdateTaskInput, mentionsUsers []*dgraphStruct.DgraphUser) (taskUUIDRes uuid.UUID, err error) {
-	// Given only to someone who sees it (one of the project's people:
-	// UnseeingNew), whichever path makes it, before anything is written.
+// ErrBadDate is a new task's due or start date that isn't a date: the asker's
+// to correct, refused before anything is written.
+var ErrBadDate = errors.New("a due or start date is an RFC 3339 time, such as 2026-10-23T09:00:00Z")
+
+// newTaskDates is a new task's due and start dates (nil: none given), read
+// before anything is written: a date that didn't parse used to fail the task
+// after its row was made.
+func newTaskDates(in adapter.CreateOrUpdateTaskInput) (due, start *time.Time, err error) {
+	read := func(s string) (*time.Time, error) {
+		if s == "" {
+			return nil, nil
+		}
+		t, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			return nil, ErrBadDate
+		}
+		return &t, nil
+	}
+	if due, err = read(in.DueDate); err != nil {
+		return nil, nil, err
+	}
+	if start, err = read(in.StartDate); err != nil {
+		return nil, nil, err
+	}
+	return due, start, nil
+}
+
+// putNewDates puts a new task's or sub-task's dates (newTaskDates) on it, and
+// leaves what it was made with where none was given.
+func putNewDates(t *dgraphStruct.DgraphTask, due, start *time.Time) {
+	if due != nil {
+		t.DueDate = due
+	}
+	if start != nil {
+		t.StartDate = start
+	}
+}
+
+// CreateTask makes a task as CreateTaskAsked does, for a caller whose status
+// is the project's default or a data move's (DataMove): none of its tasks is
+// held for approval, so there's nothing more to tell.
+func CreateTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.UserInfo, projectDgraphInfo *dgraphStruct.DgraphProject, assigneeDgraphInfo *dgraphStruct.DgraphUser, taskInfo adapter.CreateOrUpdateTaskInput, mentionsUsers []*dgraphStruct.DgraphUser) (uuid.UUID, error) {
+	id, _, err := CreateTaskAsked(ctx, projectUUID, userInfo, projectDgraphInfo, assigneeDgraphInfo, taskInfo, mentionsUsers)
+	return id, err
+}
+
+// CreateTaskAsked makes a task. Its first status meets the project's status
+// rules as a move into it from the default status would (firstStatus): who
+// may and what it must have refuse in words, and nothing is made; a status
+// that wants approval makes it in the default and asks for the move at once,
+// and held says both.
+func CreateTaskAsked(ctx context.Context, projectUUID uuid.UUID, userInfo *model.UserInfo, projectDgraphInfo *dgraphStruct.DgraphProject, assigneeDgraphInfo *dgraphStruct.DgraphUser, taskInfo adapter.CreateOrUpdateTaskInput, mentionsUsers []*dgraphStruct.DgraphUser) (taskUUIDRes uuid.UUID, held *Held, err error) {
+	// Given only to someone who can be given work and who sees it (one of the
+	// project's people: UnseeingNew), whichever path makes it (the app, a
+	// token, an agent), before anything is written.
 	if assigneeDgraphInfo != nil {
+		if err = principalBusiness.Unassignable(assigneeDgraphInfo, principalBusiness.Assigned); err != nil {
+			return
+		}
 		if err = UnseeingNew(ctx, projectUUID.String(), "", assigneeDgraphInfo); err != nil {
 			return
 		}
+	}
+	due, start, err := newTaskDates(taskInfo)
+	if err != nil {
+		return
 	}
 
 	taskInfo.Label = helpers.NormaliseTags(taskInfo.Label)
@@ -614,6 +666,21 @@ func CreateTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.User
 	}
 
 	taskUUID := uuid.New()
+	def, _ := taskStatusBusiness.Resolve(ctx, projectUUID.String(), "")
+	// The task as it would be made, for the rules to read, in the project as
+	// read for its maker (their standing there: workAccess.OfTask).
+	draft := &dgraphStruct.DgraphTask{
+		Uuid: taskUUID.String(), Name: taskInfo.TaskName, Status: def.Category,
+		Project:  readFor(projectDgraphInfo, projectUUID),
+		Assignee: assigneeDgraphInfo, DueDate: due, Label: &taskInfo.Label, Description: &taskInfo.TaskDescription,
+	}
+	asked := status
+	switch err = firstStatus(ctx, draft, def, status, &userInfo.UserDgraphInfo); {
+	case errors.Is(err, ErrWantsApproval):
+		status, taskInfo.Status, err = def, def.Value(), nil
+	case err != nil:
+		return
+	}
 	zeroUnixTime := time.Time{}
 	currentTime := time.Now()
 	activityUUID := uuid.New()
@@ -685,25 +752,7 @@ func CreateTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.User
 		dgraphTask.CustomStatus, dgraphTask.CustomStatusName = &status.CustomID, &status.CustomName
 	}
 
-	if len(taskInfo.DueDate) > 0 {
-		var dueDate time.Time
-		dueDate, err = time.Parse(time.RFC3339, taskInfo.DueDate)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/createTask Failed parse due date err: %+v", err)
-			return
-		}
-		dgraphTask.DueDate = &dueDate
-	}
-
-	if len(taskInfo.StartDate) > 0 {
-		var startDate time.Time
-		startDate, err = time.Parse(time.RFC3339, taskInfo.StartDate)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "business/createTask Failed parse start date err: %+v", err)
-			return
-		}
-		dgraphTask.StartDate = &startDate
-	}
+	putNewDates(&dgraphTask, due, start)
 
 	emptyString := ""
 	opensearchTask := &openSearchStruct.OpenSearchTask{
@@ -738,6 +787,8 @@ func CreateTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.User
 		helpers.LogErrorWithContext(ctx, "business/createTask failed to create new task in dgraph err: %+v", err)
 		return
 	}
+	// A doc, task or project chip in the description shows on what it links (DG15a).
+	refsBusiness.Saved(ctx, refsBusiness.Task, taskUUID.String(), taskInfo.TaskDescription, true)
 
 	helpers.GoSafeNamed("domain.CreateTaskWithAttachmentsInOpensearch", func() {
 		domain.CreateTaskWithAttachmentsInOpensearch(opensearchTask, taskInfo.Attachments, &userInfo.UserDgraphInfo)
@@ -801,6 +852,9 @@ func CreateTask(ctx context.Context, projectUUID uuid.UUID, userInfo *model.User
 		})
 	}
 
+	if asked != status {
+		held = askFirst(ctx, draft, asked, &userInfo.UserDgraphInfo)
+	}
 	taskUUIDRes = taskUUID
 	return
 }
@@ -1006,6 +1060,7 @@ func UpdateTaskDesByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskDesc s
 		helpers.LogErrorWithContext(ctx, "business/UpdateTaskDesByTaskUUID failed to update task desc in dgraph err: %+v", err)
 		return
 	}
+	refsBusiness.Saved(ctx, refsBusiness.Task, taskUUID.String(), taskDesc, false)
 
 	taskOpenSearch := &openSearchStruct.OpenSearchTask{
 		Uuid:            dgraphTask.Uuid,
@@ -1104,9 +1159,13 @@ func UpdateTaskAssigneeByTaskUUID(ctx context.Context, taskUUID uuid.UUID, newAs
 	if dgraphTaskInfo != nil && helpers.IsSoftDeleted(dgraphTaskInfo.DeletedAt) {
 		return ErrTaskDeleted
 	}
-	// Handed only to someone who may read it already (Unseeing), from every
-	// path that assigns; GitHub's sync and an import's re-check as data moves.
+	// Handed only to someone who can be given work and who may read it
+	// already (Unseeing), from every path that assigns: the app, an agent, a
+	// rule; GitHub's sync and an import's re-check as data moves.
 	if newAssigneeDgraphInfo != nil {
+		if err = principalBusiness.Unassignable(newAssigneeDgraphInfo, principalBusiness.Assigned); err != nil {
+			return err
+		}
 		if err = Unseeing(ctx, taskUUID.String(), dgraphTaskInfo, newAssigneeDgraphInfo); err != nil {
 			return err
 		}
@@ -1174,6 +1233,13 @@ func UpdateTaskAssigneeByTaskUUID(ctx context.Context, taskUUID uuid.UUID, newAs
 // callers run it in a goroutine. The assignee's USER uuid is sent so the
 // agent-principal resolver can match it.
 func dispatchTaskAssignedEvent(ctx context.Context, taskUUID uuid.UUID, dgraphTaskInfo *dgraphStruct.DgraphTask, assigneeUUID string, actor *dgraphStruct.DgraphUser) {
+	webhookBusiness.DispatchEvent(ctx, "task.assigned", AssignedEventData(taskUUID, dgraphTaskInfo, assigneeUUID, actor))
+}
+
+// AssignedEventData is the task.assigned event's payload: the one shape an
+// AI teammate's hand-off reads, whether the event carries it or a rule hands
+// the work over itself (business/Workflow agent.go).
+func AssignedEventData(taskUUID uuid.UUID, dgraphTaskInfo *dgraphStruct.DgraphTask, assigneeUUID string, actor *dgraphStruct.DgraphUser) map[string]interface{} {
 	payload := map[string]interface{}{
 		"task_id":     taskUUID.String(),
 		"assignee_id": assigneeUUID,
@@ -1192,7 +1258,7 @@ func dispatchTaskAssignedEvent(ctx context.Context, taskUUID uuid.UUID, dgraphTa
 		// Who handed the work over: the person told when the agent needs them.
 		payload["assigned_by"] = actor.Uuid
 	}
-	webhookBusiness.DispatchEvent(ctx, "task.assigned", payload)
+	return payload
 }
 
 // TaskDates are the dates to set on a task. A nil date is left as it is; the
@@ -1347,6 +1413,11 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 	if prev.Category == next.Category && prev.CustomID == next.CustomID {
 		return nil
 	}
+	if StatusGate != nil {
+		if err := StatusGate(ctx, dgraphTaskInfo, prev, next, userInfo); err != nil {
+			return err
+		}
+	}
 
 	currentTime := time.Now()
 	zeroUnixTime := time.Time{}
@@ -1400,6 +1471,9 @@ func UpdateTaskStatusByTaskUUID(ctx context.Context, taskUUID uuid.UUID, taskSta
 	}
 	dgraphTaskInfo.Status = next.Category
 	dgraphTaskInfo.CustomStatus, dgraphTaskInfo.CustomStatusName = dgraphTask.CustomStatus, dgraphTask.CustomStatusName
+	if WentOn != nil {
+		WentOn(ctx, taskUUID, false)
+	}
 
 	taskOpenSearch := &openSearchStruct.OpenSearchTask{
 		Uuid:          taskUUID.String(),
@@ -1646,6 +1720,9 @@ func ArchiveTaskByTaskUUID(ctx context.Context, taskUUID uuid.UUID, dgraphTaskIn
 		helpers.LogErrorWithContext(ctx, "business/ArchiveTaskByTaskUUID failed to update delete time for task in dgraph err: %+v", err)
 		return
 	}
+	if WentOn != nil {
+		WentOn(ctx, taskUUID, true)
+	}
 
 	taskID, archivedAt, attachments := taskUUID.String(), helpers.Int64Pointer(currentTime.Unix()), dgraphTaskInfo.Attachments
 	taskSearchCascades.Go(taskID, "task.search-delete", func() { taskInSearch(taskID, archivedAt, currentTime.Unix(), attachments) })
@@ -1785,11 +1862,15 @@ var ErrNotAllowed = workAccess.ErrNotAllowed
 // failure, never "not found". The one check for a task named by id, whether a
 // request names one task or many. Reading needs no more than the graph's
 // answer; anything else reads the person's role in the task's project too.
+// The read is who's whoever ctx carries (a job with no one signed in, an
+// approval moving a task for its requester), unless ctx reads for no one in
+// particular (taskread.AsNobody) or for the system.
 func TaskFor(ctx context.Context, taskID uuid.UUID, who *model.UserInfo, need workAccess.Need) (*dgraphStruct.DgraphTask, workAccess.Standing, error) {
 	if who == nil {
 		return nil, workAccess.Standing{}, ErrTaskNotVisible
 	}
 	uid := who.UserDgraphInfo.Uid
+	ctx = taskread.ActingAs(ctx, *who)
 	task, err := readable(GetDgraphBasicTaskInfo(ctx, taskID.String(), uid))(uid)
 	if err != nil || need == workAccess.NeedView {
 		return task, workAccess.Standing{}, err
@@ -1853,6 +1934,11 @@ func GetDgraphTaskInfo(ctx context.Context, teamUUID string, userDgraphUID strin
 
 	if !CanViewTask(dgraphTask, userDgraphUID) {
 		return nil, ErrTaskNotVisible
+	}
+	// A dependency's other task in a project they may not see isn't there
+	// for them (DG10).
+	if err := workAccess.KeepSeenEnds(ctx, taskread.ReaderOf(ctx), userDgraphUID, dgraphTask); err != nil {
+		return nil, err
 	}
 	// Its key and type, and its sub-tasks', parent's and dependencies'.
 	taskKeys.Lay(ctx, dgraphTask)

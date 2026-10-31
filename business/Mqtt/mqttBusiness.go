@@ -327,8 +327,9 @@ func publishToTopic(ctx context.Context, topic string, kind int8, data any, what
 
 // PublishCallState tells a call's conversation that the call changed: a
 // channel's members, a DM's two people or a group's members, on the topics
-// the call's dot has always used. A meeting has no conversation to tell: the
-// people in it hear through the call itself.
+// the call's dot has always used. A meeting has no conversation to tell, so
+// each member in its call hears on their own topic (state.Members): its host
+// reads the call again and sees who knocked.
 func PublishCallState(state *mqttStruct.MqttCallState) {
 	if state == nil || state.ResourceID == "" {
 		return
@@ -339,6 +340,9 @@ func PublishCallState(state *mqttStruct.MqttCallState) {
 		topic = helpers.GetMqttTopicForChannelMessage(state.ResourceID)
 	case mqttStruct.CONVERSATION_KIND_DM, mqttStruct.CONVERSATION_KIND_GROUP:
 		topic = helpers.GetMqttTopicForDmMessage(state.ResourceID)
+	case mqttStruct.CALL_RESOURCE_MEETING:
+		PublishToTopics(activityTopics(state.Members), mqttStruct.MESSAGE_CALL_STATE, state)
+		return
 	default:
 		return
 	}
@@ -379,6 +383,23 @@ func PublishTaskDates(msg *mqttStruct.MqttTaskDates) {
 		return
 	}
 	publishToProject(context.Background(), msg.ProjectUuid, mqttStruct.MESSAGE_TASK_DATES, msg, "PublishTaskDates", msg.TaskUuid)
+}
+
+// PublishTaskDatesMany tells a project, in one message, that tasks of it
+// moved together (a move and the chain it pushed along, DG10): the first in
+// the message's own fields, every one in Tasks. A chain with a task only a
+// few may see is told as Reread (publishToProject).
+func PublishTaskDatesMany(projectUUID, by string, tasks []mqttStruct.MqttTaskDate) {
+	if len(tasks) == 0 {
+		return
+	}
+	named := make([]string, len(tasks))
+	for i, t := range tasks {
+		named[i] = t.TaskUuid
+	}
+	first := tasks[0]
+	msg := &mqttStruct.MqttTaskDates{TaskUuid: first.TaskUuid, ProjectUuid: projectUUID, StartDate: first.StartDate, DueDate: first.DueDate, By: by, Tasks: tasks}
+	publishToProject(context.Background(), projectUUID, mqttStruct.MESSAGE_TASK_DATES, msg, "PublishTaskDatesMany", named...)
 }
 
 // PublishTaskChanged tells a task's project that the task changed.
@@ -800,16 +821,16 @@ func PublishToTopics(topics []string, msgType int8, data interface{}) {
 }
 
 // PublishConversationAccess tells each of people, on their own activity topic
-// and nobody else's, that a conversation became theirs (CONVERSATION_ADDED)
-// or stopped being theirs (CONVERSATION_DROPPED), or that a project or team
-// stopped being theirs.
+// and nobody else's, that a conversation or a project became theirs
+// (CONVERSATION_ADDED) or stopped being theirs (CONVERSATION_DROPPED).
 //
 // A client is subscribed only to the topics its settings named when it
-// connected. A conversation started, joined or added to since isn't among
-// them, so nothing in it streamed until a reload; a conversation left or
-// removed from, or a project taken away, stays among them. This is what makes an open app fetch its settings again
-// and subscribe, or let go, without reconnecting. Blank and repeated people
-// are skipped; best-effort, like every publish here.
+// connected. A conversation started, joined or added to since, or a project
+// made or added to, isn't among them, so nothing in it streamed until a
+// reload; one left or removed from stays among them. This is what makes an
+// open app fetch its settings again and subscribe, or let go, without
+// reconnecting. Blank and repeated people are skipped; best-effort, like every
+// publish here.
 func PublishConversationAccess(kind, id, change string, people ...string) {
 	if id == "" {
 		return
@@ -977,6 +998,28 @@ func PublishTableRow(tableId string, data interface{}) {
 		_ = res.WaitTimeout(mqttInit.PublishWait)
 		if res.Error() != nil {
 			helpers.LogErrorWithContext(ctx, "business/PublishTableRow publish err: %+v", res.Error())
+		}
+	})
+}
+
+// PublishTablePresence tells a table's open pages who is on it and where
+// (tables A7), on its presence topic. QoS 0: a lost one is replaced by the
+// next, and a page that subscribes late reads the people it answers itself.
+func PublishTablePresence(tableId string, data interface{}) {
+	ctx := context.Background()
+	if mqttInit.MqttClient == nil {
+		return
+	}
+	payload, err := json.Marshal(mqttStruct.Message{Type: mqttStruct.MESSAGE_TABLE_ROW, Data: data})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/PublishTablePresence marshal err: %+v", err)
+		return
+	}
+	res := mqttInit.MqttClient.Publish(helpers.GetMqttTopicForTablePresence(tableId), 0, false, payload)
+	helpers.GoSafeNamed("business/Mqtt/mqttBusiness:PublishTablePresence", func() {
+		_ = res.WaitTimeout(mqttInit.PublishWait)
+		if res.Error() != nil {
+			helpers.LogErrorWithContext(ctx, "business/PublishTablePresence publish err: %+v", res.Error())
 		}
 	})
 }

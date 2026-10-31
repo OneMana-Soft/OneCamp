@@ -48,7 +48,9 @@ import (
 // Without AI there is no MCP surface and no AI executor: a token reaches the
 // rest alone (the AI edition also reads business/MCPServer and business/AI,
 // and MCP's reach case by case).
-var tokenReachableRoots = []string{"../controllers/V1", "../business/Send", "../business/Reach", "../business/App", "../business/PublicAPI", "../business/Hooks", "../business/WhoKnows", "../controllers/WhoKnows"}
+// Person Preferences (calendar A3): a person reads and sets only their own,
+// whoever asks for them.
+var tokenReachableRoots = []string{"../controllers/V1", "../business/Send", "../business/Reach", "../business/App", "../business/PublicAPI", "../business/Hooks", "../business/WhoKnows", "../controllers/WhoKnows", "../business/Preferences", "../controllers/Preferences"}
 
 // reachFunc is MCP's reach, which the AI edition checks case by case; this
 // edition has no MCP, so no function of the roots is named so.

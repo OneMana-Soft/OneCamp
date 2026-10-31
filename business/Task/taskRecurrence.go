@@ -15,6 +15,7 @@ import (
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Task"
+	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
 	taskFieldBusiness "github.com/akashc777/OneCamp/business/TaskField"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
@@ -175,10 +176,12 @@ func repeatIfRecurring(ctx context.Context, taskUUID uuid.UUID, by *dgraphStruct
 			putBack("read assignee", err)
 			return
 		}
-		// Someone who can't see the next one (taken off the project:
-		// UnseeingNew) isn't given it: it comes unassigned, for someone to pick
-		// up, rather than not at all.
-		if err := UnseeingNew(ctx, project.Uuid, "", assignee); errors.Is(err, helpers.ErrConflict) {
+		// Someone who can't be given work any more (deactivated), or who can't
+		// see the next one (taken off the project: UnseeingNew), isn't given it:
+		// it comes unassigned, for someone to pick up, rather than not at all.
+		if !principalBusiness.CanBeAssigned(assignee).Allowed {
+			assignee = nil
+		} else if err := UnseeingNew(ctx, project.Uuid, "", assignee); errors.Is(err, helpers.ErrConflict) {
 			assignee = nil
 		} else if err != nil {
 			putBack("read who sees it", err)

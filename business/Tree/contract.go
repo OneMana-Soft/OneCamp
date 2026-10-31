@@ -98,6 +98,10 @@ type Move struct {
 // page in it), so the kind does what follows a change to their sharing.
 type Moved struct {
 	Spaced []string
+	// From is the parent the page left ("" for the top), read under the tree's
+	// lock just before the move, so the kind can follow the page out of it (a
+	// doc's block in its old parent's body). A DryRun doesn't read it.
+	From string
 }
 
 var (

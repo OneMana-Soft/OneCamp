@@ -210,17 +210,31 @@ func TestAnAnswerReachesTheAskerAndRevealsNothingTheyCantOpen(t *testing.T) {
 	}
 }
 
-// The audit says who asked, what was asked for and how it was answered, and a
-// private page by "a private page" alone.
+// The audit says who asked, what was asked for and how it was answered, in
+// words (DESIGN-BUILD-8, 23 Oct 2026), and a private page by "a private page"
+// alone. An approval that gave another level than the one asked for says
+// which it gave.
 func TestRequestsAndAnswersAreAudited(t *testing.T) {
-	summary, meta := auditRow(resourceEventBusiness.Event{Kind: resourceEventBusiness.DocAccessAnswered, ResourceKind: "doc", ResourceUUID: docID,
-		Subjects: []string{awayID}, Data: map[string]string{"request": "r1", "status": "declined", "level": "edit"}}, privateDoc())
-	if summary != "Answered a request for access to a private page (declined, edit)" || meta["request"] != "r1" || meta["people"] != awayID {
+	answered := func(status, asked, given string) resourceEventBusiness.Event {
+		return resourceEventBusiness.Event{Kind: resourceEventBusiness.DocAccessAnswered, ResourceKind: "doc", ResourceUUID: docID,
+			Subjects: []string{awayID}, Data: map[string]string{"request": "r1", "status": status, "asked": asked, "level": given}}
+	}
+	summary, meta := auditRow(answered("declined", "edit", "edit"), privateDoc())
+	if summary != "Declined a request to edit a private page" || meta["request"] != "r1" || meta["people"] != awayID {
 		t.Errorf("an answer's row: %q %v", summary, meta)
+	}
+	for _, c := range []struct{ asked, given, want string }{
+		{"comment", "comment", "Approved a request to comment on a private page"},
+		{"edit", "comment", "Approved a request to edit a private page, with comment access"},
+		{"view", "full", "Approved a request to view a private page, with full access"},
+	} {
+		if summary, _ := auditRow(answered("approved", c.asked, c.given), privateDoc()); summary != c.want {
+			t.Errorf("asked %s, given %s: %q, want %q", c.asked, c.given, summary, c.want)
+		}
 	}
 	summary, _ = auditRow(resourceEventBusiness.Event{Kind: resourceEventBusiness.DocAccessRequested, ResourceKind: "doc", ResourceUUID: docID,
 		Data: map[string]string{"request": "r1", "level": "comment"}}, privateDoc())
-	if summary != "Asked for access to a private page (comment)" {
+	if summary != "Asked to comment on a private page" {
 		t.Errorf("a request's row: %q", summary)
 	}
 }

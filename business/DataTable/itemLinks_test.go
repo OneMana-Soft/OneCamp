@@ -262,18 +262,22 @@ func TestHiddenItemsReadAsUnnamedLinks(t *testing.T) {
 	id := uuid.NewString()
 	var cell interface{}
 	_ = json.Unmarshal([]byte(fmt.Sprintf(`[{"id":%q,"type":"doc","hidden":true}]`, id)), &cell)
-	values := map[string]interface{}{links.Id.String(): cell}
+	b, _ := json.Marshal(map[string]interface{}{links.Id.String(): cell})
+	rows := []*model.Row{{Id: uuid.New(), Values: string(b)}}
 	fields := []*model.Field{links}
 	if labels := fieldTypes.Labels(cell); len(labels) != 0 {
 		t.Errorf("a hidden link reads as %v", labels)
 	}
-	for op, want := range map[FilterOp]bool{FilterEmpty: false, FilterNotEmpty: true} {
-		if got := matchFilter(values, fields, Filter{Field: "Linked", Op: string(op)}); got != want {
-			t.Errorf("%s on a hidden link: %v", op, got)
+	for f, want := range map[Filter]int{
+		{Field: "Linked", Op: string(FilterEmpty)}:                          0,
+		{Field: "Linked", Op: string(FilterNotEmpty)}:                       1,
+		{Field: "Linked", Op: string(FilterContains), Value: id[:8]}:        0,
+		{Field: "Linked", Op: string(FilterEq), Value: strings.ToUpper(id)}: 1,
+	} {
+		res, err := Aggregate(fields, rows, QuerySpec{Op: OpCount, Filters: []Filter{f}})
+		if err != nil || res.MatchedRows != want {
+			t.Errorf("%s %q on a hidden link: %v rows (%v), want %d", f.Op, f.Value, res, err, want)
 		}
-	}
-	if matchFilter(values, fields, Filter{Field: "Linked", Op: string(FilterContains), Value: id[:8]}) {
-		t.Error("a hidden link's id matched a filter")
 	}
 }
 

@@ -71,6 +71,23 @@ export function indexOfBlock(fragment, id) {
     return -1
 }
 
+// elementsNamed is every element of that name under node, at any depth, each
+// with the element or fragment it sits in and its index there: what an op
+// about an entity's nodes (a task's to-dos, a page's sub-page blocks) finds
+// wherever the editor nests them, a list item, a callout or a column.
+export function elementsNamed(node, name) {
+    const found = []
+    const walk = (parent) => {
+        parent.toArray().forEach((child, index) => {
+            if (!(child instanceof Y.XmlElement)) return
+            if (child.nodeName === name) found.push({ node: child, parent, index })
+            walk(child)
+        })
+    }
+    walk(node)
+    return found
+}
+
 // isBlank is whether a body holds nothing anyone wrote: no blocks, or only
 // empty paragraphs (an editor that opens an empty doc writes one).
 export function isBlank(fragment) {

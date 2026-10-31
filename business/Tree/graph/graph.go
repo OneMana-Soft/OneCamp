@@ -54,6 +54,10 @@ type Schema struct {
 	// Live is a filter keeping the nodes in the tree (not deleted). A node that
 	// isn't live is nobody's child and nobody's parent here.
 	Live string
+	// Leaf is a filter that holds of a node that holds no others: a doc
+	// tree's file or link (docs F1, D-30). "" for a kind whose every node may
+	// have children. It filters one node read by its id, never a root.
+	Leaf string
 }
 
 var predicateName = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
@@ -81,6 +85,9 @@ var (
 	// ErrTooMany is a subtree too large to change at once: refused whole,
 	// never changed part of the way.
 	ErrTooMany = errors.New("graph: too many pages under this one to change at once")
+	// ErrLeaf is a node that holds no others (Schema.Leaf) named as a new
+	// parent.
+	ErrLeaf = errors.New("graph: that node can't hold others")
 )
 
 // Row is a node as a kind reads it for one person.
@@ -270,10 +277,16 @@ func Subtree(ctx context.Context, s Schema, id string, limit int) (under []Ref, 
 }
 
 // Siblings is every live child of the node with parentID, as its level is
-// ordered (position.Order), at most limit. ErrNotFound for no live parent.
+// ordered (position.Order), at most limit: what a node made or moved under it
+// is placed among. ErrNotFound for no live parent, and ErrLeaf for one that
+// holds no others (Schema.Leaf), read in the same query.
 func Siblings(ctx context.Context, s Schema, parentID string, limit int) ([]position.Sibling, error) {
 	if !s.valid() {
 		return nil, ErrBadSchema
+	}
+	leaf := ""
+	if s.Leaf != "" {
+		leaf = fmt.Sprintf("\n\t\tleaf(func: eq(%s, $id)) @filter(%s) { uid }", s.ID, s.Leaf)
 	}
 	q := fmt.Sprintf(`query kids($id: string) {
 		parent(func: eq(%[1]s, $id)) @filter(%[2]s) {
@@ -283,18 +296,22 @@ func Siblings(ctx context.Context, s Schema, parentID string, limit int) ([]posi
 				%[5]s
 				%[6]s
 			}
-		}
-	}`, s.ID, s.Live, s.Parent, limit, s.Position, s.Created)
+		}%[7]s
+	}`, s.ID, s.Live, s.Parent, limit, s.Position, s.Created, leaf)
 	var out struct {
 		Parent []struct {
 			Kids []node `json:"kids"`
 		} `json:"parent"`
+		Leaf []node `json:"leaf"`
 	}
 	if err := dgraphInit.ReadInto(ctx, q, map[string]string{"$id": parentID}, &out); err != nil {
 		return nil, err
 	}
 	if len(out.Parent) == 0 {
 		return nil, ErrNotFound
+	}
+	if len(out.Leaf) > 0 {
+		return nil, ErrLeaf
 	}
 	sibs := make([]position.Sibling, 0, len(out.Parent[0].Kids))
 	for _, k := range out.Parent[0].Kids {
@@ -322,8 +339,9 @@ type Move struct {
 }
 
 // Apply writes a move in one upsert that checks, in the transaction that
-// writes, that the node and its new parent are live and that the parent isn't
-// the node or under it, and writes the tree's stamp. ErrNotFound, ErrCycle.
+// writes, that the node and its new parent are live, that the parent isn't
+// the node or under it and holds others (Schema.Leaf), and writes the tree's
+// stamp. ErrNotFound, ErrCycle, ErrLeaf.
 func Apply(ctx context.Context, s Schema, m Move, now time.Time) error {
 	if !s.valid() {
 		return ErrBadSchema
@@ -354,6 +372,12 @@ func Apply(ctx context.Context, s Schema, m Move, now time.Time) error {
 		t(func: uid(target)) { uid }
 		l(func: uid(loop)) { uid }`, s.ID, s.Live, MaxDepth+2, s.Parent)
 		cond = "@if(eq(len(node), 1) AND eq(len(target), 1) AND eq(len(loop), 0))"
+		if s.Leaf != "" {
+			fmt.Fprintf(&q, `
+		leafT as var(func: uid(target)) @filter(%s)
+		lt(func: uid(leafT)) { uid }`, s.Leaf)
+			cond = "@if(eq(len(node), 1) AND eq(len(target), 1) AND eq(len(loop), 0) AND eq(len(leafT), 0))"
+		}
 	}
 	// Renumbered siblings by id: a sibling deleted meanwhile is left alone
 	// (its variable is empty, and a mutation on an empty variable is skipped
@@ -415,9 +439,10 @@ func Apply(ctx context.Context, s Schema, m Move, now time.Time) error {
 		return err
 	}
 	var found struct {
-		N []struct{ UID string } `json:"n"`
-		T []struct{ UID string } `json:"t"`
-		L []struct{ UID string } `json:"l"`
+		N  []struct{ UID string } `json:"n"`
+		T  []struct{ UID string } `json:"t"`
+		L  []struct{ UID string } `json:"l"`
+		LT []struct{ UID string } `json:"lt"`
 	}
 	if err := json.Unmarshal(resp.GetJson(), &found); err != nil {
 		return err
@@ -429,6 +454,8 @@ func Apply(ctx context.Context, s Schema, m Move, now time.Time) error {
 		return ErrNotFound
 	case len(found.L) > 0:
 		return ErrCycle
+	case len(found.LT) > 0:
+		return ErrLeaf
 	}
 	return nil
 }

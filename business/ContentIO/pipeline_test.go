@@ -157,6 +157,26 @@ func TestAZipOfThreeFilesMakesThreeDocsWithTheirImages(t *testing.T) {
 	}
 }
 
+// An import's pages are seeded quietly: what they say was written somewhere
+// else, so the docs keep whom they mention and tell nobody (business/Doc
+// whoToTell). Every page of the import is.
+func TestAnImportsPagesAreSeededQuietly(t *testing.T) {
+	w := newWorld(t)
+	data := zipOf(t, map[string][]byte{
+		"Wiki/Home.md":  []byte("# Home\n\nSee [Setup](Setup.md).\n"),
+		"Wiki/Setup.md": []byte("# Setup\n\nInstall it.\n"),
+	})
+	job := w.importFile("wiki.zip", data, "")
+	if job.Status != JobDone || len(job.Created) != 2 || len(w.seeded) != 2 {
+		t.Fatalf("got %+v, seeded %d", job, len(w.seeded))
+	}
+	for _, title := range []string{"Home", "Setup"} {
+		if d := w.docTitled(title); !w.quiet[d.uuid] {
+			t.Errorf("%s was seeded loudly: an import tells nobody whom it mentions", title)
+		}
+	}
+}
+
 func TestAWordFileKeepsHeadingsListsLinksAndTables(t *testing.T) {
 	w := newWorld(t)
 	w.importFile("report.docx", docxOf(t, wordBody), "")
@@ -206,6 +226,10 @@ func TestAnImportGoesOnlyUnderAPageTheyCanEdit(t *testing.T) {
 	_, err := Pipeline.Import(context.Background(), tester, ImportRequest{Filename: "b.md", ParentUUID: readOnly, Body: strings.NewReader("x")})
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("got %v", err)
+	}
+	// An upload of its own (POST /doc/import/presign) is refused the same.
+	if _, _, err := Pipeline.PrepareUpload(context.Background(), tester, ImportRequest{Filename: "b.md", ParentUUID: readOnly, Size: 1}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("an upload under a page they may only read: %v", err)
 	}
 	_, err = Pipeline.Import(context.Background(), tester, ImportRequest{Filename: "b.pdf", Body: strings.NewReader("x")})
 	if !errors.Is(err, ErrUnsupported) {
@@ -373,5 +397,73 @@ func TestTheServerExportsMarkdownHTMLAndJSON(t *testing.T) {
 	w.levels[other] = accessBusiness.LevelNone
 	if err := Pipeline.RecordExport(context.Background(), tester, accessBusiness.Resource{Kind: accessBusiness.KindDoc, UUID: other}, "pdf"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// An importer of something other than docs (calendar A4) is chosen only for
+// an import into what it makes, makes it itself, and the job reports it as
+// it reports docs: a zip into docs still goes to the zip of docs.
+type fakeTargeted struct {
+	got  []string
+	made Made
+}
+
+func (f *fakeTargeted) Format() string                              { return "fake-calendar" }
+func (f *fakeTargeted) Accepts(filename, _ string) bool             { return hasExt(filename, ".ics", ".zip") }
+func (f *fakeTargeted) Into() string                                { return IntoCalendar }
+func (f *fakeTargeted) Import(context.Context, Input, Output) error { return nil }
+func (f *fakeTargeted) Make(_ context.Context, who accessBusiness.Subject, in Input, _ json.RawMessage, report func(done, total int)) (Made, error) {
+	data, _ := io.ReadAll(in.Reader())
+	f.got = append(f.got, who.UserUUID+" "+in.Filename+" "+string(data))
+	report(1, 2)
+	return f.made, nil
+}
+
+func TestAnImportIntoACalendarIsMadeByItsOwnImporter(t *testing.T) {
+	w := newWorld(t)
+	// A calendar's import names the first of what it made, says how many and
+	// where they went, and what to show first (calendar A4's review).
+	standup := Created{Kind: "event", UUID: "e1", Title: "Standup", At: "2026-10-22T09:00:00Z"}
+	imp := &fakeTargeted{made: Made{Created: []Created{standup}, Count: 130, Into: []Into{{UUID: "c1", Title: "Family", Count: 130}}, Show: &standup,
+		Skipped: []Skipped{{What: "A to-do", Why: "Only events are read."}}}}
+	thePipeline.RegisterImporter(imp)
+	t.Cleanup(func() {
+		thePipeline.mu.Lock()
+		defer thePipeline.mu.Unlock()
+		thePipeline.importers = thePipeline.importers[:len(thePipeline.importers)-1]
+	})
+	job, err := Pipeline.Import(context.Background(), tester, ImportRequest{Filename: "jonas.ics", Into: IntoCalendar, Size: 5, Body: strings.NewReader("BEGIN")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runQueued(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	done, err := Pipeline.Job(context.Background(), tester, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.Status != JobDone || done.Format != "fake-calendar" || len(done.Created) != 1 || done.Created[0].Title != "Standup" || len(done.Skipped) != 1 {
+		t.Fatalf("job %+v", done)
+	}
+	if done.Made != 130 || len(done.Into) != 1 || done.Into[0] != (Into{UUID: "c1", Title: "Family", Count: 130}) || done.Show == nil || *done.Show != standup {
+		t.Fatalf("how many, where, and what to show: %d %+v %+v", done.Made, done.Into, done.Show)
+	}
+	if len(imp.got) != 1 || imp.got[0] != tester.UserUUID+" jonas.ics BEGIN" {
+		t.Fatalf("made from %v", imp.got)
+	}
+	if len(w.docs) != 0 {
+		t.Fatalf("an import into a calendar made docs: %+v", w.docs)
+	}
+	// Nothing goes under a page from an import into a calendar, and a file
+	// into docs never reaches the calendar's importer.
+	if _, err := Pipeline.Import(context.Background(), tester, ImportRequest{Filename: "jonas.ics", Into: IntoCalendar, ParentUUID: "doc-1", Size: 5, Body: strings.NewReader("BEGIN")}); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("under a page: %v", err)
+	}
+	if _, err := Pipeline.Import(context.Background(), tester, ImportRequest{Filename: "jonas.ics", Size: 5, Body: strings.NewReader("BEGIN")}); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("an .ics into docs: %v", err)
+	}
+	if len(imp.got) != 1 {
+		t.Fatalf("the calendar's importer ran for docs: %v", imp.got)
 	}
 }

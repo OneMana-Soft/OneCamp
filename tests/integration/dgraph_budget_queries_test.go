@@ -136,6 +136,11 @@ var budgetRunners = map[string]budgetRunner{
 		}
 		return nonEmpty("the list", len(u.DMs), nil)
 	},
+	// DG4: the DM list's first page, 50 DMs newest first.
+	"dm.list.page": func(ctx context.Context, f *dgfixture.Fixture) (int, error) {
+		page, _, err := chatDomain.DMPage(ctx, f.Viewer.UUID, nil, 51, nil)
+		return nonEmpty("the page", len(page), err)
+	},
 	// §1.5 6: the inbox's first page: mentions, comments and reactions.
 	"inbox": func(ctx context.Context, f *dgfixture.Fixture) (int, error) {
 		m, c, r, err := activityDomain.GetUnifiedActivity(ctx, f.ViewerUID(), time.Now(), 30)
@@ -155,6 +160,34 @@ var budgetRunners = map[string]budgetRunner{
 	},
 	"docs.children": func(ctx context.Context, f *dgfixture.Fixture) (int, error) {
 		return treeLevel(ctx, f, treeBusiness.LevelQuery{Parent: f.DocParent})
+	},
+	// Docs F1: a folder opened in place, read as the tree reads any level:
+	// from the folder down its children edge, never from the kind index
+	// (helpers/docNodeKindGuard_test.go), its first page holding every kind
+	// and its count exact, the deleted items left out. The files' facts are
+	// one Postgres read after it (controllers/Doc's tree), not a graph trip.
+	"docs.folder": func(ctx context.Context, f *dgfixture.Fixture) (int, error) {
+		lister, ok := treeBusiness.Hierarchy.(treeBusiness.Lister)
+		if !ok {
+			return 0, fmt.Errorf("the tree's hierarchy lists no levels")
+		}
+		page, err := lister.Level(ctx, viewerSubject(f), "doc", treeBusiness.LevelQuery{Parent: f.Folder})
+		if err != nil {
+			return 0, err
+		}
+		if page.Count != f.Tier.FolderItems || page.Hidden != 0 {
+			return 0, fmt.Errorf("the folder counts %d items and hides %d, want %d and none", page.Count, page.Hidden, f.Tier.FolderItems)
+		}
+		kinds := map[string]bool{}
+		for _, n := range page.Nodes {
+			if d, ok := n.Data.(*dgraphStruct.DgraphDoc); ok {
+				kinds[d.NodeKind] = true
+			}
+		}
+		if len(kinds) != 4 {
+			return 0, fmt.Errorf("the folder's first page has the kinds %v, want a folder, pages, files and links", kinds)
+		}
+		return nonEmpty("the folder", len(page.Nodes), nil)
 	},
 	// §1.5 8: the big project board, with the web's default column sizes.
 	"board.kanban": func(ctx context.Context, f *dgfixture.Fixture) (int, error) {
@@ -291,6 +324,10 @@ var refsRunners = map[string]budgetRunner{
 		page, err := workGraphDomain.ReadSources(ctx, workGraphDomain.KindMessage, "", refsBusiness.PageSize)
 		return nonEmpty("the page", len(page), err)
 	},
+	"refs.page.task": func(ctx context.Context, f *dgfixture.Fixture) (int, error) {
+		page, err := workGraphDomain.ReadSources(ctx, workGraphDomain.KindTask, "", refsBusiness.PageSize)
+		return nonEmpty("the page", len(page), err)
+	},
 	"refs.page.doc": func(ctx context.Context, f *dgfixture.Fixture) (int, error) {
 		page, err := workGraphDomain.ReadSources(ctx, workGraphDomain.KindDoc, "", refsBusiness.DocPageSize)
 		return nonEmpty("the page", len(page), err)
@@ -321,3 +358,11 @@ func graphConnected(kind string, handle func(*dgfixture.Fixture) string, depth i
 // budgetMidHistory is a moment in the middle of the fixture's history, for a
 // page of older posts.
 var budgetMidHistory = time.Date(2026, 9, 15, 0, 0, 0, 0, time.UTC)
+
+// DG10's reads (dg10_budget_test.go): kept apart from the map above, so
+// packages adding rows there merge clean.
+func init() {
+	budgetRunners["deps.critical"] = dg10Critical
+	budgetRunners["deps.forecast"] = dg10Forecast
+	budgetRunners["deps.move"] = dg10Move
+}

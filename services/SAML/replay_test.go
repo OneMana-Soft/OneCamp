@@ -10,6 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	redisInit "github.com/akashc777/OneCamp/initializers/redis"
+	"github.com/akashc777/OneCamp/models/redis/registry"
 )
 
 // When Redis can't be asked whether an assertion was used, the sign-in is
@@ -28,5 +29,13 @@ func TestAnAssertionIsRefusedWhenItsUseCantBeChecked(t *testing.T) {
 	err := TakeAssertion(context.Background(), &crewjam.Assertion{ID: "id-1", IssueInstant: time.Now()})
 	if err == nil || errors.Is(err, ErrAssertionUsed) {
 		t.Fatalf("with Redis down: %v, want a refusal that it couldn't be checked", err)
+	}
+}
+
+// The registry's account of what Redis holds is true: a used assertion's key
+// lives as long as crewjam accepts the assertion, MaxIssueDelay from its issue.
+func TestTheRegistrySaysHowLongAUsedAssertionIsKept(t *testing.T) {
+	if registry.SAMLAssertionUsed.TTL != crewjam.MaxIssueDelay {
+		t.Fatalf("registry.SAMLAssertionUsed says %v; a key lives MaxIssueDelay (%v) from its assertion's issue", registry.SAMLAssertionUsed.TTL, crewjam.MaxIssueDelay)
 	}
 }

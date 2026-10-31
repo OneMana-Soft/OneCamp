@@ -21,13 +21,11 @@ package asana
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +44,10 @@ var apiBase = "https://app.asana.com/api/1.0"
 // Pagination safety cap. 200 pages × 100 items = 20k items per
 // per-project iteration, which covers every realistic Asana project.
 const maxPages = 200
+
+// statusRules reads Asana's answers. Its limit is per minute, so a 429 that
+// names no wait holds a minute.
+var statusRules = importProvider.StatusRules{Name: "Asana", Wait: time.Minute}
 
 // Provider implements the importProvider.Provider interface for Asana.
 type Provider struct {
@@ -694,28 +696,7 @@ func (p *Provider) getJSON(ctx context.Context, tok, path string, out any) error
 	req.Header.Set("Authorization", "Bearer "+tok)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := importProvider.SharedAPIClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	switch {
-	case resp.StatusCode == http.StatusTooManyRequests:
-		retryAfter := 60 * time.Second
-		if v := resp.Header.Get("Retry-After"); v != "" {
-			if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-				retryAfter = time.Duration(secs) * time.Second
-			}
-		}
-		return &importProvider.ErrRateLimited{RetryAfter: retryAfter, Reason: "Asana 429"}
-	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return &importProvider.TokenRejected{Msg: fmt.Sprintf("asana auth failed (HTTP %d); reconnect token", resp.StatusCode)}
-	case resp.StatusCode >= 400:
-		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("asana HTTP %d: %s", resp.StatusCode, string(raw))
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return statusRules.SendJSON(req, out)
 }
 
 func (p *Provider) listUsers(ctx context.Context, tok, wid string) ([]asanaUser, error) {
@@ -950,25 +931,23 @@ func buildSourceTask(t *asanaTask, projectGID string, sectionName map[string]str
 	created, _ := time.Parse(time.RFC3339, t.CreatedAt)
 	modified, _ := time.Parse(time.RFC3339, t.ModifiedAt)
 
-	var due *time.Time
+	// due_at and start_at are instants; due_on and start_on are days with
+	// no time, which the import writes where the team is (provider.Day).
+	var due, start *time.Time
+	var dueDay, startDay importProvider.Day
 	if t.DueAt != "" {
 		if v, err := time.Parse(time.RFC3339, t.DueAt); err == nil {
 			due = &v
 		}
-	} else if t.DueOn != "" {
-		if v, err := time.Parse("2006-01-02", t.DueOn); err == nil {
-			due = &v
-		}
+	} else {
+		dueDay, _ = importProvider.ParseDay(t.DueOn)
 	}
-	var start *time.Time
 	if t.StartAt != "" {
 		if v, err := time.Parse(time.RFC3339, t.StartAt); err == nil {
 			start = &v
 		}
-	} else if t.StartOn != "" {
-		if v, err := time.Parse("2006-01-02", t.StartOn); err == nil {
-			start = &v
-		}
+	} else {
+		startDay, _ = importProvider.ParseDay(t.StartOn)
 	}
 
 	// Status raw value: prefer section name within the active project;
@@ -1027,6 +1006,8 @@ func buildSourceTask(t *asanaTask, projectGID string, sectionName map[string]str
 		AssigneeIds:     assignees,
 		StartDate:       start,
 		DueDate:         due,
+		StartDay:        startDay,
+		DueDay:          dueDay,
 		Created:         created,
 		Updated:         modified,
 		Completed:       t.Completed,

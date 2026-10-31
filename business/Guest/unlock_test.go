@@ -5,12 +5,14 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
+	"github.com/akashc777/OneCamp/models/redis/registry"
 	"github.com/google/uuid"
 )
 
@@ -114,21 +116,69 @@ func TestAKindWithoutALifetimeGivesNoUnlock(t *testing.T) {
 	}
 }
 
+// countTries stands in for the limits' counter: tries per key, each limit
+// counted as Redis's fixed windows count it. It returns the counts.
+func countTries(t *testing.T) map[string]int {
+	t.Helper()
+	prev := triesAllowed
+	t.Cleanup(func() { triesAllowed = prev })
+	counts := map[string]int{}
+	triesAllowed = func(_ context.Context, spec registry.Spec, args []string, limit int) bool {
+		key := spec.Build(args...)
+		counts[key]++
+		return counts[key] <= limit
+	}
+	return counts
+}
+
 // Tries are counted per address and grant, whichever kind's address they
 // were made at.
 func TestTriesAreCountedPerAddressAndGrant(t *testing.T) {
-	prev := triesAllowed
-	t.Cleanup(func() { triesAllowed = prev })
-	var asked []string
-	triesAllowed = func(_ context.Context, ip, grant string) bool {
-		asked = append(asked, ip+"|"+grant)
-		return len(asked) < 2
-	}
+	countTries(t)
 	g := &guestModel.GuestGrant{Id: uuid.New()}
-	if !UnlockTryAllowed(context.Background(), "203.0.113.9", g) || UnlockTryAllowed(context.Background(), "203.0.113.9", g) {
-		t.Fatal("the second try past the limit was let through")
+	for i := 0; i < unlockTriesPerWindow; i++ {
+		if !UnlockTryAllowed(context.Background(), "203.0.113.9", g) {
+			t.Fatalf("try %d of the address's %d was refused", i+1, unlockTriesPerWindow)
+		}
 	}
-	if asked[0] != "203.0.113.9|"+g.Id.String() || UnlockTryAllowed(context.Background(), "203.0.113.9", nil) {
-		t.Fatalf("asked %v", asked)
+	if UnlockTryAllowed(context.Background(), "203.0.113.9", g) {
+		t.Fatal("a try past the address's limit was let through")
+	}
+	if !UnlockTryAllowed(context.Background(), "203.0.113.9", &guestModel.GuestGrant{Id: uuid.New()}) || !UnlockTryAllowed(context.Background(), "198.51.100.7", g) {
+		t.Fatal("another grant, or another address, was refused")
+	}
+	if UnlockTryAllowed(context.Background(), "203.0.113.9", nil) {
+		t.Fatal("no grant was tried")
+	}
+}
+
+// Past the grant's ceiling, guesses from many addresses slow down instead of
+// shutting the link: each new address gets one try, and no more.
+func TestALinkPastItsCeilingSlowsGuessesInsteadOfShutting(t *testing.T) {
+	countTries(t)
+	g := &guestModel.GuestGrant{Id: uuid.New()}
+	for i := 0; i < unlockTriesPerGrant; i++ {
+		if !UnlockTryAllowed(context.Background(), fmt.Sprintf("10.0.%d.%d", i/250, i%250), g) {
+			t.Fatalf("try %d, under the ceiling, was refused", i+1)
+		}
+	}
+	if !UnlockTryAllowed(context.Background(), "203.0.113.9", g) {
+		t.Fatal("past the ceiling, a new address's first try was refused: the link is shut")
+	}
+	if UnlockTryAllowed(context.Background(), "203.0.113.9", g) {
+		t.Fatal("past the ceiling, an address got a second try")
+	}
+}
+
+// An address past its own tries never counts against its link's ceiling, so
+// one stranger can't bring the ceiling down on everyone.
+func TestAnAddressPastItsTriesDoesNotSpendTheLinksCeiling(t *testing.T) {
+	counts := countTries(t)
+	g := &guestModel.GuestGrant{Id: uuid.New()}
+	for i := 0; i < 3*unlockTriesPerWindow; i++ {
+		UnlockTryAllowed(context.Background(), "198.51.100.7", g)
+	}
+	if got := counts[registry.PublishUnlockGrantRate.Build(g.Id.String())]; got != unlockTriesPerWindow {
+		t.Fatalf("the link's ceiling counted %d tries, want the address's %d", got, unlockTriesPerWindow)
 	}
 }

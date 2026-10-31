@@ -55,19 +55,20 @@ func InsertTasks(ctx context.Context, ids []uuid.UUID, projectID, createdBy uuid
 // tool (an import: ENG-123 stays 123): the number when the project has no task
 // with it yet, and the project's next number when one does. The project's
 // next number then follows the highest. 0 when the project has no key yet.
-func InsertTaskNumbered(ctx context.Context, taskID, projectID, createdBy uuid.UUID, createdAt time.Time, number int) (int, error) {
+// typeID is the task's type (nil: a Task), set as the row is made.
+func InsertTaskNumbered(ctx context.Context, taskID, projectID, createdBy uuid.UUID, createdAt time.Time, number int, typeID *uuid.UUID) (int, error) {
 	if !connected() {
 		return 0, ErrNoDatabase
 	}
 	if number < 1 {
-		return InsertTask(ctx, taskID, projectID, createdBy, createdAt)
+		return insertTask(ctx, taskID, projectID, createdBy, createdAt, typeID)
 	}
 	var got int
 	err := pgexec.InTx(ctx, func(ctx context.Context) error {
 		// The key's row lock, as InsertTask takes it, so numbers stay unique.
 		next, err := pgexec.Scalar[int](ctx, `SELECT next_number FROM project_keys WHERE project_id = $1 FOR UPDATE`, projectID)
 		if errors.Is(err, sql.ErrNoRows) {
-			_, err = pgexec.Exec(ctx, `INSERT INTO tasks (id, project_id, created_by, created_at, updated_at) VALUES ($1, $2, $3, $4, $4)`, taskID, projectID, createdBy, createdAt)
+			_, err = pgexec.Exec(ctx, `INSERT INTO tasks (id, project_id, created_by, created_at, updated_at, task_type_id) VALUES ($1, $2, $3, $4, $4, $5)`, taskID, projectID, createdBy, createdAt, typeID)
 			return err
 		}
 		if err != nil {
@@ -81,12 +82,24 @@ func InsertTaskNumbered(ctx context.Context, taskID, projectID, createdBy uuid.U
 		if taken {
 			got = next
 		}
-		if _, err := pgexec.Exec(ctx, `INSERT INTO tasks (id, project_id, created_by, created_at, updated_at, task_number) VALUES ($1, $2, $3, $4, $4, $5)`,
-			taskID, projectID, createdBy, createdAt, got); err != nil {
+		if _, err := pgexec.Exec(ctx, `INSERT INTO tasks (id, project_id, created_by, created_at, updated_at, task_number, task_type_id) VALUES ($1, $2, $3, $4, $4, $5, $6)`,
+			taskID, projectID, createdBy, createdAt, got, typeID); err != nil {
 			return err
 		}
-		_, err = pgexec.Exec(ctx, `UPDATE project_keys SET next_number = GREATEST(next_number, $2 + 1) WHERE project_id = $1`, projectID, got)
-		return err
+		return NumberAfter(ctx, projectID, got)
 	})
 	return got, err
+}
+
+// NumberAfter makes the next number a project gives a task come after n, when
+// it doesn't already: a task that kept n moves the numbering past it, and an
+// import keeps every number its source's tasks hold free before it makes a
+// task with none (business/Import keepNumbersFree). A project with no key yet
+// is left to the task that settles it.
+func NumberAfter(ctx context.Context, projectID uuid.UUID, n int) error {
+	if !connected() {
+		return ErrNoDatabase
+	}
+	_, err := pgexec.Exec(ctx, `UPDATE project_keys SET next_number = GREATEST(next_number, $2 + 1) WHERE project_id = $1`, projectID, n)
+	return err
 }

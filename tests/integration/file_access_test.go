@@ -107,16 +107,24 @@ func (p *placesForFiles) as(name string) userModels.UserInfo {
 // request: the Postgres account only.
 func (p *placesForFiles) upload(t *testing.T, who string, jsonData string) (int, map[string]any) {
 	t.Helper()
+	return uploadAs(t, p.as(who).UserPostgresInfo, "plan.txt", []byte("the plan"), jsonData)
+}
+
+// uploadAs posts one file, name with content, to /uploadFile as who, with
+// jsonData, as the route's sign-in (VerifyAuthOnlyPostgres) leaves the
+// request: the Postgres account only. It answers the status and the body.
+func uploadAs(t *testing.T, who userModels.User, name string, content []byte, jsonData string) (int, map[string]any) {
+	t.Helper()
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
-	part, _ := mw.CreateFormFile("file", "plan.txt")
-	_, _ = part.Write([]byte("the plan"))
+	part, _ := mw.CreateFormFile("file", name)
+	_, _ = part.Write(content)
 	_ = mw.WriteField("jsonData", jsonData)
 	_ = mw.Close()
 	req := httptest.NewRequest(http.MethodPost, "/uploadFile", &body)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	var u userModels.UserInfo
-	u.UserPostgresInfo = p.as(who).UserPostgresInfo
+	u.UserPostgresInfo = who
 	req = req.WithContext(context.WithValue(context.Background(), helpers.UserInfoContextKey, u))
 	rec := httptest.NewRecorder()
 	userController.UploadFile(rec, req)

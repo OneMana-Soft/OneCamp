@@ -17,7 +17,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -53,18 +52,7 @@ func TestEditProposalsMigrationUpDownUp(t *testing.T) {
 	env := integration.SetupEnv(t)
 	upName, up := proposalMigration(t, "up")
 	_, down := proposalMigration(t, "down")
-	// Ids are made in Go: nothing in the migration's SQL makes one.
-	var sqlOnly []string
-	for _, line := range strings.Split(up, "\n") {
-		if !strings.HasPrefix(strings.TrimSpace(line), "--") {
-			sqlOnly = append(sqlOnly, line)
-		}
-	}
-	for _, banned := range []string{"gen_random_uuid", "uuid_generate"} {
-		if strings.Contains(strings.Join(sqlOnly, "\n"), banned) {
-			t.Fatalf("%s uses %s; Postgres 12 has neither by default, make ids in Go", upName, banned)
-		}
-	}
+	makesNoIDs(t, upName, up)
 	exists := func() bool {
 		var n int
 		if err := env.PG.QueryRow(`SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'edit_proposals'`).Scan(&n); err != nil {

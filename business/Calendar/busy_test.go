@@ -101,6 +101,7 @@ func TestCutBusy(t *testing.T) {
 // an unreadable Google calendar counted as free there while the assistant
 // called it unknown. Find a time now names whose calendar it couldn't read.
 func TestFindTimeSaysWhoseGoogleCalendarItCouldntRead(t *testing.T) {
+	onMemStore(t)
 	fakeBusy(t, nil, nil, errors.New("429 rate limited"))
 	me := uuid.NewString()
 	now := time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC) // a Tuesday

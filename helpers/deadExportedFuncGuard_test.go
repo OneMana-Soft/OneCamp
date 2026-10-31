@@ -316,32 +316,36 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"and not linking it is what makes the seeder skip it, with no edit on either side. Deleting " +
 		"it would force DemoSeed to import the drill, which the AI-free build cannot do.",
 
-	// RELEASE-LINE ONLY (main and without-ai, from v2.73.0). Beta's demo seed
-	// (business/DemoSeed there) calls eight of these; the release lines carry the
-	// old seeder instead, since the demo's own code never ships to customers.
-	// They stay in their shared packages, identical to beta's, so later ports
-	// apply as they are; deleting them here would fork those packages. The ninth,
-	// TellAdmins, is the departed sweep the lines leave unregistered (v2.75.0).
-	"MarkProjectArchivedInOpenSearch": "called only by beta's demo seed (a refresh takes every " +
-		"retired copy of a curated project out of search); the release lines don't carry it.",
-	"ChannelIDsWithNamePrefix": "called only by beta's demo seed (the visitor leaves every " +
-		"retired copy of the curated channels); the release lines don't carry it.",
-	"ArchivedProjectsWithNamePrefix": "called only by beta's demo seed (retired copies of the " +
-		"curated projects); the release lines don't carry it.",
-	"AddAt": "called only by beta's demo seed (project updates backdated to the run); the " +
-		"release lines don't carry it.",
-	"ClearForPersonInProject": "called only by beta's demo seed (its showcase time entries); " +
-		"the release lines don't carry it.",
-	"UpdateDocPermissions": "business/Doc's is called only by beta's demo seed (the docs home's " +
-		"shared and team docs); the share routes don't call it; the release lines don't carry the seed.",
-	"TellAdmins": "business/Departed's sweep, which the release lines don't register until docs " +
-		"C6-2's web (Settings > Docs) ships: its notice would send admins to a page this web lacks.",
-	"TakeOver": "business/TaskKeys' is called only by beta's demo seed (a refreshed project keeps " +
-		"its key); never offered to people; the release lines don't carry the seed.",
-	"CreateRow": "models/postgres/DataTable's is called only by beta's demo seed (the vendors and " +
-		"formula tables' rows); every other row goes through business/DataTable's CreateRow, which " +
-		"checks access; the release lines don't carry the seed.",
+	// RELEASE-LINE ONLY (v2.76.0; as v2.73.0-v2.75.10). Beta's demo seed (business/DemoSeed there)
+	// calls these; the release lines carry the old seeder instead, since the demo's own code never
+	// ships to customers. They stay in their shared packages, identical to beta's, so later ports
+	// apply as they are; deleting them here would fork those packages.
+	"AddAt":                           "called only by beta's demo seed (project updates backdated to the run); the release lines don't carry it.",
+	"ArchivedProjectsWithNamePrefix":  "called only by beta's demo seed (retired copies of the curated projects); the release lines don't carry it.",
+	"ChannelIDsWithNamePrefix":        "called only by beta's demo seed (the visitor leaves every retired copy of the curated channels); the release lines don't carry it.",
+	"ClearForPersonInProject":         "called only by beta's demo seed (its showcase time entries); the release lines don't carry it.",
+	"MarkProjectArchivedInOpenSearch": "called only by beta's demo seed (a refresh takes every retired copy of a curated project out of search); the release lines don't carry it.",
+	"NoteColourByID":                  "business/Board/scene's is called only by beta's demo seed (business/DemoSeed/board.go colours its board's notes by id); the release lines don't carry the seed.",
+	"TakeOver":                        "business/TaskKeys' is called only by beta's demo seed (a refreshed project keeps its key); never offered to people; the release lines don't carry the seed.",
+	"UpdateDocPermissions":            "business/Doc's is called only by beta's demo seed (the docs home's shared and team docs); the share routes don't call it; the release lines don't carry the seed.",
 
+	"RegisterAgentStep": "an EDITION-CONDITIONAL registration slot (package 9 R3). " +
+		"business/Workflow ships in both editions and declares the rules' \"ask an agent\" step; " +
+		"business/AI fills it from an init and exists only on the AI edition. On the AI-free line the " +
+		"slot is declared and never filled, so saving the step is refused as needing AI, with no edit " +
+		"on either side. Deleting it would force the rules engine to import AI, which the AI-free " +
+		"build cannot do.",
+
+	"RegisterAgentHandOff": "an EDITION-CONDITIONAL registration slot (package 9 R3). A rule's " +
+		"writes reach no event listener (the loop guard), so a rule that assigns a task to an AI " +
+		"teammate hands the work over through this slot, which business/AIAgent fills when its worker " +
+		"starts, on the AI edition only. On the AI-free line there are no AI teammates and the slot " +
+		"stays empty.",
+
+	"CapPlansForTest": "cuts a plan read at a few finished tasks (business/Task's planLimit), so the " +
+		"integration test can prove a very large project's forecast counts every open task and its " +
+		"whole pace, and leaves out only the oldest finished work, without seeding 5,001 tasks; it " +
+		"exists only in the integration build.",
 	"SetStartRetriesForTest": "sets how the server's start tries again to hash links left in the clear " +
 		"(models/postgres/LinkSecret), so the integration test can prove a start whose first try failed " +
 		"hashes them on a later try, in seconds; it exists only in the integration build.",
@@ -421,6 +425,11 @@ var exemptFromDeadExportedCheck = map[string]string{
 		"its graph export is refused after the restore. The integration tests run in one process " +
 		"started before every comparison they make, so nothing else can make a restored stamp " +
 		"older than the process. It is built only with the integration tag.",
+
+	"SwapGoogleEventUpdateForTest": "stands in for the write of an edit to an event's Google copy, " +
+		"so the integration test of a copy Google says is gone can answer \"gone\" only after a " +
+		"newer edit has landed, and prove the forgetting keeps that edit. No test can reach " +
+		"Google, and nothing else orders the two edits. It is built only with the integration tag.",
 
 	"AgentBudgetLimit": "reads the per-agent cap off a context so business/MCPServer's tests can " +
 		"assert SpendContext actually carries it. services/AI keeps budgetDimensions unexported, " +

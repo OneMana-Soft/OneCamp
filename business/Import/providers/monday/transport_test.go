@@ -430,8 +430,9 @@ func TestCrawl_EndToEnd(t *testing.T) {
 	if strings.Join(it.AssigneeIds, ",") != "1" {
 		t.Fatalf("assignees (team skipped) = %v", it.AssigneeIds)
 	}
-	if it.StartDate == nil || it.DueDate == nil || it.StartDate.Format("2006-01-02") != "2026-10-01" || it.DueDate.Format("2006-01-02") != "2026-10-10" {
-		t.Fatalf("timeline dates: %v %v", it.StartDate, it.DueDate)
+	// A timeline's ends are days with no time: never midnight UTC.
+	if it.StartDate != nil || it.DueDate != nil || it.StartDay.String() != "2026-10-01" || it.DueDay.String() != "2026-10-10" {
+		t.Fatalf("timeline dates: %v %v / days %v %v", it.StartDate, it.DueDate, it.StartDay, it.DueDay)
 	}
 	if strings.Join(it.Labels, ",") != "backend" {
 		t.Fatalf("labels = %v", it.Labels)
@@ -454,7 +455,7 @@ func TestCrawl_EndToEnd(t *testing.T) {
 		t.Fatalf("subtasksOf[11] = %v", got)
 	}
 
-	if last := byID["13"]; last.DueDate == nil || last.DueDate.Format("2006-01-02") != "2026-10-20" || last.Status != "Done" {
+	if last := byID["13"]; last.DueDate != nil || last.DueDay.String() != "2026-10-20" || last.Status != "Done" {
 		t.Fatalf("second-page item: %+v", last)
 	}
 	if n := len(snap.comments["12"]); n != 103 {

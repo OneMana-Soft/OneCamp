@@ -1,0 +1,16 @@
+-- Migration 939, a placeholder the integrator numbers at landing (V-36): a
+-- table whose cell index mark is taken away while its index is being made
+-- whole stays unmarked, for the repair sweep.
+--
+-- IndexTable (business/RowQuery) walks a table's rows a batch at a time, then
+-- marks its index whole. A field made while it walked, whose entries couldn't
+-- be written for the rows already there, takes the mark away
+-- (MarkCellIndexStale) so the repair sweep makes the index whole again; the
+-- walk's mark, landing after it, put the mark back, and Row Query answered
+-- from an index without that field's entries.
+--
+-- cell_index_stale_gen counts the times the mark was taken away. The walk
+-- reads it before its first batch and marks the table whole only while it
+-- holds the same count, so a table whose mark was taken away mid-walk is left
+-- for the sweep's next pass.
+ALTER TABLE data_tables ADD COLUMN IF NOT EXISTS cell_index_stale_gen integer NOT NULL DEFAULT 0;

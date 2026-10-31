@@ -56,14 +56,14 @@ var requestsNamedFilesUntil = time.Date(2026, time.October, 19, 12, 44, 52, 0, t
 //     naming the one upload in each), a forward within a place. Taking the
 //     file off would take it from the item still there. Such an item naming
 //     someone else's file keeps that file open to the people of the file's
-//     place until it is deleted too.
+//     place (GAPS P-FILE-4L, the residual main accepted).
 //
 // A file's id in a node written since holds nothing: an id is the client's
 // to write, so another person's message naming it could otherwise keep a
 // deleted file alive.
 //
 // A file an import made holds by the same rules, but for two of the import's
-// own. Its file stages wrote
+// own (main's ruling, 26 Oct; CODE-REVIEWER-50's MF1'). Its file stages wrote
 // each file twice: the node the item it recorded as the file's holder lists,
 // and before it one more with the very same time that nothing lists (the
 // Slack stage gave both the export's time of their message). That other node
@@ -74,7 +74,8 @@ var requestsNamedFilesUntil = time.Date(2026, time.October, 19, 12, 44, 52, 0, t
 // was written. See holds.
 //
 // Deleting a post, a message or a comment used to mark its files deleted in
-// search only, and the purge, which takes only stamped rows, never took them. Nothing restores
+// search only: everyone who could read the place kept opening them by id, and
+// the purge, which takes only stamped rows, never took them. Nothing restores
 // a deleted post, message or comment, so nothing needs its files back.
 //
 // Run again after it failed, it finishes the job: it answers for every file

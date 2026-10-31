@@ -4,9 +4,11 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"time"
 
 	followBusiness "github.com/akashc777/OneCamp/business/Follow"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	sweepBusiness "github.com/akashc777/OneCamp/business/Sweep"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	userModel "github.com/akashc777/OneCamp/models/postgres/User"
 )
@@ -22,10 +24,7 @@ const (
 const SweepName = "guest.link.departed"
 
 func init() {
-	// RELEASE-LINE ONLY (v2.75.0 / v1.60.0): the sweep isn't registered. Its
-	// notice sends admins to Settings > Docs, which this release's web hasn't
-	// got (docs C6-2's web); beta registers it here, and the release that
-	// carries that web registers it again (releaseLine_test.go holds it).
+	sweepBusiness.Jobs.Register(sweepBusiness.Job{Name: SweepName, Every: 15 * time.Minute, Run: TellAdmins})
 	followBusiness.RegisterNoticeKind(NoticeKind, noticeNames)
 }
 

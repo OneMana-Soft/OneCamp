@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
 	formula "github.com/akashc777/OneCamp/business/Formula"
@@ -81,6 +82,9 @@ type QuerySpec struct {
 	Filters    []Filter `json:"filters"`
 	Limit      int      `json:"limit"`
 	Ascending  bool     `json:"ascending"`
+	// at is how its filters read (rowFilters.go); its zone is also where a
+	// time a row was made or changed falls on a day, grouped by (dayOf).
+	at reading
 }
 
 // AggBucket is one group in the result. For count, Value == Count.
@@ -150,6 +154,8 @@ func parseRowValues(raw string) map[string]interface{} {
 // numeric string, read as formula.ParseNumber reads one in en-US's signs).
 // Returns (value, true) only on success. Text was read by dropping its
 // commas, so "1,5" summed as 15, and "NaN" as a number no answer could hold.
+// Totals and formulas read cells so; a filter reads them as the grid does
+// (rowFilters.go), where a number written as text is no number.
 func cellNumber(v interface{}) (float64, bool) {
 	switch t := v.(type) {
 	case float64:
@@ -169,76 +175,46 @@ func cellNumber(v interface{}) (float64, bool) {
 	return 0, false
 }
 
-// firstLabel returns the single label of a cell (for filter comparison), or "".
-func firstLabel(v interface{}) string {
-	ls := fieldTypes.Labels(v)
-	if len(ls) == 0 {
-		return ""
-	}
-	return strings.Join(ls, ", ")
+// isDateField is whether a field's cells are dates: a date, a rollup's
+// earliest or latest, or when a row was made or last changed.
+func isDateField(f *model.Field) bool {
+	return f != nil && kindOfField(f) == formula.KindDate
 }
 
-// matchFilter evaluates one filter against a row's decoded values.
-func matchFilter(values map[string]interface{}, fields []*model.Field, f Filter) bool {
-	fld := resolveField(fields, f.Field)
-	if fld == nil {
-		return true // unknown filter field is ignored (no-op), never excludes silently on typo
+// dayOf is a date cell's label as the day it falls on, "2006-01-02": a date
+// as it is, a time with its zone (when a row was made or changed, RFC 3339)
+// as its day in loc, and one written without a zone as its own day. Anything
+// else is given back as it is.
+func dayOf(label string, loc *time.Location) string {
+	label = strings.TrimSpace(label)
+	if t, err := time.Parse(time.RFC3339, label); err == nil {
+		if loc == nil {
+			loc = time.UTC
+		}
+		return t.In(loc).Format(time.DateOnly)
 	}
-	cell := values[fld.Id.String()]
-	op := FilterOp(strings.ToLower(strings.TrimSpace(f.Op)))
-
-	switch op {
-	// A link cell with links it doesn't name has links.
-	case FilterEmpty:
-		return firstLabel(cell) == "" && !linksUnnamed(cell)
-	case FilterNotEmpty:
-		return firstLabel(cell) != "" || linksUnnamed(cell)
-	case FilterGt, FilterGte, FilterLt, FilterLte:
-		cv, ok1 := cellNumber(cell)
-		fv, ok2 := cellNumber(f.Value)
-		if !ok1 || !ok2 {
-			return false
-		}
-		switch op {
-		case FilterGt:
-			return cv > fv
-		case FilterGte:
-			return cv >= fv
-		case FilterLt:
-			return cv < fv
-		default:
-			return cv <= fv
-		}
-	case FilterContains:
-		needle := strings.ToLower(strings.TrimSpace(f.Value))
-		for _, l := range fieldTypes.Labels(cell) {
-			if strings.Contains(strings.ToLower(l), needle) {
-				return true
-			}
-		}
-		return false
-	case FilterNe:
-		return !labelEquals(cell, f.Value)
-	case FilterEq:
-		return labelEquals(cell, f.Value)
-	default:
-		return true // unknown op: no-op
+	if len(label) > len(time.DateOnly) && label[len(time.DateOnly)] == 'T' {
+		label = label[:len(time.DateOnly)]
 	}
+	if _, err := time.Parse(time.DateOnly, label); err == nil {
+		return label
+	}
+	return label
 }
 
-// labelEquals reports whether any label of the cell equals value (case-insensitive).
-func labelEquals(cell interface{}, value string) bool {
-	want := strings.ToLower(strings.TrimSpace(value))
-	for _, l := range fieldTypes.Labels(cell) {
-		if strings.ToLower(strings.TrimSpace(l)) == want {
-			return true
+// groupLabels is the groups a row's cell puts it in, grouped by field: its
+// labels, a date's as the day it falls on in loc, or "(empty)".
+func groupLabels(field *model.Field, cell interface{}, loc *time.Location) []string {
+	labels := fieldTypes.Labels(cell)
+	if isDateField(field) {
+		for i, l := range labels {
+			labels[i] = dayOf(l, loc)
 		}
 	}
-	// An empty cell equals an empty target.
-	if want == "" && firstLabel(cell) == "" && !linksUnnamed(cell) {
-		return true
+	if len(labels) == 0 {
+		return []string{"(empty)"}
 	}
-	return false
+	return labels
 }
 
 // accumulator folds numeric values for a bucket per the chosen op.
@@ -325,6 +301,10 @@ func Aggregate(fields []*model.Field, rows []*model.Row, spec QuerySpec) (*AggRe
 			return nil, fmt.Errorf("value column %q not found", spec.ValueField)
 		}
 	}
+	filters, err := newRowFilters(fields, spec.Filters, spec.at)
+	if err != nil {
+		return nil, err
+	}
 
 	buckets := map[string]*accumulator{}
 	order := []string{} // first-seen order for stable tie-breaks
@@ -337,14 +317,9 @@ func Aggregate(fields []*model.Field, rows []*model.Row, spec QuerySpec) (*AggRe
 		short = short || readsShort(values, reads)
 
 		// Row-level filters (AND).
-		skip := false
-		for _, f := range spec.Filters {
-			if !matchFilter(values, fields, f) {
-				skip = true
-				break
-			}
-		}
-		if skip {
+		if ok, err := filters.meets(r, values); err != nil {
+			return nil, err
+		} else if !ok {
 			continue
 		}
 		matched++
@@ -354,10 +329,7 @@ func Aggregate(fields []*model.Field, rows []*model.Row, spec QuerySpec) (*AggRe
 		if groupField == nil {
 			labels = []string{"Total"}
 		} else {
-			labels = fieldTypes.Labels(values[groupField.Id.String()])
-			if len(labels) == 0 {
-				labels = []string{"(empty)"}
-			}
+			labels = groupLabels(groupField, values[groupField.Id.String()], spec.at.zone)
 		}
 
 		// Numeric value for this row (for non-count ops).
@@ -394,7 +366,7 @@ func Aggregate(fields []*model.Field, rows []*model.Row, spec QuerySpec) (*AggRe
 	// ISO "YYYY-MM-DD", so lexical order == chronological) so a trend reads
 	// left-to-right, rather than by magnitude. Everything else is a breakdown,
 	// ordered by value so the biggest slice leads.
-	chronological := groupField != nil && groupField.Type == model.FieldDate
+	chronological := isDateField(groupField)
 	sortBuckets(out, spec.Ascending, chronological)
 
 	distinct := len(out)
@@ -427,12 +399,22 @@ func Aggregate(fields []*model.Field, rows []*model.Row, spec QuerySpec) (*AggRe
 	}
 	if groupField != nil {
 		res.GroupByLabel = groupField.Name
-		res.GroupByType = groupField.Type
+		res.GroupByType = groupByType(groupField)
 	}
 	if valueField != nil {
 		res.ValueFieldLabel = valueField.Name
 	}
 	return res, nil
+}
+
+// groupByType is a group-by column's type as a result names it: "date" for
+// any whose cells are dates (a row's times among them), which a chart draws
+// as a trend, and the field's own type for the rest.
+func groupByType(f *model.Field) string {
+	if isDateField(f) {
+		return model.FieldDate
+	}
+	return f.Type
 }
 
 // sortBuckets orders buckets. When byLabel is set (a time series) it sorts by
@@ -455,15 +437,13 @@ func sortBuckets(b []AggBucket, ascending bool, byLabel bool) {
 }
 
 // computedReads is the fields a query reads in each row (filters it, groups
-// by or adds up) whose cells each read works out: formulas, rollups and
-// links to tables' rows or to items, named for the reader.
+// by or adds up) whose cells each read works out (workedOutOnRead): formulas,
+// rollups, links to tables' rows or to items, named for the reader, and what
+// is read from the row itself.
 func computedReads(fields []*model.Field, filters []Filter, read ...*model.Field) []string {
 	var ids []string
 	add := func(fld *model.Field) {
-		if fld == nil {
-			return
-		}
-		if readsLinks(fld) || fld.Type == model.FieldFormula || fld.Type == model.FieldRollup {
+		if workedOutOnRead(fld) {
 			ids = append(ids, fld.Id.String())
 		}
 	}
@@ -481,30 +461,7 @@ func computedReads(fields []*model.Field, filters []Filter, read ...*model.Field
 // with more links than it shows. An answer that reads one falls short.
 func readsShort(values map[string]interface{}, ids []string) bool {
 	for _, id := range ids {
-		if formula.Unfinished(values[id]) || hasMoreRef(values[id]) {
-			return true
-		}
-	}
-	return false
-}
-
-// hasMoreRef is whether a link cell, as read, shows only some of its links.
-func hasMoreRef(cell interface{}) bool {
-	items, _ := cell.([]interface{})
-	for _, it := range items {
-		if fieldTypes.IsMoreRef(it) {
-			return true
-		}
-	}
-	return false
-}
-
-// linksUnnamed is whether a link cell, as read, has links it doesn't name:
-// past those it shows, or to items its reader can't open.
-func linksUnnamed(cell interface{}) bool {
-	items, _ := cell.([]interface{})
-	for _, it := range items {
-		if fieldTypes.IsMoreRef(it) || fieldTypes.IsHiddenRef(it) {
+		if formula.Unfinished(values[id]) || fieldTypes.HasMoreRef(values[id]) {
 			return true
 		}
 	}
@@ -531,38 +488,6 @@ func isASCIIPrintable(s string) bool {
 	return true
 }
 
-// pushableLikeTerms extracts the substrings that can be SAFELY pushed to the DB
-// as a coarse `values::text ILIKE '%term%'` pre-filter, from the exact typed
-// filters the engine will still apply in memory. Only `eq` and `contains` with
-// a non-empty, ASCII, resolvable-field value qualify: for those, "a cell label
-// equals/contains V" implies "the row's JSONB text contains V", so ILIKE on V
-// returns a SUPERSET of the true matches — never fewer. Every other operator
-// (ne, numeric comparisons, empty/not_empty), empty values, and unknown fields
-// (which the engine treats as a no-op) are left to the in-memory filter, so the
-// result is provably identical to a full scan — just reached with fewer rows.
-func pushableLikeTerms(fields []*model.Field, filters []Filter) []string {
-	var terms []string
-	for _, f := range filters {
-		op := FilterOp(strings.ToLower(strings.TrimSpace(f.Op)))
-		if op != FilterEq && op != FilterContains {
-			continue
-		}
-		v := strings.TrimSpace(f.Value)
-		if v == "" || !isASCIIPrintable(v) {
-			continue
-		}
-		rf := resolveField(fields, f.Field)
-		if rf == nil {
-			continue // unknown field is a no-op in matchFilter; must not narrow
-		}
-		if readsLinks(rf) || rf.Type == model.FieldFormula || rf.Type == model.FieldRollup {
-			continue // worked out on read (links store ids, not names), so not in the stored values to match
-		}
-		terms = append(terms, v)
-	}
-	return terms
-}
-
 // queryPage is how many rows a query reads at a time.
 const queryPage = 500
 
@@ -584,14 +509,13 @@ func tableForQuery(ctx context.Context, tableID uuid.UUID, actor Actor) (*model.
 // scan cap, and reports whether it reached the end of them. Each page has
 // only the computed cells the query reads worked out (read, by id, and what
 // those read). It is the one row-loading path behind AggregateTable and
-// ExecutePlan: when the filters give terms the database can match
-// (pushableLikeTerms) it pages only the rows holding them, a superset of the
-// matches, so a filtered query over a large table completes instead of
-// stopping short. The caller applies the exact filters either way, so the
-// answer is the same as a full scan's.
-func scanRowsForQuery(ctx context.Context, tableID uuid.UUID, actor Actor, fields []*model.Field, filters []Filter, read []string) ([]*model.Row, bool, error) {
+// ExecutePlan: given terms the database can match (rowFilters.terms), it
+// pages only the rows holding them, a superset of the matches, so a filtered
+// query over a large table completes instead of stopping short. The caller
+// applies the exact filters either way, so the answer is the same as a full
+// scan's.
+func scanRowsForQuery(ctx context.Context, tableID uuid.UUID, actor Actor, fields []*model.Field, terms, read []string) ([]*model.Row, bool, error) {
 	ctx = asViewer(ctx, actor)
-	terms := pushableLikeTerms(fields, filters)
 	var rows []*model.Row
 	for len(rows) < maxAggregateScanRows {
 		var page []*model.Row
@@ -620,8 +544,14 @@ func AggregateTable(ctx context.Context, tableID uuid.UUID, actor Actor, spec Qu
 	if err != nil {
 		return nil, nil, err
 	}
+	// Filters it can't read are refused before any row is.
+	spec.at = readingFor(ctx, actor, fields, spec.Filters)
+	filters, err := newRowFilters(fields, spec.Filters, spec.at)
+	if err != nil {
+		return nil, nil, err
+	}
 	read := computedReads(fields, spec.Filters, resolveField(fields, spec.GroupBy), resolveField(fields, spec.ValueField))
-	rows, scannedAll, serr := scanRowsForQuery(ctx, tableID, actor, fields, spec.Filters, read)
+	rows, scannedAll, serr := scanRowsForQuery(ctx, tableID, actor, fields, filters.terms(), read)
 	if serr != nil {
 		return nil, nil, serr
 	}

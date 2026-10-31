@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Post"
@@ -290,37 +289,19 @@ func receiveDelete(ctx context.Context, link model.Link, ts string) {
 }
 
 // Slack names are looked up once an hour per person, not per message.
-const nameTTL = time.Hour
-
-type cachedName struct {
-	name string
-	at   time.Time
-}
-
-var (
-	namesMu sync.Mutex
-	names   = map[string]cachedName{}
-)
+var names = helpers.NewTTLCache[string](time.Hour)
 
 // senderName is the Slack display name for a user id, "" when unknown.
 func senderName(ctx context.Context, st *state, id string) string {
-	namesMu.Lock()
-	if c, ok := names[id]; ok && time.Since(c.at) < nameTTL {
-		namesMu.Unlock()
-		return c.name
+	if name, ok := names.Get(id); ok {
+		return name
 	}
-	namesMu.Unlock()
 	u, err := st.client().userInfo(ctx, id)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "SlackBridge users.info %s: %v", id, err)
 		return ""
 	}
 	name := u.displayName()
-	namesMu.Lock()
-	if len(names) > 10000 {
-		names = map[string]cachedName{}
-	}
-	names[id] = cachedName{name: name, at: time.Now()}
-	namesMu.Unlock()
+	names.Set(id, name)
 	return name
 }

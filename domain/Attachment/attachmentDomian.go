@@ -323,6 +323,34 @@ func UpsertAttachmentInOpenSearchSafe(att *openSearchStruct.OpenSearchAttachment
 	}
 }
 
+// IndexAttachmentEntries writes attachments' search entries whole, in one
+// bulk request: index, so writing one again replaces it. The cluster's
+// refusal of any entry is an error.
+func IndexAttachmentEntries(ctx context.Context, entries []*openSearchStruct.OpenSearchAttachment) error {
+	var bulk strings.Builder
+	for _, e := range entries {
+		if e == nil || e.Uuid == "" {
+			continue
+		}
+		body, err := json.Marshal(e)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(&bulk, `{ "index" : { "_index" : %q, "_id" : %q } }`+"\n%s\n", openSearchStruct.ATTACHMENT_INDEX, e.Uuid, body)
+	}
+	if bulk.Len() == 0 {
+		return nil
+	}
+	return OpenSearchBulkModels.BulkIndexChecked(ctx, bulk.String())
+}
+
+// ForgetAttachmentEntry removes an attachment's search entry outright: a file
+// version a newer one replaced in search (docs F1). One that isn't there is
+// not an error.
+func ForgetAttachmentEntry(ctx context.Context, attachmentUUID string) error {
+	return OpenSearchModels.DeleteAttachmentInOpenSearch(ctx, attachmentUUID)
+}
+
 // ownUploads is, of the attachments named ($1), the ones $2 uploaded, each
 // with the place its upload went to and the storage key it stored.
 const ownUploads = `

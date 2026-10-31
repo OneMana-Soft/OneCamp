@@ -4,9 +4,11 @@ import (
 	"context"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
+	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	"github.com/akashc777/OneCamp/models/dgexec"
 )
 
@@ -144,7 +146,60 @@ func TestReadSourcesQueryPagesByUID(t *testing.T) {
 	if _, err := ReadSources(context.Background(), KindMessage, "x) { uid }", 1); err == nil {
 		t.Error("a page after something that isn't a uid was read")
 	}
-	if _, err := ReadSource(context.Background(), KindTask, dA); err == nil {
-		t.Error("a task was read as a source")
+	if _, err := ReadSource(context.Background(), KindProject, dA); err == nil {
+		t.Error("a project, which has no body, was read as a source")
+	}
+}
+
+// TestATaskDescriptionIsReadForLinks (DG15a): a doc chip in a task's
+// description shows on the doc as "linked from" the task, as a message's does,
+// and the task's panel lists what its description links to.
+func TestATaskDescriptionIsReadForLinks(t *testing.T) {
+	if !IsRefSource(KindTask) {
+		t.Fatal("a task's description isn't read for links")
+	}
+	if bodyOf[KindTask] != "task_description" {
+		t.Errorf("a task's body is read from %q, want task_description", bodyOf[KindTask])
+	}
+	if e, ok := EdgeFrom(KindTask, RefersTo); !ok || e.Rel != "links_to" {
+		t.Errorf("a task has no links_to edge out over refers_to (%+v, %v)", e, ok)
+	}
+	// A task linked from another task's description is walked back to it.
+	if e, ok := EdgeFrom(KindTask, "~"+RefersTo); !ok || !slices.Contains(e.To, KindTask) {
+		t.Errorf("a task's linked_from doesn't reach the tasks whose descriptions link it (%+v, %v)", e, ok)
+	}
+}
+
+// The reconciler reads pages' bodies only (docs F1): a folder, a file or a
+// link is a doc node with no body to read links from. Every doc source read
+// (a page of them, one, or several by id) takes pages only, through
+// domain/Doc's filter; the other kinds read every node as before.
+func TestADocSourceReadTakesPagesOnly(t *testing.T) {
+	var asked []string
+	prev := readSources
+	t.Cleanup(func() { readSources = prev })
+	readSources = func(_ context.Context, q string, _ map[string]string) ([]sourceNode, error) {
+		asked = append(asked, q)
+		return nil, nil
+	}
+	if _, err := ReadSources(context.Background(), KindDoc, "", 50); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadSource(context.Background(), KindDoc, dA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadSourcesByUUID(context.Background(), KindDoc, []string{dA, dB}); err != nil {
+		t.Fatal(err)
+	}
+	if len(asked) != 3 {
+		t.Fatalf("asked %d reads", len(asked))
+	}
+	for _, q := range asked {
+		if !strings.Contains(q, ") @filter("+docDomain.PageOnly+") {") {
+			t.Errorf("a doc source read takes more than pages:\n%s", q)
+		}
+	}
+	if q := ReadSourcesQuery(KindMessage, "", 500); strings.Contains(q, "@filter") {
+		t.Errorf("a message source read is filtered:\n%s", q)
 	}
 }

@@ -21,6 +21,8 @@ import (
 // held in memory, a page at a time.
 type fakeSlack struct {
 	self      string
+	team      string // auth.test's team_id
+	bot       string // auth.test's bot_id: an app's token
 	users     []map[string]any
 	kinds     map[string][]map[string]any // conversations.list by type
 	refuse    map[string]*slackapi.Error  // "method channel-or-type": its refusal
@@ -68,7 +70,19 @@ func (f *fakeSlack) Call(ctx context.Context, method string, form url.Values, ou
 	var reply any
 	switch method {
 	case "auth.test":
-		reply = map[string]any{"ok": true, "user_id": f.self}
+		if err := f.refusal(method, ""); err != nil {
+			return err
+		}
+		reply = map[string]any{"ok": true, "user_id": f.self, "team_id": f.team, "bot_id": f.bot}
+	case "users.info":
+		for _, u := range f.users {
+			if u["id"] == form.Get("user") {
+				reply = map[string]any{"ok": true, "user": u}
+			}
+		}
+		if reply == nil {
+			return &slackapi.Error{Method: method, Code: "user_not_found"}
+		}
 	case "users.list":
 		reply = pageOf("members", f.users)
 	case "conversations.list":

@@ -21,7 +21,6 @@ import (
 
 	guestBusiness "github.com/akashc777/OneCamp/business/Guest"
 	business "github.com/akashc777/OneCamp/business/LiveKit"
-	recordingBusiness "github.com/akashc777/OneCamp/business/Recording"
 	workflowBusiness "github.com/akashc777/OneCamp/business/Workflow"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/livekitInit"
@@ -70,7 +69,10 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 	// every one of them about every room: a room that isn't ours is left alone.
 	switch event.Event {
 	case "egress_ended":
-		recordingEnded(ctx, event.EgressInfo)
+		// Stamped on the recording and the call's record; a recording LiveKit
+		// cut short while everyone was in the call's breakout rooms goes on
+		// once they're back (business/CallControl).
+		callControlBusiness.OnRecordingEnded(ctx, event.EgressInfo)
 
 	case "room_finished":
 		if event.Room == nil || !callStateBusiness.BelongsHere(ctx, event.Room.Name) {
@@ -78,7 +80,10 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		roomName := event.Room.Name
 		helpers.LogInfoWithContext(ctx, "Room finished: %s", roomName)
-		callControlBusiness.OnEnded(ctx, roomName, event.Room.Sid, callStateModel.EndedRoomFinished)
+		// A call whose people are in its breakout rooms goes on there.
+		if !callControlBusiness.OnEnded(ctx, roomName, event.Room.Sid, callStateModel.EndedRoomFinished) {
+			break
+		}
 		broadcastCallStop(ctx, roomName)
 		callFinished(ctx, event.Room)
 
@@ -98,8 +103,9 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 		// departure timeout AND after the transcription agent (a participant)
 		// also leaves, so it can lag by many seconds or, if the agent lingers,
 		// effectively never arrive. This is the primary fix for the call dot
-		// that stays lit (and, for DMs, never clears) after a call ends.
-		if event.Room == nil || event.Participant == nil || business.IsAgentIdentity(event.Participant.Identity) {
+		// that stays lit (and, for DMs, never clears) after a call ends. Only
+		// a person's leave can end a call (livekitInit.IsPerson, as OnLeft asks).
+		if event.Room == nil || !livekitInit.IsPerson(event.Participant) {
 			break
 		}
 		roomName := event.Room.Name
@@ -107,27 +113,19 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 			helpers.LogInfoWithContext(ctx, "controllers/HandleWebhook Skipping participant_left for non-local room: %s", roomName)
 			break
 		}
-		callControlBusiness.OnLeft(ctx, roomName, event.Room.Sid, event.Participant, at)
-
-		// Only broadcast "call stopped" if no human participants remain.
-		// Exclude the participant who just left — LiveKit may still list
-		// them briefly depending on event ordering. A transient
-		// ListParticipants error is treated as "still active" so we never
-		// falsely clear a live call; room_finished remains the backstop.
-		active, lerr := business.IsCallActiveExcluding(ctx, roomName, event.Participant.Identity)
-		if lerr != nil {
-			helpers.LogErrorWithContext(ctx,
-				"controllers/HandleWebhook participant_left active-check failed for %s err: %+v",
-				roomName, lerr)
-			break
-		}
-		if active {
-			// Other humans are still in the call; nothing to do.
+		// The leave is recorded, and the call ends only if nobody is left in
+		// it (business/CallControl's OnLeft). A listing that fails ends
+		// nothing; room_finished remains the backstop.
+		if !callControlBusiness.OnLeft(ctx, roomName, event.Room.Sid, event.Participant, at) {
 			break
 		}
 
 		helpers.LogInfoWithContext(ctx, "Last human left, ending call: %s", roomName)
-		callControlBusiness.OnEnded(ctx, roomName, event.Room.Sid, callStateModel.EndedLastLeft)
+		// Everyone left the call's own room for its breakout rooms: the call
+		// goes on there, and its room stays for their way back.
+		if !callControlBusiness.OnEnded(ctx, roomName, event.Room.Sid, callStateModel.EndedLastLeft) {
+			break
+		}
 		broadcastCallStop(ctx, roomName)
 
 		// Best-effort: evict the room so the lingering transcription
@@ -138,43 +136,6 @@ func HandleWebhook(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("ok"))
-}
-
-// recordingEnded stamps a recording's end, length, size and how it ended.
-//
-// A failed or aborted egress (out of memory on a small box, the room closed
-// under it, storage refused the upload) used to be stamped like a good one: it
-// was listed at full length and played a black frame. Its status is kept now,
-// and lists and the player say it failed. A webhook without its egress is
-// ignored rather than dereferenced.
-func recordingEnded(ctx context.Context, info *livekit.EgressInfo) {
-	if info == nil || strings.TrimSpace(info.EgressId) == "" {
-		return
-	}
-	var durationSec float64
-	var fileSize int64
-	for _, file := range info.FileResults {
-		if file == nil {
-			continue
-		}
-		durationSec = float64(file.Duration) / 1e9
-		fileSize = file.Size
-	}
-	if durationSec == 0 && info.EndedAt > info.StartedAt {
-		durationSec = float64(info.EndedAt-info.StartedAt) / 1e9
-	}
-	status := recordingBusiness.StatusFromEgress(info.Status, fileSize)
-	if recordingBusiness.Failed(status) {
-		// LiveKit's reason goes to the log, never on screen.
-		helpers.LogErrorWithContext(ctx, "controllers/HandleWebhook recording %s ended %s: %s", info.EgressId, info.Status, info.Error)
-	}
-	_ = recordingBusiness.UpdateStopRecordingTime(ctx, info.EgressId, durationSec, fileSize, info.StartedAt, status)
-	// The call's record lists it with how it ended.
-	if err := callStateModel.RecordingEnded(ctx, info.EgressId, status, time.Now()); err != nil {
-		helpers.LogErrorWithContext(ctx, "controllers/HandleWebhook could not note the end of recording %s on its call: %+v", info.EgressId, err)
-	}
-	// Its transcript lines go back to the call's own session from here.
-	business.ForgetRecording(ctx, info.RoomName, info.EgressId)
 }
 
 // callFinished closes the books on the call that just ended in a room: its
@@ -197,6 +158,11 @@ func callFinished(ctx context.Context, room *livekit.Room) {
 	}
 	business.EndCallSession(ctx, call.SessionKey, call.Began)
 	business.ForgetCall(ctx, call.Room)
+	// A breakout room's end is no meeting's end: its call's recap and
+	// workflows come when the call itself ends.
+	if callStateBusiness.IsBreakoutRoom(call.Room) {
+		return
+	}
 
 	attendees, err := business.CallAttendees(ctx, call.SessionKey)
 	if err == nil && len(attendees) == 0 {
@@ -231,6 +197,10 @@ func callFinished(ctx context.Context, room *livekit.Room) {
 //   - Channel:     a UUID (hyphens, no spaces)
 func broadcastCallStop(ctx context.Context, roomName string) {
 	switch {
+	case callStateBusiness.IsBreakoutRoom(roomName):
+		// A breakout room has no call dot of its own: its call's is lit
+		// while the call goes on.
+		return
 	case guestBusiness.IsMeetingRoom(roomName):
 		// Instant meeting: not pinned to a sidebar conversation, so there is
 		// no call-active dot to clear. Guests/host observe call end via

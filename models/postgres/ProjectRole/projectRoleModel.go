@@ -10,6 +10,7 @@ import (
 	"errors"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 )
 
@@ -201,4 +202,34 @@ func Keep(ctx context.Context, projectID uuid.UUID, roles map[uuid.UUID]string) 
 		return nil
 	})
 	return changed, err
+}
+
+// RolesAmong is RolesIn for many people at once: each one's role rows in
+// the projects, by person and then project. One read.
+func RolesAmong(ctx context.Context, userIDs, projectIDs []uuid.UUID) (map[uuid.UUID]map[uuid.UUID]string, error) {
+	out := map[uuid.UUID]map[uuid.UUID]string{}
+	if len(userIDs) == 0 || len(projectIDs) == 0 || !connected() {
+		return out, nil
+	}
+	type row struct {
+		user, project uuid.UUID
+		role          string
+	}
+	rows, err := pgexec.Query(ctx,
+		`SELECT user_id, project_id, role FROM project_roles WHERE user_id = ANY($1) AND project_id = ANY($2)`,
+		func(r pgexec.Row) (row, error) {
+			var x row
+			err := r.Scan(&x.user, &x.project, &x.role)
+			return x, err
+		}, userIDs, projectIDs)
+	if err != nil {
+		return nil, err
+	}
+	for _, x := range rows {
+		if out[x.user] == nil {
+			out[x.user] = map[uuid.UUID]string{}
+		}
+		out[x.user][x.project] = x.role
+	}
+	return out, nil
 }

@@ -11,11 +11,49 @@
 # 20 Oct 2026, CHAT-LEAD: an import's pins are read a page of the graph's read limit (MaxRead) at a time.
 # 20 Oct 2026, CHAT-LEAD: the Slack import's reaction pass is one writer for every kind of conversation: a message's
 # target is read once (writerFor), each emoji and each person once a pass (cached), and each reaction is one write by Reaction's rule.
-# 24 Oct 2026, CHAT-LEAD-22: a share reads which files a page of its source conversation's messages
-# holds in one read (= ANY over the page's file ids, keepConversationFiles), once a page of sharePageSize.
+# 21 Oct 2026, CAL-LEAD-2: the calendar stack's loops that run per item by nature. An import
+# writes each event through the one write path (the event, its instances, guests and reminders in
+# one transaction, so a bad one is skipped alone), into a calendar found or made by name for each
+# calendar in the file (a handful). A move from Google pulls each of a link's calendars whole (a
+# handful), then keeps that calendar's refs, its ledger row and the progress bar. Two-way sync runs
+# per link (each its own account and token, at most syncLinksPerSweep a sweep), per calendar of a
+# link (each its own pull and cursor), and per pushed event (one Google call each, its ref kept at
+# once so a sweep cut short never sends an event twice). A pulled change reads its event as the
+# page's earlier writes left it, then writes it with its own later-wins check; the page's refs are
+# kept and dropped once. Many calendars' chips read their next events once.
+# 21 Oct 2026, CAL-LEAD-2 (B8 subscriptions): the import's loops live in importFiles, which takes
+# a target calendar. A subscription sweep reads each due subscription on its own (each its own claimed
+# address read, at most subscriptionsPerSweep). A changed file's events are read in one go and their
+# refs kept once; each changed event is then its own write, and its instances read the series again
+# each time, because skipping one changes it. Adopting events a cut-short read left is a rare repair.
+# 21 Oct 2026, CALLS-LEAD (HU13): a link that ends puts out the members who came in by it as
+# themselves, each checked once (MemberMayBeInCall: their conversation, meeting or another link) and
+# put out once; neither has a batch call, and one link lets in a few people.
+# 22 Oct 2026, WHITEBOARD-LEAD-3: the Miro import (W-2) reads Miro by its own pages: boards, items,
+# connectors and groups by cursor, tags by offset and the items of each tag, and an item's style one
+# at a time where the list leaves it out (Miro has no read by ids), with a 429's wait between tries.
+# A board's pictures are fetched and kept one at a time, as a paste is (each scanned and within the
+# upload limit), each kept picture's id mapping is written on its own (there is no batch upsert), and
+# a rollback deletes each imported board through the board's own delete (its drawing, versions and files).
 # 22 Oct 2026: Linear's issue lists page from the issue itself after their first page
 # (a cursor per page; only issues with more than the first page ask, since one query with every list was over
 # Linear's complexity cap). They are Linear's API calls, a page at a time by nature, not store reads.
+# 23 Oct 2026, DOCS-LEAD-7 (N1 gap 1): a copied body's mentions are kept before its seed, one doc at a time
+# beside the seed each loop already makes per doc (Duplicate's copies, an import's pages, parents first).
+# 23 Oct 2026: Jira's sprints are searched a project at a time, before its tasks come (a project
+# makes its cycles first): Jira's API, one search each, with at most one warning a project of each kind. Each project's
+# sprints are kept for the job, so the projects' stage tried again neither searches nor warns about one read before.
+# 24 Oct 2026: a task list's CSV in its Manual order reads its tasks a page of ReadAllPage
+# uids at a time (manualRows), at most ten pages, so a long list is written as it is read and never held whole.
+# 24 Oct 2026, CHAT-LEAD-22: a share reads which files a page of its source conversation's messages
+# holds in one read (= ANY over the page's file ids, keepConversationFiles), once a page of sharePageSize.
+# 24 Oct 2026, CHAT-LEAD-22: the "/" catalog reads each installed app's secret bag at most once (memoised
+# in bags) to place that app's commands: one read for each of the handful of apps the workspace installed.
+# 24 Oct 2026, TABLES-LEAD-26: an AI column's fill reads its own state (one row by its key) before each
+# cell it asks the model for (fillRun.mayGoOn), so Stop ends it within a cell; each read stands beside a model call.
+# 25 Oct 2026, CHAT-LEAD-27: the DM list's one-off backfill (DG4) stamps older DMs a batch of 500 at a time, at most 200 batches a run; each batch is one upsert.
+# 25 Oct 2026, CALLS-LEAD-10 (calls package A): the sweep writes each ended call's report of its polls and questions under that call's own claim, at most 50 calls a pass: one claim and one reply a call, by nature.
+# 29 Oct 2026, TABLES-LEAD-69 (TABLES-LEAD-70: none a field at a time): the Computed Store's fill and sweep (airtable-03) run a batch of rows or a table at a time, as IndexTable does: a fill's batches of rows (fillKept, IndexTable's .fill) and the sweep's tables (at most 20 to fill and 10 with rows waiting a round, each with its own fields and marks). A fill marks all of its table's fields in one statement, and what each reaches comes from the one plan of their table.
 business/Access/audience.go :: ResolvePeople :: .Resolve
 business/Access/contract.go :: ResolveAll :: .Resolve
 business/Access/expiry.go :: EndDueGrants :: endGrant
@@ -27,6 +65,11 @@ business/AdminAudit/evidenceReceipt.go :: RecordDueReceipts :: recordReceipt
 business/AdminAudit/evidenceReceipt.go :: StartEvidenceReceipts :: RecordDueReceipts
 business/AdminAudit/retention.go :: StartRetentionSweep :: runRetentionSweep
 business/App/places.go :: DescribePlaces :: accessBusiness.ResolveAll
+business/Approvals/remind.go :: remind :: tellSeeing
+business/Approvals/remind.go :: remind :: tellUnanswered
+business/Approvals/visible.go :: seeing :: actorOf
+business/Approvals/waiting.go :: WaitingFor :: statusName
+business/Approvals/waiting.go :: WaitingFor :: taskFor
 business/Archive/archiveBusiness.go :: StartAutoArchiver :: GetArchivePolicies
 business/Archive/archiveBusiness.go :: StartAutoArchiver :: RunArchiveJob
 business/Archive/archiveBusiness.go :: StartAutoArchiver :: RunPurges
@@ -44,7 +87,6 @@ business/Archive/purge.go :: purgeRecordings :: PurgeRecording
 business/Auth/totpBusiness.go :: ConfirmTOTPEnrollment :: userModels.HashRecoveryCode
 business/Auth/totpBusiness.go :: ConfirmTOTPEnrollment :: userModels.NewRecoveryCode
 business/Authz/capability.go :: MyCapabilities :: Can
-business/Availability/contract.go :: Busy :: calendarBusiness.BusyFor
 business/Board/boardBusiness.go :: publishBoardCommentActivity :: publishActivity
 business/Board/boardBusiness.go :: publishBoardCommentActivity :: readableBy
 business/Board/boardSnapshot.go :: StartBoardSnapshotCleanupLoop :: runBoardSnapshotCleanupTick
@@ -59,13 +101,16 @@ business/BulkPostAndChat/bulkPostAndChatBusiness.go :: sendFwdMessageNotificatio
 business/BulkPostAndChat/bulkPostAndChatBusiness.go :: sendFwdMessageNotifications :: eligibleForForward
 business/Calendar/access.go :: DecideMany :: bookingModel.PageById
 business/Calendar/access.go :: DecideMany :: domain.GetDgraphEventInfoByUUID
-business/Calendar/availability.go :: FindTime :: BusyFor
+business/Calendar/availability.go :: BusySeenBy :: BusyFor
+business/Calendar/focus.go :: EndFocus :: endFocusEvent
 business/Calendar/imip.go :: cancelFor :: .calendarFile
 business/Calendar/imip.go :: cancelFor :: .mailGuest
 business/Calendar/imip.go :: invite :: .calendarFile
 business/Calendar/imip.go :: invite :: .inviteState
 business/Calendar/imip.go :: invite :: .linkOf
 business/Calendar/imip.go :: invite :: .mailGuest
+business/Calendar/importICS.go :: importFiles :: .importGroup
+business/Calendar/importICS.go :: importFiles :: .importedCalendar
 business/Calendar/move.go :: MoveToPostgres :: .graphPage
 business/Calendar/move.go :: MoveToPostgres :: .oldPage
 business/Calendar/move.go :: MoveToPostgres :: graphEventsPage
@@ -76,6 +121,10 @@ business/Calendar/move.go :: withdraw :: models.MovedUnchangedAfter
 business/Calendar/move.go :: withdraw :: models.TrashMoved
 business/Calendar/move.go :: write :: models.RefreshMoved
 business/Calendar/move.go :: write :: models.ReplaceMovedAttendees
+business/Calendar/moveFromGoogle.go :: runMove :: .importCalendars
+business/Calendar/moveFromGoogle.go :: runMove :: .keepCalendar
+business/Calendar/moveFromGoogle.go :: runMove :: .keepRefsOf
+business/Calendar/moveFromGoogle.go :: runMove :: .setProgress
 business/Calendar/notify.go :: notice :: tellNotice
 business/Calendar/reminders.go :: planAfter :: .cancelReminders
 business/Calendar/reminders.go :: planAfter :: .planReminder
@@ -84,22 +133,47 @@ business/Calendar/store.go :: apply :: dropGuests
 business/Calendar/store.go :: apply :: models.Insert
 business/Calendar/store.go :: apply :: models.SetDeleted
 business/Calendar/store.go :: apply :: models.Update
+business/Calendar/subscriptions.go :: adoptSubscribed :: .retakeSubscribed
+business/Calendar/subscriptions.go :: readSubscriptions :: .readSubscription
+business/Calendar/subscriptions.go :: retakeSubscribed :: .get
+business/Calendar/subscriptions.go :: retakeSubscribed :: .takeRemoteInstance
+business/Calendar/subscriptions.go :: takeSubscribed :: .retakeSubscribed
+business/Calendar/syncGoogle.go :: applyPulled :: .get
+business/Calendar/syncGoogle.go :: applyPulled :: .setDeleted
+business/Calendar/syncGoogle.go :: applyPulled :: .takeRemote
+business/Calendar/syncGoogle.go :: applyPulled :: .takeRemoteInstance
+business/Calendar/syncGoogle.go :: syncAll :: .syncLink
+business/Calendar/syncGoogle.go :: syncLink :: .applyPulled
+business/Calendar/syncGoogle.go :: syncLink :: .keepCalendar
+business/Calendar/syncGoogle.go :: syncLink :: .pushOne
+business/CallControl/act.go :: Act :: tellAttrs
 business/CallControl/act.go :: mute :: livekitInit.LiveKitService.MuteTrack
 business/CallControl/act.go :: muteAll :: mute
-business/CallControl/act.go :: others :: human
+business/CallControl/act.go :: hold :: holdIn
+business/CallControl/act.go :: holdIn :: giveSources
+business/CallControl/act.go :: holdIn :: livekitInit.IsPerson
+business/CallControl/act.go :: holdIn :: model.RunsCall
+business/CallControl/act.go :: others :: livekitInit.IsPerson
 business/CallControl/people.go :: handOn :: callStateBusiness.SetRole
 business/CallControl/people.go :: handOn :: liveKitBusiness.TellInCall
 business/CallControl/people.go :: handOn :: livekitInit.LiveKitService.Participant
 business/CallControl/people.go :: handOn :: tellPart
+business/CallControl/people.go :: handOn :: tellSources
 business/CallControl/people.go :: mayStay :: stayCheck
+business/CallControl/people.go :: stillHere :: livekitInit.IsPerson
 business/CallControl/sweep.go :: Reconcile :: callStateBusiness.BelongsHere
 business/CallControl/sweep.go :: Reconcile :: reconcileRoom
+business/CallControl/sweep.go :: endLeftInRooms :: callStateBusiness.EndLeftInRooms
 business/CallControl/sweep.go :: reconcileRoom :: callStateBusiness.Joined
 business/CallControl/sweep.go :: reconcileRoom :: callStateBusiness.Left
 business/CallControl/sweep.go :: reconcileRoom :: eventOf
-business/CallControl/sweep.go :: reconcileRoom :: human
-business/CallControl/sweep.go :: reconcileRoom :: tellPart
-business/CallState/calls.go :: OpenCalls :: view
+business/CallControl/sweep.go :: reconcileRoom :: livekitInit.IsPerson
+business/CallControl/sweep.go :: reconcileRoom :: seat
+business/CallLobby/lobby.go :: Answer :: model.KnockByID
+business/CallLobby/sweep.go :: ExpireKnocks :: callStateBusiness.Publish
+business/CallState/board.go :: grantOn :: livekitInit.LiveKitService.RoomHasParticipant
+business/CallState/breakouts.go :: OpenRoomsOf :: view
+business/CallState/calls.go :: OpenCalls :: viewWith
 business/CallState/calls.go :: openFor :: endSession
 business/CallState/calls.go :: openFor :: model.OpenSession
 business/CallState/rooms.go :: BelongsHere :: userDomain.GetUserByUUID
@@ -107,10 +181,9 @@ business/Channel/defaultChannels.go :: JoinDefaultChannels :: joinAsNewMember
 business/Channel/defaultChannels.go :: addMemberRetrying :: AddChannelMemberEdge
 business/Chat/chatBusiness.go :: notifyChatThreadReply :: publishActivityTo
 business/Chat/chatBusiness.go :: notifyNewChat :: activityBusiness.PublishActivityToUser
-business/Chat/chatBusiness.go :: sendNewChatCommentReactionNotification :: firebaseInit.FirebaseApp.MultiCastPush
-business/Chat/chatBusiness.go :: sendNewChatReactionNotification :: firebaseInit.FirebaseApp.MultiCastPush
 business/Chat/chatReactions.go :: tellChatCommentReactionsGone :: mqttBusiness.PublishChatCommentReaction
 business/Chat/chatReactions.go :: tellChatReactionsGone :: mqttBusiness.PublishChatReaction
+business/Chat/dmList.go :: runDMOrder :: stampUnstampedDMs
 business/Chat/durable.go :: releaseChatEvents :: deliverEvent
 business/Chat/durable.go :: releaseChatEvents :: releaseEvent
 business/Chat/durable.go :: takeBackChat :: outboxBusiness.Cancel
@@ -128,6 +201,7 @@ business/CheckIn/checkin.go :: Sweep :: model.Claim
 business/CheckIn/checkin.go :: Sweep :: model.SetPaused
 business/Command/appBusiness.go :: ListApps :: buildAppViewFrom
 business/Command/appBusiness.go :: syncAppCommands :: slashModel.CreateAppCommand
+business/Command/dispatcher.go :: GetCatalog :: loadAppSecrets
 business/Command/marketplace.go :: ListMarketplace :: appOAuthConnected
 business/Command/marketplace.go :: ListMarketplace :: loadAppSecrets
 business/Command/marketplace.go :: ReconcileInstalledApps :: slashModel.DeleteCommandsByApp
@@ -138,7 +212,6 @@ business/Comment/threadReply.go :: NotifyThreadReply :: publishToUser
 business/Connector/connectorBusiness.go :: ConnectedProviderNames :: IsConnected
 business/Connector/gmailClient.go :: GmailSearch :: .Do
 business/Connector/gmailInbox.go :: GmailInbox :: .Do
-business/ContentIO/adapters/notion/database.go :: TableFromDatabase :: dataTableBusiness.CreateRow
 business/ContentIO/assets.go :: uploadImages :: .uploadFileBlock
 business/ContentIO/assets.go :: uploadImages :: uploadAsset
 business/ContentIO/make.go :: UnmakePages :: discardDoc
@@ -146,6 +219,7 @@ business/ContentIO/pages.go :: make :: .uploadImages
 business/ContentIO/pages.go :: make :: collab.Live.Seed
 business/ContentIO/pages.go :: make :: createDoc
 business/ContentIO/pages.go :: make :: discardDoc
+business/ContentIO/pages.go :: make :: docBusiness.KeepCopiedMentions
 business/ContentIO/run.go :: cleanup :: .ForgetFiles
 business/ContentIO/run.go :: cleanup :: publishJob
 business/ContentIO/run.go :: runQueued :: .ClaimNext
@@ -190,28 +264,59 @@ business/DataTable/aggregate.go :: scanRowsForQuery :: withComputedFor
 business/DataTable/computed.go :: countLinks :: model.CountLinks
 business/DataTable/computed.go :: load :: model.CellsOf
 business/DataTable/computed.go :: loadLinked :: .load
-business/DataTable/computed.go :: planComputedFor :: .checkRollup
-business/DataTable/computed.go :: planComputedFor :: .target
+# 29 Oct 2026, TABLES-LEAD-63 (airtable-02 head 2, rollups of rollups): planComputedFor's per-field loop moved into planUnder, which
+# each level of a rollup chain runs once per linked table (planDeeper), at most 3 levels deep; rollupChainProblem walks a chain one table
+# per level, each step needing the field the last one names. Each table is read once per read (c.open) or save (linkedFieldsFor).
+business/DataTable/computed.go :: planDeeper :: planUnder
+business/DataTable/computed.go :: planUnder :: .checkRollup
+business/DataTable/computed.go :: planUnder :: .target
+business/DataTable/computed.go :: rollupChainProblem :: fieldsOf
+business/DataTable/computed.go :: planLinkedReads :: .checkRollup
 business/DataTable/computed.go :: readLinks :: .countLinks
 business/DataTable/computed.go :: readLinks :: model.LinksOf
 business/DataTable/dataTableBusiness.go :: CreateTableFromTemplate :: buildView
 business/DataTable/dataTableBusiness.go :: CreateTableFromTemplate :: model.CreateView
+business/DataTable/importBase.go :: addOptions :: UpdateField
+business/DataTable/importBase.go :: dropOptions :: UpdateField
+business/DataTable/importBase.go :: dropOptions :: model.LabelsHeld
+business/DataTable/importBase.go :: makeComputed :: .fallback
+business/DataTable/importBase.go :: makeComputed :: CreateField
+business/DataTable/importBase.go :: makeRelations :: CreateField
+business/DataTable/importBase.go :: makeRelations :: UpdateField
+business/DataTable/importBase.go :: makeRelations :: model.ListFields
+business/DataTable/importBase.go :: makeRows :: .addOptions
+business/DataTable/importBase.go :: makeRows :: Batch
+business/DataTable/importBase.go :: makeViews :: CreateView
+business/DataTable/importBase.go :: run :: .makeComputed
+business/DataTable/importBase.go :: run :: .makeLinks
+business/DataTable/importBase.go :: run :: .makeRelations
+business/DataTable/importBase.go :: run :: .makeRows
+business/DataTable/importBase.go :: run :: .makeTable
+business/DataTable/importBase.go :: run :: .makeViews
+business/DataTable/importBase.go :: takeBack :: .dropOptions
+business/DataTable/importBase.go :: takeBack :: DeleteTable
+business/DataTable/importBase.go :: takeBack :: Undo
 business/DataTable/itemLinks.go :: RepairItemLinks :: model.StripItemLinks
 business/DataTable/ledgerRows.go :: Batch :: takeLinks
 business/DataTable/ledgerRows.go :: RestoreFromTrash :: restoreField
 business/DataTable/ledgerRows.go :: RowHistory :: model.RowHistory
+business/DataTable/ledgerRows.go :: restoreField :: model.MarkCellIndexStale
+business/DataTable/ledgerRows.go :: restoreField :: rowQuery.IndexField
 business/DataTable/ledgerRows.go :: restoreField :: tellFieldsChanged
+business/DataTable/ledgerRows.go :: reverseWhole :: reverse
 business/DataTable/linkUpkeep.go :: StartLinkUpkeep :: model.KeyRowsWithout
 business/DataTable/linkUpkeep.go :: StartLinkUpkeep :: model.TuplesChanged
 business/DataTable/linkUpkeep.go :: StartLinkUpkeep :: model.Vacuum
 business/DataTable/optionIDs.go :: KeepOptionIDs :: model.OptionFieldsWithoutIDs
 business/DataTable/optionIDs.go :: KeepOptionIDs :: model.SetFieldConfigIf
 business/DataTable/relations.go :: PickRows :: model.ListRowIDs
-business/DataTable/relations.go :: takeLinks :: linksToAdd
-business/DataTable/relations.go :: takeLinks :: model.GetTableByID
+business/DataTable/relations.go :: linkCellsOf :: model.GetTableByID
+business/DataTable/relations.go :: linkCellsOf :: readLinkCells
 business/DataTable/relations.go :: tellTables :: publishLinks
-business/DataTable/relations.go :: unlinkPair :: model.UpdateField
 business/DataTable/rowAccess.go :: RowTitles :: rowNames
+business/DataTable/rowQueryWorked.go :: workedOut :: model.ListRowsAfter
+business/DataTable/sheetImport.go :: targets :: loadViewable
+business/DataTable/sheetImport.go :: targets :: model.ListFields
 business/DemoSeed/demoSeed.go :: Run :: channelBusiness.CheckIfChannelExist
 business/DemoSeed/demoSeed.go :: Run :: channelBusiness.CreateChannel
 business/DemoSeed/demoSeed.go :: Run :: writeConversation
@@ -229,7 +334,8 @@ business/Departed/sweep.go :: TellAdmins :: tell
 business/Doc/docAccessApply.go :: AccessChanged :: RepairAccessIndexes
 business/Doc/docAccessApply.go :: ReauthLater :: Reauth
 business/Doc/docBusiness.go :: PublishDocCommentActivity :: commentActivityPublish
-business/Doc/docDuplicate.go :: DuplicateDocs :: seedBody
+business/Doc/docDuplicate.go :: DuplicateDocs :: KeepCopiedMentions
+business/Doc/docDuplicate.go :: DuplicateDocs :: seedBodyWith
 business/Doc/docDuplicate.go :: DuplicateDocs :: syncDocSearch
 business/Doc/docEvents.go :: emitUpdated :: actorFrom
 business/Doc/docReactions.go :: tellDocCommentReactionsGone :: mqttBusiness.PublishDocCommentReaction
@@ -238,12 +344,12 @@ business/Doc/docReaders.go :: withoutEnded :: .After
 business/Doc/docRepair.go :: latestGoodSnapshotBody :: getDocSnapshotObject
 business/Doc/docRepair.go :: repairDocs :: domain.GetCollabDocByUUID
 business/Doc/docRepair.go :: repairDocs :: domain.GetDocBodyPage
-business/Doc/docTrash.go :: TrashSubtree :: demoGuard.KeepsFromVisitor
 business/Doc/docTrash.go :: purge :: opensearchModels.ForgetEntry
 business/Doc/docTrash.go :: purgeDocRows :: .ExecContext
 business/Doc/docTrash.go :: purgeDocRows :: removeDocSnapshotObject
 business/Doc/docTrash.go :: searchFollowsRestore :: domain.SyncDocSearch
 business/Doc/docTrash.go :: searchFollowsTrash :: domain.SyncDocSearch
+business/Doc/docTrash.go :: trashSubtree :: demoGuard.KeepsFromVisitor
 business/Doc/searchRepair.go :: RepairDocSearch :: repairDocSearchPage
 business/Doc/searchRepair.go :: repairDocSearchPage :: repairDocSearchPage
 business/DocHome/docSearch.go :: readable :: accessBusiness.Rules.Filter
@@ -292,12 +398,18 @@ business/GitHub/githubSync.go :: syncIssueLabelToGitHub :: .Do
 business/GitHub/taskRepoLink.go :: leadTask :: eventTask
 business/GitHub/webhookRefresh.go :: StartWebhookRefresh :: registerGitHubWebhook
 business/Guest/guestBusiness.go :: NewMeetingLink :: guestModel.Revoke
-business/Guest/guestBusiness.go :: RemoveAllMeetingGuests :: removeGuestsOf
 business/Guest/guestBusiness.go :: RevokeGrants :: revoke
+business/Guest/guestBusiness.go :: removeMeetingGuests :: removeGuestsOf
+business/Guest/linkMembers.go :: putOutLinkMembers :: memberMayBeIn
+business/Guest/linkMembers.go :: putOutLinkMembers :: removeFromCall
 business/Hooks/admin.go :: purge :: purgeRows
 business/Hooks/deliveries.go :: Drain :: try
 business/Hooks/deliveries.go :: SendNow :: .claimOne
 business/Hooks/deliveries.go :: SendNow :: try
+business/Huddle/report.go :: repairReports :: report
+business/Import/boards_worker.go :: fetchPicture :: waitOutRateLimit
+business/Import/boards_worker.go :: keepPictures :: fetchPicture
+business/Import/boards_worker.go :: keepPictures :: keepPicture
 business/Import/cleanup.go :: SetAsideAbandonedImports :: importModels.SetAsideIfStillWaiting
 business/Import/cleanup.go :: SetAsideAbandonedImports :: publishProgress
 business/Import/cleanup.go :: StartCleanupLoop :: runCleanupTick
@@ -312,7 +424,6 @@ business/Import/comment_worker.go :: processTaskCommentChunk :: importModels.Loo
 business/Import/comment_worker.go :: processTaskCommentChunk :: importModels.LookupWorkspaceMapping
 business/Import/comment_worker.go :: processTaskCommentChunk :: importModels.RecordMapping
 business/Import/comment_worker.go :: processTaskCommentChunk :: importModels.ResetChunkForRetry
-business/Import/comment_worker.go :: processTaskCommentChunk :: importModels.UpsertIdMappingWithOwnership
 business/Import/comment_worker.go :: processTaskCommentChunk :: waitOutRateLimit
 business/Import/comment_worker.go :: processTaskCommentChunk :: writeTaskComment
 business/Import/dependencies.go :: runDependenciesStage :: importModels.LogImportError
@@ -335,29 +446,10 @@ business/Import/orchestrator.go :: waitForMoreWork :: importDomain.HasPendingWor
 business/Import/outcomes.go :: OutcomesFor :: PeopleToInvite
 business/Import/pages_worker.go :: keepClaimed :: renewClaim
 business/Import/pages_worker.go :: pageComments :: importModels.LogImportError
-business/Import/pages_worker.go :: pageComments :: importModels.UpsertIdMappingWithOwnership
+business/Import/pages_worker.go :: pageComments :: importModels.RecordMapping
 business/Import/pages_worker.go :: pageComments :: writeDocComment
-business/Import/pages_worker.go :: processPageChunk :: importModels.LogImportError
-business/Import/pages_worker.go :: processPageChunk :: importModels.UpsertIdMappingWithOwnership
-business/Import/pages_worker.go :: processPageChunk :: importModels.UpsertWorkspaceMapping
+business/Import/pages_worker.go :: processPageChunk :: importModels.RecordMapping
 business/Import/pages_worker.go :: processPageChunk :: pageComments
-business/Import/providers/asana/fields.go :: listProjectFields :: .getJSON
-business/Import/providers/asana/files.go :: listTaskFiles :: .getJSON
-business/Import/providers/asana/provider.go :: IterCommentsOfTask :: .getJSON
-business/Import/providers/asana/provider.go :: IterProjects :: .listProjectFields
-business/Import/providers/asana/provider.go :: IterProjects :: .listProjectMembers
-business/Import/providers/asana/provider.go :: IterSubtasksOfTask :: .getJSON
-business/Import/providers/asana/provider.go :: IterTasksOfProject :: .getJSON
-business/Import/providers/asana/provider.go :: IterTeams :: .listTeamMembers
-business/Import/providers/asana/provider.go :: Plan :: .countTasksInProject
-business/Import/providers/asana/provider.go :: Plan :: .listSections
-business/Import/providers/asana/provider.go :: countTasksInProject :: .getJSON
-business/Import/providers/asana/provider.go :: listProjectMembers :: .getJSON
-business/Import/providers/asana/provider.go :: listProjects :: .getJSON
-business/Import/providers/asana/provider.go :: listSections :: .getJSON
-business/Import/providers/asana/provider.go :: listTeamMembers :: .getJSON
-business/Import/providers/asana/provider.go :: listTeams :: .getJSON
-business/Import/providers/asana/provider.go :: listUsers :: .getJSON
 business/Import/providers/basecamp/client.go :: getAll :: .get
 business/Import/providers/basecamp/provider.go :: IterProjects :: .people
 business/Import/providers/basecamp/provider.go :: IterTasksOfProject :: .cardTable
@@ -372,21 +464,18 @@ business/Import/providers/clickup/provider.go :: buildSnapshot :: .fetchListTask
 business/Import/providers/clickup/provider.go :: buildSnapshot :: .fetchTaskComments
 business/Import/providers/clickup/provider.go :: fetchListTasks :: .getJSON
 business/Import/providers/clickup/provider.go :: fetchTaskComments :: .getJSON
-business/Import/providers/jira/provider.go :: commentPages :: .getJSON
-business/Import/providers/jira/provider.go :: IterSubtasksOfTask :: .getJSON
-business/Import/providers/jira/provider.go :: Plan :: .countIssues
-business/Import/providers/jira/provider.go :: Plan :: .listProjectStatuses
-business/Import/providers/jira/provider.go :: listProjects :: .getJSON
-business/Import/providers/jira/provider.go :: listUsers :: .getJSON
-business/Import/providers/jira/provider.go :: searchIssues :: .getJSON
-business/Import/providers/jira/provider.go :: usersInScope :: .getJSON
+business/Import/providers/jira/provider.go :: sendProjects :: .sourceProject
 business/Import/providers/linear/pages.go :: issuePages :: .gql
 business/Import/providers/linear/provider.go :: buildSnapshot :: .fetchTeamIssues
-business/Import/providers/linear/provider.go :: fetchProjects :: .gql
 business/Import/providers/linear/provider.go :: fetchTeamIssues :: .gql
 business/Import/providers/linear/provider.go :: fetchTeamIssues :: .restOfIssue
-business/Import/providers/linear/provider.go :: fetchTeams :: .gql
-business/Import/providers/linear/provider.go :: fetchUsers :: .gql
+business/Import/providers/linear/provider.go :: rootList :: .gql
+business/Import/providers/miro/provider.go :: BoardOf :: .get
+business/Import/providers/miro/provider.go :: Plan :: .get
+business/Import/providers/miro/provider.go :: boards :: .get
+business/Import/providers/miro/provider.go :: readGroups :: .get
+business/Import/providers/miro/provider.go :: readStyles :: .get
+business/Import/providers/miro/provider.go :: readTags :: .get
 business/Import/providers/monday/client.go :: gql :: .gqlOnce
 business/Import/providers/monday/provider.go :: Discover :: .gql
 business/Import/providers/monday/snapshot.go :: crawl :: .fetchBoardItems
@@ -398,43 +487,35 @@ business/Import/providers/monday/snapshot.go :: fetchUsers :: .gql
 business/Import/providers/notion/pages.go :: PagesOf :: .html
 business/Import/providers/notion/pages.go :: children :: .children
 business/Import/providers/notion/pages.go :: children :: .database
-business/Import/providers/notion/pages.go :: children :: .get
 business/Import/providers/notion/pages.go :: children :: .note
-business/Import/providers/notion/pages.go :: comments :: .get
 business/Import/providers/notion/pages.go :: database :: .note
 business/Import/providers/notion/pages.go :: database :: .table
 business/Import/providers/notion/pages.go :: page :: .page
-business/Import/providers/notion/pages.go :: pageOfBlock :: .call
 business/Import/providers/notion/pages.go :: pictures :: .note
 business/Import/providers/notion/pages.go :: pictures :: .pictures
-business/Import/providers/notion/pages.go :: planPages :: .call
-business/Import/providers/notion/pages.go :: rows :: .post
 business/Import/providers/notion/pages.go :: tableBlock :: .text
 business/Import/providers/notion/pages.go :: text :: .linkHref
 business/Import/providers/notion/pages.go :: text :: .pageHref
 business/Import/providers/notion/pages.go :: write :: .block
 business/Import/providers/notion/pages.go :: write :: .item
-business/Import/providers/notion/provider.go :: IterCommentsOfTask :: .getJSON
-business/Import/providers/notion/provider.go :: IterTasksOfProject :: .buildTaskFromPage
-business/Import/providers/notion/provider.go :: IterTasksOfProject :: .postJSON
-business/Import/providers/notion/provider.go :: Plan :: .countDatabaseRows
-business/Import/providers/notion/provider.go :: Plan :: .fetchDatabaseProperties
-business/Import/providers/notion/provider.go :: countDatabaseRows :: .postJSON
-business/Import/providers/notion/provider.go :: fetchBlockChildren :: .fetchBlockChildren
-business/Import/providers/notion/provider.go :: fetchBlockChildren :: .getJSON
-business/Import/providers/notion/provider.go :: listUsers :: .getJSON
-business/Import/providers/notion/provider.go :: projectsOf :: .fetchDatabase
-business/Import/providers/trello/provider.go :: fetchCardActions :: .getJSON
+business/Import/rollback.go :: deleteImportedBoards :: deleteBoard
+business/Import/rollback.go :: liveProjects :: projectBusiness.GetDgraphProjectInfoAndTeamAdminFlag
+business/Import/rollback.go :: liveTeams :: teamBusiness.GetDgraphTeamInfoByUUIDForArchivingAndUnarchivingTeam
 business/Import/rollback.go :: trashImportedDocs :: trashDoc
+business/Import/rollback.go :: unmakeImported :: importModels.MadeAndDeleted
+business/Import/tables_worker.go :: keepTableFile :: storeFile
+business/Import/tables_worker.go :: keepTableFile :: waitOutRateLimit
+business/Import/tables_worker.go :: matchPeople :: memberByEmail
+business/Import/tables_worker.go :: recordBase :: importModels.UpsertIdMappingWithOwnership
 business/Import/taskMapping.go :: coAssigneeNames :: .resolve
+business/Import/task_worker.go :: processSubtaskChunk :: .ofTask
 business/Import/task_worker.go :: processSubtaskChunk :: .prepare
-business/Import/task_worker.go :: processSubtaskChunk :: .resolve
 business/Import/task_worker.go :: processSubtaskChunk :: .write
-business/Import/task_worker.go :: processSubtaskChunk :: coAssigneeNames
 business/Import/task_worker.go :: processSubtaskChunk :: importModels.LogImportError
 business/Import/task_worker.go :: processSubtaskChunk :: importModels.LookupIdMapping
 business/Import/task_worker.go :: processSubtaskChunk :: importModels.RecordMapping
 business/Import/task_worker.go :: processSubtaskChunk :: importModels.ResetChunkForRetry
+business/Import/task_worker.go :: processSubtaskChunk :: keepSourceAliases
 business/Import/task_worker.go :: processSubtaskChunk :: waitOutRateLimit
 business/Import/task_worker.go :: processSubtaskChunk :: writeTask
 business/Import/task_worker.go :: processTaskChunk :: importModels.FinishChunk
@@ -465,7 +546,9 @@ business/Integration/googleCalendarBusiness.go :: listGoogleEvents :: .Do
 business/LiveKit/callRemoval.go :: RemoveGuestsWhere :: RemoveFromCall
 business/LiveKit/callTranscriptRepair.go :: RepairCallTranscripts :: callSessionNodes
 business/LiveKit/callTranscriptRepair.go :: RepairCallTranscripts :: markCallSessionEnded
-business/LiveKit/callView.go :: ReadCallView :: IsAgentIdentity
+business/Marketplace/listedFormBackfill.go :: backfillListedForms :: model.KeepListedPayloads
+business/Marketplace/listedFormBackfill.go :: backfillListedForms :: model.UnlistedAfter
+business/Milestone/milestone.go :: see :: taskDomain.GetTasksReadAccessFor
 business/Mqtt/brokerAdmin.go :: RecheckTopics :: .recheck
 business/Mqtt/brokerAdmin.go :: RecheckTopics :: atTheBroker
 business/Mqtt/brokerAdmin.go :: call :: .Do
@@ -486,13 +569,15 @@ business/Notification/worker.go :: cleanupLoop :: runCleanup
 business/Notification/worker.go :: processBatch :: deliverItem
 business/Notification/worker.go :: workerLoop :: processBatch
 business/Notification/worker.go :: workerLoop :: reapStale
+business/Outbox/outbox.go :: DeliverMany :: deliverBatch
 business/Outbox/outbox.go :: Drain :: .claimDue
-business/Outbox/outbox.go :: Drain :: deliverKey
+business/Outbox/outbox.go :: Drain :: runClaimed
 business/Outbox/outbox.go :: deliverKey :: .claimNextOfKey
 business/Outbox/outbox.go :: deliverKey :: run
 business/Outbox/outbox.go :: purgePass :: .purge
 business/Outbox/outbox.go :: resolveHeld :: .cancel
 business/Outbox/outbox.go :: resolveHeld :: .release
+business/Outbox/outbox.go :: runClaimed :: deliverKey
 business/Pin/pin.go :: readInto :: readMsgs
 business/Places/places.go :: Add :: model.Put
 business/Policy/registry.go :: ListAll :: .info
@@ -509,6 +594,7 @@ business/Project/roles.go :: SettleRoles :: projectsPage
 business/Project/roles.go :: SettleRoles :: rowsOfMany
 business/Project/roles.go :: SettleRoles :: settleProjectWith
 business/Project/roles.go :: settleProjectWith :: dropAdminEdge
+business/Project/taskListExport.go :: eachListPage :: manualRows
 business/Project/workload.go :: SetCapacity :: domain.SetDgraphCapacity
 business/ProjectTemplate/apply.go :: Apply :: taskFieldBusiness.Create
 business/ProjectTemplate/apply.go :: Apply :: taskStatusBusiness.Create
@@ -517,23 +603,50 @@ business/Publish/service.go :: Duplicate :: addFile
 business/Publish/service.go :: Duplicate :: fileOfDoc
 business/Publish/service.go :: changed :: dropPage
 business/Recording/recordingBusiness.go :: DeleteRecording :: purgeRecording
-business/Refs/reconcile.go :: ReconcileAll :: passKind
 business/Refs/reconcile.go :: fixPage :: writeFixes
 business/Refs/reconcile.go :: mirrorDocTasks :: docsWithTasks
 business/Refs/reconcile.go :: mirrorDocTasks :: fixPage
-business/Refs/reconcile.go :: passKind :: .Save
-business/Refs/reconcile.go :: passKind :: fixPage
+business/Refs/reconcile.go :: pass :: .Save
+business/RowQuery/cellIndex.go :: IndexField :: inBatch
+business/RowQuery/cellIndex.go :: IndexField :: model.LiveFields
+business/RowQuery/cellIndex.go :: IndexField :: model.RowIDsAfter
+business/RowQuery/cellIndex.go :: IndexField :: reindexRows
+business/RowQuery/cellIndex.go :: IndexTable :: inKeptBatch
+business/RowQuery/cellIndex.go :: IndexTable :: model.LiveFields
+business/RowQuery/cellIndex.go :: IndexTable :: model.RowIDsAfter
+business/RowQuery/cellIndex.go :: IndexTable :: reindexRows
+business/RowQuery/cellIndex.go :: indexTables :: IndexTable
+business/RowQuery/cellIndex.go :: indexTables :: model.MarkCellIndexFailed
+business/RowQuery/cellIndex.go :: indexTables :: model.TablesWithoutIndex
+business/RowQuery/cellIndex.go :: reindexFields :: model.RowIDsAfter
+business/RowQuery/cellIndex.go :: reindexFields :: reindexRows
+business/RowQuery/cellIndex.go :: IndexTable :: .fill
+business/RowQuery/computedStore.go :: RecomputeKept :: fillKept
+business/RowQuery/computedStore.go :: RecomputeKept :: inKeptBatch
+business/RowQuery/computedStore.go :: RecomputeKept :: keep
+business/RowQuery/computedStore.go :: RecomputeKept :: model.AnswerDirty
+business/RowQuery/computedStore.go :: RecomputeKept :: model.DirtyComputed
+business/RowQuery/computedStore.go :: RecomputeKept :: model.DirtyTables
+business/RowQuery/computedStore.go :: RecomputeKept :: model.StoredFieldsOf
+business/RowQuery/computedStore.go :: fillKept :: .fill
+business/RowQuery/computedStore.go :: fillKept :: inKeptBatch
+business/RowQuery/computedStore.go :: fillKept :: model.RowIDsAfter
+business/RowQuery/walks.go :: runWalks :: groupHolds
+business/RowQuery/walks.go :: runWalks :: model.QueryRowWalk
 business/Scheduler/schedulerBusiness.go :: DrainDueJobs :: jobModel.ClaimDueJobs
 business/Scheduler/schedulerBusiness.go :: DrainDueJobs :: runJob
 business/Scheduler/schedulerBusiness.go :: StartWorker :: DrainDueJobs
+business/SlackImport/api_job.go :: toBePlanned :: importModels.UpdateStatusFrom
+business/SlackImport/api_job.go :: toBePlanned :: publishProgress
 business/SlackImport/channel_resolver.go :: resolveChannels :: addChannelMembersBulk
 business/SlackImport/channel_resolver.go :: resolveChannels :: backdateChannel
 business/SlackImport/channel_resolver.go :: resolveChannels :: channelBusiness.CreateChannel
 business/SlackImport/channel_resolver.go :: resolveChannels :: importModels.LogImportError
 business/SlackImport/channel_resolver.go :: resolveChannels :: importModels.LookupIdMapping
 business/SlackImport/channel_resolver.go :: resolveChannels :: importModels.LookupWorkspaceMapping
+business/SlackImport/channel_resolver.go :: resolveChannels :: importModels.RecordCreated
+business/SlackImport/channel_resolver.go :: resolveChannels :: importModels.RecordMapping
 business/SlackImport/channel_resolver.go :: resolveChannels :: importModels.UpsertIdMappingWithOwnership
-business/SlackImport/channel_resolver.go :: resolveChannels :: importModels.UpsertWorkspaceMapping
 business/SlackImport/channel_resolver.go :: resolveChannels :: leaveChannel
 business/SlackImport/channel_resolver.go :: resolveChannels :: seededGeneral
 business/SlackImport/channel_resolver.go :: resolveChannels :: uniqueChannelName
@@ -541,8 +654,8 @@ business/SlackImport/channel_resolver.go :: uniqueChannelName :: channelBusiness
 business/SlackImport/dm_resolver.go :: resolveDMs :: importModels.LogImportError
 business/SlackImport/dm_resolver.go :: resolveDMs :: importModels.LookupIdMapping
 business/SlackImport/dm_resolver.go :: resolveDMs :: importModels.LookupWorkspaceMapping
-business/SlackImport/dm_resolver.go :: resolveDMs :: importModels.UpsertIdMappingWithOwnership
-business/SlackImport/dm_resolver.go :: resolveDMs :: importModels.UpsertWorkspaceMapping
+business/SlackImport/dm_resolver.go :: resolveDMs :: importModels.RecordCreated
+business/SlackImport/dm_resolver.go :: resolveDMs :: importModels.RecordMapping
 business/SlackImport/dm_worker.go :: applyDMDelete :: .find
 business/SlackImport/dm_worker.go :: applyDMDelete :: chatBusiness.DeleteChat
 business/SlackImport/dm_worker.go :: applyDMDelete :: chatBusiness.DeleteCommentOnChat
@@ -602,6 +715,9 @@ business/Task/statusSince.go :: StartStatusSinceBackfill :: domain.GetDgraphTask
 business/Task/statusSince.go :: StartStatusSinceBackfill :: domain.SetDgraphTaskStatusSince
 business/Task/taskBusiness.go :: publishTaskCommentActivity :: activityBusiness.PublishActivityToUser
 business/Task/taskBusiness.go :: sendNewTaskNotification :: activityBusiness.PublishActivityToUser
+business/Task/taskDependency.go :: afterMove :: integrationBusiness.SyncTaskToGoogleCalendar
+business/Task/taskDependency.go :: afterMove :: moveChanged
+business/Task/taskDependency.go :: afterMove :: mqttBusiness.PublishTaskDatesMany
 business/Task/taskDocSync.go :: taskToDocs :: docRefsChanged
 business/Task/taskDocSync.go :: taskToDocs :: setChecks
 business/Task/taskDocSync.go :: taskToDocs :: untieDocTask
@@ -639,11 +755,16 @@ business/Webhook/webhookBusiness.go :: dispatch :: .reach
 business/Webhook/webhookBusiness.go :: dispatch :: channelIsPublic
 business/Webhook/webhookScheduler.go :: StartWebhookCleanupScheduler :: runCleanup
 business/WorkAccess/contract.go :: OfMany :: editWho
+business/Workflow/due.go :: fireDue :: runWorkflow
+business/Workflow/due.go :: sweepDue :: .fireDue
+business/Workflow/eachTask.go :: runEachTask :: .runTaskAction
 business/Workflow/notices.go :: ruleNotices :: getRule
 business/Workflow/projectRules.go :: prepareProjectRule :: memberOf
 business/Workflow/retention.go :: purgeOldRuns :: purgeRuns
+business/Workflow/runs.go :: runWorkflow :: .madeTask
 business/Workflow/runs.go :: runWorkflow :: .runAction
 business/Workflow/runs.go :: runWorkflow :: .runTaskAction
+business/Workflow/taskActions.go :: checkTaskActionsIn :: isAgent
 business/Workflow/taskActions.go :: checkTaskActionsIn :: memberOf
 business/Workflow/taskActions.go :: checkTaskActionsIn :: taskStatusBusiness.Describe
 business/Workflow/taskActions.go :: checkTaskActionsIn :: taskStatusBusiness.Resolve
@@ -656,8 +777,6 @@ business/Workflow/workflowBusiness.go :: reload :: workflowModel.ListActiveByTri
 controllers/Connector/connectorController.go :: ListConnectors :: connectorBusiness.IsConnected
 controllers/Notification/notificationController.go :: ResendWebhook :: suppressionModels.Upsert
 controllers/Public/cspReportController.go :: ReceiveCSPReport :: configModels.RecordCSPViolation
-controllers/User/userController.go :: FwdUserMessage :: business.GetDgraphUserInfoByUUID
-controllers/User/userController.go :: FwdUserMessage :: chatBusiness.GetDgraphDmBasicByGrpId
 domain/Attachment/attachmentDomian.go :: BulkArchiveAttachmentsInDgraph :: dgraphModels.BulkSoftDeleteDgraphAttachments
 domain/Attachment/attachmentDomian.go :: BulkRestoreAttachmentsInDgraph :: dgraphModels.BulkSoftDeleteDgraphAttachments
 domain/Attachment/attachmentPurge.go :: DeleteAttachmentsEverywhere :: OpenSearchModels.DeleteAttachmentInOpenSearch
@@ -677,16 +796,38 @@ domain/Task/taskReaders.go :: readersOf :: taskread.For
 domain/User/searchName.go :: BackfillSearchNames :: .Mutate
 domain/User/searchName.go :: BackfillSearchNames :: dgexec.InTxn
 domain/User/userDomian.go :: forgetProfile :: redisStore.Delete
-# RELEASE-LINE ONLY (main and without-ai, from v2.75.0): the release lines carry the old demo
-# seeder (business/DemoSeed as the line has it), never beta's; its loops are recorded as they are.
-business/DemoSeed/demoSeed.go :: archiveByName :: channelBusiness.GetBasicDgraphChannelInfoByUUID
-business/DemoSeed/demoSeed.go :: archiveByName :: channelBusiness.UpdateChannelInfo
-business/DemoSeed/demoSeed.go :: cast :: userDomain.GetDgraphUserInfoByUUID
-business/DemoSeed/demoSeed.go :: cast :: userDomain.GetUserByEmailId
+# 25 Oct 2026, DOCS-LEAD-16 (C2-1 search engine): none of these is a read per row. compile, .compile and
+# people's teamMates run once per index the search reads (eleven at most), and teamMates is read once per
+# search (the compiler keeps it); fieldReady (opensearchInit.QueryFieldReady) is the process's own map, not
+# a store. The searchable-copies backfill rewrites each index once (UpdateByQuerySettled per index, eleven
+# at most), at start and every six hours until recorded. repairDropped asks the once-a-window limit and
+# rewrites one entry per doc or board a page's live check dropped (a page is 50 at most), in the
+# background; the limiter has no batch ask.
+business/GlobalSearch/compile.go :: compile :: .compile
+business/GlobalSearch/compile.go :: people :: .teamMates
+business/GlobalSearch/compile.go :: ready :: fieldReady
+business/GlobalSearch/engine.go :: Search :: .compile
+business/GlobalSearch/queryCopiesBackfill.go :: BackfillQueryCopies :: opensearchInit.QueryFieldReady
+business/GlobalSearch/queryCopiesBackfill.go :: BackfillQueryCopies :: rewriteMissing
+business/GlobalSearch/repair.go :: repairDropped :: redisStore.AllowFixedWindowOrLocal
+business/GlobalSearch/repair.go :: repairDropped :: repairEntry
+# 25 Oct 2026, DOCS-LEAD-16 (C2-1, revocation first): a change that took docs from someone writes each
+# doc's search entry and waits for it before it answers; the docs are the change's own (one doc, or a
+# moved page with what is under it), and a doc's entry is written whole from the doc, which has no bulk form.
+business/Doc/docAccessApply.go :: AccessChanged :: SettleAccessIndexes
+# 25 Oct 2026, PROJ-LEAD-33 (comment-search repair): the one-off startup repair pages through search's task
+# comment entries that name no project, 100 at a time (search_after on comment_id), until it has succeeded once.
+# Each page is one read of the graph by the page's ids and one update-by-query that rewrites the page.
+business/Import/commentSearchRepair.go :: RepairTaskCommentSearch :: entriesWithoutProject
+business/Import/commentSearchRepair.go :: RepairTaskCommentSearch :: repairTaskCommentPage
+# 25 Oct 2026, PROJ-LEAD-34 (comment-search repair's hold-back): once a pass, before its first page, the repair reads
+# when this install first ran each of five providers' importer fixes, a fixed list (heldBackUntil), each one
+# read of one system_configs key through the one reader of a fix's moment (FixedAt).
+business/Import/commentSearchRepair.go :: fixMoments :: fixMoment
 # 25 Oct 2026, PROJ-LEAD-33 (importer fix markers): a starting server claims each importer fix's moment once,
 # a fixed list of four keys (business/Import importFixes), each one insert that does nothing when the key is held.
 business/Import/importFixes.go :: ClaimImportFixes :: configModel.Claim
-# 26 Oct 2026, PERMISSIONS-AUDIT-LEAD-15 (the deleted files' once-per-install repair): pages through each kind's items
+# 26 Oct 2026, PERMISSIONS-AUDIT-LEAD-15 (P-FILE-4's once-per-install repair): pages through each kind's items
 # deleted in Postgres, 200 at a time (id > the last, the page's place kept after it), and takes each deleted item's
 # files off through the delete path's own ArchiveFilesOf: one upsert by the item's edges, then one read each of
 # the rows and the nodes left. Items stay one at a time: an item's pair deleted in the same batch would still be
@@ -702,7 +843,11 @@ business/Attachment/deletedFilesRepair.go :: RepairDeletedFiles :: saveProgress
 # its audit record and event) after its own graph read; each comment Jira keeps from some is hidden on its own
 # (graph, search, memory, then Postgres), its change recorded first so an admin can undo it. Undo puts each change
 # back on its own, checking it is still as it was left, and records them in one write. Containment is per task too.
-# The reviews are written once per provider, each with its own fix moment.
+# The reviews are written once per provider, each with its own fix moment. The release lets in a page of one
+# settled import's comments at a time through the repair's own page, and records each import once.
+business/Import/commentRelease.go :: releaseSettled :: importCommentIDs
+business/Import/commentRelease.go :: releaseSettled :: markReleased
+business/Import/commentRelease.go :: releaseSettled :: repairTaskCommentPage
 business/Import/recheck.go :: containImport :: containProject
 business/Import/recheck.go :: containProject :: importModels.MappedTasksIn
 business/Import/recheck.go :: containProject :: restrictionModel.OfMany
@@ -731,12 +876,6 @@ business/Import/recheck.go :: page :: .task
 business/Import/recheck.go :: project :: .page
 business/Import/recheck.go :: project :: .writeAfter
 business/Import/recheck.go :: recheckImport :: .retryLater
-# 26 Oct 2026, PROJ-LEAD-47 (R1's port to the release lines): this line's Jira provider reads through its own getJSON,
-# which this guard counts as a store call. Bounded, and per item by nature: a re-check reads each issue of its page of
-# 50 by key, one GET apiece (Jira reads an issue by its key alone), and an issue's comments' pages only when some of
-# its comments are asked about (commentsKept, through commentPages, the import's own paging).
-business/Import/providers/jira/recheck.go :: recheck :: .commentsKept
-business/Import/providers/jira/recheck.go :: recheck :: .getJSON
 # 25 Oct 2026, PROJ-LEAD-37 (R1, CR-45's nit): a kept comment is still hidden on its own (hideComment, the seam for
 # taskBusiness.HideTaskComment), and its change, recorded pending, is settled on its own once it is hidden, so a retry of
 # its task counts it once.
@@ -745,3 +884,87 @@ business/Import/recheck.go :: hideKept :: reviewModel.SettleAccessChange
 # 25 Oct 2026, PROJ-LEAD-35 (R2, old Linear imports re-checked against Linear): Linear's re-check reads the import's
 # issues by id, fifty a page, following Linear's cursor: one GraphQL read a page, as the provider pages everywhere.
 business/Import/providers/linear/recheck.go :: recheck :: .gql
+# 25 Oct 2026, PROJ-LEAD-38 (R3, old Basecamp imports' people re-checked against Basecamp): bounded by recheckSample,
+# 20. Basecamp reads a project only by its id, so the re-check proves the account with one read per sampled project, at
+# most 20, before its one read of the account's people.
+business/Import/providers/basecamp/recheck.go :: recheckPeople :: .get
+# 26 Oct 2026, PROJ-LEAD-41 (SF2, older imports' task files): the once-per-install repair reads the files a page
+# at a time (keyset on the id map's onecamp_uuid index) and links each one its task doesn't list in its own
+# upsert, as the file stage does: LinkFile's condition holds one holder and one file.
+business/Import/taskFileRepair.go :: repairTaskFiles :: importModels.KeptTaskFilesAfter
+business/Import/taskFileRepair.go :: repairTaskFiles :: linkFile
+# 26 Oct 2026, PROJ-LEAD-43 (step 2, the person-node merge): a restore puts a merge run back one batch per graph
+# transaction (at most 200 strays, as the merge wrote it) and marks each batch restored as it lands, so a restore a
+# crash stopped resumes where it stopped and never takes away an edge twice.
+business/User/strayMerge.go :: RestoreStrayMerge :: dgexec.Mutate
+business/User/strayMerge.go :: RestoreStrayMerge :: userModels.MarkMergeBatch
+# 27 Oct 2026, CALLS-LEAD-28 (calls package C, breakout rooms): one LiveKit call or claim per room or call by
+# nature (a call has at most 50 rooms; LiveKit has no batch metadata or send): the metadata mirror and packets per
+# room, the end of each room's call and its LiveKit room, the sweep's per-call settle, and openFor's adoption inside
+# its retry loop; human and model.RunsCall in toSpread are pure, as in hold.
+business/CallControl/breakoutActs.go :: dueBreakouts :: callStateBusiness.EndRoomsOf
+business/CallControl/breakoutActs.go :: dueBreakouts :: settleBreakouts
+business/CallControl/breakoutActs.go :: mirrorBreakouts :: setMeta
+business/CallControl/breakoutActs.go :: sendToRooms :: tellAcross
+business/CallControl/breakoutActs.go :: tellAcross :: tell
+business/CallControl/breakoutActs.go :: toSpread :: livekitInit.IsPerson
+business/CallControl/breakoutActs.go :: toSpread :: model.RunsCall
+business/CallState/calls.go :: EndRoomsOf :: endSession
+business/CallState/calls.go :: EndRoomsOf :: liveKitBusiness.DeleteRoom
+business/CallState/calls.go :: openFor :: model.AdoptRoomSID
+business/CallState/calls.go :: openFor :: madeAgain
+# 27 Oct 2026, CALLS-LEAD-29 (package C, CR-62's condition 4): the transcription switch is the whole call's, so a
+# flip writes each of the call's rooms (its own and at most 50 breakout rooms; LiveKit has no batch metadata write, and
+# each room's server copy is its own key), and a room made later reads the first other room that has the switch.
+business/LiveKit/callState.go :: FollowCall :: CallSwitches
+business/LiveKit/callState.go :: FollowCall :: livekitInit.LiveKitService.GetRoom
+business/LiveKit/callState.go :: FollowCall :: switchRoom
+business/LiveKit/callState.go :: SetTranscription :: switchRoom
+# 27 Oct 2026, CAL-LEAD-13 (calendar A3, ranked times): a person's busy times are one person's read (ReadBusy: their
+# OneCamp events, then their Google calendar), so the engine reads the people a request names side by side, eight at
+# a time (errgroup), for at most 20 people (maxPeople), as BusySeenBy reads Find a time's.
+business/Availability/engine.go :: Suggestions :: busyFor
+# 27 Oct 2026, CAL-LEAD-15 (the demo seed's cast hours): the fictional cast's zone and weekday hours are kept as each
+# one's own preferences through Person Preferences' one checked Set: two keys for each of the two people, once a run.
+# 27 Oct 2026, TABLES-LEAD-45: an import indexes each table it made or filled once, in the background (ImportBaseAs ::
+# indexSoon: one rowQuery.IndexTable per table; a base has a handful), so Row Query answers it at once rather than at the
+# repair sweep's next pass; each index walks its own table's rows in batches of 500.
+business/DataTable/importBase.go :: ImportBaseAs :: indexSoon
+# 27 Oct 2026, CALLS-LEAD-30: rooms whose address was made from their owner's email move, once, to the address a new
+# room gets (business/Guest roomAddresses.go): each is published again on its own (its free address, then the write),
+# for the few rooms beta and the demo made that way; later passes find none.
+business/Guest/roomAddresses.go :: MoveRoomsOffOwnersAddresses :: moveRoom
+# 27 Oct 2026, CAL-LEAD-18 (calendar head 8, events in global search): the pass at start and every night writes every
+# event's search entry a page at a time (seriesAfter: searchPage ids in order of id), each page in one read of its events,
+# their guests, calendars and people and one bulk write (writeSearchEntries), so no calendar is ever held whole.
+# 28 Oct 2026, WHITEBOARD-LEAD-6: audit C11's listed-form backfill reads the templates still missing a listed form a page of 20 at a time (each may carry a megabyte of payload) and keeps each page's forms in one write (unnest): one read and one write per page, by nature.
+business/Calendar/searchEntries.go :: writeEverySearchEntry :: .seriesAfter
+business/Calendar/searchEntries.go :: writeEverySearchEntry :: .writeSearchEntries
+business/Calendar/ooo.go :: declineAll :: .answer
+business/Calendar/ooo.go :: declineAll :: .tell
+business/ContentIO/boardFile.go :: embedPictures :: readStored
+business/ContentIO/workspaceExport.go :: exportableBoards :: boardUUIDPage
+business/ContentIO/workspaceExport.go :: exportableBoards :: readableBoardsOf
+business/ContentIO/workspaceExport.go :: writeWorkspaceZip :: excalidrawFile
+# 28 Oct 2026, WHITEBOARD-LEAD-8 (miro-36 item 4, boards in the workspace export): the live boards are listed a page of ids at a time (exportPage), each page's readable titles in one read; then each board is read and written into the zip one at a time (its state is its own object in storage, and the zip streams, so memory holds one board), and a board's pictures are read one at a time in file id order until its file's 50 MB budget is spent (object storage has no batched read)
+# 29 Oct 2026, VERIFY-LEAD-24 (V-78, CR-90 SF1): a status's restore moves back each delete's tasks that it still holds (Moves.All): one call per delete whose restore hadn't finished when the status was deleted again, so almost always one; each call is one batched upsert of that delete's tasks.
+business/TaskStatus/taskStatus.go :: Restore :: restatusTasksStillIn
+# 29 Oct 2026, CALLS-LEAD-57 (V-89, one "is this a person" rule): livekitInit.IsPerson is pure (no client call); it is
+# CallControl's human() moved down so the call's dot asks it too, in the same loops as before (renamed above), and in
+# ReadCallView's (which asked IsAgentIdentity).
+business/LiveKit/callView.go :: ReadCallView :: livekitInit.IsPerson
+# 30 Oct 2026, PROJ-LEAD-103 (the upgrade's once-per-install assignee pass): it reads the assigned tasks in projects
+# 200 at a time (by graph uid) and judges each page as one step, with one read each for the page: what imports made,
+# and its new people's restricted tasks (repairAssignees :: .page; precedent repairDocSearchPage). Each assignee is
+# taken off through the one shared unassign (history, search, calendar), a task at a time by design and bounded by
+# what the pass takes off (page :: .takeOff); each project's admins get one Inbox notice per person, by nature
+# (tellAdmins :: tell; its recipients are read once for every project before the loop).
+business/AssigneeRepair/repair.go :: page :: .takeOff
+business/AssigneeRepair/repair.go :: repairAssignees :: .page
+business/AssigneeRepair/repair.go :: tellAdmins :: tell
+# RELEASE-LINE ONLY (main and without-ai, from v2.75.0; again for v2.76.0): the release lines carry
+# the old demo seeder (business/DemoSeed as the line has it), never beta's; its loops are recorded as they are.
+business/DemoSeed/demoSeed.go :: archiveByName :: channelBusiness.GetBasicDgraphChannelInfoByUUID
+business/DemoSeed/demoSeed.go :: archiveByName :: channelBusiness.UpdateChannelInfo
+business/DemoSeed/demoSeed.go :: cast :: userDomain.GetDgraphUserInfoByUUID
+business/DemoSeed/demoSeed.go :: cast :: userDomain.GetUserByEmailId

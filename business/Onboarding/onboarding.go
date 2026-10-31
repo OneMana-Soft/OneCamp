@@ -363,12 +363,14 @@ func definitions() []stepDef {
 			Step: Step{
 				ID:    "import",
 				Title: "Bring your existing work over",
-				Detail: "Slack history, or projects and tasks from Trello, Asana, Jira, monday.com, Notion, Linear, " +
-					"ClickUp and Todoist. Doing it before people arrive means they land in a workspace that already has it.",
+				Detail: "Slack history, projects and tasks from Trello, Asana, Jira, monday.com, Notion, Linear, " +
+					"ClickUp, Basecamp and Todoist, tables from Airtable and Google Sheets, boards from Miro, or tasks from a CSV file. Doing " +
+					"it before people arrive means they land in a " +
+					"workspace that already has it.",
 				Href: "/app/admin?tab=import",
 				// NOT SLACK-SPECIFIC, and the first version of this step was.
 				//
-				// The import pipeline takes nine providers and the done probe has
+				// The import pipeline takes every provider and the done probe has
 				// always asked about all of them, but the row said "Bring your
 				// Slack history over" and linked to the Slack tab. A team arriving
 				// from Jira read a checklist that did not describe their migration

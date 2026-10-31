@@ -6,6 +6,7 @@ import (
 
 	adapter "github.com/akashc777/OneCamp/adapter/Team"
 	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
+	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
 	business "github.com/akashc777/OneCamp/business/Team"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	"github.com/akashc777/OneCamp/controllers/httpx"
@@ -316,6 +317,10 @@ func AddMemberToTeam(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "Cannot add external users to teams",
 		})
+		return
+	}
+	if err = principalBusiness.Unassignable(memberInfo, principalBusiness.Added); err != nil {
+		helpers.WriteWriteFailure(w, r, err, "Couldn't add them to the team.", "controllers/AddMemberToTeam")
 		return
 	}
 

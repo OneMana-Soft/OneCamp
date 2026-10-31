@@ -16,7 +16,8 @@
 //   - rows are always closed and rows.Err() always read, so a list cut short
 //     by a dropped connection is an error, never a short list;
 //   - a statement inside InTx runs in that transaction without being handed
-//     a *sql.Tx: the transaction travels in ctx.
+//     a *sql.Tx: the transaction travels in ctx (WithTx puts one there for
+//     code another executor handed a *sql.Tx).
 package pgexec
 
 import (
@@ -151,6 +152,12 @@ func QueryOne[T any](ctx context.Context, q string, scan func(Row) (T, error), a
 	return v, true, nil
 }
 
+// Text reads a row of one text column (ids as ::text), for Query.
+func Text(r Row) (s string, err error) {
+	err = r.Scan(&s)
+	return
+}
+
 // Scalar reads the one value a statement returns (a count, an id, an
 // EXISTS). sql.ErrNoRows when it returns no row.
 func Scalar[T any](ctx context.Context, q string, args ...any) (T, error) {
@@ -206,6 +213,20 @@ func InTx(ctx context.Context, fn func(ctx context.Context) error) error {
 		return ErrNoDatabase
 	}
 	return postgresInit.InTx(ctx, TxTimeout, func(ctx context.Context, tx *sql.Tx) error {
-		return fn(context.WithValue(ctx, txKey{}, tx))
+		return fn(WithTx(ctx, tx))
 	})
+}
+
+// WithTx is ctx carrying tx: every pgexec statement made with it runs in tx,
+// as one inside InTx does, and an InTx inside it joins tx. It is for code
+// another executor handed a *sql.Tx: the row ledger's observers get the
+// write's own transaction, and a batch that needs a longer budget than
+// TxTimeout opens its own with postgresInit.InTx. The owner of tx commits or
+// rolls it back; a statement gets no timeout of its own, since tx's context
+// bounds it. A nil tx is ctx as it was.
+func WithTx(ctx context.Context, tx *sql.Tx) context.Context {
+	if tx == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, txKey{}, tx)
 }

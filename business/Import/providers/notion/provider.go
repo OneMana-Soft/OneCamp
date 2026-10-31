@@ -38,7 +38,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -57,6 +56,9 @@ const apiBase = "https://api.notion.com/v1"
 const notionVersion = "2022-06-28"
 
 const maxPages = 200
+
+// statusRules reads Notion's answers; it averages three requests a second.
+var statusRules = importProvider.StatusRules{Name: "Notion", Wait: 10 * time.Second}
 
 // Provider implements the importProvider.Provider interface for Notion.
 type Provider struct {
@@ -687,6 +689,11 @@ type notionRichText struct {
 		Page *struct {
 			ID string `json:"id"`
 		} `json:"page,omitempty"`
+		// User is a person mention: who, by the id IterUsers brings them
+		// across by.
+		User *struct {
+			ID string `json:"id"`
+		} `json:"user,omitempty"`
 		// Date is a date mention: its start (a day, or a day and time).
 		Date *struct {
 			Start string `json:"start"`
@@ -854,40 +861,7 @@ func (p *Provider) call(ctx context.Context, tok, version, method, path string, 
 		req.Header.Set("Content-Type", "application/json")
 	}
 	req.Header.Set("Accept", "application/json")
-	return p.do(ctx, req, out)
-}
-
-// apiError is an answer of 400 or above that isn't about the token or the
-// rate: a page that isn't shared with the connection answers 404.
-type apiError struct {
-	Status int
-	Body   string
-}
-
-func (e *apiError) Error() string { return fmt.Sprintf("notion HTTP %d: %s", e.Status, e.Body) }
-
-func (p *Provider) do(ctx context.Context, req *http.Request, out any) error {
-	resp, err := importProvider.SharedAPIClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	switch {
-	case resp.StatusCode == http.StatusTooManyRequests:
-		retryAfter := 10 * time.Second
-		if v := resp.Header.Get("Retry-After"); v != "" {
-			if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-				retryAfter = time.Duration(secs) * time.Second
-			}
-		}
-		return &importProvider.ErrRateLimited{RetryAfter: retryAfter, Reason: "Notion 429"}
-	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
-		return &importProvider.TokenRejected{Msg: fmt.Sprintf("notion auth failed (HTTP %d); reconnect token", resp.StatusCode)}
-	case resp.StatusCode >= 400:
-		raw, _ := io.ReadAll(resp.Body)
-		return &apiError{Status: resp.StatusCode, Body: string(raw)}
-	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return statusRules.SendJSON(req, out)
 }
 
 func (p *Provider) loadToken(ctx context.Context, j *importModels.Job) (string, error) {
@@ -1139,13 +1113,10 @@ func (p *Provider) buildTaskFromPage(ctx context.Context, tok string, row *notio
 		}
 	}
 	var due *time.Time
+	var dueDay importProvider.Day
 	if schema.dueProp != "" {
-		if pp, ok := row.Properties[schema.dueProp]; ok && pp.Date != nil && pp.Date.Start != "" {
-			if t, err := time.Parse(time.RFC3339, pp.Date.Start); err == nil {
-				due = &t
-			} else if t, err := time.Parse("2006-01-02", pp.Date.Start); err == nil {
-				due = &t
-			}
+		if pp, ok := row.Properties[schema.dueProp]; ok {
+			due, dueDay = notionDue(pp)
 		}
 	}
 	// A Tags or Labels multi-select is the task's tags; other
@@ -1216,6 +1187,7 @@ func (p *Provider) buildTaskFromPage(ctx context.Context, tok string, row *notio
 		AssigneeIds:     assignees,
 		CreatedBy:       createdBy,
 		DueDate:         due,
+		DueDay:          dueDay,
 		Created:         created,
 		Updated:         updated,
 		Completed:       isDoneStatus(status),
@@ -1285,4 +1257,20 @@ func (p *Provider) CleanupJob(jobId string) {
 	p.mu.Lock()
 	delete(p.dbCache, id)
 	p.mu.Unlock()
+}
+
+// notionDue is a date property's start: the instant Notion gives when it has
+// a time, or the day when it has none, which the import writes where the team
+// is (provider.Day). Pure.
+func notionDue(p notionPageProperty) (*time.Time, importProvider.Day) {
+	if p.Date == nil || p.Date.Start == "" {
+		return nil, importProvider.Day{}
+	}
+	if d, ok := importProvider.ParseDay(p.Date.Start); ok {
+		return nil, d
+	}
+	if t, err := time.Parse(time.RFC3339, p.Date.Start); err == nil {
+		return &t, importProvider.Day{}
+	}
+	return nil, importProvider.Day{}
 }

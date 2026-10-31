@@ -227,8 +227,17 @@ func TestOnlyAnAdminInTheAppListsOrKeepsAnOldImportsAccess(t *testing.T) {
 		}
 	}
 	audited(t, env.PG, "import.access_kept", 1)
-	// Keeping it leaves each review's counts as they were. (This line holds no
-	// imported comment back from search, so a keep has none to let in.)
+	// Keeping it settles it: its held-back comments are let into search now,
+	// not at the next start's pass (releaseSettled), and each review keeps its
+	// counts.
+	waitFor(t, "the kept import's held-back comments to be let in", func() bool {
+		var released bool
+		if err := env.PG.QueryRow(`SELECT COALESCE(bool_and(summary ? 'comments_released'), false)
+			FROM import_access_reviews WHERE import_id = $1`, waiting).Scan(&released); err != nil {
+			t.Fatal(err)
+		}
+		return released
+	})
 	var hidden int
 	if err := env.PG.QueryRow(`SELECT (summary->>'gone_or_hidden')::int FROM import_access_reviews
 		WHERE import_id = $1 AND project_uuid = $2 AND jsonb_typeof(summary) = 'object'`, waiting, archived).Scan(&hidden); err != nil || hidden != 1 {

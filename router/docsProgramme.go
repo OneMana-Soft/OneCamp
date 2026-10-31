@@ -43,6 +43,13 @@ type docsRouters struct {
 	// V1 is the public API's /v1: an API token's owner, each route asserting the
 	// scope it needs (customMiddleware.RequireScope).
 	V1 chi.Router
+	// Files is the root behind /doc's middleware but its 8 MiB body cap, for
+	// the routes that take a file upload and nothing else (docs F1: a file in
+	// the doc tree, and its new versions): a file under the workspace's upload
+	// limit (10 MB by default, up to 5 GB) may be larger than 8 MiB. Each of
+	// its handlers caps the body at that limit before reading it
+	// (httpx.ReadUpload), as /uploadFile's does.
+	Files chi.Router
 }
 
 // newDocsRouters builds the routers a package may mount on. doc, admin,
@@ -56,7 +63,18 @@ func newDocsRouters(root, doc, admin, docColab, v1 chi.Router) docsRouters {
 		Admin:    admin,
 		Internal: docColab.With(customMiddleware.VerifyInternalServiceRequest),
 		V1:       v1,
+		Files:    uploadsOnly(root),
 	}
+}
+
+// uploadsOnly is root behind the member group's middleware but its body cap
+// (CSRF, a signed-in member): the Files router, whose handlers cap their
+// uploads at the workspace's limit themselves.
+func uploadsOnly(root chi.Router) chi.Router {
+	return root.With(
+		customMiddleware.CSRFMiddleware,
+		customMiddleware.VerifyAuth,
+	)
 }
 
 // membersOnly is root behind the middleware router.go's member group carries
@@ -99,5 +117,6 @@ func mountDocsProgramme(rt docsRouters) {
 	mountQuery(rt)       // C2: the one query grammar, read for the signed-in person
 	mountPublish(rt)     // C6: docs published to the web
 	mountGuestThread(rt) // C5-2: a doc's conversation with its guests, and its client verdict
+	mountDocFiles(rt)    // F1: Docs & Files' files and their versions
 	mountDocsAdmin(rt)   // C6-2: the work of people who left, and the link lifetime's count
 }

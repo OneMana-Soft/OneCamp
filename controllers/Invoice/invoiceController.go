@@ -11,6 +11,7 @@ import (
 	business "github.com/akashc777/OneCamp/business/Invoice"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	projectaccess "github.com/akashc777/OneCamp/controllers/ProjectAccess"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
@@ -164,7 +165,11 @@ func DeleteInvoice(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := business.Delete(r.Context(), project, id); err != nil {
+	user, signedIn := httpx.MustUser(w, r)
+	if !signedIn {
+		return
+	}
+	if err := business.Delete(r.Context(), project, id, user.UserPostgresInfo.Id); err != nil {
 		fail(w, r, "DeleteInvoice", err)
 		return
 	}

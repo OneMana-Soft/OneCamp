@@ -37,6 +37,7 @@ import (
 	"time"
 
 	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
+	model "github.com/akashc777/OneCamp/models/postgres/CallState"
 )
 
 // Ref names what a call belongs to: a conversation (business/Conversation's
@@ -52,6 +53,8 @@ var (
 	ErrNotACallRoom = errors.New("callstate: not a call room")
 	// ErrCallOver is a call that has ended: nothing can be changed about it.
 	ErrCallOver = errors.New("callstate: the call is over")
+	// ErrNotInThisCall is someone the call has no record of.
+	ErrNotInThisCall = errors.New("callstate: not in this call")
 )
 
 // Person is someone in a call, or who was.
@@ -72,9 +75,37 @@ type Person struct {
 	SecondsIn int        `json:"seconds_in"`
 	// Removed is whether someone running the call put them out of it.
 	Removed bool `json:"removed,omitempty"`
+	// HandRaisedAt is when their hand went up, nil while it is down; raised
+	// hands queue in this order.
+	HandRaisedAt *time.Time `json:"hand_raised_at,omitempty"`
+	// Feedback is what stays beside their name until removed: yes, no,
+	// slow_down or away, or "".
+	Feedback string `json:"feedback,omitempty"`
+	// Allowed is what they may do although the call holds it, as someone
+	// running the call let them (model.Holds).
+	Allowed []string `json:"allowed,omitempty"`
 }
 
 // Lock is who locked a call, so nobody new can join it, and when.
+// Breakouts is the state of a call's breakout rooms (calls package C): open
+// since OpenAt, people choose their own while Choose, they close by
+// themselves at EndsAt, and everyone is called back (or was) at ClosingAt.
+type Breakouts struct {
+	OpenAt    *time.Time `json:"open_at,omitempty"`
+	Choose    bool       `json:"choose,omitempty"`
+	EndsAt    *time.Time `json:"ends_at,omitempty"`
+	ClosingAt *time.Time `json:"closing_at,omitempty"`
+}
+
+// GoesOnInRooms is model.Session's GoesOnInRooms, on the call as it is read.
+func (s *Session) GoesOnInRooms(now time.Time) bool {
+	if s.Breakouts == nil {
+		return false
+	}
+	row := model.Session{BreakoutsOpenAt: s.Breakouts.OpenAt, BreakoutsClosingAt: s.Breakouts.ClosingAt}
+	return row.GoesOnInRooms(now)
+}
+
 type Lock struct {
 	By string    `json:"by"`
 	At time.Time `json:"at"`
@@ -87,6 +118,15 @@ type Recording struct {
 	StartedAt time.Time  `json:"started_at"`
 	EndedAt   *time.Time `json:"ended_at,omitempty"`
 	Status    string     `json:"status"`
+}
+
+// QA is a call's Q&A settings (calls package A): whether people may ask,
+// which questions the people who don't run the call see ("all" or
+// "answered"), and whether they may ask anonymously.
+type QA struct {
+	Open      bool   `json:"open"`
+	Shown     string `json:"shown"`
+	Anonymous bool   `json:"anonymous"`
 }
 
 // Session is one call, as everyone who may see it reads it.
@@ -110,6 +150,16 @@ type Session struct {
 	// Spotlight is the identity everyone's stage shows large, if anyone's.
 	Spotlight   string `json:"spotlight,omitempty"`
 	MuteOnEntry bool   `json:"mute_on_entry,omitempty"`
+	// Held is what everyone who doesn't run the call may not do now (model.Holds).
+	Held []string `json:"held,omitempty"`
+	// QA is the call's Q&A settings (calls package A).
+	QA QA `json:"qa"`
+	// Board is the board on the call's stage, if any (calls package B).
+	Board *Board `json:"board,omitempty"`
+	// Parent is the call a breakout room's call is of (calls package C).
+	Parent string `json:"parent,omitempty"`
+	// Breakouts is the state of the call's breakout rooms, once they opened.
+	Breakouts *Breakouts `json:"breakouts,omitempty"`
 	// People is everyone who was in the call, in the order they first joined.
 	People     []Person    `json:"people"`
 	Recordings []Recording `json:"recordings"`

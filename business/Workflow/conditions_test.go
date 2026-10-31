@@ -1,9 +1,13 @@
 package business
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
+
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
+	"github.com/google/uuid"
 )
 
 func TestConditionsDecideOnTheTaskAsItIsNow(t *testing.T) {
@@ -50,6 +54,43 @@ func TestConditionsDecideOnTheTaskAsItIsNow(t *testing.T) {
 	done.Category = "done"
 	if (Condition{Field: "due", Op: "overdue"}).holds(done, now, nil) {
 		t.Error("a finished task is never overdue")
+	}
+}
+
+// A due date is a day (the web writes the midnight it starts, in the zone of
+// whoever set it), and "overdue" means its day has passed in the rule's
+// zone, as the task list's Overdue group says: a task due today is due
+// today, not overdue, however late in the day.
+func TestDueDatesAreDaysInTheRulesZone(t *testing.T) {
+	kolkata, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		t.Skip("no zone data")
+	}
+	now := time.Date(2026, 10, 20, 21, 0, 0, 0, kolkata)
+	day := func(d int) *time.Time {
+		v := time.Date(2026, 10, 20+d, 0, 0, 0, 0, kolkata)
+		return &v
+	}
+	overdue := Condition{Field: "due", Op: "overdue"}
+	within := func(n string) Condition { return Condition{Field: "due", Op: "within_days", Value: n} }
+	cases := []struct {
+		name string
+		c    Condition
+		due  *time.Time
+		want bool
+	}{
+		{"due today is not overdue at 21:00", overdue, day(0), false},
+		{"due yesterday is overdue", overdue, day(-1), true},
+		{"due today is within 0 days", within("0"), day(0), true},
+		{"due tomorrow is within 1 day", within("1"), day(1), true},
+		{"due in 2 days is not within 1 day", within("1"), day(2), false},
+		{"due yesterday is not within 3 days", within("3"), day(-1), false},
+	}
+	for _, c := range cases {
+		task := taskFacts{Category: "todo", Due: c.due}
+		if got := c.c.holds(task, now, kolkata); got != c.want {
+			t.Errorf("%s: %v, want %v", c.name, got, c.want)
+		}
 	}
 }
 
@@ -102,18 +143,41 @@ func TestConditionsAreCheckedWhenSaved(t *testing.T) {
 func TestTheReadyMadeRulesAreRulesThatSave(t *testing.T) {
 	hues := map[string]bool{"sky": true, "moss": true, "sun": true, "dusk": true, "berry": true, "lake": true}
 	seen := map[string]bool{}
-	for _, tpl := range RuleTemplates {
-		if seen[tpl.Key] || !hues[tpl.Hue] {
+	check := func(tpl RuleTemplate) {
+		if seen[tpl.Key] || !(hues[tpl.Hue] || tpl.Hue == "agent" && tpl.NeedsAI) {
 			t.Errorf("%s: key repeated or hue %q", tpl.Key, tpl.Hue)
 		}
 		seen[tpl.Key] = true
-		in := WorkflowInput{Name: tpl.Name, TriggerType: tpl.TriggerType, TriggerConfig: map[string]interface{}{},
+		cfg := map[string]interface{}{}
+		for k, v := range tpl.Trigger {
+			cfg[k] = v
+		}
+		in := WorkflowInput{Name: tpl.Name, TriggerType: tpl.TriggerType, TriggerConfig: cfg, ProjectID: uuid.NewString(),
 			Conditions: tpl.Conditions, Actions: append([]WorkflowAction(nil), tpl.Actions...), ElseActions: append([]WorkflowAction(nil), tpl.ElseActions...)}
+		for i := range in.Actions {
+			if in.Actions[i].Type == ActionCreateTask {
+				in.Actions[i].ProjectID = in.ProjectID
+			}
+		}
 		if _, err := validate(&in); err != nil {
 			t.Errorf("%s: %v", tpl.Key, err)
 		}
 	}
-	if len(RuleTemplates) < 10 {
-		t.Errorf("%d ready-made rules", len(RuleTemplates))
+	withAgentHooks(t, nil, nil)
+	for _, tpl := range Templates() {
+		if tpl.NeedsAI {
+			t.Errorf("%s needs AI but is offered without it", tpl.Key)
+		}
+		check(tpl)
+	}
+	withAgentHooks(t, func(context.Context, *userModels.UserInfo, AgentQuestion) (AgentAnswer, error) {
+		return AgentAnswer{}, nil
+	}, nil)
+	seen = map[string]bool{}
+	for _, tpl := range Templates() {
+		check(tpl)
+	}
+	if len(Templates()) != len(RuleTemplates) || len(RuleTemplates) < 15 {
+		t.Errorf("%d ready-made rules with AI, of %d", len(Templates()), len(RuleTemplates))
 	}
 }

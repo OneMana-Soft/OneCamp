@@ -12,7 +12,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	chatAdapter "github.com/akashc777/OneCamp/adapter/Chat"
 	postAdapter "github.com/akashc777/OneCamp/adapter/Post"
@@ -245,6 +244,15 @@ func PrepareDirectMessage(ctx context.Context, user *userModels.UserInfo, in *ch
 	return &DirectMessage{in: in, user: user, to: to, toUUID: toUUID, mentions: mentions}, nil
 }
 
+// MaxForwardPlaces is the most places one forward may name (channels, groups
+// and people together). DG4's probe measured a forward at 79 ms to 10 places,
+// 548 ms to 100 and 5.7 s to 1,000, all in one request; the app's picker
+// counts to the same number (lib/chat forwardLimit).
+const MaxForwardPlaces = 100
+
+// TooManyForwardPlaces is the words a longer forward is refused with.
+var TooManyForwardPlaces = fmt.Sprintf("A message can be forwarded to at most %d places at once. Choose fewer and forward again.", MaxForwardPlaces)
+
 // MayMessage is the rule for writing to a person directly: an account that
 // can receive direct messages (principalBusiness.CanReceiveDirectMessage, the
 // rule the AI executor and MCP share, which refuses a deactivated one) and
@@ -347,7 +355,9 @@ func PrepareGroupMessage(ctx context.Context, user *userModels.UserInfo, in *cha
 
 // MayBeInGroup is the rule for being one of a group's people: an account
 // someone signs in to (an external identity, imported or synced, never does)
-// that isn't deactivated. A new group's people are held to it, and so is
+// that can be given a place (principalBusiness.CanBeAssigned: it isn't
+// deactivated), which a channel, a team and a project ask too, in the same
+// words and with the same 409. A new group's people are held to it, and so is
 // everyone added to one (business/Conversation AddPeople), so the rule has one
 // copy. The external check had read a field the participants' lookup never
 // selected, so it never refused anyone.
@@ -357,8 +367,9 @@ func MayBeInGroup(u *dgraphStruct.DgraphUser) *Rejection {
 		return &Rejection{Status: http.StatusBadRequest, Msg: "Got unregistered users in participants"}
 	case u.IsExternal:
 		return &Rejection{Status: http.StatusBadRequest, Msg: "Cannot add external users to group chats"}
-	case helpers.IsSoftDeleted(u.DeletedAt):
-		return &Rejection{Status: http.StatusBadRequest, Msg: strings.TrimSpace(u.DisplayName() + " can't be added: their account is deactivated.")}
+	}
+	if err := principalBusiness.Unassignable(u, principalBusiness.Added); err != nil {
+		return &Rejection{Status: http.StatusConflict, Msg: err.Error()}
 	}
 	return nil
 }

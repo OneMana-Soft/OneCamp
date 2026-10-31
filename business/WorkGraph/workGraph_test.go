@@ -197,6 +197,25 @@ func TestKindsFilterTheGroupsNotThePaths(t *testing.T) {
 	}
 }
 
+// TestAPanelShowsTheMeetingsThatDiscussedItByDefault (DG13): a panel that
+// names no kinds shows a meeting whose notes link its thing, grouped as
+// meetings, and one hidden from the reader not at all.
+func TestAPanelShowsTheMeetingsThatDiscussedItByDefault(t *testing.T) {
+	const sync, private = "50000000-0000-4000-8000-000000000001", "50000000-0000-4000-8000-000000000002"
+	reached := []domain.Reached{
+		{Node: ref(domain.KindEvent, sync), Path: []domain.Hop{hop("linked_from", domain.KindEvent, sync)}},
+		{Node: ref(domain.KindEvent, private), Path: []domain.Hop{hop("linked_from", domain.KindEvent, private)}},
+	}
+	withFakes(t, reached, nil, private)
+	got, err := NeighboursOf(context.Background(), reader, Ref{"doc", plan}, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l := lines(got); len(l) != 1 || l[0] != "event 1: linked_from>1" {
+		t.Errorf("got %v", l)
+	}
+}
+
 // TestPathsDropEveryPathThroughSomethingHidden: of three paths, the one
 // through the private doc goes; either end hidden is not found.
 func TestPathsDropEveryPathThroughSomethingHidden(t *testing.T) {

@@ -211,9 +211,22 @@ func live(o *models.Event) bool { return o.DeletedAt == nil && o.Status != statu
 // series' instances, from its overrides where it has them. At most limit,
 // earliest first.
 func (s *service) instancesOf(ctx context.Context, rows []*models.Event, w models.Window, limit int) ([]instance, error) {
+	overrides, err := s.overridesFor(ctx, rows, w)
+	if err != nil {
+		return nil, err
+	}
+	return expandInstances(ctx, rows, overrides, w, limit), nil
+}
+
+// seriesOverrides are series' overrides, by series and then by the
+// instance's recurrence id (UnixNano).
+type seriesOverrides map[uuid.UUID]map[int64]*models.Event
+
+// overridesFor reads, in one read, the overrides of rows' series that can
+// show in w: back as far as the longest instance, so one that started before
+// w and runs into it is found too.
+func (s *service) overridesFor(ctx context.Context, rows []*models.Event, w models.Window) (seriesOverrides, error) {
 	var seriesIDs []uuid.UUID
-	// The overrides of instances that started before the window and run into
-	// it: as far back as the longest instance.
 	reach := w
 	for _, e := range rows {
 		if e.RRule != "" {
@@ -223,19 +236,27 @@ func (s *service) instancesOf(ctx context.Context, rows []*models.Event, w model
 			}
 		}
 	}
-	overrides := map[uuid.UUID]map[int64]*models.Event{}
-	if len(seriesIDs) > 0 {
-		ovs, err := s.store.overridesOf(ctx, seriesIDs, reach)
-		if err != nil {
-			return nil, err
-		}
-		for _, o := range ovs {
-			if overrides[*o.SeriesID] == nil {
-				overrides[*o.SeriesID] = map[int64]*models.Event{}
-			}
-			overrides[*o.SeriesID][o.RecurrenceID.UnixNano()] = o
-		}
+	overrides := seriesOverrides{}
+	if len(seriesIDs) == 0 {
+		return overrides, nil
 	}
+	ovs, err := s.store.overridesOf(ctx, seriesIDs, reach)
+	if err != nil {
+		return nil, err
+	}
+	for _, o := range ovs {
+		if overrides[*o.SeriesID] == nil {
+			overrides[*o.SeriesID] = map[int64]*models.Event{}
+		}
+		overrides[*o.SeriesID][o.RecurrenceID.UnixNano()] = o
+	}
+	return overrides, nil
+}
+
+// expandInstances is instancesOf once the overrides are read: no store, so
+// a caller can read many calendars' rows and overrides once, then expand
+// each calendar's rows apart.
+func expandInstances(ctx context.Context, rows []*models.Event, overrides seriesOverrides, w models.Window, limit int) []instance {
 	var out []instance
 	for _, e := range rows {
 		if e.RRule == "" {
@@ -281,7 +302,7 @@ func (s *service) instancesOf(ctx context.Context, rows []*models.Event, w model
 	if len(out) > limit {
 		out = out[:limit]
 	}
-	return out, nil
+	return out
 }
 
 // resolve is the occurrence an id names, and its owner's guests, for someone
@@ -614,7 +635,7 @@ func (s *service) updateSeries(ctx context.Context, who *model.UserInfo, cur, ne
 	if err != nil {
 		return nil, nil, err
 	}
-	removed := uuidStrings(g.remove)
+	removed := helpers.UUIDStrings(g.remove)
 	changed := changedFields(cur, updated, g.changed())
 	if cur.RRule != updated.RRule {
 		changed = append(changed, "recurrence")
@@ -636,15 +657,6 @@ func (s *service) applySeries(ctx context.Context, who *model.UserInfo, series u
 		return ErrEventNotFound
 	}
 	return err
-}
-
-// uuidStrings are ids as text.
-func uuidStrings(ids []uuid.UUID) []string {
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		out = append(out, id.String())
-	}
-	return out
 }
 
 // newOverride makes row the first override of an instance made from its
@@ -849,7 +861,7 @@ func (s *service) splitAt(ctx context.Context, who *model.UserInfo, inst instanc
 	if err := s.applySeries(ctx, who, series.ID, b); err != nil {
 		return nil, err
 	}
-	removed := uuidStrings(g.remove)
+	removed := helpers.UUIDStrings(g.remove)
 	s.announce(ctx, who, resourceEventBusiness.CalendarEventUpdated, series, append(guestIDs(guests), removed...),
 		map[string]string{"changed": "recurrence", "scope": ScopeFollowing, "instance": inst.ref})
 	s.announce(ctx, who, resourceEventBusiness.CalendarEventCreated, fresh, guestIDs(g.after), map[string]string{"from": series.ID.String()})
@@ -866,6 +878,8 @@ func (s *service) deleteThis(ctx context.Context, who *model.UserInfo, inst inst
 	case roleOrganiser:
 	case roleGuest:
 		return ErrNotEventCreator
+	case roleReader:
+		return ErrSubscribedEvent
 	default:
 		return ErrEventNotFound
 	}
@@ -903,6 +917,8 @@ func (s *service) deleteFollowing(ctx context.Context, who *model.UserInfo, inst
 	case roleOrganiser:
 	case roleGuest:
 		return ErrNotEventCreator
+	case roleReader:
+		return ErrSubscribedEvent
 	default:
 		return ErrEventNotFound
 	}

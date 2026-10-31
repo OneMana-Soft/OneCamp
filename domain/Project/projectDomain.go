@@ -276,7 +276,7 @@ func GetDgraphProjectBoardCards(ctx context.Context, txn *dgo.Txn, uids []string
 	if err != nil {
 		return nil, err
 	}
-	query := tr.Fill(fmt.Sprintf(`{
+	query := tr.Fill(fmt.Sprintf(`{`+dgraphStruct.ReaderProjectsVar(taskread.ReaderOf(ctx))+`
 			cards(func: uid(%s)) {
 				%s
 			}
@@ -306,22 +306,86 @@ func GetDgraphProjectTaskPlaces(ctx context.Context, projectUUID string, userDgr
 }
 
 func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgraphUID string, filterQuery string, sortQuery string, pageSize int, pageIndex int, getAll bool) (dgraphProject *dgraphStruct.DgraphProject, err error) {
-	if len(filterQuery) > 0 {
-		filterQuery = "AND " + filterQuery
-	}
-	variables := make(map[string]string)
-	variables["$id"] = projectUUID
-	variables["$userDgraphUID"] = userDgraphUID
-	order := dgraphquery.TotalOrder(sortQuery, "task_uuid")
-
-	// Restricted tasks the viewer may not see leave the count and the pages
-	// alike (models/taskread).
-	tr, err := taskread.From(ctx)
+	query, variables, err := taskListQuery(ctx, projectUUID, userDgraphUID, filterQuery, sortQuery)
 	if err != nil {
 		return nil, err
 	}
-	query := func(page dgraphquery.Page) string {
-		return tr.Fill(fmt.Sprintf(`query ProjectInfo($id: string, $userDgraphUID: string){
+
+	if !getAll && pageSize > 0 {
+		dgraphProject, err = dgraphModels.GetDgraphProjectInfoByUUID(ctx, query(dgraphquery.Page{First: pageSize, Offset: pageIndex * pageSize}), variables)
+	} else {
+		// Everything: one sorted block stops at 1,000, so page through it, in
+		// one snapshot so the pages meet.
+		err = dgraphInit.InSnapshot(ctx, func(txn *dgo.Txn) error {
+			tasks, err := dgraphquery.ReadAll(dgraphquery.ReadAllPage, func(page dgraphquery.Page) ([]*dgraphStruct.DgraphTask, error) {
+				got, err := dgraphModels.GetDgraphProjectInfoInTxn(ctx, txn, query(page), variables)
+				if err != nil {
+					return nil, err
+				}
+				if dgraphProject == nil {
+					dgraphProject = got
+				}
+				return got.Tasks, nil
+			})
+			if err == nil {
+				dgraphProject.Tasks = tasks
+			}
+			return err
+		})
+	}
+
+	if err != nil {
+		helpers.LogErrorWithContext(ctx,
+			"domain/GetDgraphProjectTaskList Failed to get project task list from dgraph err: %+v",
+			err,
+		)
+		return nil, err
+	}
+	return
+
+}
+
+// EachProjectTaskPage reads the list as GetDgraphProjectTaskList does, a page
+// of ReadAllPage tasks at a time in one snapshot, and hands each page to each
+// with how many tasks the list holds, until most have been handed.
+func EachProjectTaskPage(ctx context.Context, projectUUID, userDgraphUID, filterQuery, sortQuery string, most int, each func(total int, tasks []*dgraphStruct.DgraphTask) error) error {
+	query, variables, err := taskListQuery(ctx, projectUUID, userDgraphUID, filterQuery, sortQuery)
+	if err != nil {
+		return err
+	}
+	return dgraphInit.InSnapshot(ctx, func(txn *dgo.Txn) error {
+		total := 0
+		_, err := dgraphquery.EachPage(dgraphquery.ReadAllPage, most, func(page dgraphquery.Page) ([]*dgraphStruct.DgraphTask, error) {
+			got, err := dgraphModels.GetDgraphProjectInfoInTxn(ctx, txn, query(page), variables)
+			if err != nil {
+				helpers.LogErrorWithContext(ctx, "domain/EachProjectTaskPage couldn't read project %s's tasks err: %+v", projectUUID, err)
+				return nil, err
+			}
+			total = int(got.TaskCount)
+			return got.Tasks, nil
+		}, func(tasks []*dgraphStruct.DgraphTask) error {
+			return each(total, tasks)
+		})
+		return err
+	})
+}
+
+// taskListQuery is the list's read of a project's tasks, a window at a time:
+// query gives the window's tasks in order (the sort made total by task_uuid),
+// with how many the list holds. Restricted tasks the reader may not see leave
+// the count and the pages alike (models/taskread).
+func taskListQuery(ctx context.Context, projectUUID, userDgraphUID, filterQuery, sortQuery string) (query func(dgraphquery.Page) string, variables map[string]string, err error) {
+	if len(filterQuery) > 0 {
+		filterQuery = "AND " + filterQuery
+	}
+	variables = map[string]string{"$id": projectUUID, "$userDgraphUID": userDgraphUID}
+	order := dgraphquery.TotalOrder(sortQuery, "task_uuid")
+	tr, err := taskread.From(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	query = func(page dgraphquery.Page) string {
+		return tr.Fill(fmt.Sprintf(`query ProjectInfo($id: string, $userDgraphUID: string){`+dgraphStruct.ReaderProjectsVar(taskread.ReaderOf(ctx))+`
 				projectInfo(func: eq(project_uuid, $id)) {
 					project_uuid
 					project_name
@@ -362,44 +426,20 @@ func GetDgraphProjectTaskList(ctx context.Context, projectUUID string, userDgrap
 							team_uuid
 						}
 						task_created_at
+						task_created_by {
+							user_uuid
+						}
+						task_parent_task @filter(`+dgraphquery.Live("task_deleted_at")+` @@hidden_tasks@@) {
+							task_uuid
+						}
+						task_estimate_minutes
+						task_estimate_points
 						task_rank
 					}
 				}
 			}`, filterQuery, filterQuery, order, page.Args()))
 	}
-
-	if !getAll && pageSize > 0 {
-		dgraphProject, err = dgraphModels.GetDgraphProjectInfoByUUID(ctx, query(dgraphquery.Page{First: pageSize, Offset: pageIndex * pageSize}), variables)
-	} else {
-		// Everything: one sorted block stops at 1,000, so page through it, in
-		// one snapshot so the pages meet.
-		err = dgraphInit.InSnapshot(ctx, func(txn *dgo.Txn) error {
-			tasks, err := dgraphquery.ReadAll(dgraphquery.ReadAllPage, func(page dgraphquery.Page) ([]*dgraphStruct.DgraphTask, error) {
-				got, err := dgraphModels.GetDgraphProjectInfoInTxn(ctx, txn, query(page), variables)
-				if err != nil {
-					return nil, err
-				}
-				if dgraphProject == nil {
-					dgraphProject = got
-				}
-				return got.Tasks, nil
-			})
-			if err == nil {
-				dgraphProject.Tasks = tasks
-			}
-			return err
-		})
-	}
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"domain/GetDgraphProjectTaskList Failed to get project task list from dgraph err: %+v",
-			err,
-		)
-		return nil, err
-	}
-	return
-
+	return query, variables, nil
 }
 
 func GetDgraphProjectInfoAndTeamAdminFlagAndAttachments(ctx context.Context, projectUUID string, userDgraphUID string) (dgraphProject *dgraphStruct.DgraphProject, err error) {
@@ -558,7 +598,11 @@ func GetBasicDgraphProjectInfoWithGivenMemberAndTeamUUID(ctx context.Context, pr
 						team_members @filter(eq(user_uuid, $memberUuid)){
 							uid
 							user_uuid
+							user_name
+							user_full_name
+							user_email_id
 							is_external
+							user_deleted_at
 						}
 						team_is_admin: count(team_admins @filter(uid($userUid)))
 					}
@@ -1100,7 +1144,7 @@ func GetDgraphProjectTimeline(ctx context.Context, projectUUID, userDgraphUID st
 	if err != nil {
 		return nil, err
 	}
-	query := tr.Fill(fmt.Sprintf(`query Timeline($id: string, $user: string){
+	query := tr.Fill(fmt.Sprintf(`query Timeline($id: string, $user: string){`+dgraphStruct.ReaderProjectsVar(taskread.ReaderOf(ctx))+`
 			projectInfo(func: eq(project_uuid, $id)) {
 				project_uuid
 				project_is_admin: count(project_admins @filter(uid($user)))
@@ -1253,7 +1297,8 @@ func GetDgraphProjectCounts(ctx context.Context, userDgraphUID string, today, we
 // GetProjectsReadAccessFor reads, for one person (by graph uid), what
 // business/WorkAccess decides each of the named projects by: whether the
 // person is its member, its admin, or an admin of its team; with its
-// deletion and its maker. One query for the lot; ids that aren't uuids are
+// deletion, its maker and its name (for a list across projects, such as
+// their running cycles). One query for the lot; ids that aren't uuids are
 // left out, and so is any project that doesn't exist.
 func GetProjectsReadAccessFor(ctx context.Context, projectUUIDs []string, readerUID string) ([]*dgraphStruct.DgraphProject, error) {
 	list := dgraphquery.UUIDList(projectUUIDs)
@@ -1264,6 +1309,7 @@ func GetProjectsReadAccessFor(ctx context.Context, projectUUIDs []string, reader
 		projectInfo(func: eq(project_uuid, [`+list+`])) {
 			uid
 			project_uuid
+			project_name
 			project_deleted_at
 			project_is_member: count(project_members @filter(uid($userUid)))
 			project_is_admin: count(project_admins @filter(uid($userUid)))
@@ -1281,7 +1327,39 @@ func GetProjectsReadAccessFor(ctx context.Context, projectUUIDs []string, reader
 	return projects, err
 }
 
-// MembershipsPage is how many projects a page of ProjectMembershipsPage holds.
+// GetReaderProjectsReadAccess is GetProjectsReadAccessFor for every live
+// project the person (by graph uid) is in, found from them rather than named:
+// for a list across their projects (their running cycles), so a busy
+// workspace's other projects are never read. One query.
+func GetReaderProjectsReadAccess(ctx context.Context, readerUID string) ([]*dgraphStruct.DgraphProject, error) {
+	if !graphUID.MatchString(readerUID) {
+		return nil, nil
+	}
+	projects, err := dgraphModels.GetDgraphProjectList(ctx, `query Access($userUid: string) {
+		var(func: uid($userUid)) { mine as user_projects }
+		projectInfo(func: uid(mine)) @filter(`+dgraphquery.Live("project_deleted_at")+`) {
+			uid
+			project_uuid
+			project_name
+			project_deleted_at
+			project_is_member: count(project_members @filter(uid($userUid)))
+			project_is_admin: count(project_admins @filter(uid($userUid)))
+			project_created_by { uid user_uuid }
+			project_team {
+				uid
+				team_uuid
+				team_is_admin: count(team_admins @filter(uid($userUid)))
+			}
+		}
+	}`, map[string]string{"$userUid": readerUID})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetReaderProjectsReadAccess err: %+v", err)
+	}
+	return projects, err
+}
+
+// MembershipsPage is how many projects one read of their people takes: a page
+// of ProjectMembershipsPage, and a part of MembersAmongEach.
 const MembershipsPage = 100
 
 // ProjectMembershipsPage reads a page of projects with who is on each one's

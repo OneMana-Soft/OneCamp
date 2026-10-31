@@ -304,21 +304,76 @@ func TestTableFieldTypes(t *testing.T) {
 		}
 	})
 
-	t.Run("a Notion database's row with a value outside its options is left out, and said", func(t *testing.T) {
+	// An import never loses a row for one bad cell, nor the value in it: a
+	// value outside a select's or a multi-select's options becomes one of
+	// them in the table the import makes, as Notion's own import makes it,
+	// once however many rows carry it, and the import's note says so. A Notion
+	// database goes through the importer every source's tables share
+	// (ImportBaseAs), whose notes the import's report keeps.
+	t.Run("a Notion database's value outside its options becomes an option, and its row keeps it, with a note", func(t *testing.T) {
 		db := notionAdapter.Database{
-			Title:   "Reading list",
-			Columns: []notionAdapter.Column{{Name: "Title", Type: "title"}, {Name: "State", Type: "select", Options: []string{"Reading", "Read"}}},
-			Rows:    []map[string]any{{"Title": "Dune", "State": "Read"}, {"Title": "Emma", "State": "Abandoned"}},
+			Title: "Reading list",
+			Columns: []notionAdapter.Column{{Name: "Title", Type: "title"}, {Name: "State", Type: "select", Options: []string{"Reading", "Read"}},
+				{Name: "Tags", Type: "multi_select", Options: []string{"Classic"}}},
+			Rows: []map[string]any{{"Title": "Dune", "State": "Read", "Tags": []string{"Classic"}},
+				{"Title": "Emma", "State": "Abandoned", "Tags": []string{"Classic", "Romance"}}, {"Title": "Ulysses", "State": "Abandoned"}},
 		}
-		tb, left, err := notionAdapter.TableFromDatabase(w.ctx, w.people["amara"], db)
+		tb, notes, err := notionAdapter.TableFromDatabase(w.ctx, w.people["amara"], db)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if left != 1 {
-			t.Errorf("%d rows were left out, want the one outside the options", left)
+		var said []string
+		for _, n := range notes {
+			said = append(said, n.Code+" "+n.Field+": "+n.Msg)
 		}
-		if n, _ := dataTableModel.CountRows(w.ctx, tb.Id); n != 1 {
-			t.Errorf("the table holds %d rows", n)
+		sort.Strings(said)
+		if got, want := strings.Join(said, "\n"), `OPTION_ADDED State: "State" gained the option "Abandoned"`+"\n"+
+			`OPTION_ADDED Tags: "Tags" gained the option "Romance"`; got != want {
+			t.Errorf("the notes are\n%s\nwant\n%s", got, want)
+		}
+		if n, _ := dataTableModel.CountRows(w.ctx, tb.Id); n != 3 {
+			t.Errorf("the table holds %d rows, want all three", n)
+		}
+		fields, err := dataTableModel.ListFields(w.ctx, tb.Id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := map[string]string{}
+		var state struct {
+			Options []map[string]any `json:"options"`
+		}
+		for _, f := range fields {
+			id[f.Name] = f.Id.String()
+			if f.Name == "State" {
+				_ = json.Unmarshal([]byte(f.Config), &state)
+			}
+		}
+		var labels []string
+		for _, o := range state.Options {
+			labels = append(labels, fmt.Sprint(o["label"]))
+		}
+		if got := strings.Join(labels, ", "); got != "Reading, Read, Abandoned" {
+			t.Errorf("State's options are %s, want Abandoned after Notion's two", got)
+		}
+		// cellOf is a row's cell as stored, as JSON.
+		cellOf := func(title, field string) string {
+			var v *string
+			if err := w.env.PG.QueryRow(`SELECT values -> $2 FROM data_table_rows WHERE table_id = $1 AND deleted_at IS NULL AND values ->> $3 = $4`,
+				tb.Id, id[field], id["Title"], title).Scan(&v); err != nil {
+				t.Fatalf("%s's row: %v", title, err)
+			}
+			if v == nil {
+				return ""
+			}
+			return *v
+		}
+		for _, c := range []struct{ title, field, want string }{
+			{"Emma", "State", `"Abandoned"`}, {"Ulysses", "State", `"Abandoned"`}, {"Dune", "State", `"Read"`},
+			{"Emma", "Tags", `["Classic", "Romance"]`}, {"Dune", "Tags", `["Classic"]`},
+		} {
+			if got := cellOf(c.title, c.field); got != c.want {
+				t.Errorf("%s's %s is %s, want %s", c.title, c.field, got, c.want)
+			}
 		}
 	})
 }

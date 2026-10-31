@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -121,8 +122,8 @@ func processMessageChunk(ctx context.Context, arc *Archive, chunk *importModels.
 		default:
 		}
 
-		// Skip system noise.
-		if skipSubtypes && SubtypeIsSystem(m.Subtype) {
+		// A system notice comes across only as a channel's line (leftOut).
+		if leftOut(m.Subtype, skipSubtypes, mc.chunkType == importModels.ChunkChannelMessages) {
 			return true
 		}
 		if SubtypeIsTombstone(m.Subtype) {
@@ -130,7 +131,11 @@ func processMessageChunk(ctx context.Context, arc *Archive, chunk *importModels.
 			// We honour deletes by tombstoning the OneCamp post if we
 			// have it mapped. Idempotent: re-runs are no-ops.
 			if m.PreviousMessage != nil && m.PreviousMessage.Ts != "" {
-				_ = applyMessageDelete(ctx, mc, m.PreviousMessage.Ts)
+				if err := applyMessageDelete(ctx, mc, m.PreviousMessage.Ts); err != nil {
+					importModels.LogImportError(ctx, mc.importId, &mc.chunkId,
+						importModels.EntityMessage, m.PreviousMessage.Ts,
+						importModels.SeverityError, "MESSAGE_DELETE_FAILED", err.Error(), nil)
+				}
 			}
 			return true
 		}
@@ -140,7 +145,11 @@ func processMessageChunk(ctx context.Context, arc *Archive, chunk *importModels.
 			// id_map; the original ts (in SubMessage.Ts) is the canonical
 			// id. Empty SubMessage = malformed export, skip.
 			if m.SubMessage != nil && m.SubMessage.Ts != "" {
-				_ = applyMessageEdit(ctx, mc, m.SubMessage)
+				if err := applyMessageEdit(ctx, mc, m.SubMessage); err != nil {
+					importModels.LogImportError(ctx, mc.importId, &mc.chunkId,
+						importModels.EntityMessage, m.SubMessage.Ts,
+						importModels.SeverityError, "MESSAGE_EDIT_FAILED", err.Error(), nil)
+				}
 			}
 			return true
 		}
@@ -168,7 +177,21 @@ func processMessageChunk(ctx context.Context, arc *Archive, chunk *importModels.
 		if mc.chunkType == importModels.ChunkChannelThreads {
 			entityType = importModels.EntityComment
 		}
-		alreadyMapped := mc.maps.ownMapping(ctx, entityType, m.Ts) != uuid.Nil
+		// One message that fails is logged, and the rest of the file goes on;
+		// the chunk is marked failed only if a fatal infra error fires below.
+		fail := func(err error) bool {
+			importModels.LogImportError(ctx, mc.importId, &mc.chunkId,
+				entityType, m.Ts,
+				importModels.SeverityError, "MESSAGE_IMPORT_FAILED",
+				err.Error(),
+				mustMarshal(map[string]interface{}{"subtype": m.Subtype}))
+			return true
+		}
+		mine, err := mc.maps.ownMapping(ctx, entityType, m.Ts)
+		if err != nil {
+			return fail(err)
+		}
+		alreadyMapped := mine != uuid.Nil
 
 		// Enqueue file chunks for any attachments referenced by this
 		// message. Done EARLY so retries after a partial-success message
@@ -205,7 +228,11 @@ func processMessageChunk(ctx context.Context, arc *Archive, chunk *importModels.
 		// silently and just record the per-import mapping for activity
 		// counting + rollback safety.
 		if mc.workspaceName != "" {
-			if existing := mc.maps.workspaceMapping(ctx, entityType, m.Ts); existing != uuid.Nil {
+			existing, err := mc.maps.workspaceMapping(ctx, entityType, m.Ts)
+			if err != nil {
+				return fail(err)
+			}
+			if existing != uuid.Nil {
 				_ = mc.maps.matched(ctx, entityType, m.Ts, existing,
 					mustMarshal(map[string]interface{}{"matched_by": "workspace_map"}))
 				mc.lastCursor = m.Ts
@@ -225,15 +252,7 @@ func processMessageChunk(ctx context.Context, arc *Archive, chunk *importModels.
 		}
 
 		if importErr != nil {
-			importModels.LogImportError(ctx, mc.importId, &mc.chunkId,
-				entityType, m.Ts,
-				importModels.SeverityError, "MESSAGE_IMPORT_FAILED",
-				importErr.Error(),
-				mustMarshal(map[string]interface{}{"subtype": m.Subtype}))
-			// Continue with the rest of the file. One bad message
-			// shouldn't kill the whole chunk; the chunk is marked
-			// failed only if a fatal infra error fires below.
-			return true
+			return fail(importErr)
 		}
 
 		mc.itemsDone++
@@ -489,37 +508,45 @@ func (mc *messageContext) resolveAuthor(ctx context.Context, m *SlackMessage, im
 // resolveUser is the OneCamp person a Slack user id was imported as, or
 // importingUser for one that wasn't (or none).
 func (mc *messageContext) resolveUser(ctx context.Context, authorId string, importingUser *userModels.UserInfo) (*userModels.UserInfo, error) {
-	if who := importedPerson(ctx, mc.maps, mc.userCache, authorId); who != nil {
-		return who, nil
+	who, err := importedPerson(ctx, mc.maps, mc.userCache, authorId)
+	if err != nil || who != nil {
+		return who, err
 	}
 	return importingUser, nil
 }
 
 // importedPerson is the OneCamp person a Slack user came across as, nil for
 // one who didn't (or no id): read once a chunk and kept in cache. The one
-// lookup a channel's and a DM's messages share.
-func importedPerson(ctx context.Context, maps *messageMaps, cache map[string]*userModels.UserInfo, slackID string) *userModels.UserInfo {
+// lookup a channel's and a DM's messages share. A read that fails is an
+// error: read as "didn't come across", the message was the importer's.
+func importedPerson(ctx context.Context, maps *messageMaps, cache map[string]*userModels.UserInfo, slackID string) (*userModels.UserInfo, error) {
 	if slackID == "" {
-		return nil
+		return nil, nil
 	}
 	if cached, ok := cache[slackID]; ok {
-		return cached
+		return cached, nil
 	}
 	ocUUID, err := maps.userId(ctx, slackID)
-	if err != nil || ocUUID == uuid.Nil {
-		return nil
+	if err != nil {
+		return nil, fmt.Errorf("reading what this import made for user %s: %w", slackID, err)
+	}
+	if ocUUID == uuid.Nil {
+		return nil, nil
 	}
 	pgUser, err := userBusiness.GetUserByUUID(ctx, ocUUID)
-	if err != nil || pgUser == nil {
-		return nil
+	if err != nil {
+		return nil, fmt.Errorf("reading person %s: %w", ocUUID, err)
 	}
 	dgUser, err := userBusiness.GetDgraphUserInfoByUUID(ctx, ocUUID.String())
-	if err != nil || dgUser == nil {
-		return nil
+	if err != nil && !errors.Is(err, helpers.ErrNotFound) {
+		return nil, fmt.Errorf("reading person %s: %w", ocUUID, err)
+	}
+	if pgUser == nil || dgUser == nil {
+		return nil, nil
 	}
 	info := &userModels.UserInfo{UserPostgresInfo: *pgUser, UserDgraphInfo: *dgUser}
 	cache[slackID] = info
-	return info
+	return info, nil
 }
 
 // newMessageContext fetches channel info and primes caches.
@@ -706,7 +733,10 @@ func applyMessageEdit(ctx context.Context, mc *messageContext, sub *SlackEditedM
 		entityType = importModels.EntityComment
 	}
 
-	ocUUID := mc.maps.find(ctx, entityType, originalTs)
+	ocUUID, err := mc.maps.find(ctx, entityType, originalTs)
+	if err != nil {
+		return err
+	}
 	if ocUUID == uuid.Nil {
 		return nil
 	}
@@ -787,7 +817,10 @@ func applyMessageEdit(ctx context.Context, mc *messageContext, sub *SlackEditedM
 // gate inside those paths suppresses live MQTT and AI fan-out.
 func applyMessageDelete(ctx context.Context, mc *messageContext, originalTs string) error {
 	for _, et := range []string{importModels.EntityMessage, importModels.EntityComment} {
-		ocUUID := mc.maps.find(ctx, et, originalTs)
+		ocUUID, err := mc.maps.find(ctx, et, originalTs)
+		if err != nil {
+			return err
+		}
 		if ocUUID == uuid.Nil {
 			continue
 		}

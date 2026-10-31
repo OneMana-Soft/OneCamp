@@ -8,7 +8,6 @@ import (
 
 	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
 	"github.com/akashc777/OneCamp/helpers"
-	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	importModels "github.com/akashc777/OneCamp/models/postgres/SlackImport"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -92,15 +91,25 @@ func resolveDMs(ctx context.Context, importId uuid.UUID, workspaceName string,
 		// to use CreateChat or CreateChatForGroup.
 		isMPIMShapedDM := len(dm.Members) > 2
 		// Tier 1: same-import retry idempotency.
-		if existing, _ := importModels.LookupIdMapping(ctx, importId, importModels.EntityDM, dm.ID); existing != uuid.Nil {
+		existing, err := importModels.LookupIdMapping(ctx, importId, importModels.EntityDM, dm.ID)
+		if err != nil {
+			return stats, fmt.Errorf("reading what this import made for DM %s: %w", dm.ID, err)
+		}
+		if existing != uuid.Nil {
 			continue
 		}
 		// Tier 2: prior import of same workspace.
-		if existing, _ := importModels.LookupWorkspaceMapping(ctx, workspaceName, importModels.EntityDM, dm.ID); existing != uuid.Nil {
-			_ = importModels.UpsertIdMappingWithOwnership(ctx, importId,
+		if existing, err = importModels.LookupWorkspaceMapping(ctx, workspaceName, importModels.EntityDM, dm.ID); err != nil {
+			return stats, fmt.Errorf("reading what an earlier import made for DM %s: %w", dm.ID, err)
+		}
+		if existing != uuid.Nil {
+			// Found in the workspace's map, so only this import's is written.
+			if err := importModels.RecordMapping(ctx, importId,
 				importModels.EntityDM, dm.ID, existing, nil,
 				mustMarshal(map[string]interface{}{"matched_by": "workspace_map"}),
-				false)
+				false, ""); err != nil {
+				return stats, err
+			}
 			continue
 		}
 
@@ -151,18 +160,16 @@ func resolveDMs(ctx context.Context, importId uuid.UUID, workspaceName string,
 		// the grouping id makes the placeholder stable across re-runs
 		// so the workspace mapping table doesn't churn.
 		ph := uuid.NewSHA1(uuid.Nil, []byte("dm:"+groupingId))
-		if err := importModels.UpsertIdMappingWithOwnership(ctx, importId,
+		if err := importModels.RecordCreated(ctx, importId,
 			importModels.EntityDM, dm.ID, ph, nil,
 			mustMarshal(map[string]interface{}{
 				"grouping_id":   groupingId,
 				"members":       memberOcUUIDs,
 				"slack_members": dm.Members,
 				"is_mpim":       isMPIMShapedDM,
-			}), true); err != nil {
+			}), workspaceName); err != nil {
 			return stats, err
 		}
-		_ = importModels.UpsertWorkspaceMapping(ctx, workspaceName,
-			importModels.EntityDM, dm.ID, ph, importId)
 		stats.DMs++
 	}
 
@@ -174,14 +181,23 @@ func resolveDMs(ctx context.Context, importId uuid.UUID, workspaceName string,
 			stats.SkippedNoMembers++
 			continue
 		}
-		if existing, _ := importModels.LookupIdMapping(ctx, importId, importModels.EntityMPIM, mp.ID); existing != uuid.Nil {
+		existing, err := importModels.LookupIdMapping(ctx, importId, importModels.EntityMPIM, mp.ID)
+		if err != nil {
+			return stats, fmt.Errorf("reading what this import made for group %s: %w", mp.ID, err)
+		}
+		if existing != uuid.Nil {
 			continue
 		}
-		if existing, _ := importModels.LookupWorkspaceMapping(ctx, workspaceName, importModels.EntityMPIM, mp.ID); existing != uuid.Nil {
-			_ = importModels.UpsertIdMappingWithOwnership(ctx, importId,
+		if existing, err = importModels.LookupWorkspaceMapping(ctx, workspaceName, importModels.EntityMPIM, mp.ID); err != nil {
+			return stats, fmt.Errorf("reading what an earlier import made for group %s: %w", mp.ID, err)
+		}
+		if existing != uuid.Nil {
+			if err := importModels.RecordMapping(ctx, importId,
 				importModels.EntityMPIM, mp.ID, existing, nil,
 				mustMarshal(map[string]interface{}{"matched_by": "workspace_map"}),
-				false)
+				false, ""); err != nil {
+				return stats, err
+			}
 			continue
 		}
 
@@ -224,18 +240,16 @@ func resolveDMs(ctx context.Context, importId uuid.UUID, workspaceName string,
 			continue
 		}
 		ph := uuid.NewSHA1(uuid.Nil, []byte("mpim:"+groupingId))
-		if err := importModels.UpsertIdMappingWithOwnership(ctx, importId,
+		if err := importModels.RecordCreated(ctx, importId,
 			importModels.EntityMPIM, mp.ID, ph, nil,
 			mustMarshal(map[string]interface{}{
 				"grouping_id":   groupingId,
 				"members":       memberOcUUIDs,
 				"slack_members": mp.Members,
 				"is_mpim":       true,
-			}), true); err != nil {
+			}), workspaceName); err != nil {
 			return stats, err
 		}
-		_ = importModels.UpsertWorkspaceMapping(ctx, workspaceName,
-			importModels.EntityMPIM, mp.ID, ph, importId)
 		stats.MPIMs++
 	}
 
@@ -353,13 +367,14 @@ func loadDMContext(ctx context.Context, chunk *importModels.Chunk, workspaceName
 // for tests.
 var groupingsThere = chatDomain.ExistingGroupingIDs
 
-// dmResolveAuthor mirrors messageContext.resolveAuthor for the chat path.
-func (dc *dmContext) resolveAuthor(ctx context.Context, m *SlackMessage, importingUser *userModels.UserInfo) (*userModels.UserInfo, *dgraphStruct.DgraphUser) {
+// resolveAuthor mirrors messageContext.resolveAuthor for the chat path.
+func (dc *dmContext) resolveAuthor(ctx context.Context, m *SlackMessage, importingUser *userModels.UserInfo) (*userModels.UserInfo, error) {
 	// A bot's message with no person, or no author at all, is the importer's.
-	if who := importedPerson(ctx, dc.maps, dc.userCache, m.User); who != nil {
-		return who, &who.UserDgraphInfo
+	who, err := importedPerson(ctx, dc.maps, dc.userCache, m.User)
+	if err != nil || who != nil {
+		return who, err
 	}
-	return importingUser, &importingUser.UserDgraphInfo
+	return importingUser, nil
 }
 
 // jsonUnmarshalRaw is a tiny wrapper used by loadDMContext to keep the

@@ -26,6 +26,7 @@ import (
 type reachWorld struct {
 	members    map[uuid.UUID]bool
 	channels   map[string]map[uuid.UUID]bool
+	meetings   map[string]map[uuid.UUID]bool
 	roles      map[string]map[uuid.UUID]workAccess.Role
 	docs       map[string]map[uuid.UUID]accessBusiness.Level
 	trashed    map[string]bool
@@ -38,13 +39,15 @@ type reachWorld struct {
 func stubReach(t *testing.T) *reachWorld {
 	t.Helper()
 	w := &reachWorld{
-		members: map[uuid.UUID]bool{}, channels: map[string]map[uuid.UUID]bool{}, roles: map[string]map[uuid.UUID]workAccess.Role{},
+		members: map[uuid.UUID]bool{}, channels: map[string]map[uuid.UUID]bool{}, meetings: map[string]map[uuid.UUID]bool{}, roles: map[string]map[uuid.UUID]workAccess.Role{},
 		docs: map[string]map[uuid.UUID]accessBusiness.Level{}, trashed: map[string]bool{}, hidden: map[uuid.UUID]map[string]bool{},
 		restricted: map[string]bool{}, asked: map[string]int{},
 	}
 	sMember, sChannel, sGraph, sProject, sStanding, sDoc, sHidden, sRestricted := memberNow, readsChannel, graphUser, projectAs, standingIn, resolveDoc, hiddenTasks, restrictedTaskEvent
+	sMeeting := readsMeeting
 	t.Cleanup(func() {
 		memberNow, readsChannel, graphUser, projectAs, standingIn, resolveDoc, hiddenTasks, restrictedTaskEvent = sMember, sChannel, sGraph, sProject, sStanding, sDoc, sHidden, sRestricted
+		readsMeeting = sMeeting
 	})
 	memberNow = func(_ context.Context, id uuid.UUID) (bool, error) {
 		w.asked["member"]++
@@ -53,6 +56,10 @@ func stubReach(t *testing.T) *reachWorld {
 	readsChannel = func(_ context.Context, who, channel string) (bool, error) {
 		w.asked["channel"]++
 		return w.channels[channel][uuid.MustParse(who)], nil
+	}
+	readsMeeting = func(_ context.Context, who, meeting string) (bool, error) {
+		w.asked["meeting"]++
+		return w.meetings[meeting][uuid.MustParse(who)], nil
 	}
 	graphUser = func(_ context.Context, who string) (*dgraphStruct.DgraphUser, error) {
 		return &dgraphStruct.DgraphUser{Uid: "0x" + who[:4], Uuid: who}, nil
@@ -153,6 +160,49 @@ func TestAnEventNamesWhatItsReaderMustRead(t *testing.T) {
 	w.restricted[task] = true
 	if got := needsOf(context.Background(), "doc.shared", data); got != (needs{channel: "c1", project: "p1", docEvent: true, doc: "d1", task: task}) {
 		t.Errorf("a doc's event about a restricted task needs %+v", got)
+	}
+	if got := needsOf(context.Background(), "call.ended", map[string]interface{}{"session_id": "s1", "meeting_id": " m1 "}); got != (needs{callEvent: true, meeting: "m1"}) {
+		t.Errorf("a meeting's call's event needs %+v", got)
+	}
+}
+
+// zoom-15: a meeting's call reaches only webhooks whose owners may read the
+// meeting's calls (business/CallState MayRead), whole from the workspace; a
+// channel's call is held to the channel alone; a call's event that names
+// neither reaches nobody.
+func TestAMeetingsCallReachesOnlyWebhooksWhoseOwnersMayReadIt(t *testing.T) {
+	w := stubReach(t)
+	host, stranger := uuid.New(), uuid.New()
+	w.members[host], w.members[stranger] = true, true
+	w.meetings["m1"] = map[uuid.UUID]bool{host: true}
+	send := dispatchTo(t, "call.ended", ScopeOrg, nil, []*webhookModel.Webhook{
+		{Id: uuid.New(), Name: "host's", CreatedBy: host, ScopeType: ScopeOrg},
+		{Id: uuid.New(), Name: "stranger's", CreatedBy: stranger, ScopeType: ScopeOrg},
+	})
+	sent := send(map[string]interface{}{"session_id": "s1", "meeting_id": "m1", "duration_s": 1500, "people": 3})
+	if len(sent) != 1 || !strings.Contains(sent["host's"], `"duration_s":1500`) {
+		t.Fatalf("sent %v, want the host's webhook alone, whole", sent)
+	}
+	if w.asked["meeting"] != 2 {
+		t.Errorf("asked %v, want the meeting rule once for each owner", w.asked)
+	}
+	if sent := send(map[string]interface{}{"session_id": "s2", "duration_s": 60}); len(sent) != 0 {
+		t.Errorf("a call's event naming neither a channel nor a meeting was sent to %v", sent)
+	}
+
+	channel := uuid.New()
+	w.channels[channel.String()] = map[uuid.UUID]bool{stranger: true}
+	w.asked = map[string]int{}
+	send = dispatchTo(t, "call.started", ScopeChannel, &channel, []*webhookModel.Webhook{
+		{Id: uuid.New(), Name: "host's", CreatedBy: host, ScopeType: ScopeOrg},
+		{Id: uuid.New(), Name: "member's", CreatedBy: stranger, ScopeType: ScopeOrg},
+	})
+	sent = send(map[string]interface{}{"session_id": "s3", "channel_id": channel.String()})
+	if _, ok := sent["member's"]; !ok || len(sent) != 1 {
+		t.Errorf("a channel's call was sent to %v, want the channel's member alone", sent)
+	}
+	if w.asked["meeting"] != 0 {
+		t.Errorf("a channel's call asked the meeting rule: %v", w.asked)
 	}
 }
 

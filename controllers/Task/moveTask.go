@@ -75,6 +75,9 @@ func MoveTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	err = business.MoveTask(ctx, taskUUID, in.Status, in.Before, in.After, dgraphTaskInfo, &userInfo.UserDgraphInfo)
+	if projectaccess.RefuseStatus(w, err) {
+		return
+	}
 	if errors.Is(err, taskStatusBusiness.ErrUnknownStatus) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That column is not a status in this project any more. Reload the board."})
 		return

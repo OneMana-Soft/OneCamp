@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/models/redis/registry"
@@ -27,7 +26,10 @@ func LoginRateLimit(kind string) func(http.Handler) http.Handler {
 
 // IPRateLimit rate-limits mutating requests per (kind, client IP) in the
 // registry.LoginRate 15-minute window, answering 429 with msg once max is
-// reached.
+// reached, and its reads (GET, HEAD) apart, at a link page's budget a minute
+// (LinkReadLimit). Reads went uncounted, so the guest links' GETs behind it
+// (a meeting, a table, a channel, a project) had no limit at all, the
+// "guest-channel-read" bucket included (audit A3, 22 Oct 2026).
 //
 // When Redis can't be asked, the request is counted in this process instead
 // (redisStore.AllowFixedWindowOrLocal). It used to be let through, so a Redis
@@ -36,11 +38,17 @@ func LoginRateLimit(kind string) func(http.Handler) http.Handler {
 func IPRateLimit(kind string, max int, msg string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Don't gate preflights or non-mutating probes. Every sign-in,
-			// two-step and reset route is a POST; the guest, booking and
-			// unsubscribe GETs this is also attached to go uncounted, which
-			// costs load, not guessing (their tokens are 24 or 32 random bytes).
-			if r.Method == http.MethodOptions || r.Method == http.MethodGet {
+			if r.Method == http.MethodOptions {
+				next.ServeHTTP(w, r)
+				return
+			}
+			// A read costs load, not guessing (a link's token is 24 or 32
+			// random bytes): its own budget, a minute's.
+			if r.Method == http.MethodGet || r.Method == http.MethodHead {
+				if res := redisStore.AllowPerAddress(r.Context(), kind, helpers.ClientIP(r), linkReadsPerAddress); !res.Allowed {
+					WriteRateLimited(w, res, registry.PublicReadRate, publicReadAddressMsg)
+					return
+				}
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -78,9 +86,8 @@ func WriteRateLimited(w http.ResponseWriter, res redisStore.RateLimitResult, spe
 	helpers.WriteJSON(w, http.StatusTooManyRequests, helpers.Envolope{"msg": msg, "status": "rate_limited"})
 }
 
-// contextWithRedisTimeout wraps the request ctx in a 500ms-bounded timeout
-// for our rate-limit Redis call. Long enough that healthy Redis isn't
-// affected, short enough that a hung Redis doesn't queue requests.
+// contextWithRedisTimeout bounds a rate-limit ask of Redis at
+// redisStore.LimitAskTimeout.
 func contextWithRedisTimeout(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(parent, 500*time.Millisecond)
+	return context.WithTimeout(parent, redisStore.LimitAskTimeout)
 }

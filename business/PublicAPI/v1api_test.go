@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	appBusiness "github.com/akashc777/OneCamp/business/App"
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // The public API's one shape (design/platform/API_CONTRACT.md §3.2): what
@@ -232,15 +233,18 @@ func TestEveryRouteHoldsAnAppToItsPlaces(t *testing.T) {
 	acting, readErr := app, error(nil)
 	prev := actsAsApp
 	t.Cleanup(func() { actsAsApp = prev })
-	actsAsApp = func(context.Context) (*appBusiness.Identity, error) { return acting, readErr }
+	reads := 0
+	actsAsApp = func(context.Context) (*appBusiness.Identity, error) { reads++; return acting, readErr }
 	ran := 0
+	var handed *appBusiness.Identity
 	echo := func(w http.ResponseWriter, r *http.Request) {
 		ran++
+		handed = AppOf(r)
 		body, _ := io.ReadAll(r.Body)
 		_, _ = w.Write(body)
 	}
 	inBody := func(r *http.Request) (string, string) {
-		body, _ := PeekBody(r)
+		body, _ := helpers.PeekBody(r)
 		var b struct {
 			Channel string `json:"channel"`
 		}
@@ -282,6 +286,13 @@ func TestEveryRouteHoldsAnAppToItsPlaces(t *testing.T) {
 		t.Errorf("a route closed to apps refused with %q, not its own words", e.Message)
 	}
 
+	// A handler that holds the app itself is handed the one the check read: one
+	// read per call.
+	reads, handed = 0, nil
+	if w := send(r, "GET", "/mine", "p:read", ""); w.Code != http.StatusOK || handed != app || reads != 1 {
+		t.Errorf("a route that holds the app itself: %d, handed %v after %d reads, want the app read once", w.Code, handed, reads)
+	}
+
 	// The app's record couldn't be read: refused, never let through as "not an app".
 	readErr, acting = errors.New("pq: connection refused"), nil
 	for _, path := range []string{"/mine", "/unread"} {
@@ -294,8 +305,8 @@ func TestEveryRouteHoldsAnAppToItsPlaces(t *testing.T) {
 	// A person's or an agent's token: no app, nothing held.
 	readErr = nil
 	ran = 0
-	if w := send(r, "GET", "/unread", "p:read", ""); w.Code != http.StatusOK || ran != 1 {
-		t.Errorf("a token that isn't an app's, on a route closed to apps: %d, the handler ran %d times", w.Code, ran)
+	if w := send(r, "GET", "/unread", "p:read", ""); w.Code != http.StatusOK || ran != 1 || handed != nil {
+		t.Errorf("a token that isn't an app's, on a route closed to apps: %d, the handler ran %d times, handed %v", w.Code, ran, handed)
 	}
 }
 

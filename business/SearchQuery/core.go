@@ -1,14 +1,14 @@
 package business
 
 // The core fields (design/QUERY_STACK_CONTRACT.md §4.7), which every area may
-// use, and how their names resolve: people by @handle, places by #channel or
-// by the person a DM is with, each only as far as the asker may see.
+// use, and how their names resolve: people by @handle; places by #channel, by
+// the person a DM is with, or by name (a channel, or a project or team the
+// asker is in), each only as far as the asker may see.
 //
-// Each lookup is a seam, so the rules are tested without the databases. What
-// resolves here is what C2-0 needs; people by full name, and projects, teams,
-// spaces, docs, tables and group DMs by name, resolve when the search engine
-// lands on the grammar (docs C2-1). Until then those names go back to being
-// words in a search, and are an issue in a list.
+// Each lookup is a seam, so the rules are tested without the databases.
+// People by full name, and spaces, docs, tables and group DMs by name, don't
+// resolve yet: they go back to being words in a search, and are an issue in
+// a list.
 
 import (
 	"context"
@@ -19,6 +19,7 @@ import (
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	querySpec "github.com/akashc777/OneCamp/business/QuerySpec"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
+	teamDomain "github.com/akashc777/OneCamp/domain/Team"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/google/uuid"
@@ -35,6 +36,7 @@ var kindChoices = []Choice{
 	{Value: "person", Synonyms: []string{"people", "user", "users", "member", "members"}, Label: "People"},
 	{Value: "channel", Synonyms: []string{"channels"}, Label: "Channels"},
 	{Value: "board", Synonyms: []string{"boards", "whiteboard", "whiteboards"}, Label: "Boards"},
+	{Value: "event", Synonyms: []string{"events", "meeting", "meetings", "calendar"}, Label: "Events"},
 	{Value: "team", Synonyms: []string{"teams"}, Label: "Teams"},
 }
 
@@ -44,8 +46,8 @@ func init() { registerCore(Fields) }
 func registerCore(r *registry) {
 	r.Register(Field{Name: "text", Family: FamilyText, Help: "Words anywhere"})
 	r.Register(Field{Name: "title", Family: FamilyText, Sortable: true, Help: "Words in titles and names only"})
-	r.Register(Field{Name: "type", Family: FamilyKind, Choices: kindChoices, Help: "What kind of thing: message, doc, task, file, person…"})
-	r.Register(Field{Name: "in", Family: FamilyPlace, Resolve: resolvePlace, Label: labelPlace, Help: "In a channel (#launch) or a DM (@sam)"})
+	r.Register(Field{Name: "type", Family: FamilyKind, Choices: kindChoices, Help: "What kind of thing: message, doc, task, event, person…"})
+	r.Register(Field{Name: "in", Family: FamilyPlace, Resolve: resolvePlace, Label: labelPlace, Help: "In a channel (#launch), a DM (@sam), or a project or team by name"})
 	r.Register(Field{Name: "from", Aliases: []string{"creator", "author", "by", "reporter"}, Family: FamilyPeople, Resolve: resolvePerson, Label: labelPerson, Help: "Written or made by someone (@sam, me)"})
 	r.Register(Field{Name: "created", Family: FamilyDate, Sortable: true, Help: "When it was made"})
 	r.Register(Field{Name: "updated", Aliases: []string{"edited", "modified"}, Family: FamilyDate, Sortable: true, Help: "When it last changed"})
@@ -99,7 +101,66 @@ var (
 	readable = func(ctx context.Context, who accessBusiness.Subject, res []accessBusiness.Resource) ([]accessBusiness.Resource, error) {
 		return accessBusiness.Rules.Filter(ctx, who, res, accessBusiness.LevelView)
 	}
+	// myProjects and myTeams are the live projects and the teams the asker
+	// is in, by id and name: the only ones a name finds, so a name never
+	// tells anyone a project or team they aren't in exists.
+	myProjects = func(ctx context.Context, who accessBusiness.Subject) ([]named, error) {
+		if who.UserUUID == "" {
+			return nil, nil
+		}
+		u, err := userDomain.GetDgraphUserProjectList(ctx, who.UserUUID)
+		if err != nil || u == nil {
+			return nil, err
+		}
+		var out []named
+		for _, p := range u.Projects {
+			if p != nil && p.Uuid != "" && (p.DeletedAt == nil || p.DeletedAt.Year() <= 1970) {
+				out = append(out, named{ID: p.Uuid, Name: p.Name})
+			}
+		}
+		return out, nil
+	}
+	myTeams = func(ctx context.Context, who accessBusiness.Subject) ([]named, error) {
+		if who.UserUID == "" {
+			return nil, nil
+		}
+		teams, err := teamDomain.GetDgraphTeamListByUserDgraphUID(ctx, who.UserUID)
+		if err != nil {
+			return nil, err
+		}
+		var out []named
+		for _, t := range teams {
+			if t != nil && t.Uuid != "" {
+				out = append(out, named{ID: t.Uuid, Name: t.Name})
+			}
+		}
+		return out, nil
+	}
 )
+
+// named is a project or a team the asker is in.
+type named struct{ ID, Name string }
+
+// namedIn are the values of the list's entries called name, any case.
+func namedIn(list []named, name, kind string) []querySpec.Value {
+	var out []querySpec.Value
+	for _, n := range list {
+		if strings.EqualFold(strings.TrimSpace(n.Name), name) {
+			out = append(out, querySpec.Value{ID: n.ID, Type: kind, Label: n.Name})
+		}
+	}
+	return out
+}
+
+// nameOf is the name of the entry with id in the list, if the asker is in it.
+func nameOf(list []named, id string) (string, bool) {
+	for _, n := range list {
+		if strings.EqualFold(n.ID, id) && n.Name != "" {
+			return n.Name, true
+		}
+	}
+	return "", false
+}
 
 // person is the person a typed @handle names, as the asker may see them.
 func person(ctx context.Context, who Asker, typed string) (string, error) {
@@ -133,29 +194,53 @@ func resolvePerson(ctx context.Context, who Asker, _ querySpec.Scope, typed stri
 	return []querySpec.Value{{ID: id, Type: "user", Label: "@" + strings.TrimPrefix(strings.TrimSpace(typed), "@")}}, nil
 }
 
+// channelNamed is the channel called name, as a value, when the asker may
+// read it.
+func channelNamed(ctx context.Context, who Asker, name string) ([]querySpec.Value, error) {
+	if name == "" {
+		return nil, nil
+	}
+	id, err := channelIDByName(ctx, name)
+	if err == nil && id == "" && strings.ToLower(name) != name {
+		id, err = channelIDByName(ctx, strings.ToLower(name))
+	}
+	if err != nil || id == "" {
+		return nil, err
+	}
+	kept, err := readable(ctx, who.Subject, []accessBusiness.Resource{{Kind: "channel", UUID: id}})
+	if err != nil || len(kept) == 0 {
+		return nil, err
+	}
+	return []querySpec.Value{{ID: id, Type: "channel", Label: "#" + name}}, nil
+}
+
 // resolvePlace is in:'s values: a channel by #name, when the asker may read
-// it, or the DM with a person by @handle.
+// it; the DM with a person by @handle; or, by a plain name, every place of
+// the asker's called that: a channel they may read, and the projects and
+// teams they're in.
 func resolvePlace(ctx context.Context, who Asker, _ querySpec.Scope, typed string) ([]querySpec.Value, error) {
 	t := strings.TrimSpace(typed)
 	switch {
 	case strings.HasPrefix(t, "#"):
-		name := strings.TrimPrefix(t, "#")
-		if name == "" {
-			return nil, nil
-		}
-		id, err := channelIDByName(ctx, name)
-		if err == nil && id == "" && strings.ToLower(name) != name {
-			id, err = channelIDByName(ctx, strings.ToLower(name))
-		}
-		if err != nil || id == "" {
+		return channelNamed(ctx, who, strings.TrimPrefix(t, "#"))
+	case t == "":
+		return nil, nil
+	case !strings.HasPrefix(t, "@"):
+		out, err := channelNamed(ctx, who, t)
+		if err != nil {
 			return nil, err
 		}
-		kept, err := readable(ctx, who.Subject, []accessBusiness.Resource{{Kind: "channel", UUID: id}})
-		if err != nil || len(kept) == 0 {
+		projects, err := myProjects(ctx, who.Subject)
+		if err != nil {
 			return nil, err
 		}
-		return []querySpec.Value{{ID: id, Type: "channel", Label: "#" + name}}, nil
-	case strings.HasPrefix(t, "@"):
+		teams, err := myTeams(ctx, who.Subject)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, namedIn(projects, t, "project")...)
+		return append(out, namedIn(teams, t, "team")...), nil
+	default:
 		id, err := person(ctx, who, t)
 		if err != nil || id == "" {
 			return nil, err
@@ -165,7 +250,6 @@ func resolvePlace(ctx context.Context, who Asker, _ querySpec.Scope, typed strin
 		// compiler finds it with helpers.GetGroupingId(reader, person).
 		return []querySpec.Value{{ID: id, Type: TypeDMWith, Label: t}}, nil
 	}
-	return nil, nil
 }
 
 // TypeDMWith is a place value naming the person a DM is with: the reader's
@@ -203,7 +287,7 @@ func labelPerson(ctx context.Context, who Asker, _ querySpec.Scope, v querySpec.
 }
 
 // labelPlace is a place as the asker reads it: #name for a channel they may
-// read, @handle for a DM.
+// read, @handle for a DM, a project's or team's name when they're in it.
 func labelPlace(ctx context.Context, who Asker, scope querySpec.Scope, v querySpec.Value) (string, bool) {
 	switch v.Type {
 	case TypeDMWith:
@@ -218,6 +302,16 @@ func labelPlace(ctx context.Context, who Asker, scope querySpec.Scope, v querySp
 			return "", false
 		}
 		return "#" + names[v.ID], true
+	case "project", "team":
+		read := myProjects
+		if v.Type == "team" {
+			read = myTeams
+		}
+		list, err := read(ctx, who.Subject)
+		if err != nil {
+			return "", false
+		}
+		return nameOf(list, v.ID)
 	}
 	return "", false
 }

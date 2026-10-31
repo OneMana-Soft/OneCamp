@@ -23,6 +23,18 @@ import (
 // CycleError is a request the person can fix; its text is written for them.
 type CycleError struct{ msg string }
 
+// Restore brings a deleted cycle back with its tasks (POST /restore/cycle/{id}),
+// a completed one ending where a cycle started since begins; not while a
+// cycle made since covers some of its dates, which the words name.
+func Restore(ctx context.Context, id uuid.UUID) error {
+	_, err := cycleModel.Restore(ctx, id)
+	var in *cycleModel.OverlapError
+	if errors.As(err, &in) {
+		return &CycleError{in.In.Label() + ", made since, covers some of its dates, and cycles can't overlap. Delete that cycle first to bring this one back."}
+	}
+	return err
+}
+
 func (e *CycleError) Error() string { return e.msg }
 
 // Progress counts a cycle's live tasks by where they stand.
@@ -181,6 +193,8 @@ func Complete(ctx context.Context, c *cycleModel.Cycle, carry bool, by uuid.UUID
 	if err != nil {
 		return nil, err
 	}
+	// Only the project's admins complete a cycle, and they may see every task
+	// in it, so every open task carries on.
 	statuses, err := taskDomain.GetDgraphTaskStatuses(ctx, tasks)
 	if err != nil {
 		return nil, err

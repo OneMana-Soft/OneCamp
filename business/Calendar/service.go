@@ -58,6 +58,10 @@ type service struct {
 	ready func(ctx context.Context) error
 	// rem keeps each person's reminders and when the next fires (reminders.go).
 	rem reminderStore
+	// ledger is calendar sync's (moveFromGoogle.go); moveNow runs a move
+	// before answering, as tests need, rather than in the background.
+	ledger  syncLedger
+	moveNow bool
 }
 
 func newService(s store) *service {
@@ -70,6 +74,7 @@ func newService(s store) *service {
 		emit:    func(ctx context.Context, e resourceEventBusiness.Event) { resourceEventBusiness.Bus.Emit(ctx, e) },
 		ready:   storeReady,
 		rem:     postgresReminders{},
+		ledger:  postgresLedger{},
 	}
 	svc.effects = liveEffects{svc}
 	svc.tells = liveTeller{svc}
@@ -98,6 +103,10 @@ const (
 	roleNone role = iota
 	roleGuest
 	roleOrganiser
+	// roleReader is the person whose subscribed calendar an event is on
+	// (calendar B8): it is theirs to see whole, and changes only where the
+	// calendar is published.
+	roleReader
 )
 
 func roleOf(e *models.Event, guests []models.Attendee, person uuid.UUID) role {
@@ -105,6 +114,9 @@ func roleOf(e *models.Event, guests []models.Attendee, person uuid.UUID) role {
 		return roleNone
 	}
 	if e.CreatedBy == person {
+		if e.Source == sourceSubscribed {
+			return roleReader
+		}
 		return roleOrganiser
 	}
 	for _, a := range guests {
@@ -124,6 +136,8 @@ func mayChange(r role, e *models.Event) error {
 		return nil
 	case r == roleGuest:
 		return ErrOnlyCreatorChanges
+	case r == roleReader:
+		return ErrSubscribedEvent
 	}
 	return ErrEventNotFound
 }
@@ -306,13 +320,18 @@ func (s *service) views(ctx context.Context, reader *model.UserInfo, rows []inst
 		plain = append(plain, i.Event)
 	}
 	booked := bookingsOf(ctx, reader, plain)
+	tasks := s.tasksOf(ctx, subjectOf(reader), plain)
 	out := make([]Event, 0, len(rows))
 	for _, inst := range rows {
 		e := inst.Event
 		start, end := whenOf(e)
+		var task *dgraphStruct.EventTask
+		if e.TaskUUID != nil {
+			task = tasks[*e.TaskUUID]
+		}
 		v := Event{
-			ID: inst.ref, CalendarID: e.CalendarID.String(), Kind: EventKind(e.Kind),
-			Title: e.Title, Notes: e.Notes, NotesFormat: e.NotesFormat, Location: e.Location, CallRoom: e.CallRoom,
+			ID: inst.ref, CalendarID: e.CalendarID.String(), ReadOnly: e.Source == sourceSubscribed, Kind: EventKind(e.Kind),
+			Title: titleOf(e, task), Task: task, Notes: e.Notes, NotesFormat: e.NotesFormat, Location: e.Location, CallRoom: e.CallRoom,
 			Start: start, End: end, AllDay: e.AllDay(),
 			Transparency: e.Transparency, Visibility: e.Visibility, Hue: e.Hue, Status: e.Status,
 			GuestsCanModify: e.GuestsCanModify, GuestsCanInvite: e.GuestsCanInvite, GuestsCanSeeGuests: e.GuestsCanSeeGuests,
@@ -342,8 +361,10 @@ func (s *service) views(ctx context.Context, reader *model.UserInfo, rows []inst
 		if organiser {
 			v.EmailOnAnswers = inst.owner().EmailOnAnswers
 		}
+		mayChangeIt := mayChange(roleOf(inst.owner(), occ[inst.ref], me), inst.owner()) == nil
 		for _, a := range guestsShown(inst.owner(), occ[inst.ref], me) {
-			at := Attendee{Role: a.Role, Response: a.Response, Note: a.Note, RespondedAt: a.RespondedAt}
+			at := Attendee{Role: a.Role, Response: a.Response, Note: a.Note, RespondedAt: a.RespondedAt,
+				Proposal: proposalShown(a, inst.Event, me, mayChangeIt)}
 			if a.UserID != nil {
 				at.Person = personNamed(*a.UserID, names)
 			} else {
@@ -448,9 +469,12 @@ func (s *service) create(ctx context.Context, who *model.UserInfo, e *models.Eve
 	if err != nil {
 		return nil, nil, err
 	}
-	calendar, err := s.store.personalCalendar(ctx, me, e.TZ)
-	if err != nil {
-		return nil, nil, err
+	// On the calendar the writer chose (checked by Create), else their own.
+	calendar := e.CalendarID
+	if calendar == uuid.Nil {
+		if calendar, err = s.store.personalCalendar(ctx, me, e.TZ); err != nil {
+			return nil, nil, err
+		}
 	}
 	now := s.now()
 	e.ID, e.CalendarID, e.CreatedBy = s.newID(), calendar, me
@@ -563,8 +587,8 @@ func (s *service) guestsFor(ctx context.Context, cur *models.Event, curGuests []
 				return g, err
 			}
 		}
-		k, ok := inputKey(w)
-		if !ok || (k.UserID != nil && *k.UserID == cur.CreatedBy) {
+		k, ok := guestKeyOf(w, cur.CreatedBy)
+		if !ok {
 			continue
 		}
 		if a := answerOf(curGuests, k); a != nil {
@@ -671,7 +695,7 @@ func (s *service) update(ctx context.Context, who *model.UserInfo, cur, next *mo
 		return nil, nil, err
 	}
 	next.Sequence = seq
-	removed := uuidStrings(g.remove)
+	removed := helpers.UUIDStrings(g.remove)
 	changed := changedFields(cur, next, g.changed())
 	if cur.RRule != next.RRule {
 		changed = append(changed, "recurrence")
@@ -736,6 +760,8 @@ func (s *service) remove(ctx context.Context, who *model.UserInfo, cur *models.E
 	case roleOrganiser:
 	case roleGuest:
 		return ErrNotEventCreator
+	case roleReader:
+		return ErrSubscribedEvent
 	default:
 		return ErrEventNotFound
 	}
@@ -750,6 +776,8 @@ func (s *service) remove(ctx context.Context, who *model.UserInfo, cur *models.E
 		return err
 	}
 	cur.Sequence, cur.DeletedAt, cur.DeletedBy = seq, &now, &me
+	// Its call ends with it (calendar B11): a restored event is given a new one.
+	s.endCall(ctx, cur.CallRoom)
 	s.announce(ctx, who, resourceEventBusiness.CalendarEventDeleted, cur, guestIDs(guests), nil)
 	s.effects.deleted(ctx, who, cur, guests)
 	if len(guests) > 0 {
@@ -796,7 +824,17 @@ func (s *service) Get(ctx context.Context, who *model.UserInfo, id string) (*Eve
 // view is one occurrence as reader sees it.
 func (s *service) view(ctx context.Context, reader *model.UserInfo, inst instance, guests []models.Attendee) *Event {
 	v := s.views(ctx, reader, []instance{inst}, map[uuid.UUID][]models.Attendee{inst.owner().ID: guests})
-	return &v[0]
+	out := &v[0]
+	s.markAwayDeclines(ctx, inst, out)
+	// An out-of-office's decline rule, to its owner alone (head 5b).
+	if owner := inst.owner(); EventKind(owner.Kind) == EventAway && owner.CreatedBy == personOf(reader) {
+		if rules, err := s.store.oooRules(ctx, []uuid.UUID{owner.ID}); err == nil {
+			if r, ok := rules[owner.ID]; ok {
+				out.OutOfOffice = &OOOView{Decline: r.Decline, Message: r.Message}
+			}
+		}
+	}
+	return out
 }
 
 func (s *service) Range(ctx context.Context, who *model.UserInfo, from, to time.Time) ([]Event, bool, error) {
@@ -819,6 +857,22 @@ func (s *service) Create(ctx context.Context, who *model.UserInfo, in EventInput
 		e.Kind = string(in.Kind)
 	}
 	e.Title, e.Location = strings.TrimSpace(in.Title), strings.TrimSpace(in.Location)
+	// A task block is time for a task the writer may read: theirs alone (no
+	// guests, keepKind). Given no title, or only its task's name, it keeps
+	// none, and is called by its task where it is read (titleOf), following a
+	// rename.
+	if in.Kind == EventTaskBlock {
+		task, name, err := s.blockedTask(ctx, who, in.TaskUUID)
+		if err != nil {
+			return nil, err
+		}
+		e.TaskUUID = &task
+		if e.Title == name {
+			e.Title = ""
+		}
+	} else if strings.TrimSpace(in.TaskUUID) != "" {
+		return nil, inputError("Only a task block is time for a task.")
+	}
 	if in.NotesFormat != "" {
 		e.NotesFormat = in.NotesFormat
 	}
@@ -829,6 +883,9 @@ func (s *service) Create(ctx context.Context, who *model.UserInfo, in EventInput
 	e.Notes = notes
 	if in.Transparency != "" {
 		e.Transparency = in.Transparency
+	}
+	if err := keepKind(e, "", personOf(who), nil, &in.Attendees); err != nil {
+		return nil, err
 	}
 	if in.Visibility != "" {
 		e.Visibility = in.Visibility
@@ -841,6 +898,13 @@ func (s *service) Create(ctx context.Context, who *model.UserInfo, in EventInput
 	if err := setWhen(e, in.Start, in.End); err != nil {
 		return nil, err
 	}
+	if in.CalendarID != "" {
+		cal, err := s.writableCalendar(ctx, who, in.CalendarID)
+		if err != nil {
+			return nil, err
+		}
+		e.CalendarID = cal
+	}
 	if in.Recurrence != nil && strings.TrimSpace(in.Recurrence.Rule) != "" {
 		if in.SyncToGoogle {
 			// Google's copy of a series is B6's: a copy of only its first
@@ -851,10 +915,27 @@ func (s *service) Create(ctx context.Context, who *model.UserInfo, in EventInput
 			return nil, err
 		}
 	}
+	var rule *models.OOORule
+	if in.OutOfOffice != nil {
+		r, err := oooRuleOf(in.OutOfOffice, EventKind(e.Kind))
+		if err != nil {
+			return nil, err
+		}
+		rule = &r
+	}
 	created, guests, err := s.create(withoutSending(ctx, in.Notify), who, e, in.Attendees, in.SyncToGoogle)
 	if err != nil {
 		return nil, err
 	}
+	// The event is written: a rule that can't be kept is logged, not a
+	// failure of the write (CR-68 SF).
+	if rule != nil {
+		if err := s.keepRule(ctx, created, *rule); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/Calendar.Create: out-of-office rule for %s not kept: %v", created.ID, err)
+		}
+	}
+	// Guests out of office with a rule decline it for themselves (head 5b).
+	s.declineForAway(ctx, created, guests)
 	return s.view(ctx, who, single(created), guests), nil
 }
 
@@ -870,6 +951,10 @@ func patched(base *models.Event, p EventPatch) (*models.Event, error) {
 	next := cloneEvent(base)
 	if p.Kind != nil {
 		next.Kind = string(*p.Kind)
+		// A block made another kind is no longer time for its task.
+		if *p.Kind != EventTaskBlock {
+			next.TaskUUID = nil
+		}
 	}
 	if p.Title != nil {
 		next.Title = strings.TrimSpace(*p.Title)
@@ -934,6 +1019,10 @@ func (s *service) Update(ctx context.Context, who *model.UserInfo, id string, p 
 	if err != nil {
 		return nil, err
 	}
+	next.Title = s.keptTitle(ctx, who, inst.Event, next)
+	if err := keepKind(next, inst.Kind, inst.owner().CreatedBy, guests, p.Attendees); err != nil {
+		return nil, err
+	}
 	// Changing what guests may do, and how the organiser hears of answers,
 	// is the organiser's alone.
 	if personOf(who) != inst.owner().CreatedBy && (permissionsDiffer(next, inst.Event) || next.EmailOnAnswers != inst.Event.EmailOnAnswers) {
@@ -966,6 +1055,14 @@ func (s *service) updateRow(ctx context.Context, who *model.UserInfo, cur, next 
 			return nil, err
 		}
 	}
+	var rule *models.OOORule
+	if p.OutOfOffice != nil {
+		r, err := oooRuleOf(p.OutOfOffice, EventKind(next.Kind))
+		if err != nil {
+			return nil, err
+		}
+		rule = &r
+	}
 	var updated *models.Event
 	var after []models.Attendee
 	var err error
@@ -977,6 +1074,12 @@ func (s *service) updateRow(ctx context.Context, who *model.UserInfo, cur, next 
 	if err != nil {
 		return nil, err
 	}
+	if rule != nil {
+		if err := s.keepRule(ctx, updated, *rule); err != nil {
+			return nil, err
+		}
+	}
+	s.declineForAway(ctx, updated, newlyOn(guests, after))
 	return s.view(ctx, who, single(updated), after), nil
 }
 

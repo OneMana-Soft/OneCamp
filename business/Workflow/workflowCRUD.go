@@ -146,20 +146,33 @@ func validate(in *WorkflowInput) (*validatedWorkflow, error) {
 	}
 
 	// Actions.
+	timed := out.triggerType == workflowModel.TriggerSchedule || isDueTrigger(out.triggerType)
 	if strings.TrimSpace(in.ProjectID) != "" {
 		id, perr := uuid.Parse(strings.TrimSpace(in.ProjectID))
 		if perr != nil {
 			return nil, fmt.Errorf("invalid project")
 		}
 		out.projectID = &id
-		if !isTaskTrigger(out.triggerType) {
-			return nil, fmt.Errorf("a project's rules start from something that happens to a task")
+		if !isTaskTrigger(out.triggerType) && out.triggerType != workflowModel.TriggerSchedule {
+			return nil, fmt.Errorf("a project's rules start from something that happens to a task, or on a schedule")
 		}
+	} else if timed {
+		return nil, fmt.Errorf("schedules and due dates are for a project's rules")
+	} else if out.triggerType == workflowModel.TriggerFormSubmitted {
+		return nil, fmt.Errorf("a form's rules are a project's rules")
+	} else if out.triggerType == workflowModel.TriggerApprovalDecided {
+		return nil, fmt.Errorf("an approval's rules are a project's rules")
 	}
 
-	task := isTaskTrigger(out.triggerType)
-	if !task && (len(in.Conditions.Items) > 0 || len(in.ElseActions) > 0) {
+	mode := modeOf(out.triggerType, in.TriggerConfig)
+	if mode == modeEvent && (len(in.Conditions.Items) > 0 || len(in.ElseActions) > 0) {
 		return nil, fmt.Errorf("conditions and an otherwise branch are for rules about tasks")
+	}
+	if mode == modeOnce && (len(in.Conditions.Items) > 0 || len(in.ElseActions) > 0) {
+		return nil, fmt.Errorf("a schedule that makes a task has no conditions; to act on tasks that match, run it for each task")
+	}
+	if mode == modeEachTask && len(in.ElseActions) > 0 {
+		return nil, fmt.Errorf("a schedule for each task has no otherwise: its conditions choose the tasks")
 	}
 	if err := in.Conditions.validate(); err != nil {
 		return nil, err
@@ -168,16 +181,16 @@ func validate(in *WorkflowInput) (*validatedWorkflow, error) {
 		return nil, fmt.Errorf("at least one action is required")
 	}
 	limit := MaxActionsPerWorkflow
-	if task {
+	if mode != modeEvent {
 		limit = MaxActionsPerBranch
 	}
 	if len(in.Actions) > limit || len(in.ElseActions) > limit {
 		return nil, fmt.Errorf("too many actions (max %d)", limit)
 	}
-	if err := validateActions(in.Actions, out.triggerType); err != nil {
+	if err := validateActions(in.Actions, out.triggerType, mode); err != nil {
 		return nil, err
 	}
-	if err := validateActions(in.ElseActions, out.triggerType); err != nil {
+	if err := validateActions(in.ElseActions, out.triggerType, mode); err != nil {
 		return nil, err
 	}
 
@@ -196,18 +209,61 @@ func validate(in *WorkflowInput) (*validatedWorkflow, error) {
 	return out, nil
 }
 
+// What a rule's steps act on.
+const (
+	// modeEvent: a workspace workflow's event (a message, a join, a call).
+	modeEvent = iota
+	// modeTask: the task an event or a due date is about.
+	modeTask
+	// modeOnce: a schedule that makes a task; the steps after it act on it.
+	modeOnce
+	// modeEachTask: a schedule that acts for each task its conditions hold
+	// for.
+	modeEachTask
+)
+
+// modeOf is what a rule's steps act on.
+func modeOf(triggerType string, cfg map[string]interface{}) int {
+	switch {
+	case triggerType == workflowModel.TriggerSchedule:
+		if each, _ := cfg["each_task"].(bool); each {
+			return modeEachTask
+		}
+		return modeOnce
+	case isTaskTrigger(triggerType):
+		return modeTask
+	}
+	return modeEvent
+}
+
 // validateActions checks one branch's actions for a trigger, tidying them.
-func validateActions(actions []WorkflowAction, triggerType string) error {
+func validateActions(actions []WorkflowAction, triggerType string, mode int) error {
+	made := false
 	for i := range actions {
 		act := &actions[i]
 		if isTaskAction(act.Type) {
-			if !isTaskTrigger(triggerType) {
+			switch {
+			case mode == modeEvent:
 				return fmt.Errorf("%s works on the task a rule is about; pick a task trigger", act.Type)
+			case mode == modeOnce && !made:
+				return fmt.Errorf("make the task first: a schedule's steps act on the task it makes")
 			}
 			if err := validateTaskAction(act); err != nil {
 				return err
 			}
 			continue
+		}
+		if mode == modeEachTask {
+			return fmt.Errorf("a schedule for each task acts on those tasks")
+		}
+		if mode == modeOnce && act.Type != ActionCreateTask {
+			return fmt.Errorf("a schedule makes a task, then acts on it")
+		}
+		if mode == modeOnce && made {
+			return fmt.Errorf("a schedule makes one task a run")
+		}
+		if act.Type == ActionCreateTask {
+			made = true
 		}
 		switch act.Type {
 		case ActionReply, ActionReplyEphemeral:

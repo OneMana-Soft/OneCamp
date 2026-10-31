@@ -7,6 +7,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	configModel "github.com/akashc777/OneCamp/models/postgres/Config"
+	"golang.org/x/oauth2"
 )
 
 // credentials.go — admin-managed OAuth credentials (Google login + Google
@@ -182,6 +183,14 @@ func httpProtocol(backendDomain string) string {
 func GoogleClientCreds() (clientID, clientSecret string) {
 	c := resolveCreds()
 	return c.GoogleClientID, c.GoogleClientSecret
+}
+
+// GoogleEndpoint is Google's OAuth 2 authorize and token addresses, for the
+// flows that borrow the Google client outside sign-in (which finds them by
+// OpenID discovery): the connectors and the Google Sheets importer.
+var GoogleEndpoint = oauth2.Endpoint{
+	AuthURL:  "https://accounts.google.com/o/oauth2/v2/auth",
+	TokenURL: "https://oauth2.googleapis.com/token",
 }
 
 // GithubClientCreds returns the resolved GitHub *login* OAuth client id/secret.

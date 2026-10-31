@@ -33,10 +33,8 @@ type rawAttachment struct {
 }
 
 type rawRelation struct {
-	Type  string `json:"type"`
-	Issue *struct {
-		ID string `json:"id"`
-	} `json:"issue"`
+	Type  string        `json:"type"`
+	Issue *relatedIssue `json:"issue"`
 }
 
 func (c rawComment) comment() linearComment {
@@ -63,10 +61,17 @@ func (iss *linearIssue) addAttachment(a rawAttachment) {
 	iss.Attachments = append(iss.Attachments, linearAttachment{ID: a.ID, Name: name, URL: a.URL})
 }
 
-// addRelation keeps an inverse "blocks" relation: an issue that blocks this one.
+// addRelation keeps a link that points at this issue: one that blocks it is a
+// dependency, and a duplicate or related one becomes a line (linkRelations).
 func (iss *linearIssue) addRelation(rel rawRelation) {
-	if rel.Type == "blocks" && rel.Issue != nil && rel.Issue.ID != "" {
+	if rel.Issue == nil || rel.Issue.ID == "" {
+		return
+	}
+	switch rel.Type {
+	case "blocks":
 		iss.BlockedBy = append(iss.BlockedBy, rel.Issue.ID)
+	case "duplicate", "related":
+		iss.Relations = append(iss.Relations, linearRelation{Type: rel.Type, Other: *rel.Issue})
 	}
 }
 
@@ -94,7 +99,7 @@ const issueRelationsQuery = `
 query ($id: String!, $cursor: String) {
   issue(id: $id) {
     inverseRelations(first: 100, after: $cursor) {
-      nodes { type issue { id } }
+      nodes { type issue { id identifier url } }
       pageInfo { hasNextPage endCursor }
     }
   }

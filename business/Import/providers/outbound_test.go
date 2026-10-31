@@ -17,11 +17,15 @@ var outbound = []struct {
 	dir, path string
 	hosts     []string
 }{
+	{"airtable", "fixed hosts", []string{"api.airtable.com"}},
 	{"asana", "fixed hosts; next_page.path is appended to the fixed base", []string{"app.asana.com"}},
 	{"basecamp", "pinned: an account's href, a Link next and a dock url are read only on apiOrigins", []string{"launchpad.37signals.com", "3.basecampapi.com"}},
 	{"clickup", "fixed hosts", []string{"api.clickup.com"}},
-	{"jira", "typed: the admin's site, through SiteAPIClient", nil},
+	{"csv", "none: an uploaded file", nil},
+	{"gsheets", "fixed hosts; a pasted sheet address gives only its id", []string{"sheets.googleapis.com"}},
+	{"jira", "typed: the admin's site, through SiteAPIClient; a sign-in's calls through Atlassian's gateway", []string{"api.atlassian.com", "auth.atlassian.com"}},
 	{"linear", "fixed hosts", []string{"api.linear.app"}},
+	{"miro", "fixed hosts; a picture's download address is read through DefaultFetchAttachment, without the token", []string{"api.miro.com"}},
 	{"monday", "fixed hosts", []string{"api.monday.com"}},
 	{"notion", "fixed hosts", []string{"api.notion.com"}},
 	{"todoist", "fixed hosts", []string{"api.todoist.com"}},
@@ -75,7 +79,7 @@ func TestEveryProvidersRequestsGoWhereTheyShould(t *testing.T) {
 		typed := typedAddress.MatchString(src)
 		switch o.dir {
 		case "jira":
-			if !typed || !strings.Contains(src, "importProvider.SiteAPIClient") || strings.Contains(src, "SharedAPIClient") {
+			if !typed || !strings.Contains(src, "Client: importProvider.SiteAPIClient") || strings.Contains(src, "SharedAPIClient") {
 				t.Errorf("jira (%s): its calls must go through SiteAPIClient alone", o.path)
 			}
 		case "basecamp":

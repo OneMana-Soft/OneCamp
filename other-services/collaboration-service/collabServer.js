@@ -31,6 +31,7 @@ import { guardIncoming } from './presenceGuard.js'
 import { createBlockIdsTransform } from './transforms/blockIds.js'
 import { createLegacyContentTransform } from './transforms/legacyContent.js' // B2
 import { closeWhenLinkEnds } from './live/ops/reauth.js'
+import { trackGuestStrokes } from './live/ops/guestStrokes.js'
 
 // Docs connect with the bare doc uuid as the document name. Boards connect with
 // a "board:" prefix so one server routes both to the right backend endpoints.
@@ -94,6 +95,45 @@ export function createCollabServer({
     const persistence = createPersistence()
     const internalHeaders = () => ({ headers: { 'X-Internal-Secret': getSecret() } })
 
+    // A QUIET WRITE'S OWN SAVE (live/ops/write.js). A quiet write (a copy's
+    // body, an import's) is stored at once, but a save asks Redis before it
+    // reads the doc (the Redis extension's lock, then the buffer's count), and
+    // whatever reached the doc meanwhile went into the quiet save with it: an
+    // @mention someone typed then told nobody (21 Oct 2026). So the op hands
+    // over the doc as it left it, taken in the same step as its write, and the
+    // doc's next save stores that first, quiet and credited to the quiet write
+    // alone. Then it stores the doc as it is now, as any save does, if that
+    // holds more: loudly, credited to whoever else edited, and checked against
+    // the quiet save (what that save stored is its last). Nothing joined, one
+    // save. A snapshot is dropped as soon as its save is in, and one whose save
+    // failed is kept for the retry. Kept in memory, so it is gone once the doc
+    // is let go unsaved (a restart, or its edits quarantined): the quiet mark
+    // in the contributors set is all that is left then (contributors.js).
+    const quietWrites = new Map() // name -> { doc: a copy of the doc, members: Set of quiet members }
+    function holdQuietWrite(name, doc, member) {
+        if (!member) return
+        const snapshot = new Y.Doc()
+        Y.applyUpdate(snapshot, Y.encodeStateAsUpdate(doc))
+        // A second quiet write before the first is stored: the later copy holds
+        // both, and its save is credited to both.
+        const members = new Set(quietWrites.get(name)?.members)
+        members.add(member)
+        quietWrites.set(name, { doc: snapshot, members })
+    }
+
+    // noteStored records a doc save the API confirmed, and tells the doc's tabs.
+    function noteStored(name, document, saved) {
+        if (saved.outcome !== 'saved' && saved.outcome !== 'state-only' && saved.outcome !== 'kept-body') return
+        const at = Date.now()
+        persistence.stored(name, { at, stateVector: saved.stateVector, hash: saved.hash, lineage: saved.lineage })
+        // Saved means stored (I8): the tabs' save dots follow this.
+        try {
+            document.broadcastStateless(persistedMessage({ at, stateVector: saved.stateVector, lineage: saved.lineage }))
+        } catch (e) {
+            log.error(`[Collab] Could not tell ${name}'s tabs it is stored:`, e?.message || e)
+        }
+    }
+
     // A board's save takes everyone who edited it so far, as before.
     async function boardContributors(documentName) {
         const members = await contributors.peek(documentName)
@@ -106,6 +146,10 @@ export function createCollabServer({
     // the first lines of one at once each send a first block with nothing
     // beside it, which is not a second copy of anything (lineage.js).
     const startedEmpty = new Set()
+    // The connections whose leaving was said (onDisconnect).
+    const reported = new WeakSet()
+    // The connections whose first sync was said (beforeSync).
+    const firstSynced = new WeakSet()
 
     // tellGone stops the tabs of a doc that is gone (deleted, or archived by
     // the retention run, while it was open) from writing, and tells them to
@@ -312,10 +356,12 @@ export function createCollabServer({
             try {
                 const decoded = decodeToken(token)
 
-                // Guest: a scoped, READ-ONLY external grant. A guest token
-                // carries a `guest` marker; the guest authorize endpoint verifies
-                // it and re-validates the grant (so revocation and expiry take
-                // effect on every reconnect). Guests always join read-only.
+                // Guest: a scoped external grant. A guest token carries a
+                // `guest` marker; the guest authorize endpoint verifies it and
+                // re-validates the grant (so revocation and expiry take effect
+                // on every reconnect). A share link's guest reads only; a
+                // call's guest draws on the board on its stage when the call
+                // lets them, as the endpoint answers (canEdit).
                 if (decoded && decoded.guest === true) {
                     const guestAuthUrl = kind === 'board'
                         ? `${backendUrl}/boardColab/guestAuthorize`
@@ -325,17 +371,17 @@ export function createCollabServer({
                     if (gResp.status !== 200) {
                         throw new Error('Unauthorized')
                     }
-                    readOnly()
-                    log.log(`[Collab] Guest joined ${kind} ${id} read-only`)
+                    const canEdit = kind === 'board' && gResp.data?.canEdit === true
+                    if (!canEdit) readOnly()
+                    log.log(`[Collab] Guest joined ${kind} ${id}${canEdit ? '' : ' read-only'}`)
                     // When the link stops working, if it ever does: the
                     // socket closes then (connected, below).
                     const linkEndsAt = Date.parse(gResp.data?.until)
                     return {
                         user: { id: decoded.sub || 'guest', name: decoded.name || 'Guest' },
-                        // A guest publishes no presence (presenceGuard.js).
                         guest: true,
                         schemaOutdated: outdated,
-                        access: { level: 'view', canEdit: false, locked: false },
+                        access: { level: canEdit ? 'edit' : 'view', canEdit, locked: false },
                         ...(Number.isFinite(linkEndsAt) ? { linkEndsAt } : {}),
                     }
                 }
@@ -413,10 +459,16 @@ export function createCollabServer({
             }
         },
 
-        // A doc whose blocks have no ids gets them, as one edit, before anyone
-        // syncs (transforms/blockIds.js). Never throws: a doc without ids
-        // opens as it always did.
+        // A board starts keeping who of a call's guests drew what. A doc whose
+        // blocks have no ids gets them, as one edit, before anyone syncs
+        // (transforms/blockIds.js). Never throws: a doc without ids opens as
+        // it always did.
         async afterLoadDocument(data) {
+            if (parseDocumentName(data.documentName).kind === 'board') {
+                // Who of a call's guests drew what (live/ops/guestStrokes.js).
+                trackGuestStrokes(data.document)
+                return
+            }
             if (parseDocumentName(data.documentName).kind !== 'doc') return
             try {
                 legacyContent.give(data.documentName, data.document)
@@ -450,27 +502,38 @@ export function createCollabServer({
                     const outcome = await persistBoard({ id, document: data.document, contributors: () => boardContributors(name), log, post: post('/boardColab/updateBoard') })
                     if (outcome !== 'skipped') await buffer.trim(name, persisted)
                 } else {
-                    const saved = await persistDoc({
+                    // One save of `document`, checked against the last one stored.
+                    const save = (document, who) => persistDoc({
                         id,
-                        document: data.document,
+                        document,
                         extensions,
-                        contributors: { peek: () => contributors.peek(name), ack: (members) => contributors.ack(name, members) },
+                        contributors: who,
                         last: persistence.get(name),
                         log,
                         post: post('/docColab/updateDoc'),
                         storedBody: async () => (await api.get(`${backendUrl}/docColab/getDoc/${id}`, internalHeaders()))?.data?.data?.doc_body ?? null,
                     })
-                    if (saved.outcome !== 'skipped') await buffer.trim(name, persisted)
-                    if (saved.outcome === 'saved' || saved.outcome === 'state-only' || saved.outcome === 'kept-body') {
-                        const at = Date.now()
-                        persistence.stored(name, { at, stateVector: saved.stateVector, hash: saved.hash, lineage: saved.lineage })
-                        // Saved means stored (I8): the tabs' save dots follow this.
-                        try {
-                            data.document.broadcastStateless(persistedMessage({ at, stateVector: saved.stateVector, lineage: saved.lineage }))
-                        } catch (e) {
-                            log.error(`[Collab] Could not tell ${name}'s tabs it is stored:`, e?.message || e)
-                        }
+                    // A quiet write's own save first, and the next one's if
+                    // another came while it was stored (see quietWrites).
+                    const taken = new Set()
+                    for (let held = quietWrites.get(name); held; held = quietWrites.get(name)) {
+                        const members = [...held.members]
+                        const quiet = await save(held.doc, { peek: async () => members, ack: (sent) => contributors.ack(name, sent) })
+                        if (quietWrites.get(name) === held) quietWrites.delete(name)
+                        // A save that sent nothing took no mark: clear it here.
+                        if (quiet.outcome === 'unchanged' || quiet.outcome === 'skipped') await contributors.ack(name, members)
+                        for (const m of members) taken.add(m)
+                        noteStored(name, data.document, quiet)
                     }
+                    // The doc as it is now. A quiet mark is never this save's
+                    // when a snapshot accounts for it, even if clearing it
+                    // failed: it is cleared again with whom this save credits.
+                    const saved = await save(data.document, {
+                        peek: async () => (await contributors.peek(name)).filter((m) => !taken.has(m) && !quietWrites.get(name)?.members.has(m)),
+                        ack: (sent) => contributors.ack(name, [...sent, ...taken]),
+                    })
+                    if (saved.outcome !== 'skipped') await buffer.trim(name, persisted)
+                    noteStored(name, data.document, saved)
                 }
                 await failures.succeeded(name)
             } catch (err) {
@@ -561,10 +624,35 @@ export function createCollabServer({
 
         // onConnect runs before the connection is counted (its payload has no
         // clientsCount), so it says only who is joining; onDisconnect counts.
+        // Its time joins the connection's context, for its first sync's line.
         async onConnect(data) {
-            log.log(`[Collab] Client connecting to ${data.documentName}`)
+            log.log(`[Collab] Client connecting to ${data.documentName} (connection ${data.socketId})`)
+            return { connectedAt: Date.now() }
         },
+        // A connection's first sync, said once it is answered: a tab that
+        // signs in and never gets its doc then shows which way the round trip
+        // failed (23 Oct 2026: on the demo the server joined and loaded a doc
+        // in 13 ms, and nothing said whether the tab's sync step 1 came). The
+        // answer is sent before this runs: Hocuspocus 3.4.3 calls the hook
+        // without waiting for it, and answers step 1 in the same step.
+        async beforeSync(data) {
+            // 0: sync step 1, the state vector a tab opens its sync with.
+            if (data.type !== 0 || !data.connection || firstSynced.has(data.connection)) return
+            firstSynced.add(data.connection)
+            log.log(`[Collab] ${data.documentName}: answered the first sync of connection ${data.connection.socketId}, ${Date.now() - data.context.connectedAt} ms after it connected`)
+        },
+        // Once per connection. Hocuspocus 3.4.3 closes a connection twice when
+        // its socket goes while the tab's presence is set:
+        // Document.removeConnection removes the presence before it deletes the
+        // connection, the removal is sent to that connection too, and the
+        // failed send closes it again. Each connection has its own context
+        // (one per socket and doc; a direct connection's is the one it was
+        // opened with, if any: it is closed once either way).
         async onDisconnect(data) {
+            if (data.context) {
+                if (reported.has(data.context)) return
+                reported.add(data.context)
+            }
             log.log(`[Collab] Client disconnected from ${data.documentName} (remaining: ${data.clientsCount})`)
         },
         // afterUnloadDocument is the per-document hook ({ instance, documentName });
@@ -572,6 +660,7 @@ export function createCollabServer({
         async afterUnloadDocument(data) {
             startedEmpty.delete(data.documentName)
             persistence.forget(data.documentName)
+            quietWrites.delete(data.documentName)
             log.log(`[Collab] Document ${data.documentName} unloaded from memory`)
         },
         async onDestroy() {
@@ -585,7 +674,7 @@ export function createCollabServer({
         failures,
         persistence,
         // What the Live Doc Writer's ops share (live/server.js, live/routes.js).
-        live: { extensions, contributors, persistence, log, isGone: (name) => failures.isGone(name) },
+        live: { extensions, contributors, persistence, log, isGone: (name) => failures.isGone(name), quiet: { hold: holdQuietWrite } },
         // Retry the docs whose saves were failing when the service stopped.
         async recoverUnsaved() {
             await failures.recover(await buffer.unsavedNames())

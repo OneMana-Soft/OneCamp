@@ -57,7 +57,7 @@ func TestOnlyPeopleMatchedByEmailTakePartInARestrictedTask(t *testing.T) {
 func TestARestrictedTasksReportLineNamesWhoIsntLetIn(t *testing.T) {
 	job := &importModels.Job{Provider: importModels.ProviderJira}
 	why := restrictedWhy(job, &importProvider.SourceTask{Restricted: "an issue security level"})
-	n := restrictedNote(job, importModels.EntityTask, "HR-4", why, []leftOut{{As: "creator", Source: "cy", Name: "Cy"}, {As: "audience", Source: "zia"}})
+	n := restrictedNote(job, nil, importModels.EntityTask, "HR-4", why, []leftOut{{As: "creator", Source: "cy", Name: "Cy"}, {As: "audience", Source: "zia"}})
 	for _, want := range []string{"Jira keeps it to some people (an issue security level)", "Cy (who made it)", "someone who didn't come across (one Jira lets see it)"} {
 		if !strings.Contains(n.Message, want) {
 			t.Errorf("the line doesn't say %q: %s", want, n.Message)
@@ -72,10 +72,10 @@ func TestARestrictedTasksReportLineNamesWhoIsntLetIn(t *testing.T) {
 // on one line for the task, without their text; a task with none has none.
 func TestTheReportCountsTheCommentsThatStayedInTheSource(t *testing.T) {
 	job := &importModels.Job{Provider: importModels.ProviderJira}
-	if n := commentsKeptNote(job, "HR-5", nil); n != nil {
+	if n := commentsKeptNote(job, nil, "HR-5", nil); n != nil {
 		t.Errorf("a line for no comments: %+v", n)
 	}
-	n := commentsKeptNote(job, "HR-5", []string{"a project role or group", "an internal note", "a project role or group"})
+	n := commentsKeptNote(job, nil, "HR-5", []string{"a project role or group", "an internal note", "a project role or group"})
 	if len(n) != 1 || n[0].SourceID != "HR-5" || n[0].Code != "COMMENTS_RESTRICTED" ||
 		!strings.Contains(n[0].Message, "(a project role or group; an internal note)") || !strings.Contains(n[0].Message, "Left there: 3.") {
 		t.Errorf("the line: %+v", n)

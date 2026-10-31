@@ -1,3 +1,5 @@
+# Node 22.23.4: CVE-2026-111497 (Brotli decoder RCE) is fixed in 22.23.4, 24.22.1
+# and 26.12.1; Node 18, end of life, gets no fix (22 Oct 2026).
 FROM node:22.23.4-alpine
 
 WORKDIR /app

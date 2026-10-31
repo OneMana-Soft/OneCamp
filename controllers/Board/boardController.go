@@ -11,6 +11,7 @@ import (
 
 	adapter "github.com/akashc777/OneCamp/adapter/Board"
 	business "github.com/akashc777/OneCamp/business/Board"
+	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -170,7 +171,21 @@ func BoardCollabAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !business.CanRead(boardDgraph, userInfo.UserDgraphInfo.Uuid) {
+	canRead := business.CanRead(boardDgraph, userInfo.UserDgraphInfo.Uuid)
+	canEdit := business.CanEdit(boardDgraph, userInfo.UserDgraphInfo.Uuid)
+	// A board on the stage of a call they are in now adds to its own rights
+	// (calls package B): they see it, and draw as the call says. Never on a
+	// deleted board, and never through an API token (BoardAccess).
+	var grant *callStateBusiness.Grant
+	if !canEdit && !helpers.IsSoftDeleted(boardDgraph.DeletedAt) {
+		if grant, err = callStateBusiness.BoardGrant(ctx, input.BoardId, userInfo.UserDgraphInfo.Uid); err != nil {
+			helpers.LogErrorWithContext(ctx, "controllers/BoardCollabAuthorize couldn't read the board's calls err: %+v", err)
+			helpers.WriteJSON(w, http.StatusServiceUnavailable, helpers.Envolope{"msg": "Couldn't check the board's calls. Try again."})
+			return
+		}
+	}
+	read, edit := callStateBusiness.BoardAccess(canRead, canEdit, grant, helpers.ActsThroughToken(ctx))
+	if !read {
 		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Unauthorized board access"})
 		return
 	}
@@ -178,12 +193,10 @@ func BoardCollabAuthorize(w http.ResponseWriter, r *http.Request) {
 	// canEdit drives server-side read-only enforcement in the collaboration
 	// service: viewers (no edit access, not owner) join the live session but
 	// their document writes are rejected. Adding a picture asks the same rule.
-	canEdit := business.CanEdit(boardDgraph, userInfo.UserDgraphInfo.Uuid)
-
 	// name is who opens it, as their presence names them to everyone on the
-	// board: a session token carries no name, so the service takes this one.
-	// Never an address (NameForGuests).
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Authorised", "canEdit": canEdit, "name": userDomain.NameForGuests(ctx, userInfo.UserPostgresInfo.Id)})
+	// board (a call's guests too): a session token carries no name, so the
+	// service takes this one. Never an address (NameForGuests).
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Authorised", "canEdit": edit, "name": userDomain.NameForGuests(ctx, userInfo.UserPostgresInfo.Id)})
 }
 
 // GetBoardForCollab GET /boardColab/getBoard/{board_uuid} - internal-service
@@ -547,8 +560,10 @@ func sanitizeBoardSearch(raw string) string {
 	return strings.TrimSpace(b.String())
 }
 
-// GetBoardList GET /board/getBoardList?pageSize=&pageIndex=&search= - returns
-// the boards the caller can access (owned or shared), newest-edited first.
+// GetBoardList GET /board/getBoardList?pageSize=&pageIndex=&search=&editable= -
+// returns the boards the caller can access (owned or shared), newest-edited
+// first. editable=1 lists only the boards they may edit: a call's Present a
+// board picker, since present_board refuses any other (board_not_editable).
 func GetBoardList(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	userInfo := ctx.Value(helpers.UserInfoContextKey).(userModels.UserInfo)
@@ -563,7 +578,7 @@ func GetBoardList(w http.ResponseWriter, r *http.Request) {
 	}
 	search := sanitizeBoardSearch(q.Get("search"))
 
-	list, err := business.GetBoardList(ctx, userInfo.UserDgraphInfo.Uid, search, pageSize, pageIndex*pageSize)
+	list, err := business.GetBoardList(ctx, userInfo.UserDgraphInfo.Uid, search, pageSize, pageIndex*pageSize, q.Get("editable") == "1")
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "controllers/GetBoardList failed err: %+v", err)
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Failed to get board list", "err": err.Error()})

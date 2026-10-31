@@ -30,6 +30,7 @@ import (
 	"regexp"
 	"time"
 
+	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	fileAccessBusiness "github.com/akashc777/OneCamp/business/FileAccess"
 	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
@@ -290,20 +291,13 @@ func keepConversationFiles(ctx context.Context, from string, page []conversation
 		return err
 	}
 	keep := func(files []*dgraphStruct.DgraphAttachment) []*dgraphStruct.DgraphAttachment {
-		out := make([]*dgraphStruct.DgraphAttachment, 0, len(files))
-		for _, f := range files {
-			if f == nil {
-				continue
-			}
-			id, err := uuid.Parse(f.Uuid)
+		return attachmentBusiness.KeepStored(files, func(id uuid.UUID) (string, bool) {
 			row, ok := rows[id.String()]
-			if err != nil || !ok {
-				continue
+			if !ok {
+				return "", false
 			}
-			f.ObjectKey = row.ObjKey
-			out = append(out, f)
-		}
-		return out
+			return row.ObjKey, true
+		})
 	}
 	for i := range page {
 		page[i].Attachments = keep(page[i].Attachments)

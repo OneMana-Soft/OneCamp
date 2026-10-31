@@ -24,7 +24,7 @@ func VIPs(ctx context.Context, user uuid.UUID) ([]string, error) {
 // list is the one text column q reads for user: an empty list, never nil,
 // for none.
 func list(ctx context.Context, q string, user uuid.UUID) ([]string, error) {
-	out, err := pgexec.Query(ctx, q, scanText, user)
+	out, err := pgexec.Query(ctx, q, pgexec.Text, user)
 	if err != nil {
 		return nil, err
 	}
@@ -32,11 +32,6 @@ func list(ctx context.Context, q string, user uuid.UUID) ([]string, error) {
 		out = []string{}
 	}
 	return out, nil
-}
-
-func scanText(r pgexec.Row) (v string, err error) {
-	err = r.Scan(&v)
-	return
 }
 
 // SetKeywords replaces a person's keywords with keywords, in one transaction,
@@ -101,7 +96,7 @@ func WhoseVIP(ctx context.Context, sender string, users []string) (map[string]bo
 	}
 	whose, err := pgexec.Query(ctx,
 		`SELECT user_id::text FROM user_vips WHERE vip_user_id = $1 AND user_id = ANY($2::uuid[])`,
-		scanText, from, pq.Array(ids))
+		pgexec.Text, from, pq.Array(ids))
 	if err != nil {
 		return nil, err
 	}

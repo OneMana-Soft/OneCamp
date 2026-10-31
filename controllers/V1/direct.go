@@ -17,12 +17,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	chatAdapter "github.com/akashc777/OneCamp/adapter/Chat"
 	postAdapter "github.com/akashc777/OneCamp/adapter/Post"
 	taskAdapter "github.com/akashc777/OneCamp/adapter/Task"
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	auditBusiness "github.com/akashc777/OneCamp/business/AdminAudit"
 	appBusiness "github.com/akashc777/OneCamp/business/App"
 	globalSearchBusiness "github.com/akashc777/OneCamp/business/GlobalSearch"
@@ -203,10 +205,7 @@ func ListTasksV1(w http.ResponseWriter, r *http.Request) {
 	if got != nil {
 		tasks, total = got.Tasks, int(got.TaskCount)
 	}
-	tasks, app, ok := narrowed(w, r, tasks, taskPlaces)
-	if !ok {
-		return
-	}
+	tasks, app := narrowed(r, tasks, taskPlaces)
 	if app != nil {
 		total = len(tasks)
 	}
@@ -308,7 +307,7 @@ func CreateTaskV1(w http.ResponseWriter, r *http.Request) {
 	}
 	taskID, err := taskBusiness.CreateTask(ctx, projectID, &user, project, assignee, input, nil)
 	if errors.Is(err, helpers.ErrConflict) {
-		// The app's answer: an assignee who can't see the task, by name.
+		// The app's answer: an assignee who can't be given work, by name.
 		refuse(w, http.StatusConflict, err.Error())
 		return
 	}
@@ -317,12 +316,13 @@ func CreateTaskV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	audited(r, "create_task", map[string]interface{}{"task_id": taskID.String(), "project_id": projectID.String()})
-	msg := fmt.Sprintf("Task %q created in project %s (priority: %s)", name, project.Name, priority)
+	key := taskKeys.KeyOf(ctx, taskID)
+	msg := fmt.Sprintf("Task %s created in project %s (priority: %s)", taskKeys.Named(key, strconv.Quote(name)), project.Name, priority)
 	if assignee != nil {
 		msg += ", assigned to " + assignee.DisplayName()
 	}
 	answer(w, http.StatusOK, msg, map[string]string{
-		"tool": "create_task", "task_uuid": taskID.String(), "project_uuid": projectID.String(), "task_name": name,
+		"tool": "create_task", "task_uuid": taskID.String(), "key": key, "project_uuid": projectID.String(), "task_name": name,
 	})
 }
 
@@ -371,6 +371,10 @@ func UpdateTaskStatusV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err = taskBusiness.UpdateTaskStatusByTaskUUID(ctx, taskID, status, task, &user.UserDgraphInfo)
+	if r, held := taskBusiness.RefusedStatus(err); held {
+		refuse(w, http.StatusConflict, r.Why)
+		return
+	}
 	switch {
 	case errors.Is(err, taskBusiness.ErrTaskDeleted):
 		refuse(w, http.StatusNotFound, "that task was deleted")
@@ -387,8 +391,9 @@ func UpdateTaskStatusV1(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		name = taskID.String()
 	}
-	answer(w, http.StatusOK, fmt.Sprintf("Moved task %q to %s", name, status), map[string]string{
-		"tool": "update_task_status", "task_uuid": taskID.String(), "status": status,
+	key := taskKeys.KeyOf(ctx, taskID)
+	answer(w, http.StatusOK, fmt.Sprintf("Moved task %s to %s", taskKeys.Named(key, strconv.Quote(name)), status), map[string]string{
+		"tool": "update_task_status", "task_uuid": taskID.String(), "key": key, "status": status,
 	})
 }
 
@@ -413,13 +418,9 @@ func ListProjectsV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if got != nil {
-		projects, _, ok := narrowed(w, r, got.Projects, func(p *dgraphStruct.DgraphProject) []appBusiness.Place {
+		got.Projects, _ = narrowed(r, got.Projects, func(p *dgraphStruct.DgraphProject) []appBusiness.Place {
 			return []appBusiness.Place{{Kind: "project", ID: p.Uuid}}
 		})
-		if !ok {
-			return
-		}
-		got.Projects = projects
 	}
 	admin := map[string]bool{}
 	if ps, err := projectBusiness.GetDgraphProjectListByAdminDgraphUID(ctx, user.UserDgraphInfo.Uid); err == nil {
@@ -579,17 +580,13 @@ func SearchV1(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusBadRequest, "query is required")
 		return
 	}
-	page, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, user.UserDgraphInfo.Uuid, user.UserPostgresInfo.EmailID,
+	page, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, accessBusiness.SubjectFor(ctx, &user), user.UserPostgresInfo.EmailID,
 		user.UserDgraphInfo.Channels, user.UserDgraphInfo.Projects, user.UserDgraphInfo.Teams, query)
 	if err != nil {
 		refuse(w, http.StatusInternalServerError, "couldn't search")
 		return
 	}
-	hits, _, ok := narrowed(w, r, page.Page, hitPlaces)
-	if !ok {
-		return
-	}
-	page.Page = hits
+	page.Page, _ = narrowed(r, page.Page, hitPlaces)
 	answer(w, http.StatusOK, fmt.Sprintf("%d results for %q.", len(page.Page), query), map[string]string{structuredKey: asJSON(page)})
 }
 

@@ -20,6 +20,20 @@ type SystemConfig struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// EmailLogoKey is the system config holding the workspace's logo: the stored
+// picture its emails carry, and the one a form's page wears when the form has
+// no logo of its own (business/Form look.go).
+const EmailLogoKey = "invitation_email_logo"
+
+// EmailLogo is the stored key of the workspace's logo, or "" when it has none.
+func EmailLogo() string {
+	cfg, err := GetConfigByKey(EmailLogoKey)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return cfg.Value
+}
+
 func GetConfigByKey(key string) (config *SystemConfig, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), postgresInit.DBConn.DBTimeout)
 	defer cancel()

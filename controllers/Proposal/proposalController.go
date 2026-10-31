@@ -4,6 +4,7 @@
 package controllers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,8 +12,11 @@ import (
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	business "github.com/akashc777/OneCamp/business/Proposal"
+	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 )
 
 // A proposal's JSON is capped well under the member router's 8 MiB body limit:
@@ -126,7 +130,53 @@ func ListProposals(w http.ResponseWriter, r *http.Request) {
 		write(w, r, "ListProposals", err)
 		return
 	}
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"proposals": list}})
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"proposals": named(r.Context(), list)}})
+}
+
+// listed is a proposal as the list shows it: with its author's name, so a
+// doc says "Suggested by Maya" (docs C5).
+type listed struct {
+	business.Proposal
+	// AuthorName is the person's or the agent's display name; "" when they
+	// have none, or for the AI (the client says who in its own words).
+	AuthorName string `json:"author_name,omitempty"`
+}
+
+// authorNames are display names by id, a seam for tests.
+var authorNames = userModels.DisplayNamesByUUIDs
+
+// named is the list with each author's name, in one read. A name that is
+// only an address (no display name set) is left out: a doc's readers learn
+// who suggested a change, never their email. A read that fails leaves every
+// name out; the list still goes.
+func named(ctx context.Context, list []business.Proposal) []listed {
+	ids := make([]uuid.UUID, 0, len(list))
+	for _, p := range list {
+		if p.AuthorKind == business.AuthorAI {
+			continue
+		}
+		if id, err := uuid.Parse(p.AuthorUUID); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	names, err := authorNames(ctx, ids)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "controllers/Proposal/ListProposals: the authors' names couldn't be read: %+v", err)
+		names = nil
+	}
+	out := make([]listed, len(list))
+	for i, p := range list {
+		out[i] = listed{Proposal: p}
+		if p.AuthorKind == business.AuthorAI {
+			continue
+		}
+		if id, err := uuid.Parse(p.AuthorUUID); err == nil {
+			if name := userDomain.MemberName(names[id]); name != "" {
+				out[i].AuthorName = name
+			}
+		}
+	}
+	return out
 }
 
 // GetProposal is one proposal. GET /proposals/{proposal_id}

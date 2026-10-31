@@ -18,6 +18,18 @@
 // ending the call for everyone and naming co-hosts; a participant and a guest
 // nothing to others. Nobody acts on someone whose part is above theirs.
 //
+// WHAT EVERYONE ELSE MAY DO (calls meet-12, zoom-14): the people running a
+// call can hold sharing, chat, reactions, microphones and cameras for everyone
+// who doesn't run it, and let one person through. Sharing, microphones and
+// cameras are held by the call server (business/LiveKit's PublishSources),
+// chat by the thread's access (business/Conversation), and reactions by every
+// screen, which drops a held person's.
+//
+// WHAT EVERYONE DOES TOGETHER (calls package A: meet-10, zoom-02): polls and
+// Q&A, run by whoever may run them (CanActivities: hosts, co-hosts, and
+// everyone in a DM or a group call), answered by everyone in the call, guests
+// too (activities.go).
+//
 // HOW THE CALL KNOWS. The server sets two attributes on each person in the
 // room (LiveKit attributes, which tokens never let a participant change):
 // AttrRole, their part, and AttrCan, what they may do, so every screen
@@ -60,12 +72,35 @@ const (
 	CanSpotlight Ability = "spotlight"
 	// CanMuteOnEntry: have people join the call muted.
 	CanMuteOnEntry Ability = "mute_on_entry"
+	// CanLowerHands: lower someone else's raised hand, or everyone's.
+	CanLowerHands Ability = "lower_hands"
+	// CanAdmit: let in, or turn away, someone waiting in the lobby.
+	CanAdmit Ability = "admit"
+	// CanHold: hold sharing, chat, reactions, microphones or cameras for
+	// everyone who doesn't run the call, and let one person through.
+	CanHold Ability = "hold"
+	// CanActivities: run the call's polls and Q&A (activities.go): start and
+	// close polls, share held-back results, open Q&A and say which questions
+	// people see, and answer, pin or dismiss questions.
+	CanActivities Ability = "activities"
+	// CanBreakouts: run the call's breakout rooms (breakouts.go): set them
+	// up, assign and move people, open and close them, and visit any room.
+	// A DM's or a group's call has none.
+	CanBreakouts Ability = "breakouts"
 )
 
 // The participant attributes the server sets.
 const (
 	AttrRole = "oc.role"
 	AttrCan  = "oc.can"
+	// AttrHand is when the person's hand went up, in Unix milliseconds ("" while
+	// down): every screen orders the queue by it.
+	AttrHand = "oc.hand"
+	// AttrFeedback is what stays beside their name: yes, no, slow_down or away.
+	AttrFeedback = "oc.feedback"
+	// AttrAllowed is what they may do although the call holds it, as someone
+	// running it let them: holds joined by commas ("" for none).
+	AttrAllowed = "oc.allowed"
 )
 
 // equalCall is a call where everyone is equal: a DM's or a group's. Pure.
@@ -74,15 +109,15 @@ func equalCall(kind string) bool {
 }
 
 var (
-	everything = []Ability{CanMute, CanMuteAll, CanAskUnmute, CanRemove, CanLock, CanEnd, CanCohost, CanSpotlight, CanMuteOnEntry}
-	cohosts    = []Ability{CanMute, CanMuteAll, CanAskUnmute, CanRemove, CanLock, CanSpotlight, CanMuteOnEntry}
-	equals     = []Ability{CanMute, CanMuteAll, CanAskUnmute}
+	everything = []Ability{CanMute, CanMuteAll, CanAskUnmute, CanRemove, CanLock, CanEnd, CanCohost, CanSpotlight, CanMuteOnEntry, CanLowerHands, CanAdmit, CanHold, CanActivities, CanBreakouts}
+	cohosts    = []Ability{CanMute, CanMuteAll, CanAskUnmute, CanRemove, CanLock, CanSpotlight, CanMuteOnEntry, CanLowerHands, CanAdmit, CanHold, CanActivities, CanBreakouts}
+	equals     = []Ability{CanMute, CanMuteAll, CanAskUnmute, CanLowerHands, CanAdmit, CanActivities}
 )
 
 // AbilitiesOf answers what someone may do in a call of a kind (what it
 // belongs to: channel, dm, group or meeting) with their part in it. Pure.
 func AbilitiesOf(kind, role string) []Ability {
-	if role == model.RoleGuest {
+	if role == model.RoleGuest || role == model.RoleInvitee {
 		return nil
 	}
 	if equalCall(kind) {
@@ -114,7 +149,7 @@ func rank(role string) int {
 		return 3
 	case model.RoleCohost:
 		return 2
-	case model.RoleParticipant:
+	case model.RoleParticipant, model.RoleInvitee:
 		return 1
 	}
 	return 0
@@ -135,7 +170,29 @@ const (
 	ActSpotlight    = "spotlight"     // identity
 	ActEndSpotlight = "end_spotlight"
 	ActMuteOnEntry  = "mute_on_entry" // on
+	ActLowerHand    = "lower_hand"    // identity (yours, or nobody's, is your own)
+	ActLowerAll     = "lower_all_hands"
+	ActAdmit        = "admit" // ticket
+	ActDeny         = "deny"  // ticket
+	ActAdmitAll     = "admit_all"
+	ActHold         = "hold"  // what, on: hold it for everyone who doesn't run the call, or let them again
+	ActAllow        = "allow" // identity, what, on: let one person through a hold, or take it back
+	// What anyone in a call may do to themselves, guests included: no ability.
+	ActRaiseHand   = "raise_hand"
+	ActSetFeedback = "set_feedback" // feedback ("" takes it away)
 )
+
+// OwnAction is something someone does to themselves: their own hand or
+// feedback. Pure.
+func OwnAction(a Action, identity string) bool {
+	switch a.Action {
+	case ActRaiseHand, ActSetFeedback, ActBreakoutChoose:
+		return true
+	case ActLowerHand:
+		return a.Identity == "" || a.Identity == identity
+	}
+	return false
+}
 
 // abilityFor is the ability an action needs, or "" for no action we know. Pure.
 func abilityFor(action string) Ability {
@@ -158,13 +215,21 @@ func abilityFor(action string) Ability {
 		return CanSpotlight
 	case ActMuteOnEntry:
 		return CanMuteOnEntry
+	case ActLowerHand, ActLowerAll:
+		return CanLowerHands
+	case ActAdmit, ActDeny, ActAdmitAll:
+		return CanAdmit
+	case ActHold, ActAllow:
+		return CanHold
+	case ActBreakoutsSet, ActBreakoutsAssign, ActBreakoutsSpread, ActBreakoutsOpen, ActBreakoutsClose, ActBreakoutsBroadcast:
+		return CanBreakouts
 	}
 	return ""
 }
 
 // targeted is an action done to one person. Pure.
 func targeted(action string) bool {
-	return slices.Contains([]string{ActMute, ActAskUnmute, ActRemove, ActMakeCohost, ActRemoveCohost, ActSpotlight}, action)
+	return slices.Contains([]string{ActMute, ActAskUnmute, ActRemove, ActMakeCohost, ActRemoveCohost, ActSpotlight, ActLowerHand, ActAllow}, action)
 }
 
 // Action is what someone running a call asks for.
@@ -173,8 +238,27 @@ type Action struct {
 	Identity string `json:"identity,omitempty"`
 	// Source is what to mute: microphone (the default), camera or screen_share.
 	Source string `json:"source,omitempty"`
-	// On is for mute_on_entry: turn it on, or off.
+	// On is for mute_on_entry, hold and allow: turn it on, or off.
 	On bool `json:"on,omitempty"`
+	// What is for hold and allow: share, chat, react, microphone or camera
+	// (model.Holds).
+	What string `json:"what,omitempty"`
+	// Feedback is for set_feedback: yes, no, slow_down, away, or "".
+	Feedback string `json:"feedback,omitempty"`
+	// Ticket is for admit and deny: who in the lobby (their knock).
+	Ticket string `json:"ticket,omitempty"`
+	// Board is for present_board: the board to put on the stage.
+	Board string `json:"board,omitempty"`
+	// Draw is for board_draw: who draws, everyone or the presenter.
+	Draw string `json:"draw,omitempty"`
+	// A call's breakout rooms (breakouts.go): their names, in order
+	// (breakouts_set); one room, from 1 (breakouts_assign, breakout_choose);
+	// how long until they close by themselves (breakouts_open, 0: until
+	// closed); what is said to every room (breakouts_broadcast).
+	Rooms   []string `json:"rooms,omitempty"`
+	Room    int      `json:"room,omitempty"`
+	Minutes int      `json:"minutes,omitempty"`
+	Text    string   `json:"text,omitempty"`
 }
 
 // Result is what an action did.
@@ -182,6 +266,8 @@ type Result struct {
 	// Affected is how many people it reached: one, or for mute_all and
 	// ask_all_unmute, everyone it muted or asked.
 	Affected int `json:"affected"`
+	// Board is the board a new_board made.
+	Board string `json:"board,omitempty"`
 }
 
 // Refusal is an action that wasn't done, in words the person can act on, with
@@ -196,14 +282,24 @@ func (r *Refusal) Error() string { return r.Msg }
 
 // The refusals.
 var (
-	ErrUnknownAction = &Refusal{http.StatusBadRequest, "unknown_action", "That isn't something you can do in a call."}
-	ErrNoTarget      = &Refusal{http.StatusBadRequest, "no_target", "Say who it's for."}
-	ErrThroughToken  = &Refusal{http.StatusForbidden, "not_through_token", "Running a call needs you in it. An API token can't do it."}
-	ErrNotInCall     = &Refusal{http.StatusForbidden, "not_in_call", "Join the call first."}
-	ErrNotAllowed    = &Refusal{http.StatusForbidden, "not_allowed", "Only the people running this call can do that."}
-	ErrAboveYou      = &Refusal{http.StatusForbidden, "not_allowed", "They're running this call too, so you can't do that to them."}
-	ErrYourself      = &Refusal{http.StatusBadRequest, "yourself", "Use your own controls for that."}
-	ErrGuestCohost   = &Refusal{http.StatusBadRequest, "guest", "Guests can't run a call. Make someone from the workspace a co-host instead."}
-	ErrTargetGone    = &Refusal{http.StatusNotFound, "not_in_call", "They're not in the call any more."}
-	ErrCallOver      = &Refusal{http.StatusConflict, "call_over", "This call has ended."}
+	ErrUnknownAction  = &Refusal{http.StatusBadRequest, "unknown_action", "That isn't something you can do in a call."}
+	ErrNoSuchFeedback = &Refusal{http.StatusBadRequest, "no_such_feedback", "That isn't one of the call's signs."}
+	ErrHandDown       = &Refusal{http.StatusConflict, "hand_down", "Their hand is already down."}
+	ErrNotWaiting     = &Refusal{http.StatusConflict, "not_waiting", "They're no longer waiting."}
+	ErrNoTarget       = &Refusal{http.StatusBadRequest, "no_target", "Say who it's for."}
+	ErrThroughToken   = &Refusal{http.StatusForbidden, "not_through_token", "Running a call needs you in it. An API token can't do it."}
+	ErrNotInCall      = &Refusal{http.StatusForbidden, "not_in_call", "Join the call first."}
+	ErrNotAllowed     = &Refusal{http.StatusForbidden, "not_allowed", "Only the people running this call can do that."}
+	ErrAboveYou       = &Refusal{http.StatusForbidden, "not_allowed", "They're running this call too, so you can't do that to them."}
+	ErrYourself       = &Refusal{http.StatusBadRequest, "yourself", "Use your own controls for that."}
+	ErrGuestCohost    = &Refusal{http.StatusBadRequest, "guest", "Guests can't run a call. Make someone from the workspace a co-host instead."}
+	ErrTargetGone     = &Refusal{http.StatusNotFound, "not_in_call", "They're not in the call any more."}
+	ErrCallOver       = &Refusal{http.StatusConflict, "call_over", "This call has ended."}
+	ErrNoSuchHold     = &Refusal{http.StatusBadRequest, "no_such_hold", "A call can hold sharing, chat, reactions, microphones and cameras, nothing else."}
+	ErrNoChat         = &Refusal{http.StatusBadRequest, "no_chat", "This call has no chat to hold."}
+	ErrMicsHeld       = &Refusal{http.StatusConflict, "mics_held", "Microphones are held for everyone. Let everyone turn on their microphone first."}
+	ErrQAClosed       = &Refusal{http.StatusConflict, "qa_closed", "Questions are closed in this call."}
+	ErrNoAnonymous    = &Refusal{http.StatusForbidden, "no_anonymous", "The people running this call have turned off anonymous questions."}
+	ErrTooFast        = &Refusal{http.StatusTooManyRequests, "too_fast", "That's a lot at once. Wait a minute and try again."}
+	ErrNoActivity     = &Refusal{http.StatusNotFound, "no_activity", "That poll or question isn't in this call any more."}
 )

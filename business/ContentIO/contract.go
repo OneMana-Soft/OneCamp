@@ -19,6 +19,7 @@ package business
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"time"
@@ -77,6 +78,43 @@ type Page struct {
 	Assets AssetOpener
 }
 
+// IntoCalendar is an import into a calendar: its events, not docs. "" is
+// docs, the default.
+const IntoCalendar = "calendar"
+
+// IntoTable is an import of a spreadsheet into tables: each of its sheets a
+// table.
+const IntoTable = "table"
+
+// Targeted is an importer of something other than docs (a calendar's
+// events): it is chosen only for an import into what it makes, and makes it
+// itself, while the pipeline keeps the job, the file and its progress, as it
+// does for docs.
+type Targeted interface {
+	Importer
+	// Into is what it makes: IntoCalendar or IntoTable.
+	Into() string
+	// Make reads in and makes what it holds for who, as choices say (what the
+	// person confirmed of a Previewer's preview; nil for an importer without
+	// one), saying how far it has got, and what it made and left out (Made's
+	// Created and Skipped). An error is the whole file's.
+	Make(ctx context.Context, who accessBusiness.Subject, in Input, choices json.RawMessage, report func(done, total int)) (Made, error)
+}
+
+// Previewer is a Targeted importer that shows what a file holds before it
+// makes anything (a spreadsheet's sheets, its columns' kinds, its first
+// rows). Its job reads the file and waits, JobReady, with Preview's answer as
+// the job's Preview, until the person chooses (Service.Choose): to see it
+// read another way, which previews it again with their choices, or to
+// confirm, which hands Make their choices.
+type Previewer interface {
+	Targeted
+	// Preview reads in as choices say how (the reading the person chose; nil
+	// at first, unless the import was started with some), and answers what a
+	// preview shows, as JSON of at most maxPreviewBytes.
+	Preview(ctx context.Context, who accessBusiness.Subject, in Input, choices json.RawMessage) (json.RawMessage, error)
+}
+
 // AssetOpener opens a file an imported body refers to.
 type AssetOpener interface {
 	// Open opens the file at path (relative to the page), with its size.
@@ -107,8 +145,11 @@ const (
 	JobUploading JobStatus = "uploading"
 	JobQueued    JobStatus = "queued"
 	JobRunning   JobStatus = "running"
-	JobDone      JobStatus = "done"
-	JobFailed    JobStatus = "failed"
+	// JobReady has read its file and waits for the person to choose what
+	// to make of it (Previewer).
+	JobReady  JobStatus = "ready"
+	JobDone   JobStatus = "done"
+	JobFailed JobStatus = "failed"
 )
 
 // Job is one import or export, with its progress, as its owner sees it.
@@ -127,10 +168,28 @@ type Job struct {
 	Created []Created `json:"created,omitempty"`
 	// Skipped is what it left out, and why.
 	Skipped []Skipped `json:"skipped,omitempty"`
-	// Exported is how many docs a workspace export wrote.
-	Exported   int        `json:"exported,omitempty"`
-	CreatedAt  time.Time  `json:"created_at"`
-	FinishedAt *time.Time `json:"finished_at,omitempty"`
+	// Exported is how many docs a workspace export wrote, and ExportedBoards
+	// how many boards.
+	Exported       int `json:"exported,omitempty"`
+	ExportedBoards int `json:"exported_boards,omitempty"`
+	// Unchanged is how many things an import found already there, and left
+	// as they were (a calendar's events imported before).
+	Unchanged int `json:"unchanged,omitempty"`
+	// Made is how many things an import made, where Created names only the
+	// first of them (a calendar's events: thousands can come at once).
+	Made int `json:"made,omitempty"`
+	// Into is where they went, and how many each: a calendar import's
+	// calendars.
+	Into []Into `json:"into,omitempty"`
+	// Show is what to show first once it is done: a calendar's next event
+	// to come, or its latest.
+	Show *Created `json:"show,omitempty"`
+	// Preview is what a ready job found in its file, as its importer shows
+	// it (Previewer). Only a read of the job carries it: its message to the
+	// person's tabs says it is ready, as a preview can be large.
+	Preview    json.RawMessage `json:"preview,omitempty"`
+	CreatedAt  time.Time       `json:"created_at"`
+	FinishedAt *time.Time      `json:"finished_at,omitempty"`
 	// KeptUntil is when the file an export made is removed; absent once it
 	// is, and for a job that made none.
 	KeptUntil *time.Time `json:"kept_until,omitempty"`
@@ -142,6 +201,19 @@ type Created struct {
 	UUID       string `json:"uuid"`
 	Title      string `json:"title"`
 	ParentUUID string `json:"parent_uuid,omitempty"`
+	// At is when it happens, for an event: an instant (RFC 3339), or a
+	// date (YYYY-MM-DD) for an all-day one.
+	At string `json:"at,omitempty"`
+}
+
+// Into is one place an import put things (a calendar), what kind of place
+// it is (a calendar's kind: "personal", the person's own, or "external", one
+// an import made), and how many.
+type Into struct {
+	UUID  string `json:"uuid"`
+	Kind  string `json:"kind,omitempty"`
+	Title string `json:"title"`
+	Count int    `json:"count"`
 }
 
 // Skipped is one thing an import left out.
@@ -155,8 +227,14 @@ type ImportRequest struct {
 	Filename   string
 	MediaType  string
 	ParentUUID string
+	// Into is what the import makes: "" docs (under ParentUUID),
+	// IntoCalendar or IntoTable.
+	Into string
 	// Size is the file's size when known, -1 when not.
 	Size int64
+	// Choices are how a Previewer's first preview reads the file (the
+	// person's number signs, say); none for the importer's own way.
+	Choices json.RawMessage
 	// Body is the file; empty for PrepareUpload, where it comes later.
 	Body io.Reader
 }
@@ -200,6 +278,10 @@ type Service interface {
 	PrepareUpload(ctx context.Context, who accessBusiness.Subject, req ImportRequest) (Job, Upload, error)
 	// StartUploaded queues an import whose file has arrived.
 	StartUploaded(ctx context.Context, who accessBusiness.Subject, id string) (Job, error)
+	// Choose hands a ready job the person's choices (JSON, its importer's to
+	// read): confirmed, it makes what it previewed as they say; else it
+	// previews the file again, read as they say.
+	Choose(ctx context.Context, who accessBusiness.Subject, id string, choices json.RawMessage, confirmed bool) (Job, error)
 	// Export writes res in a format, checked against who's access.
 	Export(ctx context.Context, who accessBusiness.Subject, res accessBusiness.Resource, format string, to ExportTarget) error
 	// RecordExport records an export the browser made (Markdown, HTML, PDF,
@@ -225,9 +307,16 @@ var (
 	ErrForbidden = errors.New("content io: not allowed")
 	// ErrNotFound is a job or a resource that isn't there, or isn't theirs.
 	ErrNotFound = errors.New("content io: not found")
-	// ErrConflict is a job that has moved on: an upload started twice.
+	// ErrConflict is a job that has moved on: an upload started twice, a
+	// preview confirmed twice.
 	ErrConflict = errors.New("content io: the job has moved on")
+	// ErrBadChoices is a preview's choices that aren't JSON of an object.
+	ErrBadChoices = errors.New("content io: the choices aren't an object")
 )
+
+// ReadError is an importer's error in words for the person importing: the
+// job says it as it is.
+func ReadError(msg string) error { return readError{msg} }
 
 // Pipeline is the pipeline everything asks.
 var Pipeline Service = newPipeline()

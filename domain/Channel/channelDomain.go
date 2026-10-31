@@ -358,6 +358,7 @@ func GetBasicChannelAndPostInfoByUUID(ctx context.Context, channelUUID string, p
 					ch_posts @filter(eq(post_uuid, $postId)) {
 						uid
 						post_uuid
+						post_kind
 						post_created_at
 						post_deleted_at
 					}

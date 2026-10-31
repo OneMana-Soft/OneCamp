@@ -252,11 +252,12 @@ var SSOState = withArity(Spec{
 }, 1) // (state)
 
 // SAMLAssertionUsed marks a SAML assertion as used, so a captured answer
-// can't sign anyone in again. Each key is set with its own TTL, until the
-// assertion expires (services/SAML TakeAssertion); this TTL is unused.
+// can't sign anyone in again. services/SAML TakeAssertion keeps each key until
+// MaxIssueDelay after its assertion's IssueInstant, when the library refuses
+// the assertion anyway: this TTL, from the moment the IdP issued it.
 var SAMLAssertionUsed = withArity(Spec{
 	Namespace:   "sso:saml:used",
-	TTL:         5 * time.Minute,
+	TTL:         90 * time.Second,
 	Datatype:    DatatypeString,
 	Category:    CategorySSO,
 	Description: "A SAML assertion ID already used to sign in. SET NX until the assertion expires; a second use is refused.",
@@ -758,8 +759,8 @@ var ApiIdempotency = withArity(Spec{
 	TTL:         24 * time.Hour,
 	Datatype:    DatatypeString,
 	Category:    CategoryRateLimit,
-	Description: "A public-API write's answer under its Idempotency-Key, replayed for a retry with the same body.",
-}, 3) // (tokenID, route, key)
+	Description: "A write's answer under its Idempotency-Key (the public API's writes, a doc import), replayed for a retry with the same body.",
+}, 3) // (caller: an API token's id or member:<uuid>, route, key)
 
 // MCPToolReadRate bounds how fast one credential can READ through the MCP server.
 //
@@ -1000,6 +1001,17 @@ var CommandInteraction = withArity(Spec{
 	Description: "Transient interactive-card state keyed by trigger id.",
 }, 1) // (triggerID)
 
+// GiphyPage keeps one page of the composer's GIF picker (trending, or a
+// search) for everyone, so people browsing the same GIFs spend the
+// workspace's Giphy quota once.
+var GiphyPage = withArity(Spec{
+	Namespace:   "command:giphy-page",
+	TTL:         10 * time.Minute,
+	Datatype:    DatatypeString,
+	Category:    CategoryCommand,
+	Description: "A page of the GIF picker's Giphy results, by lowercased search and offset.",
+}, 2) // (term, offset)
+
 // CommandResponse is one command's response URL (business/Command): the app,
 // who typed the command and where, and the answers it has left. It stops 30
 // minutes after the command, whatever its TTL says after a use.
@@ -1081,6 +1093,50 @@ var CollabStateSize = withArity(Spec{
 	Description: "Last persisted state byte-size per (kind, id) for cheap mass-delete detection on save.",
 }, 2) // (kind, id)
 
+// TABLES ---------------------------------------------------------------------
+
+// TablePresence is who has a table open, and the cell each has selected or
+// is editing (tables A7, Live Rows #65): a hash, each person's id to their
+// place and when they were last heard from. Someone not heard from in 45 s
+// is gone and is dropped as it's read; the key goes when nobody has been
+// heard from for its TTL.
+var TablePresence = withArity(Spec{
+	Namespace:   "table:presence",
+	TTL:         2 * time.Minute,
+	Datatype:    DatatypeHash,
+	Category:    CategoryCollab,
+	Description: "Who has a table open and the cell each has selected or is editing (tables A7). A field per person; entries older than 45 s are dropped on read.",
+}, 1) // (tableUUID)
+
+// TableRowList is the order of a view's rows that no index walks, listed
+// once as row ids for its later windows to read slices of (tables T5d,
+// business/RowQuery lists.go): 16 bytes an id. It is keyed by its view (a
+// hash of the table, the spec and the reader), then a hash of what it was
+// listed under (TableRowsToken, the fields, the reader's day) and where it
+// starts, so a window reads only its own view's lists.
+var TableRowList = withArity(Spec{
+	Namespace:   "table:rowlist",
+	TTL:         10 * time.Minute,
+	Datatype:    DatatypeString,
+	Category:    CategoryCollab,
+	Description: "A view's row order listed once (tables T5d): row ids of 16 bytes each, read in slices by the view's later windows. Stale once its table's TableRowsToken changes.",
+}, 2) // (view hash, list hash)
+
+// TableRowsToken changes each time a write to a table's rows commits (the
+// row ledger's observer), and each time the table's readers are told to look
+// again because a linked table changed its links (business/RowQuery
+// lists.go): a TableRowList made under another token is stale. A random
+// token rather than a count, so a key that expired and began again can never
+// repeat one a list holds; it outlives every list (24 hours against 10
+// minutes), so a list made while there was none can't be read after a write.
+var TableRowsToken = withArity(Spec{
+	Namespace:   "table:rowstoken",
+	TTL:         24 * time.Hour,
+	Datatype:    DatatypeString,
+	Category:    CategoryCollab,
+	Description: "A random token replaced by each committed write to a table's rows, and each change to its links made from a linked table (tables T5d); the row lists made under another are stale.",
+}, 1) // (tableUUID)
+
 // ViewSalt is the day's random salt a published page's visitors are counted
 // under (docs C6-3): one per UTC day, shared by every instance, gone two days
 // on. Never logged; what it keys is never an address.
@@ -1099,14 +1155,17 @@ var ViewSalt = withArity(Spec{
 // wall-clock time the tick falls in, so instances ticking in the same slot run
 // the job once between them. The claim sets its own expiry, two of the job's
 // intervals, so it outlives its slot; TTL is the longest of those today (the
-// six-hourly sweeps). A job that claims its own work takes no claim.
+// six-hourly sweeps). A job that claims its own work takes no claim. A wake
+// published by a process that runs no sweeps (Registry.Wake) is claimed the
+// same way, on "wake-" and the wake's id, for a minute, so one of the
+// instances that hear it runs it.
 var SweepClaim = withArity(Spec{
 	Namespace:   "sweep:claim",
 	TTL:         12 * time.Hour,
 	Datatype:    DatatypeString,
 	Category:    CategorySweep,
-	Description: "One instance's claim on one pass of a periodic job (SET NX); expires after two of the job's intervals, which the claim sets.",
-}, 2) // (job, slot)
+	Description: "One instance's claim on one pass of a periodic job (SET NX), a tick's slot or a wake's id; expires after two of the job's intervals (a minute for a wake), which the claim sets.",
+}, 2) // (job, slot or "wake-" and the wake's id)
 
 // SendOnce is a message send, by the person, the conversation ("ch:", "dm:" or
 // "grp:" and its id) and the id their app gave it (business/Send.Once): a
@@ -1252,15 +1311,59 @@ var PublishPageRate = withArity(Spec{
 	Description: "Work per doc page outside the workspace (a render, a password tried, a copy made), from anyone. Window-locked; resets every minute.",
 }, 1) // (grant id)
 
-// PublishUnlockRate limits password tries on a published page, per address
-// and page, in a fifteen-minute window.
+// PublishUnlockRate limits password tries at a guest link (a published page
+// or a room), per address and link, in a fifteen-minute window.
 var PublishUnlockRate = withArity(Spec{
 	Namespace:   "publish:unlock:rate",
 	TTL:         15 * time.Minute,
 	Datatype:    DatatypeCounter,
 	Category:    CategoryRateLimit,
-	Description: "Password tries per (address, guest link's page). Window-locked; resets every fifteen minutes.",
+	Description: "Password tries per (address, guest link: a page or a room). Window-locked; resets every fifteen minutes.",
 }, 2) // (ip, grant id)
+
+// PublishUnlockGrantRate is the ceiling on password tries at one guest link
+// (a published page, a room) from every address together, in the same
+// fifteen-minute window (business/Guest UnlockTryAllowed).
+var PublishUnlockGrantRate = withArity(Spec{
+	Namespace:   "publish:unlock:grant:rate",
+	TTL:         15 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Password tries per guest link (a page or a room), from every address. Window-locked; resets every fifteen minutes.",
+}, 1) // (grant id)
+
+// PublishUnlockSlowRate is an address's tries at a guest link once the link
+// is past its ceiling: slower, never shut.
+var PublishUnlockSlowRate = withArity(Spec{
+	Namespace:   "publish:unlock:slow:rate",
+	TTL:         15 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Password tries per (address, guest link) while the link is past its ceiling. Window-locked; resets every fifteen minutes.",
+}, 2) // (ip, grant id)
+
+// SearchEntryRepair lets search write a doc's or a board's index entry again
+// at most once a window, when a page's live check finds the entry lets in
+// someone the graph doesn't (business/GlobalSearch repair.go): a reader
+// searching again and again can't make the index rewrite anything more.
+var SearchEntryRepair = withArity(Spec{
+	Namespace:   "search:entry:repair",
+	TTL:         10 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Index entry rewrites search asked for, per (kind, doc or board uuid). Window-locked; resets every ten minutes.",
+}, 2) // (kind, uuid)
+
+// QuerySearchRate limits how often one person's search field runs a search
+// through the one grammar (POST /query/search): after each pause in typing,
+// so the limit sits well above that and stops a loop.
+var QuerySearchRate = withArity(Spec{
+	Namespace:   "query:search:rate",
+	TTL:         1 * time.Minute,
+	Datatype:    DatatypeCounter,
+	Category:    CategoryRateLimit,
+	Description: "Searches run per user through the one query grammar (POST /query/search). Window-locked; resets every minute.",
+}, 1) // (userUUID)
 
 // =============================================================================
 // Specs() returns every registered key for documentation / audit. Used

@@ -6,8 +6,10 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	taskBusiness "github.com/akashc777/OneCamp/business/Task"
+	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	"github.com/google/uuid"
 )
@@ -95,6 +97,30 @@ func TestApplyRefusesValuesTheRulesWouldBreak(t *testing.T) {
 	}
 	if _, _, err := Tasks.Apply(context.Background(), who, uuid.New(), []Op{{Kind: OpAssignee, Value: json.RawMessage(`"` + uuid.NewString() + `"`)}}, 0); !errors.Is(err, ErrNotInProject) {
 		t.Errorf("assigning someone outside the project: %v", err)
+	}
+	if len(c.made) != 0 {
+		t.Errorf("made %v", c.made)
+	}
+}
+
+// Someone in the project whose account is deactivated isn't given the task,
+// and the batch they're in changes nothing. The refusal names them: a rule's
+// run said "that person isn't in the task's project" about someone who was.
+func TestApplyRefusesADeactivatedAssigneeByName(t *testing.T) {
+	sam := uuid.NewString()
+	c := &calls{}
+	c.use(t)
+	c.useRuleOps(t, sam)
+	gone := time.Now().Add(-time.Hour)
+	personByUUID = func(_ context.Context, id string) (*dgraphStruct.DgraphUser, error) {
+		return &dgraphStruct.DgraphUser{Uid: "0x9", Uuid: id, UserName: "Sam Rivera", DeletedAt: &gone}, nil
+	}
+	_, _, err := Tasks.Apply(context.Background(), who, uuid.New(), []Op{
+		{Kind: OpPriority, Value: json.RawMessage(`"high"`)},
+		{Kind: OpAssignee, Value: json.RawMessage(`"` + sam + `"`)},
+	}, 0)
+	if !errors.Is(err, helpers.ErrConflict) || err.Error() != "Sam Rivera can't be assigned: their account is deactivated." {
+		t.Errorf("assigning a deactivated member: %v", err)
 	}
 	if len(c.made) != 0 {
 		t.Errorf("made %v", c.made)

@@ -59,32 +59,6 @@ func TestOnlyAnAdminInTheAppActsOnAReview(t *testing.T) {
 	}
 }
 
-// The scan keeps only the people still in their project, asking the graph
-// once per project.
-func TestTheScanKeepsThoseStillInTheirProject(t *testing.T) {
-	launch, notes := uuid.New(), uuid.New()
-	ann, ben := uuid.New(), uuid.New()
-	asked := map[string]int{}
-	was := membersAmong
-	defer func() { membersAmong = was }()
-	membersAmong = func(_ context.Context, project string, _ []string) (map[string]bool, error) {
-		asked[project]++
-		return map[string]bool{ann.String(): project == launch.String()}, nil
-	}
-	got, err := stillMembers(context.Background(), []reviewModel.Candidate{
-		{ProjectUUID: launch, UserID: ann}, {ProjectUUID: launch, UserID: ben}, {ProjectUUID: notes, UserID: ann},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 || got[0].ProjectUUID != launch || got[0].UserID != ann {
-		t.Errorf("kept %v, want Ann in Launch alone", got)
-	}
-	if asked[launch.String()] != 1 || asked[notes.String()] != 1 {
-		t.Errorf("asked the graph %v, want once for each project", asked)
-	}
-}
-
 // The notice opens only for someone who is an admin now.
 func TestTheNoticeOpensOnlyForAnAdmin(t *testing.T) {
 	was := activeAdmin

@@ -45,28 +45,6 @@ func DeleteByUserIdAndDeviceId(ctx context.Context, userId string, deviceId stri
 	return
 }
 
-func GetFCMTokenByUserId(ctx context.Context, userId string) (tokens []string, err error) {
-	tokens, err = domain.GetFCMTokenByUserId(ctx, userId)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetFCMTokenByUserId Failed to fcm tokens from userId err: %+v",
-			err)
-		return
-	}
-	return
-}
-
-func GetFCMTokenByListOfUserId(ctx context.Context, userIds []string) (tokens []string, err error) {
-	tokens, err = domain.GetFCMTokenByListOfUserId(ctx, userIds)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"business/GetFCMTokenByListOfUserId Failed to fcm tokens from list of userId err: %+v",
-			err)
-		return
-	}
-	return
-}
-
 func DeleteFromListOfFCMToken(ctx context.Context, tokens []string) (err error) {
 	err = domain.DeleteFromListOfFCMToken(ctx, tokens)
 	if err != nil {

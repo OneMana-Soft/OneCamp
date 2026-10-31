@@ -6,9 +6,12 @@ import (
 )
 
 // mountQuery is docs C2's: the one query grammar of docs, chat, projects and
-// tables, read for the signed-in person (design/QUERY_STACK_CONTRACT.md §4.8).
+// tables, read for the signed-in person (design/QUERY_STACK_CONTRACT.md §4.8),
+// and the workspace searched with it.
 // A text is at most 1,000 characters, so a body is small; each person's
 // reads are limited per minute (controllers/SearchQuery).
 func mountQuery(rt docsRouters) {
 	rt.Member.With(customMiddleware.BodyLimit(16<<10)).Post("/query/parse", queryController.ParseQuery)
+	// C2-1: the search engine on the grammar.
+	rt.Member.With(customMiddleware.BodyLimit(16<<10)).Post("/query/search", queryController.SearchQuery)
 }

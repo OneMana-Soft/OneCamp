@@ -18,10 +18,12 @@ import (
 // shape the web doesn't read, and people with MinIO down were told to check
 // their request. A handler written later would make the same choice unless
 // something stops it. A handler stores a file when it calls PutObject itself,
-// or one of the business functions that store an uploaded file.
+// or one of the business functions that store an uploaded file (Attachment's
+// Store and the functions over it).
 func TestHandlersThatStoreFilesSayWhenStorageIsDown(t *testing.T) {
 	stores := func(name string) bool {
-		return name == "PutObject" || name == "SafeUploadToMinio" || strings.HasPrefix(name, "UploadUserFile")
+		return name == "PutObject" || name == "SafeUploadToMinio" || name == "Store" || strings.HasPrefix(name, "UploadUserFile") ||
+			name == "UploadVisitorFile"
 	}
 	answers := map[string]bool{"WriteStorageFailure": true, "WriteUploadFailure": true}
 

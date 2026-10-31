@@ -6,11 +6,10 @@ package notion
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	dataTableBusiness "github.com/akashc777/OneCamp/business/DataTable"
-	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
-	"github.com/akashc777/OneCamp/helpers"
 	dataTableModels "github.com/akashc777/OneCamp/models/postgres/DataTable"
 )
 
@@ -39,27 +38,21 @@ type Column struct {
 }
 
 // TableFromDatabase makes a Notion database into a table of the person's: a
-// column per property, of the kind nearest Notion's, then its rows, and says
-// how many rows couldn't be added. A property no column kind holds (a formula,
-// a relation, a person) comes across as its text. It is the one way a Notion
-// database becomes a table: the API import, and the tables and projects
-// programmes' importers, call it.
-func TableFromDatabase(ctx context.Context, actor dataTableBusiness.Actor, db Database) (table *dataTableModels.DataTable, rowsLeftOut int, err error) {
-	actor.Kind = rowLedger.ActorImport
-	name := strings.TrimSpace(db.Title)
-	if name == "" {
-		name = "Untitled database"
+// column per property, of the kind nearest Notion's, then its rows. A
+// property no column kind holds (a formula, a relation, a person) comes
+// across as its text. It is the API import's way, and goes through the one
+// importer of every source's tables (dataTableBusiness.ImportBaseAs), so a
+// row is never lost for a cell no column kind takes: the row comes across
+// without it, and the notes say which value of which field was left out, for
+// the import's report.
+func TableFromDatabase(ctx context.Context, actor dataTableBusiness.Actor, db Database) (table *dataTableModels.DataTable, notes []dataTableBusiness.ImportNote, err error) {
+	t := dataTableBusiness.ImportTable{Key: "database", Name: db.Title, Icon: db.Icon}
+	if strings.TrimSpace(t.Name) == "" {
+		t.Name = "Untitled database"
 	}
-	if r := []rune(name); len(r) > 120 {
-		name = string(r[:120])
-	}
-	visibility := dataTableModels.VisibilityWorkspace
-	if db.Private {
-		visibility = dataTableModels.VisibilityPrivate
-	}
-	fields := make([]dataTableBusiness.FieldInput, 0, len(db.Columns))
-	for i, c := range db.Columns {
-		f := dataTableBusiness.FieldInput{Name: c.Name, Type: columnKind(c.Type), Position: float64(i)}
+	kinds := map[string]string{}
+	for _, c := range db.Columns {
+		f := dataTableBusiness.ImportField{Key: c.Name, Name: c.Name, Type: columnKind(c.Type)}
 		if f.Type == dataTableModels.FieldSelect || f.Type == dataTableModels.FieldMultiSelect {
 			opts := make([]map[string]any, 0, len(c.Options))
 			for _, o := range c.Options {
@@ -67,40 +60,26 @@ func TableFromDatabase(ctx context.Context, actor dataTableBusiness.Actor, db Da
 			}
 			f.Config = map[string]any{"options": opts}
 		}
-		fields = append(fields, f)
+		kinds[c.Name] = f.Type
+		t.Fields = append(t.Fields, f)
 	}
-	icon := db.Icon
-	if len(icon) > 64 {
-		icon = ""
-	}
-	table, err = dataTableBusiness.CreateTableFromTemplate(ctx, dataTableBusiness.TableInput{Name: name, Icon: icon, Visibility: visibility}, fields, nil, actor)
-	if err != nil {
-		return nil, 0, err
-	}
-	made, err := dataTableBusiness.ListTableFields(ctx, table.Id, actor)
-	if err != nil {
-		return table, len(db.Rows), err
-	}
-	byName := make(map[string]*dataTableModels.Field, len(made))
-	for _, f := range made {
-		byName[f.Name] = f
-	}
+	rows := make([]dataTableBusiness.ImportRow, len(db.Rows))
 	for i, row := range db.Rows {
-		values := map[string]any{}
+		cells := map[string]any{}
 		for col, v := range row {
-			if f := byName[col]; f != nil {
-				if cell := cellValue(f.Type, v); cell != nil {
-					values[f.Id.String()] = cell
-				}
+			if cell := cellValue(kinds[col], v); cell != nil {
+				cells[col] = cell
 			}
 		}
-		at := float64(i)
-		if _, err := dataTableBusiness.CreateRow(ctx, table.Id, dataTableBusiness.RowInput{Values: values, Position: &at}, actor); err != nil {
-			helpers.LogWarnWithContext(ctx, "notion: a row of %q could not be added: %v", name, err)
-			rowsLeftOut++
-		}
+		rows[i] = dataTableBusiness.ImportRow{Key: fmt.Sprint(i), Cells: cells}
 	}
-	return table, rowsLeftOut, nil
+	t.Rows = func(page func([]dataTableBusiness.ImportRow) error) error { return page(rows) }
+	made, err := dataTableBusiness.ImportBaseAs(ctx, actor, dataTableBusiness.ImportBase{Private: db.Private, Tables: []dataTableBusiness.ImportTable{t}})
+	if err != nil {
+		return nil, nil, err
+	}
+	table, err = dataTableModels.GetTableByID(ctx, made.Tables[t.Key])
+	return table, made.Notes, err
 }
 
 // columnKind is the column kind nearest a Notion property type.

@@ -30,6 +30,7 @@ import (
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	entityLinkBusiness "github.com/akashc777/OneCamp/business/EntityLink"
+	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	domain "github.com/akashc777/OneCamp/domain/WorkGraph"
 	"github.com/akashc777/OneCamp/helpers"
 )
@@ -61,6 +62,20 @@ type Hop struct {
 	ID    string         `json:"id"`
 	Title string         `json:"title"`
 	Data  map[string]any `json:"data,omitempty"`
+}
+
+// NodeKind is what a doc hop's node is when it isn't a page (docs F1):
+// folder, file or link, as its chip says; "" for a page and for any other
+// kind of thing.
+func (h Hop) NodeKind() string { return entityLinkBusiness.NodeKindOf(h.Data) }
+
+// Noun is what to call the hop's thing: a doc's node kind (folder, file or
+// link) when it has one, else its kind (doc, task, person...).
+func (h Hop) Noun() string {
+	if k := h.NodeKind(); k != "" {
+		return k
+	}
+	return h.Kind
 }
 
 // Item is a thing connected to the root, with the path that connects it
@@ -185,6 +200,39 @@ func hopOf(rel string, r domain.Ref, e entityLinkBusiness.Entity) Hop {
 	return Hop{Rel: rel, Kind: string(r.Kind), ID: r.UUID, Title: e.Title, Data: e.Data}
 }
 
+// What the doc tree's edge (domain.DocParent) reads as when one of its ends
+// isn't a page (docs F1). A folder's contents are in it (in_folder, from the
+// thing inside), and it contains them (contains, from the folder); a folder,
+// a file or a link under a page is held by it (holds), and the page is still
+// its parent. A page under a page is its subpage, as before.
+const (
+	RelInFolder = "in_folder"
+	RelContains = "contains"
+	RelHolds    = "holds"
+)
+
+// treeRel is how a hop along pred (from from to to, each as the reader's own
+// read decided it) reads: the doc tree's edge by what it joins, any other
+// edge as rel names it. The one place the tree's edge is named, for the
+// panel's items, its paths and the links Ask AI reads, so all of them say
+// the same.
+func treeRel(pred, rel string, from, to entityLinkBusiness.Entity) string {
+	switch pred {
+	case domain.DocParent:
+		if entityLinkBusiness.NodeKindOf(to.Data) == docDomain.NodeFolder {
+			return RelInFolder
+		}
+	case "~" + domain.DocParent:
+		if entityLinkBusiness.NodeKindOf(from.Data) == docDomain.NodeFolder {
+			return RelContains
+		}
+		if entityLinkBusiness.NodeKindOf(to.Data) != "" {
+			return RelHolds
+		}
+	}
+	return rel
+}
+
 // NeighboursOf is what is connected to root, up to depth (1 or 2) hops, of
 // kinds (the panel's kinds when nil), as who may see it, grouped by kind.
 func NeighboursOf(ctx context.Context, who accessBusiness.Subject, root Ref, depth int, kinds []domain.Kind) (*Connected, error) {
@@ -250,7 +298,7 @@ func NeighboursFor(ctx context.Context, readers []accessBusiness.Subject, root R
 		if shown[p.Node] || !shows(kinds, p) {
 			continue
 		}
-		path, ok := visiblePath(p.Path, seen)
+		path, ok := visiblePath(rootEntity, p.Path, seen)
 		if !ok {
 			// Through something the reader can't see: dropped whole.
 			continue
@@ -275,16 +323,18 @@ func NeighboursFor(ctx context.Context, readers []accessBusiness.Subject, root R
 	return out, nil
 }
 
-// visiblePath is a path as the reader sees it, or false when any thing on
-// it is hidden from them.
-func visiblePath(hops []domain.Hop, seen map[domain.Ref]entityLinkBusiness.Entity) ([]Hop, bool) {
+// visiblePath is a path from the thing from as the reader sees it, or false
+// when any thing on it is hidden from them. Each hop is named from the thing
+// before it (treeRel).
+func visiblePath(from entityLinkBusiness.Entity, hops []domain.Hop, seen map[domain.Ref]entityLinkBusiness.Entity) ([]Hop, bool) {
 	out := make([]Hop, 0, len(hops))
 	for _, h := range hops {
 		e, ok := seen[h.To]
 		if !ok {
 			return nil, false
 		}
-		out = append(out, hopOf(h.Rel, h.To, e))
+		out = append(out, hopOf(treeRel(h.Pred, h.Rel, from, e), h.To, e))
+		from = e
 	}
 	return out, len(out) > 0
 }
@@ -336,7 +386,7 @@ func PathsFor(ctx context.Context, readers []accessBusiness.Subject, a, b Ref) (
 	}
 	out := &Paths{From: hopOf("", ra, ea), To: hopOf("", rb, eb), Paths: []Path{}}
 	for _, p := range found {
-		if hops, ok := visiblePath(p.Hops, seen); ok {
+		if hops, ok := visiblePath(ea, p.Hops, seen); ok {
 			out.Paths = append(out.Paths, Path{Hops: hops})
 		}
 	}
@@ -476,8 +526,9 @@ func ExpandFor(ctx context.Context, readers []accessBusiness.Subject, seeds []Re
 				seed = i
 			}
 		}
+		rel := treeRel(n.Pred, n.Rel, from, to)
 		cands = append(cands, cand{
-			link: Link{From: hopOf("", n.Root, from), Rel: n.Rel, To: hopOf(n.Rel, n.Node, to), When: n.Changed},
+			link: Link{From: hopOf("", n.Root, from), Rel: rel, To: hopOf(rel, n.Node, to), When: n.Changed},
 			kind: n.Node.Kind, seed: seed,
 		})
 	}

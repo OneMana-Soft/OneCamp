@@ -274,6 +274,36 @@ test("a guest's connection is read-only: its deletions never reach the doc", asy
     assert.deepEqual(rejections, [])
 })
 
+test("a call's guest draws on the board on its stage only when the API says so", async () => {
+    const { redis, backend } = world()
+    backend.boards.set(ID, { board_state: '' })
+    const collab = await startServer({ redis, backend })
+    const token = '{"guest":true,"sub":"guest-g-1","name":"Guest: Jane","call":"s-1"}'
+
+    // "Guests can draw" off (the default): the API answers canEdit false.
+    backend.levels.set('guest-g-1', 'view')
+    const reader = new TestClient({ url: collab.url, name: `board:${ID}`, token })
+    assert.equal(await reader.connect(), 'synced')
+    assert.equal(reader.scope, 'readonly')
+    reader.doc.getMap('elements').set('e-1', { id: 'e-1', version: 1 })
+    await until(() => reader.statuses.includes(false), 2000, 'the refusal')
+    assert.equal(collab.server.hocuspocus.documents.get(`board:${ID}`).getMap('elements').has('e-1'), false)
+    await reader.close()
+    reader.destroy()
+
+    // On: the reconnect (a reauth closes the old socket) draws.
+    backend.levels.set('guest-g-1', 'edit')
+    const drawer = new TestClient({ url: collab.url, name: `board:${ID}`, token })
+    assert.equal(await drawer.connect(), 'synced')
+    assert.equal(drawer.scope, 'read-write')
+    drawer.doc.getMap('elements').set('e-2', { id: 'e-2', version: 1 })
+    await until(() => collab.server.hocuspocus.documents.get(`board:${ID}`).getMap('elements').has('e-2'), 2000, 'the stroke')
+    await drawer.close()
+    drawer.destroy()
+    await collab.stop()
+    assert.deepEqual(rejections, [])
+})
+
 test('an editor a hard lock holds at comment reconnects read-only: their edits never reach the doc', async () => {
     const { redis, backend } = world()
     const collab = await startServer({ redis, backend })
@@ -337,4 +367,62 @@ test('a tab opening a stored doc hears when it was stored, not when it was read'
         const before = Date.now()
         assert.ok(storedAtOf(doc) >= before, JSON.stringify(doc))
     }
+})
+
+// Hocuspocus 3.4.3 closed such a connection twice: Document.removeConnection
+// sends the presence removal to the leaving connection too, and its failed send
+// closes it again. Every tab with a person on it leaves this way.
+test('a tab that leaves with its presence set is reported gone once, and the others hear it leave', async () => {
+    const backend = new FakeBackend()
+    backend.doc('d1', '<p>hello</p>')
+    const collab = await startServer({ redis: new FakeRedis(), backend })
+    const ann = new TestClient({ url: collab.url, name: 'd1', token: '{"sub":"ann"}' })
+    const sam = new TestClient({ url: collab.url, name: 'd1', token: '{"sub":"sam"}' })
+    assert.equal(await ann.connect(), 'synced')
+    assert.equal(await sam.connect(), 'synced')
+    ann.presence({ user: { name: 'Ann' } })
+    sam.presence({ user: { name: 'Sam' } })
+    await until(() => sam.others.has(ann.doc.clientID), 3000, 'Sam sees Ann')
+    const gone = () => collab.logs.lines.filter((l) => l.includes('Client disconnected from d1'))
+
+    await ann.close()
+    await until(() => !sam.others.has(ann.doc.clientID), 3000, 'Sam hears Ann leave')
+    await sam.close()
+    await until(() => collab.logs.lines.some((l) => l.includes('Document d1 unloaded')), 3000, 'd1 unloaded')
+
+    assert.deepEqual(gone().map((l) => l.replace(/^.*\(/, '(')), ['(remaining: 1)', '(remaining: 0)'])
+})
+
+test('a server-side connection opened without a context is reported gone once and lets its doc go', async () => {
+    const backend = new FakeBackend()
+    backend.doc('d2', '<p>hello</p>')
+    const collab = await startServer({ redis: new FakeRedis(), backend })
+    const connection = await collab.server.hocuspocus.openDirectConnection('d2')
+    await connection.disconnect()
+    await until(() => collab.logs.lines.some((l) => l.includes('Document d2 unloaded')), 3000, 'd2 unloaded')
+    assert.deepEqual(collab.logs.lines.filter((l) => l.includes('Client disconnected from d2')), ['[Collab] Client disconnected from d2 (remaining: 0)'])
+})
+
+// 23 Oct 2026: a tab on the demo signed in and never got its doc, and the
+// server's lines couldn't say whether the tab's first sync had reached it.
+test("each connection's first sync is said once, with the connection, the doc and how long after it connected", async () => {
+    const backend = new FakeBackend()
+    backend.doc('d3', '<p>hello</p>')
+    const collab = await startServer({ redis: new FakeRedis(), backend })
+    const ann = new TestClient({ url: collab.url, name: 'd3', token: '{"sub":"ann"}' })
+    assert.equal(await ann.connect(), 'synced')
+    // Asked again on the same connection (a provider's resync): answered, not
+    // said again. The second sync status is the server's answer to it.
+    ann.send(0, 0, Y.encodeStateVector(ann.doc))
+    await until(() => ann.statuses.length >= 2, 3000, 'the second sync answered')
+    const sam = new TestClient({ url: collab.url, name: 'd3', token: '{"sub":"sam"}' })
+    assert.equal(await sam.connect(), 'synced')
+
+    const said = collab.logs.lines.filter((l) => l.includes('first sync'))
+    assert.equal(said.length, 2, said.join('\n'))
+    const ids = said.map((l) => l.match(/^\[Collab\] d3: answered the first sync of connection ([0-9a-f-]{36}), \d+ ms after it connected$/)?.[1])
+    assert.ok(ids.every(Boolean), said.join('\n'))
+    assert.notEqual(ids[0], ids[1])
+    // Each names the connection its connecting line named.
+    for (const id of ids) assert.ok(collab.logs.lines.includes(`[Collab] Client connecting to d3 (connection ${id})`), id)
 })

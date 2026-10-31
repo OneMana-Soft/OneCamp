@@ -75,7 +75,7 @@ func docError(w http.ResponseWriter, r *http.Request, err error, read bool) {
 	case errors.As(err, &refused):
 		refuse(w, http.StatusUnprocessableEntity, "The document service refused the change: "+refused.Msg)
 	default:
-		helpers.LogErrorWithContext(r.Context(), "controllers/V1 %s %s: %+v", r.Method, r.URL.Path, err)
+		helpers.LogErrorWithContext(r.Context(), "controllers/V1 %s %s: %+v", r.Method, helpers.RouteOf(r), err)
 		if read {
 			helpers.WriteRetryLater(w, "The doc couldn't be read just now.")
 			return
@@ -113,12 +113,9 @@ func ListDocsV1(w http.ResponseWriter, r *http.Request) {
 	}
 	// An app's page holds only the docs it was added to, so it can come up
 	// short while next_cursor goes on.
-	listed, _, ok = narrowed(w, r, listed, func(d contentIOBusiness.ListedDoc) []appBusiness.Place {
+	listed, _ = narrowed(r, listed, func(d contentIOBusiness.ListedDoc) []appBusiness.Place {
 		return []appBusiness.Place{{Kind: "doc", ID: d.UUID}}
 	})
-	if !ok {
-		return
-	}
 	docs := make([]apiDoc, 0, len(listed))
 	for _, d := range listed {
 		docs = append(docs, apiDoc{ListedDoc: d, URL: docURL(d.UUID)})
@@ -183,7 +180,7 @@ func CreateDocV1(w http.ResponseWriter, r *http.Request) {
 	}
 	audited(r, "create_doc", map[string]interface{}{"doc_uuid": made.UUID})
 	helpers.WriteJSON(w, http.StatusCreated, helpers.Envolope{"data": helpers.Envolope{
-		"uuid": made.UUID, "title": made.Title, "parent_uuid": made.ParentUUID, "url": docURL(made.UUID), "skipped": leftOut(skipped),
+		"uuid": made.UUID, "title": made.Title, "parent_uuid": made.ParentUUID, "url": docURL(made.UUID), "skipped": helpers.NonNil(skipped),
 	}})
 }
 
@@ -205,14 +202,5 @@ func AppendToDocV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	audited(r, "append_to_doc", map[string]interface{}{"doc_uuid": id, "blocks": res.Blocks})
-	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": helpers.Envolope{"uuid": id, "blocks": res.Blocks, "block_ids": res.BlockIDs, "skipped": leftOut(skipped)}})
-}
-
-// leftOut is what a write left out (a picture it couldn't upload), as a list
-// even when nothing was.
-func leftOut(skipped []contentIOBusiness.Skipped) []contentIOBusiness.Skipped {
-	if skipped == nil {
-		return []contentIOBusiness.Skipped{}
-	}
-	return skipped
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": helpers.Envolope{"uuid": id, "blocks": res.Blocks, "block_ids": res.BlockIDs, "skipped": helpers.NonNil(skipped)}})
 }

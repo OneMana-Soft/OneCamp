@@ -1,6 +1,7 @@
 package business
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -179,6 +180,12 @@ func TestLinkCellsSayWhatTheyLeaveOut(t *testing.T) {
 	if got := r.rollUp("sum").JSON(); got != float64(30) {
 		t.Errorf("sum: %v", got)
 	}
+	// A linked row with no answer of its own (a rollup of its links, past
+	// what it adds up) leaves the sum with none, for the same reason.
+	r.t.rows[r.of[1]].values[0] = errTooManyLinked
+	if got := r.rollUp("sum"); got != errTooManyLinked {
+		t.Errorf("sum over a row with no answer: %v", got)
+	}
 	// More than it shows: counted, and formulas don't get a part of them.
 	r = newLinkRead(250, maxShownLinks, maxShownLinks)
 	labels, v := r.cell()
@@ -296,8 +303,63 @@ func TestLinkNames(t *testing.T) {
 	}
 }
 
+// A rollup adds up rollups as far as maxRollupDepth deep, counting itself,
+// and never ones that come back round, to it or to each other.
+func TestRollupChains(t *testing.T) {
+	tables := map[uuid.UUID][]*model.Field{}
+	add := func(table uuid.UUID, name, typ, cfg string) *model.Field {
+		f := &model.Field{Id: uuid.New(), TableId: table, Name: name, Type: typ, Config: cfg}
+		tables[table] = append(tables[table], f)
+		return f
+	}
+	rollup := func(table, to uuid.UUID, of *model.Field) *model.Field {
+		rel := add(table, "Link", model.FieldRelation, fmt.Sprintf(`{"relation_target":"table","table_id":%q}`, to))
+		return add(table, "Rollup of "+of.Name, model.FieldRollup, fmt.Sprintf(`{"relation":%q,"field":%q,"aggregate":"sum"}`, rel.Id, of.Id))
+	}
+	fieldsOf := func(id uuid.UUID) []*model.Field { return tables[id] }
+	orders, vendors, projects, portfolios := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	amount := add(orders, "Amount", model.FieldNumber, "{}")
+	spend := rollup(vendors, orders, amount)
+	total := rollup(projects, vendors, spend)
+	grand := rollup(portfolios, projects, total)
+	loopA, loopB := uuid.New(), uuid.New()
+	a := add(loopA, "A", model.FieldRollup, "{}")
+	b := rollup(loopB, loopA, a)
+	relA := add(loopA, "Link", model.FieldRelation, fmt.Sprintf(`{"relation_target":"table","table_id":%q}`, loopB))
+	a.Config = fmt.Sprintf(`{"relation":%q,"field":%q,"aggregate":"sum"}`, relA.Id, b.Id)
+
+	for what, c := range map[string]struct {
+		self   uuid.UUID
+		of     *model.Field
+		fields []*model.Field
+		want   string
+	}{
+		"a new rollup of a rollup, 2 deep":      {uuid.Nil, spend, tables[vendors], ""},
+		"a new rollup 3 deep":                   {uuid.Nil, total, tables[projects], ""},
+		"a new rollup 4 deep":                   {uuid.Nil, grand, tables[portfolios], rollupsTooDeep},
+		"the spend adding up the total":         {spend.Id, total, tables[projects], rollupsGoRound},
+		"a rollup adding up itself":             {total.Id, total, tables[projects], rollupsGoRound},
+		"a new rollup of two adding each other": {uuid.Nil, a, tables[loopA], rollupsGoRound},
+	} {
+		if got := rollupChainProblem(c.self, c.of, c.fields, fieldsOf); got != c.want {
+			t.Errorf("%s: %q, want %q", what, got, c.want)
+		}
+	}
+	// A table on the way the reader can't open: the rollup there says why.
+	hidden := func(id uuid.UUID) []*model.Field {
+		if id == orders {
+			return nil
+		}
+		return tables[id]
+	}
+	if got := rollupChainProblem(uuid.Nil, total, tables[projects], hidden); got != "" {
+		t.Errorf("past a table the reader can't open: %q", got)
+	}
+}
+
 // A rollup can't add up a formula that reads links or rollups, through other
-// formulas too: a read of the linked table doesn't work those out.
+// formulas too: a read of the linked table doesn't work those out. It can add
+// up another rollup, by what that rollup gives (airtable-02).
 func TestRollupProblems(t *testing.T) {
 	field := func(name, typ, cfg string) *model.Field {
 		return &model.Field{Id: uuid.New(), Name: name, Type: typ, Config: cfg}
@@ -306,15 +368,17 @@ func TestRollupProblems(t *testing.T) {
 	docs := field("Docs", model.FieldRelation, `{"relation_target":"doc"}`)
 	cost := field("Cost", model.FieldNumber, "{}")
 	spend := field("Spend", model.FieldRollup, `{"aggregate":"count"}`)
+	names := field("Names", model.FieldRollup, `{"aggregate":"list"}`)
 	direct := field("Direct", model.FieldFormula, fmt.Sprintf(`{"formula":"{#%s} & \"\""}`, vendor.Id))
 	through := field("Through", model.FieldFormula, fmt.Sprintf(`{"formula":"LEN({#%s})"}`, direct.Id))
 	docNames := field("Doc names", model.FieldFormula, fmt.Sprintf(`{"formula":"UPPER({#%s})"}`, docs.Id))
 	plain := field("Double", model.FieldFormula, fmt.Sprintf(`{"formula":"{#%s} * 2"}`, cost.Id))
-	fields := []*model.Field{vendor, docs, cost, spend, direct, through, docNames, plain}
+	fields := []*model.Field{vendor, docs, cost, spend, names, direct, through, docNames, plain}
 	for f, want := range map[*model.Field]string{
 		vendor:   "A rollup can't add up links to another table",
 		docs:     "A rollup can't add up links to docs, tasks, boards, projects or people",
-		spend:    "A rollup can't add up another rollup",
+		spend:    "",
+		names:    "That way of adding up doesn't fit this field",
 		direct:   "A rollup can't add up a formula that reads links or rollups",
 		through:  "A rollup can't add up a formula that reads links or rollups",
 		docNames: "A rollup can't add up a formula that reads links or rollups",
@@ -354,9 +418,10 @@ func TestTellTablesSendsABurstAsOne(t *testing.T) {
 	}
 	tellEvery = 100 * time.Millisecond
 	a, b := uuid.New(), uuid.New()
-	tellTables(a, a, b)
+	ctx := context.Background()
+	tellTables(ctx, a, a, b)
 	for i := 0; i < 5; i++ {
-		tellTables(a)
+		tellTables(ctx, a)
 	}
 	if count(a) != 1 || count(b) != 1 {
 		t.Fatalf("at once: %d to a, %d to b", count(a), count(b))
@@ -367,5 +432,25 @@ func TestTellTablesSendsABurstAsOne(t *testing.T) {
 	time.Sleep(3 * tellEvery)
 	if count(a) != 2 || count(b) != 1 {
 		t.Errorf("after the wait: %d to a, %d to b", count(a), count(b))
+	}
+}
+
+// A list rollup keeps its items for formulas, a linked row's own list
+// flattened in as Airtable's lookups do, and shows the same text as before.
+func TestAListRollupIsAList(t *testing.T) {
+	a := newRollupAcc("list")
+	a.add(formula.Text("Venue"))
+	a.add(formula.List([]formula.Value{formula.Text("Print"), formula.Text("Power")}))
+	a.add(formula.Blank())
+	got := a.result()
+	if got.Str != "Venue, Print, Power" || len(got.Items()) != 3 {
+		t.Errorf("the list is %q with %d items", got.Str, len(got.Items()))
+	}
+	u := newRollupAcc("unique")
+	for _, s := range []string{"a", "b", "a"} {
+		u.add(formula.Text(s))
+	}
+	if g := u.result(); g.Str != "a, b" || len(g.Items()) != 2 {
+		t.Errorf("the unique list is %q with %d items", g.Str, len(g.Items()))
 	}
 }

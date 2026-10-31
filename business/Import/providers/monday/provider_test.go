@@ -34,11 +34,6 @@ func cv(id, typ, title, text, value string) mondayColumnValue {
 	return c
 }
 
-func day(s string) time.Time {
-	t, _ := time.Parse("2006-01-02", s)
-	return t
-}
-
 func TestParseStatus_UsesText(t *testing.T) {
 	c := cv("status", "status", "Status", "Working on it", `{"index":0,"post_id":null,"changed_at":"2026-09-01T10:00:00.000Z"}`)
 	if got := parseLabel(c); got != "Working on it" {
@@ -55,34 +50,35 @@ func TestParseLabel_StripsDefaultEmoji(t *testing.T) {
 
 func TestParseDate_ValueWithTimeIsUTC(t *testing.T) {
 	c := cv("date4", "date", "Due date", "2026-10-08 19:30", `{"date":"2026-10-08","time":"14:00:00","changed_at":"2026-09-01T10:00:00.000Z"}`)
-	got := parseDateValue(c)
+	got, d := parseDateValue(c)
 	want := time.Date(2026, 10, 8, 14, 0, 0, 0, time.UTC)
-	if got == nil || !got.Equal(want) {
-		t.Fatalf("date = %v, want %v", got, want)
+	if got == nil || !got.Equal(want) || !d.IsZero() {
+		t.Fatalf("date = %v (day %v), want the instant %v", got, d, want)
 	}
 }
 
 func TestParseDate_DateOnlyAndTextFallback(t *testing.T) {
-	if got := parseDateValue(cv("d", "date", "Date", "2026-10-08", `{"date":"2026-10-08"}`)); got == nil || !got.Equal(day("2026-10-08")) {
-		t.Fatalf("date-only value: %v", got)
+	// A date with no time is a day: never midnight UTC.
+	if at, d := parseDateValue(cv("d", "date", "Date", "2026-10-08", `{"date":"2026-10-08"}`)); at != nil || d.String() != "2026-10-08" {
+		t.Fatalf("date-only value: %v / day %v", at, d)
 	}
 	// value null (some versions) → the text still carries the day.
-	if got := parseDateValue(cv("d", "date", "Date", "2026-11-02 09:15", "")); got == nil || !got.Equal(day("2026-11-02")) {
-		t.Fatalf("text fallback: %v", got)
+	if at, d := parseDateValue(cv("d", "date", "Date", "2026-11-02 09:15", "")); at != nil || d.String() != "2026-11-02" {
+		t.Fatalf("text fallback: %v / day %v", at, d)
 	}
-	if got := parseDateValue(cv("d", "date", "Date", "", "")); got != nil {
-		t.Fatalf("empty date should be nil, got %v", got)
+	if at, d := parseDateValue(cv("d", "date", "Date", "", "")); at != nil || !d.IsZero() {
+		t.Fatalf("empty date should be none, got %v / day %v", at, d)
 	}
 }
 
 func TestParseTimeline_ValueAndText(t *testing.T) {
 	from, to := parseTimelineValue(cv("timeline", "timeline", "Timeline", "2026-10-01 - 2026-10-10",
 		`{"from":"2026-10-01","to":"2026-10-10","changed_at":"2026-09-01T10:00:00.000Z"}`))
-	if from == nil || to == nil || !from.Equal(day("2026-10-01")) || !to.Equal(day("2026-10-10")) {
+	if from.String() != "2026-10-01" || to.String() != "2026-10-10" {
 		t.Fatalf("timeline value: %v → %v", from, to)
 	}
 	from, to = parseTimelineValue(cv("timeline", "timerange", "Timeline", "2026-12-01 - 2026-12-24", ""))
-	if from == nil || to == nil || !from.Equal(day("2026-12-01")) || !to.Equal(day("2026-12-24")) {
+	if from.String() != "2026-12-01" || to.String() != "2026-12-24" {
 		t.Fatalf("timeline text fallback: %v → %v", from, to)
 	}
 }
@@ -133,12 +129,12 @@ func TestReadItemFields_FullBoard(t *testing.T) {
 	if len(f.Assignees) != 1 || f.Assignees[0] != "4012" {
 		t.Fatalf("assignees = %v", f.Assignees)
 	}
-	if f.Start == nil || !f.Start.Equal(day("2026-10-01")) {
-		t.Fatalf("start = %v (timeline from)", f.Start)
+	if f.Start != nil || f.StartDay.String() != "2026-10-01" {
+		t.Fatalf("start = %v / day %v (timeline from)", f.Start, f.StartDay)
 	}
 	// An explicit due-date column beats the timeline's end.
-	if f.Due == nil || !f.Due.Equal(day("2026-10-12")) {
-		t.Fatalf("due = %v", f.Due)
+	if f.Due != nil || f.DueDay.String() != "2026-10-12" {
+		t.Fatalf("due = %v / day %v", f.Due, f.DueDay)
 	}
 	if strings.Join(f.Labels, ",") != "backend,import" {
 		t.Fatalf("labels = %v", f.Labels)
@@ -152,8 +148,8 @@ func TestReadItemFields_TimelineGivesBothDates(t *testing.T) {
 	f := readItemFields(mondayItem{ColumnValues: []mondayColumnValue{
 		cv("timeline", "timeline", "Timeline", "", `{"from":"2026-10-01","to":"2026-10-10"}`),
 	}}, nil)
-	if f.Start == nil || f.Due == nil || !f.Start.Equal(day("2026-10-01")) || !f.Due.Equal(day("2026-10-10")) {
-		t.Fatalf("timeline → %v / %v", f.Start, f.Due)
+	if f.StartDay.String() != "2026-10-01" || f.DueDay.String() != "2026-10-10" {
+		t.Fatalf("timeline → %v / %v", f.StartDay, f.DueDay)
 	}
 }
 
@@ -164,8 +160,8 @@ func TestReadItemFields_GroupTitleWhenNoStatus(t *testing.T) {
 	if f.Status != "Done" {
 		t.Fatalf("status from group = %q", f.Status)
 	}
-	if f.Due == nil || !f.Due.Equal(day("2026-10-03")) {
-		t.Fatalf("a lone untitled date column is the due date, got %v", f.Due)
+	if f.DueDay.String() != "2026-10-03" {
+		t.Fatalf("a lone untitled date column is the due date, got %v / day %v", f.Due, f.DueDay)
 	}
 }
 

@@ -15,6 +15,9 @@ import (
 	"testing"
 	"time"
 
+	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
+	attachmentModels "github.com/akashc777/OneCamp/models/postgres/Attachment"
+
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	contentcodec "github.com/akashc777/OneCamp/business/ContentCodec"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -28,6 +31,18 @@ type workspace struct {
 	rows     []*dgraphStruct.DgraphDoc
 	consents map[string]string
 	admin    bool
+	// Its boards (none unless a test gives some), the files they keep, by
+	// attachment id, and the stored bytes, by object key.
+	boards   []wsBoard
+	files    map[string]*attachmentModels.Attachment
+	pictures map[string][]byte
+}
+
+// wsBoard is a live board as the export reads it: whether the admin may read
+// it, and its state (base64 Yjs).
+type wsBoard struct {
+	uuid, title, state string
+	readable           bool
 }
 
 func (w *world) useWorkspace(ws *workspace) {
@@ -37,9 +52,62 @@ func (w *world) useWorkspace(ws *workspace) {
 		consents func(context.Context, []string) (map[string]string, error)
 		admin    func(context.Context, string) bool
 	}{docUUIDPage, docRowsOf, consentsFor, isAdmin}
+	savedBoards := struct {
+		page     func(context.Context, int, int) ([]string, error)
+		readable func(context.Context, []string, string) (map[string]string, error)
+		state    func(context.Context, string) (string, error)
+		files    func(context.Context, string, []string) (map[string]*attachmentModels.Attachment, error)
+		read     func(context.Context, string, int64, bool) ([]byte, string, error)
+	}{boardUUIDPage, readableBoardsOf, boardStateOf, boardFilesOf, readStored}
 	w.t.Cleanup(func() {
 		docUUIDPage, docRowsOf, consentsFor, isAdmin = saved.page, saved.rows, saved.consents, saved.admin
+		boardUUIDPage, readableBoardsOf, boardStateOf, boardFilesOf, readStored = savedBoards.page, savedBoards.readable, savedBoards.state, savedBoards.files, savedBoards.read
 	})
+	boardUUIDPage = func(_ context.Context, offset, first int) ([]string, error) {
+		var ids []string
+		for i := offset; i < len(ws.boards) && i < offset+first; i++ {
+			ids = append(ids, ws.boards[i].uuid)
+		}
+		return ids, nil
+	}
+	readableBoardsOf = func(_ context.Context, ids []string, _ string) (map[string]string, error) {
+		out := map[string]string{}
+		for _, id := range ids {
+			for _, b := range ws.boards {
+				if b.uuid == id && b.readable {
+					out[strings.ToLower(id)] = b.title
+				}
+			}
+		}
+		return out, nil
+	}
+	boardStateOf = func(_ context.Context, id string) (string, error) {
+		for _, b := range ws.boards {
+			if b.uuid == id {
+				return b.state, nil
+			}
+		}
+		return "", ErrNotFound
+	}
+	boardFilesOf = func(_ context.Context, _ string, ids []string) (map[string]*attachmentModels.Attachment, error) {
+		out := map[string]*attachmentModels.Attachment{}
+		for _, id := range ids {
+			if f := ws.files[id]; f != nil {
+				out[id] = f
+			}
+		}
+		return out, nil
+	}
+	readStored = func(_ context.Context, key string, limit int64, _ bool) ([]byte, string, error) {
+		b, ok := ws.pictures[key]
+		switch {
+		case !ok:
+			return nil, "", errors.New("no such object")
+		case int64(len(b)) > limit:
+			return nil, "", attachmentBusiness.ErrStoredTooLarge
+		}
+		return b, "image/png", nil
+	}
 	docUUIDPage = func(_ context.Context, offset, first int) ([]string, error) {
 		var ids []string
 		for i := offset; i < len(ws.rows) && i < offset+first; i++ {
@@ -128,7 +196,7 @@ func TestAWorkspaceExportLeavesOutPrivateDocsUnlessTheirOwnerLetThemIn(t *testin
 	if err != nil || done.Status != JobDone || done.Exported != 3 {
 		t.Fatalf("job %+v, %v", done, err)
 	}
-	if !strings.Contains(url, "workspace-docs.zip") {
+	if !strings.Contains(url, "workspace-export.zip") {
 		t.Fatalf("download address %q", url)
 	}
 	var key string
@@ -309,7 +377,7 @@ func TestTheZipsInsideAZipImportAsOne(t *testing.T) {
 
 // A file is read in whatever it was saved in: UTF-8 with or without its
 // mark, UTF-16 as Windows' Notepad saves "Unicode", the character set an HTML
-// page declares, and Windows-1252 for the rest.
+// page declares, and Windows-1252 for the rest; a document and a sheet alike.
 func TestImportedTextIsReadInWhateverItWasSavedIn(t *testing.T) {
 	utf16 := func(s string, big bool) []byte {
 		out := []byte{0xff, 0xfe}
@@ -336,9 +404,18 @@ func TestImportedTextIsReadInWhateverItWasSavedIn(t *testing.T) {
 		{"utf-16, big end first", utf16("Café plans", true), "Café plans"},
 		{"windows-1252", []byte("It\x92s \x93quoted\x94, \x80 5, caf\xe9"), "It’s “quoted”, € 5, café"},
 		{"a declared charset", []byte("<meta charset=\"windows-1251\"><p>\xcf\xf0\xe8\xe2\xe5\xf2</p>"), `<meta charset="windows-1251"><p>Привет</p>`},
+		{"windows-1252, its one accent last", []byte("Caf\xe9"), "Café"},
 	} {
 		if got := DecodeText(c.data); got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+		// A sheet's text is read by the same rule, though a row at a time.
+		sheets, err := ReadSheets(sheetOf("Saved.tsv", c.data))
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := rowsOf(t, sheets[0]); len(got) != 1 || len(got[0]) != 1 || got[0][0] != c.want {
+			t.Errorf("%s, as a sheet: %q, want %q", c.name, got, c.want)
 		}
 	}
 }
@@ -461,7 +538,7 @@ func (fullDisk) Write([]byte) (int, error) { return 0, errors.New("no space left
 func TestAnExportWhoseZipCantBeWrittenFails(t *testing.T) {
 	w := newWorld(t)
 	w.bodies["d1"] = [2]string{"Plan", "<p>Ship it.</p>"}
-	if _, _, err := writeWorkspaceZip(context.Background(), fullDisk{}, tester, []exportDoc{{uuid: "d1", title: "Plan"}}, func(int) {}); err == nil {
+	if _, _, _, err := writeWorkspaceZip(context.Background(), fullDisk{}, tester, []exportDoc{{uuid: "d1", title: "Plan"}}, nil, func(int) {}); err == nil {
 		t.Fatal("a zip the disk refused came back as written")
 	}
 }
@@ -491,4 +568,54 @@ func (testLayout) Claims(names []string) bool {
 
 func (testLayout) Read(_ context.Context, _ *ZipArchive, out Output) error {
 	return out.Page(Page{Key: "x", Title: "From the layout", Body: emptyBody()})
+}
+
+// A folder is a directory in the export, never a file of its own, and a file
+// or a link isn't exported (docs F1: the export writes pages as Markdown;
+// files join it in F1c). A page under a folder keeps its path, and none of
+// them counts among the docs left out.
+func TestAWorkspaceExportPutsAFoldersPagesInItsDirectory(t *testing.T) {
+	w := newWorld(t)
+	maya := uuid.NewString()
+	contracts, msa, scan, roadmap := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
+	folder := row(contracts, "Contracts", "", maya, false)
+	folder.NodeKind = "folder"
+	file := row(scan, "scan.pdf", contracts, maya, false)
+	file.NodeKind = "file"
+	link := row(roadmap, "Roadmap", "", maya, false)
+	link.NodeKind, link.LinkURL = "link", "https://docs.google.com/document/d/1"
+	w.useWorkspace(&workspace{admin: true, rows: []*dgraphStruct.DgraphDoc{
+		folder, row(msa, "MSA", contracts, maya, false), file, link,
+	}})
+	for _, id := range []string{contracts, msa, scan, roadmap} {
+		w.levels[id] = accessBusiness.LevelView
+	}
+	w.bodies[msa] = [2]string{"MSA", "<p>Net 30.</p>"}
+
+	job, err := ExportWorkspace(context.Background(), tester)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runQueued(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	done, _, err := WorkspaceExport(context.Background(), tester, job.ID)
+	if err != nil || done.Status != JobDone || done.Exported != 1 || len(done.Skipped) != 0 {
+		t.Fatalf("job %+v, %v", done, err)
+	}
+	var key string
+	for k := range w.files {
+		if strings.HasSuffix(k, "workspace-docs.zip") {
+			key = k
+		}
+	}
+	files := zipNames(t, w.files[key])
+	var names []string
+	for n := range files {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	if strings.Join(names, ",") != "Contracts/MSA.md" {
+		t.Fatalf("the zip holds %v; want the folder's page in its directory, alone", names)
+	}
 }

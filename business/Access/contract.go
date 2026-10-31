@@ -97,6 +97,10 @@ type Decision struct {
 	// (docs D-18): its level is its host's on a path that opens hosted docs
 	// (business/Doc WithHostedOpen), and none on any other.
 	Hosted bool `json:"hosted,omitempty"`
+	// NodeKind is what a doc is when it isn't a page: "folder", "file" or
+	// "link" (docs F1), read with the decision. Only a page opens in the
+	// editor, so the live session refuses the rest.
+	NodeKind string `json:"node_kind,omitempty"`
 }
 
 // PrincipalKind is who a grant is to.

@@ -76,6 +76,8 @@ func TestOnlyWhatAPersonCanReadIsSubscribable(t *testing.T) {
 		{"a private board", member, helpers.GetMqttTopicForBoard(privateBoard), "subscribe", false},
 		{"a table they can see", member, helpers.GetMqttTopicForTable(table), "subscribe", true},
 		{"someone's private table", member, helpers.GetMqttTopicForTable(privateTable), "subscribe", false},
+		{"who is on a table they can see", member, helpers.GetMqttTopicForTablePresence(table), "subscribe", true},
+		{"who is on someone's private table", member, helpers.GetMqttTopicForTablePresence(privateTable), "subscribe", false},
 		{"the admin broadcast, as a member", member, helpers.GetMqttTopicForAdminBroadcast(), "subscribe", false},
 		{"the admin broadcast, as an admin", admin, helpers.GetMqttTopicForAdminBroadcast(), "subscribe", true},
 
@@ -132,7 +134,7 @@ func TestALookupThatFailsIsANo(t *testing.T) {
 	id := uuid.NewString()
 	for _, topic := range []string{
 		helpers.GetMqttTopicForChannelMessage(id), helpers.GetMqttTopicForDoc(id),
-		helpers.GetMqttTopicForBoard(id), helpers.GetMqttTopicForTable(id),
+		helpers.GetMqttTopicForBoard(id), helpers.GetMqttTopicForTable(id), helpers.GetMqttTopicForTablePresence(id),
 	} {
 		if s.allowed(context.Background(), Request{Username: "user_" + member.String(), Topic: topic, Action: "subscribe"}) {
 			t.Errorf("%s was allowed on a failed lookup", topic)

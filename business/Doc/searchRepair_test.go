@@ -158,3 +158,47 @@ func TestDocSearchRepairEndsWhenEveryReadIsRefused(t *testing.T) {
 		t.Errorf("the report: %s; want all %d docs skipped and nothing written", rep, docs)
 	}
 }
+
+// The repair writes what a doc's own write does (docs F1): a folder and a
+// link get an entry with their title alone, a file none of its own (it is
+// found through its versions' entries), and every one of them still has its
+// files' and comments' fields written for it.
+func TestDocSearchRepairWritesFoldersLinksAndFilesAsTheirOwnWritesDo(t *testing.T) {
+	g := newFakeDocSearchGraph(t, 0)
+	g.maxPage = docSearchRepairPage
+	g.docs = []*dgraphStruct.DgraphDoc{
+		{Uuid: "page", Title: "Plan", Body: "<p>Ship it</p>"},
+		{Uuid: "folder", Title: "Contracts", NodeKind: "folder"},
+		{Uuid: "file", Title: "msa.pdf", NodeKind: "file"},
+		{Uuid: "link", Title: "Roadmap", NodeKind: "link", LinkURL: "https://docs.google.com/d/1"},
+	}
+	var bodies = map[string]string{}
+	bulkIndexDocEntries = func(_ context.Context, entries []*openSearchStruct.OpenSearchDocEntry) (int, error) {
+		for _, e := range entries {
+			g.written[e.Uuid]++
+			bodies[e.Uuid] = e.DocBody
+		}
+		return len(entries), nil
+	}
+	var fields map[string]openSearchGlobalSearchModels.DocChildFields
+	repairDocChildren = func(_ context.Context, f map[string]openSearchGlobalSearchModels.DocChildFields) (int, int, error) {
+		fields = f
+		return 0, 0, nil
+	}
+	rep, err := RepairDocSearch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.written["page"] != 1 || g.written["folder"] != 1 || g.written["link"] != 1 || g.written["file"] != 0 {
+		t.Errorf("entries written: %v; want the page, the folder and the link once, the file never", g.written)
+	}
+	if bodies["page"] != "Ship it" || bodies["folder"] != "" || bodies["link"] != "" {
+		t.Errorf("bodies written: %v", bodies)
+	}
+	if rep.Docs != 3 || rep.Live != 3 {
+		t.Errorf("the report: %+v", rep)
+	}
+	if fields["file"].Title != "msa.pdf" || len(fields) != 4 {
+		t.Errorf("the files' and comments' fields: %v; want all four, the file's under its title", fields)
+	}
+}

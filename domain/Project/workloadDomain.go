@@ -92,7 +92,7 @@ func GetDgraphWorkload(ctx context.Context, userDgraphUID string, from, until ti
 				}
 			}
 		}
-		away(func: eq(event_is_away, true)) @filter(not gt(event_deleted_at, %[1]s) AND lt(event_start_time, $until) AND gt(event_end_time, $from)) {
+		away(func: eq(event_is_away, true)) @filter(`+dgraphquery.Live("event_deleted_at")+` AND lt(event_start_time, $until) AND gt(event_end_time, $from)) {
 			event_start_time
 			event_end_time
 			event_created_by { user_uuid }

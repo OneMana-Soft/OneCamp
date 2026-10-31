@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -26,6 +27,7 @@ import (
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	softDelete "github.com/akashc777/OneCamp/models/postgres/SoftDelete"
 	model "github.com/akashc777/OneCamp/models/postgres/TaskStatus"
 	"github.com/google/uuid"
 )
@@ -61,6 +63,9 @@ var (
 	ErrTooMany       = fmt.Errorf("a project can have at most %d custom statuses", MaxPerProject)
 	ErrNameTaken     = model.ErrNameTaken
 	ErrNotFound      = model.ErrNotFound
+	// ErrUnfinished is a restore that brought the status back but stopped
+	// before all its delete moved was back: restoring it again finishes it.
+	ErrUnfinished = errors.New("the status is back, but its restore didn't finish")
 )
 
 // IsBuiltIn reports whether key is one of the six built-in statuses.
@@ -195,6 +200,32 @@ func Resolve(ctx context.Context, projectID string, value string) (Resolved, err
 	return Resolved{}, ErrUnknownStatus
 }
 
+// Names is how stored status values (a built-in key, or a custom status's id,
+// as Value gives them) read in a project, from one read of its custom
+// statuses: a list names its items' statuses without a read for each.
+func Names(ctx context.Context, projectID uuid.UUID) (func(value string) string, error) {
+	customs, err := model.List(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return namesOf(customs), nil
+}
+
+// namesOf reads a value as Display does; a custom status deleted since it was
+// stored reads as nothing, never as its id. Pure.
+func namesOf(customs []*model.TaskStatus) func(string) string {
+	byID := make(map[string]string, len(customs))
+	for _, c := range customs {
+		byID[c.ID.String()] = c.Name
+	}
+	return func(value string) string {
+		if b := builtInByKey(value); b != nil {
+			return b.Label
+		}
+		return byID[value]
+	}
+}
+
 // Describe lists the statuses a project accepts, for error messages and for
 // the AI's tool descriptions.
 func Describe(ctx context.Context, projectID string) string {
@@ -311,7 +342,7 @@ func Update(ctx context.Context, projectID, id uuid.UUID, in Input) (*model.Task
 		return nil, err
 	}
 	if before.Name != after.Name || before.Category != after.Category {
-		if err := taskDomain.RestatusTasksInCustomStatus(ctx, id.String(), after.Category, id.String(), after.Name); err != nil {
+		if _, err := taskDomain.RestatusTasksInCustomStatus(ctx, id.String(), after.Category, id.String(), after.Name); err != nil {
 			return nil, fmt.Errorf("the status was saved but its tasks were not updated: %w", err)
 		}
 	}
@@ -326,7 +357,7 @@ func Update(ctx context.Context, projectID, id uuid.UUID, in Input) (*model.Task
 // Delete removes a custom status. Its tasks move to moveTo, another status of
 // the project, or when moveTo is empty back to the built-in status the deleted
 // one counted as, so no task is left in a status that no longer exists.
-func Delete(ctx context.Context, projectID, id uuid.UUID, moveTo string) error {
+func Delete(ctx context.Context, projectID, id uuid.UUID, moveTo string, by uuid.UUID) error {
 	s, err := model.Get(ctx, projectID, id)
 	if err != nil {
 		return err
@@ -341,24 +372,72 @@ func Delete(ctx context.Context, projectID, id uuid.UUID, moveTo string) error {
 		}
 	}
 	// Tasks first: if this fails the status still exists and nothing is lost.
-	if err := taskDomain.RestatusTasksInCustomStatus(ctx, id.String(), target.Category, target.CustomID, target.CustomName); err != nil {
+	moved, err := taskDomain.RestatusTasksInCustomStatus(ctx, id.String(), target.Category, target.CustomID, target.CustomName)
+	if err != nil {
 		return err
 	}
-	if err := model.Delete(ctx, projectID, id); err != nil {
+	// Softly (V-78), keeping which tasks went where, for its restore.
+	if err := model.Delete(ctx, projectID, id, by, model.Moves{Category: target.Category, CustomID: target.CustomID, CustomName: target.CustomName, Tasks: moved}); err != nil {
 		return err
 	}
-	// What pointed at it (a GitHub automation rule) now points where its tasks went.
-	repoint(ctx, Repoint{ProjectID: projectID, Old: []string{id.String(), s.Name}, New: target.Value()})
+	// What pointed at it (a GitHub automation rule) now points where its tasks
+	// went, and the deleted status keeps which, for its restore to point back.
+	if refs, _ := repoint(ctx, Repoint{ProjectID: projectID, Old: []string{id.String(), s.Name}, New: target.Value()}); len(refs) > 0 {
+		if err := model.Repointed(ctx, id, refs); err != nil {
+			helpers.LogErrorWithContext(ctx, "business/TaskStatus Delete %s: what it repointed (%v) won't point back on its restore: %+v", id, refs, err)
+		}
+	}
 	return nil
 }
 
-// Repoint says that a project's status was renamed or deleted: a stored
-// reference to any of Old (compared as Resolve would, ignoring case) should
-// now say New, a built-in key or a custom status's id.
+// Restore brings a deleted status back (POST /restore/status/{id}) with all
+// its delete moved, each that is still where the delete put it: its tasks,
+// and what pointed at it (a GitHub automation rule). One moved on since stays
+// where it is. The record of the moves is cleared last, so a restore that
+// fails partway is finished by the next: each move takes only what is still
+// where the delete put it, so doing it again moves nothing twice. A status
+// deleted again before its restore finished brings back what both deletes
+// moved.
+// ErrNameTaken: a live status of the project has its name now. ErrUnfinished:
+// it is back, but not yet all its delete moved.
+func Restore(ctx context.Context, id uuid.UUID) (*model.TaskStatus, error) {
+	s, moved, err := model.Restore(ctx, id)
+	if errors.Is(err, softDelete.ErrTaken) {
+		return nil, ErrNameTaken
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range moved.All() {
+		if _, err := restatusTasksStillIn(ctx, m.Tasks, m.Category, m.CustomID, s.Category, s.ID.String(), s.Name); err != nil {
+			return s, fmt.Errorf("%w: its tasks are not back yet: %w", ErrUnfinished, err)
+		}
+		if len(m.Repointed) > 0 {
+			was := Resolved{Category: m.Category, CustomID: m.CustomID}.Value()
+			if _, err := repoint(ctx, Repoint{ProjectID: s.ProjectID, Old: []string{was}, New: s.ID.String(), Only: m.Repointed}); err != nil {
+				return s, fmt.Errorf("%w: what pointed at it is not back yet: %w", ErrUnfinished, err)
+			}
+		}
+	}
+	if err := model.Restored(ctx, s.ID); err != nil {
+		return s, fmt.Errorf("%w: %w", ErrUnfinished, err)
+	}
+	return s, nil
+}
+
+// restatusTasksStillIn is a seam for tests.
+var restatusTasksStillIn = taskDomain.RestatusTasksStillIn
+
+// Repoint says that a project's status was renamed, deleted or restored: a
+// stored reference to any of Old (compared as Resolve would, ignoring case)
+// should now say New, a built-in key or a custom status's id. Only, when not
+// nil, names the stored references that may change, as their listener named
+// them when it changed them: a restore points back just what its delete moved.
 type Repoint struct {
 	ProjectID uuid.UUID
 	Old       []string
 	New       string
+	Only      []string
 }
 
 // Matches reports whether a stored status value is one of r.Old.
@@ -372,24 +451,38 @@ func (r Repoint) Matches(value string) bool {
 	return false
 }
 
-var repointers []func(context.Context, Repoint) error
+// Allows reports whether the stored reference named ref may change.
+func (r Repoint) Allows(ref string) bool {
+	return r.Only == nil || slices.Contains(r.Only, ref)
+}
 
-// OnRepoint registers fn to update what it stores when a status is renamed or
-// deleted. Packages that keep a status (GitHub automation rules) register in
-// their init, since they sit above this one and it cannot call them.
-func OnRepoint(fn func(context.Context, Repoint) error) {
+var repointers []func(context.Context, Repoint) ([]string, error)
+
+// OnRepoint registers fn to update what it stores when a status is renamed,
+// deleted or restored, and to answer which stored references it changed, each
+// named so that it knows it again in Only. Packages that keep a status (GitHub
+// automation rules) register in their init, since they sit above this one and
+// it cannot call them.
+func OnRepoint(fn func(context.Context, Repoint) (changed []string, err error)) {
 	repointers = append(repointers, fn)
 }
 
-// repoint runs every listener. The status change has already happened, so a
-// listener that fails is logged, not returned: the reference it kept fails at
-// use with ErrUnknownStatus, which says what is wrong.
-func repoint(ctx context.Context, r Repoint) {
+// repoint runs every listener and answers what they changed. The status change
+// has already happened, so a listener that fails is logged, not returned: the
+// reference it kept fails at use with ErrUnknownStatus, which says what is
+// wrong.
+func repoint(ctx context.Context, r Repoint) ([]string, error) {
+	var changed []string
+	var errs []error
 	for _, fn := range repointers {
-		if err := fn(ctx, r); err != nil {
+		refs, err := fn(ctx, r)
+		if err != nil {
 			helpers.LogErrorWithContext(ctx, "business/TaskStatus repoint %v err: %+v", r.Old, err)
+			errs = append(errs, err)
 		}
+		changed = append(changed, refs...)
 	}
+	return changed, errors.Join(errs...)
 }
 
 // Reorder sets the order of a project's custom statuses. A project whose

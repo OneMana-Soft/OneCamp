@@ -26,7 +26,6 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -80,17 +79,7 @@ func TestThreadsMigrationUpDownUp(t *testing.T) {
 	env := integration.SetupEnv(t) // every migration applied, this one among them
 	upName, up := threadsMigration(t, "up")
 	downName, down := threadsMigration(t, "down")
-	var sqlOnly []string
-	for _, line := range strings.Split(up, "\n") {
-		if !strings.HasPrefix(strings.TrimSpace(line), "--") {
-			sqlOnly = append(sqlOnly, line)
-		}
-	}
-	for _, banned := range []string{"gen_random_uuid", "uuid_generate"} {
-		if strings.Contains(strings.Join(sqlOnly, "\n"), banned) {
-			t.Fatalf("%s uses %s; Postgres 12 has neither by default, so ids are made in Go", upName, banned)
-		}
-	}
+	makesNoIDs(t, upName, up)
 	exists := func(table string) bool {
 		var name *string
 		if err := env.PG.QueryRow(`SELECT to_regclass($1)::text`, table).Scan(&name); err != nil {

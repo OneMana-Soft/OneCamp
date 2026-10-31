@@ -387,6 +387,24 @@ func TestWhoCannotTakePart(t *testing.T) {
 	if _, err := w.svc.Reanchor(ctx, who("bob"), v.ID, rangeAnchor()); !errors.Is(err, ErrForbidden) {
 		t.Errorf("a commenter reattached someone else's thread: %v", err)
 	}
+	if _, err := w.svc.Reopen(ctx, who("bob"), v.ID); !errors.Is(err, ErrForbidden) {
+		t.Errorf("a commenter reopened someone else's thread: %v", err)
+	}
+	if err := w.svc.MarkRead(ctx, who("stranger"), v.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a stranger marked the thread read: %v", err)
+	}
+	old := Threads
+	Threads = w.svc
+	t.Cleanup(func() { Threads = old })
+	if _, err := LinkTask(ctx, who("bob"), v.ID, "task-1"); !errors.Is(err, ErrForbidden) {
+		t.Errorf("a commenter tied someone else's thread to a task: %v", err)
+	}
+	if _, err := LinkTask(ctx, who("stranger"), v.ID, "task-1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a stranger tied the thread to a task: %v", err)
+	}
+	if tied, err := LinkTask(ctx, who("ann"), v.ID, "task-1"); err != nil || tied.TaskUUID != "task-1" {
+		t.Errorf("ann tying her thread to a task: %+v, %v", tied, err)
+	}
 	w.doc.deleted = true
 	if _, err := w.svc.Reply(ctx, who("owner"), v.ID, Body{HTML: "<p>hi</p>"}); !errors.Is(err, ErrGone) {
 		t.Errorf("the owner replied in the trash: %v", err)

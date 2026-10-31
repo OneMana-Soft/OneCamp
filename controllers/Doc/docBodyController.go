@@ -185,6 +185,10 @@ func SaveDocFromCollab(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusNotFound
 		case errors.Is(err, business.ErrDocDeleted):
 			status = http.StatusGone
+		case errors.Is(err, business.ErrNotAPage):
+			// A folder, a file or a link has no body (docs F1): a refusal,
+			// which the service gives up on.
+			status = http.StatusConflict
 		}
 		helpers.WriteJSON(w, status, helpers.Envolope{"msg": "Failed to save the doc"})
 		return

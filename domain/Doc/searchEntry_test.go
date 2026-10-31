@@ -330,3 +330,37 @@ func TestASearchEntryNamesTheDocsOtherSources(t *testing.T) {
 		}
 	}
 }
+
+// A folder's or a link's entry has its title alone (docs F1: neither has a
+// body, and a link's text is another site's); a file has no doc entry of its
+// own, found through its current version's entry in the attachments index;
+// and a hosted doc has none either (D-18). A page is written as it always was.
+func TestNodesThatArentPagesAreSearchedByTheirTitleOrNotAsDocs(t *testing.T) {
+	for _, kind := range []string{NodeFolder, NodeLink} {
+		e := DocSearchEntryOf(&dgraphStruct.DgraphDoc{Uuid: "u", Title: "Contracts", NodeKind: kind, Body: "<p>never</p>", Snippet: "never"})
+		if e.DocTitle != "Contracts" || e.DocBody != "" || e.DocSnippet != "" {
+			t.Errorf("a %s's entry: %+v; want its title alone", kind, e)
+		}
+	}
+	page := DocSearchEntryOf(&dgraphStruct.DgraphDoc{Uuid: "u", Title: "Plan", Body: "<p>Ship it</p>"})
+	if page.DocBody != "Ship it" || page.DocSnippet != "Ship it" {
+		t.Errorf("a page's entry lost its text: %+v", page)
+	}
+	for _, c := range []struct {
+		doc  dgraphStruct.DgraphDoc
+		want bool
+	}{
+		{dgraphStruct.DgraphDoc{}, true},
+		{dgraphStruct.DgraphDoc{NodeKind: NodeFolder}, true},
+		{dgraphStruct.DgraphDoc{NodeKind: NodeLink}, true},
+		{dgraphStruct.DgraphDoc{NodeKind: NodeFile}, false},
+		{dgraphStruct.DgraphDoc{HostKind: "table_row"}, false},
+	} {
+		if got := OwnSearchEntry(&c.doc); got != c.want {
+			t.Errorf("OwnSearchEntry(kind %q, host %q) = %v", c.doc.NodeKind, c.doc.HostKind, got)
+		}
+	}
+	if !strings.Contains(docSearchFields, "doc_node_kind") {
+		t.Error("the search entry's read doesn't carry the node's kind")
+	}
+}

@@ -23,6 +23,7 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	accessModels "github.com/akashc777/OneCamp/models/postgres/Access"
 	"github.com/google/uuid"
 )
 
@@ -48,9 +49,11 @@ var AuditedKinds = map[resourceEventBusiness.Kind]string{
 	resourceEventBusiness.ThreadReopened:    "Reopened a comment thread on %s",
 	resourceEventBusiness.ThreadReanchored:  "Reattached a comment thread on %s",
 
-	// Asking for access (business/Access requests.go), and the answer.
-	resourceEventBusiness.DocAccessRequested: "Asked for access to %s",
-	resourceEventBusiness.DocAccessAnswered:  "Answered a request for access to %s",
+	// Asking for access (business/Access requests.go), and the answer: what
+	// the request asked to do with the doc (askVerb), and whether it was
+	// approved.
+	resourceEventBusiness.DocAccessRequested: "Asked to %s %s",
+	resourceEventBusiness.DocAccessAnswered:  "%s a request to %s %s",
 }
 
 // Seams for tests: where the row goes, and the actor's email.
@@ -119,7 +122,25 @@ func auditRow(e resourceEventBusiness.Event, doc *dgraphStruct.DgraphDoc) (strin
 	case doc != nil:
 		name = "‘" + titleOf(doc) + "’"
 	}
-	summary := fmt.Sprintf(AuditedKinds[e.Kind], name)
+	var summary string
+	switch e.Kind {
+	case resourceEventBusiness.DocAccessRequested:
+		// "Asked to edit ‘Plan’"; the request's id is in the metadata.
+		summary = fmt.Sprintf(AuditedKinds[e.Kind], askVerb(e.Data["level"]), name)
+	case resourceEventBusiness.DocAccessAnswered:
+		// "Approved a request to edit ‘Plan’", and the level given when an
+		// approval gave another than the one asked for.
+		answer := "Declined"
+		if e.Data["status"] == accessModels.StatusApproved {
+			answer = "Approved"
+		}
+		summary = fmt.Sprintf(AuditedKinds[e.Kind], answer, askVerb(e.Data["asked"]), name)
+		if given := e.Data["level"]; answer == "Approved" && given != e.Data["asked"] {
+			summary += ", with " + given + " access"
+		}
+	default:
+		summary = fmt.Sprintf(AuditedKinds[e.Kind], name)
+	}
 	if e.Kind == resourceEventBusiness.DocExported {
 		// An export says what it made and where (business/ContentIO).
 		if format := e.Data["format"]; format != "" {
@@ -129,31 +150,8 @@ func auditRow(e resourceEventBusiness.Event, doc *dgraphStruct.DgraphDoc) (strin
 			summary += ", in the browser"
 		}
 	}
-	switch e.Kind {
-	case resourceEventBusiness.DocAccessRequested:
-		// The level asked for; the request's id is in the metadata.
-		if level := e.Data["level"]; level != "" {
-			summary += " (" + level + ")"
-		}
-	case resourceEventBusiness.DocAccessAnswered:
-		// "(approved, edit)": the level given, or for a decline, asked for.
-		if status := e.Data["status"]; status != "" {
-			summary += " (" + status
-			if level := e.Data["level"]; level != "" {
-				summary += ", " + level
-			}
-			summary += ")"
-		}
-	}
 	if e.Kind == resourceEventBusiness.DocShared && len(e.Subjects) > 0 {
-		people := "1 person"
-		if len(e.Subjects) > 1 {
-			people = fmt.Sprintf("%d people", len(e.Subjects))
-		}
-		summary += " with " + people
-		if level := e.Data["level"]; level != "" {
-			summary += " (" + level + ")"
-		}
+		summary += " with " + peopleWho(len(e.Subjects), e.Data["level"])
 	}
 	meta := map[string]interface{}{
 		"resource_kind": e.ResourceKind,
@@ -174,4 +172,17 @@ func auditRow(e resourceEventBusiness.Event, doc *dgraphStruct.DgraphDoc) (strin
 		meta[k] = v
 	}
 	return summary, meta
+}
+
+// peopleWho is the people a share reached and what they can do now: "1 person
+// who can edit", "2 people who have full access".
+func peopleWho(n int, level string) string {
+	people, have := "1 person", "has"
+	if n > 1 {
+		people, have = fmt.Sprintf("%d people", n), "have"
+	}
+	if level == "full" {
+		return people + " who " + have + " full access"
+	}
+	return people + " who can " + level
 }

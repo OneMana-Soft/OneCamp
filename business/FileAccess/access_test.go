@@ -54,6 +54,14 @@ func fake() sources {
 			return true, userUUID == me, nil
 		},
 		readsDoc: doc, addsToDoc: doc,
+		// A table I write in (mine), and one shared with me to read (ben's id).
+		readsTable: func(ctx context.Context, userUUID, id string) (bool, error) {
+			if id == ben {
+				return userUUID == me, nil
+			}
+			return yesNo(ctx, userUUID, id)
+		},
+		writesTable: yesNo,
 	}
 }
 
@@ -100,7 +108,14 @@ func TestAFileFollowsItsPlacesRule(t *testing.T) {
 		{"a doc I may only see", ann, Place{Kind: postgresStruct.ATTACHMENT_SRC_DOC, ID: mine}, ErrRefused, ErrRefused},
 		{"a doc that isn't there for me", me, Place{Kind: postgresStruct.ATTACHMENT_SRC_DOC, ID: elsewhere}, docBusiness.ErrNotFound, docBusiness.ErrNotFound},
 		{"a doc id that isn't one", me, Place{Kind: postgresStruct.ATTACHMENT_SRC_DOC, ID: "nope"}, docBusiness.ErrNotFound, docBusiness.ErrNotFound},
+		{"a table I write in", me, Place{Kind: postgresStruct.ATTACHMENT_SRC_TABLE, ID: mine}, nil, nil},
+		{"a table I may only read", me, Place{Kind: postgresStruct.ATTACHMENT_SRC_TABLE, ID: ben}, ErrRefused, nil},
+		{"a table I can't open", me, Place{Kind: postgresStruct.ATTACHMENT_SRC_TABLE, ID: elsewhere}, ErrRefused, ErrRefused},
 		{"nobody's (public)", ann, Place{Kind: postgresStruct.ATTACHMENT_SRC_PUBLIC}, nil, nil},
+		// A form's picture: anyone may upload one (its form's save decides
+		// where it goes), and no file route serves it, to its uploader either.
+		{"a form's picture, for a form not made yet", ann, Place{Kind: postgresStruct.ATTACHMENT_SRC_FORM, ID: "new"}, nil, ErrRefused},
+		{"a form's picture, by the form's id", me, Place{Kind: postgresStruct.ATTACHMENT_SRC_FORM, ID: mine}, nil, ErrRefused},
 		{"a kind with no rule (an import's task)", me, Place{Kind: postgresStruct.ATTACHMENT_SRC_TASK, ID: mine}, ErrRefused, ErrRefused},
 		{"no kind", me, Place{ID: mine}, ErrRefused, ErrRefused},
 	}
@@ -207,7 +222,7 @@ func TestAProjectsFileOnATaskKeptFromSomeoneIsntThereForThem(t *testing.T) {
 	}
 	asked = 0
 	for _, kind := range []string{postgresStruct.ATTACHMENT_SRC_CHANNEL, postgresStruct.ATTACHMENT_SRC_CHAT, postgresStruct.ATTACHMENT_SRC_GRP_CHAT,
-		postgresStruct.ATTACHMENT_SRC_DOC, postgresStruct.ATTACHMENT_SRC_BOARD, postgresStruct.ATTACHMENT_SRC_PUBLIC} {
+		postgresStruct.ATTACHMENT_SRC_DOC, postgresStruct.ATTACHMENT_SRC_BOARD, postgresStruct.ATTACHMENT_SRC_TABLE, postgresStruct.ATTACHMENT_SRC_PUBLIC} {
 		if got := s.taskFile(ctx, ben, Place{Kind: kind, ID: mine}, fileOf(keptFile)); got != nil {
 			t.Errorf("a %s's file: %v, want nil", kind, got)
 		}

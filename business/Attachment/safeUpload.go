@@ -48,6 +48,11 @@ type SafeUploadOptions struct {
 	// Size is the declared body size. -1 enables MinIO multipart
 	// upload (used when streaming with unknown size).
 	Size int64
+
+	// FailClosed refuses the file when the scanner can't say whether it is
+	// clean, whatever the install's fail-open setting: a stranger's upload
+	// (a public form's), which nobody vouches for.
+	FailClosed bool
 }
 
 // SafeUploadToMinio streams body into MinIO and concurrently scans it
@@ -65,6 +70,7 @@ type SafeUploadOptions struct {
 //	                            quarantine first).
 //	scanner error, fail-open  → write completes, Verdict=Unknown
 //	scanner error, fail-close → write rolled back, error returned
+//	  (FailClosed: always, for a stranger's file)
 //
 // Concurrency:
 //   - One goroutine reads from the original body via io.TeeReader
@@ -136,7 +142,7 @@ func SafeUploadToMinio(ctx context.Context, body io.Reader, opts SafeUploadOptio
 		return ui, scanRes, uiErr
 	}
 	if scanErr != nil {
-		if avscan.FailOpen() {
+		if keepAfterScan(scanErr, avscan.FailOpen(), opts.FailClosed) {
 			helpers.LogWarnWithContext(ctx,
 				"AV scan failed (fail-open: allowing): bucket=%s key=%s err=%+v",
 				opts.Bucket, opts.ObjectName, scanErr)
@@ -148,4 +154,11 @@ func SafeUploadToMinio(ctx context.Context, body io.Reader, opts SafeUploadOptio
 		return ui, scanRes, fmt.Errorf("av scan error (fail-closed): %w", scanErr)
 	}
 	return ui, scanRes, nil
+}
+
+// keepAfterScan is whether a file the scanner read is kept: one it scanned
+// (its verdict decides), or one it couldn't say about where the install fails
+// open and the file isn't a stranger's. Pure.
+func keepAfterScan(scanErr error, failOpen, stranger bool) bool {
+	return scanErr == nil || (failOpen && !stranger)
 }

@@ -39,7 +39,7 @@ func SetSchedule(ctx context.Context, project uuid.UUID, in ScheduleInput, by uu
 	if err != nil {
 		return nil, err
 	}
-	m := cycleModel.Schedule{ProjectUUID: project, Weeks: s.Weeks, CooldownWeeks: s.CooldownWeeks, Upcoming: s.Upcoming, RollOver: s.RollOver, Anchor: s.Anchor}
+	m := cycleModel.Schedule{ProjectUUID: project, Weeks: s.Weeks, CooldownWeeks: s.CooldownWeeks, Upcoming: s.Upcoming, RollOver: s.RollOver, AddStarted: in.AddStarted, Anchor: s.Anchor}
 	if by != uuid.Nil {
 		m.SetBy = &by
 	}

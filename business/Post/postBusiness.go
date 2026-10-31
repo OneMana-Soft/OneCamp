@@ -258,6 +258,10 @@ func writePostNode(ctx context.Context, postUUID uuid.UUID, postInfo *adapter.In
 		DType:    []string{"Post"},
 		Text:     postInfo.HTMLText,
 		MediaObj: postInfo.MediaObj,
+		// A call's post's kind and facts (calls CALLS-3b); empty, and so not
+		// written, for every other post.
+		Kind:   postInfo.Kind,
+		System: postInfo.System,
 		Mentions: &dgraphStruct.DgraphMentions{
 			DType:     []string{"Mention"},
 			Mentions:  dgraphMentions,
@@ -602,6 +606,7 @@ func CreatePostComment(ctx context.Context, commentInfo *adapter.InputCreateOrUp
 			PlainText:   helpers.HTMLToPlainText(commentInfo.HTMLText),
 			Mentioned:   mentionsDgraphUsersList,
 			At:          currentTime,
+			Outsider:    commentInfo.Outsider,
 		})
 
 		// Notify listeners so an AI teammate can CONTINUE a thread it is part of:

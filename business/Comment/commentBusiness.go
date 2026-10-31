@@ -45,19 +45,8 @@ func CreateCommentInTask(ctx context.Context, dgraphTask *dgraphStruct.DgraphTas
 	refsBusiness.CommentSaved(ctx, dgraphTask.Comments, commentUUID.String(), true)
 
 	// add to openSearch
-	plainText := helpers.HTMLToPlainText(dgraphTask.Comments[0].Text)
-	openSearchComment := &openSearchStruct.OpenSearchComment{
-		Uuid:                  commentUUID.String(),
-		CommentBody:           plainText,
-		CommentByUserUuid:     userInfo.UserDgraphInfo.Uuid,
-		CommentProjectUuid:    rawDgraphTaskInfo.Project.Uuid,
-		CommentProjectName:    rawDgraphTaskInfo.Project.Name,
-		CommentTaskUuid:       rawDgraphTaskInfo.Uuid,
-		CommentCreatedAt:      createdTime.Unix(),
-		CommentByUserFullName: userInfo.UserDgraphInfo.DisplayName(),
-		CommentByProfile:      userInfo.UserDgraphInfo.ProfileKey,
-		CommentDeletedAt:      nil,
-	}
+	openSearchComment := domain.TaskCommentInSearch(rawDgraphTaskInfo, commentUUID.String(), &userInfo.UserDgraphInfo, dgraphTask.Comments[0].Text, createdTime)
+	plainText := openSearchComment.CommentBody
 
 	go domain.CreateTaskCommentWithAttachmentsInOpenSearch(openSearchComment, dgraphTask.Comments[0].Attachments)
 

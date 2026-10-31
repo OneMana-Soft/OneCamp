@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
 	globalSearchController "github.com/akashc777/OneCamp/controllers/GlobalSearch"
+	queryController "github.com/akashc777/OneCamp/controllers/SearchQuery"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -55,7 +57,7 @@ func TestDemoVisitorFindsNoOneByTheirAddress(t *testing.T) {
 		"user_full_name": { "type": "text", "index": true },
 		"user_email": { "type": "keyword", "index": true },` + dates}
 	for _, index := range []string{openSearchStruct.CHAT_INDEX, openSearchStruct.POST_INDEX, openSearchStruct.COMMENT_INDEX,
-		openSearchStruct.ATTACHMENT_INDEX, openSearchStruct.DOC_INDEX, openSearchStruct.BOARD_INDEX, openSearchStruct.TASK_INDEX,
+		openSearchStruct.ATTACHMENT_INDEX, openSearchStruct.DOC_INDEX, openSearchStruct.BOARD_INDEX, openSearchStruct.EVENT_INDEX, openSearchStruct.TASK_INDEX,
 		openSearchStruct.PROJECT_INDEX, openSearchStruct.CHANNEL_INDEX, openSearchStruct.TEAM_INDEX} {
 		mappings[index] = dates
 	}
@@ -100,31 +102,41 @@ func TestDemoVisitorFindsNoOneByTheirAddress(t *testing.T) {
 			UserPostgresInfo: userModels.User{Id: uuid.New(), EmailID: email},
 			UserDgraphInfo:   dgraphStruct.DgraphUser{Uuid: uuid.NewString()},
 		})
-		body, _ := json.Marshal(map[string]string{"global_search_text": text})
-		rec := httptest.NewRecorder()
-		globalSearchController.GetUnifiedGlobalSearch(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body))).WithContext(as))
-		if rec.Code != http.StatusOK {
-			t.Fatalf("searching %q as %s: %d %s", text, email, rec.Code, rec.Body.String())
-		}
-		var out struct {
-			Data struct {
-				Page []struct {
-					User *struct {
-						Id string `json:"user_id"`
-					} `json:"user"`
-					Highlight map[string][]string `json:"highlight"`
-				} `json:"page"`
-			} `json:"data"`
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-			t.Fatal(err)
-		}
-		for _, hit := range out.Data.Page {
-			if hit.User != nil && hit.User.Id == who {
-				return true, hit.Highlight
+		// The search box's route and the grammar's (POST /query/search) answer
+		// the same: the grammar's gives the visitor nothing more.
+		find := func(h http.HandlerFunc, in map[string]string) (bool, map[string][]string) {
+			body, _ := json.Marshal(in)
+			rec := httptest.NewRecorder()
+			h(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body))).WithContext(as))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("searching %q as %s: %d %s", text, email, rec.Code, rec.Body.String())
 			}
+			var out struct {
+				Data struct {
+					Page []struct {
+						User *struct {
+							Id string `json:"user_id"`
+						} `json:"user"`
+						Highlight map[string][]string `json:"highlight"`
+					} `json:"page"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+				t.Fatal(err)
+			}
+			for _, hit := range out.Data.Page {
+				if hit.User != nil && hit.User.Id == who {
+					return true, hit.Highlight
+				}
+			}
+			return false, nil
 		}
-		return false, nil
+		found, highlight := find(globalSearchController.GetUnifiedGlobalSearch, map[string]string{"global_search_text": text})
+		byGrammar, grammarHighlight := find(queryController.SearchQuery, map[string]string{"q": text})
+		if byGrammar != found || !reflect.DeepEqual(grammarHighlight, highlight) {
+			t.Errorf("searching %q as %s: the grammar's route found %v (%v), the search box's %v (%v)", text, email, byGrammar, grammarHighlight, found, highlight)
+		}
+		return found, highlight
 	}
 
 	// Her address, exactly and a letter off.

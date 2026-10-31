@@ -5,6 +5,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
+	"github.com/akashc777/OneCamp/models/dgexec"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/User"
 	models "github.com/akashc777/OneCamp/models/postgres/User"
@@ -66,4 +67,34 @@ func NameForGuests(ctx context.Context, id uuid.UUID) string {
 		}
 	}
 	return ""
+}
+
+// UserUIDsByUUIDs is each person's own graph node, by uuid: the first one
+// (lowest uid) holding their user_uuid, which every read of a person by uuid
+// takes, made when they joined. Imports made one more node with the person's
+// user_uuid for each file they kept, and the person's next write of their own
+// fields types those as a User too; they come after it.
+func UserUIDsByUUIDs(ctx context.Context, userUUIDs []uuid.UUID) (map[uuid.UUID]string, error) {
+	list := dgraphquery.UUIDListOf(userUUIDs)
+	if list == "" {
+		return nil, nil
+	}
+	got, err := dgexec.Read[struct {
+		People []struct {
+			Uid  string    `json:"uid"`
+			Uuid uuid.UUID `json:"user_uuid"`
+		} `json:"people"`
+	}](ctx, `query people {
+			people(func: eq(user_uuid, [`+list+`])) { uid user_uuid }
+		}`, nil)
+	if err != nil {
+		return nil, err
+	}
+	uids := make(map[uuid.UUID]string, len(got.People))
+	for _, p := range got.People {
+		if _, seen := uids[p.Uuid]; !seen {
+			uids[p.Uuid] = p.Uid
+		}
+	}
+	return uids, nil
 }

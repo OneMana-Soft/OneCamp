@@ -21,8 +21,8 @@ import (
 // WHY. A deleted message's file stays while an item still there holds it
 // (business/Attachment ArchiveFilesOf), and a node written before 19 Oct, or
 // one with no time at all, holds whatever file it names: until then a write
-// kept any file its request named, and some writes set no time. That is safe
-// only while no write of today can make a
+// kept any file its request named, and some writes set no time (main's ruling
+// on P-FILE-4, 26 Oct). That is safe only while no write of today can make a
 // node naming a file with no time, or with a time its request chose: such a
 // node would keep a file open to the people of its place after every message
 // showing it was deleted.
@@ -36,6 +36,8 @@ import (
 //     file (Uuid), so an upsert whose variable finds nothing makes a node that
 //     names no file; or guardedUpdates names it and the condition, held where
 //     it says, under which its mutation writes only the nodes its query finds;
+//     or it sets its time too, so a node its upsert makes has it, and
+//     newNodeTimes names it as a new node's writer;
 //   - or never written as a node (notNodes says why).
 //
 // Every call of NewAttachments, which every member's write of files goes
@@ -80,17 +82,17 @@ func TestEveryAttachmentNodeTheServerWritesSaysWhenItWasWritten(t *testing.T) {
 	}
 	// NewAttachments, the generic and the Slack import, a conversation's
 	// shared copies, the deleted message's stamp, a task's or project's file
-	// let go, the trash's archive and restore, and a doc comment's shown
-	// files; and NewAttachments' callers: posts, post comments, conversation
-	// and group messages, their comments, doc and task comments, tasks (two),
-	// projects and forwards.
-	if len(s.nodes) < 9 || len(s.calls) < 11 {
+	// let go, the trash's archive and restore, a doc comment's shown files and
+	// a form's uploads; and NewAttachments' callers: posts, post comments,
+	// conversation and group messages, their comments, doc and task comments,
+	// tasks (two), projects and forwards.
+	if len(s.nodes) < 10 || len(s.calls) < 11 {
 		t.Fatalf("found %d attachment nodes and %d calls of NewAttachments; the scan has stopped seeing them", len(s.nodes), len(s.calls))
 	}
 
 	// A task comment's time can be a backfill's, which business/GitHub's sync
-	// sets in Go. A request never sets it: a comment and its files take the
-	// server's time.
+	// sets in Go. A request must never set it, or a member's comment would
+	// write its files at any time it liked, no time included.
 	src, err := os.ReadFile("../adapter/Task/taskAdapter.go")
 	if err != nil {
 		t.Fatal(err)
@@ -106,10 +108,12 @@ func TestEveryAttachmentNodeTheServerWritesSaysWhenItWasWritten(t *testing.T) {
 var newNodeTimes = map[string]struct{ from, why string }{
 	"models/dgraph/newAttachments.go::NewAttachments": {"param:at",
 		"its callers' time, each checked below"},
-	"business/Import/attachment_worker.go::processAttachmentChunk": {"time.Now()",
-		"the import's write"},
+	"business/Import/attachment_worker.go::keptFileNode": {"f.CreatedAt | time.Now()",
+		"a kept file's node: the import's write (processAttachmentChunk), or, from the task file repair, the time of the row the import made for the file, which business/Attachment holds floors an imported file's node at"},
 	"business/SlackImport/file_worker.go::processFileChunk": {"slackTsToTime(meta.ParentTs) | time.Now()",
 		"the export's message time, or the write's when it has none: never zero; not the write's own, so business/Attachment holds takes an imported file's node as no older than the row the import made"},
+	"domain/Attachment/link.go::fileNode": {"*file.CreatedAt | time.Now()",
+		"an upsert of a file's node by its uuid (LinkFile, WriteFileNode): its maker's time, which the import file stages set (each pinned here), or else the write's"},
 	"business/Conversation/share.go::copiedFiles": {"m.At | r.At",
 		"the shared message's time: each copy names a file of its own, a new id and row (fileRows), and holds nothing else"},
 }
@@ -130,6 +134,7 @@ type guardedUpdate struct{ by, text, why string }
 // notNodes make a DgraphAttachment that is never written as a node.
 var notNodes = map[string]string{
 	"business/Thread/docResource.go::clientFields": "the files a doc comment shows, sent as JSON with its thread",
+	"business/Form/files.go::claimFiles":           "a form's uploads, handed to business/TaskWriter, whose task write runs OwnFiles and NewAttachments",
 }
 
 // newAttachmentTimes are callers of NewAttachments whose time isn't only the
@@ -195,6 +200,20 @@ func copiedUntimed(f *dg.DgraphAttachment) {
 	c.Uid = ""
 }
 
+func upsertTimed(f *dg.DgraphAttachment) {
+	c := *f
+	c.Uid = "uid(f)"
+	now := time.Now()
+	c.CreatedAt = &now
+}
+
+func upsertUnpinned(f *dg.DgraphAttachment) {
+	c := *f
+	c.Uid = "uid(f)"
+	now := time.Now()
+	c.CreatedAt = &now
+}
+
 func later() {
 	a := &dg.DgraphAttachment{Uuid: "f"}
 	now := time.Now().UTC()
@@ -232,15 +251,16 @@ func callers(ctx context.Context, in []*dg.DgraphAttachment) {
 func backdated(ctx context.Context) context.Context { return helpers.WithImportTimestamp(ctx, time.Unix(0, 0)) }
 `
 	s := scanAttachmentNodes(t, map[string][]byte{"p/p.go": []byte(src)})
-	if len(s.nodes) != 12 || len(s.calls) != 5 || len(s.backdates) != 1 {
-		t.Fatalf("found %d nodes, %d calls and %d backdates, want 12, 5 and 1", len(s.nodes), len(s.calls), len(s.backdates))
+	if len(s.nodes) != 14 || len(s.calls) != 5 || len(s.backdates) != 1 {
+		t.Fatalf("found %d nodes, %d calls and %d backdates, want 14, 5 and 1", len(s.nodes), len(s.calls), len(s.backdates))
 	}
 	newTimes := map[string]struct{ from, why string }{
-		"p/p.go::fresh":     {"time.Now()", ""},
-		"p/p.go::copied":    {"param:at", ""},
-		"p/p.go::later":     {"time.Now().UTC()", ""},
-		"p/p.go::wrongTime": {"time.Now()", ""},
-		"p/p.go::gone":      {"time.Now()", ""},
+		"p/p.go::fresh":       {"time.Now()", ""},
+		"p/p.go::copied":      {"param:at", ""},
+		"p/p.go::upsertTimed": {"time.Now()", ""},
+		"p/p.go::later":       {"time.Now().UTC()", ""},
+		"p/p.go::wrongTime":   {"time.Now()", ""},
+		"p/p.go::gone":        {"time.Now()", ""},
 	}
 	problems := s.problems(newTimes, nil, map[string]string{"p/p.go::notANode": ""}, nil, map[string]string{})
 	var got []string
@@ -249,7 +269,7 @@ func backdated(ctx context.Context) context.Context { return helpers.WithImportT
 		got = append(got, rest[:strings.IndexAny(rest, " :")])
 	}
 	sort.Strings(got)
-	want := []string{"backdated", "calls", "copiedUntimed", "declared", "elided", "gone", "made", "namedUpdate", "untimed", "viaBadParam", "wrongTime"}
+	want := []string{"backdated", "calls", "copiedUntimed", "declared", "elided", "gone", "made", "namedUpdate", "untimed", "upsertUnpinned", "viaBadParam", "wrongTime"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("flagged %v, want %v:\n%s", got, want, strings.Join(problems, "\n"))
 	}
@@ -549,8 +569,12 @@ func (s *attachmentScan) problems(newTimes map[string]struct{ from, why string }
 				}
 				continue
 			}
-			out = append(out, where+": an update naming its file, in a mutation that may find nothing, makes a node naming the file with no time; don't set Uuid, or guard the mutation and add it to guardedUpdates")
-			continue
+			if _, timed := n.fields["CreatedAt"]; !timed {
+				out = append(out, where+": an update naming its file, in a mutation that may find nothing, makes a node naming the file with no time; don't set Uuid, set its time, or guard the mutation and add it to guardedUpdates")
+				continue
+			}
+			// An upsert naming its file that sets its own time: a node it
+			// makes has that time, checked below as a new node's.
 		}
 		at, timed := n.fields["CreatedAt"]
 		if !timed {

@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+
+	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 )
 
 // Rechecker is a provider that can read again what an old import brought, so
@@ -30,4 +32,26 @@ type RecheckedTask struct {
 	Task            SourceTask
 	KeptComments    map[string]string
 	MissingComments []string
+}
+
+// PeopleRechecker is a provider whose old imports made people members of
+// projects its source keeps them out of (Basecamp's clients): a re-check reads
+// who they are now, and an admin decides about each (business/Import
+// recheckPeople.go).
+type PeopleRechecker interface {
+	// RecheckPeople reads, with owner's stored connection to the job's
+	// account, which of projects (by source id) answer there, and the
+	// account's people: whether the source keeps each out of its projects.
+	// It changes nothing at the source.
+	RecheckPeople(ctx context.Context, owner uuid.UUID, job *importModels.Job, projects []string) (RecheckedPeople, error)
+}
+
+// RecheckedPeople is an account's people as its source has them now:
+// Answered holds the projects asked about that answer, KeptOut each person it
+// lists, by source id, true when it keeps them out of its projects. A person
+// it no longer lists (deleted, or hidden from the connection's person) is
+// absent.
+type RecheckedPeople struct {
+	Answered map[string]bool
+	KeptOut  map[string]bool
 }

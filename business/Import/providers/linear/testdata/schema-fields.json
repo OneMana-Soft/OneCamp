@@ -278,6 +278,142 @@
     "type": "PageInfo"
    }
   },
+  "Cycle": {
+   "archivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "autoArchivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "completedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "completedIssueCountHistory": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "completedScopeHistory": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "createdAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "currentProgress": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "description": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "documents": {
+    "deprecated": false,
+    "type": "DocumentConnection"
+   },
+   "endsAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "id": {
+    "deprecated": false,
+    "type": "ID"
+   },
+   "inProgressScopeHistory": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "inheritedFrom": {
+    "deprecated": false,
+    "type": "Cycle"
+   },
+   "isActive": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "isFuture": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "isNext": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "isPast": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "isPrevious": {
+    "deprecated": false,
+    "type": "Boolean"
+   },
+   "issueCountHistory": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "issues": {
+    "deprecated": false,
+    "type": "IssueConnection"
+   },
+   "links": {
+    "deprecated": false,
+    "type": "EntityExternalLinkConnection"
+   },
+   "name": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "number": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "progress": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "progressHistory": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "scopeHistory": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "startsAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "team": {
+    "deprecated": false,
+    "type": "Team"
+   },
+   "uncompletedIssuesUponClose": {
+    "deprecated": false,
+    "type": "IssueConnection"
+   },
+   "updatedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   }
+  },
+  "CycleConnection": {
+   "edges": {
+    "deprecated": false,
+    "type": "CycleEdge"
+   },
+   "nodes": {
+    "deprecated": false,
+    "type": "Cycle"
+   },
+   "pageInfo": {
+    "deprecated": false,
+    "type": "PageInfo"
+   }
+  },
   "Issue": {
    "activitySummary": {
     "deprecated": false,
@@ -1480,6 +1616,86 @@
    "nodes": {
     "deprecated": false,
     "type": "Project"
+   },
+   "pageInfo": {
+    "deprecated": false,
+    "type": "PageInfo"
+   }
+  },
+  "ProjectMilestone": {
+   "archivedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "createdAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   },
+   "currentProgress": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "description": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "descriptionState": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "documentContent": {
+    "deprecated": false,
+    "type": "DocumentContent"
+   },
+   "id": {
+    "deprecated": false,
+    "type": "ID"
+   },
+   "issues": {
+    "deprecated": false,
+    "type": "IssueConnection"
+   },
+   "name": {
+    "deprecated": false,
+    "type": "String"
+   },
+   "progress": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "progressHistory": {
+    "deprecated": false,
+    "type": "JSONObject"
+   },
+   "project": {
+    "deprecated": false,
+    "type": "Project"
+   },
+   "sortOrder": {
+    "deprecated": false,
+    "type": "Float"
+   },
+   "status": {
+    "deprecated": false,
+    "type": "ProjectMilestoneStatus"
+   },
+   "targetDate": {
+    "deprecated": false,
+    "type": "TimelessDate"
+   },
+   "updatedAt": {
+    "deprecated": false,
+    "type": "DateTime"
+   }
+  },
+  "ProjectMilestoneConnection": {
+   "edges": {
+    "deprecated": false,
+    "type": "ProjectMilestoneEdge"
+   },
+   "nodes": {
+    "deprecated": false,
+    "type": "ProjectMilestone"
    },
    "pageInfo": {
     "deprecated": false,

@@ -65,3 +65,18 @@ func UUIDParam(w http.ResponseWriter, r *http.Request, name string) (uuid.UUID, 
 	}
 	return id, true
 }
+
+// RouteOf names r for a log line by the route it matched
+// ("/task/info/{task_uuid}"), never by its path, which carries ids and, on the
+// guest and public routes, a link's token. A request that has matched no
+// route, or none yet (the base middleware runs before routing), is noRoute.
+func RouteOf(r *http.Request) string {
+	if rctx := chi.RouteContext(r.Context()); rctx != nil {
+		if pattern := rctx.RoutePattern(); pattern != "" {
+			return pattern
+		}
+	}
+	return noRoute
+}
+
+const noRoute = "(no route)"

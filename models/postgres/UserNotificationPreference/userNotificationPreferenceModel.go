@@ -130,6 +130,19 @@ func FocusUntilOf(userID uuid.UUID) (*time.Time, error) {
 	return until, nil
 }
 
+// RunningFocusEvents are the ids of the focus-time events userID is in now,
+// by the same rule as FocusUntilOf: what ending focus time ends
+// (business/Calendar EndFocus), so nothing is left holding them after it.
+func RunningFocusEvents(ctx context.Context, userID uuid.UUID) ([]uuid.UUID, error) {
+	f := FocusStoreNow()
+	ids, err := pgexec.Query(ctx, `SELECT fe.id FROM `+f.Events("fe")+` WHERE `+f.Running("fe", "$1")+` ORDER BY `+f.end("fe"),
+		func(r pgexec.Row) (id uuid.UUID, err error) { return id, r.Scan(&id) }, userID)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "models/UserNotificationPreference/RunningFocusEvents err: %+v", err)
+	}
+	return ids, err
+}
+
 // rowScanner is a *sql.Row or *sql.Rows.
 type rowScanner interface{ Scan(dest ...any) error }
 

@@ -302,6 +302,7 @@ type DgraphDm struct {
 	Participants        []*DgraphUser      `json:"dm_participants,omitempty"`
 	ParticipantIsMember uint64             `json:"dm_is_member,omitempty"`
 	Chats               []*DgraphChat      `json:"dm_chats,omitempty"`
+	LastChatAt          *time.Time         `json:"dm_last_chat_at,omitempty"`      // when its newest message was written; the DM list's order (dmLastChat.go)
 	NotificationType    string             `json:"dm_notification_type,omitempty"` // not used in dgraph or postgres (Only used in returning for FE)
 	UnreadMessageCount  uint64             `json:"dm_unread,omitempty"`
 	CallActive          bool               `json:"dm_call_active"`
@@ -374,6 +375,14 @@ type DgraphDoc struct {
 	// is its host's (business/Doc docHost.go); none, for a doc that has one.
 	HostKind string `json:"doc_host_kind,omitempty"`
 	HostUUID string `json:"doc_host_uuid,omitempty"`
+	// What the node is when it isn't a page (docs F1, Docs & Files): a
+	// folder, a file or a link (domain/Doc's NodeFolder, NodeFile, NodeLink).
+	// None for a page, so a page never writes one. Its colour, a camp hue's
+	// name (helpers.CampHues), none for the default look; and a link's
+	// address, https only.
+	NodeKind string `json:"doc_node_kind,omitempty"`
+	Color    string `json:"doc_color,omitempty"`
+	LinkURL  string `json:"doc_link_url,omitempty"`
 
 	// How it looks.
 	Icon        string `json:"doc_icon,omitempty"`
@@ -557,6 +566,9 @@ type DgraphTask struct {
 	BlockedOpen uint32 `json:"task_blocked_open,omitempty"`
 	// EstimateMinutes is how long the task should take; 0 or unset is none.
 	EstimateMinutes *int `json:"task_estimate_minutes,omitempty"`
+	// EstimatePoints is how big the task is on its project's estimate scale
+	// (business/EstimateScale); unset is none, since zero can be a size.
+	EstimatePoints *float64 `json:"task_estimate_points,omitempty"`
 	// The project's own status the task is in, if any, and its name at the
 	// time it was set (kept in step on rename). Status above holds the built-in
 	// category it belongs to; see business/TaskStatus.
@@ -583,6 +595,17 @@ type DgraphTask struct {
 	// its row, card and panel (WA2b): set by models/taskread on every answer
 	// it keeps, never stored, never on a task the reader can't see.
 	Restricted bool `json:"task_restricted,omitempty"`
+	// Waiting is the task's open request for approval, laid over a board's
+	// read so its card says it's waiting (business/Approvals MarkWaiting);
+	// never stored.
+	Waiting *TaskWaiting `json:"task_waiting,omitempty"`
+}
+
+// TaskWaiting is a task's open request for approval as its board card shows
+// it: the request, and the status it asks to move the task to.
+type TaskWaiting struct {
+	ApprovalID string `json:"approval_id"`
+	ToStatus   string `json:"to_status"`
 }
 
 // TaskWorkType is a task's type as the app shows it: a built-in one (Builtin
@@ -649,6 +672,9 @@ type DgraphEvent struct {
 	// IsAway marks time off: the creator is away, and the workload counts
 	// those working days out of their capacity.
 	IsAway *bool `json:"event_is_away,omitempty"`
+	// WorkingLocation is where its creator works that day, for a working
+	// location ("Home", "Office"): calendar head 5d.
+	WorkingLocation string `json:"event_working_location,omitempty"`
 	// Booking is set, on an answer to its creator only, when a guest booked
 	// this event through one of their booking pages. Never stored.
 	Booking *EventBooking `json:"event_booking,omitempty"`
@@ -666,6 +692,46 @@ type DgraphEvent struct {
 	// each event in its own colour. Answers only, never stored here.
 	Hue      string `json:"event_hue,omitempty"`
 	Location string `json:"event_location,omitempty"`
+	// Zone is a timed event's own zone (IANA), and EndZone the one it ends in
+	// when that's another (calendar head 6): a card says the event's own time
+	// where it isn't the reader's. UTC, what an event gets when none was
+	// given, isn't said. Answers only, never stored here.
+	Zone    string `json:"event_zone,omitempty"`
+	EndZone string `json:"event_end_zone,omitempty"`
+	// CalendarID is the calendar it is on (calendar A6, from the one store),
+	// so the web shows, hides and colours it with that calendar: your own, one
+	// an import brought, or a project's. Answers only, never stored here.
+	CalendarID string `json:"event_calendar_id,omitempty"`
+	// ReadOnly is an event a subscribed calendar brought (calendar B8): seen
+	// whole, changed only where that calendar is published. Answers only.
+	ReadOnly bool `json:"event_read_only,omitempty"`
+	// Task is a task block's task (calendar B1, gcal-new-task-blocks), as the
+	// reader may read it. Answers only, never stored here.
+	Task *EventTask `json:"event_task,omitempty"`
+	// Call is the event's own call (calendar B11), while its address answers.
+	// Answers only, never stored here.
+	Call *EventCall `json:"event_call,omitempty"`
+}
+
+// EventCall is an event's own call as its readers see it: the address its
+// guests come in at ("weekly-sync-3f9a1c2e", "/r/weekly-sync-3f9a1c2e"); a
+// member opening it comes in as themselves. Room, the call's room, stays on
+// the server.
+type EventCall struct {
+	Room    string `json:"-"`
+	Slug    string `json:"slug"`
+	Address string `json:"address"`
+}
+
+// EventTask is the task a task block is time for: its uuid always, and its
+// name, where it stands and its project when the reader may read the task.
+// The calendar's answers carry it (the one store), never the graph.
+type EventTask struct {
+	UUID        string `json:"task_uuid"`
+	Name        string `json:"task_name,omitempty"`
+	Status      string `json:"task_status,omitempty"`
+	ProjectUUID string `json:"project_uuid,omitempty"`
+	ProjectName string `json:"project_name,omitempty"`
 }
 
 // EventGuest is one guest's answer to an event: needs_action, accepted,
@@ -680,6 +746,17 @@ type EventGuest struct {
 	// Invite, to the organiser alone, says whether a guest by email was
 	// emailed their invitation: sent, not_sent or failed.
 	Invite string `json:"invite,omitempty"`
+	// Proposal is another time the guest proposed, for its proposer and
+	// whoever may change the event alone.
+	Proposal *EventProposal `json:"proposal,omitempty"`
+	// OutOfOffice says their decline is their out of office's (calendar head 5c).
+	OutOfOffice bool `json:"out_of_office,omitempty"`
+}
+
+// EventProposal is a time a guest proposed for an event.
+type EventProposal struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
 }
 
 // EventBooking is what a booked event's creator sees of its booking: who
@@ -735,6 +812,10 @@ type DgraphProject struct {
 	// Access is what the person it was read for may do in it (Work Access,
 	// set after the read). Never stored.
 	Access *ProjectAccess `json:"project_access,omitempty"`
+	// Key is the project's key ("Q4"), which lives in Postgres, laid over a
+	// project read for the app (business/TaskKeys LayProjects); never stored
+	// in the graph.
+	Key string `json:"project_key,omitempty"`
 }
 
 type DgraphTeam struct {
@@ -786,6 +867,10 @@ var VALID_TASK_STATUSES = []string{TASK_STATUS_TODO, TASK_STATUS_INPROGRESS, TAS
 // "upcoming" query uses it rather than spelling its own.
 const TASK_OPEN_FILTER = `not eq(task_status, "` + TASK_STATUS_DONE + `") AND not eq(task_status, "` + TASK_STATUS_CANCELED + `")`
 
+// TASK_CLOSED_FILTER matches finished tasks, done or canceled: what
+// TASK_OPEN_FILTER leaves out.
+const TASK_CLOSED_FILTER = `(eq(task_status, "` + TASK_STATUS_DONE + `") OR eq(task_status, "` + TASK_STATUS_CANCELED + `"))`
+
 // TASK_LIVE_FILTER keeps the tasks nobody deleted (a live task's
 // task_deleted_at is the zero time).
 const TASK_LIVE_FILTER = `not gt(task_deleted_at, "1970-01-01T00:00:00Z")`
@@ -795,8 +880,11 @@ const TASK_LIVE_FILTER = `not gt(task_deleted_at, "1970-01-01T00:00:00Z")`
 // Only finish to start counts, as a dependency with no kind is: the task
 // can't start while the other is open. The other kinds hang on the other
 // starting, which an open task may well have, or on finishing. (A NOT facet
-// filter keeps the edges without the facet.)
-const TASK_BLOCKED_OPEN = `task_blocked_open: count(task_blocked_by @facets(NOT eq(kind, "ss") AND NOT eq(kind, "ff") AND NOT eq(kind, "sf")) @filter(` + TASK_LIVE_FILTER + ` AND ` + TASK_OPEN_FILTER + `))`
+// filter keeps the edges without the facet.) Only blockers in a project the
+// reader is in count (DG10b): a blocker in another project they can't see
+// isn't there for them, not even as a number. The query must define
+// readerProjects (ReaderProjectsVar).
+const TASK_BLOCKED_OPEN = `task_blocked_open: count(task_blocked_by @facets(NOT eq(kind, "ss") AND NOT eq(kind, "ff") AND NOT eq(kind, "sf")) @filter(` + TASK_LIVE_FILTER + ` AND ` + TASK_OPEN_FILTER + ` AND uid_in(task_project, uid(readerProjects))))`
 
 const TASK_PRIORITY_URGENT = "urgent"
 const TASK_PRIORITY_HIGH = "high"
@@ -831,6 +919,10 @@ const ACTIVITY_TYPE_CREATE_TASK = "taskCreate"
 // or PrevState (taken off) holds the other task's uuid.
 const ACTIVITY_TYPE_ADD_DEPENDENCY = "dependencyAdd"
 const ACTIVITY_TYPE_ESTIMATE = "estimate"
+
+// A task's points set or taken off: PrevState and NextState hold the points
+// before and after, "" for none.
+const ACTIVITY_TYPE_POINTS = "points"
 
 // A custom field's value set or cleared: NextState holds the field's name.
 const ACTIVITY_TYPE_FIELD = "fieldUpdate"

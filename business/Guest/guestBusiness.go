@@ -28,7 +28,9 @@ import (
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/livekitInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/services/collab"
 	"github.com/google/uuid"
 )
@@ -142,34 +144,14 @@ func CreateInstantMeeting(ctx context.Context, host *dgraphStruct.DgraphUser, la
 	}, nil
 }
 
-// ValidateMeetingGrant resolves a raw guest link token to its active meeting
-// grant, enforcing the workspace policy. Returns a sentinel error (mapped to a
-// uniform response upstream) when access is not available for any reason, and
-// a read that failed as it is.
-func ValidateMeetingGrant(ctx context.Context, rawToken string) (*guestModel.GuestGrant, error) {
-	if !settingsBusiness.GuestAccessEnabled() {
-		return nil, ErrGuestDisabled
-	}
-	rawToken = strings.TrimSpace(rawToken)
-	if rawToken == "" {
-		return nil, ErrInvalidGrant
-	}
-	g, err := guestModel.GetActiveByHash(ctx, hashToken(rawToken))
-	if err != nil {
-		return nil, err
-	}
-	if g == nil || g.ResourceType != guestModel.ResourceMeeting {
-		return nil, ErrInvalidGrant
-	}
-	return g, nil
-}
-
-// IssueGuestMeetingToken mints a single-room, short-lived LiveKit token for a
-// validated meeting grant. The guest identity lives in the reserved `guest-`
-// namespace so it can never collide with a member UUID identity or the
-// transcription agent. The display name is sanitized and rendered with a
-// "Guest:" prefix so the UI badges it unambiguously.
-func IssueGuestMeetingToken(ctx context.Context, grant *guestModel.GuestGrant, displayName, language string) (token string, room string, err error) {
+// IssueGuestMeetingToken mints a single-room, short-lived LiveKit token for
+// the call a door opens (a meeting's link, a room's address, a call's
+// invite). The guest identity lives in the reserved `guest-` namespace so it
+// can never collide with a member UUID identity or the transcription agent.
+// The display name is sanitized and rendered with a "Guest:" prefix so the UI
+// badges it unambiguously.
+func IssueGuestMeetingToken(ctx context.Context, door Door, displayName, language string) (token string, room string, err error) {
+	grant := door.Grant
 	name := sanitizeGuestName(displayName)
 	if name == "" {
 		return "", "", ErrInvalidName
@@ -181,7 +163,12 @@ func IssueGuestMeetingToken(ctx context.Context, grant *guestModel.GuestGrant, d
 	}
 	// A meeting its host locked lets nobody new in, and a guest's every join
 	// is someone new (liveKitBusiness.ErrCallLocked, said in its own words).
-	if err := liveKitBusiness.GuestMayEnter(ctx, grant.ResourceID); err != nil {
+	if err := liveKitBusiness.GuestMayEnter(ctx, door.Room); err != nil {
+		return "", "", err
+	}
+	// What the people running the call hold for everyone else holds a guest too.
+	sources, err := liveKitBusiness.SourcesAtDoor(ctx, door.Room, nil, false)
+	if err != nil {
 		return "", "", err
 	}
 
@@ -191,17 +178,52 @@ func IssueGuestMeetingToken(ctx context.Context, grant *guestModel.GuestGrant, d
 	}
 	identity := guestIdentityPrefix(grant.Id.String()) + suffix
 
-	token, err = livekitInit.LiveKitService.GenerateGuestToken(grant.ResourceID, identity, "Guest: "+name, language)
+	token, err = livekitInit.LiveKitService.GenerateGuestToken(door.Room, identity, callNamePrefix+name, language, sources)
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "business/Guest/IssueGuestMeetingToken err: %+v", err)
 		return "", "", err
 	}
-	return token, grant.ResourceID, nil
+	return token, door.Room, nil
 }
 
-// ListActiveGrants returns active grants for the admin view.
-func ListActiveGrants(ctx context.Context) ([]*guestModel.GuestGrant, error) {
-	return guestModel.ListActive(ctx)
+// AdminGrant is a live grant as the admin's list shows it, with the name of
+// the member who made it: a room reads "Maya Chen's room", where a column of
+// "Personal room" rows told an admin nothing.
+type AdminGrant struct {
+	*guestModel.GuestGrant
+	// CreatedByName is left out for a member who has gone or whose name
+	// couldn't be read.
+	CreatedByName string `json:"created_by_name,omitempty"`
+}
+
+// activeGrants and displayNames are the admin list's two reads: seams for tests.
+var (
+	activeGrants = guestModel.ListActive
+	displayNames = userModels.DisplayNamesByUUIDs
+)
+
+// ListActiveGrants is every live grant for the admin view, newest first, each
+// with its maker's name: one query for the grants and one for the names.
+// Names that can't be read leave the rows standing, so an admin can still
+// revoke.
+func ListActiveGrants(ctx context.Context) ([]AdminGrant, error) {
+	grants, err := activeGrants(ctx)
+	if err != nil {
+		return nil, err
+	}
+	makers := make([]uuid.UUID, 0, len(grants))
+	for _, g := range grants {
+		makers = append(makers, g.CreatedBy)
+	}
+	names, err := displayNames(ctx, makers)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Guest/ListActiveGrants names err: %+v", err)
+	}
+	out := make([]AdminGrant, 0, len(grants))
+	for _, g := range grants {
+		out = append(out, AdminGrant{GuestGrant: g, CreatedByName: names[g.CreatedBy]})
+	}
+	return out, nil
 }
 
 // RevokeGrant revokes a grant by id, for an admin's settings and a link's
@@ -238,9 +260,14 @@ func revoke(ctx context.Context, id uuid.UUID) error {
 	if err := guestModel.Revoke(ctx, id); err != nil {
 		return err
 	}
-	if g, err := guestModel.GetByID(ctx, id); err == nil && g != nil && g.ResourceType == guestModel.ResourceMeeting {
-		removeGuestsOf(ctx, g.ResourceID, map[string]bool{id.String(): true})
+	// The call it opens (a meeting's, or a call's while it goes on): its
+	// guests go, and so do the members who came in by it as themselves.
+	if g, err := grantByID(ctx, id); err == nil && g != nil {
+		if door, err := DoorOf(ctx, g); err == nil {
+			removeGuestsOf(ctx, door.Room, map[string]bool{id.String(): true})
+		}
 	}
+	putOutMembersOf(ctx, []uuid.UUID{id})
 	return nil
 }
 
@@ -262,9 +289,6 @@ func EndLiveSessions(grantIDs ...uuid.UUID) {
 	collab.ClosePeopleLater(ids...)
 }
 
-// activeGrants is endLinkSessions' read of the live links: a seam for tests.
-var activeGrants = guestModel.ListActive
-
 // endLinkSessions ends the live sessions of every live doc and board link.
 func endLinkSessions(ctx context.Context) {
 	grants, err := activeGrants(ctx)
@@ -279,6 +303,14 @@ func endLinkSessions(ctx context.Context) {
 		}
 	}
 	EndLiveSessions(ids...)
+}
+
+// callNamePrefix leads a guest's name in a call, so the UI badges it.
+const callNamePrefix = "Guest: "
+
+// NameInCall is the name a guest gave, from their name in a call. Pure.
+func NameInCall(callName string) string {
+	return strings.TrimPrefix(callName, callNamePrefix)
 }
 
 // guestIdentityPrefix starts the call identity of every guest who joins from
@@ -309,39 +341,115 @@ func removeGuestsOf(ctx context.Context, room string, grants map[string]bool) {
 }
 
 // GuestMayJoin reports whether a guest's call identity still has a live link
-// to this meeting: guest access on, the link neither revoked nor expired, and
-// for this room. A guest token only ever names a meeting room.
+// to the call in this room: guest access on, the link neither revoked nor
+// expired, and opening this room now (a meeting's link its meeting, a call's
+// invite its call while it goes on).
 func GuestMayJoin(ctx context.Context, room, identity string) (bool, error) {
-	if !IsMeetingRoom(room) || !settingsBusiness.GuestAccessEnabled() {
+	if !guestOn() {
 		return false, nil
 	}
 	id, err := uuid.Parse(grantOfGuest(identity))
 	if err != nil {
 		return false, nil
 	}
-	g, err := guestModel.GetByID(ctx, id)
+	g, err := grantByID(ctx, id)
 	if err != nil {
 		return false, err
 	}
-	live := g != nil && g.ResourceType == guestModel.ResourceMeeting && g.ResourceID == room &&
-		g.RevokedAt == nil && (g.ExpiresAt == nil || time.Now().Before(*g.ExpiresAt))
-	return live, nil
+	if g == nil || g.RevokedAt != nil || grantExpired(ctx, g) {
+		return false, nil
+	}
+	// A personal room's guest, only while rooms are on: its address stops
+	// answering at once, and a token minted before must not bring them back.
+	if guestModel.IsStanding(g) && !roomsOn() {
+		return false, nil
+	}
+	opens, err := doorRoom(ctx, g)
+	if errors.Is(err, ErrInvalidGrant) {
+		return false, nil
+	}
+	return err == nil && opens == room, err
 }
 
-// RemoveAllMeetingGuests puts every guest out of every instant meeting, for
-// guest access being turned off: the policy is re-read when a guest joins, and
-// nothing put out the ones already in.
-func RemoveAllMeetingGuests(ctx context.Context) {
+// RemoveMeetingGuests puts every guest out of one meeting's call, and the
+// members who came in by its links as themselves: a personal room being
+// closed (business/CallRoom), whose links all end with it.
+func RemoveMeetingGuests(ctx context.Context, room string) {
+	removeGuestsOf(ctx, room, nil)
+	admitted, err := admittedIn(ctx, room)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Guest/RemoveMeetingGuests could not list who came in by link: %+v", err)
+		return
+	}
+	putOutLinkMembers(ctx, admitted)
+}
+
+// RemoveRoomGuests puts every guest who came in at a personal room's address
+// out of the room's call, for rooms being turned off (as RemoveAllLinkGuests
+// does for guest access): the addresses stop answering at once, and nothing
+// put out the guests already in. Only rooms with a call on are asked.
+func RemoveRoomGuests(ctx context.Context) {
+	standing, err := guestModel.ListLiveStanding(ctx)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Guest/RemoveRoomGuests could not list the rooms: %+v", err)
+		return
+	}
+	byRoom := map[string]map[string]bool{}
+	ids := make([]uuid.UUID, 0, len(standing))
+	for _, g := range standing {
+		if byRoom[g.ResourceID] == nil {
+			byRoom[g.ResourceID] = map[string]bool{}
+		}
+		byRoom[g.ResourceID][g.Id.String()] = true
+		ids = append(ids, g.Id)
+	}
+	if len(byRoom) > 0 {
+		removeMeetingGuests(ctx, byRoom)
+		// And the members who came in at a room's address as themselves.
+		putOutMembersOf(ctx, ids)
+	}
+}
+
+// RemoveAllLinkGuests puts everyone a link let in out of every call, for
+// guest access being turned off: every guest (a meeting's, a room's, a call's
+// invite's), and every member who came in by a link as themselves and has no
+// other way in. The policy is re-read when someone joins, and nothing put out
+// the ones already in.
+func RemoveAllLinkGuests(ctx context.Context) {
 	// Their open docs and boards first: a link's socket was authorised when it
 	// connected, and the policy is read again only on a reconnect.
 	endLinkSessions(ctx)
-	rooms, err := liveKitBusiness.CallRoomsWithPrefix(ctx, MeetingRoomPrefix)
+	removeMeetingGuests(ctx, nil)
+	admitted, err := admittedInLiveCalls(ctx)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/Guest/RemoveAllMeetingGuests could not list meetings: %+v", err)
+		helpers.LogErrorWithContext(ctx, "business/Guest/RemoveAllLinkGuests could not list who came in by link: %+v", err)
+		return
+	}
+	putOutLinkMembers(ctx, admitted)
+}
+
+// removeMeetingGuests puts out of every meeting with a call on the guests of
+// the grants only names for its room. With only nil it is every guest in
+// every call, a conversation's included (a call's invite lets guests in
+// there): one list of the calls, then one ask of the call server per call, as
+// it has none that reaches across calls.
+func removeMeetingGuests(ctx context.Context, only map[string]map[string]bool) {
+	prefix := MeetingRoomPrefix
+	if only == nil {
+		prefix = ""
+	}
+	rooms, err := liveKitBusiness.CallRoomsWithPrefix(ctx, prefix)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Guest/removeMeetingGuests could not list meetings: %+v", err)
 		return
 	}
 	for _, room := range rooms {
-		removeGuestsOf(ctx, room, nil)
+		switch grants := only[room]; {
+		case only == nil:
+			removeGuestsOf(ctx, room, nil)
+		case grants != nil:
+			removeGuestsOf(ctx, room, grants)
+		}
 	}
 }
 
@@ -361,39 +469,50 @@ func MeetingHost(ctx context.Context, room string) (uuid.UUID, bool, error) {
 	return guestModel.ResourceCreator(ctx, guestModel.ResourceMeeting, room)
 }
 
-// HostedMeeting answers when an instant meeting's link stops working, for
-// its host only. ErrNoMeeting for a room no meeting ever had (every meeting
-// starts with a link, and links are kept after they stop working);
-// ErrNotFound once no link to it is live (the meeting is over); ErrNotHost
-// for anyone but the person who started it.
-func HostedMeeting(ctx context.Context, room string, host *dgraphStruct.DgraphUser) (time.Time, error) {
+// Hosted is a meeting as its host sees it: when its last link with an end
+// stops working (zero while none has one), and, for a personal room, its
+// address's slug ("" for an instant meeting).
+type Hosted struct {
+	Until time.Time
+	Slug  string
+}
+
+// HostedMeeting answers when an instant meeting's link stops working, or a
+// personal room's address, for its host only. ErrNoMeeting for a room no
+// meeting ever had (every meeting starts with a link, and links are kept
+// after they stop working); ErrNotFound once no link to it is live (the
+// meeting is over); ErrNotHost for anyone but the person who started it.
+func HostedMeeting(ctx context.Context, room string, host *dgraphStruct.DgraphUser) (Hosted, error) {
 	if host == nil {
-		return time.Time{}, ErrNotHost
+		return Hosted{}, ErrNotHost
 	}
 	creator, ok, err := MeetingHost(ctx, room)
 	if err != nil {
-		return time.Time{}, err
+		return Hosted{}, err
 	}
 	if !ok {
-		return time.Time{}, ErrNoMeeting
+		return Hosted{}, ErrNoMeeting
 	}
 	if creator.String() != host.Uuid {
-		return time.Time{}, ErrNotHost
+		return Hosted{}, ErrNotHost
 	}
 	live, err := guestModel.ListActiveForResource(ctx, guestModel.ResourceMeeting, room)
 	if err != nil {
-		return time.Time{}, err
+		return Hosted{}, err
 	}
-	var until time.Time
+	var h Hosted
 	for _, g := range live {
-		if g.ExpiresAt != nil && g.ExpiresAt.After(until) {
-			until = *g.ExpiresAt
+		if g.ExpiresAt != nil && g.ExpiresAt.After(h.Until) {
+			h.Until = *g.ExpiresAt
 		}
 	}
 	if len(live) == 0 {
-		return time.Time{}, ErrNotFound
+		return Hosted{}, ErrNotFound
 	}
-	return until, nil
+	if room, _ := guestModel.StandingOf(live); room != nil {
+		h.Slug = *room.Slug
+	}
+	return h, nil
 }
 
 // RejoinMeeting mints the host's token again for an instant meeting they
@@ -424,11 +543,15 @@ func NewMeetingLink(ctx context.Context, room string, host *dgraphStruct.DgraphU
 	// The links to revoke are read first, and revoked only once the new one
 	// exists: a failure in between must not leave the meeting with no live
 	// link, which ends it for the host too (CALL-BUG-17).
+	// A personal room's address is not one of them: it ends only by the
+	// room's own controls (business/CallRoom), an admin, or rooms turned off.
 	var old []*guestModel.GuestGrant
 	if revokePrevious {
-		if old, err = guestModel.ListActiveForResource(ctx, guestModel.ResourceMeeting, room); err != nil {
+		live, err := guestModel.ListActiveForResource(ctx, guestModel.ResourceMeeting, room)
+		if err != nil {
 			return nil, err
 		}
+		_, old = guestModel.StandingOf(live)
 	}
 	raw, err := randomToken()
 	if err != nil {
@@ -479,6 +602,61 @@ func IsMeetingRoom(roomName string) bool {
 func randomToken() (string, error) {
 	raw, _, err := helpers.NewLinkSecret()
 	return raw, err
+}
+
+// Seams for tests: making a grant, and a transaction.
+var (
+	createGrant = guestModel.CreateGrant
+	inTx        = pgexec.InTx
+)
+
+// NewRoom makes a member's personal meeting room's link (calls CALLS-2) and
+// gives it its address, in one transaction (agreed with DOCS-LEAD-2, 20
+// Oct): a join link to the room that never ends (linkLifetime of KindRoom,
+// which the workspace's link cap leaves alone, as a room is standing), at
+// its owner's name when that is free. A room that can't take an address
+// isn't made, so under a cap there is never a never-ending link with no
+// address. Its token is never shown: a room is opened at its address.
+func NewRoom(ctx context.Context, room string, owner uuid.UUID) (*guestModel.GuestGrant, error) {
+	return newRoom(ctx, room, owner, "")
+}
+
+// NewEventRoom makes an event's call's link (calendar B11) as NewRoom makes a
+// personal room's, at an address of the event's title and a few random letters
+// ("weekly-sync-3f9a1c2e"), never its bare words: a title is no one's name, and
+// an event's call shouldn't be found from its title alone.
+func NewEventRoom(ctx context.Context, room string, owner uuid.UUID, title string) (*guestModel.GuestGrant, error) {
+	if normaliseSlug(title) == "" {
+		title = "call"
+	}
+	return newRoom(ctx, room, owner, slugFor(title))
+}
+
+// newRoom is NewRoom at slug, or at the room's fresh address for "".
+func newRoom(ctx context.Context, room string, owner uuid.UUID, slug string) (*guestModel.GuestGrant, error) {
+	if !guestOn() {
+		return nil, ErrGuestDisabled
+	}
+	if !roomsAllowed() {
+		return nil, ErrRoomsOff
+	}
+	raw, err := randomToken()
+	if err != nil {
+		return nil, err
+	}
+	var g *guestModel.GuestGrant
+	err = inTx(ctx, func(ctx context.Context) error {
+		id, err := createGrant(ctx, hashToken(raw), guestModel.ResourceMeeting, room, guestModel.CapabilityJoin, owner, linkLifetime(ctx, KindRoom, time.Now(), 0, true))
+		if err != nil {
+			return err
+		}
+		g, err = PublishLink(ctx, owner, id, PublishSettings{Slug: slug})
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return g, nil
 }
 
 // randomShort returns a short random suffix for a guest identity.

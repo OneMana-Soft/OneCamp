@@ -92,7 +92,7 @@ func TestFocusTimeIsHeldAsThePushGateHoldsIt(t *testing.T) {
 				t.Fatalf("%s: held until %v, want %v", c.name, got.Until, c.until)
 			}
 			// What the sender is told is what the push gate does.
-			tokens, err := fcmDomain.GetFCMTokenByUserId(ctx, c.id.String())
+			_, tokens, err := fcmDomain.ReachableNow(ctx, []string{c.id.String()})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -155,7 +155,7 @@ func TestEveryHoldIsReadAlikeByPushEmailAndStatus(t *testing.T) {
 			{"a meeting", meeting, ""},
 		} {
 			held := c.reason != ""
-			tokens, err := fcmDomain.GetFCMTokenByUserId(ctx, c.id.String())
+			_, tokens, err := fcmDomain.ReachableNow(ctx, []string{c.id.String()})
 			if err != nil {
 				t.Fatal(err)
 			}

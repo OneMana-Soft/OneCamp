@@ -124,6 +124,16 @@ func TestCalendarAttendanceMigrationUpDownUp(t *testing.T) {
 // public calls a public handler: nobody signed in.
 func public(t *testing.T, h http.HandlerFunc, method, path, body string, params map[string]string) (int, map[string]json.RawMessage) {
 	t.Helper()
+	rec := publicCall(t, h, method, path, body, params)
+	var out map[string]json.RawMessage
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec.Code, out
+}
+
+// publicCall is public's request, answered as it was, its headers too (a
+// redirect's Location).
+func publicCall(t *testing.T, h http.HandlerFunc, method, path, body string, params map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	rctx := chi.NewRouteContext()
 	for k, v := range params {
@@ -131,9 +141,7 @@ func public(t *testing.T, h http.HandlerFunc, method, path, body string, params 
 	}
 	rec := httptest.NewRecorder()
 	h(rec, req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx)))
-	var out map[string]json.RawMessage
-	_ = json.Unmarshal(rec.Body.Bytes(), &out)
-	return rec.Code, out
+	return rec
 }
 
 // guestOf is someone's entry on an event, by name or address.

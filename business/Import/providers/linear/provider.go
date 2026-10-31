@@ -77,6 +77,10 @@ const (
 // code never reassigns this.
 var graphqlEndpoint = "https://api.linear.app/graphql"
 
+// statusRules reads Linear's answers. Only a 401 refuses the token; its
+// other errors come in a 200's body. Its limits are per hour.
+var statusRules = importProvider.StatusRules{Name: "Linear", Wait: time.Minute, OnlyUnauthorized: true}
+
 // Provider implements importProvider.Provider for Linear.
 type Provider struct {
 	rl importProvider.Limiter
@@ -208,18 +212,27 @@ func (p *Provider) Plan(ctx context.Context, j *importModels.Job, opts importPro
 	if err != nil {
 		return nil, nil, err
 	}
+	return snap.plan(), nil, nil
+}
 
+// plan is what the snapshot will bring, for the person running the import to
+// confirm: its counts, a project's milestones among the tasks, and the
+// statuses and priorities to map.
+func (s *workspaceSnapshot) plan() *importProvider.Plan {
 	plan := &importProvider.Plan{
-		UserCount:    len(snap.Users),
-		TeamCount:    len(snap.Teams),
-		ProjectCount: len(snap.Projects),
+		UserCount:    len(s.Users),
+		TeamCount:    len(s.Teams),
+		ProjectCount: len(s.Projects),
 	}
 
 	// Status / priority value sets the operator confirms in the Plan UI.
-	statusSet := map[string]struct{}{}
+	plan.StatusValues, plan.StatusKinds = planStatuses(s.Issues)
 	prioritySet := map[string]struct{}{}
 
-	for _, iss := range snap.Issues {
+	for _, pr := range s.Projects {
+		plan.TaskCount += len(s.milestones[pr.ID])
+	}
+	for _, iss := range s.Issues {
 		plan.TaskCount++
 		if iss.ParentID != "" {
 			// Children are still counted as tasks but separately as
@@ -232,33 +245,22 @@ func (p *Provider) Plan(ctx context.Context, j *importModels.Job, opts importPro
 			plan.FileBytes += a.Size
 		}
 
-		if name := strings.ToLower(iss.StateName); name != "" {
-			statusSet[name] = struct{}{}
-		}
-		if t := strings.ToLower(iss.StateType); t != "" {
-			statusSet[t] = struct{}{}
-		}
 		if name := strings.ToLower(iss.PriorityLabel); name != "" {
 			prioritySet[name] = struct{}{}
 		}
 	}
 
-	for k := range statusSet {
-		plan.StatusValues = append(plan.StatusValues, k)
-	}
 	for k := range prioritySet {
 		plan.PriorityValues = append(plan.PriorityValues, k)
 	}
 	// Stable order so the UI doesn't shuffle on each plan call.
-	sort.Strings(plan.StatusValues)
 	sort.Strings(plan.PriorityValues)
 
-	if len(snap.Issues) == 0 {
+	if len(s.Issues) == 0 {
 		plan.Warnings = append(plan.Warnings,
 			"no issues visible to this token; check OAuth scope (read access required)")
 	}
-
-	return plan, nil, nil
+	return plan
 }
 
 // IterUsers streams every Linear user the snapshot saw.
@@ -278,18 +280,7 @@ func (p *Provider) IterUsers(ctx context.Context, j *importModels.Job, opts impo
 			select {
 			case <-ctx.Done():
 				return
-			case out <- importProvider.SourceUser{
-				SourceID:    u.ID,
-				DisplayName: helpers.FirstNonEmpty(u.Name, u.DisplayName),
-				Login:       u.DisplayName,
-				Email:       u.Email,
-				AvatarURL:   u.AvatarURL,
-				IsBot:       false,
-				IsExternal:  u.Guest,
-				Metadata: map[string]any{
-					"linear_id": u.ID,
-				},
-			}:
+			case out <- u.source():
 			}
 		}
 	}()
@@ -345,6 +336,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 			return
 		}
 		for _, pr := range snap.Projects {
+			issues := snap.projectIssues(pr.ID)
 			select {
 			case <-ctx.Done():
 				return
@@ -359,6 +351,11 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 					"linear_url": pr.URL,
 					"state":      pr.State,
 				},
+				HighestNumber: highestNumber(issues),
+				Fields:        milestoneFields(snap.milestones[pr.ID]),
+				Cycles:        projectCycles(issues, snap.cycleByID),
+				CycleSchedule: snap.schedules[pr.TeamID],
+				EstimateScale: snap.scales[pr.TeamID],
 			}:
 			}
 		}
@@ -368,6 +365,7 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 				continue
 			}
 			inboxID := inboxProjectIDPrefix + t.ID
+			issues := snap.projectIssues(inboxID)
 			select {
 			case <-ctx.Done():
 				return
@@ -379,6 +377,10 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 				Metadata: map[string]any{
 					"synthetic": true,
 				},
+				HighestNumber: highestNumber(issues),
+				Cycles:        projectCycles(issues, snap.cycleByID),
+				CycleSchedule: snap.schedules[t.ID],
+				EstimateScale: snap.scales[t.ID],
 			}:
 			}
 		}
@@ -388,7 +390,8 @@ func (p *Provider) IterProjects(ctx context.Context, j *importModels.Job, opts i
 
 // IterTasksOfProject streams every issue whose project matches.
 // Subtasks (issues with parent_id) come back in this stream too, with
-// ParentTaskID set so the orchestrator's task worker links them.
+// ParentTaskID set so the orchestrator's task worker links them. The
+// project's milestones follow its issues, each a Milestone task.
 //
 // For the synthetic inbox project, we emit issues whose linear_project_id
 // is empty AND whose team matches the inbox's team.
@@ -405,25 +408,22 @@ func (p *Provider) IterTasksOfProject(ctx context.Context, j *importModels.Job, 
 			return
 		}
 
-		isInbox := strings.HasPrefix(projectSourceID, inboxProjectIDPrefix)
-		inboxTeamID := strings.TrimPrefix(projectSourceID, inboxProjectIDPrefix)
-
-		for _, iss := range snap.Issues {
-			if isInbox {
-				if iss.ProjectID != "" || iss.TeamID != inboxTeamID {
-					continue
-				}
-			} else if iss.ProjectID != projectSourceID {
-				continue
-			}
+		for _, iss := range snap.projectIssues(projectSourceID) {
 			if ctx.Err() != nil {
 				return
 			}
-			task := snap.task(p, iss, projectSourceID)
+			task := snap.task(p, *iss, projectSourceID)
 			select {
 			case <-ctx.Done():
 				return
 			case out <- task:
+			}
+		}
+		for _, m := range snap.milestones[projectSourceID] {
+			select {
+			case <-ctx.Done():
+				return
+			case out <- m.task(projectSourceID):
 			}
 		}
 	}()
@@ -541,7 +541,11 @@ type workspaceSnapshot struct {
 
 	issueByID    map[string]*linearIssue
 	teamHasInbox map[string]bool
-	keptTeams    map[string]keptTeam // by team, those Linear doesn't show everyone
+	cycleByID    map[string]linearCycle
+	schedules    map[string]*importProvider.SourceCycleSchedule // by team
+	scales       map[string]*importProvider.SourceEstimateScale // by team
+	milestones   map[string][]linearMilestone                   // by project, in Linear's order
+	keptTeams    map[string]keptTeam                            // by team, those Linear doesn't show everyone
 }
 
 func (s *workspaceSnapshot) IssueByID(id string) *linearIssue {
@@ -549,6 +553,20 @@ func (s *workspaceSnapshot) IssueByID(id string) *linearIssue {
 		return nil
 	}
 	return s.issueByID[id]
+}
+
+// projectIssues are the issues a project here holds: its own, or for a
+// team's inbox, the team's issues in no project.
+func (s *workspaceSnapshot) projectIssues(projectSourceID string) []*linearIssue {
+	inboxTeam, isInbox := strings.CutPrefix(projectSourceID, inboxProjectIDPrefix)
+	var out []*linearIssue
+	for i := range s.Issues {
+		iss := &s.Issues[i]
+		if (isInbox && iss.ProjectID == "" && iss.TeamID == inboxTeam) || (!isInbox && iss.ProjectID == projectSourceID) {
+			out = append(out, iss)
+		}
+	}
+	return out
 }
 
 // task is iss as a task of projectID, kept to its team's members when Linear
@@ -632,6 +650,10 @@ func (p *Provider) buildSnapshot(ctx context.Context, j *importModels.Job) (*wor
 	if err != nil {
 		return nil, fmt.Errorf("linear projects: %w", err)
 	}
+	labels, err := p.fetchLabels(ctx, tok)
+	if err != nil {
+		return nil, fmt.Errorf("linear labels: %w", err)
+	}
 
 	// Optional narrowing: opts["team_id"] (set via the discover dropdown)
 	// scopes the import to a single team. We filter teams + projects
@@ -669,6 +691,28 @@ func (p *Provider) buildSnapshot(ctx context.Context, j *importModels.Job) (*wor
 		}
 		allIssues = append(allIssues, issues...)
 	}
+	cycles, err := p.fetchCycles(ctx, tok)
+	if err != nil {
+		return nil, fmt.Errorf("linear cycles: %w", err)
+	}
+	cycleByID := make(map[string]linearCycle, len(cycles))
+	teamCycles := map[string][]linearCycle{}
+	for _, c := range cycles {
+		cycleByID[c.ID] = c
+		teamCycles[c.Team.ID] = append(teamCycles[c.Team.ID], c)
+	}
+	schedules := make(map[string]*importProvider.SourceCycleSchedule, len(teams))
+	for _, t := range teams {
+		schedules[t.ID] = cycleSchedule(t, teamCycles[t.ID], time.Now())
+	}
+	milestones, err := p.fetchMilestones(ctx, tok)
+	if err != nil {
+		return nil, fmt.Errorf("linear milestones: %w", err)
+	}
+	milestoneByID := make(map[string]linearMilestone, len(milestones))
+	for _, m := range milestones {
+		milestoneByID[m.ID] = m
+	}
 
 	snap := &workspaceSnapshot{
 		Users:        users,
@@ -677,14 +721,23 @@ func (p *Provider) buildSnapshot(ctx context.Context, j *importModels.Job) (*wor
 		Issues:       allIssues,
 		issueByID:    make(map[string]*linearIssue, len(allIssues)),
 		teamHasInbox: make(map[string]bool, len(teams)),
+		cycleByID:    cycleByID,
+		schedules:    schedules,
+		scales:       estimateScales(teams),
+		milestones:   milestonesByProject(milestones),
 		keptTeams:    keptTeams(teams),
 	}
 	for i := range snap.Issues {
+		placeLabels(&snap.Issues[i], labels)
+		if m, ok := milestoneByID[snap.Issues[i].MilestoneID]; ok {
+			snap.Issues[i].Milestone = &m
+		}
 		snap.issueByID[snap.Issues[i].ID] = &snap.Issues[i]
 		if snap.Issues[i].ProjectID == "" && snap.Issues[i].TeamID != "" {
 			snap.teamHasInbox[snap.Issues[i].TeamID] = true
 		}
 	}
+	linkRelations(snap.Issues, snap.issueByID)
 
 	p.mu.Lock()
 	p.snapshotCache[j.Id] = snap
@@ -730,29 +783,7 @@ query ($cursor: String) {
 }`
 
 func (p *Provider) fetchUsers(ctx context.Context, tok string) ([]linearUser, error) {
-	out := []linearUser{}
-	cursor := ""
-	for page := 0; page < maxPages; page++ {
-		var resp struct {
-			Users struct {
-				Nodes []linearUser `json:"nodes"`
-				Page  pageInfo     `json:"pageInfo"`
-			} `json:"users"`
-		}
-		vars := map[string]any{}
-		if cursor != "" {
-			vars["cursor"] = cursor
-		}
-		if err := p.gql(ctx, tok, usersQuery, vars, &resp); err != nil {
-			return nil, err
-		}
-		out = append(out, resp.Users.Nodes...)
-		if !resp.Users.Page.HasNextPage {
-			break
-		}
-		cursor = resp.Users.Page.EndCursor
-	}
-	return out, nil
+	return rootList[linearUser](ctx, p, tok, usersQuery, "users")
 }
 
 const teamsQuery = `
@@ -760,6 +791,9 @@ query ($cursor: String) {
   teams(first: 50, after: $cursor) {
     nodes {
       id key name description visibility
+      cyclesEnabled cycleDuration cycleCooldownTime upcomingCycleCount
+      issueEstimationType issueEstimationExtended issueEstimationAllowZero defaultIssueEstimate
+      inheritIssueEstimation parent { id }
       members(first: 100) { nodes { id } }
     }
     pageInfo { hasNextPage endCursor }
@@ -773,44 +807,48 @@ func (p *Provider) fetchTeams(ctx context.Context, tok string) ([]linearTeam, er
 		Name        string `json:"name"`
 		Description string `json:"description"`
 		Visibility  string `json:"visibility"`
-		Members     struct {
+		// Cycle settings, in weeks.
+		CyclesEnabled bool    `json:"cyclesEnabled"`
+		CycleWeeks    float64 `json:"cycleDuration"`
+		CooldownWeeks float64 `json:"cycleCooldownTime"`
+		Upcoming      float64 `json:"upcomingCycleCount"`
+		// Estimate settings (estimates.go).
+		EstimationType      string  `json:"issueEstimationType"`
+		EstimationExtended  bool    `json:"issueEstimationExtended"`
+		EstimationAllowZero bool    `json:"issueEstimationAllowZero"`
+		DefaultEstimate     float64 `json:"defaultIssueEstimate"`
+		InheritEstimation   bool    `json:"inheritIssueEstimation"`
+		Parent              *struct {
+			ID string `json:"id"`
+		} `json:"parent"`
+		Members struct {
 			Nodes []struct {
 				ID string `json:"id"`
 			} `json:"nodes"`
 		} `json:"members"`
 	}
-	out := []linearTeam{}
-	cursor := ""
-	for page := 0; page < maxPages; page++ {
-		var resp struct {
-			Teams struct {
-				Nodes []rawTeam `json:"nodes"`
-				Page  pageInfo  `json:"pageInfo"`
-			} `json:"teams"`
+	raw, err := rootList[rawTeam](ctx, p, tok, teamsQuery, "teams")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]linearTeam, 0, len(raw))
+	for _, t := range raw {
+		lt := linearTeam{
+			ID: t.ID, Key: t.Key, Name: t.Name, Description: t.Description, Visibility: t.Visibility,
+			CyclesEnabled: t.CyclesEnabled, CycleWeeks: int(t.CycleWeeks), CooldownWeeks: int(t.CooldownWeeks), Upcoming: int(t.Upcoming),
+			EstimationType: t.EstimationType, EstimationExtended: t.EstimationExtended, EstimationAllowZero: t.EstimationAllowZero,
+			DefaultEstimate: t.DefaultEstimate, InheritEstimation: t.InheritEstimation,
 		}
-		vars := map[string]any{}
-		if cursor != "" {
-			vars["cursor"] = cursor
+		if t.Parent != nil {
+			lt.ParentID = t.Parent.ID
 		}
-		if err := p.gql(ctx, tok, teamsQuery, vars, &resp); err != nil {
-			return nil, err
+		for _, m := range t.Members.Nodes {
+			lt.MemberIDs = append(lt.MemberIDs, m.ID)
 		}
-		for _, t := range resp.Teams.Nodes {
-			lt := linearTeam{
-				ID: t.ID, Key: t.Key, Name: t.Name, Description: t.Description, Visibility: t.Visibility,
-			}
-			for _, m := range t.Members.Nodes {
-				lt.MemberIDs = append(lt.MemberIDs, m.ID)
-			}
-			// Linear's REST/GraphQL has no team-admin role surface:
-			// admins are workspace-wide. We leave AdminIDs empty so the
-			// generic resolver promotes the importing user.
-			out = append(out, lt)
-		}
-		if !resp.Teams.Page.HasNextPage {
-			break
-		}
-		cursor = resp.Teams.Page.EndCursor
+		// Linear's REST/GraphQL has no team-admin role surface:
+		// admins are workspace-wide. We leave AdminIDs empty so the
+		// generic resolver promotes the importing user.
+		out = append(out, lt)
 	}
 	return out, nil
 }
@@ -850,42 +888,26 @@ func (p *Provider) fetchProjects(ctx context.Context, tok string) ([]linearProje
 			} `json:"nodes"`
 		} `json:"members"`
 	}
-	out := []linearProject{}
-	cursor := ""
-	for page := 0; page < maxPages; page++ {
-		var resp struct {
-			Projects struct {
-				Nodes []rawProject `json:"nodes"`
-				Page  pageInfo     `json:"pageInfo"`
-			} `json:"projects"`
+	raw, err := rootList[rawProject](ctx, p, tok, projectsQuery, "projects")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]linearProject, 0, len(raw))
+	for _, pr := range raw {
+		lp := linearProject{
+			ID: pr.ID, Name: pr.Name, Description: pr.Description,
+			State: pr.Status.Type, URL: pr.URL,
 		}
-		vars := map[string]any{}
-		if cursor != "" {
-			vars["cursor"] = cursor
+		// A Linear project can span multiple teams (rare). We pin
+		// it to the first team for the OneCamp shape; secondary
+		// team members still get added via team membership.
+		if len(pr.Teams.Nodes) > 0 {
+			lp.TeamID = pr.Teams.Nodes[0].ID
 		}
-		if err := p.gql(ctx, tok, projectsQuery, vars, &resp); err != nil {
-			return nil, err
+		for _, m := range pr.Members.Nodes {
+			lp.MemberIDs = append(lp.MemberIDs, m.ID)
 		}
-		for _, pr := range resp.Projects.Nodes {
-			lp := linearProject{
-				ID: pr.ID, Name: pr.Name, Description: pr.Description,
-				State: pr.Status.Type, URL: pr.URL,
-			}
-			// A Linear project can span multiple teams (rare). We pin
-			// it to the first team for the OneCamp shape; secondary
-			// team members still get added via team membership.
-			if len(pr.Teams.Nodes) > 0 {
-				lp.TeamID = pr.Teams.Nodes[0].ID
-			}
-			for _, m := range pr.Members.Nodes {
-				lp.MemberIDs = append(lp.MemberIDs, m.ID)
-			}
-			out = append(out, lp)
-		}
-		if !resp.Projects.Page.HasNextPage {
-			break
-		}
-		cursor = resp.Projects.Page.EndCursor
+		out = append(out, lp)
 	}
 	return out, nil
 }
@@ -898,7 +920,7 @@ query ($teamId: String!, $cursor: String) {
   team(id: $teamId) {
     issues(first: 50, after: $cursor, includeArchived: true) {
       nodes {
-        id identifier title description url
+        id identifier previousIdentifiers title description url
         priority priorityLabel
         createdAt updatedAt completedAt canceledAt
         startedAt dueDate
@@ -908,10 +930,12 @@ query ($teamId: String!, $cursor: String) {
         parent   { id }
         team     { id }
         project  { id }
+        cycle    { id }
+        projectMilestone { id }
         estimate
-        labels(first: 20) { nodes { name } }
+        labelIds
         inverseRelations(first: 10) {
-          nodes { type issue { id } }
+          nodes { type issue { id identifier url } }
           pageInfo { hasNextPage endCursor }
         }
         comments(first: 20) {
@@ -932,6 +956,7 @@ func (p *Provider) fetchTeamIssues(ctx context.Context, tok, teamID string) ([]l
 	type rawIssue struct {
 		ID            string     `json:"id"`
 		Identifier    string     `json:"identifier"`
+		Previous      []string   `json:"previousIdentifiers"`
 		Title         string     `json:"title"`
 		Description   string     `json:"description"`
 		URL           string     `json:"url"`
@@ -963,11 +988,13 @@ func (p *Provider) fetchTeamIssues(ctx context.Context, tok, teamID string) ([]l
 		Project *struct {
 			ID string `json:"id"`
 		} `json:"project"`
-		Labels struct {
-			Nodes []struct {
-				Name string `json:"name"`
-			} `json:"nodes"`
-		} `json:"labels"`
+		Cycle *struct {
+			ID string `json:"id"`
+		} `json:"cycle"`
+		ProjectMilestone *struct {
+			ID string `json:"id"`
+		} `json:"projectMilestone"`
+		LabelIDs []string `json:"labelIds"`
 		Comments struct {
 			Nodes []rawComment `json:"nodes"`
 			Page  pageInfo     `json:"pageInfo"`
@@ -1005,6 +1032,7 @@ func (p *Provider) fetchTeamIssues(ctx context.Context, tok, teamID string) ([]l
 			iss := linearIssue{
 				ID:            r.ID,
 				Identifier:    r.Identifier,
+				Previous:      r.Previous,
 				Title:         r.Title,
 				Description:   r.Description,
 				URL:           r.URL,
@@ -1034,16 +1062,16 @@ func (p *Provider) fetchTeamIssues(ctx context.Context, tok, teamID string) ([]l
 			if r.Project != nil {
 				iss.ProjectID = r.Project.ID
 			}
-			if r.DueDate != nil && *r.DueDate != "" {
-				if d, err := time.Parse("2006-01-02", *r.DueDate); err == nil {
-					iss.DueDate = &d
-				}
+			if r.Cycle != nil {
+				iss.CycleID = r.Cycle.ID
 			}
-			for _, l := range r.Labels.Nodes {
-				if l.Name != "" {
-					iss.Labels = append(iss.Labels, l.Name)
-				}
+			if r.ProjectMilestone != nil {
+				iss.MilestoneID = r.ProjectMilestone.ID
 			}
+			if r.DueDate != nil {
+				iss.DueDay, _ = importProvider.ParseDay(*r.DueDate)
+			}
+			iss.LabelIDs = r.LabelIDs
 			iss.Estimate = r.Estimate
 			for _, rel := range r.InverseRelations.Nodes {
 				iss.addRelation(rel)
@@ -1072,6 +1100,38 @@ func (p *Provider) fetchTeamIssues(ctx context.Context, tok, teamID string) ([]l
 type pageInfo struct {
 	HasNextPage bool   `json:"hasNextPage"`
 	EndCursor   string `json:"endCursor"`
+}
+
+// connection is one page of a Linear list: its nodes, and where the next
+// page starts.
+type connection[T any] struct {
+	Nodes []T      `json:"nodes"`
+	Page  pageInfo `json:"pageInfo"`
+}
+
+// rootList reads every page of a list the workspace answers at the top of
+// query, under root (users, teams, cycles): query takes each page's $cursor,
+// and a runaway list stops at maxPages.
+func rootList[T any](ctx context.Context, p *Provider, tok, query, root string) ([]T, error) {
+	var out []T
+	cursor := ""
+	for page := 0; page < maxPages; page++ {
+		var resp map[string]connection[T]
+		vars := map[string]any{}
+		if cursor != "" {
+			vars["cursor"] = cursor
+		}
+		if err := p.gql(ctx, tok, query, vars, &resp); err != nil {
+			return nil, err
+		}
+		list := resp[root]
+		out = append(out, list.Nodes...)
+		if !list.Page.HasNextPage {
+			break
+		}
+		cursor = list.Page.EndCursor
+	}
+	return out, nil
 }
 
 type gqlError struct {
@@ -1109,22 +1169,16 @@ func (p *Provider) gql(ctx context.Context, tok, query string, vars map[string]a
 	}
 	defer resp.Body.Close()
 
-	switch {
-	case resp.StatusCode == http.StatusTooManyRequests:
-		// Linear returns 429 with a Retry-After header (in seconds).
-		retry := time.Duration(parseRetryAfter(resp.Header.Get("Retry-After"))) * time.Second
-		return &importProvider.ErrRateLimited{RetryAfter: retry, Reason: "linear 429"}
-	case resp.StatusCode == http.StatusUnauthorized:
-		return &importProvider.TokenRejected{Msg: "linear unauthorized; reconnect this provider"}
-	case resp.StatusCode >= 400:
-		// Read a small slice of the body for diagnostics; full body
-		// would be unbounded under malicious upstreams.
-		buf := make([]byte, 1024)
-		n, _ := io.ReadFull(resp.Body, buf)
-		if wait := rateLimited(resp.Header, buf[:n]); wait != nil {
-			return wait
+	if err := statusRules.Check(resp); err != nil {
+		// Linear refuses a request over its rate limit with a 400 whose body
+		// has the code RATELIMITED, not with a 429.
+		var refused *importProvider.StatusError
+		if errors.As(err, &refused) {
+			if wait := rateLimited(resp.Header, []byte(refused.Body)); wait != nil {
+				return wait
+			}
 		}
-		return fmt.Errorf("linear http %d: %s", resp.StatusCode, string(buf[:n]))
+		return err
 	}
 
 	var env struct {
@@ -1144,27 +1198,6 @@ func (p *Provider) gql(ctx context.Context, tok, query string, vars map[string]a
 		return errors.New("linear empty data envelope")
 	}
 	return json.Unmarshal(env.Data, out)
-}
-
-// parseRetryAfter handles both numeric "30" and HTTP-date forms; the
-// latter is rare from Linear but cheap to support. Returns 0 on
-// parse failure so the caller falls back to the limiter's natural pace.
-func parseRetryAfter(h string) int64 {
-	if h == "" {
-		return 0
-	}
-	// Numeric seconds (the common Linear shape).
-	var secs int64
-	if _, err := fmt.Sscanf(h, "%d", &secs); err == nil && secs > 0 {
-		return secs
-	}
-	// HTTP-date.
-	if t, err := http.ParseTime(h); err == nil {
-		if d := time.Until(t); d > 0 {
-			return int64(d.Seconds())
-		}
-	}
-	return 0
 }
 
 // ─── Auth ─────────────────────────────────────────────────────────
@@ -1203,7 +1236,7 @@ func (p *Provider) issueToSourceTask(iss linearIssue, projectID string) importPr
 	// Linear stores descriptions as Markdown. Render to a minimal
 	// HTML subset; the orchestrator's HTML sanitiser then keeps the
 	// safe tags.
-	desc := markdownToHTML(iss.Description)
+	desc := markdownToHTML(iss.Description) + relationLines(iss)
 
 	// Status: prefer state.name; fall back to state.type. The operator
 	// maps both classes via the Plan UI.
@@ -1232,12 +1265,15 @@ func (p *Provider) issueToSourceTask(iss linearIssue, projectID string) importPr
 			Parent:   importProvider.SourceRef{Kind: "task", SourceID: iss.ID},
 		})
 	}
+	fields := append(groupValues(iss.Groups), milestoneValue(iss.Milestone)...)
 
 	return importProvider.SourceTask{
 		SourceID:        iss.ID,
 		SourceKey:       iss.Identifier, // ENG-123
+		FormerKeys:      iss.Previous,
 		ParentTaskID:    iss.ParentID,
 		ProjectSourceID: projectID,
+		CycleSourceID:   iss.CycleID,
 		Name:            truncate(iss.Title, 256),
 		Description:     desc,
 		Status:          status,
@@ -1246,14 +1282,15 @@ func (p *Provider) issueToSourceTask(iss linearIssue, projectID string) importPr
 		AssigneeIds:     assignees,
 		CreatedBy:       iss.CreatorID,
 		StartDate:       iss.StartedAt,
-		DueDate:         iss.DueDate,
+		DueDay:          iss.DueDay,
 		Created:         iss.CreatedAt,
 		Updated:         iss.UpdatedAt,
 		Completed:       iss.CompletedAt != nil,
+		EstimatePoints:  iss.Estimate,
 		AttachmentRefs:  atts,
 		CommentCount:    len(iss.Comments),
 		Dependencies:    blockedBy(iss.BlockedBy),
-		Fields:          points(iss.Estimate),
+		Fields:          fields,
 		Metadata: map[string]any{
 			"linear_url":        iss.URL,
 			"linear_identifier": iss.Identifier, // e.g. "ENG-123"
@@ -1263,12 +1300,15 @@ func (p *Provider) issueToSourceTask(iss linearIssue, projectID string) importPr
 	}
 }
 
-// points is an issue's estimate, which Linear counts in points.
-func points(estimate *float64) []importProvider.SourceFieldValue {
-	if estimate == nil {
-		return nil
+// highestNumber is the highest number the issues keep from their keys
+// (ENG-123's 123).
+func highestNumber(issues []*linearIssue) int {
+	n := 0
+	for _, iss := range issues {
+		_, k := importProvider.SplitKey(iss.Identifier)
+		n = max(n, k)
 	}
-	return []importProvider.SourceFieldValue{importProvider.PointsValue(*estimate)}
+	return n
 }
 
 func blockedBy(ids []string) []importProvider.SourceDependency {
@@ -1337,6 +1377,18 @@ type linearTeam struct {
 	// Visibility is who Linear shows the team and its issues to: everyone
 	// ("public"), or some people only (keptTeams).
 	Visibility string
+	// Its cycle settings, in weeks (cycles.go).
+	CyclesEnabled bool
+	CycleWeeks    int
+	CooldownWeeks int
+	Upcoming      int
+	// Its estimate settings, and its parent's id for a sub-team (estimates.go).
+	EstimationType      string
+	EstimationExtended  bool
+	EstimationAllowZero bool
+	DefaultEstimate     float64
+	InheritEstimation   bool
+	ParentID            string
 }
 
 type linearProject struct {
@@ -1352,6 +1404,7 @@ type linearProject struct {
 type linearIssue struct {
 	ID            string
 	Identifier    string
+	Previous      []string // keys it had before it moved teams (previousIdentifiers)
 	Title         string
 	Description   string
 	URL           string
@@ -1362,7 +1415,7 @@ type linearIssue struct {
 	CompletedAt   *time.Time
 	CanceledAt    *time.Time
 	StartedAt     *time.Time
-	DueDate       *time.Time
+	DueDay        importProvider.Day // dueDate: a day with no time, written where the team is
 	StateID       string
 	StateName     string
 	StateType     string
@@ -1371,9 +1424,18 @@ type linearIssue struct {
 	ParentID      string
 	TeamID        string
 	ProjectID     string
-	Labels        []string
-	BlockedBy     []string // ids of the issues that block this one
-	Estimate      *float64 // points, as the team estimates
+	CycleID       string
+	MilestoneID   string           // projectMilestone: the milestone of its project it's in
+	Milestone     *linearMilestone // that milestone, as the workspace lists it (buildSnapshot)
+	Labels        []string         // the names of its labels outside any group: tags
+	LabelIDs      []string         // labelIds: every label, resolved by placeLabels
+	Groups        []labelPick      // its label in each label group: a select field
+	BlockedBy     []string         // ids of the issues that block this one
+	Relations     []linearRelation // duplicate and related links that point at it
+	DuplicateOf   []issueRef       // what it duplicates (linkRelations)
+	Duplicates    []issueRef       // the issues that duplicate it
+	Related       []issueRef       // the issues related to it
+	Estimate      *float64         // points, as the team estimates
 	Comments      []linearComment
 	Attachments   []linearAttachment
 }
@@ -1480,4 +1542,142 @@ func decodeTeamScope(j *importModels.Job) (string, error) {
 		return "", err
 	}
 	return opts.TeamID, nil
+}
+
+// planStatuses is the plan's status values, sorted, each workflow state once
+// by its name (an issue's status, issueToSourceTask), with its type as its
+// class; a state with no name is listed by its type. Pure.
+func planStatuses(issues []linearIssue) ([]string, map[string]string) {
+	set := map[string]struct{}{}
+	kinds := map[string]string{}
+	for _, iss := range issues {
+		name, typ := strings.ToLower(strings.TrimSpace(iss.StateName)), strings.ToLower(strings.TrimSpace(iss.StateType))
+		switch {
+		case name != "":
+			set[name] = struct{}{}
+			if typ != "" {
+				kinds[name] = typ
+			}
+		case typ != "":
+			set[typ] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out, kinds
+}
+
+// source is the person as the import takes them: a guest is outside the
+// company, and someone deactivated has left (never invited).
+func (u linearUser) source() importProvider.SourceUser {
+	return importProvider.SourceUser{
+		SourceID:    u.ID,
+		DisplayName: helpers.FirstNonEmpty(u.Name, u.DisplayName),
+		Login:       u.DisplayName,
+		Email:       u.Email,
+		AvatarURL:   u.AvatarURL,
+		IsExternal:  u.Guest,
+		Left:        !u.Active,
+		Metadata:    map[string]any{"linear_id": u.ID},
+	}
+}
+
+// issueLabelsQuery reads the workspace's labels once, groups and archived
+// ones included (an old issue keeps an archived label): an issue then reads
+// only its labels' ids, so none is capped. 250 labels with a parent each cost
+// about 600 points, well under the 10,000 cap.
+const issueLabelsQuery = `
+query ($cursor: String) {
+  issueLabels(first: 250, after: $cursor, includeArchived: true) {
+    nodes { id name color isGroup parent { id } }
+    pageInfo { hasNextPage endCursor }
+  }
+}`
+
+// linearLabel is one of the workspace's labels. A group (isGroup) holds
+// labels of which an issue takes one, as a single-select field holds options.
+type linearLabel struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Color    string `json:"color"`
+	IsGroup  bool   `json:"isGroup"`
+	ParentID string `json:"-"`
+	Parent   *struct {
+		ID string `json:"id"`
+	} `json:"parent"`
+}
+
+// labelPick is an issue's label in one label group, with the group's labels
+// as the field's options, by name.
+type labelPick struct {
+	GroupID, GroupName, LabelID, LabelName string
+	Options                                []importProvider.SourceOption
+}
+
+// fetchLabels is the workspace's labels by id, a page at a time.
+func (p *Provider) fetchLabels(ctx context.Context, tok string) (map[string]linearLabel, error) {
+	nodes, err := rootList[linearLabel](ctx, p, tok, issueLabelsQuery, "issueLabels")
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]linearLabel, len(nodes))
+	for _, l := range nodes {
+		if l.Parent != nil {
+			l.ParentID = l.Parent.ID
+		}
+		out[l.ID] = l
+	}
+	return out, nil
+}
+
+// placeLabels sorts an issue's labels: one in a label group is that group's
+// pick (a single-select field), and the rest are tags by name. An id the
+// workspace no longer lists (a label since deleted) is left out.
+func placeLabels(iss *linearIssue, labels map[string]linearLabel) {
+	iss.Labels, iss.Groups = nil, nil
+	for _, id := range iss.LabelIDs {
+		l, ok := labels[id]
+		if !ok || l.IsGroup || l.Name == "" {
+			continue
+		}
+		g, grouped := labels[l.ParentID]
+		if !grouped || !g.IsGroup {
+			iss.Labels = append(iss.Labels, l.Name)
+			continue
+		}
+		iss.Groups = append(iss.Groups, labelPick{
+			GroupID: g.ID, GroupName: g.Name, LabelID: l.ID, LabelName: l.Name,
+			Options: groupOptions(g.ID, labels),
+		})
+	}
+}
+
+// groupOptions is a label group's labels as a select field's options, by
+// name, each in its label's colour.
+func groupOptions(group string, labels map[string]linearLabel) []importProvider.SourceOption {
+	var out []importProvider.SourceOption
+	for _, l := range labels {
+		if l.ParentID == group && !l.IsGroup && l.Name != "" {
+			out = append(out, importProvider.SourceOption{SourceID: l.ID, Label: l.Name, Color: importProvider.PaletteColor(l.Color)})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Label < out[j].Label })
+	return out
+}
+
+// groupValues are an issue's label-group picks as select field values; the
+// field is the group, the same one on every issue.
+func groupValues(picks []labelPick) []importProvider.SourceFieldValue {
+	var out []importProvider.SourceFieldValue
+	for _, g := range picks {
+		out = append(out, importProvider.SourceFieldValue{
+			Field: importProvider.SourceField{SourceID: "label-group:" + g.GroupID, Name: g.GroupName, Type: importProvider.FieldSelect, Options: g.Options},
+			Value: g.LabelID,
+			Text:  g.LabelName,
+		})
+	}
+	return out
 }

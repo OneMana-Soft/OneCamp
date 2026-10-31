@@ -56,6 +56,11 @@ type DocDecision struct {
 	// rule gives it none, and business/Doc asks its host on a path that
 	// opens one.
 	Hosted bool
+	// NodeKind is the doc's kind when it isn't a page (docs F1,
+	// docNodeKind.go), read with every decision (accessScalars), so the paths
+	// only a page takes (the editor's session) refuse the rest without
+	// another read. It decides no level.
+	NodeKind string
 	// Lock is the doc's lock: level.LockNone, LockSoft or LockHard.
 	Lock    string
 	Reasons []level.Reason
@@ -112,6 +117,7 @@ func DecideDoc(doc *dgraphStruct.DgraphDoc, v Viewer) DocDecision {
 	if doc == nil {
 		return d
 	}
+	d.NodeKind = doc.NodeKind
 	if IsHosted(doc) {
 		// A hosted doc's level is its host's (D-18): business/Doc asks the
 		// host on a path that opens one (docHost.go), and every other path,

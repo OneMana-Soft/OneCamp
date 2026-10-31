@@ -124,13 +124,14 @@ func WriteDocLook(ctx context.Context, docUUID string, w LookWrite) error {
 	return nil
 }
 
-// GetDocMentioners reads the live docs whose bodies link to a doc (A6's
+// GetDocMentioners reads the live pages whose bodies link to a doc (A6's
 // doc_mentions, by its reverse), newest edit first, at most limit, with what
-// a backlink shows of each. Nobody's access is decided here.
+// a backlink shows of each: only a page has a body to link from (pageOnly).
+// Nobody's access is decided here.
 func GetDocMentioners(ctx context.Context, docUUID string, limit int) ([]*dgraphStruct.DgraphDoc, error) {
 	q := `query mentioners($id: string) {
 		var(func: eq(doc_uuid, $id)) { m as ~doc_mentions }
-		docInfo(func: uid(m), orderdesc: doc_updated_at, first: ` + strconv.Itoa(limit) + `) @filter(` + liveDocFilter + ` AND has(doc_uuid)) {
+		docInfo(func: uid(m), orderdesc: doc_updated_at, first: ` + strconv.Itoa(limit) + `) @filter(` + liveDocFilter + ` AND has(doc_uuid) AND ` + pageOnly + `) {
 			uid
 			doc_uuid
 			doc_title

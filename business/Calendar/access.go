@@ -18,12 +18,15 @@ package Calendar
 import (
 	"context"
 	"errors"
+	"time"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
+	entityLinkBusiness "github.com/akashc777/OneCamp/business/EntityLink"
 	domain "github.com/akashc777/OneCamp/domain/Calendar"
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	bookingModel "github.com/akashc777/OneCamp/models/postgres/Booking"
+	models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
 	"github.com/google/uuid"
 )
 
@@ -48,6 +51,8 @@ const (
 	reasonGuest   = "guest"
 	reasonOwner   = "owner"
 	reasonPublic  = "public"
+	// reasonCalendar is an event on a calendar the reader may see.
+	reasonCalendar = "calendar"
 )
 
 type eventRules struct{}
@@ -116,6 +121,19 @@ func (s *service) decideMany(ctx context.Context, who accessBusiness.Subject, id
 		return nil, err
 	}
 	person, _ := uuid.Parse(who.UserUUID)
+	// An event on a calendar someone may see (a project's, A6) is theirs to see.
+	var calendars []string
+	for _, e := range rows {
+		if roleOf(e, guests[e.ID], person) == roleNone {
+			calendars = append(calendars, e.CalendarID.String())
+		}
+	}
+	onCalendar := map[string]accessBusiness.Decision{}
+	if len(calendars) > 0 {
+		if onCalendar, err = s.decideCalendars(ctx, who, calendars); err != nil {
+			return nil, err
+		}
+	}
 	for _, e := range rows {
 		var d accessBusiness.Decision
 		switch roleOf(e, guests[e.ID], person) {
@@ -123,6 +141,13 @@ func (s *service) decideMany(ctx context.Context, who accessBusiness.Subject, id
 			d.Level, d.Owner, d.Reasons = accessBusiness.LevelFull, true, []string{reasonCreator}
 		case roleGuest:
 			d.Level, d.Reasons = accessBusiness.LevelView, []string{reasonGuest}
+		case roleReader:
+			d.Level, d.Reasons = accessBusiness.LevelView, []string{reasonSubscribed}
+		default:
+			// What shows as Busy to them is theirs to open nowhere else.
+			if c := onCalendar[e.CalendarID.String()]; c.Level >= accessBusiness.LevelView && !hiddenFrom(e, guests[e.ID], person, c) {
+				d.Level, d.Reasons = accessBusiness.LevelView, []string{reasonCalendar}
+			}
 		}
 		d.Was = d.Level
 		if e.DeletedAt != nil {
@@ -174,30 +199,38 @@ func pageDecision(p *bookingModel.Page, userUUID string) accessBusiness.Decision
 }
 
 func init() {
-	// What an inbox notice, a chip or a link names an event by: its title,
-	// for a reader who may open it now (business/Access ReadableTitles). The
-	// graph's events are named by nobody here: their notices (a guest taken
-	// off, a booking) carry what they say themselves.
-	accessBusiness.RegisterTitleReader(KindEvent, func(ctx context.Context, ids []string, reader accessBusiness.Subject) (map[string]string, error) {
+	// How a chip, an inbox notice, a link and the work graph name an event,
+	// for a reader who may open it now; the kind's title reader too
+	// (business/Access ReadableTitles). The graph's old events are named by
+	// nobody here: their notices (a guest taken off, a booking) carry what
+	// they say themselves.
+	entityLinkBusiness.RegisterKind(KindEvent, func(ctx context.Context, who accessBusiness.Subject, ids []string) (map[string]entityLinkBusiness.Entity, error) {
 		if !helpers.CalendarReadsFromStore() {
-			return map[string]string{}, nil
+			return map[string]entityLinkBusiness.Entity{}, nil
 		}
-		return stored.eventTitles(ctx, ids, reader)
+		return stored.eventChips(ctx, who, ids)
 	})
 }
 
-// eventTitles names, of ids, the events reader may open now: each one's
-// title, by id as asked. A trashed event is open to nobody.
-func (s *service) eventTitles(ctx context.Context, ids []string, reader accessBusiness.Subject) (map[string]string, error) {
-	out := map[string]string{}
-	decided, err := s.decideMany(ctx, reader, ids)
+// eventChips is each of ids, an event or one instance of a series, as who
+// may see it now, by id as asked: its title and when it starts while they
+// may open it, and gone once it is in the trash for someone who could. One
+// decision (decideMany) and one read of the events.
+func (s *service) eventChips(ctx context.Context, who accessBusiness.Subject, ids []string) (map[string]entityLinkBusiness.Entity, error) {
+	decided, err := s.decideMany(ctx, who, ids)
 	if err != nil {
 		return nil, err
 	}
+	out := map[string]entityLinkBusiness.Entity{}
 	byEvent := map[uuid.UUID][]string{}
 	var open []uuid.UUID
 	for _, id := range ids {
-		if d, ok := decided[id]; ok && d.Level >= accessBusiness.LevelView {
+		d, ok := decided[id]
+		switch {
+		case !ok:
+		case d.Deleted && d.Was >= accessBusiness.LevelView:
+			out[id] = entityLinkBusiness.Entity{Kind: KindEvent, ID: id, Access: entityLinkBusiness.AccessGone}
+		case d.Level >= accessBusiness.LevelView:
 			if u, _, err := parseRef(id); err == nil {
 				if byEvent[u] == nil {
 					open = append(open, u)
@@ -210,13 +243,30 @@ func (s *service) eventTitles(ctx context.Context, ids []string, reader accessBu
 	if err != nil {
 		return nil, err
 	}
+	title := s.titler(ctx, who, rows)
 	for _, e := range rows {
 		if e.DeletedAt != nil {
 			continue
 		}
 		for _, id := range byEvent[e.ID] {
-			out[id] = e.Title
+			_, rid, _ := parseRef(id)
+			out[id] = entityLinkBusiness.Entity{Kind: KindEvent, ID: id, Access: entityLinkBusiness.AccessOK, Title: title(e),
+				Data: map[string]any{"title": title(e), "start": refStart(e, rid), "all_day": e.AllDay(), "repeats": e.RRule != ""}}
 		}
 	}
 	return out, nil
+}
+
+// refStart is when what a ref names starts: the event, or the instance of
+// its series at rid (its start as the series gave it), in the event's zone.
+// Pure.
+func refStart(e *models.Event, rid *time.Time) When {
+	start, _ := whenOf(e)
+	switch {
+	case rid == nil:
+		return start
+	case e.AllDay():
+		return When{Date: rid.Format(dateLayout), Zone: e.TZ}
+	}
+	return When{At: rid, Zone: e.TZ}
 }

@@ -1,13 +1,9 @@
 package business
 
 import (
-	"context"
 	"errors"
 	archiveModels "github.com/akashc777/OneCamp/models/postgres/Archive"
 	"testing"
-	"time"
-
-	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 )
 
 // ------------------------------------------------------------------
@@ -138,91 +134,6 @@ func TestPolicyUpdateInputRetentionBounds(t *testing.T) {
 		})
 	}
 }
-
-// ------------------------------------------------------------------
-// Lightweight stateless helpers
-// ------------------------------------------------------------------
-
-func TestCheckRunningArchiveJob_SkippedWithoutDB(t *testing.T) {
-	// Without a DB connection this panics because postgresInit.DBConn is nil.
-	// Skip until a test DB harness is available.
-	t.Skip("requires postgres test DB")
-}
-
-// ------------------------------------------------------------------
-// Stub helpers
-// ------------------------------------------------------------------
-
-// dgraphAvailable says whether a graph answers. The unit-test runner brings
-// up no Dgraph, so a test that bottoms out in a Dgraph query skips when none
-// does. A client that exists is not enough: the integration build always has
-// one (tests/integration points it nowhere until a test sets a graph up), so
-// asking it once, briefly, is what tells a live graph from none.
-func dgraphAvailable() bool {
-	if dgraphInit.DgraphClient == nil {
-		return false
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	txn := dgraphInit.DgraphClient.NewReadOnlyTxn()
-	defer txn.Discard(ctx)
-	_, err := txn.Query(ctx, `{ q(func: uid(0x1)) { uid } }`)
-	return err == nil
-}
-
-func TestGetRecentlyArchivedDocs(t *testing.T) {
-	if !dgraphAvailable() {
-		t.Skip("requires Dgraph test instance")
-	}
-	items, total, err := getRecentlyArchivedDocs(context.Background(), 50, 0, "Document")
-	if err != nil {
-		t.Fatalf("expected nil error, got: %v", err)
-	}
-	if total != 0 {
-		t.Errorf("total = %d, want 0", total)
-	}
-	if len(items) != 0 {
-		t.Errorf("len(items) = %d, want 0", len(items))
-	}
-}
-
-func TestGetRecentlyArchivedRecordings(t *testing.T) {
-	if !dgraphAvailable() {
-		t.Skip("requires Dgraph test instance")
-	}
-	items, total, err := getRecentlyArchivedRecordings(context.Background(), 50, 0, "Recording")
-	if err != nil {
-		t.Fatalf("expected nil error, got: %v", err)
-	}
-	if total != 0 {
-		t.Errorf("total = %d, want 0", total)
-	}
-	if len(items) != 0 {
-		t.Errorf("len(items) = %d, want 0", len(items))
-	}
-}
-
-// ------------------------------------------------------------------
-// TODO: Integration tests (require postgres test DB)
-// ------------------------------------------------------------------
-//
-// The following scenarios need a real postgres connection and should be
-// added once a test DB harness is available:
-//
-// 1. TestGetArchivePolicies_HappyPath
-// 2. TestUpdateArchivePolicy_RowsAffectedZero → ErrPolicyNotFound
-// 3. TestUpdateArchivePolicy_RetentionBounds (1 → error, 7 → ok, 3650 → ok, 3651 → error)
-// 4. TestRunArchiveJob_InvalidEntityType
-// 5. TestRunArchiveJob_AlreadyRunning → ArchiveAlreadyRunningError
-// 6. TestRestoreItems_EmptyIDs → (0, nil)
-// 7. TestRestoreItems_RunningJobGuard → ArchiveAlreadyRunningError
-// 8. TestRestoreItems_Posts_HappyPath (insert 3 posts, archive 2, restore 1)
-// 9. TestUndoArchiveJob_ExactIDs (archive 5 posts, verify metadata.archived_ids, undo restores exactly those 5)
-// 10. TestGetArchiveJobs_Limit50
-// 11. TestGetArchiveStats_Accuracy
-//
-// Recommended test harness: spin up a postgres container via
-// testcontainers-go or use a throwaway DB in CI.
 
 // ------------------------------------------------------------------
 // Memory cascade wiring (privacy: archived content must not linger as

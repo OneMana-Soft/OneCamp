@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	domain "github.com/akashc777/OneCamp/domain/Doc"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
 
@@ -77,5 +78,56 @@ func TestAViewersCopyIsTheirsAlone(t *testing.T) {
 	nodes, _ = planCopies(by, []string{"p", "s"}, map[string]*dgraphStruct.DgraphDoc{"p": sources["p"], "s": {Uuid: "s", Parent: &dgraphStruct.DgraphDoc{Uuid: "elsewhere"}}}, map[string]bool{}, nil, "k3", now)
 	if len(nodes) != 1 {
 		t.Errorf("%d copies; S's parent wasn't copied", len(nodes))
+	}
+}
+
+// A copy keeps what its source is (docs F1): a folder's copy is a folder in
+// the same colour, a link's points where it did, and a file's copy is a file,
+// whose newest version the duplicate copies apart (fileCopies).
+func TestACopyKeepsTheNodesKindColourAndLink(t *testing.T) {
+	by := &dgraphStruct.DgraphUser{Uid: "0x1", Uuid: "b0b00000-0000-4000-8000-000000000002"}
+	f, x, l := "1f000000-0000-4000-8000-000000000001", "1f000000-0000-4000-8000-000000000002", "1f000000-0000-4000-8000-000000000003"
+	sources := map[string]*dgraphStruct.DgraphDoc{
+		f: {Uuid: f, Title: "Contracts", NodeKind: "folder", Color: "moss"},
+		x: {Uuid: x, Title: "msa.pdf", NodeKind: "file", Parent: &dgraphStruct.DgraphDoc{Uuid: f}},
+		l: {Uuid: l, Title: "Roadmap", NodeKind: "link", LinkURL: "https://docs.google.com/d/1", Parent: &dgraphStruct.DgraphDoc{Uuid: f}},
+	}
+	nodes, copies := planCopies(by, []string{f, x, l}, sources, map[string]bool{}, nil, "k0", time.Now())
+	if len(nodes) != 3 {
+		t.Fatalf("copies: %+v", nodes)
+	}
+	if d := nodes[0].Doc; d.NodeKind != "folder" || d.Color != "moss" || d.Title != "Copy of Contracts" {
+		t.Errorf("the folder's copy: %+v", d)
+	}
+	if d := nodes[1].Doc; d.NodeKind != "file" || d.Title != "msa.pdf" {
+		t.Errorf("the file's copy: %+v", d)
+	}
+	if d := nodes[2].Doc; d.NodeKind != "link" || d.LinkURL != "https://docs.google.com/d/1" {
+		t.Errorf("the link's copy: %+v", d)
+	}
+	got := fileCopies(nodes, copies)
+	if len(got) != 1 || got[0].From.String() != x || got[0].To.String() != nodes[1].Doc.Uuid || copies[1].SourceUUID != x {
+		t.Errorf("the files a duplicate copies the versions of: %+v", got)
+	}
+}
+
+// Only a page's copy has its source's body seeded into it. A folder, a file or
+// a link holds no body (docs F1): the collaboration service opens pages only,
+// and a seed it can't take falls back to writing the body into the node itself.
+func TestOnlyAPagesCopyIsSeeded(t *testing.T) {
+	const body = "<p>Ship it.</p>"
+	for _, c := range []struct {
+		kind, body string
+		want       bool
+	}{
+		{"", body, true},
+		{"", "", false},
+		{NodeFolder, body, false},
+		{NodeLink, body, false},
+		{domain.NodeFile, body, false},
+	} {
+		if got := seedsCopy(&dgraphStruct.DgraphDoc{NodeKind: c.kind}, c.body); got != c.want {
+			t.Errorf("a copy of kind %q with body %q is seeded: %v, want %v", c.kind, c.body, got, c.want)
+		}
 	}
 }

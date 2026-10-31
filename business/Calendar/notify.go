@@ -59,11 +59,13 @@ const (
 	toldNudged                        // the organiser asked again for answers
 )
 
-// answered is a guest's answer, for the organiser's notice.
+// answered is a guest's answer, for the organiser's notice, with the time it
+// proposes anew (proposals.go).
 type answered struct {
 	key      models.GuestKey
 	response string
 	note     string
+	proposal *models.Proposal
 }
 
 // telling is one change people may hear of.
@@ -157,11 +159,12 @@ func sending(ctx context.Context) bool {
 }
 
 // toldAbout are the changes that change a meeting for its guests: what it
-// is called, when and where it is, how it repeats, its notes. Pure.
+// is called, when and where it is (its call too: Add and Remove call), how it
+// repeats, its notes. Pure.
 func toldAbout(changed []string) bool {
 	for _, c := range changed {
 		switch c {
-		case "title", "time", "location", "recurrence", "notes":
+		case "title", "time", "location", "recurrence", "notes", "call":
 			return true
 		}
 	}
@@ -355,6 +358,15 @@ func (s *service) answerNotice(ctx context.Context, actor *model.UserInfo, ref s
 	if a.note != "" {
 		body = "“" + a.note + "”"
 	}
+	if p := a.proposal; p != nil {
+		// The inbox words the time on its reader's own clock, from the data.
+		data["proposed_start"], data["proposed_end"] = p.Start.UTC().Format(time.RFC3339), p.End.UTC().Format(time.RFC3339)
+		title = who + " proposed a new time for " + ev.Title
+		body = spanWords(p.Start, p.End, loc) + " instead of " + whenWords(ev, loc)
+		if a.note != "" {
+			body += " · “" + a.note + "”"
+		}
+	}
 	recipient := notificationBusiness.NoticeRecipient{UserUUID: t.event.CreatedBy.String(), Reason: "organiser", InboxOnly: !t.event.EmailOnAnswers, NoPush: t.event.EmailOnAnswers}
 	n := notificationBusiness.Notice{
 		Kind: noticeAnswered, ResourceKind: KindEvent, ResourceUUID: t.event.ID.String(), ResourceTitle: ev.Title,
@@ -407,7 +419,13 @@ func whenWords(e *models.Event, loc *time.Location) string {
 		}
 		return first.Format(helpers.DayLayout) + " – " + last.Format(helpers.DayLayout)
 	}
-	s, en := e.StartAt.In(loc), e.EndAt.In(loc)
+	return spanWords(*e.StartAt, *e.EndAt, loc)
+}
+
+// spanWords is a time from start to end in words, on a clock in loc: "Thu 16
+// Oct, 10:00–11:00", or "Thu 16 Oct 22:00 – Fri 17 Oct 01:00" across days. Pure.
+func spanWords(start, end time.Time, loc *time.Location) string {
+	s, en := start.In(loc), end.In(loc)
 	if s.Year() == en.Year() && s.YearDay() == en.YearDay() {
 		return s.Format(helpers.DayLayout) + ", " + s.Format(helpers.ClockLayout) + "–" + en.Format(helpers.ClockLayout)
 	}

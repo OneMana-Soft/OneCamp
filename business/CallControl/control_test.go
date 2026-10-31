@@ -10,8 +10,10 @@ import (
 
 	callStateBusiness "github.com/akashc777/OneCamp/business/CallState"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
+	"github.com/akashc777/OneCamp/initializers/livekitInit"
 	model "github.com/akashc777/OneCamp/models/postgres/CallState"
 	"github.com/google/uuid"
+	lka "github.com/livekit/protocol/auth"
 	"github.com/livekit/protocol/livekit"
 )
 
@@ -24,14 +26,18 @@ func TestAbilitiesFollowTheCallAndThePart(t *testing.T) {
 		kind, role string
 		has, lacks []Ability
 	}{
-		{"dm", model.RoleParticipant, []Ability{CanMute, CanMuteAll, CanAskUnmute}, []Ability{CanRemove, CanLock, CanEnd, CanCohost, CanSpotlight}},
-		{"group", model.RoleParticipant, []Ability{CanMute, CanMuteAll, CanAskUnmute}, []Ability{CanRemove, CanLock, CanEnd, CanCohost}},
+		{"dm", model.RoleParticipant, []Ability{CanMute, CanMuteAll, CanAskUnmute, CanActivities}, []Ability{CanRemove, CanLock, CanEnd, CanCohost, CanSpotlight, CanHold}},
+		{"group", model.RoleParticipant, []Ability{CanMute, CanMuteAll, CanAskUnmute, CanActivities}, []Ability{CanRemove, CanLock, CanEnd, CanCohost, CanHold}},
 		{"group", model.RoleGuest, nil, []Ability{CanMute, CanMuteAll}},
 		{"channel", model.RoleHost, everything, nil},
-		{"channel", model.RoleCohost, []Ability{CanMute, CanMuteAll, CanRemove, CanLock, CanSpotlight, CanMuteOnEntry}, []Ability{CanEnd, CanCohost}},
+		{"channel", model.RoleCohost, []Ability{CanMute, CanMuteAll, CanRemove, CanLock, CanSpotlight, CanMuteOnEntry, CanHold, CanActivities}, []Ability{CanEnd, CanCohost}},
 		{"channel", model.RoleParticipant, nil, everything},
 		{"meeting", model.RoleHost, everything, nil},
 		{"meeting", model.RoleGuest, nil, everything},
+		// Someone in through a call's invite runs nothing, even where everyone is equal (HU13).
+		{"dm", model.RoleInvitee, nil, everything},
+		{"group", model.RoleInvitee, nil, everything},
+		{"channel", model.RoleInvitee, nil, everything},
 	} {
 		got := AbilitiesOf(c.kind, c.role)
 		for _, a := range c.has {
@@ -51,14 +57,14 @@ func TestAbilitiesFollowTheCallAndThePart(t *testing.T) {
 // do, so every screen draws the same controls the server allows.
 func TestThePartsAreToldToTheRoom(t *testing.T) {
 	host := attributesOf("channel", model.RoleHost)
-	if host[AttrRole] != "host" || host[AttrCan] != "mute,mute_all,ask_unmute,remove,lock,end,cohost,spotlight,mute_on_entry" {
+	if host[AttrRole] != "host" || host[AttrCan] != "mute,mute_all,ask_unmute,remove,lock,end,cohost,spotlight,mute_on_entry,lower_hands,admit,hold,activities,breakouts" {
 		t.Errorf("a channel's host is told %v", host)
 	}
 	guest := attributesOf("meeting", model.RoleGuest)
 	if guest[AttrRole] != "guest" || guest[AttrCan] != "" {
 		t.Errorf("a guest is told %v", guest)
 	}
-	if every := attributesOf("dm", model.RoleParticipant); every[AttrCan] != "mute,mute_all,ask_unmute" {
+	if every := attributesOf("dm", model.RoleParticipant); every[AttrCan] != "mute,mute_all,ask_unmute,lower_hands,admit,activities" {
 		t.Errorf("someone in a DM's call is told %v", every)
 	}
 }
@@ -100,6 +106,8 @@ func TestActionsReachOnlyPeopleTheyMay(t *testing.T) {
 		{"anyone may be spotlit, you too", host, ActSpotlight, host.Identity, nil},
 		{"someone not in the call", host, ActMute, "0x99", ErrTargetGone},
 		{"nobody named", host, ActRemove, "", ErrNoTarget},
+		{"a co-host lets a guest through a hold", cohost, ActAllow, guest.Identity, nil},
+		{"nobody lets themselves through", cohost, ActAllow, cohost.Identity, ErrYourself},
 	} {
 		_, err := targetOf(s, me(c.by), c.by.Identity, Action{Action: c.action, Identity: c.target})
 		if !errors.Is(err, c.want) {
@@ -119,30 +127,9 @@ func TestAnUnknownActionIsRefusedFirst(t *testing.T) {
 	if _, err := Act(context.Background(), nil, uuid.NewString(), Action{Action: "unmute_everyone"}); !errors.Is(err, ErrUnknownAction) {
 		t.Fatalf("an unknown action: %v", err)
 	}
-	for _, a := range []string{ActMute, ActMuteAll, ActAskUnmute, ActAskAllUnmute, ActRemove, ActLock, ActUnlock, ActEnd, ActMakeCohost, ActRemoveCohost, ActSpotlight, ActEndSpotlight, ActMuteOnEntry} {
+	for _, a := range []string{ActMute, ActMuteAll, ActAskUnmute, ActAskAllUnmute, ActRemove, ActLock, ActUnlock, ActEnd, ActMakeCohost, ActRemoveCohost, ActSpotlight, ActEndSpotlight, ActMuteOnEntry, ActLowerHand, ActLowerAll, ActAdmit, ActDeny, ActAdmitAll, ActHold, ActAllow} {
 		if abilityFor(a) == "" {
 			t.Errorf("%s needs no ability", a)
-		}
-	}
-}
-
-// The transcription agent and LiveKit's hidden recorder are not people: they
-// are never recorded in a call, never handed it, never muted with everyone.
-func TestOnlyPeopleCount(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		p    *livekit.ParticipantInfo
-		want bool
-	}{
-		{"a member", &livekit.ParticipantInfo{Identity: "0x1"}, true},
-		{"a guest", &livekit.ParticipantInfo{Identity: "guest-a-b"}, true},
-		{"the transcription agent", &livekit.ParticipantInfo{Identity: "transcriber-bot"}, false},
-		{"a hidden recorder", &livekit.ParticipantInfo{Identity: "EG_1", Permission: &livekit.ParticipantPermission{Hidden: true}}, false},
-		{"an egress", &livekit.ParticipantInfo{Identity: "EG_2", Kind: livekit.ParticipantInfo_EGRESS}, false},
-		{"nobody", nil, false},
-	} {
-		if got := human(c.p); got != c.want {
-			t.Errorf("%s: %v, want %v", c.name, got, c.want)
 		}
 	}
 }
@@ -173,6 +160,17 @@ func TestThePartSomeoneTakesWhenTheyJoin(t *testing.T) {
 	join := func(id *uuid.UUID) callStateBusiness.JoinEvent {
 		return callStateBusiness.JoinEvent{Room: "r", Identity: "0x1", UserUUID: id, At: time.Now()}
 	}
+	oldIn := inConversation
+	t.Cleanup(func() { inConversation = oldIn })
+	in := true
+	asked := 0
+	inConversation = func(_ context.Context, room, uid string) (bool, error) {
+		asked++
+		if room != "r" || uid != "0x1" {
+			t.Errorf("asked about %s in %s", uid, room)
+		}
+		return in, nil
+	}
 	if got := roleRule(ctx, callStateBusiness.Ref{Kind: "channel", ID: "c"}, join(nil), true); got != model.RoleGuest {
 		t.Errorf("a guest starting a call takes %q", got)
 	}
@@ -181,6 +179,26 @@ func TestThePartSomeoneTakesWhenTheyJoin(t *testing.T) {
 	}
 	if got := roleRule(ctx, callStateBusiness.Ref{Kind: "channel", ID: "c"}, join(&member), true); got != model.RoleHost {
 		t.Errorf("whoever starts a channel's call takes %q", got)
+	}
+
+	// A member let in through a call's invite isn't in its conversation: an
+	// invitee, in a DM, a group or a channel (HU13). A check that can't be
+	// answered gives the part with no powers.
+	in = false
+	for _, kind := range []string{"dm", "group", "channel"} {
+		if got := roleRule(ctx, callStateBusiness.Ref{Kind: kind, ID: "x"}, join(&member), false); got != model.RoleInvitee {
+			t.Errorf("an invitee in a %s's call takes %q", kind, got)
+		}
+	}
+	inConversation = func(context.Context, string, string) (bool, error) { return false, errors.New("down") }
+	if got := roleRule(ctx, callStateBusiness.Ref{Kind: "group", ID: "g"}, join(&member), false); got != model.RoleInvitee {
+		t.Errorf("unchecked, someone in a group's call takes %q", got)
+	}
+	// A meeting is in no conversation: nobody there is asked.
+	asked = 0
+	roleRule(ctx, callStateBusiness.Ref{Kind: "meeting", ID: "m"}, join(nil), false)
+	if asked != 0 {
+		t.Error("a meeting's guest was asked about a conversation")
 	}
 }
 
@@ -200,9 +218,155 @@ func TestWhoIsJudgedWhenTheyConnect(t *testing.T) {
 
 // Every refusal says what to do next, in words, and never as a server error.
 func TestRefusalsSayWhatToDo(t *testing.T) {
-	for _, r := range []*Refusal{ErrUnknownAction, ErrNoTarget, ErrThroughToken, ErrNotInCall, ErrNotAllowed, ErrAboveYou, ErrYourself, ErrGuestCohost, ErrTargetGone, ErrCallOver} {
+	for _, r := range []*Refusal{ErrUnknownAction, ErrNoSuchFeedback, ErrHandDown, ErrNotWaiting, ErrNoTarget, ErrThroughToken, ErrNotInCall, ErrNotAllowed, ErrAboveYou, ErrYourself, ErrGuestCohost, ErrTargetGone, ErrCallOver} {
 		if r.Status < 400 || r.Status >= 500 || r.Code == "" || !strings.HasSuffix(r.Msg, ".") {
 			t.Errorf("%+v", r)
+		}
+	}
+}
+
+// Hands (CALLS-3a): your own hand and feedback are yours, guests included,
+// and need no ability; lowering someone else's hand, or everyone's, needs
+// lower_hands, which the people running a call have, and everyone in a DM or
+// a group.
+func TestHandsAreYoursAndLoweringOthersIsForWhoRunsTheCall(t *testing.T) {
+	me := "0xme"
+	for _, c := range []struct {
+		a    Action
+		want bool
+	}{
+		{Action{Action: ActRaiseHand}, true},
+		{Action{Action: ActSetFeedback, Feedback: "yes"}, true},
+		{Action{Action: ActLowerHand}, true},
+		{Action{Action: ActLowerHand, Identity: me}, true},
+		{Action{Action: ActLowerHand, Identity: "0xother"}, false},
+		{Action{Action: ActLowerAll}, false},
+		{Action{Action: ActMute, Identity: me}, false},
+	} {
+		if got := OwnAction(c.a, me); got != c.want {
+			t.Errorf("OwnAction(%+v) = %v, want %v", c.a, got, c.want)
+		}
+	}
+	for _, c := range []struct {
+		kind, role string
+		may        bool
+	}{
+		{"channel", model.RoleHost, true},
+		{"channel", model.RoleCohost, true},
+		{"channel", model.RoleParticipant, false},
+		{"meeting", model.RoleGuest, false},
+		{"dm", model.RoleParticipant, true},
+		{"group", model.RoleParticipant, true},
+		{"group", model.RoleGuest, false},
+	} {
+		if got := slices.Contains(AbilitiesOf(c.kind, c.role), CanLowerHands); got != c.may {
+			t.Errorf("%s %s may lower hands: %v, want %v", c.kind, c.role, got, c.may)
+		}
+	}
+	if !targeted(ActLowerHand) || targeted(ActLowerAll) || targeted(ActRaiseHand) {
+		t.Error("only lowering one hand names whose")
+	}
+}
+
+// What the room is told of someone as they (re)join carries their hand and
+// feedback, so a reconnect keeps both; a hand that is down is "" (taken away).
+func TestARejoinTellsTheRoomTheHandAndFeedback(t *testing.T) {
+	at := time.UnixMilli(1760900000123)
+	got := personAttributes("channel", &callStateBusiness.Person{Identity: "0xa", Role: model.RoleParticipant, HandRaisedAt: &at, Feedback: "slow_down"})
+	if got[AttrHand] != "1760900000123" || got[AttrFeedback] != "slow_down" || got[AttrRole] != model.RoleParticipant {
+		t.Errorf("attributes %v", got)
+	}
+	down := personAttributes("channel", &callStateBusiness.Person{Identity: "0xa", Role: model.RoleHost})
+	if v, ok := down[AttrHand]; !ok || v != "" {
+		t.Errorf("a hand that is down must be taken away: %q, %v", v, ok)
+	}
+	if v, ok := down[AttrFeedback]; !ok || v != "" {
+		t.Errorf("no feedback must be taken away: %q, %v", v, ok)
+	}
+	if v, ok := down[AttrAllowed]; !ok || v != "" {
+		t.Errorf("nothing let through must be taken away: %q, %v", v, ok)
+	}
+	let := personAttributes("channel", &callStateBusiness.Person{Identity: "0xa", Role: model.RoleParticipant, Allowed: []string{model.HoldMicrophone, model.HoldShare}})
+	if let[AttrAllowed] != "microphone,share" {
+		t.Errorf("what a host let them do: %q", let[AttrAllowed])
+	}
+}
+
+// Whom a hold holds (calls meet-12): everyone but the people running the call
+// and whoever they let through, and nobody while it isn't held.
+func TestAHoldHoldsWhoeverDoesntRunTheCall(t *testing.T) {
+	s := callWith("channel",
+		callStateBusiness.Person{Identity: "0xh", Role: model.RoleHost},
+		callStateBusiness.Person{Identity: "0xc", Role: model.RoleCohost},
+		callStateBusiness.Person{Identity: "0xp", Role: model.RoleParticipant},
+		callStateBusiness.Person{Identity: "0xl", Role: model.RoleParticipant, Allowed: []string{model.HoldMicrophone}},
+		callStateBusiness.Person{Identity: "guest-a-b", Role: model.RoleGuest, Guest: true},
+	)
+	s.Held = []string{model.HoldMicrophone}
+	for identity, want := range map[string]bool{"0xh": true, "0xc": true, "0xp": false, "0xl": true, "guest-a-b": false} {
+		if got := mayDo(s, s.Person(identity), model.HoldMicrophone); got != want {
+			t.Errorf("%s may turn on their microphone: %v, want %v", identity, got, want)
+		}
+		if !mayDo(s, s.Person(identity), model.HoldCamera) {
+			t.Errorf("%s is held from what the call doesn't hold", identity)
+		}
+	}
+}
+
+// A guest is who their own call token says, when this server signed it for a
+// guest; a member's token, another server's or a made-up one says nobody.
+func TestAGuestIsWhoTheirCallTokenSays(t *testing.T) {
+	was := livekitInit.LiveKitService.Config
+	livekitInit.LiveKitService.Config = &livekitInit.LiveKitConfigStruct{ApiKey: "devkey", ApiSecret: "a-secret-long-enough-for-hs256-signing"}
+	t.Cleanup(func() { livekitInit.LiveKitService.Config = was })
+	mint := func(key, secret, identity, room string) string {
+		at := lka.NewAccessToken(key, secret)
+		at.SetIdentity(identity).SetVideoGrant(&lka.VideoGrant{RoomJoin: true, Room: room}).SetValidFor(time.Hour)
+		tok, err := at.ToJWT()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+	id, room, err := GuestOf("Bearer " + mint("devkey", "a-secret-long-enough-for-hs256-signing", "guest-gia", "meet-1"))
+	if err != nil || id != "guest-gia" || room != "meet-1" {
+		t.Fatalf("a guest's token: %q %q %v", id, room, err)
+	}
+	for name, tok := range map[string]string{
+		"a member's token":  mint("devkey", "a-secret-long-enough-for-hs256-signing", "0x1", "meet-1"),
+		"another key":       mint("otherkey", "a-secret-long-enough-for-hs256-signing", "guest-gia", "meet-1"),
+		"another secret":    mint("devkey", "not-our-secret-but-long-enough-to-sign", "guest-gia", "meet-1"),
+		"no room":           mint("devkey", "a-secret-long-enough-for-hs256-signing", "guest-gia", ""),
+		"nothing":           "",
+		"something made up": "not-a-token",
+	} {
+		if _, _, err := GuestOf(tok); !errors.Is(err, ErrBadCallToken) {
+			t.Errorf("%s: %v, want refused", name, err)
+		}
+	}
+}
+
+// The lobby (CALLS-2): whoever runs a call lets people in or turns them away,
+// and in a DM's or a group's call everyone may; a participant of a channel's
+// call or a guest may not.
+func TestTheLobbyIsAnsweredByWhoRunsTheCall(t *testing.T) {
+	for _, c := range []struct {
+		kind, role string
+		may        bool
+	}{
+		{"meeting", model.RoleHost, true},
+		{"channel", model.RoleCohost, true},
+		{"channel", model.RoleParticipant, false},
+		{"meeting", model.RoleGuest, false},
+		{"group", model.RoleParticipant, true},
+	} {
+		if got := slices.Contains(AbilitiesOf(c.kind, c.role), CanAdmit); got != c.may {
+			t.Errorf("%s %s may admit: %v, want %v", c.kind, c.role, got, c.may)
+		}
+	}
+	for _, a := range []string{ActAdmit, ActDeny, ActAdmitAll} {
+		if abilityFor(a) != CanAdmit {
+			t.Errorf("%s needs %q", a, abilityFor(a))
 		}
 	}
 }

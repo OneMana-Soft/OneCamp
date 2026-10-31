@@ -34,6 +34,7 @@ import (
 	minioInit "github.com/akashc777/OneCamp/initializers/minioInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	snapshotModels "github.com/akashc777/OneCamp/models/postgres/BoardSnapshot"
+	collab "github.com/akashc777/OneCamp/services/collab"
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 )
@@ -411,20 +412,9 @@ func RestoreBoardSnapshot(ctx context.Context, boardUUID string, snapshotID uuid
 	if snap == nil {
 		return errors.New("snapshot not found")
 	}
-
-	gz, err := getSnapshotObject(ctx, snap.ObjectKey)
+	stateB64, err := snapshotState(ctx, snap)
 	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/RestoreBoardSnapshot fetch blob failed err: %+v", err)
-		return errors.New("could not load the snapshot")
-	}
-	stateBytes, err := gunzipBytes(gz)
-	if err != nil {
-		helpers.LogErrorWithContext(ctx, "business/RestoreBoardSnapshot decompress failed err: %+v", err)
-		return errors.New("the snapshot is corrupted")
-	}
-	stateB64 := string(stateBytes)
-	if strings.TrimSpace(stateB64) == "" {
-		return errors.New("the snapshot is empty")
+		return err
 	}
 
 	// Capture the current (pre-restore) state so the restore can be undone.
@@ -461,6 +451,49 @@ func RestoreBoardSnapshot(ctx context.Context, boardUUID string, snapshotID uuid
 		}
 	}
 	return nil
+}
+
+// snapshotState is a version's board state (base64), from object storage.
+func snapshotState(ctx context.Context, snap *snapshotModels.BoardSnapshot) (string, error) {
+	gz, err := getSnapshotObject(ctx, snap.ObjectKey)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Board snapshotState fetch blob failed err: %+v", err)
+		return "", errors.New("could not load the snapshot")
+	}
+	stateBytes, err := gunzipBytes(gz)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/Board snapshotState decompress failed err: %+v", err)
+		return "", errors.New("the snapshot is corrupted")
+	}
+	stateB64 := string(stateBytes)
+	if strings.TrimSpace(stateB64) == "" {
+		return "", errors.New("the snapshot is empty")
+	}
+	return stateB64, nil
+}
+
+// ErrNoGuestsVersion is a board with no version kept from before a call's
+// guests drew on it.
+var ErrNoGuestsVersion = errors.New("no version from before guests drew")
+
+// KeepForGuests stores a board as it was before a call's guests could draw
+// on it (calls package B): a version with the reason 'guests', which "Undo
+// guests' drawing" goes back to, and which the board's history shows.
+func KeepForGuests(ctx context.Context, boardUUID string, v collab.BoardVersion) error {
+	return storeSnapshot(ctx, boardUUID, v.State, v.Elements, snapshotModels.ReasonGuests, nil)
+}
+
+// GuestsVersion answers the state of the version KeepForGuests last kept of a
+// board; ErrNoGuestsVersion when there is none.
+func GuestsVersion(ctx context.Context, boardUUID string) (string, error) {
+	snap, err := snapshotModels.GetLatestSnapshot(ctx, boardUUID, snapshotModels.ReasonGuests)
+	if err != nil {
+		return "", err
+	}
+	if snap == nil {
+		return "", ErrNoGuestsVersion
+	}
+	return snapshotState(ctx, snap)
 }
 
 // snapshotRetentionDays resolves the age retention window from the environment.

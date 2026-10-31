@@ -34,7 +34,7 @@ func viewerOf(who Subject) docBusiness.Viewer {
 func decisionOf(d docBusiness.DocDecision) Decision {
 	out := Decision{
 		Level: d.Level, Owner: d.Owner, Deleted: d.Deleted, Archived: d.Archived, Was: d.Was,
-		Locked: d.Locked(), Lock: d.Lock, Unlocked: d.Unlocked, Hosted: d.Hosted,
+		Locked: d.Locked(), Lock: d.Lock, Unlocked: d.Unlocked, Hosted: d.Hosted, NodeKind: d.NodeKind,
 	}
 	for _, r := range d.Reasons {
 		out.Reasons = append(out.Reasons, string(r))

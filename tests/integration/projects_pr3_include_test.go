@@ -9,48 +9,25 @@ package integration_test
 // Run: integ_rel.sh <wt> <log> 'TestPR3TaskInfoIncludesThePanelsReads'
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-
 	cycleController "github.com/akashc777/OneCamp/controllers/Cycle"
+	estimateScaleController "github.com/akashc777/OneCamp/controllers/EstimateScale"
 	guestController "github.com/akashc777/OneCamp/controllers/Guest"
 	taskController "github.com/akashc777/OneCamp/controllers/Task"
 	taskFieldController "github.com/akashc777/OneCamp/controllers/TaskField"
 	taskStatusController "github.com/akashc777/OneCamp/controllers/TaskStatus"
 	timeEntryController "github.com/akashc777/OneCamp/controllers/TimeEntry"
-	userDomain "github.com/akashc777/OneCamp/domain/User"
-	"github.com/akashc777/OneCamp/helpers"
-	customMiddleware "github.com/akashc777/OneCamp/middleware"
-	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/akashc777/OneCamp/tests/integration"
 )
 
 // readWith runs a handler as who with the given route parameters.
 func (s *wa2Scale) readWith(who string, h http.HandlerFunc, params map[string]string, query string) (int, string) {
 	s.t.Helper()
-	ctx := context.Background()
-	pg, err := userDomain.GetActiveUserWithAdminFlagByUserUUID(ctx, s.people[who])
-	if err != nil || pg == nil {
-		s.t.Fatalf("load %s: %v", who, err)
-	}
-	gr, err := userDomain.GetActiveDgraphUserInfoByUUID(ctx, s.people[who].String())
-	if err != nil || gr == nil {
-		s.t.Fatalf("load %s's profile: %v", who, err)
-	}
-	rc := chi.NewRouteContext()
-	for k, v := range params {
-		rc.URLParams.Add(k, v)
-	}
-	c := context.WithValue(context.WithValue(ctx, helpers.UserInfoContextKey, userModels.UserInfo{UserPostgresInfo: *pg, UserDgraphInfo: *gr}), chi.RouteCtxKey, rc)
-	rec := httptest.NewRecorder()
-	customMiddleware.RequestIDMiddleware(h).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/"+query, nil).WithContext(s.request(c)))
-	return rec.Code, rec.Body.String()
+	return s.call(who, http.MethodGet, "/"+query, h, params, nil)
 }
 
 func TestPR3TaskInfoIncludesThePanelsReads(t *testing.T) {
@@ -87,6 +64,7 @@ func TestPR3TaskInfoIncludesThePanelsReads(t *testing.T) {
 		"time_summary":  {timeEntryController.GetTaskTime, onTask},
 		"statuses":      {taskStatusController.List, onProject},
 		"fields":        {taskFieldController.ListFields, onProject},
+		"estimates":     {estimateScaleController.GetScale, onProject},
 	}
 	const include = "?include=cycle,recurrence,client_review,time_summary,sync_status,project_meta"
 
@@ -151,7 +129,7 @@ func TestPR3TaskInfoIncludesThePanelsReads(t *testing.T) {
 	if _, ok := got.Included["sync_status"]; ok {
 		t.Errorf("sync_status included for a task with no GitHub link")
 	}
-	t.Logf("Postgres statements: %d for the task and its six reads alone, %d together", separate, together)
+	t.Logf("Postgres statements: %d for the task and its seven reads alone, %d together", separate, together)
 	if together >= separate {
 		t.Errorf("together %d statements, alone %d: including the parts should spare their own access checks", together, separate)
 	}

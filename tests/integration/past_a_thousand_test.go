@@ -27,8 +27,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
-	"github.com/opensearch-project/opensearch-go/v4"
-	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	projectController "github.com/akashc777/OneCamp/controllers/Project"
@@ -88,15 +86,7 @@ func TestBoardsListsAndHistoryPastAThousand(t *testing.T) {
 	}
 	integration.StubMqttClient(t)
 	dg := integration.SetupDgraph(t)
-	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"took":1,"errors":false,"items":[],"updated":0,"failures":[]}`)
-	}))
-	defer search.Close()
-	client, err := opensearchapi.NewClient(opensearchapi.Config{Client: opensearch.Config{Addresses: []string{search.URL}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	integration.UseOpenSearchClient(t, client)
+	integration.AcceptingOpenSearch(t)
 
 	const live = "0001-01-01T00:00:00Z"
 	rfc := func(tm time.Time) string { return tm.UTC().Format(time.RFC3339) }

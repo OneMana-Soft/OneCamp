@@ -32,6 +32,8 @@ var DocTree = graph.Schema{
 	SpaceKind: "doc_space_kind",
 	SpaceUUID: "doc_space_uuid",
 	Live:      domain.LiveDocFilter,
+	// A file or a link holds nothing (docs F1, D-30).
+	Leaf: domain.LeafFilter,
 }
 
 // docKind is the doc tree's reads.

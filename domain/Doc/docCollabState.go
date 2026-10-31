@@ -76,19 +76,22 @@ type CollabWritten struct {
 	Hosted bool
 }
 
-// collabUpsertQuery finds the doc, whether it is live, and whether its stored
-// body is the one this save's state goes with; `found` comes back with the
-// values as they were before the mutations. With an editor, `editor` is that
+// collabUpsertQuery finds the doc, whether it is a live page, and whether its
+// stored body is the one this save's state goes with; `found` comes back with
+// the values as they were before the mutations. A folder, a file or a link
+// has no body (pageOnly): nothing is written to one, and the save answers
+// ErrNotAPage (collabSaveAnswer), the backstop behind the session's refusal. With an editor, `editor` is that
 // person's node (collabEditorLine).
 const collabUpsertQuery = `query q($id: string, $hash: string%s) {%s
 	all as var(func: eq(doc_uuid, $id))
-	live as var(func: uid(all)) @filter(` + liveDocFilter + `)
+	live as var(func: uid(all)) @filter(` + liveDocFilter + ` AND ` + pageOnly + `)
 	same as var(func: uid(live)) @filter(eq(doc_yjs_body_hash, $hash))
 	found(func: uid(all)) {
 		uid
 		doc_yjs_body_hash
 		doc_deleted_at
 		doc_host_kind
+		doc_node_kind
 	}
 }`
 
@@ -182,6 +185,7 @@ func collabSaveAnswer(raw []byte, w CollabWrite) (CollabWritten, error) {
 			Hash      string     `json:"doc_yjs_body_hash"`
 			DeletedAt *time.Time `json:"doc_deleted_at"`
 			HostKind  string     `json:"doc_host_kind"`
+			NodeKind  string     `json:"doc_node_kind"`
 		} `json:"found"`
 	}
 	if err := json.Unmarshal(raw, &out); err != nil {
@@ -192,6 +196,9 @@ func collabSaveAnswer(raw []byte, w CollabWrite) (CollabWritten, error) {
 	}
 	if helpers.IsSoftDeleted(out.Found[0].DeletedAt) {
 		return CollabWritten{}, ErrDocDeleted
+	}
+	if out.Found[0].NodeKind != "" {
+		return CollabWritten{}, ErrNotAPage
 	}
 	prev := out.Found[0].Hash
 	return CollabWritten{PrevHash: prev, Stored: !w.StateOnly || prev == w.Hash, Hosted: out.Found[0].HostKind != ""}, nil

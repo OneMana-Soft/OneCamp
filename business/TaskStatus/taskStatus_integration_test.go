@@ -85,7 +85,7 @@ func TestCustomStatuses(t *testing.T) {
 	dg := integration.SetupDgraph(t)
 	project, admin := uuid.New(), uuid.New()
 	var repoints []Repoint
-	OnRepoint(func(_ context.Context, r Repoint) error { repoints = append(repoints, r); return nil })
+	OnRepoint(func(_ context.Context, r Repoint) ([]string, error) { repoints = append(repoints, r); return nil, nil })
 	lastRepoint := func() Repoint {
 		if len(repoints) == 0 {
 			return Repoint{}
@@ -278,7 +278,7 @@ func TestCustomStatuses(t *testing.T) {
 		if _, err := Update(ctx, project, empty.ID, Input{Name: "Still empty", Category: "backlog"}); err != nil {
 			t.Fatal(err)
 		}
-		if err := Delete(ctx, project, empty.ID, ""); err != nil {
+		if err := Delete(ctx, project, empty.ID, "", admin); err != nil {
 			t.Fatal(err)
 		}
 		if after := countTasks(t); after != before {
@@ -287,10 +287,10 @@ func TestCustomStatuses(t *testing.T) {
 	})
 
 	t.Run("deleting moves its tasks to the chosen status, or back to its category", func(t *testing.T) {
-		if err := Delete(ctx, project, qa.ID, qa.ID.String()); !errors.Is(err, ErrInvalid) {
+		if err := Delete(ctx, project, qa.ID, qa.ID.String(), admin); !errors.Is(err, ErrInvalid) {
 			t.Fatalf("moving tasks into the status being deleted: %v", err)
 		}
-		if err := Delete(ctx, project, qa.ID, "todo"); err != nil {
+		if err := Delete(ctx, project, qa.ID, "todo", admin); err != nil {
 			t.Fatal(err)
 		}
 		if r := lastRepoint(); !r.Matches(qaID) || !r.Matches("quality CHECK") || r.New != "todo" {
@@ -304,8 +304,134 @@ func TestCustomStatuses(t *testing.T) {
 		if _, err := Resolve(ctx, project.String(), qaID); !errors.Is(err, ErrUnknownStatus) {
 			t.Fatalf("a deleted status still resolves: %v", err)
 		}
-		if err := Delete(ctx, project, qa.ID, ""); !errors.Is(err, ErrNotFound) {
+		if err := Delete(ctx, project, qa.ID, "", admin); !errors.Is(err, ErrNotFound) {
 			t.Fatalf("deleting twice: %v", err)
+		}
+	})
+
+	// V-78: the delete was soft. Its restore brings the status back, and the
+	// tasks its delete moved that are still where it put them; one moved on
+	// since stays where it went.
+	t.Run("restoring brings it back with the tasks still where its delete put them", func(t *testing.T) {
+		if err := taskDomain.UpdateDgraphTaskClearing(ctx, &dgraphStruct.DgraphTask{Uid: "uid(task)", Uuid: b, Status: "inProgress"},
+			[]string{"task_custom_status", "task_custom_status_name"}); err != nil {
+			t.Fatal(err)
+		}
+		s, err := Restore(ctx, qa.ID)
+		if err != nil || s == nil || s.Name != "Quality check" {
+			t.Fatalf("restore: %+v %v", s, err)
+		}
+		if got := readTask(t, a); got != (taskRow{Status: "done", Custom: qaID, CustomName: "Quality check"}) {
+			t.Fatalf("a, left where the delete put it, is back in QA: %+v", got)
+		}
+		if got := readTask(t, b); got != (taskRow{Status: "inProgress"}) {
+			t.Fatalf("b, moved on since, stays: %+v", got)
+		}
+		if _, err := Resolve(ctx, project.String(), qaID); err != nil {
+			t.Fatalf("the restored status resolves: %v", err)
+		}
+		if _, err := Restore(ctx, qa.ID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("restoring twice: %v", err)
+		}
+		if err := Delete(ctx, project, qa.ID, "todo", admin); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("a restore whose tasks could not move back is finished by the next", func(t *testing.T) {
+		// However it ends, QA is deleted again for the subtests after.
+		defer func() {
+			if err := Delete(ctx, project, qa.ID, "todo", admin); err != nil && !errors.Is(err, ErrNotFound) {
+				t.Errorf("deleting QA again: %v", err)
+			}
+		}()
+		move := restatusTasksStillIn
+		restatusTasksStillIn = func(context.Context, []string, string, string, string, string, string) ([]string, error) {
+			return nil, errors.New("the graph is away")
+		}
+		_, err := Restore(ctx, qa.ID)
+		restatusTasksStillIn = move
+		if !errors.Is(err, ErrUnfinished) {
+			t.Fatalf("a restore whose tasks could not move back says it didn't finish: %v", err)
+		}
+		if got := readTask(t, a); got.Custom == qaID {
+			t.Fatalf("a is back in QA though its move failed: %+v", got)
+		}
+		s, err := Restore(ctx, qa.ID)
+		if err != nil || s == nil || s.Name != "Quality check" {
+			t.Fatalf("the next restore finishes it: %+v %v", s, err)
+		}
+		if got := readTask(t, a); got != (taskRow{Status: "done", Custom: qaID, CustomName: "Quality check"}) {
+			t.Fatalf("a is back in QA: %+v", got)
+		}
+		if _, err := Restore(ctx, qa.ID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("once it is whole, restoring again: %v", err)
+		}
+	})
+
+	// A delete made before its restore finished keeps the first delete's
+	// moves beside its own, so the restore after brings back all of both.
+	t.Run("deleting it again before its restore finished keeps what both deletes moved", func(t *testing.T) {
+		defer func() {
+			if err := Delete(ctx, project, qa.ID, "todo", admin); err != nil && !errors.Is(err, ErrNotFound) {
+				t.Errorf("deleting QA again: %v", err)
+			}
+		}()
+		// A store that keeps a reference to QA, as the GitHub rules do.
+		rule := qaID
+		OnRepoint(func(_ context.Context, r Repoint) ([]string, error) {
+			if r.ProjectID != project || !r.Matches(rule) || !r.Allows("rule") {
+				return nil, nil
+			}
+			rule = r.New
+			return []string{"rule"}, nil
+		})
+		if _, err := Restore(ctx, qa.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := Delete(ctx, project, qa.ID, "todo", admin); err != nil {
+			t.Fatal(err)
+		}
+		if got := readTask(t, a); got != (taskRow{Status: "todo"}) || rule != "todo" {
+			t.Fatalf("the first delete: a %+v, the rule %q", got, rule)
+		}
+		move := restatusTasksStillIn
+		restatusTasksStillIn = func(context.Context, []string, string, string, string, string, string) ([]string, error) {
+			return nil, errors.New("the graph is away")
+		}
+		_, err := Restore(ctx, qa.ID)
+		restatusTasksStillIn = move
+		if !errors.Is(err, ErrUnfinished) {
+			t.Fatalf("a restore whose tasks could not move back says it didn't finish: %v", err)
+		}
+		// While QA is back, b joins it; then QA is deleted again, its tasks to
+		// In progress. a and the rule are still where the first delete put them.
+		name := "Quality check"
+		if err := taskDomain.UpdateDgraphTaskClearing(ctx, &dgraphStruct.DgraphTask{Uid: "uid(task)", Uuid: b, Status: "done", CustomStatus: &qaID, CustomStatusName: &name}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := Delete(ctx, project, qa.ID, "inProgress", admin); err != nil {
+			t.Fatal(err)
+		}
+		if got := readTask(t, b); got != (taskRow{Status: "inProgress"}) {
+			t.Fatalf("the second delete: b %+v", got)
+		}
+		s, err := Restore(ctx, qa.ID)
+		if err != nil || s == nil || s.Name != name {
+			t.Fatalf("restore: %+v %v", s, err)
+		}
+		back := taskRow{Status: "done", Custom: qaID, CustomName: name}
+		if got := readTask(t, a); got != back {
+			t.Errorf("a, which the first delete moved, is back in QA: %+v", got)
+		}
+		if got := readTask(t, b); got != back {
+			t.Errorf("b, which the second delete moved, is back in QA: %+v", got)
+		}
+		if rule != qaID {
+			t.Errorf("the rule the first delete pointed elsewhere points at QA again: %q", rule)
+		}
+		if _, err := Restore(ctx, qa.ID); !errors.Is(err, ErrNotFound) {
+			t.Errorf("once it is whole, restoring again: %v", err)
 		}
 	})
 

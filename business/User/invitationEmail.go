@@ -159,14 +159,14 @@ func RenderInvitation(e InvitationEmail, subject, template, link, workspace, log
 func SendInvitationEmail(ctx context.Context, e InvitationEmail) error {
 	stored := map[string]string{}
 	if rows, err := configModels.GetMultipleConfigsByKeys([]string{
-		"sender_email", "invitation_email_subject", "invitation_email_template", "invitation_email_logo",
+		"sender_email", "invitation_email_subject", "invitation_email_template", configModels.EmailLogoKey,
 	}); err == nil {
 		for _, row := range rows {
 			stored[row.Key] = row.Value
 		}
 	}
 	logo := ""
-	if stored["invitation_email_logo"] != "" {
+	if stored[configModels.EmailLogoKey] != "" {
 		logo = `<img src="` + authService.BackendBaseURL() + `/public/email/logo" alt="Logo" style="max-height:80px; max-width:200px;" />`
 	}
 	link := InvitationLink(e.Token)

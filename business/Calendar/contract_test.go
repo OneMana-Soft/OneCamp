@@ -51,9 +51,14 @@ func TestStatusForIsTimeOffThenFocus(t *testing.T) {
 
 	ended, deleted, later := ev(at(9, 0), now, no, yes), ev(at(9, 0), at(12, 0), yes, no), ev(at(11, 0), at(12, 0), yes, no)
 	deleted.DeletedAt = &gone
-	reading(ended, deleted, later, ev(at(10, 0), at(11, 0), no, no))
+	reading(ended, deleted, later)
 	if s, _ := Statuses.StatusFor(context.Background(), "maya", now); s.Kind != "" || s.Until != nil {
-		t.Errorf("an ended, a deleted, a later and an ordinary event say nothing: %+v", s)
+		t.Errorf("an ended, a deleted and a later event say nothing: %+v", s)
+	}
+	// An ordinary event running is a meeting (calendar A3), until it ends; never its title.
+	reading(ended, deleted, later, ev(at(10, 0), at(11, 0), no, no))
+	if s, _ := Statuses.StatusFor(context.Background(), "maya", now); s.Kind != StatusBusy || s.Until == nil || !s.Until.Equal(at(11, 0)) {
+		t.Errorf("a meeting: %+v", s)
 	}
 }
 

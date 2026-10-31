@@ -115,8 +115,8 @@ verify:
 	@echo "▶ vet"
 	go vet ./business/... ./controllers/... ./domain/... ./models/... \
 		./helpers/... ./router/... ./adapter/... ./initializers/... ./services/... ./cmd/...
-	@echo "▶ vet the integration build (every integration test package must compile)"
-	go vet -tags integration . ./adapter/... ./business/... ./cmd/... ./controllers/... \
+	@echo "▶ vet the integration build (every integration test package must compile), and the generators behind tags of their own"
+	go vet -tags integration,templates_export . ./adapter/... ./business/... ./cmd/... ./controllers/... \
 		./docs/... ./domain/... ./helpers/... ./initializers/... ./middleware/... \
 		./models/... ./router/... ./services/... ./tests/...
 	@$(MAKE) --no-print-directory test

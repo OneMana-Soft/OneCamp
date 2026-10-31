@@ -6,7 +6,6 @@ import (
 	"runtime/debug"
 
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/go-chi/chi/v5"
 )
 
 // panicMessage is what the person reads when a handler panicked. The app shows
@@ -39,7 +38,7 @@ func RecoverPanic(next http.Handler) http.Handler {
 				panic(rec)
 			}
 			helpers.LogErrorWithContext(r.Context(), "middleware/RecoverPanic %s %s answered %d after a panic: %v\n%s",
-				r.Method, routeOf(r), http.StatusInternalServerError, rec, debug.Stack())
+				r.Method, helpers.RouteOf(r), http.StatusInternalServerError, rec, debug.Stack())
 			if r.Header.Get("Connection") == "Upgrade" {
 				return
 			}
@@ -47,16 +46,4 @@ func RecoverPanic(next http.Handler) http.Handler {
 		}()
 		next.ServeHTTP(w, r)
 	})
-}
-
-// routeOf is the route a request matched ("/task/info/{task_uuid}"), which
-// groups in the logs where the path, with its ids, doesn't; the path when it
-// matched none.
-func routeOf(r *http.Request) string {
-	if rctx := chi.RouteContext(r.Context()); rctx != nil {
-		if pattern := rctx.RoutePattern(); pattern != "" {
-			return pattern
-		}
-	}
-	return r.URL.Path
 }

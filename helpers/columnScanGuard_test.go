@@ -208,13 +208,19 @@ func TestInlineSelectProjectionsMatchTheirScans(t *testing.T) {
 					}
 					if call, ok := n.(*ast.CallExpr); ok {
 						if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Scan" {
-							scanArities = append(scanArities, len(call.Args))
+							if call.Ellipsis != token.NoPos {
+								// Scan(dest...): built to match a projection built
+								// alongside it, so neither side can be counted here.
+								scanArities = append(scanArities, -1)
+							} else {
+								scanArities = append(scanArities, len(call.Args))
+							}
 						}
 					}
 					return true
 				})
-				if len(projections) != 1 || len(scanArities) != 1 {
-					continue // unpairable; see the scope note above
+				if len(projections) != 1 || len(scanArities) != 1 || scanArities[0] < 0 {
+					continue // unpairable, or counted at run time; see the scope note above
 				}
 				projection := strings.TrimSpace(projections[0])
 				if strings.Contains(projection, "*") {

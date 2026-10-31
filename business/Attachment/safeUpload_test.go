@@ -2,6 +2,7 @@ package business
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -66,5 +67,29 @@ func TestAnUploadOfUnknownSizeHoldsOneSmallPart(t *testing.T) {
 	}
 	if len(stored) != 1 {
 		t.Errorf("stored %v", stored)
+	}
+}
+
+// A scanner that can't say whether a file is clean lets it through only where
+// the install fails open, and never for a stranger's file (a public form's),
+// which nobody vouches for: that upload fails closed whatever the setting.
+func TestAScanThatCantSayLetsOnlyAMembersFileThroughWhereTheInstallFailsOpen(t *testing.T) {
+	broke := errors.New("clamd: connection refused")
+	cases := []struct {
+		name               string
+		scanErr            error
+		failOpen, stranger bool
+		keep               bool
+	}{
+		{"scanned", nil, false, false, true},
+		{"scanned, a stranger's", nil, false, true, true},
+		{"can't say, fails open", broke, true, false, true},
+		{"can't say, fails closed", broke, false, false, false},
+		{"can't say, fails open, a stranger's", broke, true, true, false},
+	}
+	for _, c := range cases {
+		if got := keepAfterScan(c.scanErr, c.failOpen, c.stranger); got != c.keep {
+			t.Errorf("%s: keep %v, want %v", c.name, got, c.keep)
+		}
 	}
 }

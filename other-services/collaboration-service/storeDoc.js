@@ -16,7 +16,8 @@
 // text, its JSON and its state, about six times the HTML, and the API fanned
 // each one out at full cost (search, the AI index, permissions, comments) every
 // 5 to 30 seconds while anyone typed. Now:
-//   - the request carries only the body, the state, the lineage and who edited;
+//   - the request carries only the body, the state, the lineage and who edited
+//     (and, for a save holding a quiet write, quiet: contributors.js);
 //   - a body that hashes the same as the last one stored is a state-only save
 //     (keepBody, against that hash): the API stores the state without touching
 //     anything else (the body rides along only for an API mid-upgrade, below);
@@ -134,8 +135,11 @@ export async function persistDoc({ id, document, extensions, post, contributors 
     }
 
     const members = await contributors.peek()
-    const { users, agents } = splitContributors(members)
-    const who = { contributors: users, agents }
+    const { users, agents, quiet } = splitContributors(members)
+    // A save holding a quiet write (a copy's body, an import's) says so: the
+    // API keeps whom the body mentions and tells nobody. Any other save sends
+    // no quiet at all.
+    const who = quiet ? { contributors: users, agents, quiet: true } : { contributors: users, agents }
 
     let rendered
     try {

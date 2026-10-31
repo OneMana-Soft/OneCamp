@@ -18,13 +18,12 @@ import (
 // (business/Integration), so connecting once serves both. The assistant reads
 // and writes the calendar through business/Calendar, never Google directly.
 
-// calendarAccountMetadata is what a Google Calendar link keeps about the
-// account just linked: its address, the id of its primary calendar, so the
+// calendarAccountMetadata is the address of the Google account just linked
+// (the id of its primary calendar), and what the link keeps about it, so the
 // calendar can say "Connected as maya@outlook.com". The address is empty when
 // Google won't give it, so linking again never shows the account linked
 // before. Best effort: the link works without it.
-func calendarAccountMetadata(ctx context.Context, accessToken string) string {
-	email := ""
+func calendarAccountMetadata(ctx context.Context, accessToken string) (email, metadata string) {
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: accessToken})
@@ -36,5 +35,5 @@ func calendarAccountMetadata(ctx context.Context, accessToken string) string {
 		}
 	}
 	b, _ := json.Marshal(map[string]string{"account_email": email})
-	return string(b)
+	return email, string(b)
 }

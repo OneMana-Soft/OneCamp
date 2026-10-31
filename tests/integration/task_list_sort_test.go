@@ -13,15 +13,12 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/opensearch-project/opensearch-go/v4"
-	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
 	projectController "github.com/akashc777/OneCamp/controllers/Project"
 	userController "github.com/akashc777/OneCamp/controllers/User"
@@ -39,15 +36,7 @@ func TestTaskListsSortByEverySortTheyOffer(t *testing.T) {
 	}
 	integration.StubMqttClient(t)
 	dg := integration.SetupDgraph(t)
-	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"took":1,"errors":false,"items":[],"updated":0,"failures":[]}`)
-	}))
-	defer search.Close()
-	client, err := opensearchapi.NewClient(opensearchapi.Config{Client: opensearch.Config{Addresses: []string{search.URL}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	integration.UseOpenSearchClient(t, client)
+	integration.AcceptingOpenSearch(t)
 
 	const live = "0001-01-01T00:00:00Z"
 	ada, team, P := uuid.New(), uuid.New(), uuid.New()

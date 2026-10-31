@@ -1,4 +1,9 @@
+//go:build !integration
+
 package business
+
+// Only a build without the integration tests: they link business/DataTable,
+// whose init registers its engine, so Rows has one there.
 
 import (
 	"context"

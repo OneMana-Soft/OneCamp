@@ -16,13 +16,9 @@ package integration_test
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/opensearch-project/opensearch-go/v4"
-	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	"github.com/akashc777/OneCamp/initializers/dgraphInit"
@@ -35,15 +31,7 @@ import (
 func TestWorkLeftRunningAfterATestFindsNoNilClient(t *testing.T) {
 	t.Run("a test with clients of its own", func(t *testing.T) {
 		integration.StubMqttClient(t)
-		search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			_, _ = w.Write([]byte(`{}`))
-		}))
-		t.Cleanup(search.Close)
-		c, err := opensearchapi.NewClient(opensearchapi.Config{Client: opensearch.Config{Addresses: []string{search.URL}}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		integration.UseOpenSearchClient(t, c)
+		integration.AcceptingOpenSearch(t)
 	})
 
 	// That test's cleanups have run. A goroutine it started would see this.

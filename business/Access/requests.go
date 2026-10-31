@@ -225,7 +225,9 @@ func Answer(ctx context.Context, who Subject, requestID uuid.UUID, approve bool,
 		Kind: resourceEventBusiness.DocAccessAnswered, ResourceKind: res.Kind, ResourceUUID: res.UUID,
 		Actor: docBusiness.Actor{UserUUID: who.UserUUID, AgentUUID: who.AgentUUID}, At: now(),
 		Subjects: []string{req.RequesterUUID.String()},
-		Data:     map[string]string{"request": req.ID.String(), "status": status, "level": told},
+		// asked: the level asked for, which an approval's audit row names
+		// beside the one given when they differ.
+		Data: map[string]string{"request": req.ID.String(), "status": status, "level": told, "asked": req.LevelWanted},
 	})
 	return out, nil
 }

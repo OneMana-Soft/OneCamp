@@ -1,192 +1,128 @@
 package models
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"strings"
+	"fmt"
 
-	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
-	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 )
 
-type customSearchHit struct {
+// SearchAnswer is one search's page of hits, how many entries matched in each
+// index (the "kinds" aggregation, which a post_filter leaves whole), and how
+// many in all.
+type SearchAnswer struct {
+	Hits    []*openSearchStruct.GlobalSearchOpenSearchResp
+	ByIndex map[string]int
+	Total   int
+}
+
+type searchHit struct {
 	opensearchapi.SearchHit
 	Highlight map[string][]string `json:"highlight"`
 }
 
-type customSearchResp struct {
+type searchResp struct {
 	Hits struct {
-		Hits []customSearchHit `json:"hits"`
+		Total struct {
+			Value int `json:"value"`
+		} `json:"total"`
+		Hits []searchHit `json:"hits"`
 	} `json:"hits"`
+	Aggregations struct {
+		Kinds struct {
+			Buckets []struct {
+				Key      string `json:"key"`
+				DocCount int    `json:"doc_count"`
+			} `json:"buckets"`
+		} `json:"kinds"`
+	} `json:"aggregations"`
 }
 
-func GetUnifiedGlobalSearchFromOpenSearch(ctx context.Context, query string) (searchInfo []*openSearchStruct.GlobalSearchOpenSearchResp, err error) {
-	// Restricted tasks the reader may not see, with their comments and files,
-	// are in no answer and no count (models/taskread).
-	tr, err := taskread.From(ctx)
-	if err != nil {
-		return nil, err
+// SearchPage runs a search body (business/GlobalSearch's engine builds it)
+// over indices: its hits, each read into its type's shape, and the counts.
+func SearchPage(ctx context.Context, indices []string, body []byte) (SearchAnswer, error) {
+	var out SearchAnswer
+	if opensearchInit.OpenSearchClient == nil {
+		return out, fmt.Errorf("search is not connected")
 	}
-	if query, err = tr.SearchWithout(query, "task_id", "comment_task_id", "attachment_task_id"); err != nil {
-		return nil, err
+	var resp searchResp
+	if _, err := opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{
+		Indices: indices,
+		Body:    bytes.NewReader(body),
+	}, &resp); err != nil {
+		return out, fmt.Errorf("search: %w", err)
 	}
-
-	var resp customSearchResp
-	_, err = opensearchInit.OpenSearchClient.Client.Do(ctx, opensearchapi.SearchReq{
-		Indices: []string{openSearchStruct.CHAT_INDEX, openSearchStruct.POST_INDEX, openSearchStruct.COMMENT_INDEX, openSearchStruct.ATTACHMENT_INDEX, openSearchStruct.DOC_INDEX, openSearchStruct.BOARD_INDEX, openSearchStruct.TASK_INDEX, openSearchStruct.USER_INDEX, openSearchStruct.PROJECT_INDEX, openSearchStruct.CHANNEL_INDEX, openSearchStruct.TEAM_INDEX},
-		Body:    strings.NewReader(query),
-	}, &resp)
-
-	if err != nil {
-		helpers.LogErrorWithContext(ctx,
-			"models/GetUnifiedGlobalSearchFromOpenSearch Failed to exec query err: %+v",
-			err)
-		return
+	out.Total = resp.Hits.Total.Value
+	out.ByIndex = map[string]int{}
+	for _, b := range resp.Aggregations.Kinds.Buckets {
+		out.ByIndex[b.Key] = b.DocCount
 	}
-
 	for _, hit := range resp.Hits.Hits {
-		var hitInfo openSearchStruct.GlobalSearchOpenSearchResp
-		hitInfo.Highlight = hit.Highlight
-		hitInfo.Sort = hit.Sort
-		switch hit.Index {
-		case openSearchStruct.CHAT_INDEX:
-			var chatInfo openSearchStruct.OpenSearchChat
-			err = json.Unmarshal(hit.Source, &chatInfo)
-			if err != nil {
-				helpers.LogErrorWithContext(ctx,
-					"models/GetUnifiedGlobalSearchFromOpenSearch Failed to unmarshal open search chat json err: %+v",
-					err)
-				return
-			}
-			hitInfo.Type = openSearchStruct.CHAT_TYPE
-			hitInfo.Chat = &chatInfo
-
-		case openSearchStruct.POST_INDEX:
-			var postInfo openSearchStruct.OpenSearchPost
-			err = json.Unmarshal(hit.Source, &postInfo)
-			if err != nil {
-				helpers.LogErrorWithContext(ctx,
-					"models/GetUnifiedGlobalSearchFromOpenSearch Failed to unmarshal open search post json err: %+v",
-					err)
-				return
-			}
-			hitInfo.Type = openSearchStruct.POST_TYPE
-			hitInfo.Post = &postInfo
-
-		case openSearchStruct.COMMENT_INDEX:
-			var commentInfo openSearchStruct.OpenSearchComment
-			err = json.Unmarshal(hit.Source, &commentInfo)
-			if err != nil {
-				helpers.LogErrorWithContext(ctx,
-					"models/GetUnifiedGlobalSearchFromOpenSearch Failed to unmarshal open search comment json err: %+v",
-					err)
-				return
-			}
-			hitInfo.Type = openSearchStruct.COMMENT_TYPE
-			hitInfo.Comment = &commentInfo
-
-		case openSearchStruct.ATTACHMENT_INDEX:
-			var attachmentInfo openSearchStruct.OpenSearchAttachment
-			err = json.Unmarshal(hit.Source, &attachmentInfo)
-			if err != nil {
-				helpers.LogErrorWithContext(ctx,
-					"models/GetUnifiedGlobalSearchFromOpenSearch Failed to unmarshal open search attachment json err: %+v",
-					err)
-				return
-			}
-			hitInfo.Type = openSearchStruct.ATTACHMENT_TYPE
-			hitInfo.Attachment = &attachmentInfo
-
-		case openSearchStruct.DOC_INDEX:
-			var docInfo openSearchStruct.OpenSearchDoc
-			err = json.Unmarshal(hit.Source, &docInfo)
-			if err != nil {
-				helpers.LogErrorWithContext(ctx,
-					"models/GetUnifiedGlobalSearchFromOpenSearch Failed to unmarshal open search doc json err: %+v",
-					err)
-				return
-			}
-			hitInfo.Type = openSearchStruct.DOC_TYPE
-			hitInfo.Doc = &docInfo
-
-		case openSearchStruct.BOARD_INDEX:
-			var boardInfo openSearchStruct.OpenSearchBoard
-			err = json.Unmarshal(hit.Source, &boardInfo)
-			if err != nil {
-				helpers.LogErrorWithContext(ctx,
-					"models/GetUnifiedGlobalSearchFromOpenSearch Failed to unmarshal open search board json err: %+v",
-					err)
-				return
-			}
-			hitInfo.Type = openSearchStruct.BOARD_TYPE
-			hitInfo.Board = &boardInfo
-
-		case openSearchStruct.TASK_INDEX:
-			var taskInfo openSearchStruct.OpenSearchTask
-			err = json.Unmarshal(hit.Source, &taskInfo)
-			if err != nil {
-				helpers.LogErrorWithContext(ctx,
-					"models/GetUnifiedGlobalSearchFromOpenSearch Failed to unmarshal open search task json err: %+v",
-					err)
-				return
-			}
-			hitInfo.Type = openSearchStruct.TASK_TYPE
-			hitInfo.Task = &taskInfo
-
-		case openSearchStruct.USER_INDEX:
-			var userInfo openSearchStruct.OpenSearchUser
-			err = json.Unmarshal(hit.Source, &userInfo)
-			if err != nil {
-				helpers.LogErrorWithContext(ctx,
-					"models/GetUnifiedGlobalSearchFromOpenSearch Failed to unmarshal open search user json err: %+v",
-					err)
-				return
-			}
-			hitInfo.Type = openSearchStruct.USER_TYPE
-			hitInfo.User = &userInfo
-
-		case openSearchStruct.PROJECT_INDEX:
-			var projectInfo openSearchStruct.OpenSearchProject
-			err = json.Unmarshal(hit.Source, &projectInfo)
-			if err != nil {
-				helpers.LogErrorWithContext(ctx,
-					"models/GetUnifiedGlobalSearchFromOpenSearch Failed to unmarshal open search project json err: %+v",
-					err)
-				return
-			}
-			hitInfo.Type = openSearchStruct.PROJECT_TYPE
-			hitInfo.Project = &projectInfo
-
-		case openSearchStruct.CHANNEL_INDEX:
-			var channelInfo openSearchStruct.OpenSearchChannel
-			err = json.Unmarshal(hit.Source, &channelInfo)
-			if err != nil {
-				helpers.LogErrorWithContext(ctx,
-					"models/GetUnifiedGlobalSearchFromOpenSearch Failed to unmarshal open search channel json err: %+v",
-					err)
-				return
-			}
-			hitInfo.Type = openSearchStruct.CHANNEL_TYPE
-			hitInfo.Channel = &channelInfo
-
-		case openSearchStruct.TEAM_INDEX:
-			var teamInfo openSearchStruct.OpenSearchTeam
-			err = json.Unmarshal(hit.Source, &teamInfo)
-			if err != nil {
-				helpers.LogErrorWithContext(ctx,
-					"models/GetUnifiedGlobalSearchFromOpenSearch Failed to unmarshal open search team json err: %+v",
-					err)
-				return
-			}
-			hitInfo.Type = openSearchStruct.TEAM_TYPE
-			hitInfo.Team = &teamInfo
+		h, err := decodeHit(hit.Index, hit.Source)
+		if err != nil {
+			return SearchAnswer{}, fmt.Errorf("search: an entry in %s can't be read: %w", hit.Index, err)
 		}
-
-		searchInfo = append(searchInfo, &hitInfo)
+		if h == nil {
+			continue
+		}
+		h.Highlight = hit.Highlight
+		h.Sort = hit.Sort
+		out.Hits = append(out.Hits, h)
 	}
+	return out, nil
+}
 
-	return
+// decodeHit is an entry of an index read into its type's shape; nil for an
+// index search doesn't read.
+func decodeHit(index string, source json.RawMessage) (*openSearchStruct.GlobalSearchOpenSearchResp, error) {
+	h := &openSearchStruct.GlobalSearchOpenSearchResp{}
+	var err error
+	switch index {
+	case openSearchStruct.CHAT_INDEX:
+		h.Type, h.Chat = openSearchStruct.CHAT_TYPE, &openSearchStruct.OpenSearchChat{}
+		err = json.Unmarshal(source, h.Chat)
+	case openSearchStruct.POST_INDEX:
+		h.Type, h.Post = openSearchStruct.POST_TYPE, &openSearchStruct.OpenSearchPost{}
+		err = json.Unmarshal(source, h.Post)
+	case openSearchStruct.COMMENT_INDEX:
+		h.Type, h.Comment = openSearchStruct.COMMENT_TYPE, &openSearchStruct.OpenSearchComment{}
+		err = json.Unmarshal(source, h.Comment)
+	case openSearchStruct.ATTACHMENT_INDEX:
+		h.Type, h.Attachment = openSearchStruct.ATTACHMENT_TYPE, &openSearchStruct.OpenSearchAttachment{}
+		err = json.Unmarshal(source, h.Attachment)
+	case openSearchStruct.DOC_INDEX:
+		h.Type, h.Doc = openSearchStruct.DOC_TYPE, &openSearchStruct.OpenSearchDoc{}
+		err = json.Unmarshal(source, h.Doc)
+	case openSearchStruct.BOARD_INDEX:
+		h.Type, h.Board = openSearchStruct.BOARD_TYPE, &openSearchStruct.OpenSearchBoard{}
+		err = json.Unmarshal(source, h.Board)
+	case openSearchStruct.EVENT_INDEX:
+		h.Type, h.Event = openSearchStruct.EVENT_TYPE, &openSearchStruct.OpenSearchEvent{}
+		err = json.Unmarshal(source, h.Event)
+	case openSearchStruct.TASK_INDEX:
+		h.Type, h.Task = openSearchStruct.TASK_TYPE, &openSearchStruct.OpenSearchTask{}
+		err = json.Unmarshal(source, h.Task)
+	case openSearchStruct.USER_INDEX:
+		h.Type, h.User = openSearchStruct.USER_TYPE, &openSearchStruct.OpenSearchUser{}
+		err = json.Unmarshal(source, h.User)
+	case openSearchStruct.PROJECT_INDEX:
+		h.Type, h.Project = openSearchStruct.PROJECT_TYPE, &openSearchStruct.OpenSearchProject{}
+		err = json.Unmarshal(source, h.Project)
+	case openSearchStruct.CHANNEL_INDEX:
+		h.Type, h.Channel = openSearchStruct.CHANNEL_TYPE, &openSearchStruct.OpenSearchChannel{}
+		err = json.Unmarshal(source, h.Channel)
+	case openSearchStruct.TEAM_INDEX:
+		h.Type, h.Team = openSearchStruct.TEAM_TYPE, &openSearchStruct.OpenSearchTeam{}
+		err = json.Unmarshal(source, h.Team)
+	default:
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return h, nil
 }

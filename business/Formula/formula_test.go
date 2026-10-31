@@ -360,11 +360,19 @@ func TestValuesAsSent(t *testing.T) {
 // test has the same list); change both when one changes. CONCAT is
 // CONCATENATE's other name, which the editor doesn't list.
 func TestFunctionsTheEditorLists(t *testing.T) {
+	// 94: Airtable's 86, five of Notion's and a spreadsheet's, and Notion's
+	// FILTER and MAP with CURRENT (tables B2).
 	want := []string{
-		"ABS", "AND", "AVERAGE", "BLANK", "CEILING", "CONCAT", "CONCATENATE", "DATEADD", "DATETIME_DIFF", "DAY", "FALSE", "FIND", "FLOOR",
-		"IF", "ISBLANK", "ISERROR", "LEFT", "LEN", "LOWER", "MAX", "MID", "MIN", "MOD", "MONTH", "NOT", "NOW", "OR",
-		"POWER", "REPT", "RIGHT", "ROUND", "ROUNDDOWN", "ROUNDUP", "SQRT", "SUBSTITUTE", "SUM", "SWITCH", "TODAY",
-		"TRIM", "TRUE", "UPPER", "VALUE", "WEEKDAY", "WORKDAY_DIFF", "YEAR",
+		"ABS", "AND", "ARRAYCOMPACT", "ARRAYFLATTEN", "ARRAYJOIN", "ARRAYSLICE", "ARRAYUNIQUE", "AVERAGE", "BLANK",
+		"CEILING", "CONCAT", "CONCATENATE", "CONTAINS", "COUNT", "COUNTA", "COUNTALL", "CREATED_TIME", "CURRENT", "DATEADD",
+		"DATESTR", "DATETIME_DIFF", "DATETIME_FORMAT", "DATETIME_PARSE", "DAY", "ENCODE_URL_COMPONENT", "ERROR",
+		"EVEN", "EXP", "FALSE", "FILTER", "FIND", "FLOOR", "FROMNOW", "HOUR", "IF", "IFS", "INT", "ISBLANK", "ISERROR",
+		"IS_AFTER", "IS_BEFORE", "IS_SAME", "LAST_MODIFIED_TIME", "LEFT", "LEN", "LN", "LOG", "LOWER", "MAP", "MAX", "MID",
+		"MIN", "MINUTE", "MOD", "MONTH", "NOT", "NOW", "ODD", "OR", "PI", "POWER", "RECORD_ID", "REGEX_EXTRACT",
+		"REGEX_MATCH", "REGEX_REPLACE", "REPLACE", "REPT", "RIGHT", "ROUND", "ROUNDDOWN", "ROUNDUP", "SEARCH",
+		"SECOND", "SET_LOCALE", "SET_TIMEZONE", "SIGN", "SQRT", "SUBSTITUTE", "SUM", "SWITCH", "T", "TIMESTR",
+		"TODAY", "TONOW", "TRIM", "TRUE", "UPPER", "VALUE", "WEEKDAY", "WEEKNUM", "WORKDAY", "WORKDAY_DIFF", "XOR",
+		"YEAR",
 	}
 	var got []string
 	for name := range functions {

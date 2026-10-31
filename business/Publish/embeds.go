@@ -12,11 +12,12 @@ package business
 // embed.allowlist) are read as the web reads them (hostAllowed): https only.
 
 import (
-	"net/url"
 	"strings"
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
+
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // builtInSites are the hosts of the web app's built-in embeds, without
@@ -68,8 +69,8 @@ func hostAllowed(host string, entries []string) bool {
 // the workspace allows it; ok is false for any other link. Pure but for the
 // workspace's own addresses (intoApp).
 func embedSite(href string, adminHosts []string) (name, host string, ok bool) {
-	u, err := url.Parse(strings.TrimSpace(href))
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil || u.Host == "" || intoApp(href) {
+	u, ok := helpers.WebLink(strings.TrimSpace(href))
+	if !ok || u.User != nil || intoApp(href) {
 		return "", "", false
 	}
 	host = strings.TrimPrefix(strings.TrimSuffix(strings.ToLower(u.Hostname()), "."), "www.")

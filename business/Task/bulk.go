@@ -17,6 +17,8 @@ import (
 	"time"
 
 	syncBusiness "github.com/akashc777/OneCamp/business"
+	cycleBusiness "github.com/akashc777/OneCamp/business/Cycle"
+	milestoneBusiness "github.com/akashc777/OneCamp/business/Milestone"
 	taskPriority "github.com/akashc777/OneCamp/business/TaskPriority"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
 	domain "github.com/akashc777/OneCamp/domain/Task"
@@ -39,10 +41,13 @@ const (
 	BulkDue       = "due"
 	BulkDelete    = "delete"
 	BulkRestore   = "restore"
+	BulkCycle     = "cycle"
+	BulkMilestone = "milestone"
 )
 
 // BulkChange is one change: what (Op) and to what (Value: a priority, a tag,
-// a status, a due date as RFC 3339 or "" for none).
+// a status, a due date as RFC 3339 or "" for none, a cycle's id or "" for the
+// backlog, a milestone's id or "" for none).
 type BulkChange struct {
 	Op    string `json:"op"`
 	Value string `json:"value"`
@@ -154,6 +159,18 @@ func (c BulkChange) valid() error {
 				return &BulkError{"That due date couldn't be read."}
 			}
 		}
+	case BulkCycle:
+		if c.Value != "" {
+			if _, err := uuid.Parse(c.Value); err != nil {
+				return &BulkError{"That isn't one of this project's cycles."}
+			}
+		}
+	case BulkMilestone:
+		if c.Value != "" {
+			if _, err := uuid.Parse(c.Value); err != nil {
+				return &BulkError{"That isn't one of this project's milestones."}
+			}
+		}
 	case BulkDelete, BulkRestore:
 	default:
 		return &BulkError{"That isn't a change a bulk request makes."}
@@ -224,6 +241,10 @@ func Bulk(ctx context.Context, who *model.UserInfo, ids []uuid.UUID, change Bulk
 	switch change.Op {
 	case BulkPriority, BulkTagAdd, BulkTagRemove:
 		err = bulkFields(ctx, allowed, change, &who.UserDgraphInfo, res)
+	case BulkCycle:
+		err = bulkCycle(ctx, allowed, change.Value, res)
+	case BulkMilestone:
+		err = bulkMilestone(ctx, allowed, change.Value, res)
 	default:
 		for _, t := range allowed {
 			if e := bulkSeams.one(ctx, t, change, &who.UserDgraphInfo); e != nil {
@@ -335,6 +356,90 @@ func bulkFields(ctx context.Context, tasks []*dgraphStruct.DgraphTask, change Bu
 }
 
 // changeOne makes a change that has a writer of its own to one task.
+// bulkCycle puts tasks in the cycle with id cycleID, or takes them out of
+// theirs (""), in one write (Cycle's Put): Work Access has let the person
+// change each; Put checks each is in the cycle's project.
+func bulkCycle(ctx context.Context, tasks []*dgraphStruct.DgraphTask, cycleID string, res *BulkResult) error {
+	ids, projects, err := places(tasks)
+	if err != nil {
+		return err
+	}
+	placings := make([]cycleBusiness.Placing, 0, len(ids))
+	for _, id := range ids {
+		placings = append(placings, cycleBusiness.Placing{Task: id, Project: projects[id]})
+	}
+	moved, refused, err := cycleBusiness.Put(ctx, placings, cycleID)
+	var ce *cycleBusiness.CycleError
+	if errors.As(err, &ce) {
+		return &BulkError{ce.Error()}
+	}
+	if err != nil {
+		return err
+	}
+	placed(ids, moved, refused, res)
+	return nil
+}
+
+// bulkMilestone puts tasks in the milestone with id milestoneID, or takes
+// them out of theirs (""), in one write (Milestone's Put): Work Access has
+// let the person change each; Put checks the milestone shows in each one's
+// project.
+func bulkMilestone(ctx context.Context, tasks []*dgraphStruct.DgraphTask, milestoneID string, res *BulkResult) error {
+	ids, projects, err := places(tasks)
+	if err != nil {
+		return err
+	}
+	moved, refused, err := milestoneBusiness.Put(ctx, projects, milestoneID)
+	var me *milestoneBusiness.MilestoneError
+	if errors.As(err, &me) {
+		return &BulkError{me.Error()}
+	}
+	if err != nil {
+		return err
+	}
+	placed(ids, moved, refused, res)
+	return nil
+}
+
+// places is each task's id, in order, and its project's id ("" for none):
+// what a cycle's or a milestone's Put takes.
+func places(tasks []*dgraphStruct.DgraphTask) ([]uuid.UUID, map[uuid.UUID]string, error) {
+	ids := make([]uuid.UUID, 0, len(tasks))
+	projects := make(map[uuid.UUID]string, len(tasks))
+	for _, t := range tasks {
+		id, err := uuid.Parse(t.Uuid)
+		if err != nil {
+			return nil, nil, err
+		}
+		ids = append(ids, id)
+		projects[id] = ""
+		if t.Project != nil {
+			projects[id] = t.Project.Uuid
+		}
+	}
+	return ids, projects, nil
+}
+
+// placed files each task of ids under res by how a Put went: refused in
+// words, moved, or there already.
+func placed(ids []uuid.UUID, moved []string, refused map[uuid.UUID]error, res *BulkResult) {
+	changed := make(map[string]bool, len(moved))
+	for _, id := range moved {
+		changed[strings.ToLower(id)] = true
+	}
+	for _, t := range ids {
+		id := t.String()
+		switch {
+		case refused[t] != nil:
+			res.Refused = append(res.Refused, BulkRefusal{id, refused[t].Error()})
+		case changed[id]:
+			res.Changed = append(res.Changed, id)
+		default:
+			res.Unchanged = append(res.Unchanged, id)
+		}
+	}
+}
+
 func changeOne(ctx context.Context, t *dgraphStruct.DgraphTask, change BulkChange, by *dgraphStruct.DgraphUser) error {
 	id, err := uuid.Parse(t.Uuid)
 	if err != nil {

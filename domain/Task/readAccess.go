@@ -17,9 +17,9 @@ import (
 // GetTasksReadAccessFor reads, for one person (by graph uid), what
 // business/Task CanViewTask and business/WorkAccess decide each of the named
 // tasks by: the person's place in its project, its assignee and its maker;
-// with the task's name, its project's id, and its own and its project's
-// deletion. One query for the lot; ids that aren't uuids are left out, and so
-// is any task that doesn't exist.
+// with the task's name, where it stands and its dates, its project's id, and
+// its own and its project's deletion. One query for the lot; ids that aren't
+// uuids are left out, and so is any task that doesn't exist.
 func GetTasksReadAccessFor(ctx context.Context, taskUUIDs []string, userUID string) ([]*dgraphStruct.DgraphTask, error) {
 	ids := make([]string, 0, len(taskUUIDs))
 	for _, id := range taskUUIDs {
@@ -38,12 +38,16 @@ func GetTasksReadAccessFor(ctx context.Context, taskUUIDs []string, userUID stri
 				tasks(func: eq(task_uuid, ` + string(list) + `)) {
 					task_uuid
 					task_name
+					task_status
+					task_start_date
+					task_due_date
 					task_deleted_at
 					task_assignee { uid user_uuid }
 					task_created_by { uid user_uuid }
 					task_project {
 						uid
 						project_uuid
+						project_name
 						project_deleted_at
 						project_is_member: count(project_members @filter(uid($user)))
 						project_is_admin: count(project_admins @filter(uid($user)))
@@ -97,6 +101,80 @@ func GetTasksStandingFor(ctx context.Context, taskUUIDs []string, userUUID strin
 		helpers.LogErrorWithContext(ctx, "domain/GetTasksStandingFor err: %+v", err)
 	}
 	return tasks, err
+}
+
+// GetTasksStandingAmong is GetTasksStandingFor for many people in one read:
+// each one's own copy of the named tasks, by lower-case user uuid, with their
+// place in each task's project as GetTasksStandingFor reads it for them.
+// Ids that aren't uuids are left out.
+func GetTasksStandingAmong(ctx context.Context, taskUUIDs, userUUIDs []string) (map[string][]*dgraphStruct.DgraphTask, error) {
+	valid := func(in []string) []string {
+		out := make([]string, 0, len(in))
+		for _, id := range in {
+			if parsed, err := uuid.Parse(id); err == nil {
+				out = append(out, parsed.String())
+			}
+		}
+		return out
+	}
+	ids, people := valid(taskUUIDs), valid(userUUIDs)
+	out := make(map[string][]*dgraphStruct.DgraphTask, len(people))
+	if len(ids) == 0 || len(people) == 0 {
+		return out, nil
+	}
+	list, err := json.Marshal(ids)
+	if err != nil {
+		return nil, err
+	}
+	them, err := json.Marshal(people)
+	if err != nil {
+		return nil, err
+	}
+	query := `{
+				tasks(func: eq(task_uuid, ` + string(list) + `)) {
+					task_uuid
+					task_assignee { user_uuid }
+					task_created_by { user_uuid }
+					task_project {
+						uid
+						project_uuid
+						project_deleted_at
+						project_members @filter(eq(user_uuid, ` + string(them) + `)) { user_uuid }
+						project_admins @filter(eq(user_uuid, ` + string(them) + `)) { user_uuid }
+					}
+				}
+			}`
+	tasks, err := dgraphModels.QueryDgraphTasks(ctx, query, map[string]string{})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetTasksStandingAmong err: %+v", err)
+		return nil, err
+	}
+	among := func(users []*dgraphStruct.DgraphUser, who string) uint8 {
+		for _, u := range users {
+			if u != nil && strings.EqualFold(u.Uuid, who) {
+				return 1
+			}
+		}
+		return 0
+	}
+	for _, who := range people {
+		view := make([]*dgraphStruct.DgraphTask, 0, len(tasks))
+		for _, t := range tasks {
+			if t == nil {
+				continue
+			}
+			mine := *t
+			if t.Project != nil {
+				p := *t.Project
+				p.Members, p.Admins = nil, nil
+				p.IsProjectMember, p.IsProjectAdmin = among(t.Project.Members, who), among(t.Project.Admins, who)
+				mine.Project = &p
+			}
+			view = append(view, &mine)
+		}
+		out[who] = view
+	}
+	return out, nil
 }
 
 // GetTasksBelow is the live tasks below a task, its sub-tasks and theirs, by

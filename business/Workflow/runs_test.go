@@ -15,6 +15,7 @@ import (
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	workflowModel "github.com/akashc777/OneCamp/models/postgres/Workflow"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -249,9 +250,15 @@ func TestARunawayRuleStopsItself(t *testing.T) {
 }
 
 // Round robin goes round the people it names who are still in the project;
-// least loaded picks whoever has fewest open tasks.
+// least loaded picks whoever has fewest open tasks, counted as the rule's
+// owner sees the project.
 func TestAssignByTurnsAndByLoad(t *testing.T) {
 	f := newStore(t)
+	var countedAs []string
+	openCounts = func(ctx context.Context, _ string) (map[string]int, error) {
+		countedAs = append(countedAs, taskread.ReaderOf(ctx))
+		return f.counts, nil
+	}
 	f.members = map[string]bool{"ana": false, "ben": false, "cy": false, "bot": true}
 	cw := rule(Conditions{}, []WorkflowAction{{Type: ActionAssign, Assign: AssignRoundRobin, UserIDs: []string{"cy", "ana", "gone"}}}, nil)
 	var got []string
@@ -268,6 +275,11 @@ func TestAssignByTurnsAndByLoad(t *testing.T) {
 	runWorkflow(context.Background(), rule(Conditions{}, []WorkflowAction{{Type: ActionAssign, Assign: AssignLeastLoaded}}, nil), f.event("ll"))
 	if f.task.Assignee.Uuid != "ben" {
 		t.Errorf("least loaded gave it to %s", f.task.Assignee.Uuid)
+	}
+	// The fake owner has a profile and no Postgres row: read by their
+	// profile's uuid, as a signed-in person is.
+	if strings.Join(countedAs, ",") != "owner" {
+		t.Errorf("open tasks counted as %q, want as the rule's owner", countedAs)
 	}
 	f.counts = map[string]int{"ana": 1, "ben": 1, "cy": 1}
 	f.task.Assignee = nil

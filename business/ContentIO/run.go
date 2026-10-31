@@ -56,12 +56,19 @@ func runQueued(ctx context.Context) error {
 // upload, and the zip an export made.
 const keepFilesFor = 24 * time.Hour
 
+// readyFor is how long a ready job waits for its person to choose before the
+// cleanup fails it and lets its file go.
+const readyFor = 24 * time.Hour
+
+// maxPreviewBytes bounds what a Previewer's preview keeps on its job.
+const maxPreviewBytes = 4 << 20
+
 // cleanup fails what was abandoned and removes what is no longer needed: a
 // job's files once keepFilesFor has passed since it ended, the job itself
 // after a month.
 func cleanup(ctx context.Context) error {
 	now := time.Now()
-	dead, err := jobs.FailAbandoned(ctx, now.Add(-30*time.Minute), now.Add(-2*uploadExpiry))
+	dead, err := jobs.FailAbandoned(ctx, now.Add(-30*time.Minute), now.Add(-2*uploadExpiry), now.Add(-readyFor))
 	if err != nil {
 		return err
 	}
@@ -108,8 +115,13 @@ func (p *pipeline) run(ctx context.Context, row *contentIOModels.Job) {
 	_ = json.Unmarshal(row.Params, &params)
 	var created []Created
 	var skipped []Skipped
+	unchanged := 0
+	// A Targeted importer's count, where they went and what to show first.
+	var count int
+	var into []Into
+	var show *Created
 	finish := func(msg string) {
-		result, _ := json.Marshal(jobResult{Created: created, Skipped: skipped})
+		result, _ := json.Marshal(jobResult{Created: created, Skipped: skipped, Unchanged: unchanged, Made: count, Into: into, Show: show})
 		status := contentIOModels.StatusDone
 		var errText *string
 		if msg != "" {
@@ -137,8 +149,11 @@ func (p *pipeline) run(ctx context.Context, row *contentIOModels.Job) {
 		finish("The person who started this import can't make docs any more.")
 		return
 	}
+	targeted, _ := imp.(Targeted)
 	// Access may have changed while the job waited.
-	if err := checkParent(ctx, who, params.ParentUUID); err != nil {
+	if targeted != nil {
+		// A Targeted importer checks what it makes into itself.
+	} else if err := checkParent(ctx, who, params.ParentUUID); err != nil {
 		finish("You can no longer add pages to the page this import was going under.")
 		return
 	}
@@ -161,6 +176,36 @@ func (p *pipeline) run(ctx context.Context, row *contentIOModels.Job) {
 	}()
 
 	progress := newProgress(ctx, p, row)
+	if targeted != nil {
+		in := Input{Filename: params.Filename, MediaType: params.MediaType, Size: size, File: f}
+		if pv, ok := targeted.(Previewer); ok && !params.Confirmed {
+			p.preview(ctx, row, pv, who, in, params.Choices, finish)
+			return
+		}
+		made, err := targeted.Make(ctx, who, in, params.Choices, func(done, total int) { progress.set(scaled(done, total, 0, 100)) })
+		created, skipped, unchanged = made.Created, made.Skipped, made.Unchanged
+		count, into, show = made.Count, made.Into, made.Show
+		if err != nil {
+			finish(importError(ctx, err))
+			return
+		}
+		// Nothing is what made nothing: no new thing named, none found already
+		// there, and none counted. Rows brought into a table that was already
+		// there are counted, not named (Created holds only new things, as a
+		// sheet's new tables: business/DataTable madeOf), and once they were
+		// read as nothing, so a done import said it failed and was run again,
+		// its rows twice (V-40).
+		if len(created) == 0 && unchanged == 0 && count == 0 {
+			msg := "There was nothing in the file to import."
+			if len(skipped) > 0 {
+				msg = "Nothing in the file could be imported: " + skipped[0].Why
+			}
+			finish(msg)
+			return
+		}
+		finish("")
+		return
+	}
 	out := &collector{report: func(done, total int) { progress.set(scaled(done, total, 0, 40)) }}
 	in := Input{Filename: params.Filename, MediaType: params.MediaType, Size: size, File: f}
 	if err := imp.Import(ctx, in, out); err != nil {
@@ -184,6 +229,30 @@ func (p *pipeline) run(ctx context.Context, row *contentIOModels.Job) {
 		return
 	}
 	finish("")
+}
+
+// preview reads a Previewer's file as choices say, and leaves its job ready
+// with what it found, its file kept for the import to come; a file it can't
+// read ends the job as a failed import does (finish).
+func (p *pipeline) preview(ctx context.Context, row *contentIOModels.Job, pv Previewer, who accessBusiness.Subject, in Input, choices json.RawMessage, finish func(msg string)) {
+	found, err := pv.Preview(ctx, who, in, choices)
+	if err == nil && len(found) > maxPreviewBytes {
+		err = readError{"The file holds more than its preview can show. Import it in parts."}
+	}
+	if err != nil {
+		finish(importError(ctx, err))
+		return
+	}
+	result, err := json.Marshal(jobResult{Preview: found})
+	if err == nil {
+		err = jobs.Ready(ctx, row.ID, result)
+	}
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "content io: job %s could not be left ready: %v", row.ID, err)
+		finish("The file was read, but what it holds couldn't be kept to show you. Import it again.")
+		return
+	}
+	_, _ = p.announce(ctx, row.ID)
 }
 
 // nothingImported is what an import that filled no doc says: why, and any

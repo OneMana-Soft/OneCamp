@@ -60,12 +60,16 @@ var (
 // chatEvents is a message's change as its two outbox events. A message an
 // import writes (helpers.IsBulkImport) is only indexed, as today's writers do:
 // nobody is told of history, and no app is sent it live. Pure.
-func chatEvents(kind, conversation string, chat uuid.UUID, actor string, imported bool) []outboxBusiness.Entry {
+func chatEvents(kind, conversation string, chat uuid.UUID, actor string, imported bool, chatKind string) []outboxBusiness.Entry {
 	entities := map[string]string{"message": chat.String(), "conversation": conversation, "kind": kind}
 	rest := outboxBusiness.Entry{Topic: MessageTopic, Kind: MessageCreated, Key: "chat:" + chat.String(), Entities: entities, Actor: actor, Sinks: chatEffectSinks}
 	if imported {
 		rest.Sinks = []string{sinkChatSearch}
 		return []outboxBusiness.Entry{rest}
+	}
+	// A call's message (calls CALLS-3b) tells nobody, and isn't embedded.
+	if chatKind == helpers.KindHuddle {
+		rest.Sinks = []string{sinkChatSearch, sinkChatEvents}
 	}
 	live := outboxBusiness.Entry{Topic: MessageTopic, Kind: MessageCreated, Key: kind + ":" + conversation, Entities: entities, Actor: actor, Sinks: chatLiveSinks}
 	return []outboxBusiness.Entry{live, rest}
@@ -88,6 +92,9 @@ func CreateDMDurably(ctx context.Context, chatInfo *adapter.ChatInfo, userInfo *
 	chatUUID := uuid.New()
 	at := helpers.CreateTimeOrNow(ctx)
 	author := userInfo.UserPostgresInfo.Id
+	if chatInfo.Kind != "" {
+		ctx = helpers.WithMessageKind(ctx, chatInfo.Kind)
+	}
 	grp := helpers.GetGroupingId(author.String(), chatInfo.ToUuid)
 
 	// 1. The rows and the events.
@@ -124,6 +131,9 @@ func CreateGroupMessageDurably(ctx context.Context, chatInfo *adapter.ChatInfo, 
 	chatUUID := uuid.New()
 	at := helpers.CreateTimeOrNow(ctx)
 	author := userInfo.UserPostgresInfo.Id
+	if chatInfo.Kind != "" {
+		ctx = helpers.WithMessageKind(ctx, chatInfo.Kind)
+	}
 	isNewGroup := chatInfo.GrpUuid == ""
 	people := uuidsOf(participants)
 	if isNewGroup {
@@ -260,7 +270,7 @@ func writeChatRowsIn(ctx context.Context, kind, conversation string, chatUUID, a
 	}
 	var events []int64
 	// A message's events are two at most (live, and the rest), as a post's.
-	for _, e := range chatEvents(kind, conversation, chatUUID, actor, helpers.IsBulkImport(ctx)) {
+	for _, e := range chatEvents(kind, conversation, chatUUID, actor, helpers.IsBulkImport(ctx), helpers.MessageKind(ctx)) {
 		id, err := outboxBusiness.Add(ctx, tx, e)
 		if err != nil {
 			return nil, err

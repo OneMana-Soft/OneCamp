@@ -54,16 +54,25 @@ func manualTaskList(ctx context.Context, projectUUID, userDgraphUID, filterQuery
 	if err != nil {
 		return nil, err
 	}
-	page := manualPage(places, pageSize, pageIndex, getAll)
+	project, err := manualRows(ctx, projectUUID, userDgraphUID, filterQuery, manualPage(places, pageSize, pageIndex, getAll), getAll)
+	if err != nil || project == nil {
+		return project, err
+	}
+	project.TaskCount = uint64(len(places))
+	return project, nil
+}
+
+// manualRows reads the list's tasks at page's places, in their order; all
+// reads them however many there are.
+func manualRows(ctx context.Context, projectUUID, userDgraphUID, filterQuery string, page []*dgraphStruct.DgraphTask, all bool) (*dgraphStruct.DgraphProject, error) {
 	uids := make([]string, 0, len(page))
 	for _, p := range page {
 		uids = append(uids, p.Uid)
 	}
-	project, err := domain.GetDgraphProjectTaskList(ctx, projectUUID, userDgraphUID, uidFilter(filterQuery, uids), "", len(uids), 0, getAll || len(uids) == 0)
+	project, err := domain.GetDgraphProjectTaskList(ctx, projectUUID, userDgraphUID, uidFilter(filterQuery, uids), "", len(uids), 0, all || len(uids) == 0)
 	if err != nil || project == nil {
 		return project, err
 	}
 	inOrder(project.Tasks, page)
-	project.TaskCount = uint64(len(places))
 	return project, nil
 }

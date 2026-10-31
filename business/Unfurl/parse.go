@@ -11,6 +11,8 @@ import (
 
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/charset"
+
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // How long each of a card's words may be, in characters.
@@ -213,7 +215,7 @@ func absURL(base *url.URL, ref string) string {
 	if base != nil {
 		r = base.ResolveReference(r)
 	}
-	if (r.Scheme != "http" && r.Scheme != "https") || r.Host == "" {
+	if !helpers.IsWebURL(r) {
 		return ""
 	}
 	return r.String()

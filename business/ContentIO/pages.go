@@ -122,7 +122,9 @@ func (m *docMaker) make(ctx context.Context, pages []Page) (out Made) {
 
 	// Then each doc's content, parents first. With the document service down
 	// (not running, or not answering) every seed fails alike, so the rest are
-	// not tried.
+	// not tried. What a page says was written in the tool it came from, so its
+	// doc keeps whom it mentions and tells nobody: kept before the seed
+	// (KeepCopiedMentions), which is quiet.
 	ok := make([]bool, len(made))
 	var down bool
 	for i, d := range made {
@@ -130,7 +132,9 @@ func (m *docMaker) make(ctx context.Context, pages []Page) (out Made) {
 			body := rewriteLinks(d.page, uuids)
 			body, lost := m.uploadImages(ctx, d.uuid, d.page, body)
 			out.Skipped = append(out.Skipped, lost...)
-			_, err := collab.Live.Seed(ctx, d.uuid, contentcodec.ToHTML(body), collab.Options{By: collab.By{UserUUID: m.who.UserUUID, AgentUUID: m.who.AgentUUID}})
+			html := contentcodec.ToHTML(body)
+			docBusiness.KeepCopiedMentions(ctx, d.uuid, html)
+			_, err := collab.Live.Seed(ctx, d.uuid, html, collab.Options{By: collab.By{UserUUID: m.who.UserUUID, AgentUUID: m.who.AgentUUID}, Quiet: true})
 			if err != nil {
 				helpers.LogErrorWithContext(ctx, "content io: doc %s could not be seeded: %v", d.uuid, err)
 				if down = errors.Is(err, collab.ErrUnavailable); down {

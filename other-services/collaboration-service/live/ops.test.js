@@ -4,6 +4,7 @@ import * as Y from 'yjs'
 import { Extension } from '@tiptap/core'
 import { TiptapTransformer } from '@hocuspocus/transformer'
 import { COLLAB_EXTENSIONS } from '../extensions.js'
+import { bodyHash } from '../docState.js'
 import { covers } from '../persisted.js'
 import { FakeBackend, FakeRedis, TestClient, onClose, startServer, until, sleep } from '../testkit.js'
 import { createLiveServer } from './server.js'
@@ -40,12 +41,15 @@ const BlockIds = Extension.create({
     },
 })
 
-async function world({ body = BODY, extensions } = {}) {
+// world is a collaboration server and its live port. server is more options
+// for the server (its save debounce), and liveDeps(deps) the deps the live
+// port's ops get, from the server's own.
+async function world({ body = BODY, extensions, server = {}, liveDeps = (deps) => deps } = {}) {
     const redis = new FakeRedis()
     const backend = new FakeBackend()
     backend.doc(ID, body)
-    const collab = await startServer({ redis, backend, ...(extensions ? { extensions } : {}) })
-    const live = createLiveServer({ getSecret: () => SECRET, hocuspocus: collab.server.hocuspocus, deps: collab.live })
+    const collab = await startServer({ redis, backend, ...(extensions ? { extensions } : {}), ...server })
+    const live = createLiveServer({ getSecret: () => SECRET, hocuspocus: collab.server.hocuspocus, deps: liveDeps(collab.live) })
     await new Promise((resolve) => live.listen(0, '127.0.0.1', resolve))
     // Closed when the test ends, unless close() below gets there first: an op
     // still waiting on the doc is cut off rather than held open.
@@ -229,6 +233,313 @@ test('seed writes a new doc once, and refuses one that has content', async () =>
     const tab = await w.tab()
     assert.equal(times(tab.doc, 'From the template'), 1)
     await w.close()
+})
+
+// A quiet write (a copy's body, an import's) is saved saying so: the API keeps
+// whom its body mentions and tells nobody. Whoever the API named still counts
+// among who edited. Typing after it is a person's own, and its save is loud.
+test('a quiet seed is saved as quiet, and the typing after it is not', async () => {
+    const w = await world({ body: '' })
+    const seeded = await w.op('seed', { html: '<p>Copied: Maya owns the launch.</p>', by: { user_uuid: 'user-1' }, quiet: true })
+    assert.equal(seeded.status, 200, seeded.msg)
+    const copied = w.backend.saves.find((s) => s.html?.includes('Copied'))
+    assert.ok(copied, 'the seed is stored')
+    assert.equal(copied.quiet, true, "the seed's save says it is quiet")
+    assert.deepEqual(copied.contributors, ['user-1'], 'a quiet person still counts among who edited')
+
+    const tab = await w.tab('{"sub":"user-2"}')
+    const p = new Y.XmlElement('paragraph')
+    p.insert(0, [new Y.XmlText('Typed after the copy.')])
+    tab.doc.getXmlFragment('default').insert(tab.doc.getXmlFragment('default').length, [p])
+    await until(() => w.backend.saves.some((s) => s.html?.includes('Typed after the copy.')), 3000, 'the save of the typing')
+    const typed = w.backend.saves.find((s) => s.html?.includes('Typed after the copy.'))
+    assert.equal(typed.quiet, false, 'typing is never quiet')
+    assert.deepEqual(typed.contributors, ['user-2'])
+    await w.close()
+    assert.deepEqual(rejections, [])
+})
+
+// A quiet write's save stands alone: the op stores the doc at once (the direct
+// connection's transact), not on the save debounce, and answers once it is
+// stored. So a person who opens the fresh copy and types an @mention within
+// the debounce (5 s here, as in production) is saved apart and loudly: the API
+// tells whom they mention (Ana), not whom the seed does (Maya).
+test('a quiet seed is stored at once, so typing within the debounce is saved apart and loud', async () => {
+    const w = await world({ body: '', server: { debounce: 5000, maxDebounce: 30000 } })
+    const seeded = await w.op('seed', { html: '<p>Copied: <span data-type="mention" data-id="maya@0x3" data-label="Maya">@Maya</span> owns the launch.</p>', by: { user_uuid: 'user-1' }, quiet: true })
+    assert.equal(seeded.status, 200, seeded.msg)
+    assert.equal(seeded.data.persisted, true, 'stored before the op answers')
+
+    const tab = await w.tab('{"sub":"user-2"}')
+    const p = new Y.XmlElement('paragraph')
+    const ana = new Y.XmlElement('mention')
+    ana.setAttribute('id', 'ana@0x5')
+    ana.setAttribute('label', 'Ana')
+    p.insert(0, [new Y.XmlText('Ask '), ana])
+    tab.doc.getXmlFragment('default').insert(tab.doc.getXmlFragment('default').length, [p])
+    await until(() => w.backend.saves.some((s) => s.html?.includes('ana@0x5')), 9000, 'the save of the typing')
+
+    const seed = w.backend.saves.filter((s) => s.html?.includes('maya@0x3') && !s.html.includes('ana@0x5'))
+    assert.equal(seed.length, 1, "the seed's own save")
+    assert.equal(seed[0].quiet, true)
+    for (const s of w.backend.saves.filter((x) => x.html?.includes('ana@0x5'))) {
+        assert.equal(s.quiet, false, 'a save holding the typing is loud')
+        assert.deepEqual(s.contributors, ['user-2'])
+    }
+    await w.close()
+    assert.deepEqual(rejections, [])
+})
+
+// A copy's body that mentions Maya, as Duplicate seeds it, quietly.
+const COPIED = '<p>Copied: <span data-type="mention" data-id="maya@0x3" data-label="Maya">@Maya</span> owns the launch.</p>'
+
+// asking is a paragraph that mentions someone, as a person types it.
+function asking(label, id) {
+    const p = new Y.XmlElement('paragraph')
+    const chip = new Y.XmlElement('mention')
+    chip.setAttribute('id', id)
+    chip.setAttribute('label', label)
+    p.insert(0, [new Y.XmlText('Ask '), chip])
+    return p
+}
+
+const serverDoc = (w) => w.collab.server.hocuspocus.documents.get(ID)
+
+// gateRedis makes Redis slow to answer a save's first question, the buffer's
+// count, which comes before the save reads the doc: it answers once ready()
+// holds (or after 2 s). In production the save asks Redis twice before it
+// reads the doc (the Redis extension's lock, then the count), so whatever
+// reaches the doc while Redis answers is in the doc the save reads.
+function gateRedis(w, ready) {
+    const llen = w.redis.llen.bind(w.redis)
+    w.redis.llen = async (key) => {
+        await until(ready, 2000, 'the gate').catch(() => {})
+        return llen(key)
+    }
+}
+
+// A write to a doc nobody has open answers that it is stored once its save is
+// in. Letting go of such a doc unloads it, and the answer used to be read after
+// that, when the record of what is stored was gone with it: every such write
+// answered persisted: false and logged a retry that never was.
+test('a write to a doc nobody has open answers that it is stored, and logs no retry', async () => {
+    const w = await world()
+    const out = await w.op('append', { html: '<p>Appended with nobody there.</p>', by: { user_uuid: 'user-9' } })
+    assert.equal(out.status, 200, out.msg)
+    assert.match(w.backend.docs.get(ID).doc_body, /Appended with nobody there\./, 'stored before the op answered')
+    assert.equal(w.collab.server.hocuspocus.documents.has(ID), false, 'let go of, as nobody has it open')
+    assert.equal(out.data.persisted, true)
+    assert.ok(out.data.persisted_at)
+    assert.deepEqual(w.collab.logs.lines.filter((l) => l.includes('[Live]')), [], 'no retry logged')
+    await w.close()
+    assert.deepEqual(rejections, [])
+})
+
+// A quiet write nothing joins is one save.
+test('a quiet seed nothing joins is saved once', async () => {
+    const w = await world({ body: '' })
+    const seeded = await w.op('seed', { html: COPIED, by: { user_uuid: 'user-1' }, quiet: true })
+    assert.equal(seeded.status, 200, seeded.msg)
+    assert.equal(seeded.data.persisted, true)
+    await sleep(100) // the kit's save debounce is 20 ms: any later save is in by now
+    assert.equal(w.backend.payloads.length, 1)
+    assert.equal(w.backend.payloads[0].quiet, true)
+    assert.deepEqual(w.backend.payloads[0].contributors, ['user-1'])
+    await w.close()
+    assert.deepEqual(rejections, [])
+})
+
+// What reaches a doc while its quiet save waits on Redis is not that save's.
+// A tab open on the new doc types an @mention the moment the seed reaches it,
+// and Redis answers only once that typing is on the server. The seed's save
+// holds the doc as the seed left it, quiet and credited to the seed alone. The
+// typing goes in the next save, loud and credited to the typist alone, and that
+// save follows the seed's (its lineage) at the API.
+test('typing that lands while a quiet save waits on Redis is saved after it, loudly', async () => {
+    const w = await world({ body: '', server: { debounce: 5000, maxDebounce: 30000 } })
+    const tab = await w.tab('{"sub":"user-2"}')
+    let typed = false
+    gateRedis(w, () => typed && covers(Y.encodeStateVector(serverDoc(w)), Y.encodeStateVector(tab.doc)))
+    tab.doc.on('update', (_u, origin) => {
+        if (typed || origin !== tab || !json(tab.doc).includes('maya@0x3')) return
+        typed = true
+        tab.doc.getXmlFragment('default').push([asking('Ana', 'ana@0x5')])
+    })
+    const seeded = await w.op('seed', { html: COPIED, by: { user_uuid: 'user-1' }, quiet: true })
+    assert.equal(seeded.status, 200, seeded.msg)
+    assert.ok(typed, 'the tab typed while the seed was being saved')
+    assert.equal(seeded.data.persisted, true)
+    await until(() => w.backend.payloads.some((p) => p.htmlContent?.includes('ana@0x5')), 9000, 'the save of the typing')
+
+    const [seed, typing, ...more] = w.backend.payloads
+    assert.equal(seed.quiet, true, "the seed's save is quiet")
+    assert.deepEqual(seed.contributors, ['user-1'], 'and credited to the seed alone')
+    assert.match(seed.htmlContent, /maya@0x3/)
+    assert.doesNotMatch(seed.htmlContent, /ana@0x5/, 'and holds only the seed')
+    assert.ok(typing, 'the typing is saved after it')
+    assert.equal(typing.quiet, undefined, 'loudly')
+    assert.deepEqual(typing.contributors, ['user-2'], 'credited to the typist alone')
+    assert.match(typing.htmlContent, /maya@0x3[\s\S]*ana@0x5/)
+    assert.equal(typing.lineage, seed.lineage)
+    assert.deepEqual(more, [], 'two saves')
+    assert.match(w.backend.docs.get(ID).doc_body, /ana@0x5/)
+    await w.close()
+    assert.deepEqual(rejections, [])
+})
+
+// The save after a quiet one is checked against it at the API. The typing that
+// lands while the quiet save waits is undone before that save reads the doc, so
+// the body is the seed's again and only the state moved: the next save stores
+// the state against the body the quiet save stored (its hash, its lineage), and
+// the API takes it.
+test("the save after a quiet one is checked against the quiet save's body", async () => {
+    const w = await world({ body: '', server: { debounce: 5000, maxDebounce: 30000 } })
+    const tab = await w.tab('{"sub":"user-2"}')
+    let typed = false
+    gateRedis(w, () => typed && covers(Y.encodeStateVector(serverDoc(w)), Y.encodeStateVector(tab.doc)))
+    tab.doc.on('update', (_u, origin) => {
+        if (typed || origin !== tab || !json(tab.doc).includes('maya@0x3')) return
+        typed = true
+        const fragment = tab.doc.getXmlFragment('default')
+        fragment.push([asking('Ana', 'ana@0x5')])
+        fragment.delete(fragment.length - 1, 1)
+    })
+    const seeded = await w.op('seed', { html: COPIED, by: { user_uuid: 'user-1' }, quiet: true })
+    assert.equal(seeded.status, 200, seeded.msg)
+    assert.ok(typed, 'the tab typed while the seed was being saved')
+    await until(() => w.backend.payloads.length >= 2, 3000, 'the save after the quiet one')
+
+    const [seed, after, ...more] = w.backend.payloads
+    assert.equal(seed.quiet, true)
+    assert.deepEqual(seed.contributors, ['user-1'])
+    assert.equal(after.keepBody, true, "the body is the seed's: only the state moved")
+    assert.equal(after.expectBodyHash, bodyHash(seed.htmlContent), "checked against the quiet save's body")
+    assert.equal(after.lineage, seed.lineage)
+    assert.equal(after.quiet, undefined)
+    assert.deepEqual(after.contributors, ['user-2'])
+    assert.deepEqual(more, [])
+    assert.deepEqual(w.backend.saves.map((s) => [!!s.keepBody, s.quiet]), [[false, true], [true, false]], 'the API took both, in order')
+    await w.close()
+    assert.deepEqual(rejections, [])
+})
+
+// A seed goes only into a doc nobody has written in, saved or not, so the doc
+// as a quiet seed leaves it never holds anyone's typing. Typing still on the
+// save debounce refuses the seed, and is saved as the typist's, loudly.
+test("a quiet seed is refused by a doc holding someone's unsaved typing, which stays theirs", async () => {
+    const w = await world({ body: '', server: { debounce: 5000, maxDebounce: 30000 } })
+    const tab = await w.tab('{"sub":"user-2"}')
+    tab.doc.getXmlFragment('default').push([asking('Ana', 'ana@0x5')])
+    await until(() => json(serverDoc(w)).includes('ana@0x5'), 2000, 'the typing on the server')
+    assert.equal(w.backend.payloads.length, 0, 'not saved yet: it is on the debounce')
+    const seeded = await w.op('seed', { html: COPIED, by: { user_uuid: 'user-1' }, quiet: true })
+    assert.equal(seeded.status, 409, seeded.msg)
+    await until(() => w.backend.payloads.some((p) => p.htmlContent?.includes('ana@0x5')), 9000, 'the save of the typing')
+    for (const p of w.backend.payloads) {
+        assert.equal(p.quiet, undefined, 'loud')
+        assert.deepEqual(p.contributors, ['user-2'])
+        assert.doesNotMatch(p.htmlContent, /maya@0x3/)
+    }
+    await w.close()
+    assert.deepEqual(rejections, [])
+})
+
+// A quiet save that fails is retried as it was: the doc as the quiet write left
+// it, quiet and credited to it alone. What was typed while it failed is saved
+// after it, loudly.
+test('a quiet save that fails is retried quiet and alone, and the typing meanwhile after it, loudly', async () => {
+    const w = await world({ body: '', server: { debounce: 5000, maxDebounce: 30000 } })
+    w.backend.saveStatus = 503
+    const seeded = await w.op('seed', { html: COPIED, by: { user_uuid: 'user-1' }, quiet: true })
+    assert.equal(seeded.status, 200, seeded.msg)
+    assert.equal(seeded.data.persisted, false, 'not stored yet')
+    const tab = await w.tab('{"sub":"user-2"}')
+    tab.doc.getXmlFragment('default').push([asking('Ana', 'ana@0x5')])
+    await until(() => json(serverDoc(w)).includes('ana@0x5'), 2000, 'the typing on the server')
+    w.backend.saveStatus = null
+    await until(() => w.backend.payloads.some((p) => p.htmlContent?.includes('ana@0x5')), 9000, 'the save of the typing')
+
+    const [seed, typing, ...more] = w.backend.payloads
+    assert.equal(seed.quiet, true)
+    assert.deepEqual(seed.contributors, ['user-1'])
+    assert.doesNotMatch(seed.htmlContent, /ana@0x5/)
+    assert.ok(typing, 'the typing is saved after it')
+    assert.equal(typing.quiet, undefined)
+    assert.deepEqual(typing.contributors, ['user-2'])
+    assert.equal(typing.lineage, seed.lineage)
+    assert.deepEqual(more, [])
+    await w.close()
+    assert.deepEqual(rejections, [])
+})
+
+// The one place the conservative choice remains (contributors.js): a quiet
+// write whose save never went through before the service restarted. What the
+// quiet write left was held in memory and is gone; its quiet mark is in Redis
+// with the doc's kept state, and the save that takes it is quiet whatever it
+// holds. So the copy's mentions still tell nobody, and nor does anything typed
+// into it before the restart.
+test('after a restart, a quiet write never saved is saved quiet, with what was typed before the restart', async () => {
+    const w = await world({ body: '', server: { debounce: 5000, maxDebounce: 30000 } })
+    w.backend.saveStatus = 503
+    const seeded = await w.op('seed', { html: COPIED, by: { user_uuid: 'user-1' }, quiet: true })
+    assert.equal(seeded.status, 200, seeded.msg)
+    const tab = await w.tab('{"sub":"user-2"}')
+    tab.doc.getXmlFragment('default').push([asking('Ana', 'ana@0x5')])
+    await until(() => json(serverDoc(w)).includes('ana@0x5'), 2000, 'the typing on the server')
+    await w.close()
+    assert.equal(w.backend.payloads.length, 0, 'nothing stored before the restart')
+
+    const collab = await startServer({ redis: w.redis, backend: w.backend, debounce: 5000, maxDebounce: 30000 })
+    w.backend.saveStatus = null
+    await collab.recoverUnsaved()
+    await until(() => w.backend.payloads.length > 0, 5000, 'the save after the restart')
+    await sleep(100)
+    const [save, ...more] = w.backend.payloads
+    assert.equal(save.quiet, true)
+    assert.deepEqual(save.contributors, ['user-1', 'user-2'])
+    assert.match(save.htmlContent, /maya@0x3[\s\S]*ana@0x5/)
+    assert.deepEqual(more, [])
+    await collab.stop()
+    assert.deepEqual(rejections, [])
+})
+
+// A quiet write refused inside its transaction (someone typed between the
+// check and the write) takes its quiet mark back before the op lets go of the
+// doc, which stores it at once: that save holds only what the person typed,
+// and is loud. (The save debounce is production's here, so the op's own store
+// is the one save in that window.)
+test('a quiet write refused in its transaction leaves no quiet mark behind', async () => {
+    let typeNow = null
+    const w = await world({
+        body: '',
+        server: { debounce: 5000, maxDebounce: 30000 },
+        liveDeps: (deps) => ({
+            ...deps,
+            contributors: {
+                ...deps.contributors,
+                // Someone types between the op's check and its write.
+                record: async (id, who) => {
+                    await deps.contributors.record(id, who)
+                    if (typeNow) await typeNow()
+                },
+            },
+        }),
+    })
+    const tab = await w.tab('{"sub":"user-2"}')
+    typeNow = async () => {
+        const p = new Y.XmlElement('paragraph')
+        p.insert(0, [new Y.XmlText('Typed while the seed waited.')])
+        tab.doc.getXmlFragment('default').insert(0, [p])
+        await until(() => times(w.collab.server.hocuspocus.documents.get(ID), 'Typed while the seed waited.') === 1, 2000, 'the typing on the server')
+    }
+    const seeded = await w.op('seed', { html: '<p>Copied.</p>', by: { user_uuid: 'user-1' }, quiet: true })
+    assert.equal(seeded.status, 409, seeded.msg)
+    await until(() => w.backend.saves.some((s) => s.html?.includes('Typed while the seed waited.')), 3000, 'the save of the typing')
+    for (const s of w.backend.saves.filter((x) => x.html?.includes('Typed while the seed waited.'))) {
+        assert.equal(s.quiet, false, "the save of someone's typing is loud")
+    }
+    await w.close()
+    assert.deepEqual(rejections, [])
 })
 
 test('writes are credited to whoever the API names, and an agent with whoever asked it', async () => {

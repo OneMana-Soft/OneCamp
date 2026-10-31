@@ -25,6 +25,7 @@ import (
 	"github.com/akashc777/OneCamp/initializers/firebaseInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	mqttStruct "github.com/akashc777/OneCamp/models/mqtt"
+	approvalsModel "github.com/akashc777/OneCamp/models/postgres/Approvals"
 	guestModel "github.com/akashc777/OneCamp/models/postgres/Guest"
 	userModel "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
@@ -517,21 +518,36 @@ func archiveChats(ctx context.Context, cutoff time.Time) (int64, int64, []string
 // takes the rest.
 const archiveTaskBatch = 5000
 
+// archiveTasks archives the tasks made before cutoff: all of them, or only
+// the done and canceled ones (archiveCompletedTasks). The tasks it takes go
+// on without their open requests, as a deleted task does (business/Task
+// WentOn): each closes as moved on, a held move or an ask about the task
+// itself, so no waiting list keeps it and a late answer is told it's closed.
 func archiveTasks(ctx context.Context, cutoff time.Time, archiveCompletedTasks bool) (int64, int64, []string, error) {
+	var ids []string
 	if !archiveCompletedTasks {
-		return archiveTable(ctx, "tasks", cutoff)
+		archived, total, all, err := archiveTable(ctx, "tasks", cutoff)
+		if err != nil {
+			return archived, total, nil, err
+		}
+		ids = all
+	} else {
+		// Only the done and canceled ones, closed before the cutoff. Their status
+		// is in the graph: Postgres has no status column, so this asked it for one
+		// and, with the setting on (the default), every task archive failed.
+		closed, err := taskDomain.ClosedTaskUUIDsBefore(ctx, cutoff, archiveTaskBatch)
+		if err != nil || len(closed) == 0 {
+			return 0, 0, nil, err
+		}
+		if ids, err = archiveModels.ArchiveTasksIn(ctx, cutoff, closed); err != nil {
+			return 0, 0, nil, err
+		}
 	}
-	// Only the done and canceled ones, closed before the cutoff. Their status
-	// is in the graph: Postgres has no status column, so this asked it for one
-	// and, with the setting on (the default), every task archive failed.
-	closed, err := taskDomain.ClosedTaskUUIDsBefore(ctx, cutoff, archiveTaskBatch)
-	if err != nil || len(closed) == 0 {
-		return 0, 0, nil, err
-	}
-
-	ids, err := archiveModels.ArchiveTasksIn(ctx, cutoff, closed)
-	if err != nil {
-		return 0, 0, nil, err
+	// A failure here leaves the tasks archived and their requests open: logged.
+	if len(ids) > 0 {
+		if err := approvalsModel.CloseOpenForTasks(ctx, ids, approvalsModel.MovedOn, true); err != nil {
+			helpers.LogErrorWithContext(ctx, "archive: closing the open requests of %d archived tasks: %v", len(ids), err)
+		}
 	}
 	return int64(len(ids)), int64(len(ids)), ids, nil
 }
@@ -618,6 +634,30 @@ func checkRunningArchiveJob(ctx context.Context, entityType string) error {
 	return nil
 }
 
+// ArchiveInGraphAndSearch archives ids of entityType in the graph and search
+// as an archive run does once their rows are marked deleted: the graph in one
+// write a batch, then search in one update in the background, with the
+// entries that name them (a task's comments, files and AI entries). For a
+// caller that marked many rows deleted itself: an import's rollback.
+func ArchiveInGraphAndSearch(ctx context.Context, entityType string, ids []string) error {
+	ops, ok := entityRegistry[entityType]
+	if !ok {
+		return fmt.Errorf("unsupported entity type: %s", entityType)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if ops.ArchiveDgraphFn != nil {
+		if err := ops.ArchiveDgraphFn(ctx, ids); err != nil {
+			return err
+		}
+	}
+	if ops.OpenSearchArchiveFn != nil {
+		ops.OpenSearchArchiveFn(ids)
+	}
+	return nil
+}
+
 // RestoreItems restores archived items by clearing their deleted_at timestamp.
 // Dgraph sync is performed synchronously to match the archive path; OpenSearch
 // cascades are async fire-and-forget.
@@ -661,27 +701,35 @@ func RestoreItems(ctx context.Context, entityType string, entityIds []uuid.UUID)
 		ids[i] = id.String()
 	}
 
-	restored, err := archiveModels.Restore(ctx, entityType, ids)
-	if err != nil {
+	if _, err := archiveModels.Restore(ctx, entityType, ids); err != nil {
 		helpers.LogErrorWithContext(ctx, "business/RestoreItems Failed to bulk restore %s err: %+v", entityType, err)
 		return 0, err
 	}
-
-	if len(restored) == 0 {
+	// Every one of them that is live in Postgres, by this call or by an
+	// earlier one that stopped part way, comes back in the graph, search and
+	// memory too, so a retry heals what an ended request left: rows live in
+	// Postgres that the app, reading the graph, still shows as deleted.
+	live, err := archiveModels.Live(ctx, entityType, ids)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "business/RestoreItems Failed to read the restored %s err: %+v", entityType, err)
+		return 0, err
+	}
+	if len(live) == 0 {
 		return 0, nil
 	}
 
-	// Synchronous Dgraph restore (matches the archive path behaviour).
+	// Synchronous Dgraph restore (matches the archive path behaviour). Its
+	// error is the caller's: the items aren't back where the app reads them.
+	var graphErr error
 	if ops.RestoreDgraphFn != nil {
-		if dgErr := ops.RestoreDgraphFn(ctx, restored); dgErr != nil {
-			helpers.LogErrorWithContext(ctx,
-				"RestoreItems Dgraph restore error for %s: %v", entityType, dgErr)
+		if graphErr = ops.RestoreDgraphFn(ctx, live); graphErr != nil {
+			helpers.LogErrorWithContext(ctx, "RestoreItems Dgraph restore error for %s: %v", entityType, graphErr)
 		}
 	}
 
 	// Async OpenSearch cascade.
 	if ops.OpenSearchRestoreFn != nil {
-		ops.OpenSearchRestoreFn(restored)
+		ops.OpenSearchRestoreFn(live)
 	}
 
 	// Revive the Workspace Memory items the archive cascade removed for
@@ -692,47 +740,51 @@ func RestoreItems(ctx context.Context, entityType string, entityIds []uuid.UUID)
 		go func(sourceType string, sourceIDs []string) {
 			defer recoverOpenSearchPanic("restore memory cascade")
 			/* AI call omitted in v1 */
-		}(ops.MemorySourceType, restored)
+		}(ops.MemorySourceType, live)
 	}
 
-	return len(restored), nil
+	return len(live), graphErr
 }
 
-// UndoArchiveJob reverses an archive job by restoring the exact items that were archived,
-// UndoArchiveJob reverses an archive job by restoring the exact items
-// that were archived. Looks up the items in archive_job_items first
-// and falls back to the legacy metadata.archived_ids JSONB blob for
-// jobs that ran before migration 68.
+// ErrUndoUnderWay refuses an undo of a run whose undo is at work now, begun
+// by another request: a second one did the whole run's work again.
+var ErrUndoUnderWay = errors.New("this run is being restored already")
+
+// UndoArchiveJob reverses an archive run by restoring the exact items it
+// archived: archive_job_items, or the legacy metadata.archived_ids blob for
+// runs before migration 68.
+//
+// Once begun, it goes on to the end on a context of its own, bounded by
+// archiveModels.UndoDeadline. It ran inside the admin's request, and the web
+// stops waiting at 30 s, so a big run's undo was cut part way: every row live
+// in Postgres, the rest still deleted in the graph the app reads, the run
+// still "completed", and Undo again restored nothing (REGRESSION-AUDIT R3, 23
+// Oct 2026). Now the run reads "partial" from the moment its undo begins
+// until it is undone ("cancelled"); one that fails stays "partial", with why,
+// and Undo finishes it. While an undo is at work, another waits for it
+// (ErrUndoUnderWay).
 func UndoArchiveJob(ctx context.Context, jobId uuid.UUID) (int, error) {
-	var job struct {
-		EntityType string
-		Status     string
-		Metadata   *string
-	}
-	var found bool
-	var err error
-	job.EntityType, job.Status, job.Metadata, found, err = archiveModels.UndoJob(ctx, jobId)
+	entityType, status, metadata, found, err := archiveModels.UndoJob(ctx, jobId)
 	if err == nil && !found {
 		err = sql.ErrNoRows
 	}
 	if err != nil {
 		return 0, fmt.Errorf("archive job not found: %w", err)
 	}
-	if job.Status != "completed" {
+	if status != "completed" && status != "partial" {
 		return 0, fmt.Errorf("archive job is not in completed state")
 	}
-	if !entitySupportsUndo[job.EntityType] {
-		return 0, fmt.Errorf("undo not supported for entity type: %s", job.EntityType)
+	if !entitySupportsUndo[entityType] {
+		return 0, fmt.Errorf("undo not supported for entity type: %s", entityType)
 	}
 
-	idStrs, err := loadArchiveJobItems(ctx, jobId, job.Metadata)
+	idStrs, err := loadArchiveJobItems(ctx, jobId, metadata)
 	if err != nil {
 		return 0, fmt.Errorf("failed to load archive job items: %w", err)
 	}
 	if len(idStrs) == 0 {
 		return 0, fmt.Errorf("no archived item ids found for job (was this job archived before exact-id tracking was enabled?)")
 	}
-
 	ids := make([]uuid.UUID, 0, len(idStrs))
 	for _, idStr := range idStrs {
 		if id, parseErr := uuid.Parse(idStr); parseErr == nil {
@@ -742,27 +794,64 @@ func UndoArchiveJob(ctx context.Context, jobId uuid.UUID) (int, error) {
 	if len(ids) == 0 {
 		return 0, fmt.Errorf("no valid archived item ids found")
 	}
-
-	var count int
-	if job.EntityType == "docs" {
-		// Only the docs this run archived that are archived still: a doc its
-		// owner deleted since stays deleted.
-		if err := checkRunningArchiveJob(ctx, job.EntityType); err != nil {
-			return 0, err
-		}
-		count, err = restoreDocs(ctx, ids, true)
-	} else {
-		count, err = RestoreItems(ctx, job.EntityType, ids)
-	}
-	if err != nil {
+	if err := checkRunningArchiveJob(ctx, entityType); err != nil {
 		return 0, err
 	}
 
-	if execErr := archiveModels.MarkJobUndone(ctx, jobId); execErr != nil {
-		helpers.LogErrorWithContext(ctx, "UndoArchiveJob: failed to mark job cancelled: %v", execErr)
+	work, cancel := context.WithTimeout(context.WithoutCancel(ctx), archiveModels.UndoDeadline)
+	defer cancel()
+	claimed, err := archiveModels.ClaimUndo(work, jobId)
+	if err != nil {
+		helpers.LogErrorWithContext(work, "business/UndoArchiveJob failed to begin undoing run %s: %v", jobId, err)
+		return 0, err
 	}
+	if !claimed {
+		underWay, err := archiveModels.UndoUnderWay(work, jobId)
+		if err != nil {
+			return 0, fmt.Errorf("failed to read whether run %s is being undone: %w", jobId, err)
+		}
+		if underWay {
+			return 0, ErrUndoUnderWay
+		}
+		return 0, fmt.Errorf("archive job is not in completed state")
+	}
+	// The admins' other screens read the runs again and show it restoring.
+	publishUndoStatus(jobId, entityType, "partial", nil)
 
-	return count, nil
+	var count int
+	if entityType == "docs" {
+		// Only the docs this run archived that are archived still: a doc its
+		// owner deleted since stays deleted.
+		count, err = restoreDocs(work, ids, true)
+	} else {
+		count, err = RestoreItems(work, entityType, ids)
+	}
+	finishUndo(work, jobId, entityType, count, err)
+	return count, err
+}
+
+// finishUndo records how an undo ended, and tells the admins' screens as
+// finalizeJob does for a run: undone, or still partly undone, with why.
+func finishUndo(ctx context.Context, jobId uuid.UUID, entityType string, restored int, undoErr error) {
+	status := "cancelled"
+	if undoErr != nil {
+		status = "partial"
+		helpers.LogErrorWithContext(ctx, "business/UndoArchiveJob stopped undoing %s run %s with %d restored: %v", entityType, jobId, restored, undoErr)
+	}
+	if err := archiveModels.FinishUndo(ctx, jobId, undoErr); err != nil {
+		helpers.LogErrorWithContext(ctx, "business/UndoArchiveJob failed to record how undoing run %s ended: %v", jobId, err)
+	}
+	publishUndoStatus(jobId, entityType, status, undoErr)
+}
+
+// publishUndoStatus tells the admins' screens where a run's undo stands: begun
+// or stopped ("partial"), or undone ("cancelled").
+func publishUndoStatus(jobId uuid.UUID, entityType, status string, undoErr error) {
+	mqttPayload := &mqttStruct.MqttArchiveJobStatus{JobId: jobId.String(), EntityType: entityType, Status: status}
+	if undoErr != nil {
+		mqttPayload.ErrorMessage = undoErr.Error()
+	}
+	helpers.GoSafeNamed("mqttBusiness.PublishArchiveJobStatus", func() { mqttBusiness.PublishArchiveJobStatus(mqttPayload) })
 }
 
 // ArchivedItem represents a single archived item for the restore UI.

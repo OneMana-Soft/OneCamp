@@ -1,3 +1,5 @@
+//go:build templates_export
+
 package business
 
 import (
@@ -9,17 +11,18 @@ import (
 )
 
 // The built-in templates as JSON, for the template pages on onemana.dev, which
-// show exactly what a project made from each one gets. Runs only when asked,
+// show exactly what a project made from each one gets. A generator, not a
+// check: it builds only with its own tag, so a test run never meets it. Run it
 // from the repository root:
 //
-//	TEMPLATES_EXPORT="$PWD/../onemana-frontend/content/templates.json" go test -count=1 ./business/ProjectTemplate/ -run TestExportBuiltIns
+//	TEMPLATES_EXPORT="$PWD/../onemana-frontend/content/templates.json" go test -tags templates_export -count=1 ./business/ProjectTemplate/ -run TestExportBuiltIns
 //
 // The path must be absolute, since go test runs in the package's directory,
 // and -count=1 matters: a cached pass writes nothing.
 func TestExportBuiltIns(t *testing.T) {
 	path := os.Getenv("TEMPLATES_EXPORT")
 	if path == "" {
-		t.Skip("set TEMPLATES_EXPORT to write the built-in templates")
+		t.Fatal("set TEMPLATES_EXPORT to the file to write the built-in templates to")
 	}
 	if !filepath.IsAbs(path) {
 		t.Fatalf("TEMPLATES_EXPORT must be an absolute path (go test runs in %s): %q", "business/ProjectTemplate", path)

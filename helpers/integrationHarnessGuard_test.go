@@ -327,6 +327,103 @@ func TestMakeVerifyVetsEveryIntegrationTaggedFile(t *testing.T) {
 	}
 }
 
+// TestEveryIntegrationBinaryStopsItsServers: every package whose tests run on
+// the harness's servers, the harness's own included, has a TestMain that calls
+// integration.Main, which runs the tests and then stops every server the
+// binary started.
+//
+// WHY THIS EXISTS. On 24 Oct 2026 the workstation (31 GB) ran out of memory:
+// one integration `go test` over many packages held about 30 Dgraph containers
+// at once. A test binary starts its Dgraph, Postgres, OpenSearch, Redis and
+// broker once (tests/integration/shared.go), and only the harness's own
+// TestMain stopped them. Every other binary left them to testcontainers'
+// reaper, which reaps by session, and the session is the whole go test, so
+// every package that had run kept its servers up until the last one ended.
+func TestEveryIntegrationBinaryStopsItsServers(t *testing.T) {
+	module := goModulePath(t, "../go.mod")
+	harness := module + "/tests/integration"
+	pkgs := integrationPackages(t, module)
+	if p := pkgs[harness]; p == nil || len(p.testsOnHarness) == 0 {
+		t.Fatalf("the integration build has no tests in %s: this check stopped looking", harness)
+	}
+	var checked int
+	var found []string
+	for path, p := range pkgs {
+		if len(p.testsOnHarness) == 0 {
+			continue
+		}
+		checked++
+		file, calls := testMainCallsHarnessMain(t, p, path == harness, harness)
+		switch {
+		case file == "":
+			found = append(found, fmt.Sprintf("%s: its tests run on the harness's servers, and it has no TestMain to stop them, so its "+
+				"test binary leaves them up until the whole go test ends. Add a file behind //go:build integration, in the package of "+
+				"its tests that import the harness, with func TestMain(m *testing.M) { os.Exit(integration.Main(m)) }.", p.dir))
+		case !calls:
+			found = append(found, fmt.Sprintf("%s: its tests run on the harness's servers, and its TestMain (%s) doesn't call "+
+				"integration.Main, so its test binary leaves them up until the whole go test ends. Call integration.Main(m) where "+
+				"it calls m.Run().", p.dir, file))
+		}
+	}
+	if checked < 2 {
+		t.Fatal("no package's tests import the harness: this check stopped looking")
+	}
+	sort.Strings(found)
+	for _, f := range found {
+		t.Error(f)
+	}
+}
+
+// testMainCallsHarnessMain finds the package's TestMain among its test files,
+// and reports whether it calls the harness's Main: by the name its file
+// imports the harness under, or bare in the harness's own package.
+func testMainCallsHarnessMain(t *testing.T, p *modulePackage, own bool, harness string) (file string, calls bool) {
+	t.Helper()
+	for _, name := range p.testsOnHarness {
+		path := filepath.Join("..", p.dir, name)
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(src, []byte("TestMain")) {
+			continue
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), path, src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		alias := ""
+		for _, im := range f.Imports {
+			if ip, _ := strconv.Unquote(im.Path.Value); ip == harness {
+				alias = "integration"
+				if im.Name != nil {
+					alias = im.Name.Name
+				}
+			}
+		}
+		for _, decl := range f.Decls {
+			fd, ok := decl.(*ast.FuncDecl)
+			if !ok || fd.Recv != nil || fd.Name.Name != "TestMain" || fd.Body == nil {
+				continue
+			}
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				if call, ok := n.(*ast.CallExpr); ok && !calls {
+					switch fn := call.Fun.(type) {
+					case *ast.SelectorExpr:
+						x, ok := fn.X.(*ast.Ident)
+						calls = ok && alias != "" && x.Name == alias && fn.Sel.Name == "Main"
+					case *ast.Ident:
+						calls = own && f.Name.Name == p.name && fn.Name == "Main"
+					}
+				}
+				return !calls
+			})
+			return filepath.ToSlash(filepath.Join(p.dir, name)), calls
+		}
+	}
+	return "", false
+}
+
 // modulePackage is what the integration build has in one directory.
 type modulePackage struct {
 	dir                 string   // relative to the module root, "." for the root
@@ -334,6 +431,10 @@ type modulePackage struct {
 	imports             []string // what its non-test files import
 	testsThroughHarness string   // its own test file that imports the harness, if any
 	integrationOnly     []string // files only the integration build has
+	// Its test files, package x and x_test alike, when they run on the
+	// harness's servers: the harness's own, and any package's of which one
+	// imports the harness.
+	testsOnHarness []string
 }
 
 // integrationPackages reads every directory of the module as
@@ -386,6 +487,9 @@ func integrationPackages(t *testing.T, module string) map[string]*modulePackage 
 					break
 				}
 			}
+		}
+		if importPath == harness || slices.Contains(p.TestImports, harness) || slices.Contains(p.XTestImports, harness) {
+			mp.testsOnHarness = slices.Concat(p.TestGoFiles, p.XTestGoFiles)
 		}
 		plain := map[string]bool{}
 		if q, err := without.ImportDir(path, 0); err == nil {

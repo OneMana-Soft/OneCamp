@@ -155,6 +155,17 @@ var (
 	ChatBroadcastAdminsOnlyAt = IntPolicy{Key: "chat.broadcast.admins_only_at", Default: 0}
 )
 
+// The calendar programme's policies (design/calendar-vs-gcal/PROGRAM.md A6).
+var (
+	// CalendarFreeBusy lets members see when each other is busy, and nothing
+	// more, on a calendar not shared with them (owner decision O7: on).
+	CalendarFreeBusy = BoolPolicy{Key: "calendar.freebusy.members", Default: true}
+	// CalendarFeedsAllowed lets members make secret links that show a
+	// calendar in another calendar app (calendar B8). Off, every link stops
+	// answering at once.
+	CalendarFeedsAllowed = BoolPolicy{Key: "calendar.feeds.allowed", Default: true}
+)
+
 // Store answers policies.
 type Store interface {
 	Bool(ctx context.Context, p BoolPolicy) bool

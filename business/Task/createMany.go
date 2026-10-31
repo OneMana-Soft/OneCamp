@@ -2,12 +2,14 @@ package business
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	adapter "github.com/akashc777/OneCamp/adapter/Task"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
+	refsBusiness "github.com/akashc777/OneCamp/business/Refs"
 	taskStatusBusiness "github.com/akashc777/OneCamp/business/TaskStatus"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	webhookBusiness "github.com/akashc777/OneCamp/business/Webhook"
@@ -35,7 +37,12 @@ type NewTask struct {
 // numbers in one statement, the graph in one write, search in one _bulk, the
 // project's people told once, and one task.created event each. It answers
 // their ids in the order given. A bad date or status refuses the batch before
-// anything is written.
+// anything is written. Their first statuses meet the project's status rules
+// as CreateTaskAsked's does, asked once for the lot (FirstStatuses): a
+// refusal refuses the batch, and a status that wants approval has the batch
+// made one task at a time, as CreateTask makes one, so each held task opens
+// its own request. No caller passes such a status (the app's bulk create
+// takes names and priorities; a template's apply is a DataMove).
 func CreateTasks(ctx context.Context, projectUUID uuid.UUID, user *model.UserInfo, project *dgraphStruct.DgraphProject, tasks []NewTask) ([]uuid.UUID, error) {
 	if len(tasks) == 0 {
 		return nil, nil
@@ -49,6 +56,9 @@ func CreateTasks(ctx context.Context, projectUUID uuid.UUID, user *model.UserInf
 	}
 	now := time.Now()
 	nodes, search, err := newTaskNodes(ctx, projectUUID, user, project, tasks, now)
+	if errors.Is(err, ErrWantsApproval) {
+		return createOneByOne(ctx, projectUUID, user, project, tasks)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -77,6 +87,13 @@ func CreateTasks(ctx context.Context, projectUUID uuid.UUID, user *model.UserInf
 		helpers.LogErrorWithContext(ctx, "business/CreateTasks failed to write %d tasks to the graph err: %+v", len(nodes), err)
 		return nil, err
 	}
+	// A chip in a description shows on what it links (DG15a): one outbox
+	// write for the new tasks whose descriptions link something.
+	bodies := make([]refsBusiness.Body, len(tasks))
+	for i, t := range tasks {
+		bodies[i] = refsBusiness.Body{ID: ids[i].String(), Text: t.Input.TaskDescription}
+	}
+	refsBusiness.SavedMany(ctx, refsBusiness.Task, bodies)
 
 	searchCtx := context.WithoutCancel(ctx)
 	helpers.GoSafeNamed("Task.CreateTasks:search", func() { domain.CreateTasksInOpenSearch(searchCtx, search) })
@@ -117,7 +134,9 @@ func CreateTasks(ctx context.Context, projectUUID uuid.UUID, user *model.UserInf
 // newTaskNodes is the graph nodes and search documents of the batch, each
 // task a blank node ("_:t0", ...): its statuses resolved once each, its
 // dates read, a sub-task hung from its parent in the batch. Nothing is
-// written.
+// written. Their first statuses are asked once for the lot
+// (firstStatusesOf), and its answer is newTaskNodes' error: a refusal, or
+// ErrWantsApproval.
 func newTaskNodes(ctx context.Context, projectUUID uuid.UUID, user *model.UserInfo, project *dgraphStruct.DgraphProject, tasks []NewTask, now time.Time) ([]*dgraphStruct.DgraphTask, []*openSearchStruct.OpenSearchTask, error) {
 	statuses := map[string]taskStatusBusiness.Resolved{}
 	zero := time.Time{}
@@ -125,6 +144,13 @@ func newTaskNodes(ctx context.Context, projectUUID uuid.UUID, user *model.UserIn
 	team := &dgraphStruct.DgraphTeam{Uid: project.Team.Uid}
 	nodes := make([]*dgraphStruct.DgraphTask, len(tasks))
 	search := make([]*openSearchStruct.OpenSearchTask, len(tasks))
+	// Each task as it would be made in its project's default status (def), in
+	// the project as read for its maker (their standing there:
+	// workAccess.OfTask), for the rules to read as a move from def into the
+	// status it asks for.
+	def, _ := taskStatusBusiness.Resolve(ctx, projectUUID.String(), "")
+	drafts := make([]*dgraphStruct.DgraphTask, len(tasks))
+	asked := make([]taskStatusBusiness.Resolved, len(tasks))
 	for i, t := range tasks {
 		in := t.Input
 		if t.Parent >= i {
@@ -186,6 +212,10 @@ func newTaskNodes(ctx context.Context, projectUUID uuid.UUID, user *model.UserIn
 			}
 			*d.to = &v
 		}
+		draft := *n
+		draft.Project = readFor(project, projectUUID)
+		draft.Status, draft.CustomStatus, draft.CustomStatusName = def.Category, nil, nil
+		drafts[i], asked[i] = &draft, st
 		if t.Parent >= 0 {
 			// A sub-task: under its parent, which says so in its history.
 			parent := nodes[t.Parent]
@@ -202,6 +232,11 @@ func newTaskNodes(ctx context.Context, projectUUID uuid.UUID, user *model.UserIn
 			TaskProjectUuid: project.Uuid, TaskProjectName: project.Name, TaskStatus: n.Status, TaskPriority: n.Priority,
 			TaskLabel: n.Label, TaskCreatedByUserUuid: user.UserDgraphInfo.Uuid,
 		}
+	}
+	// Asked as CreateTaskAsked asks one: a refusal refuses the batch before
+	// anything is written.
+	if err := firstStatusesOf(ctx, drafts, def, asked, &user.UserDgraphInfo); err != nil {
+		return nil, nil, err
 	}
 	return nodes, search, nil
 }

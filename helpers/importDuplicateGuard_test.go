@@ -13,15 +13,15 @@ import (
 
 // importDuplicates are the functions models/postgres/SlackImport still
 // writes itself under a name models/postgres/Import has (backend audit U1b:
-// about 25 when it was counted, 30 by name, 12 left. The Slack import is the generic
+// about 25 when it was counted, 30 by name, 10 left. The Slack import is the generic
 // one's legacy twin over the same tables; a function the two share should
 // call the generic one. It only gets shorter: each of these differs in
 // shape (its own Job or Chunk type, Slack's fixed provider) and is to be
 // folded in, then deleted from this list.
 var importDuplicates = []string{
 	"ClaimNextChunk", "CreateChunks", "CreateJob", "GetJob", "IdMappingsByTypeOwned",
-	"ListErrors", "LookupWorkspaceMapping", "RecordMapping", "SavePlan",
-	"UpsertIdMappingThenFinish", "UpsertWorkspaceMapping", "isUniqueViolation",
+	"ListErrors", "LookupWorkspaceMapping", "SavePlan",
+	"isUniqueViolation",
 }
 
 // funcBodies is the top-level functions of the non-test files in dir.

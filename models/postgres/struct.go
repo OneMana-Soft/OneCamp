@@ -38,4 +38,9 @@ const (
 	// the same `src_key` column on the attachments row.
 	ATTACHMENT_SRC_TASK    = "task"
 	ATTACHMENT_SRC_COMMENT = "comment"
+	// A table's files: its files fields' cells name them (tables B1).
+	ATTACHMENT_SRC_TABLE = "table"
+	// A picture for a form's cover or logo (tables B5c-2, business/Form
+	// look.go): a visitor gets it by its form's link, never by a file route.
+	ATTACHMENT_SRC_FORM = "form"
 )

@@ -9,12 +9,15 @@ package business
 // so a notice about it is titled, and opens, exactly when its reader may open
 // the thing now (I12), as a doc's is. A kind nothing registered is shown as
 // before: untitled, and opening nothing. This package imports none of them.
+// A kind the Access Resolver titles registers TitledByAccess(kind).
 
 import (
 	"context"
 	"fmt"
 	"strings"
 	"sync"
+
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 )
 
 // NoticeKind answers, for a notice's reader, which of one kind's resources
@@ -87,4 +90,40 @@ func otherNotices(ctx context.Context, readerUUID string, byKind map[string][]st
 		}
 	}
 	return readable, titles
+}
+
+// The Access Resolver's title reader, and its naming of a reader by graph
+// uid: seams for tests.
+var (
+	readableTitles = accessBusiness.ReadableTitles
+	readerUID      = accessBusiness.UIDOf
+)
+
+// TitledByAccess is how the inbox names the notices of a kind the Access
+// Resolver titles (accessBusiness.ReadableTitles: an event, a project):
+// titled, and opening, only while their reader may open the thing now. A
+// reader it can't answer for is told nothing more than an untitled notice
+// (fail closed).
+func TitledByAccess(kind string) NoticeKind {
+	return func(ctx context.Context, reader string, ids []string) (map[string]bool, map[string]string, error) {
+		who := accessBusiness.Subject{UserUUID: reader}
+		uid, err := readerUID(ctx, who)
+		if err != nil {
+			return nil, nil, err
+		}
+		who.UserUID = uid
+		refs := make([]accessBusiness.ItemRef, 0, len(ids))
+		for _, id := range ids {
+			refs = append(refs, accessBusiness.ItemRef{Kind: kind, ID: id})
+		}
+		named, err := readableTitles(ctx, []accessBusiness.Subject{who}, refs)
+		if err != nil {
+			return nil, nil, err
+		}
+		readable, titles := make(map[string]bool, len(named)), make(map[string]string, len(named))
+		for ref, title := range named {
+			readable[ref.ID], titles[ref.ID] = true, title
+		}
+		return readable, titles, nil
+	}
 }

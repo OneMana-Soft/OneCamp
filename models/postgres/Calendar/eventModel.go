@@ -8,6 +8,7 @@ import (
 
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
 )
 
@@ -115,6 +116,15 @@ func UpdateCalendarEvent(query string, id uuid.UUID, title string, description s
 		return err
 	}
 	return nil
+}
+
+// ForgetGoogleCopy clears an event's Google copy while the row still names
+// gone, and nothing else: an edit made since keeps its words and times, and a
+// copy made since stays.
+func ForgetGoogleCopy(ctx context.Context, id uuid.UUID, gone string) error {
+	_, err := pgexec.Exec(ctx,
+		`UPDATE calendar_events SET google_calendar_event_id = NULL WHERE id = $1 AND google_calendar_event_id = $2`, id, gone)
+	return err
 }
 
 // SetCalendarEventFocus marks an event as focus time, or not.

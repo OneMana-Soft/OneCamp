@@ -10,6 +10,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 
 	"golang.org/x/oauth2"
 )
@@ -26,6 +27,20 @@ type OAuthConnect struct {
 	// Setup says how a server is given the provider's app, for the admin
 	// of a server that has none.
 	Setup string
+	// AuthParams are more parameters the authorize page needs (Atlassian's
+	// audience and prompt).
+	AuthParams map[string]string
+	// Optional is a provider that also takes a pasted token (Jira's API
+	// token): its sign-in is offered only on a server that has its app.
+	Optional bool
+}
+
+// OAuthCompleter is a provider whose signed-in token needs one more step
+// before it can be used: Atlassian's token reaches Jira only through the
+// site's cloud id. CompleteOAuth answers the token's metadata, for site (the
+// address the admin named, or "" for the only one the token can reach).
+type OAuthCompleter interface {
+	CompleteOAuth(ctx context.Context, accessToken, site string) (json.RawMessage, error)
 }
 
 // Configured is a server with the provider's client id and secret.
@@ -43,9 +58,14 @@ func (c OAuthConnect) config(redirectURI string) *oauth2.Config {
 	}
 }
 
-// AuthURL is the provider's authorize page for one sign-in.
+// AuthURL is the provider's authorize page for one sign-in, with the
+// provider's own parameters.
 func (c OAuthConnect) AuthURL(state, redirectURI string) string {
-	return c.config(redirectURI).AuthCodeURL(state)
+	opts := make([]oauth2.AuthCodeOption, 0, len(c.AuthParams))
+	for k, v := range c.AuthParams {
+		opts = append(opts, oauth2.SetAuthURLParam(k, v))
+	}
+	return c.config(redirectURI).AuthCodeURL(state, opts...)
 }
 
 // Exchange trades the code the provider sent back for a token.

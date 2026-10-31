@@ -219,6 +219,10 @@ func HandleUndoArchiveJob(w http.ResponseWriter, r *http.Request) {
 			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"error": err.Error(), "code": "archive_running"})
 			return
 		}
+		if errors.Is(err, business.ErrUndoUnderWay) {
+			helpers.WriteJSON(w, http.StatusConflict, helpers.Envolope{"code": "undo_running", "msg": err.Error()})
+			return
+		}
 		helpers.WriteJSON(w, http.StatusInternalServerError, helpers.Envolope{"error": err.Error()})
 		return
 	}

@@ -40,27 +40,37 @@ type InvitationGuest struct {
 	Response string `json:"response"`
 }
 
-// InvitationYou is the guest the page is for, with their answer and note.
+// InvitationYou is the guest the page is for, with their answer and note, and
+// the other time they proposed while it stands.
 type InvitationYou struct {
-	Name     string `json:"name,omitempty"`
-	Email    string `json:"email"`
-	Response string `json:"response"`
-	Note     string `json:"note,omitempty"`
+	Name     string    `json:"name,omitempty"`
+	Email    string    `json:"email"`
+	Response string    `json:"response"`
+	Note     string    `json:"note,omitempty"`
+	Proposal *Proposal `json:"proposal,omitempty"`
 }
 
 // InvitationView is what a guest's page shows.
 type InvitationView struct {
-	Title     string            `json:"title"`
-	Start     When              `json:"start"`
-	End       When              `json:"end"`
-	AllDay    bool              `json:"all_day"`
-	Location  string            `json:"location,omitempty"`
-	Notes     string            `json:"notes,omitempty"`
-	Repeats   string            `json:"repeats,omitempty"`
-	Organiser string            `json:"organiser"`
-	Ended     bool              `json:"ended"`
-	You       InvitationYou     `json:"you"`
-	Guests    []InvitationGuest `json:"guests,omitempty"`
+	Title     string `json:"title"`
+	Start     When   `json:"start"`
+	End       When   `json:"end"`
+	AllDay    bool   `json:"all_day"`
+	Location  string `json:"location,omitempty"`
+	Notes     string `json:"notes,omitempty"`
+	Repeats   string `json:"repeats,omitempty"`
+	Organiser string `json:"organiser"`
+	Ended     bool   `json:"ended"`
+	// CallAddress is the event's own call's address while it answers and the
+	// event hasn't ended (meet-02): the guest's page offers "Join call" there
+	// with their invitation, so they come in without knocking (InviteeAt).
+	CallAddress string `json:"call_address,omitempty"`
+	// Proposable is whether the guest may propose another time here: for a
+	// single event at a time, before it ends (a series' times are proposed
+	// one event at a time, in the calendar).
+	Proposable bool              `json:"proposable"`
+	You        InvitationYou     `json:"you"`
+	Guests     []InvitationGuest `json:"guests,omitempty"`
 }
 
 // lastEnd is when an event, or a series' last instance, ends; nil for a
@@ -116,6 +126,53 @@ func AnswerInvitation(ctx context.Context, secret string, in AnswerInput, now ti
 	return stored.answerInvitation(ctx, secret, in, now)
 }
 
+// Invitee is whose invitation let a guest into an event's call (meet-02): the
+// event, and the guest by email it was sent to. The join's audit row names
+// them, since a forwarded link lets in whoever holds it.
+type Invitee struct {
+	EventID string
+	Email   string
+	// Name is the guest's name on the invitation, or their address's first
+	// part when it has none: never the address itself.
+	Name string
+}
+
+// InviteeAt answers whose invitation a guest's link secret is, when it is an
+// invitation to the event whose call is in room, so they skip its lobby
+// (meet-02): the key their invitation already carries, under the same rules as
+// its page (live, not long over, not cancelled, a guest by email). Anything
+// else is nil, and they knock like anyone from outside.
+func InviteeAt(ctx context.Context, secret, room string, now time.Time) (*Invitee, error) {
+	return stored.inviteeAt(ctx, secret, room, now)
+}
+
+func (s *service) inviteeAt(ctx context.Context, secret, room string, now time.Time) (*Invitee, error) {
+	if strings.TrimSpace(secret) == "" || room == "" {
+		return nil, nil
+	}
+	if err := s.linksReady(ctx); err != nil {
+		if errors.Is(err, ErrInvitationGone) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	e, g, err := s.byLink(ctx, secret, now)
+	if errors.Is(err, ErrInvitationGone) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if e.CallRoom != room {
+		return nil, nil
+	}
+	name := strings.TrimSpace(g.Name)
+	if name == "" {
+		name, _, _ = strings.Cut(g.Email, "@")
+	}
+	return &Invitee{EventID: e.ID.String(), Email: g.Email, Name: name}, nil
+}
+
 // linksReady is whether a guest's page can be answered now: on a server whose
 // calendar isn't in its one store there are no guests by email, so no link
 // is anyone's; while it moves, the guest is asked to try again.
@@ -154,15 +211,20 @@ func (s *service) answerInvitation(ctx context.Context, secret string, in Answer
 		return nil, err
 	}
 	note := in.noteOr(g.Note)
+	proposal, err := proposalFor(in.Proposal, g.Proposal, e, e.RRule != "", nil, now)
+	if err != nil {
+		return nil, err
+	}
 	key := g.Key()
-	on, err := s.store.answer(ctx, e.ID, nil, key, response, note, now)
+	on, err := s.store.answer(ctx, e.ID, nil, key, response, note, now, proposal)
 	if err != nil {
 		return nil, err
 	}
 	if !on {
 		return nil, ErrInvitationGone
 	}
-	if g.Response != response || g.Note != note {
+	proposed := newlyProposed(in.Proposal, g, proposal)
+	if g.Response != response || g.Note != note || proposed != nil {
 		s.emit(ctx, resourceEventBusiness.Event{
 			Kind: resourceEventBusiness.CalendarEventRSVP, ResourceKind: KindEvent, ResourceUUID: e.ID.String(),
 			Actor: resourceEventBusiness.Actor{}, At: now, Subjects: []string{e.CreatedBy.String()},
@@ -173,9 +235,9 @@ func (s *service) answerInvitation(ctx context.Context, secret string, in Answer
 			return nil, err
 		}
 		s.tells.tell(ctx, nil, telling{what: toldAnswered, event: e, guestsAfter: guests[e.ID],
-			answer: &answered{key: key, response: response, note: note}})
-		g.Response, g.Note = response, note
+			answer: &answered{key: key, response: response, note: note, proposal: proposed}})
 	}
+	g.Response, g.Note, g.Proposal = response, note, proposal
 	return s.invitationView(ctx, e, g, now)
 }
 
@@ -186,6 +248,15 @@ func (s *service) invitationView(ctx context.Context, e *models.Event, g *models
 		You: InvitationYou{Name: g.Name, Email: g.Email, Response: g.Response, Note: g.Note}}
 	if last := lastEnd(e); last != nil && now.After(*last) {
 		v.Ended = true
+	}
+	v.Proposable = e.RRule == "" && !e.AllDay() && !v.Ended
+	if !v.Ended {
+		if call := s.liveCall(ctx, e.CallRoom); call != nil {
+			v.CallAddress = call.Address
+		}
+	}
+	if proposalStands(g.Proposal, e) {
+		v.You.Proposal = &Proposal{Start: g.Proposal.Start, End: g.Proposal.End}
 	}
 	if e.RRule != "" {
 		if r, err := ruleOf(e); err == nil {

@@ -136,7 +136,8 @@ func importsOf(rows []reviewModel.AccessImportRow) []ImportAccess {
 }
 
 // KeepImportAccess keeps, as the admin by, an import whose reviews wait for
-// an admin as it is: nothing it brought is narrowed. Only from waiting
+// an admin as it is: nothing it brought is narrowed, and its held-back
+// comments go into search at once. Only from waiting
 // for an admin: a contained import is re-checked or undone instead, since a
 // kept one's tasks would stay with their projects' admins with nothing left
 // to undo. It moves under the import's lock, so it can't land while a
@@ -161,5 +162,6 @@ func KeepImportAccess(ctx context.Context, importID, by uuid.UUID) error {
 	if moved == 0 {
 		return ErrNotRecheckable
 	}
+	releaseInBackground(ctx)
 	return nil
 }

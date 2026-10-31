@@ -89,6 +89,9 @@ func TestAChannelsBroadcastRules(t *testing.T) {
 	if code, _, _ := w.run(route(w.as(t, "zed", false), "channel", launch), conversationController.GetBroadcastRules, http.MethodGet, "", nil); code != http.StatusForbidden {
 		t.Errorf("Zed, not in the public #launch: %d", code)
 	}
+	if code, _, _ := w.run(route(w.as(t, "zed", false), "channel", launch), conversationController.GetMentionables, http.MethodGet, "", nil); code != http.StatusForbidden {
+		t.Errorf("Zed, not in the public #launch, reading who it may mention: %d", code)
+	}
 	if code, _, _ := w.run(route(maya, "channel", "not-an-id"), conversationController.GetBroadcastRules, http.MethodGet, "", nil); code != http.StatusBadRequest {
 		t.Errorf("a bad id: %d", code)
 	}

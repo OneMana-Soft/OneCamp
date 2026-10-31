@@ -3,8 +3,9 @@ package business
 // The files of posts, messages and comments deleted before a delete took them
 // off with the item (ArchiveFilesOf), taken off once per install.
 //
-// Until then, deleting one marked its files deleted in search only, and the
-// purge, which takes only stamped rows, never took their bytes. This reads the items deleted in
+// Until then, deleting one marked its files deleted in search only, so
+// everyone in its place kept opening them by id, and the purge, which takes
+// only stamped rows, never took their bytes. This reads the items deleted in
 // Postgres (every delete path and the Slack import's tombstones set
 // deleted_at; nothing restores one), keeps those the graph holds deleted too
 // (a delete that stopped half way leaves the item showing, and its files

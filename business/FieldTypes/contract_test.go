@@ -6,26 +6,33 @@ import (
 	"testing"
 )
 
-// Today's twelve kinds are registered, in the column menu's order, with the
-// cells they have: formulas and rollups aren't stored, selects hold options.
+// Today's kinds are registered, in the column menu's order, with the cells
+// they have: the twelve tables started with, then tables B1's (D-TB-3).
+// Formulas, rollups and what is worked out from the row aren't stored, and
+// those read from the row say how; selects and statuses hold options.
 func TestTodaysKindsAreRegistered(t *testing.T) {
 	var got []string
 	for _, k := range Kinds.All() {
 		got = append(got, k.ID)
 	}
-	want := []string{"text", "number", "select", "multi_select", "date", "checkbox", "person", "url", "email", "relation", "formula", "rollup"}
+	want := []string{"text", "number", "select", "multi_select", "date", "checkbox", "person", "url", "email", "relation", "formula", "rollup",
+		"status", "people", "long_text", "phone", "duration", "rating", "autonumber", "created_time", "created_by", "modified_time", "modified_by", "attachment"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("kinds %v, want %v", got, want)
 	}
+	fromRow := map[string]bool{"autonumber": true, "created_time": true, "created_by": true, "modified_time": true, "modified_by": true}
 	for _, id := range want {
 		k, ok := Kinds.Lookup(id)
 		if !ok || !Kinds.Valid(id) {
 			t.Errorf("%s: registered %v, valid %v", id, ok, Kinds.Valid(id))
 		}
-		if stored := id != "formula" && id != "rollup"; k.Stored != stored {
+		if stored := id != "formula" && id != "rollup" && !fromRow[id]; k.Stored != stored {
 			t.Errorf("%s stored %v, want %v", id, k.Stored, stored)
 		}
-		if opts := id == "select" || id == "multi_select"; k.HasOptions != opts {
+		if (k.FromRow != nil) != fromRow[id] {
+			t.Errorf("%s reads from the row %v, want %v", id, k.FromRow != nil, fromRow[id])
+		}
+		if opts := id == "select" || id == "multi_select" || id == "status"; k.HasOptions != opts {
 			t.Errorf("%s has options %v, want %v", id, k.HasOptions, opts)
 		}
 	}

@@ -19,7 +19,10 @@ package business
 //     and private, handing the channel's admin role to whoever made it in
 //     Slack (or its first member who came across). A public channel's
 //     history is everyone's to read, but its members are the team's, and the
-//     admin's sidebar is theirs.
+//     admin's sidebar is theirs. A member bringing their own private
+//     channels (member_read.go) is in each of them and stays, but hands the
+//     admin role on the same way: in Slack it was theirs only if they made
+//     the channel.
 
 import (
 	"context"
@@ -121,19 +124,28 @@ func wasMember(sc *SlackChannel, resolved map[string]uuid.UUID, admin uuid.UUID)
 // that they weren't in, after handing its admin role on. When none of its
 // members came across there is nobody to hand it to, and they stay, said in
 // the import's warnings: a private channel with no member is one nobody can
-// reach, and a public one would have nobody to look after it.
+// reach, and a public one would have nobody to look after it. A member
+// bringing their own (memberRead) is in the channel and stays in it, handing
+// on only its admin role, unless it is theirs (they made it in Slack).
 func leaveChannel(ctx context.Context, importId, channelUUID uuid.UUID, sc *SlackChannel, private bool,
-	admin *userModels.UserInfo, cache *dgraphUserCache) {
+	admin *userModels.UserInfo, cache *dgraphUserCache, memberRead bool) {
 
 	resolved, err := importModels.LookupIdMappingsBatch(ctx, importId, importModels.EntityUser, append([]string{sc.Creator}, sc.Members...))
 	if err != nil {
 		helpers.LogWarnWithContext(ctx, "SlackImport channel %s members lookup failed: %+v", channelUUID, err)
 		return
 	}
-	if wasMember(sc, resolved, admin.UserPostgresInfo.Id) {
+	stays := wasMember(sc, resolved, admin.UserPostgresInfo.Id)
+	if stays && !memberRead {
 		return
 	}
 	heir, ok := heirOf(sc, resolved, slackBot(ctx, importId))
+	if stays {
+		if ok && heir != admin.UserPostgresInfo.Id {
+			handOn(ctx, channelUUID, heir, admin, cache)
+		}
+		return
+	}
 	if !ok {
 		code, why := "CHANNEL_KEPT", fmt.Sprintf("You were left in #%s: none of its members came across, so it would have had nobody to look after it.", sc.Name)
 		if private {
@@ -142,19 +154,28 @@ func leaveChannel(ctx context.Context, importId, channelUUID uuid.UUID, sc *Slac
 		importModels.LogImportError(ctx, importId, nil, importModels.EntityChannel, sc.ID, importModels.SeverityWarning, code, why, nil)
 		return
 	}
+	if ch := handOn(ctx, channelUUID, heir, admin, cache); ch != "" {
+		_ = channelBusiness.DeleteChannelMemberEdge(ctx, ch, admin.UserDgraphInfo.Uid, admin.UserPostgresInfo.Id.String(), channelUUID.String())
+	}
+}
+
+// handOn makes heir the channel's admin in place of whoever the import made
+// it as, and answers the channel's node, or "" when it couldn't: then they
+// stay its admin rather than leave it with none.
+func handOn(ctx context.Context, channelUUID, heir uuid.UUID, from *userModels.UserInfo, cache *dgraphUserCache) string {
 	heirNode := cache.get(ctx, heir.String())
 	ch, err := channelBusiness.GetBasicDgraphChannelInfoByUUID(ctx, channelUUID, "")
 	if heirNode == nil || err != nil || ch == nil || ch.Uid == "" {
 		helpers.LogWarnWithContext(ctx, "SlackImport channel %s: could not hand it on: %+v", channelUUID, err)
-		return
+		return ""
 	}
 	if err := channelBusiness.AddChannelModeratorEdge(ctx, channelUUID.String(), heirNode.Uid); err != nil {
-		return // the admin stays rather than leave a channel without one
+		return ""
 	}
-	if err := channelBusiness.DeleteChannelModeratorEdge(ctx, ch.Uid, admin.UserDgraphInfo.Uid, channelUUID.String()); err != nil {
-		return
+	if err := channelBusiness.DeleteChannelModeratorEdge(ctx, ch.Uid, from.UserDgraphInfo.Uid, channelUUID.String()); err != nil {
+		return ""
 	}
-	_ = channelBusiness.DeleteChannelMemberEdge(ctx, ch.Uid, admin.UserDgraphInfo.Uid, admin.UserPostgresInfo.Id.String(), channelUUID.String())
+	return ch.Uid
 }
 
 // archiveArchivedChannels archives the channels this import made for Slack

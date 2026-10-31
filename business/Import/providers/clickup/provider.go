@@ -74,6 +74,10 @@ const (
 // httptest server URL. Production code never reassigns this.
 var apiBase = "https://api.clickup.com/api/v2"
 
+// statusRules reads ClickUp's answers. Only a 401 refuses the token, and its
+// limit is per minute.
+var statusRules = importProvider.StatusRules{Name: "ClickUp", Wait: time.Minute, OnlyUnauthorized: true}
+
 // Provider implements importProvider.Provider for ClickUp.
 type Provider struct {
 	rl importProvider.Limiter
@@ -729,36 +733,13 @@ func (p *Provider) getJSON(ctx context.Context, tok, path string, out any) error
 	}
 	defer resp.Body.Close()
 
-	switch {
-	case resp.StatusCode == http.StatusTooManyRequests:
-		retry := time.Duration(parseRetryAfter(resp.Header.Get("Retry-After"))) * time.Second
-		return &importProvider.ErrRateLimited{RetryAfter: retry, Reason: "clickup 429"}
-	case resp.StatusCode == http.StatusUnauthorized:
-		return &importProvider.TokenRejected{Msg: "clickup unauthorized; reconnect this provider"}
-	case resp.StatusCode == http.StatusNotFound:
+	if resp.StatusCode == http.StatusNotFound {
 		return importProvider.ErrAttachmentGone
-	case resp.StatusCode >= 400:
-		buf := make([]byte, 1024)
-		n, _ := resp.Body.Read(buf)
-		return fmt.Errorf("clickup http %d: %s", resp.StatusCode, string(buf[:n]))
+	}
+	if err := statusRules.Check(resp); err != nil {
+		return err
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
-}
-
-func parseRetryAfter(h string) int64 {
-	if h == "" {
-		return 0
-	}
-	var secs int64
-	if _, err := fmt.Sscanf(h, "%d", &secs); err == nil && secs > 0 {
-		return secs
-	}
-	if t, err := http.ParseTime(h); err == nil {
-		if d := time.Until(t); d > 0 {
-			return int64(d.Seconds())
-		}
-	}
-	return 0
 }
 
 // ─── Auth ─────────────────────────────────────────────────────────

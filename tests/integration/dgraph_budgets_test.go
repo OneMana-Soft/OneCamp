@@ -93,18 +93,20 @@ type dgraphBudget struct {
 var dgraphBudgets = []dgraphBudget{
 	{"profile.viewer", "small", 75 * time.Millisecond, 0, 1, "§1.5 1: every request on a Redis miss; channels, projects, teams, DMs with participants, 3 task counts"}, // 23
 	{"user.byuuid", "small", budgetFloor, 0, 1, "GetDgraphUserInfoByUUID: no cache, 92 call sites; measured 15/20 ms p50/p95 at a load of 88, one trip, so no cache (DG4)"},
-	{"profile.superposter", "small", budgetFloor, 0, 1, "the same read for 20k posts: user_posts has no block, so none are read (the runner fails if that changes)"},                                                                                       // 9
-	{"channel.latest", "small", 200 * time.Millisecond, 0, 1, "§1.5 2: #general's newest page, ordered over its ~14k posts"},                                                                                                                               // 43, then 94 at a load of 52
-	{"channel.older", "small", 250 * time.Millisecond, 0, 1, "§1.5 2: a page from the middle of #general's history"},                                                                                                                                       // 55, then 115 at a load of 52
-	{"dm.latest", "small", 110 * time.Millisecond, 0, 1, "§1.5 3: the viewer's busiest DM (3,000 messages)"},                                                                                                                                               // 37
-	{"group.latest", "small", budgetFloor, 0, 1, "§1.5 3: a group of the viewer's"},                                                                                                                                                                        // 15
-	{"sidebar.channels", "small", 300 * time.Millisecond, 0, 1, "§1.5 4: the viewer's 23 channels, each with its newest post (F3 roots it at the viewer)"},                                                                                                 // 99
-	{"dm.list", "small", 1200 * time.Millisecond, 100 * time.Millisecond, 1, "§1.5 5: all 83 DMs and groups with their newest message, unpaginated, @cascade; DG4 3 pages it"},                                                                             // 252, then 557 in a burst
+	{"profile.superposter", "small", budgetFloor, 0, 1, "the same read for 20k posts: user_posts has no block, so none are read (the runner fails if that changes)"},           // 9
+	{"channel.latest", "small", 200 * time.Millisecond, 0, 1, "§1.5 2: #general's newest page, ordered over its ~14k posts"},                                                   // 43, then 94 at a load of 52
+	{"channel.older", "small", 250 * time.Millisecond, 0, 1, "§1.5 2: a page from the middle of #general's history"},                                                           // 55, then 115 at a load of 52
+	{"dm.latest", "small", 110 * time.Millisecond, 0, 1, "§1.5 3: the viewer's busiest DM (3,000 messages)"},                                                                   // 37
+	{"group.latest", "small", budgetFloor, 0, 1, "§1.5 3: a group of the viewer's"},                                                                                            // 15
+	{"sidebar.channels", "small", 300 * time.Millisecond, 0, 1, "§1.5 4: the viewer's 23 channels, each with its newest post (F3 roots it at the viewer)"},                     // 99
+	{"dm.list", "small", 1200 * time.Millisecond, 100 * time.Millisecond, 1, "§1.5 5: all 83 DMs and groups with their newest message, unpaginated, @cascade; DG4 3 pages it"}, // 252, then 557 in a burst
+	{"dm.list.page", "small", 250 * time.Millisecond, 0, 1, "DG4: the DM list's first page, 50 of the viewer's DMs and groups newest first by dm_last_chat_at"},
 	{"inbox", "small", 100 * time.Millisecond, 0, 1, "§1.5 6: mentions, comments and reactions, 30 of each"},                                                                                                                                               // 34
 	{"docs.top.workspace", "small", 500 * time.Millisecond, 100 * time.Millisecond, 2, "§1.5 7: the workspace's top level, then every row's level in one ResolveAll (DG4: was 3 trips)"},                                                                   // 165
 	{"docs.top.private", "small", 300 * time.Millisecond, 0, 2, "§1.5 7: the viewer's private pages, with access (DG4: was 3 trips)"},                                                                                                                      // 96
 	{"docs.top.space", "small", 150 * time.Millisecond, 0, 2, "§1.5 7: a project space's top level, with access (DG4: was 3 trips)"},                                                                                                                       // 48
 	{"docs.children", "small", 300 * time.Millisecond, 0, 3, "§1.5 7: the wide page's 300 children: the parent's level, the level, its decisions (DG4: was 4 trips)"},                                                                                      // 95
+	{"docs.folder", "small", 150 * time.Millisecond, 0, 3, "docs F1: a folder of 150 (pages, files, links, a folder) opened in place: its level from the folder down its children edge, never the kind index"},                                             // 49
 	{"board.kanban", "small", 850 * time.Millisecond, 150 * time.Millisecond, 2, "§1.5 8: a 1,500-card board at the old default page (1,000 a column part): places, then cards; the web asks for board.kanban.first instead once it pages columns (DG4b)"}, // 277
 	{"board.kanban.first", "small", 350 * time.Millisecond, 0, 2, "DG4b: the same board with the web's first page of 60 an open column part, every count kept; measured beside board.kanban in one run: p50 205 vs 431 ms, p95 270 vs 659 ms"},             // 116 quiet
 	{"board.column", "small", 350 * time.Millisecond, 0, 4, "DG4b: a column's first page, then its next, two calls of places plus cards each"},                                                                                                             // 113 quiet
@@ -123,6 +125,7 @@ var dgraphBudgets = []dgraphBudget{
 	{"refs.reconcile.one", "small", 50 * time.Millisecond, 0, 1, "the sink on a post already in step: one read, no write"},                                                               // 1.6
 	{"refs.page.message", "small", 60 * time.Millisecond, 0, 1, "the reconciler's page of 500 posts, bodies and edges"},                                                                  // 18
 	{"refs.page.doc", "small", 50 * time.Millisecond, 0, 1, "the reconciler's page of 50 docs, bodies and edges"},                                                                        // 3
+	{"refs.page.task", "small", 50 * time.Millisecond, 0, 1, "the reconciler's page of 500 tasks, descriptions and edges (DG15a)"},                                                       // 9
 	{"graph.path.near", "small", 250 * time.Millisecond, 0, 7, "the backlinked doc to #general: one shortest block, three paths, depth 4, 25 an edge"},                                   // 75, 83
 	{"graph.path.far", "small", 1400 * time.Millisecond, 0, 7, "the backlinked doc to the board's project: the search's worst case, every capped edge to depth 4"},                       // 456, 284; RELEASE-LINE ONLY until beta takes it after the tags: 7, not 6 (21 Oct: beta 7aa3a43e0 measured 7, 7, 7 and the line 6, 6, 6 and 7 with the same code; the kinds reached follow the fixture's uid order, dgraph_budget_trips_test.go)
 	{"graph.expand.12", "small", 210 * time.Millisecond, 0, 9, "Ask AI's graph context: one hop from 12 hits (the 2,000-mention doc and the chain head among them), every node decided"}, // 57 p50, 69 p95 (load 19); Ask AI waits 800
@@ -413,4 +416,19 @@ func TestDgraphQueryBudgets(t *testing.T) {
 			t.Errorf("writing %s: %v", out, err)
 		}
 	}
+}
+
+// DG10's lines, kept apart from the table above so packages adding lines
+// there (DG4b re-aligned it) merge clean. Measured 19 Oct 2026 (calibrated
+// p95, loads 24 to 31): deps.critical 50.7 and 52.9 ms over 243 tasks;
+// deps.move 39.2 ms (one task) and 15.5 ms (a task and two pushed along).
+// deps.forecast (linear-20), measured 29 Oct 2026: 57.8 ms over the project's
+// 369 tasks (calibration 0.74 ms, load 38), with deps.critical at 33.2 ms on
+// the same run. Each budget is about three times the worst.
+func init() {
+	dgraphBudgets = append(dgraphBudgets,
+		dgraphBudget{"deps.critical", "small", 160 * time.Millisecond, 0, 1, "DG10: the chain's project's critical path: one @recurse read up and down, Work Access, the planner"},
+		dgraphBudget{"deps.forecast", "small", 180 * time.Millisecond, 0, 2, "linear-20: the chain's project's forecast: the plan read, then the graph's counts of every task it has (ReadPlanTotals), Work Access, the planner"},
+		dgraphBudget{"deps.move", "small", 120 * time.Millisecond, 0, 2, "DG10: moving the chain's head and its chain at once: the downstream read, then one guarded upsert"},
+	)
 }

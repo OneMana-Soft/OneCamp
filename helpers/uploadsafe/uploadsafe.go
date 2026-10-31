@@ -136,6 +136,13 @@ type Options struct {
 
 	// MaxNameLen caps the safe-filename length. 0 → 200.
 	MaxNameLen int
+
+	// RefuseRunnable refuses, rather than defuses, a file a browser could
+	// run or render: an executable or script by its extension
+	// (dangerousExtensions), or bytes that read as HTML whatever the name.
+	// For a stranger's upload (a public form's), where nobody vouches for
+	// the file: a member's is kept as octet-stream and an attachment.
+	RefuseRunnable bool
 }
 
 // PrepareUpload reads the leading bytes of body to classify it, then
@@ -150,7 +157,8 @@ type Options struct {
 //  3. Sanitise the filename (printable Unicode, no separators).
 //  4. If AllowedExtensions is set, reject names outside it.
 //  5. Detect MIME from peeked bytes (http.DetectContentType).
-//  6. Coerce dangerous extensions to application/octet-stream.
+//  6. Coerce dangerous extensions to application/octet-stream, or with
+//     RefuseRunnable, refuse them and HTML bytes.
 //  7. Build Content-Disposition: attachment by default; inline only
 //     when AllowInlineImages is true AND DetectedType ∈ inlineSafeTypes
 //     AND the extension matches the type.
@@ -188,6 +196,9 @@ func PrepareUpload(body io.Reader, suppliedName string, opts Options) (*SafeFile
 	}
 
 	detected := http.DetectContentType(peek)
+	if opts.RefuseRunnable && (dangerousExtensions[ext] || strippedMediaType(detected) == "text/html") {
+		return nil, fmt.Errorf("%w: a file a browser could run (%q, %s)", ErrUnsupportedType, ext, strippedMediaType(detected))
+	}
 	contentType := SafeContentType(detected, ext)
 
 	inline := false

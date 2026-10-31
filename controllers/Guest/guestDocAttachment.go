@@ -24,6 +24,7 @@ var (
 		return attachmentBusiness.GetAttachmentByObjUUID(ctx, objUUID, srcKey)
 	}
 	guestAttachmentURL = fileBusiness.GetFileURLByObjectName
+	guestCallBoard     = guestBusiness.GuestCallBoardOf
 )
 
 // GuestDocAttachment GET /guest/doc-attachment/{token}/{obj_uuid}: a picture
@@ -51,7 +52,7 @@ func guestAttachment(kind, srcKey, name string) http.HandlerFunc {
 			notAvailable(w)
 			return
 		}
-		grant, err := guestGrant(ctx, chi.URLParam(r, "token"), kind)
+		resource, page, err := guestScope(ctx, chi.URLParam(r, "token"), kind)
 		if err != nil {
 			guestReadFailed(w, r, name, err, "")
 			return
@@ -65,11 +66,11 @@ func guestAttachment(kind, srcKey, name string) http.HandlerFunc {
 			guestReadFailed(w, r, name, err, "")
 			return
 		}
-		if att == nil || att.SrcKey != srcKey || att.SrcValue != grant.ResourceID {
+		if att == nil || att.SrcKey != srcKey || att.SrcValue != resource {
 			notAvailable(w)
 			return
 		}
-		if guestBusiness.ServedAsPage(grant) {
+		if page {
 			// A doc's view link shows its pictures through its page alone
 			// (/public/d/<token>/files/...), behind its password if it has one.
 			notAvailable(w)
@@ -83,4 +84,21 @@ func guestAttachment(kind, srcKey, name string) http.HandlerFunc {
 		w.Header().Set("Cache-Control", "private, no-store")
 		http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 	}
+}
+
+// guestScope is the resource a guest's token opens now, and whether it is
+// served as the server's page alone: a share link's grant, or for a board, a
+// call's board token (the board on the stage of the call its guest is in).
+func guestScope(ctx context.Context, token, kind string) (resource string, page bool, err error) {
+	if kind == guestModel.ResourceBoard {
+		board, err := guestCallBoard(ctx, token)
+		if !errors.Is(err, guestBusiness.ErrNotCallToken) {
+			return board, false, err
+		}
+	}
+	grant, err := guestGrant(ctx, token, kind)
+	if err != nil {
+		return "", false, err
+	}
+	return grant.ResourceID, guestBusiness.ServedAsPage(grant), nil
 }

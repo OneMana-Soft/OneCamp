@@ -89,18 +89,27 @@ func processDMChunk(ctx context.Context, arc *Archive, chunk *importModels.Chunk
 			default:
 			}
 
-			if skipSubtypes && SubtypeIsSystem(m.Subtype) {
+			// A conversation has no lines: no system notice comes across (leftOut).
+			if leftOut(m.Subtype, skipSubtypes, false) {
 				return true
 			}
 			if SubtypeIsTombstone(m.Subtype) {
 				if pass == 1 && m.PreviousMessage != nil && m.PreviousMessage.Ts != "" {
-					_ = applyDMDelete(ctx, dc, m.PreviousMessage.Ts)
+					if err := applyDMDelete(ctx, dc, m.PreviousMessage.Ts); err != nil {
+						importModels.LogImportError(ctx, dc.importId, &dc.chunkId,
+							importModels.EntityMessage, m.PreviousMessage.Ts,
+							importModels.SeverityError, "DM_DELETE_FAILED", err.Error(), nil)
+					}
 				}
 				return true
 			}
 			if m.Subtype == "message_changed" {
 				if pass == 1 && m.SubMessage != nil && m.SubMessage.Ts != "" {
-					_ = applyDMEdit(ctx, dc, m.SubMessage)
+					if err := applyDMEdit(ctx, dc, m.SubMessage); err != nil {
+						importModels.LogImportError(ctx, dc.importId, &dc.chunkId,
+							importModels.EntityMessage, m.SubMessage.Ts,
+							importModels.SeverityError, "DM_EDIT_FAILED", err.Error(), nil)
+					}
 				}
 				return true
 			}
@@ -115,6 +124,16 @@ func processDMChunk(ctx context.Context, arc *Archive, chunk *importModels.Chunk
 			entityType := importModels.EntityMessage
 			if isThreadReply {
 				entityType = importModels.EntityComment
+			}
+			// One message that fails is logged, and the rest of the file goes on.
+			fail := func(err error) bool {
+				code := "DM_MESSAGE_FAILED"
+				if isThreadReply {
+					code = "DM_COMMENT_FAILED"
+				}
+				importModels.LogImportError(ctx, dc.importId, &dc.chunkId,
+					entityType, m.Ts, importModels.SeverityError, code, err.Error(), nil)
+				return true
 			}
 
 			// Enqueue file chunks BEFORE the idempotency short-circuit
@@ -140,7 +159,11 @@ func processDMChunk(ctx context.Context, arc *Archive, chunk *importModels.Chunk
 				}
 			}
 
-			if existing := dc.maps.ownMapping(ctx, entityType, m.Ts); existing != uuid.Nil {
+			existing, err := dc.maps.ownMapping(ctx, entityType, m.Ts)
+			if err != nil {
+				return fail(err)
+			}
+			if existing != uuid.Nil {
 				if !isThreadReply {
 					dc.lastCursor = m.Ts
 				}
@@ -148,7 +171,11 @@ func processDMChunk(ctx context.Context, arc *Archive, chunk *importModels.Chunk
 			}
 
 			if dc.workspaceName != "" {
-				if existing := dc.maps.workspaceMapping(ctx, entityType, m.Ts); existing != uuid.Nil {
+				existing, err := dc.maps.workspaceMapping(ctx, entityType, m.Ts)
+				if err != nil {
+					return fail(err)
+				}
+				if existing != uuid.Nil {
 					_ = dc.maps.matched(ctx, entityType, m.Ts, existing,
 						mustMarshal(map[string]interface{}{"matched_by": "workspace_map"}))
 					if !isThreadReply {
@@ -160,19 +187,11 @@ func processDMChunk(ctx context.Context, arc *Archive, chunk *importModels.Chunk
 
 			if isThreadReply {
 				if err := importDMThreadReply(ctx, dc, m, importingUser); err != nil {
-					importModels.LogImportError(ctx, dc.importId, &dc.chunkId,
-						importModels.EntityComment, m.Ts,
-						importModels.SeverityError, "DM_COMMENT_FAILED",
-						err.Error(), nil)
-					return true
+					return fail(err)
 				}
 			} else {
 				if err := importDMTopLevel(ctx, dc, m, importingUser); err != nil {
-					importModels.LogImportError(ctx, dc.importId, &dc.chunkId,
-						importModels.EntityMessage, m.Ts,
-						importModels.SeverityError, "DM_MESSAGE_FAILED",
-						err.Error(), nil)
-					return true
+					return fail(err)
 				}
 			}
 
@@ -213,7 +232,10 @@ func processDMChunk(ctx context.Context, arc *Archive, chunk *importModels.Chunk
 // MPIMs use chatBusiness.CreateChatForGroup (takes participant slice).
 // We pick which by looking at dc.isMPIM.
 func importDMTopLevel(ctx context.Context, dc *dmContext, m *SlackMessage, importingUser *userModels.UserInfo) error {
-	authorInfo, _ := dc.resolveAuthor(ctx, m, importingUser)
+	authorInfo, err := dc.resolveAuthor(ctx, m, importingUser)
+	if err != nil {
+		return err
+	}
 
 	html := renderDMHTML(ctx, dc, m)
 	if html == "" && len(m.Files) == 0 {
@@ -329,7 +351,10 @@ func importDMTopLevel(ctx context.Context, dc *dmContext, m *SlackMessage, impor
 // thread replies follow a different path (importThreadReply in
 // message_worker) because they live as Post comments, not chat comments.
 func importDMThreadReply(ctx context.Context, dc *dmContext, m *SlackMessage, importingUser *userModels.UserInfo) error {
-	parentUUID, _ := dc.maps.parentMapping(ctx, m.ThreadTs)
+	parentUUID, err := dc.maps.parentMapping(ctx, m.ThreadTs)
+	if err != nil {
+		return fmt.Errorf("thread parent: %w", err)
+	}
 	if parentUUID == uuid.Nil {
 		importModels.LogImportError(ctx, dc.importId, &dc.chunkId,
 			importModels.EntityComment, m.Ts,
@@ -339,7 +364,10 @@ func importDMThreadReply(ctx context.Context, dc *dmContext, m *SlackMessage, im
 		return nil
 	}
 
-	authorInfo, _ := dc.resolveAuthor(ctx, m, importingUser)
+	authorInfo, err := dc.resolveAuthor(ctx, m, importingUser)
+	if err != nil {
+		return err
+	}
 	html := renderDMHTML(ctx, dc, m)
 	if html == "" && len(m.Files) == 0 {
 		return dc.maps.placeholder(ctx, importModels.EntityComment, m.Ts,
@@ -429,7 +457,10 @@ func applyDMEdit(ctx context.Context, dc *dmContext, sub *SlackEditedMessage) er
 	if isComment {
 		entityType = importModels.EntityComment
 	}
-	ocUUID := dc.maps.find(ctx, entityType, originalTs)
+	ocUUID, err := dc.maps.find(ctx, entityType, originalTs)
+	if err != nil {
+		return err
+	}
 	if ocUUID == uuid.Nil {
 		return nil
 	}
@@ -500,7 +531,10 @@ func applyDMEdit(ctx context.Context, dc *dmContext, sub *SlackEditedMessage) er
 
 func applyDMDelete(ctx context.Context, dc *dmContext, originalTs string) error {
 	for _, et := range []string{importModels.EntityMessage, importModels.EntityComment} {
-		ocUUID := dc.maps.find(ctx, et, originalTs)
+		ocUUID, err := dc.maps.find(ctx, et, originalTs)
+		if err != nil {
+			return err
+		}
 		if ocUUID == uuid.Nil {
 			continue
 		}

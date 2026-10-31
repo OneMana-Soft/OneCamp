@@ -33,8 +33,13 @@ func TestEveryPeoplePickerHidesRealPeopleFromTheDemoVisitor(t *testing.T) {
 		{"../business/Doc/docBusiness.go", "SearchUsersForDoc", "DemoVisibleUsers("},
 		{"Board/boardController.go", "SearchUsersForBoard", "UserPostgresInfo.EmailID"},
 		{"../business/Board/boardBusiness.go", "SearchUsersForBoard", "DemoVisibleUsers("},
-		// Every page of it (GetUnifiedGlobalSearch is its first page).
-		{"../business/GlobalSearch/globalSearchBusiness.go", "GetUnifiedGlobalSearchPage", "demoPeopleHits("},
+		// Every page of every search (the one engine, docs C2-1): the search
+		// box's text and the search page's both go through Search, whose
+		// pages all pass keepPage, with the viewer's address in the reach.
+		{"../business/GlobalSearch/engine.go", "keepPage", "demoPeopleHits("},
+		{"../business/GlobalSearch/engine.go", "Search", "keepPage("},
+		{"../business/GlobalSearch/globalSearchBusiness.go", "GetUnifiedGlobalSearchPage", "Search("},
+		{"SearchQuery/searchController.go", "SearchQuery", "UserPostgresInfo.EmailID"},
 	}
 	for _, c := range cases {
 		body := funcBody(t, c.file, c.fn)

@@ -2,6 +2,7 @@ package businness
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	domain "github.com/akashc777/OneCamp/domain/Doc"
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 type eventsSeen struct {
@@ -128,6 +130,69 @@ func TestAChangedSaveIsOneWriteThenEverythingOnce(t *testing.T) {
 	e := w.events.events[0]
 	if e.Kind != resourceEventBusiness.DocUpdated || e.ResourceUUID != saveDoc || e.Actor.AgentUUID != "captain" || e.Actor.UserUUID != "sam" {
 		t.Errorf("event %+v", e)
+	}
+}
+
+// bulkSeen is an event bus that notes whether each event came from a bulk
+// import's context.
+type bulkSeen struct {
+	mu     sync.Mutex
+	events []resourceEventBusiness.Event
+	bulk   []bool
+}
+
+func (b *bulkSeen) Emit(ctx context.Context, ev resourceEventBusiness.Event) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.events = append(b.events, ev)
+	b.bulk = append(b.bulk, helpers.IsBulkImport(ctx))
+}
+
+// A quiet save (a copy's body, an import's) is a changed save like any other,
+// with Change.Quiet set, and its re-index, its hooks and its doc.updated run
+// as a bulk import's do: only the sinks that take an import's events (the
+// audit, the AI's record) hear it. A save without quiet is loud.
+func TestAQuietSaveRunsAsABulkImport(t *testing.T) {
+	var in CollabSave
+	if err := json.Unmarshal([]byte(`{"documentId":"`+saveDoc+`","htmlContent":"<p>Copied.</p>","yjsState":"eA==","contributors":["`+sam+`"],"quiet":true}`), &in); err != nil || !in.Quiet {
+		t.Fatalf("the service's quiet save reads as %+v (%v)", in, err)
+	}
+	for _, quiet := range []bool{true, false} {
+		w := newSaveWorld(t)
+		w.stored[saveDoc] = "an-older-hash"
+		bus := &bulkSeen{}
+		resourceEventBusiness.Bus = bus
+		fanOutBulk := make(chan bool, 1)
+		fanOutSavedBody = func(ctx context.Context, _ Change) { fanOutBulk <- helpers.IsBulkImport(ctx) }
+		hookBulk := make(chan bool, 1)
+		SaveHooks.Register("test.bulk", func(ctx context.Context, _ Change) { hookBulk <- helpers.IsBulkImport(ctx) })
+		in.Quiet = quiet
+		got, err := SaveFromCollab(context.Background(), in)
+		if err != nil || !got.Changed {
+			t.Fatalf("quiet %v: %+v %v", quiet, got, err)
+		}
+		if b := <-fanOutBulk; b != quiet {
+			t.Errorf("quiet %v: the re-index ran as a bulk import: %v", quiet, b)
+		}
+		select {
+		case b := <-hookBulk:
+			if b != quiet {
+				t.Errorf("quiet %v: the hooks ran as a bulk import's: %v", quiet, b)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("quiet %v: no hook ran", quiet)
+		}
+		select {
+		case c := <-w.hooks:
+			if c.Quiet != quiet || len(c.Contributors) != 1 || c.Contributors[0] != sam {
+				t.Errorf("quiet %v: the hooks saw %+v", quiet, c)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("quiet %v: no hook ran", quiet)
+		}
+		if len(bus.events) != 1 || bus.events[0].Kind != resourceEventBusiness.DocUpdated || bus.bulk[0] != quiet || bus.events[0].Actor.UserUUID != sam {
+			t.Errorf("quiet %v: events %+v, from a bulk import's context %v", quiet, bus.events, bus.bulk)
+		}
 	}
 }
 
@@ -256,5 +321,23 @@ func TestAHookThatAsksGetsTheBodyBeforeTheSave(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the hook didn't run")
+	}
+}
+
+// A folder, a file or a link takes no save (docs F1): the write refuses it
+// (domain/Doc collabSaveAnswer), and the save answers ErrNotAPage, a refusal
+// the collaboration service gives up on, with nothing fanned out.
+func TestASaveOfANodeThatIsntAPageIsRefused(t *testing.T) {
+	w := newSaveWorld(t)
+	writeCollabSave = func(_ context.Context, cw domain.CollabWrite) (domain.CollabWritten, error) {
+		w.writes = append(w.writes, cw)
+		return domain.CollabWritten{}, domain.ErrNotAPage
+	}
+	_, err := SaveFromCollab(context.Background(), CollabSave{DocUUID: "5f0c4a2e-8a63-4f3e-9d2b-1c7a9e0b3d41", HTML: "<p>a body</p>", YjsState: "c3RhdGU="})
+	if !errors.Is(err, ErrNotAPage) {
+		t.Fatalf("a save of a folder: %v, want ErrNotAPage", err)
+	}
+	if w.fanOuts != 0 {
+		t.Errorf("a refused save fanned out %d times", w.fanOuts)
 	}
 }

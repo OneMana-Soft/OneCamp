@@ -49,11 +49,7 @@ func Candidates(ctx context.Context, reader uuid.UUID) ([]Candidate, error) {
 	}
 	return pgexec.Query(ctx, `
 		SELECT r.task_id, r.project_id, r.via_task_id,
-		       NOT ($1::uuid = '00000000-0000-0000-0000-000000000000'::uuid
-		            OR (t.created_by IS DISTINCT FROM $1::uuid
-		                AND (r.via_task_id IS NULL OR v.created_by IS DISTINCT FROM $1::uuid)
-		                AND NOT EXISTS (SELECT 1 FROM task_restriction_grants g
-		                                WHERE g.task_id = COALESCE(r.via_task_id, r.task_id) AND g.user_id = $1::uuid))) AS let_in
+		       NOT ($1::uuid = '00000000-0000-0000-0000-000000000000'::uuid OR (`+keptOut("$1::uuid")+`)) AS let_in
 		FROM task_restrictions r
 		JOIN tasks t ON t.id = r.task_id
 		LEFT JOIN tasks v ON v.id = r.via_task_id`,
@@ -66,6 +62,57 @@ func Candidates(ctx context.Context, reader uuid.UUID) ([]Candidate, error) {
 			x.Via = via.UUID
 			return x, err
 		}, reader)
+}
+
+// keptOut is whether a restricted task's rows leave who out, over r (its
+// row), t (the task) and v (the task it is restricted with): neither made by
+// them, and no grant to them on it or on v.
+func keptOut(who string) string {
+	return `t.created_by IS DISTINCT FROM ` + who + `
+		AND (r.via_task_id IS NULL OR v.created_by IS DISTINCT FROM ` + who + `)
+		AND NOT EXISTS (SELECT 1 FROM task_restriction_grants g
+		                WHERE g.task_id = COALESCE(r.via_task_id, r.task_id) AND g.user_id = ` + who + `)`
+}
+
+// CandidatesAmong is Candidates for each of readers (people; nobody has none
+// let in, as Candidates says), by reader, in one read: every restricted task
+// once per reader. Restricted tasks are few.
+func CandidatesAmong(ctx context.Context, readers []uuid.UUID) (map[uuid.UUID][]Candidate, error) {
+	out := map[uuid.UUID][]Candidate{}
+	if len(readers) == 0 || !connected() {
+		return out, nil
+	}
+	ids := make([]string, len(readers))
+	for i, id := range readers {
+		ids[i] = id.String()
+	}
+	type row struct {
+		reader uuid.UUID
+		c      Candidate
+	}
+	rows, err := pgexec.Query(ctx, `
+		SELECT rd.id, r.task_id, r.project_id, r.via_task_id,
+		       NOT (rd.id = '00000000-0000-0000-0000-000000000000'::uuid OR (`+keptOut("rd.id")+`)) AS let_in
+		FROM unnest($1::uuid[]) AS rd(id)
+		CROSS JOIN task_restrictions r
+		JOIN tasks t ON t.id = r.task_id
+		LEFT JOIN tasks v ON v.id = r.via_task_id`,
+		func(r pgexec.Row) (row, error) {
+			var (
+				x   row
+				via uuid.NullUUID
+			)
+			err := r.Scan(&x.reader, &x.c.TaskID, &x.c.ProjectID, &via, &x.c.LetIn)
+			x.c.Via = via.UUID
+			return x, err
+		}, pq.Array(ids))
+	if err != nil {
+		return nil, err
+	}
+	for _, x := range rows {
+		out[x.reader] = append(out[x.reader], x.c)
+	}
+	return out, nil
 }
 
 // Restriction is one task's: whether it is restricted, and who is granted.

@@ -82,6 +82,71 @@ func TestWorkGraphReferenceUpkeep(t *testing.T) {
 		}
 	})
 
+	t.Run("a task's description linking a doc shows on the doc to who may see the task, and the nightly pass keeps it (DG15a)", func(t *testing.T) {
+		body := "<p>Spec: " + chip("doc", "plan") + "</p>"
+		w.dg.Mutate(t, map[string]any{"uid": w.uids["task"], "task_description": body})
+		refsBusiness.Saved(ctx, refsBusiness.Task, w.id["task"], body, false)
+		w.settleOutbox()
+		if mine, _ := w.connected("mia", "doc", "plan"); !refsHas(mine, "task task via linked_from>task") {
+			t.Errorf("mia doesn't see the task whose description links Plan:\n%s", strings.Join(mine, "\n"))
+		}
+		if _, raw := w.connected("out", "doc", "plan"); strings.Contains(raw, w.id["task"]) {
+			t.Errorf("out, outside the project, sees its task through Plan: %s", raw)
+		}
+		if mine, _ := w.connected("mia", "task", "task"); !refsHas(mine, "doc plan via links_to>plan") {
+			t.Errorf("the task's panel doesn't list the doc its description links:\n%s", strings.Join(mine, "\n"))
+		}
+		// A task in the trash keeps its edges as its body says; every read hides it, and the
+		// doc's panel with it. Back from the trash, it shows again.
+		w.dg.Mutate(t, map[string]any{"uid": w.uids["task"], "task_deleted_at": "2026-10-22T08:00:00Z"})
+		if mine, _ := w.connected("mia", "doc", "plan"); refsHas(mine, "task task via linked_from>task") {
+			t.Errorf("a task in the trash still shows on the doc its description links:\n%s", strings.Join(mine, "\n"))
+		}
+		w.dg.Mutate(t, map[string]any{"uid": w.uids["task"], "task_deleted_at": zero})
+		if mine, _ := w.connected("mia", "doc", "plan"); !refsHas(mine, "task task via linked_from>task") {
+			t.Errorf("a task back from the trash doesn't show again:\n%s", strings.Join(mine, "\n"))
+		}
+		// A description saved without its event (a missed one) is the nightly pass's to put right.
+		w.dg.Mutate(t, map[string]any{"uid": w.uids["task"], "task_description": "<p>Spec to follow</p>"})
+		tasks := refsBusiness.Options{Kinds: []workGraphDomain.Kind{refsBusiness.Task}}
+		if reps, err := refsBusiness.ReconcileAll(ctx, tasks); err != nil || len(reps) != 1 || reps[0].Drifted != 1 {
+			t.Fatalf("the nightly pass over tasks: %+v, %v; want one drifted", reps, err)
+		}
+		tasks.Apply = true
+		if _, err := refsBusiness.ReconcileAll(ctx, tasks); err != nil {
+			t.Fatal(err)
+		}
+		if mine, _ := w.connected("mia", "doc", "plan"); refsHas(mine, "task task via linked_from>task") {
+			t.Errorf("the link stayed after the description lost its chip:\n%s", strings.Join(mine, "\n"))
+		}
+	})
+
+	t.Run("tasks made together tell the work graph with one outbox write (DG12)", func(t *testing.T) {
+		body := "<p>Spec: " + chip("doc", "plan") + "</p>"
+		w.dg.Mutate(t, map[string]any{"uid": w.uids["task"], "task_description": body})
+		events := func() (n int) {
+			if err := w.env.PG.QueryRow(`SELECT COUNT(*) FROM outbox WHERE topic = $1`, refsBusiness.Topic).Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			return n
+		}
+		before := events()
+		refsBusiness.SavedMany(ctx, refsBusiness.Task, []refsBusiness.Body{{ID: w.id["task"], Text: body}, {ID: uuid.NewString(), Text: "<p>No links</p>"}})
+		w.settleOutbox()
+		if n := events() - before; n != 1 {
+			t.Errorf("%d events for one new task that links and one that doesn't, want 1", n)
+		}
+		if mine, _ := w.connected("mia", "doc", "plan"); !refsHas(mine, "task task via linked_from>task") {
+			t.Errorf("mia doesn't see the new task whose description links Plan:\n%s", strings.Join(mine, "\n"))
+		}
+		w.dg.Mutate(t, map[string]any{"uid": w.uids["task"], "task_description": "<p>Spec to follow</p>"})
+		refsBusiness.Changed(ctx, refsBusiness.Task, w.id["task"])
+		w.settleOutbox()
+		if mine, _ := w.connected("mia", "doc", "plan"); refsHas(mine, "task task via linked_from>task") {
+			t.Errorf("the link stayed after the description lost its chip:\n%s", strings.Join(mine, "\n"))
+		}
+	})
+
 	t.Run("the reconciler reports drift it is given and fixes it", func(t *testing.T) {
 		// m1's body links Plan with no edge (an import, a restore); m3 has an
 		// edge to the task its body never linked; m2 links a doc that isn't there.

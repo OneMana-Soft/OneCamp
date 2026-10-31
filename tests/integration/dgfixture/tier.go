@@ -2,8 +2,9 @@
 // every time, through the real schema: people (bots and external accounts
 // among them), teams, projects, channels with their members, posts with
 // comments, reactions and mentions, DMs and groups with their messages, docs
-// in deep trees with their shares, mentions and links, whiteboards, tasks
-// with subtasks and dependency chains, and workspace memory. It also builds
+// in deep trees with their shares, mentions and links, a folder holding
+// pages, files and links (docs F1), whiteboards, tasks with subtasks and
+// dependency chains, and workspace memory. It also builds
 // the super-nodes a real workspace grows: #general with every person in it,
 // one person with 20,000 posts, one doc with 2,000 backlinks, one project
 // board with thousands of cards and one long dependency chain.
@@ -72,6 +73,8 @@ type Tier struct {
 	DocPosts int // posts that share a doc (post_doc), the backlinked doc's among them
 
 	RefPosts int // posts whose body links a doc and a task (refers_to), the backlinked doc's among them
+
+	FolderItems int // live items in the one folder (docs F1): a folder, then pages, files and links in turn
 }
 
 // Small is the default: every shape and every super-node, at a size a busy
@@ -92,6 +95,7 @@ var Small = Tier{
 	MemoryItems: 400,
 	DocPosts:    600,
 	RefPosts:    600,
+	FolderItems: 150,
 }
 
 // Scale is the report's workspace (design/dgraph/REPORT-2026-10-18.md §4.6):
@@ -114,6 +118,7 @@ var Scale = Tier{
 	MemoryItems: 5000,
 	DocPosts:    20000,
 	RefPosts:    20000,
+	FolderItems: 1500,
 }
 
 // TierEnv names the tier a run builds: small (the default) or scale.
@@ -154,6 +159,8 @@ func (t Tier) check() error {
 		return fmt.Errorf("tier %s: docs too few for the chain, the wide page and the backlinks together", t.Name)
 	case t.BoardTasks+t.ChainLength*3 > t.Tasks:
 		return fmt.Errorf("tier %s: board and chain tasks are more than all tasks", t.Name)
+	case t.FolderItems < 4:
+		return fmt.Errorf("tier %s: the folder holds a folder, a page, a file and a link at least", t.Name)
 	}
 	return nil
 }

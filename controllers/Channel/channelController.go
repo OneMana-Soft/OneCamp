@@ -13,6 +13,7 @@ import (
 	business "github.com/akashc777/OneCamp/business/Channel"
 	conversationBusiness "github.com/akashc777/OneCamp/business/Conversation"
 	demoGuard "github.com/akashc777/OneCamp/business/DemoGuard"
+	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	userChannelNotificationBusiness "github.com/akashc777/OneCamp/business/UserChannelNotification"
 	"github.com/akashc777/OneCamp/helpers"
@@ -1384,6 +1385,10 @@ func AddChannelMember(w http.ResponseWriter, r *http.Request) {
 		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{
 			"msg": "Cannot add external users to channels",
 		})
+		return
+	}
+	if err = principalBusiness.Unassignable(newMemberUserInfo, principalBusiness.Added); err != nil {
+		helpers.WriteWriteFailure(w, r, err, "Couldn't add them to the channel.", "controllers/AddChannelMember")
 		return
 	}
 

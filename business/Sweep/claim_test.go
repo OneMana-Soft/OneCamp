@@ -12,13 +12,13 @@ import (
 // ask for a slot wins it.
 type claims struct {
 	mu    sync.Mutex
-	won   map[int64]string
-	asked map[int64]int
+	won   map[string]string
+	asked map[string]int
 	wins  int
 }
 
 func (c *claims) for_(who string) claimer {
-	return func(_ context.Context, _ string, slot int64, _ time.Duration) bool {
+	return func(_ context.Context, _ string, slot string, _ time.Duration) bool {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		c.asked[slot]++
@@ -34,7 +34,7 @@ func (c *claims) for_(who string) claimer {
 // Two instances tick the same job; between them it runs once a slot, never
 // twice, and not at all on a tick whose slot the other already ran.
 func TestASweepClaimedByOneOfTwoInstancesRunsOnce(t *testing.T) {
-	store := &claims{won: map[int64]string{}, asked: map[int64]int{}}
+	store := &claims{won: map[string]string{}, asked: map[string]int{}}
 	var runs atomic.Int32
 	job := func() Job {
 		return Job{Name: "doc.trash.purge", Every: 20 * time.Millisecond, Run: func(context.Context) error {
@@ -93,7 +93,7 @@ func TestATicksSlotIsTheIntervalItFallsIn(t *testing.T) {
 
 // Without Redis, every tick claims: a single instance runs every pass.
 func TestWithoutRedisEveryTickClaims(t *testing.T) {
-	if !claimInRedis(context.Background(), "a", 1, time.Minute) {
+	if !claimInRedis(context.Background(), "a", "1", time.Minute) {
 		t.Error("with no Redis configured, a tick did not claim its slot")
 	}
 }
@@ -102,7 +102,7 @@ func TestWithoutRedisEveryTickClaims(t *testing.T) {
 // slot's claim is never asked.
 func TestAJobThatClaimsItsOwnWorkRunsEverywhere(t *testing.T) {
 	var asked atomic.Int32
-	never := func(context.Context, string, int64, time.Duration) bool { asked.Add(1); return false }
+	never := func(context.Context, string, string, time.Duration) bool { asked.Add(1); return false }
 	var runs atomic.Int32
 	a, b := &Registry{claim: never}, &Registry{claim: never}
 	for _, r := range []*Registry{a, b} {
@@ -125,7 +125,7 @@ func TestAJobThatClaimsItsOwnWorkRunsEverywhere(t *testing.T) {
 // like a tick, two instances starting in the same slot run it once between
 // them; and a start under a context that has already ended runs nothing.
 func TestARunAtStartJobRunsWhenTheSweepsStart(t *testing.T) {
-	store := &claims{won: map[int64]string{}, asked: map[int64]int{}}
+	store := &claims{won: map[string]string{}, asked: map[string]int{}}
 	var atStart, later atomic.Int32
 	jobs := func() []Job {
 		return []Job{

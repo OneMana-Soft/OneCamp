@@ -57,13 +57,15 @@ type ruleView struct {
 	LastRunAt     *time.Time                        `json:"last_run_at,omitempty"`
 	LastError     *string                           `json:"last_error,omitempty"`
 	PausedReason  *string                           `json:"paused_reason,omitempty"`
-	UpdatedAt     time.Time                         `json:"updated_at"`
+	// NextRunAt is a schedule's next run, while it is on.
+	NextRunAt *time.Time `json:"next_run_at,omitempty"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
 
 func viewOf(w *workflowModel.Workflow) ruleView {
 	v := ruleView{ID: w.Id, Name: w.Name, IsActive: w.IsActive, CreatedBy: w.CreatedBy, TriggerType: w.TriggerType,
 		ChannelID: w.ChannelId, RunCount: w.RunCount, LastRunAt: w.LastRunAt, LastError: w.LastError,
-		PausedReason: w.PausedReason, UpdatedAt: w.UpdatedAt,
+		PausedReason: w.PausedReason, UpdatedAt: w.UpdatedAt, NextRunAt: workflowBusiness.NextRun(w),
 		TriggerConfig: map[string]interface{}{}, Actions: []workflowBusiness.WorkflowAction{}, ElseActions: []workflowBusiness.WorkflowAction{}}
 	_ = json.Unmarshal([]byte(w.TriggerConfig), &v.TriggerConfig)
 	_ = json.Unmarshal([]byte(w.Conditions), &v.Conditions)
@@ -117,7 +119,7 @@ func ListProjectRules(w http.ResponseWriter, r *http.Request) {
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": helpers.Envolope{
 		"rules": views, "can_manage": s.Can(workAccess.NeedManage) && !helpers.ActsThroughToken(r.Context()),
-		"templates": workflowBusiness.RuleTemplates, "max": workflowModel.MaxRulesPerProject,
+		"templates": workflowBusiness.Templates(), "max": workflowModel.MaxRulesPerProject, "agents": workflowBusiness.AgentsAvailable(),
 	}})
 }
 

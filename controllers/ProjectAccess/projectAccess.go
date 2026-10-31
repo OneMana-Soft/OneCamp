@@ -162,3 +162,22 @@ func callerOf(r *http.Request) userModels.UserInfo {
 	u, _ := r.Context().Value(helpers.UserInfoContextKey).(userModels.UserInfo)
 	return u
 }
+
+// RefuseStatus writes a status change the project's status rules held back
+// (business/Approvals): 409 with its words, and the approval it became when
+// it needs one. It answers whether err was one.
+func RefuseStatus(w http.ResponseWriter, err error) bool {
+	r, ok := taskBusiness.RefusedStatus(err)
+	if !ok {
+		return false
+	}
+	// code says which: "approval" (the move became a request; nothing
+	// failed) or "status_rule" (the rule said no).
+	body := helpers.Envolope{"msg": r.Why, "code": "status_rule"}
+	if r.ApprovalID != "" {
+		body["approval_id"] = r.ApprovalID
+		body["code"] = "approval"
+	}
+	helpers.WriteJSON(w, http.StatusConflict, body)
+	return true
+}

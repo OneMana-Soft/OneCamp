@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/initializers/postgresInit"
+	"github.com/akashc777/OneCamp/models/pgexec"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // CheckIn is one recurring question a channel asks its people.
@@ -154,6 +156,34 @@ func ForChannel(channel uuid.UUID) ([]CheckIn, error) {
 		out = append(out, *c)
 	}
 	return out, rows.Err()
+}
+
+// Running is the live check-ins of these channels that aren't paused, in one
+// read: what a person's calendar shows them being asked (calendar head 9).
+func Running(channels []uuid.UUID) ([]CheckIn, error) {
+	if len(channels) == 0 {
+		return []CheckIn{}, nil
+	}
+	ids := make([]string, len(channels))
+	for i, c := range channels {
+		ids[i] = c.String()
+	}
+	ctx, cancel := withTimeout()
+	defer cancel()
+	out, err := pgexec.Query(ctx, `
+		SELECT `+columns+` FROM checkins
+		 WHERE channel_uuid = ANY($1::uuid[]) AND deleted_at IS NULL AND NOT paused
+		 ORDER BY created_at`, func(r pgexec.Row) (CheckIn, error) {
+		c, err := scan(r)
+		if err != nil || c == nil {
+			return CheckIn{}, err
+		}
+		return *c, nil
+	}, pq.Array(ids))
+	if out == nil && err == nil {
+		out = []CheckIn{}
+	}
+	return out, err
 }
 
 // Due is the live, running check-ins whose next time has come, soonest first.

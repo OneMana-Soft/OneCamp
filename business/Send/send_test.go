@@ -64,6 +64,33 @@ func TestMayMessage(t *testing.T) {
 	}
 }
 
+// The rule for being one of a group's people. A deactivated person is refused
+// as a channel, a team and a project refuse them (principalBusiness
+// CanBeAssigned): by name, with a 409. It was a 400 of its own.
+func TestMayBeInGroup(t *testing.T) {
+	live, gone := time.Time{}, time.Now().Add(-time.Hour)
+	for _, c := range []struct {
+		name   string
+		u      *dgraphStruct.DgraphUser
+		status int
+		says   string
+	}{
+		{"someone", &dgraphStruct.DgraphUser{Uid: "0x1", Uuid: "u1", DeletedAt: &live}, 0, ""},
+		{"no one", nil, http.StatusBadRequest, "Got unregistered users in participants"},
+		{"an identity nobody signs in as", &dgraphStruct.DgraphUser{Uid: "0x1", Uuid: "u1", IsExternal: true}, http.StatusBadRequest, "Cannot add external users to group chats"},
+		{"a deactivated account", &dgraphStruct.DgraphUser{Uid: "0x1", Uuid: "u1", UserName: "Sam Rivera", DeletedAt: &gone}, http.StatusConflict,
+			"Sam Rivera can't be added: their account is deactivated."},
+	} {
+		rj := MayBeInGroup(c.u)
+		switch {
+		case c.status == 0 && rj != nil:
+			t.Errorf("%s: refused %+v", c.name, rj)
+		case c.status != 0 && (rj == nil || rj.Status != c.status || rj.Msg != c.says):
+			t.Errorf("%s: %+v, want %d %q", c.name, rj, c.status, c.says)
+		}
+	}
+}
+
 // A durable send tried again while its first try hasn't finished is answered
 // as Once answers a send in flight, so the app tries again; any other error
 // is what it was.

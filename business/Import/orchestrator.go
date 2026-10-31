@@ -56,11 +56,11 @@ var (
 // want to bump the chunk's attempts counter.
 var errReaperOnly = errors.New("transient; let the reaper retry")
 
-// importContext is what an import's work runs in. The bulk-import flag
-// suppresses MQTT/AI/webhook fan-out for every downstream business call:
-// without it an import would publish thousands of "task_created" /
-// "comment_created" events, blast FCM, and queue thousands of webhook
-// deliveries. And it reads every task, restricted ones too
+// importContext is what an import's work, and its rollback's, runs in. The
+// bulk-import flag suppresses MQTT/AI/webhook fan-out for every downstream
+// business call: without it an import would publish thousands of
+// "task_created" / "comment_created" events, blast FCM, and queue thousands
+// of webhook deliveries. And it reads every task, restricted ones too
 // (taskread.WithSystem): it reads the tasks it makes to write the rest of
 // them (a sub-task's parent, a comment's task) and shows them to no one, and
 // a read with no reader would find none of the restricted ones it made.
@@ -287,7 +287,47 @@ func RunImport(parentCtx context.Context, jobId uuid.UUID, importingUser *userMo
 		}
 	}
 
-	// ── Stage 9: finalize ───────────────────────────────────────────
+	// ── Stage 8b: boards, drawn (boards_worker.go) ─────────────────
+	if prov.Capabilities()&importProvider.CapBoards != 0 {
+		if has, err := importDomain.HasPendingWork(ctx, jobId, []string{importModels.ChunkBoards}); err == nil && has {
+			if err := setStage(ctx, jobId, "boards"); err != nil {
+				return
+			}
+			if err := runWorkerPool(ctx, jobId, "boards", boardWorkers,
+				[]string{importModels.ChunkBoards},
+				func(workerCtx context.Context, c *importModels.Chunk) error {
+					return processBoardChunk(workerCtx, prov, job, opts, c, importingUser)
+				}); err != nil {
+				helpers.LogWarnWithContext(ctx,
+					"Import boards stage errors job=%s err=%+v", jobId, err)
+			}
+			if cancelledOrCtxDone(ctx, jobId) {
+				return
+			}
+		}
+	}
+
+	// ── Stage 9: bases, as tables (tables_worker.go) ───────────────
+	if prov.Capabilities()&importProvider.CapTables != 0 {
+		if has, err := importDomain.HasPendingWork(ctx, jobId, []string{importModels.ChunkTableBase}); err == nil && has {
+			if err := setStage(ctx, jobId, "tables"); err != nil {
+				return
+			}
+			if err := runWorkerPool(ctx, jobId, "tables", tableWorkers,
+				[]string{importModels.ChunkTableBase},
+				func(workerCtx context.Context, c *importModels.Chunk) error {
+					return processTableChunk(workerCtx, prov, job, opts, c, importingUser)
+				}); err != nil {
+				helpers.LogWarnWithContext(ctx,
+					"Import tables stage errors job=%s err=%+v", jobId, err)
+			}
+			if cancelledOrCtxDone(ctx, jobId) {
+				return
+			}
+		}
+	}
+
+	// ── Stage 10: finalize ──────────────────────────────────────────
 	_ = importModels.UpdateStatus(ctx, jobId, importModels.StatusCompleted,
 		strPtr("finalize"), nil)
 	publishProgress(ctx, job, "completed", "finalize", "")

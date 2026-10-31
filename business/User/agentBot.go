@@ -125,83 +125,73 @@ func ensureBotPrincipal(ctx context.Context, userID uuid.UUID, email, name, avat
 	}
 }
 
+// fixedBot is one of the workspace's fixed principals, each with a job of its
+// own, so what it writes never reads as the assistant's, an agent's or a
+// person's. It is provisioned on first use and kept for the process once it
+// has a graph node.
+type fixedBot struct {
+	email, username, name string
+
+	mu sync.Mutex
+	id *BotIdentity
+}
+
+// ensure resolves the principal, provisioning it on first use.
+func (b *fixedBot) ensure(ctx context.Context) (*BotIdentity, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.id != nil && b.id.DgraphUID != "" {
+		return b.id, nil
+	}
+	userID, err := domain.EnsureBotUser(ctx, b.email, b.username, b.name)
+	if err != nil {
+		return nil, err
+	}
+	id := ensureBotPrincipal(ctx, userID, b.email, b.name, "")
+	if id.DgraphUID == "" {
+		return nil, fmt.Errorf("the %s principal has no graph node", b.username)
+	}
+	b.id = id
+	return id, nil
+}
+
 var (
-	slackBridgeBotMu sync.Mutex
-	slackBridgeBot   *BotIdentity
+	// The principal that authors messages arriving from a linked Slack
+	// channel, so a Slack message never reads as the AI.
+	slackBridgeBot = &fixedBot{email: domain.SlackBridgeBotEmail, username: domain.SlackBridgeBotUsername, name: "Slack"}
+	// The principal that writes for guests: channel messages and task
+	// comments from people outside the workspace.
+	channelGuestBot = &fixedBot{email: domain.ChannelGuestBotEmail, username: domain.ChannelGuestBotUsername, name: "Guests"}
+	// The principal that asks channels' automatic check-ins, so a check-in
+	// reads as "Check-in" after a reload.
+	checkInBot = &fixedBot{email: domain.CheckInBotEmail, username: domain.CheckInBotUsername, name: "Check-in"}
+	// The principal an upgrade's repairs act as, named on what they change.
+	upgradeRepairBot = &fixedBot{email: domain.UpgradeRepairBotEmail, username: domain.UpgradeRepairBotUsername, name: "OneCamp, upgrade repair"}
 )
 
 // EnsureSlackBridgeBot resolves (provisioning on first use) the principal
-// that authors messages arriving from a linked Slack channel. It is its own
-// principal, not the assistant, so a Slack message never reads as the AI.
+// that authors messages arriving from a linked Slack channel.
 func EnsureSlackBridgeBot(ctx context.Context) (*BotIdentity, error) {
-	slackBridgeBotMu.Lock()
-	defer slackBridgeBotMu.Unlock()
-	if slackBridgeBot != nil && slackBridgeBot.DgraphUID != "" {
-		return slackBridgeBot, nil
-	}
-	userID, err := domain.EnsureBotUser(ctx, domain.SlackBridgeBotEmail, domain.SlackBridgeBotUsername, "Slack")
-	if err != nil {
-		return nil, err
-	}
-	id := ensureBotPrincipal(ctx, userID, domain.SlackBridgeBotEmail, "Slack", "")
-	if id.DgraphUID == "" {
-		return nil, fmt.Errorf("slack bridge principal has no graph node")
-	}
-	slackBridgeBot = id
-	return id, nil
+	return slackBridgeBot.ensure(ctx)
 }
-
-var (
-	channelGuestBotMu sync.Mutex
-	channelGuestBot   *BotIdentity
-)
 
 // EnsureGuestBot resolves (provisioning on first use) the principal that
-// writes for guests: channel messages and task comments from people outside
-// the workspace. Like the Slack bridge's, it is its own principal, so a guest's
-// words never read as the AI's or a member's.
+// writes for guests, so a guest's words never read as the AI's or a member's.
 func EnsureGuestBot(ctx context.Context) (*BotIdentity, error) {
-	channelGuestBotMu.Lock()
-	defer channelGuestBotMu.Unlock()
-	if channelGuestBot != nil && channelGuestBot.DgraphUID != "" {
-		return channelGuestBot, nil
-	}
-	userID, err := domain.EnsureBotUser(ctx, domain.ChannelGuestBotEmail, domain.ChannelGuestBotUsername, "Guests")
-	if err != nil {
-		return nil, err
-	}
-	id := ensureBotPrincipal(ctx, userID, domain.ChannelGuestBotEmail, "Guests", "")
-	if id.DgraphUID == "" {
-		return nil, fmt.Errorf("channel guest principal has no graph node")
-	}
-	channelGuestBot = id
-	return id, nil
+	return channelGuestBot.ensure(ctx)
 }
 
-var (
-	checkInBotMu sync.Mutex
-	checkInBot   *BotIdentity
-)
-
 // EnsureCheckInBot resolves (provisioning on first use) the principal that
-// asks channels' automatic check-ins. Its own principal, so a check-in reads as
-// "Check-in" after a reload, never as the assistant or the automation bot.
+// asks channels' automatic check-ins.
 func EnsureCheckInBot(ctx context.Context) (*BotIdentity, error) {
-	checkInBotMu.Lock()
-	defer checkInBotMu.Unlock()
-	if checkInBot != nil && checkInBot.DgraphUID != "" {
-		return checkInBot, nil
-	}
-	userID, err := domain.EnsureBotUser(ctx, domain.CheckInBotEmail, domain.CheckInBotUsername, "Check-in")
-	if err != nil {
-		return nil, err
-	}
-	id := ensureBotPrincipal(ctx, userID, domain.CheckInBotEmail, "Check-in", "")
-	if id.DgraphUID == "" {
-		return nil, fmt.Errorf("check-in principal has no graph node")
-	}
-	checkInBot = id
-	return id, nil
+	return checkInBot.ensure(ctx)
+}
+
+// EnsureUpgradeRepairBot resolves (provisioning on first use) the principal an
+// upgrade's repairs act as: "OneCamp, upgrade repair", never a person, on a
+// line in a task's history. An install with nothing to repair never gets it.
+func EnsureUpgradeRepairBot(ctx context.Context) (*BotIdentity, error) {
+	return upgradeRepairBot.ensure(ctx)
 }
 
 // InvalidateAgentBot drops an agent's cached principal (call after delete) so a

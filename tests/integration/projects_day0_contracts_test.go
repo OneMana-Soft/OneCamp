@@ -129,6 +129,44 @@ func TestProjectsDay0ContractsAnswerAsToday(t *testing.T) {
 	}
 }
 
+// TaskFor reads a restricted task as the person it's asked about, whoever the
+// context carries. A job or an approval moving a task for someone has no one
+// signed in, or someone else: before, a member the task was kept to was told
+// "task not found" with no one signed in, and one it was kept from read it
+// through someone who may.
+func TestARestrictedTaskIsReadAsThePersonAskedAbout(t *testing.T) {
+	w := seedWorkWorld(t)
+	ctx := context.Background()
+	ana, ben := w.account("ana"), w.account("ben")
+	// mine (assigned to ben) is kept to ben; task (ana's) to its admins and
+	// its maker, so not to ben, a member.
+	for _, kept := range []struct {
+		id     string
+		people []uuid.UUID
+	}{{w.mine, []uuid.UUID{ben.UserPostgresInfo.Id}}, {w.task, nil}} {
+		task, err := taskBusiness.GetDgraphBasicTaskInfo(ctx, kept.id, ana.UserDgraphInfo.Uid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := workAccess.Restrict(ctx, task, ana.UserPostgresInfo.Id, kept.people, time.Now()); err != nil {
+			t.Fatalf("restrict: %v", err)
+		}
+	}
+	mine, task := uuid.MustParse(w.mine), uuid.MustParse(w.task)
+
+	if got, _, err := taskBusiness.TaskFor(ctx, mine, &ben, workAccess.NeedEditTask); err != nil || got == nil {
+		t.Errorf("ben, whom it's kept to, with no one signed in: %v", err)
+	}
+	asAna := taskread.ActingFor(ctx, ana.UserPostgresInfo.Id.String())
+	if got, _, err := taskBusiness.TaskFor(asAna, task, &ben, workAccess.NeedView); !errors.Is(err, taskBusiness.ErrTaskNotVisible) || got != nil {
+		t.Errorf("ben, whom it's kept from, read through ana: %v", err)
+	}
+	// A read for anyone's eyes still leaves every restricted task out.
+	if _, _, err := taskBusiness.TaskFor(taskread.AsNobody(ctx), mine, &ben, workAccess.NeedView); !errors.Is(err, taskBusiness.ErrTaskNotVisible) {
+		t.Errorf("ben's task, read for no one in particular: %v", err)
+	}
+}
+
 // workWorld is a workspace with one project of a team, its people and its
 // tasks, in Postgres and Dgraph:
 //   - ana made the project and is its admin;

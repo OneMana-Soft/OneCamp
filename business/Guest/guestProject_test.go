@@ -107,3 +107,54 @@ func TestReviewNeedsTheCommentLink(t *testing.T) {
 		t.Errorf("a view link reviewed: %v", err)
 	}
 }
+
+// What a client is asked never holds their board: with approvals out of the
+// build, after a failed read, or for a link only to view, which can't answer
+// so is asked nothing and costs no read.
+func TestWhatAClientIsAskedNeverHoldsTheirBoard(t *testing.T) {
+	old := ClientAsks
+	t.Cleanup(func() { ClientAsks = old })
+	ctx, project := context.Background(), uuid.New()
+	comment := &guestModel.GuestGrant{Id: uuid.New(), Capability: guestModel.CapabilityComment}
+	view := &guestModel.GuestGrant{Id: uuid.New(), Capability: guestModel.CapabilityView}
+
+	ClientAsks = nil
+	if got := asksFor(ctx, comment, project); got != nil {
+		t.Errorf("without approvals: %+v", got)
+	}
+	reads := 0
+	ClientAsks = func(_ context.Context, grant, p uuid.UUID) (map[string]ClientAsk, error) {
+		reads++
+		if grant != comment.Id || p != project {
+			t.Errorf("read link %s in project %s", grant, p)
+		}
+		return nil, errors.New("postgres is down")
+	}
+	if got := asksFor(ctx, comment, project); got != nil || reads != 1 {
+		t.Errorf("a failed read: %+v after %d reads", got, reads)
+	}
+	if got := asksFor(ctx, view, project); got != nil || reads != 1 {
+		t.Errorf("a link only to view: %+v after %d reads", got, reads)
+	}
+}
+
+// A task's ask reads as its client reads the team: who asked by the name
+// rule without their address, and "Someone" when they couldn't be read.
+func TestATasksAskReadsAsItsClientReadsTheTeam(t *testing.T) {
+	due := time.Date(2026, 10, 30, 11, 30, 0, 0, time.UTC)
+	at := due.Add(-48 * time.Hour)
+	asks := map[string]ClientAsk{
+		"layout": {Ask: "The layout", DueAt: &due, AskedAt: at, AskedBy: &dgraphStruct.DgraphUser{UserFullName: "Ben Ito", EmailID: "ben@acme.test"}},
+		"move":   {ToName: "Client sign-off", AskedAt: at},
+	}
+	a := waitingOf(asks, "layout")
+	if a == nil || a.Ask != "The layout" || a.DueAt == nil || !a.DueAt.Equal(due) || !a.AskedAt.Equal(at) || a.AskedBy != "Ben Ito" || a.ToLabel != "" {
+		t.Errorf("the ask: %+v", a)
+	}
+	if a := waitingOf(asks, "move"); a == nil || a.ToLabel != "Client sign-off" || a.AskedBy != "Someone" {
+		t.Errorf("the held move: %+v", a)
+	}
+	if a := waitingOf(asks, "other"); a != nil {
+		t.Errorf("a task nothing waits on: %+v", a)
+	}
+}

@@ -79,3 +79,54 @@ func saysNeverConnected(t *testing.T) {
 		t.Errorf("a read through gorm answered %v; want it to fail saying the test %s", err, says)
 	}
 }
+
+// Every session of the server's pool runs without JIT compiling. Postgres
+// compiles a statement whose cost passes jit_above_cost (100,000) before it
+// reads a row: a table's sums over 100k rows spent 1.5-1.8 s compiling on
+// the demo's half-CPU Postgres, past their 2 s budget, and its sorted
+// windows ran out of time beside them (V-114). A DSN that sets jit keeps it.
+func TestEverySessionOfTheServersPoolRunsWithoutJIT(t *testing.T) {
+	env := ConnectServerPostgres(t)
+	for i, jit := range sessionsJIT(t, 3) {
+		if jit != "off" {
+			t.Errorf("session %d of the server's pool runs with jit %s; want off", i+1, jit)
+		}
+	}
+	var jit string
+	if err := postgresInit.DBConn.GormDB.WithContext(context.Background()).Raw(`SHOW jit`).Scan(&jit).Error; err != nil {
+		t.Fatalf("SHOW jit through the server's gorm handle: %v", err)
+	}
+	if jit != "off" {
+		t.Errorf("a session of the server's gorm handle runs with jit %s; want off", jit)
+	}
+
+	t.Run("a DSN that sets jit keeps it", func(t *testing.T) {
+		if err := postgresInit.ConnectPostgres(context.Background(), env.DSN+"&jit=on"); err != nil {
+			t.Fatalf("connect the server's pool with jit=on in its DSN: %v", err)
+		}
+		for i, jit := range sessionsJIT(t, 2) {
+			if jit != "on" {
+				t.Errorf("session %d of a pool whose DSN says jit=on runs with jit %s; want on", i+1, jit)
+			}
+		}
+	})
+}
+
+// sessionsJIT is SHOW jit on n sessions of the server's pool held at once,
+// so each is a session of its own, never one handed back and taken again.
+func sessionsJIT(t *testing.T, n int) []string {
+	t.Helper()
+	ctx := context.Background()
+	jits := make([]string, n)
+	for i := range jits {
+		c, err := postgresInit.DBConn.SqlDB.Conn(ctx)
+		if err != nil {
+			t.Fatalf("session %d of the server's pool: %v", i+1, err)
+		}
+		t.Cleanup(func() { _ = c.Close() })
+		if err := c.QueryRowContext(ctx, `SHOW jit`).Scan(&jits[i]); err != nil {
+			t.Fatalf("SHOW jit on session %d: %v", i+1, err)
+		}
+	}
+	return jits
+}

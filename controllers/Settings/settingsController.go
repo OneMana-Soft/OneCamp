@@ -71,8 +71,8 @@ func UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		added, removed := business.AllowListChange(allowListBefore, business.AllowedUsers())
 		auditBusiness.Record(r, "settings.allowed_users", auditBusiness.CategorySettings,
 			"Updated sign-up allow-list", map[string]interface{}{
-				"added":   nonNil(added),
-				"removed": nonNil(removed),
+				"added":   helpers.NonNil(added),
+				"removed": helpers.NonNil(removed),
 				"count":   len(business.AllowedUsers()),
 			})
 	}
@@ -82,15 +82,6 @@ func UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": business.GetStatus()})
-}
-
-// nonNil is list, or an empty list for none, so the audit log says [] rather
-// than null.
-func nonNil(list []string) []string {
-	if list == nil {
-		return []string{}
-	}
-	return list
 }
 
 // GetClientConfig handles GET /config/client — non-admin, authenticated. Returns
@@ -260,8 +251,9 @@ func VerifyAuditLog(w http.ResponseWriter, r *http.Request) {
 }
 
 // ExportAuditLog handles GET /admin/audit-log/export?format=csv|json&category=...&from=RFC3339&to=RFC3339
-// — downloads the audit entries (chain order) including the per-row hash, so the
-// export is independently verifiable. CSV by default.
+// — downloads the audit entries (chain order) including the per-row hash. The
+// JSON carries every hashed field, so its chain can be verified; the CSV is for
+// reading (EntriesToCSV). CSV by default.
 // GetRetentionPolicy handles GET /admin/retention
 //
 // Returns the window, the floor, and which stores it applies to, because a
@@ -432,7 +424,7 @@ func ExportAuditLog(w http.ResponseWriter, r *http.Request) {
 	if format == "json" {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Content-Disposition", `attachment; filename="audit-log.json"`)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"entries": entries})
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"entries": helpers.NonNil(entries)})
 		return
 	}
 

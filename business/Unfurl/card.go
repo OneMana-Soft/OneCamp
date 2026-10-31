@@ -19,6 +19,8 @@ import (
 	"errors"
 	"net/url"
 	"strings"
+
+	"github.com/akashc777/OneCamp/helpers"
 )
 
 // Card is a link's preview.
@@ -90,12 +92,9 @@ func Canonical(rawURL string) (*url.URL, error) {
 	if raw == "" || len(raw) > maxURLLength {
 		return nil, ErrInvalidURL
 	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.Opaque != "" {
-		return nil, ErrInvalidURL
-	}
-	u.Scheme = strings.ToLower(u.Scheme)
-	if u.Scheme != "http" && u.Scheme != "https" {
+	// url.Parse lowercases the scheme, and an opaque address has no host.
+	u, ok := helpers.WebLink(raw)
+	if !ok {
 		return nil, ErrInvalidURL
 	}
 	u.Host = strings.ToLower(u.Host)

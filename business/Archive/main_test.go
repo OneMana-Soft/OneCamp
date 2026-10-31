@@ -3,7 +3,9 @@ package business
 // TestMain gives this package's code a logger, so a unit test that reaches a
 // log line (the purge pass reports what it did) fails on its assertion rather
 // than panicking on a nil logger. Mirrors business/AIAgent's bootstrap; output
-// is discarded to keep test logs readable.
+// is discarded to keep test logs readable. The tests run through
+// integration.Main, which stops the harness's servers once an integration
+// run's tests are done (a unit run starts none).
 
 import (
 	"io"
@@ -13,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/tests/integration"
 )
 
 func TestMain(m *testing.M) {
@@ -23,5 +26,5 @@ func TestMain(m *testing.M) {
 		discard := log.New(io.Discard, "", 0)
 		helpers.MessageLogs = &helpers.Message{InfoLog: discard, ErrorLog: discard}
 	}
-	os.Exit(m.Run())
+	os.Exit(integration.Main(m))
 }

@@ -19,6 +19,7 @@ import (
 
 	"github.com/akashc777/OneCamp/business"
 	archiveBusiness "github.com/akashc777/OneCamp/business/Archive"
+	assigneeRepairBusiness "github.com/akashc777/OneCamp/business/AssigneeRepair"
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	chatBusiness "github.com/akashc777/OneCamp/business/Chat"
 	checkInBusiness "github.com/akashc777/OneCamp/business/CheckIn"
@@ -28,6 +29,7 @@ import (
 	githubBusiness "github.com/akashc777/OneCamp/business/GitHub"
 	importReviewBusiness "github.com/akashc777/OneCamp/business/ImportReview"
 	liveKitBusiness "github.com/akashc777/OneCamp/business/LiveKit"
+	marketplaceBusiness "github.com/akashc777/OneCamp/business/Marketplace"
 	notificationBusiness "github.com/akashc777/OneCamp/business/Notification"
 	schedulerBusiness "github.com/akashc777/OneCamp/business/Scheduler"
 	settingsBusiness "github.com/akashc777/OneCamp/business/Settings"
@@ -59,6 +61,8 @@ import (
 	saml "github.com/akashc777/OneCamp/services/SAML"
 	"github.com/joho/godotenv"
 
+	// A conversation's call writes its post when it starts (calls CALLS-3b): its sink registers itself.
+	_ "github.com/akashc777/OneCamp/business/Huddle"
 	journey "github.com/akashc777/OneCamp/services/Journey"
 
 	customMiddleware "github.com/akashc777/OneCamp/middleware"
@@ -208,13 +212,21 @@ func startBackgroundLoops(ctx context.Context) {
 	taskBusiness.StartStatusSinceBackfill(ctx)
 	// Once per install: every doc's global search entries rewritten from the
 	// doc (who may find it, whether it is deleted), and its comments' too.
-	docBusiness.StartDocSearchRepair(ctx)
+	docBusiness.SearchRepair.Start(ctx)
+	// Once per install: the task comments an import brought before imports
+	// wrote a person's comment's entry, findable by the task's readers, but
+	// those of imports before their provider's fix, which stay out of search.
+	importBusiness.CommentSearchRepair.Start(ctx)
+	// Once per install: a group's messages left in search under an id it had
+	// before someone was added, moved to the id it has now.
+	chatBusiness.GroupingRepair.Start(ctx)
 	// Once per install: the files of posts, messages and comments deleted
 	// before a delete took them off with the item.
 	attachmentBusiness.DeletedFilesRepair.Start(ctx)
-	// Once per install: a group's messages left in search under an id it had
-	// before someone was added, moved to the id it has now.
-	chatBusiness.StartChatGroupingRepair(ctx)
+	// Once per install: each person's stray graph nodes (one per file an
+	// import kept for them) merged into their own node, backed up first; a
+	// dry run that only says what it would do unless PERSON_NODE_MERGE=run.
+	userBusiness.StartStrayMerge(ctx)
 	// Once per install: who old Todoist and Notion imports added, for admins to review.
 	importReviewBusiness.StartScan(ctx)
 	// Once per install, at once: a review of what each import from before its
@@ -228,12 +240,22 @@ func startBackgroundLoops(ctx context.Context) {
 	// Once per install, once that re-check has gone through every old import:
 	// the admins' notice of what it did (business/ImportReview accessNotice.go).
 	importReviewBusiness.AccessNotice.Start(ctx)
+	// Once per install: each file an import kept for a task, linked to the
+	// task, which older imports never managed, so their tasks didn't list it.
+	importBusiness.TaskFileRepair.Start(ctx)
+	// Once per install: old assignments brought into line with the rule a
+	// task is assigned by, each assignee it would refuse now taken off, and
+	// each project's admins told who and how many (business/AssigneeRepair).
+	assigneeRepairBusiness.Repair.Start(ctx)
 	// Every start: an @handle for each member who has none (accounts from
 	// before handles), derived from their name.
 	userBusiness.StartHandleBackfill(ctx)
 	// Every start: a search name for each person who has none (people saved
 	// before there were search names), so people searches find them.
 	userBusiness.StartSearchNameBackfill(ctx)
+	// Every start: the listed form of each template saved before it was kept,
+	// so the Templates list never reads a payload (audit C11).
+	marketplaceBusiness.StartListedFormBackfill(ctx)
 	// Every start: the default notification setting for anyone in a direct or
 	// group conversation who has none (groups someone was added to, and
 	// direct conversations, before the fix), or they are never told of it.

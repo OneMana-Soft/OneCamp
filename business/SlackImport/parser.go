@@ -514,8 +514,9 @@ func uploadID(dir string) (string, bool) {
 	return id, true
 }
 
-// SubtypeIsSystem reports whether a subtype is a Slack system event we
-// should drop when SkipSubtypes is true. List taken from
+// SubtypeIsSystem reports whether a subtype is a Slack system notice rather
+// than something a person wrote; leftOut decides which come across, as lines.
+// List taken from
 // https://api.slack.com/events/message + observed export samples.
 func SubtypeIsSystem(s string) bool {
 	switch s {

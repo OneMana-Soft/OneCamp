@@ -52,6 +52,12 @@ type needs struct {
 	docEvent bool
 	// task is a task its project keeps to a few people (WA2).
 	task string
+	// meeting is a meeting's call's event's meeting (business/CallState
+	// webhooks.go), and callEvent says the event is a call's: one in a channel
+	// is held to the channel, one in a meeting to who may read the meeting, and
+	// one that names neither reaches nobody.
+	meeting   string
+	callEvent bool
 }
 
 // needsOf is what an event names. Whether its task is kept to a few people is
@@ -60,6 +66,9 @@ func needsOf(ctx context.Context, eventType string, data map[string]interface{})
 	n := needs{channel: named(data, "channel_id"), project: named(data, "project_id")}
 	if strings.HasPrefix(eventType, "doc.") {
 		n.docEvent, n.doc = true, named(data, "doc_uuid")
+	}
+	if strings.HasPrefix(eventType, "call.") {
+		n.callEvent, n.meeting = true, named(data, "meeting_id")
 	}
 	if task := taskOfEvent(data); task != "" && restrictedTaskEvent(ctx, data) {
 		n.task = task
@@ -90,6 +99,10 @@ func named(data map[string]interface{}, key string) string {
 // may read one.
 var errNoChannelRule = errors.New("webhooks: nothing says who may read a channel")
 
+// errNoMeetingRule is a meeting asked about before business/CallState said who
+// may read one.
+var errNoMeetingRule = errors.New("webhooks: nothing says who may read a meeting")
+
 // The rules reachOf is built from, as seams for tests.
 var (
 	memberNow = hooksBusiness.MemberNow
@@ -97,6 +110,9 @@ var (
 	// (ReadChannelsWith): it imports this package, so this one can't call it.
 	// Until it does, nobody reads a channel.
 	readsChannel = func(context.Context, string, string) (bool, error) { return false, errNoChannelRule }
+	// readsMeeting is business/CallState's MayRead for a meeting, which it
+	// sets (ReadMeetingsWith), as business/Channel sets readsChannel.
+	readsMeeting = func(context.Context, string, string) (bool, error) { return false, errNoMeetingRule }
 	graphUser    = userDomain.GetActiveDgraphUserInfoByUUID
 	projectAs    = projectDomain.GetBasicDgraphProjectInfo
 	standingIn   = workAccess.Of
@@ -110,6 +126,12 @@ var (
 // rule.
 func ReadChannelsWith(f func(ctx context.Context, userUUID, channelID string) (bool, error)) {
 	readsChannel = f
+}
+
+// ReadMeetingsWith sets who may read a meeting's calls: business/CallState's
+// rule.
+func ReadMeetingsWith(f func(ctx context.Context, userUUID, meetingID string) (bool, error)) {
+	readsMeeting = f
 }
 
 // reachOf is how an event that names event stands for a webhook set up for
@@ -189,10 +211,20 @@ func (r *reader) once(key string, ask func() (bool, error)) (bool, error) {
 // reads is whether they may read everything n names: its channel (who may read
 // its messages), its project (a role of viewer or above, as Work Access
 // decides), its doc (the Access Resolver; a doc in the trash, as they could
-// before), and its task, when its project keeps it to a few people.
+// before), its meeting (who may read its calls), and its task, when its
+// project keeps it to a few people.
 func (r *reader) reads(ctx context.Context, n needs) (bool, error) {
 	if n.channel != "" {
 		ok, err := r.once("channel "+n.channel, func() (bool, error) { return readsChannel(ctx, r.who.String(), n.channel) })
+		if err != nil || !ok {
+			return false, err
+		}
+	}
+	if n.callEvent && n.channel == "" {
+		if n.meeting == "" {
+			return false, nil
+		}
+		ok, err := r.once("meeting "+n.meeting, func() (bool, error) { return readsMeeting(ctx, r.who.String(), n.meeting) })
 		if err != nil || !ok {
 			return false, err
 		}

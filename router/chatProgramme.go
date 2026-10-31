@@ -54,4 +54,5 @@ func mountChatProgramme(rt chatRouters) {
 	mountDrafts(rt)        // P5: drafts kept on the server
 	mountChatThreads(rt)   // P2: threads you follow
 	mountChatReach(rt)     // P3: mentions that reach
+	mountSlackDMs(rt)      // item 2: each member's own Slack DMs
 }

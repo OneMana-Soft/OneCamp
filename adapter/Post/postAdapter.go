@@ -21,6 +21,10 @@ type InputCreateOrUpdatePostInfo struct {
 	// ClientMsgID is the id the app gave the post when it showed it: a send
 	// tried again with it is the same send (business/Send Once).
 	ClientMsgID string `json:"client_msg_id,omitempty"`
+	// Kind and System are the server's alone, never a request's: a call's
+	// post (helpers.KindHuddle) and its facts as JSON (calls CALLS-3b).
+	Kind   string `json:"-"`
+	System string `json:"-"`
 }
 
 type InputCreateOrUpdateCommentToPost struct {
@@ -32,6 +36,10 @@ type InputCreateOrUpdateCommentToPost struct {
 	// the reply is additionally posted as a top-level message in the thread's
 	// channel so people not in the thread still see it.
 	AlsoSendToChannel bool `json:"also_send_to_channel,omitempty"`
+	// Outsider is the server's alone: the writer isn't in the conversation
+	// (let into its call by the call's invite, calls CALLS-3b), so the thread's
+	// index records the reply but not them.
+	Outsider bool `json:"-"`
 }
 
 type InputUpdateReactionForPost struct {

@@ -74,10 +74,22 @@ func LabelsWith(v any, format func(float64) string) []string {
 	}
 }
 
-// RefLabel is what a link reads as: its label, or failing one its name,
-// value, title or id. Pure.
+// RefLabel is what a link reads as: its name (RefName), or failing one its
+// id. Pure.
 func RefLabel(m map[string]any) string {
-	for _, k := range []string{"label", "name", "value", "title", "id"} {
+	if s := RefName(m); s != "" {
+		return s
+	}
+	if s, ok := m["id"].(string); ok && strings.TrimSpace(s) != "" {
+		return s
+	}
+	return ""
+}
+
+// RefName is the name a link shows: its label, or failing one its name,
+// value or title; never its id, which only the app reads. Pure.
+func RefName(m map[string]any) string {
+	for _, k := range []string{"label", "name", "value", "title"} {
 		if s, ok := m[k].(string); ok && strings.TrimSpace(s) != "" {
 			return s
 		}
@@ -90,6 +102,18 @@ func RefLabel(m map[string]any) string {
 func IsMoreRef(item any) bool {
 	m, ok := item.(map[string]any)
 	return ok && m["type"] == "more"
+}
+
+// HasMoreRef is whether a link cell, as a read gives it, shows only some of
+// its links (IsMoreRef): it has links, however few it names. Pure.
+func HasMoreRef(cell any) bool {
+	items, _ := cell.([]any)
+	for _, it := range items {
+		if IsMoreRef(it) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsHiddenRef is whether a cell's item is a link to something its reader

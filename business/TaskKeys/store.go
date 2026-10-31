@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"errors"
+	"strconv"
 
 	"github.com/akashc777/OneCamp/helpers"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
@@ -27,7 +28,9 @@ var (
 	numberProject = model.NumberUnnumbered
 	projectName   = model.ProjectName
 	resolve       = model.Resolve
+	keepAliases   = model.KeepAliases
 	factsFor      = model.FactsFor
+	projectKeys   = model.ProjectKeys
 )
 
 // Ensure gives a project its key from its name, the first that no other
@@ -67,15 +70,36 @@ func Settle(ctx context.Context, projectID uuid.UUID) error {
 	return err
 }
 
-// Resolve is the task a key names ("Q4-12", "q4-12", or a key its project
-// used before). It doesn't ask whether anyone may open the task: its caller
-// does, and answers a task they can't open as one that isn't there.
+// Resolve is the task a key names ("Q4-12", "q4-12", a key its project used
+// before, or one the task had in the tool it was imported from: Linear's
+// ENG-7). It doesn't ask whether anyone may open the task: its caller does,
+// and answers a task they can't open as one that isn't there.
 func Resolve(ctx context.Context, raw string) (uuid.UUID, error) {
-	k, n, ok := Parse(raw)
+	k, n, ok := ParseSource(raw)
 	if !ok {
 		return uuid.Nil, ErrNoTask
 	}
 	return resolve(ctx, k, n)
+}
+
+// KeepSourceKeys makes the keys a task had in the tool it was imported from
+// (raws: Linear's ENG-7, and those it had before it moved teams) find it,
+// beside its own key, when its project's key differs (O-L2). It answers the
+// keys it left as they were: one a project here uses or used, or one another
+// task already answers to. A raw no key could be is left out, unanswered.
+// Rolling importID back puts the task, and so its keys, in the trash.
+func KeepSourceKeys(ctx context.Context, raws []string, task, importID uuid.UUID) (held []string, err error) {
+	var keys []model.AliasKey
+	for _, raw := range raws {
+		if k, n, ok := ParseSource(raw); ok {
+			keys = append(keys, model.AliasKey{Key: k, Number: n})
+		}
+	}
+	got, err := keepAliases(ctx, keys, task, importID)
+	for _, k := range got {
+		held = append(held, k.Key+"-"+strconv.Itoa(k.Number))
+	}
+	return held, err
 }
 
 // Ref is the task raw names: its id, or its key. As with Resolve, the caller
@@ -145,6 +169,39 @@ func Lay(ctx context.Context, tasks ...*dgraphStruct.DgraphTask) {
 	}
 }
 
+// LayProjects sets each project's key on an answer that lists projects (a
+// new task's address names its project by key), in one read: a project with
+// no key yet, or a read that fails (logged), has none.
+func LayProjects(ctx context.Context, projects ...*dgraphStruct.DgraphProject) {
+	ids := make([]uuid.UUID, 0, len(projects))
+	for _, p := range projects {
+		if id, err := uuid.Parse(projectID(p)); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	keys, err := projectKeys(ctx, ids)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "TaskKeys: reading the keys of %d projects: %v", len(ids), err)
+		return
+	}
+	for _, p := range projects {
+		if id, err := uuid.Parse(projectID(p)); err == nil {
+			p.Key = keys[id]
+		}
+	}
+}
+
+// projectID is a listed project's id, "" for none.
+func projectID(p *dgraphStruct.DgraphProject) string {
+	if p == nil {
+		return ""
+	}
+	return p.Uuid
+}
+
 // KeysOf is the key of each of tasks that has one, by id: for answers that
 // aren't graph tasks (search hits).
 func KeysOf(ctx context.Context, tasks []uuid.UUID) (map[uuid.UUID]string, error) {
@@ -159,6 +216,61 @@ func KeysOf(ctx context.Context, tasks []uuid.UUID) (map[uuid.UUID]string, error
 		}
 	}
 	return out, nil
+}
+
+// KeyOf is one task's key, for an answer that names the task (the API's, an
+// agent's tool's): "" when its project has no key yet, or when it can't be
+// read now (logged), and the answer names the task without it.
+func KeyOf(ctx context.Context, task uuid.UUID) string {
+	keys, err := KeysOf(ctx, []uuid.UUID{task})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "TaskKeys: reading the key of task %s: %v", task, err)
+		return ""
+	}
+	return keys[task]
+}
+
+// Named is how an answer names a task with its key first, as Linear names an
+// issue (Q4-12 "Write the launch post"): named as the answer quotes it, and
+// left as it is when there's no key.
+func Named(key, named string) string {
+	if key == "" {
+		return named
+	}
+	return key + " " + named
+}
+
+// NamedAll is Named for tasks' names by id, in one read: what a notice calls
+// each (Q4-12 Fix the login). A name left empty (one its reader can't see)
+// stays empty, keyless; so does every name when the read fails (logged).
+func NamedAll(ctx context.Context, names map[string]string) map[string]string {
+	ids := make([]uuid.UUID, 0, len(names))
+	for id, name := range names {
+		if parsed, err := uuid.Parse(id); err == nil && name != "" {
+			ids = append(ids, parsed)
+		}
+	}
+	if len(ids) == 0 {
+		return names
+	}
+	keys, err := KeysOf(ctx, ids)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "TaskKeys: reading the keys of %d named tasks: %v", len(ids), err)
+		return names
+	}
+	out := make(map[string]string, len(names))
+	for id, name := range names {
+		out[id] = name
+		if parsed, err := uuid.Parse(id); err == nil && name != "" {
+			out[id] = Named(keys[parsed], name)
+		}
+	}
+	return out
+}
+
+// NamedTask is NamedAll for one task.
+func NamedTask(ctx context.Context, id, name string) string {
+	return NamedAll(ctx, map[string]string{id: name})[id]
 }
 
 // SetKey changes a project's key as typed, by whom, keeping the one it had

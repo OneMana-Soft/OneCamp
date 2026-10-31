@@ -52,16 +52,20 @@ const docAccessFields = accessScalars + accessCounts + `
 	doc_created_by { uid user_uuid user_name user_full_name user_profile_object_key }
 	doc_owner { uid user_uuid user_name user_full_name user_profile_object_key }`
 
-// docRowFields is a doc as a row of the tree or of a list shows it.
+// docRowFields is a doc as a row of the tree or of a list shows it: with its
+// kind (an access fact), colour and link (docs F1), so a row says what it is,
+// and who made its last change beside when (doc_updated_by, docs F1: a row's
+// "Maya · 3h ago"), one edge in the same read.
 const docRowFields = `
 	uid
 	doc_uuid
 	doc_title
-	doc_icon
+	doc_icon` + nodeLook + `
 	doc_position
 	doc_snippet
 	doc_created_at
 	doc_updated_at
+	doc_updated_by { uid user_uuid user_name user_full_name }
 	doc_deleted_batch` + docAccessFields + `
 	doc_child_count: count(~doc_parent @filter(` + liveDocFilter + `))`
 
@@ -597,9 +601,16 @@ type NewDocNode struct {
 // first of them (and only it) under a live doc named by uuid, which must still
 // be live when the write lands (ErrNotFound otherwise); siblings given fresh
 // keys (renumber, by uuid) in the same transaction. Answers the new docs' uids.
+// Each node's kind, colour and link are checked before anything is written
+// (checkNodeFields): ErrBadNodeKind, ErrBadColor, ErrBadLink.
 func CreateDocNodes(ctx context.Context, nodes []NewDocNode, renumber map[string]string, at time.Time) ([]string, error) {
 	if len(nodes) == 0 {
 		return nil, nil
+	}
+	for _, n := range nodes {
+		if err := checkNodeFields(n.Doc); err != nil {
+			return nil, err
+		}
 	}
 	type obj map[string]any
 	var set []obj

@@ -21,12 +21,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
+	repairBusiness "github.com/akashc777/OneCamp/business/Repair"
 	domain "github.com/akashc777/OneCamp/domain/Chat"
-	"github.com/akashc777/OneCamp/helpers"
 	openSearchChatModels "github.com/akashc777/OneCamp/models/openSearch/Chat"
-	configModel "github.com/akashc777/OneCamp/models/postgres/Config"
 )
 
 const (
@@ -58,36 +56,10 @@ func (r ChatGroupingRepair) String() string {
 		r.IDs, r.Stale, r.Moved, r.Orphaned)
 }
 
-// StartChatGroupingRepair runs RunChatGroupingRepair in the background until
-// it succeeds, ctx ends, or the tries run out.
-func StartChatGroupingRepair(ctx context.Context) {
-	helpers.RetryInBackground(ctx, "chat.search-grouping-repair",
-		helpers.Retries{First: 30 * time.Second, Cap: 30 * time.Minute, Tries: chatGroupingRepairTries},
-		func(ctx context.Context) error {
-			rep, ran, err := RunChatGroupingRepair(ctx)
-			if err != nil {
-				helpers.MessageLogs.ErrorLog.Printf("Chat search grouping repair failed (will retry): %v (so far: %s)", err, rep)
-				return err
-			}
-			if ran {
-				helpers.MessageLogs.InfoLog.Printf("Chat search grouping repair: %s", rep)
-			}
-			return nil
-		})
-}
-
-// RunChatGroupingRepair repairs the chat entries' grouping ids, unless that
-// has been done, and then records that it has, with what it did. ran is
-// whether it ran this time.
-func RunChatGroupingRepair(ctx context.Context) (rep ChatGroupingRepair, ran bool, err error) {
-	if done, derr := configModel.IsDone(chatGroupingRepairKey); derr != nil || done {
-		return rep, false, derr
-	}
-	rep, err = RepairChatGroupings(ctx)
-	if err != nil {
-		return rep, true, err
-	}
-	return rep, true, configModel.UpsertConfig(chatGroupingRepairKey, "done: "+rep.String())
+// GroupingRepair moves the chat entries under an id no conversation has
+// (RepairChatGroupings) once per install.
+var GroupingRepair = repairBusiness.Once[ChatGroupingRepair]{
+	Key: chatGroupingRepairKey, Name: "chat.search-grouping-repair", Tries: chatGroupingRepairTries, Repair: RepairChatGroupings,
 }
 
 // RepairChatGroupings moves the chat entries under an id no conversation has

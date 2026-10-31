@@ -128,3 +128,33 @@ func TestTheTreeKeepsTheContractsShape(t *testing.T) {
 		}
 	}
 }
+
+// A collapsed group is a path of keys from the top level down to its own: a
+// JSON list of as many keys as its level is deep, at most MaxGroupCounts of
+// them a level.
+func TestACollapsedGroupNamesItsPath(t *testing.T) {
+	table := Scope{Kind: ScopeTable, ID: "t"}
+	ok := Spec{Scope: table, Groups: []Group{
+		{Field: "stage", Collapsed: []string{`["Won"]`, `[""]`}},
+		{Field: "due", Granularity: GranularityWeek, Collapsed: []string{`["Won","2026-10-19"]`}},
+	}}
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("well made: %v", err)
+	}
+	tooMany := make([]string, 1001)
+	for i := range tooMany {
+		tooMany[i] = `["x"]`
+	}
+	for name, groups := range map[string][]Group{
+		"a key, not a path":          {{Field: "stage", Collapsed: []string{"Won"}}},
+		"a path too short":           {{Field: "stage"}, {Field: "due", Collapsed: []string{`["Won"]`}}},
+		"a path too long":            {{Field: "stage", Collapsed: []string{`["Won","2026-10-19"]`}}},
+		"a key that isn't text":      {{Field: "amount", Collapsed: []string{`[12]`}}},
+		"a path that isn't a list":   {{Field: "stage", Collapsed: []string{`{"key":"Won"}`}}},
+		"more than a thousand paths": {{Field: "stage", Collapsed: tooMany}},
+	} {
+		if err := (Spec{Scope: table, Groups: groups}).Validate(); !errors.Is(err, ErrBadSpec) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

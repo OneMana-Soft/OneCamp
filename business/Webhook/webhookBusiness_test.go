@@ -1,6 +1,7 @@
 package business
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 )
@@ -18,6 +19,9 @@ func TestSanitizeEvents(t *testing.T) {
 		{"only empty", []string{"", ""}, nil},
 		{"with duplicates", []string{"a", "a", "b"}, []string{"a", "b"}},
 		{"mixed", []string{"a", "", "a", "b", "", "b"}, []string{"a", "b"}},
+		// A blank kind names nothing, and a padded one is the kind it pads.
+		{"only blank", []string{" ", "\t\n"}, nil},
+		{"padded", []string{" a ", "a", "b\t"}, []string{"a", "b"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -26,6 +30,27 @@ func TestSanitizeEvents(t *testing.T) {
 				t.Errorf("sanitizeEvents(%v) = %v, want %v", c.input, got, c.want)
 			}
 		})
+	}
+}
+
+// An outgoing webhook is sent only the kinds of event it names, so one that
+// names none, blank ones included, is refused in words an admin can act on
+// (V-112). An incoming webhook is sent nothing whatever it names, so it keeps
+// what it is given.
+func TestAnOutgoingWebhookNamesAtLeastOneKind(t *testing.T) {
+	for _, none := range [][]string{nil, {}, {""}, {" ", "\t"}} {
+		got, err := eventsColumn("outgoing", none)
+		var said ScopeError
+		if got != nil || !errors.As(err, &said) || said.Error() != noKinds {
+			t.Errorf("outgoing, events %q: %v, %v; want refused with %q", none, got, err, noKinds)
+		}
+		if got, err := eventsColumn("incoming", none); got != nil || err != nil {
+			t.Errorf("incoming, events %q: %v, %v; want none, and no error", none, got, err)
+		}
+	}
+	got, err := eventsColumn("outgoing", []string{" post.created ", "post.created", "task.created"})
+	if err != nil || got == nil || *got != `["post.created","task.created"]` {
+		t.Errorf("outgoing with kinds: %v, %v", got, err)
 	}
 }
 

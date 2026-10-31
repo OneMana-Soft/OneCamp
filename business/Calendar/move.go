@@ -181,6 +181,11 @@ func (m *moveRun) graphPage(ctx context.Context, nodes []*dgraphStruct.DgraphEve
 	var good []*dgraphStruct.DgraphEvent
 	var ids []uuid.UUID
 	for _, n := range nodes {
+		// Deleted under the old stores (CALENDAR_STORE=graph): its row moves
+		// it, to the trash (oldPage), as when the delete took its node away.
+		if helpers.IsSoftDeleted(n.DeletedAt) {
+			continue
+		}
 		m.report.GraphEvents++
 		id, err := uuid.Parse(n.Uuid)
 		if err != nil || n.StartTime == nil || n.EndTime == nil || n.CreatedBy == nil || n.CreatedBy.Uuid == "" || m.seen[id] {
@@ -385,7 +390,7 @@ func (m *moveRun) calendarOf(ctx context.Context, person uuid.UUID, zone string)
 
 // zoneSourceOf says where a zone came from, for the report. Pure.
 func zoneSourceOf(h models.ZoneHints, zone string) string {
-	for _, c := range []struct{ name, hint string }{{"quiet_hours", h.QuietHours}, {"booking_page", h.BookingPage}, {"task_repeat", h.TaskRepeat}} {
+	for _, c := range []struct{ name, hint string }{{"stored", h.Stored}, {"quiet_hours", h.QuietHours}, {"booking_page", h.BookingPage}, {"task_repeat", h.TaskRepeat}} {
 		if loc, ok := helpers.FirstLocation(c.hint); ok && loc.String() == zone {
 			return c.name
 		}

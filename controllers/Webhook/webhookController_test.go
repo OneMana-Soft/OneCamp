@@ -194,3 +194,25 @@ func fakeAdminUser() *userModel.UserInfo {
 		},
 	}
 }
+
+// zoom-15: an admin can send a webhook a call's beginning and end, as Zoom's
+// meeting.started and meeting.ended (business/CallState webhooks.go).
+func TestTheCatalogueOffersACallsBeginningAndEnd(t *testing.T) {
+	rec := httptest.NewRecorder()
+	HandleGetWebhookEventTypes(rec, httptest.NewRequest(http.MethodGet, "/webhooks/event-types", nil))
+	var got struct {
+		EventTypes []string `json:"event_types"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"call.started", "call.ended"} {
+		found := false
+		for _, k := range got.EventTypes {
+			found = found || k == kind
+		}
+		if !found {
+			t.Errorf("the catalogue doesn't offer %s: %v", kind, got.EventTypes)
+		}
+	}
+}

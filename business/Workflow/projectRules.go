@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	formModel "github.com/akashc777/OneCamp/models/postgres/Form"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	workflowModel "github.com/akashc777/OneCamp/models/postgres/Workflow"
 	"github.com/google/uuid"
@@ -44,6 +45,9 @@ var (
 	setRuleOn   = workflowModel.SetWorkflowActive
 	deleteRule  = workflowModel.SoftDeleteWorkflow
 	reloadRules = reload
+	// formIn says whether a form is the project's and makes tasks: a form
+	// rule's form (one that adds table rows has no task to run on).
+	formIn = formModel.MakesTasks
 )
 
 // prepareProjectRule fills a project rule's input and checks it against the
@@ -58,7 +62,7 @@ func prepareProjectRule(ctx context.Context, projectID uuid.UUID, in *WorkflowIn
 		in.TriggerConfig = map[string]interface{}{}
 	}
 	// The zone of whoever saved it, kept with every rule (zone.go): where its
-	// due dates are days and its due date steps land.
+	// due dates are days, its due date steps land and its schedule keeps time.
 	tz, _ := in.TriggerConfig["tz"].(string)
 	if _, err := zoneNamed(tz); err != nil {
 		return nil, err
@@ -72,6 +76,56 @@ func prepareProjectRule(ctx context.Context, projectID uuid.UUID, in *WorkflowIn
 	case workflowModel.TriggerTaskFieldChanged:
 		if err := normalizeFields(in); err != nil {
 			return nil, err
+		}
+	case workflowModel.TriggerSchedule:
+		sch, err := parseSchedule(in.TriggerConfig, clock())
+		if err != nil {
+			return nil, err
+		}
+		in.TriggerConfig = map[string]interface{}{"repeat": sch.cfg.Repeat, "at": sch.cfg.At, "from": sch.cfg.From}
+		if sch.cfg.EachTask {
+			in.TriggerConfig["each_task"] = true
+		}
+		for i := range in.Actions {
+			if in.Actions[i].Type == ActionCreateTask {
+				in.Actions[i].ProjectID = projectID.String()
+			}
+		}
+	case workflowModel.TriggerFormSubmitted:
+		// One of this project's forms: its id is the client's, so it is
+		// read back here, never taken on trust.
+		raw, _ := in.TriggerConfig["form_id"].(string)
+		form, err := uuid.Parse(strings.TrimSpace(raw))
+		if err != nil {
+			return nil, fmt.Errorf("pick the form the rule runs on")
+		}
+		ok, err := formIn(ctx, projectID, form)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			return nil, fmt.Errorf("pick one of this project's forms that make tasks")
+		}
+		in.TriggerConfig = map[string]interface{}{"form_id": form.String()}
+	case workflowModel.TriggerApprovalDecided:
+		// How the request must end; "any" (or none) is every ending.
+		o, _ := in.TriggerConfig["outcome"].(string)
+		switch o = strings.TrimSpace(o); o {
+		case "", "any":
+			in.TriggerConfig = map[string]interface{}{}
+		case "approved", "changes", "rejected":
+			in.TriggerConfig = map[string]interface{}{"outcome": o}
+		default:
+			return nil, fmt.Errorf("say how the approval must end: approved, changes asked for, or rejected")
+		}
+	case workflowModel.TriggerTaskDueSoon, workflowModel.TriggerTaskOverdue:
+		d, err := parseDue(in.TriggerType, in.TriggerConfig)
+		if err != nil {
+			return nil, err
+		}
+		in.TriggerConfig = map[string]interface{}{"at": d.cfg.At}
+		if in.TriggerType == workflowModel.TriggerTaskDueSoon {
+			in.TriggerConfig["days"] = d.cfg.Days
 		}
 	default:
 		in.TriggerConfig = map[string]interface{}{}
@@ -150,13 +204,19 @@ func CreateProjectRule(ctx context.Context, who *userModels.UserInfo, projectID 
 		return nil, err
 	}
 	_ = reloadRules(ctx)
+	if in.TriggerType == workflowModel.TriggerSchedule {
+		if err := syncSchedule(ctx, id); err != nil {
+			helpers.LogErrorWithContext(ctx, "Workflow %s plan schedule: %v", id, err)
+		}
+	}
 	return getRule(ctx, id)
 }
 
 // UpdateProjectRule saves a project's rule; whoever saves it becomes the one
 // it acts as.
 func UpdateProjectRule(ctx context.Context, who *userModels.UserInfo, projectID, id uuid.UUID, in WorkflowInput) (*workflowModel.Workflow, error) {
-	if _, err := ruleIn(ctx, projectID, id); err != nil {
+	was, err := ruleIn(ctx, projectID, id)
+	if err != nil {
 		return nil, err
 	}
 	v, err := prepareProjectRule(ctx, projectID, &in)
@@ -170,6 +230,12 @@ func UpdateProjectRule(ctx context.Context, who *userModels.UserInfo, projectID,
 		return nil, err
 	}
 	_ = reloadRules(ctx)
+	// Its job moves with it, and goes when it stops being a schedule.
+	if was.TriggerType == workflowModel.TriggerSchedule || in.TriggerType == workflowModel.TriggerSchedule {
+		if err := syncSchedule(ctx, id); err != nil {
+			helpers.LogErrorWithContext(ctx, "Workflow %s plan schedule: %v", id, err)
+		}
+	}
 	return getRule(ctx, id)
 }
 
@@ -179,7 +245,8 @@ func SetProjectRuleActive(ctx context.Context, who *userModels.UserInfo, project
 	if helpers.ActsThroughToken(ctx) {
 		return ErrThroughToken
 	}
-	if _, err := ruleIn(ctx, projectID, id); err != nil {
+	wf, err := ruleIn(ctx, projectID, id)
+	if err != nil {
 		return err
 	}
 	if err := setRuleOn(ctx, id, on); err != nil {
@@ -190,6 +257,11 @@ func SetProjectRuleActive(ctx context.Context, who *userModels.UserInfo, project
 			return err
 		}
 	}
+	if wf.TriggerType == workflowModel.TriggerSchedule {
+		if err := syncSchedule(ctx, id); err != nil {
+			helpers.LogErrorWithContext(ctx, "Workflow %s plan schedule: %v", id, err)
+		}
+	}
 	return reloadRules(ctx)
 }
 
@@ -198,11 +270,17 @@ func DeleteProjectRule(ctx context.Context, projectID, id uuid.UUID) error {
 	if helpers.ActsThroughToken(ctx) {
 		return ErrThroughToken
 	}
-	if _, err := ruleIn(ctx, projectID, id); err != nil {
+	wf, err := ruleIn(ctx, projectID, id)
+	if err != nil {
 		return err
 	}
 	if err := deleteRule(ctx, id); err != nil {
 		return err
+	}
+	if wf.TriggerType == workflowModel.TriggerSchedule {
+		if err := cancelScheduleJob(ctx, id); err != nil {
+			helpers.LogErrorWithContext(ctx, "Workflow %s cancel schedule: %v", id, err)
+		}
 	}
 	return reloadRules(ctx)
 }

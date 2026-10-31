@@ -70,8 +70,10 @@ type Event struct {
 	// it skips, and RecurrenceID, on a changed instance of a series, is the
 	// start it had in the series. For an all-day series these are dates at
 	// 00:00 UTC.
-	RRule        string
-	ExDates      []time.Time
+	RRule   string
+	ExDates []time.Time
+	// RDates are instances added to the series beyond its rule.
+	RDates       []time.Time
 	RecurrenceID *time.Time
 	Summary      string
 	Description  string
@@ -85,12 +87,29 @@ type Event struct {
 	// booked it, as Attendee instead: accepted, with no answer asked.
 	Attendees []Attendee
 	Attendee  Address
+	// Alarms are its reminders; an invitation carries none.
+	Alarms []Alarm
+	// Conference is where it's joined (a Meet, Zoom or OneCamp call link).
+	Conference string
+	// Attachments are the files linked to it.
+	Attachments []Attachment
+}
+
+// Attachment is a file linked to an event: its name and where it is.
+type Attachment struct {
+	Name string
+	URL  string
 }
 
 // Message is an iCalendar message: a method and the VEVENTs of one event.
 type Message struct {
 	Method string
 	Events []Event
+	// Name is the calendar a feed is (X-WR-CALNAME), which a calendar app
+	// shows it as; Refresh is how often to read it again (REFRESH-INTERVAL
+	// and X-PUBLISHED-TTL). Both are left out when empty, as an invitation.
+	Name    string
+	Refresh time.Duration
 }
 
 // Write is an iCalendar message about ev alone: METHOD method, and the event
@@ -111,6 +130,14 @@ func WriteMessage(m Message) []byte {
 	line("PRODID:-//OneCamp//Calendar//EN")
 	line("CALSCALE:GREGORIAN")
 	line("METHOD:" + value(m.Method))
+	if m.Name != "" {
+		line("X-WR-CALNAME:" + text(m.Name))
+	}
+	if m.Refresh > 0 {
+		d := durationOf(m.Refresh)
+		line("REFRESH-INTERVAL;VALUE=DURATION:" + d)
+		line("X-PUBLISHED-TTL:" + d)
+	}
 	for _, z := range zonesOf(m.Events) {
 		for _, l := range z {
 			line(l)
@@ -153,6 +180,9 @@ func writeEvent(line func(string), method string, ev Event) {
 	if len(ev.ExDates) > 0 {
 		line("EXDATE" + whenList(ev.ExDates, allDay, loc))
 	}
+	if len(ev.RDates) > 0 {
+		line("RDATE" + whenList(ev.RDates, allDay, loc))
+	}
 	line("SUMMARY:" + text(ev.Summary))
 	if ev.Description != "" {
 		line("DESCRIPTION:" + text(ev.Description))
@@ -177,11 +207,36 @@ func writeEvent(line func(string), method string, ev Event) {
 		}
 		line("ATTENDEE;CN=" + param(a.Name) + ";ROLE=" + role + ";PARTSTAT=" + paramText(stat) + ";RSVP=" + rsvp + ":" + calAddress(a.Email))
 	}
+	if ev.Conference != "" {
+		line("CONFERENCE;VALUE=URI;FEATURE=AUDIO,VIDEO:" + value(ev.Conference))
+	}
+	for _, a := range ev.Attachments {
+		if a.Name != "" {
+			line("ATTACH;FILENAME=" + param(a.Name) + ":" + value(a.URL))
+		} else {
+			line("ATTACH:" + value(a.URL))
+		}
+	}
 	line("STATUS:" + value(status))
 	if ev.Transparent {
 		line("TRANSP:TRANSPARENT")
 	} else {
 		line("TRANSP:OPAQUE")
+	}
+	for _, a := range ev.Alarms {
+		action := "DISPLAY"
+		if a.Email {
+			action = "EMAIL"
+		}
+		line("BEGIN:VALARM")
+		line("ACTION:" + action)
+		line("TRIGGER:" + triggerOf(a.Before))
+		line("DESCRIPTION:" + text(ev.Summary))
+		if a.Email {
+			line("SUMMARY:" + text(ev.Summary))
+			line("ATTENDEE:" + calAddress(ev.Organizer.Email))
+		}
+		line("END:VALARM")
 	}
 	line("END:VEVENT")
 }
@@ -287,6 +342,33 @@ func untilOf(rule string, otherwise time.Time) time.Time {
 	return otherwise
 }
 
+// triggerOf is a VALARM's TRIGGER for a time before the start ("-PT15M",
+// "PT0S" at the start). Pure.
+func triggerOf(before time.Duration) string {
+	if before <= 0 {
+		return "PT0S"
+	}
+	secs := int64(before / time.Second)
+	d, h, m, sec := secs/86400, secs%86400/3600, secs%3600/60, secs%60
+	out := "-P"
+	if d > 0 {
+		out += strconv.FormatInt(d, 10) + "D"
+	}
+	if h > 0 || m > 0 || sec > 0 {
+		out += "T"
+		if h > 0 {
+			out += strconv.FormatInt(h, 10) + "H"
+		}
+		if m > 0 {
+			out += strconv.FormatInt(m, 10) + "M"
+		}
+		if sec > 0 {
+			out += strconv.FormatInt(sec, 10) + "S"
+		}
+	}
+	return out
+}
+
 // calAddress is a cal-address (RFC 5545 3.3.3): mailto: and the address
 // alone. A sender set as "Acme <hi@acme.com>", which mail accepts, is
 // hi@acme.com here. Pure.
@@ -353,4 +435,35 @@ func fold(s string) string {
 	}
 	b.WriteString(s)
 	return b.String()
+}
+
+// RecurrenceLines is a series' recurrence as a provider takes it apart from
+// its event (Google's "recurrence"): its RRULE, EXDATE and RDATE lines, in
+// its zone, as WriteMessage writes them. None for an event that doesn't
+// repeat. Pure.
+func RecurrenceLines(ev Event) []string {
+	if ev.RRule == "" {
+		return nil
+	}
+	allDay, loc := ev.StartDate != "", zoneOf(ev)
+	out := []string{"RRULE:" + value(ev.RRule)}
+	if len(ev.ExDates) > 0 {
+		out = append(out, "EXDATE"+whenList(ev.ExDates, allDay, loc))
+	}
+	if len(ev.RDates) > 0 {
+		out = append(out, "RDATE"+whenList(ev.RDates, allDay, loc))
+	}
+	return out
+}
+
+// durationOf is a positive span as an RFC 5545 duration: PT1H, PT15M, P2D. Pure.
+func durationOf(d time.Duration) string {
+	n := func(unit time.Duration) string { return strconv.FormatInt(int64((d+unit-1)/unit), 10) }
+	if d%(24*time.Hour) == 0 {
+		return "P" + n(24*time.Hour) + "D"
+	}
+	if d%time.Hour == 0 {
+		return "PT" + n(time.Hour) + "H"
+	}
+	return "PT" + n(time.Minute) + "M"
 }

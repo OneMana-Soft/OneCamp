@@ -33,7 +33,9 @@ func TestA5MountsItsRoutes(t *testing.T) {
 	if got := routes(doc); strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Errorf("/doc routes:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
-	if got := routes(admin); strings.Join(got, ",") != "POST /docs/recover" {
+	// Taking over a departed person's docs is Settings > Docs' hand-over
+	// (business/Departed), not a route of A5's.
+	if got := routes(admin); len(got) != 0 {
 		t.Errorf("admin routes: %v", got)
 	}
 }

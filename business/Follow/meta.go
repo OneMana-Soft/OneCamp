@@ -1,8 +1,10 @@
 package business
 
 // Open tabs learn of a doc's changes live: renames, deletes and restores,
-// moves, and changes to its access or lock, published on the doc's topic
-// (MESSAGE_DOC_META), which only people who may read the doc subscribe to.
+// moves, changes to its access or lock, its threads, and its proposals (a
+// suggestion made, accepted, declined or withdrawn: docs C5), published on
+// the doc's topic (MESSAGE_DOC_META), which only people who may read the doc
+// subscribe to.
 //
 // A meta event carries what a tab needs to act on, and nothing about who was
 // given or lost access: a tab told its doc's access changed asks again what it
@@ -38,10 +40,19 @@ var metaKeep = map[resourceEventBusiness.Kind][]string{
 	resourceEventBusiness.ThreadResolved:   threadMeta,
 	resourceEventBusiness.ThreadReopened:   threadMeta,
 	resourceEventBusiness.ThreadReanchored: threadMeta,
+	// Proposals: the client reads the doc's proposals again.
+	resourceEventBusiness.DocProposalCreated:   proposalMeta,
+	resourceEventBusiness.DocProposalAccepted:  proposalMeta,
+	resourceEventBusiness.DocProposalDeclined:  proposalMeta,
+	resourceEventBusiness.DocProposalWithdrawn: proposalMeta,
 }
 
 // threadMeta is what open tabs are sent of a thread's event: ids, never text.
 var threadMeta = []string{"thread_id", "anchor_kind", "status", "comment_id"}
+
+// proposalMeta is what open tabs are sent of a proposal's event: its id, its
+// status and who made it (person, agent or ai), never its text.
+var proposalMeta = []string{"proposal_id", "status", "author_kind"}
 
 // Seam for tests: where meta events are published.
 var publishMeta = func(docUUID string, meta mqttStruct.MqttDocMeta) {

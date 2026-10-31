@@ -27,8 +27,11 @@ type BacklogRead struct {
 	// Backlog is a page of the open top-level tasks in no open cycle, oldest
 	// first.
 	Backlog []*dgraphStruct.DgraphTask
-	// Count and Minutes are all of them, not the page.
+	// Count and Minutes are all of them, not the page; Points are their
+	// points added up, and Pointed how many have points.
 	Count, Minutes int
+	Points         float64
+	Pointed        int
 	// Planned are the live tasks of planned (the open cycles' and the latest
 	// completed ones'), as the reader may see them.
 	Planned []*dgraphStruct.DgraphTask
@@ -45,6 +48,7 @@ var backlogTaskFields = `
 	task_status_since
 	task_created_at
 	task_estimate_minutes
+	task_estimate_points
 	task_assignee { uid user_uuid user_name user_full_name user_profile_object_key }
 	task_sub_task_count: count(task_sub_tasks @filter(` + dgraphquery.Live("task_deleted_at") + ` @@hidden_tasks@@))
 	task_sub_task_done: count(task_sub_tasks @filter(` + dgraphquery.Live("task_deleted_at") + ` AND (eq(task_status, "done") OR eq(task_status, "canceled")) @@hidden_tasks@@))
@@ -84,10 +88,12 @@ func GetDgraphProjectBacklog(ctx context.Context, projectUUID string, inCycles, 
 			project_tasks @filter(%s AND NOT has(task_parent_task) AND %s%s @@hidden_tasks@@) {
 				b as uid
 				e as task_estimate_minutes
+				p as task_estimate_points
 			}
 		}
 		counted(func: uid(b)) { n: count(uid) }
-		summed() { minutes: sum(val(e)) }
+		pointed(func: uid(b)) @filter(has(task_estimate_points)) { n: count(uid) }
+		summed() { minutes: sum(val(e)) points: sum(val(p)) }
 		backlog(func: uid(b), orderasc: task_created_at, first: %d) {%s}
 		%s
 	}`, dgraphStruct.TASK_LIVE_FILTER, dgraphStruct.TASK_OPEN_FILTER, notPlanned, BacklogPage, backlogTaskFields, plannedBlock))
@@ -100,8 +106,13 @@ func GetDgraphProjectBacklog(ctx context.Context, projectUUID string, inCycles, 
 		Counted []struct {
 			N int `json:"n"`
 		} `json:"counted"`
+		Pointed []struct {
+			N int `json:"n"`
+		} `json:"pointed"`
+		// One object an aggregate.
 		Summed []struct {
 			Minutes float64 `json:"minutes"`
+			Points  float64 `json:"points"`
 		} `json:"summed"`
 		Backlog []*dgraphStruct.DgraphTask `json:"backlog"`
 		Planned []*dgraphStruct.DgraphTask `json:"planned"`
@@ -113,8 +124,12 @@ func GetDgraphProjectBacklog(ctx context.Context, projectUUID string, inCycles, 
 	if len(out.Counted) > 0 {
 		read.Count = out.Counted[0].N
 	}
+	if len(out.Pointed) > 0 {
+		read.Pointed = out.Pointed[0].N
+	}
 	for _, s := range out.Summed {
 		read.Minutes += int(s.Minutes)
+		read.Points += s.Points
 	}
 	if read.Backlog == nil {
 		read.Backlog = []*dgraphStruct.DgraphTask{}

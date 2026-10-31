@@ -93,8 +93,9 @@ var (
 		}
 		return ch, err
 	}
-	personByUUID = userBusiness.GetDgraphUserInfoByUUID
-	groupsNow    = time.Now
+	personByUUID  = userBusiness.GetDgraphUserInfoByUUID
+	channelPeople = conversationDomain.ChannelPeople
+	groupsNow     = time.Now
 )
 
 // groupPeopleOf is a DM's or group's people, for a share.
@@ -144,6 +145,16 @@ func refPeople(ctx context.Context, ref Ref) ([]*dgraphStruct.DgraphUser, error)
 		}
 	}
 	return out, nil
+}
+
+// PeopleIn is a conversation's people as the graph has them, whoever asks: a
+// channel's members, a DM's two, a group's people. What each may do in it is
+// Resolve's to say.
+func PeopleIn(ctx context.Context, ref Ref) ([]*dgraphStruct.DgraphUser, error) {
+	if ref.Kind == KindChannel {
+		return channelPeople(ctx, ref.ID)
+	}
+	return refPeople(ctx, ref)
 }
 
 // ShareChoice is one row of the Add people sheet's "Share earlier messages?":

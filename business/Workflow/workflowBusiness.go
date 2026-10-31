@@ -76,6 +76,9 @@ type WorkflowAction struct {
 	DueInDays *int `json:"due_in_days,omitempty"`
 	// notify: whom (taskActions.go Notify*).
 	Notify string `json:"notify,omitempty"`
+	// ask_agent: the AI teammate asked (its principal's user id); empty asks
+	// the workspace's assistant.
+	AgentID string `json:"agent_id,omitempty"`
 }
 
 // compiledWorkflow is the cached, ready-to-match form of a workflow row.
@@ -90,11 +93,19 @@ type compiledWorkflow struct {
 	taskMove taskStatusBusiness.MoveFilter
 	// task_field_changed only: which fields count ("" all).
 	fields []string
+	// form_submitted only: the form whose submissions it runs on.
+	formID string
+	// approval_decided only: how a request must end ("" any).
+	outcome string
 	// A project rule's project ("" for a workspace workflow).
 	projectID string
 	// loc is the rule's zone (trigger_config "tz", saved from the browser of
-	// whoever set it; UTC when it has none): where its due dates are days.
-	loc         *time.Location
+	// whoever set it; UTC when it has none): where its due dates are days and
+	// its schedule keeps time.
+	loc *time.Location
+	// A schedule rule's schedule; a due rule's days and time.
+	schedule    *schedule
+	due         *dueTrigger
 	conditions  Conditions
 	elseActions []WorkflowAction
 	matchType   string
@@ -183,6 +194,15 @@ var engineTriggers = []string{
 	workflowModel.TriggerTaskCreated,
 	workflowModel.TriggerTaskAssigned,
 	workflowModel.TriggerTaskFieldChanged,
+	// Time: run by their queued job (schedule.go) and the due sweep (due.go),
+	// not by an event.
+	workflowModel.TriggerSchedule,
+	workflowModel.TriggerTaskDueSoon,
+	workflowModel.TriggerTaskOverdue,
+	// A project's form sent (business/Form's form.submitted).
+	workflowModel.TriggerFormSubmitted,
+	// A task's approval request answered (business/Approvals).
+	workflowModel.TriggerApprovalDecided,
 }
 
 // IsEngineTrigger reports whether a trigger type is actively evaluated by the
@@ -317,11 +337,33 @@ func compile(w *workflowModel.Workflow) (*compiledWorkflow, error) {
 			loc = l
 		}
 	}
+	formID, _ := cfg["form_id"].(string)
+	outcome, _ := cfg["outcome"].(string)
+	var sched *schedule
+	if w.TriggerType == workflowModel.TriggerSchedule {
+		s, err := parseSchedule(cfg, clock())
+		if err != nil {
+			return nil, fmt.Errorf("bad schedule: %w", err)
+		}
+		sched, loc = s, s.loc
+	}
+	var due *dueTrigger
+	if isDueTrigger(w.TriggerType) {
+		d, err := parseDue(w.TriggerType, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("bad due trigger: %w", err)
+		}
+		due, loc = d, d.loc
+	}
 
 	return &compiledWorkflow{
 		loc:         loc,
+		schedule:    sched,
+		due:         due,
 		taskMove:    move,
 		fields:      fieldCfg.Fields,
+		formID:      formID,
+		outcome:     outcome,
 		projectID:   projectID,
 		conditions:  conds,
 		elseActions: elseActions,
@@ -357,6 +399,10 @@ func handleEvent(ctx context.Context, eventType string, data map[string]interfac
 		handleTaskEvent(ctx, workflowModel.TriggerTaskAssigned, data)
 	case "task.changed":
 		handleTaskEvent(ctx, workflowModel.TriggerTaskFieldChanged, data)
+	case "form.submitted":
+		handleTaskEvent(ctx, workflowModel.TriggerFormSubmitted, data)
+	case "task.approval_decided":
+		handleTaskEvent(ctx, workflowModel.TriggerApprovalDecided, data)
 	}
 }
 

@@ -1,20 +1,37 @@
 package business
 
 import (
+	"slices"
 	"testing"
 
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 )
 
-// These tests pin the SAFETY contract of the DB pushdown: pushableLikeTerms may
-// only ever emit a term when a coarse `values::text ILIKE '%term%'` pre-filter
-// is guaranteed to return a SUPERSET of what the in-memory engine matches. If
-// it emitted a term for an operator/value where that isn't true, a filtered
-// aggregation over a large table could silently drop real matches. The pure
-// engine stays authoritative; these guard the optimization that feeds it.
+// These tests pin the SAFETY contract of the DB pushdown: a filter may only
+// give a term (rowFilters.terms) when a coarse `values::text ILIKE '%term%'`
+// pre-filter is guaranteed to return a SUPERSET of what the in-memory filter
+// keeps. If it gave a term for an operator or a value where that isn't true,
+// a filtered aggregation over a large table could silently drop real
+// matches. The in-memory filter stays authoritative; these guard the
+// optimization that feeds it.
+
+// termsOf is the terms filters over fields push down, read in UTC.
+func termsOf(t *testing.T, fields []*model.Field, filters ...Filter) []string {
+	t.Helper()
+	rf, err := newRowFilters(fields, filters, reading{})
+	if err != nil {
+		t.Fatalf("%v: %v", filters, err)
+	}
+	return rf.terms()
+}
 
 func TestPushableLikeTerms_OnlyEqAndContains(t *testing.T) {
 	fields, _, _ := buildDeals()
+	won := fld("Won", model.FieldCheckbox)
+	due := fld("Due", model.FieldDate)
+	stage := fld("Phase", model.FieldSelect)
+	stage.Config = `{"options":[{"id":"o_talk","label":"Talking"}]}`
+	fields = append(fields, won, due, stage)
 
 	cases := []struct {
 		name   string
@@ -31,17 +48,23 @@ func TestPushableLikeTerms_OnlyEqAndContains(t *testing.T) {
 		{"blank value never push", Filter{Field: "Stage", Op: "eq", Value: "   "}, nil},
 		{"unknown field never push", Filter{Field: "Nope", Op: "eq", Value: "Won"}, nil},
 		{"non-ascii value never push", Filter{Field: "Stage", Op: "eq", Value: "café"}, nil},
+		// A number is stored as one: "1,000" is 1000 there.
+		{"a number never pushes", Filter{Field: "Amount", Op: "eq", Value: "1,000"}, nil},
+		// A tick is stored as true or false, whatever word asked for it.
+		{"a checkbox never pushes", Filter{Field: "Won", Op: "eq", Value: "yes"}, nil},
+		// A choice is stored as its label, whichever way it was named.
+		{"an option's id pushes its label", Filter{Field: "Phase", Op: "eq", Value: "o_talk"}, []string{"Talking"}},
+		// A stored date is its day, so a month or a day it falls in is in it.
+		{"a date's day pushes", Filter{Field: "Due", Op: "eq", Value: "2026-10"}, []string{"2026-10"}},
+		{"a date after a day never pushes", Filter{Field: "Due", Op: "gt", Value: "2026-10-01"}, nil},
+		// A stored cell's JSON writes a quote as \" and a backslash as \\.
+		{"a quote never pushes", Filter{Field: "Stage", Op: "eq", Value: `Say "won"`}, nil},
+		{"a backslash never pushes", Filter{Field: "Stage", Op: "contains", Value: `a\b`}, nil},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := pushableLikeTerms(fields, []Filter{c.filter})
-			if len(got) != len(c.want) {
+			if got := termsOf(t, fields, c.filter); !slices.Equal(got, c.want) {
 				t.Fatalf("terms = %v, want %v", got, c.want)
-			}
-			for i := range got {
-				if got[i] != c.want[i] {
-					t.Fatalf("terms = %v, want %v", got, c.want)
-				}
 			}
 		})
 	}
@@ -49,12 +72,11 @@ func TestPushableLikeTerms_OnlyEqAndContains(t *testing.T) {
 
 func TestPushableLikeTerms_MixedFiltersKeepOnlySafe(t *testing.T) {
 	fields, _, _ := buildDeals()
-	filters := []Filter{
-		{Field: "Stage", Op: "eq", Value: "Won"},    // pushable
-		{Field: "Amount", Op: "gt", Value: "100"},   // not pushable (numeric)
-		{Field: "Tags", Op: "contains", Value: "e"}, // pushable
-	}
-	got := pushableLikeTerms(fields, filters)
+	got := termsOf(t, fields,
+		Filter{Field: "Stage", Op: "eq", Value: "Won"},    // pushable
+		Filter{Field: "Amount", Op: "gt", Value: "100"},   // not pushable (numeric)
+		Filter{Field: "Tags", Op: "contains", Value: "e"}, // pushable
+	)
 	if len(got) != 2 || got[0] != "Won" || got[1] != "e" {
 		t.Fatalf("expected [Won e], got %v", got)
 	}
@@ -79,7 +101,7 @@ func TestPushdownSupersetPreservesResult(t *testing.T) {
 
 	// Superset pre-filter: keep rows whose raw JSONB text contains every term
 	// (case-insensitive), mirroring model.ListRowsFiltered's ILIKE narrowing.
-	terms := pushableLikeTerms(fields, spec.Filters)
+	terms := termsOf(t, fields, spec.Filters...)
 	narrowed := filterRowsBySubstrings(rows, terms)
 	if len(narrowed) >= len(rows) {
 		t.Fatalf("expected the pre-filter to narrow rows (got %d of %d)", len(narrowed), len(rows))

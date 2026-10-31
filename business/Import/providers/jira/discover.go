@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"strings"
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
@@ -14,15 +13,11 @@ import (
 // Discover lists Jira projects visible at the configured site URL.
 // The token's metadata must include site_url + (email | bearer="true").
 func (p *Provider) Discover(ctx context.Context, ownerUserId string, token *importModels.Token) ([]importProvider.DiscoverItem, error) {
-	var md struct {
-		SiteURL string `json:"site_url"`
-		Email   string `json:"email"`
-		Bearer  string `json:"bearer"`
-	}
+	var md tokenMeta
 	_ = json.Unmarshal(token.Metadata, &md)
-	site := strings.TrimRight(md.SiteURL, "/")
-	if site == "" {
-		return nil, errors.New("jira token missing metadata.site_url")
+	api, browse, err := md.bases()
+	if err != nil {
+		return nil, err
 	}
 	auth := ""
 	if md.Bearer == "true" {
@@ -33,7 +28,7 @@ func (p *Provider) Discover(ctx context.Context, ownerUserId string, token *impo
 		}
 		auth = base64.StdEncoding.EncodeToString([]byte(md.Email + ":" + token.AccessToken))
 	}
-	projects, err := p.listProjects(ctx, auth, site)
+	projects, err := p.listProjects(ctx, auth, api)
 	if err != nil {
 		return nil, err
 	}
@@ -43,7 +38,7 @@ func (p *Provider) Discover(ctx context.Context, ownerUserId string, token *impo
 			ID:          pr.Key,
 			Name:        pr.Name,
 			Description: pr.Description,
-			URL:         site + "/browse/" + pr.Key,
+			URL:         browse + "/browse/" + pr.Key,
 			Kind:        "project",
 		})
 	}

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"strings"
 
+	docDomain "github.com/akashc777/OneCamp/domain/Doc"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/dgraphquery"
 	"github.com/akashc777/OneCamp/models/dgexec"
@@ -88,12 +89,25 @@ type kindSpec struct {
 	kind, root, uuid, deleted, comments string
 	authors                             []string // predicates naming who wrote it
 	assignee                            string   // "" for none
+	// only keeps the items of the kind that can count, "" for every one: of
+	// the docs, the pages (docs F1). Making a folder, uploading a file or
+	// adding a link isn't writing about anything, and a comment on one isn't
+	// either.
+	only string
 }
 
 var kinds = []kindSpec{
-	{kind: KindDoc, root: "D", uuid: "doc_uuid", deleted: "doc_deleted_at", comments: "doc_comments", authors: []string{"doc_created_by"}},
+	{kind: KindDoc, root: "D", uuid: "doc_uuid", deleted: "doc_deleted_at", comments: "doc_comments", authors: []string{"doc_created_by"}, only: docDomain.PageOnly},
 	{kind: KindTask, root: "T", uuid: "task_uuid", deleted: "task_deleted_at", comments: "task_comments", authors: []string{"task_created_by"}, assignee: "task_assignee"},
 	{kind: KindMessage, root: "P", uuid: "post_uuid", deleted: "post_deleted_at", comments: "post_comments", authors: []string{"post_by"}},
+}
+
+// keep is the filter on the kind's items: the live ones that can count.
+func (k kindSpec) keep() string {
+	if k.only == "" {
+		return dgraphquery.Live(k.deleted)
+	}
+	return dgraphquery.Live(k.deleted) + " AND " + k.only
 }
 
 func (s Items) of(kind string) []string {
@@ -126,7 +140,7 @@ func CountQuery(s Items) string {
 		if list == "" {
 			continue
 		}
-		fmt.Fprintf(&b, "\t%s as var(func: eq(%s, [%s])) @filter(%s)\n", k.root, k.uuid, list, dgraphquery.Live(k.deleted))
+		fmt.Fprintf(&b, "\t%s as var(func: eq(%s, [%s])) @filter(%s)\n", k.root, k.uuid, list, k.keep())
 		fmt.Fprintf(&b, "\tvar(func: uid(%s)) { %sC as %s @filter(%s) (first: %d) }\n", k.root, k.root, k.comments, dgraphquery.Live("comment_deleted_at"), CommentsPerItem)
 		comments = append(comments, k.root+"C")
 		for i, a := range k.authors {

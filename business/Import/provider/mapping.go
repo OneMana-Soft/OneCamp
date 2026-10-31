@@ -87,3 +87,34 @@ func ApplyPriorityMap(source string, mapping, defaults map[string]string) string
 	}
 	return dgraphStruct.TASK_PRIORITY_MEDIUM
 }
+
+// StatusDefaults is defaults with each status that has no default of its own
+// proposed by its class (kinds: name → class, both lower-cased), as Linear's
+// "Ready to ship" is a started state. A name's own default wins. Pure.
+func StatusDefaults(defaults, kinds map[string]string) map[string]string {
+	out := make(map[string]string, len(defaults)+len(kinds))
+	for k, v := range defaults {
+		out[k] = v
+	}
+	for name, kind := range kinds {
+		name, kind = strings.TrimSpace(strings.ToLower(name)), strings.TrimSpace(strings.ToLower(kind))
+		if _, own := out[name]; own || name == "" {
+			continue
+		}
+		if v, ok := defaults[kind]; ok {
+			out[name] = v
+		}
+	}
+	return out
+}
+
+// ProposeStatuses is the status the plan proposes for each of values, by the
+// defaults StatusDefaults gives. Pure.
+func ProposeStatuses(values []string, defaults map[string]string) map[string]string {
+	out := make(map[string]string, len(values))
+	for _, v := range values {
+		key := strings.TrimSpace(strings.ToLower(v))
+		out[key] = ApplyStatusMap(key, nil, defaults)
+	}
+	return out
+}

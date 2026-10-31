@@ -61,8 +61,7 @@ func createInConversation(ctx context.Context, user *userModels.UserInfo, in New
 		return nil, err
 	}
 	if id, perr := uuid.Parse(messageID); perr == nil {
-		_ = pollModel.SetPost(ctx, p.ID, id)
-		p.PostID = &id
+		linkPost(ctx, p, id)
 	}
 	return view(p, &pollModel.Tally{Counts: map[string]int{}}, user.UserPostgresInfo.Id, true), nil
 }

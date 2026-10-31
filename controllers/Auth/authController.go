@@ -1365,9 +1365,9 @@ func UpdateOAuthConfig(w http.ResponseWriter, r *http.Request) {
 // the token the middleware in front of it checked (authcookie.AccessToken):
 // this server's own, never another workspace's sent along on a shared zone.
 //
-// Rate-limited to 15 req/min per IP to prevent brute-force token extraction.
-// The token has a 5-min TTL; the FE's onAuthenticationFailed handler
-// re-fetches a fresh token on expiry.
+// Limited per address (middleware.CollabTokenReadLimit), at a budget an
+// office's tabs fit in. The token has a 5-min TTL; the FE's
+// onAuthenticationFailed handler re-fetches a fresh token on expiry.
 func GetCollabToken(w http.ResponseWriter, r *http.Request) {
 	token := authcookie.AccessToken(r)
 	if token == "" {

@@ -3,6 +3,7 @@ package domain
 import (
 	"context"
 	"fmt"
+	"github.com/akashc777/OneCamp/models/dgexec"
 	"strconv"
 	"time"
 
@@ -134,6 +135,17 @@ func GetBoardsReadAccessFor(ctx context.Context, boardUUIDs []string, userUUID s
 	return boards, err
 }
 
+// GetLiveBoardUUIDPage reads the uuids of one page of every live board (none
+// deleted), in the graph's order: for reading every board a page at a time
+// (the workspace export).
+func GetLiveBoardUUIDPage(ctx context.Context, offset, first int) ([]string, error) {
+	ids, err := dgexec.UUIDPage(ctx, "board_uuid", dgraphquery.Live("board_deleted_at"), offset, first)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/GetLiveBoardUUIDPage err: %+v", err)
+	}
+	return ids, err
+}
+
 // GetSystemBoardByUUID returns the board state for the collaboration service
 // (no user context; internal-service authenticated upstream).
 func GetSystemBoardByUUID(ctx context.Context, boardUUID string) (dgraphBoard *dgraphStruct.DgraphBoard, err error) {
@@ -223,9 +235,10 @@ func GetBoardPermissions(ctx context.Context, boardUUID string) (dgraphBoard *dg
 
 // GetDgraphBoardList returns the boards a user can access (owned or shared via
 // edit/read/comment), newest-edited first, with an optional title search and
-// pagination. Relies on the @reverse indexes on board_created_by and the
-// board_*_users predicates.
-func GetDgraphBoardList(ctx context.Context, userUID string, search string, first int, offset int) (list *dgraphStruct.DgraphBoardList, err error) {
+// pagination. With editable, only those CanEdit lets them change (owned or
+// shared to edit), as a call's board picker lists. Relies on the @reverse
+// indexes on board_created_by and the board_*_users predicates.
+func GetDgraphBoardList(ctx context.Context, userUID string, search string, first int, offset int, editable bool) (list *dgraphStruct.DgraphBoardList, err error) {
 	variables := make(map[string]string)
 	variables["$userId"] = userUID
 	variables["$first"] = strconv.Itoa(first)
@@ -237,19 +250,27 @@ func GetDgraphBoardList(ctx context.Context, userUID string, search string, firs
 		filter = fmt.Sprintf(`%s AND regexp(board_title, /%s/i)`, notDeleted, search)
 	}
 
+	// Dgraph refuses a query that defines a variable it never uses, so the
+	// editable list doesn't define the read and comment shares at all.
+	shares, boards := `owned as ~board_created_by
+					edits as ~board_editing_users`, "owned, edits"
+	if !editable {
+		shares += `
+					reads as ~board_reading_users
+					comments as ~board_commenting_users`
+		boards += ", reads, comments"
+	}
+
 	query := fmt.Sprintf(`query BoardList($userId: string, $first: int, $offset: int){
 				var(func: uid($userId)) {
-					owned as ~board_created_by
-					edits as ~board_editing_users
-					reads as ~board_reading_users
-					comments as ~board_commenting_users
+					%s
 				}
 
-				board_count(func: uid(owned, edits, reads, comments)) @filter(%s) {
+				board_count(func: uid(%s)) @filter(%s) {
 					count(uid)
 				}
 
-				boardList(func: uid(owned, edits, reads, comments), orderdesc: board_updated_at, first: $first, offset: $offset) @filter(%s) {
+				boardList(func: uid(%s), orderdesc: board_updated_at, first: $first, offset: $offset) @filter(%s) {
 					uid
 					board_uuid
 					board_title
@@ -263,7 +284,7 @@ func GetDgraphBoardList(ctx context.Context, userUID string, search string, firs
 						user_profile_object_key
 					}
 				}
-			}`, filter, filter)
+			}`, shares, boards, filter, boards, filter)
 
 	list, err = dgraphModels.GetDgraphBoardsWithCount(ctx, query, variables)
 	if err != nil {

@@ -3,6 +3,7 @@ package business
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -34,13 +35,22 @@ import (
 // (a miss is skipped), and a message what it became (a miss is a message that
 // wasn't brought across, such as a filtered system message). A write that
 // fails is noted (REACTION_IMPORT_FAILED): it used to be only logged.
+//
+// A read of the import's maps or people that fails stops the pass, and its
+// chunk is tried again: read as "not there", a conversation's, a message's or
+// a person's reactions were skipped for good. The run again adds none twice
+// (each is set once per person and emoji).
 func processReactionPass(ctx context.Context, arc *Archive, chunk *importModels.Chunk,
 	parsed *ParsedExport) error {
 
 	rs := newReactionState(chunk.ImportId)
-	conversations := rs.conversations(ctx, parsed)
+	conversations, err := rs.conversations(ctx, parsed)
+	if err != nil {
+		return err
+	}
 	var total reactionTally
 	var notes []importModels.ImportError
+	var readErr error
 	for slackChannelId, dailyFiles := range parsed.MessageFiles {
 		conv, ok := conversations[slackChannelId]
 		if !ok {
@@ -64,16 +74,27 @@ func processReactionPass(ctx context.Context, arc *Archive, chunk *importModels.
 				if len(m.Reactions) == 0 {
 					return true
 				}
-				put, ok := rs.writerFor(ctx, conv, m)
+				put, ok, err := rs.writerFor(ctx, conv, m)
+				if err != nil {
+					readErr = err
+					return false
+				}
 				if !ok {
 					total.skippedComment += len(m.Reactions)
 					return true
 				}
-				tally, noted := rs.applyReactions(ctx, m, put)
+				tally, noted, err := rs.applyReactions(ctx, m, put)
+				if err != nil {
+					readErr = err
+					return false
+				}
 				total.add(tally)
 				notes = append(notes, noted...)
 				return true
 			})
+			if readErr != nil {
+				return readErr
+			}
 			if err != nil {
 				helpers.LogWarnWithContext(ctx,
 					"SlackImport reaction pass failed on %s: %+v", dailyPath, err)
@@ -126,7 +147,7 @@ type reactionConversation struct {
 // conversations is each of the export's conversations the import brought
 // across, by Slack id: its channels' mappings and its DMs' and groups'
 // grouping ids, read in at most three statements.
-func (s *reactionState) conversations(ctx context.Context, parsed *ParsedExport) map[string]reactionConversation {
+func (s *reactionState) conversations(ctx context.Context, parsed *ParsedExport) (map[string]reactionConversation, error) {
 	out := map[string]reactionConversation{}
 	var channels, dms, mpims []string
 	for id := range parsed.MessageFiles {
@@ -139,17 +160,19 @@ func (s *reactionState) conversations(ctx context.Context, parsed *ParsedExport)
 			mpims = append(mpims, id)
 		}
 	}
-	if found, err := importModels.LookupIdMappingsMany(ctx, s.importId, importModels.EntityChannel, channels); err == nil {
-		for id, u := range found {
-			if u != uuid.Nil {
-				out[id] = reactionConversation{channel: u}
-			}
+	found, err := importModels.LookupIdMappingsMany(ctx, s.importId, importModels.EntityChannel, channels)
+	if err != nil {
+		return nil, fmt.Errorf("reading what this import made for its channels: %w", err)
+	}
+	for id, u := range found {
+		if u != uuid.Nil {
+			out[id] = reactionConversation{channel: u}
 		}
 	}
-	grouping := func(entity string, ids []string) {
+	grouping := func(entity string, ids []string) error {
 		meta, err := importModels.IdMapMetadataMany(ctx, s.importId, entity, ids)
 		if err != nil {
-			return
+			return fmt.Errorf("reading what this import recorded with its %s conversations: %w", entity, err)
 		}
 		for id, raw := range meta {
 			var m struct {
@@ -159,10 +182,15 @@ func (s *reactionState) conversations(ctx context.Context, parsed *ParsedExport)
 				out[id] = reactionConversation{grp: m.GroupingID}
 			}
 		}
+		return nil
 	}
-	grouping(importModels.EntityDM, dms)
-	grouping(importModels.EntityMPIM, mpims)
-	return out
+	if err := grouping(importModels.EntityDM, dms); err != nil {
+		return nil, err
+	}
+	if err := grouping(importModels.EntityMPIM, mpims); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // reactionWriter writes one person's reaction (a OneCamp emoji) on what a
@@ -170,59 +198,66 @@ func (s *reactionState) conversations(ctx context.Context, parsed *ParsedExport)
 type reactionWriter func(emoji string, reactor *dgraphStruct.DgraphUser) error
 
 // writerFor is the writer for m's reactions in conv: on the post, reply,
-// message or reply m became; ok false when m wasn't brought across.
-func (s *reactionState) writerFor(ctx context.Context, conv reactionConversation, m *SlackMessage) (reactionWriter, bool) {
+// message or reply m became; ok false when m wasn't brought across. A read
+// of the import's maps or people that fails is the error.
+func (s *reactionState) writerFor(ctx context.Context, conv reactionConversation, m *SlackMessage) (reactionWriter, bool, error) {
 	reply := m.ThreadTs != "" && m.ThreadTs != m.Ts
 	entity := importModels.EntityMessage
 	if reply {
 		entity = importModels.EntityComment
 	}
-	target := s.mapping(ctx, entity, m.Ts)
-	if target == uuid.Nil {
-		return nil, false
+	target, err := s.mapping(ctx, entity, m.Ts)
+	if err != nil || target == uuid.Nil {
+		return nil, false, err
 	}
 	id := target.String()
+	// The target's graph reads below skip it on any error: the comment model
+	// says "not there" and "failed" alike.
 	switch {
 	case conv.channel != uuid.Nil && !reply:
-		ownerUid, ownerUuid := s.lookupAuthor(ctx, m.User)
+		ownerUid, ownerUuid, err := s.lookupAuthor(ctx, m.User)
+		if err != nil {
+			return nil, false, err
+		}
 		return func(emoji string, reactor *dgraphStruct.DgraphUser) error {
 			_, err := postBusiness.CreateOrUpdatePostReaction(ctx, &postAdapter.InputUpdateReactionForPost{EmojiUuid: emoji, Uuid: id},
 				ownerUid, ownerUuid, reactor.Uid, reactor.Uuid, reactor.UserName, conv.channel.String())
 			return err
-		}, true
+		}, true, nil
 	case conv.channel != uuid.Nil:
 		comment, err := commentBusiness.GetDgraphPostCommentInfoByUUID(ctx, id, "")
 		if err != nil || comment == nil {
-			return nil, false
+			return nil, false, nil
 		}
 		return func(emoji string, reactor *dgraphStruct.DgraphUser) error {
 			_, err := postBusiness.CreateOrUpdatePostCommentReaction(ctx, &postAdapter.InputUpdateReactionForCommentInPost{EmojiUuid: emoji, Uuid: id}, comment, reactor)
 			return err
-		}, true
+		}, true, nil
 	case !reply:
 		chat, err := chatBusiness.GetDgraphChatByUUID(ctx, id)
 		if err != nil || chat == nil {
-			return nil, false
+			return nil, false, nil
 		}
 		return func(emoji string, reactor *dgraphStruct.DgraphUser) error {
 			_, err := chatBusiness.CreateOrUpdateChatReaction(ctx, &chatAdapter.InputUpdateReactionForChat{EmojiReactionUuid: emoji, Uuid: id}, chat, reactor, conv.grp)
 			return err
-		}, true
+		}, true, nil
 	}
 	comment, err := commentBusiness.GetDgraphChatCommentInfoByUUID(ctx, id, "")
 	if err != nil || comment == nil {
-		return nil, false
+		return nil, false, nil
 	}
 	return func(emoji string, reactor *dgraphStruct.DgraphUser) error {
 		_, err := chatBusiness.CreateOrUpdateChatCommentReaction(ctx, &chatAdapter.InputUpdateReactionForCommentInChat{EmojiReactionUuid: emoji, Uuid: id}, comment, reactor)
 		return err
-	}, true
+	}, true, nil
 }
 
 // applyReactions writes m's reactions through put, each emoji's people one
 // at a time (business/Reaction's rule is per person and emoji), and says what
-// came of them, with the notes for what didn't.
-func (s *reactionState) applyReactions(ctx context.Context, m *SlackMessage, put reactionWriter) (reactionTally, []importModels.ImportError) {
+// came of them, with the notes for what didn't. A read of the emoji map or of
+// a reactor that fails is the error.
+func (s *reactionState) applyReactions(ctx context.Context, m *SlackMessage, put reactionWriter) (reactionTally, []importModels.ImportError, error) {
 	var tally reactionTally
 	var notes []importModels.ImportError
 	entity := importModels.EntityMessage
@@ -231,7 +266,10 @@ func (s *reactionState) applyReactions(ctx context.Context, m *SlackMessage, put
 	}
 	for _, r := range m.Reactions {
 		emoji, err := s.emoji(ctx, r.Name)
-		if err != nil || emoji == "" {
+		if err != nil {
+			return tally, notes, fmt.Errorf("reading the emoji map for %s: %w", r.Name, err)
+		}
+		if emoji == "" {
 			tally.skippedEmoji += len(r.Users)
 			notes = append(notes, importModels.ImportError{
 				EntityType: entity, SourceID: m.Ts, Severity: importModels.SeverityWarning, Code: "CUSTOM_EMOJI_UNSUPPORTED",
@@ -240,12 +278,18 @@ func (s *reactionState) applyReactions(ctx context.Context, m *SlackMessage, put
 			continue
 		}
 		for _, slackUserId := range r.Users {
-			reactorUUID := s.person(ctx, slackUserId)
+			reactorUUID, err := s.person(ctx, slackUserId)
+			if err != nil {
+				return tally, notes, err
+			}
 			if reactorUUID == uuid.Nil {
 				tally.skippedUser++
 				continue
 			}
-			reactor := s.lookupFullUser(ctx, reactorUUID.String())
+			reactor, err := s.lookupFullUser(ctx, reactorUUID.String())
+			if err != nil {
+				return tally, notes, err
+			}
 			if reactor == nil || reactor.Uid == "" {
 				tally.skippedUser++
 				continue
@@ -261,7 +305,7 @@ func (s *reactionState) applyReactions(ctx context.Context, m *SlackMessage, put
 			tally.applied++
 		}
 	}
-	return tally, notes
+	return tally, notes, nil
 }
 
 // reactionState caches per-user Dgraph info across a single reaction
@@ -324,29 +368,33 @@ func (s *reactionState) prefetch(ctx context.Context, batch []*SlackMessage) {
 
 // mapping is what the import made for a message (EntityMessage) or a
 // reply (EntityComment), or uuid.Nil.
-func (s *reactionState) mapping(ctx context.Context, entityType, ts string) uuid.UUID {
+func (s *reactionState) mapping(ctx context.Context, entityType, ts string) (uuid.UUID, error) {
 	key := messageKey(s.conv, ts)
 	m := s.messages
 	if entityType == importModels.EntityComment {
 		m = s.replies
 	}
 	if m != nil {
-		return m[key]
+		return m[key], nil
 	}
-	id, _ := importModels.LookupIdMapping(ctx, s.importId, entityType, key)
-	return id
+	id, err := importModels.LookupIdMapping(ctx, s.importId, entityType, key)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("reading what this import made for %s %s: %w", entityType, key, err)
+	}
+	return id, nil
 }
 
 // person is the OneCamp person a Slack user came across as, or uuid.Nil.
-func (s *reactionState) person(ctx context.Context, slackUserId string) uuid.UUID {
+func (s *reactionState) person(ctx context.Context, slackUserId string) (uuid.UUID, error) {
 	if id, ok := s.people[slackUserId]; ok {
-		return id
+		return id, nil
 	}
 	id, err := importModels.LookupIdMapping(ctx, s.importId, importModels.EntityUser, slackUserId)
-	if err == nil {
-		s.people[slackUserId] = id
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("reading what this import made for user %s: %w", slackUserId, err)
 	}
-	return id
+	s.people[slackUserId] = id
+	return id, nil
 }
 
 // emoji is the OneCamp emoji for a Slack emoji name ("" for none), read
@@ -373,60 +421,59 @@ func newReactionState(importId uuid.UUID) *reactionState {
 	}
 }
 
-// lookupUser resolves a OneCamp user UUID to its Dgraph uid + display name.
-// Returns ("", "") on miss.
-func (s *reactionState) lookupUser(ctx context.Context, ocUUID string) (string, string) {
-	u := s.lookupFullUser(ctx, ocUUID)
-	if u == nil {
-		return "", ""
-	}
-	return u.Uid, u.UserName
-}
-
-// lookupFullUser is the same as lookupUser but returns the full
-// DgraphUser. Used by paths that need ProfileKey / IsExternal in
-// addition to the uid.
-func (s *reactionState) lookupFullUser(ctx context.Context, ocUUID string) *dgraphStruct.DgraphUser {
+// lookupFullUser is a OneCamp person's Dgraph user, or nil for a person the
+// graph has no node for.
+func (s *reactionState) lookupFullUser(ctx context.Context, ocUUID string) (*dgraphStruct.DgraphUser, error) {
 	s.mu.Lock()
 	if u, ok := s.dgUsers[ocUUID]; ok {
 		s.mu.Unlock()
-		return u
+		return u, nil
 	}
 	s.mu.Unlock()
 
 	u, err := userBusiness.GetDgraphUserInfoByUUID(ctx, ocUUID)
-	if err != nil || u == nil {
-		return nil
+	if errors.Is(err, helpers.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading person %s: %w", ocUUID, err)
 	}
 	s.mu.Lock()
 	s.dgUsers[ocUUID] = u
 	s.mu.Unlock()
-	return u
+	return u, nil
 }
 
 // lookupAuthor returns (dgraphUid, ocUUID) for the original message
 // poster. Used to set postOwnerUUID on reaction writes so the Dgraph
 // activity row is correct.
-func (s *reactionState) lookupAuthor(ctx context.Context, slackUserId string) (string, string) {
+func (s *reactionState) lookupAuthor(ctx context.Context, slackUserId string) (string, string, error) {
 	if slackUserId == "" {
-		return "", ""
+		return "", "", nil
 	}
 	s.mu.Lock()
 	if uid, ok := s.authors[slackUserId]; ok {
 		ocUUID := s.authorUUIDs[slackUserId]
 		s.mu.Unlock()
-		return uid, ocUUID
+		return uid, ocUUID, nil
 	}
 	s.mu.Unlock()
 
-	authorUUID := s.person(ctx, slackUserId)
-	if authorUUID == uuid.Nil {
-		return "", ""
+	authorUUID, err := s.person(ctx, slackUserId)
+	if err != nil || authorUUID == uuid.Nil {
+		return "", "", err
 	}
-	uid, _ := s.lookupUser(ctx, authorUUID.String())
+	author, err := s.lookupFullUser(ctx, authorUUID.String())
+	if err != nil {
+		return "", "", err
+	}
+	var uid string
+	if author != nil {
+		uid = author.Uid
+	}
 	s.mu.Lock()
 	s.authors[slackUserId] = uid
 	s.authorUUIDs[slackUserId] = authorUUID.String()
 	s.mu.Unlock()
-	return uid, authorUUID.String()
+	return uid, authorUUID.String(), nil
 }

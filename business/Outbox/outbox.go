@@ -37,6 +37,7 @@ import (
 
 	sweepBusiness "github.com/akashc777/OneCamp/business/Sweep"
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	redisInit "github.com/akashc777/OneCamp/initializers/redis"
 	models "github.com/akashc777/OneCamp/models/postgres/Outbox"
 	"github.com/akashc777/OneCamp/models/redis/registry"
@@ -190,12 +191,12 @@ func (t Told) Only(how string, recipients []string) []string {
 
 // The store, a seam for tests.
 type store interface {
-	insert(ctx context.Context, ex models.Execer, r models.Row) (int64, error)
-	release(ctx context.Context, id int64) (bool, error)
+	insert(ctx context.Context, ex models.Execer, rs []models.Row) ([]int64, error)
+	release(ctx context.Context, ids []int64) error
 	releaseWith(ctx context.Context, id int64, more map[string]string) (bool, error)
 	cancel(ctx context.Context, ex models.Execer, id int64) error
 	claimDue(ctx context.Context, by string, lease time.Duration, limit int) ([]models.Row, error)
-	claimOne(ctx context.Context, id int64, by string, lease time.Duration) (models.Row, bool, error)
+	claim(ctx context.Context, ids []int64, by string, lease time.Duration) ([]models.Row, error)
 	claimNextOfKey(ctx context.Context, key string, after int64, by string, lease time.Duration) (models.Row, bool, error)
 	finish(ctx context.Context, id int64, by string, done []string) (bool, error)
 	retry(ctx context.Context, id int64, by string, done []string, at time.Time, lastErr string, dead bool) (bool, error)
@@ -206,10 +207,10 @@ type store interface {
 
 type pgStore struct{}
 
-func (pgStore) insert(ctx context.Context, ex models.Execer, r models.Row) (int64, error) {
-	return models.Insert(ctx, ex, r)
+func (pgStore) insert(ctx context.Context, ex models.Execer, rs []models.Row) ([]int64, error) {
+	return models.Insert(ctx, ex, rs)
 }
-func (pgStore) release(ctx context.Context, id int64) (bool, error) { return models.Release(ctx, id) }
+func (pgStore) release(ctx context.Context, ids []int64) error { return models.Release(ctx, ids) }
 func (pgStore) releaseWith(ctx context.Context, id int64, more map[string]string) (bool, error) {
 	return models.ReleaseWith(ctx, id, more)
 }
@@ -219,8 +220,8 @@ func (pgStore) cancel(ctx context.Context, ex models.Execer, id int64) error {
 func (pgStore) claimDue(ctx context.Context, by string, l time.Duration, limit int) ([]models.Row, error) {
 	return models.ClaimDue(ctx, by, l, limit)
 }
-func (pgStore) claimOne(ctx context.Context, id int64, by string, l time.Duration) (models.Row, bool, error) {
-	return models.ClaimOne(ctx, id, by, l)
+func (pgStore) claim(ctx context.Context, ids []int64, by string, l time.Duration) ([]models.Row, error) {
+	return models.Claim(ctx, ids, by, l)
 }
 func (pgStore) claimNextOfKey(ctx context.Context, key string, after int64, by string, l time.Duration) (models.Row, bool, error) {
 	return models.ClaimNextOfKey(ctx, key, after, by, l)
@@ -328,23 +329,73 @@ func contains(list []string, s string) bool {
 // Add writes e as held, inside ex (the change's own transaction), and answers
 // its id for Release.
 func Add(ctx context.Context, ex models.Execer, e Entry) (int64, error) {
-	if e.Topic == "" || e.Kind == "" || e.Key == "" {
-		return 0, errors.New("outbox: an event needs a topic, a kind and a key")
+	ids, err := AddMany(ctx, ex, []Entry{e})
+	if err != nil {
+		return 0, err
 	}
-	r := models.Row{EventID: uuid.New(), Topic: e.Topic, Kind: e.Kind, Key: e.Key, Entities: e.Entities, Sinks: e.Sinks}
-	if e.Actor != "" {
-		if id, err := uuid.Parse(e.Actor); err == nil {
-			r.Actor = &id
+	return ids[0], nil
+}
+
+// AddMany writes es as held in one statement, inside ex, and answers their
+// ids in es's order for ReleaseMany: what a change that makes many events
+// (CreateTasks' new tasks, a table's rows) writes. Every entry is checked
+// before anything is written; none writes nothing.
+func AddMany(ctx context.Context, ex models.Execer, es []Entry) ([]int64, error) {
+	if len(es) == 0 {
+		return nil, nil
+	}
+	rs := make([]models.Row, len(es))
+	for i, e := range es {
+		if e.Topic == "" || e.Kind == "" || e.Key == "" {
+			return nil, errors.New("outbox: an event needs a topic, a kind and a key")
+		}
+		rs[i] = models.Row{EventID: uuid.New(), Topic: e.Topic, Kind: e.Kind, Key: e.Key, Entities: e.Entities, Sinks: e.Sinks}
+		if e.Actor != "" {
+			if id, err := uuid.Parse(e.Actor); err == nil {
+				rs[i].Actor = &id
+			}
 		}
 	}
-	return rows.insert(ctx, ex, r)
+	return rows.insert(ctx, ex, rs)
+}
+
+// errNoPostgres is an event Enqueue can't write: Postgres isn't connected.
+var errNoPostgres = errors.New("outbox: Postgres isn't connected")
+
+// Enqueue writes es ready and delivers them at once: for events no change's
+// transaction holds (a job asked for, or a change already saved). It writes
+// them in one statement and releases them in one, however many there are.
+// Those whose release fails stay held, and the drain releases them once
+// their time is up: so it suits topics with no resolver, as on one with a
+// resolver (Registry.Resolve) an event left held is that resolver's to
+// decide.
+func Enqueue(ctx context.Context, es ...Entry) error {
+	if postgresInit.DBConn == nil || postgresInit.DBConn.SqlDB == nil {
+		return errNoPostgres
+	}
+	ids, err := AddMany(ctx, postgresInit.DBConn.SqlDB, es)
+	if err != nil {
+		return err
+	}
+	if err := ReleaseMany(ctx, ids); err != nil {
+		return nil
+	}
+	DeliverMany(ids)
+	return nil
 }
 
 // Release makes a held event ready, once the change's other stores are
 // written. It doesn't run the sinks: Deliver does.
 func Release(ctx context.Context, id int64) error {
-	_, err := rows.release(ctx, id)
-	return err
+	return ReleaseMany(ctx, []int64{id})
+}
+
+// ReleaseMany is Release for the events of ids, in one statement.
+func ReleaseMany(ctx context.Context, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return rows.release(ctx, ids)
 }
 
 // ReleaseWith releases a held event as Release does, adding to the ids it is
@@ -370,18 +421,51 @@ func Cancel(ctx context.Context, ex models.Execer, id int64) error {
 // Release, so a live change reaches open apps at once. One another drain has
 // already is left to it; one that fails is the Sweeper's to try again.
 func Deliver(id int64) {
+	DeliverMany([]int64{id})
+}
+
+// DeliverMany is Deliver for the events of ids, claimed a batch at a time
+// (one statement each, as the drain claims) and run as the drain runs what it
+// claims. A key's events among them still run one at a time, oldest first: a
+// later one is taken after the earlier.
+func DeliverMany(ids []int64) {
+	if len(ids) == 0 {
+		return
+	}
 	helpers.GoSafeNamed("outbox.deliver", func() {
-		ctx, cancel := context.WithTimeout(context.Background(), lease)
-		defer cancel()
-		r, ok, err := rows.claimOne(ctx, id, instance, lease)
-		if err != nil {
-			helpers.LogErrorWithContext(ctx, "outbox: event %d couldn't be claimed to deliver, so the drain will: %v", id, err)
-			return
-		}
-		if ok {
-			deliverKey(ctx, r)
+		for from := 0; from < len(ids); from += batch {
+			deliverBatch(ids[from:min(from+batch, len(ids))])
 		}
 	})
+}
+
+// deliverBatch claims ids, at most a batch, and runs them inside their own
+// lease, so a long list's last ones don't wait out the first ones' lease.
+func deliverBatch(ids []int64) {
+	ctx, cancel := context.WithTimeout(context.Background(), lease)
+	defer cancel()
+	claimed, err := rows.claim(ctx, ids, instance, lease)
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "outbox: %d events couldn't be claimed to deliver, so the drain will: %v", len(ids), err)
+		return
+	}
+	runClaimed(ctx, "outbox.deliver", claimed)
+}
+
+// runClaimed runs claimed rows, each followed by its key's next ones, parallel
+// at a time, and waits for them.
+func runClaimed(ctx context.Context, name string, claimed []models.Row) {
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, parallel)
+	for _, r := range claimed {
+		slots <- struct{}{}
+		wg.Add(1)
+		helpers.GoSafeNamed(name, func() {
+			defer func() { <-slots; wg.Done() }()
+			deliverKey(ctx, r)
+		})
+	}
+	wg.Wait()
 }
 
 // deliverKey runs r, then the rows of its key after it, up to chain of them.
@@ -456,18 +540,7 @@ func Drain(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		var wg sync.WaitGroup
-		slots := make(chan struct{}, parallel)
-		for _, r := range claimed {
-			r := r
-			slots <- struct{}{}
-			wg.Add(1)
-			helpers.GoSafeNamed("outbox.drain", func() {
-				defer func() { <-slots; wg.Done() }()
-				deliverKey(ctx, r)
-			})
-		}
-		wg.Wait()
+		runClaimed(ctx, "outbox.drain", claimed)
 		if len(claimed) < batch || ctx.Err() != nil {
 			return nil
 		}
@@ -496,7 +569,7 @@ func resolveHeld(ctx context.Context) {
 			written = ok
 		}
 		if written {
-			if _, err := rows.release(ctx, r.ID); err != nil {
+			if err := rows.release(ctx, []int64{r.ID}); err != nil {
 				helpers.LogErrorWithContext(ctx, "outbox: held event %d couldn't be released: %v", r.ID, err)
 			}
 			continue

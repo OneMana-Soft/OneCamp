@@ -190,21 +190,7 @@ func Of(ctx context.Context, userUUID string, p *dgraphStruct.DgraphProject) (St
 // OfMany is Of for many projects read for one person, by lower-case project
 // id, with one read of their role rows.
 func OfMany(ctx context.Context, userUUID string, ps []*dgraphStruct.DgraphProject) (map[string]Standing, error) {
-	out := make(map[string]Standing, len(ps))
-	var ids []uuid.UUID
-	for _, p := range ps {
-		if p == nil {
-			continue
-		}
-		s := dgraphStanding(p)
-		out[s.ProjectUUID] = s
-		if s.Role == RoleNone {
-			continue
-		}
-		if id, err := uuid.Parse(s.ProjectUUID); err == nil {
-			ids = append(ids, id)
-		}
-	}
+	out, ids := graphStandings(ps)
 	me, err := uuid.Parse(userUUID)
 	if err != nil {
 		// Someone who isn't a person stands nowhere.
@@ -218,14 +204,7 @@ func OfMany(ctx context.Context, userUUID string, ps []*dgraphStruct.DgraphProje
 		if err != nil {
 			return nil, err
 		}
-		for id, row := range rows {
-			key := id.String()
-			s := out[key]
-			if r, ok := ParseRole(row); ok && s.Role != RoleNone {
-				s.Role = Lower(s.Role, r)
-			}
-			out[key] = s
-		}
+		lowerBy(out, rows)
 	}
 	// Their projects' own policies, read together (PR1, the BE audit's #2).
 	var in []string
@@ -385,4 +364,42 @@ func dgraphStanding(p *dgraphStruct.DgraphProject) Standing {
 		s.Role = RoleMember
 	}
 	return s
+}
+
+// graphStandings is each project's standing as read from the graph for one
+// person, by lower-case project id, and the projects they have a role in,
+// whose role rows may say less. Pure.
+func graphStandings(ps []*dgraphStruct.DgraphProject) (map[string]Standing, []uuid.UUID) {
+	out := make(map[string]Standing, len(ps))
+	var ids []uuid.UUID
+	for _, p := range ps {
+		if p == nil {
+			continue
+		}
+		s := dgraphStanding(p)
+		out[s.ProjectUUID] = s
+		if s.Role == RoleNone {
+			continue
+		}
+		if id, err := uuid.Parse(s.ProjectUUID); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	return out, ids
+}
+
+// lowerBy lowers each standing with a role to what the person's role row in
+// its project says, when that says less (a row never raises one). Pure.
+func lowerBy(out map[string]Standing, rows map[uuid.UUID]string) {
+	for id, row := range rows {
+		key := id.String()
+		s, ok := out[key]
+		if !ok {
+			continue
+		}
+		if r, ok := ParseRole(row); ok && s.Role != RoleNone {
+			s.Role = Lower(s.Role, r)
+		}
+		out[key] = s
+	}
 }

@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
@@ -37,12 +38,20 @@ type ListItem struct {
 	UpdatedAt  *time.Time       `json:"doc_updated_at,omitempty"`
 	ArchivedAt *time.Time       `json:"doc_archived_at,omitempty"`
 	Owner      *business.Person `json:"owner,omitempty"`
+	UpdatedBy  *business.Person `json:"updated_by,omitempty"` // who made the change at doc_updated_at (docs F1), never the owner in its place
 	Path       []business.Crumb `json:"path"`
 	ViewedAt   *time.Time       `json:"viewed_at,omitempty"`
 	// Level is what the person may do with it, by the Access Resolver
 	// ("view", "comment", "edit", "full"): the list marks one they can't
 	// change (docs incident, 14 Oct 2026). Left out for an archived doc.
 	Level string `json:"level,omitempty"`
+	// What a node that isn't a page is (docs F1): folder, file or link, its
+	// colour, a link's address and a file's facts. A page carries none of
+	// them.
+	NodeKind string              `json:"doc_node_kind,omitempty"`
+	Color    string              `json:"doc_color,omitempty"`
+	LinkURL  string              `json:"doc_link_url,omitempty"`
+	File     *business.FileFacts `json:"doc_file,omitempty"`
 }
 
 // readableIDs is which of the docs the person can open now, by the Access
@@ -93,11 +102,17 @@ func listItems(ctx context.Context, who accessBusiness.Subject, rows []*dgraphSt
 		decided = got
 	}
 	open := func(id string) bool { return decided[docRes(id)].Level >= accessBusiness.LevelView }
+	// The page's files' facts, in one read for them all (docs F1).
+	files, err := business.FileFactsOf(ctx, rows)
+	if err != nil {
+		return nil, err
+	}
 	items := make([]ListItem, 0, len(rows))
 	for _, d := range rows {
 		it := ListItem{
 			UUID: d.Uuid, Title: d.Title, Icon: d.Icon, Snippet: d.Snippet, Private: d.IsPrivate,
 			CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt, ViewedAt: d.ViewedAt,
+			NodeKind: d.NodeKind, Color: d.Color, LinkURL: d.LinkURL, File: files[strings.ToLower(d.Uuid)],
 		}
 		if helpers.IsSoftDeleted(d.ArchivedAt) {
 			it.ArchivedAt = d.ArchivedAt
@@ -105,6 +120,7 @@ func listItems(ctx context.Context, who accessBusiness.Subject, rows []*dgraphSt
 			it.Level = decided[docRes(d.Uuid)].Level.String()
 		}
 		it.Owner = business.OwnerOf(d)
+		it.UpdatedBy = business.PersonOf(d.UpdatedBy)
 		it.Path = business.CrumbsOf(d, open)
 		items = append(items, it)
 	}
@@ -261,37 +277,48 @@ func GetDocTrash(w http.ResponseWriter, r *http.Request) {
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": helpers.Envolope{"items": page, "count": len(items), "next_cursor": next}})
 }
 
-func readDocUUID(w http.ResponseWriter, r *http.Request, what string) (string, bool) {
-	var in struct {
-		DocUUID string `json:"doc_uuid"`
-	}
+// docRequest is a trash request about one doc. Placed is a restore's: the
+// page's block is back in its parent's body already, put there by the
+// editor's Undo (docs C7a), so the restore places none.
+type docRequest struct {
+	DocUUID string `json:"doc_uuid"`
+	Placed  bool   `json:"placed"`
+}
+
+func readDocRequest(w http.ResponseWriter, r *http.Request, what string) (docRequest, bool) {
+	var in docRequest
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil || !helpers.IsCanonicalUUID(in.DocUUID) {
 		badRequest(w, "Say which doc to "+what+".")
-		return "", false
+		return in, false
 	}
-	return in.DocUUID, true
+	return in, true
 }
 
 // RestoreDocFromTrash brings a doc back (POST /doc/restore): with everything
 // deleted with it, or archived under it. A page whose parent is gone lands at
 // the top. Who may is decided before anything else is said
 // (accessBusiness.OpenDeleted), so a page someone never had answers as a
-// missing one does, live, in the trash or not there at all.
+// missing one does, live, in the trash or not there at all. A page back under
+// a page shows in its body again (FollowRestore), unless placed says the
+// editor has put its block back already.
 func RestoreDocFromTrash(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	_, who := accessBusiness.RequestSubject(r)
-	id, ok := readDocUUID(w, r, "restore")
+	in, ok := readDocRequest(w, r, "restore")
 	if !ok {
 		return
 	}
-	if _, err := accessBusiness.OpenDeleted(ctx, who, docRes(id), business.RestoreNeeds); err != nil {
+	if _, err := accessBusiness.OpenDeleted(ctx, who, docRes(in.DocUUID), business.RestoreNeeds); err != nil {
 		treeFailed(w, r, "RestoreDocFromTrash", err)
 		return
 	}
-	res, err := business.RestoreDoc(ctx, id, who.UserUID, who.UserUUID, who.ActingAdmin())
+	res, err := business.RestoreDoc(ctx, in.DocUUID, who.UserUID, who.UserUUID, who.ActingAdmin())
 	if err != nil {
 		treeFailed(w, r, "RestoreDocFromTrash", err)
 		return
+	}
+	if !in.Placed {
+		business.FollowRestore(ctx, res, moverOf(who))
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Restored.", "data": res})
 }
@@ -304,10 +331,11 @@ func RestoreDocFromTrash(w http.ResponseWriter, r *http.Request) {
 func PurgeDocForGood(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	_, who := accessBusiness.RequestSubject(r)
-	id, ok := readDocUUID(w, r, "delete for good")
+	in, ok := readDocRequest(w, r, "delete for good")
 	if !ok {
 		return
 	}
+	id := in.DocUUID
 	if _, err := accessBusiness.OpenDeleted(ctx, who, docRes(id), business.PurgeNeeds); err != nil {
 		treeFailed(w, r, "PurgeDocForGood", err)
 		return

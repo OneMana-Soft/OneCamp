@@ -261,7 +261,7 @@ func TestDocAccessJoin(t *testing.T) {
 		}
 		rows := audited("doc.shared", plan)
 		slices.Sort(rows)
-		want := []string{"Shared a private page with 1 person (edit)", "Shared a private page with 1 person (full)", "Shared a private page with 4 people (view)"}
+		want := []string{"Shared a private page with 1 person who can edit", "Shared a private page with 1 person who has full access", "Shared a private page with 4 people who can view"}
 		if !slices.Equal(rows, want) {
 			t.Errorf("doc.shared rows %q, want %q", rows, want)
 		}
@@ -375,7 +375,7 @@ func TestDocAccessJoin(t *testing.T) {
 		if got := pushedTo("ann"); len(got) == 0 || got[len(got)-1].title != "zed asked to edit Plan" || !strings.Contains(got[len(got)-1].body, "For the launch review") {
 			t.Errorf("ann was pushed %+v", got)
 		}
-		if rows := audited("doc.access_requested", plan); !slices.Equal(rows, []string{"Asked for access to a private page (edit)"}) {
+		if rows := audited("doc.access_requested", plan); !slices.Equal(rows, []string{"Asked to edit a private page"}) {
 			t.Errorf("request rows %q", rows)
 		}
 	})
@@ -424,7 +424,7 @@ func TestDocAccessJoin(t *testing.T) {
 		if found == nil || found.Title != "" || found.CanOpen || found.Actor != nil || found.Agent != nil {
 			t.Errorf("zed's inbox item: %+v", found)
 		}
-		if rows := audited("doc.access_answered", plan); !slices.Equal(rows, []string{"Answered a request for access to a private page (declined, edit)"}) {
+		if rows := audited("doc.access_answered", plan); !slices.Equal(rows, []string{"Declined a request to edit a private page"}) {
 			t.Errorf("answer rows %q", rows)
 		}
 	})
@@ -454,7 +454,7 @@ func TestDocAccessJoin(t *testing.T) {
 		if got := pushedTo("zed")[before:]; len(got) != 1 || got[0].title != "olu approved your request for ‘Plan’" || got[0].body != "You can read it and comment on it." {
 			t.Errorf("zed was pushed %+v", got)
 		}
-		if rows := audited("doc.access_answered", plan); len(rows) != 2 || rows[1] != "Answered a request for access to a private page (approved, comment)" {
+		if rows := audited("doc.access_answered", plan); len(rows) != 2 || rows[1] != "Approved a request to edit a private page, with comment access" {
 			t.Errorf("answer rows %q", rows)
 		}
 	})

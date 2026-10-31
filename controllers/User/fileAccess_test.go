@@ -119,7 +119,7 @@ func TestAnUploadToAPlaceWithNoRuleOrNotTheirsIsRefused(t *testing.T) {
 
 // An upload for several places is asked about each place as what it is: a
 // group named among its conversations is a group, whose files are its
-// people's, as the rows the upload writes say (models ConversationFileKind).
+// people's, as the rows the upload writes say (helpers.ConversationFileKind).
 func TestAnUploadsConversationsAreAskedAboutAsWhatTheyAre(t *testing.T) {
 	ann, ben, cat, channel := uuid.NewString(), uuid.NewString(), uuid.NewString(), uuid.NewString()
 	dm := helpers.GetGroupingId(ann, ben)

@@ -10,9 +10,13 @@
 // testcontainers-go which isn't available on every developer's box, and
 // (b) it pulls in the migrate library which would otherwise be a
 // heavyweight transitive dep on the unit set. CI's integration job runs
-// `go test -tags=integration` to opt in.
+// `go test -tags=integration` to opt in. main.go, which reaches no Docker,
+// is the one file outside the tag (it says why).
 //
-// Usage from a test file (also under //go:build integration):
+// Usage from a test file (also under //go:build integration), in a package
+// whose TestMain runs the tests through Main (main.go):
+//
+//	func TestMain(m *testing.M) { os.Exit(integration.Main(m)) }
 //
 //	func TestSomething(t *testing.T) {
 //	    env := integration.SetupEnv(t)
@@ -293,16 +297,40 @@ type pgServer struct {
 // TestTheTestsThatApplyMigrationsGetADatabaseMigratedFromBlank reads the test
 // files and fails when this list and theirs differ.
 var migratesItself = map[string]bool{
+	"TestChangeSetOperationsMigrationDownUp":                    true,
+	"TestContentIOJobsWaitReadyForAChoice":                      true,
+	"TestComputedStoreMigrationUpDownUp":                        true,
+	"TestApprovalsAnyItemMigrationUpDownUp":                     true,
 	"TestBookingPages":                                          true,
 	"TestCalendarAttendanceMigrationUpDownUp":                   true,
+	"TestCalendarContainersMigrationUpDownUp":                   true,
+	"TestCalendarFeedsMigrationUpDownUp":                        true,
+	"TestCalendarImportMigrationUpDownUp":                       true,
 	"TestCallStateMigrationUpDownUp":                            true,
+	"TestCallAdmissionsMigrationUpDownUp":                       true,
+	"TestCallRoomsMigrationUpDownUp":                            true,
+	"TestCallHandsMigrationUpDownUp":                            true,
+	"TestCallLobbyMigrationUpDownUp":                            true,
+	"TestCallLobbyInviteesMigrationUpDownUp":                    true,
+	"TestCallQualityMigrationUpDownUp":                          true,
+	"TestCallATakesOnePostOnce":                                 true,
+	"TestCallHoldsMigrationUpDownUp":                            true,
+	"TestCallActivitiesMigrationUpDownUp":                       true,
+	"TestCallBoardMigrationUpDownUp":                            true,
+	"TestCallRecordingByMigrationUpDownUp":                      true,
+	"TestCalendarProposalsMigrationUpDownUp":                    true,
 	"TestCalendarRemindersMigrationUpDownUp":                    true,
 	"TestCalendarStoreMigrationUpDownUp":                        true,
+	"TestCalendarSubscriptionsMigrationUpDownUp":                true,
+	"TestCalendarSyncMigrationUpDownUp":                         true,
+	"TestCalendarSyncRefusalsMigrationUpDownUp":                 true,
+	"TestCalendarTaskBlocksMigrationUpDownUp":                   true,
 	"TestConnectedWork":                                         true,
 	"TestContentIOMigrationUpDownUp":                            true,
 	"TestConversationsMigrationUpDownUp":                        true,
 	"TestDocAIIndexMigrationUpDownUp":                           true,
 	"TestDocAccessResolver":                                     true,
+	"TestDocFileVersionsMigrationUpDownUp":                      true,
 	"TestDocExportConsentsMigrationUpDownUp":                    true,
 	"TestDocTreeAcceptance":                                     true,
 	"TestDocsClientLoopMigration":                               true,
@@ -314,9 +342,11 @@ var migratesItself = map[string]bool{
 	"TestInvitationLinksMigrationUpDownUp":                      true,
 	"TestMigration204ClosesInvitationsToMembers":                true,
 	"TestOutboxMigrationUpDownUp":                               true,
+	"TestPersonPreferencesOverHTTP":                             true,
 	"TestPublishMigrationUpDownUp":                              true,
 	"TestResourceFollowsMigrationUpDownUp":                      true,
 	"TestResourceMentionSyncsMigrationUpDownUp":                 true,
+	"TestSoftDeleteMigrationUpDownUp":                           true,
 	"TestTableMigrationFieldSettings":                           true,
 	"TestTableMigrationRowLedger":                               true,
 	"TestTableRowComments":                                      true,

@@ -25,7 +25,6 @@ import (
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
-	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	configModel "github.com/akashc777/OneCamp/models/postgres/Config"
@@ -55,15 +54,14 @@ var (
 	ErrCreator      = errors.New("the project's creator can't be taken off it")
 )
 
-// Seams for tests: who is in a project, how many are undecided, the admins,
-// telling them, whether a reader is an admin now, a project's undecided
-// reviews, and takeOff's reads and writes.
+// Seams for tests: how many are undecided, the admins, telling them, whether
+// a reader is an admin now, a project's undecided reviews, and takeOff's
+// reads and writes.
 var (
-	membersAmong = projectDomain.MembersAmong
-	pending      = reviewModel.Pending
-	undecided    = reviewModel.Undecided
-	undecidedIn  = reviewModel.UndecidedIn
-	adminUsers   = func(ctx context.Context) ([]*userModel.User, error) {
+	pending     = reviewModel.Pending
+	undecided   = reviewModel.Undecided
+	undecidedIn = reviewModel.UndecidedIn
+	adminUsers  = func(ctx context.Context) ([]*userModel.User, error) {
 		users, _, err := userDomain.GetAllAdminUsers(ctx, 0, 200)
 		return users, err
 	}
@@ -120,7 +118,7 @@ func Scan(ctx context.Context) (added int64, ran bool, err error) {
 	if err != nil {
 		return 0, true, err
 	}
-	still, err := stillMembers(ctx, cands)
+	still, err := importBusiness.StillMembers(ctx, cands)
 	if err != nil {
 		return 0, true, err
 	}
@@ -131,37 +129,6 @@ func Scan(ctx context.Context) (added int64, ran bool, err error) {
 		return added, true, err
 	}
 	return added, true, configModel.UpsertConfig(scanKey, fmt.Sprintf("done: %d to review", added))
-}
-
-// stillMembers keeps the candidates who are still in their project: one read
-// of the graph per project.
-func stillMembers(ctx context.Context, cands []reviewModel.Candidate) ([]reviewModel.Candidate, error) {
-	var projects []uuid.UUID
-	byProject := map[uuid.UUID][]reviewModel.Candidate{}
-	for _, c := range cands {
-		if _, seen := byProject[c.ProjectUUID]; !seen {
-			projects = append(projects, c.ProjectUUID)
-		}
-		byProject[c.ProjectUUID] = append(byProject[c.ProjectUUID], c)
-	}
-	var out []reviewModel.Candidate
-	for _, p := range projects {
-		cs := byProject[p]
-		ids := make([]string, len(cs))
-		for i, c := range cs {
-			ids[i] = c.UserID.String()
-		}
-		in, err := membersAmong(ctx, p.String(), ids)
-		if err != nil {
-			return nil, err
-		}
-		for _, c := range cs {
-			if in[c.UserID.String()] {
-				out = append(out, c)
-			}
-		}
-	}
-	return out, nil
 }
 
 // TellAdmins tells each admin, once in their Inbox, that old imports added

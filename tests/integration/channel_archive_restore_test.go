@@ -29,6 +29,7 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
 	channelAdapter "github.com/akashc777/OneCamp/adapter/Channel"
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	channelBusiness "github.com/akashc777/OneCamp/business/Channel"
 	globalSearchBusiness "github.com/akashc777/OneCamp/business/GlobalSearch"
 	channelController "github.com/akashc777/OneCamp/controllers/Channel"
@@ -117,7 +118,7 @@ func TestAnArchivedChannelStaysFoundAndComesBack(t *testing.T) {
 	// What the member finds searching for it, and whether it says Archived.
 	memberFinds := func() (found, archived bool) {
 		t.Helper()
-		p, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, people["member"].String(), "member@example.test",
+		p, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, accessBusiness.Subject{UserUUID: people["member"].String()}, "member@example.test",
 			[]*dgraphStruct.DgraphChannel{{Uuid: launch.String()}}, nil, nil, "rollout checklist")
 		if err != nil {
 			t.Fatal(err)

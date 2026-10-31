@@ -34,11 +34,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/opensearch-project/opensearch-go/v4"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	contentIOBusiness "github.com/akashc777/OneCamp/business/ContentIO"
@@ -91,17 +88,7 @@ func TestContentIOMigrationUpDownUp(t *testing.T) {
 	if n, err := strconv.Atoi(strings.SplitN(upName, "_", 2)[0]); err != nil || n == 198 || n < 205 {
 		t.Fatalf("%s: a docs programme migration is numbered above 204, and never 198", upName)
 	}
-	var sqlOnly []string
-	for _, line := range strings.Split(up, "\n") {
-		if !strings.HasPrefix(strings.TrimSpace(line), "--") {
-			sqlOnly = append(sqlOnly, line)
-		}
-	}
-	for _, banned := range []string{"gen_random_uuid", "uuid_generate"} {
-		if strings.Contains(strings.Join(sqlOnly, "\n"), banned) {
-			t.Fatalf("%s uses %s; Postgres 12 has neither by default, so ids are made in Go", upName, banned)
-		}
-	}
+	makesNoIDs(t, upName, up)
 
 	env := integration.SetupEnv(t)
 	if !tableExists(t, env.PG, "content_io_jobs") {
@@ -129,6 +116,110 @@ func TestContentIOMigrationUpDownUp(t *testing.T) {
 	if _, err := env.PG.Exec(`INSERT INTO content_io_jobs (id, kind, user_uuid, status) VALUES ($1, 'import', $2, 'lost')`, uuid.New(), user); err == nil {
 		t.Fatal("a status outside the CHECK was accepted")
 	}
+}
+
+// A job waits, ready, for its person's choice (tables S1's preview): only a
+// running job becomes ready, keeping what its file holds; a choice queues it
+// again with the choices in its params once, never twice; one left
+// unconfirmed past its time fails, so its file can go. The ready status's
+// migration goes down and up again: a job still ready fails on the way down.
+func TestContentIOJobsWaitReadyForAChoice(t *testing.T) {
+	ctx := context.Background()
+	env := integration.SetupEnv(t)
+	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
+		t.Fatal(err)
+	}
+	user := uuid.New()
+	if _, err := env.PG.Exec(`INSERT INTO users (id, email_id, username, display_name, created_at, updated_at) VALUES ($1, $2, 'u', 'u', NOW(), NOW())`, user, user.String()+"@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	key := "content-io/ready/in"
+	job := &contentIOModels.Job{ID: uuid.New(), Kind: "import", Format: "sheet", UserUUID: user, Status: contentIOModels.StatusQueued, InputKey: &key}
+	if err := contentIOModels.Create(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	preview := json.RawMessage(`{"preview":{"sheets":[]}}`)
+	if err := contentIOModels.Ready(ctx, job.ID, preview); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := contentIOModels.Get(ctx, job.ID); got.Status != contentIOModels.StatusQueued {
+		t.Fatalf("a queued job became %s; only a running one becomes ready", got.Status)
+	}
+	if claimed, err := contentIOModels.ClaimNext(ctx); err != nil || claimed == nil || claimed.ID != job.ID {
+		t.Fatalf("claimed %+v, %v", claimed, err)
+	}
+	if err := contentIOModels.Ready(ctx, job.ID, preview); err != nil {
+		t.Fatal(err)
+	}
+	ready, err := contentIOModels.Get(ctx, job.ID)
+	if err != nil || ready.Status != contentIOModels.StatusReady || ready.Progress != 100 || !strings.Contains(string(ready.Result), `"sheets"`) {
+		t.Fatalf("the ready job is %+v (%v)", ready, err)
+	}
+	params := json.RawMessage(`{"filename":"Deals.xlsx","choices":{"sheets":[]},"confirmed":true}`)
+	for i, want := range []bool{true, false} {
+		chose, err := contentIOModels.Choose(ctx, job.ID, params)
+		if err != nil || chose != want {
+			t.Fatalf("choice %d: %v (%v), want %v", i+1, chose, err, want)
+		}
+	}
+	queued, _ := contentIOModels.Get(ctx, job.ID)
+	if queued.Status != contentIOModels.StatusQueued || !strings.Contains(string(queued.Params), `"confirmed": true`) || string(queued.Result) != "{}" {
+		t.Fatalf("after the choice the job is %s with params %s and result %s", queued.Status, queued.Params, queued.Result)
+	}
+
+	// Left unconfirmed past its time, a ready job fails.
+	if _, err := contentIOModels.ClaimNext(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := contentIOModels.Ready(ctx, job.ID, preview); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	dead, err := contentIOModels.FailAbandoned(ctx, now.Add(-time.Hour), now.Add(-time.Hour), now.Add(time.Minute))
+	if err != nil || len(dead) != 1 || dead[0].ID != job.ID || dead[0].Status != contentIOModels.StatusFailed || dead[0].Error == nil || !strings.Contains(*dead[0].Error, "Nobody confirmed") {
+		t.Fatalf("the unconfirmed job's cleanup: %+v (%v)", dead, err)
+	}
+
+	// The migration down fails a job still ready, and refuses the status;
+	// up again takes it.
+	again := &contentIOModels.Job{ID: uuid.New(), Kind: "import", Format: "sheet", UserUUID: user, Status: contentIOModels.StatusRunning, InputKey: &key}
+	if err := contentIOModels.Create(ctx, again); err != nil {
+		t.Fatal(err)
+	}
+	if err := contentIOModels.Ready(ctx, again.ID, preview); err != nil {
+		t.Fatal(err)
+	}
+	up, down := readyMigration(t, "up"), readyMigration(t, "down")
+	if _, err := env.PG.Exec(down); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := contentIOModels.Get(ctx, again.ID); got.Status != contentIOModels.StatusFailed {
+		t.Errorf("down left a ready job %s, want failed", got.Status)
+	}
+	if _, err := env.PG.Exec(`UPDATE content_io_jobs SET status = 'ready' WHERE id = $1`, again.ID); err == nil {
+		t.Error("down still takes the ready status")
+	}
+	if _, err := env.PG.Exec(up); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.PG.Exec(`UPDATE content_io_jobs SET status = 'ready' WHERE id = $1`, again.ID); err != nil {
+		t.Errorf("up again doesn't take the ready status: %v", err)
+	}
+}
+
+// readyMigration is the ready status's migration, up or down.
+func readyMigration(t *testing.T, dir string) string {
+	t.Helper()
+	_, here, _, _ := runtime.Caller(0)
+	matches, _ := filepath.Glob(filepath.Join(filepath.Dir(here), "..", "..", "migrations", "*_content_io_ready."+dir+".sql"))
+	if len(matches) != 1 {
+		t.Fatalf("want one content_io_ready %s migration, found %v", dir, matches)
+	}
+	b, err := os.ReadFile(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
 }
 
 // Two workers asking at once take different jobs, oldest first.
@@ -192,50 +283,10 @@ func (l *liveRecorder) Seed(_ context.Context, id, html string, _ collab.Options
 	return collab.Result{PersistedAt: time.Now()}, nil
 }
 
-// minioImage is the S3 server the test stores images in. MinIO no longer
-// publishes images on Docker Hub or Quay (the compose files' minio/minio tag
-// answers "pull access denied" since late 2025), so the test runs Chainguard's
-// build of the same server, pinned by digest; CONTENT_IO_TEST_MINIO_IMAGE
-// names another.
-func minioImage() string {
-	if img := os.Getenv("CONTENT_IO_TEST_MINIO_IMAGE"); img != "" {
-		return img
-	}
-	return "cgr.dev/chainguard/minio@sha256:dc455cdd4db6e390b1b26514f15ff37681a777bf8dab41aac445a0259f751e56"
-}
-
+// startMinio gives the docs' tests their uploads bucket (integration.SetupMinio).
 func startMinio(t *testing.T) {
 	t.Helper()
-	ctx := context.Background()
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        minioImage(),
-			Cmd:          []string{"server", "/data"},
-			Env:          map[string]string{"MINIO_ROOT_USER": "onecamp", "MINIO_ROOT_PASSWORD": "onecamp-secret"},
-			ExposedPorts: []string{"9000/tcp"},
-			WaitingFor:   wait.ForHTTP("/minio/health/live").WithPort("9000/tcp").WithStartupTimeout(90 * time.Second),
-		},
-		Started: true,
-	})
-	if err != nil {
-		t.Fatalf("start minio: %v", err)
-	}
-	t.Cleanup(func() { _ = c.Terminate(context.Background()) })
-	host, _ := c.Host(ctx)
-	port, _ := c.MappedPort(ctx, "9000")
-	client, err := minio.New(fmt.Sprintf("%s:%s", host, port.Port()), &minio.Options{
-		Creds: credentials.NewStaticV4("onecamp", "onecamp-secret", ""),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	saved := minioInit.MinioClient
-	minioInit.MinioClient = client
-	t.Cleanup(func() { minioInit.MinioClient = saved })
-	t.Setenv("USER_UPLOAD_BUCKET_NAME", "content-io-test")
-	if err := client.MakeBucket(ctx, "content-io-test", minio.MakeBucketOptions{}); err != nil {
-		t.Fatal(err)
-	}
+	integration.SetupMinio(t, "content-io-test")
 }
 
 var onePixelPNG = []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82")

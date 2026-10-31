@@ -33,6 +33,20 @@ func isChannelLine(subtype string) bool {
 	return false
 }
 
+// leftOut is whether the import leaves a message of subtype out. Slack's
+// system notices never come across as messages. A channel's history (joins,
+// leaves, topics, renames, archives: isChannelLine) comes across as its quiet
+// lines where OneCamp writes them (linesHere: a channel's own messages),
+// unless the operator skips it. The rest (a purpose set, a pin notice, a
+// reminder, an integration added) have no line, so they stay out whatever the
+// option says; a pin comes across as the pin itself (the pin pass). Pure.
+func leftOut(subtype string, skip, linesHere bool) bool {
+	if isChannelLine(subtype) {
+		return skip || !linesHere
+	}
+	return SubtypeIsSystem(subtype)
+}
+
 // channelLineEvent is the change m says, with its Slack people: its actor,
 // and the one it happened to ("" for a change to the channel itself); ok
 // false for a subtype that isn't one. A Slack event happens to one person at

@@ -17,12 +17,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	fieldTypes "github.com/akashc777/OneCamp/business/FieldTypes"
 	formula "github.com/akashc777/OneCamp/business/Formula"
+	rowQuery "github.com/akashc777/OneCamp/business/RowQuery"
 	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
@@ -48,6 +51,9 @@ const (
 	maxLinkedRows = 50000
 	// loadBatch is how many linked rows are read at a time.
 	loadBatch = 2000
+	// maxRollupDepth is how many rollups deep a rollup's value goes, itself
+	// counted: a rollup can add up a rollup that adds up another.
+	maxRollupDepth = 3
 )
 
 // What a read can leave out, said in the cells it leaves out: no answer,
@@ -61,6 +67,15 @@ var (
 	errTooManyToRead  = formula.Short("Too many links for a formula to read")
 )
 
+// Why a rollup can't add up another rollup: the rollups it would go through
+// go too deep, or come back round (rollupChainProblem), or that rollup can't
+// be worked out (planDeeper).
+var (
+	rollupsTooDeep  = fmt.Sprintf("A rollup can't add up rollups more than %d levels deep", maxRollupDepth)
+	rollupsGoRound  = "A rollup can't add up rollups that add each other up"
+	rollupNotWorked = "The rollup this adds up can't be worked out"
+)
+
 // computed is what a table's computed fields need, found once for a read.
 type computed struct {
 	own     uuid.UUID
@@ -71,8 +86,17 @@ type computed struct {
 	program *formula.Program
 	links   []tableLink
 	rollups []*rollupField
+	// linkedReads is each {Link}.{Field} the formulas read, by its
+	// formula.LinkedRef: a list rollup of that field over that link, worked
+	// out like one but never shown as a cell.
+	linkedReads map[string]*rollupField
 	// items is the relation fields linking to OneCamp items (itemLinks.go).
-	items   []itemField
+	items []itemField
+	// stamps is the fields worked out from the row itself (its number, when
+	// it was made and last changed, and by whom: business/FieldTypes'
+	// FromRow), and stampOf each one's.
+	stamps  []*model.Field
+	stampOf []func(*model.Field, *model.Row) any
 	targets map[uuid.UUID]*target
 	// order is the targets in the order the fields name them.
 	order    []uuid.UUID
@@ -83,8 +107,22 @@ type computed struct {
 	// linked is each table link's links for the page, by field id; none for
 	// one whose links aren't shown to the reader.
 	linked map[string]*pageLinks
-	// counted and fetched are the links the read has counted and fetched.
-	counted, fetched int
+	// reach is what the read has taken in, shared with the reads one level
+	// deeper that work out the rollups its rollups add up (planDeeper).
+	*reach
+	// depth is how far down those reads this one is: 0 for a table's own.
+	depth int
+	// now and loc are the read's moment and the reader's zone.
+	now time.Time
+	loc *time.Location
+}
+
+// reach is what one read takes in, however deep its rollups go: the links it
+// has counted and fetched, the linked rows it has worked out, and each table
+// it opens, opened once.
+type reach struct {
+	counted, fetched, loaded int
+	tables                   map[uuid.UUID]*opened
 }
 
 // pageLinks is a table link's links for a page.
@@ -109,15 +147,32 @@ type rollupField struct {
 	cfg   rollupConfig
 	link  tableLink
 	of    *model.Field
+	// cond is where its conditions are among its target's (target.conds),
+	// counted from 1, so a rollup without conditions has 0; program is its
+	// formula, when it adds up by one.
+	cond    int
+	program *formula.Program
+	// sorted is where the order of its linked rows (rollupConfig's Sort and
+	// Desc) is among its target's sorts, counted from 1: 0 for link order.
+	sorted int
+	// chain is the tables checkRollup went down past the one it links to,
+	// adding up a rollup: each one rollupChainProblem opened on the way.
+	chain []uuid.UUID
 }
 
-// target is a table a read's relation fields link to.
-type target struct {
+// opened is a table as a read opens it: whether its reader may, its fields,
+// and which of them names a row.
+type opened struct {
 	table   *model.DataTable // nil once deleted
 	visible bool
 	fields  []*model.Field
 	// label is the field whose value names a row.
 	label *model.Field
+}
+
+// target is a table a read's relation fields link to.
+type target struct {
+	opened
 	// reads are the fields rollups add up here, in order, and readAt where
 	// each is among them, by id.
 	reads  []*model.Field
@@ -125,6 +180,16 @@ type target struct {
 	rows   map[uuid.UUID]*linkedRow
 	// skipped is the linked rows left out, past what one read works out.
 	skipped map[uuid.UUID]bool
+	// conds is the rollups' conditions here, each checked once a linked
+	// row (linkedRow.passes).
+	conds []*rollupCond
+	// sorts is the orders rollups put the linked rows in here, each read
+	// once a linked row (linkedRow.keys).
+	sorts []*rollupSort
+	// deeper is the rollups here that rollups add up, by id, and sub the
+	// read one level deeper that works them out for the linked rows.
+	deeper []string
+	sub    *computed
 }
 
 func newTarget() *target {
@@ -136,11 +201,23 @@ func newTarget() *target {
 type linkedRow struct {
 	label  string
 	values []formula.Value
+	// passes is whether the row meets each of its target's conds, and keys
+	// its place in each of its target's sorts.
+	passes []bool
+	keys   []rowQuery.SortKey
 }
 
 // read is the value of a field rollups add up in a linked row of t.
 func (t *target) read(lr *linkedRow, field string) formula.Value {
 	return lr.values[t.readAt[field]]
+}
+
+// reading has t's linked rows read f, once however many rollups read it.
+func (t *target) reading(f *model.Field) {
+	if _, ok := t.readAt[f.Id.String()]; !ok {
+		t.readAt[f.Id.String()] = len(t.reads)
+		t.reads = append(t.reads, f)
+	}
 }
 
 // planComputed finds what a table's computed fields need: the tables its
@@ -154,6 +231,12 @@ func planComputed(ctx context.Context, fields []*model.Field) *computed {
 // whoever passes it: its links wait there for its restore (D14) and nothing
 // reads them, so a rollup over it says its relation has been deleted.
 func planComputedFor(ctx context.Context, fields []*model.Field, keep map[string]bool) *computed {
+	return planUnder(ctx, fields, keep, nil)
+}
+
+// planUnder is planComputedFor one level under the read above, on its
+// budget and reach, or for a read of its own when above is nil.
+func planUnder(ctx context.Context, fields []*model.Field, keep map[string]bool, above *computed) *computed {
 	fields = liveOnly(fields)
 	c := &computed{
 		fields:   fields,
@@ -164,6 +247,10 @@ func planComputedFor(ctx context.Context, fields []*model.Field, keep map[string
 		problems: map[string]string{},
 		rolledUp: map[string]bool{},
 		linked:   map[string]*pageLinks{},
+		reach:    &reach{tables: map[uuid.UUID]*opened{}},
+	}
+	if above != nil {
+		c.budget, c.reach, c.depth = above.budget, above.reach, above.depth+1
 	}
 	byID := make(map[string]*model.Field, len(fields))
 	for _, f := range fields {
@@ -181,13 +268,18 @@ func planComputedFor(ctx context.Context, fields []*model.Field, keep map[string
 		if target, ok := itemsOf(f); ok && kept(f) {
 			c.items = append(c.items, itemField{field: f, target: target})
 		}
+		if from := rowStamp(f); from != nil && kept(f) {
+			c.stamps = append(c.stamps, f)
+			c.stampOf = append(c.stampOf, from)
+		}
 	}
 	for _, f := range fields {
 		if cfg, ok := rollupOf(f); ok && kept(f) {
 			r := &rollupField{field: f, cfg: cfg}
 			if why := c.checkRollup(ctx, r, byID); why != "" {
 				c.problems[f.Id.String()] = why
-			} else if cfg.Aggregate != "count" {
+			} else if cfg.Aggregate != "count" || r.cond > 0 {
+				// A count with conditions reads the rows it counts.
 				c.rolledUp[r.link.field.Id.String()] = true
 			}
 			c.rollups = append(c.rollups, r)
@@ -197,8 +289,76 @@ func planComputedFor(ctx context.Context, fields []*model.Field, keep map[string
 	if keep != nil {
 		in = onlyFormulas(fields, keep)
 	}
+	// Only formulas read linked rows' fields ({Link}.{Field}): a read one
+	// level deeper, which works out rollups alone, opens no more tables.
+	if slices.ContainsFunc(in, func(f formula.Field) bool { return f.IsFormula }) {
+		in = withLinked(in, fields, func(table uuid.UUID) []*model.Field {
+			if t := c.target(ctx, table); t.visible {
+				return t.fields
+			}
+			return nil
+		})
+	}
 	c.program = formula.Compile(in).Within(c.budget)
+	c.planLinkedReads(ctx, byID)
+	c.planDeeper(ctx)
 	return c
+}
+
+// planDeeper plans, for each table this read links to whose rollups its
+// rollups add up (target.deeper), the read one level deeper that works
+// those out for the linked rows, on this read's budget and reach. Their
+// chains were checked (rollupChainProblem), so each level down holds
+// shorter ones. A rollup adding up one that can't be worked out says so.
+func (c *computed) planDeeper(ctx context.Context) {
+	for _, id := range c.order {
+		if t := c.targets[id]; len(t.deeper) > 0 {
+			t.sub = planUnder(ctx, t.fields, computedNeeds(t.fields, t.deeper), c)
+		}
+	}
+	notWorked := func(r *rollupField) bool {
+		if c.problems[r.field.Id.String()] != "" || r.of == nil || r.of.Type != model.FieldRollup {
+			return false
+		}
+		return c.targets[r.link.table].sub.problems[r.of.Id.String()] != ""
+	}
+	for _, r := range c.rollups {
+		if notWorked(r) {
+			c.problems[r.field.Id.String()] = rollupNotWorked
+		}
+	}
+	for _, r := range c.linkedReads {
+		if notWorked(r) {
+			c.problems[r.field.Id.String()] = linkedReadWords.Replace(rollupNotWorked)
+		}
+	}
+}
+
+// linkedReadWords puts why a rollup can't add up a field as why a formula
+// can't read it.
+var linkedReadWords = strings.NewReplacer("A rollup can't add up", "A formula can't read", "this adds up", "this reads", "The relation this reads", "The link this reads")
+
+// planLinkedReads makes each {Link}.{Field} the formulas read a list rollup
+// of the field over the link, checked as a rollup is: the read fetches the
+// link's rows and their field as it does for one.
+func (c *computed) planLinkedReads(ctx context.Context, byID map[string]*model.Field) {
+	for _, ref := range c.program.LinkedRefs() {
+		link, field, _ := formula.SplitLinkedRef(ref)
+		r := &rollupField{
+			field: &model.Field{Id: uuid.NewSHA1(uuid.NameSpaceOID, []byte("linked-read:"+ref)), Type: model.FieldRollup},
+			cfg:   rollupConfig{Relation: link, Field: field, Aggregate: "list"},
+		}
+		if why := c.checkRollup(ctx, r, byID); why != "" {
+			// What a rollup can't add up, a formula can't read.
+			c.problems[r.field.Id.String()] = linkedReadWords.Replace(why)
+		} else {
+			c.rolledUp[r.link.field.Id.String()] = true
+		}
+		if c.linkedReads == nil {
+			c.linkedReads = map[string]*rollupField{}
+		}
+		c.linkedReads[ref] = r
+	}
 }
 
 // liveOnly is fields without those in the trash, in their order: fields
@@ -242,7 +402,7 @@ func computedNeeds(fields []*model.Field, ids []string) map[string]bool {
 			for _, ref := range formula.Refs(storedFormula(f)) {
 				need(strings.TrimPrefix(ref, "#"))
 			}
-		} else if readsLinks(f) {
+		} else if readsLinks(f) || rowStamp(f) != nil {
 			keep[id] = true
 		}
 	}
@@ -250,6 +410,35 @@ func computedNeeds(fields []*model.Field, ids []string) map[string]bool {
 		need(id)
 	}
 	return keep
+}
+
+// rowStamp is how a field worked out from the row itself reads it (its
+// number, when it was made and last changed, and by whom), nil for any other.
+func rowStamp(f *model.Field) func(*model.Field, *model.Row) any {
+	if f == nil {
+		return nil
+	}
+	if k, ok := fieldTypes.Kinds.Lookup(f.Type); ok {
+		return k.FromRow
+	}
+	return nil
+}
+
+// stampNamesPeople is whether a field worked out from the row is who made it
+// or last changed it: people, whom each read names for its reader, as a link
+// to people is.
+func stampNamesPeople(f *model.Field) bool {
+	return f != nil && (f.Type == model.FieldCreatedBy || f.Type == model.FieldModifiedBy)
+}
+
+// workedOutOnRead is whether a field's cells, as a reader sees them, are
+// worked out on each read rather than read as stored: formulas, rollups,
+// links to tables' rows, links to items (people among them), stored as ids
+// and named for the reader, and what is read from the row itself. A query
+// that filters, groups or adds up by one works it out first, and never looks
+// for it in the stored cells.
+func workedOutOnRead(f *model.Field) bool {
+	return f != nil && (readsLinks(f) || f.Type == model.FieldFormula || f.Type == model.FieldRollup || rowStamp(f) != nil)
 }
 
 // labelField is the field whose value names a table's rows: its primary
@@ -271,10 +460,11 @@ func labelField(fields []*model.Field) *model.Field {
 }
 
 // namesRows is whether a field's value can name a table's rows: one of its
-// own, or a formula's that doesn't read links or rollups, worked out for every
-// reader alike.
+// own, or a formula's that doesn't read links, rollups or who made or changed
+// a row, worked out for every reader alike. What is read from the row itself
+// (its number, when it was made) doesn't name it.
 func namesRows(f *model.Field, fields []*model.Field) bool {
-	if readsLinks(f) || f.Type == model.FieldRollup {
+	if readsLinks(f) || f.Type == model.FieldRollup || rowStamp(f) != nil {
 		return false
 	}
 	return f.Type != model.FieldFormula || !readsComputed(f, fields)
@@ -286,24 +476,47 @@ func (c *computed) target(ctx context.Context, id uuid.UUID) *target {
 		return t
 	}
 	t := newTarget()
+	t.opened = *c.open(ctx, id)
 	c.targets[id] = t
 	c.order = append(c.order, id)
+	return t
+}
+
+// open is table id as the read's reader opens it, once a read however deep
+// its rollups go, so every level sees the same fields.
+func (c *computed) open(ctx context.Context, id uuid.UUID) *opened {
+	if o, ok := c.tables[id]; ok {
+		return o
+	}
+	o := &opened{}
+	c.tables[id] = o
 	tb, err := model.GetTableByID(ctx, id)
 	if err != nil || tb == nil {
-		return t
+		return o
 	}
-	t.table, t.visible = tb, mayOpen(ctx, tb, c.own)
-	if !t.visible {
-		return t
+	o.table, o.visible = tb, mayOpen(ctx, tb, c.own)
+	if !o.visible {
+		return o
 	}
 	if id == c.own {
-		t.fields = c.fields
-	} else if t.fields, err = model.ListFields(ctx, id); err != nil {
-		t.visible = false
-		return t
+		o.fields = c.fields
+	} else if o.fields, err = model.ListFields(ctx, id); err != nil {
+		o.visible = false
+		return o
 	}
-	t.label = labelField(t.fields)
-	return t
+	o.label = labelField(o.fields)
+	return o
+}
+
+// fieldsOf is a table's fields as the read's reader may read them: none
+// for one they can't open.
+func (c *computed) fieldsOf(ctx context.Context) func(uuid.UUID) []*model.Field {
+	return func(id uuid.UUID) []*model.Field {
+		if o := c.open(ctx, id); o.visible {
+			return o.fields
+		}
+		return nil
+	}
 }
 
 // checkRollup finds what a rollup reads, or why it can't be worked out.
@@ -322,8 +535,39 @@ func (c *computed) checkRollup(ctx context.Context, r *rollupField, byID map[str
 		return "The table this adds up has been deleted"
 	case !t.visible:
 		return "You can't open the table this adds up"
-	case r.cfg.Aggregate == "count":
+	}
+	if len(r.cfg.Where) > 0 {
+		// Each condition's field is read from the linked rows.
+		for _, w := range r.cfg.Where {
+			f := resolveField(t.fields, w.Field)
+			if f == nil {
+				return "A field this rollup's conditions read has been deleted"
+			}
+			t.reading(f)
+		}
+		t.conds = append(t.conds, &rollupCond{where: r.cfg.Where})
+		r.cond = len(t.conds)
+	}
+	if r.cfg.Sort != "" {
+		// The rows are read, and sorted, by it before they're added up.
+		by := resolveField(t.fields, r.cfg.Sort)
+		if by == nil {
+			return "The field this rollup sorts by has been deleted"
+		}
+		if why := sortProblem(by, t.fields); why != "" {
+			return why
+		}
+		t.reading(by)
+		r.sorted = t.sortingBy(by, r.cfg.Desc)
+	}
+	if r.cfg.Aggregate == "count" {
 		return ""
+	}
+	if r.cfg.Aggregate == rollupByFormula {
+		r.program = rollupProgram(r.cfg.Formula).Within(c.budget)
+		if err := r.program.Err(rollupDraftID); err != nil {
+			return formula.Message(err)
+		}
 	}
 	for _, f := range t.fields {
 		if f.Id.String() == r.cfg.Field {
@@ -336,23 +580,55 @@ func (c *computed) checkRollup(ctx context.Context, r *rollupField, byID map[str
 	if why := rollupProblem(r.cfg.Aggregate, r.of, t.fields); why != "" {
 		return why
 	}
-	if _, ok := t.readAt[r.of.Id.String()]; !ok {
-		t.readAt[r.of.Id.String()] = len(t.reads)
-		t.reads = append(t.reads, r.of)
+	if r.of.Type == model.FieldRollup {
+		fieldsOf := c.fieldsOf(ctx)
+		if why := rollupChainProblem(r.field.Id, r.of, t.fields, func(id uuid.UUID) []*model.Field {
+			r.chain = append(r.chain, id)
+			return fieldsOf(id)
+		}); why != "" {
+			return why
+		}
+		t.deeper = append(t.deeper, r.of.Id.String())
 	}
+	t.reading(r.of)
 	return ""
 }
 
-// rollupProblem is why a rollup can't add up field of in a table with fields
-// that way, or "".
-func rollupProblem(how string, of *model.Field, fields []*model.Field) string {
-	if of.Type == model.FieldRollup {
-		return "A rollup can't add up another rollup"
+// rollupChainProblem is why rollup self can't add up of, a rollup in a table
+// with fields, or "": the rollups it would go through, each adding up the
+// next, go more than maxRollupDepth deep counting self, or come back round to
+// one of them. fieldsOf is a table's fields, none when the reader can't open
+// it; a rollup on the way that can't be worked out says why itself.
+func rollupChainProblem(self uuid.UUID, of *model.Field, fields []*model.Field, fieldsOf func(uuid.UUID) []*model.Field) string {
+	seen := map[uuid.UUID]bool{self: true}
+	for depth := 2; ; depth++ {
+		if seen[of.Id] {
+			return rollupsGoRound
+		}
+		if depth > maxRollupDepth {
+			return rollupsTooDeep
+		}
+		seen[of.Id] = true
+		cfg, _ := rollupOf(of)
+		l, ok := linkOf(resolveField(fields, cfg.Relation))
+		if !ok {
+			return ""
+		}
+		fields = fieldsOf(l.table)
+		if of = resolveField(fields, cfg.Field); of == nil || of.Type != model.FieldRollup {
+			return ""
+		}
 	}
+}
+
+// rollupProblem is why a rollup can't add up field of in a table with fields
+// that way, or "": another rollup by what it gives, its chain checked apart
+// (rollupChainProblem).
+func rollupProblem(how string, of *model.Field, fields []*model.Field) string {
 	if _, isLink := linkOf(of); isLink {
 		return "A rollup can't add up links to another table"
 	}
-	if _, isItems := itemsOf(of); isItems {
+	if _, isItems := itemsOf(of); isItems || stampNamesPeople(of) {
 		return "A rollup can't add up links to docs, tasks, boards, projects or people"
 	}
 	if of.Type == model.FieldFormula && readsComputed(of, fields) {
@@ -369,8 +645,9 @@ func rollupProblem(how string, of *model.Field, fields []*model.Field) string {
 }
 
 // readsComputed is whether a formula reads, itself or through other
-// formulas, a field linking to a table or to items, or a rollup: values a
-// rollup's read of another table doesn't work out.
+// formulas, a field linking to a table or to items, a rollup, or who made or
+// last changed a row: values a rollup's read of another table doesn't work
+// out. A row's number and when it was made or changed it does (target.load).
 func readsComputed(f *model.Field, fields []*model.Field) bool {
 	byID := make(map[string]*model.Field, len(fields))
 	for _, g := range fields {
@@ -383,7 +660,7 @@ func readsComputed(f *model.Field, fields []*model.Field) bool {
 			return false
 		}
 		seen[g.Id.String()] = true
-		if readsLinks(g) || g.Type == model.FieldRollup {
+		if readsLinks(g) || g.Type == model.FieldRollup || stampNamesPeople(g) {
 			return true
 		}
 		if g.Type != model.FieldFormula {
@@ -404,7 +681,7 @@ func readsComputed(f *model.Field, fields []*model.Field) bool {
 // stored (DeleteField only marks the field), and went to every reader, guests
 // and the AI among them.
 func (c *computed) apply(ctx context.Context, rows []*model.Row) {
-	if c.program.Empty() && len(c.links) == 0 && len(c.rollups) == 0 && len(c.items) == 0 {
+	if c.program.Empty() && len(c.links) == 0 && len(c.rollups) == 0 && len(c.items) == 0 && len(c.stamps) == 0 {
 		for _, r := range rows {
 			if r != nil {
 				r.Values = keepCells(r.Values, c.live)
@@ -424,6 +701,7 @@ func (c *computed) apply(ctx context.Context, rows []*model.Row) {
 		}
 	}
 	now, loc := time.Now(), zoneFrom(ctx)
+	c.now, c.loc = now, loc // a rollup's formula reads today where the reader is
 	c.readLinks(ctx, ids)
 	c.loadLinked(ctx, ids, now, loc)
 	// Each row's links to items, by field, as stored; then named, all at once.
@@ -434,6 +712,17 @@ func (c *computed) apply(ctx context.Context, rows []*model.Row) {
 			refs, _ := fieldTypes.ParseItems(pr.raw(it.field.Id.String()), it.target)
 			stored[i*len(c.items)+j] = refs
 			wanted = append(wanted, refs...)
+		}
+	}
+	// The people a row's stamps name (who made it, and last changed it),
+	// named with the links, for the person reading.
+	stampRefs := make([][]fieldTypes.ItemRef, len(page)*len(c.stamps))
+	for i, pr := range page {
+		for j, f := range c.stamps {
+			if refs, ok := c.stampOf[j](f, pr.row).([]fieldTypes.ItemRef); ok {
+				stampRefs[i*len(c.stamps)+j] = refs
+				wanted = append(wanted, refs...)
+			}
 		}
 	}
 	var names itemNames
@@ -464,15 +753,34 @@ func (c *computed) apply(ctx context.Context, rows []*model.Row) {
 			}
 			values[fid] = v
 		}
+		for j, f := range c.stamps {
+			fid := f.Id.String()
+			if refs := stampRefs[i*len(c.stamps)+j]; refs != nil {
+				named, v := names.cell(refs)
+				if len(named) > 0 {
+					out[fid] = named
+				} else {
+					out[fid] = nil
+				}
+				values[fid] = v
+				continue
+			}
+			v := c.stampOf[j](f, pr.row)
+			out[fid] = v
+			values[fid] = cellValue(f.Type, v)
+		}
 		for _, r := range c.rollups {
 			v := c.rollUp(r, row)
 			out[r.field.Id.String()] = v.JSON()
 			values[r.field.Id.String()] = v
 		}
 		if !c.program.Empty() {
-			worked := c.program.Run(func(id string) (formula.Value, int) {
+			worked := c.program.RunRow(formulaRow(pr.row), func(id string) (formula.Value, int) {
 				if v, ok := values[id]; ok {
 					return v, 0
+				}
+				if r := c.linkedReads[id]; r != nil {
+					return c.rollUp(r, row), 0 // charged to the budget as it adds up
 				}
 				return pr.cell(id, c.types[id])
 			}, now, loc)
@@ -534,7 +842,7 @@ func (c *computed) readLinks(ctx context.Context, ids []uuid.UUID) {
 				fid := l.field.Id.String()
 				pl := c.linked[fid]
 				n, has := pl.count[id], limits[fid][i]
-				want := min(n, maxShownLinks)
+				want := min(n, c.shown())
 				if pass == 1 {
 					if !c.rolledUp[fid] || pl.uncounted[id] || n > maxRolledUp || has != want {
 						continue
@@ -596,13 +904,12 @@ func (c *computed) countLinks(ctx context.Context, field uuid.UUID, to bool, ids
 	return nil
 }
 
-// loadLinked reads the linked rows a page needs, up to maxLinkedRows: first
-// those its cells show, a row of the page at a time across the fields, then
-// those rollups add up. The rest are left out (target.skipped).
+// loadLinked reads the linked rows a page needs, up to maxLinkedRows a read:
+// first those its cells show, a row of the page at a time across the fields,
+// then those rollups add up. The rest are left out (target.skipped).
 func (c *computed) loadLinked(ctx context.Context, ids []uuid.UUID, now time.Time, loc *time.Location) {
 	wanted := map[uuid.UUID][]uuid.UUID{}
 	seen := map[uuid.UUID]bool{}
-	n := 0
 	for pass := 0; pass < 2; pass++ {
 		for _, id := range ids {
 			for _, l := range c.links {
@@ -611,7 +918,7 @@ func (c *computed) loadLinked(ctx context.Context, ids []uuid.UUID, now time.Tim
 					continue
 				}
 				of := pl.of[id]
-				part := of[:min(len(of), maxShownLinks)]
+				part := of[:min(len(of), c.shown())]
 				if pass == 1 {
 					part = of[len(part):]
 				}
@@ -620,11 +927,11 @@ func (c *computed) loadLinked(ctx context.Context, ids []uuid.UUID, now time.Tim
 						continue
 					}
 					seen[other] = true
-					if n == maxLinkedRows {
+					if c.loaded == maxLinkedRows {
 						t.skipped[other] = true
 						continue
 					}
-					n++
+					c.loaded++
 					wanted[l.table] = append(wanted[l.table], other)
 				}
 			}
@@ -633,6 +940,15 @@ func (c *computed) loadLinked(ctx context.Context, ids []uuid.UUID, now time.Tim
 	for _, id := range c.order {
 		c.load(ctx, c.targets[id], wanted[id], now, loc)
 	}
+}
+
+// shown is how many of a row's links its cell shows: none one level down,
+// where cells are only added up.
+func (c *computed) shown() int {
+	if c.depth > 0 {
+		return 0
+	}
+	return maxShownLinks
 }
 
 // needs is what reading a target's rows needs: the stored cells, by field
@@ -650,6 +966,9 @@ func (t *target) needs() ([]string, map[string]bool) {
 			return
 		}
 		seen[f.Id.String()] = true
+		if rowStamp(f) != nil {
+			return // read from the row itself, nothing stored
+		}
 		if f.Type != model.FieldFormula {
 			keys = append(keys, f.Id.String())
 			return
@@ -688,12 +1007,41 @@ func (c *computed) load(ctx context.Context, t *target, ids []uuid.UUID, now tim
 	}
 	keys, formulas := t.needs()
 	types := make(map[string]string, len(t.fields))
+	stamps := map[string]*model.Field{}
 	for _, f := range t.fields {
 		types[f.Id.String()] = f.Type
+		if rowStamp(f) != nil && !stampNamesPeople(f) {
+			stamps[f.Id.String()] = f
+		}
 	}
 	var program *formula.Program
 	if len(formulas) > 0 {
 		program = formula.Compile(onlyFormulas(t.fields, formulas)).Within(c.budget)
+	}
+	// The conditions read the linked rows as the grid's filters do, for no
+	// one in particular: a rollup adds up alike for every reader.
+	if len(t.conds) > 0 {
+		at := reading{zone: loc, now: now, kinds: resultKinds(program, t.reads)}
+		for _, rc := range t.conds {
+			rc.ready(t.fields, at)
+		}
+	}
+	// The sorts order them as the grid's sorts do, alike for every reader.
+	if len(t.sorts) > 0 {
+		t.readySorts(resultKinds(program, t.reads))
+	}
+	// The rollups rollups add up here are worked out for these rows first,
+	// one level deeper (planDeeper).
+	deeper := make([]*rollupField, len(t.reads))
+	if t.sub != nil {
+		t.sub.now, t.sub.loc = now, loc
+		t.sub.readLinks(ctx, ids)
+		t.sub.loadLinked(ctx, ids, now, loc)
+		for _, r := range t.sub.rollups {
+			if at, ok := t.readAt[r.field.Id.String()]; ok {
+				deeper[at] = r
+			}
+		}
 	}
 	for len(ids) > 0 {
 		batch := ids[:min(loadBatch, len(ids))]
@@ -709,15 +1057,23 @@ func (c *computed) load(ctx context.Context, t *target, ids []uuid.UUID, now tim
 		}
 		for _, r := range rows {
 			pr := newPageRow(r)
+			// A cell as the linked row has it: stored, or read from the row
+			// itself (its number, when it was made and last changed).
+			cell := func(id string) (formula.Value, int) {
+				if f := stamps[id]; f != nil {
+					return cellValue(f.Type, rowStamp(f)(f, r)), 1
+				}
+				return pr.cell(id, types[id])
+			}
 			var worked map[string]formula.Value
 			if program != nil {
-				worked = program.Run(func(id string) (formula.Value, int) { return pr.cell(id, types[id]) }, now, loc)
+				worked = program.RunRow(formulaRow(r), cell, now, loc)
 			}
 			value := func(f *model.Field) formula.Value {
 				if f.Type == model.FieldFormula {
 					return worked[f.Id.String()]
 				}
-				v, _ := pr.cell(f.Id.String(), f.Type)
+				v, _ := cell(f.Id.String())
 				return v
 			}
 			lr := &linkedRow{values: make([]formula.Value, len(t.reads))}
@@ -725,7 +1081,32 @@ func (c *computed) load(ctx context.Context, t *target, ids []uuid.UUID, now tim
 				lr.label = clipLabel(value(t.label).Text())
 			}
 			for i, f := range t.reads {
-				lr.values[i] = value(f)
+				if d := deeper[i]; d != nil {
+					lr.values[i] = t.sub.rollUp(d, r.Id)
+				} else {
+					lr.values[i] = value(f)
+				}
+			}
+			if len(t.conds) > 0 || len(t.sorts) > 0 {
+				// The conditions and sorts read cells as the grid's filters
+				// and sorts do: raw, a formula as worked out; what the row
+				// says of itself (its number, when it was made), from the row.
+				raw := map[string]interface{}{}
+				for _, f := range t.reads {
+					id := f.Id.String()
+					if f.Type == model.FieldFormula {
+						raw[id] = worked[id].JSON()
+					} else {
+						raw[id] = pr.raw(id)
+					}
+				}
+				if len(t.conds) > 0 {
+					lr.passes = make([]bool, len(t.conds))
+					for i, rc := range t.conds {
+						lr.passes[i] = rc.passes(r, raw)
+					}
+				}
+				t.key(lr, r, raw)
 			}
 			t.rows[r.Id] = lr
 		}
@@ -821,6 +1202,11 @@ func (c *computed) rollUp(r *rollupField, row uuid.UUID) formula.Value {
 	if why := c.problems[r.field.Id.String()]; why != "" {
 		return formula.Error(why)
 	}
+	if r.cond > 0 {
+		if err := c.targets[r.link.table].conds[r.cond-1].err; err != nil {
+			return formula.Error(err.Error())
+		}
+	}
 	pl := c.linked[r.link.field.Id.String()]
 	if pl == nil || pl.failed {
 		return errLinksFailed
@@ -829,7 +1215,10 @@ func (c *computed) rollUp(r *rollupField, row uuid.UUID) formula.Value {
 	switch {
 	case pl.uncounted[row]:
 		return errLinksUncounted
-	case r.cfg.Aggregate != "count":
+	case r.cfg.Aggregate != "count" || r.cond > 0:
+	case r.cfg.Limit > 0 && n > r.cfg.Limit:
+		// A count of its first N, whatever their order: no rows to read.
+		return formula.Number(float64(r.cfg.Limit))
 	case n > maxCounted:
 		return errTooManyCounted
 	default:
@@ -840,7 +1229,9 @@ func (c *computed) rollUp(r *rollupField, row uuid.UUID) formula.Value {
 		return errTooManyLinked // more than a rollup adds up, or past what the read fetches
 	}
 	t := c.targets[r.link.table]
-	acc := newRollupAcc(r.cfg.Aggregate)
+	// The linked rows it adds up, in link order: those that meet its
+	// conditions, then sorted and cut to its first N when it says so.
+	rows := make([]*linkedRow, 0, len(others))
 	for _, id := range others {
 		lr, ok := t.rows[id]
 		if !ok {
@@ -849,15 +1240,67 @@ func (c *computed) rollUp(r *rollupField, row uuid.UUID) formula.Value {
 			}
 			continue // deleted since
 		}
+		if r.cond > 0 && !lr.passes[r.cond-1] {
+			continue
+		}
+		rows = append(rows, lr)
+	}
+	if r.sorted > 0 {
+		if err := t.sorts[r.sorted-1].err; err != nil {
+			return formula.Error(err.Error())
+		}
+		if !c.sortLinked(rows, r.sorted-1) {
+			return formula.RanOut()
+		}
+	}
+	if r.cfg.Limit > 0 && len(rows) > r.cfg.Limit {
+		rows = rows[:r.cfg.Limit]
+	}
+	if r.cfg.Aggregate == "count" {
+		return formula.Number(float64(len(rows)))
+	}
+	how := r.cfg.Aggregate
+	if how == rollupByFormula {
+		how = "values" // every value, for the formula
+	}
+	acc := newRollupAcc(how)
+	for _, lr := range rows {
 		v := t.read(lr, r.of.Id.String())
-		if v.IsUnfinished() || !c.budget.Spend(1+len(v.Str)/32) {
+		if v.IsUnfinished() {
+			return v // the linked row's own value left something out
+		}
+		if !c.budget.Spend(1 + len(v.Str)/32) {
 			return formula.RanOut()
 		}
 		if acc.add(v) {
 			break
 		}
 	}
+	switch r.cfg.Aggregate {
+	case rollupByFormula:
+		values := acc.result()
+		if values.Kind == formula.KindError {
+			return values
+		}
+		return r.program.Run(func(string) (formula.Value, int) { return values, 0 }, c.now, c.loc)[rollupDraftID]
+	}
 	return acc.result()
+}
+
+// sortLinked puts a rollup's linked rows in its target's sort at, by their
+// keys (rowQuery.Sorter, the tables' one order): rows that tie stay in link
+// order. Each comparison is charged to the read's budget; once it runs out
+// the rest compare as ties, and false says so.
+func (c *computed) sortLinked(rows []*linkedRow, at int) bool {
+	enough := true
+	sort.SliceStable(rows, func(i, j int) bool {
+		if !enough || !c.budget.Spend(1) {
+			enough = false
+			return false
+		}
+		return rows[i].keys[at].Compare(rows[j].keys[at]) < 0
+	})
+	return enough
 }
 
 // rollupAcc adds up a rollup's values one at a time, in place.
@@ -870,9 +1313,11 @@ type rollupAcc struct {
 	pick          formula.Value
 	picked        bool
 	seen          map[string]bool
-	text          strings.Builder
-	chars         int
-	tooLong       bool
+	// items are a list's values, for formulas that read it as a list
+	// (ARRAYUNIQUE, COUNTA); its text is what it shows.
+	items   []formula.Value
+	chars   int
+	tooLong bool
 }
 
 func newRollupAcc(how string) *rollupAcc {
@@ -905,6 +1350,12 @@ func (a *rollupAcc) add(v formula.Value) bool {
 		}
 	case "unique_count":
 		a.seen[v.Text()] = true
+	case "values":
+		if inner := v.Items(); inner != nil {
+			a.items = append(a.items, inner...)
+		} else {
+			a.items = append(a.items, v)
+		}
 	case "list", "unique":
 		s := v.Text()
 		if a.how == "unique" {
@@ -913,11 +1364,16 @@ func (a *rollupAcc) add(v formula.Value) bool {
 			}
 			a.seen[s] = true
 		}
-		if a.text.Len() > 0 {
-			a.text.WriteString(", ")
+		if len(a.items) > 0 {
 			a.chars += 2
 		}
-		a.text.WriteString(s)
+		// A linked row's own list (a multi-select) gives its items, as a
+		// lookup of it does in Airtable.
+		if inner := v.Items(); inner != nil {
+			a.items = append(a.items, inner...)
+		} else {
+			a.items = append(a.items, v)
+		}
 		if a.chars += utf8.RuneCountInString(s); a.chars > maxRollupText {
 			a.tooLong = true
 			return true
@@ -953,11 +1409,13 @@ func (a *rollupAcc) result() formula.Value {
 			return formula.Blank()
 		}
 		return a.pick
+	case "values":
+		return formula.List(a.items)
 	case "list", "unique":
 		if a.tooLong {
 			return formula.Error(fmt.Sprintf("The list would be longer than %d characters", maxRollupText))
 		}
-		return formula.Text(a.text.String())
+		return formula.List(a.items)
 	}
 	return formula.Error("Choose how to add it up")
 }
@@ -1013,7 +1471,14 @@ func (p *pageRow) cell(id, fieldType string) (formula.Value, int) {
 //   - a relation linking to a table with that table's name ("table_name"),
 //     or why it can't link to it.
 func presentComputedFields(fields []*model.Field, c *computed) {
-	inputs := formulaInputs(fields)
+	// A link's fields by name too ({Vendor}.{City}), from the tables the
+	// read loaded.
+	inputs := withLinked(formulaInputs(fields), fields, func(table uuid.UUID) []*model.Field {
+		if t := c.targets[table]; t != nil && t.visible {
+			return t.fields
+		}
+		return nil
+	})
 	for _, f := range fields {
 		cfg := map[string]interface{}{}
 		switch f.Type {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +25,8 @@ type fakeRows struct {
 	state map[int64]*fakeState
 	clock time.Time
 	now   models.Stats
+	// The statements a writer's path and its delivery cost.
+	inserts, releases, claims int
 }
 
 type fakeState struct {
@@ -46,32 +50,40 @@ func (f *fakeRows) row(id int64) *models.Row {
 	return nil
 }
 
-func (f *fakeRows) insert(_ context.Context, _ models.Execer, r models.Row) (int64, error) {
+func (f *fakeRows) insert(_ context.Context, _ models.Execer, rs []models.Row) ([]int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	r.ID = int64(len(f.rows) + 1)
-	r.State = models.StateHeld
-	r.CreatedAt = f.clock
-	f.rows = append(f.rows, &r)
-	f.state[r.ID] = &fakeState{available: f.clock, created: f.clock}
-	return r.ID, nil
+	f.inserts++
+	ids := make([]int64, 0, len(rs))
+	for _, r := range rs {
+		r.ID = int64(len(f.rows) + 1)
+		r.State = models.StateHeld
+		r.CreatedAt = f.clock
+		f.rows = append(f.rows, &r)
+		f.state[r.ID] = &fakeState{available: f.clock, created: f.clock}
+		ids = append(ids, r.ID)
+	}
+	return ids, nil
 }
 
-func (f *fakeRows) release(_ context.Context, id int64) (bool, error) {
+func (f *fakeRows) release(_ context.Context, ids []int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	r := f.row(id)
-	if r == nil || r.State != models.StateHeld {
-		return false, nil
+	f.releases++
+	for _, id := range ids {
+		if r := f.row(id); r != nil && r.State == models.StateHeld {
+			r.State = models.StateReady
+			f.state[id].available = f.clock
+		}
 	}
-	r.State = models.StateReady
-	f.state[id].available = f.clock
-	return true, nil
+	return nil
 }
 
 func (f *fakeRows) releaseWith(ctx context.Context, id int64, more map[string]string) (bool, error) {
 	f.mu.Lock()
-	if r := f.row(id); r != nil && r.State == models.StateHeld {
+	r := f.row(id)
+	held := r != nil && r.State == models.StateHeld
+	if held {
 		merged := map[string]string{}
 		for k, v := range r.Entities {
 			merged[k] = v
@@ -82,7 +94,7 @@ func (f *fakeRows) releaseWith(ctx context.Context, id int64, more map[string]st
 		r.Entities = merged
 	}
 	f.mu.Unlock()
-	return f.release(ctx, id)
+	return held, f.release(ctx, []int64{id})
 }
 
 func (f *fakeRows) cancel(_ context.Context, _ models.Execer, id int64) error {
@@ -133,14 +145,17 @@ func (f *fakeRows) claimDue(_ context.Context, by string, l time.Duration, limit
 	return out, nil
 }
 
-func (f *fakeRows) claimOne(_ context.Context, id int64, by string, l time.Duration) (models.Row, bool, error) {
+func (f *fakeRows) claim(_ context.Context, ids []int64, by string, l time.Duration) ([]models.Row, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	r := f.row(id)
-	if r == nil || !f.claimable(r) {
-		return models.Row{}, false, nil
+	f.claims++
+	var out []models.Row
+	for _, id := range ids {
+		if r := f.row(id); r != nil && f.claimable(r) {
+			out = append(out, f.take(r, by, l))
+		}
 	}
-	return f.take(r, by, l), true, nil
+	return out, nil
 }
 
 func (f *fakeRows) claimNextOfKey(_ context.Context, key string, after int64, by string, l time.Duration) (models.Row, bool, error) {
@@ -199,6 +214,13 @@ func (f *fakeRows) advance(d time.Duration) {
 	f.mu.Lock()
 	f.clock = f.clock.Add(d)
 	f.mu.Unlock()
+}
+
+// statements is what the writes and claims cost so far.
+func (f *fakeRows) statements() (inserts, releases, claims int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inserts, f.releases, f.claims
 }
 
 func (f *fakeRows) stateOf(id int64) string {
@@ -630,5 +652,119 @@ func TestAnEventReleasedWithMoreCarriesItToItsSinks(t *testing.T) {
 	_ = Drain(context.Background())
 	if got["message"] != "m1" || got["opened"] != "a,b" {
 		t.Errorf("the sink was handed %v", got)
+	}
+}
+
+// A change that makes many events (CreateTasks' new tasks, a table's rows)
+// writes them in one statement and releases them in one, and its delivery
+// claims them in one: the writer's path costs two statements however many
+// there are.
+func TestManyEventsCostOneStatementEachToWriteReleaseAndClaim(t *testing.T) {
+	f := withFake(t)
+	rec := &recorder{}
+	Sinks.Register(rec.sink("test", "graph", 1, nil))
+	ctx := context.Background()
+	var es []Entry
+	for _, m := range []string{"a", "b", "c"} {
+		es = append(es, Entry{Topic: "test", Kind: "test.made", Key: "task:" + m, Entities: map[string]string{"message": m}})
+	}
+	ids, err := AddMany(ctx, nil, es)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 3 || ids[0] >= ids[1] || ids[1] >= ids[2] {
+		t.Fatalf("ids %v: one each, in the order given", ids)
+	}
+	if err := ReleaseMany(ctx, ids); err != nil {
+		t.Fatal(err)
+	}
+	DeliverMany(ids)
+	helpers.SettleBackground(10 * time.Second)
+	got := rec.calls()
+	sort.Strings(got)
+	if strings.Join(got, ",") != "graph#a,graph#b,graph#c" {
+		t.Errorf("ran %v: each event once", got)
+	}
+	for _, id := range ids {
+		if s := f.stateOf(id); s != models.StateDone {
+			t.Errorf("event %d is %s, want done", id, s)
+		}
+	}
+	if ins, rel, cl := f.statements(); ins != 1 || rel != 1 || cl != 1 {
+		t.Errorf("%d inserts, %d releases, %d claims: one statement each", ins, rel, cl)
+	}
+}
+
+// Every event of a batch is checked as Add checks one, before anything is
+// written; an empty batch costs nothing.
+func TestABatchWithABadEventWritesNothing(t *testing.T) {
+	f := withFake(t)
+	ctx := context.Background()
+	if _, err := AddMany(ctx, nil, []Entry{{Topic: "t", Kind: "k", Key: "k"}, {Topic: "t", Kind: "k"}}); err == nil {
+		t.Error("a batch holding an event with no key was added")
+	}
+	if ids, err := AddMany(ctx, nil, nil); err != nil || ids != nil {
+		t.Errorf("an empty batch answered %v, %v", ids, err)
+	}
+	if err := ReleaseMany(ctx, nil); err != nil {
+		t.Error(err)
+	}
+	DeliverMany(nil)
+	helpers.SettleBackground(10 * time.Second)
+	if ins, rel, cl := f.statements(); ins+rel+cl != 0 || len(f.rows) != 0 {
+		t.Errorf("%d statements and %d rows for a bad or empty batch, want none", ins+rel+cl, len(f.rows))
+	}
+}
+
+// A key's events delivered in one call still run one at a time, oldest
+// first; another key's run beside them.
+func TestEventsDeliveredTogetherKeepTheirKeysOrder(t *testing.T) {
+	withFake(t)
+	rec := &recorder{}
+	Sinks.Register(rec.sink("test", "realtime", 1, nil))
+	m1 := add(t, "channel:c1", "m1")
+	m2 := add(t, "channel:c1", "m2")
+	o1 := add(t, "channel:c2", "o1")
+	DeliverMany([]int64{m2, o1, m1})
+	helpers.SettleBackground(10 * time.Second)
+	got := rec.calls()
+	var c1 []string
+	for _, c := range got {
+		if c != "realtime#o1" {
+			c1 = append(c1, c)
+		}
+	}
+	if len(got) != 3 || strings.Join(c1, ",") != "realtime#m1,realtime#m2" {
+		t.Errorf("ran %v: c1's m1 then m2, and c2's o1", got)
+	}
+}
+
+// A long list delivered at once is claimed a batch at a time, each batch under
+// a lease of its own, so the last ones' leases don't run out while the first
+// ones run: every event still runs once.
+func TestALongListIsDeliveredABatchAtATime(t *testing.T) {
+	f := withFake(t)
+	rec := &recorder{}
+	Sinks.Register(rec.sink("test", "graph", 1, nil))
+	ctx := context.Background()
+	es := make([]Entry, batch+1)
+	for i := range es {
+		m := strconv.Itoa(i)
+		es[i] = Entry{Topic: "test", Kind: "test.made", Key: "row:" + m, Entities: map[string]string{"message": m}}
+	}
+	ids, err := AddMany(ctx, nil, es)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ReleaseMany(ctx, ids); err != nil {
+		t.Fatal(err)
+	}
+	DeliverMany(ids)
+	helpers.SettleBackground(10 * time.Second)
+	if got := len(rec.calls()); got != len(ids) {
+		t.Errorf("%d events ran, want each of the %d once", got, len(ids))
+	}
+	if _, _, cl := f.statements(); cl != 2 {
+		t.Errorf("%d claims for %d events, want one per batch of %d", cl, len(ids), batch)
 	}
 }

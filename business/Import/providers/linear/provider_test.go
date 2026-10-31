@@ -6,12 +6,15 @@ package linear
 // need network or DB lives here.
 
 import (
+	"context"
+	"maps"
 	"strings"
 	"testing"
 	"time"
 
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
+	"github.com/google/uuid"
 )
 
 func TestMarkdownToHTML_BasicShape(t *testing.T) {
@@ -51,15 +54,6 @@ func TestTruncate_NoChangeUnderLimit(t *testing.T) {
 func TestTruncate_CutsAtLimit(t *testing.T) {
 	if got := truncate("abcdef", 3); got != "abc" {
 		t.Fatalf("expected abc, got %q", got)
-	}
-}
-
-func TestParseRetryAfter_Numeric(t *testing.T) {
-	if got := parseRetryAfter("30"); got != 30 {
-		t.Fatalf("expected 30, got %d", got)
-	}
-	if got := parseRetryAfter(""); got != 0 {
-		t.Fatalf("expected 0 for empty, got %d", got)
 	}
 }
 
@@ -208,4 +202,43 @@ func asJob(a *importModelsAlias) *importModels.Job {
 		return nil
 	}
 	return &importModels.Job{Options: a.Options}
+}
+
+// O-L2: the keys an issue had before it moved teams come with it, so they
+// keep finding its task (Linear resolves them too).
+func TestIssueToSourceTask_KeepsTheKeysItHadBefore(t *testing.T) {
+	out := New().issueToSourceTask(linearIssue{ID: "iss-7", Identifier: "ENG-7", Previous: []string{"DES-2", "OPS-40"}}, "proj-1")
+	if out.SourceKey != "ENG-7" || len(out.FormerKeys) != 2 || out.FormerKeys[0] != "DES-2" || out.FormerKeys[1] != "OPS-40" {
+		t.Fatalf("keys %q and %v; want ENG-7 and [DES-2 OPS-40]", out.SourceKey, out.FormerKeys)
+	}
+}
+
+// L-2: a project says the highest number its issues keep, a sub-issue's and
+// another team's included, so the tasks made with none (its milestones) are
+// numbered after them; a team's inbox says its own.
+func TestAProjectSaysTheHighestNumberItsIssuesKeep(t *testing.T) {
+	p := New()
+	job := &importModels.Job{Id: uuid.New()}
+	p.snapshotCache[job.Id] = &workspaceSnapshot{
+		Teams:    []linearTeam{{ID: "eng", Name: "Eng"}},
+		Projects: []linearProject{{ID: "proj", Name: "Launch", TeamID: "eng"}, {ID: "empty", Name: "Empty", TeamID: "eng"}},
+		Issues: []linearIssue{
+			{ID: "a", Identifier: "ENG-3", TeamID: "eng", ProjectID: "proj"},
+			{ID: "a1", Identifier: "ENG-12", TeamID: "eng", ProjectID: "proj", ParentID: "a"},
+			{ID: "b", Identifier: "DES-7", TeamID: "des", ProjectID: "proj"},
+			{ID: "loose", Identifier: "ENG-40", TeamID: "eng"},
+		},
+		teamHasInbox: map[string]bool{"eng": true},
+	}
+	projects, errs := p.IterProjects(context.Background(), job, nil)
+	got := map[string]int{}
+	for sp := range projects {
+		got[sp.SourceID] = sp.HighestNumber
+	}
+	if err := <-errs; err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]int{"proj": 12, "empty": 0, inboxProjectIDPrefix + "eng": 40}; !maps.Equal(got, want) {
+		t.Fatalf("highest numbers %v, want %v", got, want)
+	}
 }

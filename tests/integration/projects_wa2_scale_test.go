@@ -16,8 +16,10 @@ package integration_test
 //      WA2_MEASURE=1 go test -tags=integration ./tests/integration/ -run TestWA2AReadTimesAtScale -v
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -68,8 +70,7 @@ func newWA2Scale(t *testing.T, env *integration.Env, dg *integration.DgraphEnv) 
 	live := "0001-01-01T00:00:00Z"
 	team := uuid.New()
 	for _, name := range []string{"ana", "ben"} {
-		s.people[name] = uuid.New()
-		s.exec(`INSERT INTO users (id, email_id, username, display_name, created_at, updated_at) VALUES ($1, $2 || '@scale.test', $2, $2, NOW(), NOW())`, s.people[name], name)
+		s.account(name)
 	}
 	s.exec(`INSERT INTO teams (id, team_name, created_by) VALUES ($1, 'Scale', $2)`, team, s.people["ana"])
 	s.exec(`INSERT INTO projects (id, project_name, team_id, created_by) VALUES ($1, 'Big board', $2, $3)`, s.project, team, s.people["ana"])
@@ -94,6 +95,33 @@ func (s *wa2Scale) exec(q string, args ...any) {
 	if _, err := s.env.PG.Exec(q, args...); err != nil {
 		s.t.Fatalf("%s: %v", q, err)
 	}
+}
+
+// account adds name's row to the workspace's users, as s.people[name].
+func (s *wa2Scale) account(name string) {
+	s.t.Helper()
+	s.people[name] = uuid.New()
+	s.exec(`INSERT INTO users (id, email_id, username, display_name, created_at, updated_at) VALUES ($1, $2 || '@scale.test', $2, $2, NOW(), NOW())`, s.people[name], name)
+}
+
+// person adds someone to the workspace, in Postgres and the graph, and
+// answers their graph uid. A viewer is also a viewer of s's project;
+// anyone else is outside it.
+func (s *wa2Scale) person(name string, viewer bool) string {
+	s.t.Helper()
+	s.account(name)
+	user := map[string]any{"uid": "_:" + name, "dgraph.type": "User", "user_uuid": s.people[name].String(), "user_name": name,
+		"user_deleted_at": "0001-01-01T00:00:00Z"}
+	nodes := []map[string]any{user}
+	if viewer {
+		user["user_projects"] = []map[string]any{{"uid": s.uids["p"]}}
+		nodes = append(nodes, map[string]any{"uid": s.uids["p"], "project_members": []map[string]any{{"uid": "_:" + name}}})
+	}
+	uid := s.dg.Mutate(s.t, nodes)[name]
+	if viewer {
+		s.exec(`INSERT INTO project_roles (project_id, user_id, role) VALUES ($1, $2, 'viewer')`, s.project, s.people[name])
+	}
+	return uid
 }
 
 // addTasks adds n tasks to the project, as the app makes them: a row in
@@ -153,9 +181,11 @@ func (s *wa2Scale) restrict(n int) bool {
 	return true
 }
 
-// read runs a handler as who, through the request middleware (which gives the
-// request its one filter), with the project's id as a route parameter.
-func (s *wa2Scale) read(who string, h http.HandlerFunc, query string) (int, string) {
+// call runs a handler as who, through the request middleware (which gives
+// the request its one filter), with the route parameters given, raw as its
+// body (nil for none) and target as its URL: the one way every test here
+// calls a handler.
+func (s *wa2Scale) call(who, method, target string, h http.HandlerFunc, params map[string]string, raw []byte) (int, string) {
 	s.t.Helper()
 	ctx := context.Background()
 	pg, err := userDomain.GetActiveUserWithAdminFlagByUserUUID(ctx, s.people[who])
@@ -167,11 +197,24 @@ func (s *wa2Scale) read(who string, h http.HandlerFunc, query string) (int, stri
 		s.t.Fatalf("load %s's profile: %v", who, err)
 	}
 	rc := chi.NewRouteContext()
-	rc.URLParams.Add("project_uuid", s.project)
+	for k, v := range params {
+		rc.URLParams.Add(k, v)
+	}
 	c := context.WithValue(context.WithValue(ctx, helpers.UserInfoContextKey, userModels.UserInfo{UserPostgresInfo: *pg, UserDgraphInfo: *gr}), chi.RouteCtxKey, rc)
+	var body io.Reader
+	if raw != nil {
+		body = bytes.NewReader(raw)
+	}
 	rec := httptest.NewRecorder()
-	customMiddleware.RequestIDMiddleware(h).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/"+query, nil).WithContext(s.request(c)))
+	customMiddleware.RequestIDMiddleware(h).ServeHTTP(rec, httptest.NewRequest(method, target, body).WithContext(s.request(c)))
 	return rec.Code, rec.Body.String()
+}
+
+// read runs a handler as who, through the request middleware (which gives the
+// request its one filter), with the project's id as a route parameter.
+func (s *wa2Scale) read(who string, h http.HandlerFunc, query string) (int, string) {
+	s.t.Helper()
+	return s.call(who, http.MethodGet, "/"+query, h, map[string]string{"project_uuid": s.project}, nil)
 }
 
 // wa2Reads are the reads of many tasks at once: the board (progressive

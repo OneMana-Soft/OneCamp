@@ -2,15 +2,16 @@ package business
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	workAccess "github.com/akashc777/OneCamp/business/WorkAccess"
+	domain "github.com/akashc777/OneCamp/domain/Task"
+
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
-	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -290,106 +291,179 @@ func TestPlanShiftsByKindAndLag(t *testing.T) {
 	}
 }
 
-// PR2 (#14): moving a task pushes its chain along with one Postgres statement
-// and one graph mutation for all of it, each task keeping its history line;
-// only the project's tasks move.
+// PR2 (#14), DG10: moving a task pushes its chain along in one commit (one
+// Postgres statement inside it, one graph upsert) guarded by the dates it
+// read, each task keeping its history line; a task the person may not move
+// (here, another project's they only read) stays.
 func TestShiftingAChainWritesOnce(t *testing.T) {
 	loc := time.UTC
-	a := waits("7a5c0000-0000-4000-8000-00000000000a", at(loc, 2026, 10, 1, 9), at(loc, 2026, 10, 10, 9))
-	b := waits("7a5c0000-0000-4000-8000-00000000000b", at(loc, 2026, 10, 5, 9), at(loc, 2026, 10, 6, 9), a.Uuid)
-	c := waits("7a5c0000-0000-4000-8000-00000000000c", at(loc, 2026, 10, 7, 9), at(loc, 2026, 10, 8, 9), b.Uuid)
-	other := waits("7a5c0000-0000-4000-8000-00000000000d", at(loc, 2026, 10, 5, 9), at(loc, 2026, 10, 6, 9), a.Uuid)
+	a, b, c, other := chainOf(loc)
+	stubShift(t, []*dgraphStruct.DgraphTask{a, b, c, other}, map[string]bool{other.Uuid: false})
+	var commits [][]*dgraphStruct.DgraphTask
+	var guards [][]domain.MoveGuard
+	shiftSeams.commit = func(_ context.Context, ids []uuid.UUID, _ time.Time, ws []*dgraphStruct.DgraphTask, gs []domain.MoveGuard) error {
+		if len(ids) != len(ws) || len(gs) != len(ws) {
+			t.Fatalf("a row and a guard for each write: %d %d %d", len(ids), len(ws), len(gs))
+		}
+		commits, guards = append(commits, ws), append(guards, gs)
+		return nil
+	}
+	afters := 0
+	shiftSeams.after = func(_ context.Context, ms []movedTask, _ *dgraphStruct.DgraphUser) { afters += len(ms) }
+	moved, err := moveAlong(context.Background(), a.Uuid, nil, loc, &dgraphStruct.DgraphUser{Uid: "0x7", Uuid: uuid.NewString()})
+	if err != nil || len(moved) != 2 {
+		t.Fatalf("moved %+v %v", moved, err)
+	}
+	if len(commits) != 1 || len(commits[0]) != 2 || afters != 2 {
+		t.Fatalf("one commit for both, and both told: %d commits, %d told", len(commits), afters)
+	}
+	for i, w := range commits[0] {
+		if w.Uid != "0x2" && w.Uid != "0x3" || len(w.Activity) == 0 {
+			t.Fatalf("each moved task by its uid, with its history: %+v", w)
+		}
+		if g := guards[0][i]; g.Uid != w.Uid || g.Start == nil || g.Start.Day() == w.StartDate.Day() {
+			t.Fatalf("guarded by its dates as read: %+v against %+v", g, w)
+		}
+	}
+}
+
+// MoveTaskDates writes the dragged task and its chain in the same commit.
+func TestAMoveAndItsChainAreOneCommit(t *testing.T) {
+	loc := time.UTC
+	a, b, c, other := chainOf(loc)
+	stubShift(t, []*dgraphStruct.DgraphTask{a, b, c, other}, nil)
+	n := 0
+	var wrote []*dgraphStruct.DgraphTask
+	shiftSeams.commit = func(_ context.Context, _ []uuid.UUID, _ time.Time, ws []*dgraphStruct.DgraphTask, _ []domain.MoveGuard) error {
+		n++
+		wrote = ws
+		return nil
+	}
+	shiftSeams.after = func(context.Context, []movedTask, *dgraphStruct.DgraphUser) {}
+	due := time.Date(2026, 10, 12, 9, 0, 0, 0, loc)
+	moved, err := MoveTaskDates(context.Background(), a, TaskDates{Due: &due}, loc, &dgraphStruct.DgraphUser{Uid: "0x7", Uuid: uuid.NewString()})
+	if err != nil || n != 1 || len(wrote) != 4 || len(moved) != 3 {
+		t.Fatalf("a, b, c and the other project's d in one commit (%d): wrote %d, shifted %+v %v", n, len(wrote), moved, err)
+	}
+	if wrote[0].Uid != a.Uid || !wrote[0].DueDate.Equal(due) {
+		t.Fatalf("the dragged task first, at its new date: %+v", wrote[0])
+	}
+}
+
+// A move tells the rules and webhooks watching due dates (task.changed) of
+// every task whose due date it moved, the dragged one included, as one
+// task's new dates do (afterDates): a timeline drag that pushes a chain along
+// must not move due dates without "When a task's due date changes" rules
+// hearing of it. A task the move leaves where it was tells them nothing.
+func TestAMoveTellsTaskChangedOfEachDueDateItMoved(t *testing.T) {
+	loc := time.UTC
+	// a is dragged from the 10th to the 15th; b starts the day after a ends,
+	// so it moves along; c starts on the 20th, after a's new end, and stays.
+	a := waits("7a5c0000-0000-4000-8000-0000000000aa", at(loc, 2026, 10, 1, 9), at(loc, 2026, 10, 10, 9))
+	b := waits("7a5c0000-0000-4000-8000-0000000000bb", at(loc, 2026, 10, 11, 9), at(loc, 2026, 10, 12, 9), a.Uuid)
+	c := waits("7a5c0000-0000-4000-8000-0000000000cc", at(loc, 2026, 10, 20, 9), at(loc, 2026, 10, 21, 9), a.Uuid)
+	a.Uid, b.Uid, c.Uid = "0x1", "0x2", "0x3"
+	stubShift(t, []*dgraphStruct.DgraphTask{a, b, c}, nil)
+	shiftSeams.commit = func(context.Context, []uuid.UUID, time.Time, []*dgraphStruct.DgraphTask, []domain.MoveGuard) error {
+		return nil
+	}
+	saved := moveChanged
+	t.Cleanup(func() { moveChanged = saved })
+	told := map[string][2]string{}
+	moveChanged = func(_ context.Context, task *dgraphStruct.DgraphTask, field, before, after string, _ *dgraphStruct.DgraphUser) {
+		if field != FieldDue {
+			t.Errorf("%s: told of %q, want %q", task.Uuid, field, FieldDue)
+		}
+		if before != after {
+			told[task.Uuid] = [2]string{before, after}
+		}
+	}
+	due := time.Date(2026, 10, 15, 9, 0, 0, 0, loc)
+	if _, err := MoveTaskDates(context.Background(), a, TaskDates{Due: &due}, loc, &dgraphStruct.DgraphUser{Uid: "0x7", Uuid: uuid.NewString()}); err != nil {
+		t.Fatalf("move: %v", err)
+	}
+	if got, want := told[a.Uuid], [2]string{"2026-10-10T09:00:00Z", "2026-10-15T09:00:00Z"}; got != want {
+		t.Errorf("the dragged task: told %v, want %v", got, want)
+	}
+	if got := told[b.Uuid]; got[0] != "2026-10-12T09:00:00Z" || got[1] == "" || got[1] == got[0] {
+		t.Errorf("the task pushed along: told %v, want its due date moved from the 12th", got)
+	}
+	if got, ok := told[c.Uuid]; ok {
+		t.Errorf("the task that stayed: told %v, want nothing", got)
+	}
+}
+
+// Tasks that change under a move are read and planned again; after three
+// tries the move gives up, having written nothing.
+func TestAStaleMoveIsPlannedAgainThenRefused(t *testing.T) {
+	loc := time.UTC
+	a, b, c, other := chainOf(loc)
+	reads := stubShift(t, []*dgraphStruct.DgraphTask{a, b, c, other}, nil)
+	tries := 0
+	shiftSeams.commit = func(context.Context, []uuid.UUID, time.Time, []*dgraphStruct.DgraphTask, []domain.MoveGuard) error {
+		tries++
+		return domain.ErrMoveStale
+	}
+	told := false
+	shiftSeams.after = func(context.Context, []movedTask, *dgraphStruct.DgraphUser) { told = true }
+	_, err := moveAlong(context.Background(), a.Uuid, nil, loc, &dgraphStruct.DgraphUser{Uid: "0x7", Uuid: uuid.NewString()})
+	if !errors.Is(err, ErrMoveStale) || tries != moveTries || *reads != moveTries || told {
+		t.Fatalf("three reads, three tries, nothing told: %v %d %d %v", err, tries, *reads, told)
+	}
+}
+
+// A person who may not change the dragged task moves nothing.
+func TestAMoveOfATaskThePersonCantChangeIsRefused(t *testing.T) {
+	loc := time.UTC
+	a, b, c, other := chainOf(loc)
+	stubShift(t, []*dgraphStruct.DgraphTask{a, b, c, other}, map[string]bool{a.Uuid: false})
+	shiftSeams.commit = func(context.Context, []uuid.UUID, time.Time, []*dgraphStruct.DgraphTask, []domain.MoveGuard) error {
+		t.Fatal("nothing is written")
+		return nil
+	}
+	if _, err := moveAlong(context.Background(), a.Uuid, nil, loc, &dgraphStruct.DgraphUser{Uid: "0x7", Uuid: uuid.NewString()}); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("refused: %v", err)
+	}
+}
+
+// chainOf is a (moved, due on the 10th) ← b ← c in project p, and d in
+// project q waiting on a.
+func chainOf(loc *time.Location) (a, b, c, d *dgraphStruct.DgraphTask) {
+	a = waits("7a5c0000-0000-4000-8000-00000000000a", at(loc, 2026, 10, 1, 9), at(loc, 2026, 10, 10, 9))
+	b = waits("7a5c0000-0000-4000-8000-00000000000b", at(loc, 2026, 10, 5, 9), at(loc, 2026, 10, 6, 9), a.Uuid)
+	c = waits("7a5c0000-0000-4000-8000-00000000000c", at(loc, 2026, 10, 7, 9), at(loc, 2026, 10, 8, 9), b.Uuid)
+	d = waits("7a5c0000-0000-4000-8000-00000000000d", at(loc, 2026, 10, 5, 9), at(loc, 2026, 10, 6, 9), a.Uuid)
 	for i, x := range []*dgraphStruct.DgraphTask{a, b, c} {
 		x.Uid = fmt.Sprintf("0x%d", i+1)
 		x.Project = &dgraphStruct.DgraphProject{Uuid: "p"}
 	}
-	other.Uid, other.Project = "0x9", &dgraphStruct.DgraphProject{Uuid: "q"}
-	old := shiftSeams
-	t.Cleanup(func() { shiftSeams = old })
-	touched, written := 0, 0
-	var wrote []*dgraphStruct.DgraphTask
-	shiftSeams.schedule = func(context.Context, string) ([]*dgraphStruct.DgraphTask, error) {
-		return []*dgraphStruct.DgraphTask{a, b, c, other}, nil
-	}
-	shiftSeams.touch = func(_ context.Context, ids []uuid.UUID, _ time.Time) error {
-		touched++
-		if len(ids) != 2 {
-			t.Fatalf("touched %d", len(ids))
-		}
-		return nil
-	}
-	shiftSeams.write = func(_ context.Context, ts []*dgraphStruct.DgraphTask) error {
-		written++
-		wrote = ts
-		return nil
-	}
-	shiftSeams.after = func(context.Context, *dgraphStruct.DgraphTask, TaskDates, *dgraphStruct.DgraphUser) {}
-	shiftSeams.judge = judging()
-	moved, err := ShiftDependents(context.Background(), "p", a.Uuid, loc, &dgraphStruct.DgraphUser{Uid: "0x7"})
-	if err != nil || len(moved) != 2 {
-		t.Fatalf("moved %+v %v", moved, err)
-	}
-	if touched != 1 || written != 1 || len(wrote) != 2 {
-		t.Fatalf("one Postgres statement (%d) and one graph write (%d) for both: %+v", touched, written, wrote)
-	}
-	for _, w := range wrote {
-		if w.Uid != "0x2" && w.Uid != "0x3" || len(w.Activity) == 0 {
-			t.Fatalf("each moved task by its uid, with its history: %+v", w)
-		}
-	}
+	d.Uid, d.Project = "0x9", &dgraphStruct.DgraphProject{Uuid: "q"}
+	return a, b, c, d
 }
 
-// judging is a verdict seam: the person sees every task, and may change all
-// but the ones refused.
-func judging(refused ...string) func(context.Context, string, string, ...*dgraphStruct.DgraphTask) (map[string]workAccess.Verdict, error) {
-	return func(_ context.Context, _, _ string, ts ...*dgraphStruct.DgraphTask) (map[string]workAccess.Verdict, error) {
-		out := make(map[string]workAccess.Verdict, len(ts))
-		for _, t := range ts {
-			out[strings.ToLower(t.Uuid)] = workAccess.Verdict{See: true, Move: !slices.Contains(refused, t.Uuid)}
+// stubShift reads tasks for every move and judges each movable and visible,
+// except those named in move (false: seen, not movable). It returns a count
+// of the reads.
+func stubShift(t *testing.T, tasks []*dgraphStruct.DgraphTask, move map[string]bool) *int {
+	t.Helper()
+	old := shiftSeams
+	t.Cleanup(func() { shiftSeams = old })
+	reads := 0
+	shiftSeams.schedule = func(context.Context, string) ([]*dgraphStruct.DgraphTask, error) {
+		reads++
+		return tasks, nil
+	}
+	shiftSeams.judge = func(_ context.Context, _, _ string, ts ...*dgraphStruct.DgraphTask) (map[string]workAccess.Verdict, error) {
+		out := map[string]workAccess.Verdict{}
+		member := workAccess.Standing{ProjectUUID: "p", Role: workAccess.RoleMember, EditWho: workAccess.EditMembers}
+		for _, x := range ts {
+			v := workAccess.VerdictOf(member, workAccess.TaskFacts{})
+			if ok, named := move[x.Uuid]; named && !ok {
+				v = workAccess.VerdictOf(workAccess.Standing{ProjectUUID: "p", Role: workAccess.RoleViewer}, workAccess.TaskFacts{})
+			}
+			out[strings.ToLower(x.Uuid)] = v
 		}
 		return out, nil
 	}
-}
-
-// A2-1 (the web audit, released code): in a project where members change only
-// their own tasks, moving your task with its chain moved other people's tasks
-// too: the chain was read as the person may see it, never judged as a change.
-// Now it's judged for the mover by Work Access's dependency rule, as beta's
-// move is (DG10): a task they may not change stays where it is, and so does
-// what waits only on it.
-func TestShiftingLeavesATaskThePersonMayNotChange(t *testing.T) {
-	loc := time.UTC
-	a := waits("7a5c0000-0000-4000-8000-00000000000a", at(loc, 2026, 10, 1, 9), at(loc, 2026, 10, 10, 9))
-	b := waits("7a5c0000-0000-4000-8000-00000000000b", at(loc, 2026, 10, 5, 9), at(loc, 2026, 10, 6, 9), a.Uuid)
-	c := waits("7a5c0000-0000-4000-8000-00000000000c", at(loc, 2026, 10, 7, 9), at(loc, 2026, 10, 8, 9), b.Uuid)
-	for i, x := range []*dgraphStruct.DgraphTask{a, b, c} {
-		x.Uid, x.Project = fmt.Sprintf("0x%d", i+1), &dgraphStruct.DgraphProject{Uuid: "p"}
-	}
-	mia := &dgraphStruct.DgraphUser{Uid: "0x7", Uuid: "5e1a0000-0000-4000-8000-000000000007"}
-	old := shiftSeams
-	t.Cleanup(func() { shiftSeams = old })
-	var wrote []*dgraphStruct.DgraphTask
-	shiftSeams.schedule = func(ctx context.Context, _ string) ([]*dgraphStruct.DgraphTask, error) {
-		if got := taskread.ReaderOf(ctx); got != mia.Uuid {
-			t.Fatalf("the chain was read for %q, want the mover", got)
-		}
-		return []*dgraphStruct.DgraphTask{a, b, c}, nil
-	}
-	shiftSeams.touch = func(context.Context, []uuid.UUID, time.Time) error { return nil }
-	shiftSeams.write = func(_ context.Context, ts []*dgraphStruct.DgraphTask) error { wrote = ts; return nil }
-	shiftSeams.after = func(context.Context, *dgraphStruct.DgraphTask, TaskDates, *dgraphStruct.DgraphUser) {}
-
-	// Someone else's c: b moves, c stays.
-	shiftSeams.judge = judging(c.Uuid)
-	moved, err := ShiftDependents(context.Background(), "p", a.Uuid, loc, mia)
-	if err != nil || len(moved) != 1 || moved[0].UUID != b.Uuid || len(wrote) != 1 || wrote[0].Uid != "0x2" {
-		t.Fatalf("moved %+v, wrote %+v: %v", moved, wrote, err)
-	}
-	// Someone else's b: nothing moves, as c waits only on b.
-	shiftSeams.judge = judging(b.Uuid)
-	wrote = nil
-	moved, err = ShiftDependents(context.Background(), "p", a.Uuid, loc, mia)
-	if err != nil || len(moved) != 0 || wrote != nil {
-		t.Fatalf("moved %+v, wrote %+v: %v", moved, wrote, err)
-	}
+	return &reads
 }

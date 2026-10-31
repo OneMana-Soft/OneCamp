@@ -207,42 +207,43 @@ func GetJob(ctx context.Context, jobId uuid.UUID) (*Job, error) {
 	return j, nil
 }
 
+// slackJobColumns are the columns scanSlackJob reads, in its order.
+const slackJobColumns = `id, source_workspace_name, source, raw_object_key, status, stage,
+		       started_at, completed_at, options, plan, progress,
+		       error_message, digest, triggered_by, created_at, updated_at`
+
+// scanSlackJob reads a job selected as slackJobColumns.
+func scanSlackJob(row pgexec.Row) (*Job, error) {
+	j := &Job{}
+	return j, row.Scan(
+		&j.Id, &j.SlackWorkspaceName, &j.Source, &j.RawObjectKey, &j.Status, &j.Stage,
+		&j.StartedAt, &j.CompletedAt, &j.Options, (*[]byte)(&j.Plan), &j.Progress,
+		&j.ErrorMessage, &j.Digest, &j.TriggeredBy, &j.CreatedAt, &j.UpdatedAt,
+	)
+}
+
 // ListJobs returns up to limit jobs ordered by created_at desc.
 func ListJobs(ctx context.Context, limit int) ([]*Job, error) {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-
-	rows, err := postgresInit.DBConn.SqlDB.QueryContext(dbCtx, `
-		SELECT id, source_workspace_name, source, raw_object_key, status, stage,
-		       started_at, completed_at, options, plan, progress,
-		       error_message, digest, triggered_by, created_at, updated_at
-		FROM import_jobs
+	return pgexec.Query(ctx, `SELECT `+slackJobColumns+` FROM import_jobs
 		WHERE provider = 'slack'
 		ORDER BY created_at DESC
-		LIMIT $1
-	`, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
+		LIMIT $1`, scanSlackJob, limit)
+}
 
-	out := make([]*Job, 0, 16)
-	for rows.Next() {
-		j := &Job{}
-		if err := rows.Scan(
-			&j.Id, &j.SlackWorkspaceName, &j.Source, &j.RawObjectKey, &j.Status, &j.Stage,
-			&j.StartedAt, &j.CompletedAt, &j.Options, (*[]byte)(&j.Plan), &j.Progress,
-			&j.ErrorMessage, &j.Digest, &j.TriggeredBy, &j.CreatedAt, &j.UpdatedAt,
-		); err != nil {
-			return nil, err
-		}
-		out = append(out, j)
+// ListMemberReads is member's own reads of their Slack conversations
+// (options.member_dms), newest first.
+func ListMemberReads(ctx context.Context, member uuid.UUID, limit int) ([]*Job, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
 	}
-	return out, rows.Err()
+	return pgexec.Query(ctx, `SELECT `+slackJobColumns+` FROM import_jobs
+		WHERE provider = 'slack' AND triggered_by = $1
+		  AND COALESCE(options->>'member_dms', 'false') = 'true'
+		ORDER BY created_at DESC
+		LIMIT $2`, scanSlackJob, member, limit)
 }
 
 // UpdateStatus transitions a job's status (and optionally stage). Used at
@@ -613,9 +614,18 @@ func LogImportError(ctx context.Context, importId uuid.UUID, chunkId *uuid.UUID,
 // ImportError is one entry LogImportErrors writes.
 type ImportError = jobs.ImportError
 
-// LogImportErrors is LogImportError for several entries in one statement.
+// LogImportErrors is LogImportError for several entries, written together,
+// each from chunkId (nil: the import as a whole).
 func LogImportErrors(ctx context.Context, importId uuid.UUID, chunkId *uuid.UUID, entries []ImportError) {
-	jobs.LogImportErrors(ctx, importId, chunkId, entries)
+	jobs.LogImportErrors(ctx, importId, fromChunk(chunkId, entries))
+}
+
+// fromChunk is entries, each from chunk.
+func fromChunk(chunk *uuid.UUID, entries []ImportError) []ImportError {
+	for i := range entries {
+		entries[i].ChunkID = chunk
+	}
+	return entries
 }
 
 // ListErrors returns up to limit error rows, optionally filtered by severity.
@@ -842,23 +852,6 @@ func LookupWorkspaceMapping(ctx context.Context, workspaceName, entityType, slac
 	return u, err
 }
 
-// UpsertWorkspaceMapping records the workspace-wide mapping. Called by
-// resolvers/workers right after they UpsertIdMapping into the per-import
-// map. Idempotent on the composite primary key, so re-imports become
-// no-ops as expected.
-func UpsertWorkspaceMapping(ctx context.Context, workspaceName, entityType, slackId string,
-	onecampUUID uuid.UUID, originImportId uuid.UUID) error {
-	dbCtx, cancel := context.WithTimeout(ctx, postgresInit.DBConn.DBTimeout)
-	defer cancel()
-	_, err := postgresInit.DBConn.SqlDB.ExecContext(dbCtx, `
-		INSERT INTO import_workspace_id_map
-		    (provider, source_workspace_name, entity_type, source_id, onecamp_uuid, origin_import_id)
-		VALUES ('slack', $1, $2, $3, $4, $5)
-		ON CONFLICT (provider, source_workspace_name, entity_type, source_id) DO NOTHING`,
-		workspaceName, entityType, slackId, onecampUUID, originImportId)
-	return err
-}
-
 // UpsertIdMappingWithOwnership extends UpsertIdMapping with the
 // created_by_this_import flag. Workers call this when reusing an entity
 // from a prior import (created_by_this_import=false), so rollback can
@@ -916,6 +909,21 @@ func CountChannelPosts(ctx context.Context, channelUUID, author uuid.UUID) (tota
 // rollback, or the manual delete endpoint).
 func ClearRawObjectKey(ctx context.Context, jobId uuid.UUID) error {
 	return jobs.ClearRawObjectKey(ctx, jobId)
+}
+
+// SlackWorkspace is a Slack workspace an admin's import brought in.
+type SlackWorkspace = jobs.SlackWorkspace
+
+// SlackWorkspaces is every Slack workspace an admin's completed import
+// brought in, newest first.
+func SlackWorkspaces(ctx context.Context) ([]SlackWorkspace, error) {
+	return jobs.SlackWorkspaces(ctx)
+}
+
+// MemberReadUnderWay is whether member has a read of their own Slack
+// conversations not yet finished.
+func MemberReadUnderWay(ctx context.Context, member uuid.UUID) (bool, error) {
+	return jobs.MemberReadUnderWay(ctx, member)
 }
 
 // ResetChunkForRetry puts a claimed chunk back in 'pending' WITHOUT

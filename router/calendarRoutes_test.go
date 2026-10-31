@@ -31,6 +31,15 @@ func TestGoogleCalendarLinksOnlyThroughTheConnectorsFlow(t *testing.T) {
 	}
 }
 
+// Focus time ends on the server, wherever it was started (23 Oct 2026, the
+// owner's "End focus button is not working"): the web's End and the phone's
+// call this one route.
+func TestFocusTimeEndsOnTheServer(t *testing.T) {
+	if !strings.Contains(strings.Join(routerSource(t), "\n"), `r.Post("/endFocus", eventController.EndFocusController)`) {
+		t.Error("POST /event/endFocus is not registered")
+	}
+}
+
 // An event opens by its id, in any month (calendar CAL-BUG-7).
 func TestOneEventCanBeRead(t *testing.T) {
 	if !strings.Contains(strings.Join(routerSource(t), "\n"), `r.Get("/getEvent/{eventId}", eventController.GetEventController)`) {

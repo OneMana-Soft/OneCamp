@@ -74,6 +74,11 @@ var (
 	// hold a slot for ever.
 	handoffWaitMax = 10 * time.Minute
 	handoffSlots   = 16
+	// handoffOpenFor is how long a task's open mark (handedOffEvent.OpenTask)
+	// holds on the far side: a worker takes a fresh entry in well under a
+	// second. One that takes it later (none was running, or all were busy)
+	// reads the task's restriction, which may have been set while it waited.
+	handoffOpenFor = 5 * time.Second
 )
 
 var handingOff atomic.Bool
@@ -88,14 +93,19 @@ func HandEventsToWorkers() (undo func()) {
 }
 
 // handedOffEvent is one event as it crosses: what happened, when, the context
-// the listeners read (handoffOrigin), and the event's own data, as JSON (a
-// list arrives as []interface{}, which every listener reads).
+// the listeners read (handoffOrigin, OpenTask), and the event's own data, as
+// JSON (a list arrives as []interface{}, which every listener reads).
 type handedOffEvent struct {
-	V      int                    `json:"v"`
-	Kind   string                 `json:"kind"`
-	At     time.Time              `json:"at"`
-	Origin handoffOrigin          `json:"origin"`
-	Data   map[string]interface{} `json:"data"`
+	V      int           `json:"v"`
+	Kind   string        `json:"kind"`
+	At     time.Time     `json:"at"`
+	Origin handoffOrigin `json:"origin"`
+	// OpenTask is the event's own task when the dispatching context marks it
+	// open (helpers.WithOpenTasks: one of a batch just made), so the workers
+	// needn't read its restriction either. Only that task's mark crosses: a
+	// batch of n tasks is n events, and each would carry all n.
+	OpenTask string                 `json:"open_task,omitempty"`
+	Data     map[string]interface{} `json:"data"`
 }
 
 // handoffOrigin is what the listeners read from the dispatching context
@@ -120,6 +130,25 @@ func (o handoffOrigin) context() context.Context {
 	return ctx
 }
 
+// openTaskOf is the task data names (taskOfEvent) when ctx marks it open, or "".
+func openTaskOf(ctx context.Context, data map[string]interface{}) string {
+	if task := taskOfEvent(data); helpers.TasksOpen(ctx, task) {
+		return task
+	}
+	return ""
+}
+
+// context is the context the listeners get on the far side: the dispatching
+// context's flags, and its mark on the event's own task while the entry is
+// fresh (handoffOpenFor).
+func (ev handedOffEvent) context(now time.Time) context.Context {
+	ctx := ev.Origin.context()
+	if task, err := uuid.Parse(ev.OpenTask); err == nil && now.Sub(ev.At) <= handoffOpenFor {
+		ctx = helpers.WithOpenTasks(ctx, task)
+	}
+	return ctx
+}
+
 // handOff sends the event to the workers when this process hands its events
 // over, and says whether it did; when it doesn't, the caller runs the
 // listeners here.
@@ -134,7 +163,7 @@ func handOff(ctx context.Context, eventType string, data map[string]interface{})
 }
 
 func enqueueEvent(ctx context.Context, eventType string, data map[string]interface{}) error {
-	body, err := json.Marshal(handedOffEvent{V: 1, Kind: eventType, At: time.Now().UTC(), Origin: originOf(ctx), Data: data})
+	body, err := json.Marshal(handedOffEvent{V: 1, Kind: eventType, At: time.Now().UTC(), Origin: originOf(ctx), OpenTask: openTaskOf(ctx, data), Data: data})
 	if err != nil {
 		return err
 	}
@@ -316,7 +345,7 @@ func (d *eventDrain) handle(ctx context.Context, m redis.XMessage) {
 		helpers.LogErrorWithContext(ctx, "business/Webhook event drain could not read which listeners had %s, leaving it for later err: %+v", m.ID, err)
 		return
 	}
-	evCtx := ev.Origin.context()
+	evCtx := ev.context(time.Now())
 	// A restricted task's events reach only the listeners that may be told
 	// of them (RegisterEventListenerSeeingRestricted), as in-process.
 	restricted := restrictedTaskEvent(evCtx, ev.Data)

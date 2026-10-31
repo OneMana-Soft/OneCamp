@@ -78,11 +78,34 @@ type callState struct {
 // callStateLocks serialises read-modify-writes of one room's state here.
 var callStateLocks helpers.KeyedLock
 
-// switchLocks serialises flips of one room's transcription switch, so the
-// server's copy and the clients' (the room's metadata) are written in the same
-// order: two people flipping it at once could otherwise leave one saying on and
-// the other off.
+// switchLocks serialises flips of one call's transcription switch, keyed by
+// the call's own room, so the server's copy and the clients' (each room's
+// metadata) are written in the same order: two people flipping it at once could
+// otherwise leave one saying on and the other off, and a breakout room made
+// meanwhile (FollowCall) could take the switch from before the flip.
 var switchLocks helpers.KeyedLock
+
+// callRooms answers every LiveKit room of the call going on in a room: the
+// call's own room first, then its open breakout rooms (calls package C). Call
+// State, which this package can't import, says how (OnCallRooms); until it
+// does, a room is a call of its own.
+var callRooms = func(_ context.Context, room string) ([]string, error) { return []string{room}, nil }
+
+// OnCallRooms tells this package how to find all the rooms of a room's call.
+func OnCallRooms(fn func(ctx context.Context, room string) ([]string, error)) {
+	callRooms = fn
+}
+
+// callOwnRoom answers the own room of the call going on in a room, from the
+// room's name alone: a breakout room's call's, any other room itself. Call
+// State says how (OnCallOwnRoom), as for callRooms; until it does, a room is a
+// call of its own. Pure.
+var callOwnRoom = func(room string) string { return room }
+
+// OnCallOwnRoom tells this package how to find the own room of a room's call.
+func OnCallOwnRoom(fn func(room string) string) {
+	callOwnRoom = fn
+}
 
 // keepsTranscript reports whether a call in this room has somewhere to keep a
 // transcript: a channel, a DM or a group. An instant meeting has none until
@@ -134,12 +157,17 @@ func CallSwitches(ctx context.Context, roomName, sid string) (TranscriptionSwitc
 }
 
 // SetTranscription turns a call's transcription on or off, on behalf of a
-// member who is in it, and tells everyone in the call through the room's
+// member who is in it, and tells everyone in the call through its rooms'
 // metadata.
 //
 // Anyone connected to the call may turn it either way: it is the call's
 // switch, not the host's, and the notice names whoever did it. Guests have no
 // session and can't reach this. Refused while the workspace's mode is off.
+//
+// A call split into breakout rooms has one switch: a flip in any of its rooms
+// is a flip in every one, so no room transcribes while the call's switch is
+// off. A breakout room captions only and keeps no transcript, as it isn't
+// recorded.
 func SetTranscription(ctx context.Context, roomName, identity, byName string, on bool) (*TranscriptionSwitch, error) {
 	roomName = strings.TrimSpace(roomName)
 	if roomName == "" || strings.TrimSpace(identity) == "" || !livekitInit.LiveKitService.Ready() {
@@ -149,11 +177,9 @@ func SetTranscription(ctx context.Context, roomName, identity, byName string, on
 		return nil, ErrTranscriptionDisabled
 	}
 
-	room, err := livekitInit.LiveKitService.GetRoom(ctx, roomName)
-	if errors.Is(err, livekitInit.ErrRoomNotFound) {
+	if _, err := livekitInit.LiveKitService.GetRoom(ctx, roomName); errors.Is(err, livekitInit.ErrRoomNotFound) {
 		return nil, ErrNotInCall
-	}
-	if err != nil {
+	} else if err != nil {
 		return nil, err
 	}
 	present, err := livekitInit.LiveKitService.RoomHasParticipant(ctx, roomName, identity)
@@ -164,8 +190,17 @@ func SetTranscription(ctx context.Context, roomName, identity, byName string, on
 		return nil, ErrNotInCall
 	}
 
-	switchLocks.Acquire(roomName, 0)
-	defer switchLocks.Release(roomName)
+	// Turned off, it reaches at least the room it was asked in when the call's
+	// other rooms can't be read; the caller is told, and asks again.
+	rooms, failed := callRooms(ctx, roomName)
+	if failed != nil {
+		if on {
+			return nil, failed
+		}
+		rooms = []string{roomName}
+	}
+	switchLocks.Acquire(rooms[0], 0)
+	defer switchLocks.Release(rooms[0])
 
 	sw := &TranscriptionSwitch{
 		On:    on,
@@ -173,7 +208,79 @@ func SetTranscription(ctx context.Context, roomName, identity, byName string, on
 		ByID:  identity,
 		Since: time.Now().UnixMilli(),
 		Where: transcriptionBusiness.Where(),
-		Kept:  keepsTranscript(roomName),
+		Kept:  keepsTranscript(rooms[0]),
+	}
+	// Every room is flipped, even past one that fails, so a failure never
+	// leaves more of the call transcribing than it must; the caller retries.
+	// The answer is the switch as the caller's own room has it.
+	mine := *sw
+	for i, room := range rooms {
+		inRoom := *sw
+		inRoom.Kept = i == 0 && sw.Kept
+		if room == roomName {
+			mine = inRoom
+		}
+		if err := switchRoom(ctx, room, &inRoom); err != nil && failed == nil {
+			failed = err
+		}
+	}
+	if failed != nil {
+		return nil, failed
+	}
+	callChanged(ctx, rooms[0])
+	return &mine, nil
+}
+
+// FollowCall gives a room its call's transcription switch: a breakout room as
+// it is made, or a call's own room LiveKit made again while everyone was in
+// its breakout rooms. Every room of a call has the switch the call was last
+// given, so it is read off the first other room that has one. A room starts
+// off, so nothing is written while the call's is off.
+func FollowCall(ctx context.Context, roomName string) error {
+	rooms, err := callRooms(ctx, roomName)
+	if err != nil {
+		return err
+	}
+	switchLocks.Acquire(rooms[0], 0)
+	defer switchLocks.Release(rooms[0])
+	for _, room := range rooms {
+		if room == roomName {
+			continue
+		}
+		lkRoom, err := livekitInit.LiveKitService.GetRoom(ctx, room)
+		if errors.Is(err, livekitInit.ErrRoomNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		sw, _ := CallSwitches(ctx, room, lkRoom.Sid)
+		if sw.Since == 0 {
+			continue
+		}
+		if !sw.On {
+			return nil
+		}
+		sw.Kept = roomName == rooms[0] && keepsTranscript(roomName)
+		return switchRoom(ctx, roomName, &sw)
+	}
+	return nil
+}
+
+// switchRoom writes a call's switch into one of its rooms: the room's
+// metadata, which everyone in it goes by, and the server's copy for the room's
+// session. The order is the rule: everyone is told before a word is kept, and
+// no word is kept after it is turned off. So on: the room first, then the
+// server's copy; off: the server's copy first. A room LiveKit has closed (a
+// call's own room while everyone is in its breakout rooms) has nobody to tell;
+// it takes the switch again when it is made (FollowCall).
+func switchRoom(ctx context.Context, roomName string, sw *TranscriptionSwitch) error {
+	room, err := livekitInit.LiveKitService.GetRoom(ctx, roomName)
+	if errors.Is(err, livekitInit.ErrRoomNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
 	}
 	keep := func() error {
 		return editCallState(ctx, roomName, room.Sid, func(st *callState) { st.Transcription = sw })
@@ -182,20 +289,16 @@ func SetTranscription(ctx context.Context, roomName, identity, byName string, on
 		_, err := livekitInit.LiveKitService.UpdateRoomMetadata(ctx, roomName, map[string]any{metaTranscription: sw})
 		return err
 	}
-	// The order is the rule: everyone is told before a word is kept, and no
-	// word is kept after it is turned off. So on: the call first, then the
-	// server's copy; off: the server's copy first.
 	steps := []func() error{tell, keep}
-	if !on {
+	if !sw.On {
 		steps = []func() error{keep, tell}
 	}
 	for _, step := range steps {
 		if err := step(); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	callChanged(ctx, roomName)
-	return sw, nil
+	return nil
 }
 
 // changeListeners are told when something a call says about itself changes.

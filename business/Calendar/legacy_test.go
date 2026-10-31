@@ -39,13 +39,20 @@ func TestTheOldRoutesAnswerInTheGraphsShape(t *testing.T) {
 	sam, maya := h.member("Sam"), h.member("Maya")
 	start := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 	yes := true
-	out, err := h.s.legacyCreate(ctx, sam, adapter.CreateOrUpdateEventInput{Title: "Focus time", Description: "Announcement draft.",
-		StartTime: rfcTime(start), EndTime: rfcTime(start.Add(2 * time.Hour)), IsFocus: &yes,
+	// Focus time is its owner's alone (keepOwnTime): its flag is answered on
+	// one of its own, and the people named on a meeting.
+	focus, err := h.s.legacyCreate(ctx, sam, adapter.CreateOrUpdateEventInput{Title: "Focus time",
+		StartTime: rfcTime(start.Add(4 * time.Hour)), EndTime: rfcTime(start.Add(5 * time.Hour)), IsFocus: &yes})
+	if err != nil || !focus.IsFocus || focus.IsAway || len(focus.Participants) != 0 {
+		t.Fatalf("focus time's answer: %+v %v", focus, err)
+	}
+	out, err := h.s.legacyCreate(ctx, sam, adapter.CreateOrUpdateEventInput{Title: "Announcement review", Description: "Announcement draft.",
+		StartTime: rfcTime(start), EndTime: rfcTime(start.Add(2 * time.Hour)),
 		Participants: []string{maya.UserDgraphInfo.Uuid, sam.UserDgraphInfo.Uuid}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.Title != "Focus time" || !out.IsFocus || out.IsAway || out.CreatedBy != sam.UserDgraphInfo.Uuid ||
+	if out.Title != "Announcement review" || out.IsFocus || out.IsAway || out.CreatedBy != sam.UserDgraphInfo.Uuid ||
 		!reflect.DeepEqual(out.Participants, []string{maya.UserDgraphInfo.Uuid}) || !out.StartTime.Equal(start) {
 		t.Fatalf("the create's answer: %+v", out)
 	}
@@ -55,16 +62,22 @@ func TestTheOldRoutesAnswerInTheGraphsShape(t *testing.T) {
 	}
 	got := asJSON(t, list[0])
 	samID, mayaID := sam.UserDgraphInfo.Uuid, maya.UserDgraphInfo.Uuid
+	samCalendar, err := h.store.personalCalendar(ctx, personOf(sam), "UTC")
+	if err != nil {
+		t.Fatal(err)
+	}
 	want := map[string]any{
-		"event_uuid": out.EventUuid, "event_title": "Focus time", "event_description": "Announcement draft.",
+		"event_uuid": out.EventUuid, "event_title": "Announcement review", "event_description": "Announcement draft.",
 		"event_start_time": "2026-10-16T12:00:00Z", "event_end_time": "2026-10-16T14:00:00Z",
 		"event_created_by":   map[string]any{"uid": h.people[samID].Uid, "user_uuid": samID, "user_name": "Sam", "user_full_name": "Sam Full"},
 		"event_participants": []any{map[string]any{"uid": h.people[mayaID].Uid, "user_uuid": mayaID, "user_name": "Maya", "user_full_name": "Maya Full"}},
-		"event_is_focus":     true, "event_is_away": false,
+		"event_is_focus":     false, "event_is_away": false,
 		// Calendar A2: each guest's answer, beside the people the web names.
 		"event_guests": []any{map[string]any{"user_uuid": mayaID, "role": "required", "response": "needs_action"}},
 		// Calendar A5: the reader's reminders. Maya hasn't answered: none by default.
 		"event_reminders": []any{}, "event_reminders_default": true,
+		// Calendar A6: the calendar it is on, Sam's own.
+		"event_calendar_id": samCalendar.String(),
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("the old shape:\n got %v\nwant %v", got, want)
@@ -133,10 +146,24 @@ func TestTheOldUpdateIsAWholeReplace(t *testing.T) {
 	start := time.Date(2026, 10, 16, 15, 0, 0, 0, time.UTC)
 	yes := true
 	out, _ := h.s.legacyCreate(ctx, sam, adapter.CreateOrUpdateEventInput{Title: "Copy sync", Description: "Pricing page",
-		StartTime: rfcTime(start), EndTime: rfcTime(start.Add(time.Hour)), Participants: []string{maya.UserDgraphInfo.Uuid}, IsAway: &yes})
+		StartTime: rfcTime(start), EndTime: rfcTime(start.Add(time.Hour)), Participants: []string{maya.UserDgraphInfo.Uuid}})
 	id := uuid.MustParse(out.EventUuid)
 
 	move := adapter.CreateOrUpdateEventInput{Title: "Copy sync", StartTime: rfcTime(start.Add(time.Hour)), EndTime: rfcTime(start.Add(2 * time.Hour))}
+	// A flag left out leaves the kind as it was: an out of office (its
+	// owner's alone, keepOwnTime) stays one.
+	away, err := h.s.legacyCreate(ctx, sam, adapter.CreateOrUpdateEventInput{Title: "Away", StartTime: rfcTime(start.Add(3 * time.Hour)),
+		EndTime: rfcTime(start.Add(4 * time.Hour)), IsAway: &yes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.s.legacyUpdate(ctx, uuid.MustParse(away.EventUuid), adapter.CreateOrUpdateEventInput{Title: "Away, all afternoon",
+		StartTime: rfcTime(start.Add(3 * time.Hour)), EndTime: rfcTime(start.Add(5 * time.Hour))}, sam); err != nil {
+		t.Fatal(err)
+	}
+	if v, _ := h.s.Get(ctx, sam, away.EventUuid); v == nil || v.Kind != EventAway {
+		t.Errorf("an out of office moved without its flag: %+v", v)
+	}
 	if err := h.s.legacyUpdate(ctx, id, move, maya); !errors.Is(err, ErrOnlyCreatorChanges) {
 		t.Errorf("a guest: %v", err)
 	}
@@ -147,7 +174,7 @@ func TestTheOldUpdateIsAWholeReplace(t *testing.T) {
 		t.Fatal(err)
 	}
 	v, _ := h.s.Get(ctx, sam, out.EventUuid)
-	if v.Notes != "" || guestNames(v) != "Maya" || v.Kind != EventAway || !v.Start.At.Equal(start.Add(time.Hour)) {
+	if v.Notes != "" || guestNames(v) != "Maya" || v.Kind != EventPlain || !v.Start.At.Equal(start.Add(time.Hour)) {
 		t.Errorf("after the move: %+v", v)
 	}
 	// The old routes name members alone, so a guest invited by email stays.
@@ -226,6 +253,40 @@ func TestTheListCarriesAnEventsColourAndPlace(t *testing.T) {
 		if err != nil || len(list) != 1 || list[0].Hue != "moss" || list[0].Location != "Studio, second floor" {
 			t.Errorf("%s reads %+v %v", who.UserDgraphInfo.UserName, list, err)
 		}
+	}
+}
+
+// The list says a timed event's own zone, and the one it ends in when that's
+// another (calendar head 6), so a card can say the event's own time. UTC,
+// what an event gets when none was given, says none, nor does an all-day
+// event, which is its dates everywhere.
+func TestTheListSaysATimedEventsOwnZone(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	sam := h.member("Sam")
+	at := time.Date(2026, 10, 16, 9, 0, 0, 0, time.UTC)
+	end := at.Add(time.Hour)
+	for _, in := range []EventInput{
+		{Title: "Tokyo", Start: When{At: &at, Zone: "Asia/Tokyo"}, End: When{At: &end}},
+		{Title: "Tokyo to London", Start: When{At: &at, Zone: "Asia/Tokyo"}, End: When{At: &end, Zone: "Europe/London"}},
+		{Title: "UTC", Start: When{At: &at, Zone: "UTC"}, End: When{At: &end}},
+		{Title: "All day", Start: When{Date: "2026-10-16"}, End: When{Date: "2026-10-17"}},
+	} {
+		if _, err := h.s.Create(ctx, sam, in); err != nil {
+			t.Fatalf("%s: %v", in.Title, err)
+		}
+	}
+	list, err := h.s.legacyRange(ctx, sam, at.Add(-24*time.Hour), at.Add(48*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][2]string{}
+	for _, ev := range list {
+		got[ev.Title] = [2]string{ev.Zone, ev.EndZone}
+	}
+	want := map[string][2]string{"Tokyo": {"Asia/Tokyo", ""}, "Tokyo to London": {"Asia/Tokyo", "Europe/London"}, "UTC": {"", ""}, "All day": {"", ""}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("zones said: %v, want %v", got, want)
 	}
 }
 

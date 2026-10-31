@@ -66,6 +66,15 @@ func optStr(s string) *string {
 	return &s
 }
 
+// payloadLimit is how large a kind's payload may be: a board's holds a
+// board of a few hundred notes.
+func payloadLimit(kind string) int {
+	if kind == KindBoard {
+		return maxBoardPayloadBytes
+	}
+	return maxPayloadBytes
+}
+
 // Publish validates and stores a new template owned by the user.
 func Publish(ctx context.Context, in PublishInput, createdBy uuid.UUID) (*model.Template, error) {
 	kind := strings.TrimSpace(in.Kind)
@@ -89,7 +98,7 @@ func Publish(ctx context.Context, in PublishInput, createdBy uuid.UUID) (*model.
 	if payload == "" || payload == "null" {
 		payload = "{}"
 	}
-	if len(payload) > maxPayloadBytes {
+	if len(payload) > payloadLimit(kind) {
 		return nil, fmt.Errorf("template payload is too large")
 	}
 	// Validate the payload is well-formed JSON and decodes for its kind, so a
@@ -114,7 +123,7 @@ func Publish(ctx context.Context, in PublishInput, createdBy uuid.UUID) (*model.
 		payload = string(raw)
 	}
 
-	id, err := model.CreateTemplate(ctx, kind, name, optStr(in.Description), optStr(in.Icon), payload, createdBy)
+	id, err := model.CreateTemplate(ctx, kind, name, optStr(in.Description), optStr(in.Icon), payload, listedForm(kind, payload), createdBy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to publish template")
 	}
@@ -133,14 +142,38 @@ func List(ctx context.Context, kind string) ([]*model.Template, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := listUnlisted(ctx, items); err != nil {
+		return nil, err
+	}
 	var out []*model.Template
 	if kind == "" || kind == KindDoc {
 		out = builtinsListed()
 	}
+	return append(out, items...), nil
+}
+
+// listUnlisted gives templates saved before their listed form was kept that
+// form, made from their payloads, until StartListedFormBackfill keeps it.
+func listUnlisted(ctx context.Context, items []*model.Template) error {
+	var ids []uuid.UUID
 	for _, t := range items {
-		out = append(out, asListed(t))
+		if t.Unlisted {
+			ids = append(ids, t.Id)
+		}
 	}
-	return out, nil
+	if len(ids) == 0 {
+		return nil
+	}
+	payloads, err := model.Payloads(ctx, ids)
+	if err != nil {
+		return fmt.Errorf("failed to list templates")
+	}
+	for _, t := range items {
+		if t.Unlisted {
+			t.Payload = listedForm(t.Kind, payloads[t.Id])
+		}
+	}
+	return nil
 }
 
 // Get returns a single listed template; a doc template with its body.
@@ -207,6 +240,8 @@ func Install(ctx context.Context, id uuid.UUID, userInfo *userModels.UserInfo) (
 		res, err = installTable(ctx, t.Payload, userInfo)
 	case KindDoc:
 		res, err = installDoc(ctx, t.Id, userInfo)
+	case KindBoard:
+		res, err = installBoard(ctx, t.Payload, t.Name, userInfo)
 	default:
 		return nil, fmt.Errorf("unsupported template kind")
 	}
@@ -231,6 +266,8 @@ func decodeForKind(kind string, payload json.RawMessage) (interface{}, error) {
 	case KindDoc:
 		var in DocPayload
 		return in, json.Unmarshal(payload, &in)
+	case KindBoard:
+		return readBoardPayload(string(payload))
 	default:
 		return nil, fmt.Errorf("unsupported kind")
 	}

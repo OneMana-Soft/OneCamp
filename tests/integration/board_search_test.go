@@ -28,6 +28,7 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
 	boardAdapter "github.com/akashc777/OneCamp/adapter/Board"
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	boardBusiness "github.com/akashc777/OneCamp/business/Board"
 	globalSearchBusiness "github.com/akashc777/OneCamp/business/GlobalSearch"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
@@ -69,10 +70,11 @@ func TestGlobalSearchFindsBoardCommentsByWhoMayReadTheBoardNow(t *testing.T) {
 	// comment (by id)?
 	finds := func(t *testing.T, who, text, id string) bool {
 		t.Helper()
-		p, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, people[who].String(), people[who].String()+"@example.test", nil, nil, nil, text)
+		p, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, accessBusiness.Subject{UserUUID: people[who].String()}, people[who].String()+"@example.test", nil, nil, nil, text)
 		if err != nil {
 			t.Fatalf("searching %q as %s: %v", text, who, err)
 		}
+		countsOnlyWhatShows(t, who+" searching "+text, p)
 		for _, h := range p.Page {
 			switch {
 			case h.Board != nil && h.Board.Uuid == id, h.Comment != nil && h.Comment.Uuid == id:
@@ -144,11 +146,13 @@ func TestGlobalSearchFindsBoardCommentsByWhoMayReadTheBoardNow(t *testing.T) {
 		if err := boardBusiness.UpdateBoard(ctx, &boardAdapter.InputUpdateBoard{BoardId: plans.Uuid, IsPrivate: &private}); err != nil {
 			t.Fatal(err)
 		}
-		eventually(t, "the board's entry says it is private", func() bool { return entry("boards", plans.Uuid)["board_private"] == true })
-		eventually(t, "the comment's entry says its board is private", func() bool {
-			e := entry("comments", merge)
-			return e != nil && e["comment_board_public"] == false
-		})
+		// Written, and seen by search, before the change returned (docs C2-1).
+		if entry("boards", plans.Uuid)["board_private"] != true {
+			t.Error("the board's entry doesn't say it is private when the change returns")
+		}
+		if e := entry("comments", merge); e == nil || e["comment_board_public"] != false {
+			t.Errorf("the comment's entry doesn't say its board is private when the change returns: %v", e)
+		}
 		if finds(t, "member", "platform", merge) {
 			t.Error("the member still finds a comment on a board made private")
 		}
@@ -189,10 +193,12 @@ func TestGlobalSearchFindsBoardCommentsByWhoMayReadTheBoardNow(t *testing.T) {
 		if err := boardBusiness.DeleteBoard(ctx, retro.Uuid); err != nil {
 			t.Fatal(err)
 		}
-		eventually(t, "the comment's entry says it is deleted", func() bool {
-			e := entry("comments", lessons)
-			return e != nil && e["deleted_date"] != nil
-		})
+		if e := entry("comments", lessons); e == nil || e["deleted_date"] == nil {
+			t.Fatalf("the comment's entry doesn't say it is deleted when the delete returns: %v", e)
+		}
+		if e := entry("boards", retro.Uuid); e == nil || e["deleted_date"] == nil {
+			t.Errorf("the board's entry doesn't say it is deleted when the delete returns: %v", e)
+		}
 		// As an index the delete's cascade missed would hold it: live.
 		stale := entry("comments", lessons)
 		delete(stale, "deleted_date")

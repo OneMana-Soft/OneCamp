@@ -317,20 +317,21 @@ func TestTheImportStepNamesEveryProvider(t *testing.T) {
 		t.Fatal(err)
 	}
 	detail := strings.ToLower(findStep(t, "import").Detail)
+	// A provider's directory is its name in the code; where a reader knows the
+	// tool by other words, the step says those.
+	readerWords := map[string]string{"gsheets": "google sheets"}
 	providers := 0
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		// RELEASE-LINE ONLY (v2.75.0 / v1.60.0): the release lines don't offer
-		// Basecamp yet (business/Import/providers/releaseLine_test.go), so the
-		// step doesn't name it.
-		if e.Name() == "basecamp" {
-			continue
-		}
 		providers++
-		if !strings.Contains(detail, e.Name()) {
-			t.Errorf("the import step doesn't name %s, which the importer takes", e.Name())
+		words := e.Name()
+		if w, ok := readerWords[words]; ok {
+			words = w
+		}
+		if !strings.Contains(detail, words) {
+			t.Errorf("the import step doesn't name %s, which the importer takes", words)
 		}
 	}
 	if providers == 0 {

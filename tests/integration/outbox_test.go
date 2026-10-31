@@ -225,6 +225,81 @@ func TestTheOutboxDeliversAKeysEventsOldestFirstWhoeverDeliversFirst(t *testing.
 	}
 }
 
+// TestTheOutboxWritesManyEventsInOneStatementAndDeliversThemTogether: on
+// Postgres 12, AddMany keeps each event as written (its entities, its actor
+// or none, its sinks) and answers the ids in the order given; ReleaseMany and
+// DeliverMany take them all, a key's oldest first, and only their sinks run.
+func TestTheOutboxWritesManyEventsInOneStatementAndDeliversThemTogether(t *testing.T) {
+	env := outboxWorld(t)
+	topic := testTopic()
+	var mu sync.Mutex
+	var ran []string
+	outboxBusiness.Sinks.Register(outboxBusiness.Sink{Topic: topic, Name: "graph", Run: func(_ context.Context, ev outboxBusiness.Event) error {
+		mu.Lock()
+		ran = append(ran, ev.Key+"="+ev.Entities["n"])
+		mu.Unlock()
+		return nil
+	}})
+	others := 0
+	outboxBusiness.Sinks.Register(outboxBusiness.Sink{Topic: topic, Name: "other", Run: func(context.Context, outboxBusiness.Event) error {
+		mu.Lock()
+		others++
+		mu.Unlock()
+		return nil
+	}})
+	ctx := context.Background()
+	actor := uuid.NewString()
+	tx, err := postgresInit.DBConn.SqlDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := outboxBusiness.AddMany(ctx, tx, []outboxBusiness.Entry{
+		{Topic: topic, Kind: "test.made", Key: "k1", Entities: map[string]string{"n": "1"}, Actor: actor, Sinks: []string{"graph"}},
+		{Topic: topic, Kind: "test.made", Key: "k1", Entities: map[string]string{"n": "2"}, Sinks: []string{"graph"}},
+		{Topic: topic, Kind: "test.made", Key: "k2", Sinks: []string{"graph"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 3 || ids[0] >= ids[1] || ids[1] >= ids[2] {
+		t.Fatalf("ids %v: one each, in the order given", ids)
+	}
+	want := []string{"k1|{\"n\": \"1\"}|" + actor + "|graph|held", "k1|{\"n\": \"2\"}||graph|held", "k2|{}||graph|held"}
+	for i, id := range ids {
+		var key, entities, actorOf, sinks, state string
+		if err := env.PG.QueryRow(`SELECT key, entities::text, COALESCE(actor::text, ''), array_to_string(sinks, ','), state FROM outbox WHERE id = $1`, id).Scan(&key, &entities, &actorOf, &sinks, &state); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Join([]string{key, entities, actorOf, sinks, state}, "|"); got != want[i] {
+			t.Errorf("event %d is %s, want %s", i, got, want[i])
+		}
+	}
+	if err := outboxBusiness.ReleaseMany(ctx, ids); err != nil {
+		t.Fatal(err)
+	}
+	outboxBusiness.DeliverMany([]int64{ids[1], ids[2], ids[0]})
+	helpers.SettleBackground(10 * time.Second)
+	for _, id := range ids {
+		if state, done := stateOf(t, env, id); state != outboxModels.StateDone || strings.Join(done, ",") != "graph" {
+			t.Errorf("event %d is %s with %v done, want done by graph", id, state, done)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	var k1 []string
+	for _, r := range ran {
+		if strings.HasPrefix(r, "k1=") {
+			k1 = append(k1, r)
+		}
+	}
+	if len(ran) != 3 || strings.Join(k1, ",") != "k1=1,k1=2" || others != 0 {
+		t.Errorf("ran %v and the other sink %d times: k1's in order, k2's, and only graph", ran, others)
+	}
+}
+
 func TestTheOutboxTriesAFailedSinkAgainAloneAndGivesUpVisibly(t *testing.T) {
 	env := outboxWorld(t)
 	ctx := context.Background()

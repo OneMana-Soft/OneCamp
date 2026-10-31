@@ -7,6 +7,7 @@ import (
 	taskDomain "github.com/akashc777/OneCamp/domain/Task"
 	"github.com/akashc777/OneCamp/helpers"
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
+	"github.com/akashc777/OneCamp/models/taskread"
 	"github.com/google/uuid"
 )
 
@@ -16,6 +17,19 @@ var (
 	readTask   = taskDomain.GetDgraphBasicTaskInfoByUUID
 	keysOf     = taskKeys.KeysOf
 )
+
+// A search for exactly a task's key shows that task first (the engine's exact
+// step), and every task hit on a page carries its key.
+func init() {
+	exactSteps = append(exactSteps, func(ctx context.Context, reach Reach, text string) *openSearchStruct.GlobalSearchOpenSearchResp {
+		projects := make(map[string]bool, len(reach.Projects))
+		for _, p := range reach.Projects {
+			projects[p] = true
+		}
+		return exactKeyHit(ctx, text, projects)
+	})
+	decorators = append(decorators, keyTaskHits)
+}
 
 // noReader is a uid that matches nobody: the task's read here needs no
 // reader's counts, since the reader's own projects decide.
@@ -41,6 +55,10 @@ func exactKeyHit(ctx context.Context, text string, readerProjects map[string]boo
 	if t.DeletedAt != nil && !t.DeletedAt.IsZero() && t.DeletedAt.Year() > 1970 {
 		return nil
 	}
+	// A restricted task the reader may not see is found by no key.
+	if tr, err := taskread.From(ctx); err != nil || tr.Hides(t.Uuid) {
+		return nil
+	}
 	// Its current key comes with every task hit's (keyTaskHits), so an old
 	// key typed finds the task under the key it has now.
 	hit := &openSearchStruct.OpenSearchTask{
@@ -53,23 +71,6 @@ func exactKeyHit(ctx context.Context, text string, readerProjects map[string]boo
 		hit.TaskAssigneeFullName = t.Assignee.DisplayName()
 	}
 	return &openSearchStruct.GlobalSearchOpenSearchResp{Type: openSearchStruct.TASK_TYPE, Task: hit}
-}
-
-// withExactKey puts the key's task first in a page and leaves its own hit
-// further down out, so it shows once.
-func withExactKey(first *openSearchStruct.GlobalSearchOpenSearchResp, page []*openSearchStruct.GlobalSearchOpenSearchResp) []*openSearchStruct.GlobalSearchOpenSearchResp {
-	if first == nil {
-		return page
-	}
-	out := make([]*openSearchStruct.GlobalSearchOpenSearchResp, 0, len(page)+1)
-	out = append(out, first)
-	for _, h := range page {
-		if h != nil && h.Task != nil && h.Task.Uuid == first.Task.Uuid {
-			continue
-		}
-		out = append(out, h)
-	}
-	return out
 }
 
 // keyTaskHits sets each task hit's key, in one read. A read that failed

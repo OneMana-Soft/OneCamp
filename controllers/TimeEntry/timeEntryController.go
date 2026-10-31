@@ -282,7 +282,7 @@ func DeleteTime(w http.ResponseWriter, r *http.Request) {
 	if !validID {
 		return
 	}
-	ok, err := timeModel.Delete(id, me(r).UserPostgresInfo.Id)
+	ok, err := timeModel.Delete(r.Context(), id, me(r).UserPostgresInfo.Id)
 	if err != nil {
 		fail(w, r, "DeleteTime", err)
 		return

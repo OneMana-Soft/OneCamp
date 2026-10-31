@@ -369,6 +369,25 @@ func TestAClientApplyRunsNoStep(t *testing.T) {
 	}
 }
 
+// Reopening changes decisions, so it needs edit at the call (CR-35, 25 Oct): a
+// decider moved down to view inside the window keeps their decision.
+func TestADeciderMovedDownToViewCantReopen(t *testing.T) {
+	w := setup(t)
+	ctx := context.Background()
+	p, _ := w.svc.Create(ctx, commenter, suggestion(1))
+	if _, err := w.svc.Decide(ctx, editor, p.ID, Decision{}); err != nil {
+		t.Fatal(err)
+	}
+	w.kind.levels[editor.UserUUID] = accessBusiness.LevelView
+	if _, err := w.svc.Reopen(ctx, editor, p.ID, []string{"h1"}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("a viewer reopening their decision: %v", err)
+	}
+	got, err := w.svc.Get(ctx, owner, p.ID)
+	if err != nil || got.Status != StatusDeclined || got.Hunks[0].Decision != DecisionDeclined {
+		t.Fatalf("after the refused reopen: %v %+v", err, got)
+	}
+}
+
 func TestOneDecisionAtATime(t *testing.T) {
 	w := setup(t)
 	ctx := context.Background()

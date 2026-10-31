@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/akashc777/OneCamp/helpers"
 	"strings"
 	"testing"
 	"time"
@@ -165,7 +166,7 @@ func TestARetryWhileTheFirstTryHasNoNodeIsStillBeingSent(t *testing.T) {
 // next post reaching open apps.
 func TestAPostsLiveEventIsInItsChannelsOrderAndTheRestInItsOwn(t *testing.T) {
 	post, channel := uuid.New(), uuid.New()
-	events := postEvents(MessageCreated, post, channel, "u-ada", false)
+	events := postEvents(MessageCreated, post, channel, "u-ada", false, "")
 	if len(events) != 2 {
 		t.Fatalf("%d events", len(events))
 	}
@@ -200,9 +201,21 @@ func TestAPostsLiveEventIsInItsChannelsOrderAndTheRestInItsOwn(t *testing.T) {
 // for an import: no app gets history live, and nobody is told of it.
 func TestAnImportedPostIsOnlyIndexed(t *testing.T) {
 	post := uuid.New()
-	events := postEvents(MessageCreated, post, uuid.New(), "u-ada", true)
+	events := postEvents(MessageCreated, post, uuid.New(), "u-ada", true, "")
 	if len(events) != 1 || events[0].Key != "post:"+post.String() || strings.Join(events[0].Sinks, ",") != sinkSearch {
 		t.Errorf("an imported post's events: %+v", events)
+	}
+}
+
+// A call's post (calls CALLS-3b, agreed with CHAT-LEAD-2) reaches open apps
+// and search and tells nobody: the call's ring is P10's, and "Maya started a
+// call" isn't worth an embedding. The choice is the outbox row's, so a replay
+// makes the same one.
+func TestACallsPostIsLiveAndIndexedAndTellsNobody(t *testing.T) {
+	post, channel := uuid.New(), uuid.New()
+	events := postEvents(MessageCreated, post, channel, "u-ada", false, helpers.KindHuddle)
+	if len(events) != 2 || strings.Join(events[0].Sinks, ",") != sinkRealtime || strings.Join(events[1].Sinks, ",") != "post.search,post.events" {
+		t.Errorf("a call's post's events: %+v", events)
 	}
 }
 

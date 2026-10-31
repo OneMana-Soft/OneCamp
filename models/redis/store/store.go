@@ -152,6 +152,21 @@ func GetString(ctx context.Context, spec registry.Spec, args []string) (string, 
 	return val, true, nil
 }
 
+// GetRange loads the bytes of a string from start to end, both counted in,
+// as GETRANGE reads them: "" on a miss, or past the string's end.
+func GetRange(ctx context.Context, spec registry.Spec, args []string, start, end int64) (string, error) {
+	if !IsAvailable() {
+		return "", nil
+	}
+	key := spec.Build(args...)
+	val, err := redisInit.RedisClient.GetRange(ctx, key, start, end).Result()
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "redis store: GetRange failed key=%s err=%+v", key, err)
+		return "", err
+	}
+	return val, nil
+}
+
 // AddToSet adds members to a set and refreshes its TTL.
 //
 // The TTL is set on every add rather than only on creation, because a set that
@@ -524,6 +539,24 @@ func AllowFixedWindowOrLocal(ctx context.Context, spec registry.Spec, args []str
 		return RateLimitResult{Allowed: true, Limit: limit, Unchecked: true}
 	}
 	return RateLimitResult{Allowed: false, Limit: limit, RetryAfter: local.Retry(key), Unchecked: true}
+}
+
+// LimitAskTimeout bounds a limiter's ask of Redis: long enough that a healthy
+// Redis isn't affected, short enough that a hung one doesn't queue requests.
+const LimitAskTimeout = 500 * time.Millisecond
+
+// AllowPerAddress counts one ask of surface from ip (an address as
+// helpers.ClientIP gives it; an IPv6 one by its /64) in registry.PublicReadRate's
+// one-minute window, within perMinute: every public read's one limit per
+// address, each surface counted apart. An ask with no address is let through;
+// a counter that can't be reached within LimitAskTimeout counts in this process.
+func AllowPerAddress(ctx context.Context, surface, ip string, perMinute int) RateLimitResult {
+	if ip == "" {
+		return RateLimitResult{Allowed: true}
+	}
+	ctx, cancel := context.WithTimeout(ctx, LimitAskTimeout)
+	defer cancel()
+	return AllowFixedWindowOrLocal(ctx, registry.PublicReadRate, []string{surface, helpers.RateKeyIP(ip)}, perMinute)
 }
 
 // localWindows are AllowFixedWindowOrLocal's in-process windows, one per

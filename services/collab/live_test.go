@@ -70,6 +70,27 @@ func TestAWriteReachesItsOpAndSaysWhatItDid(t *testing.T) {
 	}
 }
 
+// A quiet write (a copy's body, an import's) says so on the wire, so the save
+// that stores it tells nobody whom it mentions; any other write sends no quiet
+// at all.
+func TestAQuietWriteSaysSoOnTheWire(t *testing.T) {
+	_, bodies := fakeLive(t, func(string, map[string]any) (int, any) {
+		return http.StatusOK, map[string]any{"blocks": 1, "persisted": true}
+	})
+	if _, err := Live.Seed(context.Background(), "doc-1", "<p>x</p>", Options{By: By{UserUUID: "sam"}, Quiet: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Live.Seed(context.Background(), "doc-2", "<p>x</p>", Options{By: By{UserUUID: "sam"}}); err != nil {
+		t.Fatal(err)
+	}
+	if q, ok := (*bodies)[0]["quiet"]; !ok || q != true {
+		t.Errorf("a quiet seed sent quiet %v (present %v)", q, ok)
+	}
+	if q, ok := (*bodies)[1]["quiet"]; ok {
+		t.Errorf("a loud seed sent quiet %v", q)
+	}
+}
+
 // A refusal is an answer: never retried, and told apart by kind.
 func TestARefusalIsNeverRetriedAndSaysWhatItIs(t *testing.T) {
 	for _, c := range []struct {

@@ -17,7 +17,9 @@ type jobStore interface {
 	ClaimNext(ctx context.Context) (*contentIOModels.Job, error)
 	SetProgress(ctx context.Context, id uuid.UUID, progress int) error
 	Finish(ctx context.Context, id uuid.UUID, status string, result json.RawMessage, outputKey, errText *string) error
-	FailAbandoned(ctx context.Context, runningBefore, uploadingBefore time.Time) ([]*contentIOModels.Job, error)
+	Ready(ctx context.Context, id uuid.UUID, result json.RawMessage) error
+	Choose(ctx context.Context, id uuid.UUID, params json.RawMessage) (bool, error)
+	FailAbandoned(ctx context.Context, runningBefore, uploadingBefore, readyBefore time.Time) ([]*contentIOModels.Job, error)
 	FinishedBefore(ctx context.Context, before time.Time, limit int) ([]*contentIOModels.Job, error)
 	ForgetFiles(ctx context.Context, id uuid.UUID) error
 	DeleteFinishedBefore(ctx context.Context, before time.Time) (int64, error)
@@ -46,8 +48,14 @@ func (pgJobs) SetProgress(ctx context.Context, id uuid.UUID, progress int) error
 func (pgJobs) Finish(ctx context.Context, id uuid.UUID, status string, result json.RawMessage, outputKey, errText *string) error {
 	return contentIOModels.Finish(ctx, id, status, result, outputKey, errText)
 }
-func (pgJobs) FailAbandoned(ctx context.Context, runningBefore, uploadingBefore time.Time) ([]*contentIOModels.Job, error) {
-	return contentIOModels.FailAbandoned(ctx, runningBefore, uploadingBefore)
+func (pgJobs) Ready(ctx context.Context, id uuid.UUID, result json.RawMessage) error {
+	return contentIOModels.Ready(ctx, id, result)
+}
+func (pgJobs) Choose(ctx context.Context, id uuid.UUID, params json.RawMessage) (bool, error) {
+	return contentIOModels.Choose(ctx, id, params)
+}
+func (pgJobs) FailAbandoned(ctx context.Context, runningBefore, uploadingBefore, readyBefore time.Time) ([]*contentIOModels.Job, error) {
+	return contentIOModels.FailAbandoned(ctx, runningBefore, uploadingBefore, readyBefore)
 }
 func (pgJobs) FinishedBefore(ctx context.Context, before time.Time, limit int) ([]*contentIOModels.Job, error) {
 	return contentIOModels.FinishedBefore(ctx, before, limit)
@@ -68,14 +76,27 @@ type jobParams struct {
 	MediaType  string `json:"media_type,omitempty"`
 	ParentUUID string `json:"parent_uuid,omitempty"`
 	Size       int64  `json:"size,omitempty"`
+	Into       string `json:"into,omitempty"`
+	// Choices are what the person chose of a Previewer's preview; Confirmed
+	// says they're to make it, not to see it read their way.
+	Choices   json.RawMessage `json:"choices,omitempty"`
+	Confirmed bool            `json:"confirmed,omitempty"`
 }
 
 // jobResult is what a job did, kept in its result column.
 type jobResult struct {
 	Created []Created `json:"created,omitempty"`
-	// Exported is how many docs a workspace export wrote.
-	Exported int       `json:"exported,omitempty"`
-	Skipped  []Skipped `json:"skipped,omitempty"`
+	Made    int       `json:"made,omitempty"`
+	Into    []Into    `json:"into,omitempty"`
+	Show    *Created  `json:"show,omitempty"`
+	// Exported is how many docs a workspace export wrote, and ExportedBoards
+	// how many boards.
+	Exported       int       `json:"exported,omitempty"`
+	ExportedBoards int       `json:"exported_boards,omitempty"`
+	Unchanged      int       `json:"unchanged,omitempty"`
+	Skipped        []Skipped `json:"skipped,omitempty"`
+	// Preview is what a ready job found (Previewer).
+	Preview json.RawMessage `json:"preview,omitempty"`
 }
 
 // toJob is a row as its owner sees it.
@@ -85,19 +106,25 @@ func toJob(r *contentIOModels.Job) Job {
 	var res jobResult
 	_ = json.Unmarshal(r.Result, &res)
 	j := Job{
-		ID:         r.ID.String(),
-		Kind:       r.Kind,
-		Format:     r.Format,
-		UserUUID:   r.UserUUID.String(),
-		Status:     JobStatus(r.Status),
-		Progress:   r.Progress,
-		Filename:   p.Filename,
-		ParentUUID: p.ParentUUID,
-		Created:    res.Created,
-		Skipped:    res.Skipped,
-		Exported:   res.Exported,
-		CreatedAt:  r.CreatedAt,
-		FinishedAt: r.FinishedAt,
+		ID:             r.ID.String(),
+		Kind:           r.Kind,
+		Format:         r.Format,
+		UserUUID:       r.UserUUID.String(),
+		Status:         JobStatus(r.Status),
+		Progress:       r.Progress,
+		Filename:       p.Filename,
+		ParentUUID:     p.ParentUUID,
+		Created:        res.Created,
+		Skipped:        res.Skipped,
+		Exported:       res.Exported,
+		ExportedBoards: res.ExportedBoards,
+		Unchanged:      res.Unchanged,
+		Made:           res.Made,
+		Into:           res.Into,
+		Show:           res.Show,
+		Preview:        res.Preview,
+		CreatedAt:      r.CreatedAt,
+		FinishedAt:     r.FinishedAt,
 	}
 	if r.Error != nil {
 		j.Error = *r.Error

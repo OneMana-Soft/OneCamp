@@ -156,6 +156,57 @@ func TestPagingNeverSkipsAMessageInTheSameSecondAsTheEdge(t *testing.T) {
 	if got[first["post_uuid"].(string)] {
 		t.Error("the newer page repeats its edge")
 	}
+
+	// Each page's order, as the web reads it (lib/conversation/adapters
+	// NEWEST_FIRST): the newest and an older page newest first, a newer page
+	// and a link's page oldest first.
+	around := call(postController.GetNewPostsWithCurrentPost,
+		map[string]string{"channel_uuid": channel, "post_uuid": first["post_uuid"].(string)}, "")
+	if len(around.Data.Posts) == 0 || around.Data.Posts[0].UUID != first["post_uuid"].(string) {
+		t.Errorf("a link's page doesn't start at the linked post: %+v", around.Data.Posts)
+	}
+	inOrder(t, "newest", postTimes(latest), true)
+	inOrder(t, "older", postTimes(older), true)
+	inOrder(t, "newer", postTimes(newer), false)
+	inOrder(t, "linked", postTimes(around), false)
+}
+
+// inOrder says whether a page's messages run newest first or oldest first.
+func inOrder(t *testing.T, page string, times []string, newestFirst bool) {
+	t.Helper()
+	if len(times) < 2 {
+		t.Errorf("the %s page has %d messages, too few to show its order", page, len(times))
+		return
+	}
+	for i := 1; i < len(times); i++ {
+		a, errA := time.Parse(time.RFC3339Nano, times[i-1])
+		b, errB := time.Parse(time.RFC3339Nano, times[i])
+		if errA != nil || errB != nil {
+			t.Fatalf("the %s page's times: %v %v", page, errA, errB)
+		}
+		if (newestFirst && !a.After(b)) || (!newestFirst && !a.Before(b)) {
+			want := "oldest first"
+			if newestFirst {
+				want = "newest first"
+			}
+			t.Errorf("the %s page isn't %s: %v", page, want, times)
+			return
+		}
+	}
+}
+
+func postTimes(a pageAnswer) (times []string) {
+	for _, p := range a.Data.Posts {
+		times = append(times, p.CreatedAt)
+	}
+	return times
+}
+
+func chatTimes(a pageAnswer) (times []string) {
+	for _, c := range a.Data.Chats {
+		times = append(times, c.CreatedAt)
+	}
+	return times
 }
 
 func TestPagingADMNeverSkipsAMessageInTheSameSecondAsTheEdge(t *testing.T) {
@@ -193,22 +244,30 @@ func TestPagingADMNeverSkipsAMessageInTheSameSecondAsTheEdge(t *testing.T) {
 			"dm_participants": []map[string]any{{"uid": "_:me"}, {"uid": "_:them"}}, "dm_chats": refs},
 	}, chats...))
 
-	req := httptest.NewRequest(http.MethodGet, "/?at="+url.QueryEscape(chats[2]["chat_created_at"].(string))+"&id="+chats[2]["chat_uuid"].(string), nil)
-	rctx := chi.NewRouteContext()
-	rctx.URLParams.Add("user_uuid", them.String())
-	rctx.URLParams.Add("time_stamp", strconv.FormatInt(second.Unix(), 10))
 	var who userModels.UserInfo
 	who.UserPostgresInfo.Id = me
 	who.UserDgraphInfo = dgraphStruct.DgraphUser{Uid: uids["me"], Uuid: me.String()}
-	rec := httptest.NewRecorder()
-	chatController.GetOldChats(rec, req.WithContext(context.WithValue(context.WithValue(ctx, chi.RouteCtxKey, rctx), helpers.UserInfoContextKey, who)))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("%d %s", rec.Code, rec.Body)
+	ask := func(handler http.HandlerFunc, params map[string]string, query string) pageAnswer {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/?"+query, nil)
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("user_uuid", them.String())
+		for k, v := range params {
+			rctx.URLParams.Add(k, v)
+		}
+		rec := httptest.NewRecorder()
+		handler(rec, req.WithContext(context.WithValue(context.WithValue(ctx, chi.RouteCtxKey, rctx), helpers.UserInfoContextKey, who)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%d %s", rec.Code, rec.Body)
+		}
+		var answer pageAnswer
+		if err := json.Unmarshal(rec.Body.Bytes(), &answer); err != nil {
+			t.Fatal(err)
+		}
+		return answer
 	}
-	var answer pageAnswer
-	if err := json.Unmarshal(rec.Body.Bytes(), &answer); err != nil {
-		t.Fatal(err)
-	}
+	answer := ask(chatController.GetOldChats, map[string]string{"time_stamp": strconv.FormatInt(second.Unix(), 10)},
+		"at="+url.QueryEscape(chats[2]["chat_created_at"].(string))+"&id="+chats[2]["chat_uuid"].(string))
 	got := map[string]bool{}
 	for _, c := range answer.Data.Chats {
 		got[c.UUID] = true
@@ -221,4 +280,20 @@ func TestPagingADMNeverSkipsAMessageInTheSameSecondAsTheEdge(t *testing.T) {
 	if got[chats[2]["chat_uuid"].(string)] {
 		t.Error("the older page repeats its edge")
 	}
+
+	// Each page's order, as the web reads it (lib/conversation/adapters
+	// NEWEST_FIRST); a group's pages are read by the same queries.
+	firstChat := chats[0]
+	firstAt, _ := time.Parse(time.RFC3339Nano, firstChat["chat_created_at"].(string))
+	edgeOfFirst := "at=" + url.QueryEscape(firstChat["chat_created_at"].(string)) + "&id=" + firstChat["chat_uuid"].(string)
+	latest := ask(chatController.GetLatestChats, nil, "")
+	newer := ask(chatController.GetNewChats, map[string]string{"time_stamp": strconv.FormatInt(int64(math.Ceil(float64(firstAt.UnixNano())/1e9)), 10)}, edgeOfFirst)
+	around := ask(chatController.GetNewChatsIncludingChat, map[string]string{"chat_uuid": firstChat["chat_uuid"].(string)}, "")
+	if len(around.Data.Chats) == 0 || around.Data.Chats[0].UUID != firstChat["chat_uuid"].(string) {
+		t.Errorf("a link's page doesn't start at the linked message: %+v", around.Data.Chats)
+	}
+	inOrder(t, "newest", chatTimes(latest), true)
+	inOrder(t, "older", chatTimes(answer), true)
+	inOrder(t, "newer", chatTimes(newer), false)
+	inOrder(t, "linked", chatTimes(around), false)
 }

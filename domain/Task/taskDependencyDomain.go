@@ -3,6 +3,7 @@ package Domain
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -14,8 +15,13 @@ import (
 )
 
 // dependencyFields is what the task panel shows of a task on the other end
-// of a dependency.
-const dependencyFields = `task_uuid task_name task_status task_custom_status task_custom_status_name task_start_date task_due_date`
+// of a dependency, with standing (how the reader stands to its project, as
+// the task read counts it): an end in another project they may not see is
+// dropped (DG10, workAccess.KeepSeenEnds).
+func dependencyFields(standing string) string {
+	return `task_uuid task_name task_status task_custom_status task_custom_status_name task_start_date task_due_date
+	task_project { uid project_uuid project_name ` + standing + ` }`
+}
 
 // DependencyPair is what a dependency change has to check: both tasks (a
 // task that doesn't exist comes back nil), the task's project and whether the
@@ -27,6 +33,10 @@ type DependencyPair struct {
 	Blocker  *dgraphStruct.DgraphTask
 	Linked   bool
 	Upstream map[string]bool
+	// UpstreamProjects are the graph uids of the projects of the tasks in
+	// Upstream (DG10): a change stamps them all, so two links in different
+	// projects that would close a loop together still conflict.
+	UpstreamProjects map[string]bool
 	// How the task already waits on the blocker, when Linked: the edge's
 	// facets (no kind is finish to start).
 	Kind string
@@ -34,16 +44,43 @@ type DependencyPair struct {
 }
 
 type upstreamNode struct {
-	UUID string         `json:"task_uuid"`
-	Up   []upstreamNode `json:"task_blocked_by"`
+	UUID    string         `json:"task_uuid"`
+	Project uidRef         `json:"task_project"`
+	Up      []upstreamNode `json:"task_blocked_by"`
 }
 
-func (n upstreamNode) collect(into map[string]bool) {
+// uidRef is a node's uid, read from an object or a list of one.
+type uidRef string
+
+func (u *uidRef) UnmarshalJSON(b []byte) error {
+	var one struct {
+		Uid string `json:"uid"`
+	}
+	if err := json.Unmarshal(b, &one); err == nil {
+		*u = uidRef(one.Uid)
+		return nil
+	}
+	var many []struct {
+		Uid string `json:"uid"`
+	}
+	if err := json.Unmarshal(b, &many); err != nil {
+		return err
+	}
+	if len(many) > 0 {
+		*u = uidRef(many[0].Uid)
+	}
+	return nil
+}
+
+func (n upstreamNode) collect(into, projects map[string]bool) {
 	if n.UUID != "" {
 		into[n.UUID] = true
 	}
+	if n.Project != "" {
+		projects[string(n.Project)] = true
+	}
 	for _, u := range n.Up {
-		u.collect(into)
+		u.collect(into, projects)
 	}
 }
 
@@ -83,7 +120,23 @@ func ChangeTaskDependency(ctx context.Context, taskUUID, blockerUUID, userDgraph
 		if err != nil {
 			return err
 		}
-		stamp, err := json.Marshal(map[string]any{"uid": pair.Task.Project.Uid, "project_dependencies_at": time.Now().UTC()})
+		// Every project the link touches: both ends', and, when adding, those
+		// of every task upstream of the blocker.
+		now := time.Now().UTC()
+		touched := map[string]bool{pair.Task.Project.Uid: true}
+		if pair.Blocker != nil && pair.Blocker.Project != nil && pair.Blocker.Project.Uid != "" {
+			touched[pair.Blocker.Project.Uid] = true
+		}
+		for uid := range pair.UpstreamProjects {
+			touched[uid] = true
+		}
+		var stamps []map[string]any
+		for uid := range touched {
+			if strings.HasPrefix(uid, "0x") {
+				stamps = append(stamps, map[string]any{"uid": uid, "project_dependencies_at": now})
+			}
+		}
+		stamp, err := json.Marshal(stamps)
 		if err != nil {
 			return err
 		}
@@ -119,7 +172,7 @@ func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID
 	if upstream {
 		// loop: false follows each edge once, so it ends on any graph and
 		// reaches every task upstream, however far.
-		up = `up(func: eq(task_uuid, $b)) @recurse(loop: false) { task_uuid task_blocked_by }`
+		up = `up(func: eq(task_uuid, $b)) @recurse(loop: false) { uid task_uuid task_blocked_by task_project }`
 	}
 	query := `query q($t: string, $b: string, $u: string) {
 		t(func: eq(task_uuid, $t)) {
@@ -136,7 +189,14 @@ func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID
 		}
 		b(func: eq(task_uuid, $b)) {
 			` + fields + `
-			task_project { uid project_uuid }
+			task_assignee { uid }
+			task_created_by { uid }
+			task_project {
+				uid
+				project_uuid
+				project_is_member: count(project_members @filter(uid($u)))
+				project_is_admin: count(project_admins @filter(uid($u)))
+			}
 		}
 		` + up + `
 	}`
@@ -166,7 +226,7 @@ func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID
 	if err != nil {
 		return nil, err
 	}
-	pair := &DependencyPair{Upstream: map[string]bool{}}
+	pair := &DependencyPair{Upstream: map[string]bool{}, UpstreamProjects: map[string]bool{}}
 	if len(out.T) > 0 && !tr.Hides(out.T[0].Uuid) {
 		pair.Task = &out.T[0].DgraphTask
 		if link := out.T[0].Link; len(link) > 0 {
@@ -179,26 +239,19 @@ func readDependencyPair(ctx context.Context, txn *dgo.Txn, taskUUID, blockerUUID
 		tr.Keep(pair.Blocker)
 	}
 	for _, n := range out.Up {
-		n.collect(pair.Upstream)
+		n.collect(pair.Upstream, pair.UpstreamProjects)
 	}
 	return pair, nil
 }
 
 // DownstreamSchedule is the moved task and every live top-level task that
-// waits on it, however indirectly, with their dates and the tasks each waits
-// on: what moving the tasks waiting on it along reads. Each carries how the
-// reader of ctx (taskread.ReaderOf) stands to it and its project, so Work
-// Access can say which they may move. Nothing else of the project is read,
-// so a task nothing waits on costs one small query.
+// waits on it, however indirectly and in any project, with their dates and
+// the tasks each waits on: what moving the tasks waiting on it along reads.
+// Each carries how the reader of ctx (taskread.ReaderOf) stands to it and its
+// project, so Work Access can say which they may move (DG10). Nothing else is
+// read, so a task nothing waits on costs one small query.
 func DownstreamSchedule(ctx context.Context, movedUUID string) ([]*dgraphStruct.DgraphTask, error) {
-	const fields = `uid task_uuid task_name task_status task_start_date task_due_date
-		task_assignee { uid user_uuid }
-		task_created_by { uid user_uuid }
-		task_project {
-			uid project_uuid project_name project_deleted_at
-			project_is_member: count(project_members @filter(eq(user_uuid, $u)))
-			project_is_admin: count(project_admins @filter(eq(user_uuid, $u)))
-		}`
+	const fields = planFields
 	query := `query q($m: string, $u: string) {
 		var(func: eq(task_uuid, $m)) @recurse(loop: false) { d as ~task_blocked_by }
 		moved(func: eq(task_uuid, $m)) { ` + fields + ` }

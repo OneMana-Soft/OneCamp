@@ -59,7 +59,12 @@ func TestSigningInToAProvider(t *testing.T) {
 		ClientID: "id", ClientSecret: "secret",
 		Endpoint: oauth2.Endpoint{AuthURL: "https://launchpad.test/authorization/new", TokenURL: launchpad.URL},
 	}}}
+	// The registry is the process's: Basecamp's own provider comes back for
+	// the tests after this one (TestAnOptionalSignInIsOfferedOnlyWhereItWorks
+	// read this fake's app).
+	basecamp := importProvider.Get(prov.Name())
 	importProvider.Register(prov)
+	t.Cleanup(func() { importProvider.Register(basecamp) })
 
 	ana, ben := uuid.New(), uuid.New()
 	for _, u := range []uuid.UUID{ana, ben} {
@@ -70,7 +75,7 @@ func TestSigningInToAProvider(t *testing.T) {
 	const back = "https://api.test/admin/import/oauth/callback"
 	start := func() string {
 		t.Helper()
-		page, problem := StartOAuthConnect(ctx, prov, ana, back)
+		page, problem := StartOAuthConnect(ctx, prov, ana, back, "")
 		if problem != nil {
 			t.Fatalf("start: %+v", problem)
 		}
@@ -110,7 +115,7 @@ func TestSigningInToAProvider(t *testing.T) {
 
 	// A server without the provider's app says how to set it up.
 	bare := signInProvider{conn: importProvider.OAuthConnect{Setup: "set it up"}}
-	if _, problem := StartOAuthConnect(ctx, bare, ana, back); problem == nil || problem.Code != "not_configured" || problem.Msg != "set it up" {
+	if _, problem := StartOAuthConnect(ctx, bare, ana, back, ""); problem == nil || problem.Code != "not_configured" || problem.Msg != "set it up" {
 		t.Fatalf("unconfigured: %+v", problem)
 	}
 }

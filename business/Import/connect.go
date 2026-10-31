@@ -52,6 +52,8 @@ var tokenHints = map[string]string{
 	importModels.ProviderClickUp:  "ClickUp didn't accept that token. Copy your personal API token again from ClickUp's Settings, Apps.",
 	importModels.ProviderBasecamp: "Basecamp didn't accept the sign-in any more. Connect Basecamp again.",
 	importModels.ProviderMonday:   "monday.com didn't accept that token. Open your avatar, Developers, My access tokens, and copy the personal API token again.",
+	importModels.ProviderMiro:     "Miro didn't accept that token. In Miro, open your app (Profile settings, Your apps), choose Install app and get OAuth token for the team that holds your boards, and paste the token again.",
+	importModels.ProviderAirtable: "Airtable didn't accept that token. Create a personal access token at airtable.com/create/tokens with the data.records:read and schema.bases:read scopes and access to your bases, and paste it again.",
 }
 
 // providerNames is how each provider is written in a sentence.
@@ -65,7 +67,10 @@ var providerNames = map[string]string{
 	importModels.ProviderClickUp:  "ClickUp",
 	importModels.ProviderMonday:   "monday.com",
 	importModels.ProviderBasecamp: "Basecamp",
+	importModels.ProviderMiro:     "Miro",
+	importModels.ProviderAirtable: "Airtable",
 	importModels.ProviderSlack:    "Slack",
+	importModels.ProviderCSV:      "CSV",
 }
 
 func providerName(provider string) string {

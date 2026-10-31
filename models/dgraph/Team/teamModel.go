@@ -26,15 +26,19 @@ func CreateOrUpdateDgraphTeam(ctx context.Context, dgraphTeam *dgraphStruct.Dgra
 	return uids[dgexec.Var("team")], nil
 }
 
-// GetDgraphTeamInfoByUUID is the first node of query's teamInfo block, an
-// error when there is none.
+// ErrNotFound is a team read that found nothing, which errors.Is also matches
+// to helpers.ErrNotFound, as the project model's is.
+var ErrNotFound = helpers.NotFound("failed to get dgraph team")
+
+// GetDgraphTeamInfoByUUID is the first node of query's teamInfo block,
+// ErrNotFound when there is none.
 func GetDgraphTeamInfoByUUID(ctx context.Context, query string, variables map[string]string) (team *dgraphStruct.DgraphTeam, err error) {
 	// Only the tasks the reader may see (models/taskread).
 	defer taskread.Settle(ctx, &team, &err)
 	team, err = dgexec.First[dgraphStruct.DgraphTeam](ctx, query, variables, "teamInfo")
 	if errors.Is(err, dgexec.ErrNotFound) {
 		helpers.LogErrorWithContext(ctx, "models/GetDgraphTeamInfoByUUID failed to get dgraph team variables: %+v", variables)
-		return nil, errors.New("failed to get dgraph team")
+		return nil, ErrNotFound
 	}
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "models/GetDgraphTeamInfoByUUID failed to get team err: %+v", err)

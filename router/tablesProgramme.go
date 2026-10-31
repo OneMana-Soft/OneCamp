@@ -46,6 +46,7 @@ func newTablesRouters(root, admin, tables, v1 chi.Router) tablesRouters {
 // mountTablesProgramme mounts every merged package of the tables programme:
 // one line per package, in merge order, and nothing else.
 func mountTablesProgramme(rt tablesRouters) {
-	mountRowLedger(rt) // A2
-	mountRowPages(rt)  // T2 (rows as pages)
+	mountRowLedger(rt)  // A2
+	mountRowPages(rt)   // T2 (rows as pages)
+	mountTableForms(rt) // B5 (a table's own forms)
 }

@@ -87,7 +87,7 @@ func CSRFMiddleware(next http.Handler) http.Handler {
 		if !isTrustedOrigin(r) {
 			helpers.LogWarnWithContext(r.Context(),
 				"CSRF blocked: untrusted origin %s referer %s for %s %s",
-				r.Header.Get("Origin"), r.Header.Get("Referer"), r.Method, r.URL.Path)
+				r.Header.Get("Origin"), refererOrigin(r), r.Method, helpers.RouteOf(r))
 			http.Error(w, "csrf origin check failed", http.StatusForbidden)
 			return
 		}
@@ -95,7 +95,7 @@ func CSRFMiddleware(next http.Handler) http.Handler {
 		header := strings.TrimSpace(r.Header.Get(csrfHeaderName))
 		if header == "" || !(sameToken(header, token) || legacyCSRFMatches(r, header)) {
 			helpers.LogWarnWithContext(r.Context(),
-				"CSRF blocked: cookie/header mismatch for %s %s", r.Method, r.URL.Path)
+				"CSRF blocked: cookie/header mismatch for %s %s", r.Method, helpers.RouteOf(r))
 			http.Error(w, "csrf token missing or invalid", http.StatusForbidden)
 			return
 		}
@@ -156,15 +156,19 @@ func isTrustedOrigin(r *http.Request) bool {
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
 		return originTrusted(origin)
 	}
-	referer := strings.TrimSpace(r.Header.Get("Referer"))
-	if referer == "" {
-		return false
-	}
-	u, err := url.Parse(referer)
+	referer := refererOrigin(r)
+	return referer != "" && originTrusted(referer)
+}
+
+// refererOrigin is the origin (scheme and host) of r's Referer, "" when it has
+// none. The check needs no more, and a log line takes no more: a Referer's
+// path and query can carry a link's token.
+func refererOrigin(r *http.Request) string {
+	u, err := url.Parse(strings.TrimSpace(r.Header.Get("Referer")))
 	if err != nil || u.Scheme == "" || u.Host == "" {
-		return false
+		return ""
 	}
-	return originTrusted(u.Scheme + "://" + u.Host)
+	return u.Scheme + "://" + u.Host
 }
 
 func originTrusted(origin string) bool {
@@ -176,12 +180,12 @@ func originTrusted(origin string) bool {
 	return false
 }
 
-// trustedOrigins are the web app's and the API's own origins, any listed in
-// CSRF_ALLOWED_ORIGINS, and the local development ones. Plain-http origins
-// only where cookies are insecure (development): on an https install a page
-// over http is one anybody on the network path can write, as CORS already had
-// it.
-func trustedOrigins() []string {
+// OwnOrigins are the web app's and the API's own origins (FE_HOST_DOMAIN,
+// BACKEND_DOMAIN), and over plain http too only where cookies are insecure
+// (development): on an https install a page over http is one anybody on the
+// network path can write. Credentialed CORS (router) and the CSRF check both
+// start from it, so the two can't trust different origins.
+func OwnOrigins() []string {
 	plainHTTP := !authcookie.Secure()
 	out := []string{}
 	for _, host := range []string{os.Getenv("FE_HOST_DOMAIN"), os.Getenv("BACKEND_DOMAIN")} {
@@ -194,6 +198,14 @@ func trustedOrigins() []string {
 			out = append(out, "http://"+host)
 		}
 	}
+	return out
+}
+
+// trustedOrigins are the CSRF check's: OwnOrigins, any listed in
+// CSRF_ALLOWED_ORIGINS, and on a development backend the web's dev servers
+// (DevOrigins).
+func trustedOrigins() []string {
+	out := OwnOrigins()
 	if extra := os.Getenv("CSRF_ALLOWED_ORIGINS"); extra != "" {
 		for _, p := range strings.Split(extra, ",") {
 			p = strings.TrimSpace(p)
@@ -202,10 +214,18 @@ func trustedOrigins() []string {
 			}
 		}
 	}
-	// Dev convenience.
-	out = append(out,
-		"http://localhost:3000", "http://localhost:3001",
-		"https://localhost:3000", "https://localhost:3001",
-	)
-	return out
+	return append(out, DevOrigins()...)
+}
+
+// DevOrigins are the web's local dev servers (next dev on 3000 and 3001),
+// which credentialed CORS (router) and the CSRF check trust only on a
+// development backend, where cookies are insecure. Every install trusted
+// them, so a page on a visitor's own localhost:3000 passed both origin checks
+// against a production API (audit, LOW). APP_ENV can't tell: no install sets
+// it.
+func DevOrigins() []string {
+	if authcookie.Secure() {
+		return nil
+	}
+	return []string{"http://localhost:3000", "http://localhost:3001", "https://localhost:3000", "https://localhost:3001"}
 }

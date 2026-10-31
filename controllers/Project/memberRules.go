@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 
+	principalBusiness "github.com/akashc777/OneCamp/business/Principal"
 	business "github.com/akashc777/OneCamp/business/Project"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 )
@@ -68,6 +69,9 @@ func memberChangeRefusal(p *dgraphStruct.DgraphProject, manages bool, change mem
 		}
 		if p.Team.Members[0].IsExternal {
 			return http.StatusBadRequest, "A guest can't join a project. Share it with them instead."
+		}
+		if err := principalBusiness.Unassignable(p.Team.Members[0], principalBusiness.Added); err != nil {
+			return http.StatusConflict, err.Error()
 		}
 		return 0, ""
 	}

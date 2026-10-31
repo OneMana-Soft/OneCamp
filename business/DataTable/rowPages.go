@@ -229,7 +229,7 @@ func tablePagesChanged(ctx context.Context, table uuid.UUID) {
 		helpers.LogErrorWithContext(ctx, "business/tablePagesChanged %s: its pages' sockets stay until they reconnect: %+v", table, err)
 		return
 	}
-	hostsChanged(uuidStrings(pages))
+	hostsChanged(helpers.UUIDStrings(pages))
 }
 
 // rowPagesLeft is the ledger's observer: a change set that put rows in the
@@ -257,13 +257,5 @@ func rowPagesLeft(ctx context.Context, cs *rowLedger.ChangeSet) {
 	for _, p := range pages {
 		ids = append(ids, p)
 	}
-	hostsChanged(uuidStrings(ids))
-}
-
-func uuidStrings(ids []uuid.UUID) []string {
-	out := make([]string, 0, len(ids))
-	for _, id := range ids {
-		out = append(out, id.String())
-	}
-	return out
+	hostsChanged(helpers.UUIDStrings(ids))
 }

@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -110,13 +109,7 @@ func DefaultFetchAttachment(ctx context.Context, att SourceAttachment, dest io.W
 	case resp.StatusCode == http.StatusNotFound, resp.StatusCode == http.StatusGone:
 		return "", 0, ErrAttachmentGone
 	case resp.StatusCode == http.StatusTooManyRequests:
-		retryAfter := 5 * time.Second
-		if v := resp.Header.Get("Retry-After"); v != "" {
-			if secs, err := strconv.Atoi(v); err == nil && secs > 0 {
-				retryAfter = time.Duration(secs) * time.Second
-			}
-		}
-		return "", 0, &ErrRateLimited{RetryAfter: retryAfter, Reason: "HTTP 429"}
+		return "", 0, &ErrRateLimited{RetryAfter: helpers.RetryAfter(resp.Header, 5*time.Second), Reason: "HTTP 429"}
 	case resp.StatusCode >= 400:
 		return "", 0, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}

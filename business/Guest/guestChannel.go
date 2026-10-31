@@ -21,6 +21,7 @@ import (
 
 	botpost "github.com/akashc777/OneCamp/business/BotPost"
 	postBusiness "github.com/akashc777/OneCamp/business/Post"
+	threadIndex "github.com/akashc777/OneCamp/business/ThreadIndex"
 	userBusiness "github.com/akashc777/OneCamp/business/User"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	postDomain "github.com/akashc777/OneCamp/domain/Post"
@@ -227,6 +228,16 @@ func GuestMessageHTML(name, text string) (string, error) {
 	if name == "" {
 		return "", &ErrGuestInput{"Enter your name."}
 	}
+	text, err := MessageText(text)
+	if err != nil {
+		return "", err
+	}
+	return botpost.LabelledHTML(guestBody(text), guestLabel(name)), nil
+}
+
+// MessageText is plain text someone wrote, trimmed, or why it can't be sent:
+// empty, or over 4,000 characters. Pure.
+func MessageText(text string) (string, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return "", &ErrGuestInput{"Write a message first."}
@@ -234,10 +245,10 @@ func GuestMessageHTML(name, text string) (string, error) {
 	if utf8.RuneCountInString(text) > maxGuestMessage {
 		return "", &ErrGuestInput{"Keep messages under 4,000 characters."}
 	}
-	return botpost.LabelledHTML(guestBody(text), guestLabel(name)), nil
+	return text, nil
 }
 
-// guestBody is a guest's text as message HTML, escaped, line breaks kept. Pure.
+// guestBody is a guest's text as message HTML: escaped, line breaks kept. Pure.
 func guestBody(text string) string {
 	return "<p>" + strings.ReplaceAll(html.EscapeString(text), "\n", "<br>") + "</p>"
 }
@@ -249,6 +260,16 @@ func guestLabel(name string) string {
 		return "A guest"
 	}
 	return name + " (guest)"
+}
+
+// guestNameOf is the name a guest gave, read back from the label their
+// message went under (guestLabel): "Guest" for none, as the call names a
+// guest without one. Pure.
+func guestNameOf(label string) string {
+	if label == "A guest" {
+		return "Guest"
+	}
+	return strings.TrimSuffix(label, " (guest)")
 }
 
 // PostAsGuest writes in the guest's channel, or replies in a thread of it,
@@ -280,25 +301,7 @@ func PostAsGuest(ctx context.Context, grant *guestModel.GuestGrant, name, text, 
 		return err
 	}
 	if replyTo != "" {
-		postID, err := uuid.Parse(replyTo)
-		if err != nil {
-			return ErrNotFound
-		}
-		p, err := postDomain.GetDgraphPostByUUIDWithAllComments(ctx, postID.String(), bot.DgraphUID)
-		if readFailed(err, postModels.ErrNotFound) {
-			return err
-		}
-		if p == nil || p.Channel == nil || p.Channel.Uuid != channelID.String() || helpers.IsSoftDeleted(p.DeletedAt) {
-			return ErrNotFound
-		}
-		res, err := botpost.PostCommentToPostAsBot(ctx, postID, body, bot)
-		if err != nil {
-			return err
-		}
-		if notifyDue(ctx, "thread", postID.String()) {
-			postBusiness.NotifyReplyFor(bot, who, p, res.CommentUUID, guestBody(text), text)
-		}
-		return nil
+		return replyAsGuest(ctx, bot, channelID, replyTo, body, who, text)
 	}
 	res, err := botpost.PostToChannelAsBot(ctx, channelID, body, bot)
 	if err != nil {
@@ -306,6 +309,35 @@ func PostAsGuest(ctx context.Context, grant *guestModel.GuestGrant, name, text, 
 	}
 	if notifyDue(ctx, "channel", channelID.String()) {
 		postBusiness.NotifyPostFor(bot, who, ch, res.PostUUID, text)
+	}
+	return nil
+}
+
+// replyAsGuest writes a guest's reply (body, as GuestMessageHTML made it) in a
+// thread of the channel, as the guest bot, and tells the thread's people once
+// per thread per few minutes. A reply held back from telling is still the
+// thread's latest in its index, which the Threads view and a call's chat poll
+// read. A message of another channel, or deleted, takes no reply.
+func replyAsGuest(ctx context.Context, bot *userBusiness.BotIdentity, channelID uuid.UUID, replyTo, body, who, text string) error {
+	postID, err := uuid.Parse(replyTo)
+	if err != nil {
+		return ErrNotFound
+	}
+	p, err := postDomain.GetDgraphPostByUUIDWithAllComments(ctx, postID.String(), bot.DgraphUID)
+	if readFailed(err, postModels.ErrNotFound) {
+		return err
+	}
+	if p == nil || p.Channel == nil || p.Channel.Uuid != channelID.String() || helpers.IsSoftDeleted(p.DeletedAt) {
+		return ErrNotFound
+	}
+	res, err := botpost.PostCommentToPostAsBot(ctx, postID, body, bot)
+	if err != nil {
+		return err
+	}
+	if notifyDue(ctx, "thread", postID.String()) {
+		postBusiness.NotifyReplyFor(bot, who, p, res.CommentUUID, guestBody(text), text)
+	} else {
+		threadIndex.Replied(ctx, threadIndex.Reply{Thread: threadIndex.OfPost(p), At: time.Now()})
 	}
 	return nil
 }

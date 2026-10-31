@@ -15,8 +15,6 @@ import (
 
 	attachmentBusiness "github.com/akashc777/OneCamp/business/Attachment"
 	attachmentDomain "github.com/akashc777/OneCamp/domain/Attachment"
-	chatDomain "github.com/akashc777/OneCamp/domain/Chat"
-	postDomain "github.com/akashc777/OneCamp/domain/Post"
 	userDomain "github.com/akashc777/OneCamp/domain/User"
 	"github.com/akashc777/OneCamp/helpers"
 	"github.com/akashc777/OneCamp/helpers/avscan"
@@ -26,6 +24,7 @@ import (
 	openSearchStruct "github.com/akashc777/OneCamp/models/openSearch"
 	postgressStruct "github.com/akashc777/OneCamp/models/postgres"
 	importModels "github.com/akashc777/OneCamp/models/postgres/SlackImport"
+	userModels "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7"
 )
@@ -87,25 +86,25 @@ const (
 //	                channel/private group: ("channel",  channel_uuid)
 //	                1:1 DM:                ("chat",     grouping_id)
 //	                MPIM/group chat:       ("grpChat",  grouping_id)
-//	Dgraph:       DgraphAttachment node + MediaObj edge from parent post/chat
+//	Dgraph:       DgraphAttachment node, listed by its parent post/chat
 //	OpenSearch:   attachments index doc with denormalised parent fields
 //
-// The Dgraph + OpenSearch writes are done by retrofitFileToParent below
-// AFTER the parent post/chat has been imported. This keeps the two-pass
-// ordering simple: file_worker writes everything except the parent edge,
-// then the orchestrator's "files" stage retrofits the Dgraph edge.
+// The files stage runs after the posts and chats are imported, so a file's
+// node and its parent's edge to it are one upsert (attachmentDomain.LinkFile),
+// and indexFile then writes its search entry.
 //
 // Failure modes:
 //   - 4xx from Slack (gone, expired link)        → mark done with placeholder (no parent edge)
 //   - 5xx / network error                        → mark failed (retried up to max_attempts)
 //   - file > MaxFileBytes                        → mark done, log warning placeholder
 //   - MinIO failure                              → mark failed (retried)
+//   - a read of the import's maps fails          → mark failed (retried)
 //   - rate-limited (429)                         → reset to pending without bumping attempts
 //   - parent never imported (e.g., system msg)   → file uploaded, attachment row written
 //     with channel-level src as fallback,
 //     warning logged
 func processFileChunk(ctx context.Context, src fileSource, chunk *importModels.Chunk,
-	importingUser uuid.UUID, maxBytes int64) error {
+	importingUser *userModels.UserInfo, maxBytes int64) error {
 
 	if chunk.ObjectKey == nil {
 		return fmt.Errorf("file chunk missing object_key")
@@ -119,9 +118,13 @@ func processFileChunk(ctx context.Context, src fileSource, chunk *importModels.C
 		maxBytes = defaultMaxFileBytes
 	}
 
-	// Idempotency: did we already create an attachment for this file?
-	if existing, _ := importModels.LookupIdMapping(ctx, chunk.ImportId,
-		importModels.EntityFile, meta.FileID); existing != uuid.Nil {
+	// Idempotency: did we already create an attachment for this file? A read
+	// that fails isn't "not yet": the file would be fetched and made again.
+	existing, err := importModels.LookupIdMapping(ctx, chunk.ImportId, importModels.EntityFile, meta.FileID)
+	if err != nil {
+		return fmt.Errorf("reading what this import made for file %s: %w", meta.FileID, err)
+	}
+	if existing != uuid.Nil {
 		return importModels.FinishChunk(ctx, chunk.Id, 1, nil)
 	}
 
@@ -144,16 +147,16 @@ func processFileChunk(ctx context.Context, src fileSource, chunk *importModels.C
 	}
 	defer body.Close()
 
-	// MinIO key shape MUST match UploadUserFile so GetFileURLByObjectName
-	// (which prepends "userFileUpload/" to whatever's in attachments.obj_key)
-	// produces a valid presigned URL.
+	// MinIO key shape MUST match UploadUserFile, stored under the one name
+	// every reader asks for (attachmentBusiness.ObjectName of
+	// attachments.obj_key), so GetFileURLByObjectName presigns a valid URL.
 	bucketName := helpers.UserUploadBucket()
 	attachmentUUID := uuid.New()
 	sanitizedName := helpers.SanitizeUploadFileName(meta.Name)
 	// objKey is what gets stored in the postgres attachments.obj_key column.
-	// fullObjName is what gets uploaded to MinIO (prefixed with userFileUpload/).
-	objKey := fmt.Sprintf("%s/%s_%s", importingUser, attachmentUUID, sanitizedName)
-	fullObjName := fmt.Sprintf("%s/%s", "userFileUpload", objKey)
+	// fullObjName is what gets uploaded to MinIO (attachmentBusiness.ObjectName).
+	objKey := fmt.Sprintf("%s/%s_%s", importingUser.UserPostgresInfo.Id, attachmentUUID, sanitizedName)
+	fullObjName := attachmentBusiness.ObjectName(objKey)
 
 	contentType := served
 	if contentType == "" {
@@ -218,7 +221,7 @@ func processFileChunk(ctx context.Context, src fileSource, chunk *importModels.C
 		return fmt.Errorf("resolve parent: %w", err)
 	}
 
-	if err := attachmentBusiness.CreateAttachment(ctx, attachmentUUID, objKey, importingUser,
+	if err := attachmentBusiness.CreateAttachment(ctx, attachmentUUID, objKey, importingUser.UserPostgresInfo.Id,
 		parentInfo.SrcKey, parentInfo.SrcValue); err != nil {
 		// Roll back the MinIO upload so a retry doesn't leak orphans.
 		_ = minioInit.MinioClient.RemoveObject(context.Background(), bucketName, fullObjName, minio.RemoveObjectOptions{})
@@ -228,12 +231,11 @@ func processFileChunk(ctx context.Context, src fileSource, chunk *importModels.C
 	// Detect attachment type for the FE renderer. Same heuristic as
 	// onecamp-fe/lib/utils/file/getAttachmentType.ts so the import-side
 	// classification matches what a native upload would produce.
-	attType := classifyAttachmentByName(meta.Name)
+	attType := attachmentBusiness.KindOf(meta.Name)
 	rawType := contentType
 
-	// Dgraph: write the standalone DgraphAttachment node. The MediaObj
-	// edge that ties it to the parent post/chat is added below in
-	// retrofitFileToParent.
+	// Dgraph: the file's node names its maker by the importer's own node.
+	// A maker nested by uuid alone is a new, untyped user node, one per file.
 	createdAt := slackTsToTime(meta.ParentTs)
 	if createdAt.IsZero() {
 		createdAt = time.Now()
@@ -246,27 +248,26 @@ func processFileChunk(ctx context.Context, src fileSource, chunk *importModels.C
 		RawType:   rawType,
 		Size:      int(uploadInfo.Size),
 		CreatedAt: &createdAt,
-		CreatedBy: &dgraphStruct.DgraphUser{Uuid: importingUser.String()},
+		CreatedBy: &dgraphStruct.DgraphUser{Uid: importingUser.UserDgraphInfo.Uid},
 		DType:     []string{"Attachment"},
 	}
-	if _, err := attachmentDomain.BulkAddAttachmentsToDgraph(ctx, []*dgraphStruct.DgraphAttachment{dgAttachment}); err != nil {
-		// Non-fatal: the file is in MinIO and Postgres. Dgraph drift is
-		// reconcileable. Log loudly so the operator can re-run.
-		helpers.LogWarnWithContext(ctx,
-			"SlackImport file %s: Dgraph attachment write failed (will not appear in UI until reconciled): %+v",
-			attachmentUUID, err)
-	}
-
-	// Retrofit: attach this DgraphAttachment to the parent post/chat in
-	// Dgraph, and write the OpenSearch attachments-index entry with all
-	// denormalised parent fields. Both happen here (rather than a
-	// separate stage) so a single chunk is the unit of consistency.
-	if parentInfo.ParentUUID != uuid.Nil {
-		if err := retrofitFileToParent(ctx, parentInfo, dgAttachment, uploadInfo.Size); err != nil {
+	// A graph write that fails is only logged: the file is in MinIO and
+	// Postgres, and this import records it only as the chunk finishes, so a
+	// chunk that ran again would keep it a second time.
+	holderKind, holder := parentInfo.holder()
+	if holder != uuid.Nil {
+		// The node and its holder's edge to it in one upsert, so the holder
+		// lists this one node.
+		if err := attachmentDomain.LinkFile(ctx, holderKind, holder.String(), dgAttachment); err != nil {
 			helpers.LogWarnWithContext(ctx,
-				"SlackImport file %s: parent retrofit failed: %+v", attachmentUUID, err)
+				"SlackImport file %s: linking it to its %s %s failed: %+v", attachmentUUID, holderKind, holder, err)
 		}
+		indexFile(ctx, parentInfo, dgAttachment)
 	} else {
+		if _, err := attachmentDomain.BulkAddAttachmentsToDgraph(ctx, []*dgraphStruct.DgraphAttachment{dgAttachment}); err != nil {
+			helpers.LogWarnWithContext(ctx,
+				"SlackImport file %s: Dgraph attachment write failed: %+v", attachmentUUID, err)
+		}
 		// Defensive log path. Should be rare — files only get scheduled
 		// for messages whose parent was successfully imported.
 		importModels.LogImportError(ctx, chunk.ImportId, &chunk.Id,
@@ -284,30 +285,33 @@ func processFileChunk(ctx context.Context, src fileSource, chunk *importModels.C
 			"name":         meta.Name,
 			"obj_key":      objKey,
 			"size":         uploadInfo.Size,
-			"parent_uuid":  parentInfo.ParentUUID.String(),
-			"parent_kind":  parentInfo.Kind,
+			"parent_uuid":  holder.String(),
+			"parent_kind":  holderKind,
 			"channel_uuid": parentInfo.ChannelUUID.String(),
 			"grouping_id":  parentInfo.GroupingId,
 		}))
 }
 
-// fileParentInfo carries everything retrofitFileToParent needs to wire
-// the dgraph edge and write the opensearch attachments doc. Resolved
-// once per file in resolveFileParent.
+// fileParentInfo carries everything the file's graph link and its
+// opensearch attachments doc need. Resolved once per file in
+// resolveFileParent.
 type fileParentInfo struct {
 	// SrcKey/SrcValue go into the postgres attachments row.
 	SrcKey   string
 	SrcValue string
 
-	// Kind discriminates the retrofit pathway:
-	//   "post"   — channel post (write Post.MediaObj edge, opensearch with channel_uuid+post_uuid)
-	//   "chat"   — DM or MPIM (write Chat.MediaObj edge, opensearch with chat_uuid+chat_grp_id)
-	//   "channel" — file referenced in a system message we kept as channel-level
-	//               attachment with no post edge. Rare.
+	// Kind is the parent's kind, as LinkFile and indexFile take it:
+	//   "post" — channel post (opensearch with channel_uuid+post_uuid)
+	//   "chat" — DM or MPIM (opensearch with chat_uuid+chat_grp_id)
 	Kind string
 
-	// ParentUUID is the OneCamp UUID of the post/chat to attach to.
+	// ParentUUID is the OneCamp UUID of the post/chat the file is under: a
+	// thread reply's thread's, which its search entry is filed under.
 	ParentUUID uuid.UUID
+
+	// Comment is the thread reply the file came with, when it came with one:
+	// the file hangs on the reply, as a reply's upload in the app does.
+	Comment uuid.UUID
 
 	// ChannelUUID is set for channel posts; used for OpenSearch denorm.
 	ChannelUUID uuid.UUID
@@ -329,9 +333,22 @@ type fileParentInfo struct {
 	MemberUUIDs []string
 }
 
+// holder is what the file hangs on in the graph, as LinkFile takes it: the
+// reply it came with, else its post or chat. Nil while its post or chat
+// isn't known.
+func (p *fileParentInfo) holder() (kind string, id uuid.UUID) {
+	switch {
+	case p.ParentUUID == uuid.Nil:
+		return p.Kind, uuid.Nil
+	case p.Comment != uuid.Nil:
+		return "comment", p.Comment
+	}
+	return p.Kind, p.ParentUUID
+}
+
 // resolveFileParent works out where this file's parent message lives.
 // It looks up the slack DM/MPIM/channel id, then the parent message ts,
-// then loads the minimal parent metadata needed for the retrofit.
+// then loads the minimal parent metadata the link and the search entry need.
 func resolveFileParent(ctx context.Context, chunk *importModels.Chunk, meta *fileChunkMeta) (*fileParentInfo, error) {
 	out := &fileParentInfo{
 		SrcKey: postgressStruct.ATTACHMENT_SRC_CHANNEL,
@@ -341,46 +358,44 @@ func resolveFileParent(ctx context.Context, chunk *importModels.Chunk, meta *fil
 	}
 	slackId := *chunk.ChannelSlackId
 
-	// Determine conversation kind: DM, MPIM, or channel.
-	if dmUUID, _ := importModels.LookupIdMapping(ctx, chunk.ImportId, importModels.EntityDM, slackId); dmUUID != uuid.Nil {
+	// Which conversation the file is in, as this import mapped its id. A read
+	// that fails here or below is the file's error (its chunk is tried
+	// again), never "no conversation" or "no parent": the file was filed on
+	// its channel for good.
+	kind, convUUID, err := importModels.LookupConversationMapping(ctx, chunk.ImportId, slackId)
+	if err != nil {
+		return out, fmt.Errorf("reading what this import made for conversation %s: %w", slackId, err)
+	}
+	switch kind {
+	case importModels.EntityDM, importModels.EntityMPIM:
 		out.Kind = "chat"
 		out.SrcKey = postgressStruct.ATTACHMENT_SRC_CHAT
-		if md, _ := importModels.GetIdMapMetadata(ctx, chunk.ImportId, importModels.EntityDM, slackId); len(md) > 0 {
-			var m struct {
-				GroupingId string   `json:"grouping_id"`
-				Members    []string `json:"members"`
-			}
-			_ = json.Unmarshal(md, &m)
-			out.SrcValue = m.GroupingId
-			out.GroupingId = m.GroupingId
-			out.MemberUUIDs = m.Members
+		if kind == importModels.EntityMPIM {
+			out.SrcKey = postgressStruct.ATTACHMENT_SRC_GRP_CHAT
 		}
-	} else if mpimUUID, _ := importModels.LookupIdMapping(ctx, chunk.ImportId, importModels.EntityMPIM, slackId); mpimUUID != uuid.Nil {
-		out.Kind = "chat"
-		out.SrcKey = postgressStruct.ATTACHMENT_SRC_GRP_CHAT
-		if md, _ := importModels.GetIdMapMetadata(ctx, chunk.ImportId, importModels.EntityMPIM, slackId); len(md) > 0 {
-			var m struct {
-				GroupingId string   `json:"grouping_id"`
-				Members    []string `json:"members"`
-			}
-			_ = json.Unmarshal(md, &m)
-			out.SrcValue = m.GroupingId
-			out.GroupingId = m.GroupingId
-			out.MemberUUIDs = m.Members
+		var m struct {
+			GroupingId string   `json:"grouping_id"`
+			Members    []string `json:"members"`
 		}
-	} else if channelUUID, _ := importModels.LookupIdMapping(ctx, chunk.ImportId, importModels.EntityChannel, slackId); channelUUID != uuid.Nil {
+		if err := decodeIdMapMeta(ctx, chunk.ImportId, kind, slackId, &m); err != nil {
+			return out, err
+		}
+		out.SrcValue = m.GroupingId
+		out.GroupingId = m.GroupingId
+		out.MemberUUIDs = m.Members
+	case importModels.EntityChannel:
 		out.Kind = "post"
 		out.SrcKey = postgressStruct.ATTACHMENT_SRC_CHANNEL
-		out.SrcValue = channelUUID.String()
-		out.ChannelUUID = channelUUID
+		out.SrcValue = convUUID.String()
+		out.ChannelUUID = convUUID
 		// Channel name from id_map metadata so we don't hit Dgraph here.
-		if md, _ := importModels.GetIdMapMetadata(ctx, chunk.ImportId, importModels.EntityChannel, slackId); len(md) > 0 {
-			var m struct {
-				FinalName string `json:"final_name"`
-			}
-			_ = json.Unmarshal(md, &m)
-			out.ChannelName = m.FinalName
+		var m struct {
+			FinalName string `json:"final_name"`
 		}
+		if err := decodeIdMapMeta(ctx, chunk.ImportId, kind, slackId, &m); err != nil {
+			return out, err
+		}
+		out.ChannelName = m.FinalName
 	}
 
 	if out.SrcValue == "" {
@@ -388,26 +403,43 @@ func resolveFileParent(ctx context.Context, chunk *importModels.Chunk, meta *fil
 	}
 
 	// Resolve the parent message uuid (post for channels, chat for DM/MPIM),
-	// known by its conversation and its ts (msgkey.go).
+	// known by its conversation and its ts (msgkey.go). A thread reply was
+	// made a comment under its thread's message, under the same key.
 	if meta.ParentTs != "" {
 		parent := messageKey(slackId, meta.ParentTs)
-		if parentUUID, _ := importModels.LookupIdMapping(ctx, chunk.ImportId,
-			importModels.EntityMessage, parent); parentUUID != uuid.Nil {
-			out.ParentUUID = parentUUID
+		entity := importModels.EntityMessage
+		parentUUID, err := importModels.LookupIdMapping(ctx, chunk.ImportId, entity, parent)
+		if err == nil && parentUUID == uuid.Nil {
+			entity = importModels.EntityComment
+			out.Comment, err = importModels.LookupIdMapping(ctx, chunk.ImportId, entity, parent)
 		}
+		if err != nil {
+			return out, fmt.Errorf("reading what this import made for message %s: %w", parent, err)
+		}
+		out.ParentUUID = parentUUID
 		// Resolve author for OpenSearch denorm. Cheap: one PG row.
-		if md, _ := importModels.GetIdMapMetadata(ctx, chunk.ImportId,
-			importModels.EntityMessage, parent); len(md) > 0 {
-			var m struct {
-				AuthorSlack string `json:"author_slack"`
+		var m struct {
+			AuthorSlack string `json:"author_slack"`
+			ThreadTs    string `json:"thread_ts"`
+		}
+		if err := decodeIdMapMeta(ctx, chunk.ImportId, entity, parent, &m); err != nil {
+			return out, err
+		}
+		if out.Comment != uuid.Nil {
+			thread := messageKey(slackId, m.ThreadTs)
+			if out.ParentUUID, err = importModels.LookupIdMapping(ctx, chunk.ImportId, importModels.EntityMessage, thread); err != nil {
+				return out, fmt.Errorf("reading what this import made for message %s: %w", thread, err)
 			}
-			if err := json.Unmarshal(md, &m); err == nil && m.AuthorSlack != "" {
-				if authorUUID, _ := importModels.LookupIdMapping(ctx, chunk.ImportId,
-					importModels.EntityUser, m.AuthorSlack); authorUUID != uuid.Nil {
-					out.AuthorUUID = authorUUID.String()
-					// Name is not strictly needed; OpenSearch denorm
-					// degrades to empty if missing.
-				}
+		}
+		if m.AuthorSlack != "" {
+			authorUUID, err := importModels.LookupIdMapping(ctx, chunk.ImportId, importModels.EntityUser, m.AuthorSlack)
+			if err != nil {
+				return out, fmt.Errorf("reading what this import made for user %s: %w", m.AuthorSlack, err)
+			}
+			if authorUUID != uuid.Nil {
+				out.AuthorUUID = authorUUID.String()
+				// Name is not strictly needed; OpenSearch denorm
+				// degrades to empty if missing.
 			}
 		}
 	}
@@ -415,24 +447,27 @@ func resolveFileParent(ctx context.Context, chunk *importModels.Chunk, meta *fil
 	return out, nil
 }
 
-// retrofitFileToParent stitches the imported attachment to its parent
-// in Dgraph (the MediaObj edge) and writes the OpenSearch index entry.
-//
-// Why a single function: keeps the cross-store consistency atomic per
-// file. If either store fails we log loudly; the operator can re-run
-// the import (idempotent) or operate on the orphan via the admin UI.
-func retrofitFileToParent(ctx context.Context, p *fileParentInfo, att *dgraphStruct.DgraphAttachment, size int64) error {
+// decodeIdMapMeta decodes what this import recorded with a Slack id into v;
+// an id with no row, or no metadata, leaves v as it was.
+func decodeIdMapMeta(ctx context.Context, importId uuid.UUID, entityType, slackId string, v any) error {
+	md, err := importModels.GetIdMapMetadata(ctx, importId, entityType, slackId)
+	if err != nil {
+		return fmt.Errorf("reading what this import recorded with %s %s: %w", entityType, slackId, err)
+	}
+	if len(md) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(md, v); err != nil {
+		return fmt.Errorf("what this import recorded with %s %s: %w", entityType, slackId, err)
+	}
+	return nil
+}
+
+// indexFile writes an imported file's OpenSearch entry, with its parent
+// post's or chat's fields.
+func indexFile(ctx context.Context, p *fileParentInfo, att *dgraphStruct.DgraphAttachment) {
 	switch p.Kind {
 	case "post":
-		// Dgraph: append MediaObj edge from Post → Attachment using a
-		// query-by-uuid upsert. We reuse the existing attachment domain
-		// helper rather than crafting raw mutations here.
-		if err := postDomain.AddAttachmentToPostInDgraph(ctx, p.ParentUUID.String(), att); err != nil {
-			helpers.LogWarnWithContext(ctx,
-				"SlackImport: AddAttachmentToPostInDgraph failed post=%s att=%s err=%+v",
-				p.ParentUUID, att.Uuid, err)
-		}
-		// OpenSearch: attachment doc with denormalised parent fields.
 		osAttachment := &openSearchStruct.OpenSearchAttachment{
 			Uuid:                     att.Uuid,
 			AttachmentByUserUuid:     p.AuthorUUID,
@@ -447,13 +482,7 @@ func retrofitFileToParent(ctx context.Context, p *fileParentInfo, att *dgraphStr
 		}
 		helpers.GoSafeNamed("attachmentDomain.UpsertAttachmentInOpenSearchSafe", func() { attachmentDomain.UpsertAttachmentInOpenSearchSafe(osAttachment) })
 	case "chat":
-		// Dgraph: append MediaObj edge from Chat → Attachment.
-		if err := chatDomain.AddAttachmentToChatInDgraph(ctx, p.ParentUUID.String(), att); err != nil {
-			helpers.LogWarnWithContext(ctx,
-				"SlackImport: AddAttachmentToChatInDgraph failed chat=%s att=%s err=%+v",
-				p.ParentUUID, att.Uuid, err)
-		}
-		// OpenSearch. Mirror native CreateChatWithAttachmentsInOpenSearch
+		// Mirror native CreateChatWithAttachmentsInOpenSearch
 		// by populating attachment_chat_participants — without it the
 		// "shared with me" / cross-user attachment search won't return
 		// imported files for participants who aren't the uploader.
@@ -472,21 +501,7 @@ func retrofitFileToParent(ctx context.Context, p *fileParentInfo, att *dgraphStr
 			AttachmentDeletedAt:            nil,
 		}
 		helpers.GoSafeNamed("attachmentDomain.UpsertAttachmentInOpenSearchSafe", func() { attachmentDomain.UpsertAttachmentInOpenSearchSafe(osAttachment) })
-	default:
-		// Channel-level attachment without a post edge. Just index for
-		// search; the Dgraph node already exists.
-		osAttachment := &openSearchStruct.OpenSearchAttachment{
-			Uuid:                  att.Uuid,
-			AttachmentFileName:    att.FileName,
-			AttachmentObjKey:      att.ObjectKey,
-			AttachmentChannelUuid: p.ChannelUUID.String(),
-			AttachmentChannelName: p.ChannelName,
-			AttachmentCreatedAt:   safeUnix(att.CreatedAt),
-			AttachmentDeletedAt:   nil,
-		}
-		helpers.GoSafeNamed("attachmentDomain.UpsertAttachmentInOpenSearchSafe", func() { attachmentDomain.UpsertAttachmentInOpenSearchSafe(osAttachment) })
 	}
-	return nil
 }
 
 // fileChunkMeta is the parsed form of object_key for ChunkFile entries.
@@ -535,11 +550,14 @@ func (s fileSource) open(ctx context.Context, chunk *importModels.Chunk, meta *f
 
 // filePlaceholder maps the file to a placeholder, so a re-run doesn't try it
 // again, and finishes its chunk with nothing imported; why says what became
-// of it.
+// of it. A mapping that can't be saved fails the chunk rather than finishing
+// it unmapped.
 func filePlaceholder(ctx context.Context, chunk *importModels.Chunk, meta *fileChunkMeta, why map[string]interface{}) error {
 	why["placeholder"] = true
-	_ = importModels.UpsertIdMapping(ctx, chunk.ImportId, importModels.EntityFile, meta.FileID,
-		uuid.New(), nil, mustMarshal(why))
+	if err := importModels.RecordCreated(ctx, chunk.ImportId, importModels.EntityFile, meta.FileID,
+		uuid.New(), nil, mustMarshal(why), ""); err != nil {
+		return err
+	}
 	return importModels.FinishChunk(ctx, chunk.Id, 0, nil)
 }
 
@@ -649,26 +667,6 @@ func parseFileChunkMeta(s string) (*fileChunkMeta, error) {
 		return nil, fmt.Errorf("invalid file chunk meta")
 	}
 	return out, nil
-}
-
-// classifyAttachmentByName mirrors onecamp-fe/lib/utils/file/getAttachmentType.ts
-// so an imported attachment renders the same as a natively uploaded one.
-// Slack file `Mode` (e.g., "snippet", "post") is ignored — we classify by
-// extension to match the FE.
-func classifyAttachmentByName(name string) string {
-	ext := strings.ToLower(filepath.Ext(name))
-	switch ext {
-	case ".jpg", ".jpeg", ".png", ".gif", ".webp":
-		return "image"
-	case ".pdf", ".txt", ".doc", ".docx", ".xls", ".xlsx", ".csv":
-		return "document"
-	case ".mp3", ".wav", ".ogg", ".m4a", ".weba":
-		return "audio"
-	case ".mp4", ".mov", ".webm", ".avi", ".mkv":
-		return "video"
-	default:
-		return "other"
-	}
 }
 
 // safeUnix returns t.Unix() or 0 for a nil pointer. Tiny helper used in

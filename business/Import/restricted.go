@@ -216,7 +216,7 @@ func restrictedRecord(md map[string]any, why string, left []leftOut) map[string]
 // restricted, and why, without its name, and who of its people isn't let in,
 // so the admin can share it on purpose. A chunk writes its lines at once.
 // Pure.
-func restrictedNote(job *importModels.Job, entity, sourceID, why string, left []leftOut) importModels.ImportError {
+func restrictedNote(job *importModels.Job, chunkID *uuid.UUID, entity, sourceID, why string, left []leftOut) importModels.ImportError {
 	source := providerName(job.Provider)
 	msg := fmt.Sprintf("%s, so it's restricted here: its project's admins, whoever ran the import, and those %s lets see it "+
 		"who were matched by email and are in the project see it.", why, source)
@@ -238,7 +238,7 @@ func restrictedNote(job *importModels.Job, entity, sourceID, why string, left []
 		}
 		msg += " Not let in: " + strings.Join(names, ", ") + "."
 	}
-	return importModels.ImportError{EntityType: entity, SourceID: sourceID,
+	return importModels.ImportError{ChunkID: chunkID, EntityType: entity, SourceID: sourceID,
 		Severity: importModels.SeverityWarning, Code: "TASK_RESTRICTED", Message: msg + " Share it from the task to let others in."}
 }
 
@@ -247,7 +247,7 @@ func restrictedNote(job *importModels.Job, entity, sourceID, why string, left []
 // see the task (kept is why, for each), without their text, so the admin
 // knows they are there: none when there are none. A chunk writes its lines at
 // once. Pure.
-func commentsKeptNote(job *importModels.Job, taskSourceID string, kept []string) []importModels.ImportError {
+func commentsKeptNote(job *importModels.Job, chunkID *uuid.UUID, taskSourceID string, kept []string) []importModels.ImportError {
 	if len(kept) == 0 {
 		return nil
 	}
@@ -258,7 +258,7 @@ func commentsKeptNote(job *importModels.Job, taskSourceID string, kept []string)
 		}
 	}
 	source := providerName(job.Provider)
-	return []importModels.ImportError{{EntityType: importModels.EntityTask, SourceID: taskSourceID,
+	return []importModels.ImportError{{ChunkID: chunkID, EntityType: importModels.EntityTask, SourceID: taskSourceID,
 		Severity: importModels.SeverityWarning, Code: "COMMENTS_RESTRICTED",
 		Message: fmt.Sprintf("%s keeps some of the task's comments from people who see it (%s), so they weren't imported and remain in %s. Left there: %d.",
 			source, strings.Join(why, "; "), source, len(kept))}}

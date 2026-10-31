@@ -4,7 +4,7 @@ package business
 // the Task Writer as the person undoing it (so they need to be able to make
 // that change by hand), newest first, and only where the task still holds
 // what the rule set: a change someone made since is theirs and stays.
-// Comments and notices stay; a sub-task the run added is deleted when the
+// Comments and notices stay; a subtask the run added is deleted when the
 // person may delete it.
 
 import (
@@ -85,9 +85,9 @@ func undoStep(ctx context.Context, who *userModels.UserInfo, st *workflowModel.S
 			return false, ""
 		}
 		if err := applyOps(ctx, who, sub, []taskWriter.Op{{Kind: taskWriter.OpDelete}}); err != nil {
-			return false, "kept the sub-task: " + plainError(err)
+			return false, "kept the subtask: " + plainError(err)
 		}
-		return true, "sub-task deleted"
+		return true, "subtask deleted"
 	}
 	if st.Field == "" {
 		return false, ""

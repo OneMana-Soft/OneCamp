@@ -52,9 +52,10 @@ func TestEnqueueIsInertForAnUnlinkedTask(t *testing.T) {
 	}
 }
 
-// Both guards must sit ahead of the insert. A source check because the true
-// path needs a database, and because the ordering is the whole point: a guard
-// after the insert would still queue the row it exists to prevent.
+// The guards must sit ahead of the insert. A source check because the true
+// path needs a database (tests/integration's upgrade repair of assignees has
+// one), and because the ordering is the whole point: a guard after the insert
+// would still queue the row it exists to prevent.
 func TestBothGuardsPrecedeTheInsert(t *testing.T) {
 	src, err := os.ReadFile("enqueue.go")
 	if err != nil {
@@ -63,17 +64,32 @@ func TestBothGuardsPrecedeTheInsert(t *testing.T) {
 	body := string(src)
 
 	origin := strings.Index(body, "helpers.IsGitHubOrigin(ctx)")
+	workspace := strings.Index(body, "helpers.IsWorkspaceOnly(ctx)")
 	link := strings.Index(body, "TaskHasGitHubLink(ctx, taskID)")
 	insert := strings.Index(body, "AtomicInsertGitHubSyncQueueItem")
 
-	if origin < 0 || link < 0 || insert < 0 {
-		t.Fatalf("expected both guards and the insert in EnqueueGitHubSync (origin=%d link=%d insert=%d)", origin, link, insert)
+	if origin < 0 || workspace < 0 || link < 0 || insert < 0 {
+		t.Fatalf("expected the guards and the insert in EnqueueGitHubSync (origin=%d workspace=%d link=%d insert=%d)", origin, workspace, link, insert)
 	}
 	if origin > insert {
 		t.Error("the GitHub-origin guard runs after the insert, so echoes are still queued")
 	}
+	if workspace > insert {
+		t.Error("the workspace-only guard runs after the insert, so a change that stays in the workspace is still queued")
+	}
 	if link > insert {
 		t.Error("the link guard runs after the insert, so unlinked tasks are still queued")
+	}
+}
+
+// A change marked as staying in the workspace never wakes the worker.
+func TestEnqueueIsInertForWorkspaceOnlyWork(t *testing.T) {
+	EnqueueGitHubSync(helpers.WithWorkspaceOnly(context.Background()), uuid.New(), "assignee", map[string]interface{}{"assignee_uuid": ""})
+
+	select {
+	case <-SyncSignal:
+		t.Error("a change that stays in the workspace signalled the sync worker")
+	default:
 	}
 }
 

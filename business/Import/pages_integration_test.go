@@ -12,17 +12,12 @@ package business
 import (
 	"context"
 	"errors"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/opensearch-project/opensearch-go/v4"
-	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
 	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	contentIOBusiness "github.com/akashc777/OneCamp/business/ContentIO"
@@ -30,8 +25,6 @@ import (
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	resourceEventBusiness "github.com/akashc777/OneCamp/business/ResourceEvent"
 	"github.com/akashc777/OneCamp/helpers"
-	"github.com/akashc777/OneCamp/initializers/opensearchInit"
-	"github.com/akashc777/OneCamp/initializers/postgresInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	importModels "github.com/akashc777/OneCamp/models/postgres/Import"
 	userModels "github.com/akashc777/OneCamp/models/postgres/User"
@@ -52,16 +45,19 @@ func (p pagesFrom) PagesOf(context.Context, *importModels.Job, importProvider.Jo
 }
 
 // pageSeeds is the Live Doc Writer, recording what each doc is seeded with;
-// past downAfter seeds (when it is set) it is down.
+// past downAfter seeds (when it is set) it is down. With markLost, each seed's
+// save comes back as the collaboration service posts it, loud whatever the
+// seed was (its quiet mark lost to a restart).
 type pageSeeds struct {
 	collab.Writer
 	mu        sync.Mutex
 	seeded    map[string]string
 	asked     int
 	downAfter int
+	markLost  bool
 }
 
-func (s *pageSeeds) Seed(_ context.Context, id, html string, _ collab.Options) (collab.Result, error) {
+func (s *pageSeeds) Seed(ctx context.Context, id, html string, o collab.Options) (collab.Result, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.asked++
@@ -69,6 +65,12 @@ func (s *pageSeeds) Seed(_ context.Context, id, html string, _ collab.Options) (
 		return collab.Result{}, collab.ErrUnavailable
 	}
 	s.seeded[id] = html
+	if s.markLost {
+		save := docBusiness.CollabSave{DocUUID: id, HTML: html, YjsState: "c3RhdGU=", Contributors: []string{o.By.UserUUID}}
+		if _, err := docBusiness.SaveFromCollab(ctx, save); err != nil {
+			return collab.Result{}, err
+		}
+	}
 	return collab.Result{PersistedAt: time.Now()}, nil
 }
 
@@ -93,23 +95,7 @@ var tree = pagesFrom{pages: []importProvider.SourcePage{
 
 func newPagesWorld(t *testing.T) *pagesWorld {
 	t.Helper()
-	ctx := context.Background()
-	env := integration.SetupEnv(t)
-	if err := postgresInit.ConnectPostgres(ctx, env.DSN); err != nil {
-		t.Fatal(err)
-	}
-	integration.SetupRedis(t)
-	integration.StubMqttClient(t)
-	dg := integration.SetupDgraph(t)
-	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"took":1,"errors":false,"items":[],"updated":0,"failures":[],"result":"updated","_id":"x"}`)
-	}))
-	t.Cleanup(search.Close)
-	client, err := opensearchapi.NewClient(opensearchapi.Config{Client: opensearch.Config{Addresses: []string{search.URL}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	opensearchInit.OpenSearchClient = client
+	env, dg := importEnv(t)
 	w := &pagesWorld{env: env, dg: dg, seeds: &pageSeeds{seeded: map[string]string{}}, admin: uuid.New()}
 	savedLive := collab.Live
 	collab.Live = w.seeds
@@ -269,6 +255,36 @@ func TestATreeHalfMadeIsTakenAwayAndMadeAgainWhole(t *testing.T) {
 	}
 }
 
+// N1 gap 1: a page that mentions Maya tells her nothing as it comes across,
+// even when its seed's save comes back loud, its quiet mark lost to a
+// restart: the import keeps a page's mentions before it seeds it.
+func TestAnImportedPagesMentionsTellNobodyFromALoudSave(t *testing.T) {
+	ctx := context.Background()
+	w := newPagesWorld(t)
+	w.seeds.markLost = true
+	job, chunk := w.job(t)
+	maya := uuid.NewString()
+	mentioning := pagesFrom{pages: []importProvider.SourcePage{
+		{SourceID: treeRoot, Title: "Engineering", HTML: `<p><span data-type="mention" data-id="` + maya + `" data-label="Maya">@Maya</span> owns the launch.</p>`},
+	}}
+	tap := &busTap{next: resourceEventBusiness.Bus}
+	resourceEventBusiness.Bus = tap
+	t.Cleanup(func() { resourceEventBusiness.Bus = tap.next })
+
+	if err := processPageChunk(ctx, mentioning, job, importProvider.JobOptions{}, chunk, w.importing); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.seeds.seeded) != 1 {
+		t.Fatalf("seeded %d docs, want the page's", len(w.seeds.seeded))
+	}
+	heard := tap.heard(t)
+	for _, kind := range heard {
+		if kind == string(resourceEventBusiness.DocMentioned) {
+			t.Fatalf("an imported page's mention of Maya told her: %v", heard)
+		}
+	}
+}
+
 // busTap records what the bus is told, and passes it on.
 type busTap struct {
 	next  resourceEventBusiness.Emitter
@@ -281,6 +297,20 @@ func (b *busTap) Emit(ctx context.Context, e resourceEventBusiness.Event) {
 	b.kinds = append(b.kinds, string(e.Kind))
 	b.mu.Unlock()
 	b.next.Emit(ctx, e)
+}
+
+// heard is every kind emitted once the background work the import started
+// has finished: who a save tells is worked out after it answers, so a read
+// before that misses an event on its way, and a test that nobody was told
+// passes whatever happened.
+func (b *busTap) heard(t *testing.T) []string {
+	t.Helper()
+	if busy := helpers.SettleBackground(30 * time.Second); len(busy) > 0 {
+		t.Fatalf("still running after 30 s: %v", busy)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.kinds...)
 }
 
 // Docs N1: a page's comments come across as its doc's comments, by their
@@ -348,9 +378,10 @@ func TestAPagesCommentsComeAcrossQuietly(t *testing.T) {
 	if texts[first.String()] != "<p>Can we ship on <strong>Friday</strong>?</p>" || texts[second.String()] != "<p>Yes, after the review.</p>" {
 		t.Fatalf("the comments read %v", texts)
 	}
-	for _, kind := range tap.kinds {
+	heard := tap.heard(t)
+	for _, kind := range heard {
 		if kind == string(resourceEventBusiness.DocCommentCreated) {
-			t.Fatalf("an imported comment told someone: %v", tap.kinds)
+			t.Fatalf("an imported comment told someone: %v", heard)
 		}
 	}
 

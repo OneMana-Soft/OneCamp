@@ -8,7 +8,6 @@ import (
 	importProvider "github.com/akashc777/OneCamp/business/Import/provider"
 	projectBusiness "github.com/akashc777/OneCamp/business/Project"
 	teamBusiness "github.com/akashc777/OneCamp/business/Team"
-	importDomain "github.com/akashc777/OneCamp/domain/Import"
 	projectDomain "github.com/akashc777/OneCamp/domain/Project"
 	teamDomain "github.com/akashc777/OneCamp/domain/Team"
 	"github.com/akashc777/OneCamp/helpers"
@@ -68,10 +67,9 @@ func ensureDefaultTeam(ctx context.Context, job *importModels.Job, importingUser
 	if existing, _ := importModels.LookupWorkspaceMapping(ctx,
 		job.Provider, job.SourceWorkspaceName,
 		importModels.EntityTeam, defaultId); existing != uuid.Nil {
-		_ = importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
+		return importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 			importModels.EntityTeam, defaultId, existing, nil,
 			mustMarshal(map[string]any{"matched_by": "workspace_map"}), false)
-		return nil
 	}
 
 	finalName, err := uniqueTeamName(ctx, teamNameFor(job, ""))
@@ -86,19 +84,13 @@ func ensureDefaultTeam(ctx context.Context, job *importModels.Job, importingUser
 	if err != nil {
 		return err
 	}
-	if err := importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
+	return importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 		importModels.EntityTeam, defaultId, teamUUID, nil,
 		mustMarshal(map[string]any{
 			"name":       finalName,
 			"synthetic":  true,
 			"dgraph_uid": dgTeam.Uid,
-		}), true); err != nil {
-		return err
-	}
-	_ = importModels.UpsertWorkspaceMapping(ctx,
-		job.Provider, job.SourceWorkspaceName,
-		importModels.EntityTeam, defaultId, teamUUID, job.Id)
-	return nil
+		}), true)
 }
 
 func resolveOneTeam(ctx context.Context, job *importModels.Job,
@@ -114,12 +106,14 @@ func resolveOneTeam(ctx context.Context, job *importModels.Job,
 	if existing, _ := importModels.LookupWorkspaceMapping(ctx,
 		job.Provider, job.SourceWorkspaceName,
 		importModels.EntityTeam, st.SourceID); existing != uuid.Nil {
-		_ = importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
+		if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 			importModels.EntityTeam, st.SourceID, existing, nil,
 			mustMarshal(map[string]any{
 				"matched_by": "workspace_map",
 				"name":       st.Name,
-			}), false)
+			}), false); err != nil {
+			return err
+		}
 		addTeamMembers(ctx, job, existing, st)
 		return nil
 	}
@@ -136,7 +130,7 @@ func resolveOneTeam(ctx context.Context, job *importModels.Job,
 	if err != nil {
 		return err
 	}
-	if err := importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
+	if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 		importModels.EntityTeam, st.SourceID, teamUUID, nil,
 		mustMarshal(map[string]any{
 			"name":        finalName,
@@ -146,41 +140,32 @@ func resolveOneTeam(ctx context.Context, job *importModels.Job,
 		}), true); err != nil {
 		return err
 	}
-	_ = importModels.UpsertWorkspaceMapping(ctx,
-		job.Provider, job.SourceWorkspaceName,
-		importModels.EntityTeam, st.SourceID, teamUUID, job.Id)
 
 	addTeamMembers(ctx, job, teamUUID, st)
 	return nil
 }
 
-// addTeamMembers wires team_members + team_admins. Members not yet in
-// id_map are silently skipped — re-running the import picks them up.
+// addTeamMembers wires team_members + team_admins: the team's members who
+// take their place here (joiners). Members not yet in id_map are skipped —
+// re-running the import picks them up.
 func addTeamMembers(ctx context.Context, job *importModels.Job, teamUUID uuid.UUID, st *importProvider.SourceTeam) {
-	all := append([]string{}, st.MemberIds...)
-	all = append(all, st.AdminIds...)
-	idMap, err := importDomain.LookupIdMappingsBatch(ctx, job.Id, importModels.EntityUser, all)
+	in, err := joiners(ctx, job, importModels.EntityTeam, st.SourceID, st.MemberIds, st.AdminIds)
 	if err != nil {
 		helpers.LogWarnWithContext(ctx,
 			"Import.addTeamMembers lookup failed team=%s err=%+v", teamUUID, err)
 		return
 	}
-	adminSet := make(map[string]struct{}, len(st.AdminIds))
-	for _, id := range st.AdminIds {
-		adminSet[id] = struct{}{}
-	}
-	for _, sid := range st.MemberIds {
-		ocUUID, ok := idMap[sid]
-		if !ok {
-			continue
-		}
-		dgUid, err := dgraphUidForUser(ctx, ocUUID)
+	for _, m := range in {
+		dgUid, err := dgraphUidForUser(ctx, m.id)
 		if err != nil || dgUid == "" {
 			continue
 		}
-		_ = teamBusiness.AddMemberToTeam(ctx, teamUUID, dgUid, ocUUID.String())
-		if _, isAdmin := adminSet[sid]; isAdmin {
-			_ = teamBusiness.AddAdminMemberToTeam(ctx, teamUUID, dgUid, ocUUID.String())
+		// Not principalBusiness.CanBeAssigned: an import copies who was on the
+		// team, as deactivating someone keeps their places, so a deactivated
+		// match keeps their history (their tasks keep them too).
+		_ = teamBusiness.AddMemberToTeam(ctx, teamUUID, dgUid, m.id.String())
+		if m.admin {
+			_ = teamBusiness.AddAdminMemberToTeam(ctx, teamUUID, dgUid, m.id.String())
 		}
 	}
 }
@@ -233,14 +218,17 @@ func resolveOneProject(ctx context.Context, job *importModels.Job,
 	if existing, _ := importModels.LookupWorkspaceMapping(ctx,
 		job.Provider, job.SourceWorkspaceName,
 		importModels.EntityProject, sp.SourceID); existing != uuid.Nil {
-		_ = importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
+		if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 			importModels.EntityProject, sp.SourceID, existing, nil,
 			mustMarshal(map[string]any{
 				"matched_by": "workspace_map",
 				"name":       sp.Name,
-			}), false)
+			}), false); err != nil {
+			return err
+		}
 		addProjectMembers(ctx, job, existing, sp)
 		newProjectFields(job, nil, sp.SourceID, existing, importingUser.UserPostgresInfo.Id).ensure(ctx, sp.Fields)
+		keepNumbersFree(ctx, sp, existing)
 		_ = scheduleProjectTaskChunk(ctx, job.Id, sp.SourceID)
 		return nil
 	}
@@ -289,8 +277,9 @@ func resolveOneProject(ctx context.Context, job *importModels.Job,
 		return err
 	}
 	keepSourceKey(ctx, job, sp, projectUUID, importingUser.UserPostgresInfo.Id)
+	keepNumbersFree(ctx, sp, projectUUID)
 
-	if err := importModels.UpsertIdMappingWithOwnership(ctx, job.Id,
+	if err := importModels.RecordMapping(ctx, job.Id, job.Provider, job.SourceWorkspaceName,
 		importModels.EntityProject, sp.SourceID, projectUUID, nil,
 		mustMarshal(map[string]any{
 			"name":        finalName,
@@ -302,12 +291,11 @@ func resolveOneProject(ctx context.Context, job *importModels.Job,
 		}), true); err != nil {
 		return err
 	}
-	_ = importModels.UpsertWorkspaceMapping(ctx,
-		job.Provider, job.SourceWorkspaceName,
-		importModels.EntityProject, sp.SourceID, projectUUID, job.Id)
 
 	addProjectMembers(ctx, job, projectUUID, sp)
 	newProjectFields(job, nil, sp.SourceID, projectUUID, importingUser.UserPostgresInfo.Id).ensure(ctx, sp.Fields)
+	keepEstimateScale(ctx, job, sp, projectUUID, importingUser.UserPostgresInfo.Id)
+	makeCycles(ctx, job, sp, projectUUID, importingUser.UserPostgresInfo.Id)
 	return scheduleProjectTaskChunk(ctx, job.Id, sp.SourceID)
 }
 
@@ -324,31 +312,24 @@ func scheduleProjectTaskChunk(ctx context.Context, importId uuid.UUID, projectSr
 	}})
 }
 
+// addProjectMembers wires the project's members and admins as the team's
+// are (addTeamMembers).
 func addProjectMembers(ctx context.Context, job *importModels.Job,
 	projectUUID uuid.UUID, sp *importProvider.SourceProject) {
 
-	all := append([]string{}, sp.MemberIds...)
-	all = append(all, sp.AdminIds...)
-	idMap, err := importDomain.LookupIdMappingsBatch(ctx, job.Id, importModels.EntityUser, all)
+	in, err := joiners(ctx, job, importModels.EntityProject, sp.SourceID, sp.MemberIds, sp.AdminIds)
 	if err != nil {
 		return
 	}
-	adminSet := make(map[string]struct{}, len(sp.AdminIds))
-	for _, id := range sp.AdminIds {
-		adminSet[id] = struct{}{}
-	}
-	for _, sid := range sp.MemberIds {
-		ocUUID, ok := idMap[sid]
-		if !ok {
-			continue
-		}
-		dgUid, err := dgraphUidForUser(ctx, ocUUID)
+	for _, m := range in {
+		dgUid, err := dgraphUidForUser(ctx, m.id)
 		if err != nil || dgUid == "" {
 			continue
 		}
-		_ = projectBusiness.AddMemberToProject(ctx, projectUUID, dgUid, ocUUID.String())
-		if _, isAdmin := adminSet[sid]; isAdmin {
-			_ = projectBusiness.AddAdminMemberToProject(ctx, projectUUID, dgUid, ocUUID.String())
+		// Copied as the team's are: a deactivated match keeps their history.
+		_ = projectBusiness.AddMemberToProject(ctx, projectUUID, dgUid, m.id.String())
+		if m.admin {
+			_ = projectBusiness.AddAdminMemberToProject(ctx, projectUUID, dgUid, m.id.String())
 		}
 	}
 }

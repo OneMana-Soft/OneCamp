@@ -68,6 +68,9 @@ const (
 	FIREBASE_PUSH_DATA_TYPE_DOC_COMMENT           = "doc_comment"
 	FIREBASE_PUSH_DATA_TYPE_REMINDER              = "reminder"
 	FIREBASE_PUSH_DATA_TYPE_LATER                 = "later"
+	// An agent is waiting for a decision; the click opens Home, where
+	// "Needs your approval" leads the list.
+	FIREBASE_PUSH_DATA_TYPE_APPROVAL = "approval"
 	// A guest booked or cancelled time through a booking page; type_id is the
 	// event's id, and the click opens the calendar.
 	FIREBASE_PUSH_DATA_TYPE_CALENDAR = "calendar"
@@ -75,7 +78,7 @@ const (
 	// type_id is the table's id and thread_id the row's, and the click opens
 	// the row in its table.
 	FIREBASE_PUSH_DATA_TYPE_TABLE_ROW = "table_row"
-	// The notification tag: a later push with the same one replaces it.
+	// The notification tag; one per approval so two do not replace each other.
 	FIREBASE_PUSH_DATA_TAG         = "tag"
 	FIREBASE_PUSH_DATA_TITLE       = "title"
 	FIREBASE_PUSH_DATA_BODY        = "body"

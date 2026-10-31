@@ -40,9 +40,11 @@ var (
 	ErrUnavailable = errors.New("live document writes are not available just now")
 	// ErrNoSuchDoc is a doc the service's API lookup does not know.
 	ErrNoSuchDoc = errors.New("live write: no such doc")
-	// ErrNoSuchBlock is a block id the doc does not hold.
+	// ErrNoSuchBlock is a block id the doc does not hold, or for RemoveSubpage
+	// a page it holds no block of.
 	ErrNoSuchBlock = errors.New("live write: no such block")
-	// ErrHasContent is a seed refused because the doc already holds something.
+	// ErrHasContent is a write refused because the doc already holds what it
+	// would add: a seed's doc has content, or PlaceSubpage's has the page's block.
 	ErrHasContent = errors.New("live write: the doc already has content")
 	// ErrDocInTrash is a doc in the trash: it takes no writes.
 	ErrDocInTrash = errors.New("live write: the doc is in the trash")
@@ -54,6 +56,11 @@ var (
 // to a doc it can't find says (live/ops/write.js): matched, never said to
 // anyone, so it isn't a doc's 404 answer (helpers.DocNotFound).
 const serviceNoSuchDoc = "no such doc"
+
+// serviceNoSuchOp is the service's answer to an op it doesn't have, an image
+// older than the API (live/server.js): it can't make the write now, as a
+// service that isn't there can't, and it says nothing about the doc's blocks.
+const serviceNoSuchOp = "no such op"
 
 // OpError is the service's answer to a write it did not make.
 type OpError struct {
@@ -77,17 +84,21 @@ func (e *OpError) Is(target error) bool {
 	case ErrNoSuchDoc:
 		return e.Status == http.StatusNotFound && strings.Contains(e.Msg, serviceNoSuchDoc)
 	case ErrNoSuchBlock:
-		return e.Status == http.StatusNotFound && !strings.Contains(e.Msg, serviceNoSuchDoc)
+		return e.Status == http.StatusNotFound && !strings.Contains(e.Msg, serviceNoSuchDoc) && !e.noSuchOp()
 	case ErrHasContent:
 		return e.Status == http.StatusConflict
 	case ErrDocInTrash:
 		return e.Status == http.StatusGone
 	case ErrUnavailable:
-		return e.Status >= 500
+		return e.Status >= 500 || e.noSuchOp()
 	case ErrRefused:
-		return e.Status >= 400 && e.Status < 500
+		return e.Status >= 400 && e.Status < 500 && !e.noSuchOp()
 	}
 	return false
+}
+
+func (e *OpError) noSuchOp() bool {
+	return e.Status == http.StatusNotFound && e.Msg == serviceNoSuchOp
 }
 
 // By is who a write is from, taken from server context, never from the client.
@@ -112,6 +123,12 @@ type Options struct {
 	SnapshotFirst  bool
 	SnapshotName   string
 	SnapshotReason string
+	// Quiet is a write whose body tells nobody it mentions them: a copy's, an
+	// import's. The save that stores it keeps whom the body mentions and tells
+	// nobody, and its hooks and its doc.updated run as a bulk import's do
+	// (business/Doc SaveFromCollab). Only the API sets it, and the save it
+	// rides back on is internal (/docColab/updateDoc), so no client can.
+	Quiet bool
 }
 
 // Result is what a write did.
@@ -230,10 +247,12 @@ type wire struct {
 	UserIDs       []string        `json:"user_ids,omitempty"`
 	State         string          `json:"state,omitempty"`
 	TaskChecks    map[string]bool `json:"task_checks,omitempty"`
+	DocID         string          `json:"doc_id,omitempty"`
 	By            *By             `json:"by,omitempty"`
 	AgentEdit     bool            `json:"agent_edit,omitempty"`
 	RunID         string          `json:"run_id,omitempty"`
 	SnapshotFirst bool            `json:"snapshot_first,omitempty"`
+	Quiet         bool            `json:"quiet,omitempty"`
 }
 
 type writeAnswer struct {
@@ -307,6 +326,7 @@ func write(ctx context.Context, docUUID, op string, body wire, o Options) (Resul
 	body.AgentEdit = o.AgentEdit && o.By.AgentUUID != ""
 	body.RunID = o.RunID
 	body.SnapshotFirst = o.SnapshotFirst
+	body.Quiet = o.Quiet
 	var a writeAnswer
 	if err := call(ctx, docUUID, op, body, &a); err != nil {
 		return Result{}, err
@@ -376,6 +396,39 @@ func (liveClient) ApplyProposal(ctx context.Context, docUUID, proposalID string,
 // swap it.
 var ReauthBoard = func(ctx context.Context, boardUUID string, userUUIDs []string) error {
 	return callAt(ctx, "/live/boards/"+boardUUID+"/reauth", "reauth", wire{UserUUIDs: userUUIDs}, nil)
+}
+
+// BoardVersion is a board as its live copy has it: its Yjs state, base64, and
+// how many of its elements show.
+type BoardVersion struct {
+	State    string `json:"state"`
+	Elements int    `json:"elements"`
+}
+
+// GuestsSnapshot answers a board as it is now, the version "Undo guests'
+// drawing" goes back to, and starts the live copy's record of what a call's
+// guests drew afresh (calls package B). A test may swap it.
+var GuestsSnapshot = func(ctx context.Context, boardUUID string) (BoardVersion, error) {
+	var v BoardVersion
+	err := callAt(ctx, "/live/boards/"+boardUUID+"/guestsSnapshot", "guestsSnapshot", wire{}, &v)
+	return v, err
+}
+
+// BeginGuests starts a board's record of what a call's guests drew afresh,
+// once the version GuestsSnapshot answered is stored. A test may swap it.
+var BeginGuests = func(ctx context.Context, boardUUID string) error {
+	return callAt(ctx, "/live/boards/"+boardUUID+"/guestsBegin", "guestsBegin", wire{}, nil)
+}
+
+// UndoGuests takes back what a call's guests did on a board since state (a
+// GuestsSnapshot's), answering how many elements it took back. A test may
+// swap it.
+var UndoGuests = func(ctx context.Context, boardUUID, state string) (int, error) {
+	var out struct {
+		Undone int `json:"undone"`
+	}
+	err := callAt(ctx, "/live/boards/"+boardUUID+"/undoGuests", "undoGuests", wire{State: state}, &out)
+	return out.Undone, err
 }
 
 // ClosePeople closes every live socket the people named have open, on every

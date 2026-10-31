@@ -2,6 +2,7 @@ package models
 
 import (
 	"context"
+	"database/sql"
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
@@ -20,6 +21,8 @@ type Chat struct {
 type ChatMessageCount struct {
 	GrpId     string
 	ChatCount uint64
+	// LastUnreadAt is the newest unread message's time; zero with none.
+	LastUnreadAt sql.NullTime
 }
 
 func UpdateChatByUUID(query string, chatUUID uuid.UUID) (err error) {
@@ -81,7 +84,7 @@ func GetLatestChatMessageCountByUserID(query string, userID uuid.UUID) (chatMess
 	// Process the rows to get the result
 	for rows.Next() {
 		var chatMessageCountTemp ChatMessageCount
-		if err = rows.Scan(&chatMessageCountTemp.GrpId, &chatMessageCountTemp.ChatCount); err != nil {
+		if err = rows.Scan(&chatMessageCountTemp.GrpId, &chatMessageCountTemp.ChatCount, &chatMessageCountTemp.LastUnreadAt); err != nil {
 			helpers.LogErrorWithContext(ctx,
 				"models/GetLatestChatMessageCountByUserID Failed to scan row err: %+v",
 				err)

@@ -7,10 +7,13 @@ import (
 	"time"
 
 	"github.com/akashc777/OneCamp/helpers"
+	"github.com/akashc777/OneCamp/helpers/dgraphquery"
+	"github.com/akashc777/OneCamp/initializers/dgraphInit"
 	dgraphStruct "github.com/akashc777/OneCamp/models/dgraph"
 	dgraphModels "github.com/akashc777/OneCamp/models/dgraph/Calendar"
 	models "github.com/akashc777/OneCamp/models/postgres/Calendar"
 	v2Models "github.com/akashc777/OneCamp/models/postgres/CalendarV2"
+	"github.com/dgraph-io/dgo/v230/protos/api"
 	"github.com/google/uuid"
 )
 
@@ -138,28 +141,56 @@ func eventDeletions(eventUid string, removedParticipantUids []string, clearDescr
 	return string(b)
 }
 
-// ClearDgraphEventGoogleId forgets the Google Calendar copy of an event, when
-// Google says it is gone. Writing a nil id did nothing (omitempty), so the
-// stale id stayed and every later edit failed against it again.
-func ClearDgraphEventGoogleId(ctx context.Context, eventUid string) error {
-	del := fmt.Sprintf(`{"uid": %q, "event_google_calendar_id": null}`, eventUid)
-	if _, err := dgraphModels.CreateOrUpdateDgraphEvent(ctx, &dgraphStruct.DgraphEvent{Uid: eventUid}, "", del); err != nil {
-		helpers.LogErrorWithContext(ctx, "domain/ClearDgraphEventGoogleId err: %+v", err)
+// ForgetCalendarEventGoogleCopy forgets the Google copy Google says is gone
+// (models.ForgetGoogleCopy): only the id, only while it is still that one.
+func ForgetCalendarEventGoogleCopy(ctx context.Context, id uuid.UUID, gone string) error {
+	if err := models.ForgetGoogleCopy(ctx, id, gone); err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/ForgetCalendarEventGoogleCopy err: %+v", err)
 		return err
 	}
 	return nil
 }
 
-func DeleteDgraphEvent(ctx context.Context, eventUuid string) error {
-	query := `query {
-				event as var(func: eq(event_uuid, "` + eventUuid + `"))
-			}`
-	delStringJSON := `
-		{
-			"uid": "uid(event)"
-		}
-	`
-	_, err := dgraphModels.CreateOrUpdateDgraphEvent(ctx, &dgraphStruct.DgraphEvent{}, query, delStringJSON)
+// ForgetDgraphEventGoogleCopy is ForgetCalendarEventGoogleCopy for the event's
+// graph node: one upsert drops the id only while the node still names gone, so
+// a copy made since stays. It deletes the id: writing a nil one does nothing
+// (omitempty), and every later edit would fail against the stale id again.
+func ForgetDgraphEventGoogleCopy(ctx context.Context, eventUid, gone string) error {
+	_, err := dgraphInit.DoCommitNow(ctx, &api.Request{
+		Query: `query q($e: string, $g: string) {
+			e as var(func: uid($e)) @filter(eq(event_google_calendar_id, $g))
+		}`,
+		Vars:      map[string]string{"$e": eventUid, "$g": gone},
+		Mutations: []*api.Mutation{{DelNquads: []byte(`uid(e) <event_google_calendar_id> * .`), Cond: "@if(eq(len(e), 1))"}},
+	})
+	if err != nil {
+		helpers.LogErrorWithContext(ctx, "domain/ForgetDgraphEventGoogleCopy err: %+v", err)
+	}
+	return err
+}
+
+// liveEvent keeps the old stores' events nobody deleted (CALENDAR_STORE=graph):
+// a deleted one keeps its Event node with event_deleted_at set
+// (DeleteDgraphEvent). Every read of Event nodes says it.
+var liveEvent = dgraphquery.Live("event_deleted_at")
+
+// DeleteDgraphEvent deletes an event's graph node as the old stores delete its
+// row (calendar_events.deleted_at): softly. The node stays, its
+// event_deleted_at and event_updated_at at deletedAt, and every read leaves it
+// out (liveEvent). One deleted already stays as it was.
+func DeleteDgraphEvent(ctx context.Context, eventUuid string, deletedAt time.Time) error {
+	at := deletedAt.UTC().Format(time.RFC3339Nano)
+	set, err := json.Marshal(map[string]string{"uid": "uid(e)", "event_deleted_at": at, "event_updated_at": at})
+	if err != nil {
+		return err
+	}
+	_, err = dgraphInit.DoCommitNow(ctx, &api.Request{
+		Query: `query q($id: string) {
+			e as var(func: eq(event_uuid, $id)) @filter(` + liveEvent + `)
+		}`,
+		Vars:      map[string]string{"$id": eventUuid},
+		Mutations: []*api.Mutation{{SetJson: set, Cond: "@if(eq(len(e), 1))"}},
+	})
 	if err != nil {
 		helpers.LogErrorWithContext(ctx, "domain/DeleteDgraphEvent Failed to delete event in dgraph err: %+v", err)
 		return err
@@ -181,7 +212,7 @@ func GetDgraphEventInfoByUUID(ctx context.Context, eventUuid string) (*dgraphStr
 	variables := make(map[string]string)
 	variables["$id"] = eventUuid
 	query := `query EventInfo($id: string){
-			eventInfo(func: eq(event_uuid, $id)) {
+			eventInfo(func: eq(event_uuid, $id)) @filter(` + liveEvent + `) {
 				uid
 				event_uuid
 				event_title
@@ -218,13 +249,13 @@ func GetDgraphEventsByUserId(ctx context.Context, userUuid string, startDate *ti
 	variables := make(map[string]string)
 	variables["$id"] = userUuid
 
-	filter := ""
+	filter := `@filter(` + liveEvent + `)`
 	queryArgs := "$id: string"
 	if startDate != nil && endDate != nil {
 		variables["$startDate"] = startDate.Format(time.RFC3339)
 		variables["$endDate"] = endDate.Format(time.RFC3339)
 		queryArgs += ", $startDate: string, $endDate: string"
-		filter = `@filter(le(event_start_time, $endDate) AND ge(event_end_time, $startDate))`
+		filter = `@filter(` + liveEvent + ` AND le(event_start_time, $endDate) AND ge(event_end_time, $startDate))`
 	}
 
 	query := `query UserEvents(` + queryArgs + `){

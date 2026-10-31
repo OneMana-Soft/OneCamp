@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 
 	models "github.com/akashc777/OneCamp/models/postgres/User"
@@ -18,11 +19,12 @@ var ErrNoActor = errors.New("that person can't act any more")
 // never acts.
 func ActorByUUID(ctx context.Context, id uuid.UUID) (*models.UserInfo, error) {
 	pg, err := GetActiveUserWithAdminFlagByUserUUID(ctx, id)
+	// The read keeps active people only, so no row is someone who has left.
+	if pg == nil && (err == nil || errors.Is(err, sql.ErrNoRows)) {
+		return nil, ErrNoActor
+	}
 	if err != nil {
 		return nil, err
-	}
-	if pg == nil {
-		return nil, ErrNoActor
 	}
 	dg, err := GetDgraphUserInfoByUUID(ctx, id.String())
 	if err != nil {

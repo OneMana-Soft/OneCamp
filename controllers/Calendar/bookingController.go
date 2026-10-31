@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"time"
 
+	availabilityBusiness "github.com/akashc777/OneCamp/business/Availability"
 	business "github.com/akashc777/OneCamp/business/Calendar"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
 	customMiddleware "github.com/akashc777/OneCamp/middleware"
 	bookingModel "github.com/akashc777/OneCamp/models/postgres/Booking"
@@ -182,4 +184,139 @@ func CancelPublicBooking(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": view})
+}
+
+// SuggestTimes ranks times for the signed-in person and the people listed,
+// each in their own working hours and zone, with the reason each is offered
+// (calendar A3). POST /event/suggestTimes
+func SuggestTimes(w http.ResponseWriter, r *http.Request) {
+	userInfo, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	var in business.FindTimeInput
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&in); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Couldn't read that request."})
+		return
+	}
+	res, err := availabilityBusiness.Suggestions(r.Context(), userInfo.UserDgraphInfo.Uuid, in, time.Now())
+	var refusal *availabilityBusiness.Refusal
+	if errors.As(err, &refusal) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": refusal.Msg})
+		return
+	}
+	if err != nil {
+		writeAvailabilityError(w, r, "SuggestTimes", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": res})
+}
+
+// PeopleHours answers the working hours, in their zone, of each of the people
+// asked about who keeps some (calendar A3): for the week's drawn hours and
+// the event form's "outside their hours". Only those the asker may see when
+// they're busy are answered; the rest are named private. Given a day, it also
+// answers where each works that day, by their working location (head 5d).
+// POST /event/hours {"people": [...], "day": "2026-10-29"}
+func PeopleHours(w http.ResponseWriter, r *http.Request) {
+	userInfo, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		People []string `json:"people"`
+		Day    string   `json:"day"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&in); err != nil || len(in.People) > 50 {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Ask about up to 50 people."})
+		return
+	}
+	ids := make([]uuid.UUID, 0, len(in.People))
+	for _, p := range in.People {
+		id, err := uuid.Parse(p)
+		if err != nil {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "One of those people isn't in this workspace."})
+			return
+		}
+		ids = append(ids, id)
+	}
+	hours, private, err := business.HoursSeenBy(r.Context(), userInfo.UserDgraphInfo.Uuid, ids)
+	if err != nil {
+		writeAvailabilityError(w, r, "PeopleHours", err)
+		return
+	}
+	answer := helpers.Envolope{"data": hours, "private": private}
+	if in.Day != "" {
+		day, err := time.Parse("2006-01-02", in.Day)
+		if err != nil {
+			helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That isn't a day."})
+			return
+		}
+		where, err := business.WhereSeenBy(r.Context(), userInfo.UserDgraphInfo.Uuid, ids, day)
+		if err != nil {
+			writeAvailabilityError(w, r, "PeopleHours", err)
+			return
+		}
+		answer["where"] = where
+	}
+	helpers.WriteJSON(w, http.StatusOK, answer)
+}
+
+// ExplainTime says why a time isn't free for someone, in words, never a
+// title (calendar A3), when the asker may see when they're busy.
+// POST /event/explain {"person", "start", "end"}
+func ExplainTime(w http.ResponseWriter, r *http.Request) {
+	userInfo, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Person string    `json:"person"`
+		Start  time.Time `json:"start"`
+		End    time.Time `json:"end"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<10)).Decode(&in); err != nil || !in.End.After(in.Start) || in.End.Sub(in.Start) > 24*time.Hour {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "Pick a time that ends after it starts, within a day."})
+		return
+	}
+	words, err := availabilityBusiness.Times.Explain(r.Context(), userInfo.UserDgraphInfo.Uuid, in.Person, business.Interval{Start: in.Start, End: in.End})
+	var refusal *availabilityBusiness.Refusal
+	if errors.As(err, &refusal) {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": refusal.Msg})
+		return
+	}
+	if errors.Is(err, availabilityBusiness.ErrPrivate) {
+		helpers.WriteJSON(w, http.StatusForbidden, helpers.Envolope{"msg": "Your workspace keeps when people are busy private."})
+		return
+	}
+	if err != nil {
+		writeAvailabilityError(w, r, "ExplainTime", err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]string{"words": words}})
+}
+
+// PersonStatus is what someone's calendar says of them now: away, in focus
+// time or in a meeting, until when, in words on the reader's clock and in
+// their zone; never a title (calendar A3). Someone the asker may not see
+// when they're busy says nothing, and is marked private.
+// GET /event/status/{user_uuid}
+func PersonStatus(w http.ResponseWriter, r *http.Request) {
+	userInfo, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	person := chi.URLParam(r, "user_uuid")
+	if _, err := uuid.Parse(person); err != nil {
+		helpers.WriteJSON(w, http.StatusBadRequest, helpers.Envolope{"msg": "That person isn't in this workspace."})
+		return
+	}
+	now := time.Now()
+	st, private, err := business.StatusSeenBy(r.Context(), userInfo.UserDgraphInfo.Uuid, person, now)
+	if err != nil {
+		writeAvailabilityError(w, r, "PersonStatus", err)
+		return
+	}
+	loc, twelve := business.ReaderClock(r.Context(), userInfo.UserPostgresInfo.Id)
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"data": map[string]any{"kind": st.Kind, "until": st.Until, "words": business.StatusWords(st, now, loc, twelve), "private": private}})
 }

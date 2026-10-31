@@ -46,6 +46,17 @@ func OwnUploads(ctx context.Context, writer string, list []*dgraphStruct.DgraphA
 // left out.
 func (u Uploads) In(srcKey, srcValue string, list []*dgraphStruct.DgraphAttachment) []*dgraphStruct.DgraphAttachment {
 	srcValue = strings.ToLower(srcValue)
+	return KeepStored(list, func(id uuid.UUID) (string, bool) {
+		up, ok := u[id]
+		return up.ObjKey, ok && up.SrcKey == srcKey && up.SrcValue == srcValue
+	})
+}
+
+// KeepStored is, of list, the files stored says a row holds, in list's order
+// and each once, each on the storage key stored gives: its row's. A message
+// lists its files as its writer sent them; a write keeps only what a row,
+// written at upload, says, on that row's object. Any other is left out.
+func KeepStored(list []*dgraphStruct.DgraphAttachment, stored func(id uuid.UUID) (objKey string, ok bool)) []*dgraphStruct.DgraphAttachment {
 	out := make([]*dgraphStruct.DgraphAttachment, 0, len(list))
 	seen := map[uuid.UUID]bool{}
 	for _, f := range list {
@@ -56,12 +67,12 @@ func (u Uploads) In(srcKey, srcValue string, list []*dgraphStruct.DgraphAttachme
 		if err != nil || seen[id] {
 			continue
 		}
-		up, ok := u[id]
-		if !ok || up.SrcKey != srcKey || up.SrcValue != srcValue {
+		key, ok := stored(id)
+		if !ok {
 			continue
 		}
 		seen[id] = true
-		f.Uuid, f.ObjectKey = id.String(), up.ObjKey
+		f.Uuid, f.ObjectKey = id.String(), key
 		out = append(out, f)
 	}
 	return out

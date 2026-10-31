@@ -31,6 +31,7 @@ import (
 	"github.com/opensearch-project/opensearch-go/v4"
 	"github.com/opensearch-project/opensearch-go/v4/opensearchapi"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	globalSearchBusiness "github.com/akashc777/OneCamp/business/GlobalSearch"
 	taskKeys "github.com/akashc777/OneCamp/business/TaskKeys"
 	workTaxonomy "github.com/akashc777/OneCamp/business/WorkTaxonomy"
@@ -274,14 +275,14 @@ func TestA8KAKeyTypedIntoSearchFindsItsTask(t *testing.T) {
 		t.Fatal(err)
 	}
 	website := []*dgraphStruct.DgraphProject{{Uuid: w.project}}
-	page, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, w.people["ben"].String(), "ben@acme.test", nil, website, nil, "web-1")
+	page, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, accessBusiness.Subject{UserUUID: w.people["ben"].String()}, "ben@acme.test", nil, website, nil, "web-1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(page.Page) == 0 || page.Page[0].Task == nil || page.Page[0].Task.Uuid != w.task || page.Page[0].Task.TaskKey != "WEB-1" {
 		t.Fatalf("ben's search for web-1: %+v; want the task first, as WEB-1", page.Page)
 	}
-	page, err = globalSearchBusiness.GetUnifiedGlobalSearch(ctx, w.people["cy"].String(), "cy@acme.test", nil, nil, nil, "WEB-1")
+	page, err = globalSearchBusiness.GetUnifiedGlobalSearch(ctx, accessBusiness.Subject{UserUUID: w.people["cy"].String()}, "cy@acme.test", nil, nil, nil, "WEB-1")
 	if err != nil {
 		t.Fatal(err)
 	}

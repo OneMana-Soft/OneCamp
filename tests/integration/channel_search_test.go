@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/uuid"
 
+	accessBusiness "github.com/akashc777/OneCamp/business/Access"
 	globalSearchBusiness "github.com/akashc777/OneCamp/business/GlobalSearch"
 	channelDomain "github.com/akashc777/OneCamp/domain/Channel"
 	"github.com/akashc777/OneCamp/initializers/opensearchInit"
@@ -56,7 +57,7 @@ func TestSearchFindsTheChannelsYouAreIn(t *testing.T) {
 		for _, c := range channels {
 			mine = append(mine, &dgraphStruct.DgraphChannel{Uuid: c})
 		}
-		p, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, me, me+"@example.test", mine, nil, nil, text)
+		p, err := globalSearchBusiness.GetUnifiedGlobalSearch(ctx, accessBusiness.Subject{UserUUID: me}, me+"@example.test", mine, nil, nil, text)
 		if err != nil {
 			t.Fatalf("searching %q: %v", text, err)
 		}

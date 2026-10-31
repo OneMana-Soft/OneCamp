@@ -10,6 +10,7 @@ import (
 	adapter "github.com/akashc777/OneCamp/adapter/Calendar"
 	business "github.com/akashc777/OneCamp/business/Calendar"
 	integrationBusiness "github.com/akashc777/OneCamp/business/Integration"
+	"github.com/akashc777/OneCamp/controllers/httpx"
 	"github.com/akashc777/OneCamp/helpers"
 	model "github.com/akashc777/OneCamp/models/postgres/User"
 	"github.com/go-chi/chi/v5"
@@ -98,6 +99,23 @@ func UpdateEventController(w http.ResponseWriter, r *http.Request) {
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Updated event!"})
+}
+
+// EndFocusController ends the caller's focus time, wherever it was started
+// (business/Calendar EndFocus): the End of the web's sidebar and profile menu,
+// and of the phone's profile drawer. It answers the ids of the events it
+// ended, none when no focus time was running.
+func EndFocusController(w http.ResponseWriter, r *http.Request) {
+	userInfo, ok := httpx.MustUser(w, r)
+	if !ok {
+		return
+	}
+	ended, err := business.EndFocus(r.Context(), &userInfo)
+	if err != nil {
+		writeEventError(w, err)
+		return
+	}
+	helpers.WriteJSON(w, http.StatusOK, helpers.Envolope{"msg": "Ended focus time", "data": map[string][]string{"ended": ended}})
 }
 
 func DeleteEventController(w http.ResponseWriter, r *http.Request) {

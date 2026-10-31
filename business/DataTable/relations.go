@@ -30,6 +30,7 @@ import (
 	formula "github.com/akashc777/OneCamp/business/Formula"
 	mqttBusiness "github.com/akashc777/OneCamp/business/Mqtt"
 	rowLedger "github.com/akashc777/OneCamp/business/RowLedger"
+	rowQuery "github.com/akashc777/OneCamp/business/RowQuery"
 	model "github.com/akashc777/OneCamp/models/postgres/DataTable"
 	"github.com/google/uuid"
 )
@@ -133,6 +134,17 @@ type rollupConfig struct {
 	Relation  string `json:"relation"`
 	Field     string `json:"field"`
 	Aggregate string `json:"aggregate"`
+	// Formula adds up values when Aggregate is "formula" (rollupMore.go).
+	Formula string `json:"formula,omitempty"`
+	// Where is the conditions a linked row meets to be added up.
+	Where []Filter `json:"where,omitempty"`
+	// Sort is the field of the linked rows, by id, that orders them before
+	// they're added up (a list follows it), Desc largest or latest first, and
+	// Limit how many of the first are added up: Airtable's sorted rollups and
+	// first N. Without Sort, the first in link order.
+	Sort  string `json:"sort,omitempty"`
+	Desc  bool   `json:"desc,omitempty"`
+	Limit int    `json:"limit,omitempty"`
 }
 
 func rollupOf(f *model.Field) (rollupConfig, bool) {
@@ -158,13 +170,15 @@ var rollupGives = map[string]formula.Kind{
 	"latest":       formula.KindDate,
 	"list":         formula.KindText,
 	"unique":       formula.KindText,
+	// A formula gives what it gives (rollupKind).
+	rollupByFormula: formula.KindText,
 }
 
 // rollupFits is whether a field whose cells are of kind k can be added up
 // that way.
 func rollupFits(how string, k formula.Kind) bool {
 	switch how {
-	case "count", "count_values", "unique_count", "list", "unique":
+	case "count", "count_values", "unique_count", "list", "unique", rollupByFormula:
 		return true
 	case "sum", "average", "min", "max":
 		return k == formula.KindNumber
@@ -182,6 +196,12 @@ func rollupFits(how string, k formula.Kind) bool {
 // the first item that isn't a row's id, as it was given.
 func linkItems(raw interface{}) (ids []uuid.UUID, bad string) {
 	items, isList := raw.([]interface{})
+	if strs, ok := raw.([]string); ok { // as a Go writer (an import) gives them
+		items, isList = make([]interface{}, len(strs)), true
+		for i, s := range strs {
+			items[i] = s
+		}
+	}
 	if !isList && raw != nil {
 		items = []interface{}{raw}
 	}
@@ -212,12 +232,25 @@ func linkItems(raw interface{}) (ids []uuid.UUID, bad string) {
 // row of t is an error.
 func linksToAdd(ctx context.Context, l tableLink, t *model.DataTable, fieldName string, row uuid.UUID, ids []uuid.UUID) ([]model.Link, error) {
 	if len(ids) > maxLinks {
-		return nil, fmt.Errorf("Link at most %d rows at a time", maxLinks)
+		return nil, errLinkAtMost
 	}
 	rows, err := model.RowsIn(ctx, t.Id, ids)
 	if err != nil {
-		return nil, fmt.Errorf("failed to check the linked rows")
+		return nil, errLinkedRowsUnread
 	}
+	return addsOf(l, t, fieldName, row, ids, rows)
+}
+
+// errLinkAtMost and errLinkedRowsUnread refuse a cell's links: it lists too
+// many rows at once, or the rows it lists couldn't be read.
+var (
+	errLinkAtMost       = fmt.Errorf("Link at most %d rows at a time", maxLinks)
+	errLinkedRowsUnread = fmt.Errorf("failed to check the linked rows")
+)
+
+// addsOf is linksToAdd's links, with rows the rows of t that ids name, as
+// RowsIn reads them. Pure.
+func addsOf(l tableLink, t *model.DataTable, fieldName string, row uuid.UUID, ids []uuid.UUID, rows map[uuid.UUID]bool) ([]model.Link, error) {
 	add := make([]model.Link, 0, len(ids))
 	for _, id := range ids {
 		live, found := rows[id]
@@ -231,46 +264,184 @@ func linksToAdd(ctx context.Context, l tableLink, t *model.DataTable, fieldName 
 	return add, nil
 }
 
-// takeLinks takes the cells linking to tables out of a new row (links aren't
-// stored in a row's values), as the links it's made with:
-//   - a cell links the row to the rows it lists, by id or as a read gave them
-//     (linkItems), whichever side of the link it's on;
-//   - a cell linking to a table the actor can't open is left out.
-//
-// It also returns the tables the links go to, whose readers should look
-// again.
+// takeLinks takes the cells linking to tables out of a new row, as the links
+// it's made with (linkCellsOf). It also returns the tables the links go to,
+// whose readers should look again.
 func takeLinks(ctx context.Context, actor Actor, fields []*model.Field, values map[string]interface{}, row uuid.UUID) ([]model.FieldLinks, []uuid.UUID, error) {
+	rows := []rowCells{{row: row, values: values}}
+	linkCellsOf(ctx, actor, fields, rows, false)
+	if rows[0].err != nil {
+		return nil, nil, rows[0].err
+	}
 	var changes []model.FieldLinks
 	var tables []uuid.UUID
+	for _, c := range rows[0].cells {
+		changes = append(changes, c.Links)
+		tables = append(tables, c.table)
+	}
+	return changes, tables, nil
+}
+
+// linkCell is one cell's change to its row's links, and the table they go to.
+type linkCell struct {
+	model.RowLinks
+	table uuid.UUID
+}
+
+// rowCells is a row whose cells linking to tables linkCellsOf reads, taking
+// them out of its values, and what they come to: its cells' changes to its
+// links, or why it can't have them (then none).
+type rowCells struct {
+	row    uuid.UUID
+	values map[string]interface{}
+	cells  []linkCell
+	err    error
+}
+
+// linkGroup is how many rows' cells of a field linkCellsOf reads at once,
+// so each read stays bounded: a row lists at most maxLinks rows.
+const linkGroup = 100
+
+// linkCellsOf takes the cells linking to tables out of rows' values (links
+// aren't stored in a row's values), as changes to their links:
+//   - a cell links its row to the rows it lists, by id or as a read gave them
+//     (linkItems), whichever side of the link it's on;
+//   - with replace (a patch to a row that is there) it sets the row's links
+//     through its field to those rows, adding the missing and removing the
+//     others, so writing a relation's cell means for a row there what it
+//     means for a new one; a cell not written leaves its links be;
+//   - a cell linking to a table the actor can't open is left out.
+//
+// Each field's table is read once, and a group's links and the rows its
+// cells list in a read each, where reading a row at a time made them reads
+// of every row (a batch's patches, an import's links). A row's error is its
+// own: it gets no links, and the others are read on.
+func linkCellsOf(ctx context.Context, actor Actor, fields []*model.Field, rows []rowCells, replace bool) {
 	for _, f := range fields {
 		l, ok := linkOf(f)
 		if !ok {
 			continue
 		}
-		raw, present := values[f.Id.String()]
-		delete(values, f.Id.String())
 		field, ok := l.linkField()
-		if !present || !ok {
+		var cells []rawCell
+		for i := range rows {
+			if rows[i].err != nil {
+				continue // its first error is its answer, as a row at a time
+			}
+			raw, present := rows[i].values[f.Id.String()]
+			delete(rows[i].values, f.Id.String())
+			if present && ok {
+				cells = append(cells, rawCell{at: i, raw: raw})
+			}
+		}
+		if len(cells) == 0 {
 			continue
 		}
 		t, err := model.GetTableByID(ctx, l.table)
 		if err != nil || t == nil || !canView(t, actor) {
 			continue
 		}
-		ids, bad := linkItems(raw)
-		if bad != "" {
-			return nil, nil, fmt.Errorf("%q links to rows of %q by their ids: %s isn't one", f.Name, t.Name, bad)
-		}
-		add, err := linksToAdd(ctx, l, t, f.Name, row, ids)
-		if err != nil {
-			return nil, nil, err
-		}
-		if len(add) > 0 {
-			changes = append(changes, model.FieldLinks{Field: field, Add: add})
-			tables = append(tables, l.table)
+		for len(cells) > 0 {
+			n := min(linkGroup, len(cells))
+			readLinkCells(ctx, f, l, field, t, rows, cells[:n], replace)
+			cells = cells[n:]
 		}
 	}
-	return changes, tables, nil
+	for i := range rows {
+		if rows[i].err != nil {
+			rows[i].cells = nil
+		}
+	}
+}
+
+// rawCell is a row's cell of a link field as written, by the row's place in
+// linkCellsOf's rows.
+type rawCell struct {
+	at  int
+	raw interface{}
+}
+
+// readLinkCells reads a group of rows' cells of link field f, to table t: the
+// rows' links through it in one read (with replace) and the rows the cells
+// list in one, and adds each row's change to its cells, or sets its error.
+func readLinkCells(ctx context.Context, f *model.Field, l tableLink, field uuid.UUID, t *model.DataTable, rows []rowCells, cells []rawCell, replace bool) {
+	ids := make([][]uuid.UUID, len(cells))
+	for j, c := range cells {
+		var bad string
+		if ids[j], bad = linkItems(c.raw); bad != "" {
+			rows[c.at].err = fmt.Errorf("%q links to rows of %q by their ids: %s isn't one", f.Name, t.Name, bad)
+		}
+	}
+	remove := make([][]model.Link, len(cells))
+	if replace {
+		var which []uuid.UUID
+		var limits []int
+		for _, c := range cells {
+			if rows[c.at].err == nil {
+				which, limits = append(which, rows[c.at].row), append(limits, maxLinks+1)
+			}
+		}
+		to := l.inverseOf != "" // the rows are the other end of field's links
+		now, err := model.LinksOf(ctx, field, which, limits, to)
+		for j, c := range cells {
+			r := &rows[c.at]
+			if r.err != nil {
+				continue
+			}
+			if err != nil {
+				r.err = fmt.Errorf("failed to read the row's links")
+				continue
+			}
+			want := make(map[uuid.UUID]bool, len(ids[j]))
+			for _, id := range ids[j] {
+				want[id] = true
+			}
+			has := make(map[uuid.UUID]bool, len(now[r.row]))
+			for _, id := range now[r.row] {
+				has[id] = true
+				if !want[id] {
+					remove[j] = append(remove[j], l.link(r.row, id))
+				}
+			}
+			var missing []uuid.UUID
+			for _, id := range ids[j] {
+				if !has[id] {
+					missing = append(missing, id)
+				}
+			}
+			ids[j] = missing
+		}
+	}
+	var listed []uuid.UUID
+	for j, c := range cells {
+		if rows[c.at].err != nil {
+			continue
+		}
+		if len(ids[j]) > maxLinks {
+			rows[c.at].err = errLinkAtMost
+			continue
+		}
+		listed = append(listed, ids[j]...)
+	}
+	live, err := model.RowsIn(ctx, t.Id, listed)
+	for j, c := range cells {
+		r := &rows[c.at]
+		if r.err != nil {
+			continue
+		}
+		if err != nil && len(ids[j]) > 0 {
+			r.err = errLinkedRowsUnread
+			continue
+		}
+		add, aerr := addsOf(l, t, f.Name, r.row, ids[j], live)
+		if aerr != nil {
+			r.err = aerr
+			continue
+		}
+		if len(add)+len(remove[j]) > 0 {
+			r.cells = append(r.cells, linkCell{RowLinks: model.RowLinks{Row: r.row, Shown: f.Id, Links: model.FieldLinks{Field: field, Add: add, Remove: remove[j]}}, table: l.table})
+		}
+	}
 }
 
 // errTooManyLinks is what a write that would take a row past maxLinks links
@@ -296,16 +467,21 @@ var told = struct {
 }{at: map[uuid.UUID]time.Time{}, waiting: map[uuid.UUID]bool{}}
 
 // tellTables has the readers of each table look again: links between its
-// rows and another table's, or the rows they link to, changed. A table is
-// told at most once each tellEvery, so a burst of writes elsewhere has its
-// readers look again once, at the end.
-func tellTables(ids ...uuid.UUID) {
+// rows and another table's, or the rows they link to, changed. Its row lists
+// are stale at once (a filter on links reads them, and this table's ledger
+// never saw the change); its readers are told at most once each tellEvery,
+// so a burst of writes elsewhere has them look again once, at the end.
+func tellTables(ctx context.Context, ids ...uuid.UUID) {
 	seen := map[uuid.UUID]bool{}
+	tables := make([]uuid.UUID, 0, len(ids))
 	for _, id := range ids {
-		if seen[id] {
-			continue
+		if !seen[id] {
+			seen[id] = true
+			tables = append(tables, id)
 		}
-		seen[id] = true
+	}
+	rowQuery.ListsStale(ctx, tables...)
+	for _, id := range tables {
 		switch wait := toldIn(id); {
 		case wait == 0:
 			publishLinks(id)
@@ -362,7 +538,7 @@ func tellLinkedTables(ctx context.Context, table, row uuid.UUID, wasLinked bool)
 // read, or which shows their links.
 func tellTablesLinkedWith(ctx context.Context, table uuid.UUID) {
 	if tables, err := model.TablesLinkedWith(ctx, table); err == nil {
-		tellTables(tables...)
+		tellTables(ctx, tables...)
 	}
 }
 
@@ -429,7 +605,7 @@ func ChangeLinks(ctx context.Context, tableID, rowID, fieldID uuid.UUID, add, re
 		}
 		return nil, LinksChanged{}, fmt.Errorf("failed to change the links")
 	}
-	tellTables(tableID, l.table)
+	tellTables(ctx, tableID, l.table)
 	announce(ctx, t, cs, hooksOnly)
 	withComputed(ctx, fields, []*model.Row{row})
 	return row, done, nil
@@ -590,7 +766,7 @@ func computedFieldConfig(ctx context.Context, actor Actor, t *model.DataTable, f
 	}
 	switch typ {
 	case model.FieldFormula:
-		cfg, err := formulaConfigWith(fields, self, in.Config)
+		cfg, err := formulaConfigWith(fields, self, in.Config, linkedFieldsFor(ctx, actor))
 		if err != nil {
 			return nil, err
 		}
@@ -611,7 +787,7 @@ func computedFieldConfig(ctx context.Context, actor Actor, t *model.DataTable, f
 		if err := roomFor(fields, self, model.FieldRollup, false); err != nil {
 			return nil, err
 		}
-		cfg, err := rollupFieldConfig(ctx, actor, t.Id, fields, in.Config)
+		cfg, err := rollupFieldConfig(ctx, actor, t.Id, self, fields, in.Config)
 		if err != nil {
 			return nil, err
 		}
@@ -621,7 +797,7 @@ func computedFieldConfig(ctx context.Context, actor Actor, t *model.DataTable, f
 }
 
 // unlinkPair deletes a field, and what goes with it for a relation linking
-// to a table:
+// to a table, in one transaction:
 //   - one whose links show from the other table takes the field showing them,
 //     and its links, with it;
 //   - one showing another's links goes alone, and the other is no longer
@@ -638,32 +814,15 @@ func unlinkPair(ctx context.Context, f *model.Field, by uuid.UUID) error {
 		}
 		return model.DeleteFieldPair(ctx, f, other, by)
 	}
-	if err := model.DeleteField(ctx, f.TableId, f.Id, by); err != nil {
-		return err
-	}
-	fid, err := uuid.Parse(l.inverseOf)
-	if err != nil {
-		return nil
-	}
-	theirs, err := model.ListFields(ctx, l.table)
-	if err != nil {
-		return nil
-	}
-	for _, g := range theirs {
-		if gl, ok := linkOf(g); ok && g.Id == fid && gl.inverse == f.Id.String() {
-			cfg, _ := json.Marshal(map[string]string{"relation_target": linksTable, "table_id": gl.table.String()})
-			g.Config = string(cfg)
-			_ = model.UpdateField(ctx, g)
-		}
-	}
-	return nil
+	return model.DeleteShowingField(ctx, f, l.table, by)
 }
 
 // rollupFieldConfig checks a rollup's config as it's saved in table own,
 // with fields: a relation here that links to a table the actor can open, one
 // of that table's fields (none for counting), and a way of adding it up that
-// fits that field.
-func rollupFieldConfig(ctx context.Context, actor Actor, own uuid.UUID, fields []*model.Field, cfg map[string]interface{}) (map[string]interface{}, error) {
+// fits that field. When that field is a rollup, the rollups self (the field
+// saved, or none yet) would go through mustn't go too deep or come back round.
+func rollupFieldConfig(ctx context.Context, actor Actor, own, self uuid.UUID, fields []*model.Field, cfg map[string]interface{}) (map[string]interface{}, error) {
 	rel, _ := cfg["relation"].(string)
 	how, _ := cfg["aggregate"].(string)
 	of, _ := cfg["field"].(string)
@@ -685,14 +844,42 @@ func rollupFieldConfig(ctx context.Context, actor Actor, own uuid.UUID, fields [
 		return nil, fmt.Errorf("Choose a relation to a table you can open")
 	}
 	out := map[string]interface{}{"relation": rel, "aggregate": how}
-	if how == "count" {
-		return out, nil
+	format, err := resultFormat(cfg["format"])
+	if err != nil {
+		return nil, err
+	}
+	if format != nil {
+		out["format"] = format
 	}
 	theirs := fields
 	if l.table != own {
 		if theirs, err = model.ListFields(ctx, l.table); err != nil {
 			return nil, fmt.Errorf("failed to load fields")
 		}
+	}
+	where, err := rollupWhere(cfg["where"], liveOnly(theirs))
+	if err != nil {
+		return nil, err
+	}
+	if len(where) > 0 {
+		out["where"] = where
+	}
+	order, err := rollupOrder(cfg, liveOnly(theirs))
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range order {
+		out[k] = v
+	}
+	if how == "count" {
+		return out, nil
+	}
+	if how == rollupByFormula {
+		src, _ := cfg["formula"].(string)
+		if err := checkRollupFormula(src); err != nil {
+			return nil, err
+		}
+		out["formula"] = src
 	}
 	var field *model.Field
 	for _, f := range theirs {
@@ -705,6 +892,11 @@ func rollupFieldConfig(ctx context.Context, actor Actor, own uuid.UUID, fields [
 	}
 	if why := rollupProblem(how, field, theirs); why != "" {
 		return nil, fmt.Errorf("%s", why)
+	}
+	if field.Type == model.FieldRollup {
+		if why := rollupChainProblem(self, field, theirs, linkedFieldsFor(ctx, actor)); why != "" {
+			return nil, fmt.Errorf("%s", why)
+		}
 	}
 	out["field"] = of
 	return out, nil
